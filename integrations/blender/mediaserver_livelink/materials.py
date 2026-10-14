@@ -10,7 +10,7 @@ from .translation import bounded, warn
 DEFAULT = [0.8, 0.8, 0.8, 0.5, 0, 0, 0, 0]
 
 
-def describe_material(material, identities, scene):
+def describe_material(material, identities, scene, uv=''):
     if material is None:
         return list(DEFAULT)
     import bpy
@@ -21,6 +21,9 @@ def describe_material(material, identities, scene):
     def value(shader, name, fallback=0):
         socket = shader.inputs.get(name)
         return socket.default_value if socket else fallback
+    def render_uv(name):
+        # A named map is accepted only when it is the mesh's active render UV.
+        return not name or name == uv
     def strict_image(socket, role, output='Color'):
         if not socket.is_linked:
             return False
@@ -38,9 +41,9 @@ def describe_material(material, identities, scene):
             warn(material.name + ': interpreting ' + role + ' as ' + expected)
         vector = node.inputs['Vector']
         if vector.is_linked:
-            uv = vector.links[0]
-            if not ((uv.from_node.type == 'UVMAP' and not uv.from_node.uv_map)
-                    or (uv.from_node.type == 'TEX_COORD' and uv.from_socket.name == 'UV')):
+            link = vector.links[0]
+            if not ((link.from_node.type == 'UVMAP' and render_uv(link.from_node.uv_map))
+                    or (link.from_node.type == 'TEX_COORD' and link.from_socket.name == 'UV')):
                 refuse('textures require the active render UV map without Mapping/texture transforms')
         if node.projection != 'FLAT' or node.extension not in ('REPEAT', 'EXTEND') or node.interpolation not in ('Linear', 'Closest'):
             refuse('use Flat projection, Repeat/Extend and Linear/Closest sampling')
@@ -54,6 +57,19 @@ def describe_material(material, identities, scene):
         except (ValueError, KeyError, AttributeError) as error:
             warn(str(error) + '; using material color without this texture')
             return False
+    def factored_image(socket, role, fallback):
+        # The glTF importer encodes texture * factor as a full-strength Multiply
+        # Mix with one constant operand; that is exactly the glTF factor contract.
+        if socket.is_linked and socket.links[0].from_node.type == 'MIX':
+            mix = socket.links[0].from_node
+            sockets = {s.identifier: s for s in mix.inputs}
+            factor, a, b = sockets.get('Factor_Float'), sockets.get('A_Color'), sockets.get('B_Color')
+            if (mix.data_type == 'RGBA' and mix.blend_type == 'MULTIPLY' and socket.links[0].from_socket.name == 'Result'
+                    and factor is not None and not factor.is_linked and abs(factor.default_value - 1) < 1e-6
+                    and a is not None and b is not None and a.is_linked != b.is_linked):
+                texture, constant = (a, b) if a.is_linked else (b, a)
+                return list(constant.default_value)[:3] if image(texture, role) else fallback
+        return [1, 1, 1] if image(socket, role) else fallback
     if not material.use_nodes:
         factors = [*material.diffuse_color[:3], material.roughness, material.metallic, 0, 0, 0]
         alpha, emission_strength, extensions = material.diffuse_color[3], 1, {}
@@ -84,12 +100,9 @@ def describe_material(material, identities, scene):
                 different = abs(actual-default) > 1e-5
             if different:
                 warn(material.name + ': approximated ' + name)
-        base = list(value(shader, 'Base Color'))[:3]
-        emission = list(value(shader, 'Emission Color'))[:3]
-        if image(shader.inputs['Base Color'], 'baseColorTexture'):
-            base = [1, 1, 1]
-        if image(shader.inputs['Emission Color'], 'emissiveTexture'):
-            emission = [1, 1, 1]
+        base = factored_image(shader.inputs['Base Color'], 'baseColorTexture', list(value(shader, 'Base Color'))[:3])
+        emission = factored_image(shader.inputs['Emission Color'], 'emissiveTexture',
+                                  list(value(shader, 'Emission Color'))[:3])
         roughness, metallic = value(shader, 'Roughness'), value(shader, 'Metallic')
         packed_node = None
         packed_valid = True
@@ -118,7 +131,7 @@ def describe_material(material, identities, scene):
         normal = shader.inputs['Normal']
         if normal.is_linked:
             node = normal.links[0].from_node
-            if (node.type == 'NORMAL_MAP' and node.space == 'TANGENT' and not node.uv_map
+            if (node.type == 'NORMAL_MAP' and node.space == 'TANGENT' and render_uv(node.uv_map)
                     and not node.inputs['Strength'].is_linked
                     and image(node.inputs['Color'], 'normalTexture')):
                 textures['normalTexture']['scale'] = bounded(node.inputs['Strength'].default_value, 0, 1, 1)
@@ -127,7 +140,12 @@ def describe_material(material, identities, scene):
         alpha = value(shader, 'Alpha', 1)
         if shader.inputs['Alpha'].is_linked:
             original = textures.get('baseColorTexture')
-            if image(shader.inputs['Alpha'], 'baseColorTexture', 'Alpha') and original == textures.get('baseColorTexture'):
+            try:
+                # Probing alpha must not report the retained color texture as dropped.
+                assigned = strict_image(shader.inputs['Alpha'], 'baseColorTexture', 'Alpha')
+            except (ValueError, KeyError, AttributeError):
+                assigned = False
+            if assigned and original == textures.get('baseColorTexture'):
                 alpha = 1
             else:
                 if original is None:

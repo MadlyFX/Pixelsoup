@@ -193,7 +193,7 @@ struct MaskHarness final {
             editor::MaskViewportCanvasPoint{1440.0F, 270.0F},
             editor::MaskViewportCanvasPoint{1440.0F, 810.0F},
             editor::MaskViewportCanvasPoint{480.0F, 810.0F},
-        }}};
+        }, scene::MaskCoordinateExtent{960.0F, 540.0F}}};
     bool pen_active{};
     bool coverage_visible{};
     bool authoring_enabled{true};
@@ -266,7 +266,7 @@ struct ProgramMaskHarness final {
             editor::MaskViewportCanvasPoint{960.0F, 270.0F},
             editor::MaskViewportCanvasPoint{960.0F, 810.0F},
             editor::MaskViewportCanvasPoint{0.0F, 810.0F},
-        }}};
+        }, scene::MaskCoordinateExtent{960.0F, 540.0F}}};
     bool authoring_enabled{true};
 
     [[nodiscard]] editor::ViewportProjection projection() const {
@@ -478,7 +478,7 @@ void clicking_bare_canvas_picks_nothing() {
     UI_CHECK(!h.panel.dragging());
 }
 
-void stage_bare_canvas_explicitly_reserves_the_press_for_orbit() {
+void stage_bare_canvas_explicitly_reserves_the_press_for_navigation() {
     gui::InputState input;
     gui::UiDrawList list;
     gui::FontAtlas font{gui::FontAtlas::empty()};
@@ -503,7 +503,232 @@ void stage_bare_canvas_explicitly_reserves_the_press_for_orbit() {
 
     UI_CHECK(pressed.pressed);
     UI_CHECK(!pressed.picked.has_value());
-    UI_CHECK(pressed.empty_canvas == editor::EmptyCanvasInteraction::Orbit);
+    UI_CHECK(pressed.empty_canvas == editor::EmptyCanvasInteraction::Navigate);
+}
+
+// Alt+left orbits in Unreal even with the pointer over geometry, and adding the
+// left button to a right or middle drag pans. Neither may pick or drag the
+// clip underneath; a plain press on the same pixel still does.
+void stage_camera_chords_never_pick_what_is_underneath() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("stage.chords"),
+                                editor::ViewportRole::Stage};
+    const scene::Scene clip_scene = make_scene();
+
+    const auto draw = [&](float x, float y, bool left, gui::KeyMods mods,
+                          gui::MouseButton held, bool hold) {
+        input.new_frame();
+        input.set_mods(mods);
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(held, hold);
+        input.set_mouse_button(gui::MouseButton::Left, left);
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds, target, clip_scene);
+    };
+    const editor::ViewportFrame placed = draw(
+        0.0F, 0.0F, false, gui::KeyMods::None, gui::MouseButton::Right, false);
+    const float x = placed.image.x + placed.image.width * 0.5F;
+    const float y = placed.image.y + placed.image.height * 0.5F;
+
+    const editor::ViewportFrame alt = draw(
+        x, y, true, gui::KeyMods::Alt, gui::MouseButton::Right, false);
+    UI_CHECK(alt.pressed);
+    UI_CHECK(!alt.picked.has_value() && !alt.surface_picked.has_value());
+    UI_CHECK(alt.empty_canvas == editor::EmptyCanvasInteraction::Navigate);
+    UI_CHECK(!panel.dragging());
+    static_cast<void>(draw(x, y, false, gui::KeyMods::None,
+                           gui::MouseButton::Right, false));
+
+    for (const gui::MouseButton held :
+         {gui::MouseButton::Right, gui::MouseButton::Middle}) {
+        static_cast<void>(draw(x, y, false, gui::KeyMods::None, held, true));
+        const editor::ViewportFrame chord =
+            draw(x, y, true, gui::KeyMods::None, held, true);
+        UI_CHECK(chord.pressed && !chord.picked.has_value());
+        UI_CHECK(chord.empty_canvas ==
+                 editor::EmptyCanvasInteraction::Navigate);
+        static_cast<void>(draw(x, y, false, gui::KeyMods::None, held, false));
+    }
+
+    const editor::ViewportFrame plain = draw(
+        x, y, true, gui::KeyMods::None, gui::MouseButton::Right, false);
+    UI_CHECK(plain.picked == clip_node);
+}
+
+// The world box F frames: a clip's unit quad through its world transform, and
+// a node with only a position as that point.
+void world_bounds_cover_the_selection_as_picked() {
+    Harness h;
+    scene::Scene framed = make_scene();
+    framed.media.front().world =
+        scene::multiply(scene::translation(scene::Vec3{3.0F, -1.0F, 2.0F}),
+                        scene::scaling(scene::Vec3{4.0F, 2.0F, 1.0F}));
+    scene::PointLight lamp{};
+    lamp.source = other_node;
+    lamp.position = scene::Vec3{-6.0F, 5.0F, 0.5F};
+    framed.point_lights.push_back(lamp);
+
+    const std::array<doc::NodeId, 1U> clip_only{clip_node};
+    const auto clip_box = h.panel.world_bounds(framed, clip_only);
+    UI_CHECK(clip_box.has_value());
+    UI_CHECK(near(clip_box->minimum.x, 1.0F) && near(clip_box->maximum.x, 5.0F));
+    UI_CHECK(near(clip_box->minimum.y, -2.0F) && near(clip_box->maximum.y, 0.0F));
+    UI_CHECK(near(clip_box->minimum.z, 1.5F) && near(clip_box->maximum.z, 2.5F));
+
+    const std::array<doc::NodeId, 2U> both{clip_node, other_node};
+    const auto both_box = h.panel.world_bounds(framed, both);
+    UI_CHECK(both_box.has_value());
+    UI_CHECK(near(both_box->minimum.x, -6.0F) && near(both_box->maximum.y, 5.0F));
+    UI_CHECK(near(both_box->minimum.z, 0.5F) && near(both_box->maximum.z, 2.5F));
+
+    const std::array<doc::NodeId, 1U> missing{doc::NodeId{404U}};
+    UI_CHECK(!h.panel.world_bounds(framed, missing).has_value());
+}
+
+void stage_navigation_follows_unreal_chords() {
+    using editor::StageNavigation;
+    const auto pick = [](bool left, bool middle, bool right, bool alt,
+                         bool shift) {
+        return editor::stage_navigation_for(
+            editor::StageNavigationButtons{left, middle, right, alt, shift});
+    };
+    UI_CHECK(pick(false, false, false, false, false) == StageNavigation::None);
+    UI_CHECK(pick(true, false, false, false, false) == StageNavigation::Walk);
+    UI_CHECK(pick(false, false, true, false, false) == StageNavigation::Look);
+    UI_CHECK(pick(false, true, false, false, false) == StageNavigation::Orbit);
+    UI_CHECK(pick(true, false, true, false, false) == StageNavigation::Pan);
+    UI_CHECK(pick(false, true, false, false, true) == StageNavigation::Track);
+    UI_CHECK(pick(true, false, false, true, false) == StageNavigation::Orbit);
+    UI_CHECK(pick(false, true, false, true, false) == StageNavigation::Track);
+    UI_CHECK(pick(false, false, true, true, false) == StageNavigation::Dolly);
+    UI_CHECK(pick(true, false, true, true, false) == StageNavigation::Dolly);
+    // Alt alone, with nothing pressed on the Stage, moves nothing.
+    UI_CHECK(pick(false, false, false, true, true) == StageNavigation::None);
+}
+
+[[nodiscard]] bool near_vec(scene::Vec3 a, scene::Vec3 b,
+                            float tolerance = 0.001F) noexcept {
+    return near(a.x, b.x, tolerance) && near(a.y, b.y, tolerance) &&
+           near(a.z, b.z, tolerance);
+}
+
+void a_right_drag_looks_in_place_and_flies_with_wasd() {
+    const editor::StageOrbit start{{2.0F, 1.0F, -3.0F}, 0.0F, 0.0F, 6.0F};
+    const scene::Vec3 eye = editor::stage_eye(start);
+    UI_CHECK(near_vec(eye, scene::Vec3{2.0F, 1.0F, 3.0F}));
+
+    // Dragging right turns right: the eye stays and the view swings to +x.
+    editor::StageNavigationStep look{};
+    look.gesture = editor::StageNavigation::Look;
+    look.dx = 50.0F;
+    look.dy = -40.0F;
+    const editor::StageOrbit turned = editor::navigate_stage(start, look);
+    UI_CHECK(near_vec(editor::stage_eye(turned), eye));
+    UI_CHECK(turned.target.x > eye.x);
+    // Dragging up looks up.
+    UI_CHECK(turned.target.y > eye.y);
+    UI_CHECK(near(turned.distance, start.distance));
+
+    // W flies along the view at the fly speed; D strafes right; Q sinks.
+    editor::StageNavigationStep fly{};
+    fly.gesture = editor::StageNavigation::Look;
+    fly.seconds = 0.5F;
+    fly.fly_speed = 3.0F;
+    fly.move = scene::Vec3{0.0F, 0.0F, 1.0F};
+    UI_CHECK(near_vec(editor::stage_eye(editor::navigate_stage(start, fly)),
+                      scene::Vec3{2.0F, 1.0F, 1.5F}));
+    fly.move = scene::Vec3{1.0F, 0.0F, 0.0F};
+    UI_CHECK(near_vec(editor::stage_eye(editor::navigate_stage(start, fly)),
+                      scene::Vec3{3.5F, 1.0F, 3.0F}));
+    fly.move = scene::Vec3{0.0F, -1.0F, 0.0F};
+    const editor::StageOrbit sunk = editor::navigate_stage(start, fly);
+    UI_CHECK(near_vec(editor::stage_eye(sunk), scene::Vec3{2.0F, -0.5F, 3.0F}));
+    UI_CHECK(near(sunk.yaw, start.yaw) && near(sunk.pitch, start.pitch));
+
+    // Each wheel notch is a quarter faster or slower, within bounds.
+    UI_CHECK(near(editor::stage_fly_speed_after(4.0F, 1.0F), 5.0F));
+    UI_CHECK(near(editor::stage_fly_speed_after(4.0F, -2.0F), 2.56F));
+    UI_CHECK(editor::stage_fly_speed_after(4.0F, 100.0F) ==
+             editor::stage_maximum_fly_speed);
+}
+
+void orbit_pan_walk_and_dolly_move_the_view_as_unreal_does() {
+    const editor::StageOrbit start{{1.0F, 0.5F, -2.0F}, 0.0F, 0.0F, 8.0F};
+    editor::StageNavigationStep step{};
+
+    // Orbit turns about the pivot at the same distance, and never flips over.
+    step.gesture = editor::StageNavigation::Orbit;
+    step.dx = 100.0F;
+    step.dy = 10'000.0F;
+    const editor::StageOrbit orbited = editor::navigate_stage(start, step);
+    UI_CHECK(orbited.target == start.target);
+    UI_CHECK(near(orbited.distance, start.distance));
+    UI_CHECK(near(orbited.yaw, -0.15F));
+    UI_CHECK(orbited.pitch == editor::stage_pitch_limit);
+
+    // Pan keeps the view's direction and moves the camera with the mouse:
+    // right and up. Track moves it the other way, so the scene follows.
+    step = {};
+    step.gesture = editor::StageNavigation::Pan;
+    step.dx = 20.0F;
+    step.dy = -10.0F;
+    step.units_per_pixel = 0.05F;
+    const editor::StageOrbit panned = editor::navigate_stage(start, step);
+    UI_CHECK(near_vec(panned.target, scene::Vec3{2.0F, 1.0F, -2.0F}));
+    UI_CHECK(panned.yaw == start.yaw && panned.distance == start.distance);
+    step.gesture = editor::StageNavigation::Track;
+    UI_CHECK(near_vec(editor::navigate_stage(start, step).target,
+                      scene::Vec3{0.0F, 0.0F, -2.0F}));
+
+    // A left drag walks along the ground, however far the view is pitched.
+    editor::StageOrbit pitched = start;
+    pitched.pitch = 0.1F;
+    step = {};
+    step.gesture = editor::StageNavigation::Walk;
+    step.dy = -80.0F;
+    step.fly_speed = 2.0F;
+    const editor::StageOrbit walked = editor::navigate_stage(pitched, step);
+    UI_CHECK(near_vec(walked.target, scene::Vec3{1.0F, 0.5F, -4.0F}));
+    UI_CHECK(walked.pitch == pitched.pitch);
+
+    // The wheel closes on the pivot, then carries it ahead rather than stop.
+    const editor::StageOrbit closer = editor::stage_wheel_dolly(start, 2.0F);
+    UI_CHECK(near(closer.distance, 6.4F) && closer.target == start.target);
+    editor::StageOrbit near_pivot = start;
+    near_pivot.distance = 0.6F;
+    const editor::StageOrbit pushed =
+        editor::stage_wheel_dolly(near_pivot, 3.0F);
+    UI_CHECK(pushed.distance == editor::stage_minimum_distance);
+    UI_CHECK(near(pushed.target.z, -2.2F));
+    UI_CHECK(near_vec(editor::stage_eye(pushed),
+                      editor::stage_eye(near_pivot) +
+                          scene::Vec3{0.0F, 0.0F, -0.3F}));
+    UI_CHECK(near(editor::stage_wheel_dolly(start, -1.0F).distance, 8.8F));
+
+    // Alt+right: dragging right or up closes in, proportionally.
+    step = {};
+    step.gesture = editor::StageNavigation::Dolly;
+    step.dx = 10.0F;
+    step.dy = -15.0F;
+    UI_CHECK(near(editor::navigate_stage(start, step).distance, 7.0F));
+}
+
+void f_frames_the_whole_box_from_the_current_direction() {
+    const editor::StageOrbit start{{9.0F, 9.0F, 9.0F}, 0.2F, -0.05F, 30.0F};
+    const editor::WorldBounds box{{-1.0F, 0.0F, 2.0F}, {3.0F, 4.0F, 6.0F}};
+    const editor::StageOrbit framed = editor::stage_focus(start, box);
+    UI_CHECK(near_vec(framed.target, scene::Vec3{1.0F, 2.0F, 4.0F}));
+    UI_CHECK(framed.yaw == start.yaw && framed.pitch == start.pitch);
+    // The bounding sphere fits inside the vertical field of view, without
+    // standing off more than twice as far as it needs to.
+    const float radius = std::sqrt(12.0F);
+    const float half_view = editor::stage_field_of_view * 3.14159265F;
+    UI_CHECK(std::asin(radius / framed.distance) < half_view);
+    UI_CHECK(framed.distance < 2.0F * radius / std::sin(half_view));
 }
 
 void the_front_most_clip_wins_an_overlap() {
@@ -1188,6 +1413,54 @@ void mask_mapping_preserves_source_and_authored_canvas_spaces() {
                   image, canvas, scene::MaskCoordinateSpace::SourceLayer,
                   &degenerate, mapped->x, mapped->y)
                   .has_value());
+}
+
+void mask_mapping_follows_a_layer_seen_in_perspective() {
+    // A full-canvas image, so viewport and canvas pixels coincide.
+    constexpr gui::Rect image{0.0F, 0.0F, 1920.0F, 1080.0F};
+    constexpr scene::Canvas canvas{1920U, 1080U};
+    // A layer turned away from the camera: its far edge is shorter.
+    const editor::MaskViewportSourceMapping turned{{
+        editor::MaskViewportCanvasPoint{400.0F, 200.0F},
+        editor::MaskViewportCanvasPoint{1500.0F, 350.0F},
+        editor::MaskViewportCanvasPoint{1500.0F, 730.0F},
+        editor::MaskViewportCanvasPoint{400.0F, 880.0F},
+    }, scene::MaskCoordinateExtent{1100.0F, 530.0F}};
+    // Under perspective the surface's centre is where its diagonals cross,
+    // which lies toward the far edge; the corners' average does not.
+    const auto centre = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &turned, 0.5F,
+        0.5F);
+    UI_CHECK(centre.has_value());
+    // Diagonal UL-BR falls 530 px over 1100 px and UR-BL rises by the same,
+    // so they meet at y = 540, 340/530 of the way across.
+    const float t = (540.0F - 200.0F) / 530.0F;
+    UI_CHECK(near(centre->x, 400.0F + t * 1100.0F, 0.05F));
+    UI_CHECK(near(centre->y, 540.0F, 0.05F));
+    UI_CHECK(centre->x > 1000.0F); // the corners average to x = 950
+
+    // A straight mask edge stays straight on screen.
+    const auto top = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &turned,
+        0.25F, 0.0F);
+    const auto bottom = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &turned,
+        0.25F, 1.0F);
+    const auto middle = editor::mask_normalized_to_viewport(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &turned,
+        0.25F, 0.4F);
+    UI_CHECK(top.has_value() && bottom.has_value() && middle.has_value());
+    const float cross =
+        (bottom->x - top->x) * (middle->y - top->y) -
+        (bottom->y - top->y) * (middle->x - top->x);
+    UI_CHECK(std::fabs(cross) < 1.0F);
+
+    const auto round_trip = editor::mask_viewport_to_normalized(
+        image, canvas, scene::MaskCoordinateSpace::SourceLayer, &turned,
+        centre->x, centre->y);
+    UI_CHECK(round_trip.has_value());
+    UI_CHECK(near(round_trip->x, 0.5F, 0.0001F));
+    UI_CHECK(near(round_trip->y, 0.5F, 0.0001F));
 }
 
 void mask_overlays_and_selection_stay_in_the_mask_domain() {
@@ -1886,7 +2159,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 44U> cases{{
+constexpr std::array<Case, 51U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -1905,8 +2178,20 @@ constexpr std::array<Case, 44U> cases{{
     {"mapped Program pixels drive selection and direct manipulation",
      &mapped_program_pixels_drive_selection_and_direct_manipulation},
     {"clicking bare canvas picks nothing", &clicking_bare_canvas_picks_nothing},
-    {"Stage bare canvas explicitly reserves the press for orbit",
-     &stage_bare_canvas_explicitly_reserves_the_press_for_orbit},
+    {"Stage bare canvas explicitly reserves the press for navigation",
+     &stage_bare_canvas_explicitly_reserves_the_press_for_navigation},
+    {"Stage camera chords never pick what is underneath",
+     &stage_camera_chords_never_pick_what_is_underneath},
+    {"world bounds cover the selection as picked",
+     &world_bounds_cover_the_selection_as_picked},
+    {"Stage navigation follows Unreal chords",
+     &stage_navigation_follows_unreal_chords},
+    {"a right drag looks in place and flies with WASD",
+     &a_right_drag_looks_in_place_and_flies_with_wasd},
+    {"orbit, pan, walk and dolly move the view as Unreal does",
+     &orbit_pan_walk_and_dolly_move_the_view_as_unreal_does},
+    {"F frames the whole box from the current direction",
+     &f_frames_the_whole_box_from_the_current_direction},
     {"the front most clip wins an overlap",
      &the_front_most_clip_wins_an_overlap},
     {"a stationary long press offers every overlapping element",
@@ -1951,6 +2236,8 @@ constexpr std::array<Case, 44U> cases{{
      &an_explicit_same_path_surface_refresh_publishes_a_new_wire},
     {"mask mapping preserves source and authored canvas spaces",
      &mask_mapping_preserves_source_and_authored_canvas_spaces},
+    {"mask mapping follows a layer seen in perspective",
+     &mask_mapping_follows_a_layer_seen_in_perspective},
     {"mask overlays and selection stay in the mask domain",
      &mask_overlays_and_selection_stay_in_the_mask_domain},
     {"mask hit priority prefers selected handles then points then pen path",

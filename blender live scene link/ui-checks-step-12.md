@@ -1,5 +1,10 @@
 # Step 12 — Qualification and delivery checks
 
+This reproduces the explicit publication qualification harness. For the current
+live project workflow, use the [add-on README](../integrations/blender/README.md)
+and [operator guide](operator-guide.md). The recorded figures below describe
+the historical delivery, rather than a fresh qualification of this checkout.
+
 Qualified with Blender **5.2.0 LTS, fbe6228777e7**, add-on **0.7.0**, link
 protocol **v1 with capability negotiation**, and the Advanced D3D12 renderer.
 The support boundary, declared limits and measured figures are in
@@ -18,7 +23,7 @@ One command packages the add-on, runs the qualification harness, writes the
 sample Blender scene and the two delivered projects, prints the bundle, and
 starts a Director editor on the delivered Preview project with isolated local
 settings. `-NoLaunch` builds the bundle only; `-NoBlender` skips the sample
-scene. If your checkout does not include the README's build helper scripts, use
+scene. Use
 `cmake --build --preset windows-msvc-debug-gui` and `cmake --build --preset
 windows-msvc-release-gui` from a Visual Studio developer shell.
 
@@ -139,10 +144,7 @@ This is local process, resource and GPU qualification on one machine. It does no
 claim physical two-machine scanout, genlock, tracker-hardware calibration or lens
 agreement between Blender's reference viewport and calibrated output.
 
-Evidence is retained in `evidence/step12-*`: Debug and Release build logs, the
-targeted CTest logs (32/32 in each configuration), both qualification reports,
-both installed-Blender reports, the add-on compatibility manifest, and the
-[Scene Link card](evidence/step12-scene-link-card.png) captured from the running
-editor on the delivered project. The full suite also passed 180/180 in each
-configuration. The Blender **Compatibility and evidence** box is exercised by the
-installed-add-on run rather than by a screenshot.
+The historical Director and installed-Blender qualification reports are retained
+in `evidence/step12-*` and linked from [qualification v1](qualification-v1.md).
+Build logs, screenshots and the original package manifest are recoverable in Git
+history. Run the checks above to gather evidence for the current delivery.

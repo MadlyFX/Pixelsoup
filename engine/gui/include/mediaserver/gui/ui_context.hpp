@@ -373,9 +373,24 @@ public:
     [[nodiscard]] bool middle_pointer_released() const noexcept {
         return !pointer_blocked() && input_.mouse_released(MouseButton::Middle);
     }
-    // The right button, which asks for a context menu and nothing else.
+    // The right button: a context menu, or a 3D viewport's camera look.
     [[nodiscard]] bool secondary_pointer_pressed() const noexcept {
         return !pointer_blocked() && input_.mouse_pressed(MouseButton::Right);
+    }
+    [[nodiscard]] bool secondary_pointer_down() const noexcept {
+        return !pointer_blocked() && input_.mouse_down(MouseButton::Right);
+    }
+    // Raw mouse travel this frame. Unlike pointer_dx() it keeps arriving while
+    // the pointer is locked for a camera drag.
+    [[nodiscard]] float pointer_motion_x() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.motion_dx();
+    }
+    [[nodiscard]] float pointer_motion_y() const noexcept {
+        return pointer_blocked() ? 0.0F : input_.motion_dy();
+    }
+    // A movement key held down. Never while a field or menu has the keyboard.
+    [[nodiscard]] bool move_key_down(MoveKey key) const noexcept {
+        return focus_ == UiId{} && dropdown_id_ == 0U && input_.move_key_down(key);
     }
     // This frame's wheel travel, for a surface that zooms or scrolls - the
     // timeline's time axis, a viewport's dolly.
@@ -396,10 +411,14 @@ public:
     // is what `typing()` below is for.
     [[nodiscard]] bool key_pressed(Key key) const noexcept;
     // True while some field owns the keyboard, so a bare Delete or Ctrl+Z
-    // shortcut stands down rather than firing mid-word.
+    // shortcut stands down rather than firing mid-word - and while a viewport
+    // camera is being flown, whose W, A, S, D, Q and E are movement.
     [[nodiscard]] bool typing() const noexcept {
-        return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_;
+        return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_ ||
+               navigating_;
     }
+    // A viewport camera has the keyboard for movement until this is cleared.
+    void set_navigating(bool navigating) noexcept { navigating_ = navigating; }
     // Printable characters struck this frame while nothing is typing - the
     // single-key shortcuts a timeline lives on (Space, I, O, M). Empty while a
     // field or menu owns the keyboard, so a name being typed never also plays
@@ -458,6 +477,7 @@ private:
     // The focused field's whole value is selected (see
     // focus_text_field_selected).
     bool select_all_{};
+    bool navigating_{};
     // What the focused field held when the edit began, for Escape.
     std::string edit_original_;
     double time_{};

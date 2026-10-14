@@ -1190,6 +1190,43 @@ void drawable_mask_gpu_gates_opaque_partial_and_transparent_source() {
     EXECUTOR_CHECK(padded_masked.rgba[corner + 3U] == 0U);
 }
 
+void a_source_layer_mask_lands_on_its_layer_not_the_frame() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    const auto graph_value = key_graph(100U, KeyGraphKind::None);
+    EXECUTOR_CHECK(graph_value.valid());
+    // A layer right of centre and turned away, so its source plane is
+    // neither the frame nor any axis-aligned part of it.
+    scene::Scene value = white_layer_scene(canvas, 1.0F);
+    scene::MeshInstance& layer = value.instances.front();
+    layer.world = scene::multiply(
+        scene::translation(scene::Vec3{0.55F, 0.0F, 0.0F}),
+        scene::rotation(0.08F, 0.0F, 0.0F));
+    layer.normal = scene::normal_basis(layer.world);
+    // The layer's left half.
+    value.mask_programs.push_back(rectangle_mask_program(
+        100U, scene::MaskBounds{0.0F, 0.0F, 0.5F, 1.0F}));
+    const Image image = execute_graph(device, graph_value, value);
+    EXECUTOR_CHECK(image.stats.masked_layers == 1U);
+
+    const auto on_layer = [&value, &image](float u, float v) {
+        const scene::CanvasProjection at = scene::project_to_canvas(
+            value.camera, value.canvas,
+            scene::transform_point(value.instances.front().world,
+                                   scene::Vec3{-0.5F + u, 0.5F - v, 0.0F}));
+        EXECUTOR_CHECK(at.visible);
+        return image.rgba[image.at(static_cast<core::u32>(at.x),
+                                   static_cast<core::u32>(at.y)) + 3U];
+    };
+    EXECUTOR_CHECK(on_layer(0.25F, 0.5F) > 250U);
+    EXECUTOR_CHECK(on_layer(0.4F, 0.2F) > 250U);
+    EXECUTOR_CHECK(on_layer(0.75F, 0.5F) < 5U);
+    EXECUTOR_CHECK(on_layer(0.6F, 0.8F) < 5U);
+    // The frame's left half, where a frame-space mask would have cut.
+    EXECUTOR_CHECK(image.rgba[image.at(canvas.width / 4U,
+                                       canvas.height / 2U) + 3U] < 5U);
+}
+
 void a_masked_layer_retains_its_intersecting_tested_depth() {
     auto device = open_device();
     constexpr scene::Canvas canvas{64U, 64U};
@@ -2010,7 +2047,7 @@ void bloom_splits_across_nodes_byte_exactly_through_the_compositor() {
 }
 
 
-constexpr std::array<Case, 26U> cases{{
+constexpr std::array<Case, 27U> cases{{
     {"the compositor publishes what the renderer rendered",
      &the_compositor_publishes_what_the_renderer_rendered},
     {"a blurred wall splits across nodes byte exactly",
@@ -2053,6 +2090,8 @@ constexpr std::array<Case, 26U> cases{{
      &drawable_mask_gpu_gates_opaque_partial_and_transparent_source},
     {"a masked layer retains its intersecting tested depth",
      &a_masked_layer_retains_its_intersecting_tested_depth},
+    {"a source-layer mask lands on its layer, not the frame",
+     &a_source_layer_mask_lands_on_its_layer_not_the_frame},
     {"keyed media is consistent across slices and explicit output views",
      &keyed_media_is_consistent_across_slices_and_explicit_output_views},
     {"atmosphere is applied once however many layers",

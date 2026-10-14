@@ -187,8 +187,8 @@ void matches_reference(const Image& image,
 
 [[nodiscard]] render::MaskRasterMapping mapping(float width,
                                                 float height) noexcept {
-    return render::MaskRasterMapping{0.0F, 0.0F, 1.0F, 1.0F,
-                                     width, height};
+    return render::affine_mask_raster_mapping(0.0F, 0.0F, 1.0F, 1.0F,
+                                              width, height);
 }
 
 [[nodiscard]] rhi::Device open_device() {
@@ -470,8 +470,9 @@ void closed_bezier_authored_canvas_matches_gpu_and_retains_depth() {
     operation.opacity = 0.8F;
     const auto group_program = program(
         {operation}, scene::MaskCoordinateSpace::AuthoredCanvas);
-    const render::MaskRasterMapping group_mapping{
-        0.25F, 0.0F, 0.5F, 1.0F, 480.0F, 280.0F};
+    const render::MaskRasterMapping group_mapping =
+        render::affine_mask_raster_mapping(
+            0.25F, 0.0F, 0.5F, 1.0F, 480.0F, 280.0F);
     MASK_RASTER_CHECK(render::valid_mask_program(group_program));
     const auto expected = render::mask_layer_reference(
         colors, width, height, group_program, group_mapping);
@@ -542,15 +543,188 @@ void resize_is_transactional() {
     MASK_RASTER_CHECK(raster.stats() == render::MaskRasterStats{});
 }
 
+struct MaskCoordinate final {
+    float x{};
+    float y{};
+};
+
+[[nodiscard]] MaskCoordinate apply(const render::MaskRasterMapping& mapping,
+                                   float u, float v) noexcept {
+    const auto& m = mapping.mask_from_output;
+    const float depth = m[6U] * u + m[7U] * v + m[8U];
+    return MaskCoordinate{(m[0U] * u + m[1U] * v + m[2U]) / depth,
+                          (m[3U] * u + m[4U] * v + m[5U]) / depth};
+}
+
+void source_layer_mapping_follows_the_drawable_plane() {
+    constexpr scene::Canvas canvas{1920U, 1080U};
+    const scene::Camera camera{};
+    // Off to the right and turned away, so the quad is seen in perspective
+    // and the middle of the frame is not on it at all.
+    const scene::Mat4 world = scene::multiply(
+        scene::translation(scene::Vec3{1.6F, 0.3F, -5.0F}),
+        scene::multiply(scene::rotation(0.1F, 0.04F, 0.0F),
+                        scene::scaling(scene::Vec3{2.0F, 1.2F, 1.0F})));
+    const scene::Mat4 view_projection =
+        scene::view_for_slice(camera, canvas, scene::whole(canvas))
+            .view_projection;
+    const scene::MaskCoordinateExtent extent = scene::mask_source_extent(
+        camera, canvas, world, scene::Primitive::Quad);
+    MASK_RASTER_CHECK(extent.width > 100.0F && extent.width < 1000.0F);
+    MASK_RASTER_CHECK(extent.height > 100.0F && extent.height < 1000.0F);
+
+    // Where scene projection puts a point of the quad's UV square.
+    const auto canvas_point = [&world, &camera, canvas](float u, float v) {
+        const scene::Vec3 local{-0.5F + u, 0.5F - v, 0.0F};
+        return scene::project_to_canvas(
+            camera, canvas, scene::transform_point(world, local));
+    };
+
+    const auto whole = render::source_layer_mask_mapping(
+        view_projection, canvas, scene::whole(canvas), world,
+        scene::Primitive::Quad, extent);
+    // A padded slice: the output covers this canvas rectangle only.
+    constexpr scene::CanvasRect padded{1000U, 200U, 900U, 700U};
+    const auto sliced = render::source_layer_mask_mapping(
+        view_projection, canvas, padded, world, scene::Primitive::Quad,
+        extent);
+    MASK_RASTER_CHECK(whole.has_value() && sliced.has_value());
+    MASK_RASTER_CHECK(render::valid_mask_raster_mapping(*whole));
+    MASK_RASTER_CHECK(whole->coordinate_width_canvas_px == extent.width);
+    MASK_RASTER_CHECK(whole->coordinate_height_canvas_px == extent.height);
+    for (const MaskCoordinate expected :
+         {MaskCoordinate{0.1F, 0.2F}, MaskCoordinate{0.5F, 0.5F},
+          MaskCoordinate{0.9F, 0.7F}, MaskCoordinate{0.3F, 0.95F}}) {
+        const scene::CanvasProjection at =
+            canvas_point(expected.x, expected.y);
+        MASK_RASTER_CHECK(at.visible);
+        const MaskCoordinate from_whole = apply(
+            *whole, at.x / static_cast<float>(canvas.width),
+            at.y / static_cast<float>(canvas.height));
+        MASK_RASTER_CHECK(std::abs(from_whole.x - expected.x) < 1.0e-3F);
+        MASK_RASTER_CHECK(std::abs(from_whole.y - expected.y) < 1.0e-3F);
+        const MaskCoordinate from_slice = apply(
+            *sliced,
+            (at.x - static_cast<float>(padded.x)) /
+                static_cast<float>(padded.width),
+            (at.y - static_cast<float>(padded.y)) /
+                static_cast<float>(padded.height));
+        MASK_RASTER_CHECK(std::abs(from_slice.x - expected.x) < 1.0e-3F);
+        MASK_RASTER_CHECK(std::abs(from_slice.y - expected.y) < 1.0e-3F);
+    }
+
+    // Coverage lands on the quad, not on the same fraction of the frame.
+    constexpr core::u32 width = 192U;
+    constexpr core::u32 height = 108U;
+    const auto coverage = render::mask_coverage_reference(
+        width, height,
+        program({rectangle(40U, 100U,
+                           scene::MaskBounds{0.25F, 0.25F, 0.75F, 0.75F})}),
+        *whole);
+    MASK_RASTER_CHECK(coverage.has_value());
+    const auto sample = [&coverage](scene::CanvasProjection at) {
+        const auto x = static_cast<std::size_t>(at.x / 10.0F);
+        const auto y = static_cast<std::size_t>(at.y / 10.0F);
+        return coverage.value()[y * width + x];
+    };
+    MASK_RASTER_CHECK(sample(canvas_point(0.5F, 0.5F)) == 1.0F);
+    MASK_RASTER_CHECK(sample(canvas_point(0.4F, 0.65F)) == 1.0F);
+    MASK_RASTER_CHECK(sample(canvas_point(0.1F, 0.5F)) == 0.0F);
+    MASK_RASTER_CHECK(sample(canvas_point(0.5F, 0.9F)) == 0.0F);
+    MASK_RASTER_CHECK(
+        sample(scene::CanvasProjection{960.0F, 540.0F, 0.0F, true}) == 0.0F);
+
+    // A plane through the eye is seen edge-on: no pixel lies on it, so the
+    // mask covers nothing rather than dividing by zero.
+    const scene::Mat4 edge_on = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, -5.0F}),
+        scene::scaling(scene::Vec3{2.0F, 1.0F, 2.0F}));
+    const auto flat = render::source_layer_mask_mapping(
+        view_projection, canvas, scene::whole(canvas), edge_on,
+        scene::Primitive::Plane, extent);
+    MASK_RASTER_CHECK(flat.has_value());
+    MASK_RASTER_CHECK(render::valid_mask_raster_mapping(*flat));
+    const auto flat_coverage = render::mask_coverage_reference(
+        16U, 9U,
+        program({rectangle(41U, 100U,
+                           scene::MaskBounds{0.0F, 0.0F, 1.0F, 1.0F})}),
+        *flat);
+    MASK_RASTER_CHECK(flat_coverage.has_value());
+    MASK_RASTER_CHECK(std::all_of(flat_coverage.value().begin(),
+                                  flat_coverage.value().end(),
+                                  [](float value) { return value == 0.0F; }));
+
+    // A volume has no one surface for mask coordinates to name.
+    MASK_RASTER_CHECK(!render::source_layer_mask_mapping(
+                           view_projection, canvas, scene::whole(canvas),
+                           world, scene::Primitive::Box, extent)
+                           .has_value());
+}
+
+void perspective_source_layer_coverage_matches_gpu() {
+    auto device = open_device();
+    constexpr core::u32 width = 48U;
+    constexpr core::u32 height = 27U;
+    const auto pixels = solid_pixels(width, height, {200U, 120U, 40U, 255U});
+    const auto colors = reference_source(pixels);
+    const auto source = upload_source(device, width, height, pixels);
+    const auto depth = create_depth(device, width, height);
+    auto created = render::MaskRaster::create(device, width, height);
+    MASK_RASTER_CHECK(created.has_value());
+    auto raster = std::move(created).value();
+
+    constexpr scene::Canvas canvas{1920U, 1080U};
+    const scene::Camera camera{};
+    const scene::Mat4 world = scene::multiply(
+        scene::translation(scene::Vec3{0.4F, -0.2F, -3.0F}),
+        scene::multiply(scene::rotation(0.12F, -0.06F, 0.02F),
+                        scene::scaling(scene::Vec3{2.4F, 1.5F, 1.0F})));
+    const auto layer_mapping = render::source_layer_mask_mapping(
+        scene::view_for_slice(camera, canvas, scene::whole(canvas))
+            .view_projection,
+        canvas, scene::CanvasRect{240U, 135U, 1440U, 810U}, world,
+        scene::Primitive::Quad,
+        scene::mask_source_extent(camera, canvas, world,
+                                  scene::Primitive::Quad));
+    MASK_RASTER_CHECK(layer_mapping.has_value());
+    auto operation = rectangle(
+        12U, 100U, scene::MaskBounds{0.2F, 0.3F, 0.7F, 0.8F});
+    operation.rotation_turns = 0.07F;
+    operation.feather_canvas_px = 24.0F;
+    const auto held_program = program({operation});
+    const auto expected = render::mask_layer_reference(
+        colors, width, height, held_program, *layer_mapping);
+    MASK_RASTER_CHECK(expected.has_value());
+    const auto opaque = std::count_if(
+        expected.value().begin(), expected.value().end(),
+        [](const rhi::Color& color) { return color.a > 0.99F; });
+    const auto clear = std::count_if(
+        expected.value().begin(), expected.value().end(),
+        [](const rhi::Color& color) { return color.a < 0.01F; });
+    MASK_RASTER_CHECK(opaque > 20 && clear > 20);
+    const auto& held_mapping = *layer_mapping;
+    const GpuResult masked = run(
+        device,
+        [&raster, &source, &depth, &held_program, &held_mapping](
+            rhi::CommandList& commands) {
+            return raster.apply(
+                commands, source, depth, held_program, held_mapping);
+        });
+    matches_reference(masked.image, expected.value(), 4);
+    MASK_RASTER_CHECK(masked.depth == &depth);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
     bool requires_gpu{};
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"CPU shapes, folds, and validation are deterministic",
      &cpu_shapes_folds_and_validation_are_deterministic, false},
+    {"Source-layer mapping follows the drawable plane",
+     &source_layer_mapping_follows_the_drawable_plane, false},
     {"GPU identity is byte, pointer, pass, and stat inert",
      &gpu_identity_is_byte_pointer_pass_and_stat_inert, true},
     {"Rectangle, ellipse, feather, expansion, and alpha match GPU",
@@ -560,6 +734,8 @@ constexpr std::array<Case, 6U> cases{{
     {"Ordered Add/Subtract/Intersect/Difference matches GPU",
      &ordered_add_subtract_intersect_difference_matches_gpu, true},
     {"Resize is transactional", &resize_is_transactional, true},
+    {"Perspective source-layer coverage matches GPU",
+     &perspective_source_layer_coverage_matches_gpu, true},
 }};
 
 [[nodiscard]] bool gpu_mask_available() {

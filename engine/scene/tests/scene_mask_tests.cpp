@@ -1076,12 +1076,51 @@ void one_mask_replacement_undoes_and_redoes_exactly() {
     MASK_CHECK(scheduler.undo_depth(context) == 1U);
 }
 
+void source_plane_and_extent_follow_the_drawable_surface() {
+    // Quad and Plane name the corners whose UVs are (0,0), (1,0), (1,1), (0,1).
+    const auto quad = scene::mask_source_plane(scene::Primitive::Quad);
+    MASK_CHECK(quad.has_value());
+    MASK_CHECK((*quad)[0U] == scene::Vec3{-0.5F, 0.5F, 0.0F});
+    MASK_CHECK((*quad)[2U] == scene::Vec3{0.5F, -0.5F, 0.0F});
+    const auto plane = scene::mask_source_plane(scene::Primitive::Plane);
+    MASK_CHECK(plane.has_value());
+    MASK_CHECK((*plane)[0U] == scene::Vec3{-0.5F, 0.0F, -0.5F});
+    MASK_CHECK((*plane)[2U] == scene::Vec3{0.5F, 0.0F, 0.5F});
+    MASK_CHECK(!scene::mask_source_plane(scene::Primitive::Box).has_value());
+    MASK_CHECK(!scene::mask_source_plane(scene::Primitive::Sphere).has_value());
+
+    // A 2 x 1 quad facing a 45-degree camera 5 m away on a 1920 x 1080
+    // canvas: 540 / tan(22.5 deg) px per unit of depth-scaled size.
+    constexpr scene::Canvas canvas{1920U, 1080U};
+    const scene::Camera camera{};
+    const scene::Mat4 world = scene::multiply(
+        scene::translation(scene::Vec3{0.7F, -0.4F, -5.0F}),
+        scene::scaling(scene::Vec3{2.0F, 1.0F, 1.0F}));
+    const double focal_px = 540.0 / std::tan(3.14159265358979323846 / 8.0);
+    const scene::MaskCoordinateExtent extent = scene::mask_source_extent(
+        camera, canvas, world, scene::Primitive::Quad);
+    MASK_CHECK(std::abs(extent.width - focal_px * 2.0 / 5.0) < 0.05);
+    MASK_CHECK(std::abs(extent.height - focal_px * 1.0 / 5.0) < 0.05);
+
+    // Without one plane, or with a corner behind the eye, it is the canvas.
+    MASK_CHECK(scene::mask_source_extent(camera, canvas, world,
+                                         scene::Primitive::Box) ==
+               (scene::MaskCoordinateExtent{1920.0F, 1080.0F}));
+    const scene::Mat4 behind = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, 0.0F, -0.2F}),
+        scene::multiply(scene::rotation(0.25F, 0.0F, 0.0F),
+                        scene::scaling(scene::Vec3{4.0F, 1.0F, 1.0F})));
+    MASK_CHECK(scene::mask_source_extent(camera, canvas, behind,
+                                         scene::Primitive::Quad) ==
+               (scene::MaskCoordinateExtent{1920.0F, 1080.0F}));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"typed shapes and finite values normalize at the model boundary",
      &typed_shapes_and_finite_values_normalize_at_the_model_boundary},
     {"programs use strict order and exact coverage folds",
@@ -1110,6 +1149,8 @@ constexpr std::array<Case, 14U> cases{{
      &bezier_point_authoring_keeps_dense_order_ownership_and_caps},
     {"one mask replacement undoes and redoes exactly",
      &one_mask_replacement_undoes_and_redoes_exactly},
+    {"source plane and extent follow the drawable surface",
+     &source_plane_and_extent_follow_the_drawable_surface},
 }};
 
 } // namespace

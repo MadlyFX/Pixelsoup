@@ -89,6 +89,25 @@ namespace {
     }
 }
 
+[[nodiscard]] std::optional<MoveKey> move_key_of(SDL_Scancode code) noexcept {
+    switch (code) {
+    case SDL_SCANCODE_W:
+        return MoveKey::W;
+    case SDL_SCANCODE_A:
+        return MoveKey::A;
+    case SDL_SCANCODE_S:
+        return MoveKey::S;
+    case SDL_SCANCODE_D:
+        return MoveKey::D;
+    case SDL_SCANCODE_Q:
+        return MoveKey::Q;
+    case SDL_SCANCODE_E:
+        return MoveKey::E;
+    default:
+        return std::nullopt;
+    }
+}
+
 [[nodiscard]] KeyMods mods_of(SDL_Keymod mod) noexcept {
     KeyMods mods = KeyMods::None;
     if ((mod & SDL_KMOD_SHIFT) != 0U) {
@@ -119,6 +138,8 @@ bool translate_event(
     case SDL_EVENT_MOUSE_MOTION:
         input.set_mouse_position(
             event.motion.x * to_logical, event.motion.y * to_logical);
+        input.add_mouse_motion(
+            event.motion.xrel * to_logical, event.motion.yrel * to_logical);
         break;
 
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -147,6 +168,9 @@ bool translate_event(
 
     case SDL_EVENT_KEY_DOWN: {
         input.set_mods(mods_of(event.key.mod));
+        if (const auto move = move_key_of(event.key.scancode)) {
+            input.set_move_key(move.value(), true);
+        }
         const auto key = key_of(event.key.key, event.key.mod);
         if (key.has_value()) {
             // Repeats are kept: holding Backspace should keep deleting.
@@ -177,6 +201,15 @@ bool translate_event(
 
     case SDL_EVENT_KEY_UP:
         input.set_mods(mods_of(event.key.mod));
+        if (const auto move = move_key_of(event.key.scancode)) {
+            input.set_move_key(move.value(), false);
+        }
+        break;
+
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        // The key and button ups go to whichever window has focus now, so
+        // anything held here would otherwise stay held forever.
+        input.release_held();
         break;
 
     default:
@@ -209,6 +242,11 @@ struct UiWindow::Impl final {
 
     std::array<SDL_Cursor*, 7U> cursors{};
     Cursor cursor{Cursor::Arrow};
+    // Relative mouse mode, and where the cursor was when it began so it can
+    // be put back there when it ends.
+    bool pointer_locked{};
+    float lock_x{};
+    float lock_y{};
 
     // The atlas is copied rather than borrowed: uploading needs a command list,
     // so it happens on the next present, by which time the caller's FontAtlas
@@ -397,6 +435,7 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
 
 bool UiWindow::pump(InputState& input) {
     input.new_frame();
+    input.set_pointer_locked(impl_->pointer_locked);
 
     // Events are in window coordinates; the UI wants logical units. Read the
     // scale first so a frame's pointer and its layout agree on one.
@@ -490,6 +529,22 @@ void UiWindow::set_cursor(Cursor cursor) noexcept {
     if (shape != nullptr && SDL_SetCursor(shape)) {
         impl_->cursor = cursor;
     }
+}
+
+void UiWindow::set_pointer_locked(bool locked) noexcept {
+    if (locked == impl_->pointer_locked || impl_->window == nullptr) {
+        return;
+    }
+    if (locked) {
+        static_cast<void>(SDL_GetMouseState(&impl_->lock_x, &impl_->lock_y));
+        if (!SDL_SetWindowRelativeMouseMode(impl_->window, true)) {
+            return;
+        }
+    } else {
+        SDL_WarpMouseInWindow(impl_->window, impl_->lock_x, impl_->lock_y);
+        static_cast<void>(SDL_SetWindowRelativeMouseMode(impl_->window, false));
+    }
+    impl_->pointer_locked = locked;
 }
 
 double UiWindow::time_seconds() const noexcept {

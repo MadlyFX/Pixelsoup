@@ -14,8 +14,9 @@ static const uint max_mask_points = 256u;
 static const uint bezier_subdivisions = 8u;
 
 cbuffer MaskRasterConstants : register(b0, space3) {
-    // xy: output-UV origin in mask coordinates; zw: output-UV extent.
-    float4 mapping;
+    // Rows of the projective map from (output u, output v, 1) to mask
+    // coordinates times a positive depth; w is unused.
+    float4 mapping[3];
     // xy: normalized-coordinate extent in authored canvas pixels;
     // z: feather pixels; w: signed expansion pixels.
     float4 geometry;
@@ -153,16 +154,26 @@ float bezier_distance(float2 sample_position) {
 }
 
 float operation_coverage(float2 output_uv) {
-    const float2 mask_coordinate = mapping.xy + output_uv * mapping.zw;
-    const float2 sample_position = mask_coordinate * geometry.xy;
-    float signed_distance = 0.0;
-    const uint kind = (uint)operation.y;
-    if (kind == 0u) {
-        signed_distance = rectangle_distance(sample_position);
-    } else if (kind == 1u) {
-        signed_distance = ellipse_distance(sample_position);
-    } else {
-        signed_distance = bezier_distance(sample_position);
+    // Mirrors the CPU reference term by term. A pixel whose depth is not
+    // positive lies beyond the source plane's horizon: outside every shape.
+    const float depth = mapping[2].x * output_uv.x
+        + mapping[2].y * output_uv.y + mapping[2].z;
+    float signed_distance = 3.402823466e+38;
+    if (depth > 0.0) {
+        const float2 mask_coordinate = float2(
+            (mapping[0].x * output_uv.x + mapping[0].y * output_uv.y
+                + mapping[0].z) / depth,
+            (mapping[1].x * output_uv.x + mapping[1].y * output_uv.y
+                + mapping[1].z) / depth);
+        const float2 sample_position = mask_coordinate * geometry.xy;
+        const uint kind = (uint)operation.y;
+        if (kind == 0u) {
+            signed_distance = rectangle_distance(sample_position);
+        } else if (kind == 1u) {
+            signed_distance = ellipse_distance(sample_position);
+        } else {
+            signed_distance = bezier_distance(sample_position);
+        }
     }
     signed_distance -= geometry.w;
 

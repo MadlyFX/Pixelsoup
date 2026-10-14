@@ -1,7 +1,7 @@
 # 10 — Measuring a wall and producing its look
 
 The procedure that goes with [10 — Display transform and
-calibration](10-display-transform-and-calibration.md). The code in that step is
+calibration](../docs/renderer.md). The code in that step is
 only the delivery mechanism; this is what actually gets the colour right on the
 day. Written to be followed cold by whoever is standing at the wall with a probe.
 

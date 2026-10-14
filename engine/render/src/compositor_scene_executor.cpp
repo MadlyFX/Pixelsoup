@@ -119,6 +119,47 @@ struct SourceStyle final {
 using SourceStyles = std::map<doc::NodeId, SourceStyle>;
 using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
 
+// Where a SourceLayer mask lands in this frame's padded raster. Its
+// coordinates name the target's source plane, the surface its UVs cover, so
+// each pixel is traced back onto that plane through the same view, grid and
+// padded rectangle the atmosphere resolves against. Measuring the mask across
+// the raster instead put it wherever the layer's UV square would sit if it
+// filled the padded frame, which is nowhere near the drawable the Stage
+// outline is drawn on. No value when the target has no single source plane.
+[[nodiscard]] std::optional<MaskRasterMapping> source_layer_mapping(
+    const scene::Scene& scene, doc::NodeId target,
+    const SceneRenderView* view, const PaddedSlice& padded,
+    core::u32 target_width, core::u32 target_height) noexcept {
+    const scene::Mat4* world{};
+    scene::Primitive primitive{scene::Primitive::Quad};
+    for (const scene::MediaInstance& media : scene.media) {
+        if (media.source_node == target) {
+            world = &media.world;
+            primitive = media.mesh.primitive;
+            break;
+        }
+    }
+    if (world == nullptr) {
+        for (const scene::MeshInstance& instance : scene.instances) {
+            if (instance.source == target) {
+                world = &instance.world;
+                primitive = instance.mesh.primitive;
+                break;
+            }
+        }
+    }
+    if (world == nullptr) {
+        return std::nullopt;
+    }
+    const FogFrame frame =
+        fog_frame_for(scene, view, padded, target_width, target_height);
+    return source_layer_mask_mapping(
+        frame.view_projection, frame.grid_canvas, frame.render, *world,
+        primitive,
+        scene::mask_source_extent(scene.camera, scene.canvas, *world,
+                                  primitive));
+}
+
 [[nodiscard]] bool collect_mask_programs(const scene::Scene& source,
                                          MaskPrograms& programs) {
     const auto target_is_drawn = [&source](doc::NodeId target) noexcept {
@@ -2227,12 +2268,23 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             if (pass.mask_program.has_value()) {
                 const scene::MaskProgram& program = *pass.mask_program;
                 masked_layer = !mask_program_is_identity(program);
-                const MaskRasterMapping mapping{
-                    0.0F, 0.0F, 1.0F, 1.0F,
-                    static_cast<float>(plan.adjusted_scene.canvas.width),
-                    static_cast<float>(plan.adjusted_scene.canvas.height)};
+                const auto mapping = source_layer_mapping(
+                    plan.adjusted_scene, program.target,
+                    render_view.has_value() ? &*render_view : nullptr,
+                    padded.value(), padded_width(), padded_height());
+                if (!mapping.has_value()) {
+                    // A volume or imported model has no one surface for the
+                    // mask's coordinates to name, so there is nowhere
+                    // honest to put it.
+                    static_cast<void>(core::report_idle_once(
+                        "layer mask",
+                        "masked layer has no source plane; masks need a "
+                        "quad or plane"));
+                    return CompositorSceneResult::failure(
+                        RenderError::CapabilityUnsupported);
+                }
                 auto result = mask_raster_.apply(
-                    commands, *above, *tested_depth, program, mapping);
+                    commands, *above, *tested_depth, program, *mapping);
                 if (!result || result.value().color == nullptr ||
                     result.value().depth != tested_depth) {
                     return CompositorSceneResult::failure(

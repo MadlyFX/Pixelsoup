@@ -282,22 +282,26 @@ void accumulate_segment(Vec2 point, Vec2 start, Vec2 finish,
     const MaskRasterMapping& mapping) noexcept {
     const Vec2 extent{mapping.coordinate_width_canvas_px,
                       mapping.coordinate_height_canvas_px};
-    const Vec2 point{
-        (mapping.origin_x + output_u * mapping.extent_x) * extent.x,
-        (mapping.origin_y + output_v * mapping.extent_y) * extent.y};
-    float signed_distance{};
-    switch (operation.kind) {
-    case scene::MaskKind::Rectangle:
-        signed_distance = rectangle_distance(
-            point, operation.bounds, extent, operation.rotation_turns);
-        break;
-    case scene::MaskKind::Ellipse:
-        signed_distance = ellipse_distance(
-            point, operation.bounds, extent, operation.rotation_turns);
-        break;
-    case scene::MaskKind::Bezier:
-        signed_distance = bezier_distance(point, operation, extent);
-        break;
+    const auto& m = mapping.mask_from_output;
+    const float depth = m[6U] * output_u + m[7U] * output_v + m[8U];
+    float signed_distance = std::numeric_limits<float>::max();
+    if (depth > 0.0F) {
+        const Vec2 point{
+            (m[0U] * output_u + m[1U] * output_v + m[2U]) / depth * extent.x,
+            (m[3U] * output_u + m[4U] * output_v + m[5U]) / depth * extent.y};
+        switch (operation.kind) {
+        case scene::MaskKind::Rectangle:
+            signed_distance = rectangle_distance(
+                point, operation.bounds, extent, operation.rotation_turns);
+            break;
+        case scene::MaskKind::Ellipse:
+            signed_distance = ellipse_distance(
+                point, operation.bounds, extent, operation.rotation_turns);
+            break;
+        case scene::MaskKind::Bezier:
+            signed_distance = bezier_distance(point, operation, extent);
+            break;
+        }
     }
     signed_distance -= operation.expansion_canvas_px;
     float coverage = signed_distance <= 0.0F ? 1.0F : 0.0F;
@@ -407,13 +411,13 @@ struct alignas(16) GpuMaskPoint final {
 static_assert(sizeof(GpuMaskPoint) == 32U);
 
 struct alignas(16) MaskRasterUniform final {
-    std::array<float, 4U> mapping{};
+    std::array<std::array<float, 4U>, 3U> mapping{};
     std::array<float, 4U> geometry{};
     std::array<float, 4U> operation{};
     std::array<core::u32, 4U> counts{};
     std::array<GpuMaskPoint, scene::max_mask_points_per_mask> points{};
 };
-static_assert(sizeof(MaskRasterUniform) == 8'256U);
+static_assert(sizeof(MaskRasterUniform) == 8'288U);
 
 struct alignas(16) MaskComposeUniform final {
     std::array<float, 4U> reserved{};
@@ -430,8 +434,11 @@ template <typename Value>
     const scene::MaskInstance& operation,
     const MaskRasterMapping& mapping, bool seed) noexcept {
     MaskRasterUniform value{};
-    value.mapping = {mapping.origin_x, mapping.origin_y, mapping.extent_x,
-                     mapping.extent_y};
+    const auto& m = mapping.mask_from_output;
+    for (std::size_t row = 0U; row < value.mapping.size(); ++row) {
+        value.mapping[row] = {m[row * 3U], m[row * 3U + 1U],
+                              m[row * 3U + 2U], 0.0F};
+    }
     value.geometry = {mapping.coordinate_width_canvas_px,
                       mapping.coordinate_height_canvas_px,
                       operation.feather_canvas_px,
@@ -473,15 +480,116 @@ template <typename Value>
 
 } // namespace
 
+MaskRasterMapping affine_mask_raster_mapping(
+    float origin_x, float origin_y, float extent_x, float extent_y,
+    float coordinate_width_canvas_px,
+    float coordinate_height_canvas_px) noexcept {
+    return MaskRasterMapping{
+        {extent_x, 0.0F, origin_x, 0.0F, extent_y, origin_y, 0.0F, 0.0F,
+         1.0F},
+        coordinate_width_canvas_px,
+        coordinate_height_canvas_px};
+}
+
+std::optional<MaskRasterMapping> source_layer_mask_mapping(
+    const scene::Mat4& view_projection, scene::Canvas grid,
+    scene::CanvasRect render, const scene::Mat4& world,
+    scene::Primitive primitive,
+    scene::MaskCoordinateExtent extent) noexcept {
+    const auto plane = scene::mask_source_plane(primitive);
+    if (!plane.has_value()) {
+        return std::nullopt;
+    }
+    // The plane is origin + u*across + v*down, so its clip position is linear
+    // in (u, v, 1) and so is its grid pixel position scaled by clip w. That
+    // 3x3 takes (u, v, 1) to (x*w, y*w, w); its inverse takes a pixel back to
+    // (u, v, 1)/w, whose last term is positive exactly where the pixel sees
+    // the plane in front of the camera.
+    const scene::Mat4 clip_from_local = scene::multiply(view_projection, world);
+    const scene::Vec3 origin_local = (*plane)[0U];
+    const scene::Vec3 across_local = (*plane)[1U] - (*plane)[0U];
+    const scene::Vec3 down_local = (*plane)[3U] - (*plane)[0U];
+    const scene::Vec4 origin = scene::transform(
+        clip_from_local,
+        scene::Vec4{origin_local.x, origin_local.y, origin_local.z, 1.0F});
+    const scene::Vec4 across = scene::transform(
+        clip_from_local,
+        scene::Vec4{across_local.x, across_local.y, across_local.z, 0.0F});
+    const scene::Vec4 down = scene::transform(
+        clip_from_local,
+        scene::Vec4{down_local.x, down_local.y, down_local.z, 0.0F});
+    const double grid_width = static_cast<double>(grid.width);
+    const double grid_height = static_cast<double>(grid.height);
+    const auto pixel_x = [grid_width](scene::Vec4 clip) noexcept {
+        return 0.5 * grid_width *
+            (static_cast<double>(clip.x) + static_cast<double>(clip.w));
+    };
+    const auto pixel_y = [grid_height](scene::Vec4 clip) noexcept {
+        return 0.5 * grid_height *
+            (static_cast<double>(clip.w) - static_cast<double>(clip.y));
+    };
+    const std::array<double, 9U> f{
+        pixel_x(across), pixel_x(down), pixel_x(origin),
+        pixel_y(across), pixel_y(down), pixel_y(origin),
+        static_cast<double>(across.w), static_cast<double>(down.w),
+        static_cast<double>(origin.w)};
+    const std::array<double, 9U> adjugate{
+        f[4U] * f[8U] - f[5U] * f[7U], f[2U] * f[7U] - f[1U] * f[8U],
+        f[1U] * f[5U] - f[2U] * f[4U], f[5U] * f[6U] - f[3U] * f[8U],
+        f[0U] * f[8U] - f[2U] * f[6U], f[2U] * f[3U] - f[0U] * f[5U],
+        f[3U] * f[7U] - f[4U] * f[6U], f[1U] * f[6U] - f[0U] * f[7U],
+        f[0U] * f[4U] - f[1U] * f[3U]};
+    const double determinant =
+        f[0U] * adjugate[0U] + f[1U] * adjugate[3U] + f[2U] * adjugate[6U];
+    double scale{};
+    for (const double value : f) {
+        scale = std::max(scale, std::abs(value));
+    }
+    MaskRasterMapping mapping{};
+    mapping.coordinate_width_canvas_px = extent.width;
+    mapping.coordinate_height_canvas_px = extent.height;
+    if (!std::isfinite(determinant) ||
+        std::abs(determinant) <= 1.0e-12 * scale * scale * scale) {
+        mapping.mask_from_output.fill(0.0F);
+        return mapping;
+    }
+    // Output UV to grid pixels, then through the inverse. Only the sign of
+    // the overall scale matters, so the result is normalized to keep the
+    // shader's binary32 arithmetic well inside range.
+    const std::array<double, 9U> grid_from_output{
+        static_cast<double>(render.width), 0.0, static_cast<double>(render.x),
+        0.0, static_cast<double>(render.height), static_cast<double>(render.y),
+        0.0, 0.0, 1.0};
+    std::array<double, 9U> mask_from_output{};
+    double largest{};
+    for (std::size_t row = 0U; row < 3U; ++row) {
+        for (std::size_t column = 0U; column < 3U; ++column) {
+            double sum{};
+            for (std::size_t k = 0U; k < 3U; ++k) {
+                sum += adjugate[row * 3U + k] / determinant *
+                    grid_from_output[k * 3U + column];
+            }
+            mask_from_output[row * 3U + column] = sum;
+            largest = std::max(largest, std::abs(sum));
+        }
+    }
+    if (!std::isfinite(largest) || largest <= 0.0) {
+        mapping.mask_from_output.fill(0.0F);
+        return mapping;
+    }
+    for (std::size_t index = 0U; index < mask_from_output.size(); ++index) {
+        mapping.mask_from_output[index] =
+            static_cast<float>(mask_from_output[index] / largest);
+    }
+    return mapping;
+}
+
 bool valid_mask_raster_mapping(const MaskRasterMapping& mapping) noexcept {
-    return finite(mapping.origin_x) && finite(mapping.origin_y) &&
-        finite(mapping.extent_x) && finite(mapping.extent_y) &&
+    return std::all_of(mapping.mask_from_output.begin(),
+                       mapping.mask_from_output.end(),
+                       [](float value) { return finite(value); }) &&
         finite(mapping.coordinate_width_canvas_px) &&
         finite(mapping.coordinate_height_canvas_px) &&
-        mapping.origin_x >= 0.0F && mapping.origin_y >= 0.0F &&
-        mapping.extent_x > 0.0F && mapping.extent_y > 0.0F &&
-        mapping.origin_x + mapping.extent_x <= 1.0F &&
-        mapping.origin_y + mapping.extent_y <= 1.0F &&
         mapping.coordinate_width_canvas_px > 0.0F &&
         mapping.coordinate_height_canvas_px > 0.0F;
 }

@@ -87,10 +87,11 @@ def collection_objects(collection):
     return objects
 
 
-def material_factors(material):
+def material_factors(material, mesh=None):
     from .materials import describe_material
     from .runtime import runtime
-    return describe_material(material, runtime.identities, bpy.context.scene)
+    uv = next((layer.name for layer in getattr(mesh, 'uv_layers', ()) if layer.active_render), '')
+    return describe_material(material, runtime.identities, bpy.context.scene, uv)
 
 
 def validate_generator(obj):
@@ -266,7 +267,7 @@ def describe(scene, collection, identities):
             for slot in obj.material_slots:
                 if slot.material:
                     identities.identity(slot.material, scene)
-                materials.append(material_factors(slot.material))
+                materials.append(material_factors(slot.material, obj.data))
         parent = source_parent(obj)
         objects.append({'id': ids[name], 'name': name, 'parent': ids.get(parent.name, '') if parent else '',
                         'prototype': str(uuid.uuid5(uuid.UUID(ids[name]), 'evaluated-mesh-v1')) if mesh else '',
@@ -299,7 +300,7 @@ def describe(scene, collection, identities):
             'parent':parent_id,'prototype':str(uuid.uuid5(uuid.UUID(prototype_id),'evaluated-mesh-v1')),
             'visible':next(o['visible'] for o in objects if o['id']==parent_id),
             'matrix':[float(c == r) for c in range(4) for r in range(4)],
-            'materials':[material_factors(s.material) for s in prototype.material_slots] or [list(DEFAULT_MATERIAL)],
+            'materials':[material_factors(s.material, prototype.data) for s in prototype.material_slots] or [list(DEFAULT_MATERIAL)],
             'session':prototype.session_uid,'data_session':prototype.data.session_uid,'batch':packed})
     for obj in list(objects):
         if not obj['prototype']:
@@ -314,7 +315,7 @@ def describe(scene, collection, identities):
             objects.append(dict(obj,id=low_id,name=low.name,mesh_name=low.name,
                 prototype=str(uuid.uuid5(uuid.UUID(low_id),'mesh')),session=low.session_uid,
                 data_session=low.data.session_uid,resource_only=True,lod_id='',terrain_size=0,batch='',
-                materials=[material_factors(s.material) for s in low.material_slots] or [list(DEFAULT_MATERIAL)]))
+                materials=[material_factors(s.material, low.data) for s in low.material_slots] or [list(DEFAULT_MATERIAL)]))
     if sum(bool(obj['prototype']) for obj in objects) > MAX_RESOURCES:
         raise ValueError('Collection exceeds ' + str(MAX_RESOURCES) + ' evaluated prototypes')
     by_id = {obj['id']: obj for obj in objects}
@@ -378,7 +379,7 @@ def copy_mesh(name, scale):
         if sum(map(len, result)) > MAX_MESH_BYTES:
             raise ValueError(name + ': evaluated geometry exceeds the 4 GiB copy budget')
         # Evaluated modifiers may introduce their own material slots.
-        materials = [material_factors(m) for m in mesh.materials] or [list(DEFAULT_MATERIAL)]
+        materials = [material_factors(m, mesh) for m in mesh.materials] or [list(DEFAULT_MATERIAL)]
         return result, materials
     finally:
         evaluated.to_mesh_clear()

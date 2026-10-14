@@ -55,6 +55,23 @@ class Tests(unittest.TestCase):
             self.assertFalse(result[0]['materials'][0]['textures'])
             self.assertTrue(warnings)
 
+    def test_scene_keeps_256_distinct_images_and_reports_the_next(self):
+        # Sponza plus a helmet is 84 images; the old budget kept only 32.
+        with tempfile.TemporaryDirectory() as directory:
+            obj = object_row()
+            obj['materials'] = []
+            for index in range(257):
+                path = Path(directory)/(str(index) + '.png')
+                path.write_bytes(png([index % 256, index // 256, 7, 255]))
+                obj['materials'].append(material('m-' + str(index), 'Material ' + str(index), path))
+            warnings = []
+            result = resolve_materials([obj], warnings=warnings, blender='blender')
+            kept = [m for m in result[0]['materials'] if m['textures']]
+            self.assertEqual(len(kept), 256)
+            self.assertEqual(kept[-1]['name'], 'Material 255')
+            self.assertFalse(result[0]['materials'][256]['textures'])
+            self.assertEqual(warnings, ['Material 256: ignored texture (Scene exceeds 256 distinct images)'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -3,7 +3,7 @@
 Step 07 completes the local static authoring loop built by steps 01–06. The
 qualified Blender build and supported source subset remain those in the
 [publisher contract](publisher-v1.md) and [shot contract](shot-placement-v1.md).
-Use the [UI walkthrough](ui-checks-step-07.md) to exercise the workflow.
+Use the [current operator workflow](operator-guide.md) to exercise the workflow.
 
 ## Hierarchy and editing
 

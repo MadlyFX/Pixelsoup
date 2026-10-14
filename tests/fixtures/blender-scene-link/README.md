@@ -25,4 +25,4 @@ packages in its scratch directory, never beside these source fixtures.
 
 See [contract](../../../blender%20live%20scene%20link/contract-v1.md),
 [measurements](../../../blender%20live%20scene%20link/baseline-v1.md) and
-[UI checks and known limits](../../../blender%20live%20scene%20link/ui-checks.md).
+[UI checks and known limits](../../../blender%20live%20scene%20link/operator-guide.md).

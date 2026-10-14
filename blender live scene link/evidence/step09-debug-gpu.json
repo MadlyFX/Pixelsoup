@@ -1,1 +1,0 @@
-{"instances":4096,"document_nodes":62,"vertices":6153,"indices":6153,"worst_shadow_triangles":694144,"working_bytes":5006500,"import_ms":203.285,"repaint_ms":201.919,"evaluate_ms":52.2768,"render_submit_wait_ms":140.798,"gpu_instances":4096,"gpu_batches":1,"gpu_camera_triangles":6128,"shadow_cascades":4,"shadow_casters":4096,"gpu_upload_bytes":1572992,"lod_reductions":4080}

@@ -742,6 +742,22 @@ void shortcut_text_stands_down_while_anything_is_typing() {
     UI_CHECK(ctx.shortcut_text().empty());
 }
 
+// A flown camera owns W A S D Q E: the letters stop being shortcuts while it
+// flies, and a field with the keyboard takes them back as typing.
+void a_flying_camera_takes_movement_keys_from_shortcuts() {
+    gui::InputState input;gui::UiDrawList list;const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
+    input.new_frame();input.add_text("q");input.set_move_key(gui::MoveKey::Q,true);ctx.new_frame();
+    UI_CHECK(ctx.shortcut_text()=="q");UI_CHECK(ctx.move_key_down(gui::MoveKey::Q));
+    ctx.set_navigating(true);
+    input.new_frame();input.add_text("q");ctx.new_frame();
+    UI_CHECK(ctx.typing());UI_CHECK(ctx.shortcut_text().empty());UI_CHECK(ctx.move_key_down(gui::MoveKey::Q));
+    ctx.set_navigating(false);
+    std::string value;
+    ctx.focus_text_field(81,value);
+    input.new_frame();ctx.new_frame();
+    UI_CHECK(!ctx.move_key_down(gui::MoveKey::Q));
+}
+
 // A dense display draws the same logical layout with more pixels. The list
 // multiplies as it emits, so every vertex and clip edge lands at the physical
 // position, and rectangles stay on whole pixels.
@@ -851,7 +867,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 30U> cases{{
+constexpr std::array<Case, 31U> cases{{
     {"a scaled list emits physical pixels", &a_scaled_list_emits_physical_pixels},
     {"thin rules keep one width at fractional scale",
      &thin_rules_keep_one_width_at_fractional_scale},
@@ -863,6 +879,7 @@ constexpr std::array<Case, 30U> cases{{
     {"dropdown keyboard and dismissal", &dropdown_keyboard_selection_escape_and_disappearing_owner},
     {"a context menu opens at a point and reports one choice", &a_context_menu_opens_at_a_point_and_reports_one_choice},
     {"shortcut text stands down while anything is typing", &shortcut_text_stands_down_while_anything_is_typing},
+    {"a flying camera takes movement keys from shortcuts", &a_flying_camera_takes_movement_keys_from_shortcuts},
     {"a paste inserts at the caret", &a_paste_inserts_at_the_caret},
     {"a click is a press then a release over the button",
      &a_click_is_a_press_then_a_release_over_the_button},

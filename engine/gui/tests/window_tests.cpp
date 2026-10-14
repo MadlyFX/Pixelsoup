@@ -316,6 +316,90 @@ void an_unhandled_event_changes_nothing() {
     UI_CHECK(input.keys().empty());
 }
 
+[[nodiscard]] SDL_Event scancode_event(SDL_Scancode code, SDL_Keycode key,
+                                       bool down) noexcept {
+    SDL_Event event = key_event(key, down);
+    event.key.scancode = code;
+    return event;
+}
+
+// Flying a viewport camera reads W A S D Q E as held state, by physical
+// position: an AZERTY Z (on the QWERTY W key) still flies forward, and the
+// letter typed on the keyboard as it is labelled still arrives as text.
+void movement_keys_are_held_by_physical_position() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event forward = scancode_event(SDL_SCANCODE_W, SDLK_Z, true);
+    const SDL_Event rise = scancode_event(SDL_SCANCODE_E, SDLK_E, true);
+    UI_CHECK(gui::translate_event(&forward, input));
+    UI_CHECK(gui::translate_event(&rise, input));
+    UI_CHECK(input.move_key_down(gui::MoveKey::W));
+    UI_CHECK(input.move_key_down(gui::MoveKey::E));
+    UI_CHECK(!input.move_key_down(gui::MoveKey::S));
+    UI_CHECK(input.keys().empty());
+
+    // Held across frames until the key comes up.
+    input.new_frame();
+    UI_CHECK(input.move_key_down(gui::MoveKey::W));
+    const SDL_Event lifted = scancode_event(SDL_SCANCODE_W, SDLK_Z, false);
+    UI_CHECK(gui::translate_event(&lifted, input));
+    UI_CHECK(!input.move_key_down(gui::MoveKey::W));
+    UI_CHECK(input.move_key_down(gui::MoveKey::E));
+}
+
+// Raw travel accumulates from each motion's relative part, and keeps arriving
+// while a lock holds the pointer where a camera drag began.
+void raw_motion_keeps_arriving_while_the_pointer_is_locked() {
+    gui::InputState input;
+    input.new_frame();
+    SDL_Event motion = motion_event(400.0F, 300.0F);
+    motion.motion.xrel = 7.0F;
+    motion.motion.yrel = -3.0F;
+    UI_CHECK(gui::translate_event(&motion, input, 0.5F));
+    UI_CHECK(gui::translate_event(&motion, input, 0.5F));
+    UI_CHECK(near(input.motion_dx(), 7.0F));
+    UI_CHECK(near(input.motion_dy(), -3.0F));
+    UI_CHECK(near(input.mouse_x(), 200.0F));
+
+    input.new_frame();
+    UI_CHECK(near(input.motion_dx(), 0.0F));
+    input.set_pointer_locked(true);
+    SDL_Event locked = motion_event(960.0F, 540.0F);
+    locked.motion.xrel = -12.0F;
+    const SDL_Event click = button_event(SDL_BUTTON_LEFT, true, 961.0F, 541.0F);
+    UI_CHECK(gui::translate_event(&locked, input));
+    UI_CHECK(gui::translate_event(&click, input));
+    UI_CHECK(near(input.motion_dx(), -12.0F));
+    UI_CHECK(near(input.mouse_x(), 200.0F) && near(input.mouse_y(), 150.0F));
+    UI_CHECK(input.mouse_pressed(gui::MouseButton::Left));
+
+    input.set_pointer_locked(false);
+    UI_CHECK(gui::translate_event(&locked, input));
+    UI_CHECK(near(input.mouse_x(), 960.0F));
+}
+
+// The ups for anything held go to whichever window has focus next, so losing
+// focus releases it all here, with edges, rather than flying on forever.
+void losing_focus_releases_everything_held() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event right = button_event(SDL_BUTTON_RIGHT, true, 5.0F, 5.0F);
+    const SDL_Event strafe = scancode_event(SDL_SCANCODE_A, SDLK_A, true);
+    SDL_Event alt = key_event(SDLK_LALT, true, SDL_KMOD_LALT);
+    UI_CHECK(gui::translate_event(&right, input));
+    UI_CHECK(gui::translate_event(&strafe, input));
+    UI_CHECK(gui::translate_event(&alt, input));
+
+    input.new_frame();
+    SDL_Event lost{};
+    lost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+    UI_CHECK(gui::translate_event(&lost, input));
+    UI_CHECK(!input.mouse_down(gui::MouseButton::Right));
+    UI_CHECK(input.mouse_released(gui::MouseButton::Right));
+    UI_CHECK(!input.move_key_down(gui::MoveKey::A));
+    UI_CHECK(input.mods() == gui::KeyMods::None);
+}
+
 // The only case that wants a display. A machine without one - or without a GPU
 // the RHI can drive - is a skip, not a failure: the same contract the render
 // suite runs under.
@@ -397,7 +481,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"motion moves the pointer", &motion_moves_the_pointer},
     {"a button event carries its own position",
      &a_button_event_carries_its_own_position},
@@ -423,6 +507,12 @@ constexpr std::array<Case, 15U> cases{{
     {"quit and close ask the pump to stop",
      &quit_and_close_ask_the_pump_to_stop},
     {"an unhandled event changes nothing", &an_unhandled_event_changes_nothing},
+    {"movement keys are held by physical position",
+     &movement_keys_are_held_by_physical_position},
+    {"raw motion keeps arriving while the pointer is locked",
+     &raw_motion_keeps_arriving_while_the_pointer_is_locked},
+    {"losing focus releases everything held",
+     &losing_focus_releases_everything_held},
     {"a window opens when the platform has one",
      &a_window_opens_when_the_platform_has_one},
 }};

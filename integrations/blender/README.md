@@ -111,6 +111,11 @@ same connection dialog.
 - Supported Principled values and directly assigned PNG/JPEG textures are retained.
   Oversized textures are resized to at most 1024 pixels in a separate Blender
   process using temporary export copies. Original texture files remain unchanged.
+  The glTF importer's base color factor (a full-strength Multiply of the texture and
+  a constant) is kept, as are UV and Normal Map nodes naming the active render UV map.
+  Images packed into the .blend (the glTF importer's default) count as unsaved: use
+  File > External Data > Unpack Resources. A scene publishes at most 256 distinct
+  images / 256 MiB.
   Unassigned, missing, unsupported or unsaved textures are omitted; unsupported
   shader graphs fall back to viewport material color. Missing UV maps omit textures.
   Unsupported inputs use constant values. Link alpha honors Opaque, Mask and Blend

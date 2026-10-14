@@ -1,8 +1,18 @@
-/out/
-/.vs/
+# Build and scratch output, including output from scripts run in subdirectories.
+out/
+.vs/
 /CMakeUserPresets.json
-/.cache/
+.cache/
 /.claude/
+/.vcpkg/
+vcpkg_installed/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+build.ninja
+.ninja_log
+.ninja_deps
 compile_commands.json
 # Dear ImGui writes its window/docking layout here at runtime; per-user state,
 # not source.
@@ -13,8 +23,14 @@ imgui.ini
 /media-server.wal.release
 /example UI images/
 
-# Blender publisher development; installable archives include source files only.
-/integrations/blender/**/__pycache__/
-/tests/blender/__pycache__/
-/scripts/__pycache__/
+# Derived import/lighting packages are recreated from their source assets.
+.mslink-cache-v1/
+*.gltf.*.msmodel
+*.glb.*.msmodel
+*.obj.*.msmodel
+/scripts/lighting.*.msgi
+
+# Python caches are disposable regardless of which working directory runs them.
+__pycache__/
+*.py[cod]
 /test_media/

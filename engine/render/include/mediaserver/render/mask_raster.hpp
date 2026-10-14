@@ -6,6 +6,8 @@
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <array>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -21,20 +23,41 @@ namespace mediaserver::render {
 inline constexpr core::u32 mask_bezier_subdivisions = 8U;
 
 // Maps the processor's output UV into the MaskProgram's normalized coordinate
-// space. `coordinate_extent_canvas_px` converts normalized distances to the
-// authored canvas-pixel unit used by feather and expansion. A complete source
-// layer uses origin (0,0), extent (1,1); a sliced raster may select a stable
-// normalized subrectangle without changing the authored mask geometry.
+// space through one projective transform: for output UV (u, v), with
+// p = (u, v, 1), the mask coordinate is (r0.p, r1.p) / (r2.p), where r0..r2
+// are the rows of `mask_from_output`. A complete AuthoredCanvas raster is the
+// identity and a slice of it an affine subrectangle. A SourceLayer raster maps
+// through its drawable's source plane as the frame's camera sees it
+// (source_layer_mask_mapping), so the mask stays on the surface exactly as its
+// UVs do, under perspective and inside a padded or sliced render alike. Where
+// r2.p is not positive the pixel lies beyond the plane's horizon and is
+// outside every shape. `coordinate_*_canvas_px` converts normalized distances
+// to the canvas-pixel unit used by feather, expansion and rotation.
 struct MaskRasterMapping final {
-    float origin_x{};
-    float origin_y{};
-    float extent_x{1.0F};
-    float extent_y{1.0F};
+    std::array<float, 9U> mask_from_output{
+        1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F};
     float coordinate_width_canvas_px{1.0F};
     float coordinate_height_canvas_px{1.0F};
 
     bool operator==(const MaskRasterMapping&) const = default;
 };
+
+// The output covers the normalized subrectangle origin..origin+extent.
+[[nodiscard]] MaskRasterMapping affine_mask_raster_mapping(
+    float origin_x, float origin_y, float extent_x, float extent_y,
+    float coordinate_width_canvas_px,
+    float coordinate_height_canvas_px) noexcept;
+
+// The SourceLayer mapping for a drawable with `world` and `primitive` drawn
+// through `view_projection`, whose clip space spans `grid` pixels; the
+// processor's output covers `render` inside that grid. No value when the
+// primitive has no source plane (scene::mask_source_plane). A plane seen
+// edge-on maps every pixel beyond its horizon, so the mask covers nothing.
+[[nodiscard]] std::optional<MaskRasterMapping> source_layer_mask_mapping(
+    const scene::Mat4& view_projection, scene::Canvas grid,
+    scene::CanvasRect render, const scene::Mat4& world,
+    scene::Primitive primitive,
+    scene::MaskCoordinateExtent extent) noexcept;
 
 [[nodiscard]] bool valid_mask_raster_mapping(
     const MaskRasterMapping& mapping) noexcept;

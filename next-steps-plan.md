@@ -1,151 +1,27 @@
-# Next Steps: From a Working Prototype to a Deployable System
+# Remaining work
 
-This software is unreleased and undeployed, no "legacy" features, workflows, or UX/UI elements need to be supported or migrated. Breaking changes are okay, new projects can easily be created.
+The current product is described by the [README](README.md),
+[architecture](media-server-architecture-plan.md), [operator guide](docs/operator-guide.md)
+and [renderer capabilities](advanced-renderer-status.md). Development rules and
+build requirements are in [AGENTS.md](AGENTS.md). This roadmap retains future
+contracts; check current code before treating an individual item as missing.
 
-This software is being run with .\scripts\run-editor-demo.ps1, so ensure the output executable that is run by this script.
+## Renderer and stage workflow
 
-This roadmap starts from the code that exists today. It supersedes the earlier
-"vertical slice" plan: the native editor, keyframe timeline, FFmpeg media
-decode, imported models, document-backed compositor, physical output mapping,
-project files, and lifecycle-managed node workflow are now implemented.
-
-Architectural context is in
-[media-server-architecture-plan.md](media-server-architecture-plan.md).
-
-After changes are complete, update the README and architecture docs to reflect the new functionality.
-
-## Implemented baseline
-
-The following are no longer roadmap work:
-
-- Immutable project document, command/revision model, frame scheduling,
-  checkpoints, Director/node sessions, and frame-boundary presentation.
-- Project save/open, checksummed atomic `.mstage` files, WAL/release records,
-  and recent-project recovery.
-- Bespoke native operator UI: docking, Scene/Library, Stage, Inspector,
-  Timeline, Compositor, Hardware Map, Feed Map, and Output Monitor.
-- Scene authoring for primitives, lights, media, imported models, materials,
-  effects, Program/Rehearsal switching, and component keyframes with hold,
-  linear, and cubic interpolation.
-- Image-sequence/still and FFmpeg video decode behind `MediaSource`, plus
-  glTF/GLB/OBJ import and GPU caching.
-- Typed compositor graph nodes for Scene Layer, Brightness, Saturation, Blur,
-  Radial Array, Composite, and Output; a deterministic evaluated plan and GPU
-  executor.
-- Canvas, planar, horizontal-arc, and imported-UV-mesh feed mapping.
-- A lifecycle agent that owns a fixed local child, authenticates status/start/
-  restart/stop requests, and reports transient machine/display inventory and
-  physical output-timing state.
-- A project-wide output synchronization policy, synchronization groups derived
-  from the Hardware Map with exact timing validation, an authenticated sync
-  device/reference/lock report, render-runtime present-barrier and frame
-  accounting on the session heartbeat, a group late-frame hold rule, and a
-  fail-closed Program gate that names the specific unmet condition.
-- Depth-correct compositor layers: an isolated layer is primed with the depth
-  of the opaque drawables in front of it, so a brightness or blur node no
-  longer lifts its object in front of the frame.
-- Clip placement and editing on the timeline - start, duration, source trim,
-  and head/tail opacity ramps - with move, trim, split at the playhead, snap,
-  fade, and cross dissolve as ordinary document edits.
-- Project-wide effect settings (blur kernel taps, sigma ratio, pass count;
-  brightness curve and response gamma) as a replicated, digested document node
-  edited from File > Project Settings.
-
-The code is still a prototype. "Implemented" means an exercised capability
-exists, not that it has the device coverage, operational tooling, performance
-budget, or interoperability needed for a production show.
+- Light cards, outer-frustum color-correction windows and plate chromakey:
+  replicate and digest authored regions, emissive cards and deterministic wall
+  markers; verify feathering and placement across output-node seams.
+- Bindless descriptors, writable storage buffers and indirect submission before
+  GPU-driven culling or BLAS/TLAS/ray-query effects. Preserve deterministic
+  instance ordering, honest capability gates and cohort conformance.
+- Physical two-node genlock/present-barrier and camera latency qualification,
+  recorded capture procedures and a pinned driver matrix; an editor-as-remote
+  client role would let a stage machine own the Director clock.
+- Optional USD composition/identity translation remains gated by a real studio
+  workflow need; see the [adapter proposal](blender%20live%20scene%20link/13-optional-usd-adapter.md).
 
 ## Editorial and compositor depth
 
-### Deliverable
-
-Expand editing around real operator workflows while
-keeping document evaluation, undo, and cross-node behavior deterministic.
-
-### Landed
-
-- Traditional video timeline editing: clip placement, move, trim, split at the
-  playhead, delete, snapping, fade to black, and cross dissolve by overlapping
-  ramps. Every gesture is one document edit and one undo step.
-- Advanced per-effect settings in File > Project Settings - blur kernel taps,
-  sigma ratio, and pass count; brightness curve and response gamma - kept out
-  of the Inspector and out of machine-local preferences.
-- Depth-correct isolated compositor layers.
-- Exact Set In and Set Out controls beside the Timeline range fields. Each
-  takes the current playhead, preserves Loop, and keeps a valid inclusive range
-  even when a stale Preview playhead sits outside the previous bounds.
-- A first-class Saturation layer effect and compositor node: amount `0..4`,
-  Inspector editing, timeline keyframing, deterministic multiplicative
-  folding, save/load and undo/redo coverage, and real lit-geometry and media
-  shader execution. Identity is inert; unsupported inline-after-Blur ordering
-  is diagnosed instead of silently reordered.
-- Deterministic per-context redo, exposed beside Undo and through
-  Ctrl+Shift+Z/Ctrl+Y. Undo and redo both schedule ordinary inverse document
-  commands; a successful new edit invalidates only that context's redo branch.
-- Ordered Levels, Lift/Gamma/Gain, Contrast/Pivot, Colour Matrix/Channel Mixer,
-  White Balance, and Curves effects. Each has one typed scene/compositor schema,
-  canonical finite model parameters, persistence/digest coverage, registry and
-  planner validation, a shared lit/media GPU implementation, and identity/order
-  pixel tests in both project response domains. Curves derives a fixed
-  1024-entry binary32 monotone-cubic LUT from strict master/optional RGB control
-  points. The editor exposes these effects in the Effects palette, Compositor
-  properties, and a dedicated Color Correction panel.
-- Deterministic Film Grain / Noise as an ordered inline scene effect and
-  compositor node. Its uint32 hash uses the replicated seed, exact 64-bit show
-  frame, authored canvas pixel, and channel, so independently rendered wall
-  slices agree byte-for-byte. Amount is keyframeable; the dedicated Texture
-  panel authors pixel scale, chroma ratio, exact seed, and monochrome/RGB mode.
-- Distinct Box Blur and Directional Blur isolated-layer effects and compositor
-  nodes, separate from Gaussian Blur. Both carry exact bounds/alpha/depth
-  traits and real GPU processors; Box radius and Directional length are
-  keyframeable, while Box passes and angle remain typed static properties and
-  the bounded odd Directional tap count is replicated project state.
-- Canonical editor-local multi-selection: unique sorted membership plus a
-  distinct primary item, Ctrl toggle and Shift visible-range selection across
-  Scene/Timeline, explicit empty-canvas clear behavior, and mixed-value
-  multi-editing in the Inspector without modifying locked/incompatible items.
-- Director-local clip Copy/Paste through Ctrl+C/Ctrl+V and Timeline actions.
-  Copy snapshots selected unlocked placements with targeted effects/channels;
-  Paste remaps ids, targets, scene, clip starts, and keyframes deterministically
-  at the playhead and schedules one undoable transaction.
-- Scene-owned Timeline lanes with deterministic lane/clip compositing order,
-  inherited lock and replicated mute, lane headers and scrolling, and explicit
-  create/rename/reorder/delete-or-move operations. Non-empty lane deletion never
-  guesses: the operator chooses cascade delete or a named destination lane.
-- Context-sensitive Ripple Trim/Delete, Roll, Slip, Slide, Insert, and
-  Overwrite tools. Exact rational frame mapping, handle and adjacency checks,
-  split effect/channel retargeting, affected-span previews, accurate rejection
-  messages, and one replacement transaction make each accepted edit atomic.
-- Clip-key Copy/Paste and Alt-duplicate as a distinct clipboard domain. Typed
-  values, interpolation, target compatibility, collisions, locked channels,
-  and skipped targets are preserved or reported; each accepted batch is one
-  Scene transaction.
-- Semantic 350 ms undo coalescing for repeatable keyboard and numeric edits.
-  Focus, selection, property, direction, modifiers, panel/project boundaries,
-  and intervening commands close the group; rejected edits create no history.
-- Stable compositor diagnostics with codes, severity, deterministic ordering,
-  offending paths, execution-domain and identity metadata, dead-branch
-  warnings, and canvas-derived pass/texture/tap budget errors.
-- Replicated scene groups with hierarchy validation, inherited lock/visibility,
-  world-transform-preserving Group/Ungroup plans, selectable Scene rows, and
-  one atomic undoable transaction per accepted operation.
-- Named Selection Sets as explicit stage-owned document nodes plus ordered
-  member nodes. The dedicated panel supports Save New, Replace, Rename,
-  Delete, and Director-local Recall; missing members are counted and skipped,
-  while every mutating action is one Scene-history transaction.
-- Imported asset byte-length/SHA-256 fingerprints carried through the exact
-  authenticated content manifest, with missing/size/hash/verification failure
-  states. Versioned derivative keys, an atomic pin-aware local cache, exact
-  proxy frame-map primitives, asynchronous deterministic thumbnail generation,
-  exact eight-sample filmstrip atlas generation, visible-row/prefetch
-  cancellation, bounded Library and Timeline GPU residency, trim-aware atlas
-  sampling, and a versioned deterministic 2048-bin peak/RMS waveform payload
-  all retain the persistent Asset NodeId as the sole asset identity. Source,
-  Prefer Proxy, and Require Proxy playback resolve exact cache keys and surface
-  runtime state in the Library; proxy publication validates an injectable
-  encoder backend and otherwise fails visibly instead of fabricating output.
-
-### Remaining packages
 
 The following packages are specified enough to estimate and implement. They
 are ordered by dependency: establish the data model and deterministic CPU

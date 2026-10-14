@@ -75,6 +75,18 @@ enum class Key : core::u8 {
     ZoomReset,
 };
 
+// Physical keys read as held state rather than as presses: a 3D viewport flies
+// its camera for as long as one is down. Translated from scancodes, so the
+// cluster sits under the left hand whatever the keyboard layout.
+enum class MoveKey : core::u8 {
+    W,
+    A,
+    S,
+    D,
+    Q,
+    E,
+};
+
 class InputState final {
 public:
     // Snapshots the pointer and clears per-frame button edges, wheel, typed
@@ -88,6 +100,18 @@ public:
     void add_text(std::string_view utf8);
     void add_key(Key key);
     void set_mods(KeyMods mods) noexcept { mods_ = mods; }
+    // Raw mouse travel, independent of where the pointer is. It keeps arriving
+    // while the pointer is locked, which is what a camera drag reads.
+    void add_mouse_motion(float dx, float dy) noexcept;
+    void set_move_key(MoveKey key, bool down) noexcept;
+    // The window lost the keyboard and mouse: whatever was held is released,
+    // with release edges, so no drag or flight outlives the focus.
+    void release_held() noexcept;
+    // While locked the pointer stays where the lock began: position updates
+    // are ignored and only raw motion arrives. The window host sets this to
+    // match the platform's relative mouse mode.
+    void set_pointer_locked(bool locked) noexcept { pointer_locked_ = locked; }
+    [[nodiscard]] bool pointer_locked() const noexcept { return pointer_locked_; }
 
     // --- Queries: the widget layer reads these. ---
     [[nodiscard]] float mouse_x() const noexcept { return mouse_x_; }
@@ -100,12 +124,16 @@ public:
     // Went up this frame (a click's trailing edge).
     [[nodiscard]] bool mouse_released(MouseButton button) const noexcept;
     [[nodiscard]] float wheel() const noexcept { return wheel_; }
+    [[nodiscard]] float motion_dx() const noexcept { return motion_x_; }
+    [[nodiscard]] float motion_dy() const noexcept { return motion_y_; }
+    [[nodiscard]] bool move_key_down(MoveKey key) const noexcept;
     [[nodiscard]] std::string_view text() const noexcept { return text_; }
     [[nodiscard]] std::span<const Key> keys() const noexcept { return keys_; }
     [[nodiscard]] KeyMods mods() const noexcept { return mods_; }
 
 private:
     static constexpr std::size_t button_count = 3U;
+    static constexpr std::size_t move_key_count = 6U;
     [[nodiscard]] static std::size_t index(MouseButton button) noexcept {
         return static_cast<std::size_t>(button);
     }
@@ -118,6 +146,10 @@ private:
     std::array<bool, button_count> pressed_{};
     std::array<bool, button_count> released_{};
     float wheel_{};
+    float motion_x_{};
+    float motion_y_{};
+    std::array<bool, move_key_count> move_keys_{};
+    bool pointer_locked_{};
     std::string text_;
     std::vector<Key> keys_;
     KeyMods mods_{KeyMods::None};

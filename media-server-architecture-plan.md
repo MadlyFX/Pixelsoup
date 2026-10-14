@@ -364,19 +364,21 @@ when `MEDIASERVER_ENABLE_SOAK_TESTS=ON` because its normal gate is ten minutes.
 
 ## Intentional gaps and delivery boundaries
 
-The following are explicit gaps, not hidden claims of support:
+Current renderer behavior and hardware qualification boundaries are recorded
+in [capabilities and limits](advanced-renderer-status.md). Camera tracking,
+inner-frustum composition, managed color, animation and baked lighting now
+have implementation paths; they must not be treated as unimplemented merely
+because an early delivery table listed them as future work.
 
-| Boundary | Current state | Needed before production use |
-| --- | --- | --- |
-| Project assets | External, path-based references | Packaging/content store, verification, per-node readiness and transfer |
-| Output devices | Native D3D12/DXGI scene windows with SDL Basic fallback | Connector binding, multi-output process model, pro video I/O |
-| Synchronization | Frame-sealed control plane, authored sync policy, derived sync groups with timing validation, authenticated sync-device reporting, native non-blocking D3D12 presentation, present-barrier seam, and a fail-closed Program gate | A vendor sync-device/present-barrier provider, PTP clock correlation, and measured photon-level validation |
-| Colour/calibration | sRGB; LED processor owns calibration | Managed colour pipeline, HDR policy, measured calibration workflow |
-| Advanced renderer | Native D3D12 raster, linear `RGBA16F` composition/warp/mix, complete raster products, native window presentation, fail-closed selection/readiness | Vulkan, owned RT/DDGI/ReSTIR/denoise/TAAU/motion-blur passes, donor conformance images, hardware qualification |
-| Media | Image sequences and FFmpeg CPU decode | Supported-codec matrix, decode performance/reliability work, GPU decode where useful |
-| VP interfaces | Internal scene camera only | Camera tracking, inner-frustum composition, external render/IO interfaces |
-| Cluster operations | Authenticated fixed-child lifecycle agent | Installation/service management, observability, secure deployment and recovery procedures |
+| Area | Remaining boundary |
+| --- | --- |
+| Assets | General production packaging/transfer and operational content management beyond the linked-scene publication path |
+| Outputs | SDI, NDI, ST 2110, pro video interfaces and broader platform/display qualification |
+| Synchronization | Physical NVAPI/genlock/present-barrier qualification, PTP correlation and measured photon timing |
+| Renderer | Native Vulkan, GPU-driven/bindless/RT features, hardware/driver matrix and product-driven compositor completion |
+| Color and tracking | Measured panel/camera calibration, lens agreement and on-stage latency validation |
+| Media | Supported-codec performance/reliability matrix and hardware decode where needed |
+| Operations | Service installation, observability, secure deployment and recovery on real show networks |
 
-The right next increment should close one of these boundaries end to end rather
-than add an isolated UI or renderer feature. The roadmap records the proposed
-order and acceptance criteria.
+The [roadmap](next-steps-plan.md) retains future effect/editor requirements,
+professional interfaces and hardware-control candidates.

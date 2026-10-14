@@ -494,6 +494,33 @@ struct MaskDiagnostic final {
 [[nodiscard]] float fold_mask_coverage(float accumulated, float coverage,
                                        MaskCombine combine) noexcept;
 
+// The local corners of a drawable's source plane in UL, UR, BR, BL order:
+// the points whose mesh UVs are (0,0), (1,0), (1,1) and (0,1), and so the
+// points SourceLayer mask coordinates name. Quad and Plane carry exactly one
+// such plane. Volumes and imported models have several or arbitrary UV
+// islands, so they have none rather than a guessed one.
+[[nodiscard]] std::optional<std::array<Vec3, 4U>> mask_source_plane(
+    Primitive primitive) noexcept;
+
+// Canvas pixels per normalized SourceLayer unit: the mean lengths of the
+// source plane's opposite edges as the scene camera projects them onto the
+// full canvas. Feather, expansion and shape rotation are measured in this
+// space. It is taken from the whole canvas, never a node's slice, apron or
+// plate, so every node rendering one scene measures a mask identically, and
+// an editor view that draws a mask over a scene uses that scene's value. Falls
+// back to the canvas extent when the drawable has no source plane or a corner
+// is behind the camera.
+struct MaskCoordinateExtent final {
+    float width{1.0F};
+    float height{1.0F};
+
+    bool operator==(const MaskCoordinateExtent&) const = default;
+};
+
+[[nodiscard]] MaskCoordinateExtent mask_source_extent(
+    const Camera& camera, Canvas canvas, const Mat4& world,
+    Primitive primitive) noexcept;
+
 enum class EffectKind : core::u8 {
     Brightness,
     Saturation,

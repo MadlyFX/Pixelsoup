@@ -121,6 +121,11 @@ public:
     // platform cursor only changes when the shape does.
     void set_cursor(Cursor cursor) noexcept;
 
+    // Hides the cursor and holds it in place while raw motion keeps arriving,
+    // for a camera drag that must not stop at the edge of the screen. Unlocking
+    // puts the cursor back where the lock began. Cheap to call every frame.
+    void set_pointer_locked(bool locked) noexcept;
+
     // Seconds since the window was created. Feeds UiContext::new_frame(), which
     // uses it for the caret blink.
     [[nodiscard]] double time_seconds() const noexcept;

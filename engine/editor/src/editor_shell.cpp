@@ -1318,22 +1318,14 @@ mask_source_mapping(const scene::Scene &view, doc::NodeId target,
   // imported models have multiple/arbitrary UV islands, so presenting one
   // guessed quad would author in the wrong coordinate system; Stage reports
   // mapping unavailable instead.
-  if (world == nullptr || (primitive != scene::Primitive::Quad &&
-                           primitive != scene::Primitive::Plane)) {
+  if (world == nullptr) {
     return std::nullopt;
   }
-  const std::array<scene::Vec3, 4U> local =
-      primitive == scene::Primitive::Quad
-          ? std::array<scene::Vec3, 4U>{
-                scene::Vec3{-0.5F, 0.5F, 0.0F},
-                scene::Vec3{0.5F, 0.5F, 0.0F},
-                scene::Vec3{0.5F, -0.5F, 0.0F},
-                scene::Vec3{-0.5F, -0.5F, 0.0F}}
-          : std::array<scene::Vec3, 4U>{
-                scene::Vec3{-0.5F, 0.0F, -0.5F},
-                scene::Vec3{0.5F, 0.0F, -0.5F},
-                scene::Vec3{0.5F, 0.0F, 0.5F},
-                scene::Vec3{-0.5F, 0.0F, 0.5F}};
+  const auto plane = scene::mask_source_plane(primitive);
+  if (!plane.has_value()) {
+    return std::nullopt;
+  }
+  const std::array<scene::Vec3, 4U> &local = *plane;
   // The layer's four corners are projected with whatever projector the view
   // showing them uses, so the quad the mask resolves inside is the quad on
   // screen. On Stage that is the authored camera; on Program Output it is the
@@ -1354,6 +1346,10 @@ mask_source_mapping(const scene::Scene &view, doc::NodeId target,
     mapping.corners[index] =
         MaskViewportCanvasPoint{projected.x, projected.y};
   }
+  // Measured as the renderer measures it for this scene, so a rotated or
+  // feathered outline keeps the shape the rendered mask has.
+  mapping.extent = scene::mask_source_extent(view.camera, view.canvas,
+                                             *world, primitive);
   return mapping;
 }
 
@@ -1563,13 +1559,19 @@ struct EditorShell::Impl final {
   double hardware_warning_until{};
   double compositor_warning_until{};
 
-  // The Stage camera orbits an editor-local point and never enters the
-  // document. Angles are turns, matching scene math everywhere else.
-  float camera_yaw{0.10F};
-  float camera_pitch{0.06F};
-  float camera_distance{9.0F};
-  scene::Vec3 camera_target{};
-  bool orbiting{};
+  // The Stage camera is editor-local and never enters the document. It is
+  // navigated as in the Unreal Editor (see stage_navigation_for): a button
+  // joins a camera gesture only when it was pressed on the Stage, and the
+  // gesture then follows whichever of those buttons are still held.
+  StageOrbit stage_view{};
+  bool navigate_left{};
+  bool navigate_middle{};
+  bool navigate_right{};
+  // The gesture has moved the camera, so the cursor is hidden and locked.
+  bool navigation_moved{};
+  float fly_speed{stage_default_fly_speed};
+  double fly_speed_shown_until{};
+  double navigation_time{};
 
   // The Stage renderer follows the dock's actual content aspect (one frame
   // behind a resize), so the authoring view fills its pane instead of looking
@@ -2282,7 +2284,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.group_nodes.clear();
     impl.group_start.clear();
     impl.manipulating = false;
-    impl.orbiting = false;
+    impl.navigate_left = false;
+    impl.navigate_middle = false;
+    impl.navigate_right = false;
     impl.hardware_edit_gesture = 0U;
     impl.feed_mapping_edit_gesture = 0U;
     impl.compositor_edit_gesture = 0U;
@@ -2387,9 +2391,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   const scene::Scene &authored_stage =
       switcher.stage_scene != nullptr ? *switcher.stage_scene : scene;
-  const scene::Camera stage_camera = stage_camera_for(
-      authored_stage.camera, StageOrbit{impl.camera_target, impl.camera_yaw,
-                                        impl.camera_pitch, impl.camera_distance});
+  const scene::Camera stage_camera =
+      stage_camera_for(authored_stage.camera, impl.stage_view);
   const auto request_clip_clipboard = [&](ClipClipboardAction action) {
     ClipClipboardRequest request{};
     request.action = action;
@@ -3331,8 +3334,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   const auto handle_viewport = [&](const ViewportFrame &viewport,
                                    const scene::Scene &authored_view,
-                                   const scene::Scene &display_view,
-                                   bool stage_view) {
+                                   const scene::Scene &display_view) {
     if (viewport.pressed) {
       if (viewport.surface_picked.has_value()) {
         impl.stage_surface_selection = viewport.surface_picked;
@@ -3340,7 +3342,6 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.scene_selection.clear();
         impl.group_nodes.clear();
         impl.group_start.clear();
-        impl.orbiting = false;
         impl.delete_domain = DeleteDomain::Surface;
       } else if (viewport.picked.has_value()) {
         impl.stage_surface_selection.reset();
@@ -3364,10 +3365,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.group_nodes.clear();
           impl.group_start.clear();
         }
-      } else if (viewport.empty_canvas == EmptyCanvasInteraction::Orbit) {
+      } else if (viewport.empty_canvas == EmptyCanvasInteraction::Navigate) {
         // Stage bare canvas is camera space. Preserve every selection domain;
-        // the drag may become an orbit and must not masquerade as deselection.
-        impl.orbiting = true;
+        // the drag is camera navigation and must not masquerade as
+        // deselection.
       } else if (viewport.empty_canvas ==
                  EmptyCanvasInteraction::ClearSelection) {
         impl.stage_surface_selection.reset();
@@ -3379,19 +3380,97 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (viewport.dragging && !impl.group_nodes.empty()) {
       emit_group(viewport.translation);
     }
-    if (stage_view && impl.orbiting && viewport.held && !viewport.pressed) {
-      impl.camera_yaw -= ui.pointer_dx() * 0.0015F;
-      impl.camera_pitch = std::clamp(
-          impl.camera_pitch + ui.pointer_dy() * 0.0015F, -0.24F, 0.24F);
-    }
-    if (stage_view && viewport.hovered && ui.wheel() != 0.0F) {
-      impl.camera_distance = std::clamp(
-          impl.camera_distance * (1.0F - ui.wheel() * 0.1F), 1.0F, 200.0F);
-    }
     if (viewport.released) {
-      impl.orbiting = false;
       impl.group_nodes.clear();
       impl.group_start.clear();
+    }
+  };
+
+  // Stage camera navigation, as in the Unreal Editor's perspective viewport.
+  // `pointer_free` says no floating panel covers the pointer; `left_available`
+  // that a left press on bare canvas may walk (mask authoring owns it).
+  const auto navigate_stage_camera = [&](const ViewportFrame &viewport,
+                                         bool pointer_free,
+                                         bool left_available) {
+    const bool already = impl.navigate_left || impl.navigate_middle ||
+                         impl.navigate_right;
+    const bool over =
+        pointer_free && viewport.image.contains(ui.pointer_x(), ui.pointer_y());
+    const bool left_press = left_available && viewport.pressed &&
+                            viewport.empty_canvas ==
+                                EmptyCanvasInteraction::Navigate;
+    // A left drag that picked an element is that element's; a right or
+    // middle press then leaves the camera alone.
+    const bool element_drag =
+        viewport.held && !impl.navigate_left && !left_press;
+    if ((over || already) && !element_drag) {
+      impl.navigate_right = impl.navigate_right || ui.secondary_pointer_pressed();
+      impl.navigate_middle = impl.navigate_middle || ui.middle_pointer_pressed();
+      impl.navigate_left = impl.navigate_left || left_press;
+    }
+    impl.navigate_left = impl.navigate_left && ui.pointer_down();
+    impl.navigate_middle = impl.navigate_middle && ui.middle_pointer_down();
+    impl.navigate_right = impl.navigate_right && ui.secondary_pointer_down();
+
+    const double now = impl.window.time_seconds();
+    const float seconds =
+        std::clamp(static_cast<float>(now - impl.navigation_time), 0.0F, 0.1F);
+    impl.navigation_time = now;
+    const StageNavigation gesture = stage_navigation_for(StageNavigationButtons{
+        impl.navigate_left, impl.navigate_middle, impl.navigate_right,
+        ui.alt_held(), ui.shift_held()});
+    if (gesture == StageNavigation::None) {
+      impl.navigation_moved = false;
+      if (over && ui.wheel() != 0.0F) {
+        impl.stage_view = stage_wheel_dolly(impl.stage_view, ui.wheel());
+      }
+      // F frames the selection, as everywhere in Unreal.
+      const std::string_view typed = ui.shortcut_text();
+      if (over && !impl.scene_selection.empty() &&
+          typed.find_first_of("fF") != std::string_view::npos) {
+        if (const auto bounds = impl.stage_panel.world_bounds(
+                stage_interaction_scene, impl.scene_selection.members())) {
+          impl.stage_view = stage_focus(impl.stage_view, *bounds);
+        }
+      }
+    } else {
+      StageNavigationStep step{};
+      step.gesture = gesture;
+      step.dx = ui.pointer_motion_x();
+      step.dy = ui.pointer_motion_y();
+      step.seconds = seconds;
+      step.units_per_pixel =
+          stage_units_per_pixel(impl.stage_view, viewport.image.height);
+      if (gesture == StageNavigation::Look) {
+        const auto axis = [&](gui::MoveKey positive, gui::MoveKey negative) {
+          return (ui.move_key_down(positive) ? 1.0F : 0.0F) -
+                 (ui.move_key_down(negative) ? 1.0F : 0.0F);
+        };
+        step.move = scene::Vec3{axis(gui::MoveKey::D, gui::MoveKey::A),
+                                axis(gui::MoveKey::E, gui::MoveKey::Q),
+                                axis(gui::MoveKey::W, gui::MoveKey::S)};
+        if (ui.wheel() != 0.0F) {
+          impl.fly_speed = stage_fly_speed_after(impl.fly_speed, ui.wheel());
+          impl.fly_speed_shown_until = now + 1.5;
+        }
+      }
+      step.fly_speed = impl.fly_speed;
+      impl.navigation_moved = impl.navigation_moved || step.dx != 0.0F ||
+                              step.dy != 0.0F || step.move != scene::Vec3{};
+      impl.stage_view = navigate_stage(impl.stage_view, step);
+    }
+
+    if (now < impl.fly_speed_shown_until) {
+      char text[48]{};
+      std::snprintf(text, sizeof(text), "CAMERA SPEED %.2f", impl.fly_speed);
+      const gui::Rect badge{viewport.image.x + 8.0F,
+                            viewport.image.y + viewport.image.height - 32.0F,
+                            156.0F, 24.0F};
+      ui.panel(badge, ui.theme().background);
+      outline(ui, badge, ui.theme().divider);
+      ui.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 16.0F,
+                         badge.height},
+               text, ui.theme().text);
     }
   };
 
@@ -3807,7 +3886,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         if (!mask_stage_active) {
           handle_viewport(stage_viewport_frame, stage_scene,
-                          stage_interaction_scene, true);
+                          stage_interaction_scene);
         }
       } else if (!color_sample_active) {
         const float notice_width =
@@ -3819,6 +3898,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         ui.label(gui::Rect{notice.x + 8.0F, notice.y, notice.width - 16.0F,
                            notice.height},
                  "TRANSITION ACTIVE - REHEARSAL LOCKED", ui.theme().warning);
+      }
+      // The camera is the operator's own view, so it navigates through a
+      // rehearsal lock and while masks are authored, though a mask tool keeps
+      // the left button.
+      if (color_sample_active) {
+        impl.navigate_left = false;
+        impl.navigate_middle = false;
+        impl.navigate_right = false;
+      } else {
+        navigate_stage_camera(stage_viewport_frame,
+                              !floating_occluder.has_value(),
+                              !mask_stage_active);
       }
       return;
     }
@@ -3924,7 +4015,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             nullptr, doc::NodeId{}, program_projection, plate_overlay);
         program_viewport_image = program_viewport.image;
         if (!color_sample_active && !switcher.rehearsal_locked) {
-          handle_viewport(program_viewport, scene, scene, false);
+          handle_viewport(program_viewport, scene, scene);
         }
       } else {
         const std::string_view fault =
@@ -5912,6 +6003,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.saved_workspace_layout = *result.save_workspace_layout;
     }
   }
+
+  if (!stage_viewport_drawn) {
+    impl.navigate_left = false;
+    impl.navigate_middle = false;
+    impl.navigate_right = false;
+  }
+  // A camera gesture owns the keyboard (W A S D Q E fly) until it ends, and
+  // once it has moved the camera the cursor hides and stays put.
+  const bool navigating =
+      impl.navigate_left || impl.navigate_middle || impl.navigate_right;
+  ui.set_navigating(navigating);
+  impl.window.set_pointer_locked(navigating && impl.navigation_moved);
 
   ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});
   impl.window.set_cursor(ui.cursor());

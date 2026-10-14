@@ -153,4 +153,4 @@ These are requirements for step 05; step 02 does not install a Blender add-on.
    Delete/undo restores the same UUID and clears the Director tombstone. Do not
    reuse a deleted object's UUID for unrelated newly authored content.
 
-See [step 02 UI checks](ui-checks-step-02.md) for the native editor workflow.
+See [current operator workflow](operator-guide.md) for the native editor workflow.

@@ -3,7 +3,7 @@
 Step 10 adds a bounded look translation to the existing evaluated scene link.
 Qualification uses Blender **5.2.0 LTS, fbe6228777e7**, add-on **0.5.0**, and the
 Windows D3D12 Advanced renderer. This is a property translation, not a promise
-of matching Cycles or Eevee pixels. See the [UI walkthrough](ui-checks-step-10.md).
+of matching Cycles or Eevee pixels. See the [current operator workflow](operator-guide.md).
 
 ## Material contract and importer audit
 
@@ -36,11 +36,13 @@ color/output policy remains authoritative.
 
 Supported image nodes use Flat projection, Repeat or Extend addressing, and
 Linear or Closest filtering. An unconnected Vector input, Texture Coordinate UV,
-or an unnamed UV Map node selects the active render map. Named alternate UVs,
+or a UV Map or Normal Map node that is unnamed or names the active render map
+selects it. A full-strength Multiply Mix of a color texture and a constant (the
+glTF importer's base color factor) keeps the texture with that factor. Named alternate UVs,
 Mapping nodes, `KHR_texture_transform`, triplanar/generated coordinates, UDIMs,
 image sequences, packed/dirty images and nonsaved images are diagnosed. Save or
 unpack PNG/JPEG images before publication. Each input image is at most 4096 pixels
-per axis and 16 MiB; the publisher retains at most 32 distinct images / 64 MiB.
+per axis and 16 MiB; the publisher retains at most 256 distinct images / 256 MiB.
 The Director additionally enforces its decoded texture and full-scene budgets.
 
 Unchanged images reuse worker-owned bytes after a size/time check. **Publish Now**

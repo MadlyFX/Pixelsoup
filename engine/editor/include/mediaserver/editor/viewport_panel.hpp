@@ -3,6 +3,7 @@
 #include <mediaserver/editor/preview_resolution.hpp>
 
 #include <mediaserver/editor/masks_panel.hpp>
+#include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -90,8 +91,9 @@ enum class EmptyCanvasInteraction : core::u8 {
     None,
     // Program/preview canvas: clear editor-local scene selection.
     ClearSelection,
-    // Stage canvas: preserve selection and reserve the drag for camera orbit.
-    Orbit,
+    // Stage canvas, or any Alt+press on Stage: preserve selection and reserve
+    // the drag for camera navigation.
+    Navigate,
 };
 
 // What one viewport frame reported to the shell above it.
@@ -100,8 +102,8 @@ struct ViewportFrame final {
     gui::Rect image{};
     bool hovered{};
     // The viewport owns the pointer, including the release frame. The Stage
-    // shell uses this for a bare-canvas orbit while picked media use the
-    // translation path below.
+    // shell uses this for bare-canvas camera navigation while picked media
+    // use the translation path below.
     bool held{};
     CanvasPoint pointer{};
 
@@ -150,6 +152,11 @@ struct MaskViewportCanvasPoint final {
 
 struct MaskViewportSourceMapping final {
     std::array<MaskViewportCanvasPoint, 4U> corners{};
+    // The renderer's measure of one normalized unit for the scene this view
+    // shows (scene::mask_source_extent). Shape rotation, feather and
+    // expansion are drawn in it rather than re-measured from the corners,
+    // which a crop or warp may have rescaled.
+    scene::MaskCoordinateExtent extent{};
 
     bool operator==(const MaskViewportSourceMapping&) const = default;
 };
@@ -162,8 +169,12 @@ struct MaskViewportNormalizedPoint final {
 };
 
 // Exact forward/inverse mapping used by both drawing and interaction. A
-// missing or degenerate SourceLayer quad returns no value; it never falls back
-// to canvas space. AuthoredCanvas ignores source_mapping by contract.
+// SourceLayer point maps through the projective transform taking the unit
+// square onto the quad - how a flat surface lands on screen, and how the
+// renderer traces each pixel back onto the layer. A missing or degenerate
+// quad, or a point beyond the plane's horizon, returns no value; it never
+// falls back to canvas space. AuthoredCanvas ignores source_mapping by
+// contract.
 [[nodiscard]] std::optional<gui::UiPoint> mask_normalized_to_viewport(
     const gui::Rect& image, scene::Canvas canvas,
     scene::MaskCoordinateSpace coordinate_space,
@@ -358,6 +369,13 @@ class ViewportPanel final {
     [[nodiscard]] bool deep_select_open() const noexcept {
         return deep_select_open_;
     }
+
+    // The world box around `nodes` as this viewport picks them: drawables by
+    // their unit bounds, imported models by their own, and anything else with
+    // a world position (a light, a group) as that point. Empty when none of
+    // them is in `scene`.
+    [[nodiscard]] std::optional<WorldBounds>
+    world_bounds(const scene::Scene& scene, std::span<const doc::NodeId> nodes);
 
     // Project-generation boundary. Background workers are process-owned, so
     // this drops only panel-local observations and never joins asset work.

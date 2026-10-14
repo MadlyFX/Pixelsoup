@@ -11,6 +11,7 @@ sys.path.insert(0, str(repo / 'tests/blender'))
 import mediaserver_livelink as addon
 from mediaserver_livelink.extract import copy_mesh, Identities
 from mediaserver_livelink.materials import describe_material
+from mediaserver_livelink import translation
 from test_shading_export import accessor
 from geometry import glb
 
@@ -45,6 +46,61 @@ try:
         mat.ms_link_alpha = 'BLEND'
         assert abs(describe_material(mat, ids, scene)['alpha'] - 0.3) < 1e-6
         print('PASS: opaque, masked and blended materials retain explicit alpha mode')
+
+        # glTF importer shape: Base Color = Multiply(texture, baseColorFactor).
+        tinted = bpy.data.materials.new('Imported glTF factor')
+        tinted.use_nodes = True
+        nodes, links = tinted.node_tree.nodes, tinted.node_tree.links
+        bsdf = nodes.get('Principled BSDF')
+        tex = nodes.new('ShaderNodeTexImage')
+        tex.image = image
+        mix = nodes.new('ShaderNodeMix')
+        mix.data_type, mix.blend_type = 'RGBA', 'MULTIPLY'
+        operands = {s.identifier: s for s in mix.inputs}
+        operands['Factor_Float'].default_value = 1
+        operands['B_Color'].default_value = (0.25, 0.5, 0.75, 1)
+        links.new(tex.outputs['Color'], operands['A_Color'])
+        links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
+        descriptor = describe_material(tinted, ids, scene)
+        assert descriptor['textures']['baseColorTexture']['path'] == str(Path(directory) / 'scan.png'), descriptor
+        assert descriptor['factors'][:3] == [0.25, 0.5, 0.75], descriptor
+        links.remove(operands['A_Color'].links[0])
+        links.new(tex.outputs['Color'], operands['B_Color'])
+        operands['A_Color'].default_value = (0.125, 0.375, 0.625, 1)
+        assert describe_material(tinted, ids, scene)['factors'][:3] == [0.125, 0.375, 0.625]
+        for blend, strength in (('ADD', 1), ('MULTIPLY', 0.5)):
+            mix.blend_type, operands['Factor_Float'].default_value = blend, strength
+            refused = describe_material(tinted, ids, scene)
+            assert 'baseColorTexture' not in refused['textures'], refused
+            assert max(abs(v - 0.8) for v in refused['factors'][:3]) < 1e-6, refused
+        print('PASS: imported glTF base color factors multiply their texture')
+
+        # The glTF importer names the render UV map on its Normal Map node.
+        normal_tex = nodes.new('ShaderNodeTexImage')
+        normal_tex.image = image
+        normal_map = nodes.new('ShaderNodeNormalMap')
+        normal_map.uv_map = 'Imported UV'
+        normal_map.inputs['Strength'].default_value = 0.625
+        links.new(normal_tex.outputs['Color'], normal_map.inputs['Color'])
+        links.new(normal_map.outputs['Normal'], bsdf.inputs['Normal'])
+        named = describe_material(tinted, ids, scene, 'Imported UV')['textures']
+        assert named['normalTexture']['scale'] == 0.625, named
+        assert 'normalTexture' not in describe_material(tinted, ids, scene, 'Other UV')['textures']
+        assert 'normalTexture' not in describe_material(tinted, ids, scene)['textures']
+        print('PASS: named UV maps are accepted only as the active render map')
+
+        # The importer's alpha cutoff (Math nodes on the image alpha) keeps color.
+        mix.blend_type, operands['Factor_Float'].default_value = 'MULTIPLY', 1
+        cutoff = nodes.new('ShaderNodeMath')
+        cutoff.operation = 'LESS_THAN'
+        links.new(tex.outputs['Alpha'], cutoff.inputs[0])
+        links.new(cutoff.outputs['Value'], bsdf.inputs['Alpha'])
+        translation.notices.clear()
+        cut = describe_material(tinted, ids, scene, 'Imported UV')
+        assert cut['textures']['baseColorTexture']['path'] == str(Path(directory) / 'scan.png'), cut
+        assert 'Imported glTF factor: ignored unassigned alpha texture' in translation.notices, translation.notices
+        assert not any('direct Image Texture' in notice for notice in translation.notices), translation.notices
+        print('PASS: an unsupported alpha graph keeps its color texture and says so accurately')
 
     mesh = bpy.data.meshes.new('Mirrored UV tangent fixture')
     mesh.from_pydata([(0,0,0), (1,0,0), (0,1,0), (2,0,0), (3,0,0), (2,1,0)], [], [(0,1,2), (3,4,5)])

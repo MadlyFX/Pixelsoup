@@ -984,6 +984,61 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 
 } // namespace
 
+std::optional<WorldBounds> ViewportPanel::world_bounds(
+    const scene::Scene& scene, std::span<const doc::NodeId> nodes) {
+    std::optional<WorldBounds> box;
+    const auto include = [&](scene::Vec3 point) {
+        if (!box.has_value()) {
+            box = WorldBounds{point, point};
+            return;
+        }
+        box->minimum = scene::Vec3{std::min(box->minimum.x, point.x),
+                                   std::min(box->minimum.y, point.y),
+                                   std::min(box->minimum.z, point.z)};
+        box->maximum = scene::Vec3{std::max(box->maximum.x, point.x),
+                                   std::max(box->maximum.y, point.y),
+                                   std::max(box->maximum.z, point.z)};
+    };
+    const auto include_box = [&](const scene::Mat4& world,
+                                 const scene::ModelLocalBounds& local) {
+        for (std::size_t corner = 0U; corner < 8U; ++corner) {
+            include(scene::transform_point(
+                world,
+                scene::Vec3{(corner & 1U) != 0U ? local.maximum.x : local.minimum.x,
+                            (corner & 2U) != 0U ? local.maximum.y : local.minimum.y,
+                            (corner & 4U) != 0U ? local.maximum.z : local.minimum.z}));
+        }
+    };
+    for (const doc::NodeId node : nodes) {
+        bool found = false;
+        for (const auto& object : scene.instances) {
+            if (object.source == node) {
+                include_box(object.world, scene::ModelLocalBounds{});
+                found = true;
+            }
+        }
+        for (const auto& clip : scene.media) {
+            if (clip.source_node == node) {
+                include_box(clip.world, scene::ModelLocalBounds{});
+                found = true;
+            }
+        }
+        for (const auto& model : scene.models) {
+            if (model.source_node == node) {
+                include_box(model.world, model_bounds_for(model).value_or(
+                                             scene::ModelLocalBounds{}));
+                found = true;
+            }
+        }
+        if (!found) {
+            if (const auto world = scene::world_for(scene, node)) {
+                include(scene::translation_of(*world));
+            }
+        }
+    }
+    return box;
+}
+
 std::optional<scene::ModelLocalBounds>
 ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
     const std::string& source = model.source;
@@ -1202,6 +1257,59 @@ std::optional<gui::UiColor> sample_viewport_color(
     return color;
 }
 
+namespace {
+
+// The projective map taking the unit square onto the source quad: canvas
+// (x, y) = (r0.p, r1.p) / (r2.p) for p = (u, v, 1). A planar surface seen
+// through a pinhole camera lands on screen exactly this way, and it is how the
+// renderer traces a pixel back onto the layer, so the outline drawn here and
+// the coverage rendered there follow the same surface. Interpolating the four
+// corners bilinearly instead bends straight mask edges and drifts away from
+// the rendered mask whenever the layer is seen in perspective.
+using QuadProjective = std::array<double, 9U>;
+
+[[nodiscard]] std::optional<QuadProjective> square_to_quad(
+    const MaskViewportSourceMapping& mapping) noexcept {
+    const auto& q = mapping.corners;
+    for (const MaskViewportCanvasPoint& corner : q) {
+        if (!std::isfinite(corner.x) || !std::isfinite(corner.y)) {
+            return std::nullopt;
+        }
+    }
+    const float area_twice =
+        q[0U].x * q[1U].y - q[1U].x * q[0U].y +
+        q[1U].x * q[2U].y - q[2U].x * q[1U].y +
+        q[2U].x * q[3U].y - q[3U].x * q[2U].y +
+        q[3U].x * q[0U].y - q[0U].x * q[3U].y;
+    if (!std::isfinite(area_twice) || std::abs(area_twice) < 1.0e-4F) {
+        return std::nullopt;
+    }
+    const double x0 = q[0U].x, y0 = q[0U].y, x1 = q[1U].x, y1 = q[1U].y;
+    const double x2 = q[2U].x, y2 = q[2U].y, x3 = q[3U].x, y3 = q[3U].y;
+    const double sx = x0 - x1 + x2 - x3;
+    const double sy = y0 - y1 + y2 - y3;
+    const double dx1 = x1 - x2, dx2 = x3 - x2;
+    const double dy1 = y1 - y2, dy2 = y3 - y2;
+    const double denominator = dx1 * dy2 - dx2 * dy1;
+    if (!std::isfinite(denominator) || std::abs(denominator) < 1.0e-12) {
+        return std::nullopt;
+    }
+    const double g = (sx * dy2 - dx2 * sy) / denominator;
+    const double h = (dx1 * sy - sx * dy1) / denominator;
+    const QuadProjective result{
+        x1 - x0 + g * x1, x3 - x0 + h * x3, x0,
+        y1 - y0 + g * y1, y3 - y0 + h * y3, y0,
+        g, h, 1.0};
+    for (const double value : result) {
+        if (!std::isfinite(value)) {
+            return std::nullopt;
+        }
+    }
+    return result;
+}
+
+} // namespace
+
 std::optional<gui::UiPoint> mask_normalized_to_viewport(
     const gui::Rect& image, scene::Canvas canvas,
     scene::MaskCoordinateSpace coordinate_space,
@@ -1221,32 +1329,22 @@ std::optional<gui::UiPoint> mask_normalized_to_viewport(
         if (source_mapping == nullptr) {
             return std::nullopt;
         }
-        for (const MaskViewportCanvasPoint& corner : source_mapping->corners) {
-            if (!std::isfinite(corner.x) || !std::isfinite(corner.y)) {
-                return std::nullopt;
-            }
-        }
-        const auto& corners = source_mapping->corners;
-        const float area_twice =
-            corners[0U].x * corners[1U].y -
-                corners[1U].x * corners[0U].y +
-            corners[1U].x * corners[2U].y -
-                corners[2U].x * corners[1U].y +
-            corners[2U].x * corners[3U].y -
-                corners[3U].x * corners[2U].y +
-            corners[3U].x * corners[0U].y -
-                corners[0U].x * corners[3U].y;
-        if (!std::isfinite(area_twice) || std::abs(area_twice) < 1.0e-4F) {
+        const auto map = square_to_quad(*source_mapping);
+        if (!map.has_value()) {
             return std::nullopt;
         }
-        const float one_minus_x = 1.0F - x;
-        const float one_minus_y = 1.0F - y;
-        const std::array weights{
-            one_minus_x * one_minus_y, x * one_minus_y, x * y,
-            one_minus_x * y};
-        for (std::size_t index = 0U; index < corners.size(); ++index) {
-            canvas_x += corners[index].x * weights[index];
-            canvas_y += corners[index].y * weights[index];
+        const auto& m = *map;
+        const double u = x;
+        const double v = y;
+        const double depth = m[6U] * u + m[7U] * v + m[8U];
+        // Beyond the plane's horizon: no point on the surface lands there.
+        if (!(depth > 1.0e-9)) {
+            return std::nullopt;
+        }
+        canvas_x = static_cast<float>((m[0U] * u + m[1U] * v + m[2U]) / depth);
+        canvas_y = static_cast<float>((m[3U] * u + m[4U] * v + m[5U]) / depth);
+        if (!std::isfinite(canvas_x) || !std::isfinite(canvas_y)) {
+            return std::nullopt;
         }
     }
     return gui::UiPoint{
@@ -1275,63 +1373,37 @@ std::optional<MaskViewportNormalizedPoint> mask_viewport_to_normalized(
             canvas_x / static_cast<float>(canvas.width),
             canvas_y / static_cast<float>(canvas.height)};
     }
-    if (source_mapping == nullptr ||
-        !mask_normalized_to_viewport(image, canvas, coordinate_space,
-                                     source_mapping, 0.5F, 0.5F)
-             .has_value()) {
+    if (source_mapping == nullptr) {
         return std::nullopt;
     }
-
-    const auto& q = source_mapping->corners;
-    const float ax = q[0U].x;
-    const float ay = q[0U].y;
-    const float bx = q[1U].x - q[0U].x;
-    const float by = q[1U].y - q[0U].y;
-    const float cx = q[3U].x - q[0U].x;
-    const float cy = q[3U].y - q[0U].y;
-    const float dx = q[0U].x - q[1U].x + q[2U].x - q[3U].x;
-    const float dy = q[0U].y - q[1U].y + q[2U].y - q[3U].y;
-    float u = 0.5F;
-    float v = 0.5F;
-    const float affine_determinant = bx * cy - by * cx;
-    if (std::abs(affine_determinant) > 1.0e-8F) {
-        const float px = canvas_x - ax;
-        const float py = canvas_y - ay;
-        u = (px * cy - py * cx) / affine_determinant;
-        v = (bx * py - by * px) / affine_determinant;
-    }
-    for (std::size_t iteration = 0U; iteration < 12U; ++iteration) {
-        const float projected_x = ax + bx * u + cx * v + dx * u * v;
-        const float projected_y = ay + by * u + cy * v + dy * u * v;
-        const float error_x = projected_x - canvas_x;
-        const float error_y = projected_y - canvas_y;
-        const float j00 = bx + dx * v;
-        const float j01 = cx + dx * u;
-        const float j10 = by + dy * v;
-        const float j11 = cy + dy * u;
-        const float determinant = j00 * j11 - j01 * j10;
-        if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-8F) {
-            return std::nullopt;
-        }
-        const float delta_u = (error_x * j11 - error_y * j01) / determinant;
-        const float delta_v = (j00 * error_y - j10 * error_x) / determinant;
-        u -= delta_u;
-        v -= delta_v;
-        if (std::abs(delta_u) + std::abs(delta_v) < 1.0e-6F) {
-            break;
-        }
-    }
-    if (!std::isfinite(u) || !std::isfinite(v)) {
+    const auto map = square_to_quad(*source_mapping);
+    if (!map.has_value()) {
         return std::nullopt;
     }
-    const float check_x = ax + bx * u + cx * v + dx * u * v;
-    const float check_y = ay + by * u + cy * v + dy * u * v;
-    const float error_x = check_x - canvas_x;
-    const float error_y = check_y - canvas_y;
-    if (error_x * error_x + error_y * error_y > 0.01F) {
+    // The adjugate inverts the map up to scale, and scale cancels in the
+    // division. Which side of the horizon the pointer is on is checked by
+    // mapping the answer forward again.
+    const auto& m = *map;
+    const QuadProjective inverse{
+        m[4U] * m[8U] - m[5U] * m[7U], m[2U] * m[7U] - m[1U] * m[8U],
+        m[1U] * m[5U] - m[2U] * m[4U], m[5U] * m[6U] - m[3U] * m[8U],
+        m[0U] * m[8U] - m[2U] * m[6U], m[2U] * m[3U] - m[0U] * m[5U],
+        m[3U] * m[7U] - m[4U] * m[6U], m[1U] * m[6U] - m[0U] * m[7U],
+        m[0U] * m[4U] - m[1U] * m[3U]};
+    const double px = canvas_x;
+    const double py = canvas_y;
+    const double w = inverse[6U] * px + inverse[7U] * py + inverse[8U];
+    if (!std::isfinite(w) || std::abs(w) < 1.0e-12) {
         return std::nullopt;
     }
-    return MaskViewportNormalizedPoint{u, v};
+    const double u = (inverse[0U] * px + inverse[1U] * py + inverse[2U]) / w;
+    const double v = (inverse[3U] * px + inverse[4U] * py + inverse[5U]) / w;
+    if (!std::isfinite(u) || !std::isfinite(v) ||
+        !(m[6U] * u + m[7U] * v + m[8U] > 1.0e-9)) {
+        return std::nullopt;
+    }
+    return MaskViewportNormalizedPoint{static_cast<float>(u),
+                                       static_cast<float>(v)};
 }
 
 namespace {
@@ -1381,18 +1453,12 @@ struct MaskPick final {
         return {static_cast<float>(canvas.width),
                 static_cast<float>(canvas.height)};
     }
-    const auto& corners = input.source_layer_mapping->corners;
-    const auto distance = [](const MaskViewportCanvasPoint& a,
-                             const MaskViewportCanvasPoint& b) noexcept {
-        const float dx = b.x - a.x;
-        const float dy = b.y - a.y;
-        return std::sqrt(dx * dx + dy * dy);
-    };
-    return {
-        std::max((distance(corners[0U], corners[1U]) +
-                  distance(corners[3U], corners[2U])) * 0.5F, 1.0F),
-        std::max((distance(corners[0U], corners[3U]) +
-                  distance(corners[1U], corners[2U])) * 0.5F, 1.0F)};
+    // The renderer's unit for this scene, not the corners' spacing: a mask
+    // measured against Program Output's crop or warp would rotate and
+    // feather differently from the one rendered.
+    const scene::MaskCoordinateExtent& extent =
+        input.source_layer_mapping->extent;
+    return {std::max(extent.width, 1.0F), std::max(extent.height, 1.0F)};
 }
 
 [[nodiscard]] MaskViewportNormalizedPoint rotate_shape_point(
@@ -2084,8 +2150,16 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         deep_select_open_ = false;
         deep_candidates_.clear();
 
-        if (hovered_surface_axis != GizmoAxis::None &&
-            selected_surface_value != nullptr) {
+        // On Stage, Alt+left orbits and left added to a right or middle drag
+        // pans: camera chords that never pick, or drag, what is underneath.
+        const bool camera_chord =
+            role_ == ViewportRole::Stage &&
+            (ctx.alt_held() || ctx.secondary_pointer_down() ||
+             ctx.middle_pointer_down());
+        if (camera_chord) {
+            // Left to the shell's camera navigation.
+        } else if (hovered_surface_axis != GizmoAxis::None &&
+                   selected_surface_value != nullptr) {
             frame.surface_picked = selected_surface_value->node;
             surface_drag_start_ = *selected_surface_value;
             drag_axis_ = hovered_surface_axis;
@@ -2131,7 +2205,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         } else {
             // A plain press takes the nearest element wholly in front of the
             // camera; one the camera is partly inside (a floor, a wall, a
-            // room) leaves the press to the camera orbit. Holding still still
+            // room) leaves the press to camera navigation. Holding still still
             // offers every element under the pointer, those included.
             const std::vector<scene::ScenePick> hits =
                 scene_hits_under_pointer();
@@ -2155,7 +2229,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         if (!frame.picked.has_value() && !frame.surface_picked.has_value()) {
             frame.empty_canvas =
                 role_ == ViewportRole::Stage
-                    ? EmptyCanvasInteraction::Orbit
+                    ? EmptyCanvasInteraction::Navigate
                     : EmptyCanvasInteraction::ClearSelection;
         }
     }

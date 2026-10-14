@@ -132,4 +132,4 @@ renderer through the ordinary show workflow. Admission failure retains Program.
 
 This implements publication for the supported static collection workflow. Steps
 09–11 still define broader scatter, material translation, animation and stage
-context support. See [the UI walkthrough and test evidence](ui-checks-step-08.md).
+context support. See [current operator workflow](operator-guide.md).

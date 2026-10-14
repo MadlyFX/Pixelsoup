@@ -11,6 +11,10 @@ import numpy
 from geometry import MAX_CORNERS, numeric, pack_array, unpack_array
 
 IDENTITY = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
+# Embedded image budget per scene. Linked packages hold textures as BC7/BC5
+# (one byte per pixel), so 256 images fit the Director's publication limits.
+MAX_IMAGES = 256
+MAX_IMAGE_BYTES = 256 * 1024 * 1024
 
 
 def surface_id(identity, material):
@@ -169,8 +173,8 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                 path = view['path']
                 if path in prepared or path in failed:
                     continue
-                if len(prepared) >= 32:
-                    failed[path] = 'Scene exceeds 32 distinct images'
+                if len(prepared) >= MAX_IMAGES:
+                    failed[path] = 'Scene exceeds ' + str(MAX_IMAGES) + ' distinct images'
                     continue
                 try:
                     source = Path(path)
@@ -224,8 +228,9 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                             old=(stamp,hashlib.sha256(data).hexdigest(),data)
                         data=old[2]
                         cache[path]=old
-                        if total + len(data) > 64*1024*1024 or len(images) >= 32:
-                            raise ValueError('Images exceed 64 MiB / 32 distinct image budget')
+                        if total + len(data) > MAX_IMAGE_BYTES or len(images) >= MAX_IMAGES:
+                            raise ValueError('Images exceed ' + str(MAX_IMAGE_BYTES >> 20) + ' MiB / '
+                                             + str(MAX_IMAGES) + ' distinct image budget')
                         total += len(data)
                         images[path] = (old[1],data)
                     digest, data = images[path]

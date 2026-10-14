@@ -1,0 +1,3 @@
+# Optional manual-rendering sample assets are outside default source searches.
+# Search Models/ explicitly when changing or inspecting those assets.
+/Models/

@@ -1,0 +1,860 @@
+# Operator guide
+
+Run commands below from the repository root. See the [README](../README.md) for building.
+
+## Run the local editor demo
+
+From the repository root, after a GUI build:
+
+```powershell
+.\scripts\run-editor-demo.ps1
+```
+
+The script starts a Director editor and a lifecycle-supervised local output
+node. Dragging or editing content in the editor updates the replicated scene
+shown by the node. Both halves read one temporary password file the script
+creates, so Output Monitor controls the node securely without setup.
+
+Other Windows demonstrations are:
+
+```powershell
+.\scripts\run-scene-demo.ps1  # Director preview plus two scene slices
+.\scripts\run-wall-demo.ps1   # Director preview plus two feed-mapped outputs
+```
+
+## Run across two machines
+
+The demo above puts everything on one machine. To drive a render machine from a
+separate control machine, start the editor half on the control machine:
+
+```powershell
+.\scripts\run-editor.ps1
+```
+
+That opens the editor and a Director listener, and prints this machine's
+address and the port.
+
+**A render machine needs no command line.** Put `media-server.exe` on it, with
+the files beside it (the release package, or a GUI build directory), and
+double-click it. The first time, a small window asks for three things:
+
+- the control machine's numeric address, and the Director port (normally
+  45060);
+- this machine's node index - 0 for the first render machine, 1 for the next;
+- the render node password from **File > Preferences** on the control machine,
+  or nothing if none is set there.
+
+**SAVE AND START** stores them in this machine's per-user Preferences - never
+in a project - and starts the lifecycle agent, which starts the render process
+straight away. From then on, double-clicking `media-server.exe` (or a shortcut
+to it, or `media-server.exe --render-machine`) skips the form and runs with
+those settings; **CHANGE SETTINGS** edits them. The window shows the render
+process with local START, STOP and RESTART, the control port Output Monitor
+reaches it on, whether it has a password, how many control requests were
+accepted or refused, and this machine's addresses for entering it by hand.
+Closing it asks first, because it stops the output. Tick **Start this render
+machine when I sign in to Windows** to have it come back after a restart.
+Launched from Explorer it closes the console window it was given; started from
+a terminal it keeps logging there. `media-server.exe --render-machine
+--validate-startup` prints what a launch would start without opening anything.
+
+On Windows the window also checks for Media Server's inbound firewall rules -
+the control port (TCP 47840 + node index) and discovery (UDP 47839) - and while
+one is missing offers **ALLOW THROUGH FIREWALL**: Windows asks for an
+administrator, then exactly those two rules are added, replacing any earlier
+copy. Nothing else is changed. If Windows showed its own "allow access" prompt
+when the agent started, Allow does the same job; Cancel can leave a block rule
+for `media-server.exe`, which wins over any allow rule - remove it under
+Windows Defender Firewall > Advanced settings > Inbound Rules.
+
+The script does the same from a command line, and is still the way to pass
+the extra options below:
+
+```powershell
+.\scripts\run-output-node.ps1 -DirectorHost 192.0.2.10 -NodeIndex 0
+```
+
+**Render node password.** Output Monitor starts, stops and inspects render
+machines over an authenticated control channel. Set the password in **File >
+Preferences > Render nodes** on the control machine - it applies as soon as it
+is saved, no restart - and give each render machine the same password in its
+setup window (`-Password` to the script, `--lifecycle-password=` on the
+executable). With no password on
+either side everything still works, but any Media Server on the network could
+control those machines too; Output Monitor shows `No password` while that is
+so, and a machine started with a different password reads `password rejected`.
+The password is kept on this machine only as the key it derives
+(PBKDF2-HMAC-SHA256), never in a project.
+
+`-NodeIndex` selects which slice of the wall that machine drives and must be
+distinct per render machine; the 128-bit node identity is derived from it.
+`-Fullscreen` drives a real wall, `-Windowed` is easier while setting up.
+
+Both scripts take `-Build auto|packaged|release|debug`. `auto` prefers a
+packaged `media-server.exe` beside the scripts directory, then the
+`windows-msvc-release-gui` build, then `windows-msvc-debug-gui`, so the same
+scripts work from the repository and from an extracted release package on a
+machine with no build tree. `-DryRun` prints the exact command line without
+starting anything.
+
+By default the node script runs the machine-local lifecycle agent, which owns
+the render process and starts it immediately. That is what lets Output Monitor
+START, RESTART, and STOP the node, and what reports its sync device, house
+reference, and display lock state. Finish the link in the editor: open
+Hardware Map, where the machine appears under **DETECTED ON NETWORK** along
+the bottom of the map, and drag it on (or click it). The new Render Server card
+already has the machine's name, address, and node index. By hand it is a Render
+Server with that node index, the render machine's address, and control port
+47840 + the node index (the script's default). Pass `-Direct` to skip the agent
+and run the render process alone - no remote control, but one fewer moving part
+when first proving connectivity.
+
+Two things are commonly in the way. Windows Firewall must allow the Director
+port inbound on the control machine, and on each render machine the lifecycle
+port (TCP) and discovery (UDP 47839) inbound; the render-machine window adds
+the latter on request, while both scripts print the `netsh` commands but
+deliberately do not change firewall rules themselves. And every address here
+must be numeric - the setup window's address, `-DirectorHost` and the Hardware
+Map Host field take IPv4/IPv6 literals, not host names.
+
+To open only the editor, provide a Director listener and stable show identity:
+
+```powershell
+out/build/windows-msvc-debug-gui/apps/server/media-server.exe `
+  --role=director --director-listen=127.0.0.1:45000 `
+  --show-id=00000000000000010000000000000002 `
+  --director-epoch=00000000000000030000000000000004 `
+  --playback --edit --surface=1600x900 --wal=editor-test.wal
+```
+
+Run `media-server.exe --help` for the complete option reference. `--playback`
+starts the show clock; `--scene` opens an ordinary scene-output window; and
+`--output` selects the feed-mapped output path. The editor is Director-only.
+
+## Program and Preview
+
+Program is what the wall is showing. Preview is where the next look is built.
+The point of the pair is that an operator can do real work - scrub, play, move
+elements, key them, rebuild the compositor graph - on a scene that is not on
+air, and put it on air only when they decide it is ready.
+
+The `PROGRAM` / `SWAP` / `PREVIEW` group at the top right is the whole control
+surface. `PROGRAM` puts the editor back on the live scene; `PREVIEW` returns to
+the scene being rehearsed; `SWAP` promotes Preview to Program. `PROJECT
+SCENES`, at the top of the left-hand SCENE panel, is where a scene is chosen:
+`PGM` marks the live one, `RHS` the rehearsed one, and clicking any other row
+takes it into Preview. `+ NEW` creates an empty scene and `CREATE COPY`
+duplicates the scene currently on the Stage, both straight into Preview. On a
+project that has never used the switcher, the first `PREVIEW` press copies
+Program into a new `<name> Rehearsal` scene and opens it, so there is always
+something to work on.
+
+**What Preview owns.** Entering Preview seeds a Director-local playhead from
+wherever the show currently is and freezes it there. From that moment the
+timeline - the playhead and its transport buttons, including step, jump, and
+go-to-start - drives Preview alone. The show keeps running underneath at its
+own frame, and the status bar reads `PREVIEW  PGM <frame>` so the live position
+is always visible. The Program viewport and Output Monitor keep reporting the
+live show, never the rehearsal. Preview's playhead is never replicated and
+never written to the project: render nodes only ever hear about Program.
+
+**Masking on the output.** A matte is judged against the picture it is cutting,
+which is the one on the wall rather than the one in a perspective viewport. With
+the Masks panel open on a target, the Program Output panel becomes a second
+authoring surface for it: the same masks, the same selection, the same undo
+gesture as the Stage, drawn over the connector image. Its overlay resolves
+through the output's own projection, so a mask over a canvas slice registers
+with the crop and one over a physical surface registers with the warp, and the
+panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
+Both mask-authoring viewports display `OBJECT SELECTION LOCKED WHILE MASKS IS
+OPEN`, making the temporary interaction domain explicit instead of leaving an
+ordinary selection click to appear broken.
+
+Primitive masks are transformed on the picture itself. Selecting a rectangle
+or ellipse exposes four resize handles and a rotation handle; dragging the body
+moves it, dragging a corner resizes it, and Shift constrains a resize or snaps
+rotation. The normalized bounds remain available in Masks for exact entry, but
+they are a precision path rather than the primary crop gesture. Each mask row
+owns its Delete action beside its name, while dragging the row continues to
+reorder the mask stack.
+
+A layer's mask is pinned to the layer's surface, not to the frame: it moves,
+turns and foreshortens with the layer, and the outline on Stage or Program
+Output is exactly where the render cuts. Feather and expansion are canvas
+pixels at the size the layer appears on the canvas. Only flat layers - quads,
+planes and media - have one surface for a mask to sit on; a mask on a volume or
+imported model reports `SOURCE MASK MAPPING UNAVAILABLE` on Stage, and the
+render refuses the frame rather than cut it somewhere arbitrary.
+
+Program Output authors masks only while the Stage is on the Program scene. In
+Preview the two panels are showing different scenes, and a mask dragged over a
+picture that does not contain the layer it belongs to would be authored
+somewhere nobody is looking; the panel stays an ordinary output view until the
+Stage comes back. A running dissolve is excluded for the same reason - that
+picture is a mix of two committed scenes and belongs to neither - and a locked
+target still draws its overlay while refusing to author, exactly as on Stage.
+
+Scenes own their content, so editing in Preview cannot reach Program. That
+includes the compositor graph: graph objects carry the scene that owns them,
+Program composites through its scene's graph, and the Compositor panel edits
+the graph of whatever scene is on the Stage. Copying a scene copies its graph
+with it, with scene-layer references repointed at the copied elements, so a
+promoted copy looks exactly like the scene it came from before you change it.
+
+**What is shared, deliberately.** Show length, loop, and frame rate are one
+project-wide setting; Preview follows Program for those. So are the Hardware
+Map and the Feed Map - the physical wall does not change because a different
+scene is being rehearsed - and surface edits made while in Preview key against
+the Program playhead, which is the frame the mapping panels draw.
+
+**Promoting.** `SWAP` exchanges the two slots at an exact control frame, so
+every node performs the same transition on the same frame. The default is a
+30-control-frame dissolve. A dissolve renders both scenes and mixes two
+finished pictures, which is only defined when the two scenes share a canvas;
+when they do not, the button reads `CUT` and promotes on a single frame
+instead. `FADING` means a transition is already running, during which scene,
+graph, and switcher edits are all refused - both inputs of a dissolve are
+committed pictures. After a swap, Preview holds the scene that just came off
+air and its playhead re-seeds to the live frame.
+
+`SWAP` is held by exactly one thing beyond the switcher's own preconditions: a
+project that asks for physical output synchronization under a STRICT failure
+policy, whose timing the cluster cannot prove. The button then reads `HELD`,
+and Output Monitor's timing line names the unmet condition. Nothing else blocks
+a promotion. In particular, whether render nodes hold the media a scene needs
+is reported on the Output Monitor and never gates the switcher - distributing
+content to nodes is an external concern in this build.
+
+**Scenes from Blender.** A project has one `.blend` beside it with a Blender
+scene per Media Server scene. The orange `B` before a `PROJECT SCENES` row's name
+(shown on hover for other rows) opens it (created the first time) with the LiveLink
+add-on running and shows that scene. It stays on scenes Blender holds: filled for the
+one Blender syncs, outlined otherwise. A linked scene is live wherever it is - Blender edits reach Program and every
+output node as the artist drags - and Media Server's edits to Blender objects are
+written back into them, so the `.blend` always holds what the wall shows. The
+add-on keeps that true on disk: a few seconds after syncing goes quiet following
+a change Media Server accepted or wrote back, it saves the `.blend` (Keep file
+saved, on by default). A Blender the `B` starts later - Blender closed, a crash,
+"Don't Save" - therefore opens the scene Media Server holds, with the same link
+identities, instead of an older file whose objects Media Server's edits no
+longer attach to. Take a linked scene to air with the ordinary switcher. See
+[integrations/blender](../integrations/blender/README.md).
+
+## Editing clips on the timeline
+
+A media element is a *placement* of a source, not a copy of it. The document
+carries where the clip starts on the show timeline, how many show frames it
+occupies, which source frame its first show frame shows, and how long its head
+and tail opacity ramps are. All of them are exact frame counts rather than
+durations in seconds, for the same reason show time is an ordinal: every node
+has to agree on the frame a cut lands on, and a seconds value would already
+have been rounded.
+
+### A track is a screen
+
+Placements belong to scene-owned tracks, and a track owns the plane its clips
+are drawn on. It is a screen: it has a place in the scene, a format, an
+opacity, a blend mode, and a grade, and the clips filed under it are what is
+playing on it. Nine driving plates for nine angles are nine screens, each
+positioned where that part of the volume is and graded for it, and cutting a
+plate is an edit to what plays on one screen rather than to where a picture
+sits in the world.
+
+Selecting a track header selects the track, and the Inspector shows the same
+sections it shows for anything else - transform, compositing, effects - plus a
+`SCREEN` section carrying the raster the screen drives and one aspect control.
+With the lock closed the plane's height follows its width and the raster, so
+media on the screen cannot be stretched by a scale gesture; the lock is applied
+in evaluation rather than in the authoring path, because a gizmo drag, a
+keyframe, and a typed field all have to obey it and only evaluation sees all
+three. The raster is authored, never read from whatever clip happens to be up:
+an operator sets a screen to the format of the wall, and a plate of the wrong
+size should look wrong rather than quietly reshape the wall around itself.
+
+A clip on a screen has no transform of its own to offer, so the Inspector says
+which screen it is playing on instead of showing nine fields that move nothing.
+Its transform properties are still in the document and untouched - they are
+what it returns to when it is dragged out of the track - they are simply not
+what it renders with. A track's grade runs after the clip's, because the look
+an operator sets on a wall is meant to survive whichever plate is up.
+
+Screens are outlined in the Stage viewport, so a track with nothing on it, a
+muted one, and one between clips are all still findable and still have a gizmo.
+They are carried in the evaluated scene rather than re-derived by each panel,
+which is what makes the editor and the renderer agree about where a screen is.
+
+A track holds any number of clips from any number of sources. Start and
+duration decide when a clip plays; explicit clip order decides where it sits in
+the layer stack even when two clips have different start times. The list runs
+top-down through that compositing stack - what is in front is at the top, for
+tracks and for the clips inside them - which is the reverse of the ascending
+order the model reports them in. A track header carries its own mute and lock
+toggles; a second click on the header opens its name for editing, because the
+first one selects the track. The toolbar keeps only the operations that need a
+confirmed destination. Track order and each clip's explicit order are also the
+deterministic media compositing order. That order stacks clips sharing one
+surface, where every clip is at the same depth - which every clip on one screen
+is, by construction; it does not reorder clips across surfaces at different
+depths, which composite back-to-front from the camera like everything else in
+the scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
+track never disappears on a bare delete: choose `DELETE+CLIPS`, or choose a
+named destination and `MOVE+DELETE` its placements first.
+
+A placement carrying no track belongs to none. It stands on its own transform
+like any other scene element, and is drawn as an ordinary top-level row rather
+than under a header of its own, because a clip outside every track is already
+visibly outside every track, and inventing a container for it would be
+inventing one the document does not have. Clips move between tracks the way
+they move anywhere else: drag a clip up or down onto a track's band - its
+header or any clip already in it - and the band outlines as a real nesting
+target. The clip bar previews locally and one placement edit is authored on
+release. The media row is also a full-width lift handle, so a clip that is
+offscreen or only a few pixels wide does not require hunting for its bar.
+Dropping on any row outside every band takes the clip out of its track again,
+and back onto its own transform. A locked track refuses an arriving clip.
+
+Every orderable layer row has the same full-width lift gesture. Dragging a clip
+within its current track reorders that track's clips; dragging an object, model,
+light, group, or trackless clip inserts it before or after another sibling. The target
+is one insertion line, not a highlighted row: highlighting a peer would imply
+nesting, while reparenting is a separate hierarchy operation. Release authors
+one dense sibling order as one undo step. For 3D drawables camera depth remains
+the primary visibility rule; authored layer order resolves equal-depth
+translucent, blended, or isolated layers and determines the editor stack.
+
+The timeline nests Blender collections, source objects, and material parts using
+the same parent relationships as the Scene outliner. Authored transform groups
+also contain their children. Parents start collapsed; opening a parent reveals
+its children and a separate Properties foldout for its animation channels.
+Search keeps matching descendants with their parent context, and selecting a
+part in another panel reveals its ancestors. Live-link updates retain the
+timeline's open folders.
+
+Track order is changed by dragging a header up or down the stack. The target is
+shown as a single insertion cursor between tracks, never as a highlighted
+track: the operation is ordering, not nesting. Crossing several tracks previews
+locally and reports one absolute reorder on release, so the whole drag is one
+undo step. A track whose name is open for editing is grabbed by the strip left
+of its name field, because the rest of the row is that field.
+
+Compositing a track is still one draw per on-air clip at the screen's
+transform, not a render of the screen to its own buffer. The two are the same
+picture except where clips overlap - during a cross dissolve, a screen-level
+opacity or a non-linear screen grade applies per clip rather than to the
+blended result. That is a real difference and it is the reason this is written
+down rather than assumed away.
+
+The document keeps calling this a lane - `lane_id` on a placement, and
+`timeline_lane` nodes - because those names are in saved projects and renaming
+them would not open an older show.
+
+The exact IN and OUT number fields remain available for typed or dragged range
+entry. The adjacent Set In and Set Out controls take the current playhead in
+one click and preserve Loop. If a local Preview playhead is outside the old
+range, the other endpoint moves only as far as needed to keep the new range
+valid.
+
+On a media layer row the Timeline draws that placement as a bar:
+
+- **Drag the bar** to move the clip. **Drag either end** to trim it; trimming
+  the head advances the source trim by exactly the frames it removed, so the
+  frames that survive still show what they showed.
+- **SPLIT** cuts every selected clip at the playhead into two placements that
+  together play what the one clip played. Nothing is copied or re-encoded, and
+  a split that would leave an empty half is not offered.
+- **The two handles on the bar's top edge** set the head and tail ramps, drawn
+  as the diagonals an editor expects. A tail ramp over the scene's black
+  surround is a fade to black; overlapping one clip's tail ramp with the next
+  clip's head ramp is a cross dissolve.
+- Drags snap to the playhead, the show range, and the ends of every other clip,
+  so butt-joining two clips and cutting on the playhead do not need pixel
+  accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
+  Move, trim, and fade bars preview during the lift and commit once on release.
+
+The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
+Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
+requires one valid contiguous selected span. Insert Clipboard and Overwrite
+Clipboard target the active unlocked track at the playhead, preview their exact
+affected span, and run only after `GO`; Overwrite retains both uncovered split
+remainders and their retargeted effects/key channels. Handle limits, adjacency,
+locks, rational source rates, and stale selections are validated by the
+Director, and every accepted operation is one undo step.
+
+Navigating the timeline is the wheel and the middle button, on both axes.
+Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
+`CURVES` mode Alt+wheel zooms values about the value under the pointer and
+Ctrl+wheel pans them, and a middle drag pans time with rows or, held with Ctrl,
+values. Because all six of those are gestures, the `KEYS` panel carries no
+stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
+`FIT ALL`, which put a selection or the whole animation back on screen. Track
+mute and lock are the layer list's eye and padlock rather than a letter, so the
+state of a stack reads from across a stage. The stage's LED surfaces follow the
+scene's elements in both the Timeline and the Scene outliner, each with the same
+padlock - the lock Feed Mapping and Stage picking already honour. A surface has
+no eye, and clicking its Scene row selects it on Stage.
+
+A ramp *scales* whatever opacity was authored or keyed rather than replacing
+it, so a dissolve composes with an animated layer. A clip the playhead has
+moved past keeps its row and its bar - it is marked `off air` rather than
+disappearing, because a clip you cannot see is still a clip you have to be able
+to drag. Every authored media item is an explicit placement with a positive
+duration; an invalid placement is reported rather than reinterpreted as an
+always-on layer.
+
+## Project settings
+
+**File > Project Settings** holds the numbers that decide *how* an effect is
+computed, as opposed to how much of it an operator asked for. They live in the
+project rather than in machine-local preferences because they change the image:
+two nodes filtering with different kernels would render a visibly different
+frame of the same show, which is exactly the divergence the scene digest exists
+to catch. Applying them is an ordinary document edit, so it undoes, saves, and
+replicates.
+
+- **Blur** - Gaussian kernel taps per axis, sigma as a fraction of the authored
+  radius, and how many times the separable pair runs. A wide radius stays smooth
+  at a modest tap count by repeating passes rather than by widening the kernel.
+  **Directional Blur taps** is a separate bounded odd gather count; Box Blur
+  uses its exact per-effect integer radius and pass count.
+- **Brightness** - whether the multiplier is a scene-referred *exposure*,
+  applied before the tone map so highlights roll off, or a display-referred
+  *gain* applied to the finished picture, which clips the way a vision mixer's
+  gain does. A response gamma shapes the multiplier once, over the whole folded
+  stack, so two brightness effects of 4 and 0.5 still mean one of 2.
+- **Saturation** follows that same response choice: linear-light colourfulness
+  in Exposure mode, encoded/display-referred colourfulness in Gain mode. The
+  per-effect Amount remains in the Inspector; only its project-wide response
+  domain is selected here.
+
+None of this appears beside an individual effect in the Inspector. A kernel
+width is set once per show and then left alone; five such controls on every
+blur node would be five things an operator scrolls past forever.
+
+## Preferences
+
+The machine-local settings an operator would otherwise retype on every launch
+live in **File > Preferences**: the Director listen endpoint, show ID, Director
+epoch, render node password, and write-ahead log path. They describe this
+installation, not the show, so none of them is written into a `.mstage` or sent
+to a render node.
+
+Precedence is **command line > preferences > built-in default**. An argument
+given this run always wins, which keeps scripted deployments and the bundled
+demos exactly reproducible on a machine whose operator has saved settings; the
+panel names the value actually in use beside any field an argument displaced,
+so an argument-driven launch never reads as settings being ignored. An empty
+field means "no preference" and restores the built-in default.
+
+Saved settings take effect the next time the program starts. Nothing here is
+applied live: the listener, the WAL, and the lifecycle credential are all bound
+during start-up, and the panel says so rather than implying otherwise.
+
+Settings are stored per user beside the recent-project record, written to an
+exclusive sibling temporary file and atomically installed, so an interrupted
+save leaves the previous settings intact. A damaged settings file is reported
+at start-up and the built-in defaults are used; it is never silently ignored.
+
+A render machine has its own small window instead of this panel (see [Run
+across two machines](#run-across-two-machines)). Its settings - the control
+machine's address, node index, control port and show ID - live in the same
+per-user record, and the render node password is one setting whichever end of
+the connection the machine is: on a machine that runs both, the editor and its
+render machine agree by construction. Each side saves only its own fields.
+The Director's listen endpoint, show ID and epoch apply only to a Director
+launch, so a render process started on the operator's own machine never
+inherits them. A render process started with explicit arguments, and a
+`--lifecycle-listen` agent, read none of this: their configuration is on the
+command line, local and immutable by design.
+
+## Project assets
+
+Library imports are persistent project assets, separate from scene placement.
+An import records a reference: the Director probes the file for metadata
+(dimensions, frame count, rate, triangle and vertex counts), streams it once to
+record the expected byte length and SHA-256, and stores its **absolute path** in
+the project. The source itself is not copied into the project. Reimporting the
+same exact source updates the existing asset record without changing its stable
+project ID; accepting changed bytes is therefore an explicit new revision of
+that one identity, not a derivative asset.
+
+The model this rests on is that a path means the same file everywhere: a clip
+the operator opens from `D:\Media\clip.mov` is opened from `D:\Media\clip.mov`
+by every render node. Use identical local layouts, a mounted share, or a UNC
+path that resolves the same way on every machine. Sources must be absolute; a
+relative or `..`-bearing path is refused at import, because it would otherwise
+resolve against whichever directory each process happened to start in.
+
+Getting source media onto those paths is external sync tooling's job, not this
+program's. What the program does is distinguish a missing path, wrong byte
+length, wrong hash, and a local verification failure instead of treating any
+file with the right name as ready - when it is asked to. Routinely it asks the
+cheaper question.
+
+Every machine answers the same question about the paths the current document
+actually needs — scene media, scene models, and imported projection surfaces.
+Library assets nothing currently uses are not counted, so an operator can keep
+a shelf of unused imports. A placement whose Library record was deleted is
+still counted, because the renderer still opens that file.
+
+Output Monitor displays required/ready counts per render node, including
+missing, byte-mismatched, hash-mismatched, and verification-failed totals.
+Readiness is reported over the authenticated lifecycle listener, so it is
+available while the render child is stopped; the agent answers only the exact
+manifest requirements and never returns a directory listing, rewritten path,
+or file contents. START and RESTART remain disabled until every required path
+matches on that node; STOP remains available.
+
+Asset readiness is reported, not enforced against the switcher. A disconnect,
+restart, stale manifest, duplicate node index, or pending Hardware Map change
+shows on the Output Monitor, but it does not hold a Program promotion: the
+operator, not the readiness gate, decides when a look goes on air.
+
+**Presence is routine; content is asked for.** When the manifest revision
+changes, every machine stats the required paths and reports present or missing.
+That is one stat per asset, it reads nothing, and it cannot report a content
+mismatch because it never looks at content.
+
+`RESCAN`, in the Library, is the other question: it streams each required file
+and reports wrong byte lengths, wrong hashes, and local verification failures.
+It is the only thing in the program that reads a source's bytes for this
+purpose, and the only place a mismatch can come from.
+
+Nothing rescans on a timer. An earlier build re-verified every fingerprinted
+source every five seconds for as long as anything was missing, which on a 40 MB
+plate stalled the control thread for two and a half seconds at a time, forever,
+because a missing file never stops being missing. A share that mounts late is
+picked up by pressing `RESCAN` - which is a worse answer than automatic
+recovery only if the automatic version is free, and that one was not.
+
+Thumbnails are derivatives, not assets. Their key contains the persistent Asset
+NodeId, expected fingerprint, frozen `thumb-320x180-srgb` profile, and generator
+version. The Director chooses the first valid video frame at or after 10% of
+duration (then follows the specified fallback order), corrects orientation and
+pixel aspect, and writes a transparent-letterboxed PNG through an atomic,
+validated machine-local cache envelope. Library requests only visible rows and
+a bounded prefetch window; leaving that window cancels work. Ready PNGs are
+decoded through the renderer and uploaded on the editor's own GPU device into a
+64-entry retained texture cache. Cache files are disposable and never enter a
+project save, command stream, placement, or content manifest.
+
+## Render-node lifecycle control
+
+The normal Director/node session exists only after a node process is running.
+Lifecycle control is therefore a separate, per-machine listener that supervises
+one fixed child configuration. The listener accepts only `status`, `start`,
+`restart`, and `stop`; executable paths and child arguments remain local and
+never cross the network.
+
+A render machine set up through its window runs exactly this agent, with the
+render process arguments `run-output-node.ps1` would pass. The command-line
+form below is for services and scripts, and is unchanged.
+
+Choose a render node password, set it in the editor's Preferences, and give
+every render machine's agent the same one with `--lifecycle-password=TEXT` or
+`--lifecycle-secret-file=PATH` (a file holding the password, which keeps it
+out of process listings; restrict it to the service account). An agent with
+neither runs unsecured and accepts any Media Server on the network. For
+example, this agent supervises node 0:
+
+```powershell
+media-server.exe `
+  --lifecycle-listen=10.20.0.21:47840 `
+  --lifecycle-node-index=0 `
+  --lifecycle-secret-file=C:\ProgramData\MediaServer\lifecycle.secret `
+  --lifecycle-child=C:\MediaServer\media-server.exe `
+  --lifecycle-autostart `
+  --lifecycle-child-arg=--role=render,output `
+  --lifecycle-child-arg=--director-connect=10.20.0.10:45000 `
+  --lifecycle-child-arg=--show-id=00000000000000010000000000000002 `
+  --lifecycle-child-arg=--node-id=00000000000000030000000000000004 `
+  --lifecycle-child-arg=--node-incarnation=00000000000000050000000000000006 `
+  --lifecycle-child-arg=--playback `
+  --lifecycle-child-arg=--output
+```
+
+`--lifecycle-autostart` is optional. It starts the configured child before the
+listener accepts control requests; without it, Output Monitor starts the child
+on demand. The controller authenticates requests with HMAC-SHA256 over a key
+derived from the password, with a fresh nonce, but it is designed for a
+trusted, isolated production-control LAN. Use host firewalls, choose a real
+password, and do not expose the listener to the public Internet.
+
+**Finding render machines.** Every lifecycle agent answers discovery on UDP
+47839 (`--lifecycle-discovery-port=N` to move it, `0` to turn it off), and the
+editor asks every two seconds - by broadcast on each IPv4 interface and on
+loopback - listing what answered under **DETECTED ON NETWORK** at the bottom of
+Hardware Map. Drag a machine onto the map, or click it to drop it at a free
+spot, and its Render Server card starts with the machine's name, address, and
+node index; the first one placed also moves the project's control port to
+where that machine listens. A machine already on the map reads `ON MAP` and
+selects its card. Otherwise a card says what would stop it working before it
+is placed: its node index already used by another card (a click selects that
+card, often the same machine at an old address), a control port the project's
+range does not reach, or a password mismatch. The answer carries the machine's
+name, node index, control port, and whether it has a password - never the
+password - and authorizes nothing; control still goes over the authenticated
+lifecycle channel. Discovery stays on one broadcast domain, so a machine on
+another subnet is entered by hand.
+
+In Hardware Map, set the project-wide control port and assign each Render
+Server a unique numeric node index plus a numeric IPv4/IPv6 address (a blank
+address means local loopback). Output Monitor derives the endpoint, rejects
+duplicate node indices from lifecycle actions, and displays listener/process
+state plus runtime inventory. Only a cabled card is part of the show: a Render
+Server no cable touches and no output binding names reads `PARKED` on the map -
+an alternative or future configuration - and is never launched, never holds the
+Program gate or the asset cohort for the rest of the cluster, and cannot make a
+cabled card's node index a duplicate. A newly placed card takes the next free
+node index. Display targets are observations, not persistent
+project state; on Windows they are active DisplayConfig targets, not a promise
+of unused physical connectors.
+
+For physical output deployment, start with the node graph after the Render
+Server listener reports active displays. Drag a cable from the server's live
+video-output pin to the corresponding video input. That one gesture creates
+the cable, a persistent binding to the display's stable observed identity, and
+a full-canvas Feed Mapping region. Repeat for each display driven by the same
+render process. Select a binding row to tune its exact Feed index, Window mode,
+Width, Height, Refresh numerator, and Rate divisor. Disconnecting the graph
+cable removes its generated binding and region; a region shared by another
+binding is retained. Feed indices refer to the numbered rows in Feed Mapping
+and are never inferred from physical display order.
+
+Fullscreen applies an exclusive native mode and refuses launch when the exact
+raster and rational refresh are not advertised. Windowed and borderless modes
+apply the saved raster at the detected target's desktop position. The Program
+gate also requires authenticated inventory to contain every saved target; an
+exclusive target must report the requested applied mode, and the live render
+process must resolve every bound Feed index before acknowledging readiness. A
+missing target stays
+on its authored logical port and is labelled `MISSING` rather than compacting a
+different connector into its place. Select that binding and use `REPAIR WITH
+NEXT ACTIVE OUTPUT` to explicitly adopt a replacement. Discovery and hotplug
+never rewrite bindings, cables, or project files on their own.
+
+One lifecycle agent still supervises one fixed render-process identity. That
+child now opens one presenter per saved output binding and selects each binding's
+Feed index. Changing bindings is replicated as project state; Restart from
+Output Monitor relaunches the same process, which reapplies the saved deployment.
+Projects without output-binding nodes use the single-window output model.
+
+## Output synchronization
+
+Set the project policy in Hardware Map under `SYNC POLICY`: UNSYNCED,
+FRAMELOCK, or EXTERNAL GENLOCK, the required raster and rational refresh, the
+vendor swap-group and present-barrier identifiers, whether a failure is STRICT
+or DEGRADED, and whether a late frame holds the whole group or lets outputs
+advance independently. It is ordinary replicated document state and undoes like
+any other edit.
+
+Synchronization groups are derived from the cables already drawn in the same
+panel: the render-server video outputs that reach a common LED processor or
+wall are one group. Two outputs of one machine driving unrelated walls are two
+groups. Group timing is validated exactly, so 60/1 and 60000/1001 are never
+treated as the same rate.
+
+Output Monitor reports what the cluster can actually prove. The machine-local
+lifecycle agent answers for the sync device, the house reference, and each
+display target's lock state; the render process answers for present-barrier
+membership and its missed, late, held, and repeated frame counts. Until every
+condition holds the surface names the specific unmet one - `SYNC UNVERIFIED`,
+`REFERENCE LOST`, `SWAP BARRIER INCOMPLETE`, `DISPLAY TIMING MISMATCH` -
+instead of a generic green state, and a STRICT policy refuses to promote
+Program.
+
+This build carries no vendor sync integration, and SDL_GPU swapchains cannot
+join a present barrier, so a physical policy correctly reports
+`SWAP BARRIER INCOMPLETE` on this presentation path. To rehearse the operator
+procedures without a genlock card, pass `-SyncSimulate locked`,
+`reference-lost`, `reference-idle`, or `no-device` to
+`scripts/run-editor-demo.ps1`; simulated samples are marked as such all the
+way to the surface and can satisfy only a DEGRADED policy.
+
+Under HOLD GROUP a render process that cannot produce a complete frame for one
+of its outputs repeats the previous complete frame on all of them: on an LED
+wall one repeated frame everywhere is far less visible than one segment
+advancing while its neighbour stands still.
+
+## Cluster reliability and timing
+
+Output Monitor now exposes current control-plane health, live and catching-up
+session counts, release/pacer lag, cumulative incidents, and whether the
+rotating post-show diagnostic log is recording. It reports the exact
+synchronization verdict beside the control-plane one. A node acknowledgement
+proves replicated state adoption, never simultaneous physical scan-out or even
+physical cable/LED presence, so the two lines never merge into one green
+online state.
+
+The currently certified baseline is one Director plus two render nodes at 120
+control frames per second for ten minutes with bounded replay and edit-shaped
+durability. Node loss/restart, checkpoint/replay convergence, heartbeat
+timeout, slow-node, WAL, and release-ledger recovery are automated Release
+tests. Larger clusters and real project/media/device loads require their own
+pre-show soak; the 64-session runtime ceiling is not a 64-node performance
+claim.
+
+See [cluster-operations.md](../cluster-operations.md) for the exact supported
+envelope, soak commands, JSONL diagnostic location, failure recovery procedure,
+firewall/service/secret-rotation guidance, and the explicit future
+PTP/genlock/frame-lock integration boundary.
+
+## Authoring and project files
+
+Use Library to import media or models, then drag them into Stage. The Inspector
+and Timeline author ordinary document commands, so their changes participate in
+replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
+Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
+new edit after undo starts a new branch and clears redo only for that authoring
+context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
+of those two histories the global actions navigate. A clip dropped into a
+scene lands *placed* on the
+timeline, with its own natural length in show frames, and is edited there - see
+[Editing clips on the timeline](#editing-clips-on-the-timeline).
+
+Effects can be applied to a selected element or connected in that scene's
+compositor graph. The graph's **Add Node** palette uses searchable, expandable
+Inputs, Color, Keying, Blur, Texture, Spatial / 3D, and Combine & Output
+categories instead of giving every node equal weight in one toolbar. Array
+nodes live under Spatial / 3D. Every newly-created composition starts with its
+required Output node. Dragging a layer or Track row from the Timeline creates
+its Scene Layer node at the release point; a Track remains one stable graph
+input whose picture follows the clips currently on air, including transparent
+timeline gaps. Dragging from Effects creates the matching effect node there.
+Both gestures outline the graph and name the pending node before release.
+The graph is an infinite canvas: use the mouse wheel to zoom around the point
+under the cursor and middle-mouse drag to pan. The toolbar also provides zoom
+buttons, a percentage reset, and a full view reset. Node moves and Effects or
+Timeline drops remain in graph coordinates, so navigating never changes the
+authored layout or makes a dropped node jump away from the cursor.
+
+The Spatial / 3D category also contains **LED Car Process**, a purpose-built
+nine-socket virtual-production rig. Any subset of its optional Front, four
+three-quarter/side, Back, and Ceiling Reflection sockets can be used. Connected
+wall plates arrange around the vehicle and the reflection plate sits overhead.
+Position and yaw/pitch/roll move the complete rig; Plate Scale changes the wall
+plate size, Array Scale changes their distance from the centre, and independent
+Reflection Height and Reflection Scale controls tune the overhead plate.
+Horizontal Blend feathers only the wall plates. The node's Setup Effects socket
+is evaluated after each connected layer's own effects. Slot transforms likewise
+parent, rather than replace, the layer or Track transform, so per-plate
+positioning, effects, and masks remain local corrections that travel with the
+array. Stage selection outlines and gizmos follow those composed positions while
+edits continue to author the layer-local offset.
+
+Each effect in the Inspector carries the layer list's eye. Switching one off
+authors the document's own enabled flag, so the effect, its parameters, and its
+key channels all survive - which is what comparing a look against the one before
+it needs, and what deleting the effect instead would throw away. A switched-off
+effect keeps its row rather than disappearing from the panel that would switch
+it back on. The Color Correction panel grades what is reaching the picture, so
+it says when a layer's colour effects are off instead of offering controls that
+would do nothing. That panel exposes the structured tonal controls without
+flattening their authored order, and how those effects are computed is set once
+per project under [Project settings](#project-settings). The Texture panel
+exposes Film Grain's exact seed, pixel scale, chroma ratio, and monochrome/RGB
+mode while Amount is also keyframeable in Inspector and Timeline. Each scene
+owns its own graph, which is what lets the Compositor panel be used in Preview
+without touching what Program is rendering - see
+[Program and Preview](#program-and-preview).
+
+The Effects browser groups effects by Color, Keying, Blur, and Texture, has a
+search field, and is strictly a drag source. In Color Correction, Levels exposes draggable input and
+output rails, Lift/Gamma/Gain uses colour wheels with luminance rails, and
+Curves points are dragged directly on the graph; clicking empty graph space
+adds a point there. Numeric fields remain alongside these surfaces for exact
+entry and keyboard work, not as substitutes for the visual gestures.
+The contextual note on a structured color or texture effect has an adjacent
+button that activates its `COLOR` or `TEXTURE` dock tab. Chroma Key exposes key
+RGB, tolerance, softness, signed edge growth/erosion, spill suppression, and
+Mix; Luma Key exposes its low/high thresholds, independent softness, matte
+invert, and Mix directly in Properties.
+Chroma Key's colour well has an adjacent eyedropper icon: activate it, then
+click the exact Stage or Program Output pixel to set key RGB; Escape cancels
+without authoring. The viewport sampler and icon are target-agnostic so another
+three-component colour control can reuse the same interaction.
+
+Cameras are placed like every other element: a Position and a Rotation (yaw,
+pitch and roll in turns, turning a camera that looks down -Z with +Y up) in the
+Inspector's TRANSFORM section, keyable from the Inspector and the Timeline. The
+CAMERA section keeps only lens and exposure. A camera saved with the older eye
+and look-at target reads as the rotation that gives the same view.
+
+On Stage a click picks the nearest element under the pointer. Press and hold
+still for about half a second to choose instead: a menu lists everything under
+the pointer, front to back - including elements the camera is partly inside,
+such as a floor, a wall or a Blender room, which a plain click leaves to the
+camera.
+
+The Stage camera is your own view and is navigated as in the Unreal Editor.
+It never changes the scene, works during a rehearsal lock, and hides the
+cursor while a drag moves it.
+
+| Input | Camera |
+| --- | --- |
+| Right drag | Look around in place |
+| Right drag + W A S D | Fly forward, left, back, right |
+| Right drag + Q / E | Fly down / up |
+| Right drag + wheel | Fly faster or slower (the speed shows briefly) |
+| Middle drag, or Alt+left drag | Orbit the pivot |
+| Left drag on bare canvas | Move across the ground and turn |
+| Left+right drag | Pan |
+| Alt+middle or Shift+middle drag | Pan, with the scene following the mouse |
+| Alt+right drag | Dolly toward or away from the pivot |
+| Wheel | Move forward or back |
+| F | Frame the selection |
+
+The fly keys go by position, so they sit under the left hand on any keyboard
+layout; while a camera drag is held they never trigger timeline shortcuts.
+Alt+left and a left press during a right or middle drag never pick or move what
+is under the pointer.
+
+Scene, Stage, and Timeline share one typed multi-selection for scene elements.
+Ctrl toggles membership and Shift selects a visible range; the Inspector shows
+`MIXED` for disagreeing compatible values and applies an accepted edit only to
+unlocked compatible members. Select top-level elements and use `GROUP` in the
+Scene footer to create a replicated transform group without moving them in
+world space. Selecting that group enables `UNGROUP`, which preserves its direct
+children and selects them. Rejected hierarchy or transform operations create no
+history entry.
+
+Hardware Map and Feed Map are setup panels. Feed mappings support flat,
+horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,
+split the calibrated LED geometry externally, retain a shared model origin, and
+import each feed mesh with `+ IMPORT UV MESH`. Its persistent projection asset
+is referenced by absolute path and reported for readiness exactly like media
+and models. UV0 represents the full connector image; it is not material UV
+space.
+
+A surface reaches an output by being dragged onto it. Drag a row out of
+`PROJECTION SURFACES` and drop it on the output that drives that part of the
+wall - its row in the list, or its rectangle in the mapping area, whichever the
+operator is already looking at - and the drop switches that output to the
+surface and takes its whole raster as the region. Every output that can accept
+the drop outlines itself while one is in flight. The details rail names the
+surface an output is on rather than offering a stepper to hunt through them:
+cycling blindly past eight walls to find the ninth is what a control looks like
+when the gesture was never decided.
+
+Feed Mapping treats application windows and viewports as separate spaces. A
+window's raster comes from its Hardware Map output binding and stays fixed;
+the colored rectangle inside it is the feed's destination viewport. Moving or
+resizing that rectangle changes only `viewport_x`, `viewport_y`,
+`viewport_width`, and `viewport_height`, leaving the scene/surface source crop
+unchanged. Pixels in the window outside the viewport are black. The panel lays
+configured windows side by side. A four-node setup can therefore show four
+3840x2160 windows across a 15360x2160 mapping area, each with a 3456x1356
+viewport. An NVIDIA Mosaic setup instead authors one 15360x2160 window with
+four independent 3456x1356 viewports at x=0, 3840, 7680, and 11520. Any number
+of viewport rows may target the same logical window index; they are composited
+into that window in stable document order. Every viewport explicitly authors
+all four viewport properties.
+
+Start, save and open complete projects through File > New Project / Save
+Project / Open Project. New Project replaces the open project (asking first if
+it has unsaved changes) with an untitled one holding a single empty 1920x1080
+scene and a full-canvas Feed Map for node 0, the same as a first launch without
+the demo content; Save Project then asks where to put it.
+`.mstage` saves are checksummed and atomically replaced. Recovered WAL state
+takes precedence at startup; otherwise the last successfully opened/saved
+project is offered through recent-project recovery. A damaged or inaccessible
+project safely falls back to untitled startup.

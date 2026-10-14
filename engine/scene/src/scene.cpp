@@ -736,6 +736,59 @@ float fold_mask_coverage(float accumulated, float coverage,
     return accumulated;
 }
 
+std::optional<std::array<Vec3, 4U>> mask_source_plane(
+    Primitive primitive) noexcept {
+    // Matches build_quad and build_plane: uv (0,0) is the top-left corner.
+    switch (primitive) {
+    case Primitive::Quad:
+        return std::array<Vec3, 4U>{
+            Vec3{-0.5F, 0.5F, 0.0F}, Vec3{0.5F, 0.5F, 0.0F},
+            Vec3{0.5F, -0.5F, 0.0F}, Vec3{-0.5F, -0.5F, 0.0F}};
+    case Primitive::Plane:
+        return std::array<Vec3, 4U>{
+            Vec3{-0.5F, 0.0F, -0.5F}, Vec3{0.5F, 0.0F, -0.5F},
+            Vec3{0.5F, 0.0F, 0.5F}, Vec3{-0.5F, 0.0F, 0.5F}};
+    default:
+        return std::nullopt;
+    }
+}
+
+MaskCoordinateExtent mask_source_extent(const Camera& camera, Canvas canvas,
+                                        const Mat4& world,
+                                        Primitive primitive) noexcept {
+    const MaskCoordinateExtent fallback{
+        static_cast<float>(std::max(canvas.width, 1U)),
+        static_cast<float>(std::max(canvas.height, 1U))};
+    const auto plane = mask_source_plane(primitive);
+    if (!plane.has_value() || canvas.width == 0U || canvas.height == 0U) {
+        return fallback;
+    }
+    std::array<CanvasProjection, 4U> corners{};
+    for (std::size_t index = 0U; index < corners.size(); ++index) {
+        corners[index] = project_to_canvas(
+            camera, canvas, transform_point(world, (*plane)[index]));
+        if (!corners[index].visible || !std::isfinite(corners[index].x) ||
+            !std::isfinite(corners[index].y)) {
+            return fallback;
+        }
+    }
+    const auto distance = [](const CanvasProjection& a,
+                             const CanvasProjection& b) noexcept {
+        const float dx = b.x - a.x;
+        const float dy = b.y - a.y;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    const float width = (distance(corners[0U], corners[1U]) +
+                         distance(corners[3U], corners[2U])) * 0.5F;
+    const float height = (distance(corners[0U], corners[3U]) +
+                          distance(corners[1U], corners[2U])) * 0.5F;
+    if (!std::isfinite(width) || !std::isfinite(height)) {
+        return fallback;
+    }
+    return MaskCoordinateExtent{std::max(width, 1.0F),
+                                std::max(height, 1.0F)};
+}
+
 const CanvasRect* Scene::slice_for(core::u32 node_index) const noexcept {
     for (const auto& binding : slices) {
         if (binding.node_index == node_index) {

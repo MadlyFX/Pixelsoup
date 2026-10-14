@@ -1,5 +1,12 @@
 # Qualification and support boundary v1
 
+This reference retains measured reports from the earlier explicit-publication
+delivery and later geometry benchmarks. The current live project workflow is
+described in the [add-on README](../integrations/blender/README.md),
+[operator guide](operator-guide.md) and [protocol](protocol-v1.md). Older
+Program-side authoring restrictions and add-on versions below describe their
+measurement context; rerun qualification for a new build or hardware setup.
+
 What the Blender live scene link is qualified to do, on what builds, and what it
 does not do. Everything below was measured on the hardware named here; nothing
 is inferred from a different scene size, machine or configuration.
@@ -269,4 +276,4 @@ and manifest, `evidence/qualification.json`, the offline `preview.mstage` and
 `published.mstage` projects, and `sample-collection.blend`. Keep the output
 directory path short — immutable package names must stay inside the legacy
 Windows path limit. See the [operator guide](operator-guide.md) and the
-[step 12 walkthrough](ui-checks-step-12.md).
+[delivery checks](ui-checks-step-12.md).
