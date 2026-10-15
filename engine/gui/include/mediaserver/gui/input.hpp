@@ -73,6 +73,11 @@ enum class Key : core::u8 {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    // Alt+G / Alt+R / Alt+S: put the selection back at the origin, unrotated,
+    // or at unit scale, as Blender's clear-transform chords do.
+    ClearLocation,
+    ClearRotation,
+    ClearScale,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies

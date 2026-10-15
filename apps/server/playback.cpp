@@ -5540,6 +5540,28 @@ schedule_effect_delete(cmd::DirectorScheduler &scheduler,
     return static_cast<bool>(scheduled);
 }
 
+// Authors a viewport rotate, scale or clear on a Blender-linked object: its
+// whole new world placement, planned as the occurrence's override exactly as a
+// move is. Anything that is not a linked occurrence is placed by its own
+// transform fields, which the editor edits directly instead.
+[[nodiscard]] bool schedule_world_edit(cmd::DirectorScheduler &scheduler,
+                                       const editor::WorldEdit &edit,
+                                       cmd::FrameNumber apply_at) {
+    const auto *const existing = scheduler.projected_document().get(edit.node);
+    if (existing == nullptr || !scene::is_linked_occurrence(*existing)) {
+        return true;
+    }
+    auto plan = scene::plan_linked_world(scheduler.projected_document(),
+                                         edit.node, edit.world);
+    if (!plan) {
+        std::cerr << "Linked scene placement: " << plan.error().message << '\n';
+        return true;
+    }
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{*plan.value().get(edit.node)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{2U}, cmd::TransactionId{edit.gesture}, apply_at));
+}
+
 [[nodiscard]] std::string_view
 hardware_kind_property(topology::HardwareDeviceKind kind) noexcept {
     switch (kind) {
@@ -8936,6 +8958,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // Operator moves from the editor, coalesced to the latest per node,
     // authored at the next frame boundary like the transport commands.
     std::vector<editor::EditIntent> pending_edits;
+    std::vector<editor::WorldEdit> pending_world_edits;
     // A pending scene-history step, authored at the boundary after the edits so
     // it navigates from exactly the state those edits just left behind.
     std::optional<editor::HistoryRequest> pending_history;
@@ -9232,6 +9255,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 next_new_node{100'000U};
     const auto clear_pending_project_authoring = [&]() {
         pending_edits.clear();
+        pending_world_edits.clear();
         pending_history.reset();
         pending_seek.reset();
         pending_preview_seek.reset();
@@ -10415,10 +10439,11 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 }
                 if (scene_edits_locked) {
-                    if (!pending_edits.empty() || !pending_properties.empty() || !pending_generics.empty() || !pending_locks.empty())
+                    if (!pending_edits.empty() || !pending_world_edits.empty() || !pending_properties.empty() || !pending_generics.empty() || !pending_locks.empty())
                         project_message="Scene edits wait for the running dissolve to finish.";
                     pending_locks.clear();
                     pending_edits.clear();
+                    pending_world_edits.clear();
                     pending_keys.clear();
                     pending_key_moves.clear();
                     pending_key_duplicate.reset();
@@ -10469,6 +10494,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 }
                 pending_edits.clear();
+                for (const auto &edit : pending_world_edits) {
+                    if (!schedule_world_edit(scheduler, edit, frame)) {
+                        std::cerr << "could not author a linked placement for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_world_edits.clear();
                 for (const auto &key : pending_keys) {
                     if (!schedule_key_edit(scheduler, key, frame,
                                            coalescing_for(key.gesture))) {
@@ -14084,6 +14117,24 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         pending_edits.push_back(edit);
                     } catch (const std::bad_alloc &) {
                         std::cerr << "could not queue a scene edit\n";
+                        return 1;
+                    }
+                }
+            }
+            for (const auto &edit : editor_frame.world_edits) {
+                bool merged = false;
+                for (auto &queued : pending_world_edits) {
+                    if (queued.node == edit.node) {
+                        queued = edit;
+                        merged = true;
+                        break;
+                    }
+                }
+                if (!merged) {
+                    try {
+                        pending_world_edits.push_back(edit);
+                    } catch (const std::bad_alloc &) {
+                        std::cerr << "could not queue a linked placement\n";
                         return 1;
                     }
                 }

@@ -35,6 +35,11 @@ struct EffectApplyRequest final {
 void draw_effect_drop_target(gui::UiContext& ctx, const gui::Rect& bounds,
                              std::string_view target_name);
 
+// A contextual picker uses the browser's catalogue and leaves the workspace
+// in place. The chosen kind is authored by the caller's document authority.
+[[nodiscard]] std::optional<scene::EffectKind>
+draw_effect_picker(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds);
+
 // The effect browser is intentionally small but real: dragging an effect onto
 // a valid target asks the shell to author it. Its parameters then live in the
 // Inspector and timeline.

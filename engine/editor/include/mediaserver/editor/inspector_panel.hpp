@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/file_picker.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -75,6 +76,11 @@ enum class InspectorPanelRequest : core::u8 {
     Texture,
 };
 
+struct InspectorEffectAdd final {
+    doc::NodeId target{};
+    scene::EffectKind kind{scene::EffectKind::Brightness};
+};
+
 // A reusable three-component colour destination for viewport sampling. The
 // Inspector names the document properties; the shell owns the cross-panel
 // eyedropper gesture and writes the sampled RGB values back to this target.
@@ -85,6 +91,7 @@ struct InspectorColorSampleRequest final {
 
 // What one Inspector frame reported.
 struct InspectorFrame final {
+    std::optional<FilePickerRequest> file_picker;
     std::vector<ComponentEdit> component_edits;
     // Explicit diamond presses toggle keys at the playhead. Kept distinct from
     // a value edit so auto-key is never required to discover the control.
@@ -98,6 +105,7 @@ struct InspectorFrame final {
     // selected element. Kept separate from named edits: removal erases the
     // effect and its animation channels rather than merely disabling it.
     std::vector<doc::NodeId> effect_deletes;
+    std::vector<InspectorEffectAdd> effect_adds;
     // A contextual "open" button beside a structured-effect note.
     std::optional<InspectorPanelRequest> panel_request;
     // A colour well asked the shell to enter viewport eyedropper mode.
@@ -121,6 +129,14 @@ struct InspectorFrame final {
     std::vector<doc::NodeId> skipped_locked;
     std::vector<doc::NodeId> skipped_incompatible;
 };
+
+// An element's authored values with its keyed transform and look channels
+// sampled at `show_frame` - what the Inspector's fields show, and where a
+// viewport rotate or scale of the element starts from.
+[[nodiscard]] ElementInfo evaluated_element(
+    const ElementInfo& authored,
+    std::span<const scene::ChannelKeyframes> keyframes,
+    core::u64 show_frame) noexcept;
 
 class InspectorPanel final {
   public:
@@ -329,6 +345,9 @@ class InspectorPanel final {
     bool light_open_{true};
     bool material_open_{true};
     bool material_extensions_open_{};
+    bool linked_open_{};
+    bool animation_open_{};
+    bool baking_open_{};
     void draw_material_extensions(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     bool content_open_{true};
     bool screen_open_{true};

@@ -13,6 +13,23 @@ TimelineFilmstripTextureCache::TimelineFilmstripTextureCache(
       capacity_(
           std::min(capacity, maximum_timeline_filmstrip_texture_capacity)) {}
 
+TimelineFilmstripTextureCache::~TimelineFilmstripTextureCache() {
+  const auto busy = [](const Entry& entry) { return !entry.texture.safe_to_release(); };
+  if (std::any_of(entries_.begin(), entries_.end(), busy) ||
+      std::any_of(retiring_.begin(), retiring_.end(), busy))
+    device_->wait_idle();
+}
+
+void TimelineFilmstripTextureCache::collect() noexcept {
+  for (auto entry = retiring_.begin(); entry != retiring_.end();)
+    entry = entry->texture.safe_to_release() ? retiring_.erase(entry) : std::next(entry);
+}
+
+void TimelineFilmstripTextureCache::retire(EntryList::iterator entry) noexcept {
+  if (entry->texture.safe_to_release()) entries_.erase(entry);
+  else retiring_.splice(retiring_.end(), entries_, entry);
+}
+
 const rhi::Texture *TimelineFilmstripTextureCache::find(
     const assets::DerivativeKey &key) noexcept {
   const auto found =
@@ -42,6 +59,9 @@ const rhi::Texture *TimelineFilmstripTextureCache::upload(
       frame.pixels.size() != expected_bytes) {
     return nullptr;
   }
+  collect();
+  if (entries_.size() >= capacity_) retire(entries_.begin());
+  if (entries_.size() + retiring_.size() >= capacity_ * 2U) return nullptr;
 
   rhi::TextureDesc desc{};
   desc.width = timeline_filmstrip_texture_width;
@@ -60,25 +80,27 @@ const rhi::Texture *TimelineFilmstripTextureCache::upload(
   }
   EntryList::iterator inserted = std::prev(entries_.end());
   if (!commands.upload(inserted->texture, frame.pixels)) {
-    entries_.erase(inserted);
+    retire(inserted);
     return nullptr;
-  }
-  while (entries_.size() > capacity_) {
-    entries_.pop_front();
   }
   return &inserted->texture;
 }
 
 void TimelineFilmstripTextureCache::retain(
     std::span<const assets::DerivativeKey> keys) noexcept {
+  collect();
   for (auto entry = entries_.begin(); entry != entries_.end();) {
     const bool retained =
         std::find(keys.begin(), keys.end(), entry->key) != keys.end();
-    entry = retained ? std::next(entry) : entries_.erase(entry);
+    auto current = entry++;
+    if (!retained) retire(current);
   }
 }
 
-void TimelineFilmstripTextureCache::clear() noexcept { entries_.clear(); }
+void TimelineFilmstripTextureCache::clear() noexcept {
+  collect();
+  while (!entries_.empty()) retire(entries_.begin());
+}
 
 void TimelineFilmstripTextureCache::reset(
     core::u64 project_generation) noexcept {

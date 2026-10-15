@@ -1,4 +1,5 @@
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/gui/input.hpp>
@@ -26,7 +27,7 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y]
+//       [hover_x hover_y] [properties: media|model|light|renderer|environment]
 namespace {
 
 namespace core = mediaserver::core;
@@ -40,7 +41,7 @@ namespace scene = mediaserver::scene;
   constexpr std::array<const char *, 2U> candidates{
       "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"};
   for (const char *path : candidates) {
-    auto atlas = gui::FontAtlas::create(path, 13U, scale);
+    auto atlas = gui::FontAtlas::create(path, 14U, scale);
     if (atlas.has_value()) {
       return atlas;
     }
@@ -239,7 +240,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y]");
+              "[width] [height] [hover_x hover_y] [properties: media|model|light|renderer|environment]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -249,6 +250,7 @@ int main(int argc, char **argv) {
       argc > 4 ? std::strtof(argv[4], nullptr) : 620.0F;
   const float hover_x = argc > 6 ? std::strtof(argv[5], nullptr) : -100.0F;
   const float hover_y = argc > 6 ? std::strtof(argv[6], nullptr) : -100.0F;
+  const std::string_view properties = argc > 7 ? argv[7] : "";
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -280,6 +282,18 @@ int main(int argc, char **argv) {
   editor::ScenePanel scene_panel{gui::ui_id("snapshot.scene")};
   editor::TimelinePanel timeline_panel{gui::ui_id("snapshot.timeline")};
   editor::OutputMonitorPanel output_panel{gui::ui_id("snapshot.output")};
+  editor::InspectorPanel inspector_panel{gui::ui_id("snapshot.inspector")};
+  editor::SceneSettingsPanel settings_panel;
+  auto inspected = show.elements[4];
+  if (properties == "model") inspected = show.elements[2];
+  if (properties == "light") inspected = show.elements[7];
+  inspected.source = properties == "model"
+      ? "T:/Production/Shows/Autumn/Models/Truss_Structure.glb"
+      : "T:/Production/Shows/Autumn/Media/Particle_Ribbons.mov";
+  inspected.ies_source = "T:/Production/Lighting/Profiles/practical.ies";
+  editor::ProjectSettingsState settings;
+  settings.stage_node = doc::NodeId{1U};
+  settings.environment.map_source = "T:/Production/Lighting/stage_environment.exr";
   editor::EditorTimeline timeline{};
   timeline.show_frame = 140U;
   timeline.program_frame = 140U;
@@ -307,13 +321,22 @@ int main(int argc, char **argv) {
     input.set_mouse_position(hover_x, hover_y);
     ctx.new_frame(1.0);
     ctx.panel(window, ctx.theme().background);
-    static_cast<void>(scene_panel.draw(
-        ctx, scene_bounds, show.elements, show.selection,
-        show.selection.empty() ? doc::NodeId{} : show.selection.front(), true));
-    static_cast<void>(timeline_panel.draw(
-        ctx, timeline_bounds, timeline, show.keyframes, show.elements,
-        show.selection, show.selection.front(), {}, {}, {}, show.lanes));
-    static_cast<void>(output_panel.draw(ctx, output_bounds, outputs));
+    if (!properties.empty()) {
+      if (properties == "renderer" || properties == "environment")
+        static_cast<void>(settings_panel.draw(ctx, window,
+            properties == "renderer" ? editor::SceneSettingsTarget::Renderer : editor::SceneSettingsTarget::Environment,
+            settings, {}, 0U));
+      else
+        static_cast<void>(inspector_panel.draw(ctx, window, &inspected));
+    } else {
+      static_cast<void>(scene_panel.draw(
+          ctx, scene_bounds, show.elements, show.selection,
+          show.selection.empty() ? doc::NodeId{} : show.selection.front(), true));
+      static_cast<void>(timeline_panel.draw(
+          ctx, timeline_bounds, timeline, show.keyframes, show.elements,
+          show.selection, show.selection.front(), {}, {}, {}, show.lanes));
+      static_cast<void>(output_panel.draw(ctx, output_bounds, outputs));
+    }
     ctx.draw_overlays(window);
   }
 

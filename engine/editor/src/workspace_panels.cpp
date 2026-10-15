@@ -591,63 +591,13 @@ struct CompositorPortVisual final {
 };
 
 [[nodiscard]] gui::UiColor port_color(const gui::UiContext &ctx,
-                                      compositor::PortValueType type) noexcept {
-  switch (type) {
-  case compositor::PortValueType::Image:
-    return ctx.theme().accent;
-  case compositor::PortValueType::Effect:
-    return gui::UiColor{0.780F, 0.318F, 0.922F, 1.0F};
-  case compositor::PortValueType::TransformSet:
-    return ctx.theme().playhead;
-  }
+                                      compositor::PortValueType) noexcept {
   return ctx.theme().text_muted;
 }
 
 [[nodiscard]] gui::UiColor
 compositor_node_color(const gui::UiContext &ctx,
-                      compositor::NodeKind kind) noexcept {
-  switch (kind) {
-  case compositor::NodeKind::SceneLayer:
-    return ctx.theme().good;
-  case compositor::NodeKind::Brightness:
-    return ctx.theme().keyframe;
-  case compositor::NodeKind::Saturation:
-    return gui::UiColor{0.965F, 0.380F, 0.600F, 1.0F};
-  case compositor::NodeKind::Levels:
-    return gui::UiColor{0.330F, 0.850F, 0.680F, 1.0F};
-  case compositor::NodeKind::LiftGammaGain:
-    return gui::UiColor{0.940F, 0.620F, 0.240F, 1.0F};
-  case compositor::NodeKind::ContrastPivot:
-    return gui::UiColor{0.720F, 0.480F, 0.980F, 1.0F};
-  case compositor::NodeKind::ColorMatrix:
-    return gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F};
-  case compositor::NodeKind::WhiteBalance:
-    return gui::UiColor{0.980F, 0.700F, 0.420F, 1.0F};
-  case compositor::NodeKind::Curves:
-    return gui::UiColor{0.520F, 0.880F, 0.980F, 1.0F};
-  case compositor::NodeKind::FilmGrain:
-    return gui::UiColor{0.760F, 0.720F, 0.580F, 1.0F};
-  case compositor::NodeKind::Blur:
-    return gui::UiColor{0.780F, 0.318F, 0.922F, 1.0F};
-  case compositor::NodeKind::BoxBlur:
-    return gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F};
-  case compositor::NodeKind::DirectionalBlur:
-    return gui::UiColor{0.620F, 0.500F, 0.980F, 1.0F};
-  case compositor::NodeKind::ChromaKey:
-    return gui::UiColor{0.300F, 0.900F, 0.430F, 1.0F};
-  case compositor::NodeKind::LumaKey:
-    return gui::UiColor{0.780F, 0.820F, 0.880F, 1.0F};
-  case compositor::NodeKind::Matte:
-    return gui::UiColor{0.520F, 0.720F, 0.980F, 1.0F};
-  case compositor::NodeKind::RadialArray:
-    return ctx.theme().playhead;
-  case compositor::NodeKind::LedCarProcess:
-    return gui::UiColor{0.180F, 0.760F, 0.960F, 1.0F};
-  case compositor::NodeKind::Composite:
-    return ctx.theme().accent;
-  case compositor::NodeKind::Output:
-    return ctx.theme().good;
-  }
+                      compositor::NodeKind) noexcept {
   return ctx.theme().text_muted;
 }
 
@@ -3306,7 +3256,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool diagnostic = !compositor_graph.diagnostics.empty();
     const gui::Rect guide{
         canvas.x + 8.0F, canvas.y + 8.0F,
-        std::min(std::max(canvas.width - 16.0F, 0.0F), 660.0F), 40.0F};
+        std::min(std::max(canvas.width - 16.0F, 0.0F), 660.0F), 28.0F};
     ctx.panel(guide, with_alpha(scale(ctx.theme().header, 0.92F), 0.94F));
     border(ctx, guide,
            diagnostic ? with_alpha(ctx.theme().warning, 0.72F)
@@ -3324,13 +3274,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               compositor_graph.diagnostics.front())
                         : std::string_view{"Add a Layer for each scene object"};
     ctx.label(gui::Rect{guide.x + 8.0F, guide.y + 3.0F,
-                        std::max(guide.width - 16.0F, 0.0F), 17.0F},
+                        std::max(guide.width - 16.0F, 0.0F), 22.0F},
               title, diagnostic ? ctx.theme().warning : ctx.theme().text_muted);
-    ctx.label(gui::Rect{guide.x + 8.0F, guide.y + 20.0F,
-                        std::max(guide.width - 16.0F, 0.0F), 17.0F},
-              "FLOW: EFFECT / RADIAL -> LAYER -> COMP -> OUTPUT  |  "
-              "DRAG RIGHT OUT TO LEFT IN",
-              ctx.theme().text_muted);
+    ctx.tooltip(guide, title + " · Connect the output on the right of a node to an input on the left. Layers feed Composite, then Output.");
   }
 
   for (const compositor::GraphEdge &edge : compositor_graph.edges) {

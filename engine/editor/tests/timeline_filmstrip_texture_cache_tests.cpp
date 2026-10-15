@@ -178,7 +178,49 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+void native_pending_filmstrips_survive_tab_changes_and_eviction() {
+  if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+  auto created = rhi::Device::create({.debug=true, .frames_in_flight=2,
+                                    .backend=rhi::BackendKind::D3d12});
+  FILMSTRIP_CHECK(created);
+  auto device = std::move(created).value();
+  editor::TimelineFilmstripTextureCache cache{device, 1};
+  auto acquired = device.acquire_commands();
+  FILMSTRIP_CHECK(acquired);
+  auto commands = std::move(acquired).value();
+  const auto first = key(301, 3), second = key(302, 7), third = key(303, 11);
+  const auto frame = atlas();
+  const auto* texture = cache.upload(commands, first, frame);
+  FILMSTRIP_CHECK(texture && !texture->safe_to_release());
+  auto readback = device.create_readback(editor::timeline_filmstrip_texture_width *
+                                       editor::timeline_filmstrip_texture_height * 4);
+  FILMSTRIP_CHECK(readback && commands.download(*texture, readback.value()));
+  // Capacity eviction and switching to Cues both remove still-recorded
+  // filmstrips. Their GPU storage must outlive those logical cache changes.
+  FILMSTRIP_CHECK(cache.upload(commands, second, frame));
+  FILMSTRIP_CHECK(!cache.find(first) && cache.size() == 1);
+  cache.retain({});
+  FILMSTRIP_CHECK(cache.size() == 0);
+  FILMSTRIP_CHECK(!cache.upload(commands, third, frame));
+  auto submitted = device.submit(std::move(commands));
+  FILMSTRIP_CHECK(submitted && submitted.value().wait());
+  const auto pixels = readback.value().map();
+  FILMSTRIP_CHECK(pixels.size() == frame.pixels.size());
+  const auto offset = (45U * editor::timeline_filmstrip_texture_width +
+                       7U * editor::timeline_filmstrip_tile_width + 80U) * 4U;
+  FILMSTRIP_CHECK(pixels[offset] == 7 && pixels[offset+1] == 45 &&
+                  pixels[offset+2] == 71 && pixels[offset+3] == 255);
+  readback.value().unmap();
+  cache.reset(49);
+  auto retry = device.acquire_commands();
+  FILMSTRIP_CHECK(retry && cache.upload(retry.value(), third, frame));
+  auto retried = device.submit(std::move(retry).value());
+  FILMSTRIP_CHECK(retried && retried.value().wait());
+}
+
+constexpr std::array<Case, 4U> cases{{
+    {"native pending filmstrips survive tab changes and eviction",
+     &native_pending_filmstrips_survive_tab_changes_and_eviction},
     {"exact atlas uploads one sampled texture",
      &exact_atlas_uploads_one_sampled_texture},
     {"full keys drive lru retain and generation reset",

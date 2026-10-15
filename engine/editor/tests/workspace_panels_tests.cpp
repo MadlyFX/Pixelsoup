@@ -2626,13 +2626,13 @@ struct LiveSettingsHarness {
   }
   void advanced_section(std::size_t section) {
     state.renderer.backend=scene::RendererBackend::Advanced;
-    static_cast<void>(click(50,30));static_cast<void>(click(80,30));static_cast<void>(click(110,30));
-    static_cast<void>(click(50.0F+30.0F*static_cast<float>(section),30));
+    static_cast<void>(click(58,30));
+    static_cast<void>(click(58.0F+40.0F*static_cast<float>(section),30));
   }
   void environment_section(std::size_t section) {
     target=editor::SceneSettingsTarget::Environment;
-    static_cast<void>(click(50,30));static_cast<void>(click(80,30));
-    static_cast<void>(click(50.0F+30.0F*static_cast<float>(section),30));
+    static_cast<void>(click(58,30));
+    static_cast<void>(click(58.0F+40.0F*static_cast<float>(section),30));
   }
 };
 
@@ -2645,15 +2645,41 @@ void project_settings_apply_reports_the_edited_values() {
   UI_CHECK(!h.panel.is_open());
 }
 
+void scene_file_fields_request_the_matching_picker_without_editing() {
+  LiveSettingsHarness environment;
+  environment.target = editor::SceneSettingsTarget::Environment;
+  environment.state.environment.map_source = "C:/lighting/stage.exr";
+  const auto map = environment.click(154, 285);
+  UI_CHECK(map.file_picker && map.file_picker->kind == editor::FilePickerKind::EnvironmentMap);
+  UI_CHECK(map.file_picker->current == "C:/lighting/stage.exr");
+  UI_CHECK(!map.project.apply);
+
+  LiveSettingsHarness renderer;
+  renderer.advanced_section(2);
+  renderer.state.renderer.color.show_lut_source = "C:/color/show.cube";
+  const auto lut = renderer.click(234, 285);
+  UI_CHECK(lut.file_picker && lut.file_picker->kind == editor::FilePickerKind::ShowLut);
+  UI_CHECK(lut.file_picker->current == "C:/color/show.cube");
+  UI_CHECK(!lut.project.apply);
+
+  LiveSettingsHarness bake;
+  bake.environment_section(2);
+  bake.panel.set_bake_destination("C:/exports/lighting");
+  const auto folder = bake.click(618, 285);
+  UI_CHECK(folder.file_picker && folder.file_picker->kind == editor::FilePickerKind::BakeFolder);
+  UI_CHECK(folder.file_picker->current == "C:/exports/lighting");
+  UI_CHECK(!folder.project.apply && !folder.project.bake);
+}
+
 void baked_lighting_page_starts_cancels_and_preserves_the_authored_field() {
   LiveSettingsHarness h;h.state.environment.baked.enabled=true;h.state.environment.baked.source="lighting.msgi";
   h.state.environment.baked.content="1234567890abcdef";h.state.environment.baked.count_x=3;
   h.environment_section(2);
-  UI_CHECK(!h.click(500).project.bake);
+  UI_CHECK(!h.click(650.0).project.bake);
   h.state.renderer.backend=scene::RendererBackend::Advanced;
-  auto bake=h.click(500);
+  auto bake=h.click(650.0);
   UI_CHECK(bake.project.bake && *bake.project.bake==h.state.environment.baked && !bake.project.bake_destination.empty());
-  h.state.bake_running=true;auto cancel=h.click(500);UI_CHECK(cancel.project.cancel_bake && !cancel.project.bake);
+  h.state.bake_running=true;auto cancel=h.click(650.0);UI_CHECK(cancel.project.cancel_bake && !cancel.project.bake);
 }
 
 void reflection_targets_choose_scene_objects_without_truncating_ids() {
@@ -2668,10 +2694,10 @@ void reflection_targets_choose_scene_objects_without_truncating_ids() {
   h.state.environment.baked.reflections[0].enabled = true;
   h.environment_section(3);
   UI_CHECK(h.state.environment.planar.receiver == doc::NodeId{999U});
-  const auto receiver = h.choose(192, 2, 1);
+  const auto receiver = h.choose(242.0, 2, 1);
   UI_CHECK(receiver.project.apply);
   UI_CHECK(receiver.project.apply->environment.planar.receiver == floor.node);
-  const auto probe = h.choose(426, 0, 1);
+  const auto probe = h.choose(530.0, 0, 1);
   UI_CHECK(probe.project.apply);
   UI_CHECK(probe.project.apply->environment.baked.reflections[0].source == floor.node);
 }
@@ -2704,16 +2730,16 @@ void project_settings_defaults_restores_the_built_in_values() {
 
 void advanced_renderer_required_is_an_explicit_project_edit() {
   LiveSettingsHarness h;
-  auto backend=h.choose(76,0,1);UI_CHECK(backend.project.apply && h.state.renderer.backend==scene::RendererBackend::Advanced);
-  auto required=h.click(102);UI_CHECK(required.project.apply && h.state.renderer.required);
-  static_cast<void>(h.choose(128,1,2));UI_CHECK(h.state.renderer.quality==scene::RendererQuality::Cinematic);
+  auto backend=h.choose(90.0,0,1);UI_CHECK(backend.project.apply && h.state.renderer.backend==scene::RendererBackend::Advanced);
+  auto required=h.click(122.0);UI_CHECK(required.project.apply && h.state.renderer.required);
+  static_cast<void>(h.choose(154.0,1,2));UI_CHECK(h.state.renderer.quality==scene::RendererQuality::Cinematic);
 }
 
 void raster_only_clears_only_unavailable_future_pass_requests() {
   LiveSettingsHarness h;h.state.renderer.backend=scene::RendererBackend::Advanced;
   h.state.renderer.ray_tracing=true;h.state.renderer.ddgi=true;h.state.renderer.restir=true;h.state.renderer.denoising=true;
   h.state.renderer.taau=true;h.state.renderer.motion_blur=true;
-  auto result=h.click(180);UI_CHECK(result.project.apply);
+  auto result=h.click(218.0);UI_CHECK(result.project.apply);
   UI_CHECK(!h.state.renderer.ray_tracing && !h.state.renderer.ddgi && !h.state.renderer.restir && !h.state.renderer.denoising);
   UI_CHECK(h.state.renderer.taau && h.state.renderer.motion_blur);
 }
@@ -2725,8 +2751,8 @@ void raster_only_clears_only_unavailable_future_pass_requests() {
 // the renderer obeys.
 void occlusion_is_authored_as_a_radius() {
   LiveSettingsHarness h;h.advanced_section(1);
-  auto result=h.enter(210,"2.5");UI_CHECK(result.project.apply && h.state.renderer.occlusion_radius==2.5F);
-  static_cast<void>(h.enter(210,"0"));UI_CHECK(h.state.renderer.occlusion_radius==0.0F);
+  auto result=h.enter(258.0,"2.5");UI_CHECK(result.project.apply && h.state.renderer.occlusion_radius==2.5F);
+  static_cast<void>(h.enter(258.0,"0"));UI_CHECK(h.state.renderer.occlusion_radius==0.0F);
 }
 
 // Antialiasing is one choice, authored, with the jitter period behind it.
@@ -2736,52 +2762,52 @@ void occlusion_is_authored_as_a_radius() {
 // set, and what the buttons show is what `antialiasing_for` returns.
 void antialiasing_is_one_authored_choice() {
   LiveSettingsHarness h;h.advanced_section(1);
-  static_cast<void>(h.choose(106,0,2));UI_CHECK(h.state.renderer.taau && !h.state.renderer.spatial_antialiasing);
-  static_cast<void>(h.enter(132,"33"));UI_CHECK(h.state.renderer.taa_sequence_length==33);
-  static_cast<void>(h.choose(106,2,1));UI_CHECK(!h.state.renderer.taau && h.state.renderer.spatial_antialiasing);
-  static_cast<void>(h.choose(106,1,0));UI_CHECK(scene::antialiasing_for(h.state.renderer)==scene::AntialiasingMode::None);
+  static_cast<void>(h.choose(130.0,0,2));UI_CHECK(h.state.renderer.taau && !h.state.renderer.spatial_antialiasing);
+  static_cast<void>(h.enter(162.0,"33"));UI_CHECK(h.state.renderer.taa_sequence_length==33);
+  static_cast<void>(h.choose(130.0,2,1));UI_CHECK(!h.state.renderer.taau && h.state.renderer.spatial_antialiasing);
+  static_cast<void>(h.choose(130.0,1,0));UI_CHECK(scene::antialiasing_for(h.state.renderer)==scene::AntialiasingMode::None);
 }
 
 void geometry_controls_emit_replicated_settings() {
   LiveSettingsHarness h;h.advanced_section(4);
-  static_cast<void>(h.click(196));static_cast<void>(h.click(222));static_cast<void>(h.click(248));
+  static_cast<void>(h.click(250.0));static_cast<void>(h.click(282.0));static_cast<void>(h.click(314.0));
   UI_CHECK(!h.state.renderer.frustum_culling && !h.state.renderer.geometry_instancing && !h.state.renderer.model_lod);
 }
 
 void object_motion_controls_apply_and_cancel() {
   LiveSettingsHarness h;h.advanced_section(1);
-  static_cast<void>(h.click(132));UI_CHECK(h.state.renderer.motion_blur);
-  static_cast<void>(h.enter(158,"16"));UI_CHECK(h.state.renderer.motion_blur_radius==16);
-  static_cast<void>(h.click(158));h.input.new_frame();h.input.add_text("9");h.ctx.new_frame();static_cast<void>(h.draw());
+  static_cast<void>(h.click(162.0));UI_CHECK(h.state.renderer.motion_blur);
+  static_cast<void>(h.enter(194.0,"16"));UI_CHECK(h.state.renderer.motion_blur_radius==16);
+  static_cast<void>(h.click(194.0));h.input.new_frame();h.input.add_text("9");h.ctx.new_frame();static_cast<void>(h.draw());
   static_cast<void>(h.key(gui::Key::Escape));UI_CHECK(h.state.renderer.motion_blur_radius==16);
 }
 
 void plate_dof_controls_apply_and_cancel() {
   LiveSettingsHarness h;h.advanced_section(1);
-  static_cast<void>(h.click(158));UI_CHECK(h.state.renderer.plate_depth_of_field);
-  static_cast<void>(h.enter(184,"14"));UI_CHECK(h.state.renderer.plate_dof_radius==14);
-  static_cast<void>(h.click(158));UI_CHECK(!h.state.renderer.plate_depth_of_field);
+  static_cast<void>(h.click(194.0));UI_CHECK(h.state.renderer.plate_depth_of_field);
+  static_cast<void>(h.enter(226.0,"14"));UI_CHECK(h.state.renderer.plate_dof_radius==14);
+  static_cast<void>(h.click(194.0));UI_CHECK(!h.state.renderer.plate_depth_of_field);
 }
 
 void texture_sampling_controls_apply_and_cancel() {
   LiveSettingsHarness h;h.advanced_section(4);
-  static_cast<void>(h.choose(352,0,3));UI_CHECK(h.state.renderer.texture_anisotropy==8);
-  static_cast<void>(h.enter(378,"-0.75"));UI_CHECK(h.state.renderer.texture_lod_bias==-0.75F);
+  static_cast<void>(h.choose(442.0,0,3));UI_CHECK(h.state.renderer.texture_anisotropy==8);
+  static_cast<void>(h.enter(474.0,"-0.75"));UI_CHECK(h.state.renderer.texture_lod_bias==-0.75F);
 }
 
 void texture_streaming_controls_emit_authored_policy() {
   LiveSettingsHarness h;h.advanced_section(4);
-  static_cast<void>(h.enter(300,"256"));static_cast<void>(h.enter(326,"2"));
+  static_cast<void>(h.enter(378.0,"256"));static_cast<void>(h.enter(410.0,"2"));
   UI_CHECK(h.state.renderer.texture_budget_mib==256 && h.state.renderer.texture_mip_bias==2);
   // The field stops at the renderer's envelope rather than accepting a value it would cut.
-  static_cast<void>(h.enter(300,"4096"));UI_CHECK(h.state.renderer.texture_budget_mib==1024);
-  static_cast<void>(h.click(274));UI_CHECK(!h.state.renderer.texture_streaming);
+  static_cast<void>(h.enter(378.0,"4096"));UI_CHECK(h.state.renderer.texture_budget_mib==1024);
+  static_cast<void>(h.click(346.0));UI_CHECK(!h.state.renderer.texture_streaming);
 }
 
 void shadow_cascades_and_bounce_are_authored_beside_the_backend() {
   LiveSettingsHarness h;h.advanced_section(3);
-  static_cast<void>(h.enter(166,"3"));UI_CHECK(h.state.renderer.shadow_cascades==3);
-  static_cast<void>(h.enter(166,"0"));UI_CHECK(h.state.renderer.shadow_cascades==0);
+  static_cast<void>(h.enter(210.0,"3"));UI_CHECK(h.state.renderer.shadow_cascades==3);
+  static_cast<void>(h.enter(210.0,"0"));UI_CHECK(h.state.renderer.shadow_cascades==0);
 }
 
 void calibrated_lens_controls_author_their_profile() {
@@ -2846,18 +2872,18 @@ struct Case final {
 // Map edits are immediate and preserve the other scene environment values.
 void the_environment_category_authors_the_lighting_map() {
   LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
-  static_cast<void>(h.click(102));h.input.new_frame();h.input.add_text("studio.hdr");h.ctx.new_frame();auto result=h.draw();
+  static_cast<void>(h.click(154.0));h.input.new_frame();h.input.add_text("studio.hdr");h.ctx.new_frame();auto result=h.draw();
   UI_CHECK(result.project.apply && h.state.environment.map_source=="studio.hdr");
-  static_cast<void>(h.key(gui::Key::Enter));static_cast<void>(h.enter(128,"2.5"));static_cast<void>(h.enter(154,"0.25"));
+  static_cast<void>(h.key(gui::Key::Enter));static_cast<void>(h.enter(186.0,"2.5"));static_cast<void>(h.enter(218.0,"0.25"));
   UI_CHECK(h.state.environment.map_intensity==2.5F && h.state.environment.map_rotation==0.25F);
 }
 
 // Physical sky values use the same property key controls as fog and maps.
 void physical_sky_controls_apply_and_author_a_time_key() {
   LiveSettingsHarness h;h.target=editor::SceneSettingsTarget::Environment;
-  static_cast<void>(h.click(76));UI_CHECK(h.state.environment.physical_sky.enabled);
-  static_cast<void>(h.enter(102,"16.5"));
-  auto result=h.click(102,306);UI_CHECK(result.keys.size()==1 && result.keys[0].channel==scene::PropertyChannel::SkyTimeOfDay && result.keys[0].value==16.5);
+  static_cast<void>(h.click(90.0));UI_CHECK(h.state.environment.physical_sky.enabled);
+  static_cast<void>(h.enter(122.0,"16.5"));
+  auto result=h.click(122.0,306);UI_CHECK(result.keys.size()==1 && result.keys[0].channel==scene::PropertyChannel::SkyTimeOfDay && result.keys[0].value==16.5);
   UI_CHECK(!result.keys[0].erase);
 }
 
@@ -2865,24 +2891,24 @@ void environment_keys_preserve_interpolation_and_authored_base() {
   LiveSettingsHarness h;h.environment_section(1);
   scene::ChannelKeyframes channel{};channel.target=h.state.stage_node;channel.component=scene::PropertyChannel::FogDensity;
   channel.frames={0,60};channel.values={0.0,0.6};h.keys={channel};h.time=30;
-  auto key=h.click(106,306);UI_CHECK(key.keys.size()==1 && std::abs(key.keys[0].value-0.3)<1e-6 && !key.keys[0].erase);
-  h.time=60;auto erased=h.click(106,306);UI_CHECK(erased.keys.size()==1 && erased.keys[0].erase);
-  h.time=30;auto edited=h.enter(106,"0.4");UI_CHECK(edited.keys.size()==1 && !edited.project.apply);
+  auto key=h.click(130.0,306);UI_CHECK(key.keys.size()==1 && std::abs(key.keys[0].value-0.3)<1e-6 && !key.keys[0].erase);
+  h.time=60;auto erased=h.click(130.0,306);UI_CHECK(erased.keys.size()==1 && erased.keys[0].erase);
+  h.time=30;auto edited=h.enter(130.0,"0.4");UI_CHECK(edited.keys.size()==1 && !edited.project.apply);
   UI_CHECK(h.state.environment.fog_density==0.0F);
 }
 
 // Small physical-lighting scales retain their precision in numeric fields.
 void photometric_scale_accepts_precise_numeric_input() {
   LiveSettingsHarness h;h.advanced_section(1);
-  auto result=h.enter(262,"0.0062831853");UI_CHECK(result.project.apply);
+  auto result=h.enter(322.0,"0.0062831853");UI_CHECK(result.project.apply);
   UI_CHECK(h.state.renderer.photometric_scale==0.0062831853F);
 }
 
 void colour_is_authored_from_its_own_tab() {
   LiveSettingsHarness h;h.advanced_section(2);
-  static_cast<void>(h.choose(136,1,0));static_cast<void>(h.click(188));
+  static_cast<void>(h.choose(170.0,1,0));static_cast<void>(h.click(266.0));
   UI_CHECK(h.state.renderer.color.display_transform==scene::DisplayTransform::Srgb && !h.state.renderer.color.dither);
-  static_cast<void>(h.choose(136,0,2));UI_CHECK(h.state.renderer.color.display_transform==scene::DisplayTransform::Aces13);
+  static_cast<void>(h.choose(170.0,0,2));UI_CHECK(h.state.renderer.color.display_transform==scene::DisplayTransform::Aces13);
   UI_CHECK(!h.state.renderer.color.dither && h.state.renderer.backend==scene::RendererBackend::Advanced);
 }
 
@@ -2985,7 +3011,7 @@ void program_publication_status_reports_the_actual_wait() {
 
 void shadow_stability_controls_apply_and_reopen() {
   LiveSettingsHarness h;h.advanced_section(3);
-  static_cast<void>(h.enter(192,"0.2"));static_cast<void>(h.enter(218,"3.5"));static_cast<void>(h.enter(244,"0.4"));static_cast<void>(h.enter(270,"0.05"));
+  static_cast<void>(h.enter(242.0,"0.2"));static_cast<void>(h.enter(274.0,"3.5"));static_cast<void>(h.enter(306.0,"0.4"));static_cast<void>(h.enter(338.0,"0.05"));
   UI_CHECK(h.state.renderer.shadow_blend_band==0.2F && h.state.renderer.shadow_filter_radius==3.5F);
   UI_CHECK(h.state.renderer.contact_shadow_length==0.4F && h.state.renderer.contact_shadow_thickness==0.05F);
 }
@@ -3012,7 +3038,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 106U> cases{{
+constexpr std::array<Case, 107U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3168,6 +3194,8 @@ constexpr std::array<Case, 106U> cases{{
      &output_monitor_cluster_health_keeps_node_controls_reachable},
     {"project settings apply reports the edited values",
      &project_settings_apply_reports_the_edited_values},
+    {"scene file fields request matching pickers without editing",
+     &scene_file_fields_request_the_matching_picker_without_editing},
     {"project settings cancel discards the draft",
      &project_settings_cancel_discards_the_draft},
     {"project settings defaults restores the built-in values",

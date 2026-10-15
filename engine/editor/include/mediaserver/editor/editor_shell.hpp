@@ -76,6 +76,19 @@ struct EditIntent final {
   bool operator==(const EditIntent &) const = default;
 };
 
+// A Blender-linked object's whole placement after a viewport rotate, scale, or
+// clear. A linked occurrence is placed by one world matrix (an override on
+// the source object's), not by yaw/pitch/roll and scale fields, so a turn or a
+// resize reaches it as the matrix it produces. Same gesture rules as
+// EditIntent.
+struct WorldEdit final {
+  doc::NodeId node{};
+  scene::Mat4 world{};
+  core::u64 gesture{};
+
+  bool operator==(const WorldEdit &) const = default;
+};
+
 // A kind of element the operator can add to the scene. The Director turns each
 // into a new document node with sensible defaults.
 enum class AddKind : core::u8 {
@@ -679,6 +692,7 @@ struct EditorFrame final {
   core::u64 temporal_restarts{};
   core::u64 temporal_restart_frame{};
   std::vector<EditIntent> edits;
+  std::vector<WorldEdit> world_edits;
   // Set when the operator asked to move backward or forward through the active
   // scene or compositor context. Selecting in either panel changes that active
   // context without authoring; a gesture-grouped drag remains one step in

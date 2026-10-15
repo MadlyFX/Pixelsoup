@@ -4,6 +4,7 @@
 
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/stage_view.hpp>
+#include <mediaserver/editor/transform_tool.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -56,8 +57,10 @@ enum class ViewportRole : core::u8 {
     Stage,
 };
 
-// Which translation handle owns the current drag. Screen is the existing
-// direct-on-object drag; X/Y/Z are the constrained gizmo arrows.
+// Which handle owns the current drag. Screen is the direct-on-object drag;
+// X/Y/Z are the gizmo's axis arrows, rings or scale handles for the active
+// tool; View is the outer screen-space ring that rotates about the view axis
+// or scales uniformly.
 enum class GizmoAxis : core::u8 {
     None,
     Screen,
@@ -65,8 +68,9 @@ enum class GizmoAxis : core::u8 {
     Y,
     Z,
     // Surface calibration has a dedicated, screen-space ring for rotation
-    // about stage-up. Scene elements do not consume this value yet.
+    // about stage-up.
     Yaw,
+    View,
 };
 
 // Optional final-output projection for an interactive Program viewport. The
@@ -133,6 +137,21 @@ struct ViewportFrame final {
     bool dragging{};
     scene::Vec3 translation{};
     GizmoAxis gizmo_axis{GizmoAxis::None};
+    // The selection's move, rotate or scale this frame, measured like
+    // `translation` from where the gesture began. Set by gizmo and direct
+    // drags (with `dragging`) and by a keyboard transform. Already snapped.
+    std::optional<TransformDelta> transform{};
+
+    // A Blender-style keyboard transform (G, R or S over the Stage) began,
+    // and the shell should capture the selection as it stands now. It ends
+    // with `transform_ended`; `transform_cancelled` then says the operator
+    // backed out and `transform` carries the identity delta that restores it.
+    bool transform_began{};
+    bool transform_ended{};
+    bool transform_cancelled{};
+    // A keyboard transform owns the pointer and keyboard this frame, the
+    // right button included: camera navigation stands down.
+    bool keyboard_transform{};
 
     // The viewport capture ended this frame, whether it held an element drag,
     // a gizmo handle, or a bare-canvas gesture.
@@ -366,6 +385,28 @@ class ViewportPanel final {
         return show_overlays_;
     }
     [[nodiscard]] bool gizmo_visible() const noexcept { return show_gizmo_; }
+    // The gizmo's tool, its orientation, and increment snapping. G, R and S
+    // choose the tool as they start a keyboard transform; the Stage toolbar
+    // sets all three.
+    [[nodiscard]] TransformTool tool() const noexcept { return tool_; }
+    void set_tool(TransformTool tool) noexcept { tool_ = tool; }
+    [[nodiscard]] TransformOrientation orientation() const noexcept {
+        return orientation_;
+    }
+    void set_orientation(TransformOrientation orientation) noexcept {
+        orientation_ = orientation;
+    }
+    [[nodiscard]] bool snapping() const noexcept { return snapping_; }
+    void set_snapping(bool snapping) noexcept { snapping_ = snapping; }
+    // A keyboard transform is running: it owns the keyboard and pointer
+    // until Enter or a left click confirms it, or Escape or a right click
+    // cancels it.
+    [[nodiscard]] bool transforming() const noexcept {
+        return keyboard_.active || swallow_pointer_;
+    }
+    // Abandons a keyboard transform without reporting it: for when the shell
+    // can no longer author into the Stage at all.
+    void cancel_transform() noexcept { keyboard_.active = false; }
     [[nodiscard]] bool deep_select_open() const noexcept {
         return deep_select_open_;
     }
@@ -404,8 +445,52 @@ class ViewportPanel final {
     [[nodiscard]] std::shared_ptr<const output::ProjectionMesh>
     projection_mesh_for(const output::ProjectionSurface& surface);
 
+    // Blender's axis constraint while a keyboard transform runs: one axis, or
+    // the plane that excludes it (Shift+X/Y/Z).
+    enum class Constraint : core::u8 {
+        None,
+        Axis,
+        Plane,
+    };
+
+    struct KeyboardTransform final {
+        bool active{};
+        TransformTool tool{TransformTool::Move};
+        Constraint constraint{Constraint::None};
+        std::size_t axis{};
+        TransformOrientation orientation{TransformOrientation::Global};
+        NumericEntry entry;
+        scene::Vec3 pivot{};
+        std::array<scene::Vec3, 3U> local_axes{};
+        // Pointer travel in panel pixels, scaled down while Shift is held.
+        float press_x{};
+        float press_y{};
+        float pointer_x{};
+        float pointer_y{};
+        float last_x{};
+        float last_y{};
+        float turns{};
+    };
+
+    // Applies the snap toggle (inverted while Ctrl is held) to a delta.
+    [[nodiscard]] TransformDelta snapped(const gui::UiContext& ctx,
+                                         TransformDelta delta) const noexcept;
+    // The running keyboard transform's constraint lines and readout.
+    void draw_keyboard_transform(gui::UiContext& ctx, gui::UiDrawList& list,
+                                 const gui::Rect& image,
+                                 const scene::Scene& scene,
+                                 gui::UiPoint centre,
+                                 std::optional<float> reading) const;
+
     gui::UiId id_{};
     ViewportRole role_{ViewportRole::Program};
+    TransformTool tool_{TransformTool::Move};
+    TransformOrientation orientation_{TransformOrientation::Global};
+    bool snapping_{};
+    KeyboardTransform keyboard_;
+    // A keyboard transform ended on a button press: the press and its release
+    // belong to it, not to picking or the camera.
+    bool swallow_pointer_{};
     bool show_grid_{true};
     PreviewResolution resolution_{PreviewResolution::Full};
     bool show_overlays_{true};
@@ -423,6 +508,16 @@ class ViewportPanel final {
     float axis_world_length_{};
     scene::Vec3 axis_world_{};
     float press_pointer_x_{};
+    // Rotate and scale gizmo drags, in panel pixels.
+    TransformTool drag_tool_{TransformTool::Move};
+    scene::Vec3 drag_pivot_{};
+    std::array<scene::Vec3, 3U> drag_basis_{};
+    float drag_centre_x_{};
+    float drag_centre_y_{};
+    float drag_last_x_{};
+    float drag_last_y_{};
+    float drag_turns_{};
+    float drag_press_reach_{};
     output::ProjectionSurface surface_drag_start_{};
     std::optional<output::ProjectionSurface> surface_preview_;
     double surface_preview_deadline_{};

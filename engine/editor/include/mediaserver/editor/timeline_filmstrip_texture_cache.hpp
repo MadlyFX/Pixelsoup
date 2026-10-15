@@ -29,6 +29,7 @@ public:
       rhi::Device &device,
       std::size_t capacity =
           default_timeline_filmstrip_texture_capacity) noexcept;
+  ~TimelineFilmstripTextureCache();
 
   TimelineFilmstripTextureCache(const TimelineFilmstripTextureCache &) = delete;
   TimelineFilmstripTextureCache &
@@ -46,6 +47,8 @@ public:
   upload(rhi::CommandList &commands, const assets::DerivativeKey &key,
          const render::DecodedFrame &frame) noexcept;
 
+  // Lookup changes immediately; textures remain alive through their final
+  // GPU use. Total resident and retiring storage is bounded to twice capacity.
   void retain(std::span<const assets::DerivativeKey> keys) noexcept;
   void clear() noexcept;
   void reset(core::u64 project_generation) noexcept;
@@ -63,11 +66,14 @@ private:
   };
 
   using EntryList = std::list<Entry>;
+  void collect() noexcept;
+  void retire(EntryList::iterator entry) noexcept;
 
   rhi::Device *device_{};
   std::size_t capacity_{};
   core::u64 project_generation_{};
   EntryList entries_;
+  EntryList retiring_;
 };
 
 } // namespace mediaserver::editor

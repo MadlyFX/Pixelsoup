@@ -1124,6 +1124,8 @@ void a_rotated_stage_gizmo_moves_along_the_displayed_local_axis() {
     rhi::Texture target;
     editor::ViewportPanel panel{gui::ui_id("rotated-stage"),
                                 editor::ViewportRole::Stage};
+    // Local orientation: the gizmo follows the element, not the world.
+    panel.set_orientation(editor::TransformOrientation::Local);
     scene::Scene scn = make_scene();
     scn.media.front().world = scene::multiply(
         scene::rotation(0.0F, 0.0F, 0.125F),
@@ -1176,6 +1178,305 @@ void a_rotated_stage_gizmo_moves_along_the_displayed_local_axis() {
              0.999F);
     UI_CHECK(dragged.translation.x > 0.0F);
     UI_CHECK(dragged.translation.y < 0.0F);
+}
+
+// A Stage panel with the clip selected, driven the way the shell drives it:
+// after each frame the shell hands the keyboard to a running keyboard
+// transform.
+struct StageTools final {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("stage-tools"),
+                                editor::ViewportRole::Stage};
+    scene::Scene scn = make_scene();
+    std::array<doc::NodeId, 1U> selection{clip_node};
+    float centre_x{};
+    float centre_y{};
+
+    StageTools() {
+        const editor::ViewportFrame placed = frame(0.0F, 0.0F);
+        centre_x = placed.image.x + placed.image.width * 0.5F;
+        centre_y = placed.image.y + placed.image.height * 0.5F;
+    }
+
+    editor::ViewportFrame frame(float x, float y, bool down = false,
+                                std::string_view text = {},
+                                std::optional<gui::Key> key = {},
+                                bool right = false,
+                                gui::KeyMods mods = gui::KeyMods::None) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        input.set_mouse_button(gui::MouseButton::Right, right);
+        input.set_mods(mods);
+        if (!text.empty()) {
+            input.add_text(text);
+        }
+        if (key.has_value()) {
+            input.add_key(*key);
+        }
+        ctx.new_frame();
+        const editor::ViewportFrame out = panel.draw(
+            ctx, Harness::bounds, target, scn, selection, clip_node);
+        ctx.set_navigating(panel.transforming());
+        return out;
+    }
+
+    // A point at `radius` pixels from the gizmo centre, `degrees`
+    // anticlockwise from screen right.
+    [[nodiscard]] std::pair<float, float> around(float radius,
+                                                 float degrees) const {
+        const float radians = degrees * 3.14159265F / 180.0F;
+        return {centre_x + radius * std::cos(radians),
+                centre_y - radius * std::sin(radians)};
+    }
+};
+
+[[nodiscard]] bool near(scene::Vec3 a, scene::Vec3 b, float tolerance) {
+    return near(a.x, b.x, tolerance) && near(a.y, b.y, tolerance) &&
+           near(a.z, b.z, tolerance);
+}
+
+void the_move_gizmo_defaults_to_world_axes_like_blender() {
+    StageTools h;
+    UI_CHECK(h.panel.orientation() == editor::TransformOrientation::Global);
+    UI_CHECK(h.panel.tool() == editor::TransformTool::Move);
+    // Rolled an eighth of a turn, the clip's own X points up and right; the
+    // global gizmo's X arrow still runs straight across the screen.
+    h.scn.media.front().world = scene::multiply(
+        scene::rotation(0.0F, 0.0F, 0.125F),
+        scene::scaling(scene::Vec3{2.0F, 2.0F, 1.0F}));
+    static_cast<void>(h.frame(h.centre_x + 42.0F, h.centre_y, true));
+    const editor::ViewportFrame dragged =
+        h.frame(h.centre_x + 92.0F, h.centre_y, true);
+    UI_CHECK(dragged.gizmo_axis == editor::GizmoAxis::X);
+    UI_CHECK(dragged.transform.has_value());
+    UI_CHECK(dragged.transform->tool == editor::TransformTool::Move);
+    UI_CHECK(dragged.translation.x > 0.0F);
+    UI_CHECK(near(dragged.translation.y, 0.0F, 1.0e-5F));
+    UI_CHECK(near(dragged.translation.z, 0.0F, 1.0e-5F));
+}
+
+void a_rotate_ring_turns_about_its_axis_as_the_pointer_circles() {
+    StageTools h;
+    h.panel.set_tool(editor::TransformTool::Rotate);
+    // The Z ring faces this camera: a circle 0.92 of the 72-pixel gizmo.
+    const auto [press_x, press_y] = h.around(72.0F * 0.92F, 45.0F);
+    const editor::ViewportFrame pressed = h.frame(press_x, press_y, true);
+    UI_CHECK(pressed.picked == clip_node);
+    const auto [half_x, half_y] = h.around(72.0F * 0.92F, 90.0F);
+    static_cast<void>(h.frame(half_x, half_y, true));
+    const auto [end_x, end_y] = h.around(72.0F * 0.92F, 135.0F);
+    const editor::ViewportFrame dragged = h.frame(end_x, end_y, true);
+    UI_CHECK(dragged.dragging);
+    UI_CHECK(dragged.gizmo_axis == editor::GizmoAxis::Z);
+    UI_CHECK(dragged.transform.has_value());
+    UI_CHECK(dragged.transform->tool == editor::TransformTool::Rotate);
+    UI_CHECK(near(dragged.transform->axis, scene::Vec3{0.0F, 0.0F, 1.0F},
+                  1.0e-5F));
+    // A quarter anticlockwise on screen is a quarter turn about +Z, which
+    // points at this camera. The pivot is the clip.
+    UI_CHECK(near(dragged.transform->turns, 0.25F, 0.003F));
+    UI_CHECK(near(dragged.transform->pivot, scene::Vec3{}, 1.0e-5F));
+    const editor::ViewportFrame released = h.frame(end_x, end_y, false);
+    UI_CHECK(released.released);
+
+    // The outer ring turns about the view axis, whichever way the camera
+    // looks: here also +Z, pointing back at the viewer.
+    const auto [ring_x, ring_y] = h.around(86.0F, 0.0F);
+    static_cast<void>(h.frame(ring_x, ring_y, true));
+    const auto [up_x, up_y] = h.around(86.0F, -60.0F);
+    const editor::ViewportFrame clockwise = h.frame(up_x, up_y, true);
+    UI_CHECK(clockwise.gizmo_axis == editor::GizmoAxis::View);
+    UI_CHECK(near(clockwise.transform->axis, scene::Vec3{0.0F, 0.0F, 1.0F},
+                  1.0e-5F));
+    UI_CHECK(near(clockwise.transform->turns, -60.0F / 360.0F, 0.003F));
+}
+
+void scale_handles_follow_the_pointer_and_the_ring_scales_uniformly() {
+    StageTools h;
+    h.panel.set_tool(editor::TransformTool::Scale);
+    static_cast<void>(h.frame(h.centre_x + 60.0F, h.centre_y, true));
+    const editor::ViewportFrame wider =
+        h.frame(h.centre_x + 120.0F, h.centre_y, true);
+    UI_CHECK(wider.gizmo_axis == editor::GizmoAxis::X);
+    UI_CHECK(wider.transform.has_value());
+    UI_CHECK(wider.transform->tool == editor::TransformTool::Scale);
+    UI_CHECK(near(wider.transform->factors, scene::Vec3{2.0F, 1.0F, 1.0F},
+                  1.0e-3F));
+    static_cast<void>(h.frame(h.centre_x + 120.0F, h.centre_y, false));
+
+    // On the diagonal, clear of the Y handle that runs up into the ring.
+    const auto [ring_x, ring_y] = h.around(86.0F, 45.0F);
+    static_cast<void>(h.frame(ring_x, ring_y, true));
+    const auto [half_x, half_y] = h.around(43.0F, 45.0F);
+    const editor::ViewportFrame smaller = h.frame(half_x, half_y, true);
+    UI_CHECK(smaller.gizmo_axis == editor::GizmoAxis::View);
+    UI_CHECK(near(smaller.transform->factors, scene::Vec3{0.5F, 0.5F, 0.5F},
+                  1.0e-3F));
+}
+
+void snapping_rounds_a_gizmo_drag_and_ctrl_inverts_it() {
+    StageTools h;
+    h.panel.set_snapping(true);
+    static_cast<void>(h.frame(h.centre_x + 42.0F, h.centre_y, true));
+    const editor::ViewportFrame snapped =
+        h.frame(h.centre_x + 92.0F, h.centre_y, true);
+    // Fifty pixels is a little over half a metre at this depth: one step.
+    UI_CHECK(snapped.translation.x == 1.0F);
+    const editor::ViewportFrame free =
+        h.frame(h.centre_x + 92.0F, h.centre_y, true, {}, {}, false,
+                gui::KeyMods::Ctrl);
+    UI_CHECK(free.translation.x > 0.3F && free.translation.x < 0.9F);
+    static_cast<void>(h.frame(h.centre_x + 92.0F, h.centre_y, false));
+
+    // Shift+Tab over the Stage flips the toggle, as in Blender.
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, {},
+                              gui::Key::Tab, false, gui::KeyMods::Shift));
+    UI_CHECK(!h.panel.snapping());
+}
+
+void g_x_and_a_typed_distance_move_exactly_and_enter_confirms() {
+    StageTools h;
+    const editor::ViewportFrame began =
+        h.frame(h.centre_x + 10.0F, h.centre_y + 10.0F, false, "g");
+    UI_CHECK(began.transform_began);
+    UI_CHECK(began.keyboard_transform);
+    UI_CHECK(h.panel.transforming());
+    UI_CHECK(h.panel.tool() == editor::TransformTool::Move);
+    UI_CHECK(began.transform.has_value());
+    UI_CHECK(began.transform->translation == scene::Vec3{});
+
+    // X constrains to world X: pointer travel up and down no longer counts.
+    static_cast<void>(
+        h.frame(h.centre_x + 10.0F, h.centre_y + 10.0F, false, "x"));
+    const editor::ViewportFrame slid =
+        h.frame(h.centre_x + 110.0F, h.centre_y + 60.0F);
+    UI_CHECK(slid.transform->translation.x > 0.0F);
+    UI_CHECK(slid.transform->translation.y == 0.0F);
+    UI_CHECK(slid.transform->translation.z == 0.0F);
+    // A typed value replaces the pointer's.
+    const editor::ViewportFrame typed =
+        h.frame(h.centre_x + 110.0F, h.centre_y + 60.0F, false, "-2.5");
+    UI_CHECK(typed.transform->translation == (scene::Vec3{-2.5F, 0.0F, 0.0F}));
+    const editor::ViewportFrame confirmed = h.frame(
+        h.centre_x + 110.0F, h.centre_y + 60.0F, false, {}, gui::Key::Enter);
+    UI_CHECK(confirmed.transform_ended);
+    UI_CHECK(!confirmed.transform_cancelled);
+    UI_CHECK(confirmed.transform->translation ==
+             (scene::Vec3{-2.5F, 0.0F, 0.0F}));
+    UI_CHECK(!h.panel.transforming());
+    // Over and done: the next frame reports nothing.
+    const editor::ViewportFrame after =
+        h.frame(h.centre_x + 110.0F, h.centre_y + 60.0F);
+    UI_CHECK(!after.transform.has_value());
+}
+
+void an_axis_key_twice_uses_the_elements_own_axis_then_frees_it() {
+    StageTools h;
+    h.scn.media.front().world = scene::multiply(
+        scene::rotation(0.0F, 0.0F, 0.125F),
+        scene::scaling(scene::Vec3{2.0F, 2.0F, 1.0F}));
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, "g"));
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, "x"));
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, "x"));
+    const editor::ViewportFrame local =
+        h.frame(h.centre_x, h.centre_y, false, "1");
+    // Roll turns the clip's X down to the right on screen (see the rotated
+    // gizmo test above); a typed metre goes that way.
+    const float eighth = std::sqrt(0.5F);
+    UI_CHECK(near(local.transform->translation,
+                  scene::Vec3{eighth, -eighth, 0.0F}, 1.0e-4F));
+    // Third press: unconstrained, the pointer moves on the view plane.
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, {},
+                              gui::Key::Backspace));
+    static_cast<void>(h.frame(h.centre_x, h.centre_y, false, "x"));
+    const editor::ViewportFrame free =
+        h.frame(h.centre_x + 40.0F, h.centre_y - 40.0F);
+    UI_CHECK(free.transform->translation.x > 0.0F);
+    UI_CHECK(free.transform->translation.y > 0.0F);
+    UI_CHECK(near(free.transform->translation.z, 0.0F, 1.0e-5F));
+}
+
+void a_right_click_cancels_and_its_press_is_swallowed() {
+    StageTools h;
+    const auto [start_x, start_y] = h.around(100.0F, 0.0F);
+    static_cast<void>(h.frame(start_x, start_y, false, "r"));
+    UI_CHECK(h.panel.tool() == editor::TransformTool::Rotate);
+    const auto [turn_x, turn_y] = h.around(100.0F, 30.0F);
+    const editor::ViewportFrame turning = h.frame(turn_x, turn_y);
+    UI_CHECK(near(turning.transform->turns, 30.0F / 360.0F, 0.002F));
+    UI_CHECK(near(turning.transform->axis, scene::Vec3{0.0F, 0.0F, 1.0F},
+                  1.0e-5F));
+    const editor::ViewportFrame cancelled =
+        h.frame(turn_x, turn_y, false, {}, {}, true);
+    UI_CHECK(cancelled.transform_ended);
+    UI_CHECK(cancelled.transform_cancelled);
+    UI_CHECK(cancelled.transform->tool == editor::TransformTool::Rotate);
+    UI_CHECK(cancelled.transform->turns == 0.0F);
+    // The right button is still down: it belongs to the cancel, so the camera
+    // must not start looking with it.
+    UI_CHECK(cancelled.keyboard_transform);
+    UI_CHECK(h.panel.transforming());
+    static_cast<void>(h.frame(turn_x, turn_y));
+    UI_CHECK(!h.panel.transforming());
+}
+
+void a_left_click_confirms_without_picking_and_s_shift_z_scales_a_plane() {
+    StageTools h;
+    static_cast<void>(
+        h.frame(h.centre_x + 100.0F, h.centre_y, false, "s"));
+    static_cast<void>(h.frame(h.centre_x + 100.0F, h.centre_y, false, "Z"));
+    const editor::ViewportFrame scaled = h.frame(h.centre_x + 200.0F, h.centre_y);
+    UI_CHECK(near(scaled.transform->factors, scene::Vec3{2.0F, 2.0F, 1.0F},
+                  1.0e-3F));
+    // Shift slows the pointer to a tenth: another 100 pixels adds 0.1.
+    const editor::ViewportFrame fine =
+        h.frame(h.centre_x + 300.0F, h.centre_y, false, {}, {}, false,
+                gui::KeyMods::Shift);
+    UI_CHECK(near(fine.transform->factors.x, 2.1F, 1.0e-3F));
+    const editor::ViewportFrame confirmed =
+        h.frame(h.centre_x + 300.0F, h.centre_y, true);
+    UI_CHECK(confirmed.transform_ended);
+    UI_CHECK(!confirmed.transform_cancelled);
+    UI_CHECK(!confirmed.pressed);
+    UI_CHECK(!confirmed.picked.has_value());
+    // Held after the confirm, the button still picks nothing.
+    const editor::ViewportFrame held =
+        h.frame(h.centre_x + 300.0F, h.centre_y, true);
+    UI_CHECK(!held.pressed && !held.dragging);
+}
+
+void keyboard_transforms_start_only_over_the_image_with_a_selection() {
+    StageTools h;
+    const editor::ViewportFrame outside = h.frame(5.0F, 5.0F, false, "g");
+    UI_CHECK(!outside.transform_began);
+    UI_CHECK(!h.panel.transforming());
+    // With no primary there is nothing to transform.
+    h.input.new_frame();
+    h.input.set_mouse_position(h.centre_x, h.centre_y);
+    h.input.add_text("g");
+    h.ctx.new_frame();
+    const editor::ViewportFrame unselected =
+        h.panel.draw(h.ctx, Harness::bounds, h.target, h.scn, {}, {});
+    UI_CHECK(!unselected.transform_began);
+    // A program view never takes keyboard transforms.
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    editor::ViewportPanel program{gui::ui_id("program-tools")};
+    input.new_frame();
+    input.set_mouse_position(500.0F, 500.0F);
+    input.add_text("g");
+    ctx.new_frame();
+    const std::array<doc::NodeId, 1U> selection{clip_node};
+    const editor::ViewportFrame on_program = program.draw(
+        ctx, Harness::bounds, h.target, h.scn, selection, clip_node);
+    UI_CHECK(!on_program.transform_began);
 }
 
 void a_planar_surface_is_pickable_and_direct_drag_preserves_calibration() {
@@ -2159,7 +2460,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 51U> cases{{
+constexpr std::array<Case, 60U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2222,6 +2523,24 @@ constexpr std::array<Case, 51U> cases{{
      &the_stage_x_gizmo_constrains_a_drag_to_world_x},
     {"a rotated Stage gizmo moves along the displayed local axis",
      &a_rotated_stage_gizmo_moves_along_the_displayed_local_axis},
+    {"the move gizmo defaults to world axes like blender",
+     &the_move_gizmo_defaults_to_world_axes_like_blender},
+    {"a rotate ring turns about its axis as the pointer circles",
+     &a_rotate_ring_turns_about_its_axis_as_the_pointer_circles},
+    {"scale handles follow the pointer and the ring scales uniformly",
+     &scale_handles_follow_the_pointer_and_the_ring_scales_uniformly},
+    {"snapping rounds a gizmo drag and ctrl inverts it",
+     &snapping_rounds_a_gizmo_drag_and_ctrl_inverts_it},
+    {"g x and a typed distance move exactly and enter confirms",
+     &g_x_and_a_typed_distance_move_exactly_and_enter_confirms},
+    {"an axis key twice uses the elements own axis then frees it",
+     &an_axis_key_twice_uses_the_elements_own_axis_then_frees_it},
+    {"a right click cancels and its press is swallowed",
+     &a_right_click_cancels_and_its_press_is_swallowed},
+    {"a left click confirms without picking and s shift z scales a plane",
+     &a_left_click_confirms_without_picking_and_s_shift_z_scales_a_plane},
+    {"keyboard transforms start only over the image with a selection",
+     &keyboard_transforms_start_only_over_the_image_with_a_selection},
     {"a planar surface is pickable and direct drag preserves calibration",
      &a_planar_surface_is_pickable_and_direct_drag_preserves_calibration},
     {"a locked surface is visible but not pickable or manipulable",

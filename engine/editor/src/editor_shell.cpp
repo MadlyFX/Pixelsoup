@@ -93,13 +93,13 @@ using Result = core::Result<std::unique_ptr<EditorShell>, EditorError>;
 constexpr float top_bar_height = 34.0F;
 constexpr float status_bar_height = 28.0F;
 
-// Docked panels sit on the window background with a four-unit gutter between
+// Docked panels sit on the window background with a six-unit gutter between
 // them; every seam answers the pointer four units either side of that gap.
 constexpr gui::DockMetrics editor_dock_metrics{
-    .divider = 4.0F,
+    .divider = 6.0F,
     .seam_reach = 4.0F,
-    .tab_bar = 28.0F,
-    .title_bar = 26.0F,
+    .tab_bar = 32.0F,
+    .title_bar = 30.0F,
     .edge = 0.25F,
 };
 
@@ -570,6 +570,7 @@ enum class ApplicationMenuAction : core::u8 {
   ZoomIn,
   ZoomOut,
   ZoomReset,
+  ResetWorkspace,
 };
 
 struct ApplicationMenuResult final {
@@ -619,10 +620,11 @@ struct ViewMenuItem final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
 };
 
-constexpr std::array<ViewMenuItem, 3U> view_menu_items{{
+constexpr std::array<ViewMenuItem, 4U> view_menu_items{{
     {"Zoom In", "Ctrl+=", ApplicationMenuAction::ZoomIn},
     {"Zoom Out", "Ctrl+-", ApplicationMenuAction::ZoomOut},
     {"Actual Size", "Ctrl+0", ApplicationMenuAction::ZoomReset},
+    {"Reset Workspace", "", ApplicationMenuAction::ResetWorkspace},
 }};
 
 struct WindowPanelEntry final {
@@ -717,6 +719,31 @@ struct WindowPanelEntry final {
   const char* const path = tinyfd_openFileDialog("Choose UV Projection Mesh", "", 4,
       filters, "UV projection meshes (glTF, GLB, OBJ, model package)", 0);
   return path ? std::optional<std::string>{path} : std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> choose_property_file(const FilePickerRequest& request) {
+  const char* path = nullptr;
+  switch (request.kind) {
+  case FilePickerKind::IesProfile: {
+    const char* filters[]{"*.ies"};
+    path = tinyfd_openFileDialog("Choose IES Profile", request.current.c_str(), 1, filters, "IES light profiles", 0);
+    break;
+  }
+  case FilePickerKind::ShowLut: {
+    const char* filters[]{"*.cube"};
+    path = tinyfd_openFileDialog("Choose Show LUT", request.current.c_str(), 1, filters, "Cube color lookup tables", 0);
+    break;
+  }
+  case FilePickerKind::EnvironmentMap: {
+    const char* filters[]{"*.hdr", "*.exr"};
+    path = tinyfd_openFileDialog("Choose Environment Map", request.current.c_str(), 2, filters, "HDR environment maps", 0);
+    break;
+  }
+  case FilePickerKind::BakeFolder:
+    path = tinyfd_selectFolderDialog("Choose Bake Folder", request.current.c_str());
+    break;
+  }
+  return path != nullptr ? std::optional<std::string>{path} : std::nullopt;
 }
 
 [[nodiscard]] std::string projection_mesh_name(std::string_view source) {
@@ -815,7 +842,7 @@ draw_application_header(gui::UiContext &ui, float width,
 
   // Program/Preview are mode selectors, not show-state jargon. Keep the whole
   // group an exact width so its labels stay stable when the window is resized.
-  constexpr float modes_width = 202.0F;
+  constexpr float modes_width = 246.0F;
   constexpr float modes_right_margin = 16.0F;
   const float modes_x =
       std::max(width - modes_width - modes_right_margin, x + 16.0F);
@@ -853,9 +880,9 @@ draw_application_header(gui::UiContext &ui, float width,
   float mode_x = modes_x;
   actions.program = chrome_button(
       ui, gui::ui_id("editor.mode.program"),
-      gui::Rect{mode_x, 6.0F, 66.0F, 22.0F}, "PROGRAM",
+      gui::Rect{mode_x, 5.0F, 80.0F, 24.0F}, "Program",
       !switcher.rehearsal_mode, !switcher.rehearsal_locked);
-  mode_x += 70.0F;
+  mode_x += 84.0F;
   const bool has_rehearsal = switcher.rehearsal_scene != scene::SceneId{};
   const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
   // Swap is held by the switcher's own preconditions - a Preview scene to
@@ -866,16 +893,16 @@ draw_application_header(gui::UiContext &ui, float width,
                             !switcher.rehearsal_locked && has_rehearsal &&
                             !switcher.program_held && !switcher.publication_pending;
   actions.swap = chrome_button(
-      ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 6.0F, 62.0F, 22.0F},
+      ui, gui::ui_id("editor.mode.swap"), gui::Rect{mode_x, 5.0F, 74.0F, 24.0F},
       switcher.transition_active
           ? "FADING"
           : (switcher.program_held ? "HELD" : switcher.publication_pending ? "STAGING"
               : switcher.linked_publication ? "PUBLISH" : (canvas_mismatch ? "CUT" : "SWAP")),
       false, swap_enabled);
-  mode_x += 66.0F;
+  mode_x += 78.0F;
   actions.preview = chrome_button(
       ui, gui::ui_id("editor.mode.preview"),
-      gui::Rect{mode_x, 6.0F, 66.0F, 22.0F}, "PREVIEW",
+      gui::Rect{mode_x, 5.0F, 80.0F, 24.0F}, "Preview",
       switcher.rehearsal_mode, !switcher.rehearsal_locked);
   return actions;
 }
@@ -1127,19 +1154,17 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   // Preview owns its own playhead, so an operator scrubbing a rehearsal scene
   // must still be able to read where the live show is without leaving Preview.
   reading(switcher.rehearsal_mode ? "Preview" : "Program",
-          "frame " + std::to_string(timeline.program_frame),
-          switcher.rehearsal_mode ? ui.theme().accent : ui.theme().good,
+          "frame " + std::to_string(timeline.show_frame),
+          ui.theme().accent,
           ui.theme().text);
-  reading("Timeline", timeline.playing ? "Playing" : "Paused",
-          timeline.playing ? ui.theme().good : ui.theme().text_muted,
+  reading("", timeline.playing ? "Playing" : "Paused",
+          std::nullopt,
           ui.theme().text);
-  reading("Canvas",
-          std::to_string(canvas.width) + " x " + std::to_string(canvas.height),
-          std::nullopt, ui.theme().text);
-  reading("Frame", std::to_string(timeline.show_frame), std::nullopt,
-          ui.theme().text);
-  reading("Selected", std::to_string(selection_count), std::nullopt,
-          selection_count == 0U ? ui.theme().text_muted : ui.theme().text);
+  if (switcher.rehearsal_mode)
+    reading("Program", "frame " + std::to_string(timeline.program_frame), std::nullopt, ui.theme().text_muted);
+  ui.tooltip({status.x, status.y, x - status.x, status.height},
+             "Canvas " + std::to_string(canvas.width) + " x " + std::to_string(canvas.height) +
+             " · " + std::to_string(selection_count) + " selected");
 
   // The interface zoom, at the right edge: what Ctrl+= and Ctrl+- changed,
   // and a click away from the View menu that changes it back.
@@ -1189,7 +1214,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
 
 // The editor's body text, in logical units. Every row height and inset in the
 // panels is laid out around it.
-constexpr core::u32 editor_font_size = 13U;
+constexpr core::u32 editor_font_size = 14U;
 
 // The interface zoom steps Ctrl+= and Ctrl+- walk through, in percent of the
 // display's own scale.
@@ -1258,6 +1283,18 @@ find_element(const std::vector<ElementInfo> &elements,
     }
   }
   return nullptr;
+}
+
+// `length` along world axis `column` (0 = X).
+[[nodiscard]] scene::Vec3 with_axis(core::u32 column, float length) noexcept {
+  return scene::Vec3{column == 0U ? length : 0.0F,
+                     column == 1U ? length : 0.0F,
+                     column == 2U ? length : 0.0F};
+}
+
+// A Blender-linked object (not its collection): placed by one world matrix.
+[[nodiscard]] bool linked_occurrence(const ElementInfo *element) noexcept {
+  return element != nullptr && element->linked && !element->linked_collection;
 }
 
 [[nodiscard]] bool keyed(
@@ -1589,6 +1626,14 @@ struct EditorShell::Impl final {
   // parent space. This includes both scene-group ancestry and any compositor
   // spatial parent (for example an LED car-process plate slot).
   std::vector<scene::Mat4> group_delta_to_local;
+  // What a rotate or scale needs as well: each node's evaluated rotation and
+  // scale, and where and how it is drawn, parallel to group_nodes.
+  std::vector<TransformStart> group_transform;
+  // Blender-linked objects are placed by one world matrix: their authored
+  // world when the gesture began, and how the Stage's display differs from it.
+  std::vector<bool> group_linked;
+  std::vector<scene::Mat4> group_authored_world;
+  std::vector<scene::Mat4> group_display_adjustment;
 
   core::u64 edit_gesture{};
   core::u64 hardware_edit_gesture{};
@@ -1630,82 +1675,7 @@ struct EditorShell::Impl final {
         dock_host(docks) {
     workspace_window_width = window.pixel_width();
     workspace_window_height = window.pixel_height();
-    // The default workspace mirrors a live-production editor: a broad Stage
-    // canvas in the centre; hierarchy/library and properties/output rails;
-    // time and compositing surfaces stacked below. Every region is still a
-    // real dock leaf, so this reference-like starting point remains fully
-    // rearrangeable.
-    const gui::DockId stage_dock = docks.add(panel_stage, "VIEW");
-    const gui::DockId timeline_dock = docks.dock(
-        panel_timeline, "TIMELINE", stage_dock, gui::DockSide::Bottom, 0.45F);
-    static_cast<void>(
-        docks.dock(panel_nodes, "NODES", timeline_dock, gui::DockSide::Center));
-    static_cast<void>(
-        docks.dock(panel_cues, "CUES", timeline_dock, gui::DockSide::Center));
-    static_cast<void>(docks.dock(panel_automation, "AUTOMATION", timeline_dock,
-                                 gui::DockSide::Center));
-    docks.set_active(timeline_dock, panel_timeline);
-    const gui::DockId compositor_dock =
-        docks.dock(panel_compositor, "COMPOSITOR", timeline_dock,
-                   gui::DockSide::Bottom, 0.31F);
-    docks.set_active(compositor_dock, panel_compositor);
-
-    const gui::DockId scene_dock = docks.dock(
-        panel_scene, "SCENE", docks.root(), gui::DockSide::Left, 0.20F);
-    static_cast<void>(docks.dock(panel_selection_sets, "SELECTION SETS",
-                                 scene_dock, gui::DockSide::Center));
-    docks.set_active(scene_dock, panel_scene);
-    const gui::DockId library_dock = docks.dock(
-        panel_library, "LIBRARY", scene_dock, gui::DockSide::Bottom, 0.40F);
-    static_cast<void>(docks.dock(panel_macros, "MACROS", library_dock,
-                                 gui::DockSide::Center));
-    static_cast<void>(docks.dock(panel_effects, "EFFECTS", library_dock,
-                                 gui::DockSide::Center));
-    docks.set_active(library_dock, panel_library);
-
-    const gui::DockId inspector_dock =
-        docks.dock(panel_inspector_overview, "INSPECTOR", docks.root(),
-                   gui::DockSide::Right, 0.22F);
-    static_cast<void>(docks.dock(panel_inspector, "PROPERTIES", inspector_dock,
-                                 gui::DockSide::Center));
-    static_cast<void>(docks.dock(panel_color_correction, "COLOR",
-                                 inspector_dock, gui::DockSide::Center));
-    static_cast<void>(docks.dock(panel_texture, "TEXTURE", inspector_dock,
-                                 gui::DockSide::Center));
-    static_cast<void>(docks.dock(panel_masks, "MASKS", inspector_dock,
-                                 gui::DockSide::Center));
-    docks.set_active(inspector_dock, panel_inspector);
-    static_cast<void>(docks.dock(panel_output, "OUTPUT MONITOR", inspector_dock,
-                                 gui::DockSide::Bottom, 0.19F));
-    // Beside the Output Monitor: both answer "what is the stage actually
-    // doing right now", and neither authors anything.
-    static_cast<void>(docks.dock(panel_live_data, "LIVE DATA", inspector_dock,
-                                 gui::DockSide::Center));
-    docks.set_active(inspector_dock, panel_inspector);
-
-    // Program Output starts as the reference's monitor over Stage, but it
-    // is a real dock panel rather than painted picture-in-picture. Its tab
-    // can be dropped beside, beneath, or into any other leaf; dropping it
-    // over open space detaches it again.
-    static_cast<void>(docks.dock(panel_program, "PROGRAM OUTPUT", stage_dock,
-                                 gui::DockSide::Center));
-    const float monitor_width =
-        std::clamp(static_cast<float>(window.width()) * 0.19F, 280.0F, 360.0F);
-    const float monitor_height = monitor_width * 9.0F / 16.0F + 68.0F;
-    static_cast<void>(docks.detach(
-        panel_program, gui::Rect{static_cast<float>(window.width()) * 0.585F,
-                                 static_cast<float>(window.height()) * 0.29F,
-                                 monitor_width, monitor_height}));
-
-    // Register panels that are closed in the default workspace, then replace
-    // the defaults only with a fully decoded and structurally valid snapshot.
-    // A bad or newer record is a recoverable startup condition; leaving the
-    // saved baseline empty causes the first settled frame to repair it.
-    for (const WindowPanelEntry &entry : window_panel_entries()) {
-      if (docks.title_of(entry.panel).empty()) {
-        docks.register_panel(entry.panel, entry.title);
-      }
-    }
+    reset_workspace();
     if (!workspace_layout.empty()) {
       auto decoded = decode_workspace_layout(workspace_layout);
       if (decoded) {
@@ -1716,6 +1686,65 @@ struct EditorShell::Impl final {
         program_panel.set_resolution(decoded.value().program_resolution);
         saved_workspace_layout.assign(workspace_layout.begin(),
                                       workspace_layout.end());
+      }
+    }
+  }
+
+  void reset_workspace() {
+    ui.clear_focus();
+    docks = gui::DockLayout{};
+    dock_host = gui::DockHost{docks};
+    // Keep the picture and common edits visible; specialized tools share
+    // dock tabs or open from Window. Every region remains rearrangeable.
+    const gui::DockId stage_dock = docks.add(panel_stage, "Stage");
+    const gui::DockId timeline_dock = docks.dock(
+        panel_timeline, "Timeline", stage_dock, gui::DockSide::Bottom, 0.34F);
+    static_cast<void>(
+        docks.dock(panel_cues, "Cues", timeline_dock, gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_automation, "Automation", timeline_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(timeline_dock, panel_timeline);
+    static_cast<void>(docks.dock(panel_compositor, "Compositor", timeline_dock,
+                                gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_output, "Output Monitor", timeline_dock,
+                                gui::DockSide::Center));
+    docks.set_active(timeline_dock, panel_timeline);
+
+    const float workspace_width = static_cast<float>(window.width());
+    const float properties_width = std::clamp(workspace_width * 0.25F, 320.0F, 440.0F);
+    const float scene_width = std::clamp(workspace_width * 0.18F, 200.0F, 300.0F);
+
+    const gui::DockId scene_dock = docks.dock(
+        panel_scene, "Scene", docks.root(), gui::DockSide::Left,
+        scene_width / std::max(workspace_width - properties_width - 6.0F, 1.0F));
+    docks.set_active(scene_dock, panel_scene);
+    const gui::DockId library_dock = docks.dock(
+        panel_library, "Library", scene_dock, gui::DockSide::Bottom, 0.40F);
+    static_cast<void>(docks.dock(panel_effects, "Effects", library_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(library_dock, panel_library);
+
+    const gui::DockId inspector_dock =
+        docks.dock(panel_inspector, "Properties", docks.root(),
+                   gui::DockSide::Right, properties_width / std::max(workspace_width, 1.0F));
+    static_cast<void>(docks.dock(panel_color_correction, "Color",
+                                 inspector_dock, gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_texture, "Texture", inspector_dock,
+                                 gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_masks, "Masks", inspector_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(inspector_dock, panel_inspector);
+
+    // Program is a dock tab alongside Stage; it does not obscure the canvas
+    // until the operator chooses to detach it.
+    static_cast<void>(docks.dock(panel_program, "Program Output", stage_dock,
+                                 gui::DockSide::Center));
+    docks.set_active(stage_dock, panel_stage);
+
+    // Register less frequently used panels so Window can open them on demand.
+    for (const WindowPanelEntry &entry : window_panel_entries()) {
+      if (docks.title_of(entry.panel).empty()) {
+        docks.register_panel(entry.panel, entry.title);
       }
     }
   }
@@ -1892,7 +1921,12 @@ struct EditorShell::Impl final {
 EditorShell::EditorShell(std::unique_ptr<Impl> impl) noexcept
     : impl_(std::move(impl)) {}
 
-EditorShell::~EditorShell() = default;
+EditorShell::~EditorShell() {
+  // The window owns the device, but scene targets, UI caches and pipelines
+  // are destroyed first. Finish their submissions before any owner releases
+  // resources; the device's own destructor would be too late.
+  if (impl_) impl_->window.device().wait_idle();
+}
 
 void EditorShell::reset_library_thumbnail_textures(
     core::u64 project_generation) noexcept {
@@ -3140,6 +3174,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   case ApplicationMenuAction::ZoomReset:
     impl.ui_zoom_percent = 100U;
     break;
+  case ApplicationMenuAction::ResetWorkspace:
+    impl.reset_workspace();
+    break;
   case ApplicationMenuAction::None:
     break;
   }
@@ -3170,6 +3207,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.group_nodes.clear();
     impl.group_start.clear();
     impl.group_delta_to_local.clear();
+    impl.group_transform.clear();
+    impl.group_linked.clear();
+    impl.group_authored_world.clear();
+    impl.group_display_adjustment.clear();
     for (const doc::NodeId node : impl.scene_selection.members()) {
       const auto authored_world = scene::world_for(authored_scene, node);
       const auto displayed_world = scene::world_for(display_scene, node);
@@ -3201,39 +3242,164 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.group_start.push_back(local_start);
       impl.group_delta_to_local.push_back(
           scene::invert_affine(displayed_parent));
+
+      TransformStart start{};
+      start.local_position = local_start;
+      start.world_position = scene::translation_of(*displayed_world);
+      start.world_to_local = impl.group_delta_to_local.back();
+      for (std::size_t axis = 0U; axis < start.world_axes.size(); ++axis) {
+        const auto column = static_cast<core::u32>(axis);
+        start.world_axes[axis] = scene::normalize(
+            scene::Vec3{displayed_world->at(0U, column),
+                        displayed_world->at(1U, column),
+                        displayed_world->at(2U, column)},
+            start.world_axes[axis]);
+      }
+      if (element != nullptr) {
+        const ElementInfo evaluated =
+            evaluated_element(*element, keyframes, timeline.show_frame);
+        start.rotation = evaluated.rotation;
+        start.scale = evaluated.scale;
+      }
+      impl.group_transform.push_back(start);
+      impl.group_linked.push_back(linked_occurrence(element));
+      impl.group_authored_world.push_back(*authored_world);
+      impl.group_display_adjustment.push_back(display_adjustment);
     }
   };
 
-  const auto emit_group = [&](scene::Vec3 delta) {
-    const core::u64 gesture = impl.begin_gesture();
+  // One transform component group (position, rotation or scale) written the
+  // way the Inspector writes it: a key at the show frame on a component that
+  // is animated, the base value on one that is not.
+  const auto emit_components = [&](doc::NodeId node,
+                                   scene::TransformChannel first,
+                                   scene::Vec3 values, core::u64 gesture) {
+    const std::array<double, 3U> components{values.x, values.y, values.z};
+    for (std::size_t index = 0U; index < components.size(); ++index) {
+      const auto component = static_cast<scene::TransformChannel>(
+          static_cast<core::u8>(static_cast<std::size_t>(first) + index));
+      if (keyed(keyframes, node, component)) {
+        result.keys.push_back(KeyIntent{node, component, timeline.show_frame,
+                                        components[index], false, gesture});
+      } else {
+        result.property_edits.push_back(
+            PropertyEdit{node, component, components[index], gesture});
+      }
+    }
+  };
+
+  // Lands one viewport move, rotate or scale on every captured element. A
+  // rotate or scale orbits the elements about the shared pivot, so each one
+  // off the pivot also moves; one on it keeps its position untouched rather
+  // than gaining a key it never asked for.
+  const auto emit_transform = [&](const TransformDelta &delta,
+                                  core::u64 gesture) {
     for (std::size_t index = 0U; index < impl.group_nodes.size(); ++index) {
       const doc::NodeId node = impl.group_nodes[index];
-      const scene::Mat4 &to_local = impl.group_delta_to_local[index];
-      const scene::Vec3 local_delta =
-          scene::transform_point(to_local, delta) -
-          scene::transform_point(to_local, scene::Vec3{});
-      const scene::Vec3 moved = impl.group_start[index] + local_delta;
-      const bool position_keyed =
-          keyed(keyframes, node, scene::TransformChannel::PositionX) ||
-          keyed(keyframes, node, scene::TransformChannel::PositionY) ||
-          keyed(keyframes, node, scene::TransformChannel::PositionZ);
-      if (!position_keyed) {
-        result.edits.push_back(EditIntent{node, moved, gesture});
+      const TransformStart &start = impl.group_transform[index];
+      const TransformResult moved = apply_transform(start, delta);
+      const ElementInfo *const element = find_element(elements, node);
+      if (delta.tool != TransformTool::Move && impl.group_linked[index]) {
+        // The turn or resize as the whole matrix it produces, mapped from
+        // what the Stage draws back to the authored placement.
+        const scene::Mat4 &adjustment = impl.group_display_adjustment[index];
+        const scene::Mat4 displayed =
+            scene::multiply(adjustment, impl.group_authored_world[index]);
+        result.world_edits.push_back(WorldEdit{
+            node,
+            scene::multiply(scene::invert_affine(adjustment),
+                            transformed_world(displayed, delta)),
+            gesture});
         continue;
       }
-      const std::array<std::pair<scene::TransformChannel, double>, 3U> axes{{
-          {scene::TransformChannel::PositionX, moved.x},
-          {scene::TransformChannel::PositionY, moved.y},
-          {scene::TransformChannel::PositionZ, moved.z},
-      }};
-      for (const auto &[component, value] : axes) {
-        if (keyed(keyframes, node, component)) {
-          result.keys.push_back(KeyIntent{node, component, timeline.show_frame,
-                                          value, false, gesture});
+      const bool orbits =
+          scene::length(start.world_position - delta.pivot) > 1.0e-5F;
+      if (delta.tool == TransformTool::Move || orbits) {
+        const bool position_keyed =
+            keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+            keyed(keyframes, node, scene::TransformChannel::PositionY) ||
+            keyed(keyframes, node, scene::TransformChannel::PositionZ);
+        if (!position_keyed) {
+          result.edits.push_back(EditIntent{node, moved.position, gesture});
         } else {
-          result.property_edits.push_back(
-              PropertyEdit{node, component, value, gesture});
+          emit_components(node, scene::TransformChannel::PositionX,
+                          moved.position, gesture);
         }
+      }
+      // Lights are placed, not turned or sized, from the viewport; a camera
+      // turns but has no size.
+      if (element == nullptr || is_light(element->kind)) {
+        continue;
+      }
+      if (delta.tool == TransformTool::Rotate) {
+        emit_components(node, scene::TransformChannel::RotationYaw,
+                        moved.rotation, gesture);
+      } else if (delta.tool == TransformTool::Scale &&
+                 element->kind != ElementKind::Camera) {
+        emit_components(node, scene::TransformChannel::ScaleX, moved.scale,
+                        gesture);
+      }
+    }
+  };
+
+  // Alt+G / Alt+R / Alt+S over the Stage: Blender's clear location, rotation
+  // and scale, as one undo step for the whole selection.
+  const auto clear_transform = [&](TransformTool tool,
+                                   const scene::Scene &authored_scene) {
+    const core::u64 gesture = impl.next_edit_gesture++;
+    impl.history_context = HistoryContext::Scene;
+    for (const doc::NodeId node : impl.scene_selection.members()) {
+      const ElementInfo *const element = find_element(elements, node);
+      if (element == nullptr || element->locked) {
+        continue;
+      }
+      if (tool != TransformTool::Move && linked_occurrence(element) &&
+          !is_light(element->kind)) {
+        // Unturned keeps each axis's length; unit scale keeps its direction.
+        const auto world = scene::world_for(authored_scene, node);
+        if (!world.has_value()) {
+          continue;
+        }
+        scene::Mat4 cleared = *world;
+        for (core::u32 column = 0U; column < 3U; ++column) {
+          const scene::Vec3 axis{world->at(0U, column), world->at(1U, column),
+                                 world->at(2U, column)};
+          scene::Vec3 replacement{};
+          if (tool == TransformTool::Rotate) {
+            replacement = with_axis(column, scene::length(axis));
+          } else {
+            replacement = scene::normalize(axis, with_axis(column, 1.0F));
+          }
+          cleared.set(0U, column, replacement.x);
+          cleared.set(1U, column, replacement.y);
+          cleared.set(2U, column, replacement.z);
+        }
+        result.world_edits.push_back(WorldEdit{node, cleared, gesture});
+        continue;
+      }
+      switch (tool) {
+      case TransformTool::Move:
+        if (keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+            keyed(keyframes, node, scene::TransformChannel::PositionY) ||
+            keyed(keyframes, node, scene::TransformChannel::PositionZ)) {
+          emit_components(node, scene::TransformChannel::PositionX,
+                          scene::Vec3{}, gesture);
+        } else {
+          result.edits.push_back(EditIntent{node, scene::Vec3{}, gesture});
+        }
+        break;
+      case TransformTool::Rotate:
+        if (!is_light(element->kind)) {
+          emit_components(node, scene::TransformChannel::RotationYaw,
+                          scene::Vec3{}, gesture);
+        }
+        break;
+      case TransformTool::Scale:
+        if (!is_light(element->kind) && element->kind != ElementKind::Camera) {
+          emit_components(node, scene::TransformChannel::ScaleX,
+                          scene::Vec3{1.0F, 1.0F, 1.0F}, gesture);
+        }
+        break;
       }
     }
   };
@@ -3377,10 +3543,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.group_start.clear();
       }
     }
-    if (viewport.dragging && !impl.group_nodes.empty()) {
-      emit_group(viewport.translation);
+    if (viewport.transform_began) {
+      impl.history_context = HistoryContext::Scene;
+      capture_group(authored_view, display_view);
     }
-    if (viewport.released) {
+    if (viewport.transform.has_value() && !impl.group_nodes.empty()) {
+      emit_transform(*viewport.transform, impl.begin_gesture());
+    }
+    if (viewport.released || viewport.transform_ended) {
       impl.group_nodes.clear();
       impl.group_start.clear();
     }
@@ -3869,6 +4039,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           case GizmoAxis::Yaw:
             changed = FeedSurfaceTransform::Yaw;
             break;
+          case GizmoAxis::View:
           case GizmoAxis::None:
             break;
           }
@@ -3887,6 +4058,21 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (!mask_stage_active) {
           handle_viewport(stage_viewport_frame, stage_scene,
                           stage_interaction_scene);
+          const bool over_stage =
+              !floating_occluder.has_value() &&
+              stage_viewport_frame.image.contains(ui.pointer_x(),
+                                                  ui.pointer_y());
+          if (over_stage && !ui.typing() &&
+              !impl.stage_panel.transforming() &&
+              !impl.scene_selection.empty()) {
+            if (ui.key_pressed(gui::Key::ClearLocation)) {
+              clear_transform(TransformTool::Move, stage_scene);
+            } else if (ui.key_pressed(gui::Key::ClearRotation)) {
+              clear_transform(TransformTool::Rotate, stage_scene);
+            } else if (ui.key_pressed(gui::Key::ClearScale)) {
+              clear_transform(TransformTool::Scale, stage_scene);
+            }
+          }
         }
       } else if (!color_sample_active) {
         const float notice_width =
@@ -3902,13 +4088,21 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       // The camera is the operator's own view, so it navigates through a
       // rehearsal lock and while masks are authored, though a mask tool keeps
       // the left button.
+      if (color_sample_active || switcher.rehearsal_locked) {
+        // Nothing may author into the Stage now; a keyboard transform must
+        // not keep holding the keyboard waiting for a confirm.
+        impl.stage_panel.cancel_transform();
+      }
       if (color_sample_active) {
         impl.navigate_left = false;
         impl.navigate_middle = false;
         impl.navigate_right = false;
       } else {
+        // A keyboard transform owns the pointer, its right-click cancel and
+        // the wheel included.
         navigate_stage_camera(stage_viewport_frame,
-                              !floating_occluder.has_value(),
+                              !floating_occluder.has_value() &&
+                                  !stage_viewport_frame.keyboard_transform,
                               !mask_stage_active);
       }
       return;
@@ -5300,6 +5494,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         state.bake_running = impl.bake_job != nullptr;
         state.bake_status = bake_activity;
         live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements);
+        if (live_scene_settings.file_picker) {
+          const auto& request = *live_scene_settings.file_picker;
+          if (auto path = choose_property_file(request)) {
+            if (request.kind == FilePickerKind::BakeFolder) {
+              impl.scene_settings_panel.set_bake_destination(std::move(*path));
+            } else {
+              auto values = live_scene_settings.project.apply.value_or(
+                  ProjectSettingsValues{state.settings, state.renderer, state.environment, state.lens_profile});
+              if (request.kind == FilePickerKind::ShowLut) values.renderer.color.show_lut_source = std::move(*path);
+              if (request.kind == FilePickerKind::EnvironmentMap) values.environment.map_source = std::move(*path);
+              live_scene_settings.project.apply = std::move(values);
+            }
+          }
+        }
         if (!live_scene_settings.keys.empty()) {
           const auto gesture = impl.begin_gesture();
           for (const auto& key : live_scene_settings.keys)
@@ -5323,8 +5531,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const InspectorFrame inspector = impl.inspector_panel.draw(
           ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
           keyframes, timeline.show_frame, effects, tracking_sources);
+      if (inspector.file_picker) {
+        if (auto path = choose_property_file(*inspector.file_picker)) {
+          if (path->size() > 1024U) {
+            impl.ingest_message = "IES profile path exceeds 1024 bytes";
+          } else {
+            const auto gesture = impl.begin_gesture();
+            for (const auto node : inspector.file_picker->targets)
+              result.generic_edits.push_back(GenericEdit{node, std::string{scene::schema::ies_source}, 0.0, gesture, *path});
+          }
+        }
+      }
       if (inspector.panel_request.has_value()) {
         pending_inspector_panel = inspector.panel_request;
+      }
+      if (!inspector.effect_adds.empty()) {
+        const auto gesture = impl.next_edit_gesture++;
+        for (const auto& effect : inspector.effect_adds)
+          result.effects.push_back({effect.target, effect.kind, gesture});
       }
       if (inspector.color_sample_request.has_value()) {
         impl.color_sample_request = inspector.color_sample_request;
@@ -5923,7 +6147,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
-  if (!ui.pointer_down() && !ui.typing()) {
+  // A keyboard transform is one gesture from G to its confirm, though no
+  // button is held through it.
+  if (!ui.pointer_down() && !ui.typing() &&
+      !impl.stage_panel.transforming()) {
     impl.manipulating = false;
   }
 
@@ -6013,7 +6240,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // once it has moved the camera the cursor hides and stays put.
   const bool navigating =
       impl.navigate_left || impl.navigate_middle || impl.navigate_right;
-  ui.set_navigating(navigating);
+  ui.set_navigating(navigating ||
+                    (stage_viewport_drawn && impl.stage_panel.transforming()));
   impl.window.set_pointer_locked(navigating && impl.navigation_moved);
 
   ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});

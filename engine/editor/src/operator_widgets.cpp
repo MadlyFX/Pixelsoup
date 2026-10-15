@@ -78,26 +78,7 @@ std::string element_display_name(const ElementInfo &element) {
 }
 
 gui::UiColor element_kind_color(ElementKind kind) noexcept {
-  switch (kind) {
-  case ElementKind::Media:
-    return gui::UiColor{0.30F, 0.62F, 0.92F, 1.0F};
-  case ElementKind::Model:
-    return gui::UiColor{0.30F, 0.76F, 0.70F, 1.0F};
-  case ElementKind::DirectionalLight:
-  case ElementKind::PointLight:
-    return gui::UiColor{0.95F, 0.72F, 0.30F, 1.0F};
-  case ElementKind::Group:
-    return gui::UiColor{0.62F, 0.66F, 0.74F, 1.0F};
-  case ElementKind::Track:
-    return gui::UiColor{0.42F, 0.56F, 0.98F, 1.0F};
-  case ElementKind::Camera:
-    return gui::UiColor{0.72F, 0.55F, 0.95F, 1.0F};
-  case ElementKind::Environment:
-    return gui::UiColor{0.42F, 0.80F, 0.52F, 1.0F};
-  case ElementKind::Object:
-    break;
-  }
-  return gui::UiColor{0.58F, 0.66F, 0.76F, 1.0F};
+  return kind_color(kind);
 }
 
 gui::UiColor element_kind_color(const ElementInfo &element) noexcept {

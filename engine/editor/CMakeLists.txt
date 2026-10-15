@@ -4,6 +4,7 @@ add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
+    src/transform_tool.cpp
     src/light_guides.cpp
     src/inspector_panel.cpp
     src/number_field.cpp
@@ -70,6 +71,34 @@ mediaserver_set_project_options(mediaserver_editor_ui_snapshot)
 set_target_properties(mediaserver_editor_ui_snapshot PROPERTIES FOLDER "tools")
 
 if(BUILD_TESTING)
+    find_package(SDL3 CONFIG REQUIRED)
+    add_executable(mediaserver_editor_shell_workflow_tests
+        tests/editor_shell_workflow_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_shell_workflow_tests
+        PRIVATE MediaServer::Editor MediaServer::Persist SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_editor_shell_workflow_tests)
+    add_test(NAME mediaserver.editor_shell_workflow
+        COMMAND mediaserver_editor_shell_workflow_tests)
+    set_tests_properties(mediaserver.editor_shell_workflow PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_workflow_tests PROPERTIES FOLDER "tests")
+
+    # The Stage's Blender transform keys through the real shell and window.
+    add_executable(mediaserver_editor_shell_transform_tests
+        tests/editor_shell_transform_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_shell_transform_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_editor_shell_transform_tests)
+    add_test(NAME mediaserver.editor_shell_transform
+        COMMAND mediaserver_editor_shell_transform_tests)
+    set_tests_properties(mediaserver.editor_shell_transform PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_transform_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_editor_workspace_layout_tests
         tests/workspace_layout_tests.cpp
     )
@@ -142,6 +171,22 @@ if(BUILD_TESTING)
     # canvas pixels, what it picks, and what world translation a drag resolves
     # to. None of that needs a GPU or a window, so the suite drives it with a
     # synthetic pointer and a scene built by hand.
+    # The transform tools' arithmetic: snapping, pivot orbits, yaw/pitch/roll
+    # recovery and the pointer geometry the gizmos and G/R/S keys share.
+    add_executable(mediaserver_editor_transform_tool_tests
+        tests/transform_tool_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_transform_tool_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_transform_tool_tests)
+    add_test(
+        NAME mediaserver.editor_transform_tool
+        COMMAND mediaserver_editor_transform_tool_tests
+    )
+    set_target_properties(mediaserver_editor_transform_tool_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_editor_viewport_tests
         tests/viewport_panel_tests.cpp
     )

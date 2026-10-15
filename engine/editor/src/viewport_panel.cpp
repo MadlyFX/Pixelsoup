@@ -26,6 +26,8 @@ constexpr float gizmo_hit_pixels = 9.0F;
 constexpr float surface_hit_pixels = 8.0F;
 constexpr float surface_yaw_radius_pixels = 49.0F;
 constexpr float surface_yaw_hit_pixels = 7.0F;
+constexpr float view_ring_radius_pixels = 86.0F;
+constexpr float view_ring_hit_pixels = 6.0F;
 constexpr std::size_t maximum_imported_wire_triangles = 4096U;
 constexpr std::size_t maximum_cached_model_bounds = 128U;
 constexpr std::size_t maximum_cached_projection_surfaces = 256U;
@@ -47,6 +49,8 @@ constexpr gui::UiColor screen_color{0.906F, 0.596F, 0.400F, 0.55F};
 constexpr gui::UiColor screen_selected{0.980F, 0.706F, 0.470F, 1.0F};
 constexpr gui::UiColor screen_muted{0.549F, 0.529F, 0.510F, 0.45F};
 constexpr gui::UiColor surface_yaw{1.0F, 0.74F, 0.22F, 1.0F};
+constexpr gui::UiColor gizmo_hot{1.0F, 0.94F, 0.56F, 1.0F};
+constexpr gui::UiColor gizmo_view_color{0.90F, 0.92F, 0.96F, 0.85F};
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
     core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
@@ -578,26 +582,57 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
         wire_box(list,image,view,scene::identity(),id==primary?outline_primary:outline_secondary,bounds,projection);
 }
 
+constexpr std::size_t gizmo_ring_segments = 48U;
+
 struct GizmoGeometry final {
     bool visible{};
     gui::UiPoint origin{};
+    scene::Vec3 world_origin{};
     std::array<gui::UiPoint, 3U> ends{};
     std::array<float, 3U> canvas_dx{};
     std::array<float, 3U> canvas_dy{};
     std::array<scene::Vec3, 3U> world_axes{};
     float world_length{};
+    // Rotate rings: one circle per axis in the plane it is normal to, and
+    // whether each point faces the camera. Only the near half is a handle,
+    // as in Blender - the far half sits behind the element.
+    bool rings{};
+    std::array<std::array<gui::UiPoint, gizmo_ring_segments + 1U>, 3U>
+        ring_points{};
+    std::array<std::array<bool, gizmo_ring_segments + 1U>, 3U> ring_front{};
 };
 
-[[nodiscard]] GizmoGeometry gizmo_geometry(const gui::Rect& image,
-                                           const scene::Scene& view,
-                                           const scene::Mat4& world) noexcept {
+[[nodiscard]] std::array<scene::Vec3, 3U> world_axes_of(
+    const scene::Mat4& world) noexcept {
+    static constexpr std::array<scene::Vec3, 3U> fallback_axes{
+        scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
+        scene::Vec3{0.0F, 0.0F, 1.0F}};
+    std::array<scene::Vec3, 3U> axes{};
+    for (std::size_t index = 0U; index < axes.size(); ++index) {
+        axes[index] = scene::normalize(
+            scene::Vec3{world.at(0U, static_cast<core::u32>(index)),
+                        world.at(1U, static_cast<core::u32>(index)),
+                        world.at(2U, static_cast<core::u32>(index))},
+            fallback_axes[index]);
+    }
+    return axes;
+}
+
+constexpr std::array<scene::Vec3, 3U> world_basis{
+    scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
+    scene::Vec3{0.0F, 0.0F, 1.0F}};
+
+[[nodiscard]] GizmoGeometry gizmo_geometry(
+    const gui::Rect& image, const scene::Scene& view,
+    scene::Vec3 origin_world, const std::array<scene::Vec3, 3U>& axes,
+    bool rings = false) noexcept {
     GizmoGeometry result{};
     if (view.canvas.height == 0U || image.height <= 0.0F) {
         return result;
     }
     const scene::Vec3 forward =
         scene::normalize(view.camera.target - view.camera.eye);
-    const scene::Vec3 origin_world = scene::translation_of(world);
+    result.world_origin = origin_world;
     const float depth = scene::dot(origin_world - view.camera.eye, forward);
     if (!(depth > 0.0F)) {
         return result;
@@ -617,15 +652,8 @@ struct GizmoGeometry final {
         return result;
     }
     result.origin = to_ui(image, view.canvas, origin);
-    static constexpr std::array<scene::Vec3, 3U> fallback_axes{
-        scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
-        scene::Vec3{0.0F, 0.0F, 1.0F}};
+    result.world_axes = axes;
     for (std::size_t index = 0U; index < result.world_axes.size(); ++index) {
-        result.world_axes[index] = scene::normalize(
-            scene::Vec3{world.at(0U, static_cast<core::u32>(index)),
-                        world.at(1U, static_cast<core::u32>(index)),
-                        world.at(2U, static_cast<core::u32>(index))},
-            fallback_axes[index]);
         const auto endpoint =
             scene::project_to_canvas(view.camera, view.canvas,
                                      origin_world + result.world_axes[index] *
@@ -637,6 +665,31 @@ struct GizmoGeometry final {
         result.canvas_dy[index] = endpoint.y - origin.y;
         result.ends[index] = to_ui(image, view.canvas, endpoint);
     }
+    if (rings) {
+        const float radius = result.world_length * 0.92F;
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            const scene::Vec3 u = result.world_axes[(index + 1U) % 3U];
+            const scene::Vec3 v = result.world_axes[(index + 2U) % 3U];
+            for (std::size_t step = 0U; step <= gizmo_ring_segments; ++step) {
+                const float turns = static_cast<float>(step) /
+                                    static_cast<float>(gizmo_ring_segments);
+                const scene::Vec3 offset =
+                    (u * scene::deterministic::cos_turns(turns) +
+                     v * scene::deterministic::sin_turns(turns)) *
+                    radius;
+                const auto point = scene::project_to_canvas(
+                    view.camera, view.canvas, origin_world + offset);
+                if (!point.visible) {
+                    return GizmoGeometry{};
+                }
+                result.ring_points[index][step] =
+                    to_ui(image, view.canvas, point);
+                result.ring_front[index][step] =
+                    scene::dot(offset, forward) <= radius * 0.02F;
+            }
+        }
+        result.rings = true;
+    }
     result.visible = true;
     return result;
 }
@@ -644,7 +697,7 @@ struct GizmoGeometry final {
 [[nodiscard]] GizmoGeometry gizmo_geometry(const gui::Rect& image,
                                            const scene::Scene& view,
                                            scene::Vec3 world) noexcept {
-    return gizmo_geometry(image, view, scene::translation(world));
+    return gizmo_geometry(image, view, world, world_basis);
 }
 
 [[nodiscard]] float distance_to_segment(float px, float py, gui::UiPoint a,
@@ -980,6 +1033,168 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
     }
     list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
                   gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+}
+
+// The outer white ring Blender's rotate and scale gizmos share: rotation about
+// the view axis, or uniform scale. Fixed in pixels, outside the axis handles.
+[[nodiscard]] bool hit_view_ring(const GizmoGeometry& gizmo, float pointer_x,
+                                 float pointer_y) noexcept {
+    if (!gizmo.visible) {
+        return false;
+    }
+    const float dx = pointer_x - gizmo.origin.x;
+    const float dy = pointer_y - gizmo.origin.y;
+    return std::abs(std::sqrt(dx * dx + dy * dy) - view_ring_radius_pixels) <=
+           view_ring_hit_pixels;
+}
+
+[[nodiscard]] GizmoAxis hit_rotate_gizmo(const GizmoGeometry& gizmo,
+                                         float pointer_x,
+                                         float pointer_y) noexcept {
+    if (!gizmo.visible || !gizmo.rings) {
+        return GizmoAxis::None;
+    }
+    GizmoAxis best = GizmoAxis::None;
+    float best_distance = gizmo_hit_pixels;
+    for (std::size_t index = 0U; index < 3U; ++index) {
+        for (std::size_t step = 0U; step < gizmo_ring_segments; ++step) {
+            if (!gizmo.ring_front[index][step] ||
+                !gizmo.ring_front[index][step + 1U]) {
+                continue;
+            }
+            const float distance = distance_to_full_segment(
+                pointer_x, pointer_y, gizmo.ring_points[index][step],
+                gizmo.ring_points[index][step + 1U]);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = static_cast<GizmoAxis>(
+                    static_cast<core::u8>(GizmoAxis::X) +
+                    static_cast<core::u8>(index));
+            }
+        }
+    }
+    if (best == GizmoAxis::None && hit_view_ring(gizmo, pointer_x, pointer_y)) {
+        best = GizmoAxis::View;
+    }
+    return best;
+}
+
+[[nodiscard]] GizmoAxis hit_scale_gizmo(const GizmoGeometry& gizmo,
+                                        float pointer_x,
+                                        float pointer_y) noexcept {
+    const GizmoAxis axis = hit_gizmo(gizmo, pointer_x, pointer_y);
+    if (axis != GizmoAxis::None) {
+        return axis;
+    }
+    return hit_view_ring(gizmo, pointer_x, pointer_y) ? GizmoAxis::View
+                                                      : GizmoAxis::None;
+}
+
+void draw_view_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
+                    bool emphasized) {
+    const gui::UiColor color = emphasized ? gizmo_hot : gizmo_view_color;
+    gui::UiPoint previous{gizmo.origin.x + view_ring_radius_pixels,
+                          gizmo.origin.y};
+    for (std::size_t step = 1U; step <= gizmo_ring_segments; ++step) {
+        const float turns = static_cast<float>(step) /
+                            static_cast<float>(gizmo_ring_segments);
+        const gui::UiPoint next{
+            gizmo.origin.x + scene::deterministic::cos_turns(turns) *
+                                 view_ring_radius_pixels,
+            gizmo.origin.y + scene::deterministic::sin_turns(turns) *
+                                 view_ring_radius_pixels};
+        line(list, previous, next, 4.0F, outline_shadow);
+        line(list, previous, next, emphasized ? 2.6F : 1.6F, color);
+        previous = next;
+    }
+}
+
+void draw_rotate_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
+                       GizmoAxis hovered, GizmoAxis active) {
+    if (!gizmo.visible || !gizmo.rings) {
+        return;
+    }
+    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
+                                                         axis_z};
+    for (std::size_t index = 0U; index < 3U; ++index) {
+        const GizmoAxis axis = static_cast<GizmoAxis>(
+            static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
+        // A drag on one ring hides the others, so the one being turned reads.
+        if (active != GizmoAxis::None && active != axis) {
+            continue;
+        }
+        const bool emphasized = hovered == axis || active == axis;
+        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
+        const gui::UiColor faded{color.r, color.g, color.b, 0.28F};
+        for (std::size_t step = 0U; step < gizmo_ring_segments; ++step) {
+            const gui::UiPoint a = gizmo.ring_points[index][step];
+            const gui::UiPoint b = gizmo.ring_points[index][step + 1U];
+            if (gizmo.ring_front[index][step] &&
+                gizmo.ring_front[index][step + 1U]) {
+                line(list, a, b, 4.6F, outline_shadow);
+                line(list, a, b, emphasized ? 3.0F : 2.1F, color);
+            } else if (active == GizmoAxis::None) {
+                line(list, a, b, 1.2F, faded);
+            }
+        }
+    }
+    if (active == GizmoAxis::None || active == GizmoAxis::View) {
+        draw_view_ring(list, gizmo,
+                       hovered == GizmoAxis::View || active == GizmoAxis::View);
+    }
+    list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
+                  gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+}
+
+void draw_scale_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
+                      GizmoAxis hovered, GizmoAxis active) {
+    if (!gizmo.visible) {
+        return;
+    }
+    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
+                                                         axis_z};
+    for (std::size_t index = 0U; index < gizmo.ends.size(); ++index) {
+        const GizmoAxis axis = static_cast<GizmoAxis>(
+            static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
+        const bool emphasized = hovered == axis || active == axis;
+        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
+        line(list, gizmo.origin, gizmo.ends[index], 5.0F, outline_shadow);
+        line(list, gizmo.origin, gizmo.ends[index], emphasized ? 3.2F : 2.2F,
+             color);
+        const gui::UiPoint end = gizmo.ends[index];
+        list.add_rect(end.x - 5.5F, end.y - 5.5F, 11.0F, 11.0F,
+                      outline_shadow);
+        list.add_rect(end.x - 4.0F, end.y - 4.0F, 8.0F, 8.0F, color);
+    }
+    draw_view_ring(list, gizmo,
+                   hovered == GizmoAxis::View || active == GizmoAxis::View);
+    list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
+                  gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+}
+
+[[nodiscard]] bool is_xyz(GizmoAxis axis) noexcept {
+    return axis == GizmoAxis::X || axis == GizmoAxis::Y ||
+           axis == GizmoAxis::Z;
+}
+
+[[nodiscard]] float component_of(scene::Vec3 v, std::size_t index) noexcept {
+    return index == 0U ? v.x : (index == 1U ? v.y : v.z);
+}
+
+[[nodiscard]] scene::Vec3 with_component(scene::Vec3 v, std::size_t index,
+                                         float value) noexcept {
+    if (index == 0U) {
+        v.x = value;
+    } else if (index == 1U) {
+        v.y = value;
+    } else {
+        v.z = value;
+    }
+    return v;
+}
+
+[[nodiscard]] const char* axis_name(std::size_t index) noexcept {
+    return index == 0U ? "X" : (index == 1U ? "Y" : "Z");
 }
 
 } // namespace
@@ -1839,6 +2054,140 @@ void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
     }
 }
 
+TransformDelta ViewportPanel::snapped(const gui::UiContext& ctx,
+                                     TransformDelta delta) const noexcept {
+    if (snapping_ == ctx.ctrl_held()) {
+        return delta;
+    }
+    const bool fine = ctx.shift_held();
+    switch (delta.tool) {
+    case TransformTool::Move: {
+        // Per component of the gesture's own frame, so an axis-constrained
+        // move snaps its length and a free one lands on the grid's steps.
+        const float step = fine ? move_snap_fine_step : move_snap_step;
+        scene::Vec3 result{};
+        for (const scene::Vec3& axis : delta.basis) {
+            result = result +
+                     axis * snap_to_step(scene::dot(delta.translation, axis),
+                                         step);
+        }
+        delta.translation = result;
+        break;
+    }
+    case TransformTool::Rotate:
+        delta.turns = snap_to_step(delta.turns,
+                                   fine ? rotate_snap_fine_step_turns
+                                        : rotate_snap_step_turns);
+        break;
+    case TransformTool::Scale: {
+        const float step = fine ? scale_snap_fine_step : scale_snap_step;
+        delta.factors = scene::Vec3{snap_to_step(delta.factors.x, step),
+                                    snap_to_step(delta.factors.y, step),
+                                    snap_to_step(delta.factors.z, step)};
+        break;
+    }
+    }
+    return delta;
+}
+
+void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
+                                            gui::UiDrawList& list,
+                                            const gui::Rect& image,
+                                            const scene::Scene& scene,
+                                            gui::UiPoint centre,
+                                            std::optional<float> reading) const {
+    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
+                                                         axis_z};
+    const std::array<scene::Vec3, 3U>& axes =
+        keyboard_.orientation == TransformOrientation::Global
+            ? world_basis
+            : keyboard_.local_axes;
+    // An infinite constraint line, drawn as long as both ends stay in front
+    // of the camera.
+    const auto constraint_line = [&](std::size_t index) {
+        for (const float reach : {200.0F, 40.0F, 8.0F, 1.5F}) {
+            const auto from = scene::project_to_canvas(
+                scene.camera, scene.canvas,
+                keyboard_.pivot - axes[index] * reach);
+            const auto to = scene::project_to_canvas(
+                scene.camera, scene.canvas,
+                keyboard_.pivot + axes[index] * reach);
+            if (from.visible && to.visible) {
+                line(list, to_ui(image, scene.canvas, from),
+                     to_ui(image, scene.canvas, to), 1.6F, colors[index]);
+                return;
+            }
+        }
+    };
+    if (keyboard_.constraint == Constraint::Axis) {
+        constraint_line(keyboard_.axis);
+    } else if (keyboard_.constraint == Constraint::Plane) {
+        constraint_line((keyboard_.axis + 1U) % 3U);
+        constraint_line((keyboard_.axis + 2U) % 3U);
+    }
+    if (keyboard_.tool != TransformTool::Move) {
+        line(list, centre, gui::UiPoint{keyboard_.pointer_x, keyboard_.pointer_y},
+             1.0F, gizmo_view_color);
+        list.add_rect(centre.x - 3.0F, centre.y - 3.0F, 6.0F, 6.0F,
+                      gizmo_view_color);
+    }
+
+    const char* tool = keyboard_.tool == TransformTool::Move
+                           ? "MOVE"
+                           : (keyboard_.tool == TransformTool::Rotate
+                                  ? "ROTATE"
+                                  : "SCALE");
+    std::string constraint;
+    switch (keyboard_.constraint) {
+    case Constraint::None:
+        constraint = keyboard_.tool == TransformTool::Rotate ? "VIEW AXIS"
+                     : keyboard_.tool == TransformTool::Move ? "VIEW PLANE"
+                                                             : "UNIFORM";
+        break;
+    case Constraint::Axis:
+        constraint = std::string{axis_name(keyboard_.axis)};
+        break;
+    case Constraint::Plane:
+        constraint = std::string{axis_name((keyboard_.axis + 1U) % 3U)} +
+                     axis_name((keyboard_.axis + 2U) % 3U) + " PLANE";
+        break;
+    }
+    if (keyboard_.constraint != Constraint::None) {
+        constraint += keyboard_.orientation == TransformOrientation::Global
+                          ? " GLOBAL"
+                          : " LOCAL";
+    }
+    std::string value;
+    if (keyboard_.entry.active()) {
+        value = keyboard_.entry.display() + "|";
+    } else if (reading.has_value()) {
+        std::array<char, 32U> text{};
+        const char* format = keyboard_.tool == TransformTool::Move
+                                 ? "%.3f m"
+                                 : (keyboard_.tool == TransformTool::Rotate
+                                        ? "%.1f deg"
+                                        : "%.3fx");
+        const int length =
+            std::snprintf(text.data(), text.size(), format, *reading);
+        value.assign(text.data(),
+                     static_cast<std::size_t>(std::max(length, 0)));
+    }
+    if (snapping_ != ctx.ctrl_held()) {
+        value += "  SNAP";
+    }
+    const std::string status = std::string{tool} + "  " + constraint + "  " +
+                               value +
+                               "    ENTER / CLICK  CONFIRM    ESC / RIGHT-CLICK"
+                               "  CANCEL";
+    const gui::Rect bar{image.x + 8.0F, image.y + 8.0F,
+                        std::max(std::min(image.width - 16.0F, 640.0F), 0.0F),
+                        22.0F};
+    ctx.panel(bar, ctx.theme().background);
+    ctx.label(gui::Rect{bar.x + 8.0F, bar.y, std::max(bar.width - 16.0F, 0.0F),
+                        bar.height},
+              status, ctx.theme().text);
+}
+
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
                                   const scene::Scene& scene,
@@ -1876,39 +2225,65 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
                             toolbar.width, 1.0F},
                   ctx.theme().divider);
-        // Keep preview resolution accessible even in a narrow dock.
-        if (toolbar.width >= 740.0F) {
-            float left = toolbar.x + 7.0F;
-            ctx.label(gui::Rect{left, toolbar.y, 34.0F, toolbar.height}, "VIEW",
-                      ctx.theme().text_muted);
-            left += 37.0F;
-            const gui::Rect camera{left, toolbar.y + 4.0F, 104.0F, 20.0F};
-            ctx.panel(camera, ctx.theme().widget);
-            ctx.label(gui::Rect{camera.x + 7.0F, camera.y, camera.width - 7.0F,
-                                camera.height},
-                      "FREE ORBIT", ctx.theme().text);
-            left += 109.0F;
-            const auto disabled_tool = [&](float x, float width,
-                                           std::string_view label) {
-                const gui::Rect tool{x, toolbar.y + 4.0F, width, 20.0F};
-                ctx.panel(tool, ctx.theme().track);
-                ctx.label(gui::Rect{tool.x + 7.0F, tool.y,
-                                    std::max(tool.width - 7.0F, 0.0F),
-                                    tool.height},
-                          label, ctx.theme().text_muted);
+        // Keep preview resolution accessible even in a narrow dock: the
+        // transform tools go first, the display toggles only when there is
+        // room for them too.
+        float left = toolbar.x + 7.0F;
+        if (toolbar.width >= 520.0F) {
+            // A selected choice is drawn pressed; every one is a button, so a
+            // click on the current tool is harmless rather than dead.
+            const auto choice = [&](core::u64 salt, float width,
+                                    std::string_view label, bool chosen,
+                                    std::string_view hint) {
+                const gui::Rect rect{left, toolbar.y + 4.0F, width, 20.0F};
+                const bool clicked = ctx.button(mix(id_, salt), rect, label);
+                if (chosen) {
+                    ctx.panel(rect, ctx.theme().widget_active);
+                    ctx.label(gui::Rect{rect.x + 7.0F, rect.y,
+                                        std::max(rect.width - 7.0F, 0.0F),
+                                        rect.height},
+                              label, ctx.theme().text);
+                }
+                ctx.tooltip(rect, hint);
+                left += width + 4.0F;
+                return clicked;
             };
-            disabled_tool(left, 24.0F, "S");
-            left += 28.0F;
-            disabled_tool(left, 24.0F, "M");
-            left += 30.0F;
-            disabled_tool(left, 28.0F, "2D");
-            left += 32.0F;
-            ctx.panel(gui::Rect{left, toolbar.y + 4.0F, 28.0F, 20.0F},
-                      ctx.theme().widget_active);
-            ctx.label(gui::Rect{left + 6.0F, toolbar.y + 4.0F, 22.0F, 20.0F}, "3D",
-                      ctx.theme().text);
-            left += 34.0F;
-
+            if (choice(10U, 46.0F, "MOVE", tool_ == TransformTool::Move,
+                       "Move tool. G moves the selection from the keyboard; "
+                       "X, Y or Z constrains it, Shift+X/Y/Z to a plane.")) {
+                tool_ = TransformTool::Move;
+            }
+            if (choice(11U, 56.0F, "ROTATE", tool_ == TransformTool::Rotate,
+                       "Rotate tool. R rotates the selection about the view, "
+                       "or about X, Y or Z once one is typed.")) {
+                tool_ = TransformTool::Rotate;
+            }
+            if (choice(12U, 48.0F, "SCALE", tool_ == TransformTool::Scale,
+                       "Scale tool. S scales the selection; X, Y or Z scales "
+                       "one axis, Shift+X/Y/Z the other two.")) {
+                tool_ = TransformTool::Scale;
+            }
+            left += 6.0F;
+            if (choice(13U, 56.0F,
+                       orientation_ == TransformOrientation::Global ? "GLOBAL"
+                                                                    : "LOCAL",
+                       false,
+                       "Gizmo and axis-key orientation: world axes, or the "
+                       "selected element's own. Pressing an axis key twice "
+                       "uses the other one for that transform.")) {
+                orientation_ = orientation_ == TransformOrientation::Global
+                                   ? TransformOrientation::Local
+                                   : TransformOrientation::Global;
+            }
+            if (choice(14U, 44.0F, "SNAP", snapping_,
+                       "Snap moves to 1 m, rotation to 5 degrees and scale to "
+                       "0.1 (Shift: 0.1 m, 1 degree, 0.01). Shift+Tab "
+                       "toggles; hold Ctrl to invert while dragging.")) {
+                snapping_ = !snapping_;
+            }
+            left += 6.0F;
+        }
+        if (toolbar.width >= 740.0F) {
             float button_x = left;
             if (ctx.button(mix(id_, 1U),
                            gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
@@ -2034,11 +2409,49 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     const auto primary_world = primary_locked
                                    ? std::optional<scene::Mat4>{}
                                    : scene::world_for(scene, primary);
+    // Blender's median point: what the selection moves, turns and scales
+    // about, and where the gizmo sits.
+    std::optional<scene::Vec3> pivot;
+    if (primary_world.has_value()) {
+        scene::Vec3 sum{};
+        float count = 0.0F;
+        for (const doc::NodeId node : selection) {
+            if (scene::element_locked(scene, node)) {
+                continue;
+            }
+            if (const auto world = scene::world_for(scene, node)) {
+                sum = sum + scene::translation_of(*world);
+                count += 1.0F;
+            }
+        }
+        pivot = count > 0.0F ? sum * (1.0F / count)
+                             : scene::translation_of(*primary_world);
+    }
+    const std::array<scene::Vec3, 3U> primary_axes =
+        primary_world.has_value() ? world_axes_of(*primary_world)
+                                  : world_basis;
+    const scene::Vec3 view_forward =
+        scene::normalize(scene.camera.target - scene.camera.eye);
+    if (keyboard_.active && !pivot.has_value()) {
+        // The selection went away under a keyboard transform.
+        keyboard_.active = false;
+        frame.transform_ended = true;
+        frame.transform_cancelled = true;
+    }
+    // A gizmo drag keeps the tool it began with; scale always works on the
+    // element's own axes (see TransformOrientation).
+    const TransformTool gizmo_tool =
+        dragging_ && drag_axis_ != GizmoAxis::Screen ? drag_tool_ : tool_;
+    const std::array<scene::Vec3, 3U>& gizmo_axes =
+        gizmo_tool == TransformTool::Scale ||
+                orientation_ == TransformOrientation::Local
+            ? primary_axes
+            : world_basis;
     const GizmoGeometry scene_gizmo =
-        role_ == ViewportRole::Stage && show_gizmo_ &&
-                selected_surface_value == nullptr && primary_world.has_value()
-            ? gizmo_geometry(frame.image, scene,
-                             *primary_world)
+        role_ == ViewportRole::Stage && show_gizmo_ && !keyboard_.active &&
+                selected_surface_value == nullptr && pivot.has_value()
+            ? gizmo_geometry(frame.image, scene, *pivot, gizmo_axes,
+                             gizmo_tool == TransformTool::Rotate)
             : GizmoGeometry{};
     GizmoGeometry surface_gizmo =
         role_ == ViewportRole::Stage && show_gizmo_ &&
@@ -2049,9 +2462,23 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     const bool occluded =
         interaction_occluder != nullptr &&
         interaction_occluder->contains(ctx.pointer_x(), ctx.pointer_y());
-    const GizmoAxis hovered_scene_axis =
-        occluded ? GizmoAxis::None
-                 : hit_gizmo(scene_gizmo, ctx.pointer_x(), ctx.pointer_y());
+    GizmoAxis hovered_scene_axis = GizmoAxis::None;
+    if (!occluded) {
+        switch (gizmo_tool) {
+        case TransformTool::Move:
+            hovered_scene_axis =
+                hit_gizmo(scene_gizmo, ctx.pointer_x(), ctx.pointer_y());
+            break;
+        case TransformTool::Rotate:
+            hovered_scene_axis = hit_rotate_gizmo(scene_gizmo, ctx.pointer_x(),
+                                                  ctx.pointer_y());
+            break;
+        case TransformTool::Scale:
+            hovered_scene_axis = hit_scale_gizmo(scene_gizmo, ctx.pointer_x(),
+                                                 ctx.pointer_y());
+            break;
+        }
+    }
     GizmoAxis hovered_surface_axis =
         occluded ? GizmoAxis::None
                  : hit_gizmo(surface_gizmo, ctx.pointer_x(), ctx.pointer_y());
@@ -2107,7 +2534,264 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         }
     }
 
-    const gui::Rect interaction_bounds = occluded ? gui::Rect{} : frame.image;
+    // --- Keyboard transforms, as in Blender: G, R or S over the Stage moves,
+    // rotates or scales the selection with the pointer - no button held - until
+    // Enter or a left click confirms it, or Escape or a right click puts it
+    // back. X, Y or Z constrains to an axis (twice: the other orientation,
+    // three times: free), Shift+X/Y/Z to the plane without it, and a typed
+    // number gives the exact distance, angle in degrees, or factor.
+    const bool pointer_over_image =
+        !occluded && frame.image.contains(ctx.pointer_x(), ctx.pointer_y());
+    if (swallow_pointer_ && !ctx.pointer_down() &&
+        !ctx.secondary_pointer_down()) {
+        swallow_pointer_ = false;
+    }
+    if (role_ == ViewportRole::Stage && pointer_over_image && !ctx.typing() &&
+        ctx.shift_held() && ctx.key_pressed(gui::Key::Tab)) {
+        snapping_ = !snapping_;
+    }
+    if (role_ == ViewportRole::Stage && !keyboard_.active &&
+        !swallow_pointer_ && !dragging_ && !surface_dragging_ &&
+        !deep_select_open_ && pivot.has_value() && pointer_over_image &&
+        !ctx.pointer_down() && !ctx.secondary_pointer_down() &&
+        !ctx.middle_pointer_down() && !ctx.alt_held() && !ctx.ctrl_held()) {
+        std::optional<TransformTool> started;
+        for (const char typed : ctx.shortcut_text()) {
+            if (typed == 'g') {
+                started = TransformTool::Move;
+            } else if (typed == 'r') {
+                started = TransformTool::Rotate;
+            } else if (typed == 's') {
+                started = TransformTool::Scale;
+            }
+        }
+        if (started.has_value()) {
+            keyboard_ = KeyboardTransform{};
+            keyboard_.active = true;
+            keyboard_.tool = *started;
+            keyboard_.orientation = orientation_;
+            keyboard_.pivot = *pivot;
+            keyboard_.local_axes = primary_axes;
+            keyboard_.press_x = keyboard_.pointer_x = keyboard_.last_x =
+                ctx.pointer_x();
+            keyboard_.press_y = keyboard_.pointer_y = keyboard_.last_y =
+                ctx.pointer_y();
+            tool_ = *started;
+            frame.transform_began = true;
+        }
+    }
+
+    gui::UiPoint keyboard_centre{frame.image.x + frame.image.width * 0.5F,
+                                 frame.image.y + frame.image.height * 0.5F};
+    std::optional<float> keyboard_reading;
+    if (keyboard_.active) {
+        if (const auto centre = scene::project_to_canvas(
+                scene.camera, scene.canvas, keyboard_.pivot);
+            centre.visible) {
+            keyboard_centre = to_ui(frame.image, scene.canvas, centre);
+        }
+        if (!frame.transform_began) {
+            for (const char typed : ctx.claimed_text()) {
+                const char lower = typed >= 'A' && typed <= 'Z'
+                                       ? static_cast<char>(typed - 'A' + 'a')
+                                       : typed;
+                if (lower == 'x' || lower == 'y' || lower == 'z') {
+                    const std::size_t axis =
+                        static_cast<std::size_t>(lower - 'x');
+                    const Constraint wanted =
+                        typed == lower ? Constraint::Axis : Constraint::Plane;
+                    if (keyboard_.constraint != wanted ||
+                        keyboard_.axis != axis) {
+                        keyboard_.constraint = wanted;
+                        keyboard_.axis = axis;
+                        keyboard_.orientation = orientation_;
+                    } else if (keyboard_.orientation == orientation_) {
+                        keyboard_.orientation =
+                            orientation_ == TransformOrientation::Global
+                                ? TransformOrientation::Local
+                                : TransformOrientation::Global;
+                    } else {
+                        keyboard_.constraint = Constraint::None;
+                        keyboard_.orientation = orientation_;
+                    }
+                } else {
+                    static_cast<void>(
+                        keyboard_.entry.type(std::string_view{&typed, 1U}));
+                }
+            }
+            if (ctx.key_pressed(gui::Key::Backspace)) {
+                keyboard_.entry.backspace();
+            }
+        }
+        // Shift slows the pointer to a tenth for fine work.
+        const float motion_scale = ctx.shift_held() ? 0.1F : 1.0F;
+        const float previous_x = keyboard_.pointer_x;
+        const float previous_y = keyboard_.pointer_y;
+        keyboard_.pointer_x += (ctx.pointer_x() - keyboard_.last_x) * motion_scale;
+        keyboard_.pointer_y += (ctx.pointer_y() - keyboard_.last_y) * motion_scale;
+        keyboard_.last_x = ctx.pointer_x();
+        keyboard_.last_y = ctx.pointer_y();
+        // Anticlockwise screen turns, whatever the axis: the axis decides the
+        // sign when the delta is built, so changing it mid-way keeps the
+        // rotation following the pointer.
+        keyboard_.turns += sweep_turns(
+            keyboard_centre.x, keyboard_centre.y, previous_x, previous_y,
+            keyboard_.pointer_x, keyboard_.pointer_y, -view_forward,
+            view_forward);
+
+        const std::array<scene::Vec3, 3U>& axes =
+            keyboard_.orientation == TransformOrientation::Global
+                ? world_basis
+                : keyboard_.local_axes;
+        const std::size_t axis = keyboard_.axis;
+        const float to_canvas_x = canvas_width / frame.image.width;
+        const float to_canvas_y = canvas_height / frame.image.height;
+        const float press_canvas_x =
+            (keyboard_.press_x - frame.image.x) * to_canvas_x;
+        const float press_canvas_y =
+            (keyboard_.press_y - frame.image.y) * to_canvas_y;
+        const float now_canvas_x =
+            (keyboard_.pointer_x - frame.image.x) * to_canvas_x;
+        const float now_canvas_y =
+            (keyboard_.pointer_y - frame.image.y) * to_canvas_y;
+        const float drag_x = now_canvas_x - press_canvas_x;
+        const float drag_y = now_canvas_y - press_canvas_y;
+        const std::optional<float> typed = keyboard_.entry.value();
+
+        TransformDelta delta{};
+        delta.tool = keyboard_.tool;
+        delta.pivot = keyboard_.pivot;
+        delta.basis = axes;
+        switch (keyboard_.tool) {
+        case TransformTool::Move:
+            if (typed.has_value()) {
+                const std::size_t along =
+                    keyboard_.constraint == Constraint::Plane
+                        ? (axis + 1U) % 3U
+                        : (keyboard_.constraint == Constraint::Axis ? axis
+                                                                    : 0U);
+                delta.translation = axes[along] * *typed;
+            } else if (keyboard_.constraint == Constraint::Axis) {
+                const auto from = scene::project_to_canvas(
+                    scene.camera, scene.canvas, keyboard_.pivot);
+                const auto to = scene::project_to_canvas(
+                    scene.camera, scene.canvas,
+                    keyboard_.pivot + axes[axis]);
+                const float unit_x = to.x - from.x;
+                const float unit_y = to.y - from.y;
+                const float unit_squared = unit_x * unit_x + unit_y * unit_y;
+                if (from.visible && to.visible && unit_squared > 1.0e-4F) {
+                    delta.translation =
+                        axes[axis] *
+                        ((drag_x * unit_x + drag_y * unit_y) / unit_squared);
+                }
+            } else {
+                const scene::Vec3 free = scene::screen_drag_to_translation(
+                    scene.camera, scene.canvas, keyboard_.pivot, drag_x,
+                    drag_y);
+                if (keyboard_.constraint == Constraint::Plane) {
+                    delta.translation =
+                        plane_drag_translation(scene.camera, scene.canvas,
+                                               keyboard_.pivot, axes[axis],
+                                               press_canvas_x, press_canvas_y,
+                                               now_canvas_x, now_canvas_y)
+                            .value_or(free -
+                                      axes[axis] *
+                                          scene::dot(free, axes[axis]));
+                } else {
+                    delta.translation = free;
+                }
+            }
+            break;
+        case TransformTool::Rotate:
+            delta.axis = keyboard_.constraint == Constraint::None
+                             ? -view_forward
+                             : axes[axis];
+            delta.turns =
+                typed.has_value()
+                    ? *typed / 360.0F
+                    : keyboard_.turns *
+                          (scene::dot(delta.axis, view_forward) < 0.0F ? 1.0F
+                                                                       : -1.0F);
+            break;
+        case TransformTool::Scale: {
+            const float press_dx = keyboard_.press_x - keyboard_centre.x;
+            const float press_dy = keyboard_.press_y - keyboard_centre.y;
+            const float now_dx = keyboard_.pointer_x - keyboard_centre.x;
+            const float now_dy = keyboard_.pointer_y - keyboard_centre.y;
+            const float reach =
+                std::sqrt(press_dx * press_dx + press_dy * press_dy);
+            float factor =
+                reach > 1.0F
+                    ? std::sqrt(now_dx * now_dx + now_dy * now_dy) / reach
+                    : 1.0F;
+            if (typed.has_value()) {
+                factor = *typed;
+            }
+            switch (keyboard_.constraint) {
+            case Constraint::None:
+                delta.factors = scene::Vec3{factor, factor, factor};
+                break;
+            case Constraint::Axis:
+                delta.factors =
+                    with_component(scene::Vec3{1.0F, 1.0F, 1.0F}, axis, factor);
+                break;
+            case Constraint::Plane:
+                delta.factors = with_component(
+                    scene::Vec3{factor, factor, factor}, axis, 1.0F);
+                break;
+            }
+            break;
+        }
+        }
+        if (!typed.has_value()) {
+            delta = snapped(ctx, delta);
+        }
+
+        const bool confirm =
+            ctx.key_pressed(gui::Key::Enter) || ctx.pointer_pressed();
+        const bool cancel = ctx.key_pressed(gui::Key::Escape) ||
+                            ctx.secondary_pointer_pressed();
+        if (cancel) {
+            TransformDelta restore{};
+            restore.tool = keyboard_.tool;
+            restore.pivot = keyboard_.pivot;
+            delta = restore;
+            frame.transform_cancelled = true;
+        }
+        if (cancel || confirm) {
+            keyboard_.active = false;
+            frame.transform_ended = true;
+            swallow_pointer_ =
+                ctx.pointer_down() || ctx.secondary_pointer_down();
+        }
+        frame.transform = delta;
+        switch (delta.tool) {
+        case TransformTool::Move:
+            keyboard_reading = scene::length(delta.translation);
+            if (keyboard_.constraint == Constraint::Axis) {
+                keyboard_reading = scene::dot(delta.translation, axes[axis]);
+            }
+            break;
+        case TransformTool::Rotate:
+            keyboard_reading = delta.turns * 360.0F;
+            break;
+        case TransformTool::Scale:
+            keyboard_reading = keyboard_.constraint == Constraint::Plane
+                                   ? component_of(delta.factors,
+                                                  (axis + 1U) % 3U)
+                                   : component_of(delta.factors,
+                                                  keyboard_.constraint ==
+                                                          Constraint::Axis
+                                                      ? axis
+                                                      : 0U);
+            break;
+        }
+    }
+    frame.keyboard_transform = keyboard_.active || swallow_pointer_;
+
+    const gui::Rect interaction_bounds =
+        occluded || frame.keyboard_transform ? gui::Rect{} : frame.image;
     const gui::Interaction it = ctx.grab(id_, interaction_bounds);
     frame.hovered = it.hovered;
     frame.held = it.held;
@@ -2185,15 +2869,46 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             press_pointer_x_ = ctx.pointer_x();
             surface_dragging_ = true;
         } else if (hovered_scene_axis != GizmoAxis::None &&
-                   primary_world.has_value()) {
+                   pivot.has_value()) {
             frame.picked = primary;
             drag_axis_ = hovered_scene_axis;
-            press_world_ = scene::translation_of(*primary_world);
-            const std::size_t index = axis_index(hovered_scene_axis);
-            axis_canvas_x_ = scene_gizmo.canvas_dx[index];
-            axis_canvas_y_ = scene_gizmo.canvas_dy[index];
-            axis_world_length_ = scene_gizmo.world_length;
-            axis_world_ = scene_gizmo.world_axes[index];
+            drag_tool_ = gizmo_tool;
+            press_world_ = *pivot;
+            drag_pivot_ = *pivot;
+            drag_basis_ = scene_gizmo.world_axes;
+            drag_centre_x_ = scene_gizmo.origin.x;
+            drag_centre_y_ = scene_gizmo.origin.y;
+            drag_last_x_ = ctx.pointer_x();
+            drag_last_y_ = ctx.pointer_y();
+            drag_turns_ = 0.0F;
+            axis_world_ = -view_forward;
+            if (is_xyz(hovered_scene_axis)) {
+                const std::size_t index = axis_index(hovered_scene_axis);
+                axis_canvas_x_ = scene_gizmo.canvas_dx[index];
+                axis_canvas_y_ = scene_gizmo.canvas_dy[index];
+                axis_world_length_ = scene_gizmo.world_length;
+                axis_world_ = scene_gizmo.world_axes[index];
+            }
+            // A scale handle follows the pointer: the factor is how far along
+            // the handle (or out from the centre, for the ring) it now is,
+            // over how far it was when pressed.
+            const float from_x = ctx.pointer_x() - scene_gizmo.origin.x;
+            const float from_y = ctx.pointer_y() - scene_gizmo.origin.y;
+            drag_press_reach_ = std::sqrt(from_x * from_x + from_y * from_y);
+            if (is_xyz(hovered_scene_axis)) {
+                const std::size_t index = axis_index(hovered_scene_axis);
+                const float handle_x =
+                    scene_gizmo.ends[index].x - scene_gizmo.origin.x;
+                const float handle_y =
+                    scene_gizmo.ends[index].y - scene_gizmo.origin.y;
+                const float handle =
+                    std::sqrt(handle_x * handle_x + handle_y * handle_y);
+                drag_press_reach_ =
+                    handle > 0.0F
+                        ? (from_x * handle_x + from_y * handle_y) / handle
+                        : 0.0F;
+            }
+            drag_press_reach_ = std::max(drag_press_reach_, 1.0F);
             press_x_ = frame.pointer.x;
             press_y_ = frame.pointer.y;
             dragging_ = true;
@@ -2222,6 +2937,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     press_x_ = frame.pointer.x;
                     press_y_ = frame.pointer.y;
                     drag_axis_ = GizmoAxis::Screen;
+                    drag_tool_ = TransformTool::Move;
+                    drag_pivot_ = press_world_;
+                    drag_basis_ = orientation_ == TransformOrientation::Local
+                                      ? world_axes_of(*world)
+                                      : world_basis;
                     dragging_ = true;
                 }
             }
@@ -2342,27 +3062,70 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         if (!deep_select_armed_ && (dx != 0.0F || dy != 0.0F)) {
             frame.dragging = true;
             frame.gizmo_axis = drag_axis_;
-            if (drag_axis_ == GizmoAxis::Screen) {
-                frame.translation =
-                    projection != nullptr && projection->project
-                        ? scene::screen_drag_to_translation(
-                              press_world_, projection->forward,
-                              projection->up, projection->project, dx, dy)
-                        : scene::screen_drag_to_translation(
-                              scene.camera, scene.canvas, press_world_, dx,
-                              dy);
-            } else {
-                const float axis_pixels_squared =
-                    axis_canvas_x_ * axis_canvas_x_ +
-                    axis_canvas_y_ * axis_canvas_y_;
-                if (axis_pixels_squared > 0.0F) {
-                    const float along =
-                        (dx * axis_canvas_x_ + dy * axis_canvas_y_) /
-                        axis_pixels_squared;
-                    frame.translation =
-                        axis_world_ * (along * axis_world_length_);
+            TransformDelta delta{};
+            delta.tool = drag_tool_;
+            delta.pivot = drag_pivot_;
+            delta.basis = drag_basis_;
+            switch (drag_tool_) {
+            case TransformTool::Move:
+                if (drag_axis_ == GizmoAxis::Screen) {
+                    delta.translation =
+                        projection != nullptr && projection->project
+                            ? scene::screen_drag_to_translation(
+                                  press_world_, projection->forward,
+                                  projection->up, projection->project, dx, dy)
+                            : scene::screen_drag_to_translation(
+                                  scene.camera, scene.canvas, press_world_, dx,
+                                  dy);
+                } else {
+                    const float axis_pixels_squared =
+                        axis_canvas_x_ * axis_canvas_x_ +
+                        axis_canvas_y_ * axis_canvas_y_;
+                    if (axis_pixels_squared > 0.0F) {
+                        const float along =
+                            (dx * axis_canvas_x_ + dy * axis_canvas_y_) /
+                            axis_pixels_squared;
+                        delta.translation =
+                            axis_world_ * (along * axis_world_length_);
+                    }
                 }
+                break;
+            case TransformTool::Rotate:
+                drag_turns_ += sweep_turns(drag_centre_x_, drag_centre_y_,
+                                           drag_last_x_, drag_last_y_,
+                                           ctx.pointer_x(), ctx.pointer_y(),
+                                           axis_world_, view_forward);
+                drag_last_x_ = ctx.pointer_x();
+                drag_last_y_ = ctx.pointer_y();
+                delta.axis = axis_world_;
+                delta.turns = drag_turns_;
+                break;
+            case TransformTool::Scale: {
+                const float now_x = ctx.pointer_x() - drag_centre_x_;
+                const float now_y = ctx.pointer_y() - drag_centre_y_;
+                float reach = std::sqrt(now_x * now_x + now_y * now_y);
+                if (is_xyz(drag_axis_)) {
+                    const std::size_t index = axis_index(drag_axis_);
+                    const float handle_x = axis_canvas_x_;
+                    const float handle_y = axis_canvas_y_;
+                    const float handle =
+                        std::sqrt(handle_x * handle_x + handle_y * handle_y);
+                    reach = handle > 0.0F
+                                ? (now_x * handle_x + now_y * handle_y) / handle
+                                : drag_press_reach_;
+                    delta.factors =
+                        with_component(scene::Vec3{1.0F, 1.0F, 1.0F}, index,
+                                       reach / drag_press_reach_);
+                } else {
+                    const float factor = reach / drag_press_reach_;
+                    delta.factors = scene::Vec3{factor, factor, factor};
+                }
+                break;
             }
+            }
+            delta = snapped(ctx, delta);
+            frame.transform = delta;
+            frame.translation = delta.translation;
         }
     }
 
@@ -2455,8 +3218,33 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                           "YAW", surface_yaw);
             }
         } else {
-            draw_gizmo(list, scene_gizmo, hovered_scene_axis, drag_axis_);
+            const GizmoAxis active =
+                dragging_ && drag_axis_ != GizmoAxis::Screen ? drag_axis_
+                                                             : GizmoAxis::None;
+            const GizmoAxis hovered =
+                dragging_ ? GizmoAxis::None : hovered_scene_axis;
+            switch (gizmo_tool) {
+            case TransformTool::Move:
+                draw_gizmo(list, scene_gizmo, hovered, active);
+                break;
+            case TransformTool::Rotate:
+                draw_rotate_gizmo(list, scene_gizmo, hovered, active);
+                break;
+            case TransformTool::Scale:
+                draw_scale_gizmo(list, scene_gizmo, hovered, active);
+                break;
+            }
+            if (scene_gizmo.visible && active != GizmoAxis::None &&
+                drag_tool_ != TransformTool::Move) {
+                line(list, gui::UiPoint{drag_centre_x_, drag_centre_y_},
+                     gui::UiPoint{ctx.pointer_x(), ctx.pointer_y()}, 1.0F,
+                     gizmo_view_color);
+            }
         }
+    }
+    if (keyboard_.active) {
+        draw_keyboard_transform(ctx, list, frame.image, scene, keyboard_centre,
+                                keyboard_reading);
     }
     ctx.pop_clip();
 
@@ -2478,6 +3266,8 @@ MaskViewportFrame ViewportPanel::draw_masks(
     dragging_ = false;
     surface_dragging_ = false;
     drag_axis_ = GizmoAxis::None;
+    keyboard_.active = false;
+    swallow_pointer_ = false;
     deep_select_armed_ = false;
     deep_select_open_ = false;
     deep_candidates_.clear();

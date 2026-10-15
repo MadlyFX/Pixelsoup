@@ -24,6 +24,7 @@ public:
       rhi::Device &device,
       std::size_t capacity =
           default_library_thumbnail_texture_capacity) noexcept;
+  ~LibraryThumbnailTextureCache();
 
   LibraryThumbnailTextureCache(const LibraryThumbnailTextureCache &) = delete;
   LibraryThumbnailTextureCache &
@@ -46,9 +47,9 @@ public:
   upload(rhi::CommandList &commands, const assets::DerivativeKey &key,
          const render::DecodedFrame &frame) noexcept;
 
-  // Keeps exactly the listed resident keys. It never creates a key or loads
-  // content; callers should apply this after prior GPU work is submitted and
-  // before uploading the next frame's requested thumbnails.
+  // Removes unlisted keys from lookup immediately, retaining their storage
+  // until the last GPU use completes. Resident plus retiring storage is
+  // bounded to twice capacity; uploads refuse while that budget is occupied.
   void retain(std::span<const assets::DerivativeKey> keys) noexcept;
   void clear() noexcept;
   // Project replacement is an explicit residency fence even if a new
@@ -68,11 +69,14 @@ private:
   };
 
   using EntryList = std::list<Entry>;
+  void collect() noexcept;
+  void retire(EntryList::iterator entry) noexcept;
 
   rhi::Device *device_{};
   std::size_t capacity_{};
   core::u64 project_generation_{};
   EntryList entries_;
+  EntryList retiring_;
 };
 
 } // namespace mediaserver::editor

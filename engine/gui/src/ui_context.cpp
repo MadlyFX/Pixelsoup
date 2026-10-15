@@ -546,10 +546,32 @@ void UiContext::label(const Rect& bounds, std::string_view text) {
 }
 
 void UiContext::label(const Rect& bounds, std::string_view text, UiColor color) {
+    if (bounds.width <= 0.0F || bounds.height <= 0.0F) return;
     list_.push_clip(bounds.x, bounds.y, std::max(bounds.width, 0.0F), std::max(bounds.height, 0.0F));
-    draw_label(list_, font_, bounds, bounds.x, text, color);
+    if (font_width(text) > bounds.width) {
+        // Never leave a half glyph at a dock edge. Keep the complete label on
+        // hover, and shorten on UTF-8 boundaries for the visible line.
+        constexpr std::string_view ellipsis{"..."};
+        const float room = bounds.width - font_width(ellipsis);
+        std::size_t end = 0U;
+        float used = 0.0F;
+        while (end < text.size()) {
+            std::size_t next = end + 1U;
+            while (next < text.size() && is_continuation(text[next])) ++next;
+            const float advance = font_width(text.substr(end, next - end));
+            if (used + advance > room) break;
+            used += advance;
+            end = next;
+        }
+        if (room >= 0.0F) {
+            draw_label(list_, font_, bounds, bounds.x, text.substr(0U, end), color);
+            draw_label(list_, font_, bounds, bounds.x + used, ellipsis, color);
+        }
+        tooltip(bounds, text);
+    } else {
+        draw_label(list_, font_, bounds, bounds.x, text, color);
+    }
     list_.pop_clip();
-    if (font_width(text) > bounds.width) tooltip(bounds, text);
 }
 
 void UiContext::tooltip(const Rect& bounds, std::string_view text) {
@@ -921,6 +943,9 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::ZoomIn:
         case Key::ZoomOut:
         case Key::ZoomReset:
+        case Key::ClearLocation:
+        case Key::ClearRotation:
+        case Key::ClearScale:
             // Global shortcuts. A text field deliberately leaves document
             // history to its caller; Escape is the field-local way to abandon
             // typing.
@@ -1075,7 +1100,10 @@ bool UiContext::edit_field(UiId id, const Rect& bounds, std::string& value,
                        width_to(font_, shown, shown.size()) + 2.0F, height,
                        theme_.selection);
     }
-    draw_label(list_, font_, bounds, inner.x - scroll, shown, theme_.text);
+    if (focused || masked)
+        draw_label(list_, font_, bounds, inner.x - scroll, shown, theme_.text);
+    else
+        label({inner.x, bounds.y, inner.width, bounds.height}, shown, theme_.text);
     if (focused && !select_all_) {
         const bool visible = std::fmod(time_ - blink_base_, 1.0) < 0.5;
         if (visible) {

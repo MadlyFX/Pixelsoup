@@ -1,4 +1,6 @@
 #pragma once
+
+#include <mediaserver/editor/file_picker.hpp>
 #include <mediaserver/core/frame_timing.hpp>
 #include <mediaserver/core/render_conformance.hpp>
 
@@ -1052,6 +1054,7 @@ struct EnvironmentKeyEdit final {
 };
 
 struct SceneSettingsFrame final {
+  std::optional<FilePickerRequest> file_picker;
   ProjectSettingsFrame project;
   std::vector<EnvironmentKeyEdit> keys;
 };
@@ -1061,6 +1064,7 @@ struct SceneSettingsFrame final {
 // environment values use the same channels and diamonds as object properties.
 class SceneSettingsPanel final {
 public:
+  void set_bake_destination(std::string path) { bake_destination_ = std::move(path); }
   [[nodiscard]] SceneSettingsFrame draw(gui::UiContext& ctx, const gui::Rect& bounds,
       SceneSettingsTarget target, const ProjectSettingsState& state,
       std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
@@ -1071,7 +1075,7 @@ private:
   doc::NodeId stage_{};
   float scroll_{};
   float content_height_{};
-  std::array<bool, 10> sections_{{true,true,true,false,false,false,true,true,false,false}};
+  std::array<bool, 10> sections_{{true,false,false,false,false,false,true,false,false,false}};
   std::string bake_destination_{"lighting"};
 };
 

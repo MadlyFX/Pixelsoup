@@ -22,6 +22,38 @@ Other Windows demonstrations are:
 .\scripts\run-wall-demo.ps1   # Director preview plus two feed-mapped outputs
 ```
 
+## Find your way around the editor
+
+The initial workspace puts Scene and Library on the left, Stage in the center,
+Properties on the right, and Timeline below Stage. Compositor shares the bottom
+area as a tab alongside Output Monitor; Program Output shares Stage's dock. Select an object on Stage or
+in Scene to edit it in Properties. Import content in Library, then drag it onto
+Stage or a Timeline track. Additional panels are available in the Window menu.
+Saved workspaces retain their dock arrangement. **View > Reset Workspace**
+restores this starting layout when you want to adopt it or undo dock rearrangements.
+
+Properties groups placement, source, appearance, and effects in that order.
+Model animation, surface layers, baking, and Blender connection details open
+when their section headers are clicked. Delete is at the end of the panel.
+**Add effect...** opens a picker beside the Properties button. Choose an effect
+to append it to the selected elements; its controls then appear in the stack.
+The button stays available after adding an effect. Locked and incompatible
+selection members are skipped, and one addition is one undo step.
+Long numeric labels stack above their controls when the dock is narrow; shortened
+names and paths show their full text on hover. Selecting another object returns
+Properties to the top. Ctrl+= and Ctrl+- adjust interface size; Ctrl+0 resets it.
+
+**Browse...** opens a native file picker for a light's IES profile, the renderer's
+Show LUT (`.cube`), or the Environment map (`.hdr` / `.exr`). Choosing a file
+applies that path; Cancel leaves the document unchanged. Typed IES paths use
+**Apply**; **Clear** removes the profile. Baked lighting's **Bake folder** picker
+sets the export destination, and **Bake lighting** starts the bake. Content's
+Source row shows the file name with its full path on hover.
+
+Object and effect icons use a neutral palette; shape and labels identify their
+types. Blue marks selection and active tools, while health colors report actual
+output states. User-assigned marker colors remain available.
+
 ## Run across two machines
 
 The demo above puts everything on one machine. To drive a render machine from a
@@ -537,6 +569,12 @@ decoded through the renderer and uploaded on the editor's own GPU device into a
 64-entry retained texture cache. Cache files are disposable and never enter a
 project save, command stream, placement, or content manifest.
 
+Leaving Library or Timeline removes unused previews from lookup immediately.
+Their textures remain alive until earlier UI frames finish using them on the
+GPU. Both preview caches have a bounded retirement reserve; when it is full,
+new preview uploads retry after completion instead of waiting on the control
+thread. Editor shutdown finishes GPU work before releasing scene and UI images.
+
 ## Render-node lifecycle control
 
 The normal Director/node session exists only after a node process is running.
@@ -807,6 +845,42 @@ The fly keys go by position, so they sit under the left hand on any keyboard
 layout; while a camera drag is held they never trigger timeline shortcuts.
 Alt+left and a left press during a right or middle drag never pick or move what
 is under the pointer.
+
+### Moving, rotating and scaling on Stage
+
+The Stage toolbar's `MOVE`, `ROTATE` and `SCALE` choose the gizmo drawn on the
+selection. It sits at the selection's median point, and everything selected
+moves, turns and scales about that point. Move shows axis arrows, Rotate shows
+an axis ring per axis plus an outer white ring that turns about your view, and
+Scale shows axis handles plus an outer ring that scales uniformly. A plain drag
+on an element still moves it across the view. `GLOBAL` / `LOCAL` sets whether
+arrows and rings follow the world axes or the primary element's own; scale
+handles always use the element's own axes.
+
+The Blender keys work while the pointer is over Stage, with no button held:
+
+| Keys | Transform |
+| --- | --- |
+| G / R / S | Move / rotate / scale with the pointer (also picks the gizmo) |
+| X, Y or Z | Constrain to that axis; again for the other orientation; a third time frees it |
+| Shift+X, Y or Z | Constrain to the plane without that axis (scale the other two) |
+| Digits, `.`, `-` | Type an exact distance in metres, angle in degrees, or factor |
+| Shift (held) | Move the pointer at a tenth of the speed |
+| Ctrl (held) | Invert snapping for this transform or drag |
+| Enter or left click | Confirm |
+| Esc or right click | Cancel and put the selection back |
+| Alt+G / Alt+R / Alt+S | Clear position, rotation or scale |
+| Shift+Tab | Toggle `SNAP` |
+
+While a keyboard transform runs, a bar at the top of Stage names the tool,
+constraint and value, and the keyboard belongs to it: timeline, cue and fly
+keys stand down until it ends, and the whole transform is one undo step.
+`SNAP` rounds the change rather than the absolute value: moves to 1 m,
+rotation to 5 degrees, scale to 0.1, or 0.1 m, 1 degree and 0.01 with Shift
+held. A component that is keyed takes a key at the current frame, exactly as
+an Inspector edit would. A Blender-linked object takes a rotate or scale as
+a placement override on its occurrence, the same way it takes a move. Lights
+are only placed from the viewport, and a camera turns but has no scale.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 Ctrl toggles membership and Shift selects a visible range; the Inspector shows

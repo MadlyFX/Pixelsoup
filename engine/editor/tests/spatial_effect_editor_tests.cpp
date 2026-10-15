@@ -152,7 +152,7 @@ void inspector_authors_exact_box_blur_properties() {
 
   InspectorHarness radius;
   radius.effects.push_back(effect);
-  const editor::InspectorFrame radius_edit = radius.commit(493.0F, "999");
+  const editor::InspectorFrame radius_edit = radius.commit(463.0F, "999");
   SPATIAL_EDITOR_CHECK(radius_edit.component_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(radius_edit.component_edits.front().node ==
                        effect.source);
@@ -164,7 +164,7 @@ void inspector_authors_exact_box_blur_properties() {
 
   InspectorHarness passes;
   passes.effects.push_back(effect);
-  const editor::InspectorFrame passes_edit = passes.commit(519.0F, "0");
+  const editor::InspectorFrame passes_edit = passes.commit(489.0F, "0");
   SPATIAL_EDITOR_CHECK(passes_edit.named_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(passes_edit.named_edits.front().property ==
                        scene::schema::box_blur_passes);
@@ -180,7 +180,7 @@ void inspector_authors_canonical_directional_blur_properties() {
 
   InspectorHarness length;
   length.effects.push_back(effect);
-  const editor::InspectorFrame length_edit = length.commit(493.0F, "999");
+  const editor::InspectorFrame length_edit = length.commit(463.0F, "999");
   SPATIAL_EDITOR_CHECK(length_edit.component_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(length_edit.component_edits.front().component ==
                        scene::PropertyChannel::DirectionalBlurLength);
@@ -189,7 +189,7 @@ void inspector_authors_canonical_directional_blur_properties() {
 
   InspectorHarness angle;
   angle.effects.push_back(effect);
-  const editor::InspectorFrame angle_edit = angle.commit(519.0F, "1.25");
+  const editor::InspectorFrame angle_edit = angle.commit(489.0F, "1.25");
   SPATIAL_EDITOR_CHECK(angle_edit.named_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(angle_edit.named_edits.front().property ==
                        scene::schema::directional_blur_angle_turns);
@@ -204,10 +204,10 @@ void inspector_keys_primary_spatial_parameters() {
   box.box_blur = scene::BoxBlurParameters{7U, 2U};
   InspectorHarness box_harness;
   box_harness.effects.push_back(box);
-  static_cast<void>(box_harness.frame(90.0F, 493.0F, false));
-  static_cast<void>(box_harness.frame(90.0F, 493.0F, true));
+  static_cast<void>(box_harness.frame(90.0F, 463.0F, false));
+  static_cast<void>(box_harness.frame(90.0F, 463.0F, true));
   const editor::InspectorFrame box_key =
-      box_harness.frame(90.0F, 493.0F, false);
+      box_harness.frame(90.0F, 463.0F, false);
   SPATIAL_EDITOR_CHECK(box_key.key_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(box_key.key_edits.front().node == box.source);
   SPATIAL_EDITOR_CHECK(box_key.key_edits.front().component ==
@@ -222,10 +222,10 @@ void inspector_keys_primary_spatial_parameters() {
       scene::DirectionalBlurParameters{12.0F, 0.125F};
   InspectorHarness directional_harness;
   directional_harness.effects.push_back(directional);
-  static_cast<void>(directional_harness.frame(90.0F, 493.0F, false));
-  static_cast<void>(directional_harness.frame(90.0F, 493.0F, true));
+  static_cast<void>(directional_harness.frame(90.0F, 463.0F, false));
+  static_cast<void>(directional_harness.frame(90.0F, 463.0F, true));
   const editor::InspectorFrame directional_key =
-      directional_harness.frame(90.0F, 493.0F, false);
+      directional_harness.frame(90.0F, 463.0F, false);
   SPATIAL_EDITOR_CHECK(directional_key.key_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(directional_key.key_edits.front().node ==
                        directional.source);
@@ -244,7 +244,7 @@ void inspector_authors_and_keys_primary_keyer_mix() {
   InspectorHarness chroma_edit_harness;
   chroma_edit_harness.effects.push_back(chroma);
   const editor::InspectorFrame chroma_edit =
-      chroma_edit_harness.commit(645.0F, "2");
+      chroma_edit_harness.commit(615.0F, "2");
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(chroma_edit.component_edits.front().node ==
                        chroma.source);
@@ -260,10 +260,10 @@ void inspector_authors_and_keys_primary_keyer_mix() {
 
   InspectorHarness luma_key_harness;
   luma_key_harness.effects.push_back(luma);
-  static_cast<void>(luma_key_harness.frame(90.0F, 623.0F, false));
-  static_cast<void>(luma_key_harness.frame(90.0F, 623.0F, true));
+  static_cast<void>(luma_key_harness.frame(90.0F, 593.0F, false));
+  static_cast<void>(luma_key_harness.frame(90.0F, 593.0F, true));
   const editor::InspectorFrame luma_key =
-      luma_key_harness.frame(90.0F, 623.0F, false);
+      luma_key_harness.frame(90.0F, 593.0F, false);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.size() == 1U);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.front().node == luma.source);
   SPATIAL_EDITOR_CHECK(luma_key.key_edits.front().component ==
@@ -413,11 +413,11 @@ void renderer_defaults_force_directional_taps_odd() {
     return frame(x, y, false);
   };
   // Collapse Rendering, expand Effect Defaults, and type an even tap count.
-  static_cast<void>(click(30.0F, 61.0F));
-  static_cast<void>(click(30.0F, 121.0F));
-  static_cast<void>(click(200.0F, 225.0F));
-  static_cast<void>(frame(200.0F, 225.0F, false, "34"));
-  const auto result = frame(200.0F, 225.0F, false, {}, true);
+  static_cast<void>(click(30.0F, 71.0F));
+  static_cast<void>(click(30.0F, 151.0F));
+  static_cast<void>(click(200.0F, 279.0F));
+  static_cast<void>(frame(200.0F, 279.0F, false, "34"));
+  const auto result = frame(200.0F, 279.0F, false, {}, true);
   SPATIAL_EDITOR_CHECK(result.project.apply.has_value());
   SPATIAL_EDITOR_CHECK(result.project.apply->settings.directional_blur_taps == 35U);
   SPATIAL_EDITOR_CHECK((result.project.apply->settings.directional_blur_taps & 1U) == 1U);

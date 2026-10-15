@@ -13,6 +13,23 @@ LibraryThumbnailTextureCache::LibraryThumbnailTextureCache(
       capacity_(
           std::min(capacity, maximum_library_thumbnail_texture_capacity)) {}
 
+LibraryThumbnailTextureCache::~LibraryThumbnailTextureCache() {
+  const auto busy = [](const Entry& entry) { return !entry.texture.safe_to_release(); };
+  if (std::any_of(entries_.begin(), entries_.end(), busy) ||
+      std::any_of(retiring_.begin(), retiring_.end(), busy))
+    device_->wait_idle();
+}
+
+void LibraryThumbnailTextureCache::collect() noexcept {
+  for (auto entry = retiring_.begin(); entry != retiring_.end();)
+    entry = entry->texture.safe_to_release() ? retiring_.erase(entry) : std::next(entry);
+}
+
+void LibraryThumbnailTextureCache::retire(EntryList::iterator entry) noexcept {
+  if (entry->texture.safe_to_release()) entries_.erase(entry);
+  else retiring_.splice(retiring_.end(), entries_, entry);
+}
+
 const rhi::Texture *
 LibraryThumbnailTextureCache::find(const assets::DerivativeKey &key) noexcept {
   const auto found =
@@ -42,6 +59,9 @@ const rhi::Texture *LibraryThumbnailTextureCache::upload(
       frame.pixels.size() != expected_bytes) {
     return nullptr;
   }
+  collect();
+  if (entries_.size() >= capacity_) retire(entries_.begin());
+  if (entries_.size() + retiring_.size() >= capacity_ * 2U) return nullptr;
 
   rhi::TextureDesc desc{};
   desc.width = library_thumbnail_texture_width;
@@ -60,25 +80,28 @@ const rhi::Texture *LibraryThumbnailTextureCache::upload(
   }
   EntryList::iterator inserted = std::prev(entries_.end());
   if (!commands.upload(inserted->texture, frame.pixels)) {
-    entries_.erase(inserted);
+    // Even a refused upload may have recorded texture transitions or copies.
+    retire(inserted);
     return nullptr;
-  }
-  while (entries_.size() > capacity_) {
-    entries_.pop_front();
   }
   return &inserted->texture;
 }
 
 void LibraryThumbnailTextureCache::retain(
     std::span<const assets::DerivativeKey> keys) noexcept {
+  collect();
   for (auto entry = entries_.begin(); entry != entries_.end();) {
     const bool retained =
         std::find(keys.begin(), keys.end(), entry->key) != keys.end();
-    entry = retained ? std::next(entry) : entries_.erase(entry);
+    auto current = entry++;
+    if (!retained) retire(current);
   }
 }
 
-void LibraryThumbnailTextureCache::clear() noexcept { entries_.clear(); }
+void LibraryThumbnailTextureCache::clear() noexcept {
+  collect();
+  while (!entries_.empty()) retire(entries_.begin());
+}
 
 void LibraryThumbnailTextureCache::reset(
     core::u64 project_generation) noexcept {

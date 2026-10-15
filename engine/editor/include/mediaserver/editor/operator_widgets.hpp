@@ -37,8 +37,7 @@ inline constexpr float twirl_width = 16.0F;
 // 1204"). Never a path or an internal identifier.
 [[nodiscard]] std::string element_display_name(const ElementInfo &element);
 
-// The kind's own tint: quiet enough that rendered content stays the most
-// saturated thing on screen, distinct enough to find the lights in a list.
+// Neutral marks; icon shape identifies the kind without an arbitrary palette.
 [[nodiscard]] gui::UiColor element_kind_color(const ElementInfo &element) noexcept;
 [[nodiscard]] gui::UiColor element_kind_color(ElementKind kind) noexcept;
 

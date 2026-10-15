@@ -117,18 +117,8 @@ point_in_polygon(float x, float y,
 }
 
 [[nodiscard]] gui::UiColor
-channel_color(scene::PropertyChannel property) noexcept {
-  constexpr std::array<gui::UiColor, 8U> palette{{
-      {0.93F, 0.36F, 0.35F, 1.0F},
-      {0.35F, 0.76F, 0.96F, 1.0F},
-      {0.42F, 0.88F, 0.52F, 1.0F},
-      {0.95F, 0.69F, 0.29F, 1.0F},
-      {0.72F, 0.48F, 0.96F, 1.0F},
-      {0.32F, 0.88F, 0.82F, 1.0F},
-      {0.96F, 0.45F, 0.72F, 1.0F},
-      {0.76F, 0.82F, 0.34F, 1.0F},
-  }};
-  return palette[static_cast<std::size_t>(property) % palette.size()];
+channel_color(scene::PropertyChannel) noexcept {
+  return gui::UiColor{0.67F, 0.73F, 0.80F, 1.0F};
 }
 
 [[nodiscard]] std::string_view

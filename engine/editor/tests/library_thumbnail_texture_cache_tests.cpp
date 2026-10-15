@@ -209,7 +209,49 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 3U> cases{{
+void native_pending_draws_survive_retain_reset_and_budget_pressure() {
+  if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+  auto created = rhi::Device::create({.debug=true, .frames_in_flight=2,
+                                    .backend=rhi::BackendKind::D3d12});
+  CACHE_CHECK(created);
+  auto device = std::move(created).value();
+  editor::LibraryThumbnailTextureCache cache{device, 1};
+  auto acquired = device.acquire_commands();
+  CACHE_CHECK(acquired);
+  auto commands = std::move(acquired).value();
+  const auto first = thumbnail_key(201, 3), second = thumbnail_key(202, 7),
+             third = thumbnail_key(203, 11);
+  const auto frame = solid_frame(19, 73, 181, 229);
+  const auto* texture = cache.upload(commands, first, frame);
+  CACHE_CHECK(texture && !texture->safe_to_release());
+  auto readback = device.create_readback(editor::library_thumbnail_texture_width *
+                                       editor::library_thumbnail_texture_height * 4);
+  CACHE_CHECK(readback && commands.download(*texture, readback.value()));
+  // Hiding Library drops its keys while the prior UI recording still owns
+  // the image. The copy must retain its original pixels through that removal.
+  cache.retain({});
+  CACHE_CHECK(cache.size() == 0 && !cache.find(first));
+  CACHE_CHECK(cache.upload(commands, second, frame));
+  cache.reset(48);
+  CACHE_CHECK(cache.project_generation() == 48 && cache.size() == 0);
+  CACHE_CHECK(!cache.upload(commands, third, frame)); // both slots still owned
+  auto submitted = device.submit(std::move(commands));
+  CACHE_CHECK(submitted && submitted.value().wait());
+  const auto pixels = readback.value().map();
+  CACHE_CHECK(pixels.size() == frame.pixels.size());
+  CACHE_CHECK(pixels[0] == 19 && pixels[1] == 73 && pixels[2] == 181 && pixels[3] == 229);
+  readback.value().unmap();
+  // Completion releases the budget without a blocking wait in cache calls.
+  auto retry = device.acquire_commands();
+  CACHE_CHECK(retry);
+  CACHE_CHECK(cache.upload(retry.value(), third, frame));
+  auto retried = device.submit(std::move(retry).value());
+  CACHE_CHECK(retried && retried.value().wait());
+}
+
+constexpr std::array<Case, 4U> cases{{
+    {"native pending draws survive retain reset and budget pressure",
+     &native_pending_draws_survive_retain_reset_and_budget_pressure},
     {"an exact key uploads one sampled texture",
      &an_exact_key_uploads_one_sampled_texture},
     {"full derivative keys drive LRU and exact retain",

@@ -72,30 +72,29 @@ constexpr float light_intensity_y = 126.0F;
 constexpr float light_row_pitch = 26.0F;
 constexpr float light_position_y = light_intensity_y + 3.0F * light_row_pitch;
 constexpr float light_range_y = light_position_y + light_row_pitch;
-// A track's SCREEN section: TRANSFORM ends with its key note at 170, the
-// Delete row runs 178..200, then the section header 204..228 and its two rows.
+// A track's SCREEN section follows TRANSFORM at 174..198, then its two rows.
 // The raster row carries two fields rather than three, so its columns are 93.2
 // wide from x = 99.6.
-constexpr float screen_raster_y = 243.0F;
-constexpr float screen_aspect_y = 269.0F;
+constexpr float screen_raster_y = 213.0F;
+constexpr float screen_aspect_y = 239.0F;
 constexpr float raster_width_x = 145.0F;
 constexpr float raster_height_x = 243.0F;
 
 // A camera's sections: TRANSFORM is header 44..68 then Position and Rotation
 // (no Scale) and its key note, CAMERA's header is 144..168 then FOV, Shutter,
-// Focus and Aperture, then the Delete row and TRACKING. TRACKING's first row
+// Focus and Aperture, then TRACKING. TRACKING's first row
 // is None; each authored feed is one 22-pixel row four pixels below.
 constexpr float camera_position_y = 83.0F;
 constexpr float camera_rotation_y = 109.0F;
 constexpr float camera_fov_y = 183.0F;
-constexpr float tracking_none_y = 349.0F;
-constexpr float tracking_first_source_y = 375.0F;
-constexpr float tracking_second_source_y = 401.0F;
+constexpr float tracking_none_y = 319.0F;
+constexpr float tracking_first_source_y = 345.0F;
+constexpr float tracking_second_source_y = 371.0F;
 // The bound feed's own rows follow the list and the "+ New feed" button:
 // State, Protocol, Port, Camera ID, then the three lens rows.
-constexpr float tracker_state_y = 401.0F;
-constexpr float tracker_protocol_y = 427.0F;
-constexpr float tracker_port_y = 453.0F;
+constexpr float tracker_state_y = 371.0F;
+constexpr float tracker_protocol_y = 397.0F;
+constexpr float tracker_port_y = 423.0F;
 constexpr float well_x = 150.0F;
 
 const doc::NodeId feed{42U};
@@ -174,6 +173,18 @@ struct Harness final {
     core::u64 show_frame{50U};
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
+
+    float control_y(std::string_view name, std::size_t salt = 1000U) {
+        core::u64 id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
+        for (const char c : name) { id ^= static_cast<core::u8>(c); id *= 1099511628211ULL; }
+        id ^= static_cast<core::u64>(salt) + 0x9E3779B9ULL;
+        id *= 1099511628211ULL;
+        for (float y = 10.0F; y < 1750.0F; y += 4.0F) {
+            static_cast<void>(frame(40.0F, y, false, {0,0,300,1800}));
+            if (ctx.hot() == id) return y;
+        }
+        throw std::runtime_error{"Control not reachable: " + std::string{name}};
+    }
 
     editor::InspectorFrame frame(
         float x, float y, bool down,
@@ -567,10 +578,9 @@ void an_empty_selection_ends_an_edit_in_progress() {
 
 void the_delete_button_asks_the_shell_to_remove_the_selection() {
     Harness h;
-    // The button sits below the transform rows: header, section, three rows, the
-    // rotation note, then a gap.
+    // Delete follows the editing sections and must remain reachable.
     constexpr float delete_x = 40.0F;
-    constexpr float delete_y = 190.0F;
+    const float delete_y = h.control_y("delete", 0U);
     static_cast<void>(h.frame(delete_x, delete_y, false));
     static_cast<void>(h.frame(delete_x, delete_y, true));
     const editor::InspectorFrame released =
@@ -589,7 +599,7 @@ void an_effect_remove_button_requests_true_node_deletion() {
     // row. It reports the first-class effect identity, not an enabled=false
     // property edit, so the authoring boundary can erase it and its channels.
     constexpr float remove_x = 250.0F;
-    constexpr float remove_y = 470.0F;
+    constexpr float remove_y = 440.0F;
     static_cast<void>(h.frame(remove_x, remove_y, false));
     static_cast<void>(h.frame(remove_x, remove_y, true));
     const editor::InspectorFrame released =
@@ -611,7 +621,7 @@ void an_effect_eye_switches_it_off_without_deleting_it() {
     // it. It authors the document's own enabled flag, so the effect, its
     // parameters, and its key channels all survive being switched off.
     constexpr float eye_x = 15.0F;
-    constexpr float eye_y = 470.0F;
+    constexpr float eye_y = 440.0F;
     static_cast<void>(h.frame(eye_x, eye_y, false));
     static_cast<void>(h.frame(eye_x, eye_y, true));
     const editor::InspectorFrame off = h.frame(eye_x, eye_y, false);
@@ -649,7 +659,7 @@ void an_animated_effect_displays_and_keys_its_evaluated_value() {
     // The Blur radius row follows its title row near the bottom of the panel.
     // At frame 50 its evaluated radius is 5, even though the base is 1.
     constexpr float effect_key_x = 90.0F;
-    constexpr float effect_value_y = 493.0F;
+    constexpr float effect_value_y = 463.0F;
     static_cast<void>(h.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(h.frame(effect_key_x, effect_value_y, true));
     const editor::InspectorFrame keyed =
@@ -690,7 +700,7 @@ void saturation_amount_clamps_and_its_filled_key_erases() {
 
     constexpr float effect_key_x = 90.0F;
     constexpr float effect_field_x = 150.0F;
-    constexpr float effect_value_y = 493.0F;
+    constexpr float effect_value_y = 463.0F;
     static_cast<void>(
         keyed_harness.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(
@@ -743,7 +753,7 @@ void film_grain_amount_uses_its_typed_value_and_keyframe_channel() {
 
     constexpr float effect_key_x = 90.0F;
     constexpr float effect_field_x = 150.0F;
-    constexpr float effect_value_y = 493.0F;
+    constexpr float effect_value_y = 463.0F;
     static_cast<void>(keyed.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(keyed.frame(effect_key_x, effect_value_y, true));
     const editor::InspectorFrame request =
@@ -774,7 +784,7 @@ void structured_effect_notes_open_their_dedicated_tabs() {
     levels.kind = scene::EffectKind::Levels;
     color.effects.push_back(levels);
     constexpr float open_x = 250.0F;
-    constexpr float color_open_y = 505.0F;
+    constexpr float color_open_y = 475.0F;
     static_cast<void>(color.frame(open_x, color_open_y, false));
     static_cast<void>(color.frame(open_x, color_open_y, true));
     const editor::InspectorFrame color_opened =
@@ -789,7 +799,7 @@ void structured_effect_notes_open_their_dedicated_tabs() {
     grain.kind = scene::EffectKind::FilmGrain;
     grain.film_grain.amount = 0.25F;
     texture.effects.push_back(grain);
-    constexpr float texture_open_y = 520.0F;
+    constexpr float texture_open_y = 490.0F;
     static_cast<void>(texture.frame(open_x, texture_open_y, false));
     static_cast<void>(texture.frame(open_x, texture_open_y, true));
     const editor::InspectorFrame texture_opened =
@@ -812,7 +822,7 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
     Harness color;
     color.effects.push_back(key);
     constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 900.0F};
-    constexpr float key_rgb_y = 515.0F;
+    constexpr float key_rgb_y = 485.0F;
     static_cast<void>(color.frame(field_x0, key_rgb_y, false, tall));
     static_cast<void>(color.frame(field_x0, key_rgb_y, true, tall));
     const editor::InspectorFrame changed =
@@ -825,7 +835,7 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
 
     Harness edge;
     edge.effects.push_back(key);
-    constexpr float edge_y = 593.0F;
+    constexpr float edge_y = 563.0F;
     static_cast<void>(edge.frame(150.0F, edge_y, false, tall));
     static_cast<void>(edge.frame(150.0F, edge_y, true, tall));
     const editor::InspectorFrame grown =
@@ -839,7 +849,7 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
     eyedropper.effects.push_back(key);
     // The compact icon button sits immediately beside the colour well.
     constexpr float pick_view_x = 279.0F;
-    constexpr float pick_view_y = 492.0F;
+    constexpr float pick_view_y = 462.0F;
     static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, false, tall));
     static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, true, tall));
     const editor::InspectorFrame requested =
@@ -866,7 +876,7 @@ void luma_key_exposes_threshold_softness_invert_and_mix() {
     key.luma_key.high_softness = 0.15F;
     h.effects.push_back(key);
     constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 720.0F};
-    constexpr float invert_y = 597.0F;
+    constexpr float invert_y = 567.0F;
     static_cast<void>(h.frame(180.0F, invert_y, false, tall));
     static_cast<void>(h.frame(180.0F, invert_y, true, tall));
     const editor::InspectorFrame inverted =
@@ -913,7 +923,7 @@ void multi_selection_reports_equal_values_and_mixed_values_truthfully() {
     content.primary = first.node;
     const editor::InspectorFrame content_mixed =
         content.frame(0.0F, 0.0F, false);
-    UI_CHECK(content_mixed.mixed_fields == 2U);
+    UI_CHECK(content_mixed.mixed_fields == 1U);
 }
 
 void a_typed_absolute_value_fans_out_even_when_it_matches_the_primary() {
@@ -926,7 +936,7 @@ void a_typed_absolute_value_fans_out_even_when_it_matches_the_primary() {
     h.elements = {first, second};
     h.primary = first.node;
 
-    h.click(field_x0, position_y);
+    h.click(field_x0, (position_y + 22.0F));
     static_cast<void>(h.type("2.5", false, false));
     const editor::InspectorFrame committed = h.type("", true, false);
 
@@ -951,10 +961,10 @@ void a_multi_scrub_applies_one_delta_to_each_captured_start() {
     h.elements = {first, second};
     h.primary = first.node;
 
-    static_cast<void>(h.frame(field_x0, position_y, false));
-    static_cast<void>(h.frame(field_x0, position_y, true));
+    static_cast<void>(h.frame(field_x0, (position_y + 22.0F), false));
+    static_cast<void>(h.frame(field_x0, (position_y + 22.0F), true));
     const editor::InspectorFrame first_move =
-        h.frame(field_x0 + 50.0F, position_y, true);
+        h.frame(field_x0 + 50.0F, (position_y + 22.0F), true);
     UI_CHECK(first_move.component_edits.size() == 2U);
     UI_CHECK(near(first_move.component_edits[0].value, 1.5));
     UI_CHECK(near(first_move.component_edits[1].value, 10.5));
@@ -964,7 +974,7 @@ void a_multi_scrub_applies_one_delta_to_each_captured_start() {
     h.elements[0].position.x = 100.0F;
     h.elements[1].position.x = 200.0F;
     const editor::InspectorFrame second_move =
-        h.frame(field_x0 + 100.0F, position_y, true);
+        h.frame(field_x0 + 100.0F, (position_y + 22.0F), true);
     UI_CHECK(second_move.component_edits.size() == 2U);
     UI_CHECK(near(second_move.component_edits[0].value, 2.0));
     UI_CHECK(near(second_move.component_edits[1].value, 11.0));
@@ -986,10 +996,10 @@ void locked_and_incompatible_targets_are_listed_and_skipped() {
     h.elements = {object, media, locked, light};
     h.primary = object.node;
 
-    static_cast<void>(h.frame(field_x0, position_y, false));
-    static_cast<void>(h.frame(field_x0, position_y, true));
+    static_cast<void>(h.frame(field_x0, (position_y + 22.0F), false));
+    static_cast<void>(h.frame(field_x0, (position_y + 22.0F), true));
     const editor::InspectorFrame changed =
-        h.frame(field_x0 + 10.0F, position_y, true);
+        h.frame(field_x0 + 10.0F, (position_y + 22.0F), true);
 
     UI_CHECK(changed.component_edits.size() == 2U);
     UI_CHECK(changed.component_edits[0].node == object.node);
@@ -1003,7 +1013,7 @@ void locked_and_incompatible_targets_are_listed_and_skipped() {
 }
 
 void named_and_effect_fields_share_the_multi_edit_contract() {
-    constexpr float roughness_y = 287.0F;
+    constexpr float roughness_y = 279.0F;
     MultiHarness material;
     editor::ElementInfo first = make_object();
     first.material.roughness = 0.2F;
@@ -1022,7 +1032,7 @@ void named_and_effect_fields_share_the_multi_edit_contract() {
     UI_CHECK(near(material_edit.named_edits[0].value, 0.3));
     UI_CHECK(near(material_edit.named_edits[1].value, 0.8));
 
-    constexpr float effect_value_y = 493.0F;
+    constexpr float effect_value_y = 485.0F;
     MultiHarness effect;
     effect.elements = {first, second};
     effect.primary = first.node;
@@ -1400,6 +1410,24 @@ void ies_profile_path_apply_clear_and_rotation() {
     UI_CHECK(rotation.named_edits[0].value == 0.25);
 }
 
+void ies_browse_requests_only_compatible_unlocked_targets() {
+    MultiHarness h;
+    auto point = make_point_light();
+    point.ies_source = "C:/fixtures/current.ies";
+    auto spot = point; spot.node = doc::NodeId{6U}; spot.local_kind = scene::LocalLightKind::Spot;
+    auto locked = point; locked.node = doc::NodeId{7U}; locked.locked = true;
+    auto area = point; area.node = doc::NodeId{8U}; area.local_kind = scene::LocalLightKind::Sphere;
+    h.elements = {point, spot, locked, area}; h.primary = point.node;
+    static_cast<void>(h.frame(260, 326, false));
+    static_cast<void>(h.frame(260, 326, true));
+    const auto result = h.frame(260, 326, false);
+    UI_CHECK(result.file_picker);
+    UI_CHECK(result.file_picker->kind == editor::FilePickerKind::IesProfile);
+    UI_CHECK(result.file_picker->current == "C:/fixtures/current.ies");
+    UI_CHECK(result.file_picker->targets == std::vector<doc::NodeId>{subject, doc::NodeId{6U}});
+    UI_CHECK(result.text_edits.empty());
+}
+
 void photometric_controls_and_spot_fields_author_real_values() {
     const auto press = [](Harness& h, float x, float y) {
         static_cast<void>(h.frame(x, y, false));
@@ -1454,12 +1482,17 @@ void model_animation_buttons_preserve_exact_start_frame() {
     bool enabled=false,loop=false,start=false;
     constexpr core::u64 exact_frame=9007199254740993ULL;
     const gui::Rect tall{0,0,300,1800};
+    Harness locator; locator.element.kind=editor::ElementKind::Model;
+    locator.element.linked=linked; locator.element.linked_animation=linked;
+    if (linked) locator.element.source="animated-assembly.msmodel";
+    const float animation_header=locator.control_y("MODEL ANIMATION");
     // Discover clickable rows through actual emitted edits, independent of
     // the expanded material/content sections above this model-only control.
     for (float y=10;y<1700 && !(enabled && loop && start);y+=4) {
         Harness h; h.element.kind=editor::ElementKind::Model; h.show_frame=exact_frame;
         h.element.linked=linked;h.element.linked_animation=linked;
         if (linked) h.element.source="animated-assembly.msmodel";
+        static_cast<void>(h.frame(40,animation_header,true,tall)); static_cast<void>(h.frame(40,animation_header,false,tall));
         static_cast<void>(h.frame(150,y,false,tall)); static_cast<void>(h.frame(150,y,true,tall));
         const auto result=h.frame(150,y,false,tall);
         for (const auto& edit:result.named_edits) {
@@ -1504,24 +1537,51 @@ void linked_placement_controls_emit_owned_edits() {
 
 void linked_collection_controls_target_the_attachment() {
     Harness h; h.element.linked=h.element.linked_collection=true; h.element.kind=editor::ElementKind::Group;
-    static_cast<void>(h.frame(140,147,false)); static_cast<void>(h.frame(140,147,true));
-    auto clicked=h.frame(140,147,false);
+    const float connection=h.control_y("BLENDER CONNECTION");
+    static_cast<void>(h.frame(40,connection,true)); static_cast<void>(h.frame(40,connection,false));
+    static_cast<void>(h.frame(140,175,false)); static_cast<void>(h.frame(140,175,true));
+    auto clicked=h.frame(140,175,false);
     UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="pause");
     h.element.linked_paused=true;
-    static_cast<void>(h.frame(140,147,true)); clicked=h.frame(140,147,false);
+    static_cast<void>(h.frame(140,175,true)); clicked=h.frame(140,175,false);
     UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="resume");
-    static_cast<void>(h.frame(140,173,true)); clicked=h.frame(140,173,false);
+    static_cast<void>(h.frame(140,201,true)); clicked=h.frame(140,201,false);
     UI_CHECK(clicked.text_edits.size()==1 && clicked.text_edits[0].value=="details");
     h.click(45,99); static_cast<void>(h.type("3.5",false,false)); const auto edit=h.type("",true,false);
     UI_CHECK(edit.named_edits.size()==1 && edit.named_edits[0].property=="link_stage_0" && near(edit.named_edits[0].value,3.5));
 }
 
-constexpr std::array<Case, 42U> cases{{
+void add_effect_picker_authors_a_choice_and_keeps_an_existing_stack() {
+    Harness h;
+    h.click(40.0F, h.control_y("effects.add", subject.value()));
+    UI_CHECK(h.type("", false, true).effect_adds.empty());
+    h.click(40.0F, h.control_y("effects.add", subject.value()));
+    static_cast<void>(h.nudge(gui::Key::Down));
+    static_cast<void>(h.nudge(gui::Key::Down));
+    const auto added = h.type("", true, false);
+    UI_CHECK(added.effect_adds.size() == 1);
+    UI_CHECK(added.effect_adds[0].target == subject);
+    UI_CHECK(added.effect_adds[0].kind == scene::EffectKind::Saturation);
+    UI_CHECK(added.effect_deletes.empty() && !added.panel_request);
+    h.effects.push_back(scene::EffectInstance{
+        doc::NodeId{81}, subject, scene::EffectKind::Saturation, 0, true, 1.5F});
+    h.click(40.0F, h.control_y("effects.add", subject.value()));
+    static_cast<void>(h.nudge(gui::Key::Down));
+    const auto appended = h.type("", true, false);
+    UI_CHECK(appended.effect_adds.size() == 1);
+    UI_CHECK(appended.effect_adds[0].kind == scene::EffectKind::Brightness);
+    UI_CHECK(appended.effect_deletes.empty());
+    UI_CHECK(h.effects.size() == 1 && near(h.effects[0].value, 1.5));
+}
+
+constexpr std::array<Case, 44U> cases{{
+    {"Add effect picks a kind and appends to existing stacks", &add_effect_picker_authors_a_choice_and_keeps_an_existing_stack},
     {"linked collection controls target the attachment", &linked_collection_controls_target_the_attachment},
     {"linked placement controls emit owned edits", &linked_placement_controls_emit_owned_edits},
     {"model animation controls preserve the exact show frame", &model_animation_buttons_preserve_exact_start_frame},
     {"area light shapes, dimensions, units and sides", &area_lights_are_authorable_from_the_inspector},
     {"IES path, apply, clear and rotation", &ies_profile_path_apply_clear_and_rotation},
+    {"IES Browse requests only compatible unlocked targets", &ies_browse_requests_only_compatible_unlocked_targets},
     {"photometric controls and spot fields author real values", &photometric_controls_and_spot_fields_author_real_values},
     {"a camera is placed and aimed rather than transformed",
      &a_camera_has_a_position_and_rotation_like_everything_else},

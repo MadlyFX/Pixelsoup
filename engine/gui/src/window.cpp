@@ -58,6 +58,21 @@ namespace {
             return Key::ZoomReset;
         }
     }
+    // Alt+G / Alt+R / Alt+S clear location, rotation and scale, as in
+    // Blender. Alt with a letter produces no text, so these arrive as keys.
+    // Ctrl excluded: AltGr arrives as Ctrl+Alt on Windows layouts.
+    if ((modifiers & SDL_KMOD_ALT) != 0U &&
+        (modifiers & SDL_KMOD_CTRL) == 0U) {
+        if (code == SDLK_G) {
+            return Key::ClearLocation;
+        }
+        if (code == SDLK_R) {
+            return Key::ClearRotation;
+        }
+        if (code == SDLK_S) {
+            return Key::ClearScale;
+        }
+    }
     switch (code) {
     case SDLK_BACKSPACE:
         return Key::Backspace;
@@ -266,6 +281,7 @@ struct UiWindow::Impl final {
     Impl& operator=(Impl&&) = delete;
 
     ~Impl() {
+        if (device) device->wait_idle();
         // Order is load-bearing: the swapchain hands the window back to the
         // device, so both must still exist when it goes.
         target = rhi::Texture{};

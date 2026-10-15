@@ -80,23 +80,31 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     return gui::ui_id(name) ^ 0x5CE0E5E77ULL ^ state.stage_node.value();
   };
   const auto row = [&] {
-    const gui::Rect r{body.x, y, body.width, 22.0F};
-    y += 26.0F;
+    const gui::Rect r{body.x, y, body.width, 26.0F};
+    y += 32.0F;
     return r;
   };
   const auto well = [&](const gui::Rect &r, std::string_view label) {
+    if (ctx.font_width(label) > label_width - 10.0F) {
+      ctx.label(r, label, ctx.theme().text_muted);
+      const auto field = row();
+      return field;
+    }
     ctx.label({r.x, r.y, label_width - 5.0F, r.height}, label,
               ctx.theme().text_muted);
     return gui::Rect{r.x + label_width, r.y,
                      std::max(r.width - label_width, 1.0F), r.height};
   };
   const auto section = [&](std::size_t index, std::string_view label) {
-    y += 4.0F;
+    y += 8.0F;
     const auto r = row();
     const auto interaction = ctx.grab(id(label), r);
     ctx.panel(r, ctx.theme().header);
     ctx.label({r.x + 7.0F, r.y, 12.0F, r.height}, sections_[index] ? "v" : ">");
-    ctx.label({r.x + 23.0F, r.y, r.width - 27.0F, r.height}, label);
+    std::string title{label};
+    for (std::size_t i = 1U; i < title.size(); ++i)
+      if (title[i] >= 'A' && title[i] <= 'Z') title[i] += 'a' - 'A';
+    ctx.label({r.x + 23.0F, r.y, r.width - 27.0F, r.height}, title);
     if (interaction.clicked)
       sections_[index] = !sections_[index];
     return sections_[index];
@@ -129,10 +137,17 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       changed = true;
     }
   };
-  const auto text = [&](std::string_view label, std::string &value) {
+  const auto file = [&](std::string_view label, std::string &value, FilePickerKind kind) {
+    ctx.label(row(), label, ctx.theme().text_muted);
     const auto r = row();
-    if (ctx.text_field(id(label), well(r, label), value))
+    constexpr float browse_width = 70.0F;
+    const gui::Rect path{r.x, r.y, std::max(r.width - browse_width - 6.0F, 1.0F), r.height};
+    if (ctx.text_field(id(label), path, value) && kind != FilePickerKind::BakeFolder)
       changed = true;
+    ctx.tooltip(path, value.empty() ? "Choose a file or enter a path" : value);
+    if (ctx.button(id(std::string{label} + ".browse"),
+                   {r.x + r.width - browse_width, r.y, browse_width, r.height}, "Browse..."))
+      result.file_picker = FilePickerRequest{kind, value, {}};
   };
   const auto object_choice = [&](std::string_view label, doc::NodeId &value) {
     std::vector<doc::NodeId> nodes{{}};
@@ -201,7 +216,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         changed = true;
       }
     }
-    const gui::Rect key{field.x + field.width + 2.0F, r.y, 20.0F, r.height};
+    const gui::Rect key{field.x + field.width + 2.0F, field.y, 20.0F, field.height};
     const auto interaction = ctx.grab(id(label) ^ 0xD1AULL, key);
     const float cx = key.x + 10.0F, cy = key.y + 11.0F;
     const auto color = interaction.hovered ? ctx.theme().accent
@@ -277,7 +292,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       if (section(2, "OUTPUT COLOR")) {
         choice("Display transform", renderer.color.display_transform,
                {"sRGB", "ACES Approximate", "ACES 1.3"});
-        text("Show LUT", renderer.color.show_lut_source);
+        file("Show LUT", renderer.color.show_lut_source, FilePickerKind::ShowLut);
         check("Dither", renderer.color.dither);
         if (state.color_status != ColorStatus::Ready &&
             !renderer.color.show_lut_source.empty())
@@ -344,7 +359,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         environment.physical_sky.angular_radius = degrees / 360.0F;
         number("Ground albedo", environment.physical_sky.ground_albedo, 0, 1);
       } else {
-        text("Environment map", environment.map_source);
+        file("Environment map", environment.map_source, FilePickerKind::EnvironmentMap);
         if (!environment.map_source.empty()) {
           environment_number("Intensity",
                              scene::PropertyChannel::EnvironmentIntensity, 0,
@@ -389,9 +404,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       number("Maximum X", environment.baked.maximum.x, -10000, 10000);
       number("Maximum Y", environment.baked.maximum.y, -10000, 10000);
       number("Maximum Z", environment.baked.maximum.z, -10000, 10000);
-      const auto r = row();
-      static_cast<void>(ctx.text_field(id("bake path"), well(r, "Bake path"),
-                                       bake_destination_));
+      file("Bake folder", bake_destination_, FilePickerKind::BakeFolder);
       if (!state.bake_status.empty()) {
         auto remaining=std::string_view{state.bake_status};
         const auto columns=static_cast<std::size_t>(std::max(16.0F,(bounds.width-24.0F)/8.0F));

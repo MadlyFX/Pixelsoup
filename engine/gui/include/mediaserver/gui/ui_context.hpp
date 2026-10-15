@@ -417,7 +417,8 @@ public:
         return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_ ||
                navigating_;
     }
-    // A viewport camera has the keyboard for movement until this is cleared.
+    // A viewport has the keyboard - camera movement keys, or a keyboard
+    // transform's axis letters and typed value - until this is cleared.
     void set_navigating(bool navigating) noexcept { navigating_ = navigating; }
     // Printable characters struck this frame while nothing is typing - the
     // single-key shortcuts a timeline lives on (Space, I, O, M). Empty while a
@@ -425,6 +426,14 @@ public:
     // the show.
     [[nodiscard]] std::string_view shortcut_text() const noexcept {
         return typing() ? std::string_view{} : input_.text();
+    }
+    // This frame's printable characters whoever has the keyboard. Only for
+    // the owner of a set_navigating() claim - a viewport running a keyboard
+    // transform reads its axis letters and typed value here while every
+    // other shortcut stands down.
+    [[nodiscard]] std::string_view claimed_text() const noexcept {
+        return focus_ == UiId{} && dropdown_id_ == 0U ? input_.text()
+                                                      : std::string_view{};
     }
 
     // Asks for a pointer shape this frame. Later requests win, so the topmost

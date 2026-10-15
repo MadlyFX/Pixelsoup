@@ -53,48 +53,34 @@ struct EffectDescription final {
   std::string_view group;
   std::string_view name;
   std::string_view description;
-  gui::UiColor color;
+  gui::UiColor color{0.67F, 0.73F, 0.80F, 1.0F};
 };
 
 constexpr std::array<EffectDescription, 14U> effects{{
-    {scene::EffectKind::Brightness, "COLOR", "Brightness", "Linear exposure multiplier",
-     gui::UiColor{0.980F, 0.760F, 0.260F, 1.0F}},
-    {scene::EffectKind::Saturation, "COLOR", "Saturation", "Colour intensity amount",
-     gui::UiColor{0.965F, 0.380F, 0.600F, 1.0F}},
-    {scene::EffectKind::Levels, "COLOR", "Levels", "Master and per-channel tonal range",
-     gui::UiColor{0.330F, 0.850F, 0.680F, 1.0F}},
+    {scene::EffectKind::Brightness, "COLOR", "Brightness", "Linear exposure multiplier"},
+    {scene::EffectKind::Saturation, "COLOR", "Saturation", "Colour intensity amount"},
+    {scene::EffectKind::Levels, "COLOR", "Levels", "Master and per-channel tonal range"},
     {scene::EffectKind::LiftGammaGain, "COLOR", "Lift / Gamma / Gain",
-     "RGB shadows, midtones, and highlights",
-     gui::UiColor{0.940F, 0.620F, 0.240F, 1.0F}},
+     "RGB shadows, midtones, and highlights"},
     {scene::EffectKind::ContrastPivot, "COLOR", "Contrast / Pivot",
-     "Contrast around an explicit tonal pivot",
-     gui::UiColor{0.720F, 0.480F, 0.980F, 1.0F}},
+     "Contrast around an explicit tonal pivot"},
     {scene::EffectKind::ColorMatrix, "COLOR", "Channel Mixer",
-     "3x3 RGB colour matrix and offset",
-     gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F}},
+     "3x3 RGB colour matrix and offset"},
     {scene::EffectKind::WhiteBalance, "COLOR", "White Balance",
-     "D65 temperature and tint adaptation",
-     gui::UiColor{0.980F, 0.700F, 0.420F, 1.0F}},
+     "D65 temperature and tint adaptation"},
     {scene::EffectKind::Curves, "COLOR", "Curves",
-     "Deterministic master and RGB tonal curves",
-     gui::UiColor{0.520F, 0.880F, 0.980F, 1.0F}},
+     "Deterministic master and RGB tonal curves"},
     {scene::EffectKind::ChromaKey, "KEYING", "Chroma Key",
-     "Colour-distance key with spill suppression",
-     gui::UiColor{0.300F, 0.900F, 0.430F, 1.0F}},
+     "Colour-distance key with spill suppression"},
     {scene::EffectKind::LumaKey, "KEYING", "Luma Key",
-     "Threshold key from source luminance",
-     gui::UiColor{0.780F, 0.820F, 0.880F, 1.0F}},
+     "Threshold key from source luminance"},
     {scene::EffectKind::Blur, "BLUR", "Gaussian Blur",
-     "Smooth separable Gaussian kernel",
-     gui::UiColor{0.420F, 0.710F, 1.000F, 1.0F}},
-    {scene::EffectKind::BoxBlur, "BLUR", "Box Blur", "Exact integer-radius box passes",
-     gui::UiColor{0.260F, 0.820F, 0.880F, 1.0F}},
+     "Smooth separable Gaussian kernel"},
+    {scene::EffectKind::BoxBlur, "BLUR", "Box Blur", "Exact integer-radius box passes"},
     {scene::EffectKind::DirectionalBlur, "BLUR", "Directional Blur",
-     "Centred line blur by length and angle",
-     gui::UiColor{0.620F, 0.500F, 0.980F, 1.0F}},
+     "Centred line blur by length and angle"},
     {scene::EffectKind::FilmGrain, "TEXTURE", "Film Grain",
-     "Frame-stable canvas-space texture",
-     gui::UiColor{0.760F, 0.720F, 0.580F, 1.0F}},
+     "Frame-stable canvas-space texture"},
 }};
 
 [[nodiscard]] constexpr const EffectDescription *
@@ -550,6 +536,21 @@ std::string_view EffectsPanel::dragging_name() const noexcept {
   }
   const EffectDescription *const effect = description_for(*dragging_);
   return effect != nullptr ? effect->name : std::string_view{};
+}
+
+std::optional<scene::EffectKind> draw_effect_picker(
+    gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds) {
+  if (ctx.button(id, bounds, "Add effect..."))
+    ctx.open_context_menu(id, bounds.x, bounds.y + bounds.height);
+  static constexpr auto names = [] {
+    std::array<std::string_view, effects.size()> result{};
+    for (std::size_t index = 0; index < effects.size(); ++index)
+      result[index] = effects[index].name;
+    return result;
+  }();
+  if (const auto chosen = ctx.context_menu(id, names))
+    return effects[*chosen].kind;
+  return std::nullopt;
 }
 
 } // namespace mediaserver::editor
