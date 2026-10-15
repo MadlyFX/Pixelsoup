@@ -64,7 +64,13 @@ separate control machine, start the editor half on the control machine:
 ```
 
 That opens the editor and a Director listener, and prints this machine's
-address and the port.
+address and the port. Without a script, double-click `media-server.exe` and
+press **OPEN EDITOR** in the window it opens: the editor starts as this
+machine's Director, listening on port 45060 on every interface unless File >
+Preferences stores another Director endpoint, show ID or epoch. Its
+write-ahead log lives in the per-user settings folder unless Preferences names
+one. On a machine not set up as a render machine the small window then closes;
+on a render machine it stays, so one computer can be both.
 
 **A render machine needs no command line.** Put `media-server.exe` on it, with
 the files beside it (the release package, or a GUI build directory), and

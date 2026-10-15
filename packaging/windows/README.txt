@@ -4,7 +4,13 @@ MEDIA SERVER 0.1.0 - WINDOWS X64 TEST BUILD
 This is an early test build. Extract the complete folder before launching; the
 DLL files beside media-server.exe are required.
 
-QUICK START ON ONE MACHINE
+OPEN THE EDITOR
+
+Double-click media-server.exe and press OPEN EDITOR at the bottom of the
+window. The editor opens as this machine's Director, listening for render
+machines on port 45060.
+
+QUICK START ON ONE MACHINE WITH A DEMO OUTPUT
 
 1. Open PowerShell in this folder.
 2. Run:
@@ -14,9 +20,12 @@ QUICK START ON ONE MACHINE
    This opens the operator editor and a lifecycle-supervised output window.
    Press Enter in the PowerShell window when you want to stop the demo.
 
-You can also launch an editor without the bundled demo node:
+You can also launch an editor without the bundled demo node from a prompt:
 
-     .\media-server.exe --role=director --playback --edit
+     .\media-server.exe --role=director --playback --edit `
+       --director-listen=0.0.0.0:45060 `
+       --show-id=0000000000000001000000000000000B `
+       --director-epoch=0000000000000003000000000000000C
 
 TWO OR MORE MACHINES
 

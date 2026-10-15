@@ -410,7 +410,33 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+void the_editor_opens_as_a_director_on_stored_or_default_identity() {
+    // Nothing stored: the editor needs a full Director identity to listen.
+    const auto fresh = app::editor_launch_arguments(persist::Preferences{});
+    RM_CHECK(contains(fresh, "--role=director"));
+    RM_CHECK(contains(fresh, "--playback"));
+    RM_CHECK(contains(fresh, "--edit"));
+    RM_CHECK(contains(fresh, "--director-listen=0.0.0.0:45060"));
+    RM_CHECK(contains(fresh, "--show-id=0000000000000001000000000000000B"));
+    RM_CHECK(contains(fresh, "--director-epoch=0000000000000003000000000000000C"));
+    RM_CHECK(fresh.size() == 6U);
+
+    // A stored identity is the editor's to read: passing it would also mark
+    // it as overridden by the command line in Preferences.
+    persist::Preferences stored{};
+    stored.director_listen = "10.1.2.3:45101";
+    stored.show_id = "000000000000000A000000000000000D";
+    stored.director_epoch = "000000000000000E000000000000000F";
+    const auto configured = app::editor_launch_arguments(stored);
+    RM_CHECK(configured.size() == 3U);
+    for (const std::string& argument : configured) {
+        RM_CHECK(!argument.starts_with("--director-listen=") &&
+                 !argument.starts_with("--show-id=") &&
+                 !argument.starts_with("--director-epoch="));
+    }
+}
+
+constexpr std::array<Case, 11U> cases{{
     {"a first launch has nothing stored and opens the form",
      &a_first_launch_has_nothing_stored_and_opens_the_form},
     {"the form is saved once and later launches start from it",
@@ -431,6 +457,8 @@ constexpr std::array<Case, 10U> cases{{
      &stored_settings_that_no_longer_work_reopen_the_form},
     {"firewall rules name their ports and replace themselves",
      &firewall_rules_name_their_ports_and_replace_themselves},
+    {"the editor opens as a director on stored or default identity",
+     &the_editor_opens_as_a_director_on_stored_or_default_identity},
 }};
 
 } // namespace

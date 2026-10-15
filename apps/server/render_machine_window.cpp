@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -364,6 +365,31 @@ int run_render_machine_window(RenderMachineWindowOptions options) {
                     ? std::string{}
                     : "Windows did not accept the change.";
             status.starts_at_sign_in = starts_at_sign_in(options.executable);
+            break;
+        }
+        case RenderMachineAction::OpenEditor: {
+            // Its WAL defaults to the working directory, so that is this
+            // user's settings folder rather than wherever Explorer started us.
+            std::filesystem::path working = options.executable.parent_path();
+            if (!options.preferences_file.empty()) {
+                std::error_code ignored;
+                const auto folder = options.preferences_file.parent_path();
+                std::filesystem::create_directories(folder, ignored);
+                if (std::filesystem::is_directory(folder, ignored)) {
+                    working = folder;
+                }
+            }
+            const std::string error = start_independent_process(
+                options.executable, editor_launch_arguments(options.stored),
+                working, options.no_console_window);
+            status.editor_message =
+                error.empty() ? std::string{}
+                              : "The editor did not start: " + error;
+            // Not set up as a render machine, nothing here is running, so
+            // this window has done its job.
+            if (error.empty() && !agent) {
+                open = false;
+            }
             break;
         }
         case RenderMachineAction::Close:

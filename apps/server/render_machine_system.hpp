@@ -34,6 +34,15 @@ namespace mediaserver::app {
 // writes to standard error.
 void show_error_dialog(std::string_view title, std::string_view text);
 
+// Starts `executable` with `arguments` as a process of its own, which keeps
+// running after this one exits. `no_console_window` as for the render
+// process. Empty when it started; otherwise why not.
+[[nodiscard]] std::string
+start_independent_process(const std::filesystem::path& executable,
+                          const std::vector<std::string>& arguments,
+                          const std::filesystem::path& working_directory,
+                          bool no_console_window);
+
 enum class FirewallStatus : core::u8 {
     // Not Windows, or the firewall could not be asked.
     Unknown,

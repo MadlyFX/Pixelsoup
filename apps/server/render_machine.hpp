@@ -89,6 +89,18 @@ render_machine_child_arguments(const RenderMachineConfig& config);
 render_machine_agent_config(const RenderMachineConfig& config,
                             const std::filesystem::path& executable);
 
+// The Director identity an editor opened from the render-machine window uses
+// when Preferences hold none: the bundled scripts' show and epoch, listening
+// on every interface so render machines elsewhere can reach it.
+inline constexpr std::string_view render_machine_default_director_epoch =
+    "0000000000000003000000000000000C";
+
+// The arguments that open the operator editor as this machine's Director, as
+// scripts/run-editor.ps1 would. A Director identity stored in Preferences is
+// left to the editor to read, so only what is missing is passed here.
+[[nodiscard]] std::vector<std::string>
+editor_launch_arguments(const persist::Preferences& stored);
+
 // What a render-machine launch starts from.
 struct RenderMachineWindowOptions final {
     // This program, which the agent supervises as the render process.

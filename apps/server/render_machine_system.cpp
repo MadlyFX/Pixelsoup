@@ -287,6 +287,72 @@ std::optional<unsigned long> ElevatedCommand::poll() noexcept {
     return impl_->exit_code;
 }
 
+std::string
+start_independent_process(const std::filesystem::path& executable,
+                          const std::vector<std::string>& arguments,
+                          const std::filesystem::path& working_directory,
+                          bool no_console_window) {
+#if defined(_WIN32)
+    // CreateProcess takes the executable separately, so the command line is
+    // data for it alone and never passes through a shell.
+    const auto quote = [](std::wstring_view value) {
+        std::wstring output{L"\""};
+        std::size_t slashes{};
+        for (const wchar_t character : value) {
+            if (character == L'\\') {
+                ++slashes;
+                continue;
+            }
+            if (character == L'\"') {
+                output.append(slashes * 2U + 1U, L'\\');
+                output.push_back(character);
+                slashes = 0U;
+                continue;
+            }
+            output.append(slashes, L'\\');
+            slashes = 0U;
+            output.push_back(character);
+        }
+        output.append(slashes * 2U, L'\\');
+        output.push_back(L'\"');
+        return output;
+    };
+    const std::wstring program = executable.wstring();
+    std::wstring command_line = quote(program);
+    for (const std::string& argument : arguments) {
+        const std::wstring wide = widen(argument);
+        if (wide.empty() && !argument.empty()) {
+            return "an argument is not valid text";
+        }
+        command_line.push_back(L' ');
+        command_line += quote(wide);
+    }
+    const std::wstring working = working_directory.wstring();
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION created{};
+    const DWORD flags = CREATE_NEW_PROCESS_GROUP |
+                        (no_console_window ? CREATE_NO_WINDOW
+                                           : CREATE_NEW_CONSOLE);
+    if (::CreateProcessW(program.c_str(), command_line.data(), nullptr,
+                         nullptr, FALSE, flags, nullptr,
+                         working.empty() ? nullptr : working.c_str(), &startup,
+                         &created) == 0) {
+        return std::system_category().message(
+            static_cast<int>(::GetLastError()));
+    }
+    ::CloseHandle(created.hThread);
+    ::CloseHandle(created.hProcess);
+    return {};
+#else
+    static_cast<void>(executable);
+    static_cast<void>(arguments);
+    static_cast<void>(working_directory);
+    static_cast<void>(no_console_window);
+    return "starting another program is not supported here";
+#endif
+}
+
 bool start_at_sign_in_supported() noexcept {
 #if defined(_WIN32)
     return true;

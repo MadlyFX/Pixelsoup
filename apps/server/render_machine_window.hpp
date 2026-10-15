@@ -56,6 +56,8 @@ struct RenderMachineStatus final {
 
     // Set when the last settings saved apply to this run only.
     std::string settings_message;
+    // Why the editor did not open, after Open Editor.
+    std::string editor_message;
 };
 
 enum class RenderMachineAction : core::u8 {
@@ -71,6 +73,8 @@ enum class RenderMachineAction : core::u8 {
     RetryAgent,
     AllowFirewall,
     ToggleSignIn,
+    // Start the operator editor on this machine, as its control machine.
+    OpenEditor,
     // Confirmed: stop the agent and close the window.
     Close,
 };
@@ -94,6 +98,7 @@ struct RenderMachinePanelLayout final {
     gui::Rect firewall;
     gui::Rect sign_in;
     gui::Rect change;
+    gui::Rect open_editor;
     gui::Rect close;
     gui::Rect keep_running;
     gui::Rect stop_and_close;
@@ -130,8 +135,9 @@ public:
     }
 
 private:
-    [[nodiscard]] RenderMachineAction draw_setup(gui::UiContext& ctx,
-                                                 const gui::Rect& bounds);
+    [[nodiscard]] RenderMachineAction
+    draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
+               const RenderMachineStatus& status);
     [[nodiscard]] RenderMachineAction
     draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
                 const RenderMachineStatus& status);

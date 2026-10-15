@@ -265,6 +265,26 @@ render_machine_child_arguments(const RenderMachineConfig& config) {
     };
 }
 
+std::vector<std::string>
+editor_launch_arguments(const persist::Preferences& stored) {
+    std::vector<std::string> arguments{"--role=director", "--playback",
+                                       "--edit"};
+    if (stored.director_listen.empty()) {
+        arguments.push_back(
+            "--director-listen=0.0.0.0:" +
+            std::to_string(render_machine_default_director_port));
+    }
+    if (stored.show_id.empty()) {
+        arguments.push_back("--show-id=" +
+                            std::string{render_machine_default_show_id});
+    }
+    if (stored.director_epoch.empty()) {
+        arguments.push_back("--director-epoch=" +
+                            std::string{render_machine_default_director_epoch});
+    }
+    return arguments;
+}
+
 LifecycleAgentConfig
 render_machine_agent_config(const RenderMachineConfig& config,
                             const std::filesystem::path& executable) {

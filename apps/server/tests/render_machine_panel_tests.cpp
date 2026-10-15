@@ -253,7 +253,31 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+void open_editor_is_offered_on_the_setup_form_and_the_status_view() {
+    Harness harness;
+    harness.panel.open_setup(app::render_machine_form(persist::Preferences{}),
+                             {}, false);
+    static_cast<void>(harness.frame());
+    PANEL_CHECK(harness.click(harness.panel.layout().open_editor) ==
+                app::RenderMachineAction::OpenEditor);
+    // A failed launch is said where the operator just clicked.
+    harness.status.editor_message = "The editor did not start: access denied";
+    static_cast<void>(harness.frame());
+    PANEL_CHECK(harness.panel.setup_open());
+
+    harness.status = running_status();
+    harness.panel.show_status();
+    static_cast<void>(harness.frame());
+    const auto& layout = harness.panel.layout();
+    PANEL_CHECK(layout.open_editor.width > 0.0F);
+    PANEL_CHECK(layout.open_editor.x >= layout.change.x + layout.change.width);
+    PANEL_CHECK(layout.open_editor.x + layout.open_editor.width <=
+                layout.close.x);
+    PANEL_CHECK(harness.click(harness.panel.layout().open_editor) ==
+                app::RenderMachineAction::OpenEditor);
+}
+
+constexpr std::array<Case, 8U> cases{{
     {"a first run is filled in with the keyboard and saved with Enter",
      &a_first_run_is_filled_in_with_the_keyboard_and_saved_with_enter},
     {"a typed password is marked edited and CLEAR removes a stored one",
@@ -268,6 +292,8 @@ constexpr std::array<Case, 7U> cases{{
      &an_agent_that_did_not_start_offers_to_try_again},
     {"closing a running machine asks first",
      &closing_a_running_machine_asks_first},
+    {"open editor is offered on the setup form and the status view",
+     &open_editor_is_offered_on_the_setup_form_and_the_status_view},
 }};
 
 } // namespace

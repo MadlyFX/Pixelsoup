@@ -186,6 +186,11 @@ Launch `media-server.exe` with no arguments (a double-click, a shortcut, or
    **File > Preferences** - or nothing if none is set there. Advanced: a
    control port other than 47840 + node index, and a show ID other than the
    standard one, both only when the control machine uses its own.
+   **OPEN EDITOR**, on the form and in the status view, starts the operator
+   editor on this machine as its Director instead (port 45060 on every
+   interface, the standard show, unless Preferences stores a Director
+   identity). From the form the window then closes; from the status view the
+   render machine keeps running beside the editor.
 2. **SAVE AND START** stores the settings in this machine's per-user
    Preferences (never a project, never sent anywhere), starts the agent on
    every interface, and starts the render process at once.

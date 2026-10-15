@@ -227,7 +227,7 @@ RenderMachineAction RenderMachinePanel::draw(gui::UiContext& ctx,
     if (confirm_close_) {
         return draw_close(ctx, bounds);
     }
-    return setup_open_ ? draw_setup(ctx, bounds)
+    return setup_open_ ? draw_setup(ctx, bounds, status)
                        : draw_status(ctx, bounds, status);
 }
 
@@ -251,8 +251,9 @@ void RenderMachinePanel::end_content(gui::UiContext& ctx,
     content_height_ = bottom + scroll_ - (bounds.y + header_height) + 14.0F;
 }
 
-RenderMachineAction RenderMachinePanel::draw_setup(gui::UiContext& ctx,
-                                                   const gui::Rect& bounds) {
+RenderMachineAction
+RenderMachinePanel::draw_setup(gui::UiContext& ctx, const gui::Rect& bounds,
+                               const RenderMachineStatus& status) {
     const gui::Theme& theme = ctx.theme();
     const gui::UiId focused_before = ctx.focus();
     header(ctx, bounds, "SET UP THIS RENDER MACHINE", {});
@@ -267,6 +268,14 @@ RenderMachineAction RenderMachinePanel::draw_setup(gui::UiContext& ctx,
                   "up, the editor on the control machine starts, stops and "
                   "feeds it, and this window opens straight to its status.",
                   theme.text_muted);
+    y = paragraph(ctx, x, y + 6.0F, width,
+                  "Is this the control machine? Open Editor starts the "
+                  "editor here instead; nothing below is needed for it.",
+                  theme.text_muted);
+    if (!status.editor_message.empty()) {
+        y = paragraph(ctx, x, y + 6.0F, width, status.editor_message,
+                      theme.warning);
+    }
     if (!message_.empty()) {
         y = paragraph(ctx, x, y + 6.0F, width, message_, theme.warning);
     }
@@ -413,6 +422,12 @@ RenderMachineAction RenderMachinePanel::draw_setup(gui::UiContext& ctx,
                    "SAVE AND START")) {
         return RenderMachineAction::SaveAndStart;
     }
+    layout_.open_editor =
+        gui::Rect{bar.x + margin, button_y, 140.0F, button_height};
+    if (ctx.button(gui::ui_id("render-machine.open-editor"),
+                   layout_.open_editor, "OPEN EDITOR")) {
+        return RenderMachineAction::OpenEditor;
+    }
     if (can_cancel_) {
         layout_.cancel = gui::Rect{layout_.save.x - 10.0F - 100.0F, button_y,
                                    100.0F, button_height};
@@ -440,6 +455,10 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
     if (!status.settings_message.empty()) {
         y = paragraph(ctx, x, y, width, status.settings_message,
                       theme.warning);
+        y += 10.0F;
+    }
+    if (!status.editor_message.empty()) {
+        y = paragraph(ctx, x, y, width, status.editor_message, theme.warning);
         y += 10.0F;
     }
     if (!status.agent_running) {
@@ -613,6 +632,13 @@ RenderMachinePanel::draw_status(gui::UiContext& ctx, const gui::Rect& bounds,
     if (ctx.button(gui::ui_id("render-machine.change"), layout_.change,
                    "CHANGE SETTINGS")) {
         action = RenderMachineAction::ChangeSettings;
+    }
+    layout_.open_editor =
+        gui::Rect{layout_.change.x + layout_.change.width + 10.0F, button_y,
+                  140.0F, button_height};
+    if (ctx.button(gui::ui_id("render-machine.open-editor"),
+                   layout_.open_editor, "OPEN EDITOR")) {
+        action = RenderMachineAction::OpenEditor;
     }
     layout_.close = gui::Rect{bar.x + bar.width - margin - 100.0F, button_y,
                               100.0F, button_height};
