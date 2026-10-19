@@ -132,6 +132,15 @@ void what_reaches_the_display_is_what_was_rasterised() {
     auto presenter = open(config());
     UI_CHECK(presenter->windowed());
 
+    std::vector<core::u8> black(window_width * window_height * 4U, 0U);
+    for (std::size_t i = 3U; i < black.size(); i += 4U) black[i] = 255U;
+    const show::FrameBufferView expected{
+        black, window_width, window_height, window_width * 4U,
+        show::PixelFormat::Rgba8888};
+    UI_CHECK(presenter->readback().digest == show::frame_buffer_digest(expected));
+    UI_CHECK(presenter->hold() == show::PresenterStatus::Skipped);
+    UI_CHECK(presenter->readback().digest == show::frame_buffer_digest(expected));
+
     UI_CHECK(presenter->present(frame(1'234U)) == show::PresenterStatus::Presented);
 
     // The whole path is checked here, not just the rasteriser: the readback

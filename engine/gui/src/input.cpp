@@ -5,6 +5,7 @@ namespace mediaserver::gui {
 void InputState::new_frame() noexcept {
     pressed_.fill(false);
     released_.fill(false);
+    press_after_release_.fill(false);
     prev_x_ = mouse_x_;
     prev_y_ = mouse_y_;
     wheel_ = 0.0F;
@@ -27,8 +28,17 @@ void InputState::set_mouse_button(MouseButton button, bool down) noexcept {
     // A complete click can arrive between two UI refreshes. Preserve both
     // edges until the widgets consume the frame instead of losing the click
     // when its final button state is the same as the previous frame's.
-    pressed_[i] = pressed_[i] || (down && !down_[i]);
-    released_[i] = released_[i] || (!down && down_[i]);
+    if (down && !down_[i] && !pressed_[i]) {
+        pressed_[i] = true;
+        press_x_[i] = mouse_x_;
+        press_y_[i] = mouse_y_;
+        press_after_release_[i] = released_[i];
+    }
+    if (!down && down_[i] && !released_[i]) {
+        released_[i] = true;
+        release_x_[i] = mouse_x_;
+        release_y_[i] = mouse_y_;
+    }
     down_[i] = down;
 }
 

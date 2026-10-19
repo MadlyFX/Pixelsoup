@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -466,6 +467,12 @@ void surface_transform_edits_key_only_animated_components() {
                                   editor::FeedSurfaceTransform::PositionX));
   UI_CHECK(!editor::has_transform(routed.base->transform_components,
                                   editor::FeedSurfaceTransform::Yaw));
+
+  const auto without_auto_key = editor::route_surface_transform_edit(
+      request, channels, 42U, false);
+  UI_CHECK(without_auto_key.keys.empty());
+  UI_CHECK(without_auto_key.base.has_value());
+  UI_CHECK(without_auto_key.base->transform_components == request.transform_components);
 
   request.transform_components = editor::FeedSurfaceTransform::None;
   const editor::RoutedSurfaceEdit calibration =
@@ -1407,6 +1414,7 @@ void dragging_a_clip_edge_trims_without_moving_the_rest() {
   UI_CHECK(trim_drop.clip_edits.front().timing ==
            (scene::ClipTiming{25, 35, 5, 0, 0}));
 
+  h.elements[1].timing = trim_drop.clip_edits.front().timing;
   // The other end changes only the duration.
   static_cast<void>(h.frame(700.0F, 113.09F, false));
   static_cast<void>(h.frame(700.0F, 113.09F, true));
@@ -1416,7 +1424,7 @@ void dragging_a_clip_edge_trims_without_moving_the_rest() {
       h.frame(663.0F, 113.09F, false);
   UI_CHECK(shorten_drop.clip_edits.size() == 1U);
   UI_CHECK(shorten_drop.clip_edits.front().timing ==
-           (scene::ClipTiming{20, 35, 0, 0, 0}));
+           (scene::ClipTiming{25, 30, 5, 0, 0}));
 }
 
 void a_clip_fade_handle_sets_the_head_ramp() {
@@ -1429,6 +1437,408 @@ void a_clip_fade_handle_sets_the_head_ramp() {
   UI_CHECK(fade_drop.clip_edits.size() == 1U);
   UI_CHECK(fade_drop.clip_edits.front().timing ==
            (scene::ClipTiming{20, 40, 0, 5, 0}));
+}
+
+void fade_handles_accept_the_visible_outer_knobs() {
+  Harness h;
+  // The head knob extends left of the clip body (x=408). Its outer half
+  // must be as interactive as the half overlapping the fill.
+  static_cast<void>(h.frame(404.0F, 105.0F, false));
+  const auto press = h.frame(404.0F, 105.0F, true);
+  UI_CHECK(!press.seek_to_frame.has_value());
+  UI_CHECK(h.panel.dragging_clip());
+  const auto drop = h.frame(441.0F, 105.0F, false);
+  UI_CHECK(drop.clip_edits.size() == 1U);
+  UI_CHECK(drop.clip_edits.front().timing.fade_in == 5);
+  UI_CHECK(drop.clip_edits.front().timing.start == 20);
+}
+
+void clip_release_uses_the_final_pointer_and_waits_for_authority() {
+  Harness h;
+  static_cast<void>(h.frame(500.0F, 113.0F, false));
+  static_cast<void>(h.frame(500.0F, 113.0F, true));
+  // No intervening held frame: the release carries the final motion.
+  const auto drop = h.frame(870.0F, 113.0F, false, gui::KeyMods::Alt);
+  UI_CHECK(drop.clip_edits.size() == 1U);
+  UI_CHECK(drop.clip_edits.front().timing.start == 70);
+  UI_CHECK(!h.panel.dragging_clip());
+  // Authority still reports the old timing. The visible pending bar can
+  // already be picked at its destination, beyond the old bar's tail.
+  static_cast<void>(h.frame(950.0F, 113.0F, false));
+  const auto picked = h.frame(950.0F, 113.0F, true);
+  UI_CHECK(h.panel.dragging_clip());
+  UI_CHECK(picked.selection.has_value());
+  UI_CHECK(picked.selection->node == clip_node);
+}
+
+void batched_clip_gestures_keep_the_original_press_target_and_anchor() {
+  for (const bool release_in_batch : {false, true}) {
+    for (const float end_y : {113.0F, 150.0F}) {
+      Harness h;
+      static_cast<void>(h.frame(900.0F, 300.0F, false));
+      // Native polling drains down, motion and sometimes up before drawing.
+      // The endpoint is beyond the clip, and can be beyond its row too.
+      h.input.new_frame();
+      h.input.set_mouse_position(500.0F, 113.0F);
+      h.input.set_mouse_button(gui::MouseButton::Left, true);
+      h.input.set_mouse_position(870.0F, end_y);
+      if (release_in_batch) {
+        h.input.set_mouse_button(gui::MouseButton::Left, false);
+      }
+      h.input.set_mods(gui::KeyMods::Alt);
+      h.ctx.new_frame();
+      const auto captured = h.draw();
+      UI_CHECK(captured.selection.has_value());
+      UI_CHECK(captured.selection->node == clip_node);
+      UI_CHECK(captured.selection->action != editor::SelectionAction::Clear);
+      UI_CHECK(!captured.seek_to_frame);
+      UI_CHECK(h.panel.dragging_clip());
+
+      // The next draw resolves even a complete between-refreshes gesture.
+      const auto dropped = h.frame(870.0F, end_y, false, gui::KeyMods::Alt);
+      UI_CHECK(dropped.clip_edits.size() == 1U);
+      UI_CHECK(dropped.clip_edits.front().clip == clip_node);
+      UI_CHECK(dropped.clip_edits.front().timing ==
+               (scene::ClipTiming{70, 40, 0, 0, 0}));
+      UI_CHECK(!dropped.seek_to_frame);
+      UI_CHECK(!h.panel.dragging_clip());
+      UI_CHECK(h.frame(870.0F, end_y, false).clip_edits.empty());
+    }
+  }
+}
+
+void clip_and_key_releases_ignore_later_uncaptured_motion() {
+  for (const bool press_in_batch : {false, true}) {
+    Harness clip;
+    static_cast<void>(clip.frame(500.0F, 113.0F, false));
+    if (!press_in_batch) {
+      static_cast<void>(clip.frame(500.0F, 113.0F, true));
+    }
+    clip.input.new_frame();
+    if (press_in_batch) {
+      clip.input.set_mouse_button(gui::MouseButton::Left, true);
+    }
+    clip.input.set_mouse_position(574.0F, 113.0F);
+    clip.input.set_mouse_button(gui::MouseButton::Left, false);
+    clip.input.set_mouse_position(950.0F, 300.0F);
+    clip.input.set_mods(gui::KeyMods::Alt);
+    clip.ctx.new_frame();
+    auto dropped = clip.draw();
+    UI_CHECK(!dropped.seek_to_frame);
+    if (press_in_batch) {
+      // A new gesture resolves before drawing the next frame's clip bars.
+      dropped = clip.frame(960.0F, 310.0F, false, gui::KeyMods::Alt);
+    }
+    UI_CHECK(dropped.clip_edits.size() == 1U);
+    UI_CHECK(dropped.clip_edits.front().timing ==
+             (scene::ClipTiming{30, 40, 0, 0, 0}));
+    UI_CHECK(!dropped.seek_to_frame);
+
+    Harness key;
+    static_cast<void>(key.frame(0.0F, 0.0F, false));
+    key.open_position_components();
+    static_cast<void>(key.frame(334.0F, 136.0F, false));
+    if (!press_in_batch) {
+      static_cast<void>(key.frame(334.0F, 136.0F, true));
+    }
+    key.input.new_frame();
+    if (press_in_batch) {
+      key.input.set_mouse_button(gui::MouseButton::Left, true);
+    }
+    key.input.set_mouse_position(371.0F, 136.0F);
+    key.input.set_mouse_button(gui::MouseButton::Left, false);
+    key.input.set_mouse_position(630.0F, 300.0F);
+    key.ctx.new_frame();
+    const auto retimed = key.draw();
+    UI_CHECK(retimed.key_batch.has_value());
+    UI_CHECK(retimed.key_batch->action == editor::TimelineKeyBatchAction::Move);
+    UI_CHECK(retimed.key_batch->delta == 5);
+    UI_CHECK(retimed.key_batch->keys ==
+             std::vector<editor::TimelineKeyAddress>{
+                 {object_node, scene::PropertyChannel::PositionX, 10}});
+  }
+}
+
+void clips_can_move_before_in_and_the_workspace_pans_past_out() {
+  Harness h;
+  static_cast<void>(h.frame(500.0F, 113.0F, false));
+  h.timeline.first_frame = 15U;
+  static_cast<void>(h.frame(500.0F, 113.0F, true));
+  const auto drop = h.frame(389.0F, 113.0F, false, gui::KeyMods::Alt);
+  UI_CHECK(drop.clip_edits.size() == 1U);
+  UI_CHECK(drop.clip_edits.front().timing.start == 5);
+
+  Harness beyond;
+  static_cast<void>(beyond.frame(0.0F, 0.0F, false));
+  beyond.elements[1].timing.start = 150;
+  static_cast<void>(beyond.middle(800.0F, 280.0F, true));
+  static_cast<void>(beyond.middle(-310.0F, 280.0F, true));
+  static_cast<void>(beyond.middle(-310.0F, 280.0F, false));
+  // After a 150-frame pan, the parked clip starts at the graph's left edge.
+  static_cast<void>(beyond.frame(400.0F, 113.0F, true));
+  UI_CHECK(beyond.panel.dragging_clip());
+}
+
+void clips_move_across_zero_and_past_out_without_trimming_the_source() {
+  for (const auto [end_x, expected_start] :
+       std::array<std::pair<float, mediaserver::core::i64>, 2>{{
+           {278.0F, -10}, {1240.0F, 120}}}) {
+    Harness h;
+    h.elements[1].timing.source_in = 17;
+    static_cast<void>(h.frame(500.0F, 113.0F, false));
+    static_cast<void>(h.frame(500.0F, 113.0F, true));
+    const auto dropped = h.frame(end_x, 113.0F, false, gui::KeyMods::Alt);
+    UI_CHECK(dropped.clip_edits.size() == 1U);
+    UI_CHECK(dropped.clip_edits.front().timing ==
+             (scene::ClipTiming{expected_start, 40, 17, 0, 0}));
+    UI_CHECK(!dropped.seek_to_frame);
+    UI_CHECK(dropped.clip_status.find(std::to_string(expected_start)) !=
+             std::string::npos);
+  }
+}
+
+void negative_workspace_supports_clip_picking_and_signed_razor_cuts() {
+  Harness h;
+  h.elements[1].timing.start = -20;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  static_cast<void>(h.middle(500.0F, 280.0F, true));
+  static_cast<void>(h.middle(722.0F, 280.0F, true));
+  static_cast<void>(h.middle(722.0F, 280.0F, false));
+  // The view now starts at -30. Frame -10 is x=408; transport stays >=0.
+  const auto seek = h.frame(408.0F, 45.0F, true);
+  UI_CHECK(seek.seek_to_frame.has_value());
+  UI_CHECK(*seek.seek_to_frame == 0U);
+  static_cast<void>(h.frame(408.0F, 113.0F, false));
+  const auto picked = h.frame(408.0F, 113.0F, true);
+  UI_CHECK(picked.selection.has_value());
+  UI_CHECK(picked.selection->node == clip_node);
+  static_cast<void>(h.frame(408.0F, 113.0F, false));
+  static_cast<void>(h.click(510.0F, 17.0F));
+  const auto cut = h.frame(408.0F, 113.0F, true, gui::KeyMods::Alt);
+  UI_CHECK(cut.clip_splits.size() == 1U);
+  UI_CHECK(cut.clip_splits.front().frame == -10);
+  UI_CHECK(!cut.seek_to_frame);
+}
+
+void head_trim_converts_source_rate_and_wraps_before_zero() {
+  for (const auto [end_x, start, duration, source] :
+       std::array<std::array<mediaserver::core::i64, 4>, 2>{{
+           {447, 25, 35, 2}, {188, -10, 70, 36}}}) {
+    Harness h;
+    h.timeline.rate_numerator = 60U;
+    h.timeline.rate_denominator = 1U;
+    h.elements[1].sequence_count = 48U;
+    h.elements[1].source_frame_rate = scene::MediaFrameRate{24U, 1U};
+    static_cast<void>(h.frame(410.0F, 113.0F, false));
+    static_cast<void>(h.frame(410.0F, 113.0F, true));
+    const auto dropped = h.frame(static_cast<float>(end_x), 113.0F, false,
+                                 gui::KeyMods::Alt);
+    UI_CHECK(dropped.clip_edits.size() == 1U);
+    UI_CHECK(dropped.clip_edits.front().timing ==
+             (scene::ClipTiming{start, duration, source, 0, 0}));
+  }
+  Harness fractional;
+  fractional.timeline.rate_numerator = 60U;
+  fractional.elements[1].source_frame_rate = scene::MediaFrameRate{24U, 1U};
+  static_cast<void>(fractional.frame(410.0F, 113.0F, false));
+  static_cast<void>(fractional.frame(410.0F, 113.0F, true));
+  // Two show frames are 0.8 source frames: use the first retained playback
+  // frame (floor 0), rather than gesture rounding (nearest 1).
+  const auto dropped = fractional.frame(424.8F, 113.0F, false,
+                                        gui::KeyMods::Alt);
+  UI_CHECK(dropped.clip_edits.size() == 1U);
+  UI_CHECK(dropped.clip_edits.front().timing ==
+           (scene::ClipTiming{22, 38, 0, 0, 0}));
+}
+
+void slip_wraps_looping_sources_and_keeps_feedback_after_release() {
+  for (const auto [end_x, delta, source, wrapped] :
+       std::array<std::array<mediaserver::core::i64, 4>, 3>{{
+           {537, 5, 5, 0}, {463, -5, 5, 1}, {611, 15, 5, 1}}}) {
+    Harness h;
+    h.elements[1].sequence_count = 10U; // The placement loops four times.
+    static_cast<void>(h.click(458.0F, 17.0F));
+    static_cast<void>(h.frame(500.0F, 113.0F, true));
+    const auto preview = h.frame(static_cast<float>(end_x), 113.0F, true);
+    UI_CHECK(preview.timeline_edits.empty());
+    UI_CHECK(!preview.clip_status_error);
+    UI_CHECK(preview.clip_status.find("Source " + std::to_string(source) +
+                                     " of 10 frames") != std::string::npos);
+    UI_CHECK((preview.clip_status.find("wrapped") != std::string::npos) ==
+             (wrapped != 0));
+    const auto dropped = h.frame(static_cast<float>(end_x), 113.0F, false);
+    UI_CHECK(dropped.clip_edits.empty());
+    UI_CHECK(dropped.timeline_edits.size() == 1U);
+    const auto *request = std::get_if<editor::TimelineSlipRequest>(
+        &dropped.timeline_edits.front());
+    UI_CHECK(request != nullptr && request->delta == delta);
+    UI_CHECK(dropped.clip_status.find("Source 5 of 10 frames") != std::string::npos);
+    const auto pending = h.frame(0.0F, 0.0F, false);
+    UI_CHECK(pending.clip_status == dropped.clip_status);
+    UI_CHECK(h.elements[1].timing == (scene::ClipTiming{20, 40, 0, 0, 0}));
+  }
+  Harness full_source;
+  full_source.elements[1].sequence_count = 40U;
+  static_cast<void>(full_source.click(458.0F, 17.0F));
+  static_cast<void>(full_source.frame(500.0F, 113.0F, true));
+  const auto wrapped = full_source.frame(463.0F, 113.0F, false);
+  UI_CHECK(wrapped.timeline_edits.size() == 1U);
+  UI_CHECK(wrapped.clip_status.find("Source 35 of 40 frames") != std::string::npos);
+  Harness rated;
+  rated.timeline.rate_numerator = 60U;
+  rated.elements[1].sequence_count = 10U;
+  rated.elements[1].source_frame_rate = scene::MediaFrameRate{24U, 1U};
+  static_cast<void>(rated.click(458.0F, 17.0F));
+  static_cast<void>(rated.frame(500.0F, 113.0F, true));
+  const auto converted = rated.frame(537.0F, 113.0F, false);
+  UI_CHECK(converted.timeline_edits.size() == 1U);
+  UI_CHECK(converted.clip_status.find("Source 2 of 10 frames") != std::string::npos);
+}
+
+void slip_explains_invalid_source_metadata_and_single_frame_media() {
+  Harness invalid;
+  invalid.elements[1].sequence_count = 0U;
+  static_cast<void>(invalid.click(458.0F, 17.0F));
+  static_cast<void>(invalid.frame(500.0F, 113.0F, true));
+  const auto rejected = invalid.frame(537.0F, 113.0F, false);
+  UI_CHECK(rejected.timeline_edits.empty());
+  UI_CHECK(rejected.clip_status_error);
+  UI_CHECK(rejected.clip_status.find("SLIP UNAVAILABLE") != std::string::npos);
+  Harness still;
+  still.elements[1].sequence_count = 1U;
+  static_cast<void>(still.click(458.0F, 17.0F));
+  static_cast<void>(still.frame(500.0F, 113.0F, true));
+  const auto unchanged = still.frame(537.0F, 113.0F, false);
+  UI_CHECK(!unchanged.clip_status_error);
+  UI_CHECK(unchanged.clip_status.find("One source frame; image is unchanged") !=
+           std::string::npos);
+}
+
+void looping_filmstrip_preview_changes_source_and_stays_bounded() {
+  Harness h;
+  mediaserver::rhi::Texture texture;
+  h.filmstrips.push_back(editor::TimelineFilmstripObservation{
+      clip_node, filmstrip_key(), assets::DerivativeState::Ready, &texture});
+  h.elements[1].sequence_count = 10U;
+  const auto image_uvs = [&]() {
+    std::vector<float> out;
+    for (const auto &batch : h.list.batches()) {
+      if (batch.texture != &texture) continue;
+      UI_CHECK(batch.vertex_count <= 32U * 6U);
+      for (unsigned i = 0U; i < batch.vertex_count; i += 6U) {
+        out.push_back(h.list.vertices()[batch.first_vertex + i].u);
+      }
+    }
+    UI_CHECK(out.size() <= 32U);
+    return out;
+  };
+  static_cast<void>(h.click(458.0F, 17.0F));
+  const auto before = image_uvs();
+  UI_CHECK(!before.empty());
+  static_cast<void>(h.frame(500.0F, 113.0F, true));
+  static_cast<void>(h.frame(537.0F, 113.0F, true));
+  const auto preview = image_uvs();
+  UI_CHECK(before != preview);
+  const auto dropped = h.frame(537.0F, 113.0F, false);
+  UI_CHECK(dropped.timeline_edits.size() == 1U);
+  UI_CHECK(image_uvs() == preview);
+  for (unsigned delayed_frame = 0U; delayed_frame < 3U; ++delayed_frame) {
+    UI_CHECK(h.frame(0.0F, 0.0F, false).timeline_edits.empty());
+    UI_CHECK(image_uvs() == preview);
+  }
+  // Authority now adopts source phase 5. The same thumbnail positions remain,
+  // and a later authored change must supersede the expired local proposal.
+  h.elements[1].timing.source_in = 5;
+  UI_CHECK(h.frame(0.0F, 0.0F, false).timeline_edits.empty());
+  UI_CHECK(image_uvs() == preview);
+  h.elements[1].timing.source_in = 0;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(image_uvs() == before);
+  h.elements[1].timing.duration = 1'000'000;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(!image_uvs().empty());
+}
+
+void extreme_imported_timing_is_refused_visibly_and_cannot_overflow_snapping() {
+  Harness extreme;
+  extreme.elements[1].timing = scene::ClipTiming{
+      -10, std::numeric_limits<mediaserver::core::i64>::max() / 2, 0, 0, 0};
+  static_cast<void>(extreme.frame(500.0F, 113.0F, false));
+  const auto refused = extreme.frame(500.0F, 113.0F, true);
+  UI_CHECK(!extreme.panel.dragging_clip());
+  UI_CHECK(refused.clip_status_error);
+  UI_CHECK(refused.clip_status.find("Clip timing exceeds the editable range") !=
+           std::string::npos);
+  UI_CHECK(!refused.seek_to_frame);
+  const auto released = extreme.frame(574.0F, 113.0F, false);
+  UI_CHECK(released.clip_edits.empty());
+  UI_CHECK(released.timeline_edits.empty());
+
+  Harness distant;
+  auto far_clip = make_clip();
+  far_clip.node = doc::NodeId{99U};
+  far_clip.timing = scene::ClipTiming{
+      std::numeric_limits<mediaserver::core::i64>::min(), 1, 0, 0, 0};
+  distant.elements.push_back(far_clip);
+  static_cast<void>(distant.frame(500.0F, 113.0F, false));
+  static_cast<void>(distant.frame(500.0F, 113.0F, true));
+  const auto moved = distant.frame(574.0F, 113.0F, false);
+  UI_CHECK(moved.clip_edits.size() == 1U);
+  UI_CHECK(moved.clip_edits.front().timing.start == 30);
+}
+
+void auto_key_is_an_explicit_toggle_and_camera_lens_rows_are_keyable() {
+  Harness h;
+  UI_CHECK(h.panel.auto_key_enabled());
+  static_cast<void>(h.click(190.0F, 45.0F));
+  UI_CHECK(!h.panel.auto_key_enabled());
+  static_cast<void>(h.type("k"));
+  UI_CHECK(h.panel.auto_key_enabled());
+
+  Harness camera;
+  camera.elements.resize(1U);
+  camera.elements.front().kind = editor::ElementKind::Camera;
+  camera.elements.front().field_of_view = 0.173F;
+  camera.elements.front().shutter_seconds = 0.017F;
+  camera.elements.front().focus_distance_m = 7.5F;
+  camera.elements.front().aperture_f_number = 2.8F;
+  camera.keys.clear();
+  static_cast<void>(camera.click(42.0F, 88.0F));
+  const std::array channels{scene::PropertyChannel::CameraFieldOfView,
+      scene::PropertyChannel::CameraShutter,
+      scene::PropertyChannel::CameraFocusDistance,
+      scene::PropertyChannel::CameraAperture};
+  const std::array values{0.173F, 0.017F, 7.5F, 2.8F};
+  for (std::size_t index = 0; index < channels.size(); ++index) {
+    const auto keyed = camera.click(248.0F, 160.0F + 24.0F * static_cast<float>(index));
+    UI_CHECK(keyed.keys.size() == 1U);
+    UI_CHECK(keyed.keys.front().component == channels[index]);
+    UI_CHECK(std::abs(keyed.keys.front().value - values[index]) < 1.0e-6);
+  }
+}
+
+void timeline_camera_keys_preserve_cubic_evaluated_values() {
+  for (const bool weighted : {false, true}) {
+    Harness camera;
+    camera.elements.resize(1U);
+    camera.elements.front().kind = editor::ElementKind::Camera;
+    camera.timeline.show_frame = weighted ? 13U : 5U;
+    scene::ChannelKeyframes channel{object_node,
+        scene::PropertyChannel::CameraFieldOfView,
+        {0, weighted ? 32 : 20}, {0.1, 0.2},
+        {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic}};
+    if (weighted) {
+      channel.tangents = {
+          scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.02, {}, 4.0},
+          scene::KeyTangent{scene::KeyTangentMode::Broken, -0.005, 0.0, 12.0, {}}};
+    }
+    camera.keys = {channel};
+    static_cast<void>(camera.click(42.0F, 88.0F));
+    const auto keyed = camera.click(248.0F, 160.0F);
+    UI_CHECK(keyed.keys.size() == 1U);
+    UI_CHECK(keyed.keys.front().component == scene::PropertyChannel::CameraFieldOfView);
+    UI_CHECK(std::abs(keyed.keys.front().value - (weighted ? 0.2025 : 0.125)) < 1.0e-6);
+  }
 }
 
 void a_clip_move_snaps_to_the_playhead() {
@@ -1574,6 +1984,35 @@ void tool_keys_choose_the_tool_an_editor_expects() {
   }
   static_cast<void>(h.type("s"));
   UI_CHECK(!h.panel.snapping_enabled());
+}
+
+void tool_cursors_follow_selection_and_captured_gestures() {
+  Harness h;
+  h.focus();
+  const std::array<std::pair<std::string_view, gui::Cursor>, 5U> tools{{
+      {"b", gui::Cursor::RippleTrim}, {"n", gui::Cursor::Roll},
+      {"y", gui::Cursor::Slip}, {"u", gui::Cursor::Slide},
+      {"c", gui::Cursor::Razor}}};
+  for (const auto& [key, cursor] : tools) {
+    static_cast<void>(h.type(key));
+    static_cast<void>(h.frame(520.0F, 113.0F, false));
+    UI_CHECK(h.ctx.cursor() == cursor);
+    // Fade handles must not advertise Selection edits under another tool.
+    static_cast<void>(h.frame(409.0F, 102.0F, false));
+    UI_CHECK(h.ctx.cursor() == cursor);
+    static_cast<void>(h.frame(150.0F, 200.0F, false));
+    UI_CHECK(h.ctx.cursor() == gui::Cursor::Arrow);
+  }
+  static_cast<void>(h.type("y"));
+  static_cast<void>(h.frame(520.0F, 113.0F, true));
+  static_cast<void>(h.frame(150.0F, 200.0F, true));
+  UI_CHECK(h.ctx.cursor() == gui::Cursor::Slip);
+  static_cast<void>(h.frame(150.0F, 200.0F, false));
+  static_cast<void>(h.type("v"));
+  static_cast<void>(h.frame(520.0F, 113.0F, false));
+  UI_CHECK(h.ctx.cursor() == gui::Cursor::Move);
+  static_cast<void>(h.frame(409.0F, 113.0F, false));
+  UI_CHECK(h.ctx.cursor() == gui::Cursor::ResizeHorizontal);
 }
 
 void the_razor_cuts_where_it_lands_and_shift_cuts_every_track() {
@@ -2070,7 +2509,7 @@ void dragging_a_layer_out_reports_one_screen_space_drop() {
   const editor::TimelinePanelFrame dropped =
       h.frame(1'180.0F, 240.0F, false);
   UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
-                                    object_node, 1'180.0F, 240.0F});
+                                    {object_node}, 1'180.0F, 240.0F});
   UI_CHECK(dropped.layer_reorders.empty());
   UI_CHECK(!h.panel.dragging_layer());
 }
@@ -2089,14 +2528,137 @@ void dragging_a_track_out_reports_one_screen_space_drop() {
       h.frame(1'180.0F, 240.0F, true);
   UI_CHECK(h.panel.dragging_compositor_source());
   UI_CHECK(h.panel.dragging_compositor_source_node() == lane_node);
+  UI_CHECK(h.panel.dragging_compositor_source_count() == 1U);
   UI_CHECK(!lifted.layer_drop.has_value());
 
   const editor::TimelinePanelFrame dropped =
       h.frame(1'180.0F, 240.0F, false);
   UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
-                                    lane_node, 1'180.0F, 240.0F});
+                                    {lane_node}, 1'180.0F, 240.0F});
   UI_CHECK(dropped.lane_edits.empty());
   UI_CHECK(!h.panel.dragging_compositor_source());
+}
+
+void dragging_selected_layers_preserves_the_group_in_timeline_order() {
+  Harness h;
+  h.keys.clear();
+  h.selection = {clip_node, object_node};
+  h.primary = clip_node;
+  static_cast<void>(h.frame(80.0F, 88.0F, false));
+  const auto pressed = h.frame(80.0F, 88.0F, true);
+  UI_CHECK(!pressed.selection.has_value());
+  UI_CHECK(h.panel.dragging_compositor_source_count() == 2U);
+  const auto lifted = h.frame(1'180.0F, 240.0F, true);
+  UI_CHECK(!lifted.selection.has_value());
+  UI_CHECK(!lifted.layer_drop.has_value());
+  const auto dropped = h.frame(1'180.0F, 240.0F, false);
+  UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
+      {object_node, clip_node}, 1'180.0F, 240.0F});
+  UI_CHECK(!dropped.selection.has_value());
+  UI_CHECK(h.panel.dragging_compositor_source_count() == 0U);
+  UI_CHECK(!h.frame(1'180.0F, 240.0F, false).layer_drop.has_value());
+
+  // A click without a drag still focuses just the clicked layer.
+  const auto clicked = h.click(80.0F, 88.0F);
+  UI_CHECK(clicked.selection.has_value());
+  UI_CHECK(clicked.selection->action == editor::SelectionAction::Replace);
+  UI_CHECK(clicked.selection->node == object_node);
+}
+
+void layer_drags_exclude_locked_selection_and_reset_the_payload() {
+  Harness h;
+  h.keys.clear();
+  h.elements[1U].locked = true;
+  h.selection = {clip_node, object_node, doc::NodeId{999U}};
+  static_cast<void>(h.frame(80.0F, 88.0F, false));
+  static_cast<void>(h.frame(80.0F, 88.0F, true));
+  static_cast<void>(h.frame(1'180.0F, 240.0F, true));
+  UI_CHECK(h.frame(1'180.0F, 240.0F, false).layer_drop ==
+           editor::TimelineLayerDrop{{object_node}, 1'180.0F, 240.0F});
+  h.elements[1U].locked = false;
+  h.selection = {object_node};
+  static_cast<void>(h.frame(80.0F, 112.0F, false));
+  const auto pressed = h.frame(80.0F, 112.0F, true);
+  UI_CHECK(pressed.selection.has_value());
+  UI_CHECK(pressed.selection->node == clip_node);
+  static_cast<void>(h.frame(1'180.0F, 240.0F, true));
+  UI_CHECK(h.frame(1'180.0F, 240.0F, false).layer_drop ==
+           editor::TimelineLayerDrop{{clip_node}, 1'180.0F, 240.0F});
+}
+
+void modifier_layer_clicks_select_once_per_gesture() {
+  Harness h;
+  h.keys.clear();
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  editor::NodeSelection selection;
+  selection.replace(object_node);
+  const auto click = [&](float y, gui::KeyMods mods) {
+    for (const bool down : {false, true, false}) {
+      h.selection.assign(selection.members().begin(), selection.members().end());
+      h.primary = selection.primary();
+      const auto result = h.frame(80.0F, y, down, mods);
+      if (result.selection.has_value()) {
+        const auto &request = *result.selection;
+        selection.apply(request.action, request.node, request.visible_order);
+      }
+    }
+  };
+  click(112.0F, gui::KeyMods::Ctrl);
+  UI_CHECK(selection.size() == 2U);
+  click(112.0F, gui::KeyMods::Ctrl);
+  UI_CHECK(selection.size() == 1U);
+  UI_CHECK(selection.contains(object_node));
+  click(112.0F, gui::KeyMods::Shift);
+  UI_CHECK(selection.size() == 2U);
+}
+
+void dragging_selected_media_outside_the_timeline_does_not_reassign_tracks() {
+  Harness h;
+  h.keys.clear();
+  h.elements[1U].timeline_lane = lane_node;
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.selection = {object_node, clip_node};
+  // Header, clip, object. The compositor can sit beside the timeline at the
+  // same height as a row belonging to a different track (or a loose layer).
+  static_cast<void>(h.frame(80.0F, 112.0F, false));
+  static_cast<void>(h.frame(80.0F, 112.0F, true));
+  static_cast<void>(h.frame(1'180.0F, 160.0F, true));
+  const auto dropped = h.frame(1'180.0F, 160.0F, false);
+  UI_CHECK(dropped.clip_edits.empty());
+  UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
+      {clip_node, object_node}, 1'180.0F, 160.0F});
+}
+
+void track_headers_support_group_selection_and_group_drops() {
+  Harness h;
+  h.elements.clear();
+  h.keys.clear();
+  h.lanes = {
+      scene::TimelineLane{lane_node, scene::SceneId{100U}, 10, "Back", false,
+                          false, scene::BlendMode::Normal, false},
+      scene::TimelineLane{destination_lane_node, scene::SceneId{100U}, 20,
+                          "Front", false, false, scene::BlendMode::Normal, false}};
+  const auto toggled = h.click(80.0F, 112.0F, gui::KeyMods::Ctrl);
+  UI_CHECK(toggled.selection.has_value());
+  UI_CHECK(toggled.selection->action == editor::SelectionAction::Toggle);
+  UI_CHECK(toggled.selection->node == lane_node);
+  const auto ranged = h.click(80.0F, 112.0F, gui::KeyMods::Shift);
+  UI_CHECK(ranged.selection.has_value());
+  UI_CHECK(ranged.selection->action == editor::SelectionAction::Range);
+  UI_CHECK(ranged.selection->visible_order ==
+           std::vector<doc::NodeId>{destination_lane_node, lane_node});
+  h.selection = {lane_node, destination_lane_node};
+  static_cast<void>(h.frame(80.0F, 88.0F, true));
+  UI_CHECK(h.panel.dragging_compositor_source_count() == 2U);
+  static_cast<void>(h.frame(1'180.0F, 240.0F, true));
+  const auto dropped = h.frame(1'180.0F, 240.0F, false);
+  UI_CHECK(dropped.layer_drop == editor::TimelineLayerDrop{
+      {destination_lane_node, lane_node}, 1'180.0F, 240.0F});
+  UI_CHECK(dropped.lane_edits.empty());
+  UI_CHECK(!dropped.selection.has_value());
+  UI_CHECK(h.panel.dragging_compositor_source_count() == 0U);
 }
 
 void dragging_clip_rows_reorders_clips_inside_one_track() {
@@ -2498,7 +3060,33 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 74U> cases{{
+constexpr std::array<Case, 94U> cases{{
+    {"tool cursors follow selection and captured gestures",
+     &tool_cursors_follow_selection_and_captured_gestures},
+    {"extreme imported timing is refused visibly and cannot overflow snapping",
+     &extreme_imported_timing_is_refused_visibly_and_cannot_overflow_snapping},
+    {"clips move across zero and past Out without trimming source",
+     &clips_move_across_zero_and_past_out_without_trimming_the_source},
+    {"negative workspace supports picking and signed razor cuts",
+     &negative_workspace_supports_clip_picking_and_signed_razor_cuts},
+    {"head trim converts source rate and wraps before zero",
+     &head_trim_converts_source_rate_and_wraps_before_zero},
+    {"Slip wraps looping sources and keeps feedback after release",
+     &slip_wraps_looping_sources_and_keeps_feedback_after_release},
+    {"Slip explains invalid metadata and single frame media",
+     &slip_explains_invalid_source_metadata_and_single_frame_media},
+    {"looping filmstrip preview changes source and stays bounded",
+     &looping_filmstrip_preview_changes_source_and_stays_bounded},
+    {"timeline camera keys preserve cubic evaluated values",
+     &timeline_camera_keys_preserve_cubic_evaluated_values},
+    {"clip and key releases ignore later uncaptured motion",
+     &clip_and_key_releases_ignore_later_uncaptured_motion},
+    {"batched clip gestures keep the original press target and anchor",
+     &batched_clip_gestures_keep_the_original_press_target_and_anchor},
+    {"fade handles accept the visible outer knobs", &fade_handles_accept_the_visible_outer_knobs},
+    {"clip release uses final pointer and waits for authority", &clip_release_uses_the_final_pointer_and_waits_for_authority},
+    {"clips move before In and workspace pans past Out", &clips_can_move_before_in_and_the_workspace_pans_past_out},
+    {"auto key toggle and camera lens rows", &auto_key_is_an_explicit_toggle_and_camera_lens_rows_are_keyable},
     {"light rows key intensity colour and position",
      &light_rows_key_intensity_colour_and_position},
     {"a layer renames in place", &a_layer_renames_in_place},
@@ -2570,6 +3158,16 @@ constexpr std::array<Case, 74U> cases{{
      &dragging_a_layer_out_reports_one_screen_space_drop},
     {"dragging a track out reports one screen space drop",
      &dragging_a_track_out_reports_one_screen_space_drop},
+    {"dragging selected layers preserves the group in timeline order",
+     &dragging_selected_layers_preserves_the_group_in_timeline_order},
+    {"layer drags exclude locked selection and reset the payload",
+     &layer_drags_exclude_locked_selection_and_reset_the_payload},
+    {"modifier layer clicks select once per gesture",
+     &modifier_layer_clicks_select_once_per_gesture},
+    {"dragging selected media outside the timeline does not reassign tracks",
+     &dragging_selected_media_outside_the_timeline_does_not_reassign_tracks},
+    {"track headers support group selection and group drops",
+     &track_headers_support_group_selection_and_group_drops},
     {"dragging clip rows reorders clips inside one track",
      &dragging_clip_rows_reorders_clips_inside_one_track},
     {"an explicit track does not steal loose clip ordering",

@@ -271,6 +271,37 @@ void invalid_copy_replaces_the_clipboard_and_paste_reports_bounds() {
         legacy_paste.value().created.front(), scene::schema::scene_id) == 0);
 }
 
+void negative_clipboard_anchors_preserve_spacing_and_reject_overflow() {
+    auto root = source_document().set(media(10U, -60, 40)).set(media(20U, -5, 10));
+    app::ClipClipboard clipboard;
+    constexpr std::array selection{doc::NodeId{10U}, doc::NodeId{20U}};
+    CLIP_CHECK(clipboard.copy(root, selection));
+    CLIP_CHECK(clipboard.anchor() == -60);
+    CLIP_CHECK(clipboard.span_duration() == 65);
+    const auto pasted = clipboard.paste(root, scene::SceneId{99U}, 100U, 1000U);
+    CLIP_CHECK(pasted);
+    std::vector<core::i64> starts;
+    for (const auto& node : pasted.value().created) {
+        if (node.type == scene::schema::media_type) {
+            starts.push_back(integer(node, scene::schema::clip_start));
+        }
+    }
+    CLIP_CHECK(starts == std::vector<core::i64>({100, 155}));
+
+    const core::i64 low = std::numeric_limits<core::i64>::min();
+    const core::i64 high = std::numeric_limits<core::i64>::max();
+    root = root.set(media(10U, low, 1)).set(media(20U, high - 1, 1));
+    CLIP_CHECK(!clipboard.copy(root, selection));
+    CLIP_CHECK(clipboard.empty());
+    constexpr std::array one{doc::NodeId{10U}};
+    root = root.set(media(10U, -20, 10));
+    CLIP_CHECK(clipboard.copy(root, one));
+    const auto overflowing_end = clipboard.paste(root, scene::SceneId{99U},
+        static_cast<core::u64>(high - 5), 1000U);
+    CLIP_CHECK(!overflowing_end);
+    CLIP_CHECK(overflowing_end.error() == app::ClipPasteError::FrameOutOfRange);
+}
+
 } // namespace
 
 int main() {
@@ -278,6 +309,7 @@ int main() {
         copy_paste_carries_the_clip_subgraph_and_rewrites_time_and_ids,
         paste_schedules_as_one_atomic_scene_history_transaction,
         invalid_copy_replaces_the_clipboard_and_paste_reports_bounds,
+        negative_clipboard_anchors_preserve_spacing_and_reject_overflow,
     };
     std::size_t passed = 0U;
     for (const auto test : cases) {

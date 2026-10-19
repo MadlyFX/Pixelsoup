@@ -378,10 +378,9 @@ const MediaInstance* pick_media(const Scene& scene, Canvas canvas,
 
 Vec3 directional_light_anchor(const Scene& scene,
                               const DirectionalLight& light) noexcept {
-    const float view_distance = length(scene.camera.target - scene.camera.eye);
-    const float offset = std::clamp(view_distance * 0.32F, 1.5F, 4.0F);
+    static_cast<void>(scene);
     const Vec3 direction = normalize(light.direction, Vec3{0.0F, -1.0F, 0.0F});
-    return scene.camera.target - direction * offset;
+    return -direction;
 }
 
 std::optional<ScenePick> pick_scene(const Scene& scene, Canvas canvas,

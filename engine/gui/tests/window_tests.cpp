@@ -116,6 +116,33 @@ void the_three_buttons_map_to_their_own_indices() {
     UI_CHECK(input.mouse_down(gui::MouseButton::Right));
 }
 
+void one_native_batch_keeps_scaled_press_and_release_endpoints() {
+    gui::InputState input;
+    input.new_frame();
+    const std::array<SDL_Event, 4U> events{{
+        button_event(SDL_BUTTON_LEFT, true, 200.0F, 60.0F),
+        motion_event(230.0F, 70.0F),
+        button_event(SDL_BUTTON_LEFT, false, 240.0F, 80.0F),
+        motion_event(400.0F, 160.0F),
+    }};
+    for (const auto& event : events) {
+        UI_CHECK(gui::translate_event(&event, input, 0.5F));
+    }
+    UI_CHECK(input.mouse_pressed(gui::MouseButton::Left));
+    UI_CHECK(input.mouse_released(gui::MouseButton::Left));
+    UI_CHECK(input.mouse_release_follows_press(gui::MouseButton::Left));
+    UI_CHECK(!input.mouse_down(gui::MouseButton::Left));
+    UI_CHECK(near(input.mouse_press_x(gui::MouseButton::Left), 100.0F));
+    UI_CHECK(near(input.mouse_press_y(gui::MouseButton::Left), 30.0F));
+    UI_CHECK(near(input.mouse_release_x(gui::MouseButton::Left), 120.0F));
+    UI_CHECK(near(input.mouse_release_y(gui::MouseButton::Left), 40.0F));
+    UI_CHECK(near(input.mouse_x(), 200.0F));
+    UI_CHECK(near(input.mouse_y(), 80.0F));
+    input.new_frame();
+    UI_CHECK(!input.mouse_pressed(gui::MouseButton::Left));
+    UI_CHECK(!input.mouse_released(gui::MouseButton::Left));
+}
+
 void press_and_release_read_as_edges_of_their_own_frames() {
     gui::InputState input;
 
@@ -481,7 +508,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 18U> cases{{
+constexpr std::array<Case, 19U> cases{{
+    {"one native batch keeps scaled press and release endpoints",
+     &one_native_batch_keeps_scaled_press_and_release_endpoints},
     {"motion moves the pointer", &motion_moves_the_pointer},
     {"a button event carries its own position",
      &a_button_event_carries_its_own_position},

@@ -43,6 +43,7 @@ struct ProxyPlacementObservation final {
     ProxyPlacementIssue issue{ProxyPlacementIssue::None};
     core::u32 source_frame_index{};
     std::optional<core::u32> proxy_frame_index;
+    bool offline{};
 
     bool operator==(const ProxyPlacementObservation&) const = default;
 };

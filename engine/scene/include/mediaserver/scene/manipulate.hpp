@@ -123,8 +123,8 @@ pick_scene_all(const Scene& scene, float canvas_x, float canvas_y,
                float light_radius = 12.0F, bool include_lights = true);
 
 // A stable world-space place to draw and pick a directional-light icon. A sun
-// has direction but no authored position, so the editor floats its marker near
-// the camera target without adding a fake transform to the replicated scene.
+// has direction but no authored position, so its marker sits near the world
+// origin without following the camera or adding a transform to the scene.
 [[nodiscard]] Vec3
 directional_light_anchor(const Scene& scene,
                          const DirectionalLight& light) noexcept;

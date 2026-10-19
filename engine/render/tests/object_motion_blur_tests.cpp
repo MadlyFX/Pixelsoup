@@ -158,6 +158,36 @@ void shutter_reconstruction(rhi::Device& device) {
     CHECK(draw(0.5F, 16U) == draw(0.5F, 16U));
 }
 
+void compositor_owned_passes_require_deferral_and_preserve_pixels(rhi::Device& device) {
+    auto ordinary = render::HybridSceneRenderer::create(device, 128U, 64U, limits()); CHECK(ordinary);
+    auto owned = render::HybridSceneRenderer::create(device, 128U, 64U, limits(), render::SceneEffectOwner::Compositor); CHECK(owned);
+    auto frame = fixture();
+    frame.renderer_settings.motion_blur = true;
+    CHECK(owned.value().readiness(frame.renderer_settings).satisfied);
+    {
+        auto cmd = acquire(device);
+        const auto invalid = owned.value().render_frame(cmd,
+            owned.value().convenience_request(frame, scene::whole(frame.canvas), {}));
+        CHECK(!invalid && invalid.error() == render::RenderError::InvalidConfiguration);
+    }
+    const auto draw = [&](render::HybridSceneRenderer& renderer) {
+        auto cmd = acquire(device);
+        auto request = renderer.convenience_request(frame, scene::whole(frame.canvas), {});
+        request.defer_scene_effects = true;
+        auto result = renderer.render_frame(cmd, request); CHECK(result);
+        CHECK(result.value().passes.motion_blur == render::PassState::NotAuthored);
+        CHECK(result.value().object_velocity != nullptr);
+        return download(device, std::move(cmd), *result.value().color, 8U);
+    };
+    for (core::u64 n = 0; n < 3; ++n) {
+        frame.show_frame = n;
+        frame.instances[0].world = scene::multiply(scene::translation({static_cast<float>(n) * 0.25F, 0, 0}),
+            scene::scaling({0.25F, 0.75F, 1}));
+        frame.instances[0].normal = scene::normal_basis(frame.instances[0].world);
+        CHECK(draw(ordinary.value()) == draw(owned.value()));
+    }
+}
+
 void camera_motion_is_not_blurred(rhi::Device& device) {
     auto made = render::HybridSceneRenderer::create(device, 128U, 64U, limits()); CHECK(made);
     auto renderer = std::move(made).value();
@@ -294,6 +324,7 @@ int main() {
             shutter_reconstruction(device);
             std::cout << "[pass] shutter span, HDR energy, alpha, radius, occlusion and cancellation: " << static_cast<int>(backend) << '\n';
             if (device.capabilities().advanced_raster()) {
+                compositor_owned_passes_require_deferral_and_preserve_pixels(device);
                 camera_motion_is_not_blurred(device);
                 compositor_slices_and_holds(device);
                 std::cout << "[pass] camera exclusion, object motion, resets, holds and exact odd node slices\n";

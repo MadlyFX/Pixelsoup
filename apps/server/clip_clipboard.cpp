@@ -54,7 +54,7 @@ namespace {
     }
     const std::int64_t* const start =
         std::get_if<std::int64_t>(&found->second);
-    if (start == nullptr || *start < 0) {
+    if (start == nullptr) {
         return std::nullopt;
     }
     return *start;
@@ -204,6 +204,12 @@ bool ClipClipboard::copy(
         clear();
         return false;
     }
+    const core::u64 span = static_cast<core::u64>(*end) -
+                           static_cast<core::u64>(*anchor);
+    if (span > static_cast<core::u64>(std::numeric_limits<core::i64>::max())) {
+        clear();
+        return false;
+    }
 
     std::vector<doc::Node> effects;
     std::vector<doc::NodeId> effect_ids;
@@ -241,7 +247,7 @@ bool ClipClipboard::copy(
 
     nodes_ = std::move(copied);
     anchor_ = *anchor;
-    span_duration_ = *end - *anchor;
+    span_duration_ = static_cast<core::i64>(span);
     multiple_source_lanes_ = multiple_source_lanes;
     return true;
 }
@@ -315,7 +321,9 @@ core::Result<ClipPastePlan, ClipPasteError> ClipClipboard::paste(
             }
             const std::optional<core::i64> shifted =
                 shifted_frame(*start, anchor_, playhead);
-            if (!shifted.has_value() || *shifted < 0) {
+            const auto* duration = integer_property(original, scene::schema::clip_duration);
+            if (!shifted.has_value() || duration == nullptr || *duration <= 0 ||
+                *shifted > std::numeric_limits<core::i64>::max() - *duration) {
                 return core::Result<ClipPastePlan, ClipPasteError>::failure(
                     ClipPasteError::FrameOutOfRange);
             }

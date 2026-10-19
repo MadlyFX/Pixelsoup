@@ -110,6 +110,14 @@ treatment implicitly: consecutive Normal/no-blur drawables stay one pass,
 and only a layer that actually needs isolation (a blur, a destination-reading
 blend) pays for one.
 
+The compositor owns one set of scene fog, bloom and object motion-blur targets.
+Its isolated renderers retain their antialiasing and geometry products without
+allocating duplicate copies of those deferred passes. The first layer also owns
+the planar reflection capture of the complete scene; subsequent layers sample
+that same capture without constructing extra reflection renderers. This reduces
+the cold allocation cost of graphs with many plates, including LED Car Process,
+while preserving layer order, source resolution, blends and reflection content.
+
 **Isolated layers keep the frame's depth.** Isolating a layer costs it the
 shared depth buffer, and a flat premultiplied composite has no way to put that
 back: adding a brightness or blur node to an object used to lift that object in
@@ -126,7 +134,7 @@ Depth-only geometry is biased a few thousand float steps away from the camera,
 so two coplanar layers are still ordered by the composite rather than
 cancelling each other in a reversed-depth test neither can win. Program, Stage, and each side of a Preview dissolve
 composite through their own scene's graph independently - see
-[Program and Preview](#program-and-preview) - which is why rehearsing a
+[Program and Preview](operator-guide.md#program-and-preview) - which is why rehearsing a
 different composite in Preview never touches what Program is showing.
 
 **Media and imported geometry share one decode contract.** `MediaSource` turns
@@ -135,10 +143,14 @@ pair always yields the same bytes on every node, with direct seek to any frame
 rather than nearest-keyframe. Image sequences decode with stb_image; video
 decodes through FFmpeg's demuxer/decoder registry - whatever codecs the linked
 build carries - on an async worker so decode never blocks the frame path.
-`MediaCache` is the GPU residency on top: four resident frames
-or 256 MB, whichever binds first, evicted oldest-first, with current and
+`MediaCache` is the GPU residency on top: sixteen resident frames
+or 512 MiB including texture/staging ownership, whichever binds first, with current and
 committed frames pinned across a frame so a reused slot is never overwritten
-mid-draw. `model_loader` reads glTF/GLB and OBJ into the same vertex/index
+mid-draw. Large media transfers span bounded command recordings; partial images
+are never published, and cancellation retries only unaccepted rows. Shared
+upload pressure holds the last complete frame until the next transfer finishes.
+See [media playback and codec limits](media-playback.md) for supported containers,
+qualification and performance boundaries. `model_loader` reads glTF/GLB and OBJ into the same vertex/index
 arenas `SceneRenderer` already uses, preserving per-primitive material
 boundaries and PBR textures so an imported asset shades through the identical
 pipeline as a procedural one.

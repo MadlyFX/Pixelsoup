@@ -128,6 +128,7 @@ UiContext::UiContext(
 
 void UiContext::new_frame(double time_seconds) {
     hot_ = none;
+    press_consumed_ = false;
     cursor_ = Cursor::Arrow;
     time_ = time_seconds;
     pointer_block_depth_ = 0U;
@@ -169,7 +170,11 @@ void UiContext::new_frame(double time_seconds) {
                 dropdown_highlight_ = std::min(dropdown_first_ + static_cast<std::size_t>((input_.mouse_y() - dropdown_bounds_.y) / 24.0F), dropdown_options_.size() - 1U);
             }
             if (input_.mouse_pressed(MouseButton::Left)) {
-                if (inside) dropdown_pressed_ = dropdown_highlight_;
+                press_consumed_ = true;
+                if (dropdown_bounds_.contains(pointer_press_x(), pointer_press_y())) {
+                    dropdown_pressed_ = std::min(dropdown_first_ + static_cast<std::size_t>(
+                        (pointer_press_y() - dropdown_bounds_.y) / 24.0F), dropdown_options_.size() - 1U);
+                }
                 else close(false);
             }
             // A second right click dismisses rather than stacking menus; the
@@ -178,7 +183,16 @@ void UiContext::new_frame(double time_seconds) {
                 close(false);
             }
             if (dropdown_id_ != none && input_.mouse_released(MouseButton::Left)) {
-                if (inside && dropdown_pressed_ == dropdown_highlight_) close(true);
+                if (dropdown_bounds_.contains(pointer_release_x(), pointer_release_y())) {
+                    const auto released = std::min(dropdown_first_ + static_cast<std::size_t>(
+                        (pointer_release_y() - dropdown_bounds_.y) / 24.0F), dropdown_options_.size() - 1U);
+                    if (dropdown_pressed_ == released &&
+                        (!input_.mouse_pressed(MouseButton::Left) ||
+                         input_.mouse_release_follows_press(MouseButton::Left))) {
+                        dropdown_highlight_ = released;
+                        close(true);
+                    }
+                }
                 dropdown_pressed_ = static_cast<std::size_t>(-1);
             }
             if (!input_.keys().empty()) {
@@ -236,9 +250,13 @@ void UiContext::interact(
         hot_ = id;
     }
     bool pressed = false;
-    if (hot_ == id && active_ == none
-        && input_.mouse_pressed(MouseButton::Left)) {
+    const bool press_inside_clip = interaction_clip_stack_.empty()
+        || interaction_clip_stack_.back().contains(pointer_press_x(), pointer_press_y());
+    if (!pointer_blocked() && press_inside_clip && active_ == none
+        && !press_consumed_ && input_.mouse_pressed(MouseButton::Left)
+        && bounds.contains(pointer_press_x(), pointer_press_y())) {
         active_ = id;
+        press_consumed_ = true;
         pressed = true;
     }
     hovered_out = hovered;
@@ -345,7 +363,15 @@ void draw_icon(
     Icon icon,
     float center_x,
     float center_y,
-    UiColor color) {
+    UiColor color,
+    float scale) {
+    if (std::isfinite(scale) && scale > 0.0F && scale != 1.0F) {
+        const float previous_scale = list.scale();
+        list.set_scale(previous_scale * scale);
+        draw_icon(list, icon, center_x / scale, center_y / scale, color);
+        list.set_scale(previous_scale);
+        return;
+    }
     const float x = center_x;
     const float y = center_y;
     const auto right = [&](float tip, float half) {
@@ -525,9 +551,13 @@ Interaction UiContext::grab(UiId id, const Rect& bounds) noexcept {
     // Read before the release clears it, so a widget that follows the pointer
     // gets a final update at the position it was let go at.
     result.held = active_ == id;
-    if (result.held && input_.mouse_released(MouseButton::Left)) {
+    if (result.held && input_.mouse_released(MouseButton::Left) &&
+        (!result.pressed || input_.mouse_release_follows_press(MouseButton::Left))) {
         result.released = true;
-        result.clicked = result.hovered;
+        result.clicked = !pointer_blocked()
+            && bounds.contains(pointer_release_x(), pointer_release_y())
+            && (interaction_clip_stack_.empty() || interaction_clip_stack_.back().contains(
+                pointer_release_x(), pointer_release_y()));
         active_ = none;
     }
     return result;
@@ -1045,13 +1075,13 @@ bool UiContext::edit_field(UiId id, const Rect& bounds, std::string& value,
             const std::string shown(characters_before(value, value.size()),
                                     '*');
             caret_ = byte_of_character(
-                value, caret_from_x(font_, shown, inner.x, input_.mouse_x()));
+                value, caret_from_x(font_, shown, inner.x, pointer_press_x()));
         } else {
-            caret_ = caret_from_x(font_, value, inner.x, input_.mouse_x());
+            caret_ = caret_from_x(font_, value, inner.x, pointer_press_x());
         }
         blink_base_ = time_;
     } else if (focus_ == id && input_.mouse_pressed(MouseButton::Left)
-               && !it.hovered) {
+               && !bounds.contains(pointer_press_x(), pointer_press_y())) {
         // A press anywhere else commits the edit, the way clicking off a field
         // does everywhere else.
         focus_ = none;

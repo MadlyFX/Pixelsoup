@@ -102,6 +102,157 @@ void releasing_off_the_button_is_not_a_click() {
     UI_CHECK(ctx.active() == 0U);
 }
 
+void input_keeps_each_buttons_first_press_position() {
+    gui::InputState input;
+    input.new_frame();
+    input.set_mouse_position(12.0F, 24.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(32.0F, 48.0F);
+    input.set_mouse_button(gui::MouseButton::Right, true);
+    input.set_mouse_position(72.0F, 96.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    UI_CHECK(input.mouse_pressed(gui::MouseButton::Left));
+    UI_CHECK(input.mouse_released(gui::MouseButton::Left));
+    UI_CHECK(near(input.mouse_press_x(gui::MouseButton::Left), 12.0F));
+    UI_CHECK(near(input.mouse_press_y(gui::MouseButton::Left), 24.0F));
+    UI_CHECK(near(input.mouse_press_x(gui::MouseButton::Right), 32.0F));
+    UI_CHECK(near(input.mouse_press_y(gui::MouseButton::Right), 48.0F));
+    UI_CHECK(near(input.mouse_x(), 72.0F));
+    input.release_held();
+    input.new_frame();
+    UI_CHECK(!input.mouse_pressed(gui::MouseButton::Left));
+    input.set_mouse_position(120.0F, 140.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    UI_CHECK(near(input.mouse_press_x(gui::MouseButton::Left), 120.0F));
+    UI_CHECK(near(input.mouse_press_y(gui::MouseButton::Left), 140.0F));
+}
+
+void batched_motion_captures_the_press_origin_once() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::Rect origin{10.0F, 10.0F, 80.0F, 30.0F};
+    const gui::Rect destination{150.0F, 10.0F, 80.0F, 30.0F};
+    input.new_frame();
+    input.set_mouse_position(40.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(180.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    ctx.new_frame();
+    UI_CHECK(near(ctx.pointer_press_x(), 40.0F));
+    UI_CHECK(near(ctx.pointer_x(), 180.0F));
+    // The latest hovered control must not steal a press that began elsewhere,
+    // even when it is visited before the actual press target.
+    const auto other = ctx.grab(1U, destination);
+    UI_CHECK(other.hovered && !other.pressed && !other.released);
+    const auto source = ctx.grab(2U, origin);
+    UI_CHECK(source.pressed && source.held && source.released);
+    UI_CHECK(!source.hovered && !source.clicked);
+    UI_CHECK(ctx.active() == 0U);
+    const auto duplicate = ctx.grab(3U, origin);
+    UI_CHECK(!duplicate.pressed && !duplicate.released);
+
+    // A complete click in one event batch also activates only one of two
+    // overlapping controls, despite release clearing the active ID.
+    input.new_frame();
+    input.set_mouse_position(40.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    ctx.new_frame();
+    UI_CHECK(ctx.button(2U, origin, "First"));
+    UI_CHECK(!ctx.button(3U, origin, "Second"));
+}
+
+void batched_press_clipping_uses_the_press_origin() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::Rect content{0.0F, 0.0F, 200.0F, 100.0F};
+    const gui::Rect clip{0.0F, 0.0F, 80.0F, 50.0F};
+    input.new_frame();
+    input.set_mouse_position(40.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(120.0F, 20.0F);
+    ctx.new_frame();
+    ctx.push_clip(clip);
+    const auto from_visible = ctx.grab(1U, content);
+    UI_CHECK(from_visible.pressed && from_visible.held && !from_visible.hovered);
+    ctx.pop_clip();
+    begin_frame(input, ctx, 120.0F, 20.0F, false);
+    UI_CHECK(ctx.grab(1U, content).released);
+
+    input.new_frame();
+    input.set_mouse_position(120.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(40.0F, 20.0F);
+    ctx.new_frame();
+    ctx.push_clip(clip);
+    const auto from_hidden = ctx.grab(1U, content);
+    UI_CHECK(from_hidden.hovered && !from_hidden.pressed && !from_hidden.held);
+    ctx.pop_clip();
+}
+
+void motion_after_release_does_not_change_the_click_endpoint() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::Rect bounds{10.0F, 10.0F, 80.0F, 30.0F};
+    input.new_frame();
+    input.set_mouse_position(40.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(60.0F, 25.0F);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_position(180.0F, 90.0F);
+    ctx.new_frame();
+    const auto clicked = ctx.grab(1U, bounds);
+    UI_CHECK(clicked.pressed && clicked.released && clicked.clicked);
+    UI_CHECK(!clicked.hovered);
+    UI_CHECK(near(ctx.pointer_release_x(), 60.0F));
+    UI_CHECK(near(ctx.pointer_release_y(), 25.0F));
+    UI_CHECK(near(ctx.pointer_release_x() - ctx.pointer_press_x(), 20.0F));
+
+    // Conversely, a release outside cannot become a click by moving back in.
+    input.new_frame();
+    input.set_mouse_position(40.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    input.set_mouse_position(180.0F, 90.0F);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_position(40.0F, 20.0F);
+    ctx.new_frame();
+    const auto canceled = ctx.grab(1U, bounds);
+    UI_CHECK(canceled.pressed && canceled.released && !canceled.clicked);
+    UI_CHECK(canceled.hovered);
+}
+
+void a_prior_release_does_not_end_a_new_capture() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::Rect first{10.0F, 10.0F, 80.0F, 30.0F};
+    const gui::Rect second{150.0F, 10.0F, 80.0F, 30.0F};
+    begin_frame(input, ctx, 40.0F, 20.0F, true);
+    UI_CHECK(ctx.grab(1U, first).pressed);
+    input.new_frame();
+    input.set_mouse_position(60.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    input.set_mouse_position(180.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    ctx.new_frame();
+    UI_CHECK(!input.mouse_release_follows_press(gui::MouseButton::Left));
+    UI_CHECK(ctx.grab(1U, first).clicked);
+    const auto next = ctx.grab(2U, second);
+    UI_CHECK(next.pressed && next.held && !next.released);
+    UI_CHECK(ctx.active() == 2U);
+    begin_frame(input, ctx, 190.0F, 20.0F, false);
+    UI_CHECK(ctx.grab(2U, second).clicked);
+}
+
 void a_press_outside_never_activates() {
     gui::InputState input;
     gui::UiDrawList list;
@@ -867,7 +1018,12 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 31U> cases{{
+constexpr std::array<Case, 36U> cases{{
+    {"motion after release does not change the click endpoint", &motion_after_release_does_not_change_the_click_endpoint},
+    {"a prior release does not end a new capture", &a_prior_release_does_not_end_a_new_capture},
+    {"input keeps each button's first press position", &input_keeps_each_buttons_first_press_position},
+    {"batched motion captures the press origin once", &batched_motion_captures_the_press_origin_once},
+    {"batched press clipping uses the press origin", &batched_press_clipping_uses_the_press_origin},
     {"a scaled list emits physical pixels", &a_scaled_list_emits_physical_pixels},
     {"thin rules keep one width at fractional scale",
      &thin_rules_keep_one_width_at_fractional_scale},

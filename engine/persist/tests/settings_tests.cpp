@@ -120,11 +120,13 @@ void missing_settings_are_an_empty_normal_startup() {
 void paths_round_trip_absolutely_and_settings_create_their_directory() {
     TempDirectory temporary;
     const auto settings = temporary.file("nested/settings/recent-project.bin");
-    const auto relative =
-        std::filesystem::relative(temporary.file("shows/Stage â.mstage"),
-                                  std::filesystem::current_path());
+    const auto project_path = temporary.file("shows/Stage â.mstage");
+    const auto relative = std::filesystem::relative(
+        project_path, std::filesystem::current_path());
+    // Windows cannot express a relative path across drives.
+    const auto input = relative.empty() ? project_path : relative;
 
-    const auto saved = persist::save_recent_project_path(settings, relative);
+    const auto saved = persist::save_recent_project_path(settings, input);
     RECENT_CHECK(saved.has_value());
     RECENT_CHECK(saved.value().is_absolute());
     RECENT_CHECK(std::filesystem::exists(settings));
@@ -163,6 +165,33 @@ void replacing_a_setting_is_atomic_and_invalid_input_preserves_it() {
         ++entries;
     }
     RECENT_CHECK(entries == 1U);
+}
+
+void recent_projects_are_bounded_unique_and_newest_first() {
+    TempDirectory temporary;
+    const auto settings = temporary.file("settings/recent-project.bin");
+    std::vector<std::filesystem::path> projects;
+    for (std::size_t index = 0U; index < persist::max_recent_projects + 2U;
+         ++index) {
+        const auto path = temporary.file("show-" + std::to_string(index) + ".mstage");
+        projects.push_back(path);
+        RECENT_CHECK(persist::save_recent_project_path(settings, path));
+    }
+    auto loaded = persist::load_recent_project_paths(settings);
+    RECENT_CHECK(loaded.has_value());
+    RECENT_CHECK(loaded.value().size() == persist::max_recent_projects);
+    for (std::size_t index = 0U; index < persist::max_recent_projects; ++index) {
+        RECENT_CHECK(loaded.value()[index] == projects[projects.size() - 1U - index]);
+    }
+    RECENT_CHECK(persist::save_recent_project_path(settings, projects[3U]));
+    loaded = persist::load_recent_project_paths(settings);
+    RECENT_CHECK(loaded.has_value());
+    RECENT_CHECK(loaded.value().size() == persist::max_recent_projects);
+    RECENT_CHECK(loaded.value().front() == projects[3U]);
+    RECENT_CHECK(std::count(loaded.value().begin(), loaded.value().end(),
+                            projects[3U]) == 1);
+    const auto newest = persist::load_recent_project_path(settings);
+    RECENT_CHECK(newest.has_value() && newest.value() == projects[3U]);
 }
 
 void corruption_truncation_and_trailing_data_are_rejected() {
@@ -544,13 +573,15 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"missing settings are a normal startup",
      &missing_settings_are_an_empty_normal_startup},
     {"paths round trip and create the settings directory",
      &paths_round_trip_absolutely_and_settings_create_their_directory},
     {"replacement is atomic and invalid input preserves it",
      &replacing_a_setting_is_atomic_and_invalid_input_preserves_it},
+    {"recent projects stay bounded, unique, and newest first",
+     &recent_projects_are_bounded_unique_and_newest_first},
     {"corruption, truncation, and trailing data are rejected",
      &corruption_truncation_and_trailing_data_are_rejected},
     {"startup returns only a valid existing project",

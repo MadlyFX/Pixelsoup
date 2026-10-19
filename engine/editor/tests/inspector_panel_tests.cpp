@@ -174,13 +174,13 @@ struct Harness final {
 
     static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
 
-    float control_y(std::string_view name, std::size_t salt = 1000U) {
+    float control_y(std::string_view name, std::size_t salt = 1000U, float x = 40.0F) {
         core::u64 id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
         for (const char c : name) { id ^= static_cast<core::u8>(c); id *= 1099511628211ULL; }
         id ^= static_cast<core::u64>(salt) + 0x9E3779B9ULL;
         id *= 1099511628211ULL;
         for (float y = 10.0F; y < 1750.0F; y += 4.0F) {
-            static_cast<void>(frame(40.0F, y, false, {0,0,300,1800}));
+            static_cast<void>(frame(x, y, false, {0,0,300,1800}));
             if (ctx.hot() == id) return y;
         }
         throw std::runtime_error{"Control not reachable: " + std::string{name}};
@@ -377,6 +377,81 @@ void a_press_that_never_travels_commits_nothing() {
     const editor::InspectorFrame released =
         h.frame(field_x0 + 1.0F, position_y, false);
     UI_CHECK(released.component_edits.empty());
+}
+
+void numeric_capture_ignores_press_travel_and_keeps_release_travel() {
+    Harness h;
+    h.element.position.x = 7.0F;
+    static_cast<void>(h.frame(600.0F, position_y, false));
+    // SDL can deliver the move into this field and the press in one batch.
+    // That approach distance must not count as captured scrub movement.
+    const auto pressed = h.frame(field_x0, position_y, true);
+    UI_CHECK(pressed.component_edits.empty());
+    // Conversely a quick gesture can deliver all its captured travel with
+    // the release, without any intermediate held frame.
+    h.input.new_frame();
+    h.input.set_mouse_position(field_x0 + 12.0F, position_y);
+    h.input.set_mouse_button(gui::MouseButton::Left, false);
+    h.input.set_mouse_position(450.0F, position_y + 40.0F);
+    h.ctx.new_frame();
+    const auto released = h.panel.draw(
+        h.ctx, Harness::bounds, &h.element, 0U, h.keyframes,
+        h.show_frame, h.effects, h.sources);
+    UI_CHECK(released.component_edits.size() == 1U);
+    UI_CHECK(released.component_edits.front().component ==
+             scene::TransformChannel::PositionX);
+    UI_CHECK(near(released.component_edits.front().value, 7.12));
+    UI_CHECK(!h.ctx.typing());
+
+    Harness click;
+    static_cast<void>(click.frame(600.0F, position_y, false));
+    UI_CHECK(click.frame(field_x0, position_y, true).component_edits.empty());
+    UI_CHECK(click.frame(field_x0, position_y, false).component_edits.empty());
+    UI_CHECK(click.ctx.typing());
+
+    Harness batched;
+    batched.element.position.x = 7.0F;
+    static_cast<void>(batched.frame(600.0F, position_y, false));
+    batched.input.new_frame();
+    batched.input.set_mouse_position(field_x0, position_y);
+    batched.input.set_mouse_button(gui::MouseButton::Left, true);
+    batched.input.set_mouse_position(field_x0 + 12.0F, position_y);
+    batched.input.set_mouse_button(gui::MouseButton::Left, false);
+    batched.input.set_mouse_position(250.0F, position_y + 40.0F);
+    batched.ctx.new_frame();
+    const auto gesture = batched.panel.draw(
+        batched.ctx, Harness::bounds, &batched.element, 0U, batched.keyframes,
+        batched.show_frame, batched.effects, batched.sources);
+    UI_CHECK(gesture.component_edits.size() == 1U);
+    UI_CHECK(gesture.component_edits.front().component ==
+             scene::TransformChannel::PositionX);
+    UI_CHECK(near(gesture.component_edits.front().value, 7.12));
+    UI_CHECK(!batched.ctx.typing());
+
+    Harness clicked;
+    clicked.input.new_frame();
+    clicked.input.set_mouse_position(field_x0, position_y);
+    clicked.input.set_mouse_button(gui::MouseButton::Left, true);
+    clicked.input.set_mouse_button(gui::MouseButton::Left, false);
+    clicked.input.set_mouse_position(250.0F, position_y + 40.0F);
+    clicked.ctx.new_frame();
+    const auto quick_click = clicked.panel.draw(
+        clicked.ctx, Harness::bounds, &clicked.element, 0U, clicked.keyframes,
+        clicked.show_frame, clicked.effects, clicked.sources);
+    UI_CHECK(quick_click.component_edits.empty());
+    UI_CHECK(clicked.ctx.typing());
+}
+
+void nonfinite_numeric_text_cannot_author_a_property() {
+    for (const std::string_view text : {"nan", "NaN(1)", "inf", "-infinity", "1e9999"}) {
+        Harness h;
+        h.click(field_x0, position_y);
+        static_cast<void>(h.type(text, false, false));
+        const auto committed = h.type("", true, false);
+        UI_CHECK(committed.component_edits.empty());
+        UI_CHECK(committed.named_edits.empty());
+        UI_CHECK(!h.ctx.typing());
+    }
 }
 
 void a_click_opens_the_field_and_typing_commits_an_exact_value() {
@@ -1160,27 +1235,67 @@ void a_camera_has_a_position_and_rotation_like_everything_else() {
     angle.click(field_x0, camera_fov_y);
     static_cast<void>(angle.type("0", false, false));
     const editor::InspectorFrame narrowed = angle.type("", true, false);
-    UI_CHECK(narrowed.named_edits.size() == 1U);
-    UI_CHECK(narrowed.named_edits.front().property
-             == scene::schema::fov_turns);
-    UI_CHECK(narrowed.named_edits.front().value > 0.0);
+    UI_CHECK(narrowed.component_edits.size() == 1U);
+    UI_CHECK(narrowed.component_edits.front().component
+             == scene::PropertyChannel::CameraFieldOfView);
+    UI_CHECK(narrowed.component_edits.front().value > 0.0);
     Harness shutter;
     shutter.element = make_camera();
     shutter.element.shutter_seconds = 0.03125F;
     shutter.click(field_x0, camera_fov_y + 26.0F);
     static_cast<void>(shutter.type("0.010416667", false, false));
     const auto exposure = shutter.type("", true, false);
-    UI_CHECK(exposure.named_edits.size() == 1U);
-    UI_CHECK(exposure.named_edits.front().property == scene::schema::shutter_seconds);
-    UI_CHECK(std::abs(exposure.named_edits.front().value - 0.010416667) < 1.0e-9);
+    UI_CHECK(exposure.component_edits.size() == 1U);
+    UI_CHECK(exposure.component_edits.front().component == scene::PropertyChannel::CameraShutter);
+    UI_CHECK(std::abs(exposure.component_edits.front().value - 0.010416667) < 1.0e-9);
     for (bool focus : {true, false}) {
         Harness lens; lens.element = make_camera();
         lens.click(field_x0, camera_fov_y + (focus ? 52.0F : 78.0F));
         static_cast<void>(lens.type(focus ? "4.75" : "1.8", false, false));
         const auto edited = lens.type("", true, false);
-        UI_CHECK(edited.named_edits.size() == 1U);
-        UI_CHECK(edited.named_edits[0].property == (focus ? scene::schema::focus_distance_m : scene::schema::aperture_f_number));
-        UI_CHECK(std::abs(edited.named_edits[0].value - (focus ? 4.75 : 1.8)) < 1e-8);
+        UI_CHECK(edited.component_edits.size() == 1U);
+        UI_CHECK(edited.component_edits[0].component == (focus ? scene::PropertyChannel::CameraFocusDistance : scene::PropertyChannel::CameraAperture));
+        UI_CHECK(std::abs(edited.component_edits[0].value - (focus ? 4.75 : 1.8)) < 1e-8);
+    }
+    const std::array lens_channels{
+        scene::PropertyChannel::CameraFieldOfView,
+        scene::PropertyChannel::CameraShutter,
+        scene::PropertyChannel::CameraFocusDistance,
+        scene::PropertyChannel::CameraAperture};
+    for (std::size_t index = 0U; index < lens_channels.size(); ++index) {
+        Harness keyer;
+        keyer.element = make_camera();
+        const float key_y = camera_fov_y + 26.0F * static_cast<float>(index);
+        static_cast<void>(keyer.frame(90.0F, key_y, false));
+        static_cast<void>(keyer.frame(90.0F, key_y, true));
+        const auto keyed = keyer.frame(90.0F, key_y, false);
+        UI_CHECK(keyed.key_edits.size() == 1U);
+        UI_CHECK(keyed.key_edits.front().component == lens_channels[index]);
+        UI_CHECK(!keyed.key_edits.front().erase);
+    }
+}
+
+void camera_key_buttons_preserve_cubic_evaluated_values() {
+    for (const bool weighted : {false, true}) {
+        Harness camera;
+        camera.element = make_camera();
+        camera.show_frame = weighted ? 13U : 5U;
+        scene::ChannelKeyframes channel{subject,
+            scene::PropertyChannel::CameraFieldOfView,
+            {0, weighted ? 32 : 20}, {0.1, 0.2},
+            {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic}};
+        if (weighted) {
+            channel.tangents = {
+                scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.02, {}, 4.0},
+                scene::KeyTangent{scene::KeyTangentMode::Broken, -0.005, 0.0, 12.0, {}}};
+        }
+        camera.keyframes = {channel};
+        static_cast<void>(camera.frame(90.0F, camera_fov_y, false));
+        static_cast<void>(camera.frame(90.0F, camera_fov_y, true));
+        const auto keyed = camera.frame(90.0F, camera_fov_y, false);
+        UI_CHECK(keyed.key_edits.size() == 1U);
+        UI_CHECK(!keyed.key_edits.front().erase);
+        UI_CHECK(near(keyed.key_edits.front().value, weighted ? 0.2025 : 0.125));
     }
 }
 
@@ -1507,6 +1622,32 @@ void model_animation_buttons_preserve_exact_start_frame() {
     }
 }
 
+void model_texture_buttons_target_selected_part_and_channel() {
+    Harness h;
+    h.element.kind = editor::ElementKind::Model;
+    h.element.source = "C:/assets/vehicle.msmodel";
+    h.element.model_material_parts = 3U;
+    const auto dropdown = h.control_y("material.part", subject.value());
+    static_cast<void>(h.choose(dropdown, 0, 2));
+    for (std::size_t role = 0; role < 5U; ++role) {
+        const auto y = h.control_y("texture.browse", role, 200);
+        static_cast<void>(h.frame(200, y, false));
+        static_cast<void>(h.frame(200, y, true));
+        const auto result = h.frame(200, y, false);
+        UI_CHECK(result.file_picker);
+        const auto& request = *result.file_picker;
+        UI_CHECK(request.kind == editor::FilePickerKind::ModelTexture);
+        UI_CHECK(request.targets == std::vector<doc::NodeId>{subject});
+        UI_CHECK(request.model_source == h.element.source);
+        UI_CHECK(request.material_part == 2U && request.texture_role == role && !request.clear_texture);
+    }
+    const auto y = h.control_y("texture.clear", 0, 270);
+    static_cast<void>(h.frame(270, y, false));
+    static_cast<void>(h.frame(270, y, true));
+    const auto cleared = h.frame(270, y, false);
+    UI_CHECK(cleared.file_picker && cleared.file_picker->clear_texture);
+}
+
 void linked_placement_controls_emit_owned_edits() {
     Harness h;
     h.element.kind = editor::ElementKind::Model;
@@ -1574,7 +1715,14 @@ void add_effect_picker_authors_a_choice_and_keeps_an_existing_stack() {
     UI_CHECK(h.effects.size() == 1 && near(h.effects[0].value, 1.5));
 }
 
-constexpr std::array<Case, 44U> cases{{
+constexpr std::array<Case, 48U> cases{{
+    {"camera key buttons preserve cubic evaluated values",
+     &camera_key_buttons_preserve_cubic_evaluated_values},
+    {"numeric capture ignores press travel and keeps release travel",
+     &numeric_capture_ignores_press_travel_and_keeps_release_travel},
+    {"nonfinite numeric text cannot author a property",
+     &nonfinite_numeric_text_cannot_author_a_property},
+    {"model texture buttons target selected part and channel", &model_texture_buttons_target_selected_part_and_channel},
     {"Add effect picks a kind and appends to existing stacks", &add_effect_picker_authors_a_choice_and_keeps_an_existing_stack},
     {"linked collection controls target the attachment", &linked_collection_controls_target_the_attachment},
     {"linked placement controls emit owned edits", &linked_placement_controls_emit_owned_edits},

@@ -546,7 +546,38 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+void manual_texture_assignment_preserves_other_parts_and_embeds_images() {
+    const auto source = write_temp("manual-texture.obj",
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n");
+    write_temp_tga("manual-color.tga", {23, 117, 209, 255});
+    render::ModelAsset asset;
+    MODEL_CHECK(render::load_model(source, asset));
+    asset.parts.push_back(asset.parts.front());
+    const auto untouched = asset.parts[1];
+    MODEL_CHECK(render::assign_model_texture(asset, 0, 0, temp_path("manual-color.tga").string()));
+    MODEL_CHECK(asset.parts[1] == untouched);
+    MODEL_CHECK(asset.parts[0].material.base_color == scene::Vec3(1, 1, 1));
+    MODEL_CHECK(asset.textures[*asset.parts[0].base_color_texture].rgba == std::vector<core::u8>({23, 117, 209, 255}));
+    MODEL_CHECK(render::compress_model_textures(asset));
+    const auto package = render::write_model_package(source, asset);
+    std::filesystem::remove(temp_path("manual-color.tga"));
+    render::ModelAsset reloaded;
+    MODEL_CHECK(render::load_model(package, reloaded));
+    MODEL_CHECK(reloaded.parts[0].base_color_texture.has_value());
+    MODEL_CHECK(reloaded.parts[1] == untouched);
+    MODEL_CHECK(render::assign_model_texture(reloaded, 0, 0, ""));
+    MODEL_CHECK(!reloaded.parts[0].base_color_texture);
+    MODEL_CHECK(!render::assign_model_texture(reloaded, 5, 0, ""));
+    write_temp_tga("manual-normal.tga", {128, 128, 255, 255});
+    MODEL_CHECK(render::assign_model_texture(reloaded, 0, 2, temp_path("manual-normal.tga").string()));
+    MODEL_CHECK(reloaded.vertex_metadata[0].has_tangent);
+    reloaded.vertex_metadata[0].has_uv0 = false;
+    MODEL_CHECK(!render::assign_model_texture(reloaded, 0, 0, temp_path("manual-normal.tga").string()));
+    MODEL_CHECK(reloaded.diagnostic.find("UV map") != std::string::npos);
+}
+
+constexpr std::array<Case, 8U> cases{{
+    {"manual texture assignments embed images and preserve other parts", &manual_texture_assignment_preserves_other_parts_and_embeds_images},
     {"glTF extensions preserve authored factors and maps", &gltf_extensions_preserve_factors_maps_and_refuse_unknowns},
     {"authored LOD chains are atomic", &authored_lod_chain_is_atomic_and_uses_shared_ranges},
     {"an obj quad loads to geometry with normals and bounds",

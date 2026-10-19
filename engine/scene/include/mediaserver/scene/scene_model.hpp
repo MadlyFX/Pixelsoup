@@ -7,6 +7,7 @@
 
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -515,14 +516,16 @@ private:
     // across nodes; clamped before the first key and after the last. The keys
     // must be non-empty and frame-sorted, as `put` leaves them.
     [[nodiscard]] static double sample_channel(
-        const ChannelEntry& channel, core::i64 frame) noexcept;
+        std::span<const ChannelKey> channel, core::i64 frame) noexcept;
     [[nodiscard]] static double auto_tangent(
-        const ChannelEntry& channel, std::size_t key_index) noexcept;
+        std::span<const ChannelKey> channel, std::size_t key_index) noexcept;
     [[nodiscard]] static double tangent_slope(
-        const ChannelEntry& channel, std::size_t key_index,
+        std::span<const ChannelKey> channel, std::size_t key_index,
         bool incoming) noexcept;
     [[nodiscard]] static bool valid_channel(
-        const ChannelEntry& channel) noexcept;
+        std::span<const ChannelKey> channel) noexcept;
+    friend std::optional<double> sample_keyframes(
+        const ChannelKeyframes& channel, core::i64 frame) noexcept;
 
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.

@@ -51,7 +51,7 @@ node_id_property(const doc::Node &node, std::string_view name) noexcept {
 locked_property(const doc::Node &node) noexcept {
   const auto found = node.properties.find(scene::schema::locked);
   if (found == node.properties.end()) {
-    return false;
+    return node.type == "output.surface";
   }
   const bool *const held = std::get_if<bool>(&found->second);
   return held != nullptr ? std::optional<bool>{*held} : std::nullopt;
@@ -159,6 +159,14 @@ property_name(scene::PropertyChannel property) noexcept {
     return scene::schema::color_b;
   case scene::PropertyChannel::LightRange:
     return scene::schema::range;
+  case scene::PropertyChannel::CameraFieldOfView:
+    return scene::schema::fov_turns;
+  case scene::PropertyChannel::CameraShutter:
+    return scene::schema::shutter_seconds;
+  case scene::PropertyChannel::CameraFocusDistance:
+    return scene::schema::focus_distance_m;
+  case scene::PropertyChannel::CameraAperture:
+    return scene::schema::aperture_f_number;
   case scene::PropertyChannel::Count:
     break;
   }

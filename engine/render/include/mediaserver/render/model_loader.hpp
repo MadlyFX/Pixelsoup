@@ -216,4 +216,10 @@ struct ModelAsset final {
 
 [[nodiscard]] bool load_model(const std::string& source, ModelAsset& into);
 
+// Explicit worker-side material editing. The selected part is a source material
+// run. Empty image_source removes that texture; image bytes are embedded in the
+// next immutable package. Role order matches the first five material samplers.
+[[nodiscard]] bool assign_model_texture(ModelAsset& asset, core::u32 part,
+    core::u32 role, const std::string& image_source);
+
 } // namespace mediaserver::render

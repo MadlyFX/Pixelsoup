@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -49,6 +50,14 @@ void advanced_scene_reaches_the_native_application_presenter() {
   auto &presenter = static_cast<ui::SdlPresenter &>(*owned);
   PRESENTER_CHECK(presenter.backend() == rhi::BackendKind::D3d12);
 
+  std::vector<mediaserver::core::u8> black(config.width * config.height * 4U, 0U);
+  for (std::size_t i = 3U; i < black.size(); i += 4U) black[i] = 255U;
+  const show::FrameBufferView expected{black, config.width, config.height,
+      config.width * 4U, show::PixelFormat::Rgba8888};
+  PRESENTER_CHECK(presenter.readback().digest == show::frame_buffer_digest(expected));
+  PRESENTER_CHECK(presenter.hold() == show::PresenterStatus::Skipped);
+  PRESENTER_CHECK(presenter.readback().digest == show::frame_buffer_digest(expected));
+
   scene::Scene frame{};
   frame.canvas = scene::Canvas{config.width, config.height};
   frame.environment.sky_color = scene::Vec3{0.03F, 0.24F, 0.78F};
@@ -78,6 +87,54 @@ void advanced_scene_reaches_the_native_application_presenter() {
   PRESENTER_CHECK(pixels.width == config.width);
   PRESENTER_CHECK(pixels.height == config.height);
   PRESENTER_CHECK(pixels.digest != 0U);
+}
+
+void buffered_output_keeps_presenting_with_offline_media() {
+  ui::SdlPresenterConfig config{};
+  config.title = "media-server offline media output test";
+  config.width = 96;
+  config.height = 64;
+  config.gpu = config.scene = config.output = config.buffered_media = true;
+  config.resizable = false;
+  auto created = ui::SdlPresenter::create(config);
+  PRESENTER_CHECK(created);
+  auto owned = std::move(created).value();
+  auto& presenter = static_cast<ui::SdlPresenter&>(*owned);
+  scene::Scene frame{};
+  frame.canvas = {96, 64};
+  frame.camera.eye = {0, 0, 3};
+  frame.camera.target = {0, 0, 0};
+  frame.renderer_settings.backend = scene::RendererBackend::Advanced;
+  frame.renderer_settings.required = true;
+  frame.environment.sky_color = frame.environment.ground_color = {0.1F, 0.2F, 0.7F};
+  scene::MediaInstance media{};
+  media.world = scene::identity();
+  media.normal = scene::identity();
+  media.source = "offline-output-does-not-exist.mov";
+  media.source_node = mediaserver::doc::NodeId{912};
+  media.offline = true;
+  frame.media.push_back(media);
+  frame.asset_cohort_required = true;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+  while (!presenter.renderer_readiness().assets.ready &&
+         std::chrono::steady_clock::now() < deadline) {
+    const auto status = presenter.present(frame, scene::whole(frame.canvas));
+    PRESENTER_CHECK(status == show::PresenterStatus::Deferred);
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  PRESENTER_CHECK(presenter.renderer_readiness().assets.ready);
+  frame.asset_commit = {scene::asset_set_digest(frame), 10, 10};
+  mediaserver::core::u64 previous{};
+  for (int i = 0; i < 3; ++i) {
+    frame.control_frame = frame.show_frame = static_cast<mediaserver::core::u64>(i + 10);
+    frame.media.front().world = scene::translation({static_cast<float>(i) * 0.2F, 0, 0});
+    PRESENTER_CHECK(presenter.present(frame, scene::whole(frame.canvas)) == show::PresenterStatus::Presented);
+    const auto image = presenter.readback();
+    PRESENTER_CHECK(image);
+    PRESENTER_CHECK(image.digest != previous);
+    previous = image.digest;
+    PRESENTER_CHECK(presenter.renderer_readiness().assets.ready);
+  }
 }
 
 void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
@@ -177,6 +234,18 @@ void two_native_outputs_publish_bakes_together_and_a_late_output_holds() {
                     100);
     old_pixels[i] = outputs[i]->readback().digest;
     PRESENTER_CHECK(old_pixels[i] != 0 && old_pixels[i] == old_pixels[0]);
+  }
+
+  // A reopened Director may reuse the same assets with lower control-frame
+  // ordinals. Its new permit must be acknowledged without dropping the image.
+  frame.asset_commit = {scene::asset_set_digest(frame), 2, 1};
+  frame.control_frame = 2;
+  frame.show_frame = 1;
+  for (std::size_t i = 0; i < outputs.size(); ++i) {
+    outputs[i]->begin_document_stream();
+    PRESENTER_CHECK(outputs[i]->readback().digest == old_pixels[i]);
+    PRESENTER_CHECK(present(*outputs[i]) == show::PresenterStatus::Presented);
+    PRESENTER_CHECK(outputs[i]->renderer_readiness().assets.visible_commit == 2);
   }
 
   grid.source = second.source;
@@ -299,12 +368,29 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
   PRESENTER_CHECK(created);
   auto owned = std::move(created).value();
   auto &presenter = static_cast<ui::SdlPresenter &>(*owned);
+  const auto wait_for_keyboard_focus = [&](SDL_Window *window) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    do {
+      const auto status = presenter.hold();
+      PRESENTER_CHECK(status != show::PresenterStatus::Failed &&
+                      status != show::PresenterStatus::Closed);
+      if (SDL_GetKeyboardFocus() == window &&
+          (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+        return true;
+      }
+      // Raising requests focus; synchronizing window geometry does not wait
+      // for that request. Leave events queued for the presenter's own pump.
+      static_cast<void>(SDL_WaitEventTimeout(nullptr, 10));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+  };
   auto *output_window = SDL_GetWindowFromID(presenter.window_id());
   PRESENTER_CHECK(output_window != nullptr);
   PRESENTER_CHECK(SDL_GetWindowFullscreenMode(output_window) != nullptr);
   PRESENTER_CHECK(SDL_RaiseWindow(output_window));
   PRESENTER_CHECK(SDL_SyncWindow(output_window));
-  SDL_PumpEvents();
+  PRESENTER_CHECK(wait_for_keyboard_focus(output_window));
   PRESENTER_CHECK(SDL_GetWindowFlags(output_window) & SDL_WINDOW_INPUT_FOCUS);
 
   // A real second window takes focus, as the editor does during playback.
@@ -314,12 +400,7 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
   PRESENTER_CHECK(focus_window);
   PRESENTER_CHECK(SDL_RaiseWindow(focus_window.get()));
   PRESENTER_CHECK(SDL_SyncWindow(focus_window.get()));
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-  while (SDL_GetKeyboardFocus() != focus_window.get() &&
-         std::chrono::steady_clock::now() < deadline) {
-    static_cast<void>(presenter.hold());
-    std::this_thread::sleep_for(std::chrono::milliseconds{1});
-  }
+  PRESENTER_CHECK(wait_for_keyboard_focus(focus_window.get()));
   PRESENTER_CHECK(SDL_GetKeyboardFocus() == focus_window.get());
 
   scene::Scene frame;
@@ -330,6 +411,7 @@ void fullscreen_output_keeps_presenting_without_keyboard_focus() {
   mediaserver::output::OutputMap map;
   map.node = mediaserver::doc::NodeId{1};
   map.source = map.viewport = scene::whole(frame.canvas);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
   while (frame.show_frame < 8 && std::chrono::steady_clock::now() < deadline) {
     const auto status = presenter.present(frame, map);
     PRESENTER_CHECK(status != show::PresenterStatus::Failed &&
@@ -356,6 +438,8 @@ int main() {
   try {
     advanced_scene_reaches_the_native_application_presenter();
     std::cout << "[pass] Advanced scene reached native presenter\n";
+    buffered_output_keeps_presenting_with_offline_media();
+    std::cout << "[pass] buffered output continues with offline media\n";
     two_native_outputs_publish_bakes_together_and_a_late_output_holds();
     std::cout << "[pass] native bake cohort pixels and late-node hold\n";
     busy_native_output_defers_and_hold_retires_without_rendering();

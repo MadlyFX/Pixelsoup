@@ -15,6 +15,8 @@
 #include <array>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -120,6 +122,10 @@ void workflow(const char* project_path, const char* workspace_path) {
   }
   gui::DockLayout layout;
   std::vector<editor::EffectIntent> requested_effects;
+  const std::array<std::string, 1U> recent_projects{"C:/Shows/Recent.mstage"};
+  editor::EditorProjectState project_state{};
+  project_state.recent_projects = recent_projects;
+  std::optional<std::string> requested_project;
   mediaserver::core::FrameTiming completed_timing;
   float scale = 1.0F;
   SDL_Window* window = nullptr;
@@ -145,10 +151,13 @@ void workflow(const char* project_path, const char* workspace_path) {
   check(window != nullptr, "find editor window");
   scale = SDL_GetWindowDisplayScale(window);
   if (!saved_workspace.empty()) adopt_layout(saved_workspace);
+  editor::EditorSwitcherState switcher;
   auto frame = [&](const char* step) {
     std::printf("frame: %s\n", step); std::fflush(stdout);
     const auto start = std::chrono::steady_clock::now();
-    auto result = shell->frame(show, timeline, keyframes, elements);
+    auto result = shell->frame(show, timeline, keyframes, elements,
+                               {}, {}, {}, switcher, {}, {}, {}, project_state);
+    if (result.load_project) requested_project = result.load_project->path;
     completed_timing = result.frame_timing;
     requested_effects.insert(requested_effects.end(), result.effects.begin(), result.effects.end());
     const auto elapsed = std::chrono::duration<double, std::milli>(
@@ -186,6 +195,20 @@ void workflow(const char* project_path, const char* workspace_path) {
     check(SDL_PushEvent(&event), "push release"); frame(step);
     frame("settled");
   };
+  click(170.0F, 12.0F, "File menu");
+  SDL_Event hover_recent{};
+  hover_recent.type = SDL_EVENT_MOUSE_MOTION;
+  hover_recent.motion.windowID = window_id;
+  const float input_scale = scale / SDL_GetWindowPixelDensity(window);
+  hover_recent.motion.x = 180.0F * input_scale;
+  hover_recent.motion.y = 93.0F * input_scale;
+  check(SDL_PushEvent(&hover_recent), "hover Recent Projects");
+  frame("Recent Projects submenu hover");
+  check(!requested_project.has_value(),
+        "opening Recent Projects does not load a project");
+  click(400.0F, 97.0F, "Recent project");
+  check(requested_project == recent_projects.front(),
+        "recent project uses the editor's project-open request");
   const auto properties = gui::ui_id("editor.panel.inspector");
   const auto inspector_bounds = layout.content_of(layout.leaf_of(properties));
   const auto font = [&] {
@@ -245,6 +268,82 @@ void workflow(const char* project_path, const char* workspace_path) {
   for (int i = 0; i < 100; ++i) { SDL_Delay(8); frame("Cues hover"); }
   check(completed_timing.gpu_valid && completed_timing.sequence > cues_sequence,
         "GPU completes frames after Cues tab switch");
+  check(shell->apply_selection_set_recall(show.id, selected),
+        "select object before linked-source removal");
+  elements.clear();
+  show.instances.clear();
+  frame("selected source object removed");
+  SDL_Event removed_key{};
+  removed_key.type = SDL_EVENT_KEY_DOWN;
+  removed_key.key.windowID = window_id;
+  removed_key.key.key = SDLK_DELETE;
+  removed_key.key.down = true;
+  check(SDL_PushEvent(&removed_key), "press Delete after source removal");
+  check(frame("Delete after source removal").deletes.empty(),
+        "a removed source cannot be deleted again through stale selection");
+  removed_key.type = SDL_EVENT_KEY_UP;
+  removed_key.key.down = false;
+  check(SDL_PushEvent(&removed_key), "release Delete after source removal");
+  frame("removed source settled");
+
+  // A cold model on Stage must report its own preparation even though
+  // Program has no reference to it. Drive the shipping frame/UI path through
+  // decode, upload, readiness, and a failed source without a second renderer.
+  const auto fixture_dir = std::filesystem::current_path() / "out" /
+      ("stage-loading-" + std::to_string(SDL_GetTicksNS()));
+  std::filesystem::create_directories(fixture_dir);
+  const auto model_path = fixture_dir / "triangle.obj";
+  {
+    std::ofstream file{model_path};
+    file << "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n";
+    check(static_cast<bool>(file), "write Stage loading fixture");
+  }
+  scene::Scene stage;
+  stage.id = scene::SceneId{901U};
+  scene::ModelInstance stage_model;
+  stage_model.source_node = doc::NodeId{902U};
+  stage_model.source = model_path.string();
+  stage_model.world = stage_model.normal = scene::identity();
+  stage.models.push_back(stage_model);
+  switcher.stage_scene = &stage;
+  bool saw_loading = false;
+  bool saw_ready = false;
+  const auto ready_deadline = SDL_GetTicks() + 5000U;
+  while (SDL_GetTicks() < ready_deadline) {
+    const auto observed = frame("Stage model preparation");
+    saw_loading = saw_loading || observed.stage_assets.loading;
+    if (saw_loading && observed.stage_assets.headline.empty()) {
+      saw_ready = true;
+      break;
+    }
+    SDL_Delay(5);
+  }
+  check(saw_loading, "cold Stage model displays loading notice");
+  check(saw_ready, "Stage loading notice clears after model is ready");
+  stage.models.front().source = (fixture_dir / "missing.obj").string();
+  bool saw_failure = false;
+  const auto failure_deadline = SDL_GetTicks() + 5000U;
+  while (SDL_GetTicks() < failure_deadline) {
+    const auto observed = frame("Stage missing model");
+    if (!observed.stage_assets.loading &&
+        observed.stage_assets.headline == "STAGE ASSET LOAD FAILED") {
+      saw_failure = true;
+      break;
+    }
+    SDL_Delay(5);
+  }
+  check(saw_failure, "missing Stage model shows failure instead of endless loading");
+  stage.models.clear();
+  bool cleared = false;
+  const auto clear_deadline = SDL_GetTicks() + 5000U;
+  while (SDL_GetTicks() < clear_deadline) {
+    if (frame("Stage failed source removed").stage_assets.headline.empty()) {
+      cleared = true;
+      break;
+    }
+    SDL_Delay(5);
+  }
+  check(cleared, "removing failed model clears Stage failure notice");
 }
 } // namespace
 

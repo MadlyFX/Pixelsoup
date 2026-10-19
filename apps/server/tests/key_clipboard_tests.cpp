@@ -424,10 +424,37 @@ void spatial_primary_channels_copy_and_paste_by_typed_name() {
       0.75);
 }
 
+void surfaces_require_explicit_unlock_for_copy_paste_and_duplicate() {
+  auto unlocked = target(30U);
+  unlocked.type = "output.surface";
+  const std::array frames{core::i64{7}};
+  const std::array values{3.75};
+  const std::array modes{scene::KeyInterpolation::Linear};
+  auto root = source_document().set(unlocked).set(channel(
+      130U, 30U, scene::schema::position_x, frames, values, modes));
+  const std::array selection{
+      app::KeyAddress{doc::NodeId{30U}, scene::PropertyChannel::PositionX, 7}};
+  app::KeyClipboard clipboard;
+  KEY_CHECK(clipboard.copy(root, scene::SceneId{1U}, selection).captured == 1U);
+  unlocked.properties.erase(std::string{scene::schema::locked});
+  const auto locked = root.set(unlocked);
+  const auto paste = clipboard.paste(locked, scene::SceneId{1U}, 20U);
+  KEY_CHECK(paste && paste.value().report.applied == 0U);
+  KEY_CHECK(paste.value().report.locked_targets == std::vector{doc::NodeId{30U}});
+  KEY_CHECK(doc::diff(locked, paste.value().document).changes.empty());
+  const auto copied = clipboard.copy(locked, scene::SceneId{1U}, selection);
+  KEY_CHECK(copied.captured == 0U);
+  KEY_CHECK(copied.locked_targets == std::vector{doc::NodeId{30U}});
+  const auto duplicate = app::duplicate_keys(locked, scene::SceneId{1U}, selection, 8);
+  KEY_CHECK(duplicate && duplicate.value().report.applied == 0U);
+  KEY_CHECK(doc::diff(locked, duplicate.value().document).changes.empty());
+}
+
 } // namespace
 
 int main() {
   const std::array cases{
+      surfaces_require_explicit_unlock_for_copy_paste_and_duplicate,
       copy_snapshots_values_and_paste_reanchors_every_property,
       alt_duplicate_overwrites_collisions_and_is_one_undo_step,
       locked_and_incompatible_targets_are_reported_without_authorship,

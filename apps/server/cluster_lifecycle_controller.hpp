@@ -93,7 +93,8 @@ public:
     void sync(const topology::HardwareMap& map,
               const ProjectAssetManifest& manifest,
               core::u64 project_generation = 0U);
-    [[nodiscard]] std::vector<editor::OutputMonitorState::Node> snapshot()
+    [[nodiscard]] std::vector<editor::OutputMonitorState::Node> snapshot(
+        const net::DirectorFrameBarrier* barrier = nullptr)
         const;
     [[nodiscard]] topology::HardwareRuntimeSnapshot hardware_snapshot() const;
     // Both halves of the physical timing picture, merged by render output

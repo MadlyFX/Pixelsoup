@@ -82,13 +82,29 @@ try:
     rt.publish_now();pump('one saved texture changes one immutable surface')
     assert rt.serializations==serializations+1,(rt.serializations,serializations)
     assert latest()['ingested']==1
+    # Imported glTFs normally keep images packed inside the blend. The original
+    # path may not exist at all; reroutes must preserve the same texture input.
+    color.pack(); (directory/'color.png').unlink()
+    copper=bpy.data.materials['Copper'];shader=copper.node_tree.nodes.get('Principled BSDF')
+    image=next(node for node in copper.node_tree.nodes if node.type=='TEX_IMAGE' and node.image==color)
+    reroute=copper.node_tree.nodes.new('NodeReroute')
+    copper.node_tree.links.new(image.outputs['Color'],reroute.inputs[0])
+    copper.node_tree.links.new(reroute.outputs[0],shader.inputs['Base Color'])
+    rt.publish_now();pump('packed image through reroute survives missing external file')
+    copied=describe(scene,collection,rt.identities)
+    assert any(material.get('textures',{}).get('baseColorTexture',{}).get('packed_bytes')
+        for item in copied for material in item.get('materials',[]) if isinstance(material,dict))
+    assert rt.serializations==serializations+2
+    obj.location.x+=0.1
+    rt.mark(full=True);pump('packed image bytes are reused during placement edits')
+    assert rt.serializations==serializations+2
     materials=list(obj.data.materials)
     obj.data.materials[0]=materials[1];obj.data.materials[1]=materials[0]
     for polygon in obj.data.polygons:polygon.material_index=1-polygon.material_index
     rt.mark(full=True);pump('material slot reorder retains surface identity and packages')
     assert latest()['instances']==2
     assert {o['name']:o['id'] for o in latest()['objects']}==ids
-    assert rt.serializations==serializations+1
+    assert rt.serializations==serializations+2
     lamp=bpy.data.objects['AREA'];lamp.data.energy=5;lamp.data.size=3
     rt.publish_now();pump('light power/dimension update sends no GLB')
     assert latest()['ingested']==0

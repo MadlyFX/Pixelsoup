@@ -1,4 +1,5 @@
 #include <mediaserver/render/image_decode.hpp>
+#include "../src/nv12_conversion.hpp"
 
 #include <algorithm>
 #include <array>
@@ -188,7 +189,42 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+void nv12_packing_preserves_codes_and_ignores_row_padding() {
+  // Distinct legal/extreme luma and non-neutral interleaved chroma samples;
+  // padding must never enter either tightly packed output plane.
+  constexpr std::array<core::u8, 12U> luma{{
+      0U, 16U, 128U, 235U, 99U, 98U,
+      255U, 32U, 64U, 192U, 97U, 96U}};
+  constexpr std::array<core::u8, 6U> chroma{{
+      16U, 240U, 128U, 102U, 95U, 94U}};
+  const auto frame = render::detail::pack_nv12_rec709_limited(
+      4U, 2U, luma, 6U, chroma, 6U);
+  IMAGE_CHECK(frame.valid());
+  IMAGE_CHECK(frame.layout == render::DecodedPixelLayout::P010Rec709Limited);
+  IMAGE_CHECK(frame.width == 4U && frame.height == 2U);
+  constexpr std::array<core::u16, 12U> expected{{
+      0x0000U, 0x1000U, 0x8000U, 0xeb00U,
+      0xff00U, 0x2000U, 0x4000U, 0xc000U,
+      0x1000U, 0xf000U, 0x8000U, 0x6600U}};
+  IMAGE_CHECK(frame.pixels.size() == expected.size() * sizeof(core::u16));
+  for (std::size_t index = 0U; index < expected.size(); ++index) {
+    IMAGE_CHECK(half_at(frame, index) == expected[index]);
+  }
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
+      4U, 2U, luma, 3U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
+      4U, 2U, std::span{luma}.first(11U), 6U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
+      4U, 2U, luma, 6U, std::span{chroma}.first(5U), 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
+      3U, 2U, luma, 6U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
+      4U, 0U, luma, 6U, chroma, 6U).valid());
+}
+
+constexpr std::array<Case, 6U> cases{{
+    {"NV12 packing preserves codes and ignores row padding",
+     &nv12_packing_preserves_codes_and_ignores_row_padding},
     {"radiance bytes decode to exact half floats",
      &radiance_bytes_decode_to_exact_half_floats},
     {"a low dynamic range image is not a radiance map",

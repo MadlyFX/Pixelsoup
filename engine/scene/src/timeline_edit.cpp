@@ -20,6 +20,7 @@ struct WideUnsigned final {
 
 struct WideDivision final {
     core::u64 quotient{};
+    core::u64 quotient_mod{};
     core::u64 remainder{};
     bool quotient_overflow{};
 };
@@ -85,7 +86,8 @@ struct WideDivision final {
 // each step, so one subtraction is sufficient. `carry` represents the 65th
 // bit when doubling a remainder close to UINT64_MAX.
 [[nodiscard]] WideDivision divide_wide(WideUnsigned numerator,
-                                       core::u64 denominator) noexcept {
+                                       core::u64 denominator,
+                                       core::u32 modulus = 0U) noexcept {
     WideDivision result{};
     core::u64 remainder{};
     for (int bit_index = 127; bit_index >= 0; --bit_index) {
@@ -95,6 +97,11 @@ struct WideDivision final {
         const bool carry = (remainder >> 63U) != 0U;
         remainder = (remainder << 1U) | input_bit;
         const bool subtract = carry || remainder >= denominator;
+        if (modulus != 0U) {
+            // modulus is u32, so this recurrence cannot overflow u64.
+            result.quotient_mod =
+                (result.quotient_mod * 2U + (subtract ? 1U : 0U)) % modulus;
+        }
         if (subtract) {
             remainder -= denominator;
             if (bit_index >= 64) {
@@ -134,7 +141,7 @@ struct WideDivision final {
 
 [[nodiscard]] bool clip_end(const ClipPlacement& clip,
                             core::i64& out) noexcept {
-    return clip.timing.duration > 0 && clip.timing.start >= 0 &&
+    return clip.timing.placed() && valid_clip_timing(clip.timing) &&
            checked_add(clip.timing.start, clip.timing.duration, out);
 }
 
@@ -377,6 +384,42 @@ SourceOrdinalResult source_ordinal_delta(
     return Result::success(signed_result);
 }
 
+SourceOrdinalResult advance_source_phase(
+    core::i64 source_in, core::i64 show_delta, MediaFrameRate show_rate,
+    const std::optional<MediaFrameRate>& source_rate,
+    core::u32 sequence_count, SourcePhaseRounding rounding) noexcept {
+    using Result = SourceOrdinalResult;
+    if (!valid_rate(show_rate) ||
+        (source_rate && !valid_rate(*source_rate))) {
+        return Result::failure(TimelineEditError::InvalidRate);
+    }
+    if (source_in < 0 || sequence_count == 0U ||
+        (rounding != SourcePhaseRounding::Nearest &&
+         rounding != SourcePhaseRounding::Floor)) {
+        return Result::failure(TimelineEditError::InvalidSpan);
+    }
+    core::u64 offset = magnitude(show_delta) % sequence_count;
+    if (source_rate) {
+        const core::u64 numerator_factor =
+            static_cast<core::u64>(source_rate->numerator) * show_rate.denominator;
+        const core::u64 denominator =
+            static_cast<core::u64>(source_rate->denominator) * show_rate.numerator;
+        const auto division = divide_wide(
+            multiply_wide(magnitude(show_delta), numerator_factor),
+            denominator, sequence_count);
+        const bool round_up = rounding == SourcePhaseRounding::Floor
+            ? show_delta < 0 && division.remainder != 0U
+            : division.remainder > denominator / 2U ||
+                ((denominator & 1U) == 0U &&
+                 division.remainder == denominator / 2U);
+        offset = (division.quotient_mod + (round_up ? 1U : 0U)) % sequence_count;
+    }
+    const core::u64 phase = static_cast<core::u64>(source_in) % sequence_count;
+    const core::u64 shifted = show_delta < 0
+        ? phase + sequence_count - offset : phase + offset;
+    return Result::success(static_cast<core::i64>(shifted % sequence_count));
+}
+
 TimelineEditResult plan_ripple_trim(
     std::span<const ClipPlacement> clips, doc::NodeId selected,
     TimelineTrimEdge edge, core::i64 requested_delta,
@@ -590,7 +633,7 @@ TimelineEditResult plan_ripple_delete(
             ClipPlacement shifted = *clip;
             if (!checked_subtract(shifted.timing.start, span_duration,
                                   shifted.timing.start) ||
-                shifted.timing.start < 0) {
+                !timeline_valid(shifted)) {
                 return EditResult::failure(
                     TimelineEditError::IntegerOverflow);
             }
@@ -673,6 +716,10 @@ TimelineEditResult plan_roll(
             return EditResult::failure(
                 TimelineEditError::IncompatibleClip);
         }
+        core::i64 outer_duration{};
+        if (!checked_subtract(outer_end, left->timing.start, outer_duration)) {
+            return EditResult::failure(TimelineEditError::IntegerOverflow);
+        }
 
         const auto build = [&](core::i64 delta,
                                std::vector<ClipPlacement>& candidate) {
@@ -721,7 +768,7 @@ TimelineEditResult plan_roll(
         TimelineEditPlan plan{};
         plan.applied_delta = applied;
         plan.span_start = left->timing.start;
-        plan.span_duration = outer_end - left->timing.start;
+        plan.span_duration = outer_duration;
         append_changed_updates(scoped, candidate, plan);
         return EditResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
@@ -748,30 +795,19 @@ TimelineEditResult plan_slip(
         if (chosen->locked) {
             return EditResult::failure(TimelineEditError::LockedClip);
         }
-        const TimelineEditError chosen_error = source_valid(*chosen, show_rate);
-        if (sentinel_error(chosen_error)) {
-            return EditResult::failure(chosen_error);
+        if (!timeline_valid(*chosen) || chosen->sequence_count == 0U ||
+            (chosen->frame_rate && !valid_rate(*chosen->frame_rate))) {
+            return EditResult::failure(TimelineEditError::IncompatibleClip);
         }
-
-        const auto build = [&](core::i64 delta, ClipPlacement& candidate) {
-            candidate = *chosen;
-            const SourceOrdinalResult mapped = source_ordinal_delta(
-                delta, show_rate, candidate.frame_rate);
-            return mapped.has_value() &&
-                   checked_add(candidate.timing.source_in, mapped.value(),
-                               candidate.timing.source_in) &&
-                   source_is_valid(candidate, show_rate);
-        };
-        ClipPlacement scratch;
-        const core::i64 applied = clamp_delta(
-            requested_delta,
-            [&](core::i64 delta) { return build(delta, scratch); });
-        ClipPlacement candidate;
-        const bool built = build(applied, candidate);
-        static_cast<void>(built);
+        const auto phase = advance_source_phase(
+            chosen->timing.source_in, requested_delta, show_rate,
+            chosen->frame_rate, chosen->sequence_count);
+        if (!phase) return EditResult::failure(phase.error());
+        ClipPlacement candidate = *chosen;
+        candidate.timing.source_in = phase.value();
 
         TimelineEditPlan plan{};
-        plan.applied_delta = applied;
+        plan.applied_delta = requested_delta;
         plan.span_start = chosen->timing.start;
         plan.span_duration = chosen->timing.duration;
         if (candidate != *chosen) {
@@ -826,6 +862,10 @@ TimelineEditResult plan_slide(
             !clip_end(*right, outer_end)) {
             return EditResult::failure(
                 TimelineEditError::IncompatibleClip);
+        }
+        core::i64 outer_duration{};
+        if (!checked_subtract(outer_end, left->timing.start, outer_duration)) {
+            return EditResult::failure(TimelineEditError::IntegerOverflow);
         }
         if (left_end != chosen->timing.start ||
             selected_end != right->timing.start) {
@@ -892,7 +932,7 @@ TimelineEditResult plan_slide(
         TimelineEditPlan plan{};
         plan.applied_delta = applied;
         plan.span_start = left->timing.start;
-        plan.span_duration = outer_end - left->timing.start;
+        plan.span_duration = outer_duration;
         append_changed_updates(scoped, candidate, plan);
         return EditResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
@@ -905,7 +945,7 @@ TimelineEditResult plan_insert(
     core::i64 start, core::i64 duration) {
     try {
         core::i64 paste_end{};
-        if (start < 0 || duration <= 0 ||
+        if (duration <= 0 ||
             !checked_add(start, duration, paste_end)) {
             return EditResult::failure(TimelineEditError::InvalidSpan);
         }
@@ -941,7 +981,7 @@ TimelineEditResult plan_insert(
             }
             ClipPlacement shifted = *clip;
             if (!checked_add(shifted.timing.start, duration,
-                             shifted.timing.start)) {
+                             shifted.timing.start) || !timeline_valid(shifted)) {
                 return EditResult::failure(
                     TimelineEditError::IntegerOverflow);
             }
@@ -972,7 +1012,7 @@ TimelineEditResult plan_overwrite(
             return EditResult::failure(TimelineEditError::InvalidFirstId);
         }
         core::i64 paste_end{};
-        if (start < 0 || duration <= 0 ||
+        if (duration <= 0 ||
             !checked_add(start, duration, paste_end)) {
             return EditResult::failure(TimelineEditError::InvalidSpan);
         }

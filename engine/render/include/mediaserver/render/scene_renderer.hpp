@@ -173,6 +173,7 @@ struct RenderStats final {
     core::u32 instances{};
     // Media clips drawn this frame, each in its own textured pass.
     core::u32 media{};
+    core::u32 offline_media{};
     // Media quads proved to be wholly outside this render view. They are
     // intentionally not resolved through MediaCache, so an off-camera video
     // does not consume a decoder merely because it exists in the scene.
@@ -815,6 +816,7 @@ private:
     // makes the fifth descriptor valid even when no normal map is authored.
     rhi::Texture material_fallback_;
     rhi::Texture normal_fallback_;
+    rhi::Texture offline_media_;
     bool material_fallback_uploaded_{};
     MediaCache media_cache_;
     // Declared before every map holding entries of it, so those are released

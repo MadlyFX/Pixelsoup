@@ -591,8 +591,8 @@ read_luma_key(Reader& reader) noexcept {
         const auto placed_frame = static_cast<core::i64>(std::min(
             at_show_frame,
             static_cast<core::u64>(std::numeric_limits<core::i64>::max())));
-        clip_time.frame = static_cast<core::u64>(
-            placed_frame > timing.start ? placed_frame - timing.start : 0);
+        clip_time.frame = placed_frame > timing.start
+            ? frame_distance(timing.start, placed_frame) : 0U;
     } else {
         clip_time.frame = at_show_frame;
     }
@@ -1667,12 +1667,7 @@ void SceneModel::put(const doc::Node& node) {
             }
         }
         media.clip_order = reader.integer(schema::clip_order, 0);
-        if (media.timing.start < 0 || media.timing.duration < 0 ||
-            media.timing.source_in < 0 || media.timing.fade_in < 0 ||
-            media.timing.fade_out < 0) {
-            // A negative placement has no meaning on a show timeline that
-            // starts at frame zero, and clamping one would hide the edit that
-            // produced it.
+        if (!valid_clip_timing(media.timing)) {
             reader.fail();
         }
         media.position = reader.vector(
@@ -2150,6 +2145,14 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::LightColorB;
         } else if (component == schema::range) {
             channel.component = PropertyChannel::LightRange;
+        } else if (component == schema::fov_turns) {
+            channel.component = PropertyChannel::CameraFieldOfView;
+        } else if (component == schema::shutter_seconds) {
+            channel.component = PropertyChannel::CameraShutter;
+        } else if (component == schema::focus_distance_m) {
+            channel.component = PropertyChannel::CameraFocusDistance;
+        } else if (component == schema::aperture_f_number) {
+            channel.component = PropertyChannel::CameraAperture;
         } else {
             reader.fail();
         }
@@ -2312,7 +2315,7 @@ void SceneModel::put(const doc::Node& node) {
             [](const ChannelKey& left, const ChannelKey& right) noexcept {
                 return left.frame < right.frame;
             });
-        if (!valid_channel(channel)) {
+        if (!valid_channel(channel.keys)) {
             reader.fail();
         }
         parsed = Entry{std::move(channel)};
@@ -3082,9 +3085,9 @@ std::vector<SceneInfo> SceneModel::scenes() const {
     return result;
 }
 
-double SceneModel::auto_tangent(const ChannelEntry& channel,
+double SceneModel::auto_tangent(std::span<const ChannelKey> channel,
                                 std::size_t key_index) noexcept {
-    const auto& keys = channel.keys;
+    const auto keys = channel;
     if (keys.size() <= 1U) {
         return 0.0;
     }
@@ -3140,10 +3143,10 @@ double SceneModel::auto_tangent(const ChannelEntry& channel,
     return (first_weight + second_weight) / denominator;
 }
 
-double SceneModel::tangent_slope(const ChannelEntry& channel,
+double SceneModel::tangent_slope(std::span<const ChannelKey> channel,
                                  std::size_t key_index,
                                  bool incoming) noexcept {
-    const ChannelKey& key = channel.keys[key_index];
+    const ChannelKey& key = channel[key_index];
     if (key.interp != ChannelInterp::Cubic
         || key.tangent_mode == KeyTangentMode::Auto) {
         return auto_tangent(channel, key_index);
@@ -3160,15 +3163,15 @@ double SceneModel::tangent_slope(const ChannelEntry& channel,
     return 0.0;
 }
 
-bool SceneModel::valid_channel(const ChannelEntry& channel) noexcept {
-    if (channel.keys.empty()) {
+bool SceneModel::valid_channel(std::span<const ChannelKey> channel) noexcept {
+    if (channel.empty()) {
         return false;
     }
     constexpr core::u64 maximum_span =
         static_cast<core::u64>(std::numeric_limits<core::i64>::max());
     constexpr double maximum_value =
         static_cast<double>(std::numeric_limits<float>::max());
-    for (const ChannelKey& key : channel.keys) {
+    for (const ChannelKey& key : channel) {
         if (!std::isfinite(key.value) || !std::isfinite(key.in_slope)
             || !std::isfinite(key.out_slope)
             || (key.in_weight.has_value()
@@ -3180,9 +3183,9 @@ bool SceneModel::valid_channel(const ChannelEntry& channel) noexcept {
             return false;
         }
     }
-    for (std::size_t index = 0U; index + 1U < channel.keys.size(); ++index) {
-        const ChannelKey& left = channel.keys[index];
-        const ChannelKey& right = channel.keys[index + 1U];
+    for (std::size_t index = 0U; index + 1U < channel.size(); ++index) {
+        const ChannelKey& left = channel[index];
+        const ChannelKey& right = channel[index + 1U];
         if (right.frame <= left.frame) {
             return false;
         }
@@ -3226,8 +3229,8 @@ bool SceneModel::valid_channel(const ChannelEntry& channel) noexcept {
 }
 
 double SceneModel::sample_channel(
-    const ChannelEntry& channel, core::i64 frame) noexcept {
-    const auto& keys = channel.keys;
+    std::span<const ChannelKey> channel, core::i64 frame) noexcept {
+    const auto keys = channel;
     // Held flat outside the authored range, so a channel never extrapolates.
     if (frame <= keys.front().frame) {
         return keys.front().value;
@@ -3315,6 +3318,48 @@ double SceneModel::sample_channel(
     return result;
 }
 
+std::optional<double> sample_keyframes(
+    const ChannelKeyframes& channel, core::i64 frame) noexcept {
+    const std::size_t count = channel.frames.size();
+    if (count == 0U || count > max_channel_keys || channel.values.size() != count)
+        return std::nullopt;
+    std::array<SceneModel::ChannelKey, max_channel_keys> storage{};
+    for (std::size_t index = 0U; index < count; ++index) {
+        auto& key = storage[index];
+        key.frame = channel.frames[index];
+        key.value = channel.values[index];
+        constexpr double maximum_value =
+            static_cast<double>(std::numeric_limits<float>::max());
+        if (!std::isfinite(key.value) || key.value < -maximum_value ||
+            key.value > maximum_value) return std::nullopt;
+        const auto interpolation = index < channel.interpolations.size()
+            ? channel.interpolations[index] : KeyInterpolation::Linear;
+        switch (interpolation) {
+        case KeyInterpolation::Hold: key.interp = SceneModel::ChannelInterp::Hold; break;
+        case KeyInterpolation::Linear: key.interp = SceneModel::ChannelInterp::Linear; break;
+        case KeyInterpolation::Cubic: key.interp = SceneModel::ChannelInterp::Cubic; break;
+        default: return std::nullopt;
+        }
+        if (interpolation == KeyInterpolation::Cubic &&
+            index < channel.tangents.size() && channel.tangents[index]) {
+            const KeyTangent& tangent = *channel.tangents[index];
+            key.tangent_mode = tangent.mode;
+            key.in_slope = tangent.in_slope;
+            key.out_slope = tangent.out_slope;
+            key.in_weight = tangent.in_weight;
+            key.out_weight = tangent.out_weight;
+            if (tangent.mode == KeyTangentMode::Aligned) {
+                key.in_slope = std::midpoint(key.in_slope, key.out_slope);
+                key.out_slope = key.in_slope;
+            }
+            if (tangent.mode > KeyTangentMode::Flat) return std::nullopt;
+        }
+    }
+    const std::span<const SceneModel::ChannelKey> keys{storage.data(), count};
+    if (!SceneModel::valid_channel(keys)) return std::nullopt;
+    return SceneModel::sample_channel(keys, frame);
+}
+
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
     // Keyed by (target, component) so the timeline draws diamonds on the right
     // per-component row and the exact authored curve between them. Ordered by
@@ -3361,8 +3406,8 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
             if (key.interp == ChannelInterp::Cubic) {
                 tangent = KeyTangent{
                     key.tangent_mode,
-                    tangent_slope(*channel, key_index, true),
-                    tangent_slope(*channel, key_index, false),
+                    tangent_slope(channel->keys, key_index, true),
+                    tangent_slope(channel->keys, key_index, false),
                     key.in_weight,
                     key.out_weight,
                 };
@@ -3797,8 +3842,27 @@ Scene SceneModel::evaluate(
             overrides[channel->target][static_cast<std::size_t>(channel->component)];
         if (!slot.has_value()) {
             slot = static_cast<float>(
-                sample_channel(*channel, static_cast<core::i64>(time.frame)));
+                sample_channel(channel->keys, static_cast<core::i64>(time.frame)));
         }
+    }
+    const auto apply_camera_lens = [&overrides](doc::NodeId id, Camera& camera) {
+        const auto found = overrides.find(id);
+        if (found == overrides.end()) return;
+        const auto apply = [&](PropertyChannel channel, float& field,
+                               float minimum, float maximum) {
+            if (const auto value = found->second[static_cast<std::size_t>(channel)];
+                value.has_value() && std::isfinite(*value)) {
+                field = std::clamp(*value, minimum, maximum);
+            }
+        };
+        apply(PropertyChannel::CameraFieldOfView, camera.field_of_view, 0.001F, 0.499F);
+        apply(PropertyChannel::CameraShutter, camera.shutter_seconds, 0.00001F, 1.0F);
+        apply(PropertyChannel::CameraFocusDistance, camera.focus_distance_m, 0.0F, 100000.0F);
+        apply(PropertyChannel::CameraAperture, camera.aperture_f_number, 0.1F, 128.0F);
+    };
+    apply_camera_lens(scene.camera_source, scene.camera);
+    for (TrackedCameraView& view : scene.tracked_cameras) {
+        apply_camera_lens(view.camera, view.authored);
     }
     // A camera follows its position and rotation channels like any element,
     // then an orbit carries it round the stage's vertical axis, turning it
@@ -4788,7 +4852,7 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const authored = std::get_if<LightEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id) {
+            if (scope_of(id, default_scene) != scene_id || !authored->visible) {
                 continue;
             }
             // Keyframe channels animate a light's position (a local light's

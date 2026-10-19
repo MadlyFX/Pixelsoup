@@ -444,6 +444,10 @@ sync_parent_directory(const std::filesystem::path &parent) noexcept {
     return RecentProjectPathSaveResult::failure(std::move(error));
 }
 
+[[nodiscard]] RecentProjectPathsLoadResult paths_load_failure(SettingsError error) {
+    return RecentProjectPathsLoadResult::failure(std::move(error));
+}
+
 [[nodiscard]] std::vector<std::byte>
 make_setting_bytes(std::span<const std::byte, 8U> magic, std::uint16_t version,
                    std::span<const std::byte> payload) {
@@ -458,6 +462,9 @@ make_setting_bytes(std::span<const std::byte, 8U> magic, std::uint16_t version,
     std::copy(payload.begin(), payload.end(), bytes.begin() + kHeaderSize);
     return bytes;
 }
+
+[[nodiscard]] RecentProjectPathsLoadResult
+load_recent_project_paths_impl(const std::filesystem::path &settings_file);
 
 [[nodiscard]] RecentProjectPathSaveResult
 save_recent_project_path_impl(const std::filesystem::path &settings_file,
@@ -480,10 +487,34 @@ save_recent_project_path_impl(const std::filesystem::path &settings_file,
     if (encoded.empty() || encoded.size() > max_recent_project_path_bytes) {
         return save_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
     }
-    const auto payload = std::span<const std::byte>{
+    const auto encoded_path = std::span<const std::byte>{
         reinterpret_cast<const std::byte *>(encoded.data()), encoded.size()};
-    if (!valid_utf8(payload)) {
+    if (!valid_utf8(encoded_path)) {
         return save_failure(make_error(SettingsErrorCode::InvalidProjectPath));
+    }
+    auto previous = load_recent_project_paths_impl(settings_file);
+    if (!previous && previous.error().code != SettingsErrorCode::InvalidFormat &&
+        previous.error().code != SettingsErrorCode::UnsupportedVersion &&
+        previous.error().code != SettingsErrorCode::CorruptFile &&
+        previous.error().code != SettingsErrorCode::SizeLimitExceeded) {
+        return save_failure(std::move(previous.error()));
+    }
+    std::vector<std::filesystem::path> paths{absolute};
+    if (previous) {
+        for (const auto &path : previous.value()) {
+            if (paths.size() == max_recent_projects) break;
+            if (path != absolute) paths.push_back(path);
+        }
+    }
+    std::vector<std::byte> payload;
+    payload.push_back(static_cast<std::byte>(paths.size()));
+    for (const auto &path : paths) {
+        const auto utf8 = path.u8string();
+        const auto length = payload.size();
+        payload.resize(length + 4U + utf8.size());
+        put_u32(payload, length, static_cast<std::uint32_t>(utf8.size()));
+        std::transform(utf8.begin(), utf8.end(), payload.begin() + length + 4U,
+                       [](char8_t c) { return static_cast<std::byte>(c); });
     }
     auto bytes =
         make_setting_bytes(std::span<const std::byte, 8U>{kRecentMagic},
@@ -525,10 +556,10 @@ save_recent_project_path_impl(const std::filesystem::path &settings_file,
     return RecentProjectPathSaveResult::success(std::move(absolute));
 }
 
-[[nodiscard]] RecentProjectPathLoadResult
-load_recent_project_path_impl(const std::filesystem::path &settings_file) {
+[[nodiscard]] RecentProjectPathsLoadResult
+load_recent_project_paths_impl(const std::filesystem::path &settings_file) {
     if (!valid_target_path(settings_file)) {
-        return load_failure(make_error(SettingsErrorCode::InvalidSettingsPath));
+        return paths_load_failure(make_error(SettingsErrorCode::InvalidSettingsPath));
     }
 
     errno = 0;
@@ -538,75 +569,111 @@ load_recent_project_path_impl(const std::filesystem::path &settings_file) {
         const bool exists =
             std::filesystem::exists(settings_file, exists_error);
         if (!exists && !exists_error) {
-            return RecentProjectPathLoadResult::success(std::nullopt);
+            return RecentProjectPathsLoadResult::success({});
         }
-        return load_failure(
+        return paths_load_failure(
             make_error(SettingsErrorCode::OpenFailed,
                        exists_error ? exists_error : stream_io_error()));
     }
     const auto end = input.tellg();
     if (end < 0) {
-        return load_failure(
+        return paths_load_failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
     const auto size = static_cast<std::uint64_t>(end);
     if (size < kHeaderSize ||
-        size > kHeaderSize + max_recent_project_path_bytes) {
-        return load_failure(
-            make_error(size > kHeaderSize + max_recent_project_path_bytes
+        size > kHeaderSize + 1U + max_recent_projects *
+                                   (4U + max_recent_project_path_bytes)) {
+        return paths_load_failure(
+            make_error(size > kHeaderSize + 1U + max_recent_projects *
+                                             (4U + max_recent_project_path_bytes)
                            ? SettingsErrorCode::SizeLimitExceeded
                            : SettingsErrorCode::CorruptFile));
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
     input.seekg(0, std::ios::beg);
     if (!input) {
-        return load_failure(
+        return paths_load_failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
     input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
     if (!input ||
         input.gcount() != static_cast<std::streamsize>(bytes.size())) {
-        return load_failure(
+        return paths_load_failure(
             make_error(SettingsErrorCode::ReadFailed, stream_io_error()));
     }
 
     const auto view = std::span<const std::byte>{bytes};
     if (!std::equal(kRecentMagic.begin(), kRecentMagic.end(), view.begin())) {
-        return load_failure(make_error(SettingsErrorCode::InvalidFormat));
+        return paths_load_failure(make_error(SettingsErrorCode::InvalidFormat));
     }
-    if (get_u16(view, 8U) != current_recent_project_format_version) {
-        return load_failure(make_error(SettingsErrorCode::UnsupportedVersion));
+    const auto version = get_u16(view, 8U);
+    if (version != 1U && version != current_recent_project_format_version) {
+        return paths_load_failure(make_error(SettingsErrorCode::UnsupportedVersion));
     }
     if (get_u16(view, 10U) != kHeaderSize ||
         get_u32(view, kHeaderCrcOffset) !=
             crc32c(view.first(kHeaderCrcOffset))) {
-        return load_failure(make_error(SettingsErrorCode::CorruptFile));
+        return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
     const auto payload_size = get_u32(view, 12U);
-    if (payload_size == 0U || payload_size > max_recent_project_path_bytes ||
+    if (payload_size == 0U ||
+        payload_size > 1U + max_recent_projects *
+                            (4U + max_recent_project_path_bytes) ||
         static_cast<std::uint64_t>(payload_size) + kHeaderSize != size) {
-        return load_failure(
-            make_error(payload_size > max_recent_project_path_bytes
+        return paths_load_failure(
+            make_error(payload_size > 1U + max_recent_projects *
+                                           (4U + max_recent_project_path_bytes)
                            ? SettingsErrorCode::SizeLimitExceeded
                            : SettingsErrorCode::CorruptFile));
     }
     const auto payload = view.subspan(kHeaderSize, payload_size);
-    if (get_u32(view, 16U) != crc32c(payload) || !valid_utf8(payload)) {
-        return load_failure(make_error(SettingsErrorCode::CorruptFile));
+    if (get_u32(view, 16U) != crc32c(payload)) {
+        return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
-
-    std::u8string encoded;
-    encoded.resize(payload.size());
-    std::transform(
-        payload.begin(), payload.end(), encoded.begin(), [](std::byte byte) {
-            return static_cast<char8_t>(std::to_integer<std::uint8_t>(byte));
-        });
-    auto project = std::filesystem::path{encoded}.lexically_normal();
-    if (!valid_target_path(project) || !project.is_absolute()) {
-        return load_failure(make_error(SettingsErrorCode::CorruptFile));
+    const auto count = version == 1U ? 1U : std::to_integer<std::size_t>(payload[0]);
+    if (count == 0U || count > max_recent_projects) {
+        return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
     }
-    return RecentProjectPathLoadResult::success(std::move(project));
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(count);
+    std::size_t offset = version == 1U ? 0U : 1U;
+    for (std::size_t index = 0U; index < count; ++index) {
+        std::size_t length = payload.size();
+        if (version != 1U) {
+            if (payload.size() - offset < 4U) {
+                return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
+            }
+            length = get_u32(payload, offset);
+            offset += 4U;
+        }
+        if (length == 0U || length > max_recent_project_path_bytes ||
+            length > payload.size() - offset) {
+            return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
+        }
+        const auto path_bytes = payload.subspan(offset, length);
+        if (!valid_utf8(path_bytes)) {
+            return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
+        }
+        std::u8string encoded_path;
+        encoded_path.resize(length);
+        std::transform(path_bytes.begin(), path_bytes.end(), encoded_path.begin(),
+                       [](std::byte byte) {
+                           return static_cast<char8_t>(std::to_integer<std::uint8_t>(byte));
+                       });
+        auto path = std::filesystem::path{encoded_path}.lexically_normal();
+        if (!valid_target_path(path) || !path.is_absolute() ||
+            std::find(paths.begin(), paths.end(), path) != paths.end()) {
+            return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
+        }
+        paths.push_back(std::move(path));
+        offset += length;
+    }
+    if (offset != payload.size()) {
+        return paths_load_failure(make_error(SettingsErrorCode::CorruptFile));
+    }
+    return RecentProjectPathsLoadResult::success(std::move(paths));
 }
 
 [[nodiscard]] PreferencesLoadResult
@@ -1359,14 +1426,22 @@ save_workspace_layout(const std::filesystem::path &layout_file,
 
 RecentProjectPathLoadResult
 load_recent_project_path(const std::filesystem::path &settings_file) {
+    auto paths = load_recent_project_paths(settings_file);
+    if (!paths) return load_failure(std::move(paths.error()));
+    if (paths.value().empty()) return RecentProjectPathLoadResult::success(std::nullopt);
+    return RecentProjectPathLoadResult::success(std::move(paths.value().front()));
+}
+
+RecentProjectPathsLoadResult
+load_recent_project_paths(const std::filesystem::path &settings_file) {
     try {
-        return load_recent_project_path_impl(settings_file);
+        return load_recent_project_paths_impl(settings_file);
     } catch (const std::bad_alloc &) {
-        return load_failure(make_error(SettingsErrorCode::AllocationFailed));
+        return paths_load_failure(make_error(SettingsErrorCode::AllocationFailed));
     } catch (const std::length_error &) {
-        return load_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
+        return paths_load_failure(make_error(SettingsErrorCode::SizeLimitExceeded));
     } catch (const std::filesystem::filesystem_error &error) {
-        return load_failure(
+        return paths_load_failure(
             make_error(SettingsErrorCode::ReadFailed, error.code()));
     }
 }

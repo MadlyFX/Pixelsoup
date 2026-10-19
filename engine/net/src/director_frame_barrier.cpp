@@ -1422,6 +1422,27 @@ std::size_t DirectorFrameBarrier::active_sessions() const noexcept {
     return control.active_session_count;
 }
 
+DirectorNodeConnection DirectorFrameBarrier::node_connection(
+    core::u32 node_index) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    DirectorNodeConnection result{};
+    result.target_frame = control.tracked_tail.through_frame.value();
+    if (!control.valid || control.faulted) return result;
+    const auto session = std::find_if(
+        control.sessions.begin(), control.sessions.end(),
+        [node_index](const SessionSlot& candidate) noexcept {
+            return candidate.active && candidate.node_index == node_index;
+        });
+    if (session != control.sessions.end()) {
+        result.state = session->readiness == SessionReadiness::Live
+            ? DirectorNodeConnection::State::Live
+            : DirectorNodeConnection::State::CatchingUp;
+        result.committed_frame = session->committed_cursor.through_frame.value();
+    }
+    return result;
+}
+
 bool DirectorFrameBarrier::runtime_tracking(
     core::u32 node_index, RuntimeTracking& output) const noexcept {
     const auto& control = *control_;

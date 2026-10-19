@@ -357,6 +357,24 @@ if(BUILD_TESTING)
         edit_coalescing_policy.cpp
         tests/edit_coalescing_policy_tests.cpp
     )
+    if(MEDIASERVER_ENABLE_GUI)
+        add_executable(mediaserver_source_replacement_authoring_tests
+            tests/source_replacement_authoring_tests.cpp)
+        target_include_directories(mediaserver_source_replacement_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(mediaserver_source_replacement_authoring_tests PRIVATE MediaServer::Editor MediaServer::Cmd MediaServer::Assets)
+        mediaserver_set_project_options(mediaserver_source_replacement_authoring_tests)
+        add_test(NAME mediaserver.server_source_replacement_authoring COMMAND mediaserver_source_replacement_authoring_tests)
+        set_target_properties(mediaserver_source_replacement_authoring_tests PROPERTIES FOLDER "tests")
+    endif()
+
+    add_executable(mediaserver_model_source_authoring_tests
+        edit_coalescing_policy.cpp
+        tests/model_source_authoring_tests.cpp)
+    target_include_directories(mediaserver_model_source_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(mediaserver_model_source_authoring_tests PRIVATE MediaServer::Cmd MediaServer::Scene)
+    mediaserver_set_project_options(mediaserver_model_source_authoring_tests)
+    add_test(NAME mediaserver.server_model_source_authoring COMMAND mediaserver_model_source_authoring_tests)
+    set_target_properties(mediaserver_model_source_authoring_tests PROPERTIES FOLDER "tests")
     target_include_directories(mediaserver_edit_coalescing_policy_tests
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
     )

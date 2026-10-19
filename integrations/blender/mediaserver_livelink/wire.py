@@ -8,7 +8,7 @@ SHOT_STATE, STAGE_CONTEXT = 13, 14
 FIELDS = ('epoch', 'scene', 'transaction', 'origin', 'source', 'base', 'revision', 'resource')
 PACKET_LIMIT = 1024 * 1024 + 4096
 
-ADDON_VERSION = (0, 10, 0)
+ADDON_VERSION = (0, 10, 1)
 PROTOCOL_VERSION = 1
 BLENDER_REQUIRED = (5, 2, 0)
 # Optional wire features: each side names what it can serve so a mismatched pair

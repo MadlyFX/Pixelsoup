@@ -1,6 +1,6 @@
 # Media Server LiveLink for Blender
 
-Add-on **0.10.0**, Blender **5.2 or newer**, authoring link protocol **v1**.
+Add-on **0.10.1**, Blender **5.2 or newer**, authoring link protocol **v1**.
 Tested with Blender 5.2.0 LTS (fbe6228777e7) on Windows.
 
 ## One project, one Blender file
@@ -65,6 +65,8 @@ Server's override in the same update.
 Transforms, geometry, names, materials, lights, collection membership and removals sync
 automatically. Edit Mode geometry is flushed to the evaluated mesh without leaving Edit
 Mode. Sync adjustments do not change authored materials, lights or object types.
+Deleting a light in Blender also removes its illumination and Stage handle in Media
+Server; restoring it in Blender restores the same linked object.
 
 - Content Blender sends is stored beside the project in `<project> Blender/Link
   Resources`. **Remote render nodes** read it at the same absolute path, so keep the
@@ -113,9 +115,12 @@ same connection dialog.
   process using temporary export copies. Original texture files remain unchanged.
   The glTF importer's base color factor (a full-strength Multiply of the texture and
   a constant) is kept, as are UV and Normal Map nodes naming the active render UV map.
-  Images packed into the .blend (the glTF importer's default) count as unsaved: use
-  File > External Data > Unpack Resources. A scene publishes at most 256 distinct
-  images / 256 MiB.
+  PNG/JPEG images packed into the .blend (the glTF importer's default) are retained
+  even when their original files are absent. Image reroutes are supported. Packed
+  files up to 16 MiB are copied without decoding; unchanged images are retained by
+  the serializer, so moving a model neither recopies nor hashes its image files.
+  Unpack larger packed files so the worker can prepare them. A scene publishes at
+  most 256 distinct images / 256 MiB.
   Unassigned, missing, unsupported or unsaved textures are omitted; unsupported
   shader graphs fall back to viewport material color. Missing UV maps omit textures.
   Unsupported inputs use constant values. Link alpha honors Opaque, Mask and Blend

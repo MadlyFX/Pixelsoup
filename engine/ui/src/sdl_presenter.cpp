@@ -126,7 +126,9 @@ void release_video() noexcept {
 
 [[nodiscard]] SDL_WindowFlags
 window_flags(const SdlPresenterConfig &config) noexcept {
-    SDL_WindowFlags flags = 0U;
+    // Shader/resource creation can take seconds. Keep the unpainted native
+    // client area off the wall until a black image has been submitted.
+    SDL_WindowFlags flags = SDL_WINDOW_HIDDEN;
     // With explicit placement, create a desktop window first so SDL can move
     // it onto the requested display before entering fullscreen. Creating it
     // fullscreen here lets the platform select the primary monitor first and
@@ -841,6 +843,34 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
     }
     platform->window_id = SDL_GetWindowID(platform->window);
 
+    const auto present_black = [&]() -> bool {
+        if (config.gpu) {
+            auto acquired = platform->device->acquire_commands();
+            if (!acquired) return false;
+            auto commands = std::move(acquired).value();
+            auto &black = platform->output->texture();
+            if (!commands.clear(black, rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}))
+                return false;
+            const auto image = platform->swapchain.acquire(commands);
+            if (image && !platform->swapchain.present(commands, image, black,
+                                                     rhi::Filter::Nearest))
+                return false;
+            auto submitted = platform->device->submit(std::move(commands));
+            // Startup only: complete the first paint before exposing a
+            // window. No frame-recording path waits for GPU work here.
+            if (!submitted || !std::move(submitted).value().wait()) return false;
+            platform->last_presented = &black;
+            return true;
+        }
+        return SDL_SetRenderDrawColor(platform->renderer, 0U, 0U, 0U, 255U) &&
+            SDL_RenderClear(platform->renderer) &&
+            SDL_RenderPresent(platform->renderer);
+    };
+    if (!present_black() || !SDL_ShowWindow(platform->window) ||
+        !present_black()) {
+        return fail(show::PresenterError::DisplayUnavailable);
+    }
+
     std::unique_ptr<Presenter> presenter{new (std::nothrow) SdlPresenter(
         std::move(surface).value(), platform, config.accepts_commands,
         config.gpu, config.scene, config.output, config.buffered_media)};
@@ -954,6 +984,13 @@ as_presenter_video_reference(rhi::VideoReferenceSample sample) noexcept {
 }
 
 } // namespace
+
+void SdlPresenter::begin_document_stream() noexcept {
+    if (platform_ != nullptr) {
+        platform_->asset_gate.reset();
+        platform_->assets.visible_commit = 0U;
+    }
+}
 
 show::PresenterStatus SdlPresenter::hold() noexcept {
     // The window still has to breathe while its group holds, otherwise an

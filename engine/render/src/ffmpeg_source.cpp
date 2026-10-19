@@ -1,6 +1,7 @@
 #include <mediaserver/render/media_source.hpp>
 
 #include "ffmpeg_source_test_support.hpp"
+#include "nv12_conversion.hpp"
 
 // FFmpeg is a C library; its headers are included through extern "C" and with
 // warnings silenced, as they are not clean under this project's warnings-as-
@@ -380,6 +381,32 @@ stream_frame_rate(const AVStream *stream) noexcept {
             const bool rec709 = color_space == AVCOL_SPC_BT709;
             const bool limited = color_range == AVCOL_RANGE_MPEG;
             const bool full = color_range == AVCOL_RANGE_JPEG;
+            if (decoder.hardware_active &&
+                source_frame->format == AV_PIX_FMT_NV12 && rec709 && limited &&
+                width % 2 == 0 && height % 2 == 0 &&
+                source_frame->data[0] != nullptr &&
+                source_frame->data[1] != nullptr &&
+                source_frame->linesize[0] >= width &&
+                source_frame->linesize[1] >= width) {
+                const auto luma_stride =
+                    static_cast<std::size_t>(source_frame->linesize[0]);
+                const auto chroma_stride =
+                    static_cast<std::size_t>(source_frame->linesize[1]);
+                DecodedFrame out = detail::pack_nv12_rec709_limited(
+                    static_cast<core::u32>(width),
+                    static_cast<core::u32>(height),
+                    {source_frame->data[0], luma_stride *
+                        static_cast<std::size_t>(height)}, luma_stride,
+                    {source_frame->data[1], chroma_stride *
+                        static_cast<std::size_t>(height / 2)}, chroma_stride);
+                if (out.valid()) {
+                    out.source_frame = static_cast<core::u32>(index);
+                    decoder.next_index = index + 1;
+                    av_frame_unref(decoder.transferred_frame);
+                    av_frame_unref(decoder.frame);
+                    return out;
+                }
+            }
             if (decoder.hardware_active &&
                 source_frame->format == AV_PIX_FMT_P010LE && rec709 &&
                 (limited || full) && width % 2 == 0 && height % 2 == 0 &&
@@ -1080,56 +1107,37 @@ class SharedVideoRegistry final {
             key,
             ReadyFrame{std::move(frame), bytes, ++stamp_});
         resident_bytes_ += bytes;
-        if (bytes != 0U) {
-            source->latest_valid = frame_index;
-        }
-
-        // Keep the newly decoded frame even when one unusually large image is
-        // itself above budget. Otherwise evict globally least-recently-used
-        // frames until both the byte and small-frame guards are satisfied.
+        // Explicit current-frame demand outranks trail retention and speculative
+        // read-ahead. A speculative publication may evict itself: protecting it
+        // unconditionally lets fast streams repeatedly displace another clip's
+        // exact frame before the renderer can adopt it. All retention is soft
+        // when the active working set itself exceeds the bounded cache.
         while ((resident_bytes_ > max_ready_bytes_ ||
                 frames_.size() > max_ready_frames_) &&
                frames_.size() > 1U) {
             auto oldest = frames_.end();
+            unsigned oldest_priority = 3U;
             for (auto candidate = frames_.begin(); candidate != frames_.end();
                  ++candidate) {
-                if (candidate->first == key ||
-                    retained_trail_locked(candidate->first)) {
-                    continue;
-                }
-                if (oldest == frames_.end() ||
-                    candidate->second.stamp < oldest->second.stamp) {
+                const unsigned priority = retention_priority_locked(candidate->first);
+                if (oldest == frames_.end() || priority < oldest_priority ||
+                    (priority == oldest_priority &&
+                     candidate->second.stamp < oldest->second.stamp)) {
                     oldest = candidate;
-                }
-            }
-            // Trail retention is soft. If it alone would violate the selected
-            // memory budget, evict its oldest frame rather than growing without
-            // bound; the current publication remains protected in every case.
-            if (oldest == frames_.end()) {
-                for (auto candidate = frames_.begin();
-                     candidate != frames_.end(); ++candidate) {
-                    if (candidate->first == key) {
-                        continue;
-                    }
-                    if (oldest == frames_.end() ||
-                        candidate->second.stamp < oldest->second.stamp) {
-                        oldest = candidate;
-                    }
-                }
-                if (oldest == frames_.end()) {
-                    break;
+                    oldest_priority = priority;
                 }
             }
             resident_bytes_ -= oldest->second.bytes;
             frames_.erase(oldest);
         }
+        if (bytes != 0U && frames_.contains(key)) {
+            source->latest_valid = frame_index;
+        }
     }
 
-    [[nodiscard]] bool
-    retained_trail_locked(const FrameKey &frame) const noexcept {
-        if (trail_frames_ == 0U) {
-            return false;
-        }
+    [[nodiscard]] unsigned
+    retention_priority_locked(const FrameKey &frame) const noexcept {
+        unsigned priority = 0U;
         for (const auto &[stream_key, weak] : sources_) {
             static_cast<void>(stream_key);
             const auto source = weak.lock();
@@ -1137,6 +1145,7 @@ class SharedVideoRegistry final {
                 !source->latest_requested.has_value()) {
                 continue;
             }
+            if (*source->latest_requested == frame.second) return 2U;
             const core::i64 distance =
                 source->playback_direction > 0
                     ? static_cast<core::i64>(*source->latest_requested) -
@@ -1145,10 +1154,10 @@ class SharedVideoRegistry final {
                           static_cast<core::i64>(*source->latest_requested);
             if (distance > 0 &&
                 distance <= static_cast<core::i64>(trail_frames_)) {
-                return true;
+                priority = 1U;
             }
         }
-        return false;
+        return priority;
     }
 
     void prune_inactive_locked() {

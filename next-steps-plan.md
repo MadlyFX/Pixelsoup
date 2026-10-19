@@ -20,6 +20,26 @@ contracts; check current code before treating an individual item as missing.
 - Optional USD composition/identity translation remains gated by a real studio
   workflow need; see the [adapter proposal](blender%20live%20scene%20link/13-optional-usd-adapter.md).
 
+## Media and studio qualification
+
+- Preserve high-bit-depth software video through decode, upload and color
+  conversion. The current generic ProRes/DNxHR path converts to RGBA8; decoder
+  availability alone does not establish a precision-preserving pipeline.
+- Add native GPU compressed-texture HAP playback and evaluate a qualified
+  NotchLC path against real production files. Retain frame identity, alpha,
+  color metadata and bounded admission; do not advertise profiles without
+  pixel and seek coverage.
+- Qualify simultaneous production streams at their authored resolution and
+  rate, with measured decode, upload and GPU times, residency pressure and
+  held frames. Include the nine-plate LED Car Process and switching while
+  uploads are pending.
+- Qualify the physical 15360x1546 Mosaic desktop with four 3456x1536 viewports
+  at 3840-pixel intervals. GPU readback and configuration tests establish
+  placement, but cannot establish driver scanout, physical synchronization
+  or sustainable stage throughput.
+- Preserve source material names in imported model packages so the current
+  numbered material-part texture selector can show meaningful slot names.
+
 ## Editorial and compositor depth
 
 
@@ -162,6 +182,12 @@ Editing semantics:
 All edit deltas below are integer show frames. Converting a show-frame delta to
 source ordinals uses the asset/show rational-rate mapping and rounding already
 used by playback, so trimming and rendering choose the same source frame.
+Preserve the residual source-time phase when a trim or split falls between
+native source frames. The current integer `source_in` can match the cut frame
+but cannot preserve every subsequent sample at nonintegral source/show rate
+ratios. A normalized, replicated phase representation must participate in
+evaluation, digests, clipboard, undo, and checkpoint/delta tests before claiming
+frame-identical fractional-rate cuts.
 
 - **Ripple trim:** define the signed drag delta `d` in show frames. Tail ripple
   sets `duration += d` and shifts every other unlocked clip starting at or
@@ -169,7 +195,7 @@ used by playback, so trimming and rendering choose the same source frame.
   `duration -= d`, keeps the selected clip's timeline start fixed, and shifts
   every later unlocked clip by `-d`. Thus removing source frames shortens the
   show and adding available handles lengthens it. Source-handle, positive-
-  duration, and frame-zero limits clamp the whole gesture before any command is
+  duration, and representable-frame limits clamp the whole gesture before any command is
   authored. An “all selected lanes” modifier applies the same boundary/delta
   to each selected unlocked lane.
 - **Ripple delete:** the selection must contain whole clips whose union is one
@@ -183,7 +209,9 @@ used by playback, so trimming and rendering choose the same source frame.
   every later clip remain fixed. Clamp `d` to both assets' available handles.
   A transition centred on the cut moves with it and keeps its duration.
 - **Slip edit:** keep a clip's timeline start/duration fixed while moving
-  source-in by `d`; clamp to source handles. **Slide edit:** move the selected
+  source-in by the source-rate equivalent of `d`. Looping playback wraps the
+  source offset in either direction; a future explicit non-looping playback
+  mode must clamp to available source handles. **Slide edit:** move the selected
   clip by `d` while rolling its two immediate neighbours so the three-clip
   outer span stays fixed. Slide requires both neighbours and no intervening
   gap.

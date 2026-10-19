@@ -81,7 +81,7 @@ struct MediaFrameRate final {
 // show frame zero" - the behaviour every clip had before placement existed, so
 // a project authored without it keeps playing exactly as it did.
 struct ClipTiming final {
-    // The show frame the clip becomes visible on.
+    // Signed placement: a clip may begin before the nonnegative show transport.
     core::i64 start{};
     // How many show frames it occupies. Zero is the unplaced legacy form.
     core::i64 duration{};
@@ -94,12 +94,15 @@ struct ClipTiming final {
     core::i64 fade_out{};
 
     [[nodiscard]] bool placed() const noexcept { return duration > 0; }
-    [[nodiscard]] core::i64 last_frame() const noexcept {
-        return start + duration - 1;
-    }
+    [[nodiscard]] core::i64 last_frame() const noexcept;
 
     bool operator==(const ClipTiming&) const = default;
 };
+
+// Signed starts are valid, but a placed clip's exclusive end must fit i64.
+// Source offsets, durations and fades remain nonnegative. A zero duration is
+// the always-on form and has no placement end to validate.
+[[nodiscard]] bool valid_clip_timing(const ClipTiming& timing) noexcept;
 
 // The show's own repeat: the inclusive frame range the transport plays and
 // whether it wraps at the end of it.
@@ -1809,6 +1812,10 @@ struct MediaInstance final {
     std::optional<doc::NodeId> parent_group;
     core::i64 group_order{};
 
+    // Machine-local source availability, applied after the authored scene
+    // digest. Offline placements retain their geometry and draw a placeholder.
+    bool offline{};
+
     bool operator==(const MediaInstance&) const = default;
 };
 
@@ -2148,6 +2155,10 @@ enum class PropertyChannel : core::u8 {
     LightColorG,
     LightColorB,
     LightRange,
+    CameraFieldOfView,
+    CameraShutter,
+    CameraFocusDistance,
+    CameraAperture,
     Count,
 };
 
@@ -2222,6 +2233,12 @@ struct ChannelKeyframes final {
 
     bool operator==(const ChannelKeyframes&) const = default;
 };
+
+// Samples the editor's bounded channel projection with the same interpolation,
+// tangent and weight rules as SceneModel. No allocations; malformed or oversized
+// projections return no value rather than authoring a guessed replacement key.
+[[nodiscard]] std::optional<double> sample_keyframes(
+    const ChannelKeyframes& channel, core::i64 frame) noexcept;
 
 [[nodiscard]] core::u64 asset_set_digest(const struct Scene& scene) noexcept;
 [[nodiscard]] core::u64 asset_generation_key(const struct Scene& scene) noexcept;

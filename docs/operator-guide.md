@@ -31,6 +31,9 @@ in Scene to edit it in Properties. Import content in Library, then drag it onto
 Stage or a Timeline track. Additional panels are available in the Window menu.
 Saved workspaces retain their dock arrangement. **View > Reset Workspace**
 restores this starting layout when you want to adopt it or undo dock rearrangements.
+Panel dragging and other editor input target 60 Hz independently of the show's
+frame rate. At faster show rates, previews can follow every control frame. A
+scene that exceeds the machine's rendering budget can reduce that cadence.
 
 Properties groups placement, source, appearance, and effects in that order.
 Model animation, surface layers, baking, and Blender connection details open
@@ -238,6 +241,8 @@ Program composites through its scene's graph, and the Compositor panel edits
 the graph of whatever scene is on the Stage. Copying a scene copies its graph
 with it, with scene-layer references repointed at the copied elements, so a
 promoted copy looks exactly like the scene it came from before you change it.
+Scene Layer nodes show their referenced element's current name from Scene, so
+renaming an element updates its compositor label too.
 
 **What is shared, deliberately.** Show length, loop, and frame rate are one
 project-wide setting; Preview follows Program for those. So are the Hardware
@@ -279,6 +284,10 @@ longer attach to. Take a linked scene to air with the ordinary switcher. See
 [integrations/blender](../integrations/blender/README.md).
 
 ## Editing clips on the timeline
+
+New projects start with a five-minute timeline: 7,200 frames at the default
+24 fps, from frame 0 through frame 7,199 inclusive. Saved projects retain their
+authored range; `--show-range=FIRST:LAST` overrides the startup range.
 
 A media element is a *placement* of a source, not a copy of it. The document
 carries where the clip starts on the show timeline, how many show frames it
@@ -394,11 +403,12 @@ valid.
 
 On a media layer row the Timeline draws that placement as a bar:
 
-- **Drag the bar** to move the clip. **Drag either end** to trim it; trimming
-  the head advances the source trim by exactly the frames it removed, so the
-  frames that survive still show what they showed.
-- **SPLIT** cuts every selected clip at the playhead into two placements that
-  together play what the one clip played. Nothing is copied or re-encoded, and
+- With **Selection (`V`)**, **drag the bar** to move the clip. **Drag either
+  end** to trim it. Trimming the head converts the removed show frames to the
+  source frame rate and wraps within the source, retaining the first source
+  frame at the new cut. Moving the bar keeps its duration and source offset.
+- **SPLIT** cuts every selected clip at the playhead into two placements,
+  preserving the source frame at the cut. Nothing is copied or re-encoded, and
   a split that would leave an empty half is not offered.
 - **The two handles on the bar's top edge** set the head and tail ramps, drawn
   as the diagonals an editor expects. A tail ramp over the scene's black
@@ -408,6 +418,24 @@ On a media layer row the Timeline draws that placement as a bar:
   so butt-joining two clips and cutting on the playhead do not need pixel
   accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
   Move, trim, and fade bars preview during the lift and commit once on release.
+  The dropped bar stays at the proposed position while the Director adopts
+  the edit. Holding a dragged clip at either edge scrolls the view. Playback
+  In/Out does not limit clip placement: clips can cross frame zero or be parked
+  after Out. Pan left with a middle drag or Shift+wheel to see negative frames;
+  the view also pans past Out. Playback and seeking remain at frame zero or
+  later, so the part of a clip before zero is outside playback. Its source
+  continues from the signed placement start when playback reaches zero.
+
+**Auto Key**, beside Timeline search, controls whether editing an animated
+property writes a key at the current playhead. `K` toggles it while Timeline
+has keyboard focus. With Auto Key off, edits change the underlying base value;
+existing animation continues to override that value during playback. The
+property diamonds still explicitly add or remove keys in either mode. This
+setting covers the Inspector, Stage transforms, physical surface transforms,
+and animated environment values.
+Adding a key through the Inspector or Timeline samples the same interpolation
+as playback, including cubic tangents and weights, so the inserted key keeps
+the evaluated value at that frame.
 
 The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
@@ -417,6 +445,22 @@ affected span, and run only after `GO`; Overwrite retains both uncovered split
 remainders and their retargeted effects/key channels. Handle limits, adjacency,
 locks, rational source rates, and stale selections are validated by the
 Director, and every accepted operation is one undo step.
+The six editing tool buttons use enlarged icons. Over the timeline editing
+surface, the pointer matches the active Ripple Trim, Roll, Slip, Slide or Razor
+tool. Selection (`V`) shows move, trim and fade cursors at the corresponding
+clip handles. Tool cursors remain visible while dragging outside the panel.
+
+Slip (`Y`) changes which source frame plays at the clip's start, keeping its
+placement and duration. Drag right to advance the source and left to move it
+back; the offset wraps at either end, matching the clip's looping playback.
+This also works when the placement uses the whole source or loops it several
+times. A readout below the tracks shows the zero-based source frame, frame
+count, and whether the gesture wrapped. Invalid source metadata gets an
+explicit message; one-frame media explains that its image cannot change.
+The cached filmstrip previews the offset while dragging, and the final preview
+and readout remain after release as the edit reaches the Director. The Stage
+updates when the edit is committed. **Slide (`U`)** is a separate operation
+that adjusts the neighboring cuts; use Selection to freely move a clip.
 
 Navigating the timeline is the wheel and the middle button, on both axes.
 Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
@@ -430,6 +474,12 @@ state of a stack reads from across a stage. The stage's LED surfaces follow the
 scene's elements in both the Timeline and the Scene outliner, each with the same
 padlock - the lock Feed Mapping and Stage picking already honour. A surface has
 no eye, and clicking its Scene row selects it on Stage.
+To animate an LED surface, select its row in **Scene** and unlock its padlock
+if needed. Expand that surface in **Timeline**, park the playhead, then click
+the diamond beside **Position** or **Yaw** to add a key. Use these Timeline
+controls for surface animation; the object Properties inspector does not show
+surface controls. These keys support the same
+selection, dragging, scaling, copying, and deletion as scene-element keys.
 
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
 it, so a dissolve composes with an animated layer. A clip the playhead has
@@ -515,6 +565,16 @@ same exact source updates the existing asset record without changing its stable
 project ID; accepting changed bytes is therefore an explicit new revision of
 that one identity, not a derivative asset.
 
+To replace an existing source, drag a Library asset onto its **Timeline layer
+row** or the layer's **Scene Layer node in Compositor**. A compatible target is
+outlined and marked **Replace source** before release. Media assets replace
+media clips, and model assets replace standalone models; cross-kind drops,
+locked targets, and Blender-owned sources are refused. Replacement keeps the
+placement's identity, name, transform, animation, timing, trim, fades, effects,
+and graph connections. It updates the source reference and the imported media's
+frame count and cadence. The same placement changes in both views, and one Undo
+restores its previous source. Source preparation uses the already imported asset.
+
 The model this rests on is that a path means the same file everywhere: a clip
 the operator opens from `D:\Media\clip.mov` is opened from `D:\Media\clip.mov`
 by every render node. Use identical local layouts, a mounted share, or a UNC
@@ -539,8 +599,11 @@ missing, byte-mismatched, hash-mismatched, and verification-failed totals.
 Readiness is reported over the authenticated lifecycle listener, so it is
 available while the render child is stopped; the agent answers only the exact
 manifest requirements and never returns a directory listing, rewritten path,
-or file contents. START and RESTART remain disabled until every required path
-matches on that node; STOP remains available.
+or file contents. Missing media remains a warning and draws a grey box with an
+X on its existing surface; output continues, and START and RESTART remain
+available when media is the only missing content. Missing models, calibration
+or lighting assets, stale bytes and verification failures still disable those
+controls. STOP remains available. See [offline media](media-playback.md#offline-media).
 
 Asset readiness is reported, not enforced against the switcher. A disconnect,
 restart, stale manifest, duplicate node index, or pending Hardware Map change
@@ -588,6 +651,25 @@ Lifecycle control is therefore a separate, per-machine listener that supervises
 one fixed child configuration. The listener accepts only `status`, `start`,
 `restart`, and `stop`; executable paths and child arguments remain local and
 never cross the network.
+
+Running render nodes reconnect automatically when the editor returns on the
+same Director address, port and show ID. Output Monitor distinguishes the
+process from its editor connection: **CONNECTING** means the process is running
+but has no live session, **CATCHING UP** means it is adopting replicated state,
+and **LIVE** means the session is under editor control. Expand the node row to
+see its acknowledged control frame and the Director's current target. A
+persistent CONNECTING state calls for checking the render machine's saved
+Director address and show ID, plus network reachability.
+
+Startup and replacement output windows initialize to black before showing.
+A disconnected node holds its last complete image while it retries. A node
+ahead of the reopened Director requests an authoritative checkpoint; state is
+replaced only at a frame boundary. The node refreshes scene, mapping, asset
+and tracking state for a replacement stream, including when it reuses a
+document version number. Restarts retry an old connection's lease for up to
+fifteen seconds before reporting a persistent duplicate identity.
+A permanent session fault exits the render process so the agent can report
+the failure and Output Monitor can start it again.
 
 A render machine set up through its window runs exactly this agent, with the
 render process arguments `run-output-node.ps1` would pass. The command-line
@@ -755,16 +837,49 @@ scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
 [Editing clips on the timeline](#editing-clips-on-the-timeline).
 
+Select a built-in generator such as a box or plane and open **Inspector > Material** to assign Base color, Metal / rough, Normal, Occlusion or Emission textures. Images are sampled using the generator's UVs, and **Clear** removes an assigned channel. Metal / rough uses roughness in green and metallic in blue; normal maps use tangent space. PNG, JPEG, TGA and BMP images are supported. Keep the referenced image available at the same path on every render node.
+
+Select one imported model and open **Inspector > Model Materials** to assign
+texture images. Choose the numbered **Material part**, then use **Browse...** for
+Base color, Normal, Metal / rough, Occlusion or Emission. **Clear** removes that
+channel's image from the selected part. Metal / rough expects a packed image with
+roughness in green and metallic in blue; normal maps use tangent space. The part
+must have UVs. PNG, JPEG, TGA and BMP are supported up to 16384 pixels per dimension
+and 64 megapixels. A chosen color or emission image starts at full strength; the
+fallback factor controls below apply to source parts without materials.
+
+Texture preparation runs on the model worker while the existing model stays
+visible. The result embeds the image in a new immutable model package under
+`out/material-edits` beside the source, then replaces only that selected model's
+source in one undoable edit. Other placements keep their appearance. Keep that
+referenced package available at the same path on every render node. Blender-linked
+models continue to take textures from their Blender materials; create an independent
+snapshot before editing their images in Media Server.
+
 Effects can be applied to a selected element or connected in that scene's
 compositor graph. The graph's **Add Node** palette uses searchable, expandable
 Inputs, Color, Keying, Blur, Texture, Spatial / 3D, and Combine & Output
 categories instead of giving every node equal weight in one toolbar. Array
 nodes live under Spatial / 3D. Every newly-created composition starts with its
-required Output node. Dragging a layer or Track row from the Timeline creates
-its Scene Layer node at the release point; a Track remains one stable graph
-input whose picture follows the clips currently on air, including transparent
+required Output node. Dragging a layer or Track row from the Timeline onto empty graph space creates
+its Scene Layer node at the release point. Select several layers or Tracks with
+Ctrl-click or Shift-click, then drag any selected row into the Compositor to add
+them together. The selection stays intact during the drag; new nodes are
+stacked in timeline order with space between them, and one Undo removes the
+whole drop. Inputs already represented in the graph are skipped. A Track remains
+one stable graph input whose picture follows the clips currently on air, including transparent
 timeline gaps. Dragging from Effects creates the matching effect node there.
 Both gestures outline the graph and name the pending node before release.
+Drag a **single Timeline layer onto an existing Scene Layer node** to replace
+that input's layer binding. Matching layer kinds are required: a video layer
+can replace another video layer, and a model can replace another model. The node
+is outlined and marked **Replace layer** while hovered. Its position, custom
+label, outgoing connections, and downstream effects stay in place; both Timeline
+layers remain intact. One Undo restores the previous binding. Incompatible drops
+and drops of several selected layers onto an occupied node do nothing. Library
+assets dropped on a Scene Layer node instead replace its referenced placement's
+source, as described under Project assets.
+
 The graph is an infinite canvas: use the mouse wheel to zoom around the point
 under the cursor and middle-mouse drag to pan. The toolbar also provides zoom
 buttons, a percentage reset, and a full view reset. Node moves and Effects or
@@ -820,14 +935,22 @@ three-component colour control can reuse the same interaction.
 Cameras are placed like every other element: a Position and a Rotation (yaw,
 pitch and roll in turns, turning a camera that looks down -Z with +Y up) in the
 Inspector's TRANSFORM section, keyable from the Inspector and the Timeline. The
-CAMERA section keeps only lens and exposure. A camera saved with the older eye
+CAMERA section exposes field of view, shutter time, focus distance, and aperture
+with explicit key diamonds. The same four channels appear when the camera is
+expanded in Timeline and evaluate at the exact show frame. A camera saved with the older eye
 and look-at target reads as the rotation that gives the same view.
 
 On Stage a click picks the nearest element under the pointer. Press and hold
 still for about half a second to choose instead: a menu lists everything under
 the pointer, front to back - including elements the camera is partly inside,
 such as a floor, a wall or a Blender room, which a plain click leaves to the
-camera.
+camera. The menu uses the same authored names shown in Scene and Inspector.
+
+Stage shows `LOADING STAGE ASSETS...` while its models, material textures,
+media or display color transform are being prepared. The notice clears when
+Stage is ready; Program and output nodes may finish loading earlier. A failed
+asset shows a failure message instead. Selection and camera navigation remain
+available during loading.
 
 The Stage camera is your own view and is navigated as in the Unreal Editor.
 It never changes the scene, works during a rehearsal lock, and hides the
@@ -846,6 +969,12 @@ cursor while a drag moves it.
 | Alt+right drag | Dolly toward or away from the pivot |
 | Wheel | Move forward or back |
 | F | Frame the selection |
+
+Directional lights have no scene position. Stage draws their pickable marker
+near the world origin, offset opposite the light direction. The marker stays
+there as the view turns or frames another object; its direction arrows keep a
+readable on-screen size while zooming. The marker and arrows disappear when
+that location leaves the view.
 
 The fly keys go by position, so they sit under the left hand on any keyboard
 layout; while a camera drag is held they never trigger timeline shortcuts.
@@ -923,15 +1052,37 @@ resizing that rectangle changes only `viewport_x`, `viewport_y`,
 unchanged. Pixels in the window outside the viewport are black. The panel lays
 configured windows side by side. A four-node setup can therefore show four
 3840x2160 windows across a 15360x2160 mapping area, each with a 3456x1356
-viewport. An NVIDIA Mosaic setup instead authors one 15360x2160 window with
-four independent 3456x1356 viewports at x=0, 3840, 7680, and 11520. Any number
+viewport. An NVIDIA Mosaic setup can instead author one 15360x1546 window with
+four independent 3456x1536 viewports at x=0, 3840, 7680, and 11520, y=0. Any number
 of viewport rows may target the same logical window index; they are composited
 into that window in stable document order. Every viewport explicitly authors
 all four viewport properties.
 
+Select a viewport and use the **OUTPUT WINDOW / DESTINATION PIXELS** fields
+below the mapping canvas to enter its X, Y, W and H exactly. The separate
+**CANVAS / SOURCE PIXELS** or **LED SURFACE / SOURCE PIXELS** fields control
+the content crop without moving the viewport. Imported UV meshes use their full
+surface raster, so source crop fields are hidden for those mappings. Click a
+number to type or drag it to scrub. **+ ADD VIEWPORT** duplicates the selected
+source and viewport size in the same window; set each copy's destination X to
+the required spacing.
+For the Mosaic example the last viewport ends at x=14976, leaving a 384-pixel
+right margin and 10 black rows below the viewports. The source crops are
+independent: use consecutive 3456-pixel crops for continuous canvas content,
+or assign individual calibrated surfaces.
+
+Window setup, launch arguments and synchronization timing accept dimensions up
+to 16384 pixels per axis. GPU allocation and physical display-mode support are
+still required; dimension acceptance does not establish Mosaic or genlock
+qualification on a particular machine.
+
 Start, save and open complete projects through File > New Project / Save
-Project / Open Project. New Project replaces the open project (asking first if
-it has unsaved changes) with an untitled one holding a single empty 1920x1080
+Project / Open Project. File > Recent Projects opens a submenu of the five most
+recently opened or saved projects, newest first. Hover over Recent Projects,
+then choose a path to open it with the same unsaved-changes prompt as Open
+Project. New Project replaces the open project
+(asking first if it has unsaved changes) with an untitled one holding a single
+empty 1920x1080
 scene and a full-canvas Feed Map for node 0, the same as a first launch without
 the demo content; Save Project then asks where to put it.
 `.mstage` saves are checksummed and atomically replaced. Recovered WAL state

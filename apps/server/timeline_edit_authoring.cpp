@@ -112,7 +112,7 @@ placements_of(const doc::Root& root) {
 
 [[nodiscard]] bool clip_end(const scene::ClipPlacement& clip,
                             core::i64& out) noexcept {
-    return clip.timing.start >= 0 && clip.timing.duration > 0 &&
+    return clip.timing.duration > 0 &&
            checked_add(clip.timing.start, clip.timing.duration, out);
 }
 
@@ -319,7 +319,7 @@ plan_timeline_edit_authoring(
 
         core::i64 span_end{};
         if (!edit.creates.empty() &&
-            (edit.span_start < 0 || edit.span_duration <= 0 ||
+            (edit.span_duration <= 0 ||
              !checked_add(edit.span_start, edit.span_duration, span_end))) {
             return AuthorResult::failure(
                 TimelineEditAuthorError::InvalidPlan);

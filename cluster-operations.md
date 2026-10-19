@@ -170,6 +170,15 @@ times out after ten seconds. Local restart convergence is tested within five
 seconds after a new connection, but network outage detection plus service
 restart is not a five-second end-to-end SLA.
 
+Closing and reopening the editor leaves remote render machines supervised by
+their own agents. Running nodes retry automatically against their configured
+Director endpoint and show ID; Output Monitor shows CONNECTING, CATCHING UP,
+then LIVE separately from machine/process status. Expanded rows show the
+acknowledged and target control frames. Replacement windows start black, and
+disconnected outputs retain their last complete image. A restart tolerates
+up to fifteen seconds of overlap with an old connection's lease; a persistent
+duplicate becomes a process fault that can be restarted from Output Monitor.
+
 ## Bringing up a render machine
 
 There are two supported ways to run a render machine's lifecycle agent. Both
@@ -429,5 +438,8 @@ satisfied a policy demanding it.
    aligned.
 
 Control health, content readiness, display presence, and physical sync remain
-four independent gates. Program promotion requires all four.
+four independent gates. Missing media is renderable using a grey placeholder
+with an X, so it does not hold output or disable START/RESTART. Output Monitor
+continues to report the source as missing. Missing models, calibration and
+lighting assets retain their readiness checks.
 

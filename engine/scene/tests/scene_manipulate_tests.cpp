@@ -312,6 +312,13 @@ void a_directional_light_has_a_pickable_editor_anchor() {
     const auto hit = scene::pick_scene(scn, canvas, projected.x, projected.y);
     MANIP_CHECK(hit.has_value());
     MANIP_CHECK(hit->node == light.source);
+    scn.camera.target = {12.0F, 0.0F, 0.0F};
+    scn.camera.eye = {12.0F, 0.0F, 5.0F};
+    MANIP_CHECK(scene::directional_light_anchor(scn, light) == anchor);
+    const auto turned = scene::project_to_canvas(scn.camera, canvas, anchor);
+    MANIP_CHECK(turned.x < 0.0F || turned.x > canvas.width ||
+                turned.y < 0.0F || turned.y > canvas.height);
+    MANIP_CHECK(!scene::pick_scene(scn, canvas, projected.x, projected.y));
 }
 
 void locked_elements_are_absent_from_editor_picking() {

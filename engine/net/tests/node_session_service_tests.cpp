@@ -440,6 +440,8 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
             && barrier.active_sessions() == 1U;
     }));
     NODE_SERVICE_CHECK(service.snapshot().director_epoch == id(2U));
+    NODE_SERVICE_CHECK(barrier.node_connection(10U).state ==
+        net::DirectorNodeConnection::State::Live);
     NODE_SERVICE_CHECK(wait_until([&] {
         return service.counters().received_heartbeats >= 10U
             && director.counters().sent_heartbeats >= 10U
@@ -486,11 +488,12 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
             manifest_digest, required_node_indices);
     }));
 
-    // A second connection with the same stable logical node identity is a
-    // terminal lease fault, not a reconnect storm.
+    // A persistent duplicate eventually faults after a bounded retry window.
     cmd::NodeCommandBus duplicate_node;
+    auto duplicate_config = node_config(director_started.value());
+    duplicate_config.lease_rejection_timeout = std::chrono::milliseconds{80};
     net::NodeSessionService duplicate{
-        node_config(director_started.value()), duplicate_node};
+        duplicate_config, duplicate_node};
     NODE_SERVICE_CHECK(duplicate.start());
     NODE_SERVICE_CHECK(wait_until([&] {
         return duplicate.snapshot().state
@@ -499,10 +502,11 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
     NODE_SERVICE_CHECK(
         duplicate.snapshot().last_failure
         == net::NodeSessionServiceFailure::LeaseRejected);
-    NODE_SERVICE_CHECK(duplicate.counters().connection_attempts == 1U);
-    NODE_SERVICE_CHECK(duplicate.counters().reconnect_waits == 0U);
+    NODE_SERVICE_CHECK(duplicate.counters().connection_attempts > 1U);
+    NODE_SERVICE_CHECK(duplicate.counters().reconnect_waits > 0U);
+    const auto duplicate_attempts = duplicate.counters().connection_attempts;
     std::this_thread::sleep_for(std::chrono::milliseconds{30});
-    NODE_SERVICE_CHECK(duplicate.counters().connection_attempts == 1U);
+    NODE_SERVICE_CHECK(duplicate.counters().connection_attempts == duplicate_attempts);
     duplicate.stop();
 
     auto tracked = barrier.seal_and_track(hub, cmd::FrameNumber{1U});
@@ -533,18 +537,84 @@ void first_checkpoint_then_durable_permit_commit_end_to_end() {
     NODE_SERVICE_CHECK(node.cursor().through_frame == cmd::FrameNumber{1U});
     NODE_SERVICE_CHECK(service.counters().received_commit_permits == 1U);
     NODE_SERVICE_CHECK(service.counters().flushed_acknowledgements == 2U);
+    NODE_SERVICE_CHECK(barrier.node_connection(10U).committed_frame == 1U);
+    NODE_SERVICE_CHECK(barrier.node_connection(10U).target_frame == 1U);
 
-    service.stop();
-    NODE_SERVICE_CHECK(service.counters().graceful_goodbyes == 1U);
-    // No polling: the Director counts the Goodbye when it reads it, and it
-    // only closes the connection afterwards. The node's stop() completes its
-    // own close on that peer close, so by the time it returns the Director has
-    // already accounted for the record. Waiting for this would only hide a
-    // Goodbye that never arrived, which is exactly the failure worth catching.
-    NODE_SERVICE_CHECK(director.counters().graceful_goodbyes >= 1U);
+    // Reopening the editor on the same listener requires no action at the
+    // still-running node. Its committed state and identity survive the gap.
     director.stop();
+    NODE_SERVICE_CHECK(leases.active_sessions() == 0U);
+    NODE_SERVICE_CHECK(barrier.node_connection(10U).state ==
+        net::DirectorNodeConnection::State::Disconnected);
+    for (core::u64 restart = 1U; restart <= 8U; ++restart) {
+        const auto resumes = service.counters().successful_resumes;
+        auto reopened_config = director_config();
+        reopened_config.bind_endpoint = director_started.value();
+        reopened_config.first_session_sequence = restart * 100U;
+        net::DirectorSessionService reopened{
+            reopened_config, hub, durable, leases, &barrier};
+        NODE_SERVICE_CHECK(reopened.start());
+        NODE_SERVICE_CHECK(wait_until([&] {
+            return service.counters().successful_resumes > resumes &&
+                service.snapshot().state == net::NodeSessionServiceState::Live &&
+                barrier.active_sessions() == 1U;
+        }));
+        NODE_SERVICE_CHECK(node.cursor().through_frame == cmd::FrameNumber{1U});
+        if (restart == 8U) {
+            service.stop();
+            NODE_SERVICE_CHECK(service.counters().graceful_goodbyes == 1U);
+            // stop completes after the peer reads the Goodbye and closes.
+            NODE_SERVICE_CHECK(reopened.counters().graceful_goodbyes >= 1U);
+        }
+        reopened.stop();
+    }
     hub.close();
     NODE_SERVICE_CHECK(leases.active_sessions() == 0U);
+}
+
+void a_restarted_node_retries_an_old_lease_and_replaces_an_ahead_cursor() {
+    TempWal temporary;
+    auto log = open_log(temporary.path());
+    auto ledger = open_ledger(temporary.ledger_path(), log);
+    cmd::DirectorScheduler scheduler;
+    persist::DurableDirector durable{scheduler, log, ledger};
+    net::DirectorSessionHub hub{durable};
+    net::NodeSessionLeaseRegistry leases{2U};
+    const net::NodeSessionIdentity identity{id(1U), id(10U), id(11U)};
+    NODE_SERVICE_CHECK(leases.claim(identity, id(99U)));
+    net::DurableDirectorFrameReleaseAuthority releases{durable};
+    net::DirectorFrameBarrier barrier{genesis_cursor(), releases};
+    net::DirectorSessionService director{director_config(), hub, durable, leases, &barrier};
+    auto started = director.start();
+    NODE_SERVICE_CHECK(started);
+
+    doc::Root old_root;
+    old_root = old_root.set(doc::Node{doc::NodeId{777U}, "stale", {}});
+    cmd::NodeCommandBus node{old_root, cmd::FrameNumber{19U}, cmd::CommandId{2U}};
+    net::NodeSessionService service{node_config(started.value()), node};
+    NODE_SERVICE_CHECK(service.start());
+    // First retry negotiates an authoritative checkpoint for the ahead
+    // cursor; subsequent attempts encounter the old process's lease.
+    NODE_SERVICE_CHECK(wait_until([&] {
+        return service.snapshot().last_failure ==
+            net::NodeSessionServiceFailure::LeaseRejected &&
+            service.counters().reconnect_waits >= 2U;
+    }));
+    NODE_SERVICE_CHECK(node.document().get(doc::NodeId{777U}) != nullptr);
+    leases.release(identity, id(99U));
+    NODE_SERVICE_CHECK(wait_until([&] {
+        return service.snapshot().state == net::NodeSessionServiceState::CheckpointStaged;
+    }));
+    NODE_SERVICE_CHECK(node.cursor().through_frame == cmd::FrameNumber{19U});
+    NODE_SERVICE_CHECK(service.activate_checkpoint());
+    NODE_SERVICE_CHECK(wait_until([&] {
+        return service.snapshot().state == net::NodeSessionServiceState::Live;
+    }));
+    NODE_SERVICE_CHECK(node.cursor() == genesis_cursor());
+    NODE_SERVICE_CHECK(node.document().empty());
+    NODE_SERVICE_CHECK(service.counters().terminal_failures == 0U);
+    service.stop();
+    director.stop();
 }
 
 } // namespace
@@ -559,6 +629,8 @@ int main() {
         {"pending handshake stop", &pending_handshake_is_interrupted_by_stop},
         {"checkpoint durable permit E2E",
          &first_checkpoint_then_durable_permit_commit_end_to_end},
+        {"restart overlap and authoritative rewind",
+         &a_restarted_node_retries_an_old_lease_and_replaces_an_ahead_cursor},
     };
     std::size_t passed = 0U;
     for (const auto& [name, test] : tests) {

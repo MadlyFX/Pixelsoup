@@ -176,7 +176,8 @@ core::Result<HybridSceneRenderer, RenderError> HybridSceneRenderer::create(
     rhi::Device& device,
     core::u32 width,
     core::u32 height,
-    const RendererLimits& limits) {
+    const RendererLimits& limits,
+    SceneEffectOwner scene_effect_owner) {
     using Result = core::Result<HybridSceneRenderer, RenderError>;
     auto basic = SceneRenderer::create(device, width, height, limits);
     if (!basic) {
@@ -231,14 +232,14 @@ core::Result<HybridSceneRenderer, RenderError> HybridSceneRenderer::create(
     // Advanced renderer and the shaders to drive it, absent without complaint
     // otherwise, and refusing an authored request later rather than now.
     std::optional<Bloom> bloom;
-    if (advanced.has_value() && Bloom::shaders_available()) {
+    if (scene_effect_owner == SceneEffectOwner::Renderer && advanced.has_value() && Bloom::shaders_available()) {
         auto created_bloom = Bloom::create(device, width, height);
         if (created_bloom) {
             bloom.emplace(std::move(created_bloom).value());
         }
     }
     std::optional<VolumetricFog> fog;
-    if (advanced.has_value() && VolumetricFog::shaders_available()) {
+    if (scene_effect_owner == SceneEffectOwner::Renderer && advanced.has_value() && VolumetricFog::shaders_available()) {
         auto created_fog =
             VolumetricFog::create(device, width, height, FroxelGridLimits{});
         if (created_fog) {
@@ -256,12 +257,13 @@ core::Result<HybridSceneRenderer, RenderError> HybridSceneRenderer::create(
         std::move(bridge).value(), std::move(history_slots)};
     renderer.temporal_ = std::move(temporal);
     renderer.spatial_ = std::move(spatial);
-    if (renderer.advanced_) {
+    if (scene_effect_owner == SceneEffectOwner::Renderer && renderer.advanced_) {
         auto motion = ObjectMotionBlur::create(device, width, height);
         if (motion) renderer.motion_blur_.emplace(std::move(motion).value());
     }
     renderer.bloom_ = std::move(bloom);
     renderer.fog_ = std::move(fog);
+    renderer.scene_effect_owner_ = scene_effect_owner;
     renderer.diagnostics_.scene_record_capacity =
         static_cast<core::u32>(records);
     renderer.diagnostics_.history_slot_capacity =
@@ -314,6 +316,7 @@ RendererReadiness HybridSceneRenderer::readiness(
                            : rhi::DeviceCapabilities{},
         advanced_.has_value());
     if (result.selected == scene::RendererBackend::Advanced
+        && scene_effect_owner_ == SceneEffectOwner::Renderer
         && settings.motion_blur && settings.motion_blur_radius > 0U && !motion_blur_) {
         result.code = RendererReadinessCode::RequestedFeaturesUnavailable;
         result.satisfied = false;
@@ -340,6 +343,7 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     // the canvas: a plate at twice the wall's density or a mapped window wider
     // than the canvas are both legitimate. Only a canvas slice has to be one.
     if (device_ == nullptr || request.scene == nullptr ||
+        (scene_effect_owner_ == SceneEffectOwner::Compositor && !request.defer_scene_effects) ||
         request.output_width == 0U || request.output_height == 0U ||
         (!request.options.view.has_value()
          && !scene::contains(request.scene->canvas, request.slice)) ||

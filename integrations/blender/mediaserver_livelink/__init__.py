@@ -3,7 +3,7 @@
 # every value must stay a literal. wire.py holds the same version and the
 # negotiated capability list; test_publisher_core.py checks that they agree.
 bl_info = {
-    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 10, 0),
+    'name': 'Media Server LiveLink', 'author': 'Media Server', 'version': (0, 10, 1),
     'blender': (5, 2, 0), 'location': '3D View > Sidebar > Media Server',
     'description': 'Live-link Blender scenes with Media Server scenes',
     'category': 'Import-Export',
@@ -387,6 +387,8 @@ def depsgraph_changed(scene, depsgraph):
             geometry.add(data.session_uid)
         elif isinstance(data, (bpy.types.Material, bpy.types.Collection, bpy.types.Scene, bpy.types.Light, bpy.types.Image)):
             changed = True
+            if isinstance(data, bpy.types.Image):
+                getattr(runtime.identities, 'packed_images', {}).pop(data.session_uid, None)
         elif isinstance(data, bpy.types.NodeTree):
             # Shader trees only change bindings; geometry node groups may affect any prototype.
             changed = True
@@ -400,6 +402,7 @@ def history_changed(*args):
     from .animation import invalidate
     invalidate()
     if runtime.worker:
+        getattr(runtime.identities, 'packed_images', {}).clear()
         runtime.mark(full=True)
         # Undo may have restored objects from before a Media Server edit;
         # extraction sends what Blender now shows, and the rows are checked again.

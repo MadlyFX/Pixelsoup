@@ -264,6 +264,8 @@ struct RendererDiagnostics final {
 
 using RenderProductsResult = core::Result<RenderProducts, RenderError>;
 
+enum class SceneEffectOwner : core::u8 { Renderer, Compositor };
+
 // Host-owned renderer facade. It is the only product-facing selection point:
 // Basic remains the SDL path. Advanced raster is a separate scene-linear
 // implementation and is capability-gated; options whose passes have not
@@ -279,7 +281,8 @@ public:
         rhi::Device& device,
         core::u32 width,
         core::u32 height,
-        const RendererLimits& limits = RendererLimits{});
+        const RendererLimits& limits = RendererLimits{},
+        SceneEffectOwner scene_effect_owner = SceneEffectOwner::Renderer);
 
     HybridSceneRenderer(const HybridSceneRenderer&) = delete;
     HybridSceneRenderer& operator=(const HybridSceneRenderer&) = delete;
@@ -452,6 +455,10 @@ private:
     std::optional<ObjectMotionBlur> motion_blur_;
     std::optional<Bloom> bloom_;
     std::optional<VolumetricFog> fog_;
+    // Compositor-owned instances require defer_scene_effects on every request.
+    // They retain antialiasing and all geometry products, but never allocate
+    // per-layer copies of the composite's fog, bloom or object shutter passes.
+    SceneEffectOwner scene_effect_owner_{SceneEffectOwner::Renderer};
     bool last_advanced_{};
     SceneBridge bridge_;
     std::vector<HistorySlot> history_slots_;

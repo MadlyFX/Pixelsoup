@@ -3139,7 +3139,7 @@ gui::Rect feed_mapping_canvas(const gui::Rect &bounds,
   const gui::Rect area{
       bounds.x + list_width + 22.0F, bounds.y + title_height + 30.0F,
       std::max(bounds.width - list_width - details_width - 44.0F, 0.0F),
-      std::max(bounds.height - title_height - 52.0F, 0.0F)};
+      std::max(bounds.height - title_height - 132.0F, 0.0F)};
   return fit_feed_canvas(area, canvas);
 }
 
@@ -3185,6 +3185,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                         const topology::HardwareMap *hardware) {
   FeedMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
+    rectangle_numbers_.cancel(ctx);
     return frame;
   }
   if (ctx.pointer_pressed()) {
@@ -3194,6 +3195,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       feed_map.map_node(*selected_map_node_) == nullptr) {
     selected_map_node_.reset();
     drag_kind_ = DragKind::None;
+    rectangle_numbers_.cancel(ctx);
   }
   if (selected_surface_node_.has_value() &&
       feed_map.surface_for(*selected_surface_node_) == nullptr) {
@@ -3307,7 +3309,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             : (feed_map.maps.empty() ? std::string_view{"NOT CONFIGURED"}
                                      : std::string_view{"CONFIGURED"}));
   if (focused_ && valid_selection && !ctx.typing() &&
-      !surface_numbers_.live() && ctx.key_pressed(gui::Key::Delete)) {
+      !surface_numbers_.live() && !rectangle_numbers_.live() &&
+      ctx.key_pressed(gui::Key::Delete)) {
     frame.remove = FeedMapDeleteRequest{*selected_map_node_};
     frame.consume_delete = true;
   }
@@ -3864,6 +3867,88 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   }
 
   const float details_width = feed_details_width(bounds);
+  const gui::Rect rectangle_controls{
+      work.x + 12.0F, bounds.y + bounds.height - 78.0F,
+      std::max(work.width - details_width - 24.0F, 0.0F), 72.0F};
+  if (selected_map != nullptr && rectangle_controls.width >= 240.0F &&
+      content.height >= 180.0F) {
+    if (rectangle_mesh_domain_ != uv_mesh_domain) {
+      rectangle_numbers_.cancel(ctx);
+      rectangle_mesh_domain_ = uv_mesh_domain;
+    }
+    const auto draw_rectangle = [&](std::string_view label,
+                                     std::string_view domain,
+                                     scene::CanvasRect original,
+                                     scene::Canvas extent, float y) {
+      scene::CanvasRect edited = original;
+      ctx.label(gui::Rect{rectangle_controls.x, y,
+                          rectangle_controls.width, 17.0F},
+                label, ctx.theme().text_muted);
+      const float field_width = (rectangle_controls.width - 9.0F) / 4.0F;
+      const std::array<std::string_view, 4U> names{"X", "Y", "W", "H"};
+      const std::array<core::u32, 4U> values{
+          original.x, original.y, original.width, original.height};
+      bool changed = false;
+      for (std::size_t index = 0U; index < values.size(); ++index) {
+        double value{};
+        const std::string key = std::string{domain} + "." +
+                                std::string{names[index]};
+        if (!rectangle_numbers_.draw(
+                ctx, mix(id_, key, selected_map->node.value()),
+                gui::Rect{rectangle_controls.x +
+                              static_cast<float>(index) * (field_width + 3.0F),
+                          y + 17.0F, field_width, 20.0F},
+                names[index], static_cast<double>(values[index]), 1.0,
+                value, 0)) continue;
+        // Preserve the other rectangle components when moving. A source
+        // crop and a destination viewport are independent authored values.
+        const auto bounded = [&](core::u32 minimum, core::u32 maximum) {
+          return static_cast<core::u32>(std::clamp(
+              std::round(value), static_cast<double>(minimum),
+              static_cast<double>(std::max(minimum, maximum))));
+        };
+        switch (index) {
+        case 0U: edited.x = bounded(0U, extent.width -
+                     std::min(original.width, extent.width)); break;
+        case 1U: edited.y = bounded(0U, extent.height -
+                     std::min(original.height, extent.height)); break;
+        case 2U: edited.width = bounded(1U, extent.width -
+                     std::min(original.x, extent.width)); break;
+        case 3U: edited.height = bounded(1U, extent.height -
+                     std::min(original.y, extent.height)); break;
+        default: break;
+        }
+        changed = true;
+      }
+      return changed ? std::optional{edited} : std::nullopt;
+    };
+    const auto viewport = draw_rectangle(
+        "OUTPUT WINDOW  /  DESTINATION PIXELS", "feed.viewport",
+        selected_map->viewport,
+        feed_window_raster(selected_map->node_index, canvas, hardware),
+        rectangle_controls.y);
+    if (viewport) frame.edit = FeedMapRectEdit{selected_map->node, *viewport};
+    if (uv_mesh_domain) {
+      ctx.label(gui::Rect{rectangle_controls.x, rectangle_controls.y + 39.0F,
+                         rectangle_controls.width, 20.0F},
+                "UV MESH USES THE FULL SURFACE RASTER", ctx.theme().text_muted);
+    } else {
+      const auto source = draw_rectangle(
+          selected_map->projection == output::FeedProjection::PlanarSurface
+              ? "LED SURFACE  /  SOURCE PIXELS" : "CANVAS  /  SOURCE PIXELS",
+          "feed.source", selected_map->source,
+          mapping_surface != nullptr ? mapping_surface->geometry.raster : canvas,
+          rectangle_controls.y + 39.0F);
+      if (source) frame.projection_edit = FeedProjectionEdit{
+          selected_map->node, selected_map->projection, selected_map->surface,
+          *source};
+    }
+    frame.editing = frame.editing || rectangle_numbers_.live();
+  } else {
+    // A resize or replicated deletion can remove the active field without
+    // another draw call to release its keyboard focus.
+    rectangle_numbers_.cancel(ctx);
+  }
   if (details_width > 0.0F) {
     const gui::Rect details{bounds.x + bounds.width - details_width,
                             bounds.y + title_height, details_width,
@@ -4359,8 +4444,8 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         emit_surface_edit();
         surface_name_dirty_ = false;
       }
-      frame.editing = !details_locked &&
-                      (surface_numbers_.live() || ctx.focus() == name_id || ctx.focus() == camera_id);
+      frame.editing = frame.editing || (!details_locked &&
+                      (surface_numbers_.live() || ctx.focus() == name_id || ctx.focus() == camera_id));
       if (details_locked) {
         ctx.pop_pointer_block();
       }

@@ -249,6 +249,47 @@ void lowest_valid_channel_wins_and_ambiguous_channels_are_untouched() {
                == std::vector<core::i64>{6}));
 }
 
+void camera_light_and_surface_keys_support_batch_edits() {
+    doc::Root root = basic_root();
+    root = root.set(node(11U, schema::camera_type));
+    root = root.set(node(12U, schema::light_type));
+    root = root.set(node(13U, "output.surface", {flag(schema::locked, false)}));
+    root = root.set(channel(21U, 11U, schema::fov_turns,
+                           {key(5, 0.173, schema::interp_linear)}));
+    root = root.set(channel(22U, 12U, schema::intensity,
+                           {key(5, 17.3, schema::interp_linear)}));
+    root = root.set(channel(23U, 13U, schema::position_z,
+                           {key(5, -3.7, schema::interp_linear)}));
+    const std::array selection{
+        address(11U, scene::PropertyChannel::CameraFieldOfView, 5),
+        address(12U, scene::PropertyChannel::LightIntensity, 5),
+        address(13U, scene::PropertyChannel::PositionZ, 5),
+    };
+    const auto planned = scene::plan_key_move(root, selection, 9);
+    KEY_CHECK(planned.has_value());
+    KEY_CHECK(planned.value().report.applied == 3U);
+    KEY_CHECK(planned.value().report.skips.empty());
+    for (core::u64 channel_id : {21U, 22U, 23U}) {
+        KEY_CHECK(frames(*planned.value().after.get(doc::NodeId{channel_id})) ==
+                  std::vector<core::i64>{14});
+    }
+
+    const auto default_locked = root.set(node(13U, "output.surface"));
+    const std::array wall_selection{
+        address(13U, scene::PropertyChannel::PositionZ, 5)};
+    const auto check_locked = [&](const scene::KeyEditResult& result) {
+        KEY_CHECK(result.has_value());
+        KEY_CHECK(result.value().report.applied == 0U);
+        KEY_CHECK(result.value().report.skips.size() == 1U);
+        KEY_CHECK(result.value().report.skips.front().reason ==
+                  scene::KeyEditSkipReason::TargetLocked);
+        KEY_CHECK(doc::diff(default_locked, result.value().after).changes.empty());
+    };
+    check_locked(scene::plan_key_move(default_locked, wall_selection, 9));
+    check_locked(scene::plan_key_duplicate(default_locked, wall_selection, 9));
+    check_locked(scene::plan_key_delete(default_locked, wall_selection));
+}
+
 void move_is_atomic_sorted_and_replaces_stationary_destinations() {
     doc::Root root = basic_root();
     root = root.set(channel(
@@ -552,7 +593,8 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
+    {"camera light and surface keys support batch edits", &camera_light_and_surface_keys_support_batch_edits},
     {"selection is typed unique exact and lock aware",
      &selection_is_typed_unique_exact_and_lock_aware},
     {"lowest valid channel wins and ambiguous channels are untouched",

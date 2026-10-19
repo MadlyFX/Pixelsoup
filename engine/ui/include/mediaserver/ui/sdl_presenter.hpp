@@ -184,6 +184,7 @@ class SdlPresenter final : public show::Presenter {
     }
     [[nodiscard]] show::PresenterPlateStats plates() const noexcept override;
     [[nodiscard]] show::PresenterStatus hold() noexcept override;
+    void begin_document_stream() noexcept override;
     // Joins or leaves the vendor present barrier through the rhi seam. The
     // GPU path is the only one that can: the CPU path has no swapchain, and a
     // presenter with no barrier backend installed reports Unsupported rather

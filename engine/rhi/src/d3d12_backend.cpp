@@ -2382,6 +2382,32 @@ core::u64 d3d12_upload_space(void* command_value) noexcept {
     return space;
 }
 
+core::u32 d3d12_texture_upload_row_capacity(
+    void* command_value, void* texture_value, core::u64 reserve_bytes) noexcept {
+    const auto* commands = as_commands(command_value);
+    const auto* texture = as_texture(texture_value);
+    if (commands == nullptr || texture == nullptr || !commands->recording)
+        return 0U;
+    const core::u32 block = block_compressed(texture->desc.format) ? 4U : 1U;
+    const core::u32 pixel_bytes = block == 4U ? 16U : bytes_per_pixel(texture->desc.format);
+    const core::u64 row_pitch = align_up(
+        static_cast<core::u64>((texture->desc.width + block - 1U) / block) * pixel_bytes,
+        D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    if (pixel_bytes == 0U || row_pitch == 0U) return 0U;
+    const core::u64 available = d3d12_upload_space(command_value);
+    if (available <= reserve_bytes) return 0U;
+    core::u64 budget = available - reserve_bytes;
+    core::u64 rows{};
+    for (const auto& page : commands->upload_pages) {
+        const core::u64 offset = align_up(page.cursor, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (offset >= upload_page_capacity) continue;
+        const core::u64 count = std::min(upload_page_capacity - offset, budget) / row_pitch;
+        rows += count;
+        budget -= count * row_pitch;
+    }
+    return static_cast<core::u32>(std::min<core::u64>(texture->desc.height, rows * block));
+}
+
 bool d3d12_upload_buffer_range(
     void* command_value,
     void* buffer_value,
@@ -3603,6 +3629,7 @@ bool d3d12_buffer_safe_to_release(void*, void*) noexcept { return false; }
 bool d3d12_upload_buffer_range(void*, void*, core::u32, std::span<const core::u8>) noexcept { return false; }
 bool d3d12_copy_buffer(void*, void*, void*, core::u32) noexcept { return false; }
 core::u64 d3d12_upload_space(void*) noexcept { return 0U; }
+core::u32 d3d12_texture_upload_row_capacity(void*, void*, core::u64) noexcept { return 0U; }
 core::Result<void*, RhiError> d3d12_create_sampler(void*, const SamplerDesc&) noexcept {
     return core::Result<void*, RhiError>::failure(RhiError::Unavailable);
 }

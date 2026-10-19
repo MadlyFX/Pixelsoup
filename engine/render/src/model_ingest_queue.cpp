@@ -26,11 +26,21 @@ struct ModelIngestJob::Executor {
                 job->stage_.store(ModelIngestStage::Reading, std::memory_order_release);
                 ModelAsset asset;
                 if (!load_model(job->source_, asset)) throw std::runtime_error{asset.diagnostic};
+                if (job->texture_ && !assign_model_texture(asset, job->texture_->part,
+                    job->texture_->role, job->texture_->image_source)) throw std::runtime_error{asset.diagnostic};
                 job->stage_.store(ModelIngestStage::Compressing, std::memory_order_release);
                 if (!compress_model_textures(asset)) throw std::runtime_error{"Cannot prepare model textures"};
                 job->stage_.store(ModelIngestStage::Writing, std::memory_order_release);
-                const auto source = std::filesystem::path{job->source_}.extension() == ".msmodel"
-                    ? job->source_ : write_model_package(job->source_, asset);
+                std::string package_base = job->source_;
+                if (job->texture_) {
+                    const auto parent = std::filesystem::path{job->source_}.parent_path();
+                    const auto folder = parent.filename() == "material-edits" && parent.parent_path().filename() == "out"
+                        ? parent : parent / "out" / "material-edits";
+                    std::filesystem::create_directories(folder);
+                    package_base = (folder / "model").string();
+                }
+                const auto source = !job->texture_ && std::filesystem::path{job->source_}.extension() == ".msmodel"
+                    ? job->source_ : write_model_package(package_base, asset);
                 auto& result = job->result_;
                 result.source = source;
                 result.vertex_count = asset.mesh.vertices.size();
@@ -53,12 +63,14 @@ struct ModelIngestJob::Executor {
 };
 
 std::shared_ptr<ModelIngestJob> ModelIngestJob::start(std::string source,
-    std::optional<output::PhysicalSurface> projection, float scale) {
+    std::optional<output::PhysicalSurface> projection, float scale,
+    std::optional<ModelTextureAssignment> texture) {
     static Executor executor;
     std::unique_lock lock{executor.mutex, std::try_to_lock};
     if (!lock.owns_lock() || executor.pending.size() >= 15U) return {};
     auto job = std::make_shared<ModelIngestJob>();
     job->source_ = std::move(source); job->projection_ = projection; job->scale_ = scale;
+    job->texture_ = std::move(texture);
     executor.pending.push_back(job);
     executor.changed.notify_one();
     return job;

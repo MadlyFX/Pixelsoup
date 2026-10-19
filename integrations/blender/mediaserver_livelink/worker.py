@@ -20,7 +20,7 @@ def send(sock, message):
     sock.sendall(struct.pack('<I', len(payload)) + payload)
 
 
-def receive_job(sock):
+def receive_job(sock, image_cache=None):
     size, = struct.unpack('<I', exact(sock, 4))
     if size > 2 * 1024 * 1024:
         raise ValueError('Worker metadata exceeds capacity')
@@ -35,6 +35,31 @@ def receive_job(sock):
         if total > MAX_RAW_BYTES:
             raise ValueError('Copied scene exceeds 8 GiB')
         meshes[entry['id']] = tuple(exact(sock, n) for n in lengths)
+    images = {}
+    image_cache = {} if image_cache is None else image_cache
+    total = 0
+    for entry in meta.pop('packed_images', []):
+        length = entry['length']
+        if not isinstance(length, int) or not 0 < length <= 16 * 1024 * 1024:
+            raise ValueError('Invalid packed image length')
+        total += length
+        if len(images) >= 256 or total > 256 * 1024 * 1024 or entry['path'] in images:
+            raise ValueError('Packed images exceed capacity or repeat an identity')
+        images[entry['path']] = exact(sock, length)
+    image_cache.update(images)
+    active_images = set()
+    for obj in meta.get('objects', []):
+        for material in obj.get('materials', []):
+            if isinstance(material, dict):
+                for view in material.get('textures', {}).values():
+                    if view.pop('packed_image', False) or view['path'] in images:
+                        path = view['path']
+                        if path not in image_cache:
+                            raise ValueError('Missing packed image attachment; resync required')
+                        view['packed_bytes'] = image_cache[path]
+                        active_images.add(path)
+    for path in set(image_cache) - active_images:
+        del image_cache[path]
     return meta, meshes
 
 
@@ -209,6 +234,7 @@ def main():
                 reply = director.request(STAGE_CONTEXT)
                 if reply['kind'] == STAGE_CONTEXT and reply['payload']:
                     send(sock, {'kind': 'stage', 'payload': reply['payload']})
+        packed_images = {}
         while True:
             if not select.select([sock], [], [], 0.25)[0]:
                 reply = director.request(STATUS)
@@ -219,7 +245,7 @@ def main():
                     send(sock, {'kind': 'resumed'})
                 shots()
                 continue
-            job, meshes = receive_job(sock)
+            job, meshes = receive_job(sock, packed_images)
             try:
                 send(sock, publisher.publish(job, meshes))
             except CapabilityError as error:

@@ -268,6 +268,44 @@ void deleted_occurrences() {
           "absorbing the deletion restores the hierarchy");
     check(near(state.occurrences.at(hero).world, moved), "a restored object keeps its overrides");
 }
+void removed_linked_light_is_not_evaluated() {
+    auto root = fixture();
+    auto source_light = node(113, l::object_type);
+    ref(source_light, l::source, 100);
+    put(source_light, l::uuid, scene::link_instance_uuid(id(113)));
+    put(source_light, s::group_name, std::string{"Work light"});
+    put(source_light, s::light_kind, std::string{s::point_kind});
+    put(source_light, s::light_unit, std::string{s::lumens_unit});
+    put(source_light, s::intensity, 850.0);
+    root = take(scene::plan_link_source_update(root, std::array{source_light}, id(500)));
+    const auto light = occurrence(root, 200, 113);
+    scene::SceneModel model;
+    model.reset(root);
+    check(model.evaluate(id(1), {}).point_lights.size() == 1, "linked light appears before removal");
+
+    const auto hidden = take(scene::plan_linked_edit(root, light, scene::LinkedEdit::Hide));
+    model.apply(doc::diff(root, hidden));
+    check(model.evaluate(id(1), {}).point_lights.empty(), "hidden linked light does not illuminate or draw a guide");
+    model.apply(doc::diff(hidden, root));
+    check(model.evaluate(id(1), {}).point_lights.size() == 1, "show restores linked light");
+
+    const auto deleted = take(scene::plan_linked_edit(root, light, scene::LinkedEdit::Delete));
+    model.apply(doc::diff(root, deleted));
+    check(model.evaluate(id(1), {}).point_lights.empty(), "deleted linked light is absent from evaluated scene");
+    model.apply(doc::diff(deleted, root));
+
+    put(source_light, l::removed, true);
+    const auto removed = take(scene::plan_link_source_update(root, std::array{source_light}, id(500)));
+    check(removed.contains(light) && read(removed).occurrences.at(light).removed,
+          "Blender removal retains the light occurrence for recovery");
+    model.apply(doc::diff(root, removed));
+    check(model.evaluate(id(1), {}).point_lights.empty(), "Blender removal clears lighting and Stage guide");
+    scene::SceneModel rebuilt;
+    rebuilt.reset(removed);
+    check(rebuilt.evaluate(id(1), {}).point_lights.empty(), "reopened project also omits removed light");
+    model.apply(doc::diff(removed, root));
+    check(model.evaluate(id(1), {}).point_lights.size() == 1, "source restoration reuses the light identity");
+}
 void compositing_overrides() {
     auto root = fixture();
     const auto hero = occurrence(root, 200, 111);
@@ -313,6 +351,6 @@ void artifacts(const std::filesystem::path& reference, const std::filesystem::pa
 }
 } // namespace
 int main(int argc,char** argv) {
-    try { tests(); absorbed_overrides(); deleted_occurrences(); compositing_overrides(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
+    try { tests(); absorbed_overrides(); deleted_occurrences(); removed_linked_light_is_not_evaluated(); compositing_overrides(); if(argc==3) artifacts(argv[1],argv[2]); std::cout<<"Linked scene identity, affine ownership, recovery, clone, persistence and digest checks passed\n"; return 0; }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

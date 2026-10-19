@@ -304,7 +304,8 @@ bool ProxyPlaybackFrame::ready() const noexcept {
         placements.begin(), placements.end(),
         [](const ProxyPlacementObservation& placement) {
             return placement.resolution.selection ==
-                assets::ProxyPlaybackSelection::Unready;
+                assets::ProxyPlaybackSelection::Unready &&
+                !placement.offline;
         });
 }
 
@@ -694,8 +695,11 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 observation.issue = ProxyPlacementIssue::MissingAssetIdentity;
                 observation.resolution =
                     unmanaged_resolution(original, availability);
+                observation.offline = observation.resolution.source_readiness ==
+                    assets::MediaSourceReadiness::Missing;
+                selected.offline = observation.offline;
                 if (observation.resolution.selection ==
-                    assets::ProxyPlaybackSelection::Source) {
+                    assets::ProxyPlaybackSelection::Source || observation.offline) {
                     append_selected(std::move(selected));
                 }
                 append_observation(std::move(observation));
@@ -875,8 +879,12 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 }
             }
 
+            observation.offline = observation.resolution.selection == assets::ProxyPlaybackSelection::Unready &&
+                readiness == assets::MediaSourceReadiness::Missing &&
+                observation.issue != ProxyPlacementIssue::AvailabilityMissing;
+            selected.offline = observation.offline;
             if (observation.resolution.selection !=
-                assets::ProxyPlaybackSelection::Unready) {
+                assets::ProxyPlaybackSelection::Unready || observation.offline) {
                 append_selected(std::move(selected));
             }
             append_observation(std::move(observation));

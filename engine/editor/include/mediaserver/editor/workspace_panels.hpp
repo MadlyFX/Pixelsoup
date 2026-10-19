@@ -544,6 +544,11 @@ struct CompositorFrame final {
 void draw_compositor_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
                                  std::string_view item_name);
 
+// The Scene Layer node names its referenced scene element as Scene and
+// Inspector do; keep the stable ID as a fallback if that element is absent.
+[[nodiscard]] std::string compositor_scene_layer_detail(
+    doc::NodeId scene_node, std::span<const ElementInfo> elements);
+
 // A headless immediate-mode editor for the persistent compositor graph. The
 // panel never mutates the evaluated projection: it reports compact intents for
 // the shell/authoring layer to turn into ordinary document commands.
@@ -553,7 +558,8 @@ public:
 
   [[nodiscard]] CompositorFrame draw(gui::UiContext &ctx,
                                      const gui::Rect &bounds,
-                                     const compositor::CompositorGraph &graph);
+                                     const compositor::CompositorGraph &graph,
+                                     std::span<const ElementInfo> elements = {});
 
   // Transitional read-only adapter for the current shell. It presents each
   // scene element as a Scene Layer node; new integrations should pass the
@@ -579,6 +585,10 @@ public:
         (screen_x - last_canvas_.x - pan_x_) / zoom_ - node_width * 0.5F,
         (screen_y - last_canvas_.y - pan_y_) / zoom_ - node_height * 0.5F};
   }
+
+  // Uses the same pan, zoom, dimensions and stacking order as the drawn nodes.
+  [[nodiscard]] std::optional<std::pair<doc::NodeId, gui::Rect>>
+  node_at(const compositor::CompositorGraph &graph, float x, float y) const noexcept;
 
   [[nodiscard]] float graph_zoom() const noexcept { return zoom_; }
   [[nodiscard]] gui::UiPoint graph_pan() const noexcept {
@@ -694,9 +704,14 @@ struct OutputMonitorState final {
     core::u32 assets_required{};
     core::u32 assets_ready{};
     core::u32 assets_missing{};
+    bool missing_media_only{};
     core::u32 assets_mismatched{};
     core::u32 assets_verification_failed{};
     std::string content_detail;
+    enum class Connection : core::u8 { Disconnected, CatchingUp, Live };
+    Connection connection{Connection::Disconnected};
+    core::u64 committed_frame{};
+    core::u64 target_frame{};
     SyncStatus sync{SyncStatus::Unsynced};
     core::u32 sync_locked_outputs{};
     core::u32 sync_expected_outputs{};
@@ -721,7 +736,7 @@ struct OutputMonitorState final {
 
     [[nodiscard]] bool content_ready() const noexcept {
       return content == ContentStatus::NotRequired ||
-             content == ContentStatus::Ready;
+             content == ContentStatus::Ready || missing_media_only;
     }
   };
   // Borrowed only for draw(); the runtime coordinator owns the value-safe row
@@ -790,6 +805,17 @@ struct OutputMonitorState final {
   } cluster{};
 };
 
+struct StageAssetStatus final {
+  bool loading{};
+  std::string headline;
+  std::string detail;
+};
+
+// Stage's own preparation evidence, independent of Program's asset cohort.
+[[nodiscard]] StageAssetStatus stage_asset_status(
+    const render::RenderStats& geometry, core::u64 pending_media,
+    render::DisplayLutState display);
+
 struct ProgramAssetStatus final {
   bool waiting{};
   std::string headline;
@@ -812,6 +838,9 @@ struct ProgramAssetStatus final {
 // verification failures remain distinguishable without inspecting glyphs.
 [[nodiscard]] std::string
 output_node_content_label(const OutputMonitorState::Node &node);
+
+[[nodiscard]] std::string_view
+output_node_connection_label(const OutputMonitorState::Node &node) noexcept;
 
 enum class OutputLifecycleAction : core::u8 {
   Status,
@@ -1068,7 +1097,7 @@ public:
   [[nodiscard]] SceneSettingsFrame draw(gui::UiContext& ctx, const gui::Rect& bounds,
       SceneSettingsTarget target, const ProjectSettingsState& state,
       std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
-      std::span<const ElementInfo> elements = {});
+      std::span<const ElementInfo> elements = {}, bool auto_key = true);
 private:
   NumberField fields_;
   SceneSettingsTarget target_{SceneSettingsTarget::None};

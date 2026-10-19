@@ -22,6 +22,7 @@
 #endif
 
 #include <mediaserver/cmd/node_command_bus.hpp>
+#include <mediaserver/core/output_limits.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
 #include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
@@ -223,8 +224,9 @@ utf8_argument(const wchar_t *argument) {
     mediaserver::core::u64 parsed_height{};
     if (!parse_u64_argument(value.substr(0U, separator), parsed_width) ||
         !parse_u64_argument(value.substr(separator + 1U), parsed_height) ||
-        parsed_width == 0U || parsed_height == 0U || parsed_width > 7'680U ||
-        parsed_height > 4'320U) {
+        parsed_width == 0U || parsed_height == 0U ||
+        parsed_width > mediaserver::core::max_output_dimension ||
+        parsed_height > mediaserver::core::max_output_dimension) {
         return false;
     }
     width = static_cast<mediaserver::core::u32>(parsed_width);
@@ -954,7 +956,7 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                                playback.surface_width,
                                playback.surface_height)) {
                 std::cerr << "surface must be WIDTHxHEIGHT within "
-                             "7680x4320\n";
+                             "16384 pixels per dimension\n";
                 return 2;
             }
             continue;

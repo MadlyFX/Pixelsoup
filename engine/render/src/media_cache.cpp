@@ -852,12 +852,12 @@ ResolvedMediaFrame MediaCache::candidate_frame(
         candidate.layout};
 }
 
-std::optional<ResolvedMediaFrame> MediaCache::recording_snapshot(
+const MediaCache::DeferredSnapshot* MediaCache::recording_snapshot(
     const rhi::CommandRecordingToken& recording,
     const std::string& key,
     core::u64 clip) const noexcept {
     if (!recording) {
-        return std::nullopt;
+        return nullptr;
     }
     const auto found = std::find_if(
         deferred_recordings_.begin(), deferred_recordings_.end(),
@@ -865,7 +865,7 @@ std::optional<ResolvedMediaFrame> MediaCache::recording_snapshot(
             return candidate.recording.same_recording(recording);
         });
     if (found == deferred_recordings_.end()) {
-        return std::nullopt;
+        return nullptr;
     }
     const auto snapshot = std::find_if(
         found->snapshots.begin(), found->snapshots.end(),
@@ -874,17 +874,16 @@ std::optional<ResolvedMediaFrame> MediaCache::recording_snapshot(
                 && candidate.key == key;
         });
     if (snapshot == found->snapshots.end()) {
-        return std::nullopt;
+        return nullptr;
     }
-    return ResolvedMediaFrame{
-        snapshot->primary, snapshot->chroma, snapshot->layout};
+    return &*snapshot;
 }
 
 bool MediaCache::defer_recording(
     const rhi::CommandRecordingToken& recording,
     const std::string& key,
     core::u64 clip,
-    ResolvedMediaFrame frame) noexcept {
+    ResolvedMediaFrame frame, bool pending) noexcept {
     if (!recording) {
         return false;
     }
@@ -904,7 +903,7 @@ bool MediaCache::defer_recording(
         }
         found->recording = recording;
     }
-    if (recording_snapshot(recording, key, clip).has_value()) {
+    if (recording_snapshot(recording, key, clip)) {
         return true;
     }
     auto snapshot = std::find_if(
@@ -925,6 +924,7 @@ bool MediaCache::defer_recording(
     snapshot->chroma = frame.chroma;
     snapshot->layout = frame.layout;
     snapshot->occupied = true;
+    snapshot->pending = pending;
     return true;
 }
 
@@ -961,6 +961,19 @@ void MediaCache::reconcile_recordings() noexcept {
                 entry = candidates_.erase(entry);
                 continue;
             }
+            entry->state = CandidateUploadState::Retryable;
+            ++entry;
+            continue;
+        }
+        if (outcome == rhi::CommandRecordingOutcome::Submitted &&
+            entry->state == CandidateUploadState::RecordingPartial &&
+            !entry->discard) {
+            // The same queue orders the next row transfer after these rows.
+            // Keep the allocation private and resume at the accepted offset;
+            // a full image need not fit into one command's upload arena.
+            entry->committed_rows = entry->recorded_rows;
+            entry->committed_chroma_rows = entry->recorded_chroma_rows;
+            entry->recording = {};
             entry->state = CandidateUploadState::Retryable;
             ++entry;
             continue;
@@ -1365,10 +1378,10 @@ ResolvedMediaFrame MediaCache::resolve(
         if (!result) {
             if (const auto frozen = recording_snapshot(
                     recording, key, clip)) {
-                if (*frozen) {
+                if (frozen->primary) {
                     ++stats_.held_frames;
                 }
-                return *frozen;
+                return {frozen->primary, frozen->chroma, frozen->layout};
             }
         }
         if (!result) {
@@ -1382,7 +1395,10 @@ ResolvedMediaFrame MediaCache::resolve(
         }
         return result;
     };
-    if (recording_snapshot(recording, key, clip).has_value()) {
+    if (const auto frozen = recording_snapshot(recording, key, clip)) {
+        if (!frozen->pending) {
+            return {frozen->primary, frozen->chroma, frozen->layout};
+        }
         ++stats_.pending_requests;
         remember_read_ahead(
             clip_key, source_template, frame_index, window, stride, clip);
@@ -1403,6 +1419,34 @@ ResolvedMediaFrame MediaCache::resolve(
                 ? &found->second->chroma_plane
                 : nullptr,
             found->second->layout};
+    }
+
+    // Finish a placement's admitted transfer before admitting another frame.
+    // Otherwise a moving large video can fill every candidate slot with one
+    // abandoned partial frame per tick and never publish any complete image.
+    const auto unfinished = std::find_if(candidates_.begin(), candidates_.end(),
+        [&](const UploadCandidate& value) {
+            return value.key != key && value.source == source_template &&
+                !value.discard && value.resolved_frame <= frame_index &&
+                (value.state == CandidateUploadState::RecordingPartial ||
+                 value.state == CandidateUploadState::Retryable) &&
+                std::any_of(value.claims.begin(), value.claims.end(),
+                    [clip](const CandidateClaim& claim) { return claim.clip == clip; });
+        });
+    if (unfinished != candidates_.end()) {
+        remember_read_ahead(clip_key, source_template, frame_index, window, stride, clip);
+        ++stats_.pending_requests;
+        if (unfinished->state == CandidateUploadState::Retryable && recording) {
+            const auto continued = upload_decoded(device, commands, source_template,
+                unfinished->key, unfinished->resolved_frame, unfinished->decoded);
+            remember_candidate_claim(*unfinished, clip_key, unfinished->resolved_frame);
+            if (continued) {
+                const auto ready = candidate_frame(*unfinished, clip_key, unfinished->resolved_frame);
+                static_cast<void>(defer_recording(recording, key, clip, ready));
+                return ready;
+            }
+        }
+        return held_for_recording();
     }
 
     auto candidate = std::find_if(
@@ -1461,7 +1505,15 @@ ResolvedMediaFrame MediaCache::resolve(
         return held_for_recording();
     }
     if (!frame->valid()) {
-        return held_for_recording();
+        // A completed failure is offline media, not a late decode. Retaining
+        // the last image here would hide a deleted file or missing sequence
+        // frame indefinitely. Freeze the null answer across mapped views.
+        last_by_clip_.erase(clip_key);
+        last_frame_by_clip_.erase(clip_key);
+        if (recording && !defer_recording(recording, key, clip, {}, false)) {
+            ++stats_.pending_requests;
+        }
+        return {};
     }
 
     const bool late = frame->source_frame.has_value() &&
@@ -1531,12 +1583,14 @@ ResolvedMediaFrame MediaCache::resolve(
 
     const auto uploaded = upload_decoded(device, commands, source_template,
                                          resolved_key, resolved_frame, frame);
+    candidate = std::find_if(candidates_.begin(), candidates_.end(),
+        [&resolved_key](const UploadCandidate& value) { return value.key == resolved_key; });
     if (!uploaded) {
+        if (candidate != candidates_.end())
+            remember_candidate_claim(*candidate, clip_key, resolved_frame);
         ++stats_.pending_requests;
         return held_for_recording();
     }
-    candidate = std::find_if(candidates_.begin(), candidates_.end(),
-        [&resolved_key](const UploadCandidate& value) { return value.key == resolved_key; });
     return candidate_frame(*candidate, clip_key, resolved_frame);
 }
 
@@ -1596,17 +1650,20 @@ ResolvedMediaFrame MediaCache::upload_decoded(
                 candidates_.begin(), candidates_.end(),
                 [](const UploadCandidate& left,
                    const UploadCandidate& right) {
-                    if (left.state != CandidateUploadState::Retryable) {
+                    if (left.state != CandidateUploadState::Retryable || !left.texture.safe_to_release() ||
+                        (left.chroma_plane && !left.chroma_plane.safe_to_release())) {
                         return false;
                     }
-                    if (right.state != CandidateUploadState::Retryable) {
+                    if (right.state != CandidateUploadState::Retryable || !right.texture.safe_to_release() ||
+                        (right.chroma_plane && !right.chroma_plane.safe_to_release())) {
                         return true;
                     }
                     return left.stamp < right.stamp;
                 });
             if (reusable_candidate == candidates_.end() ||
                 reusable_candidate->state !=
-                    CandidateUploadState::Retryable) {
+                    CandidateUploadState::Retryable || !reusable_candidate->texture.safe_to_release() ||
+                (reusable_candidate->chroma_plane && !reusable_candidate->chroma_plane.safe_to_release())) {
                 return {};
             }
             if (reusable_candidate->texture.desc() == desc &&
@@ -1652,7 +1709,20 @@ ResolvedMediaFrame MediaCache::upload_decoded(
                     return !value.pinned && !resident_is_held(value.key);
                 });
             if (unused == resident_.end()) {
-                return {};
+                // A scrub can abandon several incomplete large frames before
+                // the candidate-count cap is reached. Their submitted rows
+                // may be reclaimed once the GPU fence has completed; an open
+                // recording or transfer still on the queue remains protected.
+                const auto abandoned = std::find_if(candidates_.begin(), candidates_.end(),
+                    [](const UploadCandidate& value) {
+                        return value.state == CandidateUploadState::Retryable &&
+                            value.texture.safe_to_release() &&
+                            (!value.chroma_plane || value.chroma_plane.safe_to_release());
+                    });
+                if (abandoned == candidates_.end()) return {};
+                candidate_bytes_ -= abandoned->bytes;
+                candidates_.erase(abandoned);
+                continue;
             }
             erase(unused);
         }
@@ -1719,21 +1789,40 @@ ResolvedMediaFrame MediaCache::upload_decoded(
     candidate->recording = recording;
     candidate->claims.clear();
     candidate->discard = false;
+    candidate->recorded_rows = candidate->committed_rows;
+    candidate->recorded_chroma_rows = candidate->committed_chroma_rows;
+    // Leave room for uniforms and geometry after media staging. Capacity comes
+    // from the RHI, which accounts for row padding and fragmented upload pages.
+    constexpr core::u64 draw_reserve_bytes = 1024U * 1024U;
+    const auto upload_rows = [&](rhi::Texture& texture,
+                                 std::span<const core::u8> pixels,
+                                 core::u32& completed) {
+        if (completed == texture.height()) return true;
+        const core::u32 rows = std::min(texture.height() - completed,
+            commands.texture_upload_row_capacity(texture, draw_reserve_bytes));
+        if (rows == 0U) return false;
+        const std::size_t row_bytes = pixels.size() / texture.height();
+        if (!commands.upload_texture_rows(texture, 0U, 0U, completed, rows,
+            pixels.subspan(static_cast<std::size_t>(completed) * row_bytes,
+                           static_cast<std::size_t>(rows) * row_bytes))) return false;
+        completed += rows;
+        return completed == texture.height();
+    };
     bool uploaded = false;
     if (p010) {
         const std::span<const core::u8> luma{
             frame->pixels.data(), luma_bytes};
         const std::span<const core::u8> chroma{
             frame->pixels.data() + luma_bytes, chroma_bytes};
-        const bool luma_uploaded = commands.upload(candidate->texture, luma);
+        const bool luma_uploaded = upload_rows(candidate->texture, luma, candidate->recorded_rows);
         const bool chroma_uploaded = luma_uploaded &&
-            commands.upload(candidate->chroma_plane, chroma);
+            upload_rows(candidate->chroma_plane, chroma, candidate->recorded_chroma_rows);
         uploaded = luma_uploaded && chroma_uploaded;
     } else {
-        uploaded = commands.upload(
+        uploaded = upload_rows(
             candidate->texture,
             std::span<const core::u8>{
-                frame->pixels.data(), frame->pixels.size()});
+                frame->pixels.data(), frame->pixels.size()}, candidate->recorded_rows);
     }
     candidate->state = uploaded
         ? CandidateUploadState::RecordingComplete

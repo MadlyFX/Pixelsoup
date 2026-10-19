@@ -45,6 +45,7 @@ struct Options final {
     bool hold_frame{};
     bool radial_plates{};
     bool buffered_output{};
+    bool d3d12{};
 };
 
 [[nodiscard]] std::size_t parse_count(std::string_view text) {
@@ -69,7 +70,7 @@ struct Options final {
             "usage: mediaserver_render_media_video_benchmark <video> "
             "[--video PATH]... [--warmup N] [--frames N] "
             "[--cadence-fps FPS] "
-            "[--hold-frame] [--radial-plates] [--buffered-output] "
+            "[--hold-frame] [--radial-plates] [--buffered-output] [--d3d12] "
             "[--second-clip-offset N] [--min-ready-ratio 0..1] "
             "[--max-render-ms MS]"};
     }
@@ -87,6 +88,10 @@ struct Options final {
         }
         if (argument == "--buffered-output") {
             options.buffered_output = true;
+            continue;
+        }
+        if (argument == "--d3d12") {
+            options.d3d12 = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -120,9 +125,10 @@ struct Options final {
     return options;
 }
 
-[[nodiscard]] rhi::Device open_device() {
+[[nodiscard]] rhi::Device open_device(bool d3d12) {
     rhi::DeviceConfig config{};
     config.debug = false;
+    config.backend = d3d12 ? rhi::BackendKind::D3d12 : rhi::BackendKind::SdlGpu;
     auto created = rhi::Device::create(config);
     if (!created) {
         throw std::runtime_error{"GPU device creation failed"};
@@ -253,7 +259,7 @@ void record_cache_result(
                ? static_cast<double>(native_rate->numerator)
                     / static_cast<double>(native_rate->denominator)
                : 24.0);
-    auto device = open_device();
+    auto device = open_device(options.d3d12);
     auto program_created = render::SceneRenderer::create(
         device, 160U, 90U, benchmark_limits());
     auto stage_created = render::SceneRenderer::create(
@@ -381,6 +387,7 @@ void record_cache_result(
 
     std::cout << std::fixed << std::setprecision(3)
               << "sources=" << options.paths.size()
+              << " backend=" << (options.d3d12 ? "D3D12" : "SDL")
               << " source_size=" << first_metadata.width << 'x'
               << first_metadata.height
               << " source_frames=" << first_metadata.frame_count

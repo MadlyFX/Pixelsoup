@@ -673,7 +673,7 @@ DirectorResumeSession::resume_impl(
         return Result::failure(
             protocol_failure(SessionProtocolErrorCode::AllocationFailed));
     }
-    if (cursor_is_ahead(hello->cursor, target)) {
+    if (!hello->force_checkpoint && cursor_is_ahead(hello->cursor, target)) {
         return reject(
             RejectCode::InvalidCursor,
             SessionProtocolErrorCode::CursorAhead);

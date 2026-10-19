@@ -57,6 +57,9 @@ struct NodeSessionServiceConfig final {
     std::chrono::milliseconds connect_timeout{10'000};
     std::chrono::milliseconds reconnect_initial_delay{50};
     std::chrono::milliseconds reconnect_max_delay{5'000};
+    // A killed child can redial before the Director releases its old lease.
+    // Retry that overlap, but still diagnose a persistent duplicate node.
+    std::chrono::milliseconds lease_rejection_timeout{15'000};
 };
 
 enum class NodeSessionServiceState : std::uint8_t {

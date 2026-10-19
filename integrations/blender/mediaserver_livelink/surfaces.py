@@ -1,8 +1,10 @@
 """Worker-only stable material surfaces and bounded embedded image resources."""
 from array import array
 import copy
+from contextlib import nullcontext
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 import uuid
 
@@ -165,6 +167,7 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
     cache = {} if cache is None else cache
     from image_resize import dimensions, resize_images
     oversized, prepared, failed = {}, {}, {}
+    packed_sources = {}
     for obj in objects:
         for mat in obj.get('materials', []):
             if not isinstance(mat, dict):
@@ -177,6 +180,28 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                     failed[path] = 'Scene exceeds ' + str(MAX_IMAGES) + ' distinct images'
                     continue
                 try:
+                    packed = view.get('packed_bytes')
+                    if packed is not None:
+                        if not isinstance(packed, bytes) or not 0 < len(packed) <= 16 * 1024 * 1024:
+                            raise ValueError('Packed image exceeds 16 MiB')
+                        old = cache.get(path)
+                        if old is not None and len(old) > 3 and old[3] is packed and not refresh:
+                            prepared[path] = old
+                            continue
+                        stamp = hashlib.sha256(packed).hexdigest()
+                        if old is not None and old[0] == stamp and not refresh:
+                            prepared[path] = (*old[:3], packed)
+                            continue
+                        width, height = dimensions(packed)
+                        if min(width, height) < 1 or max(width, height) > 32768:
+                            raise ValueError('Invalid packed image dimensions')
+                        if max(width, height) > 4096:
+                            oversized[path] = stamp
+                            packed_sources[path] = packed
+                            prepared[path] = None
+                        else:
+                            prepared[path] = (stamp, stamp, packed, packed)
+                        continue
                     source = Path(path)
                     stat = source.stat()
                     stamp = (stat.st_size, stat.st_mtime_ns)
@@ -194,11 +219,22 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                     prepared[path] = None
                 except (OSError, ValueError) as error:
                     failed[path] = str(error)
-    converted = resize_images(oversized, blender, progress, keepalive)
+    # Packed images have no external file. Materialize only private worker
+    # copies for the isolated image decoder; never unpack the user's blend.
+    with (tempfile.TemporaryDirectory(prefix='ms-link-packed-') if packed_sources else nullcontext(None)) as directory:
+        aliases = {}
+        for index, (path, data) in enumerate(packed_sources.items()):
+            file = Path(directory) / (str(index) + ('.png' if data.startswith(b'\x89PNG') else '.jpg'))
+            file.write_bytes(data)
+            aliases[path] = str(file)
+        converted_paths = resize_images([aliases.get(path, path) for path in oversized], blender, progress, keepalive)
+        converted = {path: converted_paths.get(aliases.get(path, path)) for path in oversized}
     for path, stamp in oversized.items():
         data = converted.get(path)
         if data:
             prepared[path] = (stamp, hashlib.sha256(data).hexdigest(), data)
+            if path in packed_sources:
+                prepared[path] += (packed_sources[path],)
             warnings.append(Path(path).name + ': resized export texture to fit 1024 pixels')
         else:
             failed[path] = 'Could not prepare oversized texture'
@@ -214,19 +250,19 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                     if path in failed:
                         raise ValueError(failed[path])
                     if path not in images:
-                        source = Path(path)
-                        stat=source.stat(); stamp=(stat.st_size,stat.st_mtime_ns)
                         old=prepared.get(path)
                         if old is None:
+                            source = Path(path)
+                            stat=source.stat(); stamp=(stat.st_size,stat.st_mtime_ns)
                             with source.open('rb') as stream:
                                 data=stream.read(16*1024*1024 + 1)
                             if len(data)>16*1024*1024:
                                 raise ValueError('Image grew beyond the 16 MiB limit while reading: '+path)
-                            if not (data.startswith(b'\x89PNG\r\n\x1a\n') and b'IEND' in data[-12:]
-                                or data.startswith(b'\xff\xd8') and data.endswith(b'\xff\xd9')):
-                                raise ValueError('Invalid PNG/JPEG image: '+path)
                             old=(stamp,hashlib.sha256(data).hexdigest(),data)
                         data=old[2]
+                        if not (data.startswith(b'\x89PNG\r\n\x1a\n') and b'IEND' in data[-12:]
+                            or data.startswith(b'\xff\xd8') and data.endswith(b'\xff\xd9')):
+                            raise ValueError('Invalid PNG/JPEG image: '+path)
                         cache[path]=old
                         if total + len(data) > MAX_IMAGE_BYTES or len(images) >= MAX_IMAGES:
                             raise ValueError('Images exceed ' + str(MAX_IMAGE_BYTES >> 20) + ' MiB / '
@@ -234,6 +270,7 @@ def resolve_materials(objects, cache=None, refresh=False, warnings=None, blender
                         total += len(data)
                         images[path] = (old[1],data)
                     digest, data = images[path]
+                    view.pop('packed_bytes', None)
                     view['hash'], view['bytes'] = digest, data
                 except (OSError, ValueError) as error:
                     del mat['textures'][role]

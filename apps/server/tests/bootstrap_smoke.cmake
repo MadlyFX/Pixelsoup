@@ -408,6 +408,30 @@ if(NOT node_playback_output MATCHES "show-range=100:200")
         "node playback did not report its show range: ${node_playback_output}")
 endif()
 
+# The unqualified launch cadence and range are the new-project defaults.
+execute_process(
+    COMMAND
+        "${SERVER_EXE}"
+        --validate-startup
+        --role=output
+        "--director-connect=${node_endpoint}"
+        "--show-id=${show_id}"
+        "--node-id=${node_id}"
+        "--node-incarnation=${node_incarnation}"
+        --playback
+    WORKING_DIRECTORY "${TEST_ROOT}"
+    RESULT_VARIABLE default_playback_result
+    OUTPUT_VARIABLE default_playback_output
+    ERROR_VARIABLE default_playback_error
+)
+if(NOT default_playback_result EQUAL 0
+    OR NOT default_playback_output MATCHES "show-rate=24/1"
+    OR NOT default_playback_output MATCHES "show-range=0:7199")
+    message(FATAL_ERROR
+        "default playback cadence/range changed: "
+        "${default_playback_result}: ${default_playback_output} ${default_playback_error}")
+endif()
+
 # Playback on a node is meaningless without a Director to approve frames, and
 # on a Director without the listener that releases them.
 execute_process(

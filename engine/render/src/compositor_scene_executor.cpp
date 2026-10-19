@@ -1401,7 +1401,7 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
         return CreateResult::failure(RenderError::InvalidConfiguration);
     }
 
-    auto renderer = HybridSceneRenderer::create(device, width, height, limits);
+    auto renderer = HybridSceneRenderer::create(device, width, height, limits, SceneEffectOwner::Compositor);
     if (!renderer) {
         return CreateResult::failure(renderer.error());
     }
@@ -1534,8 +1534,10 @@ bool CompositorSceneExecutor::reserve_padded(core::u32 width,
         std::vector<HybridSceneRenderer> renderers;
         renderers.reserve(layer_renderers_.size());
         for (std::size_t index = 0U; index < layer_renderers_.size(); ++index) {
+            auto layer_limits = limits_;
+            if (index != 0U) layer_limits.planar_reflections = false;
             auto renderer =
-                HybridSceneRenderer::create(device, width, height, limits_);
+                HybridSceneRenderer::create(device, width, height, layer_limits, SceneEffectOwner::Compositor);
             if (!renderer) {
                 return false;
             }
@@ -1859,9 +1861,15 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 RenderError::AllocationFailed);
         }
         while (layer_renderers_.size() < plan.layers.size()) {
+            // The first layer captures the complete residency scene once and
+            // every following layer samples that exact capture. Constructing
+            // a nested full renderer for each borrower wasted GPU memory and
+            // made cold multi-plate compositions stall before their first draw.
+            auto layer_limits = limits_;
+            layer_limits.planar_reflections = false;
             auto renderer =
                 HybridSceneRenderer::create(
-                    *device_, padded_width(), padded_height(), limits_);
+                    *device_, padded_width(), padded_height(), layer_limits, SceneEffectOwner::Compositor);
             if (!renderer) {
                 return CompositorSceneResult::failure(renderer.error());
             }

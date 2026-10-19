@@ -86,6 +86,19 @@ using SourceOrdinalResult =
     MediaFrameRate show_rate,
     const std::optional<MediaFrameRate>& source_rate) noexcept;
 
+enum class SourcePhaseRounding : core::u8 { Nearest, Floor };
+
+// Advances a looping source phase by the same exact rational, nearest-frame
+// mapping as source_ordinal_delta, then wraps into [0, sequence_count).
+// Modular wide division also handles offsets whose unwrapped ordinal would
+// exceed i64. Floor selects playback's frame at a cut; Nearest is the editing
+// gesture policy. The source offset must be nonnegative and the count nonzero.
+[[nodiscard]] SourceOrdinalResult advance_source_phase(
+    core::i64 source_in, core::i64 show_delta, MediaFrameRate show_rate,
+    const std::optional<MediaFrameRate>& source_rate,
+    core::u32 sequence_count,
+    SourcePhaseRounding rounding = SourcePhaseRounding::Nearest) noexcept;
+
 // Tail: duration += d, then later unlocked clips move by d.
 // Head: source-in += rate(d), duration -= d, then later unlocked clips move
 // by -d while the selected start remains fixed.
@@ -111,6 +124,8 @@ using SourceOrdinalResult =
     core::i64 requested_delta,
     MediaFrameRate show_rate);
 
+// Slips the looping source in either direction without changing placement or
+// fades. Full-source and longer-than-source placements have the same policy.
 [[nodiscard]] TimelineEditResult plan_slip(
     std::span<const ClipPlacement> clips,
     doc::NodeId selected,

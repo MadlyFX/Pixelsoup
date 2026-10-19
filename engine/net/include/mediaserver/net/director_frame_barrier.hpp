@@ -80,6 +80,13 @@ enum class DirectorFrameBarrierPhase : std::uint8_t {
     Committed,
 };
 
+struct DirectorNodeConnection final {
+    enum class State : std::uint8_t { Disconnected, CatchingUp, Live };
+    State state{State::Disconnected};
+    core::u64 committed_frame{};
+    core::u64 target_frame{};
+};
+
 enum class DirectorFrameBarrierWaitStatus : std::uint8_t {
     Reached,
     Degraded,
@@ -289,6 +296,8 @@ public:
     [[nodiscard]] cmd::StreamCursor tracked_tail() const noexcept;
     [[nodiscard]] cmd::StreamCursor released_through() const noexcept;
     [[nodiscard]] std::size_t active_sessions() const noexcept;
+    [[nodiscard]] DirectorNodeConnection node_connection(
+        core::u32 node_index) const noexcept;
     // One atomic membership/adoption observation for the exact configured
     // render-output set. Required indices must be unique. Unregistered,
     // catching-up, disconnected, unresolved, or stale-digest nodes fail

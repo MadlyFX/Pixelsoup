@@ -22,9 +22,10 @@ namespace mediaserver::app {
 
 struct PlaybackOptions final {
     bool enabled{};
-    show::FrameRate rate{show::FrameRate{50U, 1U}};
+    show::FrameRate rate{show::FrameRate{24U, 1U}};
     show::ShowFrame first_frame{};
-    show::ShowFrame last_frame{show::ShowFrame{999'999U}};
+    // Five minutes at the default 24 fps; the last frame is inclusive.
+    show::ShowFrame last_frame{show::ShowFrame{7'199U}};
     bool loop{};
     // The Director starts its transport immediately. A node always paces
     // itself; what it presents still comes from replicated transport state.

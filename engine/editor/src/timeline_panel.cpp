@@ -28,6 +28,19 @@ constexpr float strip_height = 20.0F;
 // toggle or a key diamond is as easy to hit as the name beside it.
 constexpr float row_height = list_metrics::row_height;
 constexpr float icon_button_width = 24.0F;
+constexpr float edit_tool_scale = 1.35F;
+
+[[nodiscard]] gui::Cursor tool_cursor(TimelineEditTool tool) noexcept {
+  switch (tool) {
+  case TimelineEditTool::Standard: return gui::Cursor::Arrow;
+  case TimelineEditTool::RippleTrim: return gui::Cursor::RippleTrim;
+  case TimelineEditTool::Roll: return gui::Cursor::Roll;
+  case TimelineEditTool::Slip: return gui::Cursor::Slip;
+  case TimelineEditTool::Slide: return gui::Cursor::Slide;
+  case TimelineEditTool::Razor: return gui::Cursor::Razor;
+  }
+  return gui::Cursor::Arrow;
+}
 // How close to an In/Out edge on the ruler's range bar a press grabs it.
 constexpr float range_handle_reach = 5.0F;
 constexpr float marker_hit_reach = 6.0F;
@@ -188,6 +201,14 @@ channel_label(scene::PropertyChannel property) noexcept {
     return "Color B";
   case scene::PropertyChannel::LightRange:
     return "Range";
+  case scene::PropertyChannel::CameraFieldOfView:
+    return "Field of view";
+  case scene::PropertyChannel::CameraShutter:
+    return "Shutter seconds";
+  case scene::PropertyChannel::CameraFocusDistance:
+    return "Focus distance";
+  case scene::PropertyChannel::CameraAperture:
+    return "Aperture";
   case scene::PropertyChannel::Count:
     break;
   }
@@ -288,7 +309,8 @@ constexpr std::array<RateChoice, 8U> common_rates{{
 [[nodiscard]] bool icon_button(gui::UiContext &ctx, gui::UiId id,
                                const gui::Rect &bounds, gui::Icon icon,
                                bool engaged, std::string_view tooltip,
-                               gui::UiColor engaged_color) {
+                               gui::UiColor engaged_color,
+                               float icon_scale = 1.0F) {
   const gui::Interaction interaction = ctx.grab(id, bounds);
   const gui::Theme &theme = ctx.theme();
   ctx.panel(bounds, (interaction.held && !interaction.released)
@@ -305,7 +327,7 @@ constexpr std::array<RateChoice, 8U> common_rates{{
                  bounds.y + bounds.height * 0.5F,
                  engaged ? engaged_color
                          : (interaction.hovered ? theme.text
-                                                : theme.text_muted));
+                                                : theme.text_muted), icon_scale);
   ctx.tooltip(bounds, tooltip);
   return interaction.clicked;
 }
@@ -513,36 +535,10 @@ channel_for(std::span<const scene::ChannelKeyframes> keyframes,
 [[nodiscard]] std::optional<double>
 sample_channel_at(const scene::ChannelKeyframes *channel,
                   core::u64 frame) noexcept {
-  constexpr core::u64 maximum =
-      static_cast<core::u64>(std::numeric_limits<core::i64>::max());
-  if (channel == nullptr || frame > maximum || channel->frames.empty() ||
-      channel->values.size() != channel->frames.size()) {
-    return std::nullopt;
-  }
-  const core::i64 wanted = static_cast<core::i64>(frame);
-  if (wanted <= channel->frames.front()) {
-    return channel->values.front();
-  }
-  if (wanted >= channel->frames.back()) {
-    return channel->values.back();
-  }
-  const auto after =
-      std::upper_bound(channel->frames.begin(), channel->frames.end(), wanted);
-  const std::size_t hi =
-      static_cast<std::size_t>(std::distance(channel->frames.begin(), after));
-  const std::size_t lo = hi - 1U;
-  const scene::KeyInterpolation interpolation =
-      lo < channel->interpolations.size() ? channel->interpolations[lo]
-                                          : scene::KeyInterpolation::Linear;
-  if (interpolation == scene::KeyInterpolation::Hold) {
-    return channel->values[lo];
-  }
-  double t = static_cast<double>(wanted - channel->frames[lo]) /
-             static_cast<double>(channel->frames[hi] - channel->frames[lo]);
-  if (interpolation == scene::KeyInterpolation::Cubic) {
-    t = t * t * (3.0 - 2.0 * t);
-  }
-  return channel->values[lo] + (channel->values[hi] - channel->values[lo]) * t;
+    constexpr core::u64 maximum =
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+    if (channel == nullptr || frame > maximum) return std::nullopt;
+    return scene::sample_keyframes(*channel, static_cast<core::i64>(frame));
 }
 
 [[nodiscard]] const std::vector<core::i64> *
@@ -674,8 +670,8 @@ struct Row final {
 
 [[nodiscard]] std::optional<core::i64>
 exclusive_clip_end(const scene::ClipTiming &timing) noexcept {
-  if (timing.start < 0 || timing.duration <= 0 ||
-      timing.duration > std::numeric_limits<core::i64>::max() - timing.start) {
+  if (timing.duration <= 0 ||
+      timing.start > std::numeric_limits<core::i64>::max() - timing.duration) {
     return std::nullopt;
   }
   return timing.start + timing.duration;
@@ -695,11 +691,15 @@ exclusive_clip_end(const scene::ClipTiming &timing) noexcept {
 nearest_snap(core::i64 value, std::span<const core::i64> candidates,
              core::i64 tolerance) noexcept {
   std::optional<core::i64> best;
-  core::i64 best_distance = tolerance + 1;
+  const core::u64 maximum_distance = static_cast<core::u64>(std::max(tolerance, core::i64{0}));
+  core::u64 best_distance = maximum_distance + 1U;
   for (const core::i64 candidate : candidates) {
-    const core::i64 distance =
-        candidate > value ? candidate - value : value - candidate;
-    if (distance > tolerance) {
+    // Unsigned subtraction represents the full distance even when the two
+    // signed authored frames straddle the complete i64 range.
+    const core::u64 distance = candidate > value
+        ? static_cast<core::u64>(candidate) - static_cast<core::u64>(value)
+        : static_cast<core::u64>(value) - static_cast<core::u64>(candidate);
+    if (distance > maximum_distance) {
       continue;
     }
     if (!best.has_value() || distance < best_distance ||
@@ -946,6 +946,7 @@ void TimelinePanel::select_marker(doc::NodeId marker) {
 }
 
 void TimelinePanel::reset_project_state() noexcept {
+  replacement_targets_.clear();
   pixels_per_frame_ = 0.0F;
   left_frame_ = 0.0;
   time_view_initialized_ = false;
@@ -981,6 +982,7 @@ void TimelinePanel::reset_project_state() noexcept {
   lane_drag_start_y_ = 0.0F;
   lane_drag_moved_ = false;
   layer_drag_node_ = doc::NodeId{};
+  layer_drag_nodes_.clear();
   layer_drag_start_x_ = 0.0F;
   layer_drag_start_y_ = 0.0F;
   layer_drag_moved_ = false;
@@ -989,10 +991,17 @@ void TimelinePanel::reset_project_state() noexcept {
   clip_drag_peer_ = doc::NodeId{};
   clip_drag_origin_ = scene::ClipTiming{};
   clip_drag_proposed_ = scene::ClipTiming{};
+  pending_clip_edit_.reset();
+  pending_clip_frames_ = 0U;
+  clip_status_.clear();
+  clip_status_error_ = false;
+  clip_status_until_ = 0.0;
+  previous_draw_time_ = 0.0;
   clip_drag_anchor_ = 0;
   clip_drag_delta_ = 0;
   clip_drag_start_x_ = 0.0F;
   clip_drag_start_y_ = 0.0F;
+  clip_drag_release_.reset();
   clip_drag_moved_ = false;
   clip_drop_lane_.reset();
   clip_snap_guide_.reset();
@@ -1013,13 +1022,19 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     std::span<const TimelineFilmstripObservation> filmstrips,
                     std::span<const TimelineWaveformObservation> waveforms,
                     std::span<const scene::TimelineMarker> markers) {
+  replacement_targets_.clear();
   TimelinePanelFrame frame{};
+  const float gesture_x = ctx.pointer_released()
+      ? ctx.pointer_release_x() : ctx.pointer_x();
+  const float gesture_y = ctx.pointer_released()
+      ? ctx.pointer_release_y() : ctx.pointer_y();
   const bool typing_at_start = ctx.typing();
   frame.filmstrip_retain = TimelineFilmstripRetainIntent{};
   frame.waveform_retain = TimelineWaveformRetainIntent{};
   ctx.panel(bounds, ctx.theme().panel);
   if (ctx.pointer_pressed()) {
-    timeline_focused_ = bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+    timeline_focused_ =
+        bounds.contains(ctx.pointer_press_x(), ctx.pointer_press_y());
   }
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     range_fields_.cancel(ctx);
@@ -1273,6 +1288,14 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       // A camera moves and turns like anything else; it has no size.
       append_group(0U);
       append_group(1U);
+      append_property(scene::PropertyChannel::CameraFieldOfView,
+                      "Field of view", element.field_of_view);
+      append_property(scene::PropertyChannel::CameraShutter,
+                      "Shutter seconds", element.shutter_seconds);
+      append_property(scene::PropertyChannel::CameraFocusDistance,
+                      "Focus distance", element.focus_distance_m);
+      append_property(scene::PropertyChannel::CameraAperture,
+                      "Aperture", element.aperture_f_number);
       return;
     }
     for (core::u8 group = 0U; group < 3U; ++group) {
@@ -1603,12 +1626,46 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   std::vector<doc::NodeId> visible_order;
   visible_order.reserve(elements.size());
   for (const Row &row : rows) {
-    if (row.kind == Row::Kind::Layer && !row.surface && !row.locked &&
+    if ((row.kind == Row::Kind::Layer || row.kind == Row::Kind::LaneHeader) &&
+        !row.surface && !row.locked &&
         std::find(visible_order.begin(), visible_order.end(), row.node) ==
             visible_order.end()) {
       visible_order.push_back(row.node);
     }
   }
+
+  const auto capture_layer_drag = [&](doc::NodeId grabbed) {
+    layer_drag_nodes_.clear();
+    if (!selected(grabbed, selection)) {
+      layer_drag_nodes_.push_back(grabbed);
+      return;
+    }
+    const auto append_selected = [&](doc::NodeId node) {
+      if (!selected(node, selection)) {
+        return;
+      }
+      const ElementInfo *const element = find_element(elements, node);
+      const bool layer = element != nullptr && !element->locked &&
+                         (orderable_layer(*element) ||
+                          element->kind == ElementKind::Track);
+      const bool track = std::any_of(lanes.begin(), lanes.end(),
+          [&](const scene::TimelineLane &lane) {
+            return !lane.implicit && !lane.locked && lane.id == node;
+          });
+      if ((layer || track) &&
+          std::find(layer_drag_nodes_.begin(), layer_drag_nodes_.end(), node) ==
+              layer_drag_nodes_.end()) {
+        layer_drag_nodes_.push_back(node);
+      }
+    };
+    for (const doc::NodeId node : visible_order) {
+      append_selected(node);
+    }
+    // A collapsed parent does not remove its children from selection.
+    for (const ElementInfo &element : elements) {
+      append_selected(element.node);
+    }
+  };
 
   const auto target_locked = [&](doc::NodeId target) noexcept {
     if (const ElementInfo *const element = find_element(elements, target)) {
@@ -1737,10 +1794,28 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (ctx.middle_pointer_released()) {
     panning_ = false;
   }
-  // The view may run back to frame zero, before In, so the In handle can be
-  // dragged earlier and clips parked outside the range stay reachable. What
-  // lies outside the range is dimmed rather than hidden.
-  left_frame_ = std::clamp(left_frame_, 0.0, static_cast<double>(last));
+  // In/Out delimit playback, not the editable workspace. Signed placement
+  // positions let an operator move a clip partly before frame zero without
+  // trimming away its source; both ends of the workspace remain reachable.
+  const double draw_delta = std::clamp(
+      ctx.time_seconds() - previous_draw_time_, 0.0, 0.05);
+  previous_draw_time_ = ctx.time_seconds();
+  if (clip_drag_ != ClipDrag::None && clip_drag_moved_ && ctx.pointer_down()) {
+    constexpr float edge_zone = 24.0F;
+    float velocity = 0.0F;
+    if (ctx.pointer_x() < graph.x + edge_zone) {
+      velocity = -std::clamp((graph.x + edge_zone - ctx.pointer_x()) /
+                                edge_zone, 0.0F, 1.0F);
+    } else if (ctx.pointer_x() > graph.x + graph.width - edge_zone) {
+      velocity = std::clamp((ctx.pointer_x() - graph.x - graph.width +
+                             edge_zone) / edge_zone, 0.0F, 1.0F);
+    }
+    left_frame_ += static_cast<double>(velocity) * 720.0 * draw_delta /
+                   static_cast<double>(pixels_per_frame_);
+  }
+  left_frame_ = std::clamp(left_frame_,
+      -static_cast<double>(std::numeric_limits<core::i64>::max() / 4),
+      static_cast<double>(std::numeric_limits<core::i64>::max() / 4));
   row_scroll_ = std::clamp(row_scroll_, 0.0F, maximum_row_scroll);
 
   // The panel owns visibility, so it is the only layer that can truthfully
@@ -1946,7 +2021,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Interaction interaction = ctx.grab(id, field);
     if (interaction.pressed) {
       time_drag_id_ = id;
-      time_drag_start_x_ = ctx.pointer_x();
+      time_drag_start_x_ = ctx.pointer_press_x();
       time_drag_origin_ = value;
       time_drag_moved_ = false;
     }
@@ -2094,14 +2169,19 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   draw_separator(ctx, bar_x, toolbar);
   bar_x += 4.0F;
   for (const ToolChoice &choice : tool_choices) {
-    if (fits(bar_x, icon_button_width) &&
+    // The enlarged marks still fit the existing width, keeping transport and
+    // editing controls reachable at the same compact panel sizes.
+    constexpr float tool_width = icon_button_width;
+    constexpr float tool_height = button_height * edit_tool_scale;
+    if (fits(bar_x, tool_width) &&
         icon_button(ctx, mix(id_, choice.name),
-                    gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                    gui::Rect{bar_x, toolbar.y + (toolbar.height - tool_height) * 0.5F,
+                              tool_width, tool_height},
                     choice.icon, edit_tool_ == choice.tool, choice.tip,
-                    theme.accent)) {
+                    theme.accent, edit_tool_scale)) {
       edit_tool_ = choice.tool;
     }
-    bar_x += icon_button_width + 2.0F;
+    bar_x += tool_width + 2.0F;
   }
   bar_x += 2.0F;
   draw_separator(ctx, bar_x, toolbar);
@@ -2354,8 +2434,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(ruler, theme.header);
   ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
             theme.row_alt);
+  const float auto_key_width = list_width >= 160.0F ? 72.0F : 0.0F;
   const gui::Rect search_bounds{ruler.x + 5.0F, ruler.y + 2.0F,
-                                std::max(list_width - 37.0F, 0.0F),
+                                std::max(list_width - 37.0F - auto_key_width, 0.0F),
                                 std::max(ruler.height - 4.0F, 0.0F)};
   static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
   if (search_.empty() && ctx.focus() != search_id) {
@@ -2370,6 +2451,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.draw_list().add_line(search_bounds.x + 11.0F, search_cy + 2.0F,
                            search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
                            theme.text_muted);
+  if (auto_key_width > 0.0F &&
+      text_toggle(ctx, mix(id_, "auto key"),
+                  gui::Rect{ruler.x + list_width - 32.0F - auto_key_width,
+                            ruler.y + 2.0F, auto_key_width - 3.0F,
+                            std::max(ruler.height - 4.0F, 0.0F)},
+                  "Auto Key", auto_key_,
+                  "Auto Key (K): edits to animated properties create keys. "
+                  "Off edits base values; existing animation still plays. "
+                  "Use a property diamond to add or remove a key explicitly.")) {
+    auto_key_ = !auto_key_;
+  }
   if (list_width >= 60.0F &&
       icon_button(ctx, mix(id_, "create lane"),
                   gui::Rect{ruler.x + list_width - 29.0F, ruler.y + 2.0F,
@@ -2465,21 +2557,23 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           static_cast<float>(minor) * pixels_per_frame_ >= 6.0F) {
         for (core::i64 sub = tick + minor; sub < tick + step; sub += minor) {
           const float sub_x = frame_to_x(static_cast<double>(sub));
-          if (sub >= 0 && sub_x >= graph.x) {
+          if (sub_x >= graph.x) {
             ctx.draw_list().add_rect(sub_x, ruler.y + ruler.height - 3.0F,
                                      1.0F, 3.0F,
                                      alpha(theme.text_muted, 0.55F));
           }
         }
       }
-      if (tick_x < graph.x || tick < 0) {
+      if (tick_x < graph.x) {
         continue;
       }
       ctx.draw_list().add_rect(tick_x, ruler.y + ruler.height - 7.0F, 1.0F,
                                7.0F, theme.text_muted);
       ctx.label(gui::Rect{tick_x + 4.0F, ruler.y, minimum_spacing,
                           ruler.height - 5.0F},
-                timecode(static_cast<core::u64>(tick)), theme.text_muted);
+                tick < 0
+                    ? "-" + timecode(static_cast<core::u64>(-tick))
+                    : timecode(static_cast<core::u64>(tick)), theme.text_muted);
     }
   }
   ctx.pop_clip();
@@ -2747,9 +2841,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (std::find(selected_markers_.begin(), selected_markers_.end(),
                   marker.id) != selected_markers_.end()) {
       marker_drag_ = marker.id;
-      marker_drag_start_x_ = ctx.pointer_x();
+      marker_drag_start_x_ = ctx.pointer_press_x();
       marker_drag_anchor_ =
-          static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
+          static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_press_x())));
       marker_drag_delta_ = 0;
       marker_drag_moved_ = false;
     }
@@ -2937,9 +3031,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // another lane. Every selected diamond shares one delta, and any one of
   // them may magnetise to the playhead, range edges, or an unselected key.
   snap_guide_.reset();
-  if (dragging_key_ && ctx.pointer_down()) {
+  const auto update_key_drag = [&] {
+    if (!dragging_key_) {
+      return;
+    }
     const core::i64 pointer_frame =
-        signed_frame(rounded_frame(x_to_frame(ctx.pointer_x()), first, last));
+        signed_frame(rounded_frame(x_to_frame(gesture_x), first, last));
     core::i64 proposed_delta = pointer_frame - drag_anchor_frame_;
 
     core::i64 earliest = drag_anchor_frame_;
@@ -2993,7 +3090,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     drag_delta_ = proposed_delta;
-  }
+  };
+  update_key_drag();
 
   if (marquee_tracking_ && ctx.pointer_down()) {
     const float travel = std::fabs(ctx.pointer_x() - marquee_start_x_) +
@@ -3043,12 +3141,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // outside every band. Locked tracks are not destinations. Keeping this
   // resolver independent of the graph lets the same gesture begin on a media
   // row when its bar is short or off screen.
-  const auto clip_lane_under_pointer = [&]() -> std::optional<doc::NodeId> {
-    if (ctx.pointer_y() < rows_bounds.y ||
-        ctx.pointer_y() >= rows_bounds.y + rows_bounds.height) {
+  const auto clip_lane_under_pointer = [&](float pointer_y) -> std::optional<doc::NodeId> {
+    if (pointer_y < rows_bounds.y ||
+        pointer_y >= rows_bounds.y + rows_bounds.height) {
       return std::nullopt;
     }
-    const float local = ctx.pointer_y() - rows_bounds.y + row_scroll_;
+    const float local = pointer_y - rows_bounds.y + row_scroll_;
     if (local < 0.0F) {
       return std::nullopt;
     }
@@ -3070,16 +3168,28 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return target;
   };
 
-  if (clip_drag_ != ClipDrag::None && ctx.pointer_down()) {
-    const float dx = ctx.pointer_x() - clip_drag_start_x_;
-    const float dy = ctx.pointer_y() - clip_drag_start_y_;
+  if (pending_clip_edit_.has_value()) {
+    const ElementInfo *const target =
+        find_element(elements, pending_clip_edit_->clip);
+    if (target == nullptr || target->timing != pending_clip_origin_ ||
+        pending_clip_frames_ == 0U) {
+      pending_clip_edit_.reset();
+    } else {
+      --pending_clip_frames_;
+    }
+  }
+  const gui::UiPoint clip_pointer =
+      clip_drag_release_.value_or(gui::UiPoint{gesture_x, gesture_y});
+  if (clip_drag_ != ClipDrag::None) {
+    const float dx = clip_pointer.x - clip_drag_start_x_;
+    const float dy = clip_pointer.y - clip_drag_start_y_;
     clip_drag_moved_ = clip_drag_moved_ ||
                        dx * dx + dy * dy >= lane_drag_threshold_squared;
   }
   const bool clip_drag_active =
       clip_drag_ != ClipDrag::None && clip_drag_moved_;
   if (clip_drag_ == ClipDrag::Move) {
-    clip_drop_lane_ = clip_drag_active ? clip_lane_under_pointer()
+    clip_drop_lane_ = clip_drag_active ? clip_lane_under_pointer(clip_pointer.y)
                                        : std::optional<doc::NodeId>{};
   }
 
@@ -3087,78 +3197,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // the pointer follows the gesture without authoring intermediate document
   // edits. Like Feed Mapping, the document changes once, on release.
   if (clip_drag_ != ClipDrag::None) {
-    if (!ctx.pointer_down()) {
-      if (clip_drag_moved_) {
-        switch (clip_drag_) {
-        case ClipDrag::RippleTrimHead:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
-                clip_drag_node_, scene::TimelineTrimEdge::Head,
-                clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::RippleTrimTail:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
-                clip_drag_node_, scene::TimelineTrimEdge::Tail,
-                clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Roll:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRollRequest{
-                clip_drag_node_, clip_drag_peer_, clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Slip:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(
-                TimelineSlipRequest{clip_drag_node_, clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Slide:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(
-                TimelineSlideRequest{clip_drag_node_, clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Move:
-        case ClipDrag::TrimIn:
-        case ClipDrag::TrimOut:
-        case ClipDrag::FadeIn:
-        case ClipDrag::FadeOut: {
-          std::optional<doc::NodeId> retarget;
-          const ElementInfo *const dragged =
-              clip_drag_ == ClipDrag::Move
-                  ? find_element(elements, clip_drag_node_)
-                  : nullptr;
-          if (dragged != nullptr && clip_drop_lane_.has_value() &&
-              *clip_drop_lane_ != dragged->timeline_lane) {
-            retarget = *clip_drop_lane_;
-          }
-          if (clip_drag_proposed_ != clip_drag_origin_ ||
-              retarget.has_value()) {
-            frame.clip_edits.push_back(TimelineClipEdit{
-                clip_drag_node_, clip_drag_proposed_, retarget});
-          }
-          break;
-        }
-        case ClipDrag::None:
-          break;
-        }
-      }
-      clip_drag_ = ClipDrag::None;
-      clip_drag_node_ = doc::NodeId{};
-      clip_drag_peer_ = doc::NodeId{};
-      clip_drag_delta_ = 0;
-      clip_drag_start_x_ = 0.0F;
-      clip_drag_start_y_ = 0.0F;
-      clip_drag_moved_ = false;
-      clip_drop_lane_.reset();
-      clip_snap_guide_.reset();
-    } else if (clip_drag_active) {
+    if (clip_drag_active) {
+      clip_status_.clear();
+      clip_status_error_ = false;
+      clip_status_until_ = ctx.time_seconds() + 3.0;
       const core::i64 pointer_frame =
-          static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
+          static_cast<core::i64>(std::llround(x_to_frame(clip_pointer.x)));
       const core::i64 delta = pointer_frame - clip_drag_anchor_;
       const scene::ClipTiming origin = clip_drag_origin_;
       scene::ClipTiming proposed = origin;
@@ -3203,9 +3247,6 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
       } else if (clip_drag_ == ClipDrag::Slide) {
         semantic_delta = snapped(origin.start + delta) - origin.start;
-        if (origin.start + semantic_delta < 0) {
-          semantic_delta = -origin.start;
-        }
       }
       clip_drag_delta_ = semantic_delta;
 
@@ -3223,22 +3264,35 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             }
           }
         }
-        proposed.start = std::max(start, first_i);
+        proposed.start = start;
         break;
       }
       case ClipDrag::TrimIn: {
         // The out point stays where it is and the source slides with
         // the in point, which is what makes this a trim rather than a
-        // move: the frames that remain still show what they showed.
+        // move. Convert at the source rate and retain the source frame at
+        // the new cut; the authored source phase currently has integer precision.
         const core::i64 limit = origin.start + origin.duration - 1;
         const core::i64 start = delta == 0
                                     ? origin.start
-                                    : std::clamp(snapped(origin.start + delta),
-                                                 first_i, limit);
+                                    : std::min(snapped(origin.start + delta), limit);
         const core::i64 shift = start - origin.start;
         proposed.start = start;
         proposed.duration = origin.duration - shift;
-        proposed.source_in = std::max(origin.source_in + shift, core::i64{0});
+        if (const ElementInfo *const clip = find_element(elements, clip_drag_node_)) {
+          const auto source = scene::advance_source_phase(
+              origin.source_in, shift,
+              scene::MediaFrameRate{timeline.rate_numerator, timeline.rate_denominator},
+              clip->source_frame_rate, clip->sequence_count,
+              scene::SourcePhaseRounding::Floor);
+          if (source) {
+            proposed.source_in = source.value();
+          } else {
+            proposed = origin;
+            clip_status_ = "TRIM UNAVAILABLE  /  Check source frames and frame rate";
+            clip_status_error_ = true;
+          }
+        }
         break;
       }
       case ClipDrag::TrimOut: {
@@ -3284,10 +3338,67 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         break;
       }
-      case ClipDrag::Slip:
-        // Placement is unchanged; the source ordinals move only after
-        // the Director applies the exact rational rate mapping.
+      case ClipDrag::Slip: {
+        const ElementInfo *const clip = find_element(elements, clip_drag_node_);
+        if (clip != nullptr) {
+          scene::ClipPlacement placement{};
+          placement.node = clip->node;
+          placement.sequence_count = clip->sequence_count;
+          placement.timing = origin;
+          placement.frame_rate = clip->source_frame_rate;
+          const auto planned = scene::plan_slip(
+              std::span{&placement, 1U}, clip->node, semantic_delta,
+              scene::MediaFrameRate{timeline.rate_numerator,
+                                    timeline.rate_denominator});
+          if (planned) {
+            clip_drag_delta_ = planned.value().applied_delta;
+            if (!planned.value().updates.empty()) {
+              proposed = planned.value().updates.front().timing;
+            }
+            clip_status_ = "SLIP  /  Source " +
+                           std::to_string(proposed.source_in) + " of " +
+                           std::to_string(clip->sequence_count) + " frames";
+            const auto offset = scene::source_ordinal_delta(
+                semantic_delta,
+                scene::MediaFrameRate{timeline.rate_numerator,
+                                      timeline.rate_denominator},
+                clip->source_frame_rate);
+            const core::i64 phase = origin.source_in % clip->sequence_count;
+            if (!offset || offset.value() < -phase ||
+                offset.value() > static_cast<core::i64>(clip->sequence_count) -
+                                     1 - phase) {
+              clip_status_ += "  /  wrapped";
+            }
+            if (clip->sequence_count == 1U) {
+              clip_status_ += "  /  One source frame; image is unchanged";
+            } else if (ctx.pointer_down()) {
+              clip_status_ += "  /  release to apply";
+            }
+          } else {
+            clip_drag_delta_ = 0;
+            clip_status_error_ = true;
+            clip_status_ = "SLIP UNAVAILABLE  /  ";
+            switch (planned.error()) {
+            case scene::TimelineEditError::InvalidRate:
+              clip_status_ += "Invalid source or show frame rate";
+              break;
+            case scene::TimelineEditError::LockedClip:
+              clip_status_ += "Clip is locked";
+              break;
+            case scene::TimelineEditError::ClipNotFound:
+              clip_status_ += "Clip is no longer available";
+              break;
+            case scene::TimelineEditError::IntegerOverflow:
+              clip_status_ += "Source offset exceeds the supported range";
+              break;
+            default:
+              clip_status_ += "Check source frame count and clip timing";
+              break;
+            }
+          }
+        }
         break;
+      }
       case ClipDrag::Slide:
         proposed.start = origin.start + semantic_delta;
         break;
@@ -3299,6 +3410,93 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       proposed.fade_out =
           std::clamp(proposed.fade_out, core::i64{0}, proposed.duration);
       clip_drag_proposed_ = proposed;
+      if (clip_status_.empty() &&
+          (clip_drag_ == ClipDrag::Move || clip_drag_ == ClipDrag::TrimIn ||
+           clip_drag_ == ClipDrag::TrimOut)) {
+        clip_status_ = clip_drag_ == ClipDrag::Move ? "MOVE" : "TRIM";
+        clip_status_ += "  /  Start " + std::to_string(proposed.start) +
+                        "  /  End " +
+                        std::to_string(proposed.start + proposed.duration) +
+                        "  /  Source " + std::to_string(proposed.source_in);
+      }
+    }
+    if (!ctx.pointer_down()) {
+      if (clip_drag_moved_) {
+        switch (clip_drag_) {
+        case ClipDrag::RippleTrimHead:
+          if (clip_drag_delta_ != 0) {
+            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
+                clip_drag_node_, scene::TimelineTrimEdge::Head,
+                clip_drag_delta_});
+          }
+          break;
+        case ClipDrag::RippleTrimTail:
+          if (clip_drag_delta_ != 0) {
+            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
+                clip_drag_node_, scene::TimelineTrimEdge::Tail,
+                clip_drag_delta_});
+          }
+          break;
+        case ClipDrag::Roll:
+          if (clip_drag_delta_ != 0) {
+            frame.timeline_edits.emplace_back(TimelineRollRequest{
+                clip_drag_node_, clip_drag_peer_, clip_drag_delta_});
+          }
+          break;
+        case ClipDrag::Slip:
+          if (clip_drag_delta_ != 0) {
+            frame.timeline_edits.emplace_back(
+                TimelineSlipRequest{clip_drag_node_, clip_drag_delta_});
+            pending_clip_edit_ = TimelineClipEdit{
+                clip_drag_node_, clip_drag_proposed_, std::nullopt};
+            pending_clip_origin_ = clip_drag_origin_;
+            pending_clip_frames_ = 12U;
+          }
+          break;
+        case ClipDrag::Slide:
+          if (clip_drag_delta_ != 0) {
+            frame.timeline_edits.emplace_back(
+                TimelineSlideRequest{clip_drag_node_, clip_drag_delta_});
+          }
+          break;
+        case ClipDrag::Move:
+        case ClipDrag::TrimIn:
+        case ClipDrag::TrimOut:
+        case ClipDrag::FadeIn:
+        case ClipDrag::FadeOut: {
+          std::optional<doc::NodeId> retarget;
+          const ElementInfo *const dragged =
+              clip_drag_ == ClipDrag::Move
+                  ? find_element(elements, clip_drag_node_)
+                  : nullptr;
+          if (dragged != nullptr && clip_drop_lane_.has_value() &&
+              *clip_drop_lane_ != dragged->timeline_lane) {
+            retarget = *clip_drop_lane_;
+          }
+          if (clip_drag_proposed_ != clip_drag_origin_ ||
+              retarget.has_value()) {
+            frame.clip_edits.push_back(TimelineClipEdit{
+                clip_drag_node_, clip_drag_proposed_, retarget});
+            pending_clip_edit_ = frame.clip_edits.back();
+            pending_clip_origin_ = clip_drag_origin_;
+            pending_clip_frames_ = 12U;
+          }
+          break;
+        }
+        case ClipDrag::None:
+          break;
+        }
+      }
+      clip_drag_ = ClipDrag::None;
+      clip_drag_node_ = doc::NodeId{};
+      clip_drag_peer_ = doc::NodeId{};
+      clip_drag_delta_ = 0;
+      clip_drag_start_x_ = 0.0F;
+      clip_drag_start_y_ = 0.0F;
+      clip_drag_release_.reset();
+      clip_drag_moved_ = false;
+      clip_drop_lane_.reset();
+      clip_snap_guide_.reset();
     }
   }
 
@@ -3449,14 +3647,19 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         find_element(elements, layer_drag_node_);
     if (source == nullptr || !orderable_layer(*source) || source->locked) {
       layer_drag_node_ = doc::NodeId{};
+      layer_drag_nodes_.clear();
       layer_drag_moved_ = false;
     } else {
       layer_drag_label = layer_name(*source);
+      if (layer_drag_nodes_.size() > 1U) {
+        layer_drag_label = std::to_string(layer_drag_nodes_.size()) + " layers";
+      }
       if (layer_drag_active) {
         frame.lane_editing = ctx.pointer_down();
         std::optional<doc::NodeId> assignment;
-        if (source->kind == ElementKind::Media) {
-          assignment = clip_lane_under_pointer();
+        if (source->kind == ElementKind::Media &&
+            rows_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+          assignment = clip_lane_under_pointer(gesture_y);
           if (assignment.has_value() && *assignment != source->timeline_lane) {
             layer_assignment_feedback = true;
             if (*assignment != doc::NodeId{}) {
@@ -3506,11 +3709,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (!ctx.pointer_down()) {
         if (layer_drag_moved_ && !layer_drop_committed) {
           frame.layer_drop = TimelineLayerDrop{
-              layer_drag_node_, ctx.pointer_x(), ctx.pointer_y()};
+              layer_drag_nodes_, ctx.pointer_x(), ctx.pointer_y()};
         }
         released_layer_drag_node = layer_drag_node_;
         released_layer_drag_moved = layer_drag_moved_;
         layer_drag_node_ = doc::NodeId{};
+        layer_drag_nodes_.clear();
         layer_drag_start_x_ = 0.0F;
         layer_drag_start_y_ = 0.0F;
         layer_drag_moved_ = false;
@@ -3538,6 +3742,12 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (y + row_height <= rows_bounds.y ||
         y >= rows_bounds.y + rows_bounds.height) {
       continue;
+    }
+    if (row.kind == Row::Kind::Layer && !row.surface) {
+      const float top = std::max(y, rows_bounds.y);
+      const float bottom = std::min(y + row_height, rows_bounds.y + rows_bounds.height);
+      replacement_targets_.push_back({row.node,
+          {rows_bounds.x, top, rows_bounds.width, bottom - top}});
     }
     const float centre_y = y + row_height * 0.5F;
     std::optional<ChannelIdentity> row_channel_identity;
@@ -3883,12 +4093,13 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            interaction_height});
     if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked) {
       lane_drag_node_ = row.node;
-      lane_drag_start_x_ = ctx.pointer_x();
-      lane_drag_start_y_ = ctx.pointer_y();
+      capture_layer_drag(row.node);
+      lane_drag_start_x_ = ctx.pointer_press_x();
+      lane_drag_start_y_ = ctx.pointer_press_y();
       lane_drag_moved_ = false;
     } else if (label_it.pressed && row.kind == Row::Kind::Layer &&
                !row.surface &&
-               !(row.expandable && ctx.pointer_x() < content_x)) {
+               !(row.expandable && ctx.pointer_press_x() < content_x)) {
       const ElementInfo *const row_element = find_element(elements, row.node);
       if (row_element != nullptr && orderable_layer(*row_element) &&
           !row.locked) {
@@ -3897,20 +4108,22 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         dragging_key_ = false;
         duplicate_drag_ = false;
         layer_drag_node_ = row.node;
-        layer_drag_start_x_ = ctx.pointer_x();
-        layer_drag_start_y_ = ctx.pointer_y();
+        const bool preserve_selection = selected(row.node, selection);
+        capture_layer_drag(row.node);
+        layer_drag_start_x_ = ctx.pointer_press_x();
+        layer_drag_start_y_ = ctx.pointer_press_y();
         layer_drag_moved_ = false;
         marquee_tracking_ = false;
         marquee_active_ = false;
         lasso_points_.clear();
-        TimelineSelectionRequest next{};
-        next.node = row.node;
-        next.action =
-            selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
-        if (next.action == SelectionAction::Range) {
-          next.visible_order = visible_order;
+        // Keep a selected group intact until a click is released. Modifier
+        // clicks also select on release, so Ctrl toggles exactly once.
+        if (!preserve_selection && !ctx.ctrl_held() && !ctx.shift_held()) {
+          TimelineSelectionRequest next{};
+          next.node = row.node;
+          next.action = SelectionAction::Replace;
+          frame.selection = std::move(next);
         }
-        frame.selection = std::move(next);
       }
     }
     const bool dragged_header_click =
@@ -3935,12 +4148,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         if (!row.locked) {
           TimelineSelectionRequest next{};
           next.node = row.node;
-          next.action = SelectionAction::Replace;
+          next.action =
+              selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
+          if (next.action == SelectionAction::Range) {
+            next.visible_order = visible_order;
+          }
           frame.selection = std::move(next);
         }
         // A second click on the same name opens it for editing, focused
         // with the whole name selected so typing replaces it.
-        if (!row.locked && name_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        if (!row.locked && !ctx.ctrl_held() && !ctx.shift_held() &&
+            name_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
             clicks_.double_click(row.node.value(), ctx.time_seconds())) {
           rename_.begin(ctx, row.node.value(), row.label);
         }
@@ -4018,7 +4236,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         clip_timing =
             clip_drag_ != ClipDrag::None && clip_drag_node_ == row.node
                 ? clip_drag_proposed_
-                : layer_element->timing;
+                : (pending_clip_edit_.has_value() &&
+                           pending_clip_edit_->clip == row.node
+                       ? pending_clip_edit_->timing
+                       : layer_element->timing);
       }
     }
     if (clip_element != nullptr) {
@@ -4038,6 +4259,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           observation->texture != nullptr) {
         float u0 = 0.0F;
         float u1 = 1.0F;
+        bool looped = false;
         const scene::MediaFrameRate source_mapping_show_rate{
             timeline.rate_numerator, timeline.rate_denominator};
         if (clip_element->sequence_count > 1U &&
@@ -4064,12 +4286,53 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               1.0F - one_tile);
               u1 = u0 + one_tile;
             }
+          } else {
+            looped = true;
           }
         }
-        ctx.draw_list().add_image_region(
-            clip_bar.x, clip_bar.y, clip_bar.width, clip_bar.height,
-            *observation->texture, u0, 0.0F, u1, 1.0F,
-            gui::UiColor{1.0F, 1.0F, 1.0F, live ? 0.62F : 0.78F});
+        const gui::UiColor tint{1.0F, 1.0F, 1.0F, live ? 0.62F : 0.78F};
+        if (looped) {
+          // Long placements repeat the source. Sample the existing eight-thumb
+          // atlas at visible timeline positions, with a fixed per-row budget.
+          // Neither a very long placement nor many loops increases this work.
+          const float begin = std::max(clip_bar.x, graph.x);
+          const float end = std::min(clip_bar.x + clip_bar.width,
+                                     graph.x + graph.width);
+          if (end > begin) {
+            const unsigned tiles = static_cast<unsigned>(std::clamp(
+                std::ceil((end - begin) / 72.0F), 1.0F, 32.0F));
+            const float width = (end - begin) / static_cast<float>(tiles);
+            for (unsigned tile = 0U; tile < tiles; ++tile) {
+              const float x = begin + static_cast<float>(tile) * width;
+              const double offset = std::clamp(
+                  x_to_frame(x + width * 0.5F) -
+                      static_cast<double>(clip_timing.start),
+                  0.0, static_cast<double>(clip_timing.duration - 1));
+              const core::i64 show_offset =
+                  offset >= static_cast<double>(clip_timing.duration - 1)
+                      ? clip_timing.duration - 1
+                      : static_cast<core::i64>(offset);
+              const auto phase = scene::advance_source_phase(
+                  clip_timing.source_in, show_offset,
+                  source_mapping_show_rate, clip_element->source_frame_rate,
+                  clip_element->sequence_count, scene::SourcePhaseRounding::Floor);
+              if (!phase) {
+                continue;
+              }
+              const auto thumbnail = static_cast<unsigned>(std::llround(
+                  static_cast<double>(phase.value()) * 7.0 /
+                  static_cast<double>(clip_element->sequence_count - 1U)));
+              const float left_uv = static_cast<float>(thumbnail) / 8.0F;
+              ctx.draw_list().add_image_region(
+                  x, clip_bar.y, width, clip_bar.height, *observation->texture,
+                  left_uv, 0.0F, left_uv + 0.125F, 1.0F, tint);
+            }
+          }
+        } else {
+          ctx.draw_list().add_image_region(
+              clip_bar.x, clip_bar.y, clip_bar.width, clip_bar.height,
+              *observation->texture, u0, 0.0F, u1, 1.0F, tint);
+        }
         drew_filmstrip = true;
       }
       if (const TimelineWaveformObservation *const waveform =
@@ -4089,16 +4352,21 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 clip_element->sequence_count - 1U,
                 static_cast<core::u64>(std::numeric_limits<core::i64>::max())));
         for (float x = begin; x <= end; x += 2.0F) {
-          const core::i64 show_offset = std::clamp(
-              static_cast<core::i64>(std::floor(x_to_frame(x))) -
-                  clip_timing.start,
-              core::i64{0}, clip_timing.duration - 1);
-          const auto source_delta = scene::source_ordinal_delta(
-              show_offset, show_frame_rate, clip_element->source_frame_rate);
-          const core::i64 source_ordinal = std::clamp(
-              clip_timing.source_in +
-                  (source_delta ? source_delta.value() : show_offset),
-              core::i64{0}, maximum_source);
+          const double offset = std::clamp(
+              std::floor(x_to_frame(x)) - static_cast<double>(clip_timing.start),
+              0.0, static_cast<double>(clip_timing.duration - 1));
+          const core::i64 show_offset =
+              offset >= static_cast<double>(clip_timing.duration - 1)
+                  ? clip_timing.duration - 1
+                  : static_cast<core::i64>(offset);
+          const auto source_phase = scene::advance_source_phase(
+              clip_timing.source_in, show_offset, show_frame_rate,
+              clip_element->source_frame_rate, clip_element->sequence_count,
+              scene::SourcePhaseRounding::Floor);
+          if (!source_phase) {
+            continue;
+          }
+          const core::i64 source_ordinal = source_phase.value();
           const double normalized =
               maximum_source > 0
                   ? static_cast<double>(source_ordinal) /
@@ -4154,6 +4422,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       // so a crossfade can be pulled without hunting for a pixel.
       const auto fade_handle = [&](float handle_x, bool engaged) {
         const bool near =
+            edit_tool_ == TimelineEditTool::Standard &&
             !ctx.pointer_blocked() && clip_drag_ == ClipDrag::None &&
             std::fabs(ctx.pointer_x() - handle_x) <= fade_handle_reach &&
             ctx.pointer_y() >= clip_bar.y - 4.0F &&
@@ -4186,6 +4455,9 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const float name_right = clip_bar.x + clip_bar.width - 6.0F;
       if (name_right - name_left >= 24.0F) {
         std::string name = row.label;
+        if (clip_drag_ == ClipDrag::Slip && clip_drag_node_ == row.node) {
+          name += "  Source " + std::to_string(clip_timing.source_in);
+        }
         if (!clip_element->on_air) {
           name += "  off air";
         }
@@ -4446,13 +4718,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     // The razor cuts where it lands and starts no drag; Shift cuts every
     // unlocked clip under that frame, on every track.
+    // A native event batch may already contain motion or release after the
+    // down edge. Classify the gesture where it began, not at that endpoint.
+    const float press_x = ctx.pointer_press_x();
+    const float press_y = ctx.pointer_press_y();
     const bool razor_press = !row.locked && lane_it.pressed &&
                              clip_element != nullptr &&
                              edit_tool_ == TimelineEditTool::Razor &&
-                             clip_bar.contains(ctx.pointer_x(), ctx.pointer_y());
+                             clip_bar.contains(press_x, press_y);
     if (razor_press) {
       clip_press_consumed_ = true;
-      const core::i64 cut = razor_frame(ctx.pointer_x());
+      const core::i64 cut = razor_frame(press_x);
       for (const ElementInfo &element : elements) {
         if (!editable_clip(element) ||
             (element.node != row.node && !ctx.shift_held())) {
@@ -4460,18 +4736,24 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         if (cut > element.timing.start && cut <= element.timing.last_frame()) {
           frame.clip_splits.push_back(
-              TimelineClipSplit{element.node, static_cast<core::u64>(cut)});
+              TimelineClipSplit{element.node, cut});
         }
       }
     } else if (!row.locked && lane_it.pressed && clip_element != nullptr &&
-               clip_bar.contains(ctx.pointer_x(), ctx.pointer_y())) {
+               (clip_bar.contains(press_x, press_y) ||
+                (edit_tool_ == TimelineEditTool::Standard &&
+                 press_y >= clip_bar.y - 4.0F &&
+                 press_y <= clip_bar.y + fade_handle_reach &&
+                 (std::fabs(press_x - clip_fade_in_x) <= fade_handle_reach ||
+                  std::fabs(press_x - clip_fade_out_x) <= fade_handle_reach)))) {
+      clip_press_consumed_ = true;
       selected_keys_.clear();
       drag_keys_.clear();
       dragging_key_ = false;
       duplicate_drag_ = false;
       selected_markers_.clear();
       const float grab = edge_grab_width(clip_bar.width);
-      const float px = ctx.pointer_x();
+      const float px = press_x;
       const float midpoint = clip_bar.x + clip_bar.width * 0.5F;
       clip_drag_peer_ = doc::NodeId{};
       doc::NodeId dragged = row.node;
@@ -4523,7 +4805,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       } else {
         // Standard placement editing. Fade handles sit on the bar's
         // top edge and take precedence over the trim strips.
-        const bool on_top = ctx.pointer_y() <= clip_bar.y + fade_handle_reach;
+        const bool on_top = press_y <= clip_bar.y + fade_handle_reach;
         const float to_in = std::fabs(px - clip_fade_in_x);
         const float to_out = std::fabs(px - clip_fade_out_x);
         if (on_top && to_in <= fade_handle_reach && to_in <= to_out) {
@@ -4541,10 +4823,30 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       clip_drag_node_ = clip_drag_ != ClipDrag::None ? dragged : doc::NodeId{};
       clip_drag_origin_ = dragged_timing;
       clip_drag_proposed_ = dragged_timing;
+      clip_status_.clear();
+      clip_status_error_ = false;
+      constexpr core::i64 edit_limit = std::numeric_limits<core::i64>::max() / 4;
+      if (dragged_timing.start < -edit_limit || dragged_timing.start > edit_limit ||
+          dragged_timing.duration > edit_limit || dragged_timing.source_in > edit_limit) {
+        // Imported documents can carry a wider range than the interactive
+        // workspace. Refuse arithmetic beyond that range rather than wrap it.
+        clip_drag_ = ClipDrag::None;
+        clip_drag_node_ = doc::NodeId{};
+        clip_status_ = "EDIT UNAVAILABLE  /  Clip timing exceeds the editable range";
+        clip_status_error_ = true;
+        clip_status_until_ = ctx.time_seconds() + 3.0;
+      }
       clip_drag_anchor_ = static_cast<core::i64>(std::llround(x_to_frame(px)));
       clip_drag_delta_ = 0;
-      clip_drag_start_x_ = ctx.pointer_x();
-      clip_drag_start_y_ = ctx.pointer_y();
+      clip_drag_start_x_ = press_x;
+      clip_drag_start_y_ = press_y;
+      // A whole gesture can be captured after the proposal phase above.
+      // Preserve its up position until the next draw resolves it, even if
+      // later motion in this batch or the next one moves the free pointer.
+      clip_drag_release_ = lane_it.released
+          ? std::optional{gui::UiPoint{ctx.pointer_release_x(),
+                                       ctx.pointer_release_y()}}
+          : std::nullopt;
       clip_drag_moved_ = false;
       clip_drop_lane_.reset();
       clip_snap_guide_.reset();
@@ -4566,8 +4868,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         for (std::size_t key_index = 0U; key_index < component_frames->size();
              ++key_index) {
           const core::i64 key_frame = (*component_frames)[key_index];
-          const float dx = component_x[key_index] - ctx.pointer_x();
-          const float dy = component_y[key_index] - ctx.pointer_y();
+          const float dx = component_x[key_index] - press_x;
+          const float dy = component_y[key_index] - press_y;
           if (dx * dx + dy * dy <= key_hit_radius * key_hit_radius) {
             const SelectedKey hit{row.kind == Row::Kind::Property
                                       ? row.property_target
@@ -4638,8 +4940,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         marquee_tracking_ = true;
         marquee_active_ = false;
-        marquee_start_x_ = ctx.pointer_x();
-        marquee_start_y_ = ctx.pointer_y();
+        marquee_start_x_ = press_x;
+        marquee_start_y_ = press_y;
         lasso_points_.clear();
         if (lasso_mode_) {
           lasso_points_.push_back(
@@ -4692,7 +4994,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // one absolute document edit rather than one adjacent swap per band.
   const LaneDropTarget *lane_drop_hovered = nullptr;
   std::optional<float> lane_drop_landing_y;
-  std::string_view lane_drag_label{"TRACK"};
+  std::string lane_drag_label{"TRACK"};
   bool lane_drag_feedback{};
   bool lane_drop_committed{};
   if (lane_drag_node_ != doc::NodeId{}) {
@@ -4707,6 +5009,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       // The track went away under the drag - a peer deleted it, or the scene
       // changed. Nothing to reorder and nothing to report.
       lane_drag_node_ = doc::NodeId{};
+      layer_drag_nodes_.clear();
       lane_drag_moved_ = false;
     } else if (lane_drag_active) {
       lane_drag_feedback = true;
@@ -4741,13 +5044,17 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (source != lane_drop_targets.end()) {
         lane_drag_label = source->label;
       }
+      if (layer_drag_nodes_.size() > 1U) {
+        lane_drag_label = std::to_string(layer_drag_nodes_.size()) + " layers";
+      }
     }
     if (!ctx.pointer_down()) {
       if (lane_drag_moved_ && !lane_drop_committed) {
         frame.layer_drop = TimelineLayerDrop{
-            lane_drag_node_, ctx.pointer_x(), ctx.pointer_y()};
+            layer_drag_nodes_, ctx.pointer_x(), ctx.pointer_y()};
       }
       lane_drag_node_ = doc::NodeId{};
+      layer_drag_nodes_.clear();
       lane_drag_start_x_ = 0.0F;
       lane_drag_start_y_ = 0.0F;
       lane_drag_moved_ = false;
@@ -4924,6 +5231,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // forwards), preventing one destination from hiding another source key in
   // the same channel while the batch is applied.
   if (dragging_key_ && !ctx.pointer_down()) {
+    update_key_drag();
     if (drag_delta_ != 0) {
       TimelineKeyBatchEdit batch{};
       batch.action = duplicate_drag_ ? TimelineKeyBatchAction::Duplicate
@@ -5410,6 +5718,23 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               ghost_label, ctx.theme().text);
   }
 
+  // Keep source feedback readable even for very short or partly hidden clips.
+  // It remains after release while the authored result reaches the editor.
+  if (!clip_status_.empty() && ctx.time_seconds() <= clip_status_until_) {
+    frame.clip_status = clip_status_;
+    frame.clip_status_error = clip_status_error_;
+    const gui::Rect status{bounds.x + 8.0F, bounds.y + bounds.height - 30.0F,
+                           std::max(bounds.width - 16.0F, 0.0F), 24.0F};
+    ctx.panel(status, ctx.theme().background);
+    draw_border(ctx, status,
+                clip_status_error_ ? ctx.theme().warning : ctx.theme().accent,
+                1.0F);
+    ctx.label(gui::Rect{status.x + 8.0F, status.y,
+                        std::max(status.width - 16.0F, 0.0F), status.height},
+              clip_status_, clip_status_error_ ? ctx.theme().warning
+                                               : ctx.theme().text);
+  }
+
   // Choosing a layer, clip, or track leaves the marker domain, so Delete and
   // the menus aim at what was just chosen.
   if (frame.selection.has_value()) {
@@ -5483,6 +5808,15 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       frame.keys.push_back(TimelineKeyEdit{
           layer, static_cast<scene::TransformChannel>(component), 0U, 0.0,
           true});
+    }
+    if (const ElementInfo *const element = find_element(elements, layer);
+        element != nullptr && element->kind == ElementKind::Camera) {
+      for (auto component = static_cast<core::u8>(scene::PropertyChannel::CameraFieldOfView);
+           component <= static_cast<core::u8>(scene::PropertyChannel::CameraAperture);
+           ++component) {
+        frame.keys.push_back(TimelineKeyEdit{
+            layer, static_cast<scene::PropertyChannel>(component), 0U, 0.0, true});
+      }
     }
     // A light's output and colour are its own channels too.
     if (const ElementInfo *const element = find_element(elements, layer);
@@ -5576,9 +5910,8 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     pixels_per_frame_ = std::clamp(
         static_cast<float>(static_cast<double>(pixels_per_frame_) * factor),
         minimum_pixels_per_frame, maximum_pixels_per_frame);
-    left_frame_ = std::max(anchor - static_cast<double>(keep_x - graph.x) /
-                                        static_cast<double>(pixels_per_frame_),
-                           0.0);
+    left_frame_ = anchor - static_cast<double>(keep_x - graph.x) /
+                              static_cast<double>(pixels_per_frame_);
   };
   const auto set_in = [&](core::u64 at) {
     frame.range = RangeRequest{at, std::max(last, at), timeline.loop};
@@ -5761,7 +6094,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       switch (static_cast<MenuCommand>(entry.command)) {
       case MenuCommand::SplitAtPlayhead:
         frame.clip_splits.push_back(
-            TimelineClipSplit{entry.node, acting_frame});
+            TimelineClipSplit{entry.node, signed_frame(acting_frame)});
         break;
       case MenuCommand::RippleDeleteSelection:
         ripple_delete(selected_clips);
@@ -5933,7 +6266,7 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         if (playhead > clip->timing.start &&
             playhead <= clip->timing.last_frame()) {
           frame.clip_splits.push_back(
-              TimelineClipSplit{clip->node, acting_frame});
+              TimelineClipSplit{clip->node, signed_frame(acting_frame)});
         }
       }
     }
@@ -6003,6 +6336,10 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       case 's':
       case 'S':
         snapping_ = !snapping_;
+        break;
+      case 'k':
+      case 'K':
+        auto_key_ = !auto_key_;
         break;
       case 'v':
       case 'V':
@@ -6096,6 +6433,21 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     requested_playhead_frames_ = 30U;
   }
   ctx.pop_clip();
+  // Tool shapes apply to the editing surface, and stay engaged throughout a
+  // captured clip gesture even when the pointer leaves the panel. Selection
+  // keeps the more specific move, trim and fade feedback drawn above.
+  if (!ctx.pointer_blocked() && !popup_pointer_blocked &&
+      !key_popup_pointer_blocked &&
+      (clip_drag_ != ClipDrag::None ||
+       (graph.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        ctx.pointer_y() >= rows_bounds.y))) {
+    if (edit_tool_ != TimelineEditTool::Standard) {
+      ctx.set_cursor(tool_cursor(edit_tool_));
+    } else if (clip_drag_ != ClipDrag::None) {
+      ctx.set_cursor(clip_drag_ == ClipDrag::Move ? gui::Cursor::Move
+                                               : gui::Cursor::ResizeHorizontal);
+    }
+  }
   return frame;
 }
 

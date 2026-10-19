@@ -106,6 +106,7 @@ struct ControllerManifest final {
     core::u64 digest{};
     core::u32 required{};
     bool valid{true};
+    std::vector<std::string> placeholder_sources;
     // Deduplicated exact requirements, in manifest order. Shared so every
     // queued readiness request for one project generation asks the identical
     // question, and a manifest change replaces the whole list at once.
@@ -160,12 +161,20 @@ struct ControllerManifest final {
     result.required = static_cast<core::u32>(std::min<std::size_t>(
         requirements->size(), std::numeric_limits<core::u32>::max()));
     result.requirements = std::move(requirements);
+    for (const auto& asset : manifest.assets) {
+        if (asset.kind == assets::AssetKind::Media &&
+            std::none_of(manifest.assets.begin(), manifest.assets.end(),
+                [&](const RequiredProjectAsset& other) {
+                    return other.source == asset.source && other.kind != assets::AssetKind::Media;
+                })) result.placeholder_sources.push_back(asset.source);
+    }
     return result;
 }
 
 [[nodiscard]] bool same_manifest(const ControllerManifest& left,
                                  const ControllerManifest& right) noexcept {
     return left.digest == right.digest && left.required == right.required &&
+           left.placeholder_sources == right.placeholder_sources &&
            left.valid == right.valid && left.requirements != nullptr &&
            right.requirements != nullptr &&
            *left.requirements == *right.requirements;
@@ -408,6 +417,7 @@ struct ControllerEntry final {
     core::u32 assets_missing{};
     core::u32 assets_mismatched{};
     core::u32 assets_verification_failed{};
+    bool missing_media_only{};
     std::string content_detail;
     bool eligible{};
     core::u8 configuration_class{};
@@ -1143,6 +1153,7 @@ public:
         entry.assets_missing = 0U;
         entry.assets_mismatched = 0U;
         entry.assets_verification_failed = 0U;
+        entry.missing_media_only = false;
         try {
             if (!outcome) {
                 entry.content = ContentStatus::Error;
@@ -1155,6 +1166,17 @@ public:
             entry.assets_mismatched = readiness.mismatched;
             entry.assets_verification_failed =
                 readiness.verification_failed;
+            entry.missing_media_only = readiness.missing > 0U &&
+                readiness.mismatched == 0U && readiness.verification_failed == 0U &&
+                readiness.availability == net::ClusterAssetReadinessAvailability::Available &&
+                saturated_add(readiness.ready, readiness.missing) == entry.assets_required &&
+                std::all_of(readiness.entries.begin(), readiness.entries.end(),
+                    [&](const net::ClusterAssetReadinessEntry& asset) {
+                        return asset.state == net::ClusterAssetReadinessState::Ready ||
+                            (asset.state == net::ClusterAssetReadinessState::Missing &&
+                             std::find(manifest.placeholder_sources.begin(), manifest.placeholder_sources.end(), asset.source)
+                                 != manifest.placeholder_sources.end());
+                    });
             using Availability = net::ClusterAssetReadinessAvailability;
             switch (readiness.availability) {
             case Availability::Available:
@@ -1169,7 +1191,8 @@ public:
                 } else if (entry.assets_missing > 0U) {
                     entry.content = ContentStatus::Missing;
                     entry.content_detail =
-                        "copy required content to this node's store";
+                        entry.missing_media_only ? "offline media will display placeholders"
+                                                 : "copy required content to this node's store";
                 } else if (entry.assets_ready == entry.assets_required) {
                     entry.content = ContentStatus::Ready;
                     entry.content_detail = "verified by lifecycle agent";
@@ -1370,6 +1393,7 @@ void ClusterLifecycleController::sync(
         entry.assets_missing = 0U;
         entry.assets_mismatched = 0U;
         entry.assets_verification_failed = 0U;
+        entry.missing_media_only = false;
         entry.next_asset_readiness_poll = now;
         if (!state_->manifest.valid) {
             entry.content = ContentStatus::Error;
@@ -1702,7 +1726,7 @@ ClusterLifecycleController::tracking_snapshot(
 }
 
 std::vector<editor::OutputMonitorState::Node>
-ClusterLifecycleController::snapshot() const {
+ClusterLifecycleController::snapshot(const net::DirectorFrameBarrier* barrier) const {
     const std::lock_guard lock{state_->mutex};
     std::vector<editor::OutputMonitorState::Node> rows;
     rows.reserve(state_->entries.size());
@@ -1716,10 +1740,21 @@ ClusterLifecycleController::snapshot() const {
         row.assets_required = entry.assets_required;
         row.assets_ready = entry.assets_ready;
         row.assets_missing = entry.assets_missing;
+        row.missing_media_only = entry.missing_media_only;
         row.assets_mismatched = entry.assets_mismatched;
         row.assets_verification_failed =
             entry.assets_verification_failed;
         row.content_detail = entry.content_detail;
+        if (barrier != nullptr) {
+            const auto connection = barrier->node_connection(entry.node_index);
+            using State = net::DirectorNodeConnection::State;
+            using Connection = editor::OutputMonitorState::Node::Connection;
+            row.connection = connection.state == State::Live ? Connection::Live
+                : connection.state == State::CatchingUp ? Connection::CatchingUp
+                : Connection::Disconnected;
+            row.committed_frame = connection.committed_frame;
+            row.target_frame = connection.target_frame;
+        }
         rows.push_back(std::move(row));
     }
     std::sort(rows.begin(), rows.end(), [](const auto& left,
@@ -1807,7 +1842,7 @@ void ClusterLifecycleController::submit(
         }
         if ((request.action == editor::OutputLifecycleAction::Start ||
              request.action == editor::OutputLifecycleAction::Restart) &&
-            !content_status_ready(entry.content)) {
+            !content_status_ready(entry.content) && !entry.missing_media_only) {
             return;
         }
         const net::ClusterLifecycleCommand command = command_for(request.action);
@@ -1919,7 +1954,10 @@ bool ClusterLifecycleController::program_ready(
             // Store readiness and lifecycle configuration are independent of
             // runtime adoption. An invalid endpoint, missing secret, duplicate
             // node index, or stale store reply must fail before promotion.
-            if (!entry.eligible || !content_status_ready(entry.content)) {
+            // Runtime adoption below distinguishes media placeholders from
+            // missing models/calibration, while store health stays Missing.
+            if (!entry.eligible ||
+                (!content_status_ready(entry.content) && !entry.missing_media_only)) {
                 return false;
             }
             if (!detail::output_bindings_observed_and_compatible(

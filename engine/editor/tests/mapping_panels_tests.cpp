@@ -1134,7 +1134,8 @@ struct FeedHarness final {
                                   std::optional<gui::Key> key = std::nullopt,
                                   core::u64 show_frame = 0U,
                                   const topology::HardwareMap *hardware =
-                                      nullptr) {
+                                      nullptr,
+                                  const gui::Rect &draw_bounds = bounds) {
     input.new_frame();
     input.set_mouse_position(x, y);
     input.set_mouse_button(gui::MouseButton::Left, down);
@@ -1142,7 +1143,7 @@ struct FeedHarness final {
       input.add_key(*key);
     }
     ctx.new_frame();
-    return panel.draw(ctx, bounds, canvas, map, show_frame, hardware);
+    return panel.draw(ctx, draw_bounds, canvas, map, show_frame, hardware);
   }
 };
 
@@ -1345,6 +1346,103 @@ void one_mosaic_window_contains_four_independent_viewports() {
   MAPPING_CHECK(added.add.has_value());
   MAPPING_CHECK(added.add->node_index == 0U);
   MAPPING_CHECK(added.add->source == map.maps[3U].source);
+}
+
+void numeric_rectangles_keep_source_and_destination_independent() {
+  const auto map = feed_demo();
+  FeedHarness destination;
+  static_cast<void>(destination.frame(70.0F, 110.0F, false, map));
+  static_cast<void>(destination.frame(70.0F, 110.0F, true, map));
+  static_cast<void>(destination.frame(70.0F, 110.0F, false, map));
+  static_cast<void>(destination.frame(240.0F, 409.0F, true, map));
+  const auto moved = destination.frame(263.0F, 409.0F, true, map);
+  MAPPING_CHECK(moved.edit.has_value());
+  MAPPING_CHECK(moved.edit->node == map.maps.front().node);
+  MAPPING_CHECK(moved.edit->viewport.x == map.maps.front().viewport.x + 23U);
+  MAPPING_CHECK(moved.edit->viewport.width == map.maps.front().viewport.width);
+  MAPPING_CHECK(!moved.projection_edit.has_value());
+
+  FeedHarness source;
+  static_cast<void>(source.frame(70.0F, 110.0F, false, map));
+  static_cast<void>(source.frame(70.0F, 110.0F, true, map));
+  static_cast<void>(source.frame(70.0F, 110.0F, false, map));
+  static_cast<void>(source.frame(240.0F, 448.0F, true, map));
+  const auto cropped = source.frame(271.0F, 448.0F, true, map);
+  MAPPING_CHECK(cropped.projection_edit.has_value());
+  MAPPING_CHECK(cropped.projection_edit->source.x == map.maps.front().source.x + 31U);
+  MAPPING_CHECK(cropped.projection_edit->source.width == map.maps.front().source.width);
+  MAPPING_CHECK(!cropped.edit.has_value());
+}
+
+void numeric_rectangles_release_focus_when_removed_or_hidden() {
+  const auto map = feed_demo();
+  const auto open_destination = [&](FeedHarness &harness) {
+    static_cast<void>(harness.frame(70.0F, 110.0F, false, map));
+    static_cast<void>(harness.frame(70.0F, 110.0F, true, map));
+    static_cast<void>(harness.frame(70.0F, 110.0F, false, map));
+    static_cast<void>(harness.frame(240.0F, 409.0F, true, map));
+    const auto opened = harness.frame(240.0F, 409.0F, false, map);
+    MAPPING_CHECK(harness.ctx.typing());
+    MAPPING_CHECK(opened.editing);
+  };
+
+  FeedHarness removed;
+  open_destination(removed);
+  auto remaining = map;
+  remaining.maps.erase(remaining.maps.begin());
+  const auto erased = removed.frame(240.0F, 409.0F, false, remaining);
+  MAPPING_CHECK(!removed.ctx.typing());
+  MAPPING_CHECK(!erased.editing);
+  MAPPING_CHECK(!erased.edit && !erased.projection_edit);
+
+  for (const gui::Rect resized : {gui::Rect{0.0F, 0.0F, 400.0F, 460.0F},
+                                  gui::Rect{0.0F, 0.0F, 800.0F, 100.0F},
+                                  gui::Rect{0.0F, 0.0F, 0.0F, 0.0F}}) {
+    FeedHarness hidden;
+    open_destination(hidden);
+    const auto resized_frame = hidden.frame(240.0F, 409.0F, false, map,
+                                            std::nullopt, 0U, nullptr, resized);
+    MAPPING_CHECK(!hidden.ctx.typing());
+    MAPPING_CHECK(!resized_frame.editing);
+    MAPPING_CHECK(!resized_frame.edit && !resized_frame.projection_edit);
+    // Restoring the panel must restore a usable field, not an abandoned edit.
+    open_destination(hidden);
+  }
+}
+
+void imported_mesh_hides_source_crop_but_keeps_destination_fields() {
+  auto map = feed_surface_demo();
+  FeedHarness harness;
+  static_cast<void>(harness.frame(70.0F, 110.0F, false, map));
+  static_cast<void>(harness.frame(70.0F, 110.0F, true, map));
+  static_cast<void>(harness.frame(70.0F, 110.0F, false, map));
+  // Begin typing the ordinary canvas source width before the replicated
+  // mapping changes to a UV mesh; hiding that field must release its focus.
+  static_cast<void>(harness.frame(420.0F, 448.0F, true, map));
+  static_cast<void>(harness.frame(420.0F, 448.0F, false, map));
+  MAPPING_CHECK(harness.ctx.typing());
+  auto& surface = map.surfaces.front();
+  surface.shape = output::ProjectionSurfaceShape::ImportedMesh;
+  surface.mesh_source = "calibration/feed-0.glb";
+  auto& feed = map.maps.front();
+  feed.projection = output::FeedProjection::PlanarSurface;
+  feed.surface = surface.node;
+  feed.source = scene::whole(surface.geometry.raster);
+  const auto changed = harness.frame(420.0F, 448.0F, false, map);
+  MAPPING_CHECK(!harness.ctx.typing());
+  MAPPING_CHECK(!changed.edit && !changed.projection_edit);
+  static_cast<void>(harness.frame(420.0F, 448.0F, true, map));
+  const auto hidden = harness.frame(390.0F, 448.0F, true, map);
+  const auto released = harness.frame(390.0F, 448.0F, false, map);
+  MAPPING_CHECK(!hidden.edit && !hidden.projection_edit);
+  MAPPING_CHECK(!released.edit && !released.projection_edit);
+  MAPPING_CHECK(!harness.ctx.typing());
+
+  static_cast<void>(harness.frame(240.0F, 409.0F, true, map));
+  const auto moved = harness.frame(263.0F, 409.0F, true, map);
+  MAPPING_CHECK(moved.edit.has_value());
+  MAPPING_CHECK(moved.edit->viewport.x == feed.viewport.x + 23U);
+  MAPPING_CHECK(!moved.projection_edit);
 }
 
 void feed_mapping_adds_another_viewport_to_the_current_window() {
@@ -2305,7 +2403,13 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 43U> cases{{
+constexpr std::array<Case, 46U> cases{{
+    {"UV mesh source crop is hidden while destination stays editable",
+     &imported_mesh_hides_source_crop_but_keeps_destination_fields},
+    {"numeric rectangles release focus when removed or hidden",
+     &numeric_rectangles_release_focus_when_removed_or_hidden},
+    {"source and destination pixel fields are independent",
+     &numeric_rectangles_keep_source_and_destination_independent},
     {"wall colour controls author only the selected surface",
      &wall_colour_controls_author_only_the_selected_surface},
     {"isometric projection round trips grid cells",

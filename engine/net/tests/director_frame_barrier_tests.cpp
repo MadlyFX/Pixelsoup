@@ -597,6 +597,10 @@ void runtime_asset_adoption_requires_live_not_catching_up() {
     const auto after = first.seal.frame.after_cursor();
     BARRIER_CHECK(fixture.barrier.register_live(registration(
         10U, 20U, genesis_cursor(), 1U, 1U, node_index)));
+    const auto catching_up = fixture.barrier.node_connection(node_index);
+    BARRIER_CHECK(catching_up.state == net::DirectorNodeConnection::State::CatchingUp);
+    BARRIER_CHECK(catching_up.committed_frame == 0U);
+    BARRIER_CHECK(catching_up.target_frame == 1U);
     BARRIER_CHECK(fixture.barrier.on_heartbeat_ack(
         id(10U),
         net::HeartbeatAcknowledgementReport{
@@ -621,6 +625,9 @@ void runtime_asset_adoption_requires_live_not_catching_up() {
             net::FrameAcknowledgementKind::Committed, 4U, 101U, after)));
     BARRIER_CHECK(fixture.barrier.runtime_assets_ready(
         manifest_digest, required));
+    BARRIER_CHECK(fixture.barrier.node_connection(node_index).state ==
+        net::DirectorNodeConnection::State::Live);
+    BARRIER_CHECK(fixture.barrier.node_connection(node_index).committed_frame == 1U);
 }
 
 void runtime_renderer_readiness_is_validated_live_session_state() {

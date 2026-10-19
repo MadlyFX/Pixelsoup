@@ -14,7 +14,7 @@
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/wire/protocol_codec.hpp>
 
-// Per-user, per-machine settings: the recent project, and the operator's
+// Per-user, per-machine settings: recent projects, and the operator's
 // cluster/control preferences.
 //
 // None of this is a document node and none of it ever lives beside a project:
@@ -24,8 +24,9 @@
 // its ordinary untitled project.
 namespace mediaserver::persist {
 
-inline constexpr std::uint16_t current_recent_project_format_version = 1U;
+inline constexpr std::uint16_t current_recent_project_format_version = 2U;
 inline constexpr std::size_t max_recent_project_path_bytes = 32U * 1024U;
+inline constexpr std::size_t max_recent_projects = 5U;
 
 enum class SettingsErrorCode {
     SettingsUnavailable,
@@ -59,6 +60,8 @@ using RecentProjectPathLoadResult =
     core::Result<std::optional<std::filesystem::path>, SettingsError>;
 using RecentProjectPathSaveResult =
     core::Result<std::filesystem::path, SettingsError>;
+using RecentProjectPathsLoadResult =
+    core::Result<std::vector<std::filesystem::path>, SettingsError>;
 
 // The platform's per-user settings file. Windows uses LOCALAPPDATA, Unix uses
 // XDG_CONFIG_HOME (or HOME/.config). Failure is a normal, nonfatal condition
@@ -72,9 +75,13 @@ using RecentProjectPathSaveResult =
 [[nodiscard]] RecentProjectPathLoadResult
 load_recent_project_path(const std::filesystem::path &settings_file);
 
-// Stores an absolute, lexically-normal UTF-8 project path. The new setting is
-// written to an exclusive sibling temporary file, flushed, and atomically
-// installed; a failure before replacement preserves the old setting.
+// Most recently opened or saved first. Missing settings return an empty list.
+[[nodiscard]] RecentProjectPathsLoadResult
+load_recent_project_paths(const std::filesystem::path &settings_file);
+
+// Moves an absolute, lexically-normal UTF-8 project path to the front of the
+// bounded list. The setting is atomically replaced; a failure before replacement
+// preserves the old setting.
 [[nodiscard]] RecentProjectPathSaveResult
 save_recent_project_path(const std::filesystem::path &settings_file,
                          const std::filesystem::path &project_file);

@@ -1,8 +1,10 @@
 #include "playback.hpp"
 #include "asset_activation.hpp"
 #include "clip_clipboard.hpp"
+#include "clip_timing_authoring.hpp"
 #include "cluster_observability.hpp"
 #include "edit_coalescing_policy.hpp"
+#include "model_source_authoring.hpp"
 #include "ffmpeg_proxy_encoder.hpp"
 #include "key_clipboard.hpp"
 #include "output_deployment.hpp"
@@ -65,6 +67,7 @@
 #include "timeline_edit_integration.hpp"
 
 #include <mediaserver/editor/editor_shell.hpp>
+#include "source_replacement_authoring.hpp"
 #include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/persist/settings.hpp>
 #include <mediaserver/render/environment_cache.hpp>
@@ -1871,6 +1874,13 @@ public:
         return entries_;
     }
 
+    void reset() noexcept {
+        for (Entry &entry : entries_) {
+            entry.channel.reset();
+            entry.lens = {};
+        }
+    }
+
 private:
     std::vector<Entry> entries_;
 };
@@ -2478,6 +2488,14 @@ transform_property(scene::TransformChannel component) noexcept {
         return scene::schema::color_b;
     case scene::PropertyChannel::LightRange:
         return scene::schema::range;
+    case scene::PropertyChannel::CameraFieldOfView:
+        return scene::schema::fov_turns;
+    case scene::PropertyChannel::CameraShutter:
+        return scene::schema::shutter_seconds;
+    case scene::PropertyChannel::CameraFocusDistance:
+        return scene::schema::focus_distance_m;
+    case scene::PropertyChannel::CameraAperture:
+        return scene::schema::aperture_f_number;
     case scene::TransformChannel::Count:
         break;
     }
@@ -2625,6 +2643,8 @@ transform_property(scene::TransformChannel component) noexcept {
                        : scene::ShadowTier::Medium);
         }
         info.material.base_color = info.color;
+        info.material.base_color_texture = std::string{text_of(
+            doc_node, scene::schema::base_color_texture, "")};
         info.material.roughness = number(scene::schema::roughness, 0.5);
         info.material.metallic = number(scene::schema::metallic, 0.0);
         info.material.emissive =
@@ -3122,8 +3142,18 @@ transform_property(scene::TransformChannel component) noexcept {
         const bool clip=edit.property==scene::schema::animation_clip;
         const auto value=static_cast<std::int64_t>(std::llround(std::clamp(edit.value,clip?0.0:2.0,clip?63.0:1000000.0)));
         updated.properties.insert_or_assign(edit.property,doc::PropertyValue{value});
+    } else if (edit.property == scene::schema::source && edit.text.has_value()) {
+        return schedule_model_source_edit(scheduler, edit.node, *edit.text,
+            cmd::TransactionId{edit.gesture}, apply_at, coalescing);
     } else if (edit.property == scene::schema::ies_source && edit.text.has_value()) {
         if (existing->type != scene::schema::light_type || edit.text->size() > 1024U) return true;
+        updated.properties.insert_or_assign(edit.property, doc::PropertyValue{*edit.text});
+    } else if ((edit.property == scene::schema::base_color_texture ||
+                edit.property == scene::schema::metallic_roughness_texture ||
+                edit.property == scene::schema::normal_texture ||
+                edit.property == scene::schema::occlusion_texture ||
+                edit.property == scene::schema::emissive_texture) && edit.text.has_value()) {
+        if (existing->type != scene::schema::object_type || edit.text->size() > 1024U) return true;
         updated.properties.insert_or_assign(edit.property, doc::PropertyValue{*edit.text});
     } else if (edit.property == scene::schema::box_blur_radius) {
         if (!std::isfinite(edit.value)) {
@@ -3515,22 +3545,6 @@ void write_clip_timing(doc::Node &node, const scene::ClipTiming &timing) {
         whole(static_cast<std::int64_t>(timing.fade_out)));
 }
 
-// A placement the scene model will accept: nothing negative, at least one
-// frame long, and ramps that fit inside the clip. The editor already clamps
-// these, but the authoring boundary is what the document has to trust.
-[[nodiscard]] scene::ClipTiming
-sane_clip_timing(const scene::ClipTiming &timing) noexcept {
-    scene::ClipTiming result{};
-    result.start = std::max(timing.start, std::int64_t{0});
-    result.duration = std::max(timing.duration, std::int64_t{1});
-    result.source_in = std::max(timing.source_in, std::int64_t{0});
-    result.fade_in =
-        std::clamp(timing.fade_in, std::int64_t{0}, result.duration);
-    result.fade_out =
-        std::clamp(timing.fade_out, std::int64_t{0}, result.duration);
-    return result;
-}
-
 [[nodiscard]] bool schedule_clip_timing(cmd::DirectorScheduler &scheduler,
                                         const editor::ClipTimingEdit &edit,
                                         cmd::FrameNumber apply_at) {
@@ -3540,7 +3554,17 @@ sane_clip_timing(const scene::ClipTiming &timing) noexcept {
         return true;
     }
     doc::Node updated = *existing;
-    write_clip_timing(updated, sane_clip_timing(edit.timing));
+    core::u32 sequence_count{1U};
+    if (const auto found = existing->properties.find(scene::schema::sequence_count);
+        found != existing->properties.end()) {
+        const auto* count = std::get_if<std::int64_t>(&found->second);
+        if (!count || *count <= 0 ||
+            static_cast<core::u64>(*count) > std::numeric_limits<core::u32>::max()) return true;
+        sequence_count = static_cast<core::u32>(*count);
+    }
+    const auto timing = normalise_clip_timing(edit.timing, sequence_count);
+    if (!timing) return true;
+    write_clip_timing(updated, *timing);
     if (edit.lane.has_value()) {
         // The implicit lane is the absence of the property, not a zero value:
         // the scene model rejects a lane_id of zero as malformed.
@@ -3564,23 +3588,25 @@ sane_clip_timing(const scene::ClipTiming &timing) noexcept {
 
 // Cuts one placement in two at `frame`. The left half keeps the node and loses
 // its tail; the right half is a new node with the same source, the same
-// transform, and its trim advanced by exactly the frames the left half kept,
-// so the two together show what the one clip showed. The tail ramp travels to
+// transform, and its trim advanced at the native source cadence to the frame
+// visible at the cut. The integer source phase restarts on that frame; a
+// fractional-rate cut does not retain a subframe cadence remainder. The tail ramp travels to
 // the right half and the head ramp stays with the left, because those are the
 // ends that still exist.
 [[nodiscard]] bool schedule_clip_split(cmd::DirectorScheduler &scheduler,
                                        const editor::ClipSplitIntent &request,
                                        doc::NodeId id,
-                                       cmd::FrameNumber apply_at) {
+                                       cmd::FrameNumber apply_at,
+                                       scene::MediaFrameRate show_rate) {
     const auto *const existing =
         scheduler.projected_document().get(request.clip);
     if (existing == nullptr || existing->type != scene::schema::media_type) {
         return true;
     }
-    const auto read = [existing](std::string_view name) -> std::int64_t {
+    const auto read = [existing](std::string_view name, std::int64_t fallback = 0) -> std::int64_t {
         const auto found = existing->properties.find(name);
         if (found == existing->properties.end()) {
-            return 0;
+            return fallback;
         }
         const auto *const value = std::get_if<std::int64_t>(&found->second);
         return value != nullptr ? *value : 0;
@@ -3591,33 +3617,31 @@ sane_clip_timing(const scene::ClipTiming &timing) noexcept {
     timing.source_in = read(scene::schema::source_in);
     timing.fade_in = read(scene::schema::fade_in);
     timing.fade_out = read(scene::schema::fade_out);
-    const auto cut = static_cast<std::int64_t>(std::min(
-        request.frame,
-        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max())));
-    if (!timing.placed() || cut <= timing.start || cut > timing.last_frame()) {
+    const auto count = read(scene::schema::sequence_count, 1);
+    if (count <= 0 || static_cast<core::u64>(count) > std::numeric_limits<core::u32>::max()) return true;
+    std::optional<scene::MediaFrameRate> source_rate;
+    const auto numerator = read(scene::schema::source_rate_numerator);
+    const auto denominator = read(scene::schema::source_rate_denominator);
+    if (numerator != 0 || denominator != 0) {
+        if (numerator <= 0 || denominator <= 0 ||
+            static_cast<core::u64>(numerator) > std::numeric_limits<core::u32>::max() ||
+            static_cast<core::u64>(denominator) > std::numeric_limits<core::u32>::max()) return true;
+        source_rate = scene::MediaFrameRate{static_cast<core::u32>(numerator),
+                                           static_cast<core::u32>(denominator)};
+    }
+    const auto split = split_clip_timing(timing, request.frame,
+        static_cast<core::u32>(count), show_rate, source_rate);
+    if (!split) {
         // Nothing to cut, or a cut that would produce an empty half. A split
         // is never allowed to become a delete.
         return true;
     }
 
-    const std::int64_t left_length = cut - timing.start;
-    scene::ClipTiming left = timing;
-    left.duration = left_length;
-    left.fade_in = std::min(timing.fade_in, left_length);
-    left.fade_out = 0;
-
-    scene::ClipTiming right = timing;
-    right.start = cut;
-    right.duration = timing.duration - left_length;
-    right.source_in = timing.source_in + left_length;
-    right.fade_in = 0;
-    right.fade_out = std::min(timing.fade_out, right.duration);
-
     doc::Node head = *existing;
-    write_clip_timing(head, left);
+    write_clip_timing(head, split->left);
     doc::Node tail = *existing;
     tail.id = id;
-    write_clip_timing(tail, right);
+    write_clip_timing(tail, split->right);
 
     const cmd::UndoContextId context{2U};
     const cmd::TransactionId transaction{request.gesture};
@@ -7244,7 +7268,8 @@ bool parse_show_range(std::string_view value, show::ShowFrame &first,
 bool valid_playback_options(const PlaybackOptions &options) noexcept {
     return show::ShowClock::valid_configuration(clock_config(options)) &&
            options.surface_width != 0U && options.surface_height != 0U &&
-           options.surface_width <= 7'680U && options.surface_height <= 4'320U;
+           options.surface_width <= core::max_output_dimension &&
+           options.surface_height <= core::max_output_dimension;
 }
 
 int run_node_playback(net::NodeSessionService &service,
@@ -7370,6 +7395,7 @@ int run_node_playback(net::NodeSessionService &service,
     scene::SceneModel scene_model;
     core::u64 scene_version = 0U;
     bool scene_loaded = false;
+    bool node_checkpoint_waiting = false;
     compositor::CompositorModel compositor_model;
     core::u64 compositor_version = 0U;
     bool compositor_loaded = false;
@@ -7796,6 +7822,16 @@ int run_node_playback(net::NodeSessionService &service,
         }
 
         const auto report = std::move(ticked).value();
+        if (!service.running()) {
+            const auto session_status = service.snapshot();
+            if (session_status.state == net::NodeSessionServiceState::Faulted) {
+                std::cerr << "node session faulted (reason "
+                          << static_cast<unsigned>(session_status.last_failure)
+                          << "); stopping the render process so Output Monitor "
+                             "can report and restart it\n";
+                return 1;
+            }
+        }
         boundaries += report.boundaries;
         last_outcome = report.last_outcome;
         // The loop wakes more often than the show rate so shutdown stays
@@ -7813,12 +7849,24 @@ int run_node_playback(net::NodeSessionService &service,
 
         std::size_t skipped = 0U;
         show::PublishedFrame incoming{};
+        if (report.checkpoint_activated) {
+            node_checkpoint_waiting = true;
+            // A checkpoint can rewind the stream. If this tick published no
+            // new approved frame, the mailbox contains only the old stream.
+            // Retire it while the connector keeps its last complete image.
+            if (report.published == 0U &&
+                driver.mailbox().consume_latest(incoming, skipped, &retired)) {
+                static_cast<void>(retired.retire(std::move(incoming.root)));
+                incoming = {};
+            }
+        }
         // Only a cabled Render Server the Hardware Map lists is in the
         // Director's asset cohort. Any other output is never sent a retry, so
         // it holds no activation: it shows a set as soon as its own renderer
         // has it.
         const auto asset_frame =
-            active_deployment.render_server != doc::NodeId{}
+            !node_checkpoint_waiting &&
+                    active_deployment.render_server != doc::NodeId{}
                 ? held_asset_activation(node_renderer_readiness.assets,
                                         node_asset_commit,
                                         presented.control_frame.value(),
@@ -7829,6 +7877,23 @@ int run_node_playback(net::NodeSessionService &service,
         if (!retain_activation &&
             driver.mailbox().consume_latest(incoming, skipped, &retired,
                                             cmd::FrameNumber{asset_frame})) {
+            if (node_checkpoint_waiting ||
+                (incoming.version == presented.version &&
+                 !incoming.root.same_snapshot(presented.root))) {
+                // Versions are local to a document stream. A replacement
+                // root can reuse the same number with different content.
+                scene_loaded = compositor_loaded = feed_loaded = false;
+                node_assets_loaded = node_hardware_loaded = node_sync_loaded = false;
+                node_pose_channels.reset();
+                node_last_pose_sequence = 0U;
+                output_playback_buffer = OutputPlaybackBuffer{
+                    options.active_preferences.output_buffer_frames};
+                for (NodeOutputPresenter &slot : output_presenters) {
+                    slot.submission.reset();
+                    slot.presenter->begin_document_stream();
+                }
+            }
+            node_checkpoint_waiting = false;
             // The outgoing root is parked rather than released here; the ring
             // is drained below, away from the boundary.
             static_cast<void>(retired.retire(std::move(presented.root)));
@@ -8127,7 +8192,7 @@ int run_node_playback(net::NodeSessionService &service,
                 node_assets_loaded = true;
             }
             if (rechecked) {
-                const bool ready = node_asset_availability.ready();
+                const bool ready = node_asset_availability.render_ready();
                 const bool readiness_changed =
                     ready != node_asset_runtime_ready;
                 node_asset_runtime_ready = ready;
@@ -8140,7 +8205,7 @@ int run_node_playback(net::NodeSessionService &service,
                 }
                 // One line per actual change, not per retry. The ongoing state
                 // belongs on the Output Monitor, not in a five-second log.
-                if (!ready && (digest_changed || readiness_changed)) {
+                if (!node_asset_availability.ready() && (digest_changed || readiness_changed)) {
                     for (const ProjectAssetPresence &presence :
                          node_asset_availability.assets) {
                         if (!presence.present) {
@@ -8345,7 +8410,17 @@ int run_node_playback(net::NodeSessionService &service,
             }
         }
 
-        if (render_output) {
+        if (node_checkpoint_waiting) {
+            // The checkpoint's root is staged state, not an image permit.
+            // Keep the last complete connector image until a frame from the
+            // replacement stream has actually been committed and published.
+            for (NodeOutputPresenter &slot : output_presenters) {
+                if (slot.presenter->hold() == show::PresenterStatus::Closed) {
+                    status = show::PresenterStatus::Closed;
+                    break;
+                }
+            }
+        } else if (render_output) {
             if (!feed_loaded || presented.version.value() != feed_version) {
                 feed_model.reset(presented.root);
                 feed_version = presented.version.value();
@@ -8698,7 +8773,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::LibraryProxyRuntimeObservation> library_proxy_runtime;
     auto next_output_media_projection = Clock::time_point::min();
     auto next_editor_refresh = Clock::time_point::min();
+    constexpr auto editor_refresh_interval = std::chrono::nanoseconds{16'666'667};
     std::optional<cmd::FrameNumber> last_editor_control_frame;
+    core::u64 editor_frame_calls{};
     std::optional<std::filesystem::path> workspace_layout_file;
     persist::WorkspaceLayoutBytes workspace_layout;
     if (options.edit) {
@@ -9030,6 +9107,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::AssetImportIntent> pending_asset_imports;
     std::vector<editor::AssetDeleteIntent> pending_asset_deletes;
     std::vector<editor::AssetProxyEditIntent> pending_asset_proxy_edits;
+    std::vector<editor::SourceReplacementIntent> pending_source_replacements;
     std::vector<editor::EffectIntent> pending_effects;
     std::vector<editor::FilmGrainEffectEditIntent>
         pending_film_grain_effect_edits;
@@ -9054,7 +9132,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::FeedSurfaceAddRequest> pending_feed_surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> pending_feed_surface_deletes;
-    std::optional<editor::CompositorAddIntent> pending_compositor_add;
+    std::vector<editor::CompositorAddIntent> pending_compositor_adds;
     std::optional<editor::CompositorMoveIntent> pending_compositor_move;
     std::optional<editor::CompositorConnectIntent> pending_compositor_connect;
     std::optional<editor::CompositorPropertyEditIntent>
@@ -9079,6 +9157,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // boundary, so both paths share transport/switcher/WAL validation.
     std::optional<doc::Root> pending_preloaded_project;
     std::optional<std::filesystem::path> recent_project_settings_file;
+    std::vector<std::string> recent_project_paths;
     std::string project_path;
     std::string project_message = recovered_session
                                       ? std::string{"RECOVERED UNSAVED CHANGES"}
@@ -9155,6 +9234,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                         settings_file.error());
         } else {
             recent_project_settings_file = settings_file.value();
+            auto paths = persist::load_recent_project_paths(*recent_project_settings_file);
+            if (paths) {
+                for (const auto &path : paths.value()) {
+                    recent_project_paths.push_back(native_path_to_utf8(path));
+                }
+            } else {
+                report_recent_project_error("could not read", paths.error());
+            }
             auto recent =
                 persist::open_recent_project(*recent_project_settings_file);
             if (!recent) {
@@ -9235,6 +9322,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         }
     }
     const auto remember_recent_project = [&recent_project_settings_file,
+                                          &recent_project_paths,
                                           &report_recent_project_error](
                                              std::string_view path) {
         if (!recent_project_settings_file.has_value()) {
@@ -9247,6 +9335,18 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         } else if (!remembered) {
             report_recent_project_error("updated without confirmed durability",
                                         remembered.error());
+        }
+        if (remembered || remembered.error().committed) {
+            auto paths = persist::load_recent_project_paths(
+                *recent_project_settings_file);
+            if (paths) {
+                recent_project_paths.clear();
+                for (const auto &item : paths.value()) {
+                    recent_project_paths.push_back(native_path_to_utf8(item));
+                }
+            } else {
+                report_recent_project_error("could not read", paths.error());
+            }
         }
     };
     // The next id to try for a created element; advanced past any occupied id
@@ -9290,6 +9390,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         pending_asset_imports.clear();
         pending_asset_deletes.clear();
         pending_asset_proxy_edits.clear();
+        pending_source_replacements.clear();
         pending_effects.clear();
         pending_film_grain_effect_edits.clear();
         pending_effect_deletes.clear();
@@ -9310,7 +9411,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         pending_feed_surface_adds.clear();
         pending_feed_surface_edits.clear();
         pending_feed_surface_deletes.clear();
-        pending_compositor_add.reset();
+        pending_compositor_adds.clear();
         pending_compositor_move.reset();
         pending_compositor_connect.reset();
         pending_compositor_property.reset();
@@ -9840,7 +9941,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                 frame);
                         } else if (transport_valid) {
                             // A project predating persisted transport settings
-                            // gets the launch/default cadence (50 fps unless an
+                            // gets the launch/default cadence (24 fps unless an
                             // explicit --show-rate was supplied), never the
                             // settings of whichever project happened to be
                             // open.
@@ -10470,7 +10571,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     pending_film_grain_effect_edits.clear();
                     pending_effect_deletes.clear();
                     pending_deletes.clear();
-                    pending_compositor_add.reset();
+                    pending_compositor_adds.clear();
+                    pending_source_replacements.clear();
                     pending_compositor_move.reset();
                     pending_compositor_connect.reset();
                     pending_compositor_property.reset();
@@ -10845,7 +10947,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                         ++next_new_node;
                     }
                     const doc::NodeId id{next_new_node++};
-                    if (!schedule_clip_split(scheduler, split, id, frame)) {
+                    if (!schedule_clip_split(scheduler, split, id, frame,
+                            scene::MediaFrameRate{transport.anchor().rate.numerator,
+                                                   transport.anchor().rate.denominator})) {
                         std::cerr << "could not split a clip for frame "
                                   << frame.value() << '\n';
                         return 1;
@@ -11377,6 +11481,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 }
                 pending_asset_deletes.clear();
+                for (const auto &request : pending_source_replacements) {
+                    if (!schedule_source_replacement(scheduler, request, frame)) {
+                        std::cerr << "could not replace an object source for frame "
+                                  << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                pending_source_replacements.clear();
                 for (const auto &request : pending_asset_proxy_edits) {
                     if (!schedule_asset_proxy_edit(scheduler, request, frame)) {
                         std::cerr << "could not author an asset proxy policy "
@@ -11658,14 +11770,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     }
                 }
                 pending_feed_map_deletes.clear();
-                if (pending_compositor_add.has_value()) {
+                for (const auto &request : pending_compositor_adds) {
                     while (scheduler.projected_document().contains(
                         doc::NodeId{next_new_node})) {
                         ++next_new_node;
                     }
                     const doc::NodeId id{next_new_node++};
                     if (!schedule_compositor_add(
-                            scheduler, *pending_compositor_add, id,
+                            scheduler, request, id,
                             authoring_scene(), pending_compositor_gesture,
                             frame)) {
                         std::cerr
@@ -11673,8 +11785,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                             << frame.value() << '\n';
                         return 1;
                     }
-                    pending_compositor_add.reset();
                 }
+                pending_compositor_adds.clear();
                 if (pending_compositor_move.has_value()) {
                     if (!schedule_compositor_move(
                             scheduler, *pending_compositor_move,
@@ -13052,15 +13164,16 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         bool handled = false;
 #if defined(MEDIASERVER_HAS_GUI)
         if (options.edit && editor) handled = true;
-        // The control loop polls between boundaries. Redrawing Program and
-        // Stage on every poll saturates the GPU and starves a separate output
-        // process, especially while the editor has foreground priority. Draw
-        // each control frame once; still refresh the UI at 30 Hz when a slow
-        // or missing external clock is not advancing the control frame.
-        if (handled && (last_editor_control_frame != control_frame ||
-                        now >= next_editor_refresh)) {
+        // Keep pointer feedback independent of the authored show rate. The
+        // control loop also wakes at this deadline, so a 50 Hz (or slower)
+        // show cannot cap panel interaction below 60 Hz. For faster shows,
+        // retain one preview per control frame. Rate-limit the preview work
+        // rather than rendering on every control-loop poll.
+        const bool fast_show = static_cast<core::u64>(input.rate.numerator) >
+            static_cast<core::u64>(input.rate.denominator) * 60U;
+        if (handled && (now >= next_editor_refresh ||
+                        (fast_show && last_editor_control_frame != control_frame))) {
             last_editor_control_frame = control_frame;
-            next_editor_refresh = now + std::chrono::milliseconds{33};
             // The timeline authors against the Stage playhead and reports the
             // Program one beside it, so an operator rehearsing at frame 900
             // can still read where the live show is.
@@ -13271,7 +13384,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 blender_state ? std::span<const render::BlenderInstance>{blender_state->instances} : std::span<const render::BlenderInstance>{},
                 blender_preview_instance, blender_connection_error.empty() && blender_state ? std::string_view{blender_state->error} : std::string_view{blender_connection_error},
                 preview_link && preview_link->connected, blender_scene_states, blender_bound_names,
-                publication_default_storage};
+                publication_default_storage,recent_project_paths};
             std::vector<editor::OutputMonitorState::Node> output_nodes;
             topology::HardwareRuntimeSnapshot hardware_runtime;
             if (lifecycle_controller) {
@@ -13279,7 +13392,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 try {
                     lifecycle_controller->sync(hardware_map, asset_manifest,
                                                project_generation);
-                    output_nodes = lifecycle_controller->snapshot();
+                    output_nodes = lifecycle_controller->snapshot(&barrier);
                     hardware_runtime =
                         lifecycle_controller->hardware_snapshot();
                 } catch (const std::bad_alloc &) {
@@ -13335,7 +13448,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             // render nodes is an external concern in this build, so a node that
             // cannot yet prove it holds every file is a warning on the Output
             // Monitor rather than a hold on the switcher.
-            bool assets_adopted = director_asset_availability.ready();
+            bool assets_adopted = director_asset_availability.render_ready();
             if (assets_adopted && lifecycle_controller) {
                 assets_adopted = lifecycle_controller->program_ready(
                     asset_manifest, hardware_map, project_generation, barrier);
@@ -13754,6 +13867,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                                    input.control_frame.value(),
                                    timeline.program_frame,
                                    director_node_tracking);
+            next_editor_refresh = Clock::now() + editor_refresh_interval;
             auto editor_frame = editor->frame(
                 scene_frame, timeline, keyframes, elements, effects,
                 hardware_map, feed_map, switcher_view, asset_registry,
@@ -13764,6 +13878,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                 selection_set_summaries, key_scale_preview,
                 filmstrip_observations, live_data_view,
                 authored_tracking_sources, stage_markers);
+            ++editor_frame_calls;
             if (editor_frame.renderer_readiness.has_value()) {
                 const render::RendererReadiness &observed =
                     *editor_frame.renderer_readiness;
@@ -14441,6 +14556,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                     return 1;
                 }
             }
+            for (const auto &request : editor_frame.source_replacements) {
+                try {
+                    pending_source_replacements.push_back(request);
+                } catch (const std::bad_alloc &) {
+                    std::cerr << "could not queue a source replacement\n";
+                    return 1;
+                }
+            }
             for (const auto &request : editor_frame.asset_proxy_edits) {
                 try {
                     pending_asset_proxy_edits.push_back(request);
@@ -14547,8 +14670,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             if (editor_frame.sync_policy_edit.has_value()) {
                 pending_sync_policy = editor_frame.sync_policy_edit;
             }
-            if (editor_frame.compositor_add.has_value()) {
-                pending_compositor_add = editor_frame.compositor_add;
+            if (!editor_frame.compositor_adds.empty()) {
+                pending_compositor_adds.insert(pending_compositor_adds.end(),
+                    editor_frame.compositor_adds.begin(),
+                    editor_frame.compositor_adds.end());
                 pending_compositor_gesture = editor_frame.compositor_gesture;
             }
             if (editor_frame.compositor_move.has_value()) {
@@ -14805,7 +14930,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         if (options.run_frames != 0U && sealed >= options.run_frames) {
             break;
         }
-        sleep_until_boundary(pacer.next_boundary_at());
+        auto next_wake = pacer.next_boundary_at();
+#if defined(MEDIASERVER_HAS_GUI)
+        if (editor) {
+            next_wake = std::min(next_wake, next_editor_refresh);
+        }
+#endif
+        sleep_until_boundary(next_wake);
     }
 
     ClusterObservation final_cluster =
@@ -14826,8 +14957,13 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                       : (presenter && presenter->windowed() ? "window"
                                                             : "headless"))
               << " released-through="
-              << barrier.released_through().through_frame.value() << '\n'
-              << std::flush;
+              << barrier.released_through().through_frame.value();
+#if defined(MEDIASERVER_HAS_GUI)
+    if (options.edit) {
+        std::cout << " editor-frame-calls=" << editor_frame_calls;
+    }
+#endif
+    std::cout << '\n' << std::flush;
     return 0;
 }
 

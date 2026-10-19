@@ -14,6 +14,58 @@ bool copy_text_to_clipboard(const std::string& text) {
 }
 namespace {
 
+// Build each native tool cursor once from the same vector mark as its toolbar
+// button. A white outline keeps the black mark legible over any clip image.
+[[nodiscard]] SDL_Cursor* create_tool_cursor(Icon icon) {
+    constexpr int size = 32;
+    UiDrawList glyph;
+    draw_icon(glyph, icon, 16.0F, 16.0F, UiColor{0.0F, 0.0F, 0.0F, 1.0F}, 1.35F);
+    std::array<bool, size * size> ink{};
+    const auto& vertices = glyph.vertices();
+    const auto edge = [](const UiVertex& a, const UiVertex& b, float x, float y) {
+        return (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+    };
+    for (std::size_t i = 0; i + 2U < vertices.size(); i += 3U) {
+        const auto& a = vertices[i];
+        const auto& b = vertices[i + 1U];
+        const auto& c = vertices[i + 2U];
+        if (edge(a, b, c.x, c.y) == 0.0F) continue;
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                const float px = static_cast<float>(x) + 0.5F;
+                const float py = static_cast<float>(y) + 0.5F;
+                const float ab = edge(a, b, px, py);
+                const float bc = edge(b, c, px, py);
+                const float ca = edge(c, a, px, py);
+                if ((ab >= 0 && bc >= 0 && ca >= 0) ||
+                    (ab <= 0 && bc <= 0 && ca <= 0)) {
+                    ink[static_cast<std::size_t>(y * size + x)] = true;
+                }
+            }
+        }
+    }
+    std::array<Uint8, size * size / 8> data{};
+    std::array<Uint8, size * size / 8> mask{};
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const auto index = static_cast<std::size_t>(y * size + x);
+            const auto bit = static_cast<Uint8>(0x80U >> (x % 8));
+            if (ink[index]) data[index / 8U] |= bit;
+            bool covered = false;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = x + dx;
+                    const int ny = y + dy;
+                    if (nx >= 0 && nx < size && ny >= 0 && ny < size &&
+                        ink[static_cast<std::size_t>(ny * size + nx)]) covered = true;
+                }
+            }
+            if (covered) mask[index / 8U] |= bit;
+        }
+    }
+    return SDL_CreateCursor(data.data(), mask.data(), size, size, 16, 16);
+}
+
 [[nodiscard]] std::optional<MouseButton> button_of(Uint8 sdl_button) noexcept {
     switch (sdl_button) {
     case SDL_BUTTON_LEFT:
@@ -255,7 +307,7 @@ struct UiWindow::Impl final {
     float pixel_density{1.0F};
     bool closed{};
 
-    std::array<SDL_Cursor*, 7U> cursors{};
+    std::array<SDL_Cursor*, static_cast<std::size_t>(Cursor::Count)> cursors{};
     Cursor cursor{Cursor::Arrow};
     // Relative mouse mode, and where the cursor was when it began so it can
     // be put back there when it ends.
@@ -539,8 +591,14 @@ void UiWindow::set_cursor(Cursor cursor) noexcept {
         case Cursor::Move:
             system = SDL_SYSTEM_CURSOR_MOVE;
             break;
+        case Cursor::RippleTrim: shape = create_tool_cursor(Icon::Ripple); break;
+        case Cursor::Roll: shape = create_tool_cursor(Icon::Roll); break;
+        case Cursor::Slip: shape = create_tool_cursor(Icon::Slip); break;
+        case Cursor::Slide: shape = create_tool_cursor(Icon::Slide); break;
+        case Cursor::Razor: shape = create_tool_cursor(Icon::Razor); break;
+        case Cursor::Count: return;
         }
-        shape = SDL_CreateSystemCursor(system);
+        if (shape == nullptr) shape = SDL_CreateSystemCursor(system);
     }
     if (shape != nullptr && SDL_SetCursor(shape)) {
         impl_->cursor = cursor;

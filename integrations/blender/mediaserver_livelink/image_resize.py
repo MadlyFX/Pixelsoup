@@ -1,5 +1,6 @@
 """Worker-side image preparation using Blender's bundled codecs in isolation."""
 import json
+import io
 from pathlib import Path
 import struct
 import subprocess
@@ -10,7 +11,7 @@ import time
 
 def dimensions(path):
     """Read PNG/JPEG dimensions without decoding pixels in the authoring UI."""
-    with Path(path).open('rb') as stream:
+    with (io.BytesIO(path) if isinstance(path, bytes) else Path(path).open('rb')) as stream:
         header = stream.read(24)
         if header.startswith(b'\x89PNG\r\n\x1a\n') and header[12:16] == b'IHDR' and len(header) == 24:
             return struct.unpack('>II', header[16:24])

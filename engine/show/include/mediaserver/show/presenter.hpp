@@ -362,6 +362,11 @@ public:
     // rather than failing every frame of it.
     [[nodiscard]] virtual bool renders_scenes() const noexcept { return false; }
 
+    // Checkpoint replacement starts a new document stream. Forget publication
+    // ordinals from the previous stream while retaining its displayed image
+    // until the replacement is approved and complete. No I/O or GPU wait.
+    virtual void begin_document_stream() noexcept {}
+
     // Presents this node's slice of a 3D scene put through its feed map: the
     // scene is rendered for the map's source rectangle, then the output stage
     // places it in the map's viewport inside the fixed window raster. This is

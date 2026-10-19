@@ -485,6 +485,52 @@ void multiple_viewports_composite_into_one_mosaic_window() {
     readback.value().unmap();
 }
 
+void studio_mosaic_raster_places_four_viewports_exactly() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    rhi::DeviceConfig config{};
+    config.debug = false;
+    config.backend = rhi::BackendKind::D3d12;
+    auto opened = rhi::Device::create(config);
+    RENDER_CHECK(opened);
+    auto device = std::move(opened).value();
+    constexpr core::u32 width = 15'360U;
+    constexpr core::u32 height = 1'546U;
+    const std::vector<core::u8> reference{
+        64U, 128U, 192U, 255U, 64U, 128U, 192U, 255U,
+        64U, 128U, 192U, 255U, 64U, 128U, 192U, 255U};
+    const auto source = upload_source(device, 2U, 2U, reference);
+    auto created = render::OutputTransform::create(device, width, height);
+    RENDER_CHECK(created);
+    auto transform = std::move(created).value();
+    auto readback = device.create_readback(width * height * 4U);
+    RENDER_CHECK(readback);
+    auto acquired = device.acquire_commands();
+    RENDER_CHECK(acquired);
+    auto commands = std::move(acquired).value();
+    RENDER_CHECK(transform.clear(commands));
+    for (core::u32 index = 0U; index < 4U; ++index) {
+        RENDER_CHECK(transform.composite(commands, source,
+            mediaserver::scene::CanvasRect{index * 3'840U, 0U, 3'456U, 1'536U}));
+    }
+    RENDER_CHECK(commands.download(transform.target(), readback.value()));
+    auto submitted = device.submit(std::move(commands));
+    RENDER_CHECK(submitted);
+    RENDER_CHECK(std::move(submitted).value().wait());
+    const auto pixels = readback.value().map();
+    RENDER_CHECK(pixels.size() >= static_cast<std::size_t>(width) * height * 4U);
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < width; ++x) {
+            const bool inside = y < 1'536U && x % 3'840U < 3'456U;
+            const auto offset = (static_cast<std::size_t>(y) * width + x) * 4U;
+            RENDER_CHECK(pixels[offset] == (inside ? 64U : 0U));
+            RENDER_CHECK(pixels[offset + 1U] == (inside ? 128U : 0U));
+            RENDER_CHECK(pixels[offset + 2U] == (inside ? 192U : 0U));
+            RENDER_CHECK(pixels[offset + 3U] == 255U);
+        }
+    }
+    readback.value().unmap();
+}
+
 // binary16 back to binary32, so a reference computation starts from exactly
 // the value the GPU sampled rather than the value it was asked to store.
 [[nodiscard]] float half_value(core::u16 bits) noexcept {
@@ -799,7 +845,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"studio Mosaic raster has exact viewports and black gaps",
+     &studio_mosaic_raster_places_four_viewports_exactly},
     {"the output pass copies the source through",
      &the_output_pass_copies_the_source_through},
     {"scene linear output goes through the baked table",

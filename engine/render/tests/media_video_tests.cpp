@@ -2,7 +2,14 @@
 
 #include "../src/ffmpeg_source_test_support.hpp"
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+}
+
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -433,12 +440,178 @@ void buffered_output_raises_the_decode_cache_without_allocating_it() {
     VIDEO_CHECK(selected.ready_frames == defaults.ready_frames);
 }
 
+void speculative_publication_preserves_current_frames_with_a_full_cache() {
+    struct RestoreDecodeLimits {
+        ~RestoreDecodeLimits() {
+            render::configure_buffered_output_media_decode(
+                render::MediaDecodeConfig{512U * 1024U * 1024U, 48U, 6U, 0U});
+        }
+    } restore_limits;
+    render::configure_buffered_output_media_decode(
+        render::MediaDecodeConfig{2048U, 2U, 6U, 0U});
+    const auto directory = std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path_a = (directory / "cache-demand-a.mp4").string();
+    const auto path_b = (directory / "cache-demand-b.mp4").string();
+    write_fixture(path_a);
+    write_fixture(path_b);
+    auto source = render::make_media_source();
+    const auto current_a = await_frame(*source, path_a, 0U, 901U);
+    const auto current_b = await_frame(*source, path_b, 0U, 902U);
+    VIDEO_CHECK(current_a->valid() && current_b->valid());
+    const auto before = render::media_decode_stats().completed_frames;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (render::media_decode_stats().completed_frames == before &&
+           std::chrono::steady_clock::now() < deadline) {
+        source->prefetch(path_a, 1U, 901U);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const auto after = render::media_decode_stats();
+    VIDEO_CHECK(after.completed_frames > before);
+    VIDEO_CHECK(after.ready_bytes <= 2048U && after.ready_frames <= 2U);
+    // Identity proves neither current frame had to be decoded again after
+    // the speculative result arrived into an already full two-frame cache.
+    VIDEO_CHECK(await_frame(*source, path_a, 0U, 901U).get() == current_a.get());
+    VIDEO_CHECK(await_frame(*source, path_b, 0U, 902U).get() == current_b.get());
+    VIDEO_CHECK(render::media_decode_stats().completed_frames == after.completed_frames);
+}
+
 struct Case final {
     const char *name;
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+// Generate tiny intraframe fixtures with the linked codec library, then read
+// them through the shipping asynchronous source. No ffmpeg CLI or user media
+// is needed, and the expected grey levels come from independently authored
+// YUV samples rather than a second invocation of the playback decoder.
+struct CodecFixtureWriter final {
+    AVFormatContext* format{};
+    AVCodecContext* codec{};
+    AVFrame* frame{};
+    AVPacket* packet{};
+    ~CodecFixtureWriter() {
+        av_packet_free(&packet);
+        av_frame_free(&frame);
+        avcodec_free_context(&codec);
+        if (format != nullptr) {
+            if (format->pb != nullptr) avio_closep(&format->pb);
+            avformat_free_context(format);
+        }
+    }
+};
+
+void professional_intraframe_codec_decodes(AVCodecID id, int profile, bool ten_bit,
+                                          const char* name) {
+    const auto directory = std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path = (directory / (std::string{name} + ".mov")).string();
+    {
+        CodecFixtureWriter writer;
+        const AVCodec* encoder = avcodec_find_encoder(id);
+        VIDEO_CHECK(encoder != nullptr);
+        writer.codec = avcodec_alloc_context3(encoder);
+        VIDEO_CHECK(writer.codec != nullptr);
+        writer.codec->width = 256;
+        writer.codec->height = 128;
+        writer.codec->time_base = AVRational{1, 24};
+        writer.codec->framerate = AVRational{24, 1};
+        writer.codec->pix_fmt = ten_bit ? AV_PIX_FMT_YUV422P10LE : AV_PIX_FMT_YUV422P;
+        writer.codec->profile = profile;
+        if (id == AV_CODEC_ID_DNXHD) {
+            // DNxHR selects its profile through the encoder's private AVOption;
+            // AVCodecContext::profile alone leaves the DNxHD default active.
+            VIDEO_CHECK(av_opt_set_int(writer.codec->priv_data, "profile", profile, 0) >= 0);
+        }
+        writer.codec->thread_count = 1;
+        writer.codec->colorspace = AVCOL_SPC_BT709;
+        writer.codec->color_range = AVCOL_RANGE_MPEG;
+        VIDEO_CHECK(avcodec_open2(writer.codec, encoder, nullptr) >= 0);
+        VIDEO_CHECK(avformat_alloc_output_context2(&writer.format, nullptr, "mov", path.c_str()) >= 0);
+        VIDEO_CHECK(writer.format != nullptr);
+        AVStream* stream = avformat_new_stream(writer.format, nullptr);
+        VIDEO_CHECK(stream != nullptr);
+        stream->time_base = writer.codec->time_base;
+        stream->avg_frame_rate = writer.codec->framerate;
+        VIDEO_CHECK(avcodec_parameters_from_context(stream->codecpar, writer.codec) >= 0);
+        VIDEO_CHECK(avio_open(&writer.format->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+        VIDEO_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+        writer.frame = av_frame_alloc();
+        writer.packet = av_packet_alloc();
+        VIDEO_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+        writer.frame->format = writer.codec->pix_fmt;
+        writer.frame->width = writer.codec->width;
+        writer.frame->height = writer.codec->height;
+        VIDEO_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+        const auto drain = [&] {
+            int status{};
+            while ((status = avcodec_receive_packet(writer.codec, writer.packet)) == 0) {
+                if (writer.packet->duration == 0) writer.packet->duration = 1;
+                av_packet_rescale_ts(writer.packet, writer.codec->time_base, stream->time_base);
+                writer.packet->stream_index = stream->index;
+                VIDEO_CHECK(av_interleaved_write_frame(writer.format, writer.packet) >= 0);
+                av_packet_unref(writer.packet);
+            }
+            VIDEO_CHECK(status == AVERROR(EAGAIN) || status == AVERROR_EOF);
+        };
+        for (int index = 0; index < 3; ++index) {
+            VIDEO_CHECK(av_frame_make_writable(writer.frame) >= 0);
+            for (int plane = 0; plane < 3; ++plane) {
+                const int width = plane == 0 ? writer.frame->width : writer.frame->width / 2;
+                const int level = plane == 0 ? 32 + index * 96 : 128;
+                for (int row = 0; row < writer.frame->height; ++row) {
+                    auto* pixels = writer.frame->data[plane] + row * writer.frame->linesize[plane];
+                    for (int column = 0; column < width; ++column) {
+                        if (ten_bit) {
+                            pixels[column * 2] = static_cast<core::u8>((level * 4) & 255);
+                            pixels[column * 2 + 1] = static_cast<core::u8>((level * 4) >> 8);
+                        } else pixels[column] = static_cast<core::u8>(level);
+                    }
+                }
+            }
+            writer.frame->pts = index;
+            writer.frame->duration = 1;
+            VIDEO_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+            drain();
+        }
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+        drain();
+        VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
+    }
+    const auto probe = render::probe_media(path);
+    VIDEO_CHECK(probe.width == 256U && probe.height == 128U);
+    VIDEO_CHECK(probe.frame_count == 3U);
+    VIDEO_CHECK(probe.frame_rate == render::MediaFrameRate{24U, 1U});
+    VIDEO_CHECK(probe.codec == (id == AV_CODEC_ID_PRORES ? "prores" : "dnxhd"));
+    VIDEO_CHECK(render::probe_media_decode_support(path) == render::MediaDecodeSupport::SoftwareOnly);
+    auto source = render::make_media_source();
+    // Reverse order checks the decoder's frame-exact seek as well as ingestion.
+    for (const core::u32 index : {2U, 0U, 1U}) {
+        const auto frame = await_frame(*source, path, index);
+        VIDEO_CHECK(frame->valid() && frame->width == 256U && frame->height == 128U);
+        VIDEO_CHECK(frame->source_frame == index);
+        const int expected = static_cast<int>((16U + index * 96U) * 255U / 219U);
+        const int actual = frame->pixels[(64U * 256U + 128U) * 4U];
+        VIDEO_CHECK(std::abs(expected - actual) <= 4);
+    }
+}
+
+void prores_422_decodes_exact_frames() {
+    professional_intraframe_codec_decodes(AV_CODEC_ID_PRORES, 2, true, "prores-422");
+}
+void dnxhr_hqx_decodes_exact_frames() {
+    professional_intraframe_codec_decodes(AV_CODEC_ID_DNXHD, AV_PROFILE_DNXHR_HQX, true, "dnxhr-hqx");
+}
+void dnxhr_lb_decodes_exact_frames() {
+    professional_intraframe_codec_decodes(AV_CODEC_ID_DNXHD, AV_PROFILE_DNXHR_LB, false, "dnxhr-lb");
+}
+
+constexpr std::array<Case, 12U> cases{{
+    {"speculative publication preserves current frames with a full cache",
+     &speculative_publication_preserves_current_frames_with_a_full_cache},
+    {"ProRes 422 decodes exact frames", &prores_422_decodes_exact_frames},
+    {"DNxHR HQX decodes exact frames", &dnxhr_hqx_decodes_exact_frames},
+    {"DNxHR LB decodes exact frames", &dnxhr_lb_decodes_exact_frames},
     {"speculative video frames can be polled without current frame demand",
      &speculative_video_frames_can_be_polled_without_current_frame_demand},
     {"a real MP4 decodes exact frames in forward and reverse order",

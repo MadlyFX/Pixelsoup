@@ -126,8 +126,27 @@ public:
     [[nodiscard]] bool mouse_down(MouseButton button) const noexcept;
     // Went down this frame (a click's leading edge).
     [[nodiscard]] bool mouse_pressed(MouseButton button) const noexcept;
+    // Position of the first down edge this frame, independent of later motion.
+    // Read when mouse_pressed(button) is true.
+    [[nodiscard]] float mouse_press_x(MouseButton button) const noexcept {
+        return press_x_[index(button)];
+    }
+    [[nodiscard]] float mouse_press_y(MouseButton button) const noexcept {
+        return press_y_[index(button)];
+    }
     // Went up this frame (a click's trailing edge).
     [[nodiscard]] bool mouse_released(MouseButton button) const noexcept;
+    [[nodiscard]] float mouse_release_x(MouseButton button) const noexcept {
+        return release_x_[index(button)];
+    }
+    [[nodiscard]] float mouse_release_y(MouseButton button) const noexcept {
+        return release_y_[index(button)];
+    }
+    // With both edges present, distinguish an entire click from a prior
+    // gesture ending before this frame's new press.
+    [[nodiscard]] bool mouse_release_follows_press(MouseButton button) const noexcept {
+        return !press_after_release_[index(button)];
+    }
     [[nodiscard]] float wheel() const noexcept { return wheel_; }
     [[nodiscard]] float motion_dx() const noexcept { return motion_x_; }
     [[nodiscard]] float motion_dy() const noexcept { return motion_y_; }
@@ -149,7 +168,12 @@ private:
     float prev_y_{};
     std::array<bool, button_count> down_{};
     std::array<bool, button_count> pressed_{};
+    std::array<float, button_count> press_x_{};
+    std::array<float, button_count> press_y_{};
     std::array<bool, button_count> released_{};
+    std::array<float, button_count> release_x_{};
+    std::array<float, button_count> release_y_{};
+    std::array<bool, button_count> press_after_release_{};
     float wheel_{};
     float motion_x_{};
     float motion_y_{};

@@ -107,6 +107,8 @@ void d3d12_release_commands(void* state, void* commands) noexcept;
 [[nodiscard]] bool d3d12_copy_buffer(
     void* commands, void* source, void* destination, core::u32 bytes) noexcept;
 [[nodiscard]] core::u64 d3d12_upload_space(void* commands) noexcept;
+[[nodiscard]] core::u32 d3d12_texture_upload_row_capacity(
+    void* commands, void* texture, core::u64 reserve_bytes) noexcept;
 [[nodiscard]] bool d3d12_upload_texture(
     void* commands, void* texture, std::span<const core::u8> data) noexcept;
 [[nodiscard]] bool d3d12_draw_instanced_quads(

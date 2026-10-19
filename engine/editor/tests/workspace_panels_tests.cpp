@@ -1148,6 +1148,21 @@ commit_compositor_field(CompositorHarness &harness,
   return harness.frame(graph, x, y, false, {}, gui::Key::Enter);
 }
 
+void compositor_scene_layers_show_the_referenced_element_name() {
+  editor::ElementInfo model{};
+  model.node = doc::NodeId{1000U};
+  model.kind = editor::ElementKind::Model;
+  model.display_name = "Hero Robot";
+  std::array<editor::ElementInfo, 1U> items{model};
+  UI_CHECK(editor::compositor_scene_layer_detail(model.node, items) ==
+           "Hero Robot");
+  items.front().display_name = "Robot Closeup";
+  UI_CHECK(editor::compositor_scene_layer_detail(model.node, items) ==
+           "Robot Closeup");
+  UI_CHECK(editor::compositor_scene_layer_detail(doc::NodeId{2000U}, items) ==
+           "OBJECT #2000");
+}
+
 void compositor_toolbar_reports_effect_add_intents() {
   const compositor::CompositorGraph graph;
   struct SearchCase final {
@@ -1370,10 +1385,33 @@ void compositor_navigation_zooms_under_the_pointer_and_pans_the_graph() {
                     ((anchor_y + 60.0F - canvas_y - panned.y) / zoom - 27.0F)) <
            0.001F);
 
+  // Replacement picking follows the navigated, visible node geometry.
+  const float node_x = panned.x + 60.0F * zoom;
+  const float node_y = canvas_y + panned.y + 40.0F * zoom;
+  const auto hit = harness.panel.node_at(graph, node_x + 30.0F, node_y + 20.0F);
+  UI_CHECK(hit.has_value() && hit->first == doc::NodeId{1U});
+  UI_CHECK(std::abs(hit->second.x - node_x) < 0.001F);
+  UI_CHECK(std::abs(hit->second.y - node_y) < 0.001F);
+  UI_CHECK(!harness.panel.node_at(graph, 10.0F, 13.0F).has_value());
+
   harness.panel.reset_project_state();
   UI_CHECK(harness.panel.graph_zoom() == 1.0F);
   UI_CHECK(harness.panel.graph_pan().x == 0.0F);
   UI_CHECK(harness.panel.graph_pan().y == 0.0F);
+}
+
+void compositor_replacement_picks_topmost_and_clips_feedback() {
+  CompositorHarness harness;
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(graph_node(1U, compositor::NodeKind::SceneLayer, -30.0F, -20.0F));
+  graph.nodes.push_back(graph_node(2U, compositor::NodeKind::Blur, -10.0F, -10.0F));
+  static_cast<void>(harness.frame(graph, 50.0F, 40.0F, false));
+  const auto hit = harness.panel.node_at(graph, 50.0F, 40.0F);
+  UI_CHECK(hit.has_value() && hit->first == doc::NodeId{2U});
+  UI_CHECK(hit->second.x == 0.0F && hit->second.y == 26.0F);
+  UI_CHECK(hit->second.width == 154.0F && hit->second.height == 44.0F);
+  UI_CHECK(!harness.panel.node_at(graph, -1.0F, 40.0F).has_value());
+  UI_CHECK(!harness.panel.node_at(graph, 20.0F, 20.0F).has_value());
 }
 
 void zoomed_compositor_node_dragging_still_authors_graph_coordinates() {
@@ -2078,6 +2116,15 @@ void missing_cluster_assets_block_start_but_keep_status_visible() {
   const auto released = harness.frame(400.0F, 92.0F, false, state);
   UI_CHECK(!released.lifecycle.has_value());
   UI_CHECK(harness.list.vertices().size() > 50U);
+
+  // Offline media keeps its warning but has a renderer fallback, so the
+  // shipping Start control must remain reachable.
+  node.missing_media_only = true;
+  node.content_detail = "offline media will display placeholders";
+  static_cast<void>(harness.frame(400.0F, 92.0F, true, state));
+  const auto offline_start = harness.frame(400.0F, 92.0F, false, state);
+  UI_CHECK(offline_start.lifecycle.has_value());
+  UI_CHECK(offline_start.lifecycle->action == editor::OutputLifecycleAction::Start);
 }
 
 void content_labels_distinguish_missing_stale_and_verification_failures() {
@@ -2091,6 +2138,16 @@ void content_labels_distinguish_missing_stale_and_verification_failures() {
   node.content = editor::OutputMonitorState::Node::ContentStatus::Error;
   node.assets_verification_failed = 4U;
   UI_CHECK(editor::output_node_content_label(node) == "ASSET VERIFY FAILED 4");
+}
+
+void process_running_is_distinct_from_editor_control() {
+  editor::OutputMonitorState::Node node{};
+  node.status = editor::OutputMonitorState::Node::Status::Running;
+  UI_CHECK(editor::output_node_connection_label(node) == "CONNECTING");
+  node.connection = editor::OutputMonitorState::Node::Connection::CatchingUp;
+  UI_CHECK(editor::output_node_connection_label(node) == "CATCHING UP");
+  node.connection = editor::OutputMonitorState::Node::Connection::Live;
+  UI_CHECK(editor::output_node_connection_label(node) == "LIVE");
 }
 
 void output_monitor_scroll_reaches_later_cluster_nodes() {
@@ -3038,7 +3095,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 107U> cases{{
+constexpr std::array<Case, 109U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3125,6 +3182,8 @@ constexpr std::array<Case, 107U> cases{{
      &proxy_runtime_status_labels_explain_resolution_and_failure},
     {"proxy runtime rows preserve thumbnail and asset identity",
      &proxy_runtime_rows_preserve_thumbnail_and_asset_identity},
+    {"Compositor Scene Layers show the referenced element name",
+     &compositor_scene_layers_show_the_referenced_element_name},
     {"compositor toolbar reports effect add intents",
      &compositor_toolbar_reports_effect_add_intents},
     {"compositor output creation is visible and unique",
@@ -3184,6 +3243,7 @@ constexpr std::array<Case, 107U> cases{{
      &duplicate_node_indices_have_no_ambiguous_controls},
     {"missing cluster assets block start but keep status visible",
      &missing_cluster_assets_block_start_but_keep_status_visible},
+    {"running process needs an editor connection", &process_running_is_distinct_from_editor_control},
     {"content labels distinguish missing stale and verification failures",
      &content_labels_distinguish_missing_stale_and_verification_failures},
     {"output monitor scroll reaches later cluster nodes",

@@ -208,6 +208,12 @@ class MediaCache final {
         std::vector<CandidateClaim> claims;
         core::u64 stamp{};
         bool discard{};
+        // Only accepted recordings advance committed progress. Canceled row
+        // transfers restart at that point; incomplete textures stay private.
+        core::u32 committed_rows{};
+        core::u32 committed_chroma_rows{};
+        core::u32 recorded_rows{};
+        core::u32 recorded_chroma_rows{};
     };
 
     // One command can render several mapped views. A held answer is the exact
@@ -222,6 +228,7 @@ class MediaCache final {
         const rhi::Texture* chroma{};
         DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
         bool occupied{};
+        bool pending{true};
     };
 
     struct DeferredRecording final {
@@ -277,13 +284,13 @@ class MediaCache final {
         rhi::Device& device, rhi::CommandList& commands,
         const std::string& source_template, const std::string& resolved_key,
         core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame);
-    [[nodiscard]] std::optional<ResolvedMediaFrame> recording_snapshot(
+    [[nodiscard]] const DeferredSnapshot* recording_snapshot(
         const rhi::CommandRecordingToken &recording,
         const std::string &key, core::u64 clip) const noexcept;
     [[nodiscard]] bool defer_recording(
         const rhi::CommandRecordingToken &recording,
         const std::string &key, core::u64 clip,
-        ResolvedMediaFrame frame) noexcept;
+        ResolvedMediaFrame frame, bool pending = true) noexcept;
     void remember_candidate_claim(
         UploadCandidate &candidate, const ClipKey &clip,
         core::u32 resolved_frame) noexcept;

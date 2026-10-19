@@ -16,7 +16,7 @@ struct LightGuideSegment final {
     LightGuideStyle style{};
 };
 
-// Editor geometry only. Fixed storage/tessellation, independent of the camera.
+// Editor geometry only. Fixed storage/tessellation.
 // Source dimensions are always exact; unselected spots use a short direction
 // glyph. Selection expands them to the real radial cutoff and adds range guides.
 struct LightGuide final {
@@ -30,7 +30,12 @@ struct LightGuide final {
 [[nodiscard]] LightGuide light_guide(const scene::PointLight& light,
                                     bool selected) noexcept;
 [[nodiscard]] LightGuide directional_light_guide(scene::Vec3 anchor,
-                                                scene::Vec3 direction) noexcept;
+                                                scene::Vec3 direction,
+                                                float arrow_length) noexcept;
+// Keep the directional glyph at a readable screen size as the Stage zooms.
+[[nodiscard]] float directional_light_arrow_length(const scene::Camera& camera,
+                                                   scene::Vec3 anchor,
+                                                   float viewport_height) noexcept;
 
 // Clip before perspective divide, including edges crossing the eye/near plane.
 // Returned points are canvas pixels; no enormous offscreen UI triangles.

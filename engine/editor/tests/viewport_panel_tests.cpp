@@ -784,6 +784,70 @@ void a_stationary_long_press_offers_every_overlapping_element() {
     UI_CHECK(!chosen.deep_select_open);
 }
 
+void deep_select_uses_the_authored_element_name() {
+    auto view = make_scene();
+    scene::ModelInstance model{};
+    model.source_node = other_node;
+    view.models.push_back(model);
+    editor::ElementInfo named{};
+    named.node = other_node;
+    named.kind = editor::ElementKind::Model;
+    named.display_name = "Hero Robot";
+    const std::array<editor::ElementInfo, 1U> elements{named};
+    UI_CHECK(editor::viewport_deep_select_label(view, other_node, elements) ==
+             "Hero Robot");
+    UI_CHECK(editor::viewport_deep_select_label(view, clip_node, elements) ==
+             "Media  7");
+}
+
+void a_long_press_can_select_an_element_crossing_the_stage_camera() {
+    Harness h;
+    editor::ViewportPanel stage{gui::ui_id("stage.crossing-deep-select"),
+                                editor::ViewportRole::Stage};
+    h.scene.media.clear();
+    h.scene.camera.eye = {0.0F, 1.5F, 5.0F};
+    h.scene.camera.target = {0.0F, 0.0F, 0.0F};
+    scene::MeshInstance floor{};
+    floor.source = other_node;
+    floor.mesh = scene::MeshKey{scene::Primitive::Plane, 1U};
+    floor.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, -0.5F, 0.0F}),
+        scene::scaling(scene::Vec3{40.0F, 1.0F, 40.0F}));
+    h.scene.instances.push_back(floor);
+
+    const auto draw = [&](float x, float y, bool down, double time) {
+        h.input.new_frame();
+        h.input.set_mouse_position(x, y);
+        h.input.set_mouse_button(gui::MouseButton::Left, down);
+        h.ctx.new_frame(time);
+        auto frame = stage.draw(h.ctx, Harness::bounds, h.target, h.scene);
+        h.ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
+        return frame;
+    };
+    const auto placed = draw(0.0F, 0.0F, false, 0.0);
+    const auto point = scene::project_to_canvas(
+        h.scene.camera, h.scene.canvas, scene::Vec3{2.5F, -0.5F, 1.0F});
+    UI_CHECK(point.visible);
+    const float x = placed.image.x + point.x * placed.image.width /
+                                         static_cast<float>(h.scene.canvas.width);
+    const float y = placed.image.y + point.y * placed.image.height /
+                                         static_cast<float>(h.scene.canvas.height);
+    const auto pressed = draw(x, y, true, 1.0);
+    UI_CHECK(pressed.pressed && !pressed.picked.has_value());
+    UI_CHECK(pressed.empty_canvas == editor::EmptyCanvasInteraction::Navigate);
+    const auto held = draw(x, y, true, 1.5);
+    UI_CHECK(held.deep_select_open);
+    UI_CHECK(held.deep_candidate_count == 1U);
+    UI_CHECK(!held.dragging);
+
+    static_cast<void>(draw(x, y, false, 1.51));
+    const auto menu_pressed = draw(x + 28.0F, y + 26.0F, true, 1.6);
+    UI_CHECK(!menu_pressed.picked.has_value());
+    const auto chosen = draw(x + 28.0F, y + 26.0F, false, 1.61);
+    UI_CHECK(chosen.pressed && chosen.picked == other_node);
+    UI_CHECK(!chosen.deep_select_open);
+}
+
 void moving_during_a_long_press_keeps_the_normal_drag() {
     Harness h;
     scene::MediaInstance nearer{};
@@ -2316,7 +2380,7 @@ void spot_guides_show_inner_outer_angles_and_radial_cutoff() {
         UI_CHECK(std::isfinite(edge.b.x) && std::isfinite(edge.b.y) && std::isfinite(edge.b.z));
         UI_CHECK(scene::length(edge.b - light.position) < 12.01F);
     }
-    const auto sun = editor::directional_light_guide({2, 3, 4}, {0, 0, -8});
+    const auto sun = editor::directional_light_guide({2, 3, 4}, {0, 0, -8}, 1.4F);
     std::size_t rays = 0;
     for (const auto& edge : sun.segments()) {
         UI_CHECK(edge.style == editor::LightGuideStyle::Direction);
@@ -2344,6 +2408,55 @@ void light_guides_clip_crossing_edges_before_projection() {
     UI_CHECK(spanning.has_value());
     UI_CHECK(near((*spanning)[0].x, 0, 0.1F));
     UI_CHECK(near((*spanning)[1].x, 1920, 0.1F));
+}
+
+void directional_light_arrows_stay_small_after_focus() {
+    auto view = make_scene();
+    constexpr float viewport_height = 600.0F;
+    const scene::Vec3 anchor{};
+    for (const float distance : {8.0F, 0.8F}) {
+        view.camera.eye = {0, 0, distance};
+        view.camera.target = anchor;
+        const float length = editor::directional_light_arrow_length(
+            view.camera, anchor, viewport_height);
+        const auto guide = editor::directional_light_guide(
+            anchor, {1, 0, 0}, length);
+        const auto shaft = std::find_if(guide.segments().begin(),
+                                        guide.segments().end(),
+            [anchor, length](const editor::LightGuideSegment& edge) {
+                return edge.a == anchor && near(edge.b.x, length);
+            });
+        UI_CHECK(shaft != guide.segments().end());
+        const auto a = scene::project_to_canvas(view.camera, view.canvas, shaft->a);
+        const auto b = scene::project_to_canvas(view.camera, view.canvas, shaft->b);
+        UI_CHECK(a.visible && b.visible);
+        const float pixels = (b.x - a.x) * viewport_height / view.canvas.height;
+        UI_CHECK(near(pixels, 60.0F, 1.0F));
+    }
+}
+
+void directional_light_guides_leave_the_view_with_their_marker() {
+    Harness h;
+    h.scene.media.clear();
+    scene::DirectionalLight light{};
+    light.source = doc::NodeId{54U};
+    light.direction = {0, -1, -0.2F};
+    h.scene.directional_lights.push_back(light);
+    editor::ViewportPanel stage{gui::ui_id("stage.sun"), editor::ViewportRole::Stage};
+    const auto draw = [&] {
+        h.input.new_frame();
+        h.ctx.new_frame();
+        static_cast<void>(stage.draw(h.ctx, Harness::bounds, h.target, h.scene));
+        return std::count_if(h.list.vertices().begin(), h.list.vertices().end(),
+            [](const auto& vertex) {
+                return near(vertex.r, 1.0F) && near(vertex.g, 0.78F) &&
+                       near(vertex.b, 0.24F);
+            });
+    };
+    UI_CHECK(draw() > 0);
+    h.scene.camera.eye = {12, 0, 8};
+    h.scene.camera.target = {12, 0, 0};
+    UI_CHECK(draw() == 0);
 }
 
 void light_guides_respect_stage_selection_and_guides_toggle() {
@@ -2460,7 +2573,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 60U> cases{{
+constexpr std::array<Case, 64U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2469,6 +2582,8 @@ constexpr std::array<Case, 60U> cases{{
     {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},
     {"spot guides show inner outer angles and radial cutoff", &spot_guides_show_inner_outer_angles_and_radial_cutoff},
     {"light guides clip crossing edges before projection", &light_guides_clip_crossing_edges_before_projection},
+    {"directional light arrows stay small after focus", &directional_light_arrows_stay_small_after_focus},
+    {"directional light guides leave the view with their marker", &directional_light_guides_leave_the_view_with_their_marker},
     {"light guides respect Stage selection and Guides toggle", &light_guides_respect_stage_selection_and_guides_toggle},
     {"the render is letterboxed to the canvas aspect",
      &the_render_is_letterboxed_to_the_canvas_aspect},
@@ -2497,6 +2612,10 @@ constexpr std::array<Case, 60U> cases{{
      &the_front_most_clip_wins_an_overlap},
     {"a stationary long press offers every overlapping element",
      &a_stationary_long_press_offers_every_overlapping_element},
+    {"deep select uses the authored element name",
+     &deep_select_uses_the_authored_element_name},
+    {"a long press can select an element crossing the Stage camera",
+     &a_long_press_can_select_an_element_crossing_the_stage_camera},
     {"moving during a long press keeps the normal drag",
      &moving_during_a_long_press_keeps_the_normal_drag},
     {"a long press over the selected gizmo still offers depths",

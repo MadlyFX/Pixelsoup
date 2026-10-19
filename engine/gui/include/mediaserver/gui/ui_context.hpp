@@ -101,6 +101,12 @@ enum class Cursor : core::u8 {
     ResizeVertical,
     ResizeDiagonal,
     Move,
+    RippleTrim,
+    Roll,
+    Slip,
+    Slide,
+    Razor,
+    Count,
 };
 
 // The raw result of pointing at something: what every widget below is built
@@ -184,7 +190,8 @@ void draw_icon(
     Icon icon,
     float center_x,
     float center_y,
-    UiColor color);
+    UiColor color,
+    float scale = 1.0F);
 
 class UiContext final {
 public:
@@ -349,6 +356,22 @@ public:
     // is where the pointer is now rather than what it is over.
     [[nodiscard]] float pointer_x() const noexcept { return input_.mouse_x(); }
     [[nodiscard]] float pointer_y() const noexcept { return input_.mouse_y(); }
+    // Where this frame's left press began. A native event batch can include
+    // motion and release after that press, so drag anchors use these instead
+    // of the latest pointer position above.
+    [[nodiscard]] float pointer_press_x() const noexcept {
+        return input_.mouse_press_x(MouseButton::Left);
+    }
+    [[nodiscard]] float pointer_press_y() const noexcept {
+        return input_.mouse_press_y(MouseButton::Left);
+    }
+    // The first release endpoint, before any later unheld motion in the batch.
+    [[nodiscard]] float pointer_release_x() const noexcept {
+        return input_.mouse_release_x(MouseButton::Left);
+    }
+    [[nodiscard]] float pointer_release_y() const noexcept {
+        return input_.mouse_release_y(MouseButton::Left);
+    }
     [[nodiscard]] float pointer_dx() const noexcept {
         return pointer_blocked() ? 0.0F : input_.mouse_dx();
     }
@@ -481,6 +504,7 @@ private:
     Theme theme_;
     UiId hot_{};
     UiId active_{};
+    bool press_consumed_{};
     UiId focus_{};
     std::size_t caret_{};
     // The focused field's whole value is selected (see

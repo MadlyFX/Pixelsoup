@@ -2047,6 +2047,72 @@ void bloom_splits_across_nodes_byte_exactly_through_the_compositor() {
 }
 
 
+// Opt-in wall-clock probe: keep performance evidence separate from timing
+// assertions, which would be unreliable across developer GPUs.
+void benchmark_led_car() {
+    rhi::DeviceConfig config{};
+    config.debug = false;
+    config.backend = rhi::BackendKind::D3d12;
+    auto opened = rhi::Device::create(config);
+    EXECUTOR_CHECK(opened);
+    auto device = std::move(opened).value();
+    scene::Scene value{};
+    value.canvas = scene::Canvas{1280U, 720U};
+    value.camera.eye = scene::Vec3{};
+    value.camera.target = scene::Vec3{0.0F, 0.0F, -1.0F};
+    value.camera.field_of_view = 0.25F;
+    value.environment.ambient = 0.0F;
+    value.renderer_settings.backend = scene::RendererBackend::Advanced;
+    value.renderer_settings.required = true;
+    std::vector<doc::Node> nodes;
+    for (core::u64 index = 0U; index < 9U; ++index) {
+        nodes.push_back(node(100U + index, "scene.object"));
+        nodes.push_back(layer(10U + index, 100U + index));
+        nodes.push_back(edge(40U + index, 10U + index, 0U, 30U,
+                             static_cast<core::u8>(index)));
+        add_quad_at(value, 100U + index, scene::Vec3{},
+                    scene::Vec3{0.1F * static_cast<float>(index + 1U),
+                                0.1F, 0.3F}, 1.0F);
+    }
+    nodes.push_back(node(30U, schema::led_car_process_type,
+        {real(schema::array_scale, 2.0), real(schema::plate_scale, 1.0),
+         real(schema::horizontal_blend, 0.1)}));
+    nodes.push_back(node(31U, schema::output_type));
+    nodes.push_back(edge(51U, 30U, 0U, 31U, 0U));
+    doc::Root root;
+    for (const auto& entry : nodes) root = root.set(entry);
+    compositor::CompositorModel model;
+    model.reset(root);
+    const auto car_graph = model.evaluate();
+    auto planned = render::plan_compositor_scene(car_graph, value);
+    EXECUTOR_CHECK(planned);
+    const auto begin = std::chrono::steady_clock::now();
+    auto created = render::CompositorSceneExecutor::create(
+        device, value.canvas.width, value.canvas.height, test_limits());
+    EXECUTOR_CHECK(created);
+    auto executor = std::move(created).value();
+    std::array<double, 12U> samples{};
+    for (std::size_t index = 0U; index < samples.size(); ++index) {
+        const auto frame_begin = std::chrono::steady_clock::now();
+        auto acquired = device.acquire_commands();
+        EXECUTOR_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        EXECUTOR_CHECK(executor.execute(commands, car_graph, value,
+                                       scene::whole(value.canvas)));
+        auto submitted = device.submit(std::move(commands));
+        EXECUTOR_CHECK(submitted);
+        EXECUTOR_CHECK(std::move(submitted).value().wait());
+        samples[index] = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - frame_begin).count();
+    }
+    std::cout << "LED car 1280x720 layers=" << planned.value().layers.size()
+              << " cold_record_submit_wait_ms=" << samples.front()
+              << " total_ms=" << std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - begin).count();
+    std::sort(samples.begin() + 1, samples.end());
+    std::cout << " warm_median_ms=" << samples[6U] << '\n';
+}
+
 constexpr std::array<Case, 27U> cases{{
     {"the compositor publishes what the renderer rendered",
      &the_compositor_publishes_what_the_renderer_rendered},
@@ -2106,7 +2172,11 @@ constexpr std::array<Case, 27U> cases{{
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--benchmark-led-car") {
+        benchmark_led_car();
+        return 0;
+    }
     if (!rhi::Device::available() ||
         !render::CompositorSceneExecutor::shaders_available()) {
         std::cout << "[skip] compositor scene executor unavailable\n";

@@ -1,7 +1,7 @@
 """Bounded Principled translation. RNA is inspected only by the Blender thread.
 
-Descriptors contain paths and values, never RNA or file bytes. The serializer
-resolves images on its worker and embeds them in immutable per-surface packages.
+Descriptors contain paths, values and bounded copies of already encoded packed
+images, never RNA. The worker validates images and prepares immutable packages.
 """
 import math
 
@@ -29,11 +29,18 @@ def describe_material(material, identities, scene, uv=''):
             return False
         link = socket.links[0]
         node = link.from_node
+        for _ in range(32):
+            if node.type != 'REROUTE':
+                break
+            if not node.inputs[0].is_linked:
+                refuse(role + ' has an unconnected image reroute')
+            link = node.inputs[0].links[0]
+            node = link.from_node
         if node.type != 'TEX_IMAGE' or link.from_socket.name != output:
             refuse(role + ' requires a direct Image Texture; bake procedural color explicitly')
         source = node.image
-        if source is None or source.source != 'FILE' or source.packed_file or source.is_dirty:
-            refuse(role + ' requires a saved, unpacked PNG/JPEG image; save the image first')
+        if source is None or source.source != 'FILE' or source.is_dirty:
+            refuse(role + ' requires a saved or packed image; save painted/generated images first')
         # Reading source.size can synchronously decode every 8K texture in an
         # imported scan. The worker validates dimensions and resizes export copies.
         expected = 'sRGB' if role in ('baseColorTexture', 'emissiveTexture') else 'Non-Color'
@@ -50,6 +57,26 @@ def describe_material(material, identities, scene, uv=''):
         textures[role] = {'path': bpy.path.abspath(source.filepath, library=source.library),
                           'wrap': 10497 if node.extension == 'REPEAT' else 33071,
                           'filter': 9729 if node.interpolation == 'Linear' else 9728}
+        packed = source.packed_file
+        if packed:
+            # PackedFile.data is the encoded file, not decoded float pixels.
+            # Copy once per packed allocation and reuse it while objects move.
+            # File validation, hashing, decoding and resizing stay on the worker.
+            if not 0 < packed.size <= 16 * 1024 * 1024:
+                textures.pop(role, None)
+                refuse(role + ' packed image exceeds 16 MiB; unpack the image to use worker resizing')
+            cache = getattr(identities, 'packed_images', None)
+            if cache is None:
+                cache = identities.packed_images = {}
+            key = source.session_uid
+            stamp = (packed.as_pointer(), packed.size)
+            old = cache.get(key)
+            if old is None or old[0] != stamp:
+                if len(cache) >= 256 or sum(len(item[1]) for item in cache.values()) + packed.size > 256 * 1024 * 1024:
+                    cache.clear()
+                old = cache[key] = (stamp, bytes(packed.data))
+            textures[role]['path'] = 'packed:' + str(key) + ':' + source.name
+            textures[role]['packed_bytes'] = old[1]
         return True
     def image(socket, role, output='Color'):
         try:

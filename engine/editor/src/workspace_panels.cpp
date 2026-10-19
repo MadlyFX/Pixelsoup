@@ -19,6 +19,20 @@
 #include <tinyfiledialogs.h>
 
 namespace mediaserver::editor {
+
+std::string compositor_scene_layer_detail(
+    doc::NodeId scene_node, std::span<const ElementInfo> elements) {
+  const auto element = std::find_if(
+      elements.begin(), elements.end(),
+      [scene_node](const ElementInfo &candidate) {
+        return candidate.node == scene_node;
+      });
+  if (element != elements.end()) {
+    return element_display_name(*element);
+  }
+  return "OBJECT #" + std::to_string(scene_node.value());
+}
+
 namespace {
 
 namespace gui = mediaserver::gui;
@@ -617,19 +631,18 @@ compositor_node_width_for(compositor::NodeKind kind) noexcept {
                                                      : compositor_node_width;
 }
 
-[[nodiscard]] std::string
-compositor_node_detail(const compositor::GraphNode &node) {
+[[nodiscard]] std::string compositor_node_detail(
+    const compositor::GraphNode &node,
+    std::span<const ElementInfo> elements) {
   std::array<char, 64U> text{};
   int length = 0;
   switch (node.kind) {
   case compositor::NodeKind::SceneLayer: {
     const auto *parameters =
         std::get_if<compositor::SceneLayerParameters>(&node.parameters);
-    length = std::snprintf(
-        text.data(), text.size(), "OBJECT #%llu",
-        static_cast<unsigned long long>(
-            parameters != nullptr ? parameters->scene_node.value() : 0U));
-    break;
+    return compositor_scene_layer_detail(
+        parameters != nullptr ? parameters->scene_node : doc::NodeId{},
+        elements);
   }
   case compositor::NodeKind::Brightness: {
     const auto *parameters =
@@ -1063,6 +1076,17 @@ void draw_compositor_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.label(gui::Rect{callout.x + 10.0F, callout.y,
                       std::max(callout.width - 14.0F, 0.0F), callout.height},
             label, hovered ? ctx.theme().text : ctx.theme().text_muted);
+}
+
+std::string_view output_node_connection_label(
+    const OutputMonitorState::Node &node) noexcept {
+  using Connection = OutputMonitorState::Node::Connection;
+  switch (node.connection) {
+  case Connection::Live: return "LIVE";
+  case Connection::CatchingUp: return "CATCHING UP";
+  case Connection::Disconnected: return "CONNECTING";
+  }
+  return "CONNECTING";
 }
 
 std::string output_node_content_label(const OutputMonitorState::Node &node) {
@@ -2738,9 +2762,24 @@ std::optional<LibraryAddAction> LibraryPanel::draw(gui::UiContext &ctx,
   return std::nullopt;
 }
 
+std::optional<std::pair<doc::NodeId, gui::Rect>>
+CompositorPanel::node_at(const compositor::CompositorGraph &graph,
+                         float x, float y) const noexcept {
+  if (!last_canvas_.contains(x, y)) return std::nullopt;
+  for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
+    const gui::Rect bounds{last_canvas_.x + pan_x_ + it->editor_x * zoom_,
+        last_canvas_.y + pan_y_ + it->editor_y * zoom_,
+        compositor_node_width_for(it->kind) * zoom_,
+        compositor_node_height(it->kind) * zoom_};
+    if (bounds.contains(x, y)) return std::pair{it->node, intersect(bounds, last_canvas_)};
+  }
+  return std::nullopt;
+}
+
 CompositorFrame
 CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
-                      const compositor::CompositorGraph &compositor_graph) {
+                      const compositor::CompositorGraph &compositor_graph,
+                      std::span<const ElementInfo> elements) {
   CompositorFrame frame;
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
@@ -3336,7 +3375,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           std::max(node_header.width - 17.0F * zoom_, 0.0F),
                           13.0F},
                 title, ctx.theme().text);
-      const std::string detail = compositor_node_detail(*visual.node);
+      const std::string detail = compositor_node_detail(*visual.node, elements);
       ctx.label(
           gui::Rect{node_header.x + 9.0F * zoom_, node_header.y + 12.0F * zoom_,
                     std::max(node_header.width - 17.0F * zoom_, 0.0F), 12.0F},
@@ -5695,6 +5734,17 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       status += " - " + node.detail;
     }
     lines.emplace_back("Status", std::move(status));
+    if (node.status == NodeStatus::Running) {
+      std::string connection{output_node_connection_label(node)};
+      if (node.connection == OutputMonitorState::Node::Connection::Disconnected) {
+        connection += " - waiting for the node to connect automatically; "
+                      "check its Director address and show ID if this persists";
+      } else {
+        connection += " - frame " + std::to_string(node.committed_frame) +
+                      " / " + std::to_string(node.target_frame);
+      }
+      lines.emplace_back("Editor connection", std::move(connection));
+    }
     if (node.content != ContentStatus::NotRequired) {
       std::string content = output_node_content_label(node);
       if (!node.content_detail.empty()) {
@@ -5981,10 +6031,19 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     row_cells(line, node.name.empty() ? identity : node.name, identity,
               resolution_text(node.width, node.height), program_fps);
 
-    const gui::UiColor node_color = status_color(node.status);
+    const bool awaiting_connection = node.status == NodeStatus::Running &&
+        node.connection != OutputMonitorState::Node::Connection::Live;
+    const gui::UiColor node_color = awaiting_connection ? theme.warning
+                                                       : status_color(node.status);
     std::string status_tip{status_label(node.status)};
     if (!node.detail.empty()) {
       status_tip += " - " + node.detail;
+    }
+    const auto displayed_status = node.status == NodeStatus::Running
+        ? output_node_connection_label(node) : status_label(node.status);
+    if (node.status == NodeStatus::Running) {
+      status_tip += " - ";
+      status_tip += displayed_status;
     }
     if (show_status) {
       const bool faulted = node.status == NodeStatus::Faulted ||
@@ -5995,7 +6054,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                            node.status == NodeStatus::DuplicateNodeIndex;
       // Lit when live or broken - the two states worth seeing from across
       // the room - and outlined otherwise.
-      status_pill(status_x, centre_y, status_label(node.status), node_color,
+      status_pill(status_x, centre_y, displayed_status, node_color,
                   node.status == NodeStatus::Running || faulted, status_tip);
     }
     if (show_assets && node.content != ContentStatus::NotRequired) {
@@ -6206,7 +6265,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   }
   const auto live = static_cast<std::size_t>(std::count_if(
       state.nodes.begin(), state.nodes.end(), [](const auto &node) {
-        return node.status == NodeStatus::Running;
+        return node.status == NodeStatus::Running &&
+            node.connection == OutputMonitorState::Node::Connection::Live;
       }));
   const std::string count =
       state.nodes.empty()
@@ -6221,6 +6281,49 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
             count, theme.text_muted);
   ctx.pop_clip();
   return frame;
+}
+
+StageAssetStatus stage_asset_status(const render::RenderStats& geometry,
+                                   core::u64 pending_media,
+                                   render::DisplayLutState display) {
+  using render::TextureStreamState;
+  const auto failed = [](std::string detail) {
+    return StageAssetStatus{false, "STAGE ASSET LOAD FAILED", std::move(detail)};
+  };
+  const auto loading = [](std::string detail) {
+    return StageAssetStatus{true, "LOADING STAGE ASSETS...", std::move(detail)};
+  };
+  if (geometry.models_failed != 0U)
+    return failed("A model could not load. Check its source path, then Rescan in Library.");
+  if (geometry.model_integration_refusals != 0U)
+    return failed("Model GPU resources are unavailable. Check Renderer diagnostics.");
+  switch (geometry.texture_streaming.state) {
+  case TextureStreamState::CapacityRefused:
+    return failed("Material textures exceed the GPU texture budget. Check Renderer settings.");
+  case TextureStreamState::AllocationFailed:
+    return failed("GPU memory for material textures could not be allocated.");
+  case TextureStreamState::UploadFailed:
+    return failed("Material textures could not be uploaded to the GPU.");
+  default: break;
+  }
+  if (!geometry.baked_ready && geometry.baked_state == render::ProbeCacheState::Failed)
+    return failed("Baked lighting could not load. Check its path or rebake the scene.");
+  if (display == render::DisplayLutState::Failed)
+    return failed("The Stage display color transform could not load.");
+  if (geometry.models_pending != 0U || geometry.models_stale != 0U)
+    return loading("Preparing models: " +
+        std::to_string(static_cast<core::u64>(geometry.models_pending) + geometry.models_stale) + " pending.");
+  if (geometry.texture_streaming.state != TextureStreamState::Ready)
+    return loading("Preparing material textures on the GPU.");
+  if (!geometry.baked_ready)
+    return loading("Loading baked lighting.");
+  if (pending_media != 0U)
+    return loading("Loading media: " + std::to_string(pending_media) + " pending.");
+  if (display != render::DisplayLutState::Ready)
+    return loading("Preparing the Stage display color transform.");
+  if (!geometry.assets.ready)
+    return loading("Preparing scene assets and GPU resources.");
+  return {};
 }
 
 ProgramAssetStatus

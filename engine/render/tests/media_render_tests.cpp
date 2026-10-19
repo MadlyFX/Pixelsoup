@@ -1,5 +1,6 @@
 #include <mediaserver/render/media_cache.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
+#include "../src/nv12_conversion.hpp"
 
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/canvas.hpp>
@@ -53,9 +54,10 @@ void check(bool condition, const char* expression, int line) {
 #define MEDIA_CHECK(...) \
     check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
 
-[[nodiscard]] rhi::Device open_device() {
+[[nodiscard]] rhi::Device open_device(rhi::BackendKind backend = rhi::BackendKind::SdlGpu) {
     rhi::DeviceConfig config{};
     config.debug = false;
+    config.backend = backend;
     auto created = rhi::Device::create(config);
     check(created.has_value(), "device creation", __LINE__);
     return std::move(created).value();
@@ -851,8 +853,7 @@ void clip_film_grain_is_identity_exact_temporal_and_ordered() {
 void a_missing_clip_leaves_the_scene_rather_than_failing() {
     auto device = open_device();
     constexpr scene::Canvas canvas{64U, 64U};
-    // A path that does not exist: the clip draws nothing, but the frame still
-    // renders (the sky), and the renderer reports it drew no media.
+    // A missing sequence frame still records a visible placeholder.
     auto scn = clip_scene(canvas, "does_not_exist_####.png");
     scn.media.front().frame_index = 7U;
 
@@ -865,15 +866,29 @@ void a_missing_clip_leaves_the_scene_rather_than_failing() {
     auto commands = std::move(acquired).value();
     MEDIA_CHECK(renderer.render(commands, scn, scene::whole(canvas)));
     MEDIA_CHECK(renderer.stats().media == 0U);
+    MEDIA_CHECK(renderer.stats().offline_media == 1U);
     auto submitted = device.submit(std::move(commands));
     MEDIA_CHECK(submitted.has_value());
     MEDIA_CHECK(std::move(submitted).value().wait());
+
+    const Image image = render_clip(device, scn, 0U);
+    const auto center = image.at(32U, 32U);
+    const auto grey = image.at(16U, 32U);
+    const auto diagonal = image.at(16U, 16U);
+    const auto other_diagonal = image.at(47U, 16U);
+    MEDIA_CHECK(image.rgba[grey] > image.rgba[center] + 30U);
+    MEDIA_CHECK(image.rgba[grey] > image.rgba[diagonal] + 30U);
+    MEDIA_CHECK(image.rgba[grey] > image.rgba[other_diagonal] + 30U);
+    MEDIA_CHECK(image.rgba[grey] == image.rgba[grey + 1U]);
+    MEDIA_CHECK(image.rgba[grey] == image.rgba[grey + 2U]);
+    MEDIA_CHECK(image.rgba[grey + 3U] == 255U);
 }
 
 struct ControlledSourceState final {
     core::u32 pending_frame{1U};
     bool frame_one_ready{};
     std::optional<core::u32> latest_frame;
+    std::optional<core::u32> failed_frame;
     std::vector<core::u32> prefetched;
     std::vector<std::string> decoded_sources;
 };
@@ -907,6 +922,9 @@ public:
     [[nodiscard]] std::shared_ptr<const render::DecodedFrame> try_decode(
         const std::string& source, core::u32 frame_index) override {
         state_->decoded_sources.push_back(source);
+        if (state_->failed_frame == frame_index) {
+            return std::make_shared<const render::DecodedFrame>();
+        }
         if (frame_index == state_->pending_frame && !state_->frame_one_ready) {
             return nullptr;
         }
@@ -986,6 +1004,35 @@ public:
 private:
     render::DecodedPixelLayout layout_;
     core::u16 y_code_{};
+};
+
+class Nv12ColorSource final : public render::MediaSource {
+public:
+    explicit Nv12ColorSource(std::array<core::u8, 3U> yuv) : yuv_(yuv) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        const std::array<core::u8, 4U> luma{{
+            yuv_[0], yuv_[0], yuv_[0], yuv_[0]}};
+        const std::array<core::u8, 2U> chroma{{yuv_[1], yuv_[2]}};
+        auto result = render::detail::pack_nv12_rec709_limited(
+            2U, 2U, luma, 2U, chroma, 2U);
+        result.source_frame = frame_index;
+        return result;
+    }
+
+private:
+    std::array<core::u8, 3U> yuv_{};
 };
 
 // In-memory RGBA plates for the native Advanced-product proof. Keeping this
@@ -1985,6 +2032,43 @@ void pending_video_holds_without_overwriting_its_stale_texture() {
     MEDIA_CHECK(std::move(next_submitted).value().wait());
 }
 
+void failed_media_replaces_a_held_image_and_freezes_between_views() {
+    auto device = open_device();
+    const auto state = std::make_shared<ControlledSourceState>();
+    render::MediaCache cache{std::make_unique<ControlledAsyncSource>(state)};
+    auto acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired);
+    auto commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(cache.resolve(device, commands, "deleted.mp4", 0U));
+    cache.end_frame();
+    auto submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+
+    state->failed_frame = 1U;
+    state->frame_one_ready = true;
+    acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired);
+    commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(!cache.resolve(device, commands, "deleted.mp4", 1U));
+    MEDIA_CHECK(cache.stats().pending_requests == 0U);
+    state->failed_frame.reset();
+    MEDIA_CHECK(!cache.resolve(device, commands, "deleted.mp4", 1U));
+    cache.end_frame();
+    submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+
+    acquired = device.acquire_commands();
+    MEDIA_CHECK(acquired);
+    commands = std::move(acquired).value();
+    cache.begin_frame();
+    MEDIA_CHECK(cache.resolve(device, commands, "deleted.mp4", 1U));
+    cache.end_frame();
+    submitted = device.submit(std::move(commands));
+    MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+}
+
 void a_late_video_frame_establishes_a_truthfully_keyed_hold() {
     auto device = open_device();
     const auto state = std::make_shared<ControlledSourceState>();
@@ -2093,6 +2177,39 @@ void full_range_p010_preserves_its_code_range() {
     MEDIA_CHECK(std::abs(
         static_cast<int>(image.rgba[center + 1U]) - image.rgba[center + 2U]) <= 2);
     MEDIA_CHECK(image.rgba[center + 3U] == 255U);
+}
+
+void native_nv12_colors_match_rec709_reference_pixels() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    auto device = open_device(rhi::BackendKind::D3d12);
+    constexpr scene::Canvas canvas{8U, 8U};
+    struct Color {
+        std::array<core::u8, 3U> yuv;
+        std::array<core::u8, 3U> rgb;
+    };
+    // Quantized Rec.709 legal-range black, white, gray and primary bars.
+    // These independently specified display values catch swapped chroma,
+    // accidental Rec.601 conversion, wrong range and non-opaque alpha.
+    constexpr std::array<Color, 6U> colors{{
+        {{{16U, 128U, 128U}}, {{0U, 0U, 0U}}},
+        {{{235U, 128U, 128U}}, {{255U, 255U, 255U}}},
+        {{{126U, 128U, 128U}}, {{128U, 128U, 128U}}},
+        {{{63U, 102U, 240U}}, {{255U, 0U, 0U}}},
+        {{{173U, 42U, 26U}}, {{0U, 255U, 0U}}},
+        {{{32U, 240U, 118U}}, {{0U, 0U, 255U}}},
+    }};
+    for (const auto& color : colors) {
+        render::MediaCache cache{std::make_unique<Nv12ColorSource>(color.yuv)};
+        const Image image = render_clip(
+            device, clip_scene(canvas, "nv12-colors.mp4"), cache);
+        MEDIA_CHECK(cache.stats().planar_uploads == 1U);
+        const std::size_t center = image.at(4U, 4U);
+        for (std::size_t component = 0U; component < 3U; ++component) {
+            MEDIA_CHECK(std::abs(static_cast<int>(image.rgba[center + component])
+                - color.rgb[component]) <= 2);
+        }
+        MEDIA_CHECK(image.rgba[center + 3U] == 255U);
+    }
 }
 
 void read_ahead_wraps_at_the_loop_point() {
@@ -2411,7 +2528,136 @@ void authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels() 
     MEDIA_CHECK(cache.stats().uploads == 1);
 }
 
-constexpr std::array<Case, 37U> cases{{
+class LargeReadySource final : public render::MediaSource {
+public:
+    LargeReadySource(core::u32 width, core::u32 height) {
+        auto frame = std::make_shared<render::DecodedFrame>();
+        frame->width = width;
+        frame->height = height;
+        frame->pixels.resize(static_cast<std::size_t>(width) * height * 4U);
+        for (core::u32 y = 0U; y < height; ++y) {
+            for (core::u32 x = 0U; x < width; ++x) {
+                const auto offset = (static_cast<std::size_t>(y) * width + x) * 4U;
+                frame->pixels[offset] = static_cast<core::u8>(y % 251U);
+                frame->pixels[offset + 1U] = static_cast<core::u8>(x % 241U);
+                frame->pixels[offset + 2U] = 73U;
+                frame->pixels[offset + 3U] = 255U;
+            }
+        }
+        frame_ = std::move(frame);
+    }
+    std::string key(const std::string& source, core::u32 index) const override {
+        return source + "#" + std::to_string(index);
+    }
+    render::MediaDecodeScheduling scheduling(const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+    render::DecodedFrame decode(const std::string&, core::u32) override { return {}; }
+    std::shared_ptr<const render::DecodedFrame> try_decode(const std::string&, core::u32) override {
+        return frame_;
+    }
+private:
+    std::shared_ptr<const render::DecodedFrame> frame_;
+};
+
+void a_6000_pixel_still_uploads_across_recordings_without_partial_publication() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    auto device = open_device(rhi::BackendKind::D3d12);
+    constexpr core::u32 width = 6000U;
+    constexpr core::u32 height = 4000U;
+    render::MediaCache cache{std::make_unique<LargeReadySource>(width, height)};
+    auto readback = device.create_readback(width * height * 4U);
+    MEDIA_CHECK(readback);
+    bool complete{};
+    std::size_t initial_bytes{};
+    // First transfer is deliberately canceled; then accepted row ranges must
+    // eventually cover the image, including its final row, exactly once.
+    for (core::u32 attempt = 0U; attempt < 8U && !complete; ++attempt) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        const auto image = cache.resolve(device, commands, "phone.jpg", 0U, {}, 601U);
+        MEDIA_CHECK(cache.stats().resident_frames == 1U);
+        if (attempt == 0U) initial_bytes = cache.stats().resident_bytes;
+        MEDIA_CHECK(cache.stats().resident_bytes == initial_bytes);
+        if (attempt < 2U && device.capabilities().backend == rhi::BackendKind::D3d12) MEDIA_CHECK(!image);
+        if (image) MEDIA_CHECK(commands.download(*image.primary, readback.value()));
+        cache.end_frame();
+        if (attempt == 0U) continue;
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted);
+        MEDIA_CHECK(std::move(submitted).value().wait());
+        complete = static_cast<bool>(image);
+    }
+    MEDIA_CHECK(complete);
+    const auto bytes = readback.value().map();
+    MEDIA_CHECK(bytes.size() == static_cast<std::size_t>(width) * height * 4U);
+    for (const core::u32 y : {0U, 1U, 2000U, 3999U}) {
+        for (const core::u32 x : {0U, 3000U, 5999U}) {
+            const auto offset = (static_cast<std::size_t>(y) * width + x) * 4U;
+            MEDIA_CHECK(bytes[offset] == y % 251U);
+            MEDIA_CHECK(bytes[offset + 1U] == x % 241U);
+            MEDIA_CHECK(bytes[offset + 2U] == 73U);
+            MEDIA_CHECK(bytes[offset + 3U] == 255U);
+        }
+    }
+    readback.value().unmap();
+}
+
+void three_uhd_playheads_recover_from_shared_upload_budget_exhaustion() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    auto device = open_device(rhi::BackendKind::D3d12);
+    render::MediaCache cache{std::make_unique<LargeReadySource>(3840U, 2160U)};
+    std::array<core::u32, 3U> ready_counts{};
+    for (core::u32 frame = 0U; frame < 8U; ++frame) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        for (core::u32 clip = 0U; clip < 3U; ++clip) {
+            const auto ready = cache.resolve(device, commands,
+                "plate-" + std::to_string(clip) + ".mov", frame, {}, clip + 1U);
+            if (ready) ++ready_counts[clip];
+        }
+        MEDIA_CHECK(cache.stats().resident_bytes <= cache.stats().byte_budget);
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted);
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    }
+    for (const auto count : ready_counts) MEDIA_CHECK(count >= 2U);
+}
+
+void backwards_scrubbing_reclaims_abandoned_large_uploads() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    auto device = open_device(rhi::BackendKind::D3d12);
+    render::MediaCache cache{std::make_unique<LargeReadySource>(6000U, 4000U)};
+    bool ready{};
+    for (const core::u32 frame : {100U, 90U, 80U, 70U, 60U, 60U}) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        ready = static_cast<bool>(cache.resolve(device, commands, "large.mov", frame, {}, 1U));
+        MEDIA_CHECK(cache.stats().resident_bytes <= cache.stats().byte_budget);
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted);
+        MEDIA_CHECK(std::move(submitted).value().wait());
+    }
+    MEDIA_CHECK(ready);
+}
+
+constexpr std::array<Case, 42U> cases{{
+    {"native NV12 colors match Rec709 reference pixels",
+     &native_nv12_colors_match_rec709_reference_pixels},
+    {"a 6000 pixel still uploads across recordings without partial publication",
+     &a_6000_pixel_still_uploads_across_recordings_without_partial_publication},
+    {"three UHD playheads recover from shared upload budget exhaustion",
+     &three_uhd_playheads_recover_from_shared_upload_budget_exhaustion},
+    {"backwards scrubbing reclaims abandoned large uploads",
+     &backwards_scrubbing_reclaims_abandoned_large_uploads},
     {"an off-air texture can be reused by an upcoming clip",
      &an_off_air_texture_can_be_reused_by_an_upcoming_clip},
     {"a preloaded loop frame never replaces the live held image",
@@ -2463,6 +2709,8 @@ constexpr std::array<Case, 37U> cases{{
      &canceled_p010_uploads_retain_both_plane_allocations},
     {"pending video holds without overwriting its stale texture",
      &pending_video_holds_without_overwriting_its_stale_texture},
+    {"failed media replaces a held image and freezes between views",
+     &failed_media_replaces_a_held_image_and_freezes_between_views},
     {"a late video frame establishes a truthfully keyed hold",
      &a_late_video_frame_establishes_a_truthfully_keyed_hold},
     {"an older late frame never replaces a newer presented frame",

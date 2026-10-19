@@ -130,6 +130,9 @@ struct ElementInfo final {
     // Drawable-only authored values. Lights keep their defaults and the
     // Inspector omits these sections for them.
     scene::Material material{};
+    // Runtime import metadata, supplied by the shell's nonblocking cache view.
+    core::u32 model_material_parts{};
+    std::string model_material_status;
     scene::LayerStyle style{};
     std::string source;
     core::u32 sequence_start{};
@@ -237,6 +240,14 @@ struct ElementInfo final {
         return element.color.z;
     case scene::PropertyChannel::LightRange:
         return element.range;
+    case scene::PropertyChannel::CameraFieldOfView:
+        return element.field_of_view;
+    case scene::PropertyChannel::CameraShutter:
+        return element.shutter_seconds;
+    case scene::PropertyChannel::CameraFocusDistance:
+        return element.focus_distance_m;
+    case scene::PropertyChannel::CameraAperture:
+        return element.aperture_f_number;
     case scene::PropertyChannel::Brightness:
         return element.style.effects.brightness;
     case scene::PropertyChannel::Saturation:

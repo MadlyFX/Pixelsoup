@@ -96,6 +96,20 @@ void an_authored_policy_round_trips_every_field() {
     SYNC_CHECK(policy.requires_external_reference());
 }
 
+void mosaic_timing_round_trips_without_aspect_ratio_limits() {
+    sync::SyncPolicy authored{};
+    authored.mode = sync::SyncMode::ExternalGenlock;
+    authored.required_timing = sync::SyncTiming{15'360U, 1'546U, 60U, 1U};
+    doc::Node written{};
+    written.id = doc::NodeId{42U};
+    sync::write_sync_policy_properties(written, authored);
+    sync::SyncPolicyModel model;
+    model.reset(with(doc::Root{}, written));
+    SYNC_CHECK(model.counters().rejected == 0U);
+    SYNC_CHECK(model.evaluate().required_timing == authored.required_timing);
+    SYNC_CHECK(model.evaluate().requires_external_reference());
+}
+
 void an_invalid_policy_node_is_rejected_and_stays_unsynced() {
     sync::SyncPolicyModel model;
     model.reset(with(doc::Root{},
@@ -196,7 +210,8 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"Mosaic timing round trips", &mosaic_timing_round_trips_without_aspect_ratio_limits},
     {"an unauthored project is unsynced", &an_unauthored_project_is_unsynced},
     {"an authored policy round trips every field",
      &an_authored_policy_round_trips_every_field},

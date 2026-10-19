@@ -54,7 +54,7 @@ class MediaSource {
         const std::string &source) const noexcept;
 
     // Decodes the frame to CPU pixels. Returns an invalid frame on any failure
-    // (missing file, undecodable data), which the renderer draws as nothing.
+    // (missing file, undecodable data), which draws the offline placeholder.
     // Non-const because a video source keeps an open decoder to walk frames
     // efficiently rather than re-opening the file each time.
     [[nodiscard]] virtual DecodedFrame decode(const std::string &source,

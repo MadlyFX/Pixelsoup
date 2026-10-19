@@ -314,33 +314,43 @@ void roll_uses_native_rate_and_rejects_gaps_overlaps_and_locks() {
     EDIT_CHECK(locked.error() == scene::TimelineEditError::LockedClip);
 }
 
-void slip_keeps_placement_fixed_and_clamps_unavailable_handles() {
-    const std::vector<scene::ClipPlacement> clips{
+void slip_keeps_placement_fixed_and_wraps_source_phase() {
+    std::vector<scene::ClipPlacement> clips{
         clip(1U, 10, 10, 5, 20), clip(2U, 12, 3, 0, 100)};
+    clips.front().timing.fade_in = 3;
+    clips.front().timing.fade_out = 4;
     const auto forward =
-        scene::plan_slip(clips, doc::NodeId{1U}, 100, show_60);
+        scene::plan_slip(clips, doc::NodeId{1U}, 103, show_60);
     EDIT_CHECK(forward.has_value());
-    EDIT_CHECK(forward.value().applied_delta == 5);
+    EDIT_CHECK(forward.value().applied_delta == 103);
     const auto* changed = update_for(forward.value(), doc::NodeId{1U});
     EDIT_CHECK(changed != nullptr);
-    EDIT_CHECK(changed->timing.start == 10);
-    EDIT_CHECK(changed->timing.duration == 10);
-    EDIT_CHECK(changed->timing.source_in == 10);
+    EDIT_CHECK(changed->timing == (scene::ClipTiming{10, 10, 8, 3, 4}));
 
     const auto backward =
-        scene::plan_slip(clips, doc::NodeId{1U}, -100, show_60);
+        scene::plan_slip(clips, doc::NodeId{1U}, -107, show_60);
     EDIT_CHECK(backward.has_value());
-    EDIT_CHECK(backward.value().applied_delta == -5);
+    EDIT_CHECK(backward.value().applied_delta == -107);
     EDIT_CHECK(update_for(backward.value(), doc::NodeId{1U})
-                   ->timing.source_in == 0);
+                   ->timing == (scene::ClipTiming{10, 10, 18, 3, 4}));
 
     const std::vector<scene::ClipPlacement> no_handles{
         clip(1U, 0, 10, 0, 10)};
-    const auto none =
+    const auto full =
         scene::plan_slip(no_handles, doc::NodeId{1U}, 1, show_60);
-    EDIT_CHECK(none.has_value());
-    EDIT_CHECK(none.value().applied_delta == 0);
-    EDIT_CHECK(none.value().updates.empty());
+    EDIT_CHECK(full.has_value());
+    EDIT_CHECK(full.value().applied_delta == 1);
+    EDIT_CHECK(update_for(full.value(), doc::NodeId{1U})->timing.source_in == 1);
+
+    // A five-minute placement of a 232-second source still loops and slips.
+    const std::vector<scene::ClipPlacement> overlong{
+        clip(1U, -30, 18'000, 0, 5'569, scene::MediaFrameRate{24'000U, 1'001U})};
+    for (const core::i64 delta : {60, -60}) {
+        const auto slipped = scene::plan_slip(overlong, doc::NodeId{1U}, delta, show_60);
+        EDIT_CHECK(slipped && slipped.value().applied_delta == delta);
+        EDIT_CHECK(update_for(slipped.value(), doc::NodeId{1U})->timing ==
+            (scene::ClipTiming{-30, 18'000, delta > 0 ? 24 : 5'545, 0, 0}));
+    }
 }
 
 void slip_maps_fractional_rates_and_remains_unambiguous_in_an_overlap() {
@@ -448,21 +458,121 @@ void insert_detects_integer_overflow_without_partial_updates() {
     EDIT_CHECK(plan.error() == scene::TimelineEditError::IntegerOverflow);
 }
 
-void frame_zero_and_incompatible_placements_fail_before_planning() {
+void negative_placements_are_valid_but_unrepresentable_ends_are_refused() {
     const std::vector<scene::ClipPlacement> negative{clip(1U, -1, 5)};
     const auto slip =
         scene::plan_slip(negative, doc::NodeId{1U}, 1, show_60);
-    EDIT_CHECK(!slip.has_value());
-    EDIT_CHECK(slip.error() == scene::TimelineEditError::IncompatibleClip);
+    EDIT_CHECK(slip.has_value());
+    EDIT_CHECK(update_for(slip.value(), doc::NodeId{1U})->timing ==
+        (scene::ClipTiming{-1, 5, 1, 0, 0}));
 
     const scene::TimelineLaneRef lane{default_scene, default_lane};
     const auto insert = scene::plan_insert({}, lane, -1, 5);
-    EDIT_CHECK(!insert.has_value());
-    EDIT_CHECK(insert.error() == scene::TimelineEditError::InvalidSpan);
+    EDIT_CHECK(insert && insert.value().span_start == -1);
     const auto overwrite = scene::plan_overwrite(
         {}, lane, -1, 5, show_60, doc::NodeId{100U});
-    EDIT_CHECK(!overwrite.has_value());
-    EDIT_CHECK(overwrite.error() == scene::TimelineEditError::InvalidSpan);
+    EDIT_CHECK(overwrite && overwrite.value().span_start == -1);
+    const auto maximum = std::numeric_limits<core::i64>::max();
+    const std::vector<scene::ClipPlacement> invalid{clip(1U, maximum, 1)};
+    const auto invalid_slip = scene::plan_slip(invalid, doc::NodeId{1U}, 1, show_60);
+    EDIT_CHECK(!invalid_slip && invalid_slip.error() == scene::TimelineEditError::IncompatibleClip);
+    EDIT_CHECK(!scene::plan_insert({}, lane, maximum, 1));
+    EDIT_CHECK(!scene::plan_overwrite({}, lane, maximum, 1, show_60, doc::NodeId{100U}));
+}
+
+void looping_phase_mapping_is_exact_at_signed_and_wide_boundaries() {
+    const auto phase = [](core::i64 start, core::i64 delta,
+                          scene::SourcePhaseRounding rounding) {
+        return scene::advance_source_phase(start, delta, show_60,
+            scene::MediaFrameRate{30U, 1U}, 7U, rounding);
+    };
+    EDIT_CHECK(phase(0, 1, scene::SourcePhaseRounding::Nearest).value() == 1);
+    EDIT_CHECK(phase(0, -1, scene::SourcePhaseRounding::Nearest).value() == 6);
+    EDIT_CHECK(phase(0, 1, scene::SourcePhaseRounding::Floor).value() == 0);
+    EDIT_CHECK(phase(0, -1, scene::SourcePhaseRounding::Floor).value() == 6);
+    EDIT_CHECK(phase(20, 3, scene::SourcePhaseRounding::Floor).value() == 0);
+    constexpr auto maximum = std::numeric_limits<core::u32>::max();
+    constexpr auto highest = std::numeric_limits<core::i64>::max();
+    constexpr auto lowest = std::numeric_limits<core::i64>::min();
+    // Independent modular expectations for (7 + delta*(2^32-1)^2) mod97.
+    const auto large = [&](core::i64 delta) {
+        return scene::advance_source_phase(7, delta,
+            scene::MediaFrameRate{1U, maximum},
+            scene::MediaFrameRate{maximum, 1U}, 97U);
+    };
+    EDIT_CHECK(large(highest).value() == 62);
+    EDIT_CHECK(large(lowest).value() == 57);
+    EDIT_CHECK(scene::advance_source_phase(0, lowest, show_60, std::nullopt, 97U).value() == 18);
+    EDIT_CHECK(!scene::advance_source_phase(0, 1, show_60, std::nullopt, 0U));
+    EDIT_CHECK(!scene::advance_source_phase(-1, 1, show_60, std::nullopt, 97U));
+    EDIT_CHECK(!scene::advance_source_phase(0, 1, {0U, 1U}, std::nullopt, 97U));
+
+    const std::vector<scene::ClipPlacement> clips{
+        clip(1U, -5, 10, 7, 97U, scene::MediaFrameRate{maximum, 1U})};
+    const auto slipped = scene::plan_slip(clips, doc::NodeId{1U}, lowest,
+        scene::MediaFrameRate{1U, maximum});
+    EDIT_CHECK(slipped && slipped.value().applied_delta == lowest);
+    EDIT_CHECK(update_for(slipped.value(), doc::NodeId{1U})->timing.source_in == 57);
+}
+
+void all_edit_planners_accept_negative_placement_starts() {
+    const std::vector<scene::ClipPlacement> clips{
+        clip(1U, -20, 10, 20), clip(2U, -10, 10, 20)};
+    const auto tail = scene::plan_ripple_trim(clips, doc::NodeId{1U},
+        scene::TimelineTrimEdge::Tail, 2, show_60);
+    EDIT_CHECK(tail && tail.value().applied_delta == 2);
+    EDIT_CHECK(update_for(tail.value(), doc::NodeId{2U})->timing.start == -8);
+    const auto head = scene::plan_ripple_trim(clips, doc::NodeId{1U},
+        scene::TimelineTrimEdge::Head, 2, show_60);
+    EDIT_CHECK(head && head.value().applied_delta == 2);
+    EDIT_CHECK(update_for(head.value(), doc::NodeId{2U})->timing.start == -12);
+    const std::array selected{doc::NodeId{1U}};
+    const auto erased = scene::plan_ripple_delete(clips, selected);
+    EDIT_CHECK(erased && erased.value().applied_delta == -10);
+    EDIT_CHECK(update_for(erased.value(), doc::NodeId{2U})->timing.start == -20);
+    const auto rolled = scene::plan_roll(clips, doc::NodeId{1U}, doc::NodeId{2U}, 2, show_60);
+    EDIT_CHECK(rolled && rolled.value().span_duration == 20);
+    EDIT_CHECK(update_for(rolled.value(), doc::NodeId{2U})->timing ==
+        (scene::ClipTiming{-8, 8, 22, 0, 0}));
+    const std::vector<scene::ClipPlacement> neighbours{
+        clip(1U, -20, 10, 20), clip(2U, -10, 5, 20), clip(3U, -5, 10, 20)};
+    const auto slid = scene::plan_slide(neighbours, doc::NodeId{2U}, 2, show_60);
+    EDIT_CHECK(slid && slid.value().span_duration == 25);
+    EDIT_CHECK(update_for(slid.value(), doc::NodeId{2U})->timing.start == -8);
+    const scene::TimelineLaneRef lane{default_scene, default_lane};
+    const auto inserted = scene::plan_insert(clips, lane, -20, 3);
+    EDIT_CHECK(inserted && update_for(inserted.value(), doc::NodeId{1U})->timing.start == -17);
+    const auto overwritten = scene::plan_overwrite(clips, lane, -17, 3,
+        show_60, doc::NodeId{100U});
+    EDIT_CHECK(overwritten);
+    EDIT_CHECK(update_for(overwritten.value(), doc::NodeId{1U})->timing.duration == 3);
+    EDIT_CHECK(create_for(overwritten.value(), doc::NodeId{100U})->timing ==
+        (scene::ClipTiming{-14, 4, 26, 0, 0}));
+}
+
+void signed_placement_union_and_shift_overflow_are_refused() {
+    constexpr auto highest = std::numeric_limits<core::i64>::max();
+    constexpr auto lowest = std::numeric_limits<core::i64>::min();
+    constexpr auto rate_max = std::numeric_limits<core::u32>::max();
+    const scene::MediaFrameRate show{rate_max, 1U};
+    const scene::MediaFrameRate slow{1U, rate_max};
+    const std::vector<scene::ClipPlacement> pair{
+        clip(1U, lowest, highest, 0, 100, slow), clip(2U, -1, highest, 0, 100, slow)};
+    const auto rolled = scene::plan_roll(pair, doc::NodeId{1U}, doc::NodeId{2U}, 1, show);
+    EDIT_CHECK(!rolled && rolled.error() == scene::TimelineEditError::IntegerOverflow);
+    const std::array both{doc::NodeId{1U}, doc::NodeId{2U}};
+    const auto erased = scene::plan_ripple_delete(pair, both);
+    EDIT_CHECK(!erased && erased.error() == scene::TimelineEditError::IntegerOverflow);
+    const std::vector<scene::ClipPlacement> triple{
+        clip(1U, lowest, highest - 1, 0, 100, slow),
+        clip(2U, -2, 1, 0, 100, slow), clip(3U, -1, highest, 0, 100, slow)};
+    const auto slid = scene::plan_slide(triple, doc::NodeId{2U}, 1, show);
+    EDIT_CHECK(!slid && slid.error() == scene::TimelineEditError::IntegerOverflow);
+    // The shifted start fits; its exclusive end does not.
+    const std::vector<scene::ClipPlacement> late{clip(1U, highest - 5, 4)};
+    const auto inserted = scene::plan_insert(late,
+        {default_scene, default_lane}, -1, 2);
+    EDIT_CHECK(!inserted && inserted.error() == scene::TimelineEditError::IntegerOverflow);
 }
 
 void overwrite_preserves_left_and_right_remainders_and_later_clips() {
@@ -570,7 +680,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 18U> cases{{
+constexpr std::array<Case, 21U> cases{{
+    {"looping phase mapping is exact at signed and wide boundaries",
+     &looping_phase_mapping_is_exact_at_signed_and_wide_boundaries},
+    {"all edit planners accept negative placement starts",
+     &all_edit_planners_accept_negative_placement_starts},
+    {"signed placement union and shift overflow are refused",
+     &signed_placement_union_and_shift_overflow_are_refused},
     {"exact rate mapping is signed rounded and overflow safe",
      &exact_rate_mapping_is_signed_rounded_and_overflow_safe},
     {"ripple tail moves the whole suffix and clamps handles",
@@ -587,8 +703,8 @@ constexpr std::array<Case, 18U> cases{{
      &roll_moves_only_one_touching_cut_and_clamps_both_assets},
     {"roll uses native rate and rejects gaps overlaps and locks",
      &roll_uses_native_rate_and_rejects_gaps_overlaps_and_locks},
-    {"slip keeps placement fixed and clamps unavailable handles",
-     &slip_keeps_placement_fixed_and_clamps_unavailable_handles},
+    {"slip keeps placement fixed and wraps source phase",
+     &slip_keeps_placement_fixed_and_wraps_source_phase},
     {"slip maps fractional rates and remains unambiguous in an overlap",
      &slip_maps_fractional_rates_and_remains_unambiguous_in_an_overlap},
     {"slide rolls two touching neighbours and keeps outer span",
@@ -599,8 +715,8 @@ constexpr std::array<Case, 18U> cases{{
      &insert_shifts_only_the_target_suffix_and_rejects_collisions},
     {"insert detects integer overflow without partial updates",
      &insert_detects_integer_overflow_without_partial_updates},
-    {"frame zero and incompatible placements fail before planning",
-     &frame_zero_and_incompatible_placements_fail_before_planning},
+    {"negative placements are valid but unrepresentable ends are refused",
+     &negative_placements_are_valid_but_unrepresentable_ends_are_refused},
     {"overwrite preserves left and right remainders and later clips",
      &overwrite_preserves_left_and_right_remainders_and_later_clips},
     {"overwrite uses native rate and rejects locked or exhausted splits",

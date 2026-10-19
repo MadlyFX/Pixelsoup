@@ -192,9 +192,8 @@ try {
         '--role=director', "--wal=$wal", "--director-listen=$listen",
         "--show-id=$showId", "--director-epoch=$epoch",
         '--playback', '--edit', '--surface=1080x760', '--window-at=30,30',
-        # A bounded, looping range so the Timeline opens on a legible edit:
-        # the built-in scene places its three clips inside these 600 frames.
-        '--show-range=0:600', '--show-loop',
+        # Use the default five-minute timeline and loop the demo.
+        '--show-loop',
         '--status-interval=120',
         "--lifecycle-secret-file=$LifecycleSecretFile") 'director (editor)'
 

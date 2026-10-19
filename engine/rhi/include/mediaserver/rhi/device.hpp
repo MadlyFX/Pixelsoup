@@ -1114,6 +1114,12 @@ public:
     // Bytes upload_range can still accept in this recording.
     [[nodiscard]] core::u64 upload_space() const noexcept;
 
+    // Complete base-level rows that can be uploaded now, including backend
+    // row padding and page fragmentation. Reserves space for later draw data.
+    // Backends with dedicated texture staging may admit the entire image.
+    [[nodiscard]] core::u32 texture_upload_row_capacity(
+        const Texture& texture, core::u64 reserve_bytes = 0U) const noexcept;
+
     // Uploads whole-texture pixel data. Used once for the glyph atlas, not per
     // frame - the point of the GPU path is that per-frame pixel upload stops.
     [[nodiscard]] bool upload(

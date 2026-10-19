@@ -218,6 +218,7 @@ ProjectAssetAvailability check_project_assets(
     for (const RequiredProjectAsset& required : manifest.assets) {
         ProjectAssetPresence presence{};
         presence.asset = required.asset;
+        presence.kind = required.kind;
         presence.source = required.source;
         presence.expected_fingerprint = required.expected_fingerprint;
 
@@ -278,6 +279,7 @@ ProjectAssetAvailability scan_project_assets(
     for (const RequiredProjectAsset& required : manifest.assets) {
         ProjectAssetPresence presence{};
         presence.asset = required.asset;
+        presence.kind = required.kind;
         presence.source = required.source;
         presence.expected_fingerprint = required.expected_fingerprint;
         presence.present = assets::asset_source_present(required.source);

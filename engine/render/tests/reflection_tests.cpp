@@ -132,6 +132,17 @@ void gpu_contract(rhi::Device& device, const render::BakeResult& baked) {
     auto borrowed_commands=acquire(device); CHECK(full.value().render(borrowed_commands,isolated,whole,isolated_options));
     CHECK(full.value().stats().planar_passes==0);
     CHECK(readback(device,std::move(borrowed_commands),full.value().target(),8)==isolated_image);
+    auto borrower_limits=limits(); borrower_limits.planar_reflections=false;
+    auto borrower=render::SceneRenderer::create(device,128,96,borrower_limits,render::SceneRendererMode::AdvancedLinear); CHECK(borrower);
+    auto shared_commands=acquire(device); CHECK(borrower.value().render(shared_commands,isolated,whole,isolated_options));
+    CHECK(borrower.value().stats().planar_passes==0 && borrower.value().stats().planar_refusals==0);
+    CHECK(borrower.value().stats().assets.ready);
+    CHECK(readback(device,std::move(shared_commands),borrower.value().target(),8)==isolated_image);
+    // An omitted shared capture must retain a specific readiness failure.
+    auto missing_options=isolated_options; missing_options.shared_planar=nullptr;
+    auto missing_commands=acquire(device); CHECK(borrower.value().render(missing_commands,isolated,whole,missing_options));
+    CHECK(borrower.value().stats().planar_refusals==1 && !borrower.value().stats().assets.ready);
+    static_cast<void>(readback(device,std::move(missing_commands),borrower.value().target(),8));
 
     s.instances.push_back(object(4,{0,-0.8F,1},{2,0.5F,1},{0,8,0}));
     CHECK(draw(full.value(),whole)==reflected); // Geometry behind the plane is clipped.

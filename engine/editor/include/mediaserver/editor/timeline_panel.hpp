@@ -253,13 +253,13 @@ struct TimelineClipEdit final {
 // before the cut, so splicing is non-destructive.
 struct TimelineClipSplit final {
   doc::NodeId clip{};
-  core::u64 frame{};
+  core::i64 frame{};
 
   bool operator==(const TimelineClipSplit &) const = default;
 };
 
-// A layer-row selection request. Scene-layer Shift clicks carry the visible
-// visible layer order so expanded property rows and collapsed/filtered layers cannot
+// A row selection request. Layer and Track Shift clicks carry the visible
+// row order so expanded property rows and collapsed/filtered layers cannot
 // distort a contiguous range. Physical surfaces remain a distinct, singular
 // Mapping selection domain.
 struct TimelineSelectionRequest final {
@@ -359,11 +359,11 @@ struct TimelineLayerReorder final {
   bool operator==(const TimelineLayerReorder &) const = default;
 };
 
-// A layer row released away from the Timeline. The shell resolves this
+// Selected layer rows released away from the Timeline. The shell resolves this
 // screen-space drop against the Compositor after every dock has drawn, so a
-// row can become a Scene Layer node without either panel knowing dock layout.
+// group becomes Scene Layer nodes without either panel knowing dock layout.
 struct TimelineLayerDrop final {
-  doc::NodeId layer{};
+  std::vector<doc::NodeId> layers;
   float screen_x{};
   float screen_y{};
 
@@ -525,6 +525,9 @@ struct TimelinePanelFrame final {
   std::vector<TimelineElementFlagEdit> element_flags;
   std::vector<TimelineRename> renames;
   std::vector<TimelineEditRequest> timeline_edits;
+  // The visible gesture readout is independent of the clip bar's width.
+  std::string clip_status;
+  bool clip_status_error{};
   // Marker and cue changes from one gesture. A drag of several selected
   // markers reports one Update each, which the shell gives one undo step.
   std::vector<TimelineMarkerEdit> marker_edits;
@@ -576,6 +579,14 @@ public:
        std::span<const TimelineWaveformObservation> waveforms = {},
        std::span<const scene::TimelineMarker> markers = {});
 
+  struct ReplacementTarget final {
+    doc::NodeId node{};
+    gui::Rect bounds{};
+  };
+  [[nodiscard]] std::span<const ReplacementTarget> replacement_targets() const noexcept {
+    return replacement_targets_;
+  }
+
   // Replaces only the Timeline's typed key selection after the Director has
   // accepted an atomic plan. Addresses remain unique and sorted; no Scene
   // layer, mapping, compositor, or Selection Set carrier is touched.
@@ -612,7 +623,11 @@ public:
     return lane_drag_node_ != doc::NodeId{} ? lane_drag_node_
                                             : layer_drag_node_;
   }
+  [[nodiscard]] std::size_t dragging_compositor_source_count() const noexcept {
+    return layer_drag_nodes_.size();
+  }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
+  [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
   [[nodiscard]] std::span<const doc::NodeId> selected_markers() const noexcept {
     return selected_markers_;
@@ -650,6 +665,8 @@ public:
   void reset_project_state() noexcept;
 
 private:
+  std::vector<ReplacementTarget> replacement_targets_;
+
   // Which part of a clip bar a drag grabbed. Move slides the placement;
   // TrimIn and TrimOut change one edge while the source stays put under the
   // other; the fade handles set the head and tail ramp lengths.
@@ -725,6 +742,9 @@ private:
   // share the same lift/insert gesture. The Director decides which order
   // domain applies; this state remains pointer-local.
   doc::NodeId layer_drag_node_{};
+  // Snapshot the selected rows at lift, in timeline order. Selection may be
+  // updated by the shell while the pointer is travelling between panels.
+  std::vector<doc::NodeId> layer_drag_nodes_;
   float layer_drag_start_x_{};
   float layer_drag_start_y_{};
   bool layer_drag_moved_{};
@@ -782,6 +802,15 @@ private:
   doc::NodeId clip_drag_peer_{};
   scene::ClipTiming clip_drag_origin_{};
   scene::ClipTiming clip_drag_proposed_{};
+  // Keep a released gesture visible while its single edit reaches authority.
+  std::optional<TimelineClipEdit> pending_clip_edit_;
+  scene::ClipTiming pending_clip_origin_{};
+  core::u32 pending_clip_frames_{};
+  std::string clip_status_;
+  bool clip_status_error_{};
+  double clip_status_until_{};
+  double previous_draw_time_{};
+  bool auto_key_{true};
   core::i64 clip_drag_anchor_{};
   core::i64 clip_drag_delta_{};
   // Clip bars use the same lift contract as tracks and Feed Mapping. A press
@@ -790,6 +819,7 @@ private:
   // stack gesture above; bar drags change show time and may change tracks.
   float clip_drag_start_x_{};
   float clip_drag_start_y_{};
+  std::optional<gui::UiPoint> clip_drag_release_;
   bool clip_drag_moved_{};
   std::optional<doc::NodeId> clip_drop_lane_;
   std::optional<core::i64> clip_snap_guide_;

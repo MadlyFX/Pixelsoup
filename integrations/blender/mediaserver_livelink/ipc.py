@@ -22,6 +22,7 @@ class Worker:
         self.auth = bytearray()
         self.input = bytearray()
         self.output = []
+        self.packed_images = {}
         self.offset = 0
         self.deadline = time.monotonic() + 15
         try:
@@ -36,11 +37,34 @@ class Worker:
     def submit(self, metadata, meshes=()):
         if self.output:
             raise RuntimeError('IPC request already pending')
+        # Binary image attachments keep packed Blender images out of JSON and
+        # reuse the same nonblocking, bounded send queue as mesh arrays.
+        import copy
+        metadata = copy.deepcopy(metadata)
+        images = {}
+        active_images = {}
+        for obj in metadata.get('objects', []):
+            for material in obj.get('materials', []):
+                if isinstance(material, dict):
+                    for view in material.get('textures', {}).values():
+                        data = view.pop('packed_bytes', None)
+                        if data is not None:
+                            path = view['path']
+                            active_images[path] = data
+                            view['packed_image'] = True
+                            if self.packed_images.get(path) is not data:
+                                images[path] = data
+        if len(active_images) > 256 or sum(map(len, active_images.values())) > 256 * 1024 * 1024:
+            raise ValueError('Packed images exceed 256 images / 256 MiB')
+        metadata['packed_images'] = [{'path': path, 'length': len(data)} for path, data in images.items()]
+        meshes = tuple(meshes)
         payload = json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode('utf-8')
         if len(payload) > 2 * 1024 * 1024 or sum(len(p) for m in meshes for p in m) > MAX_RAW_BYTES:
             raise ValueError('Copied scene exceeds IPC capacity')
         self.output = [memoryview(struct.pack('<I', len(payload)) + payload)]
         self.output.extend(memoryview(part) for mesh in meshes for part in mesh if part)
+        self.output.extend(memoryview(data) for data in images.values())
+        self.packed_images = active_images
         self.offset = 0
 
     def poll(self):

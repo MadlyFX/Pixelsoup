@@ -2325,6 +2325,103 @@ void a_channel_replicates_bit_exact() {
     }
 }
 
+void camera_lens_channels_evaluate_and_replicate() {
+    const std::vector<doc::Node> nodes{
+        node(1U, schema::stage_type, {}),
+        node(2U, schema::camera_type, {whole(schema::camera_tracking_source, 3)}),
+        node(3U, schema::tracking_source_type, {}),
+        channel_node(20U, 2U, schema::fov_turns,
+                     {{0, 0.1, schema::interp_linear}, {20, 0.2, schema::interp_linear}}),
+        channel_node(21U, 2U, schema::shutter_seconds,
+                     {{0, 0.01, schema::interp_linear}, {20, 0.03, schema::interp_linear}}),
+        channel_node(22U, 2U, schema::focus_distance_m,
+                     {{0, 4.0, schema::interp_linear}, {20, 12.0, schema::interp_linear}}),
+        channel_node(23U, 2U, schema::aperture_f_number,
+                     {{0, 2.0, schema::interp_linear}, {20, 6.0, schema::interp_linear}}),
+    };
+    scene::SceneModel checkpointed;
+    checkpointed.reset(root_of(nodes));
+    MODEL_CHECK(checkpointed.counters().rejected == 0U);
+    MODEL_CHECK(checkpointed.counters().channels == 4U);
+    const auto middle = checkpointed.evaluate(scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(std::abs(middle.camera.field_of_view - 0.15F) < 1.0e-6F);
+    MODEL_CHECK(std::abs(middle.camera.shutter_seconds - 0.02F) < 1.0e-6F);
+    MODEL_CHECK(middle.camera.focus_distance_m == 8.0F);
+    MODEL_CHECK(middle.camera.aperture_f_number == 4.0F);
+    MODEL_CHECK(middle.tracked_cameras.size() == 1U);
+    MODEL_CHECK(middle.tracked_cameras.front().authored.field_of_view == middle.camera.field_of_view);
+    MODEL_CHECK(middle.tracked_cameras.front().authored.focus_distance_m == 8.0F);
+    auto changed = middle;
+    changed.camera.aperture_f_number = 5.0F;
+    MODEL_CHECK(scene::digest(changed) != scene::digest(middle));
+
+    scene::SceneModel streamed;
+    doc::Root running;
+    for (const auto& one : nodes) {
+        const auto grown = running.set(one);
+        streamed.apply(diff(running, grown));
+        running = grown;
+    }
+    for (core::u64 frame = 0U; frame <= 30U; ++frame) {
+        const scene::SceneTime moment{frame, 60U, 1U};
+        MODEL_CHECK(scene::digest(checkpointed.evaluate(moment)) ==
+                    scene::digest(streamed.evaluate(moment)));
+    }
+    const auto limited = running.set(channel_node(20U, 2U, schema::fov_turns,
+        {{0, 4.0, schema::interp_linear}}));
+    checkpointed.reset(limited);
+    MODEL_CHECK(checkpointed.evaluate(at_start).camera.field_of_view == 0.499F);
+}
+
+void published_keyframes_use_the_canonical_cubic_sampler() {
+    const auto camera = node(2U, schema::camera_type, {});
+    auto authored = channel_node(20U, 2U, schema::fov_turns,
+        {{0, 0.1, schema::interp_cubic}, {20, 0.2, schema::interp_cubic}});
+    scene::SceneModel model;
+    model.reset(root_of({node(1U, schema::stage_type, {}), camera, authored}));
+    auto channels = model.channel_keyframes();
+    MODEL_CHECK(channels.size() == 1U);
+    // Two auto keys have the secant as both tangents: a straight line,
+    // including at a quarter interval where smoothstep is observably wrong.
+    const auto quarter = scene::sample_keyframes(channels.front(), 5);
+    MODEL_CHECK(quarter && std::abs(*quarter - 0.125) < 1.0e-12);
+    MODEL_CHECK(model.evaluate(scene::SceneTime{5U, 60U, 1U}).camera.field_of_view == 0.125F);
+
+    authored = channel_node(20U, 2U, schema::fov_turns,
+        {{0, 0.1, schema::interp_cubic}, {32, 0.2, schema::interp_cubic}});
+    const auto property = [](unsigned index, std::string_view suffix) {
+        return std::string{schema::channel_key_prefix} + std::to_string(index) +
+            std::string{suffix};
+    };
+    authored.properties[property(0U, schema::channel_key_tangent_mode_suffix)] =
+        std::string{schema::tangent_broken};
+    authored.properties[property(1U, schema::channel_key_tangent_mode_suffix)] =
+        std::string{schema::tangent_broken};
+    authored.properties[property(0U, schema::channel_key_out_slope_suffix)] = 0.02;
+    authored.properties[property(0U, schema::channel_key_out_weight_suffix)] = 4.0;
+    authored.properties[property(1U, schema::channel_key_in_slope_suffix)] = -0.005;
+    authored.properties[property(1U, schema::channel_key_in_weight_suffix)] = 12.0;
+    model.reset(root_of({node(1U, schema::stage_type, {}), camera, authored}));
+    channels = model.channel_keyframes();
+    MODEL_CHECK(channels.size() == 1U);
+    // At Bezier t=1/2, X=(0+3*4+3*20+32)/8=13, and
+    // Y=(.1+3*.18+3*.26+.2)/8=.2025. Unequal weights require x(t) inversion.
+    const auto weighted = scene::sample_keyframes(channels.front(), 13);
+    MODEL_CHECK(weighted && std::abs(*weighted - 0.2025) < 1.0e-12);
+    for (core::u64 frame = 0U; frame <= 32U; ++frame) {
+        const auto sampled = scene::sample_keyframes(channels.front(), static_cast<core::i64>(frame));
+        MODEL_CHECK(sampled.has_value());
+        MODEL_CHECK(static_cast<float>(*sampled) ==
+            model.evaluate(scene::SceneTime{frame, 60U, 1U}).camera.field_of_view);
+    }
+    auto malformed = channels.front();
+    malformed.frames[1] = malformed.frames[0];
+    MODEL_CHECK(!scene::sample_keyframes(malformed, 13));
+    malformed = channels.front();
+    malformed.values.pop_back();
+    MODEL_CHECK(!scene::sample_keyframes(malformed, 13));
+}
+
 void a_malformed_channel_is_refused() {
     // No keys: a channel that animates nothing is a mistake, not an empty curve.
     scene::SceneModel no_keys;
@@ -3191,16 +3288,93 @@ void clip_ramps_scale_the_authored_opacity() {
     MODEL_CHECK(scene::clip_fade(scene::ClipTiming{}, 12'345) == 1.0F);
 }
 
-void a_negative_clip_placement_is_refused() {
+void negative_clip_placements_evaluate_fades_and_replicate_at_frame_zero() {
     scene::SceneModel model;
-    model.reset(doc::Root{}.set(node(
+    const auto root = doc::Root{}.set(node(
         1U, schema::media_type,
         {text(schema::source, "plate_%04u.png"),
          whole(schema::sequence_count, 4),
          whole(schema::clip_start, -3),
-         whole(schema::clip_duration, 4)})));
+         whole(schema::clip_duration, 8),
+         whole(schema::source_in, 1),
+         whole(schema::fade_in, 6), whole(schema::fade_out, 2)}));
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    scene::SceneModel replicated;
+    replicated.apply(doc::diff(doc::Root{}, root));
+    const auto first = model.evaluate(at_start);
+    MODEL_CHECK(first.media.size() == 1U);
+    MODEL_CHECK(first.media.front().frame_index == 0U); // (source1 + elapsed3) mod4
+    MODEL_CHECK(first.media.front().style.opacity == 0.5F);
+    MODEL_CHECK(first.media_prewarm.empty());
+    for (core::u64 frame = 0U; frame <= 5U; ++frame) {
+        const scene::SceneTime time{frame, 60U, 1U};
+        MODEL_CHECK(scene::digest(model.evaluate(time)) ==
+                    scene::digest(replicated.evaluate(time)));
+    }
+    const auto tail = model.evaluate(scene::SceneTime{3U, 60U, 1U});
+    MODEL_CHECK(tail.media.front().frame_index == 3U);
+    MODEL_CHECK(tail.media.front().style.opacity == 0.5F);
+    MODEL_CHECK(model.evaluate(scene::SceneTime{4U, 60U, 1U}).media.front().style.opacity == 0.0F);
+    MODEL_CHECK(model.evaluate(scene::SceneTime{5U, 60U, 1U}).media.empty());
+    const auto wrapping = model.evaluate(scene::SceneTime{3U, 60U, 1U},
+        scene::ShowLoop{0U, 4U, true});
+    MODEL_CHECK(wrapping.media_prewarm.size() == 1U);
+    MODEL_CHECK(wrapping.media_prewarm.front().frame_index == 0U);
+
+    auto moved = *root.get(doc::NodeId{1U});
+    moved.properties[std::string{schema::clip_start}] = core::i64{-4};
+    const auto changed = root.set(moved);
+    replicated.apply(doc::diff(root, changed));
+    model.reset(changed);
+    MODEL_CHECK(model.evaluate(at_start).media.front().frame_index == 1U);
+    MODEL_CHECK(scene::digest(model.evaluate(at_start)) ==
+                scene::digest(replicated.evaluate(at_start)));
+    MODEL_CHECK(scene::digest(model.evaluate(at_start)) != scene::digest(first));
+}
+
+void negative_native_placements_keep_exact_source_mapping_and_safe_bounds() {
+    const auto make_root = [](core::i64 start, core::i64 duration) {
+        return doc::Root{}.set(node(1U, schema::media_type,
+            {text(schema::source, "native.mp4"),
+             whole(schema::sequence_start, 100), whole(schema::sequence_count, 97),
+             whole(schema::source_rate_numerator, 24'000),
+             whole(schema::source_rate_denominator, 1'001),
+             whole(schema::source_in, 4), whole(schema::clip_start, start),
+             whole(schema::clip_duration, duration)}));
+    };
+    scene::SceneModel model;
+    model.reset(make_root(-1'001, 2'000));
+    const auto at_zero = model.evaluate(scene::SceneTime{0U, 60'000U, 1'001U});
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(at_zero.media.front().frame_index == 116U); //100+(4+floor(1001*2/5))%97
+    constexpr auto highest = std::numeric_limits<core::i64>::max();
+    constexpr auto lowest = std::numeric_limits<core::i64>::min();
+    model.reset(make_root(-(highest / 2), highest));
+    MODEL_CHECK(model.counters().rejected == 0U);
+    // floor(4611686018427387903*2/5)+4, modulo97, is58.
+    MODEL_CHECK(model.evaluate(scene::SceneTime{0U, 60'000U, 1'001U})
+                    .media.front().frame_index == 158U);
+    model.reset(make_root(lowest, highest));
+    MODEL_CHECK(model.counters().rejected == 0U);
+    MODEL_CHECK(model.evaluate(at_start).media.empty());
+    MODEL_CHECK(model.evaluate(at_start).media_prewarm.empty());
+    model.reset(make_root(highest, 1));
     MODEL_CHECK(model.counters().rejected == 1U);
     MODEL_CHECK(model.evaluate(at_start).media.empty());
+
+    const scene::ClipTiming edge{lowest, highest, 0, 2, 2};
+    MODEL_CHECK(scene::valid_clip_timing(edge));
+    MODEL_CHECK(edge.last_frame() == -2);
+    MODEL_CHECK(scene::clip_visible(edge, lowest));
+    MODEL_CHECK(!scene::clip_visible(edge, -1));
+    MODEL_CHECK(scene::clip_fade(edge, lowest) == 0.0F);
+    MODEL_CHECK(scene::clip_fade(edge, -2) == 0.0F);
+    MODEL_CHECK(!scene::clip_starts_within(scene::ClipTiming{highest - 1, 1},
+        lowest, highest));
+    MODEL_CHECK(scene::clip_starts_within(scene::ClipTiming{-5, 3}, -8, 3));
+    MODEL_CHECK(!scene::valid_clip_timing(scene::ClipTiming{highest, 1}));
+    MODEL_CHECK(!scene::clip_visible(scene::ClipTiming{highest, 1}, highest));
 }
 
 void clip_placements_are_listed_for_the_editor_off_air() {
@@ -4686,7 +4860,12 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 81U> cases{{
+constexpr std::array<Case, 84U> cases{{
+    {"negative native placements keep exact source mapping and safe bounds",
+     &negative_native_placements_keep_exact_source_mapping_and_safe_bounds},
+    {"published keyframes use the canonical cubic sampler",
+     &published_keyframes_use_the_canonical_cubic_sampler},
+    {"camera lens channels evaluate and replicate", &camera_lens_channels_evaluate_and_replicate},
     {"moving into a group preserves world and order",
      &moving_into_a_group_preserves_world_and_order},
     {"prewarming uses show seconds and keeps the nearest cuts",
@@ -4740,8 +4919,8 @@ constexpr std::array<Case, 81U> cases{{
      &a_clip_on_air_across_the_show_wrap_names_its_landing_frame},
     {"clip ramps scale the authored opacity",
      &clip_ramps_scale_the_authored_opacity},
-    {"a negative clip placement is refused",
-     &a_negative_clip_placement_is_refused},
+    {"negative clip placements evaluate fades and replicate at frame zero",
+     &negative_clip_placements_evaluate_fades_and_replicate_at_frame_zero},
     {"clip placements are listed for the editor off air",
      &clip_placements_are_listed_for_the_editor_off_air},
     {"timeline lanes order mute lock and preserve implicit clips",

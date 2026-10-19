@@ -45,7 +45,7 @@ struct Formatted final {
     const char* const begin = text.c_str();
     char* end = nullptr;
     const double value = std::strtod(begin, &end);
-    if (end == begin) {
+    if (end == begin || !std::isfinite(value)) {
         return std::nullopt;
     }
     return value;
@@ -55,7 +55,9 @@ struct Formatted final {
 
 void NumberField::cancel(gui::UiContext& ctx) {
     if (typing_ != gui::UiId{}) {
-        ctx.clear_focus();
+        if (ctx.focus() == typing_) {
+            ctx.clear_focus();
+        }
         typing_ = gui::UiId{};
     }
     scrub_ = gui::UiId{};
@@ -161,12 +163,20 @@ bool NumberField::draw(
         scrub_travel_ = 0.0F;
         scrub_moved_ = false;
     }
-    if (it.held && scrub_ == id) {
-        scrub_travel_ += ctx.pointer_dx();
+    // A batch can contain movement both before and after capture. Only the
+    // portion since the actual down event belongs to this scrub. Release
+    // batches likewise retain their final captured movement.
+    const float captured_x = it.released
+        ? ctx.pointer_release_x() : ctx.pointer_x();
+    const float captured_dx = it.pressed
+        ? captured_x - ctx.pointer_press_x()
+        : captured_x - (ctx.pointer_x() - ctx.pointer_dx());
+    if ((it.held || it.released) && scrub_ == id) {
+        scrub_travel_ += captured_dx;
         if (!scrub_moved_ && std::abs(scrub_travel_) >= scrub_threshold) {
             scrub_moved_ = true;
         }
-        if (scrub_moved_ && ctx.pointer_dx() != 0.0F) {
+        if (scrub_moved_ && captured_dx != 0.0F) {
             out = scrub_base_ + static_cast<double>(scrub_travel_) * speed;
             if (edit != nullptr) {
                 *edit = NumberFieldEdit{

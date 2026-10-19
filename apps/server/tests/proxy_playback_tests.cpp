@@ -317,6 +317,46 @@ void require_proxy_is_unready_when_the_exact_cache_entry_is_missing() {
     PLAYBACK_CHECK(state->calls == 0U);
 }
 
+void offline_media_preserves_placements_and_does_not_hold_output() {
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "offline.mov";
+    write_file(path, bytes("offline-source"));
+    const auto asset = media_asset(path,
+                                  assets::ProxyPlaybackPolicy::Source);
+    fs::remove(path);
+    app::ProxyPlaybackService playback{nullptr};
+    const auto original = evaluated_scene(asset);
+    const auto missing = availability(asset, app::ProjectAssetPresence::State::Missing);
+    PLAYBACK_CHECK(!missing.ready());
+    PLAYBACK_CHECK(missing.render_ready());
+    auto resolved = playback.resolve(original, registry(asset), missing);
+    PLAYBACK_CHECK(resolved);
+    PLAYBACK_CHECK(resolved.value().ready());
+    PLAYBACK_CHECK(resolved.value().scene.media.size() == 1U);
+    auto expected = original.media.front();
+    expected.offline = true;
+    PLAYBACK_CHECK(resolved.value().scene.media.front() == expected);
+    PLAYBACK_CHECK(resolved.value().placements.front().offline);
+
+    // Restoring the file switches back to the authored source without a new
+    // placement or a changed persistent identity.
+    resolved = playback.resolve(original, registry(asset), availability(asset));
+    PLAYBACK_CHECK(resolved && resolved.value().ready());
+    PLAYBACK_CHECK(resolved.value().scene.media.front() == original.media.front());
+
+    auto loose = original;
+    loose.media.front().asset = {};
+    resolved = playback.resolve(loose, {}, missing);
+    PLAYBACK_CHECK(resolved && resolved.value().ready());
+    PLAYBACK_CHECK(resolved.value().scene.media.size() == 1U);
+    PLAYBACK_CHECK(resolved.value().scene.media.front().offline);
+
+    auto model_missing = missing;
+    model_missing.assets.front().kind = assets::AssetKind::Model;
+    PLAYBACK_CHECK(!model_missing.render_ready());
+    PLAYBACK_CHECK(!availability(asset, app::ProjectAssetPresence::State::Sha256Mismatch).render_ready());
+}
+
 void ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift() {
     TemporaryDirectory temporary;
     const fs::path source = temporary.path() / "fractional.mov";
@@ -589,7 +629,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 9U> cases{{
     {"upcoming proxies materialize before air without holding Program",
      &upcoming_proxies_materialize_before_air_without_holding_program},
     {"Source selects only the same ready source",
@@ -598,6 +638,8 @@ constexpr std::array<Case, 8U> cases{{
      &prefer_proxy_falls_back_visibly_but_never_to_another_source},
     {"Require is unready when its exact cache entry is missing",
      &require_proxy_is_unready_when_the_exact_cache_entry_is_missing},
+    {"offline media preserves placements and does not hold output",
+     &offline_media_preserves_placements_and_does_not_hold_output},
     {"ready proxy uses exact fractional-rate map without identity drift",
      &ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift},
     {"off-air assets report exact cache progress without generation",

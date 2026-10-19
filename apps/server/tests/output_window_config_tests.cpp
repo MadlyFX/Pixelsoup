@@ -284,12 +284,26 @@ void fresh_editors_seed_exactly_one_output_map_batch() {
         app::InitialFeedMapKind::OutputDemo);
 }
 
+void mosaic_raster_preserves_authored_dimensions() {
+    topology::HardwareMap map{};
+    auto mosaic = server(doc::NodeId{1U},
+                         topology::HardwareWindowMode::Borderless);
+    mosaic.width = 15'360U;
+    mosaic.height = 1'546U;
+    map.devices.push_back(mosaic);
+    const auto resolved = app::presenter_window_settings(launch(), cabled(map));
+    WINDOW_CHECK(resolved.width == 15'360U);
+    WINDOW_CHECK(resolved.height == 1'546U);
+    WINDOW_CHECK(resolved.borderless);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 9U> cases{{
+    {"Mosaic preserves the authored raster", &mosaic_raster_preserves_authored_dimensions},
     {"inherit preserves every launch field",
      &inherit_preserves_every_launch_field},
     {"authored modes apply signed desktop placement",

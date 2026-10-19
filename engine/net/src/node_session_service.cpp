@@ -45,6 +45,7 @@ constexpr auto connect_poll_interval = std::chrono::milliseconds{2};
         && config.connect_timeout > zero
         && config.reconnect_initial_delay > zero
         && config.reconnect_max_delay >= config.reconnect_initial_delay
+        && config.lease_rejection_timeout >= zero
         && session.io.handshake_timeout >= zero
         && session.io.read_timeout >= zero
         && session.io.write_timeout > zero
@@ -390,6 +391,8 @@ public:
 
     void run() noexcept {
         auto backoff = config.reconnect_initial_delay;
+        std::optional<std::chrono::steady_clock::time_point> lease_rejected_since;
+        bool force_checkpoint = config.session_defaults.force_checkpoint;
         try {
             while (!stopping()) {
                 phase.store(
@@ -419,6 +422,7 @@ public:
                 }
 
                 NodeSessionConfig session_config = config.session_defaults;
+                session_config.force_checkpoint = force_checkpoint;
                 {
                     const std::lock_guard lock{resource_mutex};
                     session_config.last_director_epoch = observed_director_epoch;
@@ -451,7 +455,31 @@ public:
 
                 auto resumed = session->resume();
                 if (!resumed) {
-                    const auto decision = classify_session_error(resumed.error());
+                    auto decision = classify_session_error(resumed.error());
+                    auto retry_delay = backoff;
+                    const auto* protocol =
+                        std::get_if<SessionProtocolFailure>(&resumed.error());
+                    if (protocol != nullptr &&
+                        protocol->code == SessionProtocolErrorCode::PeerRejected &&
+                        protocol->reject_code == RejectCode::InvalidCursor &&
+                        !force_checkpoint) {
+                        // The reopened authority may have an earlier tail.
+                        // Ask it to replace our state rather than replay it.
+                        force_checkpoint = true;
+                        decision.retry = true;
+                    }
+                    if (decision.failure == NodeSessionServiceFailure::LeaseRejected) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (!lease_rejected_since) lease_rejected_since = now;
+                        decision.retry = now - *lease_rejected_since <
+                            config.lease_rejection_timeout;
+                        if (decision.retry) {
+                            retry_delay = std::min(backoff,
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    config.lease_rejection_timeout -
+                                    (now - *lease_rejected_since)));
+                        }
+                    }
                     session->close();
                     clear(session);
                     last_failure.store(decision.failure, std::memory_order_release);
@@ -459,7 +487,7 @@ public:
                         latch_terminal(decision.failure);
                         break;
                     }
-                    if (!wait_backoff(backoff)) {
+                    if (!wait_backoff(retry_delay)) {
                         break;
                     }
                     backoff = grow_backoff(
@@ -477,6 +505,8 @@ public:
                     NodeSessionServiceFailure::None,
                     std::memory_order_release);
                 backoff = config.reconnect_initial_delay;
+                lease_rejected_since.reset();
+                force_checkpoint = config.session_defaults.force_checkpoint;
 
                 std::atomic_bool writer_failed{};
                 std::atomic_bool writer_retry{};

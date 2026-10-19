@@ -291,6 +291,9 @@ class Runtime:
         self.status = 'Adding ' + scene.name + ' to Media Server...'
 
     def publish_now(self):
+        # Explicit refresh must observe repacked bytes even if Blender reused
+        # the same PackedFile allocation and encoded size.
+        getattr(self.identities, 'packed_images', {}).clear()
         self.requested = True
         self.mark()
 

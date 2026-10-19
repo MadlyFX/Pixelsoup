@@ -1,5 +1,6 @@
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/light_guides.hpp>
+#include <mediaserver/editor/operator_widgets.hpp>
 
 #include <mediaserver/scene/manipulate.hpp>
 
@@ -509,6 +510,13 @@ void draw_light_overlays(gui::UiContext& ctx, gui::UiDrawList& list, const gui::
     }
     for (const auto& light : view.directional_lights) {
         const scene::Vec3 anchor = scene::directional_light_anchor(view, light);
+        const auto marker = scene::project_to_canvas(view.camera, view.canvas, anchor);
+        if (!marker.visible || !std::isfinite(marker.x) || !std::isfinite(marker.y) ||
+            !std::isfinite(marker.depth) || marker.x < 0.0F || marker.y < 0.0F ||
+            marker.x > view.canvas.width || marker.y > view.canvas.height ||
+            marker.depth < 0.0F || marker.depth > 1.0F) {
+            continue;
+        }
         const bool active = selected(selection, light.source);
         const gui::UiColor color =
             active ? (light.source == primary ? outline_primary
@@ -516,7 +524,11 @@ void draw_light_overlays(gui::UiContext& ctx, gui::UiDrawList& list, const gui::
                    : light_color;
         draw_light_icon(list, image, view, anchor, color, true);
         draw_light_guide(list, image, view, matrices,
-                         directional_light_guide(anchor, light.direction), color, active);
+                         directional_light_guide(
+                             anchor, light.direction,
+                             directional_light_arrow_length(view.camera, anchor,
+                                                            image.height)),
+                         color, active);
     }
 }
 
@@ -1198,6 +1210,16 @@ void draw_scale_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 }
 
 } // namespace
+
+std::string viewport_deep_select_label(
+    const scene::Scene& view, doc::NodeId node,
+    std::span<const ElementInfo> elements) {
+    const auto element = std::find_if(
+        elements.begin(), elements.end(),
+        [node](const ElementInfo& candidate) { return candidate.node == node; });
+    return element != elements.end() ? element_display_name(*element)
+                                     : deep_select_label(view, node);
+}
 
 std::optional<WorldBounds> ViewportPanel::world_bounds(
     const scene::Scene& scene, std::span<const doc::NodeId> nodes) {
@@ -2199,7 +2221,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const output::FeedMap* feed_map,
                                   doc::NodeId selected_surface_node,
                                   const ViewportProjection* projection,
-                                  std::span<const ViewportPlate> plates) {
+                                  std::span<const ViewportPlate> plates,
+                                  std::span<const ElementInfo> elements) {
     ViewportFrame frame{};
     // One lock-free fence per editor frame prevents a completion from becoming
     // visible halfway through a multi-model pick/outline pass.
@@ -2512,7 +2535,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         std::vector<std::string> labels;
         labels.reserve(deep_candidates_.size());
         for (const doc::NodeId candidate : deep_candidates_) {
-            labels.push_back(deep_select_label(scene, candidate));
+            labels.push_back(viewport_deep_select_label(scene, candidate,
+                                                        elements));
         }
         const std::vector<std::string_view> options(labels.begin(),
                                                     labels.end());
@@ -2812,12 +2836,14 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                          role_ == ViewportRole::Stage && show_overlays_);
     };
     const auto prepare_deep_select =
-        [&](const std::vector<scene::ScenePick>& hits) {
+        [&](const std::vector<scene::ScenePick>& hits,
+            bool plain_pick_available) {
             deep_candidates_.reserve(hits.size());
             for (const scene::ScenePick& hit : hits) {
                 deep_candidates_.push_back(hit.node);
             }
-            if (hits.size() > 1U) {
+            if (hits.size() > 1U ||
+                (!plain_pick_available && !hits.empty())) {
                 deep_select_armed_ = true;
                 deep_press_time_ = ctx.time_seconds();
                 deep_press_pointer_x_ = ctx.pointer_x();
@@ -2916,7 +2942,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             // press, but a stationary hold must still be able to inspect the
             // stack beneath it; otherwise selecting the front item makes the
             // depth chooser unreachable on the next press.
-            prepare_deep_select(scene_hits_under_pointer());
+            prepare_deep_select(scene_hits_under_pointer(), true);
         } else {
             // A plain press takes the nearest element wholly in front of the
             // camera; one the camera is partly inside (a floor, a wall, a
@@ -2928,9 +2954,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 hits.begin(), hits.end(), [](const scene::ScenePick& hit) {
                     return !hit.crosses_camera;
                 });
+            // A crossing-only hit leaves a plain press to camera navigation,
+            // but holding that press must still offer the hit in the chooser.
+            prepare_deep_select(hits, front != hits.end());
             if (front != hits.end()) {
                 frame.picked = front->node;
-                prepare_deep_select(hits);
                 const auto world = scene::world_for(scene, front->node);
                 if (world.has_value()) {
                     press_world_ = scene::translation_of(*world);

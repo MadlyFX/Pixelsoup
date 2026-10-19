@@ -67,6 +67,7 @@ struct ProjectAssetPresence final {
     } state{State::Missing};
     std::optional<assets::ContentFingerprint> expected_fingerprint;
     std::optional<assets::ContentFingerprint> observed_fingerprint;
+    assets::AssetKind kind{assets::AssetKind::Media};
 
     bool operator==(const ProjectAssetPresence&) const = default;
 };
@@ -84,6 +85,18 @@ struct ProjectAssetAvailability final {
     [[nodiscard]] bool ready() const noexcept {
         return missing == 0U && mismatched == 0U &&
             verification_failed == 0U;
+    }
+
+    // Missing media has a visible renderer fallback. Other asset failures
+    // still prevent runtime adoption; ready() remains the store-health answer.
+    [[nodiscard]] bool render_ready() const noexcept {
+        if (mismatched != 0U || verification_failed != 0U) return false;
+        core::u32 offline_media{};
+        for (const auto& presence : assets) {
+            if (presence.state == ProjectAssetPresence::State::Missing &&
+                presence.kind == assets::AssetKind::Media) ++offline_media;
+        }
+        return missing == offline_media;
     }
 
     bool operator==(const ProjectAssetAvailability&) const = default;

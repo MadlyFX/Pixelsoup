@@ -963,6 +963,15 @@ bool CommandList::upload(Texture& texture, std::span<const core::u8> pixels) noe
     return upload_texture_rows(texture, 0U, 0U, 0U, texture.height(), pixels);
 }
 
+core::u32 CommandList::texture_upload_row_capacity(
+    const Texture& texture, core::u64 reserve_bytes) const noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !texture || texture.device_ != device_)
+        return 0U;
+    if (backend_ == BackendKind::D3d12)
+        return detail::d3d12_texture_upload_row_capacity(handle_, texture.handle_, reserve_bytes);
+    return texture.height();
+}
+
 bool CommandList::upload_texture_rows(
     Texture& texture, core::u32 mip, core::u32 layer,
     core::u32 first_row, core::u32 row_count,
@@ -975,7 +984,7 @@ bool CommandList::upload_texture_rows(
     const core::u32 width = std::max(1U, texture.desc_.width >> mip);
     const core::u32 height = std::max(1U, texture.desc_.height >> mip);
     if (row_count == 0U || first_row >= height || row_count > height - first_row ||
-        (texture.desc_.streaming_upload && (mip != 0U || layer != 0U ||
+        (backend_ != BackendKind::D3d12 && texture.desc_.streaming_upload && (mip != 0U || layer != 0U ||
          first_row != 0U || row_count != height))) return false;
     const bool compressed = block_compressed(texture.desc_.format);
     if (compressed && (first_row % 4U != 0U || (row_count % 4U != 0U && first_row + row_count != height))) return false;

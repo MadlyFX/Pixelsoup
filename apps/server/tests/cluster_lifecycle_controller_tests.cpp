@@ -831,6 +831,7 @@ void required_assets_gate_launch_and_recover_after_verification() {
     auto config = controller_config();
     config.asset_readiness_poll_interval = 1ms;
     auto manifest = portable_manifest();
+    manifest.assets[0U].kind = mediaserver::assets::AssetKind::Model;
     mediaserver::assets::ContentFingerprint fingerprint{};
     fingerprint.byte_length = 1'234U;
     fingerprint.sha256.bytes[0U] = 0xa5U;
@@ -1470,7 +1471,7 @@ void hardware_revision_fences_an_in_flight_store_reply() {
     CONTROLLER_CHECK(barrier.register_live(
         runtime_registration(20U, 200U, 0U)));
     publish_runtime_adoption(barrier, 20U, 2U, manifest.digest);
-    CONTROLLER_CHECK(!controller.program_ready(
+    CONTROLLER_CHECK(controller.program_ready(
         manifest, wired(revised_map), project_generation, barrier));
     CONTROLLER_CHECK(!controller.program_ready(
         manifest, wired(map), project_generation, barrier));
@@ -1512,6 +1513,56 @@ void program_gate_is_vacuous_only_for_an_empty_valid_cluster() {
     publish_runtime_adoption(barrier, 30U, 2U, manifest.digest);
     CONTROLLER_CHECK(!controller.program_ready(
         manifest, wired(duplicates), project_generation, barrier));
+}
+
+void offline_media_can_start_while_store_health_remains_missing() {
+    std::atomic<std::size_t> starts{};
+    app::ClusterLifecycleController controller{
+        controller_config(),
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
+            net::ClusterLifecycleCommand command) {
+            if (command == net::ClusterLifecycleCommand::Start) ++starts;
+            return app::ClusterLifecycleRequestResult::success(
+                net::ClusterLifecycleReply{net::ClusterLifecycleOutcome::NoChange,
+                    net::ClusterProcessState::Stopped, node_index, 1U, "online"});
+        }, no_inventory,
+        [](const asio::ip::tcp::endpoint&, core::u32 node_index,
+           std::span<const net::ClusterAssetRequirement> sources, std::stop_token) {
+            net::ClusterAssetReadinessReply reply{};
+            reply.availability = net::ClusterAssetReadinessAvailability::Available;
+            reply.node_index = node_index;
+            for (const auto& source : sources) {
+                reply.entries.push_back({source.source, net::ClusterAssetReadinessState::Missing});
+                ++reply.missing;
+            }
+            return app::ClusterAssetReadinessRequestResult::success(std::move(reply));
+        }};
+    topology::HardwareMap map{};
+    map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
+    auto manifest = portable_manifest();
+    controller.sync(wired(map), manifest, 1U);
+    CONTROLLER_CHECK(wait_idle(controller));
+    auto rows = controller.snapshot();
+    CONTROLLER_CHECK(rows.size() == 1U && rows[0].missing_media_only);
+    CONTROLLER_CHECK(rows[0].content_ready());
+    CONTROLLER_CHECK(!controller.content_ready(manifest));
+    controller.submit(editor::OutputLifecycleRequest{doc::NodeId{1U}, 0U,
+        "127.0.0.1:47840", editor::OutputLifecycleAction::Start, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(starts == 1U);
+
+    // Reusing the same path for calibration must invalidate the fallback
+    // classification, even if a caller accidentally reuses a digest.
+    manifest.assets[0].kind = mediaserver::assets::AssetKind::ProjectionMesh;
+    controller.sync(wired(map), manifest, 2U);
+    CONTROLLER_CHECK(wait_idle(controller));
+    rows = controller.snapshot();
+    CONTROLLER_CHECK(!rows[0].missing_media_only);
+    CONTROLLER_CHECK(!rows[0].content_ready());
+    controller.submit(editor::OutputLifecycleRequest{doc::NodeId{1U}, 0U,
+        "127.0.0.1:47840", editor::OutputLifecycleAction::Start, false});
+    CONTROLLER_CHECK(wait_idle(controller));
+    CONTROLLER_CHECK(starts == 1U);
 }
 
 // A Render Server card no cable touches is a parked alternative. It is not
@@ -1716,6 +1767,8 @@ int main() {
          &hardware_revision_fences_an_in_flight_store_reply},
         {"Program gate empty and invalid cluster semantics",
          &program_gate_is_vacuous_only_for_an_empty_valid_cluster},
+        {"offline media starts with a missing-source warning",
+         &offline_media_can_start_while_store_health_remains_missing},
         {"conflicting revisions for one path fail without a probe",
          &conflicting_revisions_for_one_path_fail_without_a_probe},
         {"a parked Render Server is ignored by the cluster",

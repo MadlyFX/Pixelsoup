@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/editor/source_replacement.hpp>
+
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/result.hpp>
@@ -223,7 +225,7 @@ struct ClipTimingEdit final {
 // cut is two placements of one source.
 struct ClipSplitIntent final {
   doc::NodeId clip{};
-  core::u64 frame{};
+  core::i64 frame{};
   core::u64 gesture{};
 
   bool operator==(const ClipSplitIntent &) const = default;
@@ -482,6 +484,8 @@ struct EditorProjectState final {
   std::span<const std::pair<std::string, std::string>> blender_bound_scenes;
   // Where Publish stages Program files when no shared folder was chosen.
   std::string_view publication_default_storage;
+  // Director-owned, most recently opened or saved first. UTF-8 absolute paths.
+  std::span<const std::string> recent_projects;
 };
 
 struct ProjectFileRequest final {
@@ -566,7 +570,7 @@ struct RoutedSurfaceEdit final {
 [[nodiscard]] RoutedSurfaceEdit route_surface_transform_edit(
     FeedSurfaceEditRequest request,
     std::span<const scene::ChannelKeyframes> keyframes,
-    core::u64 show_frame);
+    core::u64 show_frame, bool auto_key = true);
 
 // A keyframe retimed by dragging its diamond: the key at `from_frame` on
 // (target, component) moves to `to_frame`. Authored once on release.
@@ -681,6 +685,9 @@ struct KeyScalePreviewRequest final {
 // author. Edits are already coalesced to one per node per frame.
 struct EditorFrame final {
   core::AssetSetReadiness assets{};
+  // The same local preparation notice displayed over Stage. Empty headline
+  // means ready; a loading notice is independent of Program's cohort.
+  StageAssetStatus stage_assets;
   EditorStatus status{EditorStatus::Running};
   // Latest readiness produced while recording Program. Empty means no GPU
   // frame slot was available, so the Director keeps the preceding answer
@@ -749,6 +756,7 @@ struct EditorFrame final {
   std::optional<ShowRateRequest> show_rate{};
   // Elements to create this frame.
   std::vector<AddIntent> adds;
+  std::vector<SourceReplacementIntent> source_replacements;
   std::vector<AssetImportIntent> asset_imports;
   std::vector<AssetDeleteIntent> asset_deletes;
   std::vector<AssetProxyEditIntent> asset_proxy_edits;
@@ -787,7 +795,8 @@ struct EditorFrame final {
   std::vector<FeedSurfaceAddRequest> feed_surface_adds;
   std::vector<FeedSurfaceEditRequest> feed_surface_edits;
   std::vector<FeedSurfaceDeleteRequest> feed_surface_deletes;
-  std::optional<CompositorAddIntent> compositor_add;
+  // All nodes from one drop share compositor_gesture for a single undo.
+  std::vector<CompositorAddIntent> compositor_adds;
   std::optional<CompositorMoveIntent> compositor_move;
   std::optional<CompositorConnectIntent> compositor_connect;
   std::optional<CompositorPropertyEditIntent> compositor_property_edit;

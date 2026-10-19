@@ -2069,11 +2069,12 @@ Result SceneRenderer::create(
     }
     auto material_fallback = device.create_texture(sampled_desc(1U, 1U));
     auto normal_fallback = device.create_texture(sampled_desc(1U, 1U));
+    auto offline_media = device.create_texture(sampled_desc(64U, 64U));
     auto ies_desc = sampled_desc(ies_vertical_samples, ies_horizontal_samples * max_ies_profiles);
     ies_desc.format = rhi::TextureFormat::R32Float;
     auto ies_atlas = device.create_texture(ies_desc);
     if (!ies_atlas) return Result::failure(RenderError::AllocationFailed);
-    if (!material_fallback || !normal_fallback) {
+    if (!material_fallback || !normal_fallback || !offline_media) {
         return Result::failure(RenderError::AllocationFailed);
     }
 
@@ -2228,6 +2229,7 @@ Result SceneRenderer::create(
     renderer.media_auxiliary_pipeline_ = std::move(media_auxiliary_pipeline);
     renderer.rsm_flux_pipeline_ = std::move(rsm_flux_pipeline);
     renderer.environment_ = std::move(environment);
+    renderer.offline_media_ = std::move(offline_media).value();
     renderer.environment_fallback_ = std::move(environment_fallback);
     renderer.environment_cube_fallback_ =
         std::move(environment_cube_fallback);
@@ -3189,7 +3191,7 @@ bool SceneRenderer::render(
         const bool receiver = p.receiver != doc::NodeId{} &&
             (std::any_of(full.instances.begin(), full.instances.end(), [&](const auto& v) { return v.source == p.receiver; }) ||
              std::any_of(full.models.begin(), full.models.end(), [&](const auto& v) { return v.source_node == p.receiver; }));
-        if (!scene_linear() || !planar_renderer_ || !receiver) {
+        if (!scene_linear() || (!planar_renderer_ && !options.shared_planar) || !receiver) {
             ++stats_.planar_refusals;
             stats_.reflection_reason = !scene_linear() ? "Planar reflections require Advanced" : !receiver ? "Choose a planar receiver object" : "Only one planar reflection pass is supported";
             static_cast<void>(core::report_idle_once("Planar reflection", stats_.reflection_reason.data()));
@@ -3300,17 +3302,33 @@ bool SceneRenderer::render(
         constexpr std::array<core::u8, 4U> white{255U, 255U, 255U, 255U};
         constexpr std::array<core::u8, 4U> positive_z{
             128U, 128U, 255U, 255U};
+        // Fixed setup texture: opaque grey with a dark X, sampled through the
+        // ordinary media pass so transforms, depth and opacity stay identical.
+        std::array<core::u8, 64U * 64U * 4U> offline_pixels{};
+        for (core::u32 y = 0U; y < 64U; ++y) {
+            for (core::u32 x = 0U; x < 64U; ++x) {
+                const bool cross = std::abs(static_cast<int>(x) - static_cast<int>(y)) <= 2 ||
+                    std::abs(static_cast<int>(x + y) - 63) <= 2;
+                const core::u8 shade = cross ? 40U : 128U;
+                const auto offset = (y * 64U + x) * 4U;
+                offline_pixels[offset] = shade;
+                offline_pixels[offset + 1U] = shade;
+                offline_pixels[offset + 2U] = shade;
+                offline_pixels[offset + 3U] = 255U;
+            }
+        }
         const auto recording = commands.recording_token();
         if (!recording) {
             return false;
         }
         if (!commands.upload(material_fallback_, white)
-            || !commands.upload(normal_fallback_, positive_z)) {
+            || !commands.upload(normal_fallback_, positive_z)
+            || !commands.upload(offline_media_, offline_pixels)) {
             return false;
         }
         material_fallback_uploaded_ = true;
         material_fallback_upload_recording_ = recording;
-        stats_.upload_bytes += white.size() + positive_z.size();
+        stats_.upload_bytes += white.size() + positive_z.size() + offline_pixels.size();
     }
 
     // The environment, adopted at a generation boundary.
@@ -3842,18 +3860,39 @@ bool SceneRenderer::render(
             continue;
         }
 
+        auto instance_textures = fallback_material_textures;
+        const std::array<std::string_view, 5U> texture_sources{
+            instance.material.base_color_texture,
+            instance.material.metallic_roughness_texture,
+            instance.material.normal_texture,
+            instance.material.occlusion_texture,
+            instance.material.emissive_texture};
+        const bool has_generator_texture = std::any_of(
+            texture_sources.begin(), texture_sources.end(),
+            [](std::string_view source) { return !source.empty(); });
+        for (std::size_t texture_index = 0U;
+             texture_index < texture_sources.size(); ++texture_index) {
+            if (texture_sources[texture_index].empty()) continue;
+            const auto texture = media_cache.resolve(
+                *device_, commands,
+                std::string{texture_sources[texture_index]}, 0U, {},
+                instance.source.value());
+            if (texture) instance_textures[texture_index] = texture.primary;
+        }
+
         // Occluders join the batched depth-writing pass whatever their own
         // compositing style says, because the only thing wanted from them is
         // the depth their silhouette would have written.
         const bool instance_depth_only = options.depth_only(instance.source);
-        if (!instance_depth_only && (needs_compositing(instance.style)
+        if (!instance_depth_only && (has_generator_texture
+            || needs_compositing(instance.style)
             || instance.material.transmission > 0.0F || instance.material.alpha_mode == scene::MaterialAlphaMode::Blend)) {
             if (!visible) continue;
             queue_composite(
                 *mesh_range,
                 instance,
                 ResolvedMediaFrame{},
-                fallback_material_textures,
+                instance_textures,
                 camera_depth(instance.world, scene::Vec3{}, render_view.eye,
                              render_view.forward),
                 instance.source,
@@ -4179,17 +4218,13 @@ bool SceneRenderer::render(
             continue;
         }
         const std::string& media_source = clip.source;
-        if (media_source.empty()) {
-            continue;
-        }
-        const ResolvedMediaFrame media_frame = media_cache.resolve(
+        ResolvedMediaFrame media_frame = clip.offline || media_source.empty()
+            ? ResolvedMediaFrame{} : media_cache.resolve(
             *device_, commands, media_source, clip.frame_index,
             MediaLoopWindow{clip.loop_first, clip.loop_count},
             clip.source_node.value());
         if (!media_frame) {
-            // The file could not be loaded: show nothing for this clip rather
-            // than failing the whole frame.
-            continue;
+            media_frame = ResolvedMediaFrame{&offline_media_};
         }
 
         scene::MeshInstance proxy{};
@@ -4298,7 +4333,8 @@ bool SceneRenderer::render(
         stats_.triangles += draw.range.index_count / 3U;
         ++stats_.instances;
         if (draw.media) {
-            ++stats_.media;
+            if (draw.media.primary == &offline_media_) ++stats_.offline_media;
+            else ++stats_.media;
         }
     }
 

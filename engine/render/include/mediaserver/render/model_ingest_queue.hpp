@@ -10,6 +10,10 @@
 
 namespace mediaserver::render {
 enum class ModelIngestStage : core::u8 { Queued, Reading, Compressing, Writing, Ready, Failed };
+struct ModelTextureAssignment final {
+    core::u32 part{}, role{};
+    std::string image_source;
+};
 
 class ModelIngestJob final {
 public:
@@ -21,7 +25,8 @@ public:
     // One process worker, at most 16 outstanding jobs. Dropping a handle never
     // joins a thread. Completed values are published with release/acquire.
     [[nodiscard]] static std::shared_ptr<ModelIngestJob> start(
-        std::string source, std::optional<output::PhysicalSurface> projection = {}, float scale = 1.0F);
+        std::string source, std::optional<output::PhysicalSurface> projection = {}, float scale = 1.0F,
+        std::optional<ModelTextureAssignment> texture = {});
     static std::string_view label(ModelIngestStage stage) noexcept;
 private:
     struct Executor;
@@ -30,5 +35,6 @@ private:
     std::string source_;
     std::optional<output::PhysicalSurface> projection_;
     float scale_{1.0F};
+    std::optional<ModelTextureAssignment> texture_;
 };
 } // namespace mediaserver::render

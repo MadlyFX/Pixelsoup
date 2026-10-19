@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace mediaserver::scene {
 
@@ -2108,7 +2109,22 @@ float saturation_from_product(double product) noexcept {
         product, 0.0, static_cast<double>(max_saturation)));
 }
 
+core::i64 ClipTiming::last_frame() const noexcept {
+    if (!placed()) return start;
+    const auto offset = duration - 1;
+    const auto maximum = std::numeric_limits<core::i64>::max();
+    return start > maximum - offset ? maximum : start + offset;
+}
+
+bool valid_clip_timing(const ClipTiming& timing) noexcept {
+    return timing.duration >= 0 && timing.source_in >= 0 &&
+        timing.fade_in >= 0 && timing.fade_out >= 0 &&
+        (!timing.placed() || timing.start <=
+            std::numeric_limits<core::i64>::max() - timing.duration);
+}
+
 bool clip_visible(const ClipTiming& timing, core::i64 frame) noexcept {
+    if (!valid_clip_timing(timing)) return false;
     if (!timing.placed()) {
         return true;
     }
@@ -2117,13 +2133,17 @@ bool clip_visible(const ClipTiming& timing, core::i64 frame) noexcept {
 
 bool clip_starts_within(const ClipTiming& timing, core::i64 frame,
                         core::i64 lead) noexcept {
-    if (!timing.placed() || lead <= 0 || timing.start <= frame) {
+    if (!valid_clip_timing(timing) || !timing.placed() || lead <= 0 ||
+        timing.start <= frame) {
         return false;
     }
-    return timing.start - frame <= lead;
+    // The positive distance may span the entire signed domain.
+    return static_cast<core::u64>(timing.start) -
+        static_cast<core::u64>(frame) <= static_cast<core::u64>(lead);
 }
 
 float clip_fade(const ClipTiming& timing, core::i64 frame) noexcept {
+    if (!valid_clip_timing(timing)) return 0.0F;
     if (!timing.placed()) {
         return 1.0F;
     }

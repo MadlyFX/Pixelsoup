@@ -127,7 +127,8 @@ LightGuide light_guide(const scene::PointLight& light, bool selected) noexcept {
     return guide;
 }
 
-LightGuide directional_light_guide(Vec3 anchor, Vec3 direction) noexcept {
+LightGuide directional_light_guide(Vec3 anchor, Vec3 direction,
+                                  float arrow_length) noexcept {
     scene::PointLight basis;
     basis.direction = direction;
     const Vec3 axis = scene::normalize(direction, {0, -1, 0});
@@ -135,10 +136,26 @@ LightGuide directional_light_guide(Vec3 anchor, Vec3 direction) noexcept {
     const Vec3 v = scene::cross(axis, u);
     LightGuide guide;
     // Parallel arrows communicate a sun's parallel rays, with no range cutoff.
-    for (const Vec3 offset : {Vec3{}, u * 0.3F, -u * 0.3F}) {
-        arrow(guide, anchor + offset, axis, u, v, 1.4F);
+    const float separation = arrow_length * (0.3F / 1.4F);
+    for (const Vec3 offset : {Vec3{}, u * separation, -u * separation}) {
+        arrow(guide, anchor + offset, axis, u, v, arrow_length);
     }
     return guide;
+}
+
+float directional_light_arrow_length(const scene::Camera& camera, Vec3 anchor,
+                                     float viewport_height) noexcept {
+    const Vec3 forward = scene::normalize(camera.target - camera.eye,
+                                          {0, 0, -1});
+    const float depth = scene::dot(anchor - camera.eye, forward);
+    const float tangent = scene::deterministic::tan_half_turns(camera.field_of_view);
+    if (!std::isfinite(depth) || !std::isfinite(tangent) ||
+        !(depth > 0.0F) || !(tangent > 0.0F) ||
+        !(viewport_height > 0.0F)) return 0.0F;
+    // 60 viewport pixels at the anchor's depth. The depth cap keeps rays from
+    // reaching the eye when a wide lens or a small panel is used.
+    return std::min(depth * 2.0F * tangent * (60.0F / viewport_height),
+                    depth * 0.1F);
 }
 
 std::optional<std::array<scene::CanvasProjection, 2U>> project_light_guide_segment(

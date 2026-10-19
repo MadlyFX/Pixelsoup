@@ -85,6 +85,30 @@ if(BUILD_TESTING)
         TIMEOUT 30 RUN_SERIAL TRUE)
     set_target_properties(mediaserver_editor_shell_workflow_tests PROPERTIES FOLDER "tests")
 
+    add_executable(mediaserver_editor_shell_layer_drop_tests
+        tests/editor_shell_layer_drop_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_shell_layer_drop_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_editor_shell_layer_drop_tests)
+    add_test(NAME mediaserver.editor_shell_layer_drop
+        COMMAND mediaserver_editor_shell_layer_drop_tests)
+    set_tests_properties(mediaserver.editor_shell_layer_drop PROPERTIES
+        TIMEOUT 30 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_layer_drop_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_shell_source_replacement_tests
+        tests/editor_shell_source_replacement_tests.cpp)
+    target_link_libraries(mediaserver_editor_shell_source_replacement_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3)
+    mediaserver_set_project_options(mediaserver_editor_shell_source_replacement_tests)
+    add_test(NAME mediaserver.editor_shell_source_replacement
+        COMMAND mediaserver_editor_shell_source_replacement_tests)
+    set_tests_properties(mediaserver.editor_shell_source_replacement PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_source_replacement_tests PROPERTIES FOLDER "tests")
+
     # The Stage's Blender transform keys through the real shell and window.
     add_executable(mediaserver_editor_shell_transform_tests
         tests/editor_shell_transform_tests.cpp

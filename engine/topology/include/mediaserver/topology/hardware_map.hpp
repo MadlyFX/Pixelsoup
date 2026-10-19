@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/core/output_limits.hpp>
+
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 
@@ -121,8 +123,8 @@ inline constexpr core::u32 max_hardware_control_base_port =
 // Live presenter limits, used by launch resolution and new-value authoring.
 // They are deliberately not document parse limits: an older project may hold
 // larger dimensions and must stay evaluable so the operator can repair it.
-inline constexpr core::u32 max_hardware_output_width = 7'680U;
-inline constexpr core::u32 max_hardware_output_height = 4'320U;
+inline constexpr core::u32 max_hardware_output_width = core::max_output_dimension;
+inline constexpr core::u32 max_hardware_output_height = core::max_output_dimension;
 
 struct HardwareControlSettings final {
   // Zero/authored=false means an older project has no settings node. Its

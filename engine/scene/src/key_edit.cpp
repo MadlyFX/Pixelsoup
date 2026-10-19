@@ -76,6 +76,15 @@ struct ParsedChannel final {
             schema::environment_fog_anisotropy,
             schema::sky_haze,
             schema::sky_solar_illuminance,
+            schema::intensity,
+            schema::color_r,
+            schema::color_g,
+            schema::color_b,
+            schema::range,
+            schema::fov_turns,
+            schema::shutter_seconds,
+            schema::focus_distance_m,
+            schema::aperture_f_number,
         };
     for (std::size_t index = 0U; index < names.size(); ++index) {
         if (name == names[index]) {
@@ -117,6 +126,15 @@ struct ParsedChannel final {
             schema::environment_fog_anisotropy,
             schema::sky_haze,
             schema::sky_solar_illuminance,
+            schema::intensity,
+            schema::color_r,
+            schema::color_g,
+            schema::color_b,
+            schema::range,
+            schema::fov_turns,
+            schema::shutter_seconds,
+            schema::focus_distance_m,
+            schema::aperture_f_number,
         };
     const std::size_t index = static_cast<std::size_t>(property);
     return index < names.size() ? std::optional<std::string_view>{names[index]}
@@ -337,6 +355,25 @@ public:
 [[nodiscard]] bool property_compatible(const doc::Node& target,
                                        PropertyChannel property) noexcept {
     if (target.type == schema::stage_type) return is_environment_channel(property);
+    if (target.type == schema::camera_type) {
+        return (property >= PropertyChannel::PositionX
+                && property <= PropertyChannel::RotationRoll)
+            || (property >= PropertyChannel::CameraFieldOfView
+                && property <= PropertyChannel::CameraAperture);
+    }
+    if (target.type == schema::light_type) {
+        return (property >= PropertyChannel::PositionX
+                && property <= PropertyChannel::PositionZ)
+            || is_light_channel(property);
+    }
+    // Output depends on Scene; keep its document vocabulary at this boundary
+    // rather than introducing the reverse module dependency.
+    if (target.type == "output.surface") {
+        return (property >= PropertyChannel::PositionX
+                && property <= PropertyChannel::PositionZ)
+            || property == PropertyChannel::RotationYaw;
+    }
+
     if (target.type == schema::group_type) {
         return is_transform(property);
     }
@@ -386,7 +423,8 @@ public:
     }
 
     bool locked{};
-    if (!read_boolean(*target, schema::locked, false, locked)) {
+    const bool default_locked = target->type == "output.surface";
+    if (!read_boolean(*target, schema::locked, default_locked, locked)) {
         return KeyEditSkipReason::InvalidTarget;
     }
     if (locked) {

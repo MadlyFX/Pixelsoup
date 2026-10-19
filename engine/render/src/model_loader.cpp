@@ -1290,4 +1290,48 @@ bool load_model(const std::string& source, ModelAsset& into) {
     return false;
 }
 
+bool assign_model_texture(ModelAsset& asset, core::u32 part_index,
+    core::u32 role, const std::string& image_source) {
+    if (part_index >= asset.parts.size() || role >= 5U) {
+        asset.diagnostic = "Material part or texture channel no longer exists";
+        return false;
+    }
+    auto& part = asset.parts[part_index];
+    const std::array<std::optional<core::u32>*, 5U> slots{
+        &part.base_color_texture, &part.metallic_roughness_texture,
+        &part.normal_texture, &part.occlusion_texture, &part.emissive_texture};
+    if (image_source.empty()) { slots[role]->reset(); return true; }
+    for (core::u32 i = 0; i < part.index_count; ++i) {
+        const auto index = static_cast<std::size_t>(part.first_index) + i;
+        if (index >= asset.mesh.indices.size() || asset.mesh.indices[index] >= asset.vertex_metadata.size()
+            || !asset.vertex_metadata[asset.mesh.indices[index]].has_uv0) {
+            asset.diagnostic = "This material part has no UV map; add UVs in the source model first";
+            return false;
+        }
+    }
+    int width{}, height{}, channels{};
+    if (!stbi_info(image_source.c_str(), &width, &height, &channels)
+        || width <= 0 || height <= 0 || width > 16384 || height > 16384
+        || static_cast<core::u64>(width) * static_cast<core::u64>(height) > 64U * 1024U * 1024U) {
+        asset.diagnostic = "Cannot read texture: use PNG, JPEG, TGA or BMP within 16384 pixels / 64 megapixels";
+        return false;
+    }
+    auto* pixels = stbi_load(image_source.c_str(), &width, &height, &channels, 4);
+    auto texture = decoded_texture(pixels, width, height);
+    if (!texture.valid()) { asset.diagnostic = "Cannot decode texture image"; return false; }
+    if (role == 2U && !generate_mikk_tangents(asset, part.first_index, part.index_count)) {
+        asset.diagnostic = "Cannot generate tangent frame for this normal map"; return false;
+    }
+    *slots[role] = static_cast<core::u32>(asset.textures.size());
+    asset.textures.push_back(std::move(texture));
+    part.has_material = true;
+    part.samplers[role] = {};
+    // An explicitly assigned image should retain its own colour/value rather
+    // than inheriting a dark source factor that previously stood in for it.
+    if (role == 0U) part.material.base_color = {1, 1, 1};
+    if (role == 1U) { part.material.roughness = 1; part.material.metallic = 1; }
+    if (role == 4U) part.material.emissive = {1, 1, 1};
+    return true;
+}
+
 } // namespace mediaserver::render

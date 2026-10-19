@@ -73,6 +73,57 @@ def fixture(directory):
 
 
 class Tests(unittest.TestCase):
+    def test_packed_images_survive_without_external_files_and_refresh_by_content(self):
+        obj = object_row()
+        obj['materials'] = [material(MAT_A, 'Packed', 'packed:42:missing.png')]
+        view = obj['materials'][0]['textures']['baseColorTexture']
+        view['packed_bytes'] = png([20, 180, 240, 255])
+        publisher = Publisher(FakeDirector())
+        job = {'source': SOURCE, 'objects': [obj]}
+        result = publisher.publish(job, {OBJECT: triangle()})
+        self.assertFalse(result['warnings'])
+        identity = surface_id(OBJECT, MAT_A)
+        first = publisher.prototypes[identity]
+        retained = publisher.materials[identity][0]['textures']['baseColorTexture']
+        self.assertEqual(retained['bytes'], view['packed_bytes'])
+        self.assertNotIn('packed_bytes', retained)
+        publisher.publish(job, {})
+        self.assertEqual(publisher.serializations, 1)
+        view['packed_bytes'] = png([240, 30, 10, 255])
+        publisher.publish(job, {})
+        self.assertNotEqual(first, publisher.prototypes[identity])
+        self.assertEqual(publisher.serializations, 2)
+
+    def test_packed_image_binary_transport_is_bounded(self):
+        import socket
+        from worker import receive_job
+        left, right = socket.socketpair()
+        try:
+            data = png([40, 80, 120, 255])
+            obj = object_row()
+            obj['materials'] = [material(MAT_A, 'Packed', 'packed:9:Color')]
+            obj['materials'][0]['textures']['baseColorTexture']['packed_image'] = True
+            metadata = {'objects': [obj], 'packed_images': [{'path': 'packed:9:Color', 'length': len(data)}]}
+            encoded = json.dumps(metadata).encode()
+            left.sendall(struct.pack('<I', len(encoded)) + encoded + data)
+            retained = {}
+            received, meshes = receive_job(right, retained)
+            self.assertFalse(meshes)
+            self.assertEqual(received['objects'][0]['materials'][0]['textures']['baseColorTexture']['packed_bytes'], data)
+            attachment = received['objects'][0]['materials'][0]['textures']['baseColorTexture']['packed_bytes']
+            reference_only = dict(metadata, packed_images=[])
+            encoded = json.dumps(reference_only).encode()
+            left.sendall(struct.pack('<I', len(encoded)) + encoded)
+            received, _ = receive_job(right, retained)
+            self.assertIs(received['objects'][0]['materials'][0]['textures']['baseColorTexture']['packed_bytes'], attachment)
+            metadata['packed_images'][0]['length'] = 16 * 1024 * 1024 + 1
+            encoded = json.dumps(metadata).encode()
+            left.sendall(struct.pack('<I', len(encoded)) + encoded)
+            with self.assertRaisesRegex(ValueError, 'packed image length'):
+                receive_job(right)
+        finally:
+            left.close(); right.close()
+
     def test_missing_uv_and_corrupt_texture_keep_geometry(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'broken.png'; path.write_bytes(b'not an image')

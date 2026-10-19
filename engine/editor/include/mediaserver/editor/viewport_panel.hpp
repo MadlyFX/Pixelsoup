@@ -2,6 +2,7 @@
 
 #include <mediaserver/editor/preview_resolution.hpp>
 
+#include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/editor/transform_tool.hpp>
@@ -39,6 +40,12 @@
 // with no window, no GPU, and no document - and what makes this a port of the
 // panel rather than a second editor.
 namespace mediaserver::editor {
+
+// The chooser uses the same authored name as Scene and Inspector, falling back
+// to a scene kind and node number when no element metadata is available.
+[[nodiscard]] std::string viewport_deep_select_label(
+    const scene::Scene& scene, doc::NodeId node,
+    std::span<const ElementInfo> elements);
 
 // A pointer position resolved into canvas pixels. `inside` is false when the
 // pointer is off the rendered image - in the letterbox bars, or outside the
@@ -351,7 +358,8 @@ class ViewportPanel final {
                        // because the rectangles come from the wall's physical
                        // geometry, and because every node and this overlay
                        // must be looking at the same ones.
-                       std::span<const ViewportPlate> plates = {});
+                       std::span<const ViewportPlate> plates = {},
+                       std::span<const ElementInfo> elements = {});
 
     // Draws the ordinary image/chrome with scene manipulation blocked, then
     // overlays and interacts with first-class masks. It is intentionally

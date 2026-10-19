@@ -120,38 +120,8 @@ void draw_diamond(gui::UiContext& ctx, float cx, float cy, float radius,
 sample_at(const scene::ChannelKeyframes* channel, core::u64 frame) noexcept {
     constexpr core::u64 maximum =
         static_cast<core::u64>(std::numeric_limits<core::i64>::max());
-    if (channel == nullptr || frame > maximum || channel->frames.empty() ||
-        channel->values.size() != channel->frames.size()) {
-        return std::nullopt;
-    }
-
-    const core::i64 wanted = static_cast<core::i64>(frame);
-    if (wanted <= channel->frames.front()) {
-        return channel->values.front();
-    }
-    if (wanted >= channel->frames.back()) {
-        return channel->values.back();
-    }
-    const auto after = std::upper_bound(channel->frames.begin(),
-                                        channel->frames.end(), wanted);
-    const std::size_t hi = static_cast<std::size_t>(
-        std::distance(channel->frames.begin(), after));
-    const std::size_t lo = hi - 1U;
-    const scene::KeyInterpolation interpolation =
-        lo < channel->interpolations.size()
-            ? channel->interpolations[lo]
-            : scene::KeyInterpolation::Linear;
-    if (interpolation == scene::KeyInterpolation::Hold) {
-        return channel->values[lo];
-    }
-    const double span =
-        static_cast<double>(channel->frames[hi] - channel->frames[lo]);
-    double t = static_cast<double>(wanted - channel->frames[lo]) / span;
-    if (interpolation == scene::KeyInterpolation::Cubic) {
-        t = t * t * (3.0 - 2.0 * t);
-    }
-    return channel->values[lo] +
-           (channel->values[hi] - channel->values[lo]) * t;
+    if (channel == nullptr || frame > maximum) return std::nullopt;
+    return scene::sample_keyframes(*channel, static_cast<core::i64>(frame));
 }
 
 [[nodiscard]] ElementInfo evaluated_for_inspector(
@@ -187,6 +157,16 @@ sample_at(const scene::ChannelKeyframes* channel, core::u64 frame) noexcept {
           displayed.style.effects.saturation);
     apply(scene::PropertyChannel::BlurRadius,
           displayed.style.effects.blur_radius);
+    if (authored.kind == ElementKind::Camera) {
+        apply(scene::PropertyChannel::CameraFieldOfView, displayed.field_of_view);
+        apply(scene::PropertyChannel::CameraShutter, displayed.shutter_seconds);
+        apply(scene::PropertyChannel::CameraFocusDistance, displayed.focus_distance_m);
+        apply(scene::PropertyChannel::CameraAperture, displayed.aperture_f_number);
+        displayed.field_of_view = std::clamp(displayed.field_of_view, 0.001F, 0.499F);
+        displayed.shutter_seconds = std::clamp(displayed.shutter_seconds, 0.00001F, 1.0F);
+        displayed.focus_distance_m = std::clamp(displayed.focus_distance_m, 0.0F, 100000.0F);
+        displayed.aperture_f_number = std::clamp(displayed.aperture_f_number, 0.1F, 128.0F);
+    }
     displayed.style.opacity = std::clamp(displayed.style.opacity, 0.0F, 1.0F);
     displayed.style.effects.brightness =
         std::clamp(displayed.style.effects.brightness, 0.0F, 16.0F);
@@ -931,6 +911,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       switch (binding.domain) {
       case FieldDomain::Transform:
       case FieldDomain::Compositing:
+      case FieldDomain::Camera:
         frame.component_edits.push_back(
             ComponentEdit{target.author, binding.component, value});
         break;
@@ -953,7 +934,6 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       case FieldDomain::Animation:
       case FieldDomain::Screen:
       case FieldDomain::Tracking:
-      case FieldDomain::Camera:
       case FieldDomain::Plate:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
@@ -1622,7 +1602,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     }
     const bool imported_model = element.kind == ElementKind::Model;
     if (!section(ctx, cursor,
-                 element.linked ? "LINKED MATERIAL FACTORS" : (imported_model ? "FALLBACK MATERIAL" : "MATERIAL"),
+                 element.linked ? "LINKED MATERIAL FACTORS" : (imported_model ? "MODEL MATERIALS" : "MATERIAL"),
                  material_open_)) {
         return;
     }
@@ -1631,6 +1611,95 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
         ctx.tooltip({cursor.column.x, cursor.y - section_height - row_gap,
                      cursor.column.width, section_height},
                     element.linked ? "Each edited factor overrides source materials" : "Used for source parts without a material");
+
+    if (element.kind == ElementKind::Object && !element.locked &&
+        selected_.size() == 1U) {
+        constexpr std::array<std::string_view, 5U> labels{
+            "Base color", "Metal / rough", "Normal", "Occlusion", "Emission"};
+        const std::array<std::string_view, 5U> sources{
+            element.material.base_color_texture,
+            element.material.metallic_roughness_texture,
+            element.material.normal_texture,
+            element.material.occlusion_texture,
+            element.material.emissive_texture};
+        for (std::size_t role = 0U; role < labels.size(); ++role) {
+            const auto row = take_row(cursor, row_height);
+            cursor.y += row_gap;
+            constexpr float controls = 124.0F;
+            ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height},
+                      labels[role], ctx.theme().text_muted);
+            const bool browse = ctx.button(mix(id_, "generator.texture.browse", element.node.value() ^ role),
+                {row.x + row.width - controls, row.y, 74.0F, row.height}, "Browse...");
+            const bool clear = ctx.button(mix(id_, "generator.texture.clear", element.node.value() ^ role),
+                {row.x + row.width - 46.0F, row.y, 46.0F, row.height}, "Clear");
+            if (browse || clear) {
+                FilePickerRequest request{FilePickerKind::GeneratorTexture,
+                    std::string{sources[role]}, {element.node}};
+                request.texture_role = static_cast<core::u32>(role);
+                request.clear_texture = clear;
+                frame.file_picker = std::move(request);
+            }
+            if (role == 1U) ctx.tooltip(row, "Packed image: roughness in green, metallic in blue");
+            if (role == 2U) ctx.tooltip(row, "Tangent-space normal image");
+        }
+    }
+
+    if (imported_model && !element.linked && !element.locked && selected_.size() == 1U) {
+        if (material_part_node_ != element.node) {
+            material_part_node_ = element.node;
+            material_part_ = 0U;
+            material_part_options_.clear();
+            material_part_labels_.clear();
+        }
+        if (element.model_material_parts == 0U) {
+            ctx.label(take_row(cursor, row_height), element.model_material_status.empty()
+                ? "Loading material parts..." : element.model_material_status, ctx.theme().text_muted);
+        } else {
+            // Immutable model packages admit at most 65,536 parts. Labels are
+            // rebuilt only when the selected model/count changes, never on
+            // every UI frame (large imports can have thousands of runs).
+            const auto part_count = std::min(element.model_material_parts, 65536U);
+            material_part_ = std::min(material_part_, static_cast<std::size_t>(part_count - 1U));
+            if (material_part_labels_.size() != part_count) {
+                material_part_options_.clear();
+                material_part_labels_.clear();
+                material_part_labels_.reserve(part_count);
+                material_part_options_.reserve(part_count);
+                for (core::u32 i = 0; i < part_count; ++i)
+                    material_part_labels_.push_back("Material part " + std::to_string(i + 1U));
+                for (const auto& name : material_part_labels_) material_part_options_.push_back(name);
+            }
+            static_cast<void>(ctx.dropdown(mix(id_, "material.part", element.node.value()),
+                take_row(cursor, row_height), material_part_options_, material_part_));
+            cursor.y += row_gap;
+            constexpr std::array<std::string_view, 5U> labels{
+                "Base color", "Metal / rough", "Normal", "Occlusion", "Emission"};
+            for (std::size_t role = 0; role < labels.size(); ++role) {
+                const auto row = take_row(cursor, row_height);
+                cursor.y += row_gap;
+                const float controls = 124.0F;
+                ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height}, labels[role], ctx.theme().text_muted);
+                const bool browse = ctx.button(mix(id_, "texture.browse", role),
+                    {row.x + row.width - controls, row.y, 74.0F, row.height}, "Browse...");
+                const bool clear = ctx.button(mix(id_, "texture.clear", role),
+                    {row.x + row.width - 46.0F, row.y, 46.0F, row.height}, "Clear");
+                if (browse || clear) {
+                    FilePickerRequest request{FilePickerKind::ModelTexture, {}, {element.node}};
+                    request.model_source = element.source;
+                    request.material_part = static_cast<core::u32>(material_part_);
+                    request.texture_role = static_cast<core::u32>(role);
+                    request.clear_texture = clear;
+                    frame.file_picker = std::move(request);
+                }
+                if (role == 1U) ctx.tooltip(row, "Packed image: roughness in green, metallic in blue");
+                if (role == 2U) ctx.tooltip(row, "Tangent-space normal image; the model must have UVs");
+            }
+            ctx.label(take_row(cursor, row_height), "Texture edits can be undone.", ctx.theme().text_muted);
+            ctx.label(take_row(cursor, row_height), "Fallback factors", ctx.theme().text_muted);
+        }
+    } else if (imported_model && element.linked) {
+        ctx.label(take_row(cursor, row_height), "Texture images follow Blender materials.", ctx.theme().text_muted);
+    }
 
     constexpr std::array<std::string_view, 3U> color_properties{{
         scene::schema::color_r, scene::schema::color_g,
@@ -2312,38 +2381,47 @@ void InspectorPanel::draw_effects(
   add_effect();
 }
 
-void InspectorPanel::draw_camera(gui::UiContext& ctx, Cursor& cursor,
-                                 const ElementInfo& element,
-                                 InspectorFrame& frame) {
-    if (element.kind != ElementKind::Camera) {
+void InspectorPanel::draw_camera(
+    gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element,
+    InspectorFrame& frame, std::span<const scene::ChannelKeyframes> keyframes,
+    core::u64 show_frame) {
+    if (element.kind != ElementKind::Camera ||
+        !section(ctx, cursor, "CAMERA", camera_open_)) {
         return;
     }
-    if (!section(ctx, cursor, "CAMERA", camera_open_)) {
-        return;
-    }
-
-    {
-        constexpr std::array<std::string_view, 1U> axes{{""}};
-        const std::array<FieldBinding, 1U> bindings{
-            {{FieldDomain::Camera, {}, scene::schema::fov_turns}}};
-        const std::array<float, 1U> values{element.field_of_view};
-        vector_row(ctx, cursor, "FOV turns", axes, values, 0.001F, bindings,
-                   frame);
-    }
-    {
-        constexpr std::array<std::string_view, 1U> axes{{""}};
-        const std::array<FieldBinding, 1U> bindings{
-            {{FieldDomain::Camera, {}, scene::schema::shutter_seconds}}};
-        const std::array<float, 1U> values{element.shutter_seconds};
-        vector_row(ctx, cursor, "Shutter s", axes, values, 0.0001F, bindings,
-                   frame, nullptr, false, false, 0U, 6);
-    }
-    for (const bool focus : {true, false}) {
-        constexpr std::array<std::string_view, 1U> axes{{""}};
-        const std::array<FieldBinding, 1U> bindings{{{FieldDomain::Camera, {},
-            focus ? scene::schema::focus_distance_m : scene::schema::aperture_f_number}}};
-        const std::array<float, 1U> values{focus ? element.focus_distance_m : element.aperture_f_number};
-        vector_row(ctx, cursor, focus ? "Focus m" : "Aperture f/", axes, values, 0.01F, bindings, frame);
+    struct LensField final {
+        std::string_view label;
+        std::string_view property;
+        scene::PropertyChannel channel;
+        float value;
+        float speed;
+        int precision;
+    };
+    const std::array<LensField, 4U> fields{{
+        {"FOV turns", scene::schema::fov_turns,
+         scene::PropertyChannel::CameraFieldOfView, element.field_of_view, 0.001F, 3},
+        {"Shutter s", scene::schema::shutter_seconds,
+         scene::PropertyChannel::CameraShutter, element.shutter_seconds, 0.0001F, 6},
+        {"Focus m", scene::schema::focus_distance_m,
+         scene::PropertyChannel::CameraFocusDistance, element.focus_distance_m, 0.01F, 3},
+        {"Aperture f/", scene::schema::aperture_f_number,
+         scene::PropertyChannel::CameraAperture, element.aperture_f_number, 0.01F, 3},
+    }};
+    constexpr std::array<std::string_view, 1U> axes{{""}};
+    for (const LensField& field : fields) {
+        const auto* const channel = channel_for(keyframes, element.node, field.channel);
+        const bool animated = channel != nullptr && !channel->frames.empty();
+        const bool keyed_here = keyed_at(channel, show_frame);
+        const std::array<FieldBinding, 1U> bindings{{
+            {FieldDomain::Camera, field.channel, field.property}}};
+        const std::array<float, 1U> values{field.value};
+        bool key_requested = false;
+        vector_row(ctx, cursor, field.label, axes, values, field.speed, bindings,
+                   frame, &key_requested, animated, keyed_here, 0U, field.precision);
+        if (key_requested) {
+            frame.key_edits.push_back(InspectorKeyEdit{
+                element.node, field.channel, field.value, keyed_here});
+        }
     }
 }
 
@@ -2721,7 +2799,7 @@ InspectorFrame InspectorPanel::draw_selection(
         if (displayed->kind == ElementKind::PointLight && light_open_) draw_ies(ctx, cursor, *displayed, frame);
     } else if (displayed->kind == ElementKind::Camera) {
         draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
-        draw_camera(ctx, cursor, *displayed, frame);
+        draw_camera(ctx, cursor, *displayed, frame, keyframes, show_frame);
     } else if (displayed->on_screen()) {
         // A clip on a track is playing on that track's screen, so the screen
         // is what has a place in the scene. Showing the clip's own transform

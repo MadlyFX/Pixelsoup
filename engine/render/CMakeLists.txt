@@ -728,8 +728,10 @@ if(BUILD_TESTING)
         tests/media_video_tests.cpp
     )
     target_link_libraries(mediaserver_render_media_video_tests
-        PRIVATE MediaServer::Render
+        PRIVATE MediaServer::Render ${FFMPEG_LIBRARIES}
     )
+    target_include_directories(mediaserver_render_media_video_tests SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(mediaserver_render_media_video_tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
     mediaserver_set_project_options(mediaserver_render_media_video_tests)
     add_test(
         NAME mediaserver.render_media_video

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mediaserver/core/output_limits.hpp>
+
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 
@@ -81,8 +83,8 @@ late_frame_policy_name(LateFramePolicy policy) noexcept;
 
 inline constexpr core::u32 max_sync_group_id = 4'095U;
 inline constexpr core::u32 max_sync_barrier_id = 4'095U;
-inline constexpr core::u32 max_sync_timing_width = 7'680U;
-inline constexpr core::u32 max_sync_timing_height = 4'320U;
+inline constexpr core::u32 max_sync_timing_width = core::max_output_dimension;
+inline constexpr core::u32 max_sync_timing_height = core::max_output_dimension;
 // A rational refresh above this is not a display mode, it is a typo.
 inline constexpr core::u32 max_sync_refresh_numerator = 1'000'000U;
 inline constexpr core::u32 max_sync_refresh_denominator = 1'001'000U;

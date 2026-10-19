@@ -41,7 +41,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     gui::UiContext &ctx, const gui::Rect &bounds, SceneSettingsTarget target,
     const ProjectSettingsState &state,
     std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
-    std::span<const ElementInfo> elements) {
+    std::span<const ElementInfo> elements, bool auto_key) {
   SceneSettingsFrame result;
   if (target == SceneSettingsTarget::None || bounds.width <= 0.0F ||
       bounds.height <= 0.0F)
@@ -208,7 +208,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     if (fields_.draw(ctx, id(label), field, unit, value, speed, edited, 3) &&
         std::isfinite(edited)) {
       value = std::clamp(edited, minimum, max_value);
-      if (animated)
+      if (animated && auto_key)
         result.keys.push_back({property, value, false});
       else {
         scene::set_environment_channel(environment, property,

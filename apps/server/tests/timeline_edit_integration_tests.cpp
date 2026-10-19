@@ -1,4 +1,6 @@
 #include "timeline_edit_integration.hpp"
+#include "timeline_edit_authoring.hpp"
+#include "clip_timing_authoring.hpp"
 
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/scene/key_edit.hpp>
@@ -173,6 +175,94 @@ void fractional_slip_routes_through_the_pure_planner() {
   EDIT_CHECK(integer(*slipped, scene::schema::source_in) == 6);
   EDIT_CHECK(integer(*slipped, scene::schema::clip_start) == 0);
   EDIT_CHECK(integer(*slipped, scene::schema::clip_duration) == 20);
+}
+
+void negative_placement_and_loop_slip_commit_with_undo_and_redo() {
+  auto root = doc::Root{}.set(stage()).set(lane()).set(media(10U, 10, 800, 190));
+  const auto normalized = app::normalise_clip_timing(
+      scene::ClipTiming{-48, 800, 790, 12, 20}, 200U);
+  EDIT_CHECK(normalized.has_value());
+  EDIT_CHECK(normalized->start == -48 && normalized->source_in == 190);
+  auto moved = placements(root).front();
+  moved.timing = *normalized;
+  scene::TimelineEditPlan placement{};
+  placement.updates.push_back(moved);
+  const auto authored = app::plan_timeline_edit_authoring(root, placement, 100U);
+  EDIT_CHECK(authored.has_value());
+  EDIT_CHECK(integer(*authored.value().document.get(moved.node), scene::schema::clip_start) == -48);
+  app::ClipClipboard clipboard;
+  const editor::TimelineEditIntent request{
+      scene_id, editor::TimelineSlipRequest{moved.node, 27}, show_60, 0U, 91U};
+  const auto slipped = app::plan_timeline_edit_integration(authored.value().document,
+      placements(authored.value().document), request, clipboard, 100U);
+  EDIT_CHECK(slipped.has_value());
+  const auto& edited = *slipped.value().document.get(moved.node);
+  EDIT_CHECK(integer(edited, scene::schema::clip_start) == -48);
+  EDIT_CHECK(integer(edited, scene::schema::clip_duration) == 800);
+  EDIT_CHECK(integer(edited, scene::schema::source_in) == 17);
+  cmd::DirectorScheduler scheduler{root};
+  constexpr cmd::UndoContextId history{2U};
+  EDIT_CHECK(scheduler.schedule_document_replace(slipped.value().document, history,
+      cmd::TransactionId{91U}, cmd::FrameNumber{1U}));
+  EDIT_CHECK(scheduler.seal_frame(cmd::FrameNumber{1U}));
+  EDIT_CHECK(*scheduler.sealed_document().get(moved.node) == edited);
+  EDIT_CHECK(scheduler.undo_depth(history) == 1U);
+  EDIT_CHECK(scheduler.schedule_undo(history, cmd::TransactionId{92U}, cmd::FrameNumber{2U}));
+  EDIT_CHECK(scheduler.seal_frame(cmd::FrameNumber{2U}));
+  EDIT_CHECK(doc::diff(root, scheduler.sealed_document()).changes.empty());
+  EDIT_CHECK(scheduler.schedule_redo(history, cmd::TransactionId{93U}, cmd::FrameNumber{3U}));
+  EDIT_CHECK(scheduler.seal_frame(cmd::FrameNumber{3U}));
+  EDIT_CHECK(*scheduler.sealed_document().get(moved.node) == edited);
+
+  const auto before_zero = doc::Root{}.set(stage()).set(lane()).set(media(10U, -40, 100));
+  const auto overwrite = scene::plan_overwrite(placements(before_zero),
+      scene::TimelineLaneRef{scene_id, lane_id}, -20, 10, show_60, doc::NodeId{100U});
+  EDIT_CHECK(overwrite.has_value());
+  const auto split_authored = app::plan_timeline_edit_authoring(before_zero, overwrite.value(), 100U);
+  EDIT_CHECK(split_authored.has_value());
+  EDIT_CHECK(integer(*split_authored.value().document.get(doc::NodeId{10U}), scene::schema::clip_start) == -40);
+  EDIT_CHECK(integer(*split_authored.value().document.get(doc::NodeId{100U}), scene::schema::clip_start) == -10);
+
+  EDIT_CHECK(!app::normalise_clip_timing(scene::ClipTiming{
+      std::numeric_limits<core::i64>::max(), 1, 0, 0, 0}, 200U));
+  EDIT_CHECK(!app::split_clip_timing(scene::ClipTiming{
+      std::numeric_limits<core::i64>::max() - 1, 8, 0, 0, 0},
+      std::numeric_limits<core::i64>::max(), 200U, show_60, std::nullopt));
+}
+
+void razor_uses_native_floor_at_cut_and_wraps_looping_sources() {
+  const scene::ClipTiming original{-1, 600, 199, 1, 8};
+  const auto cut = app::split_clip_timing(original, 2, 200U, show_60,
+      scene::MediaFrameRate{30'000U, 1'001U});
+  EDIT_CHECK(cut.has_value());
+  // Three show frames are 1.4985 source frames: playback floors to one,
+  // rather than rounding to two or advancing by three show frames.
+  EDIT_CHECK(cut->left.start == -1 && cut->left.duration == 3);
+  EDIT_CHECK(cut->right.start == 2 && cut->right.source_in == 0);
+  EDIT_CHECK(cut->left.fade_out == 0 && cut->right.fade_in == 0);
+  EDIT_CHECK(cut->right.fade_out == 8);
+  scene::SceneModel before;
+  before.reset(doc::Root{}.set(stage()).set(lane()).set(media(10U, -1, 600, 199, 501U, true)));
+  scene::SceneModel after;
+  after.reset(doc::Root{}.set(stage()).set(lane()).set(media(11U,
+      cut->right.start, cut->right.duration, cut->right.source_in, 501U, true)));
+  const scene::SceneTime time{2U, 60U, 1U};
+  EDIT_CHECK(before.evaluate(scene_id, time).media.front().frame_index == 0U);
+  EDIT_CHECK(after.evaluate(scene_id, time).media.front().frame_index == 0U);
+
+  const auto negative = app::split_clip_timing(
+      scene::ClipTiming{-20, 620, 190, 0, 0}, -5, 200U, show_60, std::nullopt);
+  EDIT_CHECK(negative.has_value());
+  EDIT_CHECK(negative->right.start == -5 && negative->right.source_in == 5);
+  before.reset(doc::Root{}.set(stage()).set(lane()).set(media(10U, -20, 620, 190)));
+  after.reset(doc::Root{}.set(stage()).set(lane()).set(media(11U,
+      negative->right.start, negative->right.duration, negative->right.source_in)));
+  for (core::u64 frame = 0U; frame < 600U; ++frame) {
+    const scene::SceneTime sample{frame, 60U, 1U};
+    const auto expected = (frame + 210U) % 200U;
+    EDIT_CHECK(before.evaluate(scene_id, sample).media.front().frame_index == expected);
+    EDIT_CHECK(after.evaluate(scene_id, sample).media.front().frame_index == expected);
+  }
 }
 
 void insert_is_one_replacement_with_lane_mapped_clipboard_subgraph() {
@@ -390,7 +480,11 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"negative placement and loop Slip commit with undo and redo",
+     &negative_placement_and_loop_slip_commit_with_undo_and_redo},
+    {"Razor uses playback rounding and wraps looping sources",
+     &razor_uses_native_floor_at_cut_and_wraps_looping_sources},
     {"fractional slip routes through the pure planner",
      &fractional_slip_routes_through_the_pure_planner},
     {"insert is one replacement with lane mapped clipboard subgraph",

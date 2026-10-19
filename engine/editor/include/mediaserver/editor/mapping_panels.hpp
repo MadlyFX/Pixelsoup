@@ -651,6 +651,8 @@ public:
     preview_projection_cache_.reset();
     mesh_browse_pending_ = false;
     surface_numbers_ = NumberField{};
+    rectangle_numbers_ = NumberField{};
+    rectangle_mesh_domain_ = false;
     focused_ = false;
   }
 
@@ -694,6 +696,8 @@ private:
   bool mesh_browse_pending_{};
   bool surface_name_dirty_{};
   NumberField surface_numbers_;
+  NumberField rectangle_numbers_;
+  bool rectangle_mesh_domain_{};
   bool focused_{};
 
   friend bool detail::wait_for_feed_mapping_projection_cache_for_test(

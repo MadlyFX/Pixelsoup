@@ -264,11 +264,11 @@ class InspectorPanel final {
                       std::span<const scene::ChannelKeyframes> keyframes,
                       core::u64 show_frame,
                       std::span<const scene::EffectInstance> effects);
-    // A camera's own section: where it stands, what it looks at, and how wide
-    // it sees. Deliberately not the shared transform - a camera reads none of
-    // those properties, so nine fields there would move nothing.
+    // Lens properties share the explicit key controls used by transforms.
     void draw_camera(gui::UiContext& ctx, Cursor& cursor,
-                     const ElementInfo& element, InspectorFrame& frame);
+                     const ElementInfo& element, InspectorFrame& frame,
+                     std::span<const scene::ChannelKeyframes> keyframes,
+                     core::u64 show_frame);
     // A camera's section: which authored tracker feed drives it. Choosing one
     // is the whole act of making a camera the tracked camera, so this is the
     // only place the two kinds meet.
@@ -344,6 +344,10 @@ class InspectorPanel final {
     bool camera_open_{true};
     bool light_open_{true};
     bool material_open_{true};
+    std::size_t material_part_{};
+    doc::NodeId material_part_node_{};
+    std::vector<std::string> material_part_labels_;
+    std::vector<std::string_view> material_part_options_;
     bool material_extensions_open_{};
     bool linked_open_{};
     bool animation_open_{};

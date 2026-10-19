@@ -47,6 +47,7 @@
 #include <filesystem>
 #include <future>
 #include <mediaserver/render/model_ingest_queue.hpp>
+#include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <iterator>
 #include <memory>
@@ -553,6 +554,8 @@ enum class ApplicationMenuAction : core::u8 {
   None,
   NewProject,
   OpenProject,
+  RecentProjects,
+  OpenRecentProject,
   ImportLinkedScene,
   CancelLinkedSceneImport,
   StartSceneLink,
@@ -576,6 +579,7 @@ enum class ApplicationMenuAction : core::u8 {
 struct ApplicationMenuResult final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
   gui::PanelId panel{};
+  std::string project_path;
 };
 
 struct ApplicationMenuItem final {
@@ -583,9 +587,10 @@ struct ApplicationMenuItem final {
   ApplicationMenuAction action{ApplicationMenuAction::None};
 };
 
-constexpr std::array<ApplicationMenuItem, 8U> file_menu_items{{
+constexpr std::array<ApplicationMenuItem, 9U> file_menu_items{{
     {"New Project", ApplicationMenuAction::NewProject},
     {"Open Project...", ApplicationMenuAction::OpenProject},
+    {"Recent Projects", ApplicationMenuAction::RecentProjects},
     {"Connect to Blender...", ApplicationMenuAction::StartSceneLink},
     {"Publish Preview...", ApplicationMenuAction::SceneLinkDetails},
     {"Save Project", ApplicationMenuAction::SaveProject},
@@ -597,6 +602,17 @@ constexpr std::array<ApplicationMenuItem, 8U> file_menu_items{{
 constexpr float application_menu_row_height = 22.0F;
 constexpr float application_menu_padding = 4.0F;
 constexpr float file_menu_separator_height = 8.0F;
+
+[[nodiscard]] std::string recent_project_label(std::string_view path) {
+  const auto separator = path.find_last_of("/\\");
+  if (separator == std::string_view::npos || separator + 1U == path.size()) {
+    return std::string{path};
+  }
+  std::string label{path.substr(separator + 1U)};
+  label += "  -  ";
+  label += path.substr(0U, separator);
+  return label;
+}
 
 struct MenuBarEntry final {
   std::string_view label;
@@ -681,7 +697,7 @@ struct WindowPanelEntry final {
         application_menu_padding * 2.0F +
         static_cast<float>(file_menu_items.size()) *
             application_menu_row_height +
-        file_menu_separator_height;
+        file_menu_separator_height * 2.0F;
     return gui::Rect{anchor.x, top_bar_height, 220.0F, height};
   }
   if (menu == ApplicationMenu::Edit) {
@@ -702,6 +718,30 @@ struct WindowPanelEntry final {
                          8.0F};
   }
   return {};
+}
+
+[[nodiscard]] gui::Rect recent_projects_row(const gui::Rect &file_popup) {
+  return gui::Rect{file_popup.x + application_menu_padding,
+                   file_popup.y + application_menu_padding +
+                       2.0F * application_menu_row_height,
+                   file_popup.width - 2.0F * application_menu_padding,
+                   application_menu_row_height};
+}
+
+[[nodiscard]] gui::Rect recent_projects_popup(const gui::Rect &file_popup,
+                                              float viewport_width,
+                                              std::size_t project_count) {
+  constexpr float preferred_width = 420.0F;
+  const float right_x = file_popup.x + file_popup.width;
+  const float right_space = std::max(viewport_width - right_x, 0.0F);
+  const bool opens_right = right_space >= file_popup.x;
+  const float width = std::min(preferred_width,
+                               opens_right ? right_space : file_popup.x);
+  const float x = opens_right ? right_x : file_popup.x - width;
+  return gui::Rect{x, recent_projects_row(file_popup).y, width,
+                   2.0F * application_menu_padding +
+                       application_menu_row_height *
+                           static_cast<float>(std::max<std::size_t>(1U, project_count))};
 }
 
 [[nodiscard]] std::optional<std::string> choose_project_to_open() {
@@ -742,6 +782,18 @@ struct WindowPanelEntry final {
   case FilePickerKind::BakeFolder:
     path = tinyfd_selectFolderDialog("Choose Bake Folder", request.current.c_str());
     break;
+  case FilePickerKind::ModelTexture: {
+    const char* filters[]{"*.png", "*.jpg", "*.jpeg", "*.tga", "*.bmp"};
+    path = tinyfd_openFileDialog("Assign Material Texture", request.current.c_str(), 5, filters,
+        "Texture images (PNG, JPEG, TGA, BMP)", 0);
+    break;
+  }
+  case FilePickerKind::GeneratorTexture: {
+    const char* filters[]{"*.png", "*.jpg", "*.jpeg", "*.tga", "*.bmp"};
+    path = tinyfd_openFileDialog("Choose Generator Texture", request.current.c_str(), 5, filters,
+        "Texture images (PNG, JPEG, TGA, BMP)", 0);
+    break;
+  }
   }
   return path != nullptr ? std::optional<std::string>{path} : std::nullopt;
 }
@@ -910,7 +962,9 @@ draw_application_header(gui::UiContext &ui, float width,
 [[nodiscard]] ApplicationMenuResult
 run_application_menu_input(gui::UiContext &ui, float width, float height,
                            ApplicationMenu &open_menu,
-                           const gui::DockLayout &docks) {
+                           bool &recent_submenu_open,
+                           const gui::DockLayout &docks,
+                           std::span<const std::string> recent_projects) {
   ApplicationMenuResult result{};
   const gui::UiId dismiss_id = gui::ui_id("editor.menu.dismiss");
   const gui::Rect whole{0.0F, 0.0F, width, height};
@@ -918,10 +972,25 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
     static_cast<void>(ui.grab(dismiss_id, whole));
   }
   if (open_menu == ApplicationMenu::None) {
+    recent_submenu_open = false;
     return result;
   }
 
   const gui::Rect popup = menu_popup_bounds(ui, open_menu);
+  if (open_menu != ApplicationMenu::File) {
+    recent_submenu_open = false;
+  }
+  const gui::Rect recent_row = recent_projects_row(popup);
+  const gui::Rect recent_popup =
+      recent_projects_popup(popup, width, recent_projects.size());
+  if (open_menu == ApplicationMenu::File) {
+    if (recent_row.contains(ui.pointer_x(), ui.pointer_y())) {
+      recent_submenu_open = true;
+    } else if (popup.contains(ui.pointer_x(), ui.pointer_y()) &&
+               !recent_popup.contains(ui.pointer_x(), ui.pointer_y())) {
+      recent_submenu_open = false;
+    }
+  }
   const std::string_view anchor_label =
       open_menu == ApplicationMenu::File   ? std::string_view{"File"}
       : open_menu == ApplicationMenu::Edit ? std::string_view{"Edit"}
@@ -929,31 +998,61 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
                                            : std::string_view{"Window"};
   const gui::Rect anchor = menu_bar_entry_bounds(ui, anchor_label);
   if (ui.pointer_pressed() && !popup.contains(ui.pointer_x(), ui.pointer_y()) &&
+      !(recent_submenu_open && open_menu == ApplicationMenu::File &&
+        recent_popup.contains(ui.pointer_x(), ui.pointer_y())) &&
       !anchor.contains(ui.pointer_x(), ui.pointer_y())) {
     if (ui.pointer_y() >= top_bar_height) {
       const gui::Interaction dismissed = ui.grab(dismiss_id, whole);
       if (dismissed.pressed) {
         open_menu = ApplicationMenu::None;
+        recent_submenu_open = false;
       }
     } else {
       open_menu = ApplicationMenu::None;
+      recent_submenu_open = false;
     }
     return result;
   }
 
   if (open_menu == ApplicationMenu::File) {
+    if (recent_submenu_open) {
+      float recent_y = recent_popup.y + application_menu_padding;
+      for (const std::string &path : recent_projects) {
+        const gui::Rect row{recent_popup.x + application_menu_padding,
+                            recent_y,
+                            recent_popup.width - 2.0F * application_menu_padding,
+                            application_menu_row_height};
+        if (ui.grab(mix(gui::ui_id("editor.file-menu.recent"), path), row).clicked) {
+          result.action = ApplicationMenuAction::OpenRecentProject;
+          result.project_path = path;
+          open_menu = ApplicationMenu::None;
+          recent_submenu_open = false;
+          return result;
+        }
+        recent_y += application_menu_row_height;
+      }
+    }
     float y = popup.y + application_menu_padding;
     for (const ApplicationMenuItem &item : file_menu_items) {
       const auto &[label, action] = item;
+      if (action == ApplicationMenuAction::StartSceneLink) {
+        y += file_menu_separator_height;
+      }
       if (action == ApplicationMenuAction::OpenProjectSettings) {
         y += file_menu_separator_height;
       }
       const gui::Rect row{popup.x + application_menu_padding, y,
                           popup.width - application_menu_padding * 2.0F,
                           application_menu_row_height};
+      if (action == ApplicationMenuAction::RecentProjects) {
+        static_cast<void>(ui.grab(mix(gui::ui_id("editor.file-menu"), label), row));
+        y += application_menu_row_height;
+        continue;
+      }
       if (ui.grab(mix(gui::ui_id("editor.file-menu"), label), row).clicked) {
         result.action = action;
         open_menu = ApplicationMenu::None;
+        recent_submenu_open = false;
         return result;
       }
       y += application_menu_row_height;
@@ -1020,7 +1119,10 @@ run_application_menu_input(gui::UiContext &ui, float width, float height,
 
 void draw_application_menu_overlay(gui::UiContext &ui,
                                    ApplicationMenu open_menu,
-                                   const gui::DockLayout &docks) {
+                                   bool recent_submenu_open,
+                                   const gui::DockLayout &docks,
+                                   std::span<const std::string> recent_projects,
+                                   float viewport_width) {
   if (open_menu == ApplicationMenu::None) {
     return;
   }
@@ -1033,20 +1135,25 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   ui.push_clip(popup);
 
   const auto draw_row = [&](gui::UiId id, const gui::Rect &row,
-                            std::string_view label) {
+                            std::string_view label, bool selected = false) {
     const bool hovered = row.contains(ui.pointer_x(), ui.pointer_y());
-    if (hovered || ui.active() == id) {
+    if (hovered || ui.active() == id || selected) {
       ui.panel(row,
                hovered ? ui.theme().widget_hover : ui.theme().widget_active);
     }
     ui.label(gui::Rect{row.x + 8.0F, row.y, row.width - 12.0F, row.height},
-             label, hovered ? ui.theme().text : ui.theme().text_muted);
+             label, hovered || selected ? ui.theme().text : ui.theme().text_muted);
   };
 
   if (open_menu == ApplicationMenu::File) {
     float y = popup.y + application_menu_padding;
     for (const ApplicationMenuItem &item : file_menu_items) {
       const std::string_view label = item.label;
+      if (item.action == ApplicationMenuAction::StartSceneLink) {
+        ui.panel(gui::Rect{popup.x + 8.0F, y + 3.0F, popup.width - 16.0F, 1.0F},
+                 ui.theme().divider);
+        y += file_menu_separator_height;
+      }
       if (label == "Project Settings...") {
         // Above the rule the File menu acts on the project file. Below it are
         // the two settings dialogs - one document, one machine - and the rule
@@ -1058,7 +1165,13 @@ void draw_application_menu_overlay(gui::UiContext &ui,
       const gui::Rect row{popup.x + application_menu_padding, y,
                           popup.width - application_menu_padding * 2.0F,
                           application_menu_row_height};
-      draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label);
+      draw_row(mix(gui::ui_id("editor.file-menu"), label), row, label,
+               item.action == ApplicationMenuAction::RecentProjects &&
+                   recent_submenu_open);
+      if (item.action == ApplicationMenuAction::RecentProjects) {
+        ui.label(gui::Rect{row.x + row.width - 18.0F, row.y, 12.0F, row.height},
+                 ">", ui.theme().text_muted);
+      }
       y += application_menu_row_height;
     }
   } else if (open_menu == ApplicationMenu::View) {
@@ -1106,6 +1219,32 @@ void draw_application_menu_overlay(gui::UiContext &ui,
     }
   }
   ui.pop_clip();
+  if (open_menu == ApplicationMenu::File && recent_submenu_open) {
+    const gui::Rect submenu =
+        recent_projects_popup(popup, viewport_width, recent_projects.size());
+    ui.panel(gui::Rect{submenu.x + 3.0F, submenu.y + 4.0F,
+                       submenu.width, submenu.height},
+             gui::UiColor{0.0F, 0.0F, 0.0F, 0.35F});
+    ui.panel(submenu, ui.theme().panel);
+    outline(ui, submenu, ui.theme().border);
+    ui.push_clip(submenu);
+    float y = submenu.y + application_menu_padding;
+    if (recent_projects.empty()) {
+      ui.label(gui::Rect{submenu.x + 12.0F, y, submenu.width - 24.0F,
+                         application_menu_row_height},
+               "None yet", ui.theme().text_muted);
+    } else {
+      for (const std::string &path : recent_projects) {
+        const gui::Rect row{submenu.x + application_menu_padding, y,
+                            submenu.width - 2.0F * application_menu_padding,
+                            application_menu_row_height};
+        draw_row(mix(gui::ui_id("editor.file-menu.recent"), path), row,
+                 recent_project_label(path));
+        y += application_menu_row_height;
+      }
+    }
+    ui.pop_clip();
+  }
 }
 
 [[nodiscard]] bool draw_status_bar(gui::UiContext &ui, float width,
@@ -1402,7 +1541,8 @@ bool editor_available() noexcept {
 
 RoutedSurfaceEdit route_surface_transform_edit(
     FeedSurfaceEditRequest request,
-    std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame) {
+    std::span<const scene::ChannelKeyframes> keyframes, core::u64 show_frame,
+    bool auto_key) {
   RoutedSurfaceEdit routed{};
   const FeedSurfaceTransform changed = request.transform_components;
   if (changed == FeedSurfaceTransform::None) {
@@ -1427,7 +1567,7 @@ RoutedSurfaceEdit route_surface_transform_edit(
     if (!has_transform(changed, component.bit)) {
       continue;
     }
-    if (keyed(keyframes, request.node, component.channel)) {
+    if (auto_key && keyed(keyframes, request.node, component.channel)) {
       routed.keys.push_back(KeyIntent{
           request.node, component.channel, show_frame,
           surface_transform_value(request.surface, component.channel), false,
@@ -1455,8 +1595,11 @@ struct EditorShell::Impl final {
     scene::SceneId add_scene{};
     std::optional<FeedSurfaceAddRequest> surface_add;
     std::optional<FeedSurfaceEditRequest> surface_edit;
+    doc::NodeId texture_target{};
+    std::string expected_source;
   };
   std::vector<PendingModelIngest> pending_model_ingests;
+  render::ModelCache inspector_model_cache;
   core::AssetPublicationGate asset_gate;
   core::AssetSetReadiness assets{};
   std::optional<rhi::Texture> visible_program;
@@ -1481,6 +1624,8 @@ struct EditorShell::Impl final {
   std::string bake_message;
   std::string completed_bake_content;
   std::chrono::steady_clock::time_point program_wait_started{};
+  StageAssetStatus stage_assets{true, "LOADING STAGE ASSETS...",
+                                "Preparing the first Stage image."};
   std::string ingest_message;
   enum class PendingMediaAction : core::u8 { Add, Import };
 
@@ -1587,6 +1732,7 @@ struct EditorShell::Impl final {
   core::u64 project_generation{};
   DeleteDomain delete_domain{DeleteDomain::Scene};
   ApplicationMenu open_menu{ApplicationMenu::None};
+  bool recent_projects_submenu_open{};
   bool scene_link_details_open{};
   bool blender_connection_open{};
   std::string blender_selection;
@@ -2293,6 +2439,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.bake_message.clear();
     impl.completed_bake_content.clear();
     impl.program_wait_started = {};
+    impl.stage_assets = {true, "LOADING STAGE ASSETS...",
+                         "Preparing the first Stage image."};
     impl.asset_gate.reset();
     impl.assets = {};
     impl.uploaded_asset_digest = 0;
@@ -2406,9 +2554,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // substitutes the operator machine's GPU result for those reports.
   const std::span<const LibraryProxyRuntimeObservation>
       library_proxy_runtime = proxy_runtime;
+  // Blender can remove a selected source between editor frames. Keep the
+  // stage settings selection, but release rows that no longer exist.
   if (impl.scene_selection.erase_if([&](doc::NodeId node) {
         const ElementInfo *const element = find_element(elements, node);
-        return element != nullptr && element->locked;
+        return element != nullptr ? element->locked
+            : node != project_settings.stage_node;
       })) {
     impl.group_nodes.clear();
     impl.group_start.clear();
@@ -2826,6 +2977,21 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             scene::CanvasRect{0U, 0U, stage_preview.width,
                               stage_preview.height},
             impl.stage_renderer.scene_linear_output());
+    auto stage_assets = stage_asset_status(
+        impl.stage_renderer.renderer_passes().geometry,
+        impl.stage_renderer.media_cache_stats().pending_requests,
+        rendered_stage != nullptr ? impl.stage_display.color_state()
+                                  : render::DisplayLutState::Ready);
+    if (!stage_targets_ready) {
+      stage_assets = {false, "STAGE TARGETS UNAVAILABLE",
+                      "The Stage render target could not be created."};
+    } else if (!impl.stage_renderer.renderer_readiness().satisfied) {
+      stage_assets = {false, "STAGE RENDER UNAVAILABLE",
+                      std::string{impl.stage_renderer.renderer_readiness().headline()}};
+    } else if (!stage_ok && stage_assets.headline.empty()) {
+      stage_assets = {false, "STAGE RENDER FAILED",
+                      "Check Renderer diagnostics."};
+    }
     if (!stage_ok) {
       static_cast<void>(commands.clear(
           impl.stage_display.target(),
@@ -2839,7 +3005,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (!submitted) {
       program_preview_ok = false;
       program_preview_fault = "PROGRAM SUBMIT FAILED";
+      impl.stage_assets = {false, "STAGE SUBMIT FAILED",
+                           "The Stage image could not be submitted to the GPU."};
     } else {
+      impl.stage_assets = std::move(stage_assets);
       impl.asset_gate = next_asset_gate;
       impl.assets.visible_commit = impl.assets.digest == impl.asset_gate.visible_digest() ? impl.asset_gate.visible_commit() : 0;
       *recording_slot = {std::move(submitted).value(), prepared.ready ? prepared.digest : 0U,
@@ -2866,6 +3035,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     result.temporal_restart_frame = std::max(result.temporal_restart_frame, impl.program_to_renderer.temporal_restart_frame());
   }
   result.assets = impl.assets;
+  result.stage_assets = impl.stage_assets;
 
   const auto& program_geometry = impl.program_renderer.renderer_passes().geometry;
   std::string loading_detail = "Loading scene assets and preparing GPU resources.";
@@ -3071,7 +3241,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const HeaderActions header =
       draw_application_header(ui, width, switcher, impl.open_menu, project);
   const ApplicationMenuResult menu_result =
-      run_application_menu_input(ui, width, height, impl.open_menu, impl.docks);
+      run_application_menu_input(ui, width, height, impl.open_menu,
+                                 impl.recent_projects_submenu_open, impl.docks,
+                                 project.recent_projects);
   // Menu rows overlay scene controls. Consume both press and selection frames
   // so starting a link cannot also arm the scene-delete control underneath it.
   const bool application_menu_blocks_pointer = impl.open_menu != ApplicationMenu::None
@@ -3114,6 +3286,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                 "those changes and open another project")) {
         result.load_project = ProjectFileRequest{std::move(*path)};
       }
+    }
+    break;
+  case ApplicationMenuAction::RecentProjects:
+    break;
+  case ApplicationMenuAction::OpenRecentProject:
+    if (!project.dirty || confirm_discard_project_changes(
+                              "those changes and open another project")) {
+      result.load_project = ProjectFileRequest{menu_result.project_path};
     }
     break;
   case ApplicationMenuAction::SaveProject:
@@ -3278,7 +3458,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     for (std::size_t index = 0U; index < components.size(); ++index) {
       const auto component = static_cast<scene::TransformChannel>(
           static_cast<core::u8>(static_cast<std::size_t>(first) + index));
-      if (keyed(keyframes, node, component)) {
+      if (impl.timeline_panel.auto_key_enabled() &&
+          keyed(keyframes, node, component)) {
         result.keys.push_back(KeyIntent{node, component, timeline.show_frame,
                                         components[index], false, gesture});
       } else {
@@ -3315,10 +3496,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       const bool orbits =
           scene::length(start.world_position - delta.pivot) > 1.0e-5F;
       if (delta.tool == TransformTool::Move || orbits) {
-        const bool position_keyed =
+        const bool position_keyed = impl.timeline_panel.auto_key_enabled() && (
             keyed(keyframes, node, scene::TransformChannel::PositionX) ||
             keyed(keyframes, node, scene::TransformChannel::PositionY) ||
-            keyed(keyframes, node, scene::TransformChannel::PositionZ);
+            keyed(keyframes, node, scene::TransformChannel::PositionZ));
         if (!position_keyed) {
           result.edits.push_back(EditIntent{node, moved.position, gesture});
         } else {
@@ -3379,9 +3560,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       switch (tool) {
       case TransformTool::Move:
-        if (keyed(keyframes, node, scene::TransformChannel::PositionX) ||
+        if (impl.timeline_panel.auto_key_enabled() && (
+            keyed(keyframes, node, scene::TransformChannel::PositionX) ||
             keyed(keyframes, node, scene::TransformChannel::PositionY) ||
-            keyed(keyframes, node, scene::TransformChannel::PositionZ)) {
+            keyed(keyframes, node, scene::TransformChannel::PositionZ))) {
           emit_components(node, scene::TransformChannel::PositionX,
                           scene::Vec3{}, gesture);
         } else {
@@ -3410,7 +3592,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // sits at a different frame would author a key the operator cannot see.
   const auto route_surface_edit = [&](FeedSurfaceEditRequest request) {
     RoutedSurfaceEdit routed = route_surface_transform_edit(
-        std::move(request), keyframes, timeline.program_frame);
+        std::move(request), keyframes, timeline.program_frame,
+        impl.timeline_panel.auto_key_enabled());
     result.keys.insert(result.keys.end(),
                        std::make_move_iterator(routed.keys.begin()),
                        std::make_move_iterator(routed.keys.end()));
@@ -3445,6 +3628,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const auto* completed = pending->job->result();
     if (!completed) { ++pending; continue; }
     if (pending->project_generation == project.generation) {
+      if (pending->texture_target.value() != 0U) {
+        const auto* current = find_element(elements, pending->texture_target);
+        if (!current || current->source != pending->expected_source || current->locked || current->linked) {
+          impl.ingest_message = "Model changed during texture preparation; retry the assignment";
+          pending = impl.pending_model_ingests.erase(pending);
+          continue;
+        }
+      }
       // Projection validation used a specific calibration. Do not overwrite a
       // surface edited or deleted while the worker was reading the model.
       if (pending->surface_edit) {
@@ -3476,6 +3667,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               pending->gesture, 16.0F / 9.0F, {}, pending->add_scene});
         } else {
           result.asset_imports.push_back({assets::Asset{std::move(asset)}, pending->gesture});
+        }
+        if (pending->texture_target.value() != 0U) {
+          result.generic_edits.push_back(GenericEdit{pending->texture_target,
+              std::string{scene::schema::source}, 0.0, pending->gesture, completed->source});
         }
         if (pending->surface_add) {
           auto request = std::move(*pending->surface_add);
@@ -3679,9 +3874,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     case LibraryAddAction::Media: {
       const char *const filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                  "*.png", "*.jpg", "*.tga", "*.exr", "*.hdr"};
+                                  "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
+                                  "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
       const char *const path = tinyfd_openFileDialog(
-          "Add Media", "", 9, filters, "Video and images", 0);
+          "Add Media", "", static_cast<int>(std::size(filters)), filters, "Video and images", 0);
       if (path != nullptr) {
         const std::string source{path};
         try {
@@ -3712,11 +3908,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto import_asset = [&](LibraryImportAction action) {
     const bool media = action == LibraryImportAction::Media;
     const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
-                                      "*.png", "*.jpg", "*.tga", "*.exr", "*.hdr"};
+                                      "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
+                                      "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
     const char *const model_filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
     const char *const path = tinyfd_openFileDialog(
         media ? "Import Media Asset" : "Import 3D Model Asset", "",
-        media ? 9 : 4, media ? media_filters : model_filters,
+        media ? static_cast<int>(std::size(media_filters)) : 4, media ? media_filters : model_filters,
         media ? "Video and images" : "3D models (glTF, OBJ)", media ? 1 : 0);
     if (path == nullptr) {
       return;
@@ -3798,10 +3995,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   ViewportFrame stage_viewport_frame{};
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
+  std::optional<doc::NodeId> dragging_asset;
   std::optional<EffectApplyRequest> pending_effect_drop;
   std::optional<TimelineLayerDrop> pending_timeline_layer_drop;
   gui::Rect compositor_panel_bounds{};
   bool compositor_panel_drawn = false;
+  bool timeline_panel_drawn = false;
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
   SceneSettingsFrame live_scene_settings;
@@ -4001,9 +4200,29 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                     std::max(timeline.rate_denominator, 1U)),
             &feed_map,
             impl.stage_surface_selection.value_or(doc::NodeId{}), nullptr,
-            plate_overlay);
+            plate_overlay, elements);
       }
       stage_viewport_drawn = true;
+      // A passive notice leaves picking, framing and navigation available.
+      // Retain the last submitted state when command acquisition is busy.
+      if (!impl.stage_assets.headline.empty()) {
+        const auto& image = stage_viewport_frame.image;
+        const gui::Rect banner{image.x + 8.0F, image.y + 8.0F,
+                               std::max(std::min(image.width - 16.0F, 520.0F), 0.0F),
+                               std::min(54.0F, std::max(image.height - 16.0F, 0.0F))};
+        ui.push_clip(image);
+        ui.panel(banner, ui.theme().header);
+        const auto color = impl.stage_assets.loading ? ui.theme().accent
+                                                    : ui.theme().warning;
+        ui.panel(gui::Rect{banner.x, banner.y, 3.0F, banner.height}, color);
+        ui.label(gui::Rect{banner.x + 12.0F, banner.y + 4.0F,
+                           std::max(banner.width - 24.0F, 0.0F), 21.0F},
+                 impl.stage_assets.headline, color);
+        ui.label(gui::Rect{banner.x + 12.0F, banner.y + 27.0F,
+                           std::max(banner.width - 24.0F, 0.0F), 20.0F},
+                 impl.stage_assets.detail, ui.theme().text);
+        ui.pop_clip();
+      }
       if (color_sample_active) {
         const bool pointer_available =
             !floating_occluder.has_value() ||
@@ -4206,7 +4425,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             interaction_block,
             static_cast<float>(timeline.rate_numerator) /
                 static_cast<float>(std::max(timeline.rate_denominator, 1U)),
-            nullptr, doc::NodeId{}, program_projection, plate_overlay);
+            nullptr, doc::NodeId{}, program_projection, plate_overlay,
+            elements);
         program_viewport_image = program_viewport.image;
         if (!color_sample_active && !switcher.rehearsal_locked) {
           handle_viewport(program_viewport, scene, scene);
@@ -4865,6 +5085,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             library.proxy_policy->policy,
             impl.next_edit_gesture++});
       }
+      dragging_asset = library.dragging_asset;
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
@@ -4894,7 +5115,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       compositor_panel_bounds = bounds;
       compositor_panel_drawn = true;
       const CompositorFrame graph_frame =
-          impl.compositor_panel.draw(ui, bounds, compositor_graph);
+          impl.compositor_panel.draw(ui, bounds, compositor_graph, elements);
       if (graph_frame.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Compositor;
         // Selection presses are reported even when the same node is clicked
@@ -4905,14 +5126,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       delete_consumed = delete_consumed || graph_frame.consume_delete;
       if (!compositor_locked) {
-        result.compositor_add = graph_frame.add_node;
-        if (result.compositor_add.has_value() &&
-            result.compositor_add->kind == compositor::NodeKind::SceneLayer) {
-          result.compositor_add->scene_node = impl.anchor();
-          if (result.compositor_add->scene_node == doc::NodeId{}) {
-            result.compositor_add.reset();
+        auto add_node = graph_frame.add_node;
+        if (add_node.has_value() &&
+            add_node->kind == compositor::NodeKind::SceneLayer) {
+          add_node->scene_node = impl.anchor();
+          if (add_node->scene_node == doc::NodeId{}) {
+            add_node.reset();
             impl.compositor_warning_until = ui.time_seconds() + 1.5;
           }
+        }
+        if (add_node.has_value()) {
+          result.compositor_adds.push_back(*add_node);
         }
         result.compositor_move = graph_frame.move_node;
         result.compositor_connect = graph_frame.connect_ports;
@@ -5109,7 +5333,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.feed_map_adds.push_back(mapping.add.value());
       }
       if (mapping.edit.has_value()) {
-        mapping.edit->gesture = impl.next_edit_gesture++;
+        if (impl.feed_mapping_edit_gesture == 0U) {
+          impl.feed_mapping_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.edit->gesture = impl.feed_mapping_edit_gesture;
         result.feed_map_edits.push_back(mapping.edit.value());
       }
       if (mapping.remove.has_value()) {
@@ -5117,7 +5344,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.feed_map_deletes.push_back(mapping.remove.value());
       }
       if (mapping.projection_edit.has_value()) {
-        mapping.projection_edit->gesture = impl.next_edit_gesture++;
+        if (impl.feed_mapping_edit_gesture == 0U) {
+          impl.feed_mapping_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.projection_edit->gesture = impl.feed_mapping_edit_gesture;
         result.feed_projection_edits.push_back(mapping.projection_edit.value());
       }
       if (mapping.surface_add.has_value()) {
@@ -5226,6 +5456,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_timeline) {
+      timeline_panel_drawn = true;
       auto timeline_elements = elements;
       if (project_settings.stage_node != doc::NodeId{}) {
         ElementInfo environment{};
@@ -5493,7 +5724,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         state.color_status = color_status_for(impl.program_display.color_state());
         state.bake_running = impl.bake_job != nullptr;
         state.bake_status = bake_activity;
-        live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements);
+        live_scene_settings = impl.scene_settings_panel.draw(ui,bounds,settings_target,state,keyframes,timeline.show_frame,elements,impl.timeline_panel.auto_key_enabled());
         if (live_scene_settings.file_picker) {
           const auto& request = *live_scene_settings.file_picker;
           if (auto path = choose_property_file(request)) {
@@ -5526,15 +5757,57 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (const ElementInfo *const element = find_element(elements, selected);
             element != nullptr) {
           inspector_elements.push_back(*element);
+          if (element->kind == ElementKind::Model && !element->linked) {
+            const auto observed = impl.inspector_model_cache.observe(element->source,
+                impl.inspector_model_cache.publication_epoch());
+            if (observed.asset) inspector_elements.back().model_material_parts =
+                static_cast<core::u32>(observed.asset->parts.size());
+            else if (observed.state == render::ModelCacheState::Failed)
+              inspector_elements.back().model_material_status = "Model import failed; check its source file";
+          }
         }
       }
       const InspectorFrame inspector = impl.inspector_panel.draw(
           ui, bounds, std::span<const ElementInfo>{inspector_elements}, anchor,
           keyframes, timeline.show_frame, effects, tracking_sources);
       if (inspector.file_picker) {
-        if (auto path = choose_property_file(*inspector.file_picker)) {
+        const auto& request = *inspector.file_picker;
+        if (auto path = request.clear_texture ? std::optional<std::string>{std::string{}} : choose_property_file(request)) {
           if (path->size() > 1024U) {
-            impl.ingest_message = "IES profile path exceeds 1024 bytes";
+            impl.ingest_message = "Resource path exceeds 1024 bytes";
+          } else if (request.kind == FilePickerKind::ModelTexture && !request.targets.empty()) {
+            const auto target = request.targets.front();
+            const auto busy = std::any_of(impl.pending_model_ingests.begin(), impl.pending_model_ingests.end(),
+                [&](const auto& pending) { return pending.texture_target == target; });
+            if (busy || impl.pending_model_ingests.size() >= 16U) {
+              impl.ingest_message = "A texture assignment is still preparing; wait for it to finish";
+            } else {
+              auto job = render::ModelIngestJob::start(request.model_source, {}, 1.0F,
+                  render::ModelTextureAssignment{request.material_part, request.texture_role, *path});
+              if (job) {
+                Impl::PendingModelIngest pending{};
+                pending.job = std::move(job);
+                pending.display_name = std::filesystem::path{request.model_source}.filename().string();
+                pending.gesture = impl.next_edit_gesture++;
+                pending.project_generation = project.generation;
+                pending.texture_target = target;
+                pending.expected_source = request.model_source;
+                impl.pending_model_ingests.push_back(std::move(pending));
+                impl.ingest_message = "Preparing material texture...";
+              } else impl.ingest_message = "Model worker is busy; retry texture assignment";
+            }
+          } else if (request.kind == FilePickerKind::GeneratorTexture && !request.targets.empty()) {
+            constexpr std::array<std::string_view, 5U> texture_properties{
+                scene::schema::base_color_texture,
+                scene::schema::metallic_roughness_texture,
+                scene::schema::normal_texture,
+                scene::schema::occlusion_texture,
+                scene::schema::emissive_texture};
+            if (request.texture_role < texture_properties.size()) {
+              const auto gesture = impl.begin_gesture();
+              result.generic_edits.push_back(GenericEdit{request.targets.front(),
+                  std::string{texture_properties[request.texture_role]}, 0.0, gesture, *path});
+            }
           } else {
             const auto gesture = impl.begin_gesture();
             for (const auto node : inspector.file_picker->targets)
@@ -5580,7 +5853,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                     static_cast<double>(target->raster_height);
           }
         }
-        if (keyed(keyframes, node, component)) {
+        if (impl.timeline_panel.auto_key_enabled() &&
+            keyed(keyframes, node, component)) {
           result.keys.push_back(KeyIntent{node, component,
                                           timeline.show_frame, value,
                                           false, inspector_gesture});
@@ -5666,17 +5940,77 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         ui, inspector_panel_bounds,
         effect_target_name(drop_target, target_title));
   }
+  // Both hover feedback and release use the drawn target geometry and the same
+  // compatibility policy. Resolving here makes dock traversal order irrelevant.
+  const auto replacement_at = [&](float x, float y, doc::NodeId asset_id,
+                                  doc::NodeId source_layer)
+      -> std::optional<std::pair<SourceReplacementIntent, gui::Rect>> {
+    if (switcher.rehearsal_locked || ui.pointer_blocked()) return std::nullopt;
+    const assets::Asset *const asset = asset_registry.asset(asset_id);
+    const ElementInfo *const source = find_element(elements, source_layer);
+    const auto compatible = [&](doc::NodeId node) {
+      const ElementInfo *const target = find_element(elements, node);
+      return target != nullptr &&
+          (asset != nullptr ? can_replace_source(*target, *asset)
+                            : source != nullptr && can_replace_layer(*target, *source));
+    };
+    if (asset != nullptr && timeline_panel_drawn) {
+      for (const auto &target : impl.timeline_panel.replacement_targets()) {
+        if (target.bounds.contains(x, y) && compatible(target.node)) {
+          return std::pair{SourceReplacementIntent{target.node, asset_id, {},
+                                                   authored_stage.id}, target.bounds};
+        }
+      }
+    }
+    if (compositor_panel_drawn && !compositor_locked) {
+      if (const auto hit = impl.compositor_panel.node_at(compositor_graph, x, y)) {
+        const auto node = std::find_if(compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+            [&](const compositor::GraphNode &entry) { return entry.node == hit->first; });
+        if (node != compositor_graph.nodes.end() && node->kind == compositor::NodeKind::SceneLayer) {
+          const auto *parameters = std::get_if<compositor::SceneLayerParameters>(&node->parameters);
+          if (parameters != nullptr && compatible(parameters->scene_node)) {
+            return std::pair{SourceReplacementIntent{
+                asset != nullptr ? parameters->scene_node : node->node,
+                asset_id, source_layer, authored_stage.id}, hit->second};
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  };
+  const doc::NodeId lifted_layer =
+      impl.timeline_panel.dragging_compositor_source_count() == 1U
+          ? impl.timeline_panel.dragging_compositor_source_node() : doc::NodeId{};
+  const auto replacement_hover = replacement_at(ui.pointer_x(), ui.pointer_y(),
+      dragging_asset.value_or(doc::NodeId{}), lifted_layer);
+  if (replacement_hover.has_value()) {
+    const auto &bounds = replacement_hover->second;
+    ui.panel(bounds, with_alpha(ui.theme().accent, 0.18F));
+    outline(ui, bounds, ui.theme().accent);
+    const std::string_view label = dragging_asset.has_value() ? "Replace source" : "Replace layer";
+    const float label_width = ui.font_width(label) + 16.0F;
+    const gui::Rect badge{bounds.x + bounds.width - label_width, bounds.y,
+                           label_width, std::min(bounds.height, 24.0F)};
+    ui.panel(badge, ui.theme().accent);
+    ui.label({badge.x + 8.0F, badge.y, badge.width - 8.0F, badge.height},
+             label, ui.theme().background);
+  }
   if (compositor_panel_drawn && !compositor_locked) {
     if (impl.effects_panel.dragging()) {
       draw_compositor_drop_target(ui, compositor_panel_bounds,
                                   impl.effects_panel.dragging_name());
-    } else if (impl.timeline_panel.dragging_compositor_source()) {
+    } else if (impl.timeline_panel.dragging_compositor_source() &&
+               !impl.compositor_panel.node_at(compositor_graph, ui.pointer_x(), ui.pointer_y()).has_value()) {
       const ElementInfo *const dragged = find_element(
           elements, impl.timeline_panel.dragging_compositor_source_node());
       std::array<char, 64U> dragged_title{};
+      const std::size_t count =
+          impl.timeline_panel.dragging_compositor_source_count();
+      const std::string group_title = std::to_string(count) + " layers";
       draw_compositor_drop_target(
           ui, compositor_panel_bounds,
-          effect_target_name(dragged, dragged_title));
+          count > 1U ? std::string_view{group_title}
+                     : effect_target_name(dragged, dragged_title));
     }
   }
 
@@ -5796,11 +6130,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const gui::Rect *const inspector_drop_bounds =
         inspector_panel_drawn ? &inspector_panel_bounds : nullptr;
     if (graph_drop && graph_effect_kind.has_value() && !compositor_locked &&
-        !result.compositor_add.has_value()) {
-      result.compositor_add = CompositorAddIntent{
+        result.compositor_adds.empty()) {
+      result.compositor_adds.push_back(CompositorAddIntent{
           *graph_effect_kind,
           graph_drop_position->x,
-          graph_drop_position->y};
+          graph_drop_position->y});
       result.compositor_gesture = impl.next_edit_gesture++;
     } else if (!graph_drop && effect_drop_targets_selected_layer(
                                   *pending_effect_drop, stage_drop_bounds,
@@ -5812,7 +6146,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
 
   if (pending_timeline_layer_drop.has_value() && compositor_panel_drawn &&
-      !compositor_locked && !result.compositor_add.has_value()) {
+      !compositor_locked && result.compositor_adds.empty()) {
     const TimelineLayerDrop &drop = *pending_timeline_layer_drop;
     constexpr float graph_layer_node_width = 164.0F;
     constexpr float graph_layer_node_height = 54.0F;
@@ -5820,42 +6154,71 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.compositor_panel.node_drop_position(
             drop.screen_x, drop.screen_y, graph_layer_node_width,
             graph_layer_node_height);
-    const bool over_canvas = graph_drop_position.has_value();
-    const ElementInfo *const dropped_element =
-        find_element(elements, drop.layer);
-    const bool already_present = std::any_of(
-        compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
-        [&](const compositor::GraphNode &node) {
-          if (node.kind != compositor::NodeKind::SceneLayer) {
-            return false;
-          }
-          const auto *parameters =
-              std::get_if<compositor::SceneLayerParameters>(&node.parameters);
-          if (parameters == nullptr) {
-            return false;
-          }
-          if (parameters->scene_node == drop.layer) {
-            return true;
-          }
-          const ElementInfo *const existing =
-              find_element(elements, parameters->scene_node);
-          const bool dropping_track =
-              dropped_element != nullptr &&
-              dropped_element->kind == ElementKind::Track;
-          const bool existing_track =
-              existing != nullptr && existing->kind == ElementKind::Track;
-          return (dropping_track && existing != nullptr &&
-                  existing->timeline_lane == drop.layer) ||
-                 (existing_track && dropped_element != nullptr &&
-                  dropped_element->timeline_lane == parameters->scene_node);
-        });
-    if (over_canvas && !already_present) {
-      result.compositor_add = CompositorAddIntent{
-          compositor::NodeKind::SceneLayer,
-          graph_drop_position->x,
-          graph_drop_position->y,
-          drop.layer};
-      result.compositor_gesture = impl.next_edit_gesture++;
+    const auto replacement = drop.layers.size() == 1U
+        ? replacement_at(drop.screen_x, drop.screen_y, {}, drop.layers.front())
+        : std::nullopt;
+    if (replacement.has_value()) {
+      auto intent = replacement->first;
+      intent.gesture = impl.next_edit_gesture++;
+      result.source_replacements.push_back(intent);
+      impl.history_context = HistoryContext::Compositor;
+      impl.semantic_boundary = true;
+    } else if (graph_drop_position.has_value() &&
+               !impl.compositor_panel.node_at(compositor_graph, drop.screen_x, drop.screen_y).has_value()) {
+      const auto overlaps = [&](doc::NodeId layer, doc::NodeId existing_node) {
+        if (existing_node == layer) {
+          return true;
+        }
+        const ElementInfo *const dropped = find_element(elements, layer);
+        const ElementInfo *const existing = find_element(elements, existing_node);
+        return (dropped != nullptr && dropped->kind == ElementKind::Track &&
+                existing != nullptr && existing->timeline_lane == layer) ||
+               (existing != nullptr && existing->kind == ElementKind::Track &&
+                dropped != nullptr && dropped->timeline_lane == existing_node);
+      };
+      for (const doc::NodeId layer : drop.layers) {
+        const ElementInfo *const dropped = find_element(elements, layer);
+        if (dropped == nullptr || dropped->locked) {
+          continue;
+        }
+        const bool already_present = std::any_of(
+            compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+            [&](const compositor::GraphNode &node) {
+              const auto *parameters =
+                  std::get_if<compositor::SceneLayerParameters>(&node.parameters);
+              return node.kind == compositor::NodeKind::SceneLayer &&
+                     parameters != nullptr &&
+                     overlaps(layer, parameters->scene_node);
+            }) || std::any_of(
+                result.compositor_adds.begin(), result.compositor_adds.end(),
+                [&](const CompositorAddIntent &added) {
+                  return overlaps(layer, added.scene_node);
+                });
+        if (!already_present) {
+          // Keep the first node under the pointer and stack the remaining
+          // nodes in graph space, independent of the current zoom and pan.
+          const float offset = static_cast<float>(result.compositor_adds.size()) *
+                               (graph_layer_node_height + 16.0F);
+          result.compositor_adds.push_back(CompositorAddIntent{
+              compositor::NodeKind::SceneLayer, graph_drop_position->x,
+              graph_drop_position->y + offset, layer});
+        }
+      }
+      if (!result.compositor_adds.empty()) {
+        result.compositor_gesture = impl.next_edit_gesture++;
+      }
+    }
+  }
+
+  if (pending_asset_drop.has_value()) {
+    const auto &drop = *pending_asset_drop;
+    if (const auto replacement = replacement_at(drop.screen_x, drop.screen_y, drop.asset, {})) {
+      auto intent = replacement->first;
+      intent.gesture = impl.next_edit_gesture++;
+      result.source_replacements.push_back(intent);
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+      pending_asset_drop.reset();
     }
   }
 
@@ -5936,7 +6299,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.ui_zoom_percent)) {
     impl.open_menu = ApplicationMenu::View;
   }
-  draw_application_menu_overlay(ui, impl.open_menu, impl.docks);
+  draw_application_menu_overlay(ui, impl.open_menu,
+                                impl.recent_projects_submenu_open, impl.docks,
+                                project.recent_projects, width);
 
   if (preferences_blocked_pointer) {
     ui.pop_pointer_block();
@@ -6154,7 +6519,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.manipulating = false;
   }
 
-  const bool compositor_authored = result.compositor_add.has_value() ||
+  const bool compositor_authored = std::any_of(result.source_replacements.begin(),
+      result.source_replacements.end(), [](const auto &edit) { return edit.layer != doc::NodeId{}; }) ||
+      !result.compositor_adds.empty() ||
       result.compositor_move.has_value() ||
       result.compositor_connect.has_value() ||
       result.compositor_property_edit.has_value() ||
@@ -6162,7 +6529,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const bool selection_set_authored =
       result.selection_set_edit.has_value() &&
       result.selection_set_edit->action != SelectionSetEditAction::Recall;
-  const bool scene_authored = !result.edits.empty() || !result.keys.empty() ||
+  const bool scene_authored = !result.source_replacements.empty() || !result.edits.empty() || !result.keys.empty() ||
       !result.key_moves.empty() || result.key_duplicate.has_value() ||
       result.key_batch.has_value() ||
       !result.clip_timings.empty() ||
