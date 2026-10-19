@@ -45,6 +45,7 @@
 #include <mediaserver/show/demo_feed_map.hpp>
 #include <mediaserver/show/demo_scene.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
+#include <mediaserver/show/frame_waiter.hpp>
 #include <mediaserver/show/presenter.hpp>
 #include <mediaserver/show/switcher_author.hpp>
 #include <mediaserver/show/switcher_authority.hpp>
@@ -6729,6 +6730,15 @@ clock_config(const PlaybackOptions &options) noexcept {
 
 // Per-frame presentation cost, reported only where there is one to report.
 // The CPU path has no submission to time and says nothing rather than zero.
+// How late this loop woke for the boundaries since the last status line.
+[[nodiscard]] std::string boundary_wake_text(
+    const show::BoundaryLateness::Window &window) {
+    return " wake-max-us=" + std::to_string(window.max.count()) +
+           " wake-mean-us=" + std::to_string(window.mean.count()) +
+           " wake-late=" + std::to_string(window.late) + '/' +
+           std::to_string(window.boundaries);
+}
+
 [[nodiscard]] std::string gpu_timing_text(const show::PresenterTiming &timing) {
     if (!timing.gpu) {
         return {};
@@ -7795,8 +7805,10 @@ int run_node_playback(net::NodeSessionService &service,
         publish_output_sync(true);
     };
 
+    show::BoundaryLateness boundary_lateness;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
+        boundary_lateness.observe(now);
         if (driver.config().timing_authority ==
             show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
             latest_video_reference = read_video_reference();
@@ -8638,6 +8650,7 @@ int run_node_playback(net::NodeSessionService &service,
                 std::cout << gpu_timing_text(
                     output_presenters.front().presenter->timing());
             }
+            std::cout << boundary_wake_text(boundary_lateness.take());
             std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
                       << " barrier="
                       << runtime_barrier_label(node_output_sync.barrier) << '/'
@@ -8673,6 +8686,7 @@ int run_node_playback(net::NodeSessionService &service,
             // boundary is created in external-reference mode.
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         } else {
+            boundary_lateness.arm(driver.clock().next_boundary_at());
             sleep_until_boundary(driver.clock().next_boundary_at());
         }
     }
@@ -9761,8 +9775,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 compositor_version = 0U;
     bool compositor_loaded = false;
 
+    show::BoundaryLateness boundary_lateness;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
+        boundary_lateness.observe(now);
 #if defined(MEDIASERVER_HAS_GUI)
         if (editor_coalescing_policy.expire(now)) {
             scheduler.end_coalescing();
@@ -14851,6 +14867,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                       << " transport=" << transport_label(transport.state())
                       << " sealed=" << sealed << " anchors=" << anchors
                       << " pacer-lag=" << cluster.pacer_lag_frames
+                      << boundary_wake_text(boundary_lateness.take())
                       << " tracked=" << tracked.size()
                       // Poses replaced in a session's mailbox before that
                       // session drained them. Nonzero means some node's plate
@@ -14931,6 +14948,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             break;
         }
         auto next_wake = pacer.next_boundary_at();
+        boundary_lateness.arm(next_wake);
 #if defined(MEDIASERVER_HAS_GUI)
         if (editor) {
             next_wake = std::min(next_wake, next_editor_refresh);
