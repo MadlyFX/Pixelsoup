@@ -1,0 +1,773 @@
+#pragma once
+
+// Internal to the Timeline panel: the constants, row model and small drawing
+// and lookup helpers its parts share. Nothing here is part of the editor's
+// public interface.
+
+#include <mediaserver/editor/cues_panel.hpp>
+#include <mediaserver/editor/timeline_panel.hpp>
+
+#include "timeline_layout.hpp"
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
+
+namespace mediaserver::editor::timeline {
+
+namespace gui = mediaserver::gui;
+namespace scene = mediaserver::scene;
+
+inline constexpr float icon_button_width = 24.0F;
+inline constexpr float edit_tool_scale = 1.35F;
+
+[[nodiscard]] inline gui::Cursor tool_cursor(TimelineEditTool tool) noexcept {
+  switch (tool) {
+  case TimelineEditTool::Standard: return gui::Cursor::Arrow;
+  case TimelineEditTool::RippleTrim: return gui::Cursor::RippleTrim;
+  case TimelineEditTool::Roll: return gui::Cursor::Roll;
+  case TimelineEditTool::Slip: return gui::Cursor::Slip;
+  case TimelineEditTool::Slide: return gui::Cursor::Slide;
+  case TimelineEditTool::Razor: return gui::Cursor::Razor;
+  }
+  return gui::Cursor::Arrow;
+}
+// How close to an In/Out edge on the ruler's range bar a press grabs it.
+inline constexpr float range_handle_reach = 5.0F;
+inline constexpr float marker_hit_reach = 6.0F;
+// The window a second click still counts as a double-click.
+inline constexpr double double_click_seconds = 0.35;
+inline constexpr float key_radius = 5.5F;
+// A key answers a press well beyond the diamond it draws: at arm's length a
+// five-unit diamond is a hard target, and nothing else in a lane competes.
+inline constexpr float key_hit_radius = 10.0F;
+// How close a press must come to a clip's fade handle to take it.
+inline constexpr float fade_handle_reach = 8.0F;
+inline constexpr float snap_distance = 8.0F;
+inline constexpr float marquee_threshold = 4.0F;
+inline constexpr float lane_drag_threshold_squared = 16.0F;
+inline constexpr float minimum_pixels_per_frame =
+    TimelineTimeAxis::minimum_pixels_per_frame;
+inline constexpr std::size_t filmstrip_prefetch_rows = 4U;
+inline constexpr std::size_t maximum_filmstrip_requests = 32U;
+inline constexpr std::size_t waveform_prefetch_rows = 4U;
+inline constexpr std::size_t maximum_waveform_requests = 32U;
+
+[[nodiscard]] inline std::optional<core::i64>
+parse_integer(std::string_view text) noexcept {
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  bool explicit_plus = text.front() == '+';
+  if (explicit_plus) {
+    text.remove_prefix(1U);
+    if (text.empty()) {
+      return std::nullopt;
+    }
+  }
+  core::i64 value{};
+  const auto parsed =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size()
+             ? std::optional<core::i64>{value}
+             : std::nullopt;
+}
+
+[[nodiscard]] inline core::u64
+key_scale_signature(std::span<const TimelineKeyAddress> keys,
+                    const scene::KeyTimeScale &scale) noexcept {
+  core::u64 hash = 1469598103934665603ULL;
+  const auto append = [&](core::u64 value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  append(static_cast<core::u64>(scale.numerator));
+  append(static_cast<core::u64>(scale.denominator));
+  append(static_cast<core::u64>(scale.anchor));
+  append(static_cast<core::u64>(scale.playhead));
+  append(static_cast<core::u64>(scale.user_anchor));
+  for (const TimelineKeyAddress &key : keys) {
+    append(key.target.value());
+    append(static_cast<core::u64>(key.property));
+    append(static_cast<core::u64>(key.frame));
+  }
+  return hash;
+}
+
+[[nodiscard]] inline bool
+point_in_polygon(float x, float y,
+                 std::span<const gui::UiPoint> polygon) noexcept {
+  if (polygon.size() < 3U) {
+    return false;
+  }
+  bool inside = false;
+  std::size_t previous = polygon.size() - 1U;
+  for (std::size_t current = 0U; current < polygon.size(); ++current) {
+    const gui::UiPoint &a = polygon[current];
+    const gui::UiPoint &b = polygon[previous];
+    const bool crosses = (a.y > y) != (b.y > y);
+    if (crosses) {
+      const float at_x = (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x;
+      if (x < at_x) {
+        inside = !inside;
+      }
+    }
+    previous = current;
+  }
+  return inside;
+}
+
+[[nodiscard]] inline gui::UiColor
+channel_color(scene::PropertyChannel) noexcept {
+  return gui::UiColor{0.67F, 0.73F, 0.80F, 1.0F};
+}
+
+[[nodiscard]] inline std::string_view
+channel_label(scene::PropertyChannel property) noexcept {
+  switch (property) {
+  case scene::PropertyChannel::PositionX:
+    return "Position X";
+  case scene::PropertyChannel::PositionY:
+    return "Position Y";
+  case scene::PropertyChannel::PositionZ:
+    return "Position Z";
+  case scene::PropertyChannel::RotationYaw:
+    return "Rotation Yaw";
+  case scene::PropertyChannel::RotationPitch:
+    return "Rotation Pitch";
+  case scene::PropertyChannel::RotationRoll:
+    return "Rotation Roll";
+  case scene::PropertyChannel::ScaleX:
+    return "Scale X";
+  case scene::PropertyChannel::ScaleY:
+    return "Scale Y";
+  case scene::PropertyChannel::ScaleZ:
+    return "Scale Z";
+  case scene::PropertyChannel::Opacity:
+    return "Opacity";
+  case scene::PropertyChannel::Brightness:
+    return "Brightness";
+  case scene::PropertyChannel::Saturation:
+    return "Saturation";
+  case scene::PropertyChannel::BlurRadius:
+    return "Gaussian Blur";
+  case scene::PropertyChannel::FilmGrainAmount:
+    return "Film Grain";
+  case scene::PropertyChannel::BoxBlurRadius:
+    return "Box Blur";
+  case scene::PropertyChannel::DirectionalBlurLength:
+    return "Directional Blur";
+  case scene::PropertyChannel::ChromaKeyMix:
+    return "Chroma Key Mix";
+  case scene::PropertyChannel::LumaKeyMix:
+    return "Luma Key Mix";
+  case scene::PropertyChannel::EnvironmentIntensity:
+    return "Map intensity";
+  case scene::PropertyChannel::EnvironmentRotation:
+    return "Map rotation";
+  case scene::PropertyChannel::FogDensity:
+    return "Fog density";
+  case scene::PropertyChannel::FogHeight:
+    return "Fog height";
+  case scene::PropertyChannel::FogFalloff:
+    return "Height falloff";
+  case scene::PropertyChannel::FogAnisotropy:
+    return "Anisotropy";
+  case scene::PropertyChannel::SkyHaze:
+    return "Haze";
+  case scene::PropertyChannel::SkyIlluminance:
+    return "Sun illuminance";
+  case scene::PropertyChannel::SkyTimeOfDay:
+    return "Solar time";
+  case scene::PropertyChannel::LightIntensity:
+    return "Intensity";
+  case scene::PropertyChannel::LightColorR:
+    return "Color R";
+  case scene::PropertyChannel::LightColorG:
+    return "Color G";
+  case scene::PropertyChannel::LightColorB:
+    return "Color B";
+  case scene::PropertyChannel::LightRange:
+    return "Range";
+  case scene::PropertyChannel::CameraFieldOfView:
+    return "Field of view";
+  case scene::PropertyChannel::CameraShutter:
+    return "Shutter seconds";
+  case scene::PropertyChannel::CameraFocusDistance:
+    return "Focus distance";
+  case scene::PropertyChannel::CameraAperture:
+    return "Aperture";
+  case scene::PropertyChannel::Count:
+    break;
+  }
+  return "Unknown Channel";
+}
+
+// Property groups a layer twirls open to. The first three are transform
+// groups whose channels are laid out three apiece from PositionX; Color is a
+// light's colour, whose channels start at LightColorR.
+inline constexpr std::array<std::string_view, 4U> group_names{
+    {"Position", "Rotation", "Scale", "Color"}};
+inline constexpr std::array<std::array<std::string_view, 3U>, 4U> component_names{{
+    {{"X", "Y", "Z"}},
+    {{"Yaw", "Pitch", "Roll"}},
+    {{"X", "Y", "Z"}},
+    {{"R", "G", "B"}},
+}};
+inline constexpr core::u8 color_group = 3U;
+
+[[nodiscard]] inline scene::PropertyChannel group_channel(core::u8 group,
+                                                   core::u8 component) noexcept {
+  if (group == color_group) {
+    return static_cast<scene::PropertyChannel>(
+        static_cast<core::u8>(scene::PropertyChannel::LightColorR) + component);
+  }
+  return static_cast<scene::PropertyChannel>(group * 3U + component);
+}
+
+struct RateChoice final {
+  ShowRateRequest rate;
+  std::string_view label;
+};
+
+inline constexpr std::array<RateChoice, 8U> common_rates{{
+    {{24'000U, 1'001U}, "23.976 FPS"},
+    {{24U, 1U}, "24 FPS"},
+    {{25U, 1U}, "25 FPS"},
+    {{30'000U, 1'001U}, "29.97 FPS"},
+    {{30U, 1U}, "30 FPS"},
+    {{50U, 1U}, "50 FPS"},
+    {{60'000U, 1'001U}, "59.94 FPS"},
+    {{60U, 1U}, "60 FPS"},
+}};
+
+[[nodiscard]] inline bool same_rate(const EditorTimeline &timeline,
+                             ShowRateRequest rate) noexcept {
+  return timeline.rate_numerator == rate.numerator &&
+         timeline.rate_denominator == rate.denominator;
+}
+
+[[nodiscard]] inline std::string rate_label(const EditorTimeline &timeline) {
+  const auto found = std::find_if(common_rates.begin(), common_rates.end(),
+                                  [&](const RateChoice &choice) {
+                                    return same_rate(timeline, choice.rate);
+                                  });
+  if (found != common_rates.end()) {
+    return std::string{found->label};
+  }
+
+  std::array<char, 48U> text{};
+  const int length =
+      timeline.rate_denominator == 1U
+          ? std::snprintf(text.data(), text.size(), "%u FPS",
+                          timeline.rate_numerator)
+          : std::snprintf(text.data(), text.size(), "%u/%u FPS",
+                          timeline.rate_numerator, timeline.rate_denominator);
+  return std::string{text.data(),
+                     static_cast<std::size_t>(std::max(length, 0))};
+}
+
+[[nodiscard]] inline gui::UiId mix(gui::UiId base, std::string_view name,
+                            core::u64 index = 0U) noexcept {
+  core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
+  for (const char c : name) {
+    hash ^= static_cast<core::u8>(c);
+    hash *= 1099511628211ULL;
+  }
+  hash ^= index + 0x9E3779B9ULL;
+  hash *= 1099511628211ULL;
+  return hash;
+}
+
+[[nodiscard]] inline gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
+  color.a = opacity;
+  return color;
+}
+
+[[nodiscard]] inline gui::UiColor mix_colors(gui::UiColor a, gui::UiColor b,
+                                      float t) noexcept {
+  return gui::UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                      a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+}
+
+// A square tool button carrying a drawn mark. `engaged` is a mode that is on
+// - the current tool, snapping, loop - and reads as a lit key rather than as
+// a pressed one. The tooltip names the action and its key, which is how an
+// icon stays learnable.
+[[nodiscard]] inline bool icon_button(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds, gui::Icon icon,
+                               bool engaged, std::string_view tooltip,
+                               gui::UiColor engaged_color,
+                               float icon_scale = 1.0F) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  const gui::Theme &theme = ctx.theme();
+  ctx.panel(bounds, (interaction.held && !interaction.released)
+                        ? theme.widget_active
+                        : (engaged ? alpha(engaged_color, 0.22F)
+                                   : (interaction.hovered ? theme.widget_hover
+                                                          : theme.widget)));
+  if (engaged) {
+    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+                        bounds.width, 2.0F},
+              engaged_color);
+  }
+  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
+                 bounds.y + bounds.height * 0.5F,
+                 engaged ? engaged_color
+                         : (interaction.hovered ? theme.text
+                                                : theme.text_muted), icon_scale);
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
+// A text toggle in the same family, for the few modes with no honest icon.
+[[nodiscard]] inline bool text_toggle(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds, std::string_view label,
+                               bool engaged, std::string_view tooltip) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  const gui::Theme &theme = ctx.theme();
+  ctx.panel(bounds, (interaction.held && !interaction.released)
+                        ? theme.widget_active
+                        : (engaged ? alpha(theme.accent, 0.22F)
+                                   : (interaction.hovered ? theme.widget_hover
+                                                          : theme.widget)));
+  if (engaged) {
+    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+                        bounds.width, 2.0F},
+              theme.accent);
+  }
+  const float width = ctx.font_width(label);
+  ctx.label(gui::Rect{bounds.x + std::max((bounds.width - width) * 0.5F, 2.0F),
+                      bounds.y, std::max(bounds.width - 4.0F, 0.0F),
+                      bounds.height},
+            label, engaged ? theme.text : theme.text_muted);
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
+inline void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolbar) {
+  ctx.panel(gui::Rect{x, toolbar.y + 8.0F, 1.0F, toolbar.height - 16.0F},
+            ctx.theme().divider);
+}
+
+// What a context-menu entry does. Entries carry their target with them, so
+// the menu means what it said when it opened.
+enum class MenuCommand : core::u8 {
+  SplitAtPlayhead,
+  RippleDeleteSelection,
+  RippleDeleteClip,
+  InsertClipboard,
+  OverwriteClipboard,
+  RangeToClip,
+  ClearKeys,
+  RenameTrack,
+  RenameLayer,
+  ToggleTrackMute,
+  ToggleTrackLock,
+  DeleteTrack,
+  DeleteTrackClips,
+  MoveClipsDeleteTrack,
+  NewTrack,
+  AddMarker,
+  AddHoldCue,
+  AddLoopCue,
+  SetIn,
+  SetOut,
+  ZoomFit,
+  ToggleRulerUnits,
+  RenameMarker,
+  MarkerToHold,
+  MarkerToLoop,
+  MarkerToPlain,
+  MarkerNextColor,
+  GoToMarker,
+  DeleteMarker,
+};
+
+// A cue's tag: the number in a filled chip. Held cues burn in the transport
+// colour, the one warm thing on the timeline, because a held show is the
+// state an operator must never lose track of.
+[[nodiscard]] inline std::string cue_tag(std::size_t number) {
+  return "Q" + std::to_string(number);
+}
+
+inline void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
+                 gui::UiColor color, float thickness = 1.0F) {
+  if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
+    return;
+  }
+  auto &draw = ctx.draw_list();
+  draw.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
+  draw.add_rect(bounds.x, bounds.y + bounds.height - thickness, bounds.width,
+                thickness, color);
+  draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
+  draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
+                bounds.height, color);
+}
+
+inline void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
+                  gui::UiColor color) {
+  const std::array<gui::UiPoint, 4U> points{{
+      {cx, cy - radius},
+      {cx + radius, cy},
+      {cx, cy + radius},
+      {cx - radius, cy},
+  }};
+  ctx.draw_list().add_convex_poly(points, color);
+}
+
+inline void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
+                 gui::UiColor color) {
+  constexpr std::size_t point_count = 12U;
+  constexpr float tau = 6.28318530718F;
+  std::array<gui::UiPoint, point_count> points{};
+  for (std::size_t index = 0U; index < point_count; ++index) {
+    const float angle =
+        tau * static_cast<float>(index) / static_cast<float>(point_count);
+    points[index] = gui::UiPoint{cx + std::cos(angle) * radius,
+                                 cy + std::sin(angle) * radius};
+  }
+  ctx.draw_list().add_convex_poly(points, color);
+}
+
+[[nodiscard]] inline bool key_button(gui::UiContext &ctx, gui::UiId id,
+                              const gui::Rect &bounds, bool animated,
+                              bool keyed_here, gui::UiColor background) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  gui::UiColor color =
+      keyed_here ? ctx.theme().playhead
+                 : (animated ? ctx.theme().keyframe : ctx.theme().text_muted);
+  if (interaction.hovered) {
+    color = ctx.theme().accent;
+  }
+  const float cx = bounds.x + bounds.width * 0.5F;
+  const float cy = bounds.y + bounds.height * 0.5F;
+  draw_diamond(ctx, cx, cy, interaction.held ? 5.0F : 4.5F, color);
+  if (!keyed_here && !interaction.held) {
+    draw_diamond(ctx, cx, cy, 2.4F, background);
+  }
+  return interaction.clicked;
+}
+
+[[nodiscard]] inline core::i64 signed_frame(core::u64 frame) noexcept {
+  constexpr core::u64 maximum =
+      static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+  return frame > maximum ? std::numeric_limits<core::i64>::max()
+                         : static_cast<core::i64>(frame);
+}
+
+[[nodiscard]] inline core::u64 rounded_frame(double frame, core::u64 first,
+                                      core::u64 last) noexcept {
+  const double lo = static_cast<double>(std::min(first, last));
+  const double hi = static_cast<double>(std::max(first, last));
+  if (!std::isfinite(frame)) {
+    return first;
+  }
+  return static_cast<core::u64>(std::floor(std::clamp(frame, lo, hi) + 0.5));
+}
+
+[[nodiscard]] inline core::u64 entered_frame(double value) noexcept {
+  if (!std::isfinite(value) || value <= 0.0) {
+    return 0U;
+  }
+  constexpr core::u64 maximum =
+      static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+  const double limit = static_cast<double>(maximum);
+  if (value >= limit) {
+    return maximum;
+  }
+  return static_cast<core::u64>(std::llround(value));
+}
+
+[[nodiscard]] inline std::string layer_name(const ElementInfo &element) {
+  return element_display_name(element);
+}
+
+// Which elements a layer row twirls open to keyable properties. A camera's
+// eye animates by position; every drawable by its transform and look; a light
+// by its placement, output and colour. Anything else lists without a twirl,
+// so a row never offers keys the show would not play.
+[[nodiscard]] inline bool animatable(const ElementInfo &element) noexcept {
+  return element.kind != ElementKind::Track;
+}
+
+[[nodiscard]] inline std::string lowercase(std::string_view input) {
+  std::string result;
+  result.reserve(input.size());
+  for (const char character : input) {
+    if (character >= 'A' && character <= 'Z') {
+      result.push_back(static_cast<char>(character - 'A' + 'a'));
+    } else {
+      result.push_back(character);
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] inline bool matches(std::string_view name, std::string_view query) {
+  return query.empty() ||
+         lowercase(name).find(lowercase(query)) != std::string::npos;
+}
+
+[[nodiscard]] inline const scene::ChannelKeyframes *
+channel_for(std::span<const scene::ChannelKeyframes> keyframes,
+            doc::NodeId node, scene::TransformChannel component) noexcept {
+  for (const scene::ChannelKeyframes &entry : keyframes) {
+    if (entry.target == node && entry.component == component) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] inline std::optional<double>
+sample_channel_at(const scene::ChannelKeyframes *channel,
+                  core::u64 frame) noexcept {
+    constexpr core::u64 maximum =
+        static_cast<core::u64>(std::numeric_limits<core::i64>::max());
+    if (channel == nullptr || frame > maximum) return std::nullopt;
+    return scene::sample_keyframes(*channel, static_cast<core::i64>(frame));
+}
+
+[[nodiscard]] inline const std::vector<core::i64> *
+frames_for(std::span<const scene::ChannelKeyframes> keyframes, doc::NodeId node,
+           scene::TransformChannel component) noexcept {
+  const scene::ChannelKeyframes *const channel =
+      channel_for(keyframes, node, component);
+  return channel != nullptr ? &channel->frames : nullptr;
+}
+
+[[nodiscard]] inline const ElementInfo *
+find_element(std::span<const ElementInfo> elements, doc::NodeId node) noexcept {
+  for (const ElementInfo &element : elements) {
+    if (element.node == node) {
+      return &element;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] inline const output::ProjectionSurface *
+find_surface(std::span<const output::ProjectionSurface> surfaces,
+             doc::NodeId node) noexcept {
+  for (const output::ProjectionSurface &surface : surfaces) {
+    if (surface.node == node) {
+      return &surface;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] inline double
+surface_component_value(const output::ProjectionSurface &surface,
+                        scene::PropertyChannel component) noexcept {
+  switch (component) {
+  case scene::PropertyChannel::PositionX:
+    return surface.geometry.center.x;
+  case scene::PropertyChannel::PositionY:
+    return surface.geometry.center.y;
+  case scene::PropertyChannel::PositionZ:
+    return surface.geometry.center.z;
+  case scene::PropertyChannel::RotationYaw: {
+    constexpr double tau = 6.28318530717958647692;
+    return std::atan2(-static_cast<double>(surface.geometry.right.z),
+                      static_cast<double>(surface.geometry.right.x)) /
+           tau;
+  }
+  default:
+    return 0.0;
+  }
+}
+
+[[nodiscard]] inline core::i64 ruler_step(float pixels_per_frame) noexcept {
+  const double wanted =
+      76.0 / std::max(static_cast<double>(pixels_per_frame),
+                      static_cast<double>(minimum_pixels_per_frame));
+  constexpr std::array<core::i64, 18U> nice{{1, 2, 5, 10, 15, 30, 60, 120, 300,
+                                             600, 1'200, 1'800, 3'600, 7'200,
+                                             18'000, 36'000, 72'000, 180'000}};
+  for (const core::i64 step : nice) {
+    if (static_cast<double>(step) >= wanted) {
+      return step;
+    }
+  }
+  return nice.back();
+}
+
+struct Row final {
+  enum class Kind : core::u8 {
+    LaneHeader,
+    Layer,
+    PropertiesHeader,
+    Group,
+    Component,
+    Property,
+  };
+
+  Kind kind{Kind::Layer};
+  doc::NodeId node{};
+  core::u8 group{};
+  core::u8 component{};
+  std::string label;
+  gui::UiColor color{};
+  ElementKind element_kind{ElementKind::Object};
+  std::size_t indent{};
+  bool expandable{};
+  scene::PropertyChannel property{scene::PropertyChannel::Count};
+  doc::NodeId property_target{};
+  double property_value{};
+  bool surface{};
+  core::u8 component_count{3U};
+  bool locked{};
+  bool muted{};
+  // The element's own authored visibility, before any group above it. The
+  // toggle reports what this row owns, so a row hidden by its group still
+  // shows its own state rather than its parent's.
+  bool element_visible{true};
+  // The lane band this row sits in: a lane header, or any row belonging to a
+  // clip under one. The implicit lane's owner is the zero id, which is also
+  // the default, so the flag rather than the id is what says "in a band".
+  bool lane_member{};
+  doc::NodeId lane_owner{};
+  bool hierarchy{};
+};
+
+[[nodiscard]] inline doc::NodeId layer_parent(const ElementInfo &element) noexcept {
+  return element.linked ? element.linked_parent
+                        : element.parent_group.value_or(doc::NodeId{});
+}
+
+[[nodiscard]] inline core::u64 group_id(doc::NodeId node, core::u8 group) noexcept {
+  return node.value() * 4U + static_cast<core::u64>(group);
+}
+
+// A clip the operator can edit on the timeline: a media placement with a real
+// duration. An unplaced clip is the legacy always-on form and keeps the plain
+// full-range layer bar, because there is no in or out point to drag.
+[[nodiscard]] inline bool editable_clip(const ElementInfo &element) noexcept {
+  return !element.locked && element.kind == ElementKind::Media &&
+         element.timing.placed();
+}
+
+[[nodiscard]] inline bool orderable_layer(const ElementInfo &element) noexcept {
+  return element.kind == ElementKind::Object ||
+         element.kind == ElementKind::Media ||
+         element.kind == ElementKind::Model ||
+         element.kind == ElementKind::Group || is_light(element.kind);
+}
+
+[[nodiscard]] inline std::optional<core::i64>
+exclusive_clip_end(const scene::ClipTiming &timing) noexcept {
+  if (timing.duration <= 0 ||
+      timing.start > std::numeric_limits<core::i64>::max() - timing.duration) {
+    return std::nullopt;
+  }
+  return timing.start + timing.duration;
+}
+
+// How wide the grab strips at a clip's two ends are. They shrink on a very
+// short bar so a two-frame clip does not become impossible to move, but on an
+// ordinary bar they are a comfortable target rather than a hairline.
+[[nodiscard]] inline float edge_grab_width(float bar_width) noexcept {
+  return std::clamp(bar_width * 0.3F, 3.0F, 10.0F);
+}
+
+// The nearest snap candidate to `value`, or nothing when none is within
+// `tolerance`. Ties resolve to the lower frame so the result never depends on
+// the order candidates were collected in.
+[[nodiscard]] inline std::optional<core::i64>
+nearest_snap(core::i64 value, std::span<const core::i64> candidates,
+             core::i64 tolerance) noexcept {
+  std::optional<core::i64> best;
+  const core::u64 maximum_distance = static_cast<core::u64>(std::max(tolerance, core::i64{0}));
+  core::u64 best_distance = maximum_distance + 1U;
+  for (const core::i64 candidate : candidates) {
+    // Unsigned subtraction represents the full distance even when the two
+    // signed authored frames straddle the complete i64 range.
+    const core::u64 distance = candidate > value
+        ? static_cast<core::u64>(candidate) - static_cast<core::u64>(value)
+        : static_cast<core::u64>(value) - static_cast<core::u64>(candidate);
+    if (distance > maximum_distance) {
+      continue;
+    }
+    if (!best.has_value() || distance < best_distance ||
+        (distance == best_distance && candidate < *best)) {
+      best = candidate;
+      best_distance = distance;
+    }
+  }
+  return best;
+}
+
+[[nodiscard]] inline core::u64 nominal_rate(core::u32 numerator,
+                                     core::u32 denominator) noexcept {
+  const core::u64 den = std::max<core::u64>(denominator, 1U);
+  return std::max<core::u64>(
+      (static_cast<core::u64>(numerator) + den / 2U) / den, 1U);
+}
+
+// Tick spacing that lands on whole timecode units: single frames when zoomed
+// right in, then whole seconds and minutes, so a label always reads as a
+// round number of the unit an operator counts in.
+[[nodiscard]] inline core::i64 timecode_step(float pixels_per_frame, core::u64 fps,
+                                      float minimum_spacing) noexcept {
+  const double wanted =
+      static_cast<double>(minimum_spacing) /
+      std::max(static_cast<double>(pixels_per_frame),
+               static_cast<double>(minimum_pixels_per_frame));
+  const auto rate = static_cast<core::i64>(fps);
+  constexpr std::array<core::i64, 4U> frames{{1, 2, 5, 10}};
+  for (const core::i64 step : frames) {
+    if (step < rate && static_cast<double>(step) >= wanted) {
+      return step;
+    }
+  }
+  constexpr std::array<core::i64, 14U> seconds{
+      {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1'800, 3'600, 7'200}};
+  for (const core::i64 step : seconds) {
+    if (static_cast<double>(step * rate) >= wanted) {
+      return step * rate;
+    }
+  }
+  return seconds.back() * rate;
+}
+
+// The rows the Timeline lists this frame, top to bottom, and the selectable
+// layer and track nodes among them in that order.
+struct RowList final {
+  std::vector<Row> rows;
+  std::vector<doc::NodeId> visible_order;
+};
+
+struct RowsInput final {
+  std::span<const ElementInfo> elements;
+  std::span<const scene::TimelineLane> lanes;
+  std::span<const output::ProjectionSurface> surfaces;
+  std::span<const scene::EffectInstance> effects;
+  std::span<const scene::ChannelKeyframes> keyframes;
+  core::u64 show_frame{};
+  std::string_view search;
+  // The selection anchor, whose ancestors open when it changes.
+  doc::NodeId anchor{};
+};
+
+// Builds the rows from separate object and property twirls. A parent opens to
+// its children and a Properties foldout; leaves open directly to P/R/S,
+// opacity and effects. Reveals a newly anchored element's ancestors in
+// `state`, which is otherwise only read.
+[[nodiscard]] RowList build_rows(RowsState &state, const RowsInput &input,
+                                 const gui::Theme &theme);
+
+} // namespace mediaserver::editor::timeline

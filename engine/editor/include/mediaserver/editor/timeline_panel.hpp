@@ -35,6 +35,18 @@
 // directly.
 namespace mediaserver::editor {
 
+namespace timeline {
+// Which rows the operator has twirled open. Objects, property groups, and
+// hierarchy parents fold independently; selecting a descendant elsewhere
+// reveals its ancestors once, when it becomes the anchor.
+struct RowsState final {
+  std::set<core::u64> expanded_layers;
+  std::set<core::u64> expanded_groups;
+  std::set<doc::NodeId> expanded_hierarchies;
+  doc::NodeId hierarchy_selection{};
+};
+} // namespace timeline
+
 // A transport action the operator asked for. The Director owns transport, so
 // the editor names the request rather than moving the show clock itself.
 enum class TransportRequest : core::u8 {
@@ -779,12 +791,9 @@ private:
 
   float row_scroll_{};
   std::string search_;
-  std::set<core::u64> expanded_layers_;
-  std::set<core::u64> expanded_groups_;
   // Object hierarchy and animated properties fold independently. Collections
   // start closed, and selecting a descendant elsewhere reveals its ancestors.
-  std::set<doc::NodeId> expanded_hierarchies_;
-  doc::NodeId hierarchy_selection_{};
+  timeline::RowsState rows_state_;
   doc::NodeId selected_lane_{};
   // A track drag follows the same lift/target/drop contract as Feed Mapping,
   // but uses an insertion cursor rather than target-band highlighting because

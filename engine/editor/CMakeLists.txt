@@ -17,6 +17,7 @@ add_library(mediaserver_editor STATIC
     src/masks_panel.cpp
     src/effects_panel.cpp
     src/timeline_panel.cpp
+    src/timeline/timeline_rows.cpp
     src/cues_panel.cpp
     src/operator_widgets.cpp
     src/workspace_panels.cpp
