@@ -5466,16 +5466,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         environment.environment = project_settings.environment;
         timeline_elements.insert(timeline_elements.begin(), environment);
       }
-      const TimelinePanelFrame timeline_frame =
-          impl.timeline_panel.draw(ui, bounds, timeline, keyframes, timeline_elements,
-                                   impl.scene_selection.members(), impl.anchor(),
-                                   effects,
-                                   feed_map.surfaces,
-                                   impl.stage_surface_selection.value_or(
-                                       doc::NodeId{}),
-                                   timeline_lanes, clip_clipboard_span,
-                                   key_scale_preview, filmstrips, {},
-                                   timeline_markers);
+      const TimelinePanelFrame timeline_frame = impl.timeline_panel.draw(
+          ui, bounds,
+          TimelineDrawInput{
+              .timeline = timeline,
+              .keyframes = keyframes,
+              .elements = timeline_elements,
+              .selection = impl.scene_selection.members(),
+              .primary = impl.anchor(),
+              .effects = effects,
+              .surfaces = feed_map.surfaces,
+              .selected_surface =
+                  impl.stage_surface_selection.value_or(doc::NodeId{}),
+              .lanes = timeline_lanes,
+              .clipboard_span = clip_clipboard_span,
+              .key_scale_preview = key_scale_preview,
+              .filmstrips = filmstrips,
+              .markers = timeline_markers,
+          });
       result.filmstrip_requests = timeline_frame.filmstrip_requests;
       route_marker_edits(timeline_frame.marker_edits);
       if (timeline_frame.cues_armed.has_value()) {

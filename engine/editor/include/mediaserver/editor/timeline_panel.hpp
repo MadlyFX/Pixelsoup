@@ -506,6 +506,62 @@ struct TimelineWaveformRetainIntent final {
   bool operator==(const TimelineWaveformRetainIntent &) const = default;
 };
 
+// The Timeline's horizontal view: which show frame sits at the graph's left
+// edge and how many pixels one frame spans. It persists across frames exactly
+// as the operator left it; the graph's left edge comes from each frame's
+// layout, so every mapping takes it as `origin`.
+struct TimelineTimeAxis final {
+  static constexpr float minimum_pixels_per_frame = 0.02F;
+  static constexpr float maximum_pixels_per_frame = 200.0F;
+
+  double left_frame{};
+  float pixels_per_frame{};
+  // False until the first frame with room fits the authored show range.
+  bool initialized{};
+
+  [[nodiscard]] float x(double frame, float origin) const noexcept {
+    return origin + static_cast<float>((frame - left_frame) *
+                                       static_cast<double>(pixels_per_frame));
+  }
+  [[nodiscard]] double frame(float x, float origin) const noexcept {
+    return left_frame + static_cast<double>(x - origin) /
+                            static_cast<double>(pixels_per_frame);
+  }
+  // Moves the view by `pixels`; positive shows later frames.
+  void pan(double pixels) noexcept {
+    left_frame += pixels / static_cast<double>(pixels_per_frame);
+  }
+  // Shows `span` frames from `begin` across `width` pixels.
+  void fit(double begin, double span, float width) noexcept;
+  // Scales the zoom by `factor` while `anchor` stays at `anchor_x`.
+  void zoom_about(double anchor, float anchor_x, float origin,
+                  double factor) noexcept;
+
+  bool operator==(const TimelineTimeAxis &) const = default;
+};
+
+// Everything the Timeline draws from in one frame. Show time, the scene's
+// elements and keys, the shell's selection, and the runtime derivative
+// observations arrive fresh every frame; the panel keeps none of them.
+struct TimelineDrawInput final {
+  EditorTimeline timeline{};
+  std::span<const scene::ChannelKeyframes> keyframes;
+  std::span<const ElementInfo> elements;
+  // The shell's current selection and its anchor, used by row-local key
+  // diamonds and the clear action.
+  std::span<const doc::NodeId> selection;
+  doc::NodeId primary{};
+  std::span<const scene::EffectInstance> effects;
+  std::span<const output::ProjectionSurface> surfaces;
+  doc::NodeId selected_surface{};
+  std::span<const scene::TimelineLane> lanes;
+  std::optional<core::i64> clipboard_span;
+  std::optional<TimelineKeyScalePreview> key_scale_preview;
+  std::span<const TimelineFilmstripObservation> filmstrips;
+  std::span<const TimelineWaveformObservation> waveforms;
+  std::span<const scene::TimelineMarker> markers;
+};
+
 struct TimelinePanelFrame final {
   std::optional<core::u64> seek_to_frame;
   std::vector<TimelineKeyEdit> keys;
@@ -561,8 +617,12 @@ public:
       : id_(id), rename_(id ^ 0x54494D454E414D45ULL) {}
 
   // Draws the toolbar, time ruler, layer tree, key lanes, and playhead into
-  // `bounds`. `selection` is the shell's current selection and `primary` is
-  // its anchor, used by row-local key diamonds and the clear action.
+  // `bounds`.
+  TimelinePanelFrame draw(gui::UiContext &ctx, const gui::Rect &bounds,
+                          const TimelineDrawInput &input);
+
+  // The same frame with each input passed separately. `selection` is the
+  // shell's current selection and `primary` is its anchor.
   TimelinePanelFrame
   draw(gui::UiContext &ctx, const gui::Rect &bounds,
        const EditorTimeline &timeline,
@@ -665,6 +725,11 @@ public:
   void reset_project_state() noexcept;
 
 private:
+  // Values one frame's sections hand to later ones: hit lists gathered while
+  // rows draw, right-click targets the context menu reads, and the drag
+  // feedback drawn last. Rebuilt on every draw; never outlives it.
+  struct FrameScratch;
+
   std::vector<ReplacementTarget> replacement_targets_;
 
   // Which part of a clip bar a drag grabbed. Move slides the placement;
@@ -710,9 +775,7 @@ private:
   // Time view. The first non-empty frame fits the authored show range; after
   // that wheel zoom and Shift+wheel pan persist exactly as the operator left
   // them.
-  float pixels_per_frame_{};
-  double left_frame_{};
-  bool time_view_initialized_{};
+  TimelineTimeAxis time_axis_;
 
   float row_scroll_{};
   std::string search_;
