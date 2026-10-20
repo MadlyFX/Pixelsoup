@@ -718,7 +718,7 @@ public:
   // The layer list's width, as the operator last dragged it; zero until they
   // do, which lets it follow the panel's own width.
   [[nodiscard]] float list_width() const noexcept { return list_width_; }
-  [[nodiscard]] bool scale_open() const noexcept { return scale_open_; }
+  [[nodiscard]] bool scale_open() const noexcept { return key_tools_.scale_open; }
   [[nodiscard]] float curve_value_zoom() const noexcept {
     return curve_value_zoom_;
   }
@@ -903,17 +903,22 @@ private:
 
   bool snapping_{true};
   bool graph_mode_{};
-  bool key_tools_open_{};
-  bool scale_open_{};
-  scene::KeyTimeAnchor scale_anchor_{scene::KeyTimeAnchor::FirstSelected};
-  std::string scale_numerator_{"1"};
-  std::string scale_denominator_{"1"};
-  std::string scale_user_anchor_{"0"};
+  // The KEYS popup and its time-scale fields.
+  struct KeyToolsState final {
+    bool open{};
+    bool scale_open{};
+    scene::KeyTimeAnchor scale_anchor{scene::KeyTimeAnchor::FirstSelected};
+    std::string scale_numerator{"1"};
+    std::string scale_denominator{"1"};
+    std::string scale_user_anchor{"0"};
+    // The active channel's value at the playhead.
+    NumberField value_field;
+  };
+  KeyToolsState key_tools_;
   float curve_value_zoom_{1.0F};
   float curve_value_pan_{};
   std::set<ChannelIdentity> hidden_channels_;
   std::optional<ChannelIdentity> active_channel_;
-  NumberField key_value_field_;
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
   bool timeline_focused_{};
   bool panning_{};

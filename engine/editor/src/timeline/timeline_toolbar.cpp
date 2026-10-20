@@ -197,7 +197,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     rate_button = gui::Rect{bar_x, control_y, rate_width, button_height};
     if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
       toolbar_.rate_menu_open = !toolbar_.rate_menu_open;
-      key_tools_open_ = false;
+      key_tools_.open = false;
     }
     constexpr float popup_width = 104.0F;
     constexpr float choice_height = 21.0F;
@@ -298,18 +298,18 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   if (show_key_tools && fits(bar_x, keys_width)) {
     key_tools_button = gui::Rect{bar_x, control_y, keys_width, button_height};
     if (text_toggle(ctx, mix(id_, "key tools"), key_tools_button, "Keys",
-                    key_tools_open_,
+                    key_tools_.open,
                     "Key selection, value and time-scale tools")) {
-      key_tools_open_ = !key_tools_open_;
+      key_tools_.open = !key_tools_.open;
       toolbar_.rate_menu_open = false;
-      if (!key_tools_open_) {
-        scale_open_ = false;
+      if (!key_tools_.open) {
+        key_tools_.scale_open = false;
       }
     }
     bar_x += keys_width + 2.0F;
   } else {
-    key_tools_open_ = false;
-    scale_open_ = false;
+    key_tools_.open = false;
+    key_tools_.scale_open = false;
   }
   const float key_popup_width = std::min(338.0F, bounds.width);
   p.key_tools_popup = gui::Rect{
@@ -323,7 +323,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   auto &scale_denominator_id = p.scale_denominator_id;
   p.scale_user_anchor_id = mix(id_, "scale user anchor");
   auto &scale_user_anchor_id = p.scale_user_anchor_id;
-  if (key_tools_open_ && ctx.pointer_pressed() &&
+  if (key_tools_.open && ctx.pointer_pressed() &&
       !key_tools_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
       !key_tools_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
     if (ctx.focus() == scale_numerator_id ||
@@ -331,10 +331,10 @@ void TimelinePanel::draw_toolbar(Pass &p) {
         ctx.focus() == scale_user_anchor_id) {
       ctx.clear_focus();
     }
-    key_tools_open_ = false;
-    scale_open_ = false;
+    key_tools_.open = false;
+    key_tools_.scale_open = false;
   }
-  if (key_tools_open_ &&
+  if (key_tools_.open &&
       key_tools_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
     ctx.push_pointer_block();
     scratch.key_popup_pointer_blocked = true;

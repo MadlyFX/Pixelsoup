@@ -95,7 +95,7 @@ void TimelinePanel::prune_key_selection(Pass &p) {
                        keys_.selected.end());
   if (active_channel_.has_value() && target_locked(active_channel_->target)) {
     active_channel_.reset();
-    key_value_field_.cancel(ctx);
+    key_tools_.value_field.cancel(ctx);
   }
   keys_.drag_keys.erase(std::remove_if(keys_.drag_keys.begin(), keys_.drag_keys.end(),
                                   [&](const SelectedKey &key) {
