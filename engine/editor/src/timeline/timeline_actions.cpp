@@ -276,6 +276,28 @@ void TimelinePanel::handle_actions(Pass &p) {
                     : (marker.is_cue() ? "Delete Cue" : "Delete Marker"),
                 MenuCommand::DeleteMarker, marker.id);
       open_menu = true;
+    } else if (const auto key = key_under_pointer(p); key.has_value()) {
+      // A key's menu eases the whole selection, which takes the key first
+      // when it was not already part of it.
+      if (!key_selected(*key)) {
+        keys_.selected.assign(1U, *key);
+      }
+      const auto ease_entry = [&](std::string label, scene::KeyEase ease) {
+        add_entry(std::move(label), MenuCommand::EaseKeys, {},
+                  static_cast<core::i64>(ease));
+      };
+      ease_entry("Linear", scene::KeyEase::Linear);
+      ease_entry("Hold", scene::KeyEase::Hold);
+      ease_entry("Ease In      Shift+F9", scene::KeyEase::EaseIn);
+      ease_entry("Ease Out      Ctrl+F9", scene::KeyEase::EaseOut);
+      ease_entry("Easy Ease      F9", scene::KeyEase::EasyEase);
+      ease_entry("Auto Bezier", scene::KeyEase::Auto);
+      if (selection_has_cubic(p)) {
+        ease_entry("Aligned Handles", scene::KeyEase::Aligned);
+        ease_entry("Broken Handles", scene::KeyEase::Broken);
+        ease_entry("Flat Handles", scene::KeyEase::Flat);
+      }
+      open_menu = true;
     } else if (ruler_graph.contains(ctx.pointer_x(), ctx.pointer_y()) ||
                strip_graph.contains(ctx.pointer_x(), ctx.pointer_y())) {
       const core::i64 at = std::max<core::i64>(pointer_frame_i, 0);
@@ -526,6 +548,9 @@ void TimelinePanel::handle_actions(Pass &p) {
           delete_markers(alone);
         }
         break;
+      case MenuCommand::EaseKeys:
+        ease_selected_keys(p, static_cast<scene::KeyEase>(entry.frame));
+        break;
       }
     } else if (!ctx.menu_open(menu_id)) {
       menu_entries_.clear();
@@ -724,6 +749,15 @@ void TimelinePanel::handle_actions(Pass &p) {
       }
     }
   }
+  // F9 eases the selected keys both ways, Shift+F9 in and Ctrl+F9 out, as
+  // After Effects' Easy Ease chords do.
+  if (timeline_focused_ && !frame.editing && !ctx.typing() &&
+      !ctx.pointer_down() && !keys_.selected.empty() &&
+      ctx.key_pressed(gui::Key::EasyEase)) {
+    ease_selected_keys(p, ctx.ctrl_held()    ? scene::KeyEase::EaseOut
+                          : ctx.shift_held() ? scene::KeyEase::EaseIn
+                                             : scene::KeyEase::EasyEase);
+  }
   if (timeline_focused_ && !frame.editing && !keys_.selected.empty() &&
       ctx.key_pressed(gui::Key::Delete)) {
     TimelineKeyBatchEdit batch{};
@@ -739,6 +773,59 @@ void TimelinePanel::handle_actions(Pass &p) {
     frame.key_batch = std::move(batch);
     frame.consume_delete = true;
   }
+}
+
+void TimelinePanel::ease_selected_keys(Pass &p, scene::KeyEase ease) {
+  if (keys_.selected.empty()) {
+    return;
+  }
+  TimelineKeyBatchEdit batch{};
+  batch.action = TimelineKeyBatchAction::Ease;
+  batch.keys = selected_addresses();
+  batch.ease = ease;
+  p.frame.key_batch = std::move(batch);
+}
+
+std::optional<TimelinePanel::SelectedKey>
+TimelinePanel::key_under_pointer(Pass &p) const {
+  const float x = p.ctx.pointer_x();
+  const float y = p.ctx.pointer_y();
+  const HitTarget *const owner = p.hits.owner(x, y);
+  if (owner == nullptr || owner->priority != HitPriority::Key ||
+      tag_part(owner->tag) != RowPart::Key) {
+    return std::nullopt;
+  }
+  // The owner is the nearest key mark; the drawn keys say which key it is.
+  std::optional<SelectedKey> nearest;
+  float nearest_distance = key_hit_radius;
+  for (const FrameScratch::VisibleKeyPoint &point : p.scratch.visible_keys) {
+    const float distance = std::hypot(point.x - x, point.y - y);
+    if (distance <= nearest_distance) {
+      nearest = point.key;
+      nearest_distance = distance;
+    }
+  }
+  return nearest;
+}
+
+bool TimelinePanel::selection_has_cubic(const Pass &p) const {
+  for (const SelectedKey &key : keys_.selected) {
+    for (const scene::ChannelKeyframes &channel : p.input.keyframes) {
+      if (channel.target != key.target || channel.component != key.component) {
+        continue;
+      }
+      const auto found = std::lower_bound(channel.frames.begin(),
+                                          channel.frames.end(), key.frame);
+      const auto index =
+          static_cast<std::size_t>(found - channel.frames.begin());
+      if (found != channel.frames.end() && *found == key.frame &&
+          index < channel.interpolations.size() &&
+          channel.interpolations[index] == scene::KeyInterpolation::Cubic) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // [ and ] step the playhead to the previous or next key on any channel of the

@@ -887,6 +887,13 @@ private:
   // Seeks to the nearest key before or after the playhead on the selected
   // layers' channels.
   void step_to_selected_key(Pass &p, bool forward);
+  // Asks the Director to ease every selected key: one batch, one undo step.
+  void ease_selected_keys(Pass &p, scene::KeyEase ease);
+  // The unlocked key that owns the pointer this frame, in a lane or on the
+  // Curves graph.
+  [[nodiscard]] std::optional<SelectedKey> key_under_pointer(Pass &p) const;
+  // Whether any selected key is Bezier, so has handles a mode can set.
+  [[nodiscard]] bool selection_has_cubic(const Pass &p) const;
 
   [[nodiscard]] bool
   selected(doc::NodeId node,

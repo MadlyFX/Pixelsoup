@@ -78,6 +78,9 @@ enum class Key : core::u8 {
     ClearLocation,
     ClearRotation,
     ClearScale,
+    // F9: Easy Ease the selected keys, as in After Effects; Shift eases in
+    // and Ctrl eases out.
+    EasyEase,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies

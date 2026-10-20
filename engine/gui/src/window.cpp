@@ -151,6 +151,8 @@ namespace {
         return Key::Escape;
     case SDLK_F2:
         return Key::Rename;
+    case SDLK_F9:
+        return Key::EasyEase;
     default:
         return std::nullopt;
     }

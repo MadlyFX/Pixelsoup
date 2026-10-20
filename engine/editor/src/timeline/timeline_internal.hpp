@@ -443,6 +443,8 @@ enum class MenuCommand : core::u8 {
   MarkerNextColor,
   GoToMarker,
   DeleteMarker,
+  // The entry's frame holds the scene::KeyEase it applies.
+  EaseKeys,
 };
 
 // A cue's tag: the number in a filled chip. Held cues burn in the transport

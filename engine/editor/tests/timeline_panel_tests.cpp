@@ -3260,6 +3260,84 @@ void a_marker_answers_ten_units_from_its_line() {
   UI_CHECK(h.panel.selected_markers().front() == doc::NodeId{60U});
 }
 
+// A key's menu eases the selection: right-clicking a key outside it selects
+// that key alone, and each choice is one Ease batch over the selection.
+// Handle modes are offered only once a selected key is Bezier.
+void a_key_menu_eases_the_selection() {
+  Harness h;
+  h.keys[0].values = {1.0, 2.0, 3.0};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  // Position X keys 10, 20 and 50 sit at x = 334, 408 and 630 on y = 136.
+  static_cast<void>(h.click(334.0F, 136.0F));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+
+  // Linear, Hold, Ease In, Ease Out, Easy Ease, Auto Bezier.
+  const editor::TimelinePanelFrame easy = h.choose(408.0F, 136.0F, 4U);
+  UI_CHECK(easy.key_batch.has_value());
+  UI_CHECK(easy.key_batch->action == editor::TimelineKeyBatchAction::Ease);
+  UI_CHECK(easy.key_batch->ease == scene::KeyEase::EasyEase);
+  UI_CHECK(easy.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 20}}));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+
+  // A key already in the selection keeps all of it.
+  static_cast<void>(h.click(630.0F, 136.0F, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.selected_key_count() == 2U);
+  const editor::TimelinePanelFrame hold = h.choose(630.0F, 136.0F, 1U);
+  UI_CHECK(hold.key_batch.has_value());
+  UI_CHECK(hold.key_batch->ease == scene::KeyEase::Hold);
+  UI_CHECK(hold.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 20},
+               {object_node, scene::PropertyChannel::PositionX, 50}}));
+
+  // With a Bezier key selected the menu goes on to the handle modes:
+  // Aligned, Broken, Flat after Auto Bezier.
+  h.keys[0].interpolations = {scene::KeyInterpolation::Linear,
+                              scene::KeyInterpolation::Cubic,
+                              scene::KeyInterpolation::Linear};
+  h.keys[0].tangents = {std::nullopt, scene::KeyTangent{}, std::nullopt};
+  const editor::TimelinePanelFrame broken = h.choose(408.0F, 136.0F, 7U);
+  UI_CHECK(broken.key_batch.has_value());
+  UI_CHECK(broken.key_batch->ease == scene::KeyEase::Broken);
+  UI_CHECK(broken.key_batch->keys.size() == 2U);
+}
+
+// F9 is Easy Ease, Shift+F9 Ease In and Ctrl+F9 Ease Out on the selected
+// keys; with nothing selected it asks for nothing.
+void f9_eases_the_selected_keys() {
+  Harness h;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  h.focus();
+  UI_CHECK(!h.key(gui::Key::EasyEase).key_batch.has_value());
+
+  static_cast<void>(h.click(334.0F, 136.0F));
+  static_cast<void>(h.click(445.0F, 160.0F, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.selected_key_count() == 2U);
+  const std::vector<editor::TimelineKeyAddress> both{
+      {object_node, scene::PropertyChannel::PositionX, 10},
+      {object_node, scene::PropertyChannel::PositionY, 25}};
+  const auto eased = [&](gui::KeyMods mods) {
+    const editor::TimelinePanelFrame frame =
+        h.key(gui::Key::EasyEase, mods);
+    UI_CHECK(frame.key_batch.has_value());
+    UI_CHECK(frame.key_batch->action == editor::TimelineKeyBatchAction::Ease);
+    UI_CHECK(frame.key_batch->keys == both);
+    return frame.key_batch->ease;
+  };
+  UI_CHECK(eased(gui::KeyMods::None) == scene::KeyEase::EasyEase);
+  UI_CHECK(eased(gui::KeyMods::Shift) == scene::KeyEase::EaseIn);
+  UI_CHECK(eased(gui::KeyMods::Ctrl) == scene::KeyEase::EaseOut);
+  UI_CHECK(eased(gui::KeyMods::Ctrl | gui::KeyMods::Shift) ==
+           scene::KeyEase::EaseOut);
+  // Delete is still Delete.
+  UI_CHECK(h.key(gui::Key::Delete).key_batch->action ==
+           editor::TimelineKeyBatchAction::Delete);
+}
+
 // The dope sheet and the Curves graph share one key selection: keys chosen
 // in either stay chosen across the switch, and Delete after it removes what
 // was chosen before it.
@@ -3585,7 +3663,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 110U> cases{{
+constexpr std::array<Case, 112U> cases{{
     {"rows show each channel evaluated at the playhead",
      &rows_show_each_channel_evaluated_at_the_playhead},
     {"a narrow list shortens the name before the value",
@@ -3792,6 +3870,8 @@ constexpr std::array<Case, 110U> cases{{
      &a_marker_answers_ten_units_from_its_line},
     {"key selection carries across the Curves switch",
      &key_selection_carries_across_the_curves_switch},
+    {"a key menu eases the selection", &a_key_menu_eases_the_selection},
+    {"F9 eases the selected keys", &f9_eases_the_selected_keys},
     {"the dope sheet and the graph share one time axis",
      &the_dope_sheet_and_the_graph_share_one_time_axis},
     {"a track twirl closes it to its header",

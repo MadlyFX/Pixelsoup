@@ -976,6 +976,7 @@ bool UiContext::edit_keys(std::string& value, bool& closed_out) {
         case Key::ClearLocation:
         case Key::ClearRotation:
         case Key::ClearScale:
+        case Key::EasyEase:
             // Global shortcuts. A text field deliberately leaves document
             // history to its caller; Escape is the field-local way to abandon
             // typing.
