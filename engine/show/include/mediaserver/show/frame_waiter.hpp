@@ -35,6 +35,10 @@ public:
     // A deadline already past returns after one yield.
     void wait_until(TimePoint deadline, Clock::duration ceiling) noexcept;
 
+    // Sleeps for about `duration` with the same timer and no spin: for a
+    // fixed-rate poll that is not waiting on a boundary.
+    void sleep_for(Clock::duration duration) noexcept;
+
     // True when waits use a high-resolution OS timer rather than the
     // portable fallback.
     [[nodiscard]] bool high_resolution() const noexcept {

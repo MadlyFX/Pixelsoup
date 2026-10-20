@@ -107,6 +107,21 @@ void the_ceiling_bounds_a_distant_wait() {
     SHOW_CHECK(after - before < 500ms);
 }
 
+// A 1 ms poll must not become a 15.6 ms system tick, nor return early.
+void a_fixed_poll_sleeps_about_its_duration() {
+    show::FrameWaiter waiter;
+    constexpr int polls = 20;
+    const auto before = Clock::now();
+    for (int poll = 0; poll < polls; ++poll) {
+        waiter.sleep_for(1ms);
+    }
+    const auto elapsed = Clock::now() - before;
+    SHOW_CHECK(elapsed >= polls * 1ms);
+    if (waiter.high_resolution()) {
+        SHOW_CHECK(elapsed < polls * 8ms);
+    }
+}
+
 constexpr std::array cases{
     show::test::Case{"lateness counts a boundary once when reached",
                      lateness_counts_a_boundary_once_when_reached},
@@ -121,6 +136,8 @@ constexpr std::array cases{
                      a_frame_loop_wakes_at_the_boundary_in_few_calls},
     show::test::Case{"the ceiling bounds a distant wait",
                      the_ceiling_bounds_a_distant_wait},
+    show::test::Case{"a fixed poll sleeps about its duration",
+                     a_fixed_poll_sleeps_about_its_duration},
 };
 
 } // namespace

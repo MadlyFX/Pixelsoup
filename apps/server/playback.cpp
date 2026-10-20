@@ -6629,15 +6629,9 @@ schedule_feed_map_delete(cmd::DirectorScheduler &scheduler,
     return result.ec == std::errc{} && result.ptr == end;
 }
 
-void sleep_until_boundary(Clock::time_point boundary) noexcept {
-    const auto now = Clock::now();
-    if (boundary <= now) {
-        std::this_thread::yield();
-        return;
-    }
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(boundary - now);
-    std::this_thread::sleep_for(std::min(remaining, max_sleep));
+void sleep_until_boundary(show::FrameWaiter &waiter,
+                          Clock::time_point boundary) noexcept {
+    waiter.wait_until(boundary, max_sleep);
 }
 
 [[nodiscard]] const char *transport_label(show::TransportState state) noexcept {
@@ -7805,6 +7799,7 @@ int run_node_playback(net::NodeSessionService &service,
         publish_output_sync(true);
     };
 
+    show::FrameWaiter frame_waiter;
     show::BoundaryLateness boundary_lateness;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
@@ -8684,10 +8679,11 @@ int run_node_playback(net::NodeSessionService &service,
             // This is merely a responsive poll for the hardware counter, not
             // a pacing source. The counter above remains the only way a frame
             // boundary is created in external-reference mode.
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            frame_waiter.sleep_for(std::chrono::milliseconds{1});
         } else {
             boundary_lateness.arm(driver.clock().next_boundary_at());
-            sleep_until_boundary(driver.clock().next_boundary_at());
+            sleep_until_boundary(frame_waiter,
+                                 driver.clock().next_boundary_at());
         }
     }
 
@@ -9775,6 +9771,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 compositor_version = 0U;
     bool compositor_loaded = false;
 
+    show::FrameWaiter frame_waiter;
     show::BoundaryLateness boundary_lateness;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
@@ -14954,7 +14951,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             next_wake = std::min(next_wake, next_editor_refresh);
         }
 #endif
-        sleep_until_boundary(next_wake);
+        sleep_until_boundary(frame_waiter, next_wake);
     }
 
     ClusterObservation final_cluster =

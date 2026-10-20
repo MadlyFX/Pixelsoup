@@ -44,25 +44,7 @@ void FrameWaiter::wait_until(TimePoint deadline,
     }
     const auto remaining = deadline - now;
     if (remaining > spin_window) {
-        const auto sleep = std::min<Clock::duration>(remaining - spin_window,
-                                                     ceiling);
-        if (high_resolution_) {
-            // Relative due time, in 100 ns units, negative by convention.
-            LARGE_INTEGER due{};
-            due.QuadPart = -std::max<LONGLONG>(
-                1, static_cast<LONGLONG>(
-                       std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           sleep)
-                           .count()
-                       / 100));
-            if (SetWaitableTimerEx(static_cast<HANDLE>(timer_), &due, 0,
-                                   nullptr, nullptr, nullptr, 0)
-                && WaitForSingleObject(static_cast<HANDLE>(timer_), INFINITE)
-                       == WAIT_OBJECT_0) {
-                return;
-            }
-        }
-        std::this_thread::sleep_for(sleep);
+        sleep_for(std::min<Clock::duration>(remaining - spin_window, ceiling));
         return;
     }
     // Inside the spin window: yield rather than sleep, since any sleep here
@@ -70,6 +52,26 @@ void FrameWaiter::wait_until(TimePoint deadline,
     while (Clock::now() < deadline) {
         std::this_thread::yield();
     }
+}
+
+void FrameWaiter::sleep_for(Clock::duration duration) noexcept {
+    if (high_resolution_) {
+        // Relative due time, in 100 ns units, negative by convention.
+        LARGE_INTEGER due{};
+        due.QuadPart = -std::max<LONGLONG>(
+            1, static_cast<LONGLONG>(
+                   std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       duration)
+                       .count()
+                   / 100));
+        if (SetWaitableTimerEx(static_cast<HANDLE>(timer_), &due, 0, nullptr,
+                               nullptr, nullptr, 0)
+            && WaitForSingleObject(static_cast<HANDLE>(timer_), INFINITE)
+                   == WAIT_OBJECT_0) {
+            return;
+        }
+    }
+    std::this_thread::sleep_for(duration);
 }
 
 #else
@@ -85,6 +87,10 @@ void FrameWaiter::wait_until(TimePoint deadline,
         return;
     }
     std::this_thread::sleep_until(std::min(deadline, now + ceiling));
+}
+
+void FrameWaiter::sleep_for(Clock::duration duration) noexcept {
+    std::this_thread::sleep_for(duration);
 }
 
 #endif
