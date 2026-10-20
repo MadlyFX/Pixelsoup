@@ -724,6 +724,9 @@ void sort_report(KeyEditPlan& plan) {
         });
 }
 
+[[nodiscard]] bool evaluates(const ParsedChannel& channel,
+                             const std::vector<ParsedKey>& keys);
+
 [[nodiscard]] KeyEditPlan make_transform_plan(
     const doc::Root& document, const DocumentIndex& index,
     KeySelection selection, std::vector<Candidate> candidates,
@@ -753,6 +756,15 @@ void sort_report(KeyEditPlan& plan) {
         std::set<core::i64> selected_frames;
         for (const Candidate& candidate : channel_candidates) {
             selected_frames.insert(candidate.record.address.frame);
+        }
+        // Undone below if the result would not evaluate.
+        const std::size_t applied_before = plan.report.applied;
+        const std::size_t selected_before = plan.selection_after.size();
+        const std::size_t collisions_before = plan.report.collisions.size();
+        const std::size_t skips_before = plan.report.skips.size();
+        std::vector<KeyAddress> sources;
+        for (const Candidate& candidate : channel_candidates) {
+            sources.push_back(candidate.record.address);
         }
         std::vector<ParsedKey> working;
         working.reserve(channel->keys.size());
@@ -819,6 +831,20 @@ void sort_report(KeyEditPlan& plan) {
             selected.address.frame = destination;
             plan.selection_after.push_back(std::move(selected));
             ++plan.report.applied;
+        }
+        // Authored handle weights travel unchanged; an interval shortened
+        // below the handles across it would stop the whole channel
+        // evaluating, so that channel is left as it was.
+        if (evaluates(*channel, channel->keys) && !evaluates(*channel, working)) {
+            plan.report.applied = applied_before;
+            plan.selection_after.resize(selected_before);
+            plan.report.collisions.resize(collisions_before);
+            plan.report.skips.resize(skips_before);
+            for (const KeyAddress& source : sources) {
+                plan.report.skips.push_back(
+                    KeyEditSkip{source, KeyEditSkipReason::InvalidTangent});
+            }
+            continue;
         }
         record_channel_mutation(index, channel_id, working, mutations);
     }
@@ -1274,7 +1300,8 @@ template <typename Change>
         if (changed.empty()) {
             continue;
         }
-        if (!evaluates(*channel, working)) {
+        if (evaluates(*channel, channel->keys)
+            && !evaluates(*channel, working)) {
             for (const std::size_t key : changed) {
                 plan.report.skips.push_back(KeyEditSkip{
                     KeyAddress{channel->target, channel->property,

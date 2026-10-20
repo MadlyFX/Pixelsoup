@@ -296,10 +296,11 @@ Curve and dope-sheet work:
   round-to-nearest, ties away from zero; if multiple moved keys land on one
   frame, the key latest in `(original frame, node id)` order wins and the UI
   previews the collision.
-- Extend cubic keys with stored in/out slope, optional handle weight, and handle
-  mode Auto, Aligned, Broken, or Flat. Hold and Linear keep no hidden tangent
-  state. Auto tangents use one documented monotone algorithm so checkpoint and
-  streamed evaluation match bit-for-bit.
+- Copy/Paste Keys and Alt-duplicate carry authored handle weights unchanged.
+  Where the destination interval is shorter than the handles across it the
+  channel stops evaluating; refuse such a paste (or shorten the handles in
+  proportion) and report it, as key moves, scales, handle drags and easing
+  already do.
 - Provide horizontal/vertical zoom, pan, fit selection, frame/value rulers,
   channel colour/visibility, snapping, value guides, and a playhead-linked
   numeric editor. Curves display evaluated pre/post-infinity as constant until

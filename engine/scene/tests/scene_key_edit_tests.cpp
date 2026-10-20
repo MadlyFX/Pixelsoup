@@ -905,6 +905,17 @@ void moved_duplicated_and_reindexed_keys_carry_their_tangents() {
                      .records[0]
                      .tangent);
 
+    // Moved to frame 57, its 6-frame outgoing handle no longer fits the
+    // 3 frames to the next key: the channel is left as it was.
+    auto cramped = scene::plan_key_move(broken_ramp_root(), thirty, 27);
+    KEY_CHECK(cramped.has_value());
+    KEY_CHECK(cramped.value().puts.empty());
+    KEY_CHECK(cramped.value().report.applied == 0U);
+    KEY_CHECK(cramped.value().selection_after.empty());
+    KEY_CHECK(cramped.value().report.skips.size() == 1U
+              && cramped.value().report.skips[0].reason
+                  == scene::KeyEditSkipReason::InvalidTangent);
+
     // Deleting the first key moves every later key down a slot; the broken
     // key's handles move with it and no slot keeps a stale one.
     const std::array zero{address(10U, scene::PropertyChannel::PositionX, 0)};

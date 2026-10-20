@@ -484,6 +484,21 @@ A key's shape shows how it leaves for the next key, in the dope sheet and on
 the Curves graph alike: a diamond moves in a straight line, an hourglass
 eases along a curve (Cubic), and a square holds its value until the next key.
 
+Right-click a key, in the dope sheet or on the Curves graph, to ease the
+selected keys; a key outside the selection is selected on its own first.
+**Linear** and **Hold** set how a key leaves for the next one and remove its
+handles. **Auto Bezier** makes it a curve whose handles follow its
+neighbours. **Easy Ease** (`F9`) flattens both handles, so the value slows
+into and out of the key. **Ease In** (`Shift+F9`) flattens only the incoming
+handle and **Ease Out** (`Ctrl+F9`) only the outgoing one, each keeping the
+other side's current slope. Easy Ease and Ease In also turn a Linear key just
+before an eased key into Auto Bezier, because that key decides the shape of
+the segment coming in; a Hold before it stays a hold. Once a selected key is
+Bezier, the menu also offers **Aligned Handles**, **Broken Handles** and
+**Flat Handles**, which keep the curve's current slopes as their starting
+point; they skip Linear and Hold keys. Each choice or shortcut is one undo
+step, and locked layers are left as they are.
+
 The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
 requires one valid contiguous selected span. Insert Clipboard and Overwrite
@@ -525,6 +540,20 @@ selection, so zooming either moves the other, and keys chosen in one are still
 chosen after switching. On the graph a key is pressed, Shift- or Ctrl-clicked,
 boxed and dragged in time exactly as in the dope sheet; its value is typed in
 the KEYS popup.
+
+A selected Bezier key shows its tangent handles on the graph. The outgoing
+handle shows whenever there is a key after it, and the incoming handle when
+the key before is also Bezier. Drag a handle to set that side's slope, and
+its length, which sets how long the curve holds that slope. The curve follows
+while you drag, and the change is one undo step when you let go. An Auto,
+Aligned or Flat key becomes Aligned, so the opposite handle stays in line
+while keeping its own length. A Broken key moves only the dragged side, and
+holding `Alt` breaks any key that way. A handle cannot be made longer than
+its interval allows alongside the handle facing it across that interval. If
+moving or time-scaling keys would leave a handle too long for its new
+interval, that channel is left unchanged and reported as skipped. A
+handle answers the pointer as far out as a key does, or halfway to its key
+where the two are closer, and wins over the key there.
 
 Navigating the timeline is the wheel and the middle button, on both axes.
 Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
