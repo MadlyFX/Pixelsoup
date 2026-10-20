@@ -203,25 +203,25 @@ void TimelinePanel::reset_project_state() noexcept {
   layer_drag_start_x_ = 0.0F;
   layer_drag_start_y_ = 0.0F;
   layer_drag_moved_ = false;
-  clip_drag_ = ClipDrag::None;
-  clip_drag_node_ = doc::NodeId{};
-  clip_drag_peer_ = doc::NodeId{};
-  clip_drag_origin_ = scene::ClipTiming{};
-  clip_drag_proposed_ = scene::ClipTiming{};
-  pending_clip_edit_.reset();
-  pending_clip_frames_ = 0U;
-  clip_status_.clear();
-  clip_status_error_ = false;
-  clip_status_until_ = 0.0;
+  clip_.drag = ClipDrag::None;
+  clip_.node = doc::NodeId{};
+  clip_.peer = doc::NodeId{};
+  clip_.origin = scene::ClipTiming{};
+  clip_.proposed = scene::ClipTiming{};
+  clip_.pending_edit.reset();
+  clip_.pending_frames = 0U;
+  clip_.status.clear();
+  clip_.status_error = false;
+  clip_.status_until = 0.0;
   previous_draw_time_ = 0.0;
-  clip_drag_anchor_ = 0;
-  clip_drag_delta_ = 0;
-  clip_drag_start_x_ = 0.0F;
-  clip_drag_start_y_ = 0.0F;
-  clip_drag_release_.reset();
-  clip_drag_moved_ = false;
-  clip_drop_lane_.reset();
-  clip_snap_guide_.reset();
+  clip_.anchor = 0;
+  clip_.delta = 0;
+  clip_.start_x = 0.0F;
+  clip_.start_y = 0.0F;
+  clip_.release.reset();
+  clip_.moved = false;
+  clip_.drop_lane.reset();
+  clip_.snap_guide.reset();
 }
 
 void TimelineTimeAxis::fit(double begin, double span, float width) noexcept {
@@ -597,7 +597,7 @@ void TimelinePanel::navigate(Pass &p) {
   const double draw_delta = std::clamp(
       ctx.time_seconds() - previous_draw_time_, 0.0, 0.05);
   previous_draw_time_ = ctx.time_seconds();
-  if (clip_drag_ != ClipDrag::None && clip_drag_moved_ && ctx.pointer_down()) {
+  if (clip_.drag != ClipDrag::None && clip_.moved && ctx.pointer_down()) {
     constexpr float edge_zone = 24.0F;
     float velocity = 0.0F;
     if (ctx.pointer_x() < graph.x + edge_zone) {
@@ -763,416 +763,6 @@ TimelinePanel::waveform_for_clip(Pass &p, doc::NodeId clip) noexcept {
   return found != waveforms.end() ? std::addressof(*found) : nullptr;
 }
 
-void TimelinePanel::resolve_clip_gesture(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  const EditorTimeline &timeline = p.input.timeline;
-  const std::span<const ElementInfo> elements = p.input.elements;
-  const std::span<const scene::TimelineMarker> markers = p.input.markers;
-  TimelinePanelFrame &frame = p.frame;
-  const gui::Rect &graph = p.layout.graph;
-  const auto x_to_frame = [&](float x) noexcept {
-    return time_axis_.frame(x, graph.x);
-  };
-  auto &gesture_x = p.gesture_x;
-  auto &gesture_y = p.gesture_y;
-  auto &first_i = p.first_i;
-  auto &last_i = p.last_i;
-
-  // Every boundary a clip gesture may land on: the show range, the playhead,
-  // and the ends of every other clip. Butt-joining two clips and cutting on
-  // the playhead are the two edits a video timeline is asked for constantly,
-  // and neither should require pixel accuracy.
-  const auto snap_targets = [&](doc::NodeId exclude) {
-    std::vector<core::i64> targets{first_i, last_i + 1,
-                                   signed_frame(timeline.show_frame)};
-    for (const ElementInfo &element : elements) {
-      if (element.node == exclude || !editable_clip(element)) {
-        continue;
-      }
-      targets.push_back(element.timing.start);
-      targets.push_back(element.timing.start + element.timing.duration);
-    }
-    // A cue is placed against a cut and a cut against a cue, so each pulls
-    // the other.
-    for (const scene::TimelineMarker &marker : markers) {
-      targets.push_back(marker.frame);
-    }
-    return targets;
-  };
-
-  // A vertical clip drop names a track band, or the ordinary top-level area
-  // outside every band. Locked tracks are not destinations. Keeping this
-  // resolver independent of the graph lets the same gesture begin on a media
-  // row when its bar is short or off screen.
-
-  if (pending_clip_edit_.has_value()) {
-    const ElementInfo *const target =
-        find_element(elements, pending_clip_edit_->clip);
-    if (target == nullptr || target->timing != pending_clip_origin_ ||
-        pending_clip_frames_ == 0U) {
-      pending_clip_edit_.reset();
-    } else {
-      --pending_clip_frames_;
-    }
-  }
-  const gui::UiPoint clip_pointer =
-      clip_drag_release_.value_or(gui::UiPoint{gesture_x, gesture_y});
-  if (clip_drag_ != ClipDrag::None) {
-    const float dx = clip_pointer.x - clip_drag_start_x_;
-    const float dy = clip_pointer.y - clip_drag_start_y_;
-    clip_drag_moved_ = clip_drag_moved_ ||
-                       dx * dx + dy * dy >= lane_drag_threshold_squared;
-  }
-  p.clip_drag_active =
-      clip_drag_ != ClipDrag::None && clip_drag_moved_;
-  auto &clip_drag_active = p.clip_drag_active;
-  if (clip_drag_ == ClipDrag::Move) {
-    clip_drop_lane_ = clip_drag_active ? clip_lane_under_pointer(p, clip_pointer.y)
-                                       : std::optional<doc::NodeId>{};
-  }
-
-  // Resolve a live clip proposal before anything is drawn, so the bar under
-  // the pointer follows the gesture without authoring intermediate document
-  // edits. Like Feed Mapping, the document changes once, on release.
-  if (clip_drag_ != ClipDrag::None) {
-    if (clip_drag_active) {
-      clip_status_.clear();
-      clip_status_error_ = false;
-      clip_status_until_ = ctx.time_seconds() + 3.0;
-      const core::i64 pointer_frame =
-          static_cast<core::i64>(std::llround(x_to_frame(clip_pointer.x)));
-      const core::i64 delta = pointer_frame - clip_drag_anchor_;
-      const scene::ClipTiming origin = clip_drag_origin_;
-      scene::ClipTiming proposed = origin;
-      const auto targets = snap_targets(clip_drag_node_);
-      const core::i64 tolerance = static_cast<core::i64>(std::max(
-          1.0, std::ceil(8.0 / static_cast<double>(time_axis_.pixels_per_frame))));
-      clip_snap_guide_.reset();
-      const auto snapped = [&](core::i64 edge) {
-        // Alt suspends snapping for the duration of a gesture, the
-        // same temporary override a key drag already honours.
-        if (!snapping_ || ctx.alt_held()) {
-          return edge;
-        }
-        const auto target = nearest_snap(edge, targets, tolerance);
-        if (!target.has_value()) {
-          return edge;
-        }
-        clip_snap_guide_ = *target;
-        return *target;
-      };
-
-      core::i64 semantic_delta = delta;
-      if (delta == 0) {
-        semantic_delta = 0;
-      } else if (clip_drag_ == ClipDrag::RippleTrimHead) {
-        semantic_delta = snapped(origin.start + delta) - origin.start;
-      } else if (clip_drag_ == ClipDrag::RippleTrimTail) {
-        const core::i64 tail = origin.start + origin.duration;
-        semantic_delta = snapped(tail + delta) - tail;
-      } else if (clip_drag_ == ClipDrag::Roll) {
-        const ElementInfo *const first_clip =
-            find_element(elements, clip_drag_node_);
-        const ElementInfo *const second_clip =
-            find_element(elements, clip_drag_peer_);
-        if (first_clip != nullptr && second_clip != nullptr) {
-          const ElementInfo *const left =
-              first_clip->timing.start <= second_clip->timing.start
-                  ? first_clip
-                  : second_clip;
-          const core::i64 cut = left->timing.start + left->timing.duration;
-          semantic_delta = snapped(cut + delta) - cut;
-        }
-      } else if (clip_drag_ == ClipDrag::Slide) {
-        semantic_delta = snapped(origin.start + delta) - origin.start;
-      }
-      clip_drag_delta_ = semantic_delta;
-
-      switch (clip_drag_) {
-      case ClipDrag::Move: {
-        core::i64 start = origin.start;
-        if (delta != 0) {
-          start = snapped(origin.start + delta);
-          if (!clip_snap_guide_.has_value()) {
-            // The tail is as good a thing to butt against as the head.
-            const core::i64 tail = origin.start + delta + origin.duration;
-            const core::i64 tail_snapped = snapped(tail);
-            if (clip_snap_guide_.has_value()) {
-              start = tail_snapped - origin.duration;
-            }
-          }
-        }
-        proposed.start = start;
-        break;
-      }
-      case ClipDrag::TrimIn: {
-        // The out point stays where it is and the source slides with
-        // the in point, which is what makes this a trim rather than a
-        // move. Convert at the source rate and retain the source frame at
-        // the new cut; the authored source phase currently has integer precision.
-        const core::i64 limit = origin.start + origin.duration - 1;
-        const core::i64 start = delta == 0
-                                    ? origin.start
-                                    : std::min(snapped(origin.start + delta), limit);
-        const core::i64 shift = start - origin.start;
-        proposed.start = start;
-        proposed.duration = origin.duration - shift;
-        if (const ElementInfo *const clip = find_element(elements, clip_drag_node_)) {
-          const auto source = scene::advance_source_phase(
-              origin.source_in, shift,
-              scene::MediaFrameRate{timeline.rate_numerator, timeline.rate_denominator},
-              clip->source_frame_rate, clip->sequence_count,
-              scene::SourcePhaseRounding::Floor);
-          if (source) {
-            proposed.source_in = source.value();
-          } else {
-            proposed = origin;
-            clip_status_ = "TRIM UNAVAILABLE  /  Check source frames and frame rate";
-            clip_status_error_ = true;
-          }
-        }
-        break;
-      }
-      case ClipDrag::TrimOut: {
-        const core::i64 end =
-            delta == 0
-                ? origin.start + origin.duration
-                : std::max(snapped(origin.start + origin.duration + delta),
-                           origin.start + 1);
-        proposed.duration = end - origin.start;
-        break;
-      }
-      case ClipDrag::FadeIn:
-        proposed.fade_in =
-            std::clamp(origin.fade_in + delta, core::i64{0}, origin.duration);
-        break;
-      case ClipDrag::FadeOut:
-        proposed.fade_out =
-            std::clamp(origin.fade_out - delta, core::i64{0}, origin.duration);
-        break;
-      case ClipDrag::RippleTrimHead:
-        proposed.duration =
-            std::max(origin.duration - semantic_delta, core::i64{1});
-        proposed.source_in =
-            std::max(origin.source_in + semantic_delta, core::i64{0});
-        break;
-      case ClipDrag::RippleTrimTail:
-        proposed.duration =
-            std::max(origin.duration + semantic_delta, core::i64{1});
-        break;
-      case ClipDrag::Roll: {
-        const ElementInfo *const peer = find_element(elements, clip_drag_peer_);
-        const bool dragged_left =
-            peer != nullptr && origin.start <= peer->timing.start;
-        if (dragged_left) {
-          proposed.duration =
-              std::max(origin.duration + semantic_delta, core::i64{1});
-        } else {
-          proposed.start = origin.start + semantic_delta;
-          proposed.duration =
-              std::max(origin.duration - semantic_delta, core::i64{1});
-          proposed.source_in =
-              std::max(origin.source_in + semantic_delta, core::i64{0});
-        }
-        break;
-      }
-      case ClipDrag::Slip: {
-        const ElementInfo *const clip = find_element(elements, clip_drag_node_);
-        if (clip != nullptr) {
-          scene::ClipPlacement placement{};
-          placement.node = clip->node;
-          placement.sequence_count = clip->sequence_count;
-          placement.timing = origin;
-          placement.frame_rate = clip->source_frame_rate;
-          const auto planned = scene::plan_slip(
-              std::span{&placement, 1U}, clip->node, semantic_delta,
-              scene::MediaFrameRate{timeline.rate_numerator,
-                                    timeline.rate_denominator});
-          if (planned) {
-            clip_drag_delta_ = planned.value().applied_delta;
-            if (!planned.value().updates.empty()) {
-              proposed = planned.value().updates.front().timing;
-            }
-            clip_status_ = "SLIP  /  Source " +
-                           std::to_string(proposed.source_in) + " of " +
-                           std::to_string(clip->sequence_count) + " frames";
-            const auto offset = scene::source_ordinal_delta(
-                semantic_delta,
-                scene::MediaFrameRate{timeline.rate_numerator,
-                                      timeline.rate_denominator},
-                clip->source_frame_rate);
-            const core::i64 phase = origin.source_in % clip->sequence_count;
-            if (!offset || offset.value() < -phase ||
-                offset.value() > static_cast<core::i64>(clip->sequence_count) -
-                                     1 - phase) {
-              clip_status_ += "  /  wrapped";
-            }
-            if (clip->sequence_count == 1U) {
-              clip_status_ += "  /  One source frame; image is unchanged";
-            } else if (ctx.pointer_down()) {
-              clip_status_ += "  /  release to apply";
-            }
-          } else {
-            clip_drag_delta_ = 0;
-            clip_status_error_ = true;
-            clip_status_ = "SLIP UNAVAILABLE  /  ";
-            switch (planned.error()) {
-            case scene::TimelineEditError::InvalidRate:
-              clip_status_ += "Invalid source or show frame rate";
-              break;
-            case scene::TimelineEditError::LockedClip:
-              clip_status_ += "Clip is locked";
-              break;
-            case scene::TimelineEditError::ClipNotFound:
-              clip_status_ += "Clip is no longer available";
-              break;
-            case scene::TimelineEditError::IntegerOverflow:
-              clip_status_ += "Source offset exceeds the supported range";
-              break;
-            default:
-              clip_status_ += "Check source frame count and clip timing";
-              break;
-            }
-          }
-        }
-        break;
-      }
-      case ClipDrag::Slide:
-        proposed.start = origin.start + semantic_delta;
-        break;
-      case ClipDrag::None:
-        break;
-      }
-      proposed.fade_in =
-          std::clamp(proposed.fade_in, core::i64{0}, proposed.duration);
-      proposed.fade_out =
-          std::clamp(proposed.fade_out, core::i64{0}, proposed.duration);
-      clip_drag_proposed_ = proposed;
-      if (clip_status_.empty() &&
-          (clip_drag_ == ClipDrag::Move || clip_drag_ == ClipDrag::TrimIn ||
-           clip_drag_ == ClipDrag::TrimOut)) {
-        clip_status_ = clip_drag_ == ClipDrag::Move ? "MOVE" : "TRIM";
-        clip_status_ += "  /  Start " + std::to_string(proposed.start) +
-                        "  /  End " +
-                        std::to_string(proposed.start + proposed.duration) +
-                        "  /  Source " + std::to_string(proposed.source_in);
-      }
-    }
-    if (!ctx.pointer_down()) {
-      if (clip_drag_moved_) {
-        switch (clip_drag_) {
-        case ClipDrag::RippleTrimHead:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
-                clip_drag_node_, scene::TimelineTrimEdge::Head,
-                clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::RippleTrimTail:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRippleTrimRequest{
-                clip_drag_node_, scene::TimelineTrimEdge::Tail,
-                clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Roll:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(TimelineRollRequest{
-                clip_drag_node_, clip_drag_peer_, clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Slip:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(
-                TimelineSlipRequest{clip_drag_node_, clip_drag_delta_});
-            pending_clip_edit_ = TimelineClipEdit{
-                clip_drag_node_, clip_drag_proposed_, std::nullopt};
-            pending_clip_origin_ = clip_drag_origin_;
-            pending_clip_frames_ = 12U;
-          }
-          break;
-        case ClipDrag::Slide:
-          if (clip_drag_delta_ != 0) {
-            frame.timeline_edits.emplace_back(
-                TimelineSlideRequest{clip_drag_node_, clip_drag_delta_});
-          }
-          break;
-        case ClipDrag::Move:
-        case ClipDrag::TrimIn:
-        case ClipDrag::TrimOut:
-        case ClipDrag::FadeIn:
-        case ClipDrag::FadeOut: {
-          std::optional<doc::NodeId> retarget;
-          const ElementInfo *const dragged =
-              clip_drag_ == ClipDrag::Move
-                  ? find_element(elements, clip_drag_node_)
-                  : nullptr;
-          if (dragged != nullptr && clip_drop_lane_.has_value() &&
-              *clip_drop_lane_ != dragged->timeline_lane) {
-            retarget = *clip_drop_lane_;
-          }
-          if (clip_drag_proposed_ != clip_drag_origin_ ||
-              retarget.has_value()) {
-            frame.clip_edits.push_back(TimelineClipEdit{
-                clip_drag_node_, clip_drag_proposed_, retarget});
-            pending_clip_edit_ = frame.clip_edits.back();
-            pending_clip_origin_ = clip_drag_origin_;
-            pending_clip_frames_ = 12U;
-          }
-          break;
-        }
-        case ClipDrag::None:
-          break;
-        }
-      }
-      clip_drag_ = ClipDrag::None;
-      clip_drag_node_ = doc::NodeId{};
-      clip_drag_peer_ = doc::NodeId{};
-      clip_drag_delta_ = 0;
-      clip_drag_start_x_ = 0.0F;
-      clip_drag_start_y_ = 0.0F;
-      clip_drag_release_.reset();
-      clip_drag_moved_ = false;
-      clip_drop_lane_.reset();
-      clip_snap_guide_.reset();
-    }
-  }
-
-
-}
-
-std::optional<doc::NodeId>
-TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
-  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
-  const gui::Rect &rows_bounds = p.layout.rows;
-  std::vector<Row> &rows = p.built.rows;
-
-  if (pointer_y < rows_bounds.y ||
-      pointer_y >= rows_bounds.y + rows_bounds.height) {
-    return std::nullopt;
-  }
-  const float local = pointer_y - rows_bounds.y + row_scroll_;
-  if (local < 0.0F) {
-    return std::nullopt;
-  }
-  const auto row_index = static_cast<std::size_t>(local / row_height);
-  const doc::NodeId target =
-      row_index < rows.size() && rows[row_index].lane_member
-          ? rows[row_index].lane_owner
-          : doc::NodeId{};
-  if (target == doc::NodeId{}) {
-    return target;
-  }
-  const auto lane = std::find_if(
-      lanes.begin(), lanes.end(), [&](const scene::TimelineLane &candidate) {
-        return !candidate.implicit && candidate.id == target;
-      });
-  if (lane == lanes.end() || lane->locked) {
-    return std::nullopt;
-  }
-  return target;
-}
-
 void TimelinePanel::resolve_reorder_targets(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const std::span<const ElementInfo> elements = p.input.elements;
@@ -1273,22 +863,22 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
   // will become a child of that track. Keeping these feedback vocabularies
   // separate prevents a reorder from looking like nesting.
   scratch.clip_move_feedback =
-      clip_drag_active && clip_drag_ == ClipDrag::Move;
+      clip_drag_active && clip_.drag == ClipDrag::Move;
   p.clip_drop_hovered = nullptr;
   auto &clip_drop_hovered = p.clip_drop_hovered;
-  if (scratch.clip_move_feedback && clip_drop_lane_.has_value() &&
-      *clip_drop_lane_ != doc::NodeId{}) {
+  if (scratch.clip_move_feedback && clip_.drop_lane.has_value() &&
+      *clip_.drop_lane != doc::NodeId{}) {
     const auto target = std::find_if(
         lane_drop_targets.begin(), lane_drop_targets.end(),
         [&](const LaneDropTarget &candidate) {
-          return !candidate.locked && candidate.lane == *clip_drop_lane_;
+          return !candidate.locked && candidate.lane == *clip_.drop_lane;
         });
     if (target != lane_drop_targets.end()) {
       clip_drop_hovered = &*target;
     }
   }
   if (scratch.clip_move_feedback) {
-    const ElementInfo *const dragged = find_element(elements, clip_drag_node_);
+    const ElementInfo *const dragged = find_element(elements, clip_.node);
     scratch.clip_drag_label = dragged != nullptr ? layer_name(*dragged) : "CLIP";
   }
 
@@ -1929,11 +1519,11 @@ void TimelinePanel::draw_rows(Pass &p) {
           layer_element->timing.placed()) {
         clip_element = layer_element;
         clip_timing =
-            clip_drag_ != ClipDrag::None && clip_drag_node_ == row.node
-                ? clip_drag_proposed_
-                : (pending_clip_edit_.has_value() &&
-                           pending_clip_edit_->clip == row.node
-                       ? pending_clip_edit_->timing
+            clip_.drag != ClipDrag::None && clip_.node == row.node
+                ? clip_.proposed
+                : (clip_.pending_edit.has_value() &&
+                           clip_.pending_edit->clip == row.node
+                       ? clip_.pending_edit->timing
                        : layer_element->timing);
       }
     }
@@ -1944,7 +1534,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       clip_bar =
           gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row_height - 6.0F};
       const bool live =
-          clip_drag_ != ClipDrag::None && clip_drag_node_ == row.node;
+          clip_.drag != ClipDrag::None && clip_.node == row.node;
       ctx.panel(clip_bar, alpha(row.color, live ? 0.42F : 0.30F));
       bool drew_filmstrip = false;
       if (const TimelineFilmstripObservation *const observation =
@@ -2118,7 +1708,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       const auto fade_handle = [&](float handle_x, bool engaged) {
         const bool near =
             edit_tool_ == TimelineEditTool::Standard &&
-            !ctx.pointer_blocked() && clip_drag_ == ClipDrag::None &&
+            !ctx.pointer_blocked() && clip_.drag == ClipDrag::None &&
             std::fabs(ctx.pointer_x() - handle_x) <= fade_handle_reach &&
             ctx.pointer_y() >= clip_bar.y - 4.0F &&
             ctx.pointer_y() <= clip_bar.y + fade_handle_reach;
@@ -2137,10 +1727,10 @@ void TimelinePanel::draw_rows(Pass &p) {
                       "Drag to set the fade");
         }
       };
-      fade_handle(clip_fade_in_x, clip_drag_ == ClipDrag::FadeIn &&
-                                      clip_drag_node_ == row.node);
-      fade_handle(clip_fade_out_x, clip_drag_ == ClipDrag::FadeOut &&
-                                       clip_drag_node_ == row.node);
+      fade_handle(clip_fade_in_x, clip_.drag == ClipDrag::FadeIn &&
+                                      clip_.node == row.node);
+      fade_handle(clip_fade_out_x, clip_.drag == ClipDrag::FadeOut &&
+                                       clip_.node == row.node);
 
       // Every editor names its clips on the bar. The name rides on a dark
       // backing so it reads over any filmstrip, and stays pinned to the
@@ -2150,7 +1740,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       const float name_right = clip_bar.x + clip_bar.width - 6.0F;
       if (name_right - name_left >= 24.0F) {
         std::string name = row.label;
-        if (clip_drag_ == ClipDrag::Slip && clip_drag_node_ == row.node) {
+        if (clip_.drag == ClipDrag::Slip && clip_.node == row.node) {
           name += "  Source " + std::to_string(clip_timing.source_in);
         }
         if (!clip_element->on_air) {
@@ -2174,7 +1764,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       // under a Selection pointer lights, and the razor draws its cut.
       if (!row.locked &&
           clip_bar.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-          clip_drag_ == ClipDrag::None && !ctx.pointer_blocked()) {
+          clip_.drag == ClipDrag::None && !ctx.pointer_blocked()) {
         const float px = ctx.pointer_x();
         if (edit_tool_ == TimelineEditTool::Razor) {
           const float cut_x =
@@ -2422,7 +2012,7 @@ void TimelinePanel::draw_rows(Pass &p) {
                              edit_tool_ == TimelineEditTool::Razor &&
                              clip_bar.contains(press_x, press_y);
     if (razor_press) {
-      clip_press_consumed_ = true;
+      clip_.press_consumed = true;
       const core::i64 cut = razor_frame(p, press_x);
       for (const ElementInfo &element : elements) {
         if (!editable_clip(element) ||
@@ -2441,7 +2031,7 @@ void TimelinePanel::draw_rows(Pass &p) {
                  press_y <= clip_bar.y + fade_handle_reach &&
                  (std::fabs(press_x - clip_fade_in_x) <= fade_handle_reach ||
                   std::fabs(press_x - clip_fade_out_x) <= fade_handle_reach)))) {
-      clip_press_consumed_ = true;
+      clip_.press_consumed = true;
       keys_.selected.clear();
       keys_.drag_keys.clear();
       keys_.dragging = false;
@@ -2450,11 +2040,11 @@ void TimelinePanel::draw_rows(Pass &p) {
       const float grab = edge_grab_width(clip_bar.width);
       const float px = press_x;
       const float midpoint = clip_bar.x + clip_bar.width * 0.5F;
-      clip_drag_peer_ = doc::NodeId{};
+      clip_.peer = doc::NodeId{};
       doc::NodeId dragged = row.node;
       scene::ClipTiming dragged_timing = clip_timing;
       if (edit_tool_ == TimelineEditTool::RippleTrim) {
-        clip_drag_ =
+        clip_.drag =
             px < midpoint ? ClipDrag::RippleTrimHead : ClipDrag::RippleTrimTail;
       } else if (edit_tool_ == TimelineEditTool::Roll) {
         // Roll the cut nearest the press: the clip butted against this
@@ -2482,21 +2072,21 @@ void TimelinePanel::draw_rows(Pass &p) {
         const ElementInfo *peer = head ? (left_of ? left_of : right_of)
                                        : (right_of ? right_of : left_of);
         if (peer != nullptr) {
-          clip_drag_ = ClipDrag::Roll;
+          clip_.drag = ClipDrag::Roll;
           // The earlier clip leads, so the request reads left to right.
           const bool peer_first = peer->timing.start < clip_timing.start;
           dragged = peer_first ? peer->node : row.node;
-          clip_drag_peer_ = peer_first ? row.node : peer->node;
+          clip_.peer = peer_first ? row.node : peer->node;
           dragged_timing = peer_first ? peer->timing : clip_timing;
         } else {
           // Nothing butts against this clip, so there is no cut to roll.
-          clip_drag_ = ClipDrag::None;
-          clip_press_consumed_ = true;
+          clip_.drag = ClipDrag::None;
+          clip_.press_consumed = true;
         }
       } else if (edit_tool_ == TimelineEditTool::Slip) {
-        clip_drag_ = ClipDrag::Slip;
+        clip_.drag = ClipDrag::Slip;
       } else if (edit_tool_ == TimelineEditTool::Slide) {
-        clip_drag_ = ClipDrag::Slide;
+        clip_.drag = ClipDrag::Slide;
       } else {
         // Standard placement editing. Fade handles sit on the bar's
         // top edge and take precedence over the trim strips.
@@ -2504,47 +2094,47 @@ void TimelinePanel::draw_rows(Pass &p) {
         const float to_in = std::fabs(px - clip_fade_in_x);
         const float to_out = std::fabs(px - clip_fade_out_x);
         if (on_top && to_in <= fade_handle_reach && to_in <= to_out) {
-          clip_drag_ = ClipDrag::FadeIn;
+          clip_.drag = ClipDrag::FadeIn;
         } else if (on_top && to_out <= fade_handle_reach) {
-          clip_drag_ = ClipDrag::FadeOut;
+          clip_.drag = ClipDrag::FadeOut;
         } else if (px <= clip_bar.x + grab) {
-          clip_drag_ = ClipDrag::TrimIn;
+          clip_.drag = ClipDrag::TrimIn;
         } else if (px >= clip_bar.x + clip_bar.width - grab) {
-          clip_drag_ = ClipDrag::TrimOut;
+          clip_.drag = ClipDrag::TrimOut;
         } else {
-          clip_drag_ = ClipDrag::Move;
+          clip_.drag = ClipDrag::Move;
         }
       }
-      clip_drag_node_ = clip_drag_ != ClipDrag::None ? dragged : doc::NodeId{};
-      clip_drag_origin_ = dragged_timing;
-      clip_drag_proposed_ = dragged_timing;
-      clip_status_.clear();
-      clip_status_error_ = false;
+      clip_.node = clip_.drag != ClipDrag::None ? dragged : doc::NodeId{};
+      clip_.origin = dragged_timing;
+      clip_.proposed = dragged_timing;
+      clip_.status.clear();
+      clip_.status_error = false;
       constexpr core::i64 edit_limit = std::numeric_limits<core::i64>::max() / 4;
       if (dragged_timing.start < -edit_limit || dragged_timing.start > edit_limit ||
           dragged_timing.duration > edit_limit || dragged_timing.source_in > edit_limit) {
         // Imported documents can carry a wider range than the interactive
         // workspace. Refuse arithmetic beyond that range rather than wrap it.
-        clip_drag_ = ClipDrag::None;
-        clip_drag_node_ = doc::NodeId{};
-        clip_status_ = "EDIT UNAVAILABLE  /  Clip timing exceeds the editable range";
-        clip_status_error_ = true;
-        clip_status_until_ = ctx.time_seconds() + 3.0;
+        clip_.drag = ClipDrag::None;
+        clip_.node = doc::NodeId{};
+        clip_.status = "EDIT UNAVAILABLE  /  Clip timing exceeds the editable range";
+        clip_.status_error = true;
+        clip_.status_until = ctx.time_seconds() + 3.0;
       }
-      clip_drag_anchor_ = static_cast<core::i64>(std::llround(x_to_frame(px)));
-      clip_drag_delta_ = 0;
-      clip_drag_start_x_ = press_x;
-      clip_drag_start_y_ = press_y;
+      clip_.anchor = static_cast<core::i64>(std::llround(x_to_frame(px)));
+      clip_.delta = 0;
+      clip_.start_x = press_x;
+      clip_.start_y = press_y;
       // A whole gesture can be captured after the proposal phase above.
       // Preserve its up position until the next draw resolves it, even if
       // later motion in this batch or the next one moves the free pointer.
-      clip_drag_release_ = lane_it.released
+      clip_.release = lane_it.released
           ? std::optional{gui::UiPoint{ctx.pointer_release_x(),
                                        ctx.pointer_release_y()}}
           : std::nullopt;
-      clip_drag_moved_ = false;
-      clip_drop_lane_.reset();
-      clip_snap_guide_.reset();
+      clip_.moved = false;
+      clip_.drop_lane.reset();
+      clip_.snap_guide.reset();
       keys_.marquee_tracking = false;
       keys_.marquee_active = false;
       keys_.lasso_points.clear();
@@ -2650,7 +2240,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       }
     }
     if (lane_it.held && !keys_.dragging && !keys_.marquee_active &&
-        clip_drag_ == ClipDrag::None && !clip_press_consumed_ &&
+        clip_.drag == ClipDrag::None && !clip_.press_consumed &&
         layer_drag_node_ == doc::NodeId{} &&
         lane_drag_node_ == doc::NodeId{}) {
       frame.seek_to_frame =
@@ -2824,8 +2414,8 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
   const std::optional<core::i64> guide =
       keys_.dragging
           ? keys_.snap_guide
-          : (clip_drag_ != ClipDrag::None
-                 ? clip_snap_guide_
+          : (clip_.drag != ClipDrag::None
+                 ? clip_.snap_guide
                  : (markers_.drag_moved ? markers_.snap_guide
                                        : std::optional<core::i64>{}));
   if (guide.has_value()) {
@@ -3278,11 +2868,11 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
                   hovered ? 2.0F : 1.0F);
     }
 
-    if (clip_drop_lane_.has_value()) {
+    if (clip_.drop_lane.has_value()) {
       const float preview_x = frame_to_x(
-          static_cast<double>(clip_drag_proposed_.start));
+          static_cast<double>(clip_.proposed.start));
       const float preview_right = frame_to_x(static_cast<double>(
-          clip_drag_proposed_.start + clip_drag_proposed_.duration));
+          clip_.proposed.start + clip_.proposed.duration));
       const float preview_y = std::clamp(
           ctx.pointer_y() - (row_height - 6.0F) * 0.5F,
           rows_bounds.y + 3.0F,
@@ -3302,10 +2892,10 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     if (clip_drop_hovered != nullptr) {
       ghost_label += "  >  ";
       ghost_label += clip_drop_hovered->label;
-    } else if (clip_drop_lane_.has_value() &&
-               *clip_drop_lane_ == doc::NodeId{}) {
+    } else if (clip_.drop_lane.has_value() &&
+               *clip_.drop_lane == doc::NodeId{}) {
       const ElementInfo *const dragged =
-          find_element(elements, clip_drag_node_);
+          find_element(elements, clip_.node);
       if (dragged != nullptr && dragged->timeline_lane != doc::NodeId{}) {
         ghost_label += "  >  OWN TRANSFORM";
       }
@@ -3324,18 +2914,18 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
 
   // Keep source feedback readable even for very short or partly hidden clips.
   // It remains after release while the authored result reaches the editor.
-  if (!clip_status_.empty() && ctx.time_seconds() <= clip_status_until_) {
-    frame.clip_status = clip_status_;
-    frame.clip_status_error = clip_status_error_;
+  if (!clip_.status.empty() && ctx.time_seconds() <= clip_.status_until) {
+    frame.clip_status = clip_.status;
+    frame.clip_status_error = clip_.status_error;
     const gui::Rect status{bounds.x + 8.0F, bounds.y + bounds.height - 30.0F,
                            std::max(bounds.width - 16.0F, 0.0F), 24.0F};
     ctx.panel(status, ctx.theme().background);
     draw_border(ctx, status,
-                clip_status_error_ ? ctx.theme().warning : ctx.theme().accent,
+                clip_.status_error ? ctx.theme().warning : ctx.theme().accent,
                 1.0F);
     ctx.label(gui::Rect{status.x + 8.0F, status.y,
                         std::max(status.width - 16.0F, 0.0F), status.height},
-              clip_status_, clip_status_error_ ? ctx.theme().warning
+              clip_.status, clip_.status_error ? ctx.theme().warning
                                                : ctx.theme().text);
   }
 
@@ -4069,7 +3659,7 @@ void TimelinePanel::close_pass(Pass &p) {
   const gui::Rect &graph = p.layout.graph;
 
   if (!ctx.pointer_down()) {
-    clip_press_consumed_ = false;
+    clip_.press_consumed = false;
   }
   if (frame.seek_to_frame.has_value()) {
     requested_playhead_ = frame.seek_to_frame;
@@ -4084,13 +3674,13 @@ void TimelinePanel::close_pass(Pass &p) {
   // keeps the more specific move, trim and fade feedback drawn above.
   if (!ctx.pointer_blocked() && !scratch.popup_pointer_blocked &&
       !scratch.key_popup_pointer_blocked &&
-      (clip_drag_ != ClipDrag::None ||
+      (clip_.drag != ClipDrag::None ||
        (graph.contains(ctx.pointer_x(), ctx.pointer_y()) &&
         ctx.pointer_y() >= rows_bounds.y))) {
     if (edit_tool_ != TimelineEditTool::Standard) {
       ctx.set_cursor(tool_cursor(edit_tool_));
-    } else if (clip_drag_ != ClipDrag::None) {
-      ctx.set_cursor(clip_drag_ == ClipDrag::Move ? gui::Cursor::Move
+    } else if (clip_.drag != ClipDrag::None) {
+      ctx.set_cursor(clip_.drag == ClipDrag::Move ? gui::Cursor::Move
                                                : gui::Cursor::ResizeHorizontal);
     }
   }

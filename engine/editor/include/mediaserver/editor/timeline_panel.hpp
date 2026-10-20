@@ -680,7 +680,7 @@ public:
     return keys_.selected.size();
   }
   [[nodiscard]] bool dragging_clip() const noexcept {
-    return clip_drag_ != ClipDrag::None;
+    return clip_.drag != ClipDrag::None;
   }
   [[nodiscard]] bool dragging_layer() const noexcept {
     return layer_drag_node_ != doc::NodeId{};
@@ -916,35 +916,40 @@ private:
   // the same reason a key drag is: the committed placement can lag the
   // pointer by several frames, and a bar that snapped back underneath the
   // cursor would be unusable.
-  ClipDrag clip_drag_{ClipDrag::None};
-  doc::NodeId clip_drag_node_{};
-  doc::NodeId clip_drag_peer_{};
-  scene::ClipTiming clip_drag_origin_{};
-  scene::ClipTiming clip_drag_proposed_{};
-  // Keep a released gesture visible while its single edit reaches authority.
-  std::optional<TimelineClipEdit> pending_clip_edit_;
-  scene::ClipTiming pending_clip_origin_{};
-  core::u32 pending_clip_frames_{};
-  std::string clip_status_;
-  bool clip_status_error_{};
-  double clip_status_until_{};
+  struct ClipGesture final {
+    ClipDrag drag{ClipDrag::None};
+    doc::NodeId node{};
+    doc::NodeId peer{};
+    scene::ClipTiming origin{};
+    scene::ClipTiming proposed{};
+    // Keep a released gesture visible while its single edit reaches
+    // authority.
+    std::optional<TimelineClipEdit> pending_edit;
+    scene::ClipTiming pending_origin{};
+    core::u32 pending_frames{};
+    std::string status;
+    bool status_error{};
+    double status_until{};
+    core::i64 anchor{};
+    core::i64 delta{};
+    // Clip bars use the same lift contract as tracks and Feed Mapping. A
+    // press can remain an ordinary selection, while a real drag previews one
+    // destination and commits once on release. Layer-row drags use the
+    // dedicated stack gesture; bar drags change show time and may change
+    // tracks.
+    float start_x{};
+    float start_y{};
+    std::optional<gui::UiPoint> release;
+    bool moved{};
+    std::optional<doc::NodeId> drop_lane;
+    std::optional<core::i64> snap_guide;
+    // A press on a clip that did its work on the press - a razor cut - and
+    // must not turn into a scrub while the button stays down.
+    bool press_consumed{};
+  };
+  ClipGesture clip_;
   double previous_draw_time_{};
   bool auto_key_{true};
-  core::i64 clip_drag_anchor_{};
-  core::i64 clip_drag_delta_{};
-  // Clip bars use the same lift contract as tracks and Feed Mapping. A press
-  // can remain an ordinary selection, while a real drag previews one
-  // destination and commits once on release. Layer-row drags use the dedicated
-  // stack gesture above; bar drags change show time and may change tracks.
-  float clip_drag_start_x_{};
-  float clip_drag_start_y_{};
-  std::optional<gui::UiPoint> clip_drag_release_;
-  bool clip_drag_moved_{};
-  std::optional<doc::NodeId> clip_drop_lane_;
-  std::optional<core::i64> clip_snap_guide_;
-  // A press on a clip that did its work on the press - a razor cut - and
-  // must not turn into a scrub while the button stays down.
-  bool clip_press_consumed_{};
 
   // The marker strip's state.
   struct MarkerState final {
