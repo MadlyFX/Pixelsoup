@@ -27,7 +27,8 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [properties: media|model|light|renderer|environment]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves]
+//   curves draws the editor with the Timeline switched to Curves mode.
 namespace {
 
 namespace core = mediaserver::core;
@@ -240,7 +241,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [properties: media|model|light|renderer|environment]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -250,7 +251,9 @@ int main(int argc, char **argv) {
       argc > 4 ? std::strtof(argv[4], nullptr) : 620.0F;
   const float hover_x = argc > 6 ? std::strtof(argv[5], nullptr) : -100.0F;
   const float hover_y = argc > 6 ? std::strtof(argv[6], nullptr) : -100.0F;
-  const std::string_view properties = argc > 7 ? argv[7] : "";
+  const std::string_view view = argc > 7 ? argv[7] : "";
+  const bool curves = view == "curves";
+  const std::string_view properties = curves ? std::string_view{} : view;
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -316,9 +319,16 @@ int main(int argc, char **argv) {
 
   // A few frames: the first lets panels settle their view state (the
   // timeline fits the show range on its first draw); the last is the one kept.
-  for (int pass = 0; pass < 3; ++pass) {
+  // Curves is switched on the way an operator does it: a click on the
+  // Timeline toolbar's Curves toggle, pressed and released over two frames.
+  const int passes = curves ? 5 : 3;
+  for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
-    input.set_mouse_position(hover_x, hover_y);
+    const bool clicking = curves && pass < 2;
+    input.set_mouse_position(
+        clicking ? timeline_bounds.x + 608.0F : hover_x,
+        clicking ? timeline_bounds.y + 17.0F : hover_y);
+    input.set_mouse_button(gui::MouseButton::Left, curves && pass == 0);
     ctx.new_frame(1.0);
     ctx.panel(window, ctx.theme().background);
     if (!properties.empty()) {
