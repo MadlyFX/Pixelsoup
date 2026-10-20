@@ -330,9 +330,17 @@ inline std::vector<std::uint64_t> &recorded_frames() {
   return frames;
 }
 
+// Off while timing, so digesting a frame is not part of what is measured.
+inline bool &observing() {
+  static bool enabled = true;
+  return enabled;
+}
+
 inline void observe(const gui::UiContext &ctx, const gui::UiDrawList &list,
                     const editor::TimelinePanelFrame &frame) {
-  recorded_frames().push_back(frame_digest(ctx, list, frame));
+  if (observing()) {
+    recorded_frames().push_back(frame_digest(ctx, list, frame));
+  }
 }
 
 } // namespace timeline_golden

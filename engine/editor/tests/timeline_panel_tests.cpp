@@ -21,6 +21,8 @@
 #if defined(MEDIASERVER_TIMELINE_GOLDEN)
 #include "timeline_golden.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -3423,7 +3425,119 @@ std::string golden_line(const GoldenRun &run) {
   return line;
 }
 
+// Times TimelinePanel::draw() on a large, fully expanded scene: `layers`
+// top-level objects and clips, each keyed on Position, Opacity and an effect,
+// each twirled open with its Position group open too. Reports the median and
+// fastest per-frame time over batches of idle frames and of frames with the
+// pointer sweeping the lanes, in the panel's typical 1920x1080 bounds.
+int golden_bench(std::size_t layers) {
+  timeline_golden::observing() = false;
+  Harness h;
+  h.timeline = editor::EditorTimeline{600U, 600U, 0U, 7'200U, false, false,
+                                      false};
+  h.elements.clear();
+  h.keys.clear();
+  for (std::size_t index = 0U; index < layers; ++index) {
+    editor::ElementInfo element =
+        index % 4U == 3U ? make_clip() : make_object();
+    element.node = doc::NodeId{10'000U + index};
+    element.display_name = "Layer " + std::to_string(index);
+    if (element.kind == editor::ElementKind::Media) {
+      element.timing = scene::ClipTiming{
+          static_cast<std::int64_t>(index * 37U % 6'000U), 900, 0, 24, 24};
+    }
+    h.elements.push_back(element);
+    for (const scene::PropertyChannel channel :
+         {scene::PropertyChannel::PositionX, scene::PropertyChannel::PositionY,
+          scene::PropertyChannel::PositionZ, scene::PropertyChannel::Opacity}) {
+      scene::ChannelKeyframes keys{element.node, channel, {}, {}, {}};
+      for (std::int64_t key = 0; key < 12; ++key) {
+        keys.frames.push_back(key * 600 + static_cast<std::int64_t>(index % 50U));
+        keys.values.push_back(static_cast<double>((key * 7 + 3) % 11));
+        keys.interpolations.push_back(
+            static_cast<scene::KeyInterpolation>(key % 3));
+      }
+      keys.tangents.assign(keys.frames.size(), std::nullopt);
+      for (std::size_t key = 0U; key < keys.frames.size(); ++key) {
+        if (keys.interpolations[key] == scene::KeyInterpolation::Cubic) {
+          keys.tangents[key] = scene::KeyTangent{};
+        }
+      }
+      h.keys.push_back(std::move(keys));
+    }
+    h.effects.push_back(scene::EffectInstance{
+        doc::NodeId{90'000U + index}, element.node,
+        scene::EffectKind::Saturation, 0, true, 1.5F});
+  }
+  // The placeholder font draws one quad per character whose u names it, so
+  // counting 'P' quads at the top of the stack shows the Position rows open.
+  const auto position_rows = [&] {
+    std::size_t count = 0U;
+    const auto &vertices = h.list.vertices();
+    for (std::size_t index = 0U; index + 5U < vertices.size(); index += 6U) {
+      if (vertices[index].u == static_cast<float>('P') / 128.0F &&
+          vertices[index].x < 250.0F) {
+        ++count;
+      }
+    }
+    return count;
+  };
+  h.bounds = gui::Rect{0.0F, 0.0F, 1920.0F, 1080.0F};
+  static_cast<void>(h.frame(1200.0F, 600.0F, false));
+  const std::size_t collapsed_vertices = h.list.vertices().size();
+  const std::size_t collapsed_p = position_rows();
+  // Every row on screen while twirling, bottom-up so the rows above a click
+  // never move: open the layer, then its Position group.
+  h.bounds = gui::Rect{0.0F, 0.0F, 1920.0F,
+                       76.0F + 24.0F * static_cast<float>(layers * 12U)};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  for (std::size_t index = layers; index-- > 0U;) {
+    const float y = 88.0F + 24.0F * static_cast<float>(index);
+    static_cast<void>(h.click(42.0F, y));
+    static_cast<void>(h.click(58.0F, y + 24.0F));
+  }
+  h.bounds = gui::Rect{0.0F, 0.0F, 1920.0F, 1080.0F};
+  static_cast<void>(h.frame(1200.0F, 600.0F, false));
+  std::printf("'P' glyphs in the list: %zu collapsed, %zu expanded\n",
+              collapsed_p, position_rows());
+  // Scroll into the middle of the stack.
+  for (int notch = 0; notch < 200; ++notch) {
+    static_cast<void>(
+        h.frame(200.0F, 600.0F, false, gui::KeyMods::None, -1.0F));
+  }
+  static_cast<void>(h.frame(1200.0F, 600.0F, false));
+
+  const auto measure = [&](const char *label, auto &&pointer) {
+    using clock = std::chrono::steady_clock;
+    for (int warm = 0; warm < 30; ++warm) pointer(warm);
+    std::vector<double> batches;
+    constexpr int frames_per_batch = 100;
+    for (int batch = 0; batch < 9; ++batch) {
+      const auto begin = clock::now();
+      for (int frame = 0; frame < frames_per_batch; ++frame) pointer(frame);
+      const std::chrono::duration<double, std::milli> elapsed =
+          clock::now() - begin;
+      batches.push_back(elapsed.count() / frames_per_batch);
+    }
+    std::sort(batches.begin(), batches.end());
+    std::printf("%-28s median %.3f ms/frame  fastest %.3f ms/frame\n", label,
+                batches[batches.size() / 2U], batches.front());
+  };
+  std::printf("%zu layers; %zu vertices per frame collapsed, %zu expanded\n",
+              layers, collapsed_vertices, h.list.vertices().size());
+  measure("idle", [&](int) { static_cast<void>(h.frame(1200.0F, 600.0F, false)); });
+  measure("pointer sweeping lanes", [&](int frame) {
+    static_cast<void>(h.frame(400.0F + static_cast<float>(frame % 100) * 14.0F,
+                              300.0F + static_cast<float>(frame % 37) * 18.0F,
+                              false));
+  });
+  return 0;
+}
+
 int golden_main(int argc, char **argv) {
+  if (argc >= 2 && std::string_view{argv[1]} == "--bench") {
+    return golden_bench(argc == 3 ? std::stoul(argv[2]) : 400U);
+  }
   const bool record = argc == 3 && std::string_view{argv[1]} == "--record";
   if (!(argc == 2 || record)) {
     std::cerr << "usage: " << argv[0] << " [--record] <digests.txt>\n";
