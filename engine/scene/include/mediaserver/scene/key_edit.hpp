@@ -4,8 +4,10 @@
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <array>
 #include <compare>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -35,6 +37,11 @@ enum class KeyEditSkipReason : core::u8 {
     AmbiguousChannel,
     KeyMissing,
     ChannelCapacity,
+    // A tangent mode was asked of a Hold or Linear key, which has none.
+    NotCubic,
+    // The change would leave the channel unable to evaluate, typically
+    // handle weights longer than the interval they span.
+    InvalidTangent,
 };
 
 struct KeyEditSkip final {
@@ -57,6 +64,10 @@ struct KeyRecord final {
     bool carrier_authored{};
     KeyInterpolation interpolation{KeyInterpolation::Linear};
     bool interpolation_authored{};
+    // The key's tangent properties exactly as authored, one slot per
+    // schema::channel_key_tangent_suffixes entry, so moving, duplicating and
+    // re-indexing a key carries its handles byte for byte.
+    std::array<std::optional<doc::PropertyValue>, 5U> tangent{};
 
     bool operator==(const KeyRecord&) const = default;
 };
@@ -74,6 +85,9 @@ enum class KeyEditError : core::u8 {
     InvalidScale,
     IntegerOverflow,
     AllocationFailed,
+    // A tangent with a non-finite slope or a weight that is not a positive
+    // finite number of frames.
+    InvalidTangent,
 };
 
 // A transformed key displaced another transformed key, or replaced a
@@ -161,5 +175,58 @@ using KeyEditResult = core::Result<KeyEditPlan, KeyEditError>;
 [[nodiscard]] KeyEditResult plan_key_scale(
     const doc::Root& document, std::span<const KeyAddress> selection,
     KeyTimeScale scale);
+
+// What an easing choice writes on each selected key. A key's interpolation
+// names how it reaches the next key; its in tangent shapes the segment from
+// the previous key, and only once that key is Cubic. Slopes are value per
+// show frame. "Weights kept" keeps authored handle lengths of a key that was
+// already Cubic and not Auto, and authors none otherwise.
+//
+//   Linear    linear; every tangent property removed.
+//   Hold      hold; every tangent property removed.
+//   Auto      cubic; every tangent property removed (Auto is the default).
+//   EasyEase  cubic, flat (both slopes zero); weights kept.
+//   EaseIn    cubic, broken: in slope 0, out slope the one it evaluated with;
+//             weights kept.
+//   EaseOut   cubic, broken: out slope 0, in slope the one it evaluated
+//             with; weights kept.
+//   Aligned   cubic keys only: aligned, both slopes the mean of the two it
+//             evaluated with; weights kept.
+//   Broken    cubic keys only: broken, each slope the one it evaluated with;
+//             weights kept.
+//   Flat      cubic keys only: flat; weights kept.
+//
+// EasyEase and EaseIn also turn an unselected Linear previous key into an
+// Auto Cubic one, so the incoming segment is a curve the eased in tangent
+// shapes; a Hold previous key stays a hold. Aligned, Broken and Flat skip a
+// Hold or Linear key as NotCubic. A channel the change would leave unable to
+// evaluate is left as it was and its keys reported InvalidTangent. The
+// selection is unchanged; selection_after lists it as the edit leaves it.
+enum class KeyEase : core::u8 {
+    Linear,
+    Hold,
+    Auto,
+    EasyEase,
+    EaseIn,
+    EaseOut,
+    Aligned,
+    Broken,
+    Flat,
+};
+
+[[nodiscard]] KeyEditResult plan_key_ease(
+    const doc::Root& document, std::span<const KeyAddress> selection,
+    KeyEase ease);
+
+// One key's handles, as a handle drag leaves them: the key becomes Cubic with
+// exactly `tangent`. Auto removes every tangent property; Flat writes the
+// mode and any weights; Aligned writes the mean of the two slopes to both;
+// Broken writes both slopes; weights are written only when present. A
+// non-finite slope or a weight that is not a positive finite number fails
+// with InvalidTangent; weights too long for the key's intervals skip the key
+// as InvalidTangent and change nothing.
+[[nodiscard]] KeyEditResult plan_key_tangent(
+    const doc::Root& document, const KeyAddress& address,
+    const KeyTangent& tangent);
 
 } // namespace mediaserver::scene

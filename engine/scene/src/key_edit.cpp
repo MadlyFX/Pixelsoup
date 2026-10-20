@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -28,6 +29,7 @@ struct ParsedKey final {
     bool carrier_authored{};
     KeyInterpolation interpolation{KeyInterpolation::Linear};
     bool interpolation_authored{};
+    std::array<std::optional<doc::PropertyValue>, 5U> tangent{};
 };
 
 struct ParsedChannel final {
@@ -227,6 +229,15 @@ struct ParsedChannel final {
                 key.interpolation = KeyInterpolation::Cubic;
             } else {
                 return false;
+            }
+        }
+        for (std::size_t slot = 0U;
+             slot < schema::channel_key_tangent_suffixes.size(); ++slot) {
+            if (const auto* const held = find(
+                    node.properties,
+                    key_property(
+                        index, schema::channel_key_tangent_suffixes[slot]))) {
+                key.tangent[slot] = *held;
             }
         }
         parsed.keys.push_back(std::move(key));
@@ -517,6 +528,7 @@ public:
         key.carrier_authored,
         key.interpolation,
         key.interpolation_authored,
+        key.tangent,
     };
 }
 
@@ -580,6 +592,7 @@ public:
         record.carrier_authored,
         record.interpolation,
         record.interpolation_authored,
+        record.tangent,
     };
 }
 
@@ -606,6 +619,10 @@ public:
             key_property(index, schema::channel_key_value_suffix));
         rebuilt.properties.erase(
             key_property(index, schema::channel_key_interp_suffix));
+        for (const std::string_view suffix :
+             schema::channel_key_tangent_suffixes) {
+            rebuilt.properties.erase(key_property(index, suffix));
+        }
     }
     for (std::size_t index = 0U; index < keys.size(); ++index) {
         const ParsedKey& key = keys[index];
@@ -624,6 +641,14 @@ public:
                 key_property(
                     persisted_index, schema::channel_key_interp_suffix),
                 std::string{interpolation_name(key.interpolation)});
+        }
+        for (std::size_t slot = 0U; slot < key.tangent.size(); ++slot) {
+            if (key.tangent[slot].has_value()) {
+                rebuilt.properties.insert_or_assign(
+                    key_property(persisted_index,
+                                 schema::channel_key_tangent_suffixes[slot]),
+                    *key.tangent[slot]);
+            }
         }
     }
     return rebuilt;
@@ -1019,6 +1044,262 @@ struct WideDivision final {
     return 0;
 }
 
+// Tangent carrier slots, in schema::channel_key_tangent_suffixes order.
+constexpr std::size_t tangent_mode_slot = 0U;
+constexpr std::size_t in_slope_slot = 1U;
+constexpr std::size_t out_slope_slot = 2U;
+constexpr std::size_t in_weight_slot = 3U;
+constexpr std::size_t out_weight_slot = 4U;
+
+[[nodiscard]] std::optional<double> carried_number(
+    const std::optional<doc::PropertyValue>& held) noexcept {
+    if (!held.has_value()) {
+        return std::nullopt;
+    }
+    if (const auto* const real = std::get_if<double>(&*held)) {
+        return *real;
+    }
+    if (const auto* const whole = std::get_if<std::int64_t>(&*held)) {
+        return static_cast<double>(*whole);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] KeyTangentMode carried_mode(const ParsedKey& key) noexcept {
+    const auto& held = key.tangent[tangent_mode_slot];
+    const auto* const name =
+        held.has_value() ? std::get_if<std::string>(&*held) : nullptr;
+    if (name == nullptr) {
+        return KeyTangentMode::Auto;
+    }
+    if (*name == schema::tangent_aligned) {
+        return KeyTangentMode::Aligned;
+    }
+    if (*name == schema::tangent_broken) {
+        return KeyTangentMode::Broken;
+    }
+    if (*name == schema::tangent_flat) {
+        return KeyTangentMode::Flat;
+    }
+    return KeyTangentMode::Auto;
+}
+
+// The keys as the evaluator sees them, for their evaluated slopes and to
+// check a planned change still evaluates.
+[[nodiscard]] ChannelKeyframes evaluated_view(
+    const ParsedChannel& channel, const std::vector<ParsedKey>& keys) {
+    ChannelKeyframes view{};
+    view.target = channel.target;
+    view.component = channel.property;
+    for (const ParsedKey& key : keys) {
+        view.frames.push_back(key.frame);
+        view.values.push_back(key.value);
+        view.interpolations.push_back(key.interpolation);
+        if (key.interpolation != KeyInterpolation::Cubic) {
+            view.tangents.emplace_back();
+            continue;
+        }
+        KeyTangent tangent{};
+        tangent.mode = carried_mode(key);
+        if (tangent.mode != KeyTangentMode::Auto) {
+            tangent.in_weight = carried_number(key.tangent[in_weight_slot]);
+            tangent.out_weight = carried_number(key.tangent[out_weight_slot]);
+        }
+        if (tangent.mode == KeyTangentMode::Aligned
+            || tangent.mode == KeyTangentMode::Broken) {
+            tangent.in_slope =
+                carried_number(key.tangent[in_slope_slot]).value_or(0.0);
+            tangent.out_slope =
+                carried_number(key.tangent[out_slope_slot]).value_or(0.0);
+        }
+        if (tangent.mode == KeyTangentMode::Aligned) {
+            const auto in = carried_number(key.tangent[in_slope_slot]);
+            const auto out = carried_number(key.tangent[out_slope_slot]);
+            const double shared = in.has_value()
+                ? (out.has_value() ? std::midpoint(*in, *out) : *in)
+                : out.value_or(0.0);
+            tangent.in_slope = shared;
+            tangent.out_slope = shared;
+        }
+        view.tangents.emplace_back(tangent);
+    }
+    return view;
+}
+
+[[nodiscard]] bool evaluates(const ParsedChannel& channel,
+                             const std::vector<ParsedKey>& keys) {
+    const ChannelKeyframes view = evaluated_view(channel, keys);
+    return !view.frames.empty()
+        && sample_keyframes(view, view.frames.front()).has_value();
+}
+
+void make_cubic(ParsedKey& key) {
+    key.interpolation = KeyInterpolation::Cubic;
+    key.interpolation_authored = true;
+}
+
+void write_mode(ParsedKey& key, std::string_view mode) {
+    key.tangent[tangent_mode_slot] = doc::PropertyValue{std::string{mode}};
+}
+
+// Keeps a Cubic, non-Auto key's authored weights; anything else has none.
+void keep_weights_only(ParsedKey& key) {
+    const bool kept = key.interpolation == KeyInterpolation::Cubic
+        && carried_mode(key) != KeyTangentMode::Auto;
+    const auto in = key.tangent[in_weight_slot];
+    const auto out = key.tangent[out_weight_slot];
+    key.tangent = {};
+    if (kept) {
+        key.tangent[in_weight_slot] = in;
+        key.tangent[out_weight_slot] = out;
+    }
+}
+
+void apply_ease(ParsedKey& key, KeyEase ease, KeySlopes slopes) {
+    switch (ease) {
+    case KeyEase::Linear:
+        key.interpolation = KeyInterpolation::Linear;
+        key.interpolation_authored = true;
+        key.tangent = {};
+        return;
+    case KeyEase::Hold:
+        key.interpolation = KeyInterpolation::Hold;
+        key.interpolation_authored = true;
+        key.tangent = {};
+        return;
+    case KeyEase::Auto:
+        make_cubic(key);
+        key.tangent = {};
+        return;
+    case KeyEase::EasyEase:
+    case KeyEase::Flat:
+        keep_weights_only(key);
+        make_cubic(key);
+        write_mode(key, schema::tangent_flat);
+        return;
+    case KeyEase::EaseIn:
+        keep_weights_only(key);
+        make_cubic(key);
+        write_mode(key, schema::tangent_broken);
+        key.tangent[in_slope_slot] = doc::PropertyValue{0.0};
+        key.tangent[out_slope_slot] = doc::PropertyValue{slopes.out};
+        return;
+    case KeyEase::EaseOut:
+        keep_weights_only(key);
+        make_cubic(key);
+        write_mode(key, schema::tangent_broken);
+        key.tangent[in_slope_slot] = doc::PropertyValue{slopes.in};
+        key.tangent[out_slope_slot] = doc::PropertyValue{0.0};
+        return;
+    case KeyEase::Aligned: {
+        keep_weights_only(key);
+        write_mode(key, schema::tangent_aligned);
+        const double shared = std::midpoint(slopes.in, slopes.out);
+        key.tangent[in_slope_slot] = doc::PropertyValue{shared};
+        key.tangent[out_slope_slot] = doc::PropertyValue{shared};
+        return;
+    }
+    case KeyEase::Broken:
+        keep_weights_only(key);
+        write_mode(key, schema::tangent_broken);
+        key.tangent[in_slope_slot] = doc::PropertyValue{slopes.in};
+        key.tangent[out_slope_slot] = doc::PropertyValue{slopes.out};
+        return;
+    }
+}
+
+[[nodiscard]] bool mode_only(KeyEase ease) noexcept {
+    return ease == KeyEase::Aligned || ease == KeyEase::Broken
+        || ease == KeyEase::Flat;
+}
+
+[[nodiscard]] bool eases_in(KeyEase ease) noexcept {
+    return ease == KeyEase::EasyEase || ease == KeyEase::EaseIn;
+}
+
+[[nodiscard]] bool valid_tangent(const KeyTangent& tangent) noexcept {
+    const auto weight_ok = [](const std::optional<double>& weight) {
+        return !weight.has_value()
+            || (std::isfinite(*weight) && *weight > 0.0);
+    };
+    return std::isfinite(tangent.in_slope) && std::isfinite(tangent.out_slope)
+        && weight_ok(tangent.in_weight) && weight_ok(tangent.out_weight)
+        && tangent.mode <= KeyTangentMode::Flat;
+}
+
+// Applies `change` to the selected keys of each selected channel, keeping a
+// channel unchanged (and its keys skipped as InvalidTangent) when the result
+// would not evaluate. `change` returns false to skip one key with `skip`.
+template <typename Change>
+[[nodiscard]] KeyEditPlan make_tangent_plan(const doc::Root& document,
+                                            const DocumentIndex& index,
+                                            KeySelection selection,
+                                            Change&& change) {
+    KeyEditPlan plan{};
+    plan.report.selected = selection.records.size();
+    plan.report.duplicate_inputs = selection.duplicate_inputs;
+    plan.report.skips = std::move(selection.skips);
+
+    std::map<ChannelIdentity, std::set<core::i64>> by_channel;
+    for (const KeyRecord& record : selection.records) {
+        by_channel[ChannelIdentity{record.address.target,
+                                   record.address.property}]
+            .insert(record.address.frame);
+    }
+    Mutations mutations;
+    std::map<KeyAddress, KeyRecord> refreshed;
+    for (const auto& [identity, frames] : by_channel) {
+        const ParsedChannel* const channel = index.channel(identity);
+        if (channel == nullptr) {
+            continue;
+        }
+        const ChannelKeyframes before = evaluated_view(*channel, channel->keys);
+        std::vector<ParsedKey> working = channel->keys;
+        std::vector<std::size_t> changed;
+        for (std::size_t key = 0U; key < working.size(); ++key) {
+            if (!frames.contains(working[key].frame)) {
+                continue;
+            }
+            const KeyAddress address{channel->target, channel->property,
+                                     working[key].frame};
+            KeyEditSkipReason skip{KeyEditSkipReason::NotCubic};
+            const KeySlopes slopes =
+                evaluated_key_slopes(before, key).value_or(KeySlopes{});
+            if (!change(working, key, frames, slopes, skip)) {
+                plan.report.skips.push_back(KeyEditSkip{address, skip});
+                continue;
+            }
+            changed.push_back(key);
+        }
+        if (changed.empty()) {
+            continue;
+        }
+        if (!evaluates(*channel, working)) {
+            for (const std::size_t key : changed) {
+                plan.report.skips.push_back(KeyEditSkip{
+                    KeyAddress{channel->target, channel->property,
+                               working[key].frame},
+                    KeyEditSkipReason::InvalidTangent});
+            }
+            continue;
+        }
+        for (const std::size_t key : changed) {
+            const KeyRecord record = make_record(*channel, working[key]);
+            refreshed.insert_or_assign(record.address, record);
+        }
+        plan.report.applied += changed.size();
+        record_channel_mutation(index, channel->node, working, mutations);
+    }
+    for (const KeyRecord& record : selection.records) {
+        const auto found = refreshed.find(record.address);
+        plan.selection_after.push_back(
+            found == refreshed.end() ? record : found->second);
+    }
+    sort_report(plan);
+    finalize_plan(document, std::move(mutations), plan);
+    return plan;
+}
+
 } // namespace
 
 KeySelectionResult inspect_key_selection(
@@ -1084,6 +1365,90 @@ KeyEditResult plan_key_delete(const doc::Root& document,
         const DocumentIndex index{document};
         return KeyEditResult::success(make_delete_plan(
             document, index, inspect_selection(index, selection)));
+    } catch (const std::bad_alloc&) {
+        return KeyEditResult::failure(KeyEditError::AllocationFailed);
+    }
+}
+
+KeyEditResult plan_key_ease(const doc::Root& document,
+                            std::span<const KeyAddress> selection,
+                            KeyEase ease) {
+    try {
+        const DocumentIndex index{document};
+        return KeyEditResult::success(make_tangent_plan(
+            document, index, inspect_selection(index, selection),
+            [ease](std::vector<ParsedKey>& keys, std::size_t key,
+                   const std::set<core::i64>& selected, KeySlopes slopes,
+                   KeyEditSkipReason& skip) {
+                if (mode_only(ease)
+                    && keys[key].interpolation != KeyInterpolation::Cubic) {
+                    skip = KeyEditSkipReason::NotCubic;
+                    return false;
+                }
+                apply_ease(keys[key], ease, slopes);
+                if (eases_in(ease) && key > 0U
+                    && !selected.contains(keys[key - 1U].frame)
+                    && keys[key - 1U].interpolation
+                        == KeyInterpolation::Linear) {
+                    apply_ease(keys[key - 1U], KeyEase::Auto, {});
+                }
+                return true;
+            }));
+    } catch (const std::bad_alloc&) {
+        return KeyEditResult::failure(KeyEditError::AllocationFailed);
+    }
+}
+
+KeyEditResult plan_key_tangent(const doc::Root& document,
+                               const KeyAddress& address,
+                               const KeyTangent& tangent) {
+    if (!valid_tangent(tangent)) {
+        return KeyEditResult::failure(KeyEditError::InvalidTangent);
+    }
+    try {
+        const DocumentIndex index{document};
+        return KeyEditResult::success(make_tangent_plan(
+            document, index, inspect_selection(index, {&address, 1U}),
+            [&tangent](std::vector<ParsedKey>& keys, std::size_t key,
+                       const std::set<core::i64>&, KeySlopes,
+                       KeyEditSkipReason&) {
+                ParsedKey& edited = keys[key];
+                make_cubic(edited);
+                edited.tangent = {};
+                if (tangent.mode == KeyTangentMode::Auto) {
+                    return true;
+                }
+                switch (tangent.mode) {
+                case KeyTangentMode::Aligned: {
+                    write_mode(edited, schema::tangent_aligned);
+                    const double shared =
+                        std::midpoint(tangent.in_slope, tangent.out_slope);
+                    edited.tangent[in_slope_slot] = doc::PropertyValue{shared};
+                    edited.tangent[out_slope_slot] = doc::PropertyValue{shared};
+                    break;
+                }
+                case KeyTangentMode::Broken:
+                    write_mode(edited, schema::tangent_broken);
+                    edited.tangent[in_slope_slot] =
+                        doc::PropertyValue{tangent.in_slope};
+                    edited.tangent[out_slope_slot] =
+                        doc::PropertyValue{tangent.out_slope};
+                    break;
+                case KeyTangentMode::Flat:
+                case KeyTangentMode::Auto:
+                    write_mode(edited, schema::tangent_flat);
+                    break;
+                }
+                if (tangent.in_weight.has_value()) {
+                    edited.tangent[in_weight_slot] =
+                        doc::PropertyValue{*tangent.in_weight};
+                }
+                if (tangent.out_weight.has_value()) {
+                    edited.tangent[out_weight_slot] =
+                        doc::PropertyValue{*tangent.out_weight};
+                }
+                return true;
+            }));
     } catch (const std::bad_alloc&) {
         return KeyEditResult::failure(KeyEditError::AllocationFailed);
     }

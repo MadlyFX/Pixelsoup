@@ -2237,6 +2237,19 @@ struct ChannelKeyframes final {
 // Samples the editor's bounded channel projection with the same interpolation,
 // tangent and weight rules as SceneModel. No allocations; malformed or oversized
 // projections return no value rather than authoring a guessed replacement key.
+// The slopes key `index` of `channel` is evaluated with, incoming then
+// outgoing: authored for Aligned and Broken, zero for Flat, and the derived
+// Auto (PCHIP) slope otherwise, including on Hold and Linear keys whose
+// neighbours are Cubic. Empty when the channel would not evaluate.
+struct KeySlopes final {
+    double in{};
+    double out{};
+
+    bool operator==(const KeySlopes&) const = default;
+};
+[[nodiscard]] std::optional<KeySlopes> evaluated_key_slopes(
+    const ChannelKeyframes& channel, std::size_t index) noexcept;
+
 [[nodiscard]] std::optional<double> sample_keyframes(
     const ChannelKeyframes& channel, core::i64 frame) noexcept;
 

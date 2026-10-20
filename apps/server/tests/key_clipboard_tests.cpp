@@ -450,6 +450,60 @@ void surfaces_require_explicit_unlock_for_copy_paste_and_duplicate() {
   KEY_CHECK(doc::diff(locked, duplicate.value().document).changes.empty());
 }
 
+// Copy, Paste and Alt-duplicate carry a key's handles with it, and a key
+// pasted over another replaces its handles rather than inheriting them.
+void tangents_travel_with_copied_and_duplicated_keys() {
+  doc::Root source = source_document();
+  doc::Node position = *source.get(doc::NodeId{100U});
+  const auto set = [&](std::size_t index, std::string_view suffix,
+                       doc::PropertyValue value) {
+    position.properties.insert_or_assign(key_property(index, suffix),
+                                         std::move(value));
+  };
+  set(1U, scene::schema::channel_key_tangent_mode_suffix,
+      std::string{scene::schema::tangent_broken});
+  set(1U, scene::schema::channel_key_in_slope_suffix, 0.375);
+  set(1U, scene::schema::channel_key_out_slope_suffix, -0.625);
+  set(1U, scene::schema::channel_key_out_weight_suffix, 2.5);
+  source = source.set(position);
+
+  app::KeyClipboard clipboard;
+  constexpr std::array cubic{
+      app::KeyAddress{doc::NodeId{10U}, scene::PropertyChannel::PositionX, 20}};
+  KEY_CHECK(clipboard.copy(source, scene::SceneId{1U}, cubic).captured == 1U);
+  auto pasted = clipboard.paste(source, scene::SceneId{1U}, 40U);
+  KEY_CHECK(pasted);
+  const doc::Node &with_copy = *pasted.value().document.get(doc::NodeId{100U});
+  KEY_CHECK(integer(with_copy, key_property(
+                                   2U, scene::schema::channel_key_frame_suffix)) ==
+            40);
+  KEY_CHECK(text(with_copy,
+                 key_property(2U, scene::schema::channel_key_tangent_mode_suffix)) ==
+            scene::schema::tangent_broken);
+  KEY_CHECK(real(with_copy,
+                 key_property(2U, scene::schema::channel_key_in_slope_suffix)) ==
+            0.375);
+  KEY_CHECK(real(with_copy,
+                 key_property(2U, scene::schema::channel_key_out_weight_suffix)) ==
+            2.5);
+  KEY_CHECK(!with_copy.properties.contains(
+      key_property(2U, scene::schema::channel_key_in_weight_suffix)));
+
+  // The Hold key at frame 10 duplicated onto frame 20 replaces the Broken
+  // key there, handles and all.
+  constexpr std::array hold{
+      app::KeyAddress{doc::NodeId{10U}, scene::PropertyChannel::PositionX, 10}};
+  auto duplicated = app::duplicate_keys(source, scene::SceneId{1U}, hold, 10);
+  KEY_CHECK(duplicated);
+  const doc::Node &over = *duplicated.value().document.get(doc::NodeId{100U});
+  KEY_CHECK(text(over, key_property(1U, scene::schema::channel_key_interp_suffix)) ==
+            scene::schema::interp_hold);
+  for (const std::string_view suffix :
+       scene::schema::channel_key_tangent_suffixes) {
+    KEY_CHECK(!over.properties.contains(key_property(1U, suffix)));
+  }
+}
+
 } // namespace
 
 int main() {
@@ -460,6 +514,7 @@ int main() {
       locked_and_incompatible_targets_are_reported_without_authorship,
       frame_overflow_rejects_the_complete_batch,
       spatial_primary_channels_copy_and_paste_by_typed_name,
+      tangents_travel_with_copied_and_duplicated_keys,
   };
   std::size_t passed = 0U;
   for (const auto test : cases) {

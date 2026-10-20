@@ -47,7 +47,7 @@ if(BUILD_TESTING)
         target_link_libraries(mediaserver_scene_${_scene_suite}_tests
             PRIVATE MediaServer::Scene
         )
-        if(_scene_suite STREQUAL "mask" OR _scene_suite STREQUAL "keyer" OR _scene_suite STREQUAL "lighting" OR _scene_suite STREQUAL "linked_scene")
+        if(_scene_suite STREQUAL "mask" OR _scene_suite STREQUAL "keyer" OR _scene_suite STREQUAL "key_edit" OR _scene_suite STREQUAL "lighting" OR _scene_suite STREQUAL "linked_scene")
             # Focused typed-effect suites pin the generic project-file round
             # trip as well as scene-model streaming/digest behaviour.
             target_link_libraries(mediaserver_scene_${_scene_suite}_tests

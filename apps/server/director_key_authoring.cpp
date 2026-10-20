@@ -111,6 +111,12 @@ key_batch_message(editor::TimelineKeyBatchAction action,
     case editor::TimelineKeyBatchAction::Scale:
         operation = "SCALE";
         break;
+    case editor::TimelineKeyBatchAction::Ease:
+        operation = "EASE";
+        break;
+    case editor::TimelineKeyBatchAction::Tangent:
+        operation = "TANGENT";
+        break;
     }
     std::string message{"KEY "};
     message.append(operation);
@@ -126,6 +132,27 @@ key_batch_message(editor::TimelineKeyBatchAction action,
         message.append(" / ");
         message.append(std::to_string(report.skips.size()));
         message.append(" SKIPPED");
+        const auto count = [&](scene::KeyEditSkipReason reason) {
+            return static_cast<std::size_t>(std::count_if(
+                report.skips.begin(), report.skips.end(),
+                [reason](const scene::KeyEditSkip &skip) {
+                    return skip.reason == reason;
+                }));
+        };
+        const auto detail = [&](scene::KeyEditSkipReason reason,
+                                std::string_view label) {
+            if (const std::size_t skipped = count(reason); skipped != 0U) {
+                message.append(" (");
+                message.append(std::to_string(skipped));
+                message.push_back(' ');
+                message.append(label);
+                message.push_back(')');
+            }
+        };
+        detail(scene::KeyEditSkipReason::TargetLocked, "LOCKED");
+        detail(scene::KeyEditSkipReason::NotCubic, "NOT BEZIER");
+        detail(scene::KeyEditSkipReason::InvalidTangent,
+               "HANDLES TOO LONG");
     }
     return message;
 }
@@ -229,8 +256,13 @@ void upsert_channel_key(doc::Node &node, core::u64 frame, double value) {
         return false;
     }
 
-    const std::array<std::string_view, 3U> suffixes{frame_suffix, value_suffix,
-                                                    interp_suffix};
+    // Every per-key property moves down with its key, tangents included, so
+    // no later key inherits another's handles.
+    std::vector<std::string_view> suffixes{frame_suffix, value_suffix,
+                                           interp_suffix};
+    suffixes.insert(suffixes.end(),
+                    scene::schema::channel_key_tangent_suffixes.begin(),
+                    scene::schema::channel_key_tangent_suffixes.end());
     for (core::u64 index = remove_at; index + 1U < count; ++index) {
         for (const std::string_view suffix : suffixes) {
             const std::string destination =

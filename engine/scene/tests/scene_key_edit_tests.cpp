@@ -1,10 +1,17 @@
+#include <mediaserver/cmd/director_scheduler.hpp>
+#include <mediaserver/persist/project_file.hpp>
 #include <mediaserver/scene/key_edit.hpp>
+#include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -17,8 +24,10 @@
 
 namespace {
 
+namespace cmd = mediaserver::cmd;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
+namespace persist = mediaserver::persist;
 namespace scene = mediaserver::scene;
 namespace schema = mediaserver::scene::schema;
 
@@ -588,12 +597,457 @@ void spatial_effect_channels_are_typed_and_kind_compatible() {
                std::vector<core::i64>{5}));
 }
 
+// --- Easing and tangents -------------------------------------------------
+
+[[nodiscard]] Property real(std::string_view name, double value) {
+    return {std::string{name}, value};
+}
+
+// A rising Position X ramp, every key Linear: 0, 12, 18, 30 at frames 0, 30,
+// 60 and 90. Its interior Auto slopes are the Fritsch-Carlson harmonic mean
+// of the 0.4 and 0.2 secants with equal 30-frame widths: 180 / (90 / 0.4 +
+// 90 / 0.2) = 4 / 15.
+constexpr double ramp_interior_slope = 4.0 / 15.0;
+
+[[nodiscard]] doc::Root ramp_root(bool locked = false) {
+    doc::Root root;
+    root = root.set(node(1U, schema::stage_type));
+    root = root.set(node(10U, schema::object_type,
+                         {whole(schema::scene_id, 1),
+                          flag(schema::locked, locked)}));
+    root = root.set(channel(
+        40U, 10U, schema::position_x,
+        {key(0, 0.0, schema::interp_linear),
+         key(30, 12.0, schema::interp_linear),
+         key(60, 18.0, schema::interp_linear),
+         key(90, 30.0, schema::interp_linear)}));
+    return root;
+}
+
+// The ramp with its frame 30 key Cubic and Broken: slopes 0.1 in and 0.5
+// out, handle lengths 4 and 6 frames.
+[[nodiscard]] doc::Root broken_ramp_root() {
+    doc::Root root = ramp_root();
+    doc::Node changed = *root.get(doc::NodeId{40U});
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_interp_suffix),
+        std::string{schema::interp_cubic});
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_tangent_mode_suffix),
+        std::string{schema::tangent_broken});
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_in_slope_suffix), 0.1);
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_out_slope_suffix), 0.5);
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_in_weight_suffix), 4.0);
+    changed.properties.insert_or_assign(
+        key_name(1U, schema::channel_key_out_weight_suffix), 6.0);
+    return root.set(std::move(changed));
+}
+
+[[nodiscard]] const doc::Node& ramp(const doc::Root& root) {
+    const doc::Node* const found = root.get(doc::NodeId{40U});
+    KEY_CHECK(found != nullptr);
+    return *found;
+}
+
+[[nodiscard]] std::string key_text(const doc::Node& channel_node,
+                                   std::size_t index,
+                                   std::string_view suffix) {
+    const auto* const held = property(channel_node, key_name(index, suffix));
+    const auto* const name =
+        held == nullptr ? nullptr : std::get_if<std::string>(held);
+    return name == nullptr ? std::string{"<none>"} : *name;
+}
+
+[[nodiscard]] std::optional<double> key_number(const doc::Node& channel_node,
+                                               std::size_t index,
+                                               std::string_view suffix) {
+    const auto* const held = property(channel_node, key_name(index, suffix));
+    const auto* const number =
+        held == nullptr ? nullptr : std::get_if<double>(held);
+    return number == nullptr ? std::nullopt : std::optional<double>{*number};
+}
+
+[[nodiscard]] bool near(std::optional<double> value, double expected) {
+    return value.has_value() && std::fabs(*value - expected) < 1e-12;
+}
+
+// No tangent property of any kind on key `index`.
+[[nodiscard]] bool untangented(const doc::Node& channel_node,
+                               std::size_t index) {
+    for (const std::string_view suffix :
+         schema::channel_key_tangent_suffixes) {
+        if (property(channel_node, key_name(index, suffix)) != nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] doc::Root eased(const doc::Root& root,
+                              std::initializer_list<core::i64> frames,
+                              scene::KeyEase ease) {
+    std::vector<scene::KeyAddress> selection;
+    for (const core::i64 frame : frames) {
+        selection.push_back(
+            address(10U, scene::PropertyChannel::PositionX, frame));
+    }
+    auto planned = scene::plan_key_ease(root, selection, ease);
+    KEY_CHECK(planned.has_value());
+    return planned.value().after;
+}
+
+void easing_presets_write_exactly_their_documented_tangents() {
+    using schema::channel_key_interp_suffix;
+    using schema::channel_key_tangent_mode_suffix;
+    using schema::channel_key_in_slope_suffix;
+    using schema::channel_key_out_slope_suffix;
+    using schema::channel_key_in_weight_suffix;
+    using schema::channel_key_out_weight_suffix;
+
+    // Ease In: the key goes Bezier with a flat in slope and keeps the slope
+    // it left with; its Linear neighbour before it goes Auto Bezier so the
+    // incoming segment curves. The keys after are untouched.
+    const doc::Node ease_in =
+        ramp(eased(ramp_root(), {60}, scene::KeyEase::EaseIn));
+    KEY_CHECK(key_text(ease_in, 2U, channel_key_interp_suffix) == "cubic");
+    KEY_CHECK(key_text(ease_in, 2U, channel_key_tangent_mode_suffix)
+              == "broken");
+    KEY_CHECK(near(key_number(ease_in, 2U, channel_key_in_slope_suffix), 0.0));
+    KEY_CHECK(near(key_number(ease_in, 2U, channel_key_out_slope_suffix),
+                   ramp_interior_slope));
+    KEY_CHECK(!key_number(ease_in, 2U, channel_key_in_weight_suffix));
+    KEY_CHECK(key_text(ease_in, 1U, channel_key_interp_suffix) == "cubic");
+    KEY_CHECK(untangented(ease_in, 1U));
+    KEY_CHECK(key_text(ease_in, 0U, channel_key_interp_suffix) == "linear");
+    KEY_CHECK(key_text(ease_in, 3U, channel_key_interp_suffix) == "linear");
+
+    // Ease Out flattens only the outgoing side and leaves the key before it.
+    const doc::Node ease_out =
+        ramp(eased(ramp_root(), {30}, scene::KeyEase::EaseOut));
+    KEY_CHECK(key_text(ease_out, 1U, channel_key_tangent_mode_suffix)
+              == "broken");
+    KEY_CHECK(near(key_number(ease_out, 1U, channel_key_in_slope_suffix),
+                   ramp_interior_slope));
+    KEY_CHECK(near(key_number(ease_out, 1U, channel_key_out_slope_suffix),
+                   0.0));
+    KEY_CHECK(key_text(ease_out, 0U, channel_key_interp_suffix) == "linear");
+
+    // Easy Ease on two neighbours: both Flat with no slopes written; only the
+    // unselected key before the first one is turned Auto Bezier.
+    const doc::Node easy =
+        ramp(eased(ramp_root(), {30, 60}, scene::KeyEase::EasyEase));
+    for (const std::size_t index : {1U, 2U}) {
+        KEY_CHECK(key_text(easy, index, channel_key_interp_suffix) == "cubic");
+        KEY_CHECK(key_text(easy, index, channel_key_tangent_mode_suffix)
+                  == "flat");
+        KEY_CHECK(!key_number(easy, index, channel_key_in_slope_suffix));
+        KEY_CHECK(!key_number(easy, index, channel_key_out_slope_suffix));
+    }
+    KEY_CHECK(key_text(easy, 0U, channel_key_interp_suffix) == "cubic");
+    KEY_CHECK(untangented(easy, 0U));
+    KEY_CHECK(key_text(easy, 3U, channel_key_interp_suffix) == "linear");
+
+    // Aligned averages the slopes it evaluated with and keeps the weights.
+    const doc::Node aligned =
+        ramp(eased(broken_ramp_root(), {30}, scene::KeyEase::Aligned));
+    KEY_CHECK(key_text(aligned, 1U, channel_key_tangent_mode_suffix)
+              == "aligned");
+    KEY_CHECK(near(key_number(aligned, 1U, channel_key_in_slope_suffix), 0.3));
+    KEY_CHECK(near(key_number(aligned, 1U, channel_key_out_slope_suffix), 0.3));
+    KEY_CHECK(near(key_number(aligned, 1U, channel_key_in_weight_suffix), 4.0));
+    KEY_CHECK(near(key_number(aligned, 1U, channel_key_out_weight_suffix),
+                   6.0));
+
+    // Flat keeps the weights and drops the slopes.
+    const doc::Node flat =
+        ramp(eased(broken_ramp_root(), {30}, scene::KeyEase::Flat));
+    KEY_CHECK(key_text(flat, 1U, channel_key_tangent_mode_suffix) == "flat");
+    KEY_CHECK(!key_number(flat, 1U, channel_key_in_slope_suffix));
+    KEY_CHECK(near(key_number(flat, 1U, channel_key_out_weight_suffix), 6.0));
+
+    // Broken writes the slopes an Auto key evaluated with.
+    const doc::Node broken = ramp(eased(
+        eased(ramp_root(), {60}, scene::KeyEase::Auto), {60},
+        scene::KeyEase::Broken));
+    KEY_CHECK(key_text(broken, 2U, channel_key_tangent_mode_suffix)
+              == "broken");
+    KEY_CHECK(near(key_number(broken, 2U, channel_key_in_slope_suffix),
+                   ramp_interior_slope));
+    KEY_CHECK(near(key_number(broken, 2U, channel_key_out_slope_suffix),
+                   ramp_interior_slope));
+
+    // Hold, Linear and Auto remove every tangent property.
+    for (const scene::KeyEase ease :
+         {scene::KeyEase::Hold, scene::KeyEase::Linear,
+          scene::KeyEase::Auto}) {
+        const doc::Node cleared = ramp(eased(broken_ramp_root(), {30}, ease));
+        KEY_CHECK(untangented(cleared, 1U));
+        KEY_CHECK(key_text(cleared, 1U, channel_key_interp_suffix)
+                  == (ease == scene::KeyEase::Hold     ? "hold"
+                      : ease == scene::KeyEase::Linear ? "linear"
+                                                       : "cubic"));
+    }
+
+    // A tangent mode on a Linear key is skipped and changes nothing.
+    const std::array selection{
+        address(10U, scene::PropertyChannel::PositionX, 60)};
+    auto skipped = scene::plan_key_ease(ramp_root(), selection,
+                                        scene::KeyEase::Flat);
+    KEY_CHECK(skipped.has_value());
+    KEY_CHECK(skipped.value().puts.empty());
+    KEY_CHECK(skipped.value().report.applied == 0U);
+    KEY_CHECK(skipped.value().report.skips.size() == 1U
+              && skipped.value().report.skips[0].reason
+                  == scene::KeyEditSkipReason::NotCubic);
+    KEY_CHECK(selected_frames(skipped.value())
+              == std::vector<core::i64>{60});
+}
+
+void tangent_edits_are_validated_and_refused_on_locked_targets() {
+    const scene::KeyAddress thirty =
+        address(10U, scene::PropertyChannel::PositionX, 30);
+    scene::KeyTangent tangent{scene::KeyTangentMode::Broken, 0.5, -0.25, 7.0,
+                              9.0};
+    auto planned = scene::plan_key_tangent(ramp_root(), thirty, tangent);
+    KEY_CHECK(planned.has_value());
+    KEY_CHECK(planned.value().report.applied == 1U);
+    const doc::Node& written = ramp(planned.value().after);
+    KEY_CHECK(key_text(written, 1U, schema::channel_key_interp_suffix)
+              == "cubic");
+    KEY_CHECK(key_text(written, 1U, schema::channel_key_tangent_mode_suffix)
+              == "broken");
+    KEY_CHECK(near(key_number(written, 1U, schema::channel_key_in_slope_suffix),
+                   0.5));
+    KEY_CHECK(near(key_number(written, 1U, schema::channel_key_out_slope_suffix),
+                   -0.25));
+    KEY_CHECK(near(key_number(written, 1U, schema::channel_key_in_weight_suffix),
+                   7.0));
+    KEY_CHECK(near(key_number(written, 1U,
+                              schema::channel_key_out_weight_suffix),
+                   9.0));
+    KEY_CHECK(planned.value().selection_after.size() == 1U
+              && planned.value().selection_after[0].interpolation
+                  == scene::KeyInterpolation::Cubic);
+
+    // Aligned stores one slope, the mean of the two asked for.
+    auto aligned = scene::plan_key_tangent(
+        ramp_root(), thirty,
+        scene::KeyTangent{scene::KeyTangentMode::Aligned, 0.2, 0.4,
+                          std::nullopt, 5.0});
+    KEY_CHECK(aligned.has_value());
+    const doc::Node& shared = ramp(aligned.value().after);
+    KEY_CHECK(near(key_number(shared, 1U, schema::channel_key_in_slope_suffix),
+                   0.3));
+    KEY_CHECK(near(key_number(shared, 1U, schema::channel_key_out_slope_suffix),
+                   0.3));
+    KEY_CHECK(!key_number(shared, 1U, schema::channel_key_in_weight_suffix));
+
+    // Values no evaluator could use are refused outright.
+    for (const scene::KeyTangent& bad :
+         {scene::KeyTangent{scene::KeyTangentMode::Broken,
+                            std::numeric_limits<double>::quiet_NaN(), 0.0},
+          scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0,
+                            std::numeric_limits<double>::infinity()},
+          scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.0, 0.0},
+          scene::KeyTangent{scene::KeyTangentMode::Aligned, 0.0, 0.0,
+                            std::nullopt, -3.0}}) {
+        const auto refused = scene::plan_key_tangent(ramp_root(), thirty, bad);
+        KEY_CHECK(!refused.has_value()
+                  && refused.error() == scene::KeyEditError::InvalidTangent);
+    }
+
+    // A handle longer than its interval would stop the channel evaluating:
+    // the key is skipped and nothing changes.
+    auto too_long = scene::plan_key_tangent(
+        ramp_root(), thirty,
+        scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.0,
+                          std::nullopt, 31.0});
+    KEY_CHECK(too_long.has_value());
+    KEY_CHECK(too_long.value().puts.empty());
+    KEY_CHECK(too_long.value().report.skips.size() == 1U
+              && too_long.value().report.skips[0].reason
+                  == scene::KeyEditSkipReason::InvalidTangent);
+
+    // A locked target is refused for both kinds of edit.
+    auto locked = scene::plan_key_tangent(ramp_root(true), thirty, tangent);
+    KEY_CHECK(locked.has_value());
+    KEY_CHECK(locked.value().puts.empty());
+    KEY_CHECK(locked.value().report.skips.size() == 1U
+              && locked.value().report.skips[0].reason
+                  == scene::KeyEditSkipReason::TargetLocked);
+    const std::array selection{thirty};
+    auto locked_ease = scene::plan_key_ease(ramp_root(true), selection,
+                                            scene::KeyEase::EasyEase);
+    KEY_CHECK(locked_ease.has_value());
+    KEY_CHECK(locked_ease.value().puts.empty());
+    KEY_CHECK(locked_ease.value().report.skips[0].reason
+              == scene::KeyEditSkipReason::TargetLocked);
+}
+
+void moved_duplicated_and_reindexed_keys_carry_their_tangents() {
+    const std::array thirty{
+        address(10U, scene::PropertyChannel::PositionX, 30)};
+    auto moved = scene::plan_key_move(broken_ramp_root(), thirty, 5);
+    KEY_CHECK(moved.has_value());
+    const doc::Node& after_move = ramp(moved.value().after);
+    KEY_CHECK(frames(after_move) == (std::vector<core::i64>{0, 35, 60, 90}));
+    KEY_CHECK(key_text(after_move, 1U,
+                       schema::channel_key_tangent_mode_suffix) == "broken");
+    KEY_CHECK(near(key_number(after_move, 1U,
+                              schema::channel_key_out_weight_suffix),
+                   6.0));
+    KEY_CHECK(moved.value().selection_after[0].tangent
+              == scene::inspect_key_selection(broken_ramp_root(), thirty)
+                     .value()
+                     .records[0]
+                     .tangent);
+
+    // Deleting the first key moves every later key down a slot; the broken
+    // key's handles move with it and no slot keeps a stale one.
+    const std::array zero{address(10U, scene::PropertyChannel::PositionX, 0)};
+    auto removed = scene::plan_key_delete(broken_ramp_root(), zero);
+    KEY_CHECK(removed.has_value());
+    const doc::Node& after_delete = ramp(removed.value().after);
+    KEY_CHECK(frames(after_delete) == (std::vector<core::i64>{30, 60, 90}));
+    KEY_CHECK(near(key_number(after_delete, 0U,
+                              schema::channel_key_in_slope_suffix),
+                   0.1));
+    KEY_CHECK(untangented(after_delete, 1U));
+    KEY_CHECK(untangented(after_delete, 2U));
+    KEY_CHECK(untangented(after_delete, 3U));
+
+    // A duplicate copies the handles.
+    auto copied = scene::plan_key_duplicate(broken_ramp_root(), thirty, 10);
+    KEY_CHECK(copied.has_value());
+    const doc::Node& after_copy = ramp(copied.value().after);
+    KEY_CHECK(frames(after_copy) == (std::vector<core::i64>{0, 30, 40, 60, 90}));
+    KEY_CHECK(near(key_number(after_copy, 2U,
+                              schema::channel_key_in_weight_suffix),
+                   4.0));
+}
+
+[[nodiscard]] scene::SceneModel model_of(const doc::Root& root) {
+    scene::SceneModel model;
+    model.reset(root);
+    return model;
+}
+
+[[nodiscard]] core::u64 channel_digest(const doc::Root& root) {
+    const auto channels = model_of(root).channel_keyframes();
+    KEY_CHECK(channels.size() == 1U);
+    return scene::digest(channels[0]);
+}
+
+[[nodiscard]] core::u64 frame_digest(const doc::Root& root, core::u64 frame) {
+    return scene::digest(model_of(root).evaluate(
+        doc::NodeId{1U}, scene::SceneTime{frame, 60U, 1U}));
+}
+
+class TempDirectory final {
+public:
+    TempDirectory() {
+        static std::atomic<std::uint64_t> sequence{0U};
+        const auto stamp =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path_ = std::filesystem::temp_directory_path()
+            / ("mediaserver-scene-key-edit-" + std::to_string(stamp) + "-"
+               + std::to_string(sequence.fetch_add(1U)));
+        std::error_code error;
+        if (!std::filesystem::create_directory(path_, error) || error) {
+            throw std::runtime_error{"could not create key test directory"};
+        }
+    }
+    ~TempDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+    TempDirectory(const TempDirectory&) = delete;
+    TempDirectory& operator=(const TempDirectory&) = delete;
+
+    [[nodiscard]] std::filesystem::path file() const {
+        return path_ / "keys.msproject";
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+void eased_keys_undo_redo_save_load_and_stream_exactly() {
+    const doc::Root original = ramp_root();
+    const doc::Root easy = eased(original, {30}, scene::KeyEase::EasyEase);
+    const doc::Root edited = [&] {
+        auto planned = scene::plan_key_tangent(
+            easy, address(10U, scene::PropertyChannel::PositionX, 30),
+            scene::KeyTangent{scene::KeyTangentMode::Broken, 0.75, -0.5, 3.0,
+                              11.0});
+        KEY_CHECK(planned.has_value());
+        return planned.value().after;
+    }();
+
+    // The curve and both digests see the change: frame 45 sits between the
+    // eased key and the next.
+    KEY_CHECK(channel_digest(easy) != channel_digest(original));
+    KEY_CHECK(channel_digest(edited) != channel_digest(easy));
+    KEY_CHECK(frame_digest(easy, 45U) != frame_digest(original, 45U));
+    KEY_CHECK(frame_digest(edited, 45U) != frame_digest(easy, 45U));
+    // Keys themselves still evaluate to their own values.
+    const auto edited_channels = model_of(edited).channel_keyframes();
+    KEY_CHECK(scene::sample_keyframes(edited_channels[0], 30) == 12.0);
+    KEY_CHECK(scene::sample_keyframes(edited_channels[0], 60) == 18.0);
+
+    // Each is one transaction; undo and redo restore exact tangents.
+    cmd::DirectorScheduler director{original};
+    const cmd::UndoContextId context{2U};
+    KEY_CHECK(director.schedule_document_replace(
+        easy, context, cmd::TransactionId{5U}, cmd::FrameNumber{1U}));
+    KEY_CHECK(director.schedule_document_replace(
+        edited, context, cmd::TransactionId{6U}, cmd::FrameNumber{1U}));
+    KEY_CHECK(director.undo_depth(context) == 2U);
+    KEY_CHECK(director.seal_frame(cmd::FrameNumber{1U}));
+    KEY_CHECK(director.schedule_undo(context, cmd::TransactionId{7U},
+                                     cmd::FrameNumber{2U}));
+    KEY_CHECK(ramp(director.projected_document()) == ramp(easy));
+    KEY_CHECK(director.schedule_undo(context, cmd::TransactionId{8U},
+                                     cmd::FrameNumber{2U}));
+    KEY_CHECK(ramp(director.projected_document()) == ramp(original));
+    KEY_CHECK(director.seal_frame(cmd::FrameNumber{2U}));
+    KEY_CHECK(director.schedule_redo(context, cmd::TransactionId{9U},
+                                     cmd::FrameNumber{3U}));
+    KEY_CHECK(director.schedule_redo(context, cmd::TransactionId{10U},
+                                     cmd::FrameNumber{3U}));
+    KEY_CHECK(ramp(director.projected_document()) == ramp(edited));
+
+    // Saved and loaded, the handles come back bit for bit.
+    TempDirectory temporary;
+    KEY_CHECK(persist::save_project_file(temporary.file(), edited));
+    const auto loaded = persist::load_project_file(temporary.file());
+    KEY_CHECK(loaded.has_value());
+    KEY_CHECK(ramp(loaded.value()) == ramp(edited));
+    KEY_CHECK(channel_digest(loaded.value()) == channel_digest(edited));
+
+    // A node fed the edits one change at a time agrees with one that loads
+    // the result.
+    scene::SceneModel streamed;
+    streamed.reset(original);
+    streamed.apply(doc::diff(original, easy));
+    streamed.apply(doc::diff(easy, edited));
+    const scene::SceneModel checkpointed = model_of(edited);
+    KEY_CHECK(streamed.channel_keyframes() == checkpointed.channel_keyframes());
+    KEY_CHECK(scene::digest(streamed.evaluate(
+                  doc::NodeId{1U}, scene::SceneTime{45U, 60U, 1U}))
+              == frame_digest(edited, 45U));
+}
+
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"camera light and surface keys support batch edits", &camera_light_and_surface_keys_support_batch_edits},
     {"selection is typed unique exact and lock aware",
      &selection_is_typed_unique_exact_and_lock_aware},
@@ -613,6 +1067,14 @@ constexpr std::array<Case, 10U> cases{{
      &full_span_identity_and_overflow_failures_are_exact_and_atomic},
     {"spatial effect channels are typed and kind compatible",
      &spatial_effect_channels_are_typed_and_kind_compatible},
+    {"easing presets write exactly their documented tangents",
+     &easing_presets_write_exactly_their_documented_tangents},
+    {"tangent edits are validated and refused on locked targets",
+     &tangent_edits_are_validated_and_refused_on_locked_targets},
+    {"moved duplicated and reindexed keys carry their tangents",
+     &moved_duplicated_and_reindexed_keys_carry_their_tangents},
+    {"eased keys undo redo save load and stream exactly",
+     &eased_keys_undo_redo_save_load_and_stream_exactly},
 }};
 
 } // namespace

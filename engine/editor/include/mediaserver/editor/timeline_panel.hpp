@@ -210,6 +210,11 @@ enum class TimelineKeyBatchAction : core::u8 {
   Duplicate,
   Delete,
   Scale,
+  // Interpolation or tangent mode across the selection: `ease`.
+  Ease,
+  // One key's handles after a Curves handle drag: `tangent`, on the single
+  // address in `keys`.
+  Tangent,
 };
 
 // A complete typed key operation. The panel never authors individual channel
@@ -221,6 +226,8 @@ struct TimelineKeyBatchEdit final {
   std::vector<TimelineKeyAddress> keys;
   core::i64 delta{};
   scene::KeyTimeScale scale{};
+  scene::KeyEase ease{scene::KeyEase::Linear};
+  scene::KeyTangent tangent{};
 
   bool operator==(const TimelineKeyBatchEdit &) const = default;
 };

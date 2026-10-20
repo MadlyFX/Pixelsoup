@@ -2207,4 +2207,38 @@ void set_environment_channel(Environment& environment, PropertyChannel channel, 
     }
 }
 
+core::u64 digest(const ChannelKeyframes& channel) noexcept {
+    auto state = fnv_offset_basis;
+    mix(state, 0x4348'414E'4B45'5901ULL); // "CHANKEY", v1
+    mix(state, channel.target.value());
+    mix(state, static_cast<core::u64>(channel.component));
+    mix(state, static_cast<core::u64>(channel.frames.size()));
+    for (std::size_t index = 0U; index < channel.frames.size(); ++index) {
+        mix(state, static_cast<core::u64>(channel.frames[index]));
+        mix(state, index < channel.values.size() ? channel.values[index] : 0.0);
+        const auto interpolation = index < channel.interpolations.size()
+            ? channel.interpolations[index]
+            : KeyInterpolation::Linear;
+        mix(state, static_cast<core::u64>(interpolation));
+        const std::optional<KeyTangent> tangent =
+            index < channel.tangents.size() ? channel.tangents[index]
+                                            : std::nullopt;
+        mix(state, static_cast<core::u64>(tangent.has_value()));
+        if (!tangent.has_value()) {
+            continue;
+        }
+        mix(state, static_cast<core::u64>(tangent->mode));
+        mix(state, tangent->in_slope);
+        mix(state, tangent->out_slope);
+        for (const std::optional<double>& weight :
+             {tangent->in_weight, tangent->out_weight}) {
+            mix(state, static_cast<core::u64>(weight.has_value()));
+            if (weight.has_value()) {
+                mix(state, *weight);
+            }
+        }
+    }
+    return state;
+}
+
 } // namespace mediaserver::scene

@@ -826,6 +826,12 @@ inline constexpr std::string_view channel_key_out_slope_suffix = "_out_slope";
 inline constexpr std::string_view channel_key_in_weight_suffix = "_in_weight";
 inline constexpr std::string_view channel_key_out_weight_suffix =
     "_out_weight";
+// Every per-key tangent property, in a fixed order. Anything that moves,
+// copies or re-indexes keys carries all of them with the key.
+inline constexpr std::array<std::string_view, 5U> channel_key_tangent_suffixes{
+    channel_key_tangent_mode_suffix, channel_key_in_slope_suffix,
+    channel_key_out_slope_suffix, channel_key_in_weight_suffix,
+    channel_key_out_weight_suffix};
 inline constexpr std::string_view interp_hold = "hold";
 inline constexpr std::string_view interp_linear = "linear";
 inline constexpr std::string_view interp_cubic = "cubic";

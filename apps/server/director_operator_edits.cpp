@@ -284,6 +284,18 @@ PhaseExit DirectorShowLoop::apply_key_requests(OperatorFrame &op) {
                 return scene::plan_key_scale(
                     scheduler.projected_document(), selection,
                     request.edit.scale);
+            case editor::TimelineKeyBatchAction::Ease:
+                return scene::plan_key_ease(
+                    scheduler.projected_document(), selection,
+                    request.edit.ease);
+            case editor::TimelineKeyBatchAction::Tangent:
+                if (selection.size() != 1U) {
+                    return scene::KeyEditResult::failure(
+                        scene::KeyEditError::InvalidTangent);
+                }
+                return scene::plan_key_tangent(
+                    scheduler.projected_document(), selection.front(),
+                    request.edit.tangent);
             }
             return scene::KeyEditResult::failure(
                 scene::KeyEditError::InvalidScale);
@@ -297,6 +309,10 @@ PhaseExit DirectorShowLoop::apply_key_requests(OperatorFrame &op) {
             case scene::KeyEditError::IntegerOverflow:
                 project_message = "KEY EDIT REJECTED - DESTINATION "
                                   "FRAME OVERFLOW";
+                break;
+            case scene::KeyEditError::InvalidTangent:
+                project_message = "KEY TANGENT REJECTED - SLOPES MUST BE "
+                                  "FINITE AND WEIGHTS POSITIVE";
                 break;
             case scene::KeyEditError::AllocationFailed:
                 std::cerr << "could not allocate an atomic key "

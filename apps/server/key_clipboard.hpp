@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <compare>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -41,7 +43,8 @@ struct KeyDocumentPlan final {
     KeyEditReport report;
 };
 
-// Director-local key clipboard. Copy snapshots value and interpolation from the
+// Director-local key clipboard. Copy snapshots value, interpolation and
+// tangents from the
 // projected document; no local timestamp or clipboard payload enters command
 // serialization. Paste keeps each target/property and anchors the earliest
 // copied frame at the active Timeline playhead.
@@ -57,6 +60,9 @@ public:
         // value. Integer channel values remain integers after Copy/Paste.
         doc::PropertyValue value{0.0};
         scene::KeyInterpolation interpolation{scene::KeyInterpolation::Linear};
+        // The key's tangent properties as authored, in
+        // schema::channel_key_tangent_suffixes order.
+        std::array<std::optional<doc::PropertyValue>, 5U> tangent{};
     };
 
     [[nodiscard]] KeyCopyReport copy(const doc::Root& document,

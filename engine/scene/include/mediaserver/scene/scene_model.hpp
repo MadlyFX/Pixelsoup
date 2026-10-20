@@ -524,6 +524,13 @@ private:
         bool incoming) noexcept;
     [[nodiscard]] static bool valid_channel(
         std::span<const ChannelKey> channel) noexcept;
+    friend std::optional<KeySlopes> evaluated_key_slopes(
+        const ChannelKeyframes& channel, std::size_t index) noexcept;
+    // The canonical keys `channel` describes, or 0 when they would not
+    // evaluate.
+    [[nodiscard]] static std::size_t load_keyframes(
+        const ChannelKeyframes& channel,
+        std::array<ChannelKey, max_channel_keys>& storage) noexcept;
     friend std::optional<double> sample_keyframes(
         const ChannelKeyframes& channel, core::i64 frame) noexcept;
 

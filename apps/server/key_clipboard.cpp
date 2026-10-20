@@ -247,7 +247,17 @@ struct ChannelInspection final {
       return {};
     }
     if (*held == address.frame && !result.key.has_value()) {
-      result.key = Snapshot{channel.id, address, value, *interp};
+      Snapshot snapshot{channel.id, address, value, *interp};
+      for (std::size_t slot = 0U;
+           slot < scene::schema::channel_key_tangent_suffixes.size(); ++slot) {
+        const auto tangent = channel.properties.find(
+            prefix + index +
+            std::string{scene::schema::channel_key_tangent_suffixes[slot]});
+        if (tangent != channel.properties.end()) {
+          snapshot.tangent[slot] = tangent->second;
+        }
+      }
+      result.key = std::move(snapshot);
     }
   }
   // SceneModel deliberately truncates a channel after the fixed cap, so a
@@ -315,7 +325,8 @@ interpolation_name(scene::KeyInterpolation value) noexcept {
 
 [[nodiscard]] UpsertResult upsert_key(doc::Node &channel, core::i64 frame,
                                       const doc::PropertyValue &value,
-                                      scene::KeyInterpolation interp) {
+                                      scene::KeyInterpolation interp,
+                                      const decltype(Snapshot::tangent) &tangent) {
   const std::string prefix{scene::schema::channel_key_prefix};
   const std::string frame_suffix{scene::schema::channel_key_frame_suffix};
   const std::string value_suffix{scene::schema::channel_key_value_suffix};
@@ -353,14 +364,21 @@ interpolation_name(scene::KeyInterpolation value) noexcept {
     const auto found = channel.properties.find(name);
     return found != channel.properties.end() && found->second == wanted;
   };
-  if (same(frame_name, wanted_frame) && same(value_name, value) &&
-      same(interp_name, wanted_interp)) {
-    return UpsertResult::Unchanged;
-  }
+  const doc::Node before = channel;
   channel.properties.insert_or_assign(frame_name, wanted_frame);
   channel.properties.insert_or_assign(value_name, value);
   channel.properties.insert_or_assign(interp_name, wanted_interp);
-  return UpsertResult::Changed;
+  for (std::size_t slot = 0U; slot < tangent.size(); ++slot) {
+    const std::string name =
+        prefix + index +
+        std::string{scene::schema::channel_key_tangent_suffixes[slot]};
+    if (tangent[slot].has_value()) {
+      channel.properties.insert_or_assign(name, *tangent[slot]);
+    } else {
+      channel.properties.erase(name);
+    }
+  }
+  return channel == before ? UpsertResult::Unchanged : UpsertResult::Changed;
 }
 
 void append_unique(std::vector<doc::NodeId> &values, doc::NodeId value) {
@@ -479,7 +497,8 @@ apply_snapshots(const doc::Root &document, std::span<const Snapshot> snapshots,
     doc::Node changed = *current;
     const UpsertResult upserted =
         upsert_key(changed, candidate.destination, candidate.snapshot->value,
-                   candidate.snapshot->interpolation);
+                   candidate.snapshot->interpolation,
+                   candidate.snapshot->tangent);
     if (upserted == UpsertResult::Incompatible) {
       append_unique(plan.report.incompatible, candidate.snapshot->address);
       continue;

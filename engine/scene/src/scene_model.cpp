@@ -3318,12 +3318,12 @@ double SceneModel::sample_channel(
     return result;
 }
 
-std::optional<double> sample_keyframes(
-    const ChannelKeyframes& channel, core::i64 frame) noexcept {
+std::size_t SceneModel::load_keyframes(
+    const ChannelKeyframes& channel,
+    std::array<ChannelKey, max_channel_keys>& storage) noexcept {
     const std::size_t count = channel.frames.size();
     if (count == 0U || count > max_channel_keys || channel.values.size() != count)
-        return std::nullopt;
-    std::array<SceneModel::ChannelKey, max_channel_keys> storage{};
+        return 0U;
     for (std::size_t index = 0U; index < count; ++index) {
         auto& key = storage[index];
         key.frame = channel.frames[index];
@@ -3331,14 +3331,14 @@ std::optional<double> sample_keyframes(
         constexpr double maximum_value =
             static_cast<double>(std::numeric_limits<float>::max());
         if (!std::isfinite(key.value) || key.value < -maximum_value ||
-            key.value > maximum_value) return std::nullopt;
+            key.value > maximum_value) return 0U;
         const auto interpolation = index < channel.interpolations.size()
             ? channel.interpolations[index] : KeyInterpolation::Linear;
         switch (interpolation) {
-        case KeyInterpolation::Hold: key.interp = SceneModel::ChannelInterp::Hold; break;
-        case KeyInterpolation::Linear: key.interp = SceneModel::ChannelInterp::Linear; break;
-        case KeyInterpolation::Cubic: key.interp = SceneModel::ChannelInterp::Cubic; break;
-        default: return std::nullopt;
+        case KeyInterpolation::Hold: key.interp = ChannelInterp::Hold; break;
+        case KeyInterpolation::Linear: key.interp = ChannelInterp::Linear; break;
+        case KeyInterpolation::Cubic: key.interp = ChannelInterp::Cubic; break;
+        default: return 0U;
         }
         if (interpolation == KeyInterpolation::Cubic &&
             index < channel.tangents.size() && channel.tangents[index]) {
@@ -3352,12 +3352,28 @@ std::optional<double> sample_keyframes(
                 key.in_slope = std::midpoint(key.in_slope, key.out_slope);
                 key.out_slope = key.in_slope;
             }
-            if (tangent.mode > KeyTangentMode::Flat) return std::nullopt;
+            if (tangent.mode > KeyTangentMode::Flat) return 0U;
         }
     }
+    return valid_channel({storage.data(), count}) ? count : 0U;
+}
+
+std::optional<KeySlopes> evaluated_key_slopes(
+    const ChannelKeyframes& channel, std::size_t index) noexcept {
+    std::array<SceneModel::ChannelKey, max_channel_keys> storage{};
+    const std::size_t count = SceneModel::load_keyframes(channel, storage);
+    if (index >= count) return std::nullopt;
     const std::span<const SceneModel::ChannelKey> keys{storage.data(), count};
-    if (!SceneModel::valid_channel(keys)) return std::nullopt;
-    return SceneModel::sample_channel(keys, frame);
+    return KeySlopes{SceneModel::tangent_slope(keys, index, true),
+                     SceneModel::tangent_slope(keys, index, false)};
+}
+
+std::optional<double> sample_keyframes(
+    const ChannelKeyframes& channel, core::i64 frame) noexcept {
+    std::array<SceneModel::ChannelKey, max_channel_keys> storage{};
+    const std::size_t count = SceneModel::load_keyframes(channel, storage);
+    if (count == 0U) return std::nullopt;
+    return SceneModel::sample_channel({storage.data(), count}, frame);
 }
 
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
