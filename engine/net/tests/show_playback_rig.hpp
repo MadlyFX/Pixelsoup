@@ -319,6 +319,21 @@ public:
     [[nodiscard]] std::size_t active_sessions() const noexcept {
         return barrier_.active_sessions();
     }
+    [[nodiscard]] net::DirectorNodeConnection node_connection(
+        core::u32 node_index) const noexcept {
+        return barrier_.node_connection(node_index);
+    }
+    [[nodiscard]] std::size_t open_frames() const noexcept {
+        return barrier_.open_frames();
+    }
+    // Cohort size of the newest sealed frame: the sessions its release
+    // waits for.
+    [[nodiscard]] std::size_t newest_frame_members() const {
+        PLAYBACK_CHECK(!tracked_.empty());
+        auto summary = barrier_.snapshot(tracked_.back());
+        PLAYBACK_CHECK(summary);
+        return summary.value().members;
+    }
 
     void retire_completed() {
         while (!tracked_.empty() && barrier_.retire(tracked_.front())) {

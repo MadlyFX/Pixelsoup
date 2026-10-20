@@ -510,6 +510,17 @@ void make_matching_permits_eligible(
     return true;
 }
 
+void promote_to_live(
+    detail::DirectorFrameBarrierControl& control,
+    SessionSlot& session) noexcept {
+    session.readiness = SessionReadiness::Live;
+    --control.catching_up_session_count;
+    ++control.live_session_count;
+    control.diagnostics.live_sessions = control.live_session_count;
+    control.diagnostics.catching_up_sessions =
+        control.catching_up_session_count;
+}
+
 } // namespace
 
 DirectorFrameBarrier::DirectorFrameBarrier(
@@ -910,12 +921,7 @@ bool DirectorFrameBarrier::on_ack(
 
     if (session->readiness == SessionReadiness::CatchingUp
         && session->committed_cursor == control.tracked_tail) {
-        session->readiness = SessionReadiness::Live;
-        --control.catching_up_session_count;
-        ++control.live_session_count;
-        control.diagnostics.live_sessions = control.live_session_count;
-        control.diagnostics.catching_up_sessions =
-            control.catching_up_session_count;
+        promote_to_live(control, *session);
     }
     control.changed.notify_all();
     return true;
@@ -1191,6 +1197,18 @@ DirectorFrameBarrier::seal_and_track(
     available->member_count = 0U;
     available->release_state = ReleaseState::CollectingPrepared;
     available->publication.reset();
+    // The cut is where a session that has received everything but the
+    // in-flight tail stops catching up. Its earlier frames keep the
+    // historical permits they were already queued for; this frame and every
+    // later one wait for its Prepared like any other member's.
+    for (auto& session : control.sessions) {
+        if (session.active && session.readiness == SessionReadiness::CatchingUp
+            && control.tracked_tail.through_frame.value()
+                    - session.prepared_cursor.through_frame.value()
+                <= limits_.max_join_prepared_lag) {
+            promote_to_live(control, session);
+        }
+    }
     for (std::size_t index = 0U; index < control.sessions.size(); ++index) {
         const auto& session = control.sessions[index];
         if (!session.active || session.readiness != SessionReadiness::Live) {

@@ -130,7 +130,8 @@ recover.
 
 The default Release suite covers session loss/timeout, node restart with a new
 incarnation, late checkpoint adoption, bounded historical replay, slow/catching
-up sessions, release barriers, WAL truncation/recovery, and release-ledger
+up sessions, a rejoining node going live within one second of show time after
+backlogs of 20 to 3,000 frames, release barriers, WAL truncation/recovery, and release-ledger
 recovery. The short 120 fps two-node rate case runs in the default suite.
 
 Run the ten-minute gate explicitly:
@@ -182,7 +183,12 @@ Closing and reopening the editor leaves remote render machines supervised by
 their own agents. Running nodes retry automatically against their configured
 Director endpoint and show ID; Output Monitor shows CONNECTING, CATCHING UP,
 then LIVE separately from machine/process status. Expanded rows show the
-acknowledged and target control frames. Replacement windows start black, and
+acknowledged and target control frames. A node that was away for more than a
+few frames is handed the Director's current checkpoint rather than the frames
+it missed, and it rejoins the release cohort as soon as it has prepared to
+within two control frames of the newest seal, so CATCHING UP lasts a few
+frames however long it was gone. A node that stays in CATCHING UP is not
+receiving or acknowledging frames; check its link rather than waiting. Replacement windows start black, and
 disconnected outputs retain their last complete image. A restart tolerates
 up to fifteen seconds of overlap with an old connection's lease; a persistent
 duplicate becomes a process fault that can be restarted from Output Monitor.

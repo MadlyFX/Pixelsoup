@@ -1343,6 +1343,91 @@ void release_failure_wakes_committed_waiter_as_terminally_degraded() {
     BARRIER_CHECK(waited->value().summary.degraded());
 }
 
+// The Director never stops sealing for a rejoining node, so a Committed
+// acknowledgement can never be expected to land exactly on the tail. The
+// publication cut instead admits a session whose Prepared cursor is within
+// the configured lag, and it is then an ordinary member whose earlier,
+// non-member frames still commit.
+void a_catching_up_session_joins_the_cut_within_the_prepared_lag() {
+    constexpr std::uint64_t join_lag = 3U;
+    constexpr core::u32 node_index = 6U;
+    Fixture fixture{net::DirectorFrameBarrierLimits{4U, 16U, 16U, join_lag}};
+    std::vector<command::StreamCursor> after{genesis_cursor()};
+    const auto seal = [&](std::uint64_t frame) {
+        auto sealed = fixture.seal(frame);
+        after.push_back(sealed.seal.frame.after_cursor());
+        return sealed;
+    };
+    for (std::uint64_t frame = 1U; frame <= 5U; ++frame) {
+        static_cast<void>(seal(frame));
+    }
+    BARRIER_CHECK(fixture.barrier.register_live(registration(
+        10U, 20U, genesis_cursor(), 1U, 40U, node_index)));
+
+    std::uint64_t sequence = 40U;
+    const auto prepare_through = [&](std::uint64_t first, std::uint64_t last) {
+        for (auto frame = first; frame <= last; ++frame) {
+            BARRIER_CHECK(fixture.barrier.on_ack(
+                id(10U),
+                acknowledgement(
+                    net::FrameAcknowledgementKind::Prepared,
+                    ++sequence,
+                    100U + frame,
+                    after[frame])));
+        }
+    };
+
+    // Prepared through 3 with the tail at 7 is a lag of 4: still history, so
+    // the cut leaves it out and the session stays catching up.
+    static_cast<void>(seal(6U));
+    static_cast<void>(seal(7U));
+    prepare_through(1U, 3U);
+    auto excluded = seal(8U);
+    BARRIER_CHECK(
+        fixture.barrier.snapshot(excluded.barrier).value().members == 0U);
+    BARRIER_CHECK(fixture.barrier.node_connection(node_index).state
+        == net::DirectorNodeConnection::State::CatchingUp);
+    BARRIER_CHECK(fixture.barrier.observer_diagnostics().catching_up_sessions
+        == 1U);
+
+    // Prepared through 5 with the tail at 8 is exactly the configured lag.
+    prepare_through(4U, 5U);
+    auto joined = seal(9U);
+    auto summary = fixture.barrier.snapshot(joined.barrier);
+    BARRIER_CHECK(summary);
+    BARRIER_CHECK(summary.value().members == 1U);
+    BARRIER_CHECK(
+        summary.value().progress
+        == net::DirectorFrameBarrierProgress::AwaitingPrepared);
+    const auto connection = fixture.barrier.node_connection(node_index);
+    BARRIER_CHECK(connection.state == net::DirectorNodeConnection::State::Live);
+    BARRIER_CHECK(connection.committed_frame == 0U);
+    BARRIER_CHECK(connection.target_frame == 9U);
+    const auto diagnostics = fixture.barrier.observer_diagnostics();
+    BARRIER_CHECK(diagnostics.live_sessions == 1U);
+    BARRIER_CHECK(diagnostics.catching_up_sessions == 0U);
+
+    // Its in-flight frames finish in order: the non-member frames commit on
+    // the permits they were queued with, and the member frame waits for it.
+    prepare_through(6U, 9U);
+    BARRIER_CHECK(
+        fixture.barrier.snapshot(joined.barrier).value().prepared == 1U);
+    for (std::uint64_t frame = 1U; frame <= 9U; ++frame) {
+        BARRIER_CHECK(fixture.barrier.on_ack(
+            id(10U),
+            acknowledgement(
+                net::FrameAcknowledgementKind::Committed,
+                ++sequence,
+                100U + frame,
+                after[frame])));
+    }
+    BARRIER_CHECK(
+        fixture.barrier.snapshot(joined.barrier).value().progress
+        == net::DirectorFrameBarrierProgress::Complete);
+    BARRIER_CHECK(
+        fixture.barrier.node_connection(node_index).committed_frame == 9U);
+}
+
 } // namespace
 
 int main() {
@@ -1364,6 +1449,8 @@ int main() {
          &a_lost_member_wakes_waiters_as_degraded_not_reached},
         {"catch-up promotion at exact tail",
          &catching_up_sessions_are_excluded_until_the_exact_tail},
+        {"catch-up joins the cut within the prepared lag",
+         &a_catching_up_session_joins_the_cut_within_the_prepared_lag},
         {"foreign acknowledgement rejection",
          &an_ahead_or_foreign_acknowledgement_is_rejected},
         {"publication cut concurrent leave",

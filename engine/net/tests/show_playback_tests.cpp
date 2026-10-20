@@ -181,6 +181,110 @@ void a_lost_node_restarts_and_rejoins_the_running_show() {
     director.stop();
 }
 
+// A node that rejoins a running show is handed the current checkpoint, so how
+// long the Director reports it as catching up must not depend on how many
+// frames were sealed while it was gone.
+struct RejoinTiming final {
+    std::chrono::milliseconds to_live{};
+    core::u64 seals_to_live{};
+    bool live{};
+};
+
+RejoinTiming rejoin_after_backlog(core::u64 backlog) {
+    DirectorShow director;
+    const auto endpoint = director.start();
+    NodeRig node_a{endpoint, 0U};
+    NodeRig node_b{endpoint, 1U};
+    node_a.start();
+    node_b.start();
+    PLAYBACK_CHECK(node_a.connected());
+    PLAYBACK_CHECK(node_b.connected());
+    PLAYBACK_CHECK(wait_until([&] { return director.active_sessions() == 2U; }));
+
+    director.play();
+    for (core::u64 index = 0U; index < 12U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &node_b}));
+
+    node_b.stop();
+    PLAYBACK_CHECK(wait_until([&] { return director.active_sessions() == 1U; }));
+    for (core::u64 index = 0U; index < backlog; ++index) {
+        static_cast<void>(director.publish_next());
+        if (director.open_frames() >= 64U) {
+            PLAYBACK_CHECK(node_a.advance_to(director.sealed_through()));
+            director.retire_completed();
+        }
+    }
+    PLAYBACK_CHECK(node_a.advance_to(director.sealed_through()));
+    director.retire_completed();
+
+    // The Director keeps sealing at the show rate throughout, as the shipping
+    // loop does, so the tail the node is chasing never stands still. Both
+    // nodes cross one boundary per seal.
+    NodeRig restarted_b{endpoint, 1U, 1U};
+    restarted_b.start();
+    PLAYBACK_CHECK(restarted_b.connected());
+    RejoinTiming timing{};
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + 10s;
+    auto due = started;
+    while (std::chrono::steady_clock::now() < deadline) {
+        static_cast<void>(director.publish_next());
+        ++timing.seals_to_live;
+        node_a.tick();
+        restarted_b.tick();
+        director.retire_completed();
+        if (director.node_connection(1U).state
+            == net::DirectorNodeConnection::State::Live) {
+            timing.live = true;
+            break;
+        }
+        due += frame_period;
+        std::this_thread::sleep_until(due);
+    }
+    timing.to_live = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    std::cout << "rejoin backlog=" << backlog
+              << " live=" << (timing.live ? "yes" : "no")
+              << " ms=" << timing.to_live.count()
+              << " seals=" << timing.seals_to_live << '\n'
+              << std::flush;
+
+    if (timing.live) {
+        // Live means a cohort member: the next frame's release waits for the
+        // rejoined node as well, and the pair then presents the same frame.
+        static_cast<void>(director.publish_next());
+        PLAYBACK_CHECK(director.newest_frame_members() == 2U);
+        PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+            director.sealed_through(), {&node_a, &restarted_b}));
+        assert_converged(node_a, restarted_b);
+        PLAYBACK_CHECK(
+            restarted_b.driver().counters().checkpoint_activations >= 1U);
+        PLAYBACK_CHECK(!restarted_b.faulted());
+        PLAYBACK_CHECK(restarted_b.driver().counters().resync_reports == 0U);
+    }
+
+    node_a.stop();
+    restarted_b.stop();
+    director.stop();
+    return timing;
+}
+
+void a_rejoining_node_goes_live_in_bounded_time_whatever_the_backlog() {
+    std::vector<RejoinTiming> timings;
+    for (const core::u64 backlog : {20U, 600U, 3'000U}) {
+        timings.push_back(rejoin_after_backlog(backlog));
+    }
+    // One second of show time is far more than the in-flight pipeline needs
+    // and far less than replaying even the smallest backlog would take.
+    for (const auto& timing : timings) {
+        PLAYBACK_CHECK(timing.live);
+        PLAYBACK_CHECK(timing.seals_to_live <= 50U);
+    }
+}
+
 // The V1 gate at a length the default suite can afford. The ten-minute run is
 // the same code in mediaserver_show_soak; this one is here so a regression that
 // puts a write, an allocation-per-frame, or a skipped position back on the seal
@@ -383,13 +487,15 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
     {"play, pause, and exact seek across two nodes",
      &two_nodes_play_pause_and_seek_to_the_same_frame},
     {"late node adopts a checkpoint at a boundary",
      &a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary},
     {"lost node restarts and rejoins the running show",
      &a_lost_node_restarts_and_rejoins_the_running_show},
+    {"rejoining node goes live in bounded time whatever the backlog",
+     &a_rejoining_node_goes_live_in_bounded_time_whatever_the_backlog},
     {"two nodes hold 120 fps with flat Director memory",
      &two_nodes_hold_the_rate_with_flat_director_memory},
     {"the journalling cadence still writes every frame",

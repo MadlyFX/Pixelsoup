@@ -23,6 +23,13 @@ struct DirectorFrameBarrierLimits final {
     std::size_t max_sessions{1'024U};
     std::size_t max_open_frames{256U};
     std::size_t max_pending_per_session{256U};
+    // A catching-up session joins the next publication cut once it has
+    // Prepared to within this many frames of the tracked tail. What remains
+    // is then the ordinary in-flight pipeline any live member has, not
+    // history, so joining costs the cohort no more than its own link latency.
+    // Requiring the exact tail instead never converges while the Director
+    // keeps sealing, because a node's acknowledgement always trails the seal.
+    std::uint64_t max_join_prepared_lag{2U};
 };
 
 // Persistence boundary used by the permit coordinator until DurableDirector
@@ -200,8 +207,10 @@ struct DirectorTrackedSealOutcome final {
 //  * a full barrier table rejects before the WAL or hub can advance.
 //
 // Registrations behind tracked_tail() are bounded CatchingUp sessions. They do
-// not enter cohorts until a validated Committed acknowledgement advances their
-// cursor to the exact current tail while holding the same cut mutex.
+// not enter cohorts until they are caught up: either a validated Committed
+// acknowledgement advances their cursor to the exact current tail, or, at a
+// publication cut, their Prepared cursor is within max_join_prepared_lag of
+// it. Both are decided while holding the same cut mutex.
 class DirectorFrameBarrier final : public DirectorSessionObserver {
 public:
     explicit DirectorFrameBarrier(

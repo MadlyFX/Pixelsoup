@@ -721,7 +721,9 @@ Running render nodes reconnect automatically when the editor returns on the
 same Director address, port and show ID. Output Monitor distinguishes the
 process from its editor connection: **CONNECTING** means the process is running
 but has no live session, **CATCHING UP** means it is adopting replicated state,
-and **LIVE** means the session is under editor control. Expand the node row to
+and **LIVE** means the session is under editor control. A reconnecting node
+takes the editor's current state directly, so CATCHING UP normally lasts only a
+few frames however long the node was away. Expand the node row to
 see its acknowledged control frame and the Director's current target. A
 persistent CONNECTING state calls for checking the render machine's saved
 Director address and show ID, plus network reachability.
