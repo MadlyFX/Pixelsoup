@@ -290,25 +290,33 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   }
   const float grab = edge_grab_width(bar.width);
   p.hits.add(HitTarget{mix(id_, "trim in", identity),
-                       gui::Rect{bar.x, bar.y, grab, bar.height},
+                       gui::Rect{bar.x - trim_outer_reach, bar.y,
+                                 grab + trim_outer_reach, bar.height},
                        HitPriority::TrimEdge,
                        gui::Rect{bar.x, bar.y, 0.0F, bar.height},
                        row_part_tag(rc.index, RowPart::TrimIn)});
   p.hits.add(HitTarget{mix(id_, "trim out", identity),
-                       gui::Rect{bar.x + bar.width - grab, bar.y, grab,
-                                 bar.height},
+                       gui::Rect{bar.x + bar.width - grab, bar.y,
+                                 grab + trim_outer_reach, bar.height},
                        HitPriority::TrimEdge,
                        gui::Rect{bar.x + bar.width, bar.y, 0.0F, bar.height},
                        row_part_tag(rc.index, RowPart::TrimOut)});
-  // The knobs ride the bar's top edge and answer a little above it.
+  // The knobs ride the bar's top edge; each answers within a disc around
+  // its centre, but no deeper into the bar than fade_knob_depth: a knob sits
+  // on its trim edge whenever the clip has no fade, and the rest of that
+  // end is the edge's to trim.
   const auto knob = [&](float x, std::string_view name, RowPart part) {
-    p.hits.add(HitTarget{mix(id_, name, identity),
-                         gui::Rect{x - fade_handle_reach, bar.y - 4.0F,
-                                   fade_handle_reach * 2.0F,
-                                   fade_handle_reach + 4.0F},
-                         HitPriority::FadeKnob,
-                         gui::Rect{x, bar.y + 1.0F, 0.0F, 0.0F},
-                         row_part_tag(rc.index, part)});
+    const float centre_y = bar.y + 1.0F;
+    const float top = centre_y - fade_handle_reach;
+    HitTarget target{mix(id_, name, identity),
+                     gui::Rect{x - fade_handle_reach, top,
+                               fade_handle_reach * 2.0F,
+                               bar.y + fade_knob_depth - top},
+                     HitPriority::FadeKnob,
+                     gui::Rect{x, centre_y, 0.0F, 0.0F},
+                     row_part_tag(rc.index, part)};
+    target.reach = fade_handle_reach;
+    p.hits.add(target);
   };
   knob(rc.clip_fade_in_x, "fade in", RowPart::FadeIn);
   knob(rc.clip_fade_out_x, "fade out", RowPart::FadeOut);

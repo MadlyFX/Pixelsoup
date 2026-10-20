@@ -167,11 +167,12 @@ void TimelinePanel::draw_ruler(Pass &p) {
     // that frame, so a fitted view shows both.
     const float in_x = frame_to_x(static_cast<double>(first));
     const float out_x = frame_to_x(static_cast<double>(last));
-    const float band_top = ruler.y + ruler.height - 9.0F;
-    const gui::Rect in_grip{in_x - range_handle_reach, band_top,
-                            range_handle_reach * 2.0F, 9.0F};
-    const gui::Rect out_grip{out_x - range_handle_reach, band_top,
-                             range_handle_reach * 2.0F, 9.0F};
+    // Each handle answers down the ruler's full height, not only on the
+    // thin range bar it draws.
+    const gui::Rect in_grip{in_x - range_handle_reach, ruler.y,
+                            range_handle_reach * 2.0F, ruler.height};
+    const gui::Rect out_grip{out_x - range_handle_reach, ruler.y,
+                             range_handle_reach * 2.0F, ruler.height};
     ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
     const gui::Interaction in_it = ctx.grab(mix(id_, "range in"), in_grip);
     const gui::Interaction out_it = ctx.grab(mix(id_, "range out"), out_grip);

@@ -395,6 +395,10 @@ The document keeps calling this a lane - `lane_id` on a placement, and
 `timeline_lane` nodes - because those names are in saved projects and renaming
 them would not open an older show.
 
+Drag the In or Out handle on the ruler to move that end of the range; each
+handle answers anywhere down the ruler's height, not only on the range bar.
+A marker or cue on the strip below the ruler is grabbed by its tag, which also
+answers a short way left of its line.
 The exact IN and OUT number fields remain available for typed or dragged range
 entry. The adjacent Set In and Set Out controls take the current playhead in
 one click and preserve Loop. If a local Preview playhead is outside the old
@@ -404,20 +408,28 @@ valid.
 On a media layer row the Timeline draws that placement as a bar:
 
 - With **Selection (`V`)**, **drag the bar** to move the clip. **Drag either
-  end** to trim it. Trimming the head converts the removed show frames to the
-  source frame rate and wraps within the source, retaining the first source
-  frame at the new cut. Moving the bar keeps its duration and source offset.
+  end** to trim it; each end also answers a few units outside the bar, so a
+  short clip's end can be taken from beside it. Trimming the head converts the
+  removed show frames to the source frame rate and wraps within the source,
+  retaining the first source frame at the new cut. Moving the bar keeps its
+  duration and source offset.
 - **SPLIT** cuts every selected clip at the playhead into two placements,
   preserving the source frame at the cut. Nothing is copied or re-encoded, and
   a split that would leave an empty half is not offered.
 - **The two handles on the bar's top edge** set the head and tail ramps, drawn
-  as the diagonals an editor expects. A tail ramp over the scene's black
+  as the diagonals an editor expects. A handle answers around its knob, above
+  the bar and across its top corner; lower on the same end, the press trims. A tail ramp over the scene's black
   surround is a fade to black; overlapping one clip's tail ramp with the next
   clip's head ramp is a cross dissolve.
 - Drags snap to the playhead, the show range, and the ends of every other clip,
   so butt-joining two clips and cutting on the playhead do not need pixel
   accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
   Move, trim, and fade bars preview during the lift and commit once on release.
+- Where these targets overlap - on a short clip, or a key close to another -
+  one press goes to exactly one of them: a key, then a fade handle, then a trim
+  end, then the bar, then the empty lane, and among two of the same kind the
+  nearer. The pointer's cursor and highlight show which one a press would
+  take before it is made.
   The dropped bar stays at the proposed position while the Director adopts
   the edit. Holding a dragged clip at either edge scrolls the view. Playback
   In/Out does not limit clip placement: clips can cross frame zero or be parked

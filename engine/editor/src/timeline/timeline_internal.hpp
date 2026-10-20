@@ -47,15 +47,22 @@ inline constexpr float edit_tool_scale = 1.35F;
 }
 // How close to an In/Out edge on the ruler's range bar a press grabs it.
 inline constexpr float range_handle_reach = 5.0F;
-inline constexpr float marker_hit_reach = 6.0F;
+// A marker's tag answers this far left of its line, so a marker is grabbed
+// without landing on the line itself.
+inline constexpr float marker_hit_reach = 10.0F;
 // The window a second click still counts as a double-click.
 inline constexpr double double_click_seconds = 0.35;
 inline constexpr float key_radius = 5.5F;
-// A key answers a press well beyond the diamond it draws: at arm's length a
-// five-unit diamond is a hard target, and nothing else in a lane competes.
-inline constexpr float key_hit_radius = 10.0F;
-// How close a press must come to a clip's fade handle to take it.
-inline constexpr float fade_handle_reach = 8.0F;
+// A key answers a press well beyond the diamond it draws - a disc as tall as
+// its row - because at arm's length a five-unit diamond is a hard target.
+inline constexpr float key_hit_radius = 12.0F;
+// How close a press must come to a clip's fade knob to take it.
+inline constexpr float fade_handle_reach = 10.0F;
+// How far down into the bar a fade knob still answers.
+inline constexpr float fade_knob_depth = 8.0F;
+// How far outside a clip's bar its trim edges still answer, so a clip's end
+// can be taken from beside it as well as from on it.
+inline constexpr float trim_outer_reach = 6.0F;
 inline constexpr float snap_distance = 8.0F;
 inline constexpr float marquee_threshold = 4.0F;
 inline constexpr float lane_drag_threshold_squared = 16.0F;

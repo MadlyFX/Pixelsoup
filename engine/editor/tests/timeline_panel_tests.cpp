@@ -3133,12 +3133,121 @@ void a_row_press_released_after_rows_shift_clicks_no_other_row() {
            released.selection->node == object_node);
 }
 
+// Drags the clip row from (from_x, y) to (to_x, y) with snapping held off
+// and returns the edit it reports on release.
+[[nodiscard]] std::optional<scene::ClipTiming>
+clip_drag(Harness &h, float from_x, float to_x, float y) {
+  static_cast<void>(h.frame(from_x, y, false));
+  static_cast<void>(h.frame(from_x, y, true, gui::KeyMods::Alt));
+  static_cast<void>(h.frame(to_x, y, true, gui::KeyMods::Alt));
+  const editor::TimelinePanelFrame dropped =
+      h.frame(to_x, y, false, gui::KeyMods::Alt);
+  if (dropped.clip_edits.size() != 1U) {
+    return std::nullopt;
+  }
+  return dropped.clip_edits.front().timing;
+}
+
+// A three-frame clip is 22 units wide, so its fade knobs and trim edges
+// overlap. The knobs own the bar's top corners; below them each end trims,
+// and the middle moves.
+void a_fade_knob_on_a_short_clip_owns_its_top_corner() {
+  const auto drag = [](float from_x, float to_x, float y) {
+    Harness h;
+    h.elements[1].timing = scene::ClipTiming{20, 3, 0, 0, 0};
+    return clip_drag(h, from_x, to_x, y);
+  };
+  // The bar runs x=408..430.2 on y=103..121, knobs centred on its top edge.
+  const auto fade_in = drag(409.0F, 424.0F, 105.0F);
+  UI_CHECK(fade_in.has_value());
+  UI_CHECK(fade_in->start == 20 && fade_in->duration == 3);
+  UI_CHECK(fade_in->fade_in > 0);
+  const auto fade_out = drag(429.0F, 415.0F, 105.0F);
+  UI_CHECK(fade_out.has_value());
+  UI_CHECK(fade_out->start == 20 && fade_out->duration == 3);
+  UI_CHECK(fade_out->fade_out > 0);
+  const auto trimmed = drag(409.0F, 416.0F, 117.0F);
+  UI_CHECK(trimmed.has_value());
+  UI_CHECK(trimmed->start == 21 && trimmed->duration == 2);
+  UI_CHECK(trimmed->fade_in == 0);
+  const auto moved = drag(419.0F, 433.0F, 117.0F);
+  UI_CHECK(moved.has_value());
+  UI_CHECK(moved->start == 22 && moved->duration == 3);
+}
+
+// A two-frame clip is under 15 units wide. Each end trims from just
+// outside the bar as well as on it, the nearer edge wins inside it, and the
+// gap between the edges still moves the clip.
+void two_frame_clips_trim_from_either_side_and_from_outside() {
+  const auto drag = [](float from_x, float to_x) {
+    Harness h;
+    h.elements[1].timing = scene::ClipTiming{20, 2, 0, 0, 0};
+    return clip_drag(h, from_x, to_x, 116.0F);
+  };
+  // The bar runs x=408..422.8.
+  const auto head = drag(404.0F, 412.0F);
+  UI_CHECK(head.has_value());
+  UI_CHECK(head->start == 21 && head->duration == 1);
+  const auto tail = drag(426.0F, 441.0F);
+  UI_CHECK(tail.has_value());
+  UI_CHECK(tail->start == 20 && tail->duration == 4);
+  const auto moved = drag(415.0F, 430.0F);
+  UI_CHECK(moved.has_value());
+  UI_CHECK(moved->start == 22 && moved->duration == 2);
+}
+
+// A clip's Opacity key directly under its head trim edge: the key row's
+// press takes the key and the clip row's press trims, each in its own row.
+void a_key_under_a_trim_edge_and_the_edge_each_keep_their_press() {
+  Harness h;
+  h.keys.push_back(scene::ChannelKeyframes{
+      clip_node, scene::PropertyChannel::Opacity, {20, 40}, {1.0, 0.5}});
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  // Open the clip: Position, Rotation and Scale groups, then Opacity at
+  // y=196..220. Its frame-20 key sits at x=408, under the bar's head.
+  static_cast<void>(h.click(42.0F, 112.0F));
+  static_cast<void>(h.frame(411.0F, 208.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(411.0F, 208.0F, true);
+  UI_CHECK(pressed.clip_edits.empty());
+  UI_CHECK(!pressed.seek_to_frame.has_value());
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  static_cast<void>(h.frame(411.0F, 208.0F, false));
+
+  const auto trimmed = clip_drag(h, 405.0F, 449.0F, 116.0F);
+  UI_CHECK(trimmed.has_value());
+  UI_CHECK(trimmed->start == 26 && trimmed->duration == 34);
+}
+
+// The In and Out handles answer down the ruler's full height, not only on
+// the range bar along its foot.
+void range_handles_answer_down_the_full_ruler() {
+  Harness h;
+  static_cast<void>(h.frame(262.0F, 38.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(262.0F, 38.0F, true);
+  UI_CHECK(!pressed.seek_to_frame.has_value());
+  static_cast<void>(h.frame(334.0F, 38.0F, true, gui::KeyMods::Alt));
+  const editor::TimelinePanelFrame released =
+      h.frame(334.0F, 38.0F, false, gui::KeyMods::Alt);
+  UI_CHECK(released.range.has_value());
+  UI_CHECK(released.range->first == 10U && released.range->last == 100U);
+}
+
+// A marker's tag answers ten units left of its line.
+void a_marker_answers_ten_units_from_its_line() {
+  Harness h;
+  h.markers = {timeline_marker(60U, 20, scene::CueAction::None, "Intro")};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  static_cast<void>(h.click(399.0F, 66.0F));
+  UI_CHECK(h.panel.selected_markers().size() == 1U);
+  UI_CHECK(h.panel.selected_markers().front() == doc::NodeId{60U});
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 96U> cases{{
+constexpr std::array<Case, 101U> cases{{
     {"tool cursors follow selection and captured gestures",
      &tool_cursors_follow_selection_and_captured_gestures},
     {"extreme imported timing is refused visibly and cannot overflow snapping",
@@ -3321,6 +3430,16 @@ constexpr std::array<Case, 96U> cases{{
      &expanding_rows_above_a_key_drag_keeps_the_drag},
     {"a row press released after rows shift clicks no other row",
      &a_row_press_released_after_rows_shift_clicks_no_other_row},
+    {"a fade knob on a short clip owns its top corner",
+     &a_fade_knob_on_a_short_clip_owns_its_top_corner},
+    {"two-frame clips trim from either side and from outside",
+     &two_frame_clips_trim_from_either_side_and_from_outside},
+    {"a key under a trim edge and the edge each keep their press",
+     &a_key_under_a_trim_edge_and_the_edge_each_keep_their_press},
+    {"range handles answer down the full ruler",
+     &range_handles_answer_down_the_full_ruler},
+    {"a marker answers ten units from its line",
+     &a_marker_answers_ten_units_from_its_line},
 }};
 
 } // namespace
