@@ -894,7 +894,6 @@ private:
   std::set<ChannelIdentity> hidden_channels_;
   std::optional<ChannelIdentity> active_channel_;
   NumberField key_value_field_;
-  bool rate_menu_open_{};
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
   bool timeline_focused_{};
   bool panning_{};
@@ -969,14 +968,19 @@ private:
   RangeHandle range_drag_{RangeHandle::None};
   core::u64 range_drag_value_{};
 
-  // Typed time entry: the playhead readout and the In/Out fields all scrub
-  // on a drag and open for typing on a click.
-  gui::UiId time_drag_id_{};
-  float time_drag_start_x_{};
-  core::u64 time_drag_origin_{};
-  bool time_drag_moved_{};
-  gui::UiId time_edit_id_{};
-  std::string time_draft_;
+  // The toolbar's own state: the show-rate menu, and typed time entry - the
+  // playhead readout and the In/Out fields all scrub on a drag and open for
+  // typing on a click.
+  struct ToolbarState final {
+    bool rate_menu_open{};
+    gui::UiId time_drag_id{};
+    float time_drag_start_x{};
+    core::u64 time_drag_origin{};
+    bool time_drag_moved{};
+    gui::UiId time_edit_id{};
+    std::string time_draft;
+  };
+  ToolbarState toolbar_;
 
   // The ruler reads in timecode or in frames; both are the same show frames.
   bool ruler_frames_{};

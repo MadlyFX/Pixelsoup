@@ -80,35 +80,35 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                               gui::UiColor color) -> std::optional<core::u64> {
     const gui::UiId text_id = mix(id, "text");
     std::optional<core::u64> result;
-    if (time_edit_id_ == id) {
-      static_cast<void>(ctx.text_field(text_id, field, time_draft_));
+    if (toolbar_.time_edit_id == id) {
+      static_cast<void>(ctx.text_field(text_id, field, toolbar_.time_draft));
       if (ctx.focus() != text_id) {
         // Enter, Tab, or a press elsewhere commits; Escape has already put
         // the original text back, which parses to the value unchanged.
         if (const auto parsed =
-                parse_timecode(time_draft_, timeline.rate_numerator,
+                parse_timecode(toolbar_.time_draft, timeline.rate_numerator,
                                timeline.rate_denominator, value);
             parsed.has_value() && std::min(*parsed, maximum) != value) {
           result = std::min(*parsed, maximum);
         }
-        time_edit_id_ = gui::UiId{};
-        time_draft_.clear();
+        toolbar_.time_edit_id = gui::UiId{};
+        toolbar_.time_draft.clear();
       }
       return result;
     }
     const gui::Interaction interaction = ctx.grab(id, field);
     if (interaction.pressed) {
-      time_drag_id_ = id;
-      time_drag_start_x_ = ctx.pointer_press_x();
-      time_drag_origin_ = value;
-      time_drag_moved_ = false;
+      toolbar_.time_drag_id = id;
+      toolbar_.time_drag_start_x = ctx.pointer_press_x();
+      toolbar_.time_drag_origin = value;
+      toolbar_.time_drag_moved = false;
     }
-    if (time_drag_id_ == id && interaction.held) {
-      const float dx = ctx.pointer_x() - time_drag_start_x_;
-      time_drag_moved_ = time_drag_moved_ || std::fabs(dx) >= 3.0F;
-      if (time_drag_moved_) {
+    if (toolbar_.time_drag_id == id && interaction.held) {
+      const float dx = ctx.pointer_x() - toolbar_.time_drag_start_x;
+      toolbar_.time_drag_moved = toolbar_.time_drag_moved || std::fabs(dx) >= 3.0F;
+      if (toolbar_.time_drag_moved) {
         const core::i64 moved =
-            signed_frame(time_drag_origin_) + std::llround(dx);
+            signed_frame(toolbar_.time_drag_origin) + std::llround(dx);
         const core::u64 next = static_cast<core::u64>(std::clamp<core::i64>(
             moved, 0, signed_frame(maximum)));
         if (next != value) {
@@ -116,13 +116,13 @@ void TimelinePanel::draw_toolbar(Pass &p) {
         }
       }
       if (interaction.released) {
-        if (!time_drag_moved_ && interaction.clicked) {
-          time_edit_id_ = id;
-          time_draft_ = timecode(p, value);
-          ctx.focus_text_field(text_id, time_draft_);
+        if (!toolbar_.time_drag_moved && interaction.clicked) {
+          toolbar_.time_edit_id = id;
+          toolbar_.time_draft = timecode(p, value);
+          ctx.focus_text_field(text_id, toolbar_.time_draft);
         }
-        time_drag_id_ = gui::UiId{};
-        time_drag_moved_ = false;
+        toolbar_.time_drag_id = gui::UiId{};
+        toolbar_.time_drag_moved = false;
       }
     }
     ctx.panel(field, interaction.hovered ? theme.widget_hover : theme.track);
@@ -196,7 +196,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   if (fits(bar_x, rate_width)) {
     rate_button = gui::Rect{bar_x, control_y, rate_width, button_height};
     if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
-      rate_menu_open_ = !rate_menu_open_;
+      toolbar_.rate_menu_open = !toolbar_.rate_menu_open;
       key_tools_open_ = false;
     }
     constexpr float popup_width = 104.0F;
@@ -205,12 +205,12 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                            popup_width,
                            8.0F + choice_height *
                                       static_cast<float>(common_rates.size())};
-    if (rate_menu_open_ && ctx.pointer_pressed() &&
+    if (toolbar_.rate_menu_open && ctx.pointer_pressed() &&
         !rate_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
         !rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-      rate_menu_open_ = false;
+      toolbar_.rate_menu_open = false;
     }
-    if (rate_menu_open_ &&
+    if (toolbar_.rate_menu_open &&
         rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
       // Process and draw the menu after the timeline. Until then, mask
       // the graph underneath it so choosing a rate cannot also scrub.
@@ -218,7 +218,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
       scratch.popup_pointer_blocked = true;
     }
   } else {
-    rate_menu_open_ = false;
+    toolbar_.rate_menu_open = false;
   }
   bar_x += rate_width + 4.0F;
 
@@ -301,7 +301,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                     key_tools_open_,
                     "Key selection, value and time-scale tools")) {
       key_tools_open_ = !key_tools_open_;
-      rate_menu_open_ = false;
+      toolbar_.rate_menu_open = false;
       if (!key_tools_open_) {
         scale_open_ = false;
       }
@@ -533,7 +533,7 @@ void TimelinePanel::draw_rate_menu(Pass &p) {
   if (scratch.popup_pointer_blocked) {
     ctx.pop_pointer_block();
   }
-  if (rate_menu_open_) {
+  if (toolbar_.rate_menu_open) {
     ctx.panel(rate_popup, ctx.theme().background);
     ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, rate_popup.width, 1.0F},
               ctx.theme().divider);
@@ -562,7 +562,7 @@ void TimelinePanel::draw_rate_menu(Pass &p) {
         if (!same_rate(timeline, choice.rate)) {
           frame.show_rate = choice.rate;
         }
-        rate_menu_open_ = false;
+        toolbar_.rate_menu_open = false;
       }
       choice_y += 21.0F;
     }

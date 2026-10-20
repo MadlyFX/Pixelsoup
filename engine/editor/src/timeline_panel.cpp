@@ -233,13 +233,13 @@ void TimelinePanel::reset_project_state() noexcept {
   range_fields_ = NumberField{};
   clear_key_context();
   drag_anchor_frame_ = 0;
-  rate_menu_open_ = false;
+  toolbar_.rate_menu_open = false;
   edit_tool_ = TimelineEditTool::Standard;
   range_drag_ = RangeHandle::None;
-  time_drag_id_ = gui::UiId{};
-  time_drag_moved_ = false;
-  time_edit_id_ = gui::UiId{};
-  time_draft_.clear();
+  toolbar_.time_drag_id = gui::UiId{};
+  toolbar_.time_drag_moved = false;
+  toolbar_.time_edit_id = gui::UiId{};
+  toolbar_.time_draft.clear();
   marker_click_ = doc::NodeId{};
   timeline_focused_ = false;
   panning_ = false;
@@ -4403,9 +4403,9 @@ void TimelinePanel::handle_actions(Pass &p) {
                   key_value_field_.live() || ctx.focus() == search_id ||
                   ctx.focus() == scale_numerator_id ||
                   ctx.focus() == scale_denominator_id ||
-                  ctx.focus() == scale_user_anchor_id || rate_menu_open_ ||
-                  time_drag_id_ != gui::UiId{} ||
-                  time_edit_id_ != gui::UiId{} ||
+                  ctx.focus() == scale_user_anchor_id || toolbar_.rate_menu_open ||
+                  toolbar_.time_drag_id != gui::UiId{} ||
+                  toolbar_.time_edit_id != gui::UiId{} ||
                   marker_name_node_ != doc::NodeId{} || frame.lane_editing ||
                   rename_.active();
 
