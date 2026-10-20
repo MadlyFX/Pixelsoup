@@ -642,6 +642,10 @@ struct Row final {
   bool lane_member{};
   doc::NodeId lane_owner{};
   bool hierarchy{};
+  // Where the row sits in the stack, measured from the first row's top, and
+  // how tall it is. Rows are laid out as a running sum of their heights.
+  float top{};
+  float height{};
 };
 
 [[nodiscard]] inline doc::NodeId layer_parent(const ElementInfo &element) noexcept {
@@ -742,6 +746,33 @@ nearest_snap(core::i64 value, std::span<const core::i64> candidates,
     }
   }
   return seconds.back() * rate;
+}
+
+// How tall the whole stack of rows is.
+[[nodiscard]] inline float rows_extent(std::span<const Row> rows) noexcept {
+  return rows.empty() ? 0.0F : rows.back().top + rows.back().height;
+}
+
+// The top of row `index`, or the end of the stack for one past the last row.
+[[nodiscard]] inline float row_top(std::span<const Row> rows,
+                                   std::size_t index) noexcept {
+  return index < rows.size() ? rows[index].top : rows_extent(rows);
+}
+
+// The row containing `local`, measured from the first row's top.
+[[nodiscard]] inline std::optional<std::size_t>
+row_at(std::span<const Row> rows, float local) noexcept {
+  const auto after = std::upper_bound(
+      rows.begin(), rows.end(), local,
+      [](float value, const Row &row) noexcept { return value < row.top; });
+  if (after == rows.begin()) {
+    return std::nullopt;
+  }
+  const auto index = static_cast<std::size_t>(after - rows.begin()) - 1U;
+  if (local >= rows[index].top + rows[index].height) {
+    return std::nullopt;
+  }
+  return index;
 }
 
 // The rows the Timeline lists this frame, top to bottom, and the selectable

@@ -482,7 +482,7 @@ void TimelinePanel::navigate(Pass &p) {
     return time_axis_.frame(x, graph.x);
   };
 
-  p.content_height = static_cast<float>(rows.size()) * row_height;
+  p.content_height = rows_extent(rows);
   auto &content_height = p.content_height;
   p.maximum_row_scroll =
       std::max(content_height - rows_bounds.height, 0.0F);
@@ -505,13 +505,16 @@ void TimelinePanel::navigate(Pass &p) {
           curve_value_zoom_ * static_cast<float>(std::pow(
                                   1.15, static_cast<double>(ctx.wheel()))),
           0.25F, 16.0F);
-      const float band = row_height - 8.0F;
+      const float local = ctx.pointer_y() - rows_bounds.y + row_scroll_;
+      const std::optional<std::size_t> under = row_at(rows, local);
+      const float band =
+          (under.has_value() ? rows[*under].height : row_height) - 8.0F;
       if (previous > 0.0F && band > 0.0F &&
           ctx.pointer_y() >= rows_bounds.y) {
-        const float local = ctx.pointer_y() - rows_bounds.y + row_scroll_;
         const float row_top =
             rows_bounds.y - row_scroll_ +
-            std::floor(local / row_height) * row_height;
+            (under.has_value() ? rows[*under].top
+                               : std::floor(local / row_height) * row_height);
         const float normal =
             std::clamp((ctx.pointer_y() - row_top - 4.0F) / band, 0.0F, 1.0F);
         const float ratio = curve_value_zoom_ / previous;
@@ -670,8 +673,8 @@ void TimelinePanel::request_derivatives(Pass &p) {
       continue;
     }
     const float row_top =
-        rows_bounds.y + static_cast<float>(index) * row_height - row_scroll_;
-    const float row_bottom = row_top + row_height;
+        rows_bounds.y + row.top - row_scroll_;
+    const float row_bottom = row_top + row.height;
     const bool visible = row_bottom > rows_bounds.y &&
                          row_top < rows_bounds.y + rows_bounds.height;
     std::size_t distance{};
@@ -766,19 +769,18 @@ void TimelinePanel::draw_rows(Pass &p) {
   ctx.push_clip(rows_bounds);
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     const Row &row = rows[index];
-    const float y =
-        rows_bounds.y + static_cast<float>(index) * row_height - row_scroll_;
-    if (y + row_height <= rows_bounds.y ||
+    const float y = rows_bounds.y + row.top - row_scroll_;
+    if (y + row.height <= rows_bounds.y ||
         y >= rows_bounds.y + rows_bounds.height) {
       continue;
     }
     if (row.kind == Row::Kind::Layer && !row.surface) {
       const float top = std::max(y, rows_bounds.y);
-      const float bottom = std::min(y + row_height, rows_bounds.y + rows_bounds.height);
+      const float bottom = std::min(y + row.height, rows_bounds.y + rows_bounds.height);
       replacement_targets_.push_back({row.node,
           {rows_bounds.x, top, rows_bounds.width, bottom - top}});
     }
-    const float centre_y = y + row_height * 0.5F;
+    const float centre_y = y + row.height * 0.5F;
     std::optional<ChannelIdentity> row_channel_identity;
     if (row.kind == Row::Kind::Component || row.kind == Row::Kind::Property) {
       row_channel_identity = ChannelIdentity{
@@ -798,7 +800,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     const bool row_hovered =
         !ctx.pointer_blocked() &&
         rows_bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-        ctx.pointer_y() >= y && ctx.pointer_y() < y + row_height;
+        ctx.pointer_y() >= y && ctx.pointer_y() < y + row.height;
     gui::UiColor background{};
     if (is_selected && layer_like) {
       background = row_theme.selection;
@@ -815,22 +817,22 @@ void TimelinePanel::draw_rows(Pass &p) {
       // reads them as that layer's contents rather than as more layers.
       background = row_theme.track;
     }
-    ctx.panel(gui::Rect{rows_bounds.x, y, rows_bounds.width, row_height},
+    ctx.panel(gui::Rect{rows_bounds.x, y, rows_bounds.width, row.height},
               background);
     if (!is_selected && row_hovered && layer_like) {
-      ctx.panel(gui::Rect{rows_bounds.x, y, list_width, row_height},
+      ctx.panel(gui::Rect{rows_bounds.x, y, list_width, row.height},
                 alpha(row_theme.widget_hover, 0.6F));
     }
     // Every layer is ruled off across the whole panel; property rows only
     // across the lanes, so a twirled-open layer still reads as one block.
     ctx.panel(gui::Rect{layer_like ? rows_bounds.x : graph.x,
-                        y + row_height - 1.0F,
+                        y + row.height - 1.0F,
                         layer_like ? rows_bounds.width : graph.width, 1.0F},
               row_theme.divider);
     if (layer_like && !row.surface) {
       // The row's own colour down its left edge: the kind for a layer, the
       // track's for a track. Selection takes the accent.
-      ctx.panel(gui::Rect{rows_bounds.x, y, 3.0F, row_height - 1.0F},
+      ctx.panel(gui::Rect{rows_bounds.x, y, 3.0F, row.height - 1.0F},
                 is_selected ? row_theme.accent
                             : alpha(row.color, row.locked ? 0.35F : 0.85F));
     }
@@ -838,7 +840,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     const float tree_x = rows_bounds.x + list_metrics::toggle + 6.0F;
     const float twirl_x =
         tree_x + static_cast<float>(row.indent) * list_metrics::indent;
-    draw_indent_guides(ctx, tree_x, y, row_height, row.indent,
+    draw_indent_guides(ctx, tree_x, y, row.height, row.indent,
                        alpha(row_theme.border, 0.9F));
     const core::u64 row_group = group_id(row.node, row.group);
     const bool open = row.hierarchy
@@ -861,11 +863,11 @@ void TimelinePanel::draw_rows(Pass &p) {
     float name_x = content_x;
     gui::Rect name_bounds{content_x, y,
                           std::max(graph.x - content_x - 48.0F, 0.0F),
-                          row_height};
+                          row.height};
     const float lock_x = graph.x - list_metrics::toggle - 4.0F;
     const gui::Rect eye_bounds{rows_bounds.x + 4.0F, y, list_metrics::toggle,
-                               row_height};
-    const gui::Rect lock_bounds{lock_x, y, list_metrics::toggle, row_height};
+                               row.height};
+    const gui::Rect lock_bounds{lock_x, y, list_metrics::toggle, row.height};
     if (row.kind == Row::Kind::LaneHeader) {
       // Tracks are numbered top-down, the way they are called across a
       // stage: "kill track two".
@@ -883,14 +885,14 @@ void TimelinePanel::draw_rows(Pass &p) {
                 number, row_theme.background);
       name_x = badge.x + badge.width + 8.0F;
       name_bounds = gui::Rect{name_x, y, std::max(lock_x - name_x - 4.0F, 0.0F),
-                              row_height};
+                              row.height};
       if (rename_.editing(row.node.value())) {
         // While a track's name is open the shell holds one lane gesture and
         // keeps the keyboard's shortcuts away from the field.
         frame.lane_editing = true;
         if (auto renamed = rename_.draw(
                 ctx, gui::Rect{name_bounds.x - 4.0F, y + 2.0F,
-                               name_bounds.width + 4.0F, row_height - 4.0F})) {
+                               name_bounds.width + 4.0F, row.height - 4.0F})) {
           frame.lane_edits.push_back(TimelineLaneEdit{
               TimelineLaneAction::Rename, row.node, std::move(*renamed)});
         }
@@ -941,11 +943,11 @@ void TimelinePanel::draw_rows(Pass &p) {
           (has_toggles ? 0.0F : 64.0F);
       name_bounds = gui::Rect{name_x, y,
                               std::max(name_right - name_x - 6.0F, 0.0F),
-                              row_height};
+                              row.height};
       if (rename_.editing(row.node.value())) {
         if (auto renamed = rename_.draw(
                 ctx, gui::Rect{name_bounds.x - 4.0F, y + 2.0F,
-                               name_bounds.width + 4.0F, row_height - 4.0F})) {
+                               name_bounds.width + 4.0F, row.height - 4.0F})) {
           frame.renames.push_back(TimelineRename{row.node, std::move(*renamed)});
         }
       } else {
@@ -957,7 +959,7 @@ void TimelinePanel::draw_rows(Pass &p) {
                                       : alpha(row_theme.text, 0.45F)));
       }
       if (row.surface) {
-        ctx.label(gui::Rect{lock_x - 60.0F, y, 56.0F, row_height}, "SURFACE",
+        ctx.label(gui::Rect{lock_x - 60.0F, y, 56.0F, row.height}, "SURFACE",
                   row_theme.text_muted);
         if (row_flag_toggle(ctx, mix(id_, "surface lock", row.node.value()),
                             lock_bounds, RowFlag::Locked, row.locked,
@@ -985,7 +987,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       // the list and the lanes read as one table.
       name_bounds = gui::Rect{content_x, y,
                               std::max(graph.x - content_x - 48.0F, 0.0F),
-                              row_height};
+                              row.height};
       ctx.label(name_bounds, row.label,
                 row.kind == Row::Kind::Component ||
                         row.kind == Row::Kind::Property
@@ -995,7 +997,7 @@ void TimelinePanel::draw_rows(Pass &p) {
 
     const float interaction_y = std::max(y, rows_bounds.y);
     const float interaction_bottom =
-        std::min(y + row_height, rows_bounds.y + rows_bounds.height);
+        std::min(y + row.height, rows_bounds.y + rows_bounds.height);
     const float interaction_height =
         std::max(interaction_bottom - interaction_y, 0.0F);
 
@@ -1247,7 +1249,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     // The time lane: a clip bar for a placed media layer, a translucent
     // authored-span bar for every other layer, aggregate diamonds for
     // groups, and draggable diamonds for component channels.
-    ctx.push_clip(gui::Rect{graph.x, y, graph.width, row_height});
+    ctx.push_clip(gui::Rect{graph.x, y, graph.width, row.height});
     // Filled in for a placed clip row, and consulted by the lane
     // interaction below so that a press on the bar becomes a clip gesture
     // rather than a scrub.
@@ -1276,7 +1278,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       const float x1 = frame_to_x(
           static_cast<double>(clip_timing.start + clip_timing.duration));
       clip_bar =
-          gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row_height - 6.0F};
+          gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row.height - 6.0F};
       const bool live =
           clip_.drag != ClipDrag::None && clip_.node == row.node;
       ctx.panel(clip_bar, alpha(row.color, live ? 0.42F : 0.30F));
@@ -1543,7 +1545,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       const float x0 = frame_to_x(static_cast<double>(first_i));
       const float x1 = frame_to_x(static_cast<double>(last_i));
       const gui::Rect clip{x0, y + 5.0F, std::max(x1 - x0, 1.0F),
-                           row_height - 10.0F};
+                           row.height - 10.0F};
       ctx.panel(clip, alpha(row.color, row.element_visible ? 0.16F : 0.06F));
       ctx.panel(gui::Rect{clip.x, clip.y, clip.width, 1.0F},
                 alpha(row.color, row.element_visible ? 0.45F : 0.18F));
@@ -1620,7 +1622,7 @@ void TimelinePanel::draw_rows(Pass &p) {
                                 (((maximum_value - value) / value_span) - 0.5) *
                                     static_cast<double>(curve_value_zoom_) +
                                 static_cast<double>(curve_value_pan_);
-          return y + 4.0F + static_cast<float>(normal) * (row_height - 8.0F);
+          return y + 4.0F + static_cast<float>(normal) * (row.height - 8.0F);
         };
 
         if (graph_mode_ && has_values && std::isfinite(value_span) &&
@@ -1637,13 +1639,13 @@ void TimelinePanel::draw_rows(Pass &p) {
               std::snprintf(minimum_label.data(), minimum_label.size(), "%.3g",
                             minimum_value);
           ctx.label(gui::Rect{graph.x + 3.0F, y, std::min(graph.width, 52.0F),
-                              row_height * 0.5F},
+                              row.height * 0.5F},
                     std::string_view{
                         maximum_label.data(),
                         static_cast<std::size_t>(std::max(maximum_length, 0))},
                     alpha(component_color, 0.68F));
           ctx.label(gui::Rect{graph.x + 3.0F, centre_y,
-                              std::min(graph.width, 52.0F), row_height * 0.5F},
+                              std::min(graph.width, 52.0F), row.height * 0.5F},
                     std::string_view{
                         minimum_label.data(),
                         static_cast<std::size_t>(std::max(minimum_length, 0))},

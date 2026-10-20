@@ -78,10 +78,8 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
            rows[end].lane_owner == lane) {
       ++end;
     }
-    const float raw_top = rows_bounds.y + static_cast<float>(index) * row_height -
-                          row_scroll_;
-    const float raw_bottom = rows_bounds.y + static_cast<float>(end) * row_height -
-                             row_scroll_;
+    const float raw_top = rows_bounds.y + row_top(rows, index) - row_scroll_;
+    const float raw_bottom = rows_bounds.y + row_top(rows, end) - row_scroll_;
     const float top = std::max(raw_top, rows_bounds.y);
     const float bottom = std::min(raw_bottom, rows_bounds.y + rows_bounds.height);
     if (bottom > top) {
@@ -115,10 +113,8 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
             rows[end].indent > rows[index].indent)) {
       ++end;
     }
-    const float raw_top = rows_bounds.y + static_cast<float>(index) * row_height -
-                          row_scroll_;
-    const float raw_bottom = rows_bounds.y + static_cast<float>(end) * row_height -
-                             row_scroll_;
+    const float raw_top = rows_bounds.y + row_top(rows, index) - row_scroll_;
+    const float raw_bottom = rows_bounds.y + row_top(rows, end) - row_scroll_;
     const float top = std::max(raw_top, rows_bounds.y);
     const float bottom = std::min(raw_bottom, rows_bounds.y + rows_bounds.height);
     if (bottom > top) {

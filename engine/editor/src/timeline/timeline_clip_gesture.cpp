@@ -406,10 +406,10 @@ TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
   if (local < 0.0F) {
     return std::nullopt;
   }
-  const auto row_index = static_cast<std::size_t>(local / row_height);
+  const std::optional<std::size_t> row_index = row_at(rows, local);
   const doc::NodeId target =
-      row_index < rows.size() && rows[row_index].lane_member
-          ? rows[row_index].lane_owner
+      row_index.has_value() && rows[*row_index].lane_member
+          ? rows[*row_index].lane_owner
           : doc::NodeId{};
   if (target == doc::NodeId{}) {
     return target;

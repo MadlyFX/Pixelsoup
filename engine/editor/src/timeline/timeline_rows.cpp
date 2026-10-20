@@ -459,6 +459,12 @@ RowList build_rows(RowsState &state, const RowsInput &input,
       visible_order.push_back(row.node);
     }
   }
+  float top = 0.0F;
+  for (Row &row : rows) {
+    row.top = top;
+    row.height = row_height;
+    top += row.height;
+  }
   return RowList{std::move(rows), std::move(visible_order)};
 }
 
