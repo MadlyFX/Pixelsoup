@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string_view>
+#include <utility>
 
 namespace mediaserver::editor::timeline {
 namespace {
@@ -217,10 +218,83 @@ TimelineGraphView::sample_curve(const scene::ChannelKeyframes &channel,
   return points;
 }
 
+std::vector<gui::UiPoint>
+TimelineGraphView::simplify(std::span<const gui::UiPoint> points,
+                            float tolerance) {
+  if (points.size() <= 2U) {
+    return {points.begin(), points.end()};
+  }
+  std::vector<bool> keep(points.size(), false);
+  keep.front() = true;
+  keep.back() = true;
+  std::vector<std::pair<std::size_t, std::size_t>> spans{
+      {0U, points.size() - 1U}};
+  while (!spans.empty()) {
+    const auto [first, last] = spans.back();
+    spans.pop_back();
+    const gui::UiPoint a = points[first];
+    const gui::UiPoint b = points[last];
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    float farthest = 0.0F;
+    std::size_t at = first;
+    for (std::size_t index = first + 1U; index < last; ++index) {
+      const gui::UiPoint q = points[index];
+      const float distance =
+          length > 0.0F
+              ? std::fabs(dy * (q.x - a.x) - dx * (q.y - a.y)) / length
+              : std::sqrt((q.x - a.x) * (q.x - a.x) +
+                          (q.y - a.y) * (q.y - a.y));
+      if (distance > farthest) {
+        farthest = distance;
+        at = index;
+      }
+    }
+    if (farthest > tolerance) {
+      keep[at] = true;
+      spans.emplace_back(first, at);
+      spans.emplace_back(at, last);
+    }
+  }
+  std::vector<gui::UiPoint> out;
+  for (std::size_t index = 0U; index < points.size(); ++index) {
+    if (keep[index]) {
+      out.push_back(points[index]);
+    }
+  }
+  return out;
+}
+
+const std::vector<gui::UiPoint> &
+TimelineGraphView::curve(const GraphChannel &channel,
+                         const TimelineTimeAxis &time, const gui::Rect &area) {
+  CachedCurve &cached = curves_[channel.id];
+  cached.used = true;
+  const bool same_area = cached.area.x == area.x && cached.area.y == area.y &&
+                         cached.area.width == area.width &&
+                         cached.area.height == area.height;
+  if (!cached.points.empty() && same_area && cached.time == time &&
+      cached.axis == axis_ && cached.keys == *channel.keys) {
+    return cached.points;
+  }
+  cached.keys = *channel.keys;
+  cached.time = time;
+  cached.axis = axis_;
+  cached.area = area;
+  cached.points =
+      simplify(sample_curve(*channel.keys, time, axis_, area), 0.25F);
+  ++resampled_;
+  return cached.points;
+}
+
 void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
                              const TimelineTimeAxis &time,
                              std::span<const GraphChannel> channels,
-                             std::span<const GraphKey> keys) const {
+                             std::span<const GraphKey> keys) {
+  for (auto &[id, cached] : curves_) {
+    cached.used = false;
+  }
   if (area.width <= 0.0F || area.height <= 0.0F) {
     return;
   }
@@ -250,8 +324,7 @@ void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
     if (channel.keys == nullptr) {
       return;
     }
-    const std::vector<gui::UiPoint> points =
-        sample_curve(*channel.keys, time, axis_, area);
+    const std::vector<gui::UiPoint> &points = curve(channel, time, area);
     const float width = channel.active ? 2.0F : 1.25F;
     const gui::UiColor colour = alpha(channel.color, channel.active ? 1.0F : 0.85F);
     for (std::size_t index = 1U; index < points.size(); ++index) {
@@ -286,6 +359,8 @@ void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
     }
   }
   ctx.pop_clip();
+  // Forget curves no longer shown, so the cache holds what is on screen.
+  std::erase_if(curves_, [](const auto &entry) { return !entry.second.used; });
 }
 
 } // namespace mediaserver::editor::timeline

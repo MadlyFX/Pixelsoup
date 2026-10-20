@@ -808,7 +808,7 @@ private:
 
   // Curves mode: where the graph is, what it shows, and the graph itself.
   [[nodiscard]] gui::Rect graph_area(const Pass &p) const noexcept;
-  void collect_graph(Pass &p);
+  void collect_graph(Pass &p, std::span<const RowContext> visible);
   void draw_graph(Pass &p);
 
   // Queries and gestures more than one section reaches.

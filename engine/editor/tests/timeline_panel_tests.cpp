@@ -3530,8 +3530,9 @@ namespace {
 // top-level objects and clips, each keyed on Position, Opacity and an effect,
 // each twirled open with its Position group open too. Reports the median and
 // fastest per-frame time over batches of idle frames and of frames with the
-// pointer sweeping the lanes, in the panel's typical 1920x1080 bounds.
-int bench(std::size_t layers) {
+// pointer sweeping the lanes, in the panel's typical 1920x1080 bounds -
+// in the dope sheet, or with `curves` on the Curves graph.
+int bench(std::size_t layers, bool curves) {
   Harness h;
   h.timeline = editor::EditorTimeline{600U, 600U, 0U, 7'200U, false, false,
                                       false};
@@ -3623,8 +3624,15 @@ int bench(std::size_t layers) {
     std::printf("%-28s median %.3f ms/frame  fastest %.3f ms/frame\n", label,
                 batches[batches.size() / 2U], batches.front());
   };
-  std::printf("%zu layers; %zu vertices per frame collapsed, %zu expanded\n",
-              layers, collapsed_vertices, h.list.vertices().size());
+  if (curves) {
+    // The Curves toggle on the toolbar.
+    static_cast<void>(h.click(608.0F, 17.0F));
+    UI_CHECK(h.panel.curves_mode());
+    static_cast<void>(h.frame(1200.0F, 600.0F, false));
+  }
+  std::printf("%zu layers%s; %zu vertices per frame collapsed, %zu now\n",
+              layers, curves ? " in Curves" : "", collapsed_vertices,
+              h.list.vertices().size());
   measure("idle", [&](int) { static_cast<void>(h.frame(1200.0F, 600.0F, false)); });
   measure("pointer sweeping lanes", [&](int frame) {
     static_cast<void>(h.frame(400.0F + static_cast<float>(frame % 100) * 14.0F,
@@ -3636,11 +3644,12 @@ int bench(std::size_t layers) {
 
 } // namespace
 
-// mediaserver_editor_timeline_bench [layers]
+// mediaserver_editor_timeline_bench [layers] [curves]
 int main(int argc, char **argv) {
   // The behaviour cases share this file; the benchmark does not run them.
   static_cast<void>(cases);
-  return bench(argc == 2 ? std::stoul(argv[1]) : 400U);
+  return bench(argc >= 2 ? std::stoul(argv[1]) : 400U,
+               argc >= 3 && std::string_view{argv[2]} == "curves");
 }
 #else
 int main() {

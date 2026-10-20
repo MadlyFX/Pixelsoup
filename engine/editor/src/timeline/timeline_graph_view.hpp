@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -134,7 +135,26 @@ public:
   void draw(gui::UiContext &ctx, const gui::Rect &area,
             const TimelineTimeAxis &time,
             std::span<const GraphChannel> channels,
-            std::span<const GraphKey> keys) const;
+            std::span<const GraphKey> keys);
+
+  // The fewest of `points` that keep every one of them within `tolerance`
+  // pixels of the line through those kept (Douglas-Peucker). The first and
+  // last always stay.
+  [[nodiscard]] static std::vector<gui::UiPoint>
+  simplify(std::span<const gui::UiPoint> points, float tolerance);
+
+  // A channel's sampled curve, simplified to a quarter pixel, kept between
+  // frames and sampled again only when its keys, either axis or the area
+  // change.
+  [[nodiscard]] const std::vector<gui::UiPoint> &
+  curve(const GraphChannel &channel, const TimelineTimeAxis &time,
+        const gui::Rect &area);
+  // How many curves were sampled afresh since the count was last read.
+  [[nodiscard]] std::size_t take_resampled() noexcept {
+    const std::size_t count = resampled_;
+    resampled_ = 0U;
+    return count;
+  }
 
 private:
   ValueAxis axis_;
@@ -143,6 +163,17 @@ private:
   bool fit_requested_{true};
   std::set<ChannelId> hidden_;
   std::optional<ChannelId> active_;
+
+  struct CachedCurve final {
+    scene::ChannelKeyframes keys;
+    TimelineTimeAxis time;
+    ValueAxis axis;
+    gui::Rect area;
+    std::vector<gui::UiPoint> points;
+    bool used{};
+  };
+  std::map<ChannelId, CachedCurve> curves_;
+  std::size_t resampled_{};
 };
 
 } // namespace mediaserver::editor::timeline

@@ -475,8 +475,8 @@ updates when the edit is committed. **Slide (`U`)** is a separate operation
 that adjusts the neighboring cuts; use Selection to freely move a clip.
 
 **Curves** turns the lanes into one graph the full height of the layer
-list. Every channel listed below an open layer - and every animated channel
-of a selected layer - is drawn there as its curve, overlaid against one value
+list. Every channel listed on screen below an open layer - and every
+animated channel of a selected layer - is drawn there as its curve, overlaid against one value
 scale whose round values are labelled down the graph's left edge. The curve is
 the one playback evaluates, Hold steps, Cubic tangents and weights included,
 sampled at every show frame on screen. Each channel keeps its colour: the X,

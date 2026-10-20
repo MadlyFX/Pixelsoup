@@ -55,7 +55,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     }
   }
   if (graph_mode_) {
-    collect_graph(p);
+    collect_graph(p, visible);
   }
   if (ctx.pointer_pressed()) {
     if (const HitTarget *const owner =
@@ -1707,17 +1707,18 @@ gui::Rect TimelinePanel::graph_area(const Pass &p) const noexcept {
   return gui::Rect{graph.x, rows_bounds.y, graph.width, rows_bounds.height};
 }
 
-// What the Curves graph shows: every channel listed in the rows, then each
-// selected layer's own animated channels, once each, if shown and sampleable;
+// What the Curves graph shows: every channel whose row is on screen in the
+// list beside it, then each selected layer's own animated channels, once
+// each, if shown and sampleable;
 // and each of their keys where it draws - at its frame on the shared time
 // axis, shifted by a key drag, and at its value on the graph's value axis.
 // Keys of unlocked targets are registered as pointer targets over the graph
 // itself, and offered to the marquee.
-void TimelinePanel::collect_graph(Pass &p) {
+void TimelinePanel::collect_graph(Pass &p,
+                                  std::span<const RowContext> visible) {
   const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
   const std::span<const ElementInfo> elements = p.input.elements;
   const std::span<const doc::NodeId> selection = p.input.selection;
-  const std::vector<Row> &rows = p.built.rows;
   const gui::Rect area = graph_area(p);
   std::vector<GraphChannel> &channels = p.graph_channels;
   std::vector<GraphKey> &graph_keys = p.graph_keys;
@@ -1738,7 +1739,8 @@ void TimelinePanel::collect_graph(Pass &p) {
     channels.push_back(GraphChannel{id, keys, channel_color(id.property),
                                     graph_->active() == id, locked});
   };
-  for (const Row &row : rows) {
+  for (const RowContext &rc : visible) {
+    const Row &row = rc.row;
     if (row.kind == Row::Kind::Component || row.kind == Row::Kind::Property) {
       add(ChannelIdentity{row.kind == Row::Kind::Property ? row.property_target
                                                           : row.node,

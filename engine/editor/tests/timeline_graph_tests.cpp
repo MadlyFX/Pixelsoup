@@ -1,6 +1,10 @@
 #include "../src/timeline/timeline_graph_view.hpp"
 #include "../src/timeline/timeline_internal.hpp"
 
+#include <mediaserver/gui/input.hpp>
+#include <mediaserver/gui/text.hpp>
+
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
@@ -282,12 +286,93 @@ void channel_visibility_and_the_active_channel_reset_together() {
   GRAPH_CHECK(graph.fit_requested());
 }
 
+// Simplifying a sampled curve keeps every sample within the tolerance of
+// what is drawn, and collapses straight runs to their ends.
+void simplified_curves_stay_within_a_quarter_pixel() {
+  mediaserver::editor::TimelineTimeAxis time{};
+  time.pixels_per_frame = 0.5F;
+  ValueAxis axis;
+  axis.show(-0.2, 1.4);
+  const gui::Rect area{0.0F, 0.0F, 600.0F, 300.0F};
+  scene::ChannelKeyframes keys{{}, scene::PropertyChannel::Opacity,
+      {0, 300, 600, 900, 1200}, {0.0, 1.0, 1.0, 0.2, 0.2},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Linear,
+       scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Hold,
+       scene::KeyInterpolation::Hold}};
+  const auto full = TimelineGraphView::sample_curve(keys, time, axis, area);
+  const auto drawn = TimelineGraphView::simplify(full, 0.25F);
+  GRAPH_CHECK(drawn.size() < full.size() / 4U);
+  GRAPH_CHECK(drawn.front().x == full.front().x && drawn.back().x == full.back().x);
+  // Every sample lies within a quarter pixel (and a hair) of the drawn
+  // segment spanning its x.
+  for (const gui::UiPoint &point : full) {
+    std::size_t segment = 1U;
+    while (segment + 1U < drawn.size() && drawn[segment].x < point.x) {
+      ++segment;
+    }
+    const gui::UiPoint a = drawn[segment - 1U];
+    const gui::UiPoint b = drawn[segment];
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    const float distance =
+        length > 0.0F
+            ? std::fabs(dy * (point.x - a.x) - dx * (point.y - a.y)) / length
+            : std::hypot(point.x - a.x, point.y - a.y);
+    GRAPH_CHECK(distance <= 0.26F);
+  }
+  // A straight ramp is its two ends.
+  const scene::ChannelKeyframes ramp{{}, scene::PropertyChannel::Opacity,
+      {0, 1200}, {0.0, 1.0},
+      {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear}};
+  const auto straight = TimelineGraphView::simplify(
+      TimelineGraphView::sample_curve(ramp, time, axis, area), 0.25F);
+  GRAPH_CHECK(straight.size() <= 4U);
+}
+
+// Drawing reuses each curve's samples until its keys, either axis or the
+// area change, and forgets curves no longer shown.
+void curves_are_sampled_again_only_when_something_changes() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  TimelineGraphView graph;
+  graph.fit_values(0.0, 1.0);
+  mediaserver::editor::TimelineTimeAxis time{};
+  time.pixels_per_frame = 2.0F;
+  scene::ChannelKeyframes keys{{}, scene::PropertyChannel::Opacity, {0, 100},
+      {0.0, 1.0},
+      {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear}};
+  const timeline::ChannelId id{mediaserver::doc::NodeId{1U},
+                               scene::PropertyChannel::Opacity};
+  const std::array<GraphChannel, 1U> shown{
+      {GraphChannel{id, &keys, gui::UiColor{}, false, false}}};
+  const gui::Rect area{0.0F, 0.0F, 300.0F, 200.0F};
+  const auto draw = [&](std::span<const GraphChannel> channels) {
+    ctx.new_frame();
+    graph.draw(ctx, area, time, channels, {});
+    return graph.take_resampled();
+  };
+  GRAPH_CHECK(draw(shown) == 1U);
+  GRAPH_CHECK(draw(shown) == 0U);
+  keys.values[1] = 0.5;
+  GRAPH_CHECK(draw(shown) == 1U);
+  time.left_frame = 10.0;
+  GRAPH_CHECK(draw(shown) == 1U);
+  graph.axis().pan(20.0F, area);
+  GRAPH_CHECK(draw(shown) == 1U);
+  GRAPH_CHECK(draw(shown) == 0U);
+  GRAPH_CHECK(draw({}) == 0U);
+  GRAPH_CHECK(draw(shown) == 1U);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 13U> cases{{
     {"axis channels read red, green, blue",
      &axis_channels_read_red_green_blue},
     {"other channels listed together never share a colour",
@@ -310,6 +395,10 @@ constexpr std::array<Case, 11U> cases{{
      &zoom_and_pan_are_reported_against_the_last_fit},
     {"channel visibility and the active channel reset together",
      &channel_visibility_and_the_active_channel_reset_together},
+    {"curves are sampled again only when something changes",
+     &curves_are_sampled_again_only_when_something_changes},
+    {"simplified curves stay within a quarter pixel",
+     &simplified_curves_stay_within_a_quarter_pixel},
 }};
 
 } // namespace
