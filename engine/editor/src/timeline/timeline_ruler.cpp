@@ -484,7 +484,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
     std::sort(markers_.selected.begin(), markers_.selected.end());
     // Choosing a marker leaves the key and layer domains, so Delete and the
     // clipboard aim at it rather than at whatever was selected before.
-    selected_keys_.clear();
+    keys_.selected.clear();
     if (std::find(markers_.selected.begin(), markers_.selected.end(),
                   marker.id) != markers_.selected.end()) {
       markers_.drag = marker.id;

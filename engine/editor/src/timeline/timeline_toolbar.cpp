@@ -42,7 +42,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
             theme.divider);
   const float control_y = toolbar.y + 6.0F;
   constexpr float button_height = 22.0F;
-  const bool show_key_tools = !keyframes.empty() || !selected_keys_.empty();
+  const bool show_key_tools = !keyframes.empty() || !keys_.selected.empty();
 
   float right_x = toolbar.x + toolbar.width - 6.0F;
   gui::Rect go_button{};

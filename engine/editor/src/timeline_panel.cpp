@@ -132,75 +132,22 @@ bool TimelinePanel::selected(
   return std::find(selection.begin(), selection.end(), node) != selection.end();
 }
 
-bool TimelinePanel::key_selected(const SelectedKey &key) const noexcept {
-  return std::find(selected_keys_.begin(), selected_keys_.end(), key) !=
-         selected_keys_.end();
-}
-
-void TimelinePanel::canonicalize_key_selection() noexcept {
-  std::sort(selected_keys_.begin(), selected_keys_.end(),
-            [](const SelectedKey &left, const SelectedKey &right) noexcept {
-              return std::tie(left.target, left.component, left.frame) <
-                     std::tie(right.target, right.component, right.frame);
-            });
-  selected_keys_.erase(
-      std::unique(selected_keys_.begin(), selected_keys_.end()),
-      selected_keys_.end());
-}
-
-void TimelinePanel::replace_key_selection(
-    std::span<const TimelineKeyAddress> selection) {
-  std::vector<SelectedKey> next;
-  next.reserve(selection.size());
-  for (const TimelineKeyAddress &address : selection) {
-    next.push_back(
-        SelectedKey{address.target, address.property, address.frame});
-  }
-  selected_keys_ = std::move(next);
-  canonicalize_key_selection();
-  drag_keys_.clear();
-  dragging_key_ = false;
-  duplicate_drag_ = false;
-  drag_delta_ = 0;
-  snap_guide_.reset();
-}
-
-std::optional<TimelineKeyClipboardEdit> TimelinePanel::key_clipboard_edit(
-    TimelineKeyClipboardAction action) const {
-  if (selected_keys_.empty()) {
-    return std::nullopt;
-  }
-  TimelineKeyClipboardEdit edit{};
-  edit.action = action;
-  if (action == TimelineKeyClipboardAction::Copy) {
-    edit.keys.reserve(selected_keys_.size());
-    for (const SelectedKey &key : selected_keys_) {
-      edit.keys.push_back(
-          TimelineKeyAddress{key.target, key.component, key.frame});
-    }
-    std::sort(edit.keys.begin(), edit.keys.end());
-    edit.keys.erase(std::unique(edit.keys.begin(), edit.keys.end()),
-                    edit.keys.end());
-  }
-  return edit;
-}
-
 void TimelinePanel::clear_key_context() noexcept {
-  selected_keys_.clear();
-  dragging_key_ = false;
-  duplicate_drag_ = false;
-  drag_keys_.clear();
-  drag_delta_ = 0;
-  snap_guide_.reset();
+  keys_.selected.clear();
+  keys_.dragging = false;
+  keys_.duplicate = false;
+  keys_.drag_keys.clear();
+  keys_.drag_delta = 0;
+  keys_.snap_guide.reset();
   key_tools_open_ = false;
   scale_open_ = false;
   hidden_channels_.clear();
   active_channel_.reset();
   key_value_field_ = NumberField{};
-  marquee_tracking_ = false;
-  marquee_active_ = false;
-  marquee_base_.clear();
-  lasso_points_.clear();
+  keys_.marquee_tracking = false;
+  keys_.marquee_active = false;
+  keys_.marquee_base.clear();
+  keys_.lasso_points.clear();
   // Markers are scene content, so a Stage-scene switch leaves none of the
   // old scene's selected or half-dragged.
   markers_.selected.clear();
@@ -232,7 +179,7 @@ void TimelinePanel::reset_project_state() noexcept {
   search_.clear();
   range_fields_ = NumberField{};
   clear_key_context();
-  drag_anchor_frame_ = 0;
+  keys_.drag_anchor_frame = 0;
   toolbar_.rate_menu_open = false;
   edit_tool_ = TimelineEditTool::Standard;
   ruler_.range_drag = RangeHandle::None;
@@ -243,10 +190,10 @@ void TimelinePanel::reset_project_state() noexcept {
   markers_.click = doc::NodeId{};
   timeline_focused_ = false;
   panning_ = false;
-  marquee_start_x_ = 0.0F;
-  marquee_start_y_ = 0.0F;
-  marquee_shift_ = false;
-  marquee_ctrl_ = false;
+  keys_.marquee_start_x = 0.0F;
+  keys_.marquee_start_y = 0.0F;
+  keys_.marquee_shift = false;
+  keys_.marquee_ctrl = false;
   lane_drag_node_ = doc::NodeId{};
   lane_drag_start_x_ = 0.0F;
   lane_drag_start_y_ = 0.0F;
@@ -562,66 +509,6 @@ void TimelinePanel::capture_layer_drag(Pass &p, doc::NodeId grabbed) {
   }
 }
 
-void TimelinePanel::prune_key_selection(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  const std::span<const ElementInfo> elements = p.input.elements;
-  const std::span<const scene::EffectInstance> effects = p.input.effects;
-  const std::span<const output::ProjectionSurface> surfaces = p.input.surfaces;
-
-  const auto target_locked = [&](doc::NodeId target) noexcept {
-    if (const ElementInfo *const element = find_element(elements, target)) {
-      return element->locked;
-    }
-    if (const output::ProjectionSurface *const surface =
-            find_surface(surfaces, target)) {
-      return surface->locked;
-    }
-    const auto effect = std::find_if(
-        effects.begin(), effects.end(),
-        [target](const auto &candidate) { return candidate.source == target; });
-    if (effect != effects.end()) {
-      const ElementInfo *const element = find_element(elements, effect->target);
-      return element != nullptr && element->locked;
-    }
-    return false;
-  };
-  selected_keys_.erase(std::remove_if(selected_keys_.begin(),
-                                      selected_keys_.end(),
-                                      [&](const SelectedKey &key) {
-                                        return target_locked(key.target);
-                                      }),
-                       selected_keys_.end());
-  if (active_channel_.has_value() && target_locked(active_channel_->target)) {
-    active_channel_.reset();
-    key_value_field_.cancel(ctx);
-  }
-  drag_keys_.erase(std::remove_if(drag_keys_.begin(), drag_keys_.end(),
-                                  [&](const SelectedKey &key) {
-                                    return target_locked(key.target);
-                                  }),
-                   drag_keys_.end());
-  if (drag_keys_.empty()) {
-    dragging_key_ = false;
-    duplicate_drag_ = false;
-    drag_delta_ = 0;
-    snap_guide_.reset();
-  }
-
-}
-
-std::vector<TimelineKeyAddress> TimelinePanel::selected_addresses() const {
-  std::vector<TimelineKeyAddress> addresses;
-  addresses.reserve(selected_keys_.size());
-  for (const SelectedKey &key : selected_keys_) {
-    addresses.push_back(
-        TimelineKeyAddress{key.target, key.component, key.frame});
-  }
-  std::sort(addresses.begin(), addresses.end());
-  addresses.erase(std::unique(addresses.begin(), addresses.end()),
-                  addresses.end());
-  return addresses;
-}
-
 void TimelinePanel::navigate(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const gui::Rect &bounds = p.bounds;
@@ -874,116 +761,6 @@ TimelinePanel::waveform_for_clip(Pass &p, doc::NodeId clip) noexcept {
         return observation.clip == clip;
       });
   return found != waveforms.end() ? std::addressof(*found) : nullptr;
-}
-
-void TimelinePanel::track_key_drag(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  const gui::Rect &rows_bounds = p.layout.rows;
-  const gui::Rect &graph = p.layout.graph;
-
-  // A selected key drag follows time even when the pointer wanders into
-  // another lane. Every selected diamond shares one delta, and any one of
-  // them may magnetise to the playhead, range edges, or an unselected key.
-  snap_guide_.reset();
-  update_key_drag(p);
-
-  if (marquee_tracking_ && ctx.pointer_down()) {
-    const float travel = std::fabs(ctx.pointer_x() - marquee_start_x_) +
-                         std::fabs(ctx.pointer_y() - marquee_start_y_);
-    marquee_active_ = marquee_active_ || travel > marquee_threshold;
-    if (lasso_mode_) {
-      const gui::UiPoint point{
-          std::clamp(ctx.pointer_x(), graph.x, graph.x + graph.width),
-          std::clamp(ctx.pointer_y(), rows_bounds.y,
-                     rows_bounds.y + rows_bounds.height)};
-      if (lasso_points_.empty()) {
-        lasso_points_.push_back(
-            gui::UiPoint{marquee_start_x_, marquee_start_y_});
-      }
-      const gui::UiPoint &previous = lasso_points_.back();
-      const float dx = point.x - previous.x;
-      const float dy = point.y - previous.y;
-      if (dx * dx + dy * dy >= 9.0F) {
-        lasso_points_.push_back(point);
-      }
-    }
-  }
-
-}
-
-void TimelinePanel::update_key_drag(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  const EditorTimeline &timeline = p.input.timeline;
-  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
-  const std::span<const scene::TimelineMarker> markers = p.input.markers;
-  const gui::Rect &graph = p.layout.graph;
-  const auto x_to_frame = [&](float x) noexcept {
-    return time_axis_.frame(x, graph.x);
-  };
-  auto &gesture_x = p.gesture_x;
-  auto &first = p.first;
-  auto &last = p.last;
-  auto &first_i = p.first_i;
-  auto &last_i = p.last_i;
-
-  if (!dragging_key_) {
-    return;
-  }
-  const core::i64 pointer_frame =
-      signed_frame(rounded_frame(x_to_frame(gesture_x), first, last));
-  core::i64 proposed_delta = pointer_frame - drag_anchor_frame_;
-
-  core::i64 earliest = drag_anchor_frame_;
-  core::i64 latest = drag_anchor_frame_;
-  for (const SelectedKey &key : drag_keys_) {
-    earliest = std::min(earliest, key.frame);
-    latest = std::max(latest, key.frame);
-  }
-  proposed_delta =
-      std::clamp(proposed_delta, first_i - earliest, last_i - latest);
-
-  if (snapping_ && !duplicate_drag_ && !ctx.alt_held() &&
-      !drag_keys_.empty()) {
-    float best_distance = snap_distance + 1.0F;
-    core::i64 best_adjustment = 0;
-    std::optional<core::i64> best_target;
-    const auto consider = [&](core::i64 moving, core::i64 target) noexcept {
-      const core::i64 adjustment = target - moving;
-      const float distance =
-          std::fabs(static_cast<float>(adjustment) * time_axis_.pixels_per_frame);
-      if (distance <= snap_distance && distance < best_distance) {
-        best_distance = distance;
-        best_adjustment = adjustment;
-        best_target = target;
-      }
-    };
-
-    for (const SelectedKey &moving : drag_keys_) {
-      const core::i64 proposed = moving.frame + proposed_delta;
-      consider(proposed, signed_frame(timeline.show_frame));
-      consider(proposed, first_i);
-      consider(proposed, last_i);
-      for (const scene::TimelineMarker &marker : markers) {
-        consider(proposed, marker.frame);
-      }
-      for (const scene::ChannelKeyframes &channel : keyframes) {
-        for (const core::i64 candidate : channel.frames) {
-          const SelectedKey identity{channel.target, channel.component,
-                                     candidate};
-          if (std::find(drag_keys_.begin(), drag_keys_.end(), identity) ==
-              drag_keys_.end()) {
-            consider(proposed, candidate);
-          }
-        }
-      }
-    }
-    if (best_target.has_value()) {
-      proposed_delta = std::clamp(proposed_delta + best_adjustment,
-                                  first_i - earliest, last_i - latest);
-      snap_guide_ = best_target;
-    }
-  }
-  drag_delta_ = proposed_delta;
 }
 
 void TimelinePanel::resolve_clip_gesture(Pass &p) {
@@ -1913,27 +1690,27 @@ void TimelinePanel::draw_rows(Pass &p) {
           hidden_channels_.erase(*row_channel_identity);
         } else {
           hidden_channels_.insert(*row_channel_identity);
-          selected_keys_.erase(
-              std::remove_if(selected_keys_.begin(), selected_keys_.end(),
+          keys_.selected.erase(
+              std::remove_if(keys_.selected.begin(), keys_.selected.end(),
                              [&](const SelectedKey &key) {
                                return key.target ==
                                           row_channel_identity->target &&
                                       key.component ==
                                           row_channel_identity->property;
                              }),
-              selected_keys_.end());
-          drag_keys_.erase(
-              std::remove_if(drag_keys_.begin(), drag_keys_.end(),
+              keys_.selected.end());
+          keys_.drag_keys.erase(
+              std::remove_if(keys_.drag_keys.begin(), keys_.drag_keys.end(),
                              [&](const SelectedKey &key) {
                                return key.target ==
                                           row_channel_identity->target &&
                                       key.component ==
                                           row_channel_identity->property;
                              }),
-              drag_keys_.end());
-          if (drag_keys_.empty()) {
-            dragging_key_ = false;
-            duplicate_drag_ = false;
+              keys_.drag_keys.end());
+          if (keys_.drag_keys.empty()) {
+            keys_.dragging = false;
+            keys_.duplicate = false;
           }
         }
       }
@@ -2021,19 +1798,19 @@ void TimelinePanel::draw_rows(Pass &p) {
       const ElementInfo *const row_element = find_element(elements, row.node);
       if (row_element != nullptr && orderable_layer(*row_element) &&
           !row.locked) {
-        selected_keys_.clear();
-        drag_keys_.clear();
-        dragging_key_ = false;
-        duplicate_drag_ = false;
+        keys_.selected.clear();
+        keys_.drag_keys.clear();
+        keys_.dragging = false;
+        keys_.duplicate = false;
         layer_drag_node_ = row.node;
         const bool preserve_selection = selected(row.node, selection);
         capture_layer_drag(p, row.node);
         layer_drag_start_x_ = ctx.pointer_press_x();
         layer_drag_start_y_ = ctx.pointer_press_y();
         layer_drag_moved_ = false;
-        marquee_tracking_ = false;
-        marquee_active_ = false;
-        lasso_points_.clear();
+        keys_.marquee_tracking = false;
+        keys_.marquee_active = false;
+        keys_.lasso_points.clear();
         // Keep a selected group intact until a click is released. Modifier
         // clicks also select on release, so Ctrl toggles exactly once.
         if (!preserve_selection && !ctx.ctrl_held() && !ctx.shift_held()) {
@@ -2055,10 +1832,10 @@ void TimelinePanel::draw_rows(Pass &p) {
           !(row.expandable && ctx.pointer_x() < content_x)) {
         selected_lane_ = row.node;
         lane_destination_ = doc::NodeId{};
-        selected_keys_.clear();
-        drag_keys_.clear();
-        dragging_key_ = false;
-        duplicate_drag_ = false;
+        keys_.selected.clear();
+        keys_.drag_keys.clear();
+        keys_.dragging = false;
+        keys_.duplicate = false;
         // A track is a screen, so selecting one has to reach the Inspector
         // like selecting anything else does. Without this the header would
         // highlight and the Inspector would keep showing whatever was
@@ -2106,10 +1883,10 @@ void TimelinePanel::draw_rows(Pass &p) {
         // A layer-row click leaves the key-selection domain. This
         // keeps a later Ctrl+C/Ctrl+V aimed at the newly selected
         // clip/layer rather than at stale Timeline diamonds.
-        selected_keys_.clear();
-        drag_keys_.clear();
-        dragging_key_ = false;
-        duplicate_drag_ = false;
+        keys_.selected.clear();
+        keys_.drag_keys.clear();
+        keys_.dragging = false;
+        keys_.duplicate = false;
         TimelineSelectionRequest next{};
         next.node = row.node;
         next.action =
@@ -2547,10 +2324,10 @@ void TimelinePanel::draw_rows(Pass &p) {
           const core::i64 key_frame = (*component_frames)[key_index];
           const SelectedKey identity{channel_target, channel, key_frame};
           const auto moving =
-              std::find(drag_keys_.begin(), drag_keys_.end(), identity);
-          const bool moving_key = dragging_key_ && moving != drag_keys_.end();
-          const core::i64 shown_frame = moving_key && !duplicate_drag_
-                                            ? key_frame + drag_delta_
+              std::find(keys_.drag_keys.begin(), keys_.drag_keys.end(), identity);
+          const bool moving_key = keys_.dragging && moving != keys_.drag_keys.end();
+          const core::i64 shown_frame = moving_key && !keys_.duplicate
+                                            ? key_frame + keys_.drag_delta
                                             : key_frame;
           const float key_x = frame_to_x(static_cast<double>(shown_frame));
           const float key_y = value_y(key_index);
@@ -2601,9 +2378,9 @@ void TimelinePanel::draw_rows(Pass &p) {
                        is_key_selected ? key_radius + 0.5F : key_radius,
                        is_key_selected ? ctx.theme().playhead
                                        : component_color);
-          if (moving_key && duplicate_drag_ && drag_delta_ != 0) {
+          if (moving_key && keys_.duplicate && keys_.drag_delta != 0) {
             const float duplicate_x =
-                frame_to_x(static_cast<double>(key_frame + drag_delta_));
+                frame_to_x(static_cast<double>(key_frame + keys_.drag_delta));
             draw_diamond(ctx, duplicate_x, key_y, key_radius + 0.5F,
                          ctx.theme().accent);
           }
@@ -2665,10 +2442,10 @@ void TimelinePanel::draw_rows(Pass &p) {
                  (std::fabs(press_x - clip_fade_in_x) <= fade_handle_reach ||
                   std::fabs(press_x - clip_fade_out_x) <= fade_handle_reach)))) {
       clip_press_consumed_ = true;
-      selected_keys_.clear();
-      drag_keys_.clear();
-      dragging_key_ = false;
-      duplicate_drag_ = false;
+      keys_.selected.clear();
+      keys_.drag_keys.clear();
+      keys_.dragging = false;
+      keys_.duplicate = false;
       markers_.selected.clear();
       const float grab = edge_grab_width(clip_bar.width);
       const float px = press_x;
@@ -2768,9 +2545,9 @@ void TimelinePanel::draw_rows(Pass &p) {
       clip_drag_moved_ = false;
       clip_drop_lane_.reset();
       clip_snap_guide_.reset();
-      marquee_tracking_ = false;
-      marquee_active_ = false;
-      lasso_points_.clear();
+      keys_.marquee_tracking = false;
+      keys_.marquee_active = false;
+      keys_.lasso_points.clear();
       TimelineSelectionRequest next{};
       next.node = row.node;
       next.action = selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
@@ -2796,47 +2573,47 @@ void TimelinePanel::draw_rows(Pass &p) {
             active_channel_ = ChannelIdentity{hit.target, hit.component};
             bool begin_drag = true;
             const auto selected_it =
-                std::find(selected_keys_.begin(), selected_keys_.end(), hit);
+                std::find(keys_.selected.begin(), keys_.selected.end(), hit);
             if (ctx.ctrl_held()) {
-              if (selected_it != selected_keys_.end()) {
-                selected_keys_.erase(selected_it);
+              if (selected_it != keys_.selected.end()) {
+                keys_.selected.erase(selected_it);
                 begin_drag = false;
               } else {
-                selected_keys_.push_back(hit);
+                keys_.selected.push_back(hit);
               }
             } else if (ctx.shift_held()) {
-              if (selected_it == selected_keys_.end()) {
-                selected_keys_.push_back(hit);
+              if (selected_it == keys_.selected.end()) {
+                keys_.selected.push_back(hit);
               }
-            } else if (selected_it == selected_keys_.end()) {
-              selected_keys_.assign(1U, hit);
+            } else if (selected_it == keys_.selected.end()) {
+              keys_.selected.assign(1U, hit);
             }
             canonicalize_key_selection();
 
             if (begin_drag) {
-              drag_keys_.clear();
-              for (const SelectedKey &selected_key : selected_keys_) {
+              keys_.drag_keys.clear();
+              for (const SelectedKey &selected_key : keys_.selected) {
                 const auto *const authored = frames_for(
                     keyframes, selected_key.target, selected_key.component);
                 if (authored != nullptr &&
                     std::find(authored->begin(), authored->end(),
                               selected_key.frame) != authored->end()) {
-                  drag_keys_.push_back(selected_key);
+                  keys_.drag_keys.push_back(selected_key);
                 }
               }
-              if (drag_keys_.empty()) {
-                drag_keys_.push_back(hit);
+              if (keys_.drag_keys.empty()) {
+                keys_.drag_keys.push_back(hit);
               }
-              dragging_key_ = true;
+              keys_.dragging = true;
               // Alt is latched at press: releasing the modifier
               // before the pointer does not turn a duplicate into
               // a destructive retime halfway through the gesture.
-              duplicate_drag_ = ctx.alt_held();
-              drag_anchor_frame_ = key_frame;
-              drag_delta_ = 0;
-              marquee_tracking_ = false;
-              marquee_active_ = false;
-              lasso_points_.clear();
+              keys_.duplicate = ctx.alt_held();
+              keys_.drag_anchor_frame = key_frame;
+              keys_.drag_delta = 0;
+              keys_.marquee_tracking = false;
+              keys_.marquee_active = false;
+              keys_.lasso_points.clear();
             }
             hit_key = true;
             markers_.selected.clear();
@@ -2850,20 +2627,20 @@ void TimelinePanel::draw_rows(Pass &p) {
         frame.selection = std::move(clear);
       }
       if (!hit_key && !row.locked) {
-        marquee_base_ = selected_keys_;
-        marquee_shift_ = ctx.shift_held();
-        marquee_ctrl_ = ctx.ctrl_held();
-        if (!marquee_shift_ && !marquee_ctrl_) {
-          selected_keys_.clear();
+        keys_.marquee_base = keys_.selected;
+        keys_.marquee_shift = ctx.shift_held();
+        keys_.marquee_ctrl = ctx.ctrl_held();
+        if (!keys_.marquee_shift && !keys_.marquee_ctrl) {
+          keys_.selected.clear();
         }
-        marquee_tracking_ = true;
-        marquee_active_ = false;
-        marquee_start_x_ = press_x;
-        marquee_start_y_ = press_y;
-        lasso_points_.clear();
-        if (lasso_mode_) {
-          lasso_points_.push_back(
-              gui::UiPoint{marquee_start_x_, marquee_start_y_});
+        keys_.marquee_tracking = true;
+        keys_.marquee_active = false;
+        keys_.marquee_start_x = press_x;
+        keys_.marquee_start_y = press_y;
+        keys_.lasso_points.clear();
+        if (keys_.lasso_mode) {
+          keys_.lasso_points.push_back(
+              gui::UiPoint{keys_.marquee_start_x, keys_.marquee_start_y});
         }
         frame.seek_to_frame =
             rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
@@ -2872,7 +2649,7 @@ void TimelinePanel::draw_rows(Pass &p) {
             rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
       }
     }
-    if (lane_it.held && !dragging_key_ && !marquee_active_ &&
+    if (lane_it.held && !keys_.dragging && !keys_.marquee_active &&
         clip_drag_ == ClipDrag::None && !clip_press_consumed_ &&
         layer_drag_node_ == doc::NodeId{} &&
         lane_drag_node_ == doc::NodeId{}) {
@@ -2988,94 +2765,6 @@ void TimelinePanel::resolve_track_drop(Pass &p) {
 
 }
 
-void TimelinePanel::finish_marquee(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  FrameScratch &scratch = p.scratch;
-  const gui::Rect &rows_bounds = p.layout.rows;
-  const gui::Rect &graph = p.layout.graph;
-
-  if (marquee_tracking_ && marquee_active_ && ctx.pointer_down()) {
-    ctx.push_clip(rows_bounds);
-    if (lasso_mode_) {
-      for (std::size_t index = 1U; index < lasso_points_.size(); ++index) {
-        const gui::UiPoint &a = lasso_points_[index - 1U];
-        const gui::UiPoint &b = lasso_points_[index];
-        ctx.draw_list().add_line(a.x, a.y, b.x, b.y, 1.0F, ctx.theme().accent);
-      }
-      if (lasso_points_.size() >= 2U) {
-        const gui::UiPoint &first_point = lasso_points_.front();
-        const gui::UiPoint &last_point = lasso_points_.back();
-        ctx.draw_list().add_line(last_point.x, last_point.y, first_point.x,
-                                 first_point.y, 1.0F,
-                                 alpha(ctx.theme().accent, 0.65F));
-      }
-    } else {
-      const float left =
-          std::max(std::min(marquee_start_x_, ctx.pointer_x()), graph.x);
-      const float right = std::min(std::max(marquee_start_x_, ctx.pointer_x()),
-                                   graph.x + graph.width);
-      const float top =
-          std::max(std::min(marquee_start_y_, ctx.pointer_y()), rows_bounds.y);
-      const float bottom = std::min(std::max(marquee_start_y_, ctx.pointer_y()),
-                                    rows_bounds.y + rows_bounds.height);
-      const gui::Rect marquee{left, top, std::max(right - left, 0.0F),
-                              std::max(bottom - top, 0.0F)};
-      ctx.panel(marquee, alpha(ctx.theme().accent, 0.15F));
-      ctx.draw_list().add_line(marquee.x, marquee.y, marquee.x + marquee.width,
-                               marquee.y, 1.0F, ctx.theme().accent);
-      ctx.draw_list().add_line(
-          marquee.x, marquee.y + marquee.height, marquee.x + marquee.width,
-          marquee.y + marquee.height, 1.0F, ctx.theme().accent);
-      ctx.draw_list().add_line(marquee.x, marquee.y, marquee.x,
-                               marquee.y + marquee.height, 1.0F,
-                               ctx.theme().accent);
-      ctx.draw_list().add_line(
-          marquee.x + marquee.width, marquee.y, marquee.x + marquee.width,
-          marquee.y + marquee.height, 1.0F, ctx.theme().accent);
-    }
-    ctx.pop_clip();
-  }
-
-  if (marquee_tracking_ && !ctx.pointer_down()) {
-    if (marquee_active_) {
-      const float left = std::min(marquee_start_x_, ctx.pointer_x());
-      const float right = std::max(marquee_start_x_, ctx.pointer_x());
-      const float top = std::min(marquee_start_y_, ctx.pointer_y());
-      const float bottom = std::max(marquee_start_y_, ctx.pointer_y());
-      selected_keys_ = marquee_base_;
-      if (!marquee_shift_ && !marquee_ctrl_) {
-        selected_keys_.clear();
-      }
-      for (const FrameScratch::VisibleKeyPoint &point : scratch.visible_keys) {
-        const bool hit = lasso_mode_
-                             ? point_in_polygon(point.x, point.y, lasso_points_)
-                             : (point.x >= left && point.x <= right &&
-                                point.y >= top && point.y <= bottom);
-        if (!hit) {
-          continue;
-        }
-        const auto found =
-            std::find(selected_keys_.begin(), selected_keys_.end(), point.key);
-        if (marquee_ctrl_) {
-          if (found == selected_keys_.end()) {
-            selected_keys_.push_back(point.key);
-          } else {
-            selected_keys_.erase(found);
-          }
-        } else if (found == selected_keys_.end()) {
-          selected_keys_.push_back(point.key);
-        }
-      }
-      canonicalize_key_selection();
-    }
-    marquee_tracking_ = false;
-    marquee_active_ = false;
-    marquee_base_.clear();
-    lasso_points_.clear();
-  }
-
-}
-
 void TimelinePanel::draw_time_overlays(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const gui::Rect &bounds = p.bounds;
@@ -3133,8 +2822,8 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
   ctx.push_clip(time_area);
   const float playhead_x = frame_to_x(static_cast<double>(timeline.show_frame));
   const std::optional<core::i64> guide =
-      dragging_key_
-          ? snap_guide_
+      keys_.dragging
+          ? keys_.snap_guide
           : (clip_drag_ != ClipDrag::None
                  ? clip_snap_guide_
                  : (markers_.drag_moved ? markers_.snap_guide
@@ -3180,40 +2869,6 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
 
 }
 
-void TimelinePanel::commit_key_drag(Pass &p) {
-  gui::UiContext &ctx = p.ctx;
-  TimelinePanelFrame &frame = p.frame;
-
-  // Commit the complete selection once, on release. Moving positive time is
-  // authored from the last key backwards (and negative time first-key
-  // forwards), preventing one destination from hiding another source key in
-  // the same channel while the batch is applied.
-  if (dragging_key_ && !ctx.pointer_down()) {
-    update_key_drag(p);
-    if (drag_delta_ != 0) {
-      TimelineKeyBatchEdit batch{};
-      batch.action = duplicate_drag_ ? TimelineKeyBatchAction::Duplicate
-                                     : TimelineKeyBatchAction::Move;
-      batch.delta = drag_delta_;
-      batch.keys.reserve(drag_keys_.size());
-      for (const SelectedKey &key : drag_keys_) {
-        batch.keys.push_back(
-            TimelineKeyAddress{key.target, key.component, key.frame});
-      }
-      std::sort(batch.keys.begin(), batch.keys.end());
-      batch.keys.erase(std::unique(batch.keys.begin(), batch.keys.end()),
-                       batch.keys.end());
-      frame.key_batch = std::move(batch);
-    }
-    dragging_key_ = false;
-    duplicate_drag_ = false;
-    drag_keys_.clear();
-    drag_delta_ = 0;
-    snap_guide_.reset();
-  }
-
-}
-
 void TimelinePanel::draw_key_tools(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const EditorTimeline &timeline = p.input.timeline;
@@ -3249,11 +2904,11 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     const float tool_y = key_tools_popup.y + 6.0F;
     if (ctx.button(mix(id_, "key selection shape"),
                    gui::Rect{tool_x, tool_y, 53.0F, 22.0F},
-                   lasso_mode_ ? "LASSO" : "BOX")) {
-      lasso_mode_ = !lasso_mode_;
-      marquee_tracking_ = false;
-      marquee_active_ = false;
-      lasso_points_.clear();
+                   keys_.lasso_mode ? "LASSO" : "BOX")) {
+      keys_.lasso_mode = !keys_.lasso_mode;
+      keys_.marquee_tracking = false;
+      keys_.marquee_active = false;
+      keys_.lasso_points.clear();
     }
     tool_x += 56.0F;
     const std::vector<TimelineKeyAddress> keys = selected_addresses();
@@ -3321,25 +2976,25 @@ void TimelinePanel::draw_key_tools(Pass &p) {
           hidden_channels_.erase(*active_channel_);
         } else {
           hidden_channels_.insert(*active_channel_);
-          selected_keys_.erase(
-              std::remove_if(selected_keys_.begin(), selected_keys_.end(),
+          keys_.selected.erase(
+              std::remove_if(keys_.selected.begin(), keys_.selected.end(),
                              [&](const SelectedKey &key) {
                                return key.target == active_channel_->target &&
                                       key.component ==
                                           active_channel_->property;
                              }),
-              selected_keys_.end());
-          drag_keys_.erase(
-              std::remove_if(drag_keys_.begin(), drag_keys_.end(),
+              keys_.selected.end());
+          keys_.drag_keys.erase(
+              std::remove_if(keys_.drag_keys.begin(), keys_.drag_keys.end(),
                              [&](const SelectedKey &key) {
                                return key.target == active_channel_->target &&
                                       key.component ==
                                           active_channel_->property;
                              }),
-              drag_keys_.end());
-          if (drag_keys_.empty()) {
-            dragging_key_ = false;
-            duplicate_drag_ = false;
+              keys_.drag_keys.end());
+          if (keys_.drag_keys.empty()) {
+            keys_.dragging = false;
+            keys_.duplicate = false;
           }
         }
       }
@@ -4258,7 +3913,7 @@ void TimelinePanel::handle_actions(Pass &p) {
       delete_markers(markers_.selected);
       frame.consume_delete = true;
     } else if (ctx.key_pressed(gui::Key::Delete) && ctx.shift_held() &&
-               selected_keys_.empty() && clip_selection_valid &&
+               keys_.selected.empty() && clip_selection_valid &&
                ripple_ready(selected_clips)) {
       ripple_delete(selected_clips);
       frame.consume_delete = true;
@@ -4375,7 +4030,7 @@ void TimelinePanel::handle_actions(Pass &p) {
     }
   }
   if (timeline_focused_ && !frame.editing && !ctx.typing() &&
-      !ctx.pointer_down() && !selected_keys_.empty()) {
+      !ctx.pointer_down() && !keys_.selected.empty()) {
     std::optional<TimelineKeyClipboardAction> action;
     if (ctx.key_pressed(gui::Key::Copy)) {
       action = TimelineKeyClipboardAction::Copy;
@@ -4389,12 +4044,12 @@ void TimelinePanel::handle_actions(Pass &p) {
       }
     }
   }
-  if (timeline_focused_ && !frame.editing && !selected_keys_.empty() &&
+  if (timeline_focused_ && !frame.editing && !keys_.selected.empty() &&
       ctx.key_pressed(gui::Key::Delete)) {
     TimelineKeyBatchEdit batch{};
     batch.action = TimelineKeyBatchAction::Delete;
-    batch.keys.reserve(selected_keys_.size());
-    for (const SelectedKey &key : selected_keys_) {
+    batch.keys.reserve(keys_.selected.size());
+    for (const SelectedKey &key : keys_.selected) {
       batch.keys.push_back(
           TimelineKeyAddress{key.target, key.component, key.frame});
     }

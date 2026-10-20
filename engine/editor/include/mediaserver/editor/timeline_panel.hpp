@@ -677,7 +677,7 @@ public:
   void clear_key_context() noexcept;
 
   [[nodiscard]] std::size_t selected_key_count() const noexcept {
-    return selected_keys_.size();
+    return keys_.selected.size();
   }
   [[nodiscard]] bool dragging_clip() const noexcept {
     return clip_drag_ != ClipDrag::None;
@@ -713,7 +713,7 @@ public:
   [[nodiscard]] TimelineEditTool edit_tool() const noexcept {
     return edit_tool_;
   }
-  [[nodiscard]] bool lasso_mode() const noexcept { return lasso_mode_; }
+  [[nodiscard]] bool lasso_mode() const noexcept { return keys_.lasso_mode; }
   [[nodiscard]] bool renaming() const noexcept { return rename_.active(); }
   // The layer list's width, as the operator last dragged it; zero until they
   // do, which lets it follow the panel's own width.
@@ -868,21 +868,35 @@ private:
 
   NumberField range_fields_;
 
-  std::vector<SelectedKey> selected_keys_;
-
-  // Every key selected when a drag begins moves by one shared delta. The
-  // source list remains fixed until release, so document latency cannot pull
-  // the diamonds back underneath the pointer.
-  bool dragging_key_{};
-  bool duplicate_drag_{};
-  std::vector<SelectedKey> drag_keys_;
-  core::i64 drag_anchor_frame_{};
-  core::i64 drag_delta_{};
-  std::optional<core::i64> snap_guide_;
+  // The Timeline's own key selection, kept apart from scene layers.
+  struct KeySelection final {
+    std::vector<SelectedKey> selected;
+    // Every key selected when a drag begins moves by one shared delta. The
+    // source list remains fixed until release, so document latency cannot
+    // pull the diamonds back underneath the pointer.
+    bool dragging{};
+    bool duplicate{};
+    std::vector<SelectedKey> drag_keys;
+    core::i64 drag_anchor_frame{};
+    core::i64 drag_delta{};
+    std::optional<core::i64> snap_guide;
+    // An empty-lane press still seeks immediately, but travelling beyond a
+    // short threshold turns it into the familiar dope-sheet selection box,
+    // or a freehand lasso in lasso mode.
+    bool lasso_mode{};
+    bool marquee_tracking{};
+    bool marquee_active{};
+    float marquee_start_x{};
+    float marquee_start_y{};
+    bool marquee_shift{};
+    bool marquee_ctrl{};
+    std::vector<SelectedKey> marquee_base;
+    std::vector<gui::UiPoint> lasso_points;
+  };
+  KeySelection keys_;
 
   bool snapping_{true};
   bool graph_mode_{};
-  bool lasso_mode_{};
   bool key_tools_open_{};
   bool scale_open_{};
   scene::KeyTimeAnchor scale_anchor_{scene::KeyTimeAnchor::FirstSelected};
@@ -897,17 +911,6 @@ private:
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
   bool timeline_focused_{};
   bool panning_{};
-
-  // An empty-lane press still seeks immediately, but travelling beyond a
-  // short threshold turns it into the familiar dope-sheet selection box.
-  bool marquee_tracking_{};
-  bool marquee_active_{};
-  float marquee_start_x_{};
-  float marquee_start_y_{};
-  bool marquee_shift_{};
-  bool marquee_ctrl_{};
-  std::vector<SelectedKey> marquee_base_;
-  std::vector<gui::UiPoint> lasso_points_;
 
   // A live clip gesture. The proposal is held here and drawn from here for
   // the same reason a key drag is: the committed placement can lag the
