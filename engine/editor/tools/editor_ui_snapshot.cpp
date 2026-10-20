@@ -27,8 +27,9 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves]
-//   curves draws the editor with the Timeline switched to Curves mode.
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|summaries]
+//   curves draws the editor with the Timeline switched to Curves mode;
+//   summaries closes the LED Wall group so its row summarises its clips.
 namespace {
 
 namespace core = mediaserver::core;
@@ -247,7 +248,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|summaries]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -259,7 +260,9 @@ int main(int argc, char **argv) {
   const float hover_y = argc > 6 ? std::strtof(argv[6], nullptr) : -100.0F;
   const std::string_view view = argc > 7 ? argv[7] : "";
   const bool curves = view == "curves";
-  const std::string_view properties = curves ? std::string_view{} : view;
+  const bool summaries = view == "summaries";
+  const std::string_view properties =
+      curves || summaries ? std::string_view{} : view;
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -327,14 +330,17 @@ int main(int argc, char **argv) {
   // timeline fits the show range on its first draw); the last is the one kept.
   // Curves is switched on the way an operator does it: a click on the
   // Timeline toolbar's Curves toggle, pressed and released over two frames.
-  const int passes = curves ? 5 : 3;
+  // The LED Wall closes the same way, by a click on its twirl, its row
+  // being the Timeline's second.
+  const bool clicks = curves || summaries;
+  const int passes = clicks ? 5 : 3;
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
-    const bool clicking = curves && pass < 2;
+    const bool clicking = clicks && pass < 2;
     input.set_mouse_position(
-        clicking ? timeline_bounds.x + 608.0F : hover_x,
-        clicking ? timeline_bounds.y + 17.0F : hover_y);
-    input.set_mouse_button(gui::MouseButton::Left, curves && pass == 0);
+        clicking ? timeline_bounds.x + (curves ? 608.0F : 38.0F) : hover_x,
+        clicking ? timeline_bounds.y + (curves ? 17.0F : 112.0F) : hover_y);
+    input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);
     ctx.new_frame(1.0);
     ctx.panel(window, ctx.theme().background);
     if (!properties.empty()) {

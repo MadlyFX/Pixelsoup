@@ -45,6 +45,9 @@ struct RowsState final {
   std::set<core::u64> expanded_groups;
   std::set<doc::NodeId> expanded_hierarchies;
   doc::NodeId hierarchy_selection{};
+  // Tracks start open; a closed track lists only its header, which then
+  // summarises its clips.
+  std::set<doc::NodeId> collapsed_lanes;
 };
 
 // One animatable property of one target: where a channel's keys live.
@@ -797,6 +800,9 @@ private:
   void group_value_cell(RowContext &rc);
   bool row_label_press(RowContext &rc);
   void layer_lane_cell(RowContext &rc);
+  // A closed parent's read-only summary: its span bar, unless a clip bar
+  // already shows it, and its key ticks.
+  void summary_lane_cell(RowContext &rc, bool span_bar);
   void clip_bar_cell(RowContext &rc);
   bool draw_clip_filmstrip(RowContext &rc, bool live);
   void draw_clip_waveform(RowContext &rc, bool drew_filmstrip);

@@ -377,6 +377,21 @@ Search keeps matching descendants with their parent context, and selecting a
 part in another panel reveals its ancestors. Live-link updates retain the
 timeline's open folders.
 
+A track's header has a twirl too: closed, it lists only the header, and a
+search still looks inside it. Anything closed summarises what it hides, the
+way a collapsed layer or compound clip does elsewhere. A closed track, group,
+collection or hierarchy parent draws a thin bar over the frames its clips and
+keys span, from the earliest clip start or key to the latest clip end or key,
+and a small tick on every frame anything below it is keyed. A layer whose
+properties are folded - or a parent's folded Properties - summarises its own
+keys the same way; a clip's ticks ride on its bar. A tick takes the channel's
+colour when every key on that frame belongs to one channel, is neutral where
+channels meet, and is larger where several keys share the frame. Opening a
+parent moves its summary down to whatever below it is still closed. A layer
+with nothing placed or keyed draws nothing in its lane. Summaries are for
+reading only: they are not dragged, and pressing one acts on the lane
+beneath.
+
 Track order is changed by dragging a header up or down the stack. The target is
 shown as a single insertion cursor between tracks, never as a highlighted
 track: the operation is ordering, not nesting. Crossing several tracks previews

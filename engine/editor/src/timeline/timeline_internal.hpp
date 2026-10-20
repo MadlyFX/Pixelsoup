@@ -54,6 +54,8 @@ inline constexpr float marker_hit_reach = 10.0F;
 // The window a second click still counts as a double-click.
 inline constexpr double double_click_seconds = 0.35;
 inline constexpr float key_radius = 5.5F;
+// A summary's key ticks are smaller than the keys they stand for.
+inline constexpr float summary_key_radius = 3.5F;
 // A key answers a press well beyond the diamond it draws - a disc as tall as
 // its row - because at arm's length a five-unit diamond is a hard target.
 inline constexpr float key_hit_radius = 12.0F;
@@ -734,6 +736,9 @@ surface_component_value(const output::ProjectionSurface &surface,
   return nice.back();
 }
 
+// No row: a root's parent, or a row with no summary.
+inline constexpr std::size_t no_row = std::numeric_limits<std::size_t>::max();
+
 struct Row final {
   enum class Kind : core::u8 {
     LaneHeader,
@@ -774,6 +779,15 @@ struct Row final {
   // how tall it is. Rows are laid out as a running sum of their heights.
   float top{};
   float height{};
+  // The row's place in the tree the list shows: the row it is listed under
+  // (no_row for a root), how deep that is, and one past its last listed
+  // descendant - so its descendants are rows (index, end) and its ancestors
+  // follow `parent`.
+  std::size_t parent{no_row};
+  std::size_t depth{};
+  std::size_t end{};
+  // A closed parent's entry in RowList::summaries, or no_row.
+  std::size_t summary{no_row};
 };
 
 [[nodiscard]] inline doc::NodeId layer_parent(const ElementInfo &element) noexcept {
@@ -997,11 +1011,44 @@ row_at(std::span<const Row> rows, float local) noexcept {
   return index;
 }
 
-// The rows the Timeline lists this frame, top to bottom, and the selectable
-// layer and track nodes among them in that order.
+// One frame a closed parent's descendants have keys on: how many keys, and
+// their channel when they all share one.
+struct SummaryKey final {
+  core::i64 frame{};
+  core::u32 count{};
+  scene::PropertyChannel channel{scene::PropertyChannel::Count};
+  bool mixed{};
+
+  bool operator==(const SummaryKey &) const = default;
+};
+
+// What a closed parent stands for - a closed track, group, collection or
+// hierarchy parent, or a layer whose properties are folded: the frames its
+// descendants' clips and keys span, from `first` up to `end` (a clip's end
+// is the frame after its last), and every frame they key, once each, as a
+// run of RowList::summary_keys.
+struct RowSummary final {
+  core::i64 first{};
+  core::i64 end{};
+  std::size_t key_first{};
+  std::size_t key_count{};
+
+  bool operator==(const RowSummary &) const = default;
+};
+
+// The rows the Timeline lists this frame, top to bottom, the selectable
+// layer and track nodes among them in that order, and the summaries of the
+// closed parents among them.
 struct RowList final {
   std::vector<Row> rows;
   std::vector<doc::NodeId> visible_order;
+  std::vector<RowSummary> summaries;
+  std::vector<SummaryKey> summary_keys;
+
+  [[nodiscard]] std::span<const SummaryKey>
+  keys(const RowSummary &summary) const {
+    return {summary_keys.data() + summary.key_first, summary.key_count};
+  }
 };
 
 struct RowsInput final {

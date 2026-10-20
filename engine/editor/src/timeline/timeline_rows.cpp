@@ -244,7 +244,7 @@ RowList build_rows(RowsState &state, const RowsInput &input,
                theme.accent,
                ElementKind::Media,
                0U,
-               false};
+               true};
     header.locked = lane.locked;
     header.muted = lane.muted;
     header.lane_member = true;
@@ -264,8 +264,15 @@ RowList build_rows(RowsState &state, const RowsInput &input,
         [](const ElementInfo *left, const ElementInfo *right) noexcept {
           return left->clip_order > right->clip_order;
         });
+    // A closed track lists only its header, unless a search is looking
+    // inside it.
+    const bool lane_open =
+        !search.empty() || !state.collapsed_lanes.contains(lane.id);
     for (const ElementInfo *element : lane_clips) {
       emitted_media.insert(element->node);
+      if (!lane_open) {
+        continue;
+      }
       const std::size_t first_row = rows.size();
       append_element(*element, 1U);
       // A clip's property rows belong to its lane too, so dropping onto an
@@ -465,7 +472,145 @@ RowList build_rows(RowsState &state, const RowsInput &input,
     row.height = row_height;
     top += row.height;
   }
-  return RowList{std::move(rows), std::move(visible_order)};
+
+  // The tree the list shows. Rows are listed parent first, each child one
+  // indent deeper, so a row's parent is the nearest earlier row one indent
+  // shallower and its descendants run up to the next row no deeper than it.
+  std::vector<std::size_t> open;
+  for (std::size_t index = 0U; index < rows.size(); ++index) {
+    while (!open.empty() && rows[open.back()].indent >= rows[index].indent) {
+      rows[open.back()].end = index;
+      open.pop_back();
+    }
+    rows[index].parent = open.empty() ? no_row : open.back();
+    rows[index].depth =
+        open.empty() ? 0U : rows[rows[index].parent].depth + 1U;
+    open.push_back(index);
+  }
+  for (const std::size_t index : open) {
+    rows[index].end = rows.size();
+  }
+
+  // What each closed parent stands for: a closed track its clips, a closed
+  // hierarchy parent itself and everything below it, and a layer or
+  // Properties foldout whose properties are folded its own channels.
+  // Rebuilt every frame, so sorted runs rather than a node per entry.
+  std::vector<std::pair<core::u64, const scene::ChannelKeyframes *>>
+      channels_of;
+  channels_of.reserve(keyframes.size());
+  for (const scene::ChannelKeyframes &channel : keyframes) {
+    channels_of.emplace_back(channel.target.value(), &channel);
+  }
+  std::ranges::sort(channels_of, {}, &decltype(channels_of)::value_type::first);
+  std::vector<std::pair<core::u64, core::u64>> effect_sources;
+  for (const scene::EffectInstance &effect : effects) {
+    if (effect.enabled) {
+      effect_sources.emplace_back(effect.target.value(),
+                                  effect.source.value());
+    }
+  }
+  std::ranges::sort(effect_sources);
+  std::vector<std::pair<core::u64, const ElementInfo *>> element_of;
+  element_of.reserve(elements.size());
+  for (const ElementInfo &element : elements) {
+    element_of.emplace_back(element.node.value(), &element);
+  }
+  std::ranges::sort(element_of, {}, &decltype(element_of)::value_type::first);
+  const auto run_of = [](const auto &sorted, core::u64 key) {
+    return std::ranges::equal_range(sorted, key, {},
+                                    [](const auto &entry) { return entry.first; });
+  };
+
+  std::vector<RowSummary> summaries;
+  std::vector<SummaryKey> summary_keys;
+  std::vector<std::pair<core::i64, scene::PropertyChannel>> keyed;
+  std::vector<const ElementInfo *> covered;
+  for (std::size_t index = 0U; index < rows.size(); ++index) {
+    Row &row = rows[index];
+    if (row.end != index + 1U ||
+        (row.kind != Row::Kind::LaneHeader && row.kind != Row::Kind::Layer &&
+         row.kind != Row::Kind::PropertiesHeader)) {
+      continue;
+    }
+    covered.clear();
+    keyed.clear();
+    bool spanned = false;
+    core::i64 first = 0;
+    core::i64 end = 0;
+    const auto take_span = [&](core::i64 from, core::i64 to) {
+      first = spanned ? std::min(first, from) : from;
+      end = spanned ? std::max(end, to) : to;
+      spanned = true;
+    };
+    const auto take_channels = [&](core::u64 target) {
+      for (const auto &[unused, channel] : run_of(channels_of, target)) {
+        for (const core::i64 frame : channel->frames) {
+          keyed.emplace_back(frame, channel->component);
+          take_span(frame, frame);
+        }
+      }
+    };
+    bool own_only = false;
+    if (row.kind == Row::Kind::LaneHeader) {
+      for (const ElementInfo &element : elements) {
+        if (element.kind == ElementKind::Media &&
+            element.timeline_lane == row.node) {
+          covered.push_back(&element);
+        }
+      }
+    } else if (row.surface) {
+      take_channels(row.node.value());
+    } else if (const auto found = run_of(element_of, row.node.value());
+               !found.empty()) {
+      covered.push_back(found.front().second);
+      own_only = row.kind == Row::Kind::PropertiesHeader;
+      if (row.hierarchy) {
+        // Everything below a closed parent, at any depth.
+        for (std::size_t next = 0U; next < covered.size(); ++next) {
+          if (const auto below = children.find(covered[next]->node);
+              below != children.end()) {
+            for (const ElementInfo *child : below->second) {
+              if (std::find(covered.begin(), covered.end(), child) ==
+                  covered.end()) {
+                covered.push_back(child);
+              }
+            }
+          }
+        }
+      }
+    }
+    for (const ElementInfo *element : covered) {
+      if (!own_only && element->kind == ElementKind::Media &&
+          element->timing.placed()) {
+        take_span(element->timing.start,
+                  element->timing.start + element->timing.duration);
+      }
+      take_channels(element->node.value());
+      for (const auto &[unused, source] :
+           run_of(effect_sources, element->node.value())) {
+        take_channels(source);
+      }
+    }
+    if (!spanned) {
+      continue;
+    }
+    std::sort(keyed.begin(), keyed.end());
+    RowSummary summary{first, end, summary_keys.size(), 0U};
+    for (const auto &[frame, channel] : keyed) {
+      if (summary.key_count > 0U && summary_keys.back().frame == frame) {
+        SummaryKey &key = summary_keys.back();
+        ++key.count;
+        key.mixed = key.mixed || key.channel != channel;
+      } else {
+        summary_keys.push_back(SummaryKey{frame, 1U, channel, false});
+        ++summary.key_count;
+      }
+    }
+    row.summary = summaries.size();
+    summaries.push_back(summary);
+  }
+  return RowList{std::move(rows), std::move(visible_order),
+                 std::move(summaries), std::move(summary_keys)};
 }
 
 } // namespace mediaserver::editor::timeline

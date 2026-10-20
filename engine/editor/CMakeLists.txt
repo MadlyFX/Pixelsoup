@@ -339,6 +339,22 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_editor_timeline_hits_tests PROPERTIES FOLDER "tests")
 
+    # The Timeline's row model on its own: the tree build_rows lists and the
+    # summaries of closed parents.
+    add_executable(mediaserver_editor_timeline_rows_tests
+        tests/timeline_rows_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_timeline_rows_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_timeline_rows_tests)
+    add_test(
+        NAME mediaserver.editor_timeline_rows
+        COMMAND mediaserver_editor_timeline_rows_tests
+    )
+    set_target_properties(mediaserver_editor_timeline_rows_tests PROPERTIES FOLDER "tests")
+
     # The Timeline's curve view on its own: channel colours, the value axis
     # and curves sampled from the scene's evaluator.
     add_executable(mediaserver_editor_timeline_graph_tests

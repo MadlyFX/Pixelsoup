@@ -116,6 +116,7 @@ void TimelinePanel::draw_rows(Pass &p) {
       break;
     case Row::Kind::LaneHeader:
     case Row::Kind::PropertiesHeader:
+      summary_lane_cell(rc, true);
       break;
     }
     lane_press(rc);
@@ -440,7 +441,9 @@ void TimelinePanel::begin_row(RowContext &rc) {
   draw_indent_guides(ctx, tree_x, y, row.height, row.indent,
                      alpha(row_theme.border, 0.9F));
   rc.row_group = group_id(row.node, row.group);
-  rc.open = row.hierarchy
+  rc.open = row.kind == Row::Kind::LaneHeader
+      ? (!search_.empty() || !rows_state_.collapsed_lanes.contains(row.node))
+      : row.hierarchy
       ? (!search_.empty() || rows_state_.expanded_hierarchies.contains(row.node))
       : ((row.kind == Row::Kind::Layer ||
           row.kind == Row::Kind::PropertiesHeader)
@@ -1019,7 +1022,13 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
     }
     const bool on_twirl = row.expandable && ctx.pointer_x() < content_x;
     if (on_twirl) {
-      if (row.hierarchy) {
+      if (row.kind == Row::Kind::LaneHeader) {
+        if (open) {
+          rows_state_.collapsed_lanes.insert(row.node);
+        } else {
+          rows_state_.collapsed_lanes.erase(row.node);
+        }
+      } else if (row.hierarchy) {
         if (open) {
           rows_state_.expanded_hierarchies.erase(row.node);
         } else {
@@ -1087,12 +1096,17 @@ void TimelinePanel::layer_lane_cell(RowContext &rc) {
   auto &centre_y = rc.centre_y;
   auto &clip_element = rc.clip_element;
 
-  // A placed clip's bar, or the always-on band of a layer with no placement.
+  // A placed clip's bar with its folded keys over it; an unplaced media
+  // layer's always-on band; or, for any other layer, a summary of what it
+  // and anything folded under it animate - nothing at all when that is
+  // nothing.
   if (clip_element != nullptr) {
     clip_bar_cell(rc);
-  } else if (row.kind == Row::Kind::Layer) {
-    // A layer with no placement is present for the whole show: a quiet
-    // band in its colour, so it reads as "always on" rather than as a clip.
+    summary_lane_cell(rc, false);
+  } else if (row.kind == Row::Kind::Layer && !row.surface &&
+             row.element_kind == ElementKind::Media) {
+    // A media layer with no placement is present for the whole show: a
+    // quiet band in its colour, so it reads as "always on", not as a clip.
     const float x0 = frame_to_x(static_cast<double>(first_i));
     const float x1 = frame_to_x(static_cast<double>(last_i));
     const gui::Rect clip{x0, y + 5.0F, std::max(x1 - x0, 1.0F),
@@ -1113,6 +1127,9 @@ void TimelinePanel::layer_lane_cell(RowContext &rc) {
         ++sample;
       }
     }
+    summary_lane_cell(rc, false);
+  } else {
+    summary_lane_cell(rc, true);
   }
 
 }
@@ -2003,6 +2020,43 @@ void TimelinePanel::draw_graph(Pass &p) {
     }
   }
   scrub_held_lane(p, graph_it);
+}
+
+// A closed parent's summary in its lane, read-only: a thin bar over the
+// frames its descendants' clips and keys span (omitted where a clip bar
+// already shows them), and a small tick on every frame they key - in the
+// channel's colour when every key there is one channel's, otherwise neutral,
+// and larger where several keys meet.
+void TimelinePanel::summary_lane_cell(RowContext &rc, bool span_bar) {
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &graph = p.layout.graph;
+  const Row &row = rc.row;
+  if (row.summary == no_row) {
+    return;
+  }
+  const RowSummary &summary = p.built.summaries[row.summary];
+  const float centre_y = rc.centre_y;
+  if (span_bar) {
+    const float x0 = time_axis_.x(static_cast<double>(summary.first), graph.x);
+    const float x1 = time_axis_.x(static_cast<double>(summary.end), graph.x);
+    ctx.panel(gui::Rect{x0, centre_y - 1.5F, std::max(x1 - x0, 2.0F), 3.0F},
+              alpha(row.color, row.element_visible ? 0.55F : 0.25F));
+  }
+  const float left = graph.x - summary_key_radius * 2.0F;
+  const float right = graph.x + graph.width + summary_key_radius * 2.0F;
+  for (const SummaryKey &key : p.built.keys(summary)) {
+    const float x = time_axis_.x(static_cast<double>(key.frame), graph.x);
+    if (x < left || x > right) {
+      continue;
+    }
+    const gui::UiColor colour = key.mixed ? ctx.theme().text_muted
+                                          : channel_color(key.channel);
+    draw_diamond(ctx, x, centre_y,
+                 key.count > 1U ? summary_key_radius + 1.0F
+                                : summary_key_radius,
+                 alpha(colour, 0.9F));
+  }
 }
 
 } // namespace mediaserver::editor

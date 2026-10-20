@@ -3555,12 +3555,37 @@ void keys_are_drawn_by_their_outgoing_interpolation() {
   UI_CHECK(!has_vertex(h.list, 630.0F - 3.96F, y - 3.96F));
 }
 
+// A track's twirl closes it to its header, which then summarises its clips,
+// and opens it again; the rows below move up and back.
+void a_track_twirl_closes_it_to_its_header() {
+  Harness h;
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.elements[1U].timeline_lane = lane_node;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  // Open: the header at y=76..100, its clip at 100..124, the object below.
+  const editor::TimelinePanelFrame clip = h.click(150.0F, 112.0F);
+  UI_CHECK(clip.selection.has_value() && clip.selection->node == clip_node);
+  // The header's twirl sits at x=30..46.
+  const editor::TimelinePanelFrame closed = h.click(38.0F, 88.0F);
+  UI_CHECK(!closed.selection.has_value());
+  UI_CHECK(closed.lane_edits.empty());
+  const editor::TimelinePanelFrame object = h.click(150.0F, 112.0F);
+  UI_CHECK(object.selection.has_value() &&
+           object.selection->node == object_node);
+  static_cast<void>(h.click(38.0F, 88.0F));
+  const editor::TimelinePanelFrame reopened = h.click(150.0F, 112.0F);
+  UI_CHECK(reopened.selection.has_value() &&
+           reopened.selection->node == clip_node);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 109U> cases{{
+constexpr std::array<Case, 110U> cases{{
     {"rows show each channel evaluated at the playhead",
      &rows_show_each_channel_evaluated_at_the_playhead},
     {"a narrow list shortens the name before the value",
@@ -3769,6 +3794,8 @@ constexpr std::array<Case, 109U> cases{{
      &key_selection_carries_across_the_curves_switch},
     {"the dope sheet and the graph share one time axis",
      &the_dope_sheet_and_the_graph_share_one_time_axis},
+    {"a track twirl closes it to its header",
+     &a_track_twirl_closes_it_to_its_header},
 }};
 
 } // namespace
