@@ -437,12 +437,131 @@ void the_graph_draws_keys_by_interpolation() {
   GRAPH_CHECK(!has_vertex(list, 140.0F - r * 0.72F, 70.0F - r * 0.72F));
 }
 
+// Three Bezier keys, 1, 2 and 3 at frames 10, 20 and 50; the middle one
+// Aligned at slope 0.05 with no authored weights, the ends Auto.
+[[nodiscard]] scene::ChannelKeyframes handled_channel(
+    scene::KeyTangent middle = scene::KeyTangent{
+        scene::KeyTangentMode::Aligned, 0.05, 0.05}) {
+  return scene::ChannelKeyframes{
+      {}, scene::PropertyChannel::PositionX, {10, 20, 50}, {1.0, 2.0, 3.0},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic,
+       scene::KeyInterpolation::Cubic},
+      {scene::KeyTangent{scene::KeyTangentMode::Auto, 0.125, 0.125}, middle,
+       scene::KeyTangent{}}};
+}
+
+[[nodiscard]] bool near(double value, double expected) noexcept {
+  return std::fabs(value - expected) < 1e-9;
+}
+
+[[nodiscard]] bool near(const std::optional<double> &value,
+                        double expected) noexcept {
+  return value.has_value() && near(*value, expected);
+}
+
+// A handle sits a weight along the key's slope: a third of the interval
+// when none is authored. The first key has no incoming handle and the last
+// no outgoing one; a key after a Linear one has no incoming handle either.
+void handles_sit_along_the_slope_a_third_of_the_interval_out() {
+  using timeline::TimelineGraphView;
+  const scene::ChannelKeyframes channel = handled_channel();
+  const auto out = TimelineGraphView::handle_point(channel, 1U, false);
+  GRAPH_CHECK(out.has_value() && near(out->frame, 30.0) &&
+              near(out->value, 2.5));
+  const auto in = TimelineGraphView::handle_point(channel, 1U, true);
+  GRAPH_CHECK(in.has_value() && near(in->frame, 20.0 - 10.0 / 3.0) &&
+              near(in->value, 2.0 - 0.05 * 10.0 / 3.0));
+  GRAPH_CHECK(!TimelineGraphView::handle_point(channel, 0U, true));
+  GRAPH_CHECK(!TimelineGraphView::handle_point(channel, 2U, false));
+
+  // An authored weight on a non-Auto key sets the length.
+  const auto weighted = TimelineGraphView::handle_point(
+      handled_channel(scene::KeyTangent{scene::KeyTangentMode::Broken, 0.05,
+                                        -0.25, 4.0, 6.0}),
+      1U, false);
+  GRAPH_CHECK(weighted.has_value() && near(weighted->frame, 26.0) &&
+              near(weighted->value, 0.5));
+
+  scene::ChannelKeyframes after_linear = handled_channel();
+  after_linear.interpolations[0] = scene::KeyInterpolation::Linear;
+  after_linear.tangents[0].reset();
+  GRAPH_CHECK(!TimelineGraphView::handle_point(after_linear, 1U, true));
+  GRAPH_CHECK(TimelineGraphView::handle_point(after_linear, 1U, false));
+}
+
+// Dragging a handle: its slope and length follow the pointer; Aligned keeps
+// the other side colinear at its own length; Alt breaks the tangent; Auto
+// and Flat turn Aligned; Broken stays Broken; the length stops short of the
+// handle facing it.
+void dragging_a_handle_sets_its_slope_length_and_mode() {
+  using timeline::TimelineGraphView;
+  using Mode = scene::KeyTangentMode;
+  // Out to frame 35 at value 3.05: 15 frames out, 1.05 up.
+  const auto aligned = TimelineGraphView::dragged_tangent(
+      handled_channel(), 1U, false, 35.0, 3.05, false);
+  GRAPH_CHECK(aligned.has_value() && aligned->mode == Mode::Aligned);
+  GRAPH_CHECK(near(aligned->out_slope, 0.07) && near(aligned->in_slope, 0.07));
+  GRAPH_CHECK(near(aligned->out_weight, 15.0) && !aligned->in_weight);
+
+  // The interval to frame 50 is 30 frames and the last key's incoming
+  // handle takes 10 of them, so a handle stops at 20.
+  const auto longest = TimelineGraphView::dragged_tangent(
+      handled_channel(), 1U, false, 47.0, 4.0, false);
+  GRAPH_CHECK(longest.has_value() && near(longest->out_weight, 20.0) &&
+              near(longest->out_slope, 2.0 / 20.0));
+  // Pulled back past its key, a handle keeps a hundredth of the interval.
+  const auto short_out = TimelineGraphView::dragged_tangent(
+      handled_channel(), 1U, false, 12.0, 2.6, false);
+  GRAPH_CHECK(short_out.has_value() && near(short_out->out_weight, 0.3) &&
+              near(short_out->out_slope, 0.6 / 0.3));
+
+  // Alt on the incoming handle, to frame 15 at value 1.5: 5 frames back and
+  // 0.5 down. Only that side moves.
+  const auto broken = TimelineGraphView::dragged_tangent(
+      handled_channel(), 1U, true, 15.0, 1.5, true);
+  GRAPH_CHECK(broken.has_value() && broken->mode == Mode::Broken);
+  GRAPH_CHECK(near(broken->in_slope, 0.1) && near(broken->out_slope, 0.05));
+  GRAPH_CHECK(near(broken->in_weight, 5.0) && !broken->out_weight);
+
+  // Broken stays Broken without Alt and keeps the other side's weight.
+  const auto still_broken = TimelineGraphView::dragged_tangent(
+      handled_channel(scene::KeyTangent{Mode::Broken, 0.4, -0.25, 4.0, 6.0}),
+      1U, false, 25.0, 2.5, false);
+  GRAPH_CHECK(still_broken.has_value() && still_broken->mode == Mode::Broken);
+  GRAPH_CHECK(near(still_broken->out_slope, 0.1) &&
+              near(still_broken->in_slope, 0.4));
+  GRAPH_CHECK(near(still_broken->out_weight, 5.0) &&
+              near(still_broken->in_weight, 4.0));
+
+  // Auto turns Aligned with no weight on the side not dragged; Flat turns
+  // Aligned and keeps its authored one.
+  const auto from_auto = TimelineGraphView::dragged_tangent(
+      handled_channel(scene::KeyTangent{Mode::Auto, 0.2, 0.2, 7.0, 7.0}), 1U,
+      true, 16.0, 1.0, false);
+  GRAPH_CHECK(from_auto.has_value() && from_auto->mode == Mode::Aligned);
+  GRAPH_CHECK(near(from_auto->in_slope, 0.25) &&
+              near(from_auto->out_slope, 0.25));
+  GRAPH_CHECK(near(from_auto->in_weight, 4.0) && !from_auto->out_weight);
+  const auto from_flat = TimelineGraphView::dragged_tangent(
+      handled_channel(scene::KeyTangent{Mode::Flat, 0.0, 0.0, 3.0}), 1U,
+      false, 28.0, 1.6, false);
+  GRAPH_CHECK(from_flat.has_value() && from_flat->mode == Mode::Aligned);
+  GRAPH_CHECK(near(from_flat->out_slope, -0.05) &&
+              near(from_flat->in_slope, -0.05));
+  GRAPH_CHECK(near(from_flat->in_weight, 3.0) &&
+              near(from_flat->out_weight, 8.0));
+
+  // No handle, no drag.
+  GRAPH_CHECK(!TimelineGraphView::dragged_tangent(handled_channel(), 0U,
+                                                  true, 5.0, 1.0, false));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 17U> cases{{
     {"key glyphs follow the outgoing interpolation",
      &key_glyphs_follow_the_outgoing_interpolation},
     {"the graph draws keys by interpolation",
@@ -473,6 +592,10 @@ constexpr std::array<Case, 15U> cases{{
      &curves_are_sampled_again_only_when_something_changes},
     {"simplified curves stay within a quarter pixel",
      &simplified_curves_stay_within_a_quarter_pixel},
+    {"handles sit along the slope a third of the interval out",
+     &handles_sit_along_the_slope_a_third_of_the_interval_out},
+    {"dragging a handle sets its slope, length and mode",
+     &dragging_a_handle_sets_its_slope_length_and_mode},
 }};
 
 } // namespace

@@ -3338,6 +3338,88 @@ void f9_eases_the_selected_keys() {
            editor::TimelineKeyBatchAction::Delete);
 }
 
+// A selected Bezier key shows its handles on the Curves graph. Dragging one
+// previews locally and commits one tangent edit on release; the key
+// selection stays; Alt breaks the tangent; a press a few pixels off the
+// handle still takes it rather than the key.
+void dragging_a_curves_handle_commits_one_tangent_edit() {
+  Harness h;
+  h.keys[0].values = {1.0, 2.0, 3.0};
+  h.keys[0].interpolations = {scene::KeyInterpolation::Cubic,
+                              scene::KeyInterpolation::Cubic,
+                              scene::KeyInterpolation::Cubic};
+  h.keys[0].tangents = {
+      scene::KeyTangent{scene::KeyTangentMode::Auto, 0.125, 0.125},
+      scene::KeyTangent{scene::KeyTangentMode::Aligned, 0.05, 0.05},
+      scene::KeyTangent{}};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  static_cast<void>(h.click(608.0F, 17.0F));
+  UI_CHECK(h.panel.curves_mode());
+  // Fitted to [0.8, 3.2] over y = 76..400 - 135 px a unit - with frames
+  // 7.4 px apart from frame 10 at x = 334. The frame-20 key, value 2, is
+  // at (408, 238); its outgoing handle, at frame 30 and value 2.5, at
+  // (482, 170.5).
+  const auto x_of = [](double frame) {
+    return static_cast<float>(334.0 + (frame - 10.0) * 7.4);
+  };
+  const auto y_of = [](double value) {
+    return static_cast<float>(76.0 + (3.2 - value) * 135.0);
+  };
+  static_cast<void>(h.click(x_of(20.0), y_of(2.0)));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+
+  // Out to frame 35 at value 3.05.
+  static_cast<void>(h.frame(x_of(30.0), y_of(2.5), false));
+  static_cast<void>(h.frame(x_of(30.0), y_of(2.5), true));
+  const editor::TimelinePanelFrame held =
+      h.frame(x_of(35.0), y_of(3.05), true);
+  UI_CHECK(!held.key_batch.has_value());
+  const editor::TimelinePanelFrame released =
+      h.frame(x_of(35.0), y_of(3.05), false);
+  UI_CHECK(released.key_batch.has_value());
+  UI_CHECK(released.key_batch->action ==
+           editor::TimelineKeyBatchAction::Tangent);
+  UI_CHECK(released.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 20}}));
+  const scene::KeyTangent aligned = released.key_batch->tangent;
+  const auto near = [](double value, double expected) {
+    return std::fabs(value - expected) < 2e-3;
+  };
+  UI_CHECK(aligned.mode == scene::KeyTangentMode::Aligned);
+  UI_CHECK(near(aligned.out_slope, 0.07) && near(aligned.in_slope, 0.07));
+  UI_CHECK(aligned.out_weight.has_value() && near(*aligned.out_weight, 15.0));
+  UI_CHECK(!aligned.in_weight.has_value());
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  UI_CHECK(!h.frame(x_of(35.0), y_of(3.05), false).key_batch.has_value());
+
+  // The Director's edit comes back. The incoming handle now sits at slope
+  // 0.07 a third of the 10-frame interval back: frame 16.67, value 1.767.
+  h.keys[0].tangents[1] = aligned;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  const double in_frame = 20.0 - 10.0 / 3.0;
+  const double in_value = 2.0 - aligned.in_slope * 10.0 / 3.0;
+  // Alt-drag it, from 4 px right of and 3 px below it, to frame 15 at 1.5.
+  static_cast<void>(h.frame(x_of(in_frame) + 4.0F, y_of(in_value) + 3.0F,
+                            false, gui::KeyMods::Alt));
+  static_cast<void>(h.frame(x_of(in_frame) + 4.0F, y_of(in_value) + 3.0F,
+                            true, gui::KeyMods::Alt));
+  static_cast<void>(
+      h.frame(x_of(15.0), y_of(1.5), true, gui::KeyMods::Alt));
+  const editor::TimelinePanelFrame broken =
+      h.frame(x_of(15.0), y_of(1.5), false, gui::KeyMods::Alt);
+  UI_CHECK(broken.key_batch.has_value());
+  UI_CHECK(broken.key_batch->action ==
+           editor::TimelineKeyBatchAction::Tangent);
+  const scene::KeyTangent split = broken.key_batch->tangent;
+  UI_CHECK(split.mode == scene::KeyTangentMode::Broken);
+  UI_CHECK(near(split.in_slope, 0.1) && near(split.out_slope, 0.07));
+  UI_CHECK(split.in_weight.has_value() && near(*split.in_weight, 5.0));
+  UI_CHECK(split.out_weight.has_value() && near(*split.out_weight, 15.0));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+}
+
 // The dope sheet and the Curves graph share one key selection: keys chosen
 // in either stay chosen across the switch, and Delete after it removes what
 // was chosen before it.
@@ -3663,7 +3745,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 112U> cases{{
+constexpr std::array<Case, 113U> cases{{
     {"rows show each channel evaluated at the playhead",
      &rows_show_each_channel_evaluated_at_the_playhead},
     {"a narrow list shortens the name before the value",
@@ -3872,6 +3954,8 @@ constexpr std::array<Case, 112U> cases{{
      &key_selection_carries_across_the_curves_switch},
     {"a key menu eases the selection", &a_key_menu_eases_the_selection},
     {"F9 eases the selected keys", &f9_eases_the_selected_keys},
+    {"dragging a Curves handle commits one tangent edit",
+     &dragging_a_curves_handle_commits_one_tangent_edit},
     {"the dope sheet and the graph share one time axis",
      &the_dope_sheet_and_the_graph_share_one_time_axis},
     {"a track twirl closes it to its header",

@@ -288,10 +288,115 @@ TimelineGraphView::curve(const GraphChannel &channel,
   return cached.points;
 }
 
+namespace {
+
+[[nodiscard]] bool cubic_at(const scene::ChannelKeyframes &channel,
+                            std::size_t key) noexcept {
+  return key < channel.interpolations.size() &&
+         channel.interpolations[key] == scene::KeyInterpolation::Cubic &&
+         key < channel.tangents.size() && channel.tangents[key].has_value();
+}
+
+// The length the evaluator gives one side of a Bezier key: its authored
+// weight unless the key is Auto, and otherwise a third of the interval.
+[[nodiscard]] double side_weight(const scene::ChannelKeyframes &channel,
+                                 std::size_t key, bool incoming,
+                                 double span) noexcept {
+  if (!cubic_at(channel, key)) {
+    return span / 3.0;
+  }
+  const scene::KeyTangent &tangent = *channel.tangents[key];
+  const std::optional<double> &weight =
+      incoming ? tangent.in_weight : tangent.out_weight;
+  return tangent.mode != scene::KeyTangentMode::Auto && weight.has_value()
+             ? *weight
+             : span / 3.0;
+}
+
+// The interval a key's handle spans: back to the key before it or on to
+// the one after. Zero when there is no such key.
+[[nodiscard]] double handle_span(const scene::ChannelKeyframes &channel,
+                                 std::size_t key, bool incoming) noexcept {
+  if (incoming ? key == 0U : key + 1U >= channel.frames.size()) {
+    return 0.0;
+  }
+  const std::size_t other = incoming ? key - 1U : key + 1U;
+  return std::fabs(static_cast<double>(channel.frames[key]) -
+                   static_cast<double>(channel.frames[other]));
+}
+
+[[nodiscard]] bool has_handle(const scene::ChannelKeyframes &channel,
+                              std::size_t key, bool incoming) noexcept {
+  return key < channel.frames.size() && key < channel.values.size() &&
+         cubic_at(channel, key) && handle_span(channel, key, incoming) > 0.0 &&
+         (!incoming || cubic_at(channel, key - 1U));
+}
+
+} // namespace
+
+std::optional<HandlePoint>
+TimelineGraphView::handle_point(const scene::ChannelKeyframes &channel,
+                                std::size_t key, bool incoming) noexcept {
+  if (!has_handle(channel, key, incoming)) {
+    return std::nullopt;
+  }
+  const scene::KeyTangent &tangent = *channel.tangents[key];
+  const double weight = side_weight(channel, key, incoming,
+                                    handle_span(channel, key, incoming));
+  const double slope = incoming ? tangent.in_slope : tangent.out_slope;
+  const double direction = incoming ? -1.0 : 1.0;
+  return HandlePoint{
+      static_cast<double>(channel.frames[key]) + direction * weight,
+      channel.values[key] + direction * slope * weight};
+}
+
+std::optional<scene::KeyTangent> TimelineGraphView::dragged_tangent(
+    const scene::ChannelKeyframes &channel, std::size_t key, bool incoming,
+    double frame, double value, bool break_tangent) noexcept {
+  if (!has_handle(channel, key, incoming) || !std::isfinite(frame) ||
+      !std::isfinite(value)) {
+    return std::nullopt;
+  }
+  const double span = handle_span(channel, key, incoming);
+  // The handle facing this one across the interval keeps its length.
+  const double facing =
+      side_weight(channel, incoming ? key - 1U : key + 1U, !incoming, span);
+  const double longest = span - facing;
+  if (!(longest > 0.0)) {
+    return std::nullopt;
+  }
+  const double direction = incoming ? -1.0 : 1.0;
+  const double key_frame = static_cast<double>(channel.frames[key]);
+  const double weight = std::clamp((frame - key_frame) * direction,
+                                   std::min(longest, span / 100.0), longest);
+  const double slope = (value - channel.values[key]) * direction / weight;
+  if (!std::isfinite(slope)) {
+    return std::nullopt;
+  }
+
+  scene::KeyTangent tangent = *channel.tangents[key];
+  const bool broken =
+      break_tangent || tangent.mode == scene::KeyTangentMode::Broken;
+  if (tangent.mode == scene::KeyTangentMode::Auto) {
+    // Auto's weights are derived, never authored.
+    tangent.in_weight.reset();
+    tangent.out_weight.reset();
+  }
+  tangent.mode = broken ? scene::KeyTangentMode::Broken
+                        : scene::KeyTangentMode::Aligned;
+  (incoming ? tangent.in_slope : tangent.out_slope) = slope;
+  if (!broken) {
+    (incoming ? tangent.out_slope : tangent.in_slope) = slope;
+  }
+  (incoming ? tangent.in_weight : tangent.out_weight) = weight;
+  return tangent;
+}
+
 void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
                              const TimelineTimeAxis &time,
                              std::span<const GraphChannel> channels,
-                             std::span<const GraphKey> keys) {
+                             std::span<const GraphKey> keys,
+                             std::span<const GraphHandle> handles) {
   for (auto &[id, cached] : curves_) {
     cached.used = false;
   }
@@ -342,6 +447,25 @@ void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
     if (channel.active) {
       draw_curve(channel);
     }
+  }
+
+  // Handles under the keys: a line from the key and a small square.
+  for (const GraphHandle &handle : handles) {
+    if (handle.key >= keys.size()) {
+      continue;
+    }
+    const GraphKey &key = keys[handle.key];
+    const gui::UiColor colour = alpha(channels[key.channel].color, 0.95F);
+    ctx.draw_list().add_line(key.x, key.y, handle.x, handle.y, 1.0F,
+                             alpha(theme.text, 0.7F));
+    ctx.panel(gui::Rect{handle.x - handle_radius - 1.0F,
+                        handle.y - handle_radius - 1.0F,
+                        handle_radius * 2.0F + 2.0F,
+                        handle_radius * 2.0F + 2.0F},
+              alpha(theme.panel, 0.9F));
+    ctx.panel(gui::Rect{handle.x - handle_radius, handle.y - handle_radius,
+                        handle_radius * 2.0F, handle_radius * 2.0F},
+              colour);
   }
 
   for (const GraphKey &key : keys) {

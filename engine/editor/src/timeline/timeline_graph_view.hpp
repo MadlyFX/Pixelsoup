@@ -83,8 +83,46 @@ struct GraphKey final {
   float duplicate_x{std::numeric_limits<float>::quiet_NaN()};
 };
 
+// A selected Bezier key's tangent handle as the graph draws it: `key` is
+// the index of its key among the graph's keys.
+struct GraphHandle final {
+  std::size_t key{};
+  bool incoming{};
+  float x{};
+  float y{};
+};
+
+// Where a handle sits, in frames and the channel's own value.
+struct HandlePoint final {
+  double frame{};
+  double value{};
+
+  bool operator==(const HandlePoint &) const = default;
+};
+
 class TimelineGraphView final {
 public:
+  // Key `key`'s incoming or outgoing handle: along the slope the key
+  // evaluates with, as far as the handle's length - its authored weight, or
+  // a third of the interval. A key has handles only when it is Bezier; its
+  // incoming one only when the key before it is Bezier too, since otherwise
+  // the evaluator never reads it.
+  [[nodiscard]] static std::optional<HandlePoint>
+  handle_point(const scene::ChannelKeyframes &channel, std::size_t key,
+               bool incoming) noexcept;
+  // The tangent a handle drag to (frame, value) leaves on the key. The
+  // dragged side takes the pointer's slope and, as its weight, the pointer's
+  // distance in frames from the key, kept short enough for the handle
+  // facing it across the interval. Broken stays Broken and moves only the
+  // dragged side; `break_tangent` (Alt) makes any key Broken that way;
+  // otherwise Auto, Aligned and Flat become Aligned, both slopes the new
+  // one, the other side keeping its weight. Empty when the key has no such
+  // handle.
+  [[nodiscard]] static std::optional<scene::KeyTangent>
+  dragged_tangent(const scene::ChannelKeyframes &channel, std::size_t key,
+                  bool incoming, double frame, double value,
+                  bool break_tangent) noexcept;
+
   // Which channels are shown, in the dope sheet as on the graph.
   [[nodiscard]] bool visible(const ChannelId &channel) const noexcept {
     return !hidden_.contains(channel);
@@ -135,7 +173,8 @@ public:
   void draw(gui::UiContext &ctx, const gui::Rect &area,
             const TimelineTimeAxis &time,
             std::span<const GraphChannel> channels,
-            std::span<const GraphKey> keys);
+            std::span<const GraphKey> keys,
+            std::span<const GraphHandle> handles = {});
 
   // The fewest of `points` that keep every one of them within `tolerance`
   // pixels of the line through those kept (Douglas-Peucker). The first and

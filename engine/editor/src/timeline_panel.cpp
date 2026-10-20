@@ -151,6 +151,7 @@ bool TimelinePanel::selected(
 
 void TimelinePanel::clear_key_context() noexcept {
   keys_.selected.clear();
+  handle_drag_ = HandleDrag{};
   keys_.dragging = false;
   keys_.duplicate = false;
   keys_.drag_keys.clear();

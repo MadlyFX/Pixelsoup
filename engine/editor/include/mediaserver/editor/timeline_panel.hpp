@@ -977,6 +977,21 @@ private:
   };
   KeySelection keys_;
 
+  // A Curves handle drag, previewed on a copy of the key's channel and
+  // committed once, on release, as one tangent edit. The copy stays on
+  // screen until the edited channel comes back or a second has passed.
+  struct HandleDrag final {
+    bool active{};
+    SelectedKey key;
+    bool incoming{};
+    scene::ChannelKeyframes base;
+    scene::ChannelKeyframes preview;
+    int hold_frames{};
+  };
+  HandleDrag handle_drag_;
+  void press_handle(Pass &p, std::size_t handle);
+  void track_handle_drag(Pass &p);
+
   bool snapping_{true};
   bool graph_mode_{};
   // The KEYS popup and its time-scale fields.

@@ -1873,6 +1873,7 @@ void TimelinePanel::scrub_held_lane(Pass &p, const gui::Interaction &lane) {
   gui::UiContext &ctx = p.ctx;
   const gui::Rect &graph = p.layout.graph;
   if (lane.held && !keys_.dragging && !keys_.marquee_active &&
+      !handle_drag_.active &&
       clip_.drag == ClipDrag::None && !clip_.press_consumed &&
       reorder_.layer_node == doc::NodeId{} &&
       reorder_.lane_node == doc::NodeId{}) {
@@ -1902,16 +1903,26 @@ void TimelinePanel::collect_graph(Pass &p,
   const gui::Rect area = graph_area(p);
   std::vector<GraphChannel> &channels = p.graph_channels;
   std::vector<GraphKey> &graph_keys = p.graph_keys;
+  std::vector<GraphHandle> &handles = p.graph_handles;
   channels.clear();
   graph_keys.clear();
+  handles.clear();
+  track_handle_drag(p);
+  const bool handle_preview =
+      handle_drag_.active || handle_drag_.hold_frames > 0;
 
   std::set<ChannelIdentity> seen;
   const auto add = [&](const ChannelIdentity &id, bool locked) {
     if (!graph_->visible(id) || !seen.insert(id).second) {
       return;
     }
-    const scene::ChannelKeyframes *const keys =
+    const scene::ChannelKeyframes *keys =
         channel_for(keyframes, id.target, id.property);
+    if (keys != nullptr && handle_preview &&
+        id == ChannelIdentity{handle_drag_.key.target,
+                              handle_drag_.key.component}) {
+      keys = &handle_drag_.preview;
+    }
     if (keys == nullptr || keys->frames.empty() ||
         keys->values.size() != keys->frames.size()) {
       return;
@@ -1996,6 +2007,111 @@ void TimelinePanel::collect_graph(Pass &p,
         SelectedKey{channel.id.target, channel.id.property, key.frame}, key.x,
         key.y});
   }
+
+  // Each selected Bezier key's handles, unless its keys are being dragged.
+  // A handle answers as far out as a key does, or half way to its key where
+  // the two are closer, so the key keeps the side nearest it.
+  if (keys_.dragging) {
+    return;
+  }
+  for (std::size_t index = 0U; index < graph_keys.size(); ++index) {
+    const GraphKey &key = graph_keys[index];
+    const GraphChannel &channel = channels[key.channel];
+    if (!key.selected || channel.locked) {
+      continue;
+    }
+    for (const bool incoming : {true, false}) {
+      const auto point =
+          TimelineGraphView::handle_point(*channel.keys, key.index, incoming);
+      if (!point.has_value()) {
+        continue;
+      }
+      const float x = time_axis_.x(point->frame, area.x);
+      const float y = axis.y(point->value, area);
+      handles.push_back(GraphHandle{index, incoming, x, y});
+      const float reach =
+          std::min(key_hit_radius, std::hypot(x - key.x, y - key.y) * 0.5F);
+      if (reach < 2.0F) {
+        continue;
+      }
+      HitTarget target{
+          mix(mix(mix(id_, "graph handle", channel.id.target.value()),
+                  "frame", static_cast<core::u64>(key.frame)),
+              "side", incoming ? 1U : 2U),
+          gui::Rect{x - reach, y - reach, reach * 2.0F, reach * 2.0F},
+          HitPriority::Handle, gui::Rect{x, y, 0.0F, 0.0F},
+          row_part_tag(graph_row, RowPart::Handle, handles.size() - 1U)};
+      target.reach = reach;
+      p.hits.add(target);
+    }
+  }
+}
+
+// A press on a handle starts its drag; the key selection stays as it was.
+void TimelinePanel::press_handle(Pass &p, std::size_t handle) {
+  const GraphHandle &pressed = p.graph_handles[handle];
+  const GraphKey &key = p.graph_keys[pressed.key];
+  const GraphChannel &channel = p.graph_channels[key.channel];
+  const scene::ChannelKeyframes *const input = channel_for(
+      p.input.keyframes, channel.id.target, channel.id.property);
+  if (input == nullptr) {
+    return;
+  }
+  graph_->set_active(channel.id);
+  handle_drag_ = HandleDrag{
+      true, SelectedKey{channel.id.target, channel.id.property, key.frame},
+      pressed.incoming, *input, *input, 0};
+}
+
+// A held handle follows the pointer on the preview copy; its release
+// commits the tangent it shows as one edit.
+void TimelinePanel::track_handle_drag(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  if (!handle_drag_.active) {
+    if (handle_drag_.hold_frames > 0) {
+      const scene::ChannelKeyframes *const input =
+          channel_for(p.input.keyframes, handle_drag_.key.target,
+                      handle_drag_.key.component);
+      if (input == nullptr || *input != handle_drag_.base) {
+        handle_drag_.hold_frames = 0;
+      } else {
+        --handle_drag_.hold_frames;
+      }
+    }
+    return;
+  }
+  const scene::ChannelKeyframes &base = handle_drag_.base;
+  const auto found = std::find(base.frames.begin(), base.frames.end(),
+                               handle_drag_.key.frame);
+  if (found == base.frames.end()) {
+    handle_drag_.active = false;
+    return;
+  }
+  const auto index = static_cast<std::size_t>(found - base.frames.begin());
+  const gui::Rect area = graph_area(p);
+  if (const auto tangent = TimelineGraphView::dragged_tangent(
+          base, index, handle_drag_.incoming,
+          time_axis_.frame(ctx.pointer_x(), area.x),
+          graph_->axis().value(ctx.pointer_y(), area), ctx.alt_held())) {
+    handle_drag_.preview = base;
+    handle_drag_.preview.tangents[index] = *tangent;
+  }
+  if (ctx.pointer_down()) {
+    return;
+  }
+  handle_drag_.active = false;
+  const std::optional<scene::KeyTangent> &shown =
+      handle_drag_.preview.tangents[index];
+  if (shown.has_value() && shown != base.tangents[index]) {
+    TimelineKeyBatchEdit batch{};
+    batch.action = TimelineKeyBatchAction::Tangent;
+    batch.keys.push_back(TimelineKeyAddress{handle_drag_.key.target,
+                                            handle_drag_.key.component,
+                                            handle_drag_.key.frame});
+    batch.tangent = *shown;
+    p.frame.key_batch = std::move(batch);
+    handle_drag_.hold_frames = 60;
+  }
 }
 
 // The Curves graph over the rows' lanes, and a press on it: a key selects
@@ -2004,12 +2120,16 @@ void TimelinePanel::collect_graph(Pass &p,
 void TimelinePanel::draw_graph(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const gui::Rect area = graph_area(p);
-  graph_->draw(ctx, area, time_axis_, p.graph_channels, p.graph_keys);
+  graph_->draw(ctx, area, time_axis_, p.graph_channels, p.graph_keys,
+               p.graph_handles);
   const gui::Interaction graph_it = ctx.grab(mix(id_, "graph"), area);
   const bool owned_here = graph_it.pressed && p.press_owner.has_value() &&
                           tag_row(p.press_owner->tag) == graph_row;
   if (owned_here) {
-    if (tag_part(p.press_owner->tag) == RowPart::Key &&
+    if (tag_part(p.press_owner->tag) == RowPart::Handle &&
+        tag_item(p.press_owner->tag) < p.graph_handles.size()) {
+      press_handle(p, tag_item(p.press_owner->tag));
+    } else if (tag_part(p.press_owner->tag) == RowPart::Key &&
         tag_item(p.press_owner->tag) < p.graph_keys.size()) {
       const GraphKey &key = p.graph_keys[tag_item(p.press_owner->tag)];
       const GraphChannel &channel = p.graph_channels[key.channel];

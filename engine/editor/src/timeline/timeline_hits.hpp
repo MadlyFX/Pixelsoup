@@ -26,6 +26,8 @@ enum class HitPriority : core::u8 {
   TrimEdge,
   FadeKnob,
   Key,
+  // A selected Bezier key's tangent handle, over the key it belongs to.
+  Handle,
 };
 
 struct HitTarget final {

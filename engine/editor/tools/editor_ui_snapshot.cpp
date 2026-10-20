@@ -27,8 +27,10 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|summaries]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries]
 //   curves draws the editor with the Timeline switched to Curves mode;
+//   handles does too, with two Opacity keys selected - one Aligned, one
+//   Broken with authored weights - so their tangent handles show;
 //   summaries closes the LED Wall group so its row summarises its clips.
 namespace {
 
@@ -248,7 +250,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|summaries]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -259,7 +261,8 @@ int main(int argc, char **argv) {
   const float hover_x = argc > 6 ? std::strtof(argv[5], nullptr) : -100.0F;
   const float hover_y = argc > 6 ? std::strtof(argv[6], nullptr) : -100.0F;
   const std::string_view view = argc > 7 ? argv[7] : "";
-  const bool curves = view == "curves";
+  const bool handles = view == "handles";
+  const bool curves = view == "curves" || handles;
   const bool summaries = view == "summaries";
   const std::string_view properties =
       curves || summaries ? std::string_view{} : view;
@@ -288,11 +291,24 @@ int main(int argc, char **argv) {
   gui::UiContext ctx{input, list, *font, editor_like_theme()};
 
   Show show = sample_show();
+  if (handles) {
+    scene::ChannelKeyframes &opacity = show.keyframes[1];
+    opacity.tangents[1] =
+        scene::KeyTangent{scene::KeyTangentMode::Aligned, 0.004, 0.004};
+    opacity.tangents[2] = scene::KeyTangent{scene::KeyTangentMode::Broken,
+                                            -0.002, -0.03, 60.0, 15.0};
+  }
   std::vector<editor::OutputMonitorState::Node> nodes;
   const editor::OutputMonitorState outputs = sample_outputs(nodes);
 
   editor::ScenePanel scene_panel{gui::ui_id("snapshot.scene")};
   editor::TimelinePanel timeline_panel{gui::ui_id("snapshot.timeline")};
+  if (handles) {
+    const std::array<editor::TimelineKeyAddress, 2U> chosen{{
+        {doc::NodeId{31U}, scene::PropertyChannel::Opacity, 60},
+        {doc::NodeId{31U}, scene::PropertyChannel::Opacity, 300}}};
+    timeline_panel.replace_key_selection(chosen);
+  }
   editor::OutputMonitorPanel output_panel{gui::ui_id("snapshot.output")};
   editor::InspectorPanel inspector_panel{gui::ui_id("snapshot.inspector")};
   editor::SceneSettingsPanel settings_panel;

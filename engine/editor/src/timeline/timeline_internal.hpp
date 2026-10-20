@@ -59,6 +59,10 @@ inline constexpr float summary_key_radius = 3.5F;
 // A key answers a press well beyond the diamond it draws - a disc as tall as
 // its row - because at arm's length a five-unit diamond is a hard target.
 inline constexpr float key_hit_radius = 12.0F;
+// A Curves tangent handle's drawn half-size. A handle answers as far out as
+// a key does, or half way to its key where they are closer, and wins over
+// the key within that.
+inline constexpr float handle_radius = 3.5F;
 // How close a press must come to a clip's fade knob to take it.
 inline constexpr float fade_handle_reach = 10.0F;
 // How far down into the bar a fade knob still answers.
@@ -1085,6 +1089,8 @@ enum class RowPart : core::u8 {
   // The list cell's steps to a channel's previous and next key.
   PreviousKey,
   NextKey,
+  // A Curves tangent handle; the item is its index among the graph's.
+  Handle,
 };
 
 // A lane target's tag: the row it belongs to, the part, and for a key its
@@ -1222,6 +1228,7 @@ struct TimelinePanel::Pass final {
   // Curves mode: the channels the graph overlays and their keys as drawn.
   std::vector<timeline::GraphChannel> graph_channels;
   std::vector<timeline::GraphKey> graph_keys;
+  std::vector<timeline::GraphHandle> graph_handles;
 };
 
 
