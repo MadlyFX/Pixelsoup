@@ -5559,7 +5559,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
       }
       if (!timeline_frame.keys.empty()) {
-        const core::u64 gesture = impl.next_edit_gesture++;
+        // A value scrubbed in a Timeline field keys on every frame it moves;
+        // the whole scrub is one gesture, so it undoes in one step.
+        const core::u64 gesture = timeline_frame.editing
+                                      ? impl.begin_gesture()
+                                      : impl.next_edit_gesture++;
         for (const TimelineKeyEdit &key : timeline_frame.keys) {
           result.keys.push_back(KeyIntent{key.target, key.component, key.frame,
                                           key.value, key.clear, gesture,

@@ -489,6 +489,87 @@ inline void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
   ctx.draw_list().add_convex_poly(points, color);
 }
 
+// A key's glyph says how it leaves for the next key, as in every motion
+// editor: a diamond runs straight to it, an hourglass curves into it, and a
+// square holds until it.
+enum class KeyGlyph : core::u8 {
+  Diamond,
+  Hourglass,
+  Square,
+};
+
+[[nodiscard]] inline KeyGlyph
+key_glyph(scene::KeyInterpolation interpolation) noexcept {
+  switch (interpolation) {
+  case scene::KeyInterpolation::Hold:
+    return KeyGlyph::Square;
+  case scene::KeyInterpolation::Cubic:
+    return KeyGlyph::Hourglass;
+  case scene::KeyInterpolation::Linear:
+    break;
+  }
+  return KeyGlyph::Diamond;
+}
+
+// The glyph of key `index` in `channel`, by its outgoing interpolation; a
+// diamond where the projection carries none.
+[[nodiscard]] inline KeyGlyph key_glyph(const scene::ChannelKeyframes &channel,
+                                        std::size_t index) noexcept {
+  return index < channel.interpolations.size()
+             ? key_glyph(channel.interpolations[index])
+             : KeyGlyph::Diamond;
+}
+
+// Draws `glyph` centred on (cx, cy), `radius` from its centre to its top.
+// Each shape covers about the same area, so no kind of key reads as heavier.
+inline void draw_key_glyph(gui::UiContext &ctx, KeyGlyph glyph, float cx,
+                           float cy, float radius, gui::UiColor color) {
+  switch (glyph) {
+  case KeyGlyph::Diamond:
+    draw_diamond(ctx, cx, cy, radius, color);
+    return;
+  case KeyGlyph::Hourglass: {
+    // Two triangles meeting at the key's frame.
+    const float half = radius * 0.8F;
+    const std::array<gui::UiPoint, 3U> top{
+        {{cx - half, cy - radius}, {cx + half, cy - radius}, {cx, cy}}};
+    const std::array<gui::UiPoint, 3U> bottom{
+        {{cx + half, cy + radius}, {cx - half, cy + radius}, {cx, cy}}};
+    ctx.draw_list().add_convex_poly(top, color);
+    ctx.draw_list().add_convex_poly(bottom, color);
+    return;
+  }
+  case KeyGlyph::Square: {
+    const float half = radius * 0.72F;
+    const std::array<gui::UiPoint, 4U> square{{{cx - half, cy - half},
+                                               {cx + half, cy - half},
+                                               {cx + half, cy + half},
+                                               {cx - half, cy + half}}};
+    ctx.draw_list().add_convex_poly(square, color);
+    return;
+  }
+  }
+}
+
+// The key nearest `from` in one direction among `frames` (ascending), kept in
+// `best` when it is nearer than what `best` already holds: the latest key
+// before `from`, or the earliest after it. A key at `from` is neither.
+inline void nearer_key(std::optional<core::i64> &best,
+                       std::span<const core::i64> frames, core::i64 from,
+                       bool forward) noexcept {
+  if (forward) {
+    const auto after = std::upper_bound(frames.begin(), frames.end(), from);
+    if (after != frames.end() && (!best.has_value() || *after < *best)) {
+      best = *after;
+    }
+    return;
+  }
+  const auto at = std::lower_bound(frames.begin(), frames.end(), from);
+  if (at != frames.begin() && (!best.has_value() || *(at - 1) > *best)) {
+    best = *(at - 1);
+  }
+}
+
 [[nodiscard]] inline bool key_button(gui::UiContext &ctx, gui::UiId id,
                               const gui::Rect &bounds, bool animated,
                               bool keyed_here, gui::UiColor background) {
@@ -704,6 +785,81 @@ struct Row final {
   return node.value() * 4U + static_cast<core::u64>(group);
 }
 
+// The channels a property group, component or property row keys and steps
+// through: a group's components, which are consecutive, or its one channel.
+struct RowChannels final {
+  doc::NodeId target{};
+  core::u8 first{};
+  core::u8 count{};
+
+  [[nodiscard]] scene::PropertyChannel at(core::u8 offset) const noexcept {
+    return static_cast<scene::PropertyChannel>(first + offset);
+  }
+};
+
+[[nodiscard]] inline std::optional<RowChannels>
+row_channels(const Row &row) noexcept {
+  switch (row.kind) {
+  case Row::Kind::Group:
+    return RowChannels{row.node,
+                       static_cast<core::u8>(group_channel(row.group, 0U)),
+                       row.component_count};
+  case Row::Kind::Component:
+    return RowChannels{
+        row.node,
+        static_cast<core::u8>(group_channel(row.group, row.component)), 1U};
+  case Row::Kind::Property:
+    return RowChannels{row.property_target,
+                       static_cast<core::u8>(row.property), 1U};
+  case Row::Kind::LaneHeader:
+  case Row::Kind::Layer:
+  case Row::Kind::PropertiesHeader:
+    break;
+  }
+  return std::nullopt;
+}
+
+// Where a channel or group row's controls sit, from the lane edge inwards:
+// next key, the key diamond, previous key, the visibility swatch, and the
+// value, whose right edge is `value_right`. The name takes what is left.
+struct ChannelControls final {
+  gui::Rect next;
+  gui::Rect key;
+  gui::Rect previous;
+  gui::Rect swatch;
+  float value_right{};
+};
+
+inline constexpr float key_step_width = 14.0F;
+inline constexpr float row_value_width = 64.0F;
+// The most a closed group's "x, y, z" takes; it takes only what it needs.
+inline constexpr float group_value_width = 132.0F;
+
+[[nodiscard]] inline ChannelControls channel_controls(float lane_x, float y,
+                                                      float height) noexcept {
+  const auto centred = [&](float x, float width, float tall) {
+    return gui::Rect{x, y + std::max((height - tall) * 0.5F, 0.0F), width,
+                     std::min(height, tall)};
+  };
+  ChannelControls out{};
+  out.next = gui::Rect{lane_x - 2.0F - key_step_width, y, key_step_width,
+                       height};
+  out.key = centred(out.next.x - 18.0F, 18.0F, 18.0F);
+  out.previous =
+      gui::Rect{out.key.x - key_step_width, y, key_step_width, height};
+  out.swatch = centred(out.previous.x - 4.0F - 14.0F, 14.0F, 14.0F);
+  out.value_right = out.swatch.x - 4.0F;
+  return out;
+}
+
+// The value's share of a row's list cell between `left` and `right`: up to
+// `width`, and all of it before the name gets any - a narrow list shortens
+// the name first.
+[[nodiscard]] inline float value_share(float left, float right,
+                                       float width) noexcept {
+  return std::clamp(right - left, 0.0F, width);
+}
+
 // A clip the operator can edit on the timeline: a media placement with a real
 // duration. An unplaced clip is the legacy always-on form and keeps the plain
 // full-range layer bar, because there is no in or out point to drag.
@@ -877,6 +1033,9 @@ enum class RowPart : core::u8 {
   FadeIn,
   FadeOut,
   Key,
+  // The list cell's steps to a channel's previous and next key.
+  PreviousKey,
+  NextKey,
 };
 
 // A lane target's tag: the row it belongs to, the part, and for a key its
@@ -1046,6 +1205,13 @@ struct TimelinePanel::RowContext final {
   gui::Rect lock_bounds{};
   float interaction_y{};
   float interaction_height{};
+  // A channel or group row's controls beside the lane, its value cell, and
+  // what its channels hold at the show frame: evaluated keys, or the base
+  // value where there are none. Worked out only for rows on screen.
+  timeline::ChannelControls controls{};
+  gui::Rect value_bounds{};
+  std::array<double, 3U> values{};
+  std::array<const scene::ChannelKeyframes *, 3U> keys{};
   const ElementInfo *clip_element{};
   scene::ClipTiming clip_timing{};
   gui::Rect clip_bar{};

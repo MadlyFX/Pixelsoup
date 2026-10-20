@@ -50,6 +50,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     rc.y = y;
     rc.track_number = track_numbers[index];
     layout_row(rc);
+    collect_list_hits(rc);
     if (!graph_mode_) {
       collect_row_hits(rc);
     }
@@ -172,6 +173,40 @@ void TimelinePanel::layout_row(RowContext &rc) {
       std::min(y + row.height, rows_bounds.y + rows_bounds.height);
   rc.interaction_height =
       std::max(interaction_bottom - rc.interaction_y, 0.0F);
+  rc.controls =
+      channel_controls(graph.x, rc.interaction_y, rc.interaction_height);
+  // What the row's channels hold at the show frame, for its value cell and
+  // its key diamond: their keys evaluated there, or where a channel has none
+  // its base value, the only reason to look its element up.
+  if (const std::optional<RowChannels> channels = row_channels(row)) {
+    std::optional<const ElementInfo *> element;
+    std::optional<const output::ProjectionSurface *> surface;
+    for (core::u8 offset = 0U;
+         offset < channels->count && offset < rc.values.size(); ++offset) {
+      const scene::PropertyChannel channel = channels->at(offset);
+      rc.keys[offset] = channel_for(keyframes, channels->target, channel);
+      const std::optional<double> sampled =
+          sample_channel_at(rc.keys[offset], p.input.timeline.show_frame);
+      if (sampled.has_value() && std::isfinite(*sampled)) {
+        rc.values[offset] = *sampled;
+      } else if (row.kind == Row::Kind::Property) {
+        rc.values[offset] = row.property_value;
+      } else if (row.surface) {
+        if (!surface.has_value()) {
+          surface = find_surface(p.input.surfaces, row.node);
+        }
+        rc.values[offset] = *surface != nullptr
+                                ? surface_component_value(**surface, channel)
+                                : 0.0;
+      } else {
+        if (!element.has_value()) {
+          element = find_element(elements, row.node);
+        }
+        rc.values[offset] =
+            *element != nullptr ? component_value(**element, channel) : 0.0;
+      }
+    }
+  }
   if (row.kind == Row::Kind::Component || row.kind == Row::Kind::Property) {
     rc.row_channel_identity = ChannelIdentity{
         row.kind == Row::Kind::Property ? row.property_target : row.node,
@@ -210,10 +245,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
   }
   const ChannelIdentity identity = *rc.row_channel_identity;
   rc.channel = identity.property;
-  rc.component_channel =
-      !graph_->visible(identity)
-          ? nullptr
-          : channel_for(keyframes, identity.target, identity.property);
+  rc.component_channel = graph_->visible(identity) ? rc.keys[0U] : nullptr;
   rc.component_frames = rc.component_channel != nullptr
                             ? &rc.component_channel->frames
                             : nullptr;
@@ -307,6 +339,25 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   };
   knob(rc.clip_fade_in_x, "fade in", RowPart::FadeIn);
   knob(rc.clip_fade_out_x, "fade out", RowPart::FadeOut);
+}
+
+// The list cell's own targets: a channel or group row's steps to its
+// previous and next key. They sit beside the lane, which a key's disc at the
+// lane's very edge reaches into; the nearer mark owns the point.
+void TimelinePanel::collect_list_hits(RowContext &rc) {
+  if (!row_channels(rc.row).has_value() || rc.interaction_height <= 0.0F) {
+    return;
+  }
+  const core::u64 identity = row_identity(rc.row);
+  const auto add = [&](const gui::Rect &bounds, std::string_view name,
+                       RowPart part) {
+    rc.p.hits.add(HitTarget{
+        mix(id_, name, identity), bounds, HitPriority::Key,
+        gui::Rect{bounds.x + bounds.width * 0.5F, rc.centre_y, 0.0F, 0.0F},
+        row_part_tag(rc.index, part)});
+  };
+  add(rc.controls.previous, "previous key", RowPart::PreviousKey);
+  add(rc.controls.next, "next key", RowPart::NextKey);
 }
 
 // The row's background, rule, twirl and the geometry its cells share.
@@ -572,29 +623,35 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
 
 // A parent's Properties foldout: only its name.
 void TimelinePanel::properties_header_list_cell(RowContext &rc) {
-  property_label(rc);
+  property_label(rc, rc.p.layout.graph.x - 48.0F);
 }
 
-// A property group - Position, Rotation, Scale, Color: its name and the
-// diamond that keys every component at the playhead.
+// A property group - Position, Rotation, Scale, Color: its name, its
+// components' values while it is closed, and the diamond that keys every
+// component at the playhead between the steps to their keys.
 void TimelinePanel::property_group_list_cell(RowContext &rc) {
-  property_label(rc);
+  group_value_cell(rc);
+  property_label(rc, rc.value_bounds.x - 4.0F);
   row_key_button(rc);
+  row_key_steps(rc);
 }
 
-// One channel - a component or a property: its name, its visibility
-// swatch and its key diamond.
+// One channel - a component or a property: its name, its value at the
+// playhead, its visibility swatch and its key diamond between the steps to
+// its previous and next key.
 void TimelinePanel::channel_list_cell(RowContext &rc) {
-  property_label(rc);
+  channel_value_cell(rc);
+  property_label(rc, rc.value_bounds.x - 4.0F);
   channel_visibility_toggle(rc);
   row_key_button(rc);
+  row_key_steps(rc);
 }
 
-// A property, a property group or the Properties foldout: its name.
-void TimelinePanel::property_label(RowContext &rc) {
+// A property, a property group or the Properties foldout: its name, up to
+// `right`.
+void TimelinePanel::property_label(RowContext &rc, float right) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
-  const gui::Rect &graph = p.layout.graph;
   const Row &row = rc.row;
   auto &y = rc.y;
   auto &row_channel_identity = rc.row_channel_identity;
@@ -603,8 +660,7 @@ void TimelinePanel::property_label(RowContext &rc) {
 
   // A property: named in the colour its keys and curve are drawn in, so
   // the list and the lanes read as one table.
-  name_bounds = gui::Rect{content_x, y,
-                          std::max(graph.x - content_x - 48.0F, 0.0F),
+  name_bounds = gui::Rect{content_x, y, std::max(right - content_x, 0.0F),
                           row.height};
   ctx.label(name_bounds, row.label,
             row.kind == Row::Kind::Component ||
@@ -613,23 +669,99 @@ void TimelinePanel::property_label(RowContext &rc) {
                 : row.color);
 }
 
+// A channel's value at the playhead. Where an edit keys - an animated
+// channel with Auto Key on - it is a field that scrubs or takes a typed
+// value and keys it at the playhead. Anywhere else an edit would change the
+// base value, which is the Inspector's to edit, so the value is only shown.
+void TimelinePanel::channel_value_cell(RowContext &rc) {
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const Row &row = rc.row;
+  const float width =
+      value_share(rc.content_x, rc.controls.value_right, row_value_width);
+  rc.value_bounds =
+      gui::Rect{rc.controls.value_right - width, rc.interaction_y + 3.0F,
+                width, std::max(rc.interaction_height - 6.0F, 0.0F)};
+  const gui::Rect &bounds = rc.value_bounds;
+  if (!rc.row_channel_identity.has_value() || bounds.width <= 0.0F ||
+      bounds.height <= 0.0F) {
+    return;
+  }
+  const ChannelIdentity identity = *rc.row_channel_identity;
+  const scene::ChannelKeyframes *const keys = rc.keys[0U];
+  const bool animated = keys != nullptr && !keys->frames.empty();
+  const double value = rc.values[0U];
+  if (animated && auto_key_ && !row.locked) {
+    double edited = value;
+    if (value_fields_.draw(ctx, mix(id_, "row value", row_identity(row)),
+                           bounds, "", value,
+                           std::max(std::fabs(value) * 0.01, 0.01), edited,
+                           3) &&
+        std::isfinite(edited)) {
+      p.frame.keys.push_back(TimelineKeyEdit{identity.target,
+                                             identity.property,
+                                             p.input.timeline.show_frame,
+                                             edited, false, false});
+    }
+    return;
+  }
+  std::array<char, 32U> text{};
+  const int length = std::snprintf(text.data(), text.size(), "%.3f", value);
+  const std::string_view shown{
+      text.data(), static_cast<std::size_t>(std::max(length, 0))};
+  const float text_width =
+      std::min(ctx.font_width(shown) + 1.0F, bounds.width);
+  ctx.label(gui::Rect{bounds.x + bounds.width - text_width, rc.y, text_width,
+                      row.height},
+            shown, ctx.theme().text_muted);
+  ctx.tooltip(bounds, row.locked ? "Unlock the layer to edit its keys"
+                      : animated ? "Turn on Auto Key (K) to key a value here"
+                                 : "Key it with the diamond to edit it here; "
+                                   "the Inspector edits its base value");
+}
+
+// A closed property group's components at the playhead, as "x, y, z". An
+// open group lists them on its own rows instead. The text takes only the
+// room it needs, so the group's name keeps the rest.
+void TimelinePanel::group_value_cell(RowContext &rc) {
+  gui::UiContext &ctx = rc.p.ctx;
+  const Row &row = rc.row;
+  rc.value_bounds = gui::Rect{rc.controls.value_right, rc.y, 0.0F, row.height};
+  if (rc.open) {
+    return;
+  }
+  std::string shown;
+  for (core::u8 component = 0U; component < row.component_count;
+       ++component) {
+    std::array<char, 32U> text{};
+    const int length = std::snprintf(text.data(), text.size(), "%.2f",
+                                     rc.values[component]);
+    if (component > 0U) {
+      shown += ", ";
+    }
+    shown.append(text.data(), static_cast<std::size_t>(std::max(length, 0)));
+  }
+  const float width =
+      value_share(rc.content_x, rc.controls.value_right,
+                  std::min(ctx.font_width(shown) + 1.0F, group_value_width));
+  rc.value_bounds.x -= width;
+  rc.value_bounds.width = width;
+  if (width > 0.0F) {
+    ctx.label(rc.value_bounds, shown, ctx.theme().text_muted);
+  }
+}
+
 // The swatch that shows or hides one channel's keys and curve.
 void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
-  const gui::Rect &graph = p.layout.graph;
   const Row &row = rc.row;
   auto &row_channel_identity = rc.row_channel_identity;
-  auto &interaction_y = rc.interaction_y;
-  auto &interaction_height = rc.interaction_height;
 
   if (row_channel_identity.has_value()) {
     const bool channel_hidden =
         !graph_->visible(*row_channel_identity);
-    const gui::Rect visibility_bounds{
-        graph.x - 41.0F,
-        interaction_y + std::max((interaction_height - 14.0F) * 0.5F, 0.0F),
-        14.0F, std::min(interaction_height, 14.0F)};
+    const gui::Rect &visibility_bounds = rc.controls.swatch;
     const gui::Interaction visibility = ctx.grab(
         mix(id_, "channel visibility", row_identity(row)),
         visibility_bounds);
@@ -680,75 +812,104 @@ void TimelinePanel::row_key_button(RowContext &rc) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
   const EditorTimeline &timeline = p.input.timeline;
-  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
   const std::span<const ElementInfo> elements = p.input.elements;
   const std::span<const output::ProjectionSurface> surfaces = p.input.surfaces;
   TimelinePanelFrame &frame = p.frame;
-  const gui::Rect &graph = p.layout.graph;
   const Row &row = rc.row;
-  auto &background = rc.background;
-  auto &interaction_y = rc.interaction_y;
-  auto &interaction_height = rc.interaction_height;
+  const std::optional<RowChannels> channels = row_channels(row);
 
   // Property-local key controls: the group diamond keys all three axes;
   // a component diamond keys only that channel. A filled diamond means
   // there is already a key at the playhead, while a hollow bright one
-  // means the channel is animated elsewhere.
-  if (!row.locked && (row.kind == Row::Kind::Group ||
-                      row.kind == Row::Kind::Component ||
-                      row.kind == Row::Kind::Property)) {
-    const ElementInfo *const row_element = find_element(elements, row.node);
-    const output::ProjectionSurface *const row_surface =
-        row.surface ? find_surface(surfaces, row.node) : nullptr;
-    if ((row_surface != nullptr) || row_element != nullptr) {
-      bool animated = false;
-      bool keyed_here = true;
-      const core::i64 show_frame = signed_frame(timeline.show_frame);
-      const core::u8 first_component =
-          row.kind == Row::Kind::Property
-              ? static_cast<core::u8>(row.property)
-              : static_cast<core::u8>(group_channel(
-                    row.group,
-                    row.kind == Row::Kind::Component ? row.component : 0U));
-      const core::u8 component_count =
-          row.kind == Row::Kind::Group ? row.component_count : 1U;
-      const doc::NodeId key_target =
-          row.kind == Row::Kind::Property ? row.property_target : row.node;
-      for (core::u8 offset = 0U; offset < component_count; ++offset) {
-        const auto component =
-            static_cast<scene::TransformChannel>(first_component + offset);
-        const scene::ChannelKeyframes *const authored =
-            channel_for(keyframes, key_target, component);
-        animated =
-            animated || (authored != nullptr && !authored->frames.empty());
-        keyed_here =
-            keyed_here && authored != nullptr &&
-            std::find(authored->frames.begin(), authored->frames.end(),
-                      show_frame) != authored->frames.end();
-      }
-
-      const gui::Rect key_bounds{
-          graph.x - 22.0F,
-          interaction_y + std::max((interaction_height - 18.0F) * 0.5F, 0.0F),
-          18.0F, std::min(interaction_height, 18.0F)};
-      if (key_button(ctx, mix(id_, "row key", row_identity(row)),
-                     key_bounds, animated, keyed_here, background)) {
-        for (core::u8 offset = 0U; offset < component_count; ++offset) {
-          const auto component =
-              static_cast<scene::TransformChannel>(first_component + offset);
-          frame.keys.push_back(TimelineKeyEdit{
-              key_target, component, timeline.show_frame,
-              row.kind == Row::Kind::Property
-                  ? row.property_value
-                  : (row_surface != nullptr
-                         ? surface_component_value(*row_surface, component)
-                         : component_value(*row_element, component)),
-              false, keyed_here});
-        }
-      }
+  // means the channel is animated elsewhere. A key takes the value the
+  // row shows: the channel evaluated at the playhead.
+  if (row.locked || !channels.has_value()) {
+    return;
+  }
+  const bool exists = row.surface ? find_surface(surfaces, row.node) != nullptr
+                                  : find_element(elements, row.node) != nullptr;
+  if (!exists) {
+    return;
+  }
+  bool animated = false;
+  bool keyed_here = true;
+  const core::i64 show_frame = signed_frame(timeline.show_frame);
+  for (core::u8 offset = 0U; offset < channels->count; ++offset) {
+    const scene::ChannelKeyframes *const authored = rc.keys[offset];
+    animated = animated || (authored != nullptr && !authored->frames.empty());
+    keyed_here = keyed_here && authored != nullptr &&
+                 std::find(authored->frames.begin(), authored->frames.end(),
+                           show_frame) != authored->frames.end();
+  }
+  if (key_button(ctx, mix(id_, "row key", row_identity(row)),
+                 rc.controls.key, animated, keyed_here, rc.background)) {
+    for (core::u8 offset = 0U; offset < channels->count; ++offset) {
+      frame.keys.push_back(TimelineKeyEdit{
+          channels->target, channels->at(offset), timeline.show_frame,
+          rc.values[offset], false, keyed_here});
     }
   }
+}
 
+// The steps either side of the key diamond: to the channel's previous and
+// next key, or for a group the nearest key on any of its components. A step
+// with no key that way is drawn dim and does nothing. They step from the
+// playhead the panel last asked for, so repeated presses walk key to key
+// without waiting for the show to arrive at each.
+void TimelinePanel::row_key_steps(RowContext &rc) {
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const Row &row = rc.row;
+  const std::optional<RowChannels> channels = row_channels(row);
+  if (!channels.has_value()) {
+    return;
+  }
+  bool animated = false;
+  std::optional<core::i64> previous;
+  std::optional<core::i64> next;
+  for (core::u8 offset = 0U; offset < channels->count; ++offset) {
+    const scene::ChannelKeyframes *const keys = rc.keys[offset];
+    if (keys == nullptr || keys->frames.empty()) {
+      continue;
+    }
+    animated = true;
+    nearer_key(previous, keys->frames, p.playhead, false);
+    nearer_key(next, keys->frames, p.playhead, true);
+  }
+  if (!animated) {
+    return;
+  }
+  const auto step = [&](const gui::Rect &bounds, std::string_view name,
+                        RowPart part, std::optional<core::i64> target,
+                        bool forward, std::string_view tooltip) {
+    const gui::Interaction it =
+        ctx.grab(mix(id_, name, row_identity(row)), bounds);
+    const bool owner = p.hover_owner.has_value() &&
+                       p.hover_owner->tag == row_part_tag(rc.index, part);
+    const gui::UiColor color =
+        !target.has_value()
+            ? alpha(ctx.theme().text_muted, 0.3F)
+            : (owner ? ctx.theme().accent : ctx.theme().text_muted);
+    const float cx = bounds.x + bounds.width * 0.5F;
+    const float cy = rc.centre_y;
+    const float tip = forward ? 3.0F : -3.0F;
+    const std::array<gui::UiPoint, 3U> arrow{
+        {{cx - tip, cy - 4.0F}, {cx + tip, cy}, {cx - tip, cy + 4.0F}}};
+    ctx.draw_list().add_convex_poly(arrow, color);
+    if (!target.has_value()) {
+      return;
+    }
+    ctx.tooltip(bounds, tooltip);
+    if (it.clicked && owner) {
+      p.frame.seek_to_frame =
+          std::clamp(static_cast<core::u64>(std::max<core::i64>(*target, 0)),
+                     p.first, p.last);
+    }
+  };
+  step(rc.controls.previous, "previous key", RowPart::PreviousKey, previous,
+       false, "Previous key ([)");
+  step(rc.controls.next, "next key", RowPart::NextKey, next, true,
+       "Next key (])");
 }
 
 // Select, twirl, rename or lift the row from its list cell. False when the
@@ -1313,14 +1474,15 @@ void TimelinePanel::property_group_lane_cell(RowContext &rc) {
   const Row &row = rc.row;
   auto &centre_y = rc.centre_y;
 
-  const auto draw_frames = [&](const std::vector<core::i64> *frames,
-                               gui::UiColor color) {
-    if (frames == nullptr) {
+  const auto draw_keys = [&](const scene::ChannelKeyframes *keys,
+                             gui::UiColor color) {
+    if (keys == nullptr) {
       return;
     }
-    for (const core::i64 key : *frames) {
-      draw_diamond(ctx, frame_to_x(static_cast<double>(key)), centre_y,
-                   key_radius, color);
+    for (std::size_t key = 0U; key < keys->frames.size(); ++key) {
+      draw_key_glyph(ctx, key_glyph(*keys, key),
+                     frame_to_x(static_cast<double>(keys->frames[key])),
+                     centre_y, key_radius, color);
     }
   };
 
@@ -1330,8 +1492,8 @@ void TimelinePanel::property_group_lane_cell(RowContext &rc) {
     if (!graph_->visible(ChannelIdentity{row.node, aggregate})) {
       continue;
     }
-    draw_frames(frames_for(keyframes, row.node, aggregate),
-                alpha(channel_color(aggregate), 0.58F));
+    draw_keys(channel_for(keyframes, row.node, aggregate),
+              alpha(channel_color(aggregate), 0.58F));
   }
 
 }
@@ -1366,18 +1528,19 @@ void TimelinePanel::channel_lane_cell(RowContext &rc) {
     const float key_x = rc.component_x[key_index];
     const float key_y = rc.component_y[key_index];
     const bool is_key_selected = key_selected(identity);
+    const KeyGlyph glyph = key_glyph(*component_channel, key_index);
     if (is_key_selected) {
-      draw_diamond(ctx, key_x, key_y, key_radius + 2.0F,
-                   alpha(ctx.theme().accent, 0.50F));
+      draw_key_glyph(ctx, glyph, key_x, key_y, key_radius + 2.0F,
+                     alpha(ctx.theme().accent, 0.50F));
     }
-    draw_diamond(ctx, key_x, key_y,
-                 is_key_selected ? key_radius + 0.5F : key_radius,
-                 is_key_selected ? ctx.theme().playhead : component_color);
+    draw_key_glyph(ctx, glyph, key_x, key_y,
+                   is_key_selected ? key_radius + 0.5F : key_radius,
+                   is_key_selected ? ctx.theme().playhead : component_color);
     if (moving_key && keys_.duplicate && keys_.drag_delta != 0) {
       const float duplicate_x =
           frame_to_x(static_cast<double>(key_frame + keys_.drag_delta));
-      draw_diamond(ctx, duplicate_x, key_y, key_radius + 0.5F,
-                   ctx.theme().accent);
+      draw_key_glyph(ctx, glyph, duplicate_x, key_y, key_radius + 0.5F,
+                     ctx.theme().accent);
     }
     if (!row.locked) {
       scratch.visible_keys.push_back(

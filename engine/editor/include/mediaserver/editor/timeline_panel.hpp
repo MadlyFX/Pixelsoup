@@ -782,15 +782,19 @@ private:
   // presses the row label and then the lane take, in draw_rows() order.
   void layout_row(RowContext &rc);
   void collect_row_hits(RowContext &rc);
+  void collect_list_hits(RowContext &rc);
   void begin_row(RowContext &rc);
   void track_header_list_cell(RowContext &rc);
   void layer_list_cell(RowContext &rc);
   void properties_header_list_cell(RowContext &rc);
   void property_group_list_cell(RowContext &rc);
   void channel_list_cell(RowContext &rc);
-  void property_label(RowContext &rc);
+  void property_label(RowContext &rc, float right);
   void channel_visibility_toggle(RowContext &rc);
   void row_key_button(RowContext &rc);
+  void row_key_steps(RowContext &rc);
+  void channel_value_cell(RowContext &rc);
+  void group_value_cell(RowContext &rc);
   bool row_label_press(RowContext &rc);
   void layer_lane_cell(RowContext &rc);
   void clip_bar_cell(RowContext &rc);
@@ -867,6 +871,9 @@ private:
   void press_key(Pass &p, const SelectedKey &hit);
   void press_lane_background(Pass &p, bool locked);
   void scrub_held_lane(Pass &p, const gui::Interaction &lane);
+  // Seeks to the nearest key before or after the playhead on the selected
+  // layers' channels.
+  void step_to_selected_key(Pass &p, bool forward);
 
   [[nodiscard]] bool
   selected(doc::NodeId node,
@@ -920,6 +927,8 @@ private:
   ReorderState reorder_;
 
   NumberField range_fields_;
+  // Each channel row's value at the playhead.
+  NumberField value_fields_;
 
   // The Timeline's own key selection, kept apart from scene layers.
   struct KeySelection final {

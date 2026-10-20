@@ -449,6 +449,26 @@ Adding a key through the Inspector or Timeline samples the same interpolation
 as playback, including cubic tangents and weights, so the inserted key keeps
 the evaluated value at that frame.
 
+Each property row in the layer list shows its value at the playhead, between
+its name and its key diamond: the animation evaluated there, or the base value
+of a property with no keys. A closed **Position**, **Rotation**, **Scale** or
+**Color** group shows its components as `x, y, z`. On an animated property
+with Auto Key on, the value is a field: drag it sideways to scrub, or click it
+and type, and the value is keyed at the playhead; one drag is one undo step.
+Otherwise the value is only shown - key the property with its diamond to edit
+it here, or change its base value in the Inspector. When the list is narrow,
+the name is shortened before the value.
+
+The arrows either side of a row's diamond move the playhead to that
+property's previous or next key; on a group they step to the nearest key on
+any of its components. An arrow is dimmed when there is no key that way.
+`[` and `]` do the same for every animated property of the selected layers,
+their effects included, while Timeline has keyboard focus.
+
+A key's shape shows how it leaves for the next key, in the dope sheet and on
+the Curves graph alike: a diamond moves in a straight line, an hourglass
+eases along a curve (Cubic), and a square holds its value until the next key.
+
 The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
 requires one valid contiguous selected span. Insert Clipboard and Overwrite

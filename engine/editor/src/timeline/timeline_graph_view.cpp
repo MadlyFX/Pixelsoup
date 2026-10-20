@@ -345,17 +345,22 @@ void TimelineGraphView::draw(gui::UiContext &ctx, const gui::Rect &area,
   }
 
   for (const GraphKey &key : keys) {
-    const gui::UiColor colour = channels[key.channel].color;
+    const GraphChannel &channel = channels[key.channel];
+    const gui::UiColor colour = channel.color;
+    // Drawn by how the key leaves for the next one, as in the dope sheet.
+    const KeyGlyph glyph = channel.keys != nullptr
+                               ? key_glyph(*channel.keys, key.index)
+                               : KeyGlyph::Diamond;
     if (key.selected) {
-      draw_diamond(ctx, key.x, key.y, key_radius + 2.0F,
-                   alpha(theme.accent, 0.50F));
+      draw_key_glyph(ctx, glyph, key.x, key.y, key_radius + 2.0F,
+                     alpha(theme.accent, 0.50F));
     }
-    draw_diamond(ctx, key.x, key.y,
-                 key.selected ? key_radius + 0.5F : key_radius,
-                 key.selected ? theme.playhead : colour);
+    draw_key_glyph(ctx, glyph, key.x, key.y,
+                   key.selected ? key_radius + 0.5F : key_radius,
+                   key.selected ? theme.playhead : colour);
     if (std::isfinite(key.duplicate_x)) {
-      draw_diamond(ctx, key.duplicate_x, key.y, key_radius + 0.5F,
-                   theme.accent);
+      draw_key_glyph(ctx, glyph, key.duplicate_x, key.y, key_radius + 0.5F,
+                     theme.accent);
     }
   }
   ctx.pop_clip();

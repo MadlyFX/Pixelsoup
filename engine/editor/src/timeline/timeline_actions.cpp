@@ -55,7 +55,8 @@ void TimelinePanel::handle_actions(Pass &p) {
     markers_.selected.clear();
   }
   frame.editing = frame.editing || range_fields_.live() ||
-                  key_tools_.value_field.live() || ctx.focus() == search_id ||
+                  key_tools_.value_field.live() || value_fields_.live() ||
+                  ctx.focus() == search_id ||
                   ctx.focus() == scale_numerator_id ||
                   ctx.focus() == scale_denominator_id ||
                   ctx.focus() == scale_user_anchor_id || toolbar_.rate_menu_open ||
@@ -675,6 +676,12 @@ void TimelinePanel::handle_actions(Pass &p) {
       case 'C':
         edit_tool_ = TimelineEditTool::Razor;
         break;
+      case '[':
+        step_to_selected_key(p, false);
+        break;
+      case ']':
+        step_to_selected_key(p, true);
+        break;
       case '\\':
         zoom_to_fit(p);
         break;
@@ -731,6 +738,34 @@ void TimelinePanel::handle_actions(Pass &p) {
                      batch.keys.end());
     frame.key_batch = std::move(batch);
     frame.consume_delete = true;
+  }
+}
+
+// [ and ] step the playhead to the previous or next key on any channel of the
+// selected layers - their transforms, looks and effects - or of the selected
+// surface. Nothing selected, or no key that way, leaves it where it is.
+void TimelinePanel::step_to_selected_key(Pass &p, bool forward) {
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  std::vector<doc::NodeId> targets(selection.begin(), selection.end());
+  for (const scene::EffectInstance &effect : p.input.effects) {
+    if (selected(effect.target, selection)) {
+      targets.push_back(effect.source);
+    }
+  }
+  if (p.input.selected_surface != doc::NodeId{}) {
+    targets.push_back(p.input.selected_surface);
+  }
+  std::optional<core::i64> target;
+  for (const scene::ChannelKeyframes &channel : p.input.keyframes) {
+    if (std::find(targets.begin(), targets.end(), channel.target) !=
+        targets.end()) {
+      nearer_key(target, channel.frames, p.playhead, forward);
+    }
+  }
+  if (target.has_value()) {
+    p.frame.seek_to_frame =
+        std::clamp(static_cast<core::u64>(std::max<core::i64>(*target, 0)),
+                   p.first, p.last);
   }
 }
 

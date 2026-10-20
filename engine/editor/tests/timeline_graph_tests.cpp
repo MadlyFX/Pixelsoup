@@ -367,12 +367,86 @@ void curves_are_sampled_again_only_when_something_changes() {
   GRAPH_CHECK(draw(shown) == 1U);
 }
 
+[[nodiscard]] bool has_vertex(const gui::UiDrawList &list, float x, float y) {
+  for (const gui::UiVertex &vertex : list.vertices()) {
+    if (std::fabs(vertex.x - x) < 0.01F && std::fabs(vertex.y - y) < 0.01F) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A key reads as how it leaves for the next one; a projection carrying no
+// interpolations draws diamonds.
+void key_glyphs_follow_the_outgoing_interpolation() {
+  using timeline::KeyGlyph;
+  GRAPH_CHECK(timeline::key_glyph(scene::KeyInterpolation::Linear) ==
+              KeyGlyph::Diamond);
+  GRAPH_CHECK(timeline::key_glyph(scene::KeyInterpolation::Cubic) ==
+              KeyGlyph::Hourglass);
+  GRAPH_CHECK(timeline::key_glyph(scene::KeyInterpolation::Hold) ==
+              KeyGlyph::Square);
+  const scene::ChannelKeyframes keys{{}, scene::PropertyChannel::Opacity,
+      {0, 10, 20}, {0.0, 1.0, 0.5},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Hold,
+       scene::KeyInterpolation::Linear}};
+  GRAPH_CHECK(timeline::key_glyph(keys, 0U) == KeyGlyph::Hourglass);
+  GRAPH_CHECK(timeline::key_glyph(keys, 1U) == KeyGlyph::Square);
+  GRAPH_CHECK(timeline::key_glyph(keys, 2U) == KeyGlyph::Diamond);
+  const scene::ChannelKeyframes bare{{}, scene::PropertyChannel::Opacity,
+                                     {0, 10}};
+  GRAPH_CHECK(timeline::key_glyph(bare, 1U) == KeyGlyph::Diamond);
+}
+
+// The graph draws each key in the glyph its interpolation names, at the
+// size the dope sheet uses.
+void the_graph_draws_keys_by_interpolation() {
+  gui::InputState input;
+  gui::UiDrawList list;
+  gui::FontAtlas font{gui::FontAtlas::empty()};
+  gui::UiContext ctx{input, list, font};
+  TimelineGraphView graph;
+  graph.fit_values(0.0, 1.0);
+  mediaserver::editor::TimelineTimeAxis time{};
+  time.pixels_per_frame = 2.0F;
+  const scene::ChannelKeyframes keys{{}, scene::PropertyChannel::Opacity,
+      {0, 10, 20}, {0.0, 1.0, 0.5},
+      {scene::KeyInterpolation::Hold, scene::KeyInterpolation::Cubic,
+       scene::KeyInterpolation::Linear}};
+  const timeline::ChannelId id{mediaserver::doc::NodeId{1U},
+                               scene::PropertyChannel::Opacity};
+  const std::array<GraphChannel, 1U> shown{
+      {GraphChannel{id, &keys, gui::UiColor{}, false, false}}};
+  const std::array<timeline::GraphKey, 3U> drawn{{
+      {0U, 0U, 0, 40.0F, 50.0F, false},
+      {0U, 1U, 10, 90.0F, 60.0F, false},
+      {0U, 2U, 20, 140.0F, 70.0F, false},
+  }};
+  ctx.new_frame();
+  graph.draw(ctx, gui::Rect{0.0F, 0.0F, 300.0F, 200.0F}, time, shown, drawn);
+  const float r = timeline::key_radius;
+  // Hold: a square's corner, and no diamond's top.
+  GRAPH_CHECK(has_vertex(list, 40.0F - r * 0.72F, 50.0F - r * 0.72F));
+  GRAPH_CHECK(!has_vertex(list, 40.0F, 50.0F - r));
+  // Cubic: an hourglass's top corner and its pinch.
+  GRAPH_CHECK(has_vertex(list, 90.0F - r * 0.8F, 60.0F - r));
+  GRAPH_CHECK(has_vertex(list, 90.0F, 60.0F));
+  // Linear: a diamond's top, and neither of the others.
+  GRAPH_CHECK(has_vertex(list, 140.0F, 70.0F - r));
+  GRAPH_CHECK(!has_vertex(list, 140.0F - r * 0.8F, 70.0F - r));
+  GRAPH_CHECK(!has_vertex(list, 140.0F - r * 0.72F, 70.0F - r * 0.72F));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 15U> cases{{
+    {"key glyphs follow the outgoing interpolation",
+     &key_glyphs_follow_the_outgoing_interpolation},
+    {"the graph draws keys by interpolation",
+     &the_graph_draws_keys_by_interpolation},
     {"axis channels read red, green, blue",
      &axis_channels_read_red_green_blue},
     {"other channels listed together never share a colour",

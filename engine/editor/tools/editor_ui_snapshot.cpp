@@ -141,6 +141,12 @@ struct Show final {
   };
   show.keyframes.push_back(keys(31U, scene::PropertyChannel::PositionX,
                                 {40, 120, 220, 330}, {0.0, 1.2, -0.4, 0.8}));
+  // One key of each interpolation, so each glyph shows.
+  show.keyframes.back().interpolations = {
+      scene::KeyInterpolation::Linear, scene::KeyInterpolation::Cubic,
+      scene::KeyInterpolation::Hold, scene::KeyInterpolation::Cubic};
+  show.keyframes.back().tangents = {std::nullopt, scene::KeyTangent{},
+                                    std::nullopt, scene::KeyTangent{}};
   show.keyframes.push_back(keys(31U, scene::PropertyChannel::Opacity,
                                 {20, 60, 300, 360}, {0.0, 1.0, 1.0, 0.0}));
   show.keyframes.push_back(keys(21U, scene::PropertyChannel::RotationYaw,

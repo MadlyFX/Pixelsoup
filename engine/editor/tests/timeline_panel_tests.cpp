@@ -6,6 +6,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstddef>
 #include <exception>
 #include <iostream>
@@ -113,6 +115,10 @@ waveform_key(mediaserver::core::u64 revision = 1U) {
 }
 
 struct Harness final {
+  Harness() = default;
+  // A harness whose text can be read back, with FontAtlas::placeholder().
+  explicit Harness(gui::FontAtlas atlas) : font{std::move(atlas)} {}
+
   gui::InputState input;
   gui::UiDrawList list;
 #if defined(MEDIASERVER_TIMELINE_BENCH)
@@ -393,7 +399,7 @@ void physical_surface_rows_author_position_and_yaw_keys() {
 
   // Surface layer y=56..78. Open it to reveal Position then Rotation.
   static_cast<void>(h.click(42.0F, 88.0F));
-  const editor::TimelinePanelFrame position = h.click(248.0F, 112.0F);
+  const editor::TimelinePanelFrame position = h.click(235.0F, 112.0F);
   UI_CHECK(position.keys.size() == 3U);
   UI_CHECK(position.keys[0].target == surface_node);
   UI_CHECK(position.keys[0].component == scene::PropertyChannel::PositionX);
@@ -404,7 +410,7 @@ void physical_surface_rows_author_position_and_yaw_keys() {
   UI_CHECK(position.keys[2].value == 6.0);
 
   // A physical surface exposes only the horizontal Rotation/Yaw channel.
-  const editor::TimelinePanelFrame yaw = h.click(248.0F, 136.0F);
+  const editor::TimelinePanelFrame yaw = h.click(235.0F, 136.0F);
   UI_CHECK(yaw.keys.size() == 1U);
   UI_CHECK(yaw.keys[0].target == surface_node);
   UI_CHECK(yaw.keys[0].component == scene::PropertyChannel::RotationYaw);
@@ -584,7 +590,7 @@ void parent_properties_fold_separately_and_key_the_parent() {
   const auto properties = h.click(74.0F, 160.0F);
   UI_CHECK(properties.keys.empty());
   UI_CHECK(!properties.selection.has_value());
-  const auto keyed = h.click(247.0F, 184.0F);
+  const auto keyed = h.click(235.0F, 184.0F);
   UI_CHECK(keyed.keys.size() == 3U);
   for (const auto &key : keyed.keys) {
     UI_CHECK(key.target == linked_model_node);
@@ -737,28 +743,28 @@ void spatial_property_rows_key_typed_effect_nodes() {
   // Expanded layer rows are P/R/S, Opacity, Box Radius, then Directional
   // Length. Each row's diamond authors the effect node, not its layer.
   static_cast<void>(h.click(42.0F, 88.0F));
-  const editor::TimelinePanelFrame box_key = h.click(248.0F, 208.0F);
+  const editor::TimelinePanelFrame box_key = h.click(235.0F, 208.0F);
   UI_CHECK(box_key.keys.size() == 1U);
   UI_CHECK(box_key.keys.front().target == box.source);
   UI_CHECK(box_key.keys.front().component ==
            scene::PropertyChannel::BoxBlurRadius);
   UI_CHECK(box_key.keys.front().value == 7.0);
 
-  const editor::TimelinePanelFrame directional_key = h.click(248.0F, 232.0F);
+  const editor::TimelinePanelFrame directional_key = h.click(235.0F, 232.0F);
   UI_CHECK(directional_key.keys.size() == 1U);
   UI_CHECK(directional_key.keys.front().target == directional.source);
   UI_CHECK(directional_key.keys.front().component ==
            scene::PropertyChannel::DirectionalBlurLength);
   UI_CHECK(directional_key.keys.front().value == 12.0);
 
-  const editor::TimelinePanelFrame chroma_key = h.click(248.0F, 256.0F);
+  const editor::TimelinePanelFrame chroma_key = h.click(235.0F, 256.0F);
   UI_CHECK(chroma_key.keys.size() == 1U);
   UI_CHECK(chroma_key.keys.front().target == chroma.source);
   UI_CHECK(chroma_key.keys.front().component ==
            scene::PropertyChannel::ChromaKeyMix);
   UI_CHECK(chroma_key.keys.front().value == 0.75);
 
-  const editor::TimelinePanelFrame luma_key = h.click(248.0F, 280.0F);
+  const editor::TimelinePanelFrame luma_key = h.click(235.0F, 280.0F);
   UI_CHECK(luma_key.keys.size() == 1U);
   UI_CHECK(luma_key.keys.front().target == luma.source);
   UI_CHECK(luma_key.keys.front().component ==
@@ -1029,7 +1035,7 @@ void property_diamonds_key_groups_and_individual_channels() {
   group.open_position_components();
 
   // The row-local diamond is at the right edge of the layer column.
-  const editor::TimelinePanelFrame group_key = group.click(248.0F, 112.0F);
+  const editor::TimelinePanelFrame group_key = group.click(235.0F, 112.0F);
   UI_CHECK(group_key.keys.size() == 3U);
   UI_CHECK(group_key.keys[0].component == scene::TransformChannel::PositionX);
   UI_CHECK(group_key.keys[0].frame == group.timeline.show_frame);
@@ -1044,7 +1050,7 @@ void property_diamonds_key_groups_and_individual_channels() {
   static_cast<void>(component.frame(0.0F, 0.0F, false));
   component.open_position_components();
   const editor::TimelinePanelFrame component_key =
-      component.click(248.0F, 136.0F);
+      component.click(235.0F, 136.0F);
   UI_CHECK(component_key.keys.size() == 1U);
   UI_CHECK(component_key.keys[0].component ==
            scene::TransformChannel::PositionX);
@@ -1067,7 +1073,8 @@ void environment_rows_key_scene_values_and_preserve_animation() {
   for (std::size_t index = 0U; index < 9U; ++index) {
     const auto property = static_cast<scene::PropertyChannel>(
         static_cast<std::size_t>(scene::PropertyChannel::SkyTimeOfDay) + index);
-    const auto keyed = h.click(248.0F, 112.0F + static_cast<float>(index) * 24.0F);
+    const auto keyed =
+        h.click(235.0F, 112.0F + static_cast<float>(index) * 24.0F);
     UI_CHECK(keyed.keys.size() == 1U);
     UI_CHECK(keyed.keys.front().target == environment.node);
     UI_CHECK(keyed.keys.front().component == property);
@@ -1080,12 +1087,12 @@ void environment_rows_key_scene_values_and_preserve_animation() {
   // A key inserted between existing keys uses the interpolated value, even
   // though the scene's authored fallback remains unchanged.
   h.timeline.show_frame = 25U;
-  const auto interpolated = h.click(248.0F, 184.0F);
+  const auto interpolated = h.click(235.0F, 184.0F);
   UI_CHECK(interpolated.keys.size() == 1U);
   UI_CHECK(interpolated.keys.front().component == scene::PropertyChannel::FogDensity);
   UI_CHECK(interpolated.keys.front().value == 0.125);
   h.timeline.show_frame = 100U;
-  UI_CHECK(h.click(248.0F, 184.0F).keys.front().erase);
+  UI_CHECK(h.click(235.0F, 184.0F).keys.front().erase);
 }
 
 void a_marquee_selects_keys_and_the_group_retimes_together() {
@@ -1267,10 +1274,10 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
 
   // The per-row swatch is a true visibility toggle, not a destructive key
   // edit. Showing it again restores hit testing and its stable channel color.
-  static_cast<void>(h.click(225.0F, 136.0F));
+  static_cast<void>(h.click(201.0F, 136.0F));
   UI_CHECK(
       !h.panel.channel_visible(object_node, scene::PropertyChannel::PositionX));
-  static_cast<void>(h.click(225.0F, 136.0F));
+  static_cast<void>(h.click(201.0F, 136.0F));
   UI_CHECK(
       h.panel.channel_visible(object_node, scene::PropertyChannel::PositionX));
 
@@ -1831,7 +1838,8 @@ void auto_key_is_an_explicit_toggle_and_camera_lens_rows_are_keyable() {
       scene::PropertyChannel::CameraAperture};
   const std::array values{0.173F, 0.017F, 7.5F, 2.8F};
   for (std::size_t index = 0; index < channels.size(); ++index) {
-    const auto keyed = camera.click(248.0F, 160.0F + 24.0F * static_cast<float>(index));
+    const auto keyed =
+        camera.click(235.0F, 160.0F + 24.0F * static_cast<float>(index));
     UI_CHECK(keyed.keys.size() == 1U);
     UI_CHECK(keyed.keys.front().component == channels[index]);
     UI_CHECK(std::abs(keyed.keys.front().value - values[index]) < 1.0e-6);
@@ -1855,7 +1863,7 @@ void timeline_camera_keys_preserve_cubic_evaluated_values() {
     }
     camera.keys = {channel};
     static_cast<void>(camera.click(42.0F, 88.0F));
-    const auto keyed = camera.click(248.0F, 160.0F);
+    const auto keyed = camera.click(235.0F, 160.0F);
     UI_CHECK(keyed.keys.size() == 1U);
     UI_CHECK(keyed.keys.front().component == scene::PropertyChannel::CameraFieldOfView);
     UI_CHECK(std::abs(keyed.keys.front().value - (weighted ? 0.2025 : 0.125)) < 1.0e-6);
@@ -2258,22 +2266,22 @@ void light_rows_key_intensity_colour_and_position() {
   h.keys.clear();
   static_cast<void>(h.click(42.0F, 88.0F));
   // Rows: the light, Position, Intensity, Color, Range.
-  const auto intensity = h.click(248.0F, 136.0F);
+  const auto intensity = h.click(235.0F, 136.0F);
   UI_CHECK(intensity.keys.size() == 1U);
   UI_CHECK(intensity.keys.front().target == light.node);
   UI_CHECK(intensity.keys.front().component ==
            scene::PropertyChannel::LightIntensity);
   UI_CHECK(intensity.keys.front().value == 3.5);
-  const auto colour = h.click(248.0F, 160.0F);
+  const auto colour = h.click(235.0F, 160.0F);
   UI_CHECK(colour.keys.size() == 3U);
   UI_CHECK(colour.keys[0].component == scene::PropertyChannel::LightColorR);
   UI_CHECK(colour.keys[1].value == 0.5);
   UI_CHECK(colour.keys[2].component == scene::PropertyChannel::LightColorB);
-  const auto position = h.click(248.0F, 112.0F);
+  const auto position = h.click(235.0F, 112.0F);
   UI_CHECK(position.keys.size() == 3U);
   UI_CHECK(position.keys[2].component == scene::PropertyChannel::PositionZ);
   UI_CHECK(position.keys[2].value == 6.0);
-  const auto range = h.click(248.0F, 184.0F);
+  const auto range = h.click(235.0F, 184.0F);
   UI_CHECK(range.keys.size() == 1U);
   UI_CHECK(range.keys.front().component == scene::PropertyChannel::LightRange);
 }
@@ -3317,12 +3325,254 @@ void the_dope_sheet_and_the_graph_share_one_time_axis() {
                {object_node, scene::PropertyChannel::PositionX, 10}}));
 }
 
+// The text drawn inside `area` with FontAtlas::placeholder(), in the order
+// it was drawn: each glyph is one six-vertex quad whose u names it.
+[[nodiscard]] std::string text_in(const gui::UiDrawList &list,
+                                  const gui::Rect &area) {
+  std::string out;
+  const auto &vertices = list.vertices();
+  for (std::size_t index = 0U; index + 6U <= vertices.size();) {
+    const float code = vertices[index].u * 128.0F;
+    bool glyph = vertices[index].v == 0.0F && code >= 32.0F &&
+                 code < 127.0F && code == std::floor(code);
+    for (std::size_t corner = 1U; glyph && corner < 6U; ++corner) {
+      glyph = vertices[index + corner].u == vertices[index].u &&
+              vertices[index + corner].v == 0.0F;
+    }
+    if (glyph && area.contains(vertices[index].x, vertices[index].y)) {
+      out.push_back(static_cast<char>(code));
+      index += 6U;
+    } else {
+      ++index;
+    }
+  }
+  return out;
+}
+
+[[nodiscard]] bool has_vertex(const gui::UiDrawList &list, float x, float y) {
+  for (const gui::UiVertex &vertex : list.vertices()) {
+    if (std::fabs(vertex.x - x) < 0.01F && std::fabs(vertex.y - y) < 0.01F) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] std::string fixed(double value, int decimals) {
+  std::array<char, 32U> text{};
+  const int length =
+      std::snprintf(text.data(), text.size(), "%.*f", decimals, value);
+  return std::string{text.data(), static_cast<std::size_t>(length)};
+}
+
+// Position X between two weighted, broken Cubic keys.
+[[nodiscard]] scene::ChannelKeyframes weighted_position_x() {
+  scene::ChannelKeyframes channel{object_node,
+                                  scene::TransformChannel::PositionX,
+                                  {10, 60},
+                                  {1.25, -3.5},
+                                  {scene::KeyInterpolation::Cubic,
+                                   scene::KeyInterpolation::Cubic}};
+  channel.tangents = {
+      scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, -0.05, {}, 9.0},
+      scene::KeyTangent{scene::KeyTangentMode::Broken, 0.02, 0.0, 21.0, {}}};
+  return channel;
+}
+
+void rows_show_each_channel_evaluated_at_the_playhead() {
+  Harness h{gui::FontAtlas::placeholder()};
+  h.keys = {weighted_position_x()};
+  h.timeline.show_frame = 23U;
+  const std::optional<double> expected =
+      scene::sample_keyframes(h.keys.front(), 23);
+  UI_CHECK(expected.has_value());
+  // Neither the straight line between the keys nor the base value.
+  UI_CHECK(std::fabs(*expected - (1.25 + 13.0 / 50.0 * -4.75)) > 1.0e-3);
+  UI_CHECK(std::fabs(*expected - 1.0) > 1.0e-3);
+
+  // Closed, the Position group reads x, y, z: X evaluated, Y and Z, which
+  // have no keys, at their base values - and its name still shows.
+  static_cast<void>(h.click(42.0F, 88.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(text_in(h.list, gui::Rect{60.0F, 100.0F, 135.0F, 24.0F}) ==
+           fixed(*expected, 2) + ", 2.00, 3.00" + "Position");
+
+  // Open, each component row shows its own value; X's is the field.
+  static_cast<void>(h.click(58.0F, 112.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(text_in(h.list, gui::Rect{100.0F, 100.0F, 95.0F, 24.0F}).empty());
+  UI_CHECK(text_in(h.list, gui::Rect{120.0F, 124.0F, 75.0F, 24.0F}) ==
+           fixed(*expected, 3));
+  UI_CHECK(text_in(h.list, gui::Rect{120.0F, 148.0F, 75.0F, 24.0F}) ==
+           "2.000");
+  UI_CHECK(text_in(h.list, gui::Rect{120.0F, 172.0F, 75.0F, 24.0F}) ==
+           "3.000");
+
+  // The diamond keys what the row shows.
+  const auto keyed = h.click(235.0F, 136.0F);
+  UI_CHECK(keyed.keys.size() == 1U);
+  UI_CHECK(keyed.keys.front().frame == 23U);
+  UI_CHECK(keyed.keys.front().value == *expected);
+}
+
+void a_narrow_list_shortens_the_name_before_the_value() {
+  Harness h{gui::FontAtlas::placeholder()};
+  h.keys = {weighted_position_x()};
+  h.timeline.show_frame = 23U;
+  const std::string value =
+      fixed(*scene::sample_keyframes(h.keys.front(), 23), 3);
+  // At 1000 wide the list is 260: Position X's value and name both show.
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  UI_CHECK(text_in(h.list, gui::Rect{0.0F, 124.0F, 260.0F, 24.0F}) ==
+           value + "X");
+
+  // At 360 wide the graph keeps its 160 and the list shrinks to 200:
+  // Position X has 50 units from where its name begins to its value's
+  // right edge, and the value takes all of them.
+  h.bounds.width = 360.0F;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(text_in(h.list, gui::Rect{0.0F, 124.0F, 200.0F, 24.0F}) == value);
+}
+
+void typing_a_value_keys_it_at_the_playhead() {
+  Harness h;
+  h.timeline.show_frame = 37U;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  // Position X is animated: a click opens its field for typing.
+  UI_CHECK(h.click(158.0F, 136.0F).keys.empty());
+  UI_CHECK(h.ctx.typing());
+  UI_CHECK(h.frame(158.0F, 136.0F, false, gui::KeyMods::None, 0.0F, "-4.75")
+               .keys.empty());
+  const editor::TimelinePanelFrame committed = h.key(gui::Key::Enter);
+  UI_CHECK(committed.keys.size() == 1U);
+  UI_CHECK(committed.keys.front().target == object_node);
+  UI_CHECK(committed.keys.front().component ==
+           scene::TransformChannel::PositionX);
+  UI_CHECK(committed.keys.front().frame == 37U);
+  UI_CHECK(committed.keys.front().value == -4.75);
+  UI_CHECK(!committed.keys.front().clear);
+  UI_CHECK(!committed.keys.front().erase);
+  UI_CHECK(committed.transport == editor::TransportRequest::None);
+  UI_CHECK(h.frame(0.0F, 0.0F, false).keys.empty());
+
+  // Position Z has no keys, so an edit there would change its base value,
+  // which is the Inspector's: the value is only shown.
+  UI_CHECK(h.click(158.0F, 184.0F).keys.empty());
+  UI_CHECK(!h.ctx.typing());
+
+  // With Auto Key off, an animated channel's value is only shown too.
+  h.focus();
+  static_cast<void>(h.type("k"));
+  UI_CHECK(!h.panel.auto_key_enabled());
+  UI_CHECK(h.click(158.0F, 136.0F).keys.empty());
+  UI_CHECK(!h.ctx.typing());
+}
+
+using Seek = std::optional<std::uint64_t>;
+
+void key_steps_seek_to_the_adjacent_key() {
+  // Position X keys 10, 20 and 50; the playhead is at 50.
+  Harness h;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  UI_CHECK(!h.click(251.0F, 136.0F).seek_to_frame.has_value());
+  UI_CHECK(h.click(219.0F, 136.0F).seek_to_frame == Seek{20U});
+  // Steps walk from the playhead last asked for, ahead of the show.
+  UI_CHECK(h.click(219.0F, 136.0F).seek_to_frame == Seek{10U});
+  UI_CHECK(!h.click(219.0F, 136.0F).seek_to_frame.has_value());
+  UI_CHECK(h.click(251.0F, 136.0F).seek_to_frame == Seek{20U});
+
+  // A group steps across its components: Y keys 25 and 50.
+  Harness group;
+  group.timeline.show_frame = 21U;
+  static_cast<void>(group.frame(0.0F, 0.0F, false));
+  group.open_position_components();
+  UI_CHECK(group.click(251.0F, 112.0F).seek_to_frame ==
+           Seek{25U});
+  Harness back;
+  back.timeline.show_frame = 21U;
+  static_cast<void>(back.frame(0.0F, 0.0F, false));
+  back.open_position_components();
+  UI_CHECK(back.click(219.0F, 112.0F).seek_to_frame ==
+           Seek{20U});
+  // Position Z has no keys and no steps.
+  UI_CHECK(!back.click(251.0F, 184.0F).seek_to_frame.has_value());
+}
+
+void bracket_keys_step_through_the_selected_layers_keys() {
+  const doc::NodeId brightness{600U};
+  Harness h;
+  h.timeline.show_frame = 21U;
+  scene::EffectInstance effect{};
+  effect.source = brightness;
+  effect.target = object_node;
+  h.effects = {effect};
+  h.keys.push_back(scene::ChannelKeyframes{
+      brightness, scene::PropertyChannel::Brightness, {23, 80}});
+  // Another layer's key, nearer still, is not the selection's.
+  h.keys.push_back(scene::ChannelKeyframes{
+      clip_node, scene::TransformChannel::ScaleX, {22}});
+  h.focus();
+  UI_CHECK(!h.type("]").seek_to_frame.has_value());
+
+  h.selection = {object_node};
+  h.primary = object_node;
+  UI_CHECK(h.type("]").seek_to_frame == Seek{23U});
+  UI_CHECK(h.type("]").seek_to_frame == Seek{25U});
+  UI_CHECK(h.type("[").seek_to_frame == Seek{23U});
+  UI_CHECK(h.type("[").seek_to_frame == Seek{20U});
+  UI_CHECK(h.type("[").seek_to_frame == Seek{10U});
+  UI_CHECK(!h.type("[").seek_to_frame.has_value());
+}
+
+void keys_are_drawn_by_their_outgoing_interpolation() {
+  Harness h;
+  h.keys = {scene::ChannelKeyframes{
+      object_node,
+      scene::TransformChannel::PositionX,
+      {10, 20, 50},
+      {0.5, 1.5, 2.5},
+      {scene::KeyInterpolation::Hold, scene::KeyInterpolation::Cubic,
+       scene::KeyInterpolation::Linear}}};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  // Position X's lane is centred on y=136; the keys at frames 10, 20 and
+  // 50 sit at x=334, 408 and 630. Key radius is 5.5.
+  const float y = 136.0F;
+  // Hold: a square, its corner 0.72 of the radius out.
+  UI_CHECK(has_vertex(h.list, 334.0F - 3.96F, y - 3.96F));
+  UI_CHECK(!has_vertex(h.list, 334.0F, y - 5.5F));
+  // Cubic: an hourglass, pinched at the key.
+  UI_CHECK(has_vertex(h.list, 408.0F - 4.4F, y - 5.5F));
+  UI_CHECK(has_vertex(h.list, 408.0F, y));
+  UI_CHECK(!has_vertex(h.list, 408.0F, y - 5.5F));
+  // Linear: a diamond.
+  UI_CHECK(has_vertex(h.list, 630.0F, y - 5.5F));
+  UI_CHECK(!has_vertex(h.list, 630.0F - 4.4F, y - 5.5F));
+  UI_CHECK(!has_vertex(h.list, 630.0F - 3.96F, y - 3.96F));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 103U> cases{{
+constexpr std::array<Case, 109U> cases{{
+    {"rows show each channel evaluated at the playhead",
+     &rows_show_each_channel_evaluated_at_the_playhead},
+    {"a narrow list shortens the name before the value",
+     &a_narrow_list_shortens_the_name_before_the_value},
+    {"typing a value keys it at the playhead",
+     &typing_a_value_keys_it_at_the_playhead},
+    {"key steps seek to the adjacent key",
+     &key_steps_seek_to_the_adjacent_key},
+    {"bracket keys step through the selected layers' keys",
+     &bracket_keys_step_through_the_selected_layers_keys},
+    {"keys are drawn by their outgoing interpolation",
+     &keys_are_drawn_by_their_outgoing_interpolation},
     {"tool cursors follow selection and captured gestures",
      &tool_cursors_follow_selection_and_captured_gestures},
     {"extreme imported timing is refused visibly and cannot overflow snapping",
