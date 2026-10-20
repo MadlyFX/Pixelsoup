@@ -45,6 +45,14 @@ struct RowsState final {
   std::set<doc::NodeId> expanded_hierarchies;
   doc::NodeId hierarchy_selection{};
 };
+
+// One animatable property of one target: where a channel's keys live.
+struct ChannelId final {
+  doc::NodeId target{};
+  scene::PropertyChannel property{};
+
+  auto operator<=>(const ChannelId &) const = default;
+};
 } // namespace timeline
 
 // A transport action the operator asked for. The Director owns transport, so

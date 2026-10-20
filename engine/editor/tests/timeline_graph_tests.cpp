@@ -1,3 +1,4 @@
+#include "../src/timeline/timeline_graph_view.hpp"
 #include "../src/timeline/timeline_internal.hpp"
 
 #include <array>
@@ -94,16 +95,221 @@ void other_channels_listed_together_never_share_a_colour() {
   }
 }
 
+using timeline::GraphChannel;
+using timeline::TimelineGraphView;
+using timeline::ValueAxis;
+
+[[nodiscard]] bool near(double a, double b, double tolerance) noexcept {
+  return std::fabs(a - b) <= tolerance;
+}
+
+void the_value_axis_maps_values_and_pixels_both_ways() {
+  ValueAxis axis;
+  axis.show(-2.0, 6.0);
+  const gui::Rect area{0.0F, 100.0F, 500.0F, 400.0F};
+  // Top of the area is the top value, bottom the bottom one, linear between.
+  GRAPH_CHECK(axis.y(6.0, area) == 100.0F);
+  GRAPH_CHECK(axis.y(-2.0, area) == 500.0F);
+  GRAPH_CHECK(axis.y(2.0, area) == 300.0F);
+  GRAPH_CHECK(axis.value(300.0F, area) == 2.0);
+  for (const double value : {-1.75, 0.3, 5.5, 9.0}) {
+    GRAPH_CHECK(near(axis.value(axis.y(value, area), area), value, 1.0e-5));
+  }
+  // An empty or inverted range is refused rather than dividing by zero.
+  axis.show(3.0, 3.0);
+  GRAPH_CHECK(axis.bottom() == -2.0 && axis.top() == 6.0);
+}
+
+void fitting_pads_a_tenth_and_keeps_a_flat_channel_visible() {
+  ValueAxis axis;
+  axis.fit(1.0, 3.0);
+  GRAPH_CHECK(near(axis.bottom(), 0.8, 1.0e-12) && near(axis.top(), 3.2, 1.0e-12));
+  axis.fit(5.0, 5.0);
+  GRAPH_CHECK(axis.bottom() < 5.0 && axis.top() > 5.0);
+  GRAPH_CHECK(near((axis.bottom() + axis.top()) * 0.5, 5.0, 1.0e-12));
+}
+
+void zooming_keeps_the_anchor_and_panning_moves_by_pixels() {
+  ValueAxis axis;
+  axis.show(0.0, 10.0);
+  const gui::Rect area{0.0F, 0.0F, 300.0F, 400.0F};
+  const float anchor_y = axis.y(4.0, area);
+  axis.zoom_about(4.0, 2.0);
+  GRAPH_CHECK(near(axis.bottom(), 2.0, 1.0e-12) && near(axis.top(), 7.0, 1.0e-12));
+  GRAPH_CHECK(axis.y(4.0, area) == anchor_y);
+
+  axis.show(0.0, 8.0);
+  // 50 of 400 pixels is an eighth of the 8-unit span: one unit, upwards.
+  axis.pan(50.0F, area);
+  GRAPH_CHECK(near(axis.bottom(), 1.0, 1.0e-12) && near(axis.top(), 9.0, 1.0e-12));
+}
+
+void ticks_are_round_steps_at_least_the_spacing_apart() {
+  ValueAxis axis;
+  axis.show(-2.0, 6.0);
+  const gui::Rect area{0.0F, 0.0F, 300.0F, 400.0F};
+  // 50 pixels per unit: a 40-pixel minimum takes whole units.
+  GRAPH_CHECK(axis.tick_step(area, 40.0F) == 1.0);
+  const std::vector<double> ticks = axis.ticks(area, 40.0F);
+  GRAPH_CHECK(ticks.size() == 9U && ticks.front() == -2.0 && ticks.back() == 6.0);
+  // 120 pixels apart needs more than two units: the next round step is 5.
+  GRAPH_CHECK(axis.tick_step(area, 120.0F) == 5.0);
+  axis.show(0.0, 0.08);
+  GRAPH_CHECK(near(axis.tick_step(area, 40.0F), 0.01, 1.0e-15));
+}
+
+// Where a curve crosses a frame, read off its points.
+[[nodiscard]] std::optional<float>
+curve_y_at(const std::vector<gui::UiPoint> &points, float x) {
+  for (const gui::UiPoint &point : points) {
+    if (std::fabs(point.x - x) < 1.0e-3F) {
+      return point.y;
+    }
+  }
+  return std::nullopt;
+}
+
+void curves_follow_the_evaluator_not_an_easing_guess() {
+  mediaserver::editor::TimelineTimeAxis time{};
+  time.left_frame = 0.0;
+  time.pixels_per_frame = 4.0F;
+  ValueAxis axis;
+  axis.show(0.05, 0.25);
+  const gui::Rect area{100.0F, 0.0F, 200.0F, 300.0F};
+
+  // Weighted, broken Cubic tangents: 0.2025 at frame 13, the value the
+  // Timeline's camera key test pins.
+  scene::ChannelKeyframes weighted{{}, scene::PropertyChannel::CameraFieldOfView,
+      {0, 32}, {0.1, 0.2},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic}};
+  weighted.tangents = {
+      scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.02, {}, 4.0},
+      scene::KeyTangent{scene::KeyTangentMode::Broken, -0.005, 0.0, 12.0, {}}};
+  const auto weighted_points =
+      TimelineGraphView::sample_curve(weighted, time, axis, area);
+  const auto at_13 = curve_y_at(weighted_points, time.x(13.0, area.x));
+  GRAPH_CHECK(at_13.has_value() && std::fabs(*at_13 - axis.y(0.2025, area)) < 1.0e-3F);
+
+  // Auto Cubic between two keys: 0.125 at frame 5.
+  const scene::ChannelKeyframes automatic{{}, scene::PropertyChannel::CameraFieldOfView,
+      {0, 20}, {0.1, 0.2},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic}};
+  const auto auto_points =
+      TimelineGraphView::sample_curve(automatic, time, axis, area);
+  const auto at_5 = curve_y_at(auto_points, time.x(5.0, area.x));
+  GRAPH_CHECK(at_5.has_value() && std::fabs(*at_5 - axis.y(0.125, area)) < 1.0e-3F);
+
+  // Hold keeps its value up to the next key, then steps.
+  const scene::ChannelKeyframes held{{}, scene::PropertyChannel::Opacity,
+      {0, 10}, {0.1, 0.2},
+      {scene::KeyInterpolation::Hold, scene::KeyInterpolation::Hold}};
+  const auto held_points = TimelineGraphView::sample_curve(held, time, axis, area);
+  GRAPH_CHECK(curve_y_at(held_points, time.x(9.0, area.x)) == axis.y(0.1, area));
+  GRAPH_CHECK(curve_y_at(held_points, time.x(10.0, area.x)) == axis.y(0.2, area));
+  // One point per frame on screen, plus one beyond each edge.
+  GRAPH_CHECK(held_points.size() == 51U);
+}
+
+void zoomed_out_curves_take_one_sample_per_column() {
+  mediaserver::editor::TimelineTimeAxis time{};
+  time.left_frame = 0.0;
+  time.pixels_per_frame = 0.25F;
+  ValueAxis axis;
+  axis.show(0.0, 1.0);
+  const gui::Rect area{0.0F, 0.0F, 200.0F, 100.0F};
+  const scene::ChannelKeyframes ramp{{}, scene::PropertyChannel::Opacity,
+      {0, 800}, {0.0, 1.0},
+      {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear}};
+  const auto points = TimelineGraphView::sample_curve(ramp, time, axis, area);
+  // 200 columns and one either side, each a distinct frame four apart.
+  GRAPH_CHECK(points.size() == 203U);
+  for (std::size_t index = 1U; index < points.size(); ++index) {
+    GRAPH_CHECK(points[index].x > points[index - 1U].x);
+  }
+  // Column 100 is frame 400, half way up the linear ramp.
+  const auto middle = curve_y_at(points, 100.0F);
+  GRAPH_CHECK(middle.has_value() && std::fabs(*middle - 50.0F) < 1.0e-3F);
+}
+
+void fitting_channels_includes_curve_overshoot() {
+  // A steep, unweighted out tangent and a flat in tangent carry the curve
+  // well above its last key; keys alone would fit [0, 1] to [-0.1, 1.1].
+  scene::ChannelKeyframes overshoot{{}, scene::PropertyChannel::Opacity,
+      {0, 10}, {0.0, 1.0},
+      {scene::KeyInterpolation::Cubic, scene::KeyInterpolation::Cubic}};
+  overshoot.tangents = {
+      scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 1.0, {}, {}},
+      scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.0, {}, {}}};
+  TimelineGraphView graph;
+  const std::array<GraphChannel, 1U> channels{
+      {GraphChannel{{}, &overshoot, gui::UiColor{}, false}}};
+  GRAPH_CHECK(graph.fit_requested());
+  graph.fit(channels, 0, 100);
+  GRAPH_CHECK(!graph.fit_requested());
+  GRAPH_CHECK(graph.axis().top() > 1.5);
+  GRAPH_CHECK(graph.axis().bottom() < 0.0);
+  GRAPH_CHECK(graph.zoom() == 1.0F && graph.pan() == 0.0F);
+}
+
+void zoom_and_pan_are_reported_against_the_last_fit() {
+  TimelineGraphView graph;
+  graph.fit_values(0.0, 10.0);
+  GRAPH_CHECK(graph.zoom() == 1.0F && graph.pan() == 0.0F);
+  const ValueAxis fitted = graph.axis();
+  graph.axis().zoom_about(5.0, 2.0);
+  GRAPH_CHECK(near(graph.zoom(), 2.0, 1.0e-6) && near(graph.pan(), 0.0, 1.0e-6));
+  const gui::Rect area{0.0F, 0.0F, 100.0F, 100.0F};
+  // A tenth of the area at half the fitted span: a twentieth of a fit.
+  graph.axis().pan(10.0F, area);
+  GRAPH_CHECK(near(graph.pan(), 0.05, 1.0e-6));
+  graph.fit_values(0.0, 10.0);
+  GRAPH_CHECK(graph.axis() == fitted);
+}
+
+void channel_visibility_and_the_active_channel_reset_together() {
+  TimelineGraphView graph;
+  const timeline::ChannelId x{mediaserver::doc::NodeId{5U}, scene::PropertyChannel::PositionX};
+  const timeline::ChannelId y{mediaserver::doc::NodeId{5U}, scene::PropertyChannel::PositionY};
+  GRAPH_CHECK(graph.visible(x) && graph.visible(y));
+  graph.set_visible(x, false);
+  GRAPH_CHECK(!graph.visible(x) && graph.visible(y));
+  graph.set_active(y);
+  GRAPH_CHECK(graph.active() == y);
+  static_cast<void>(graph.fit_requested());
+  graph.fit_values(0.0, 1.0);
+  graph.reset();
+  GRAPH_CHECK(graph.visible(x) && !graph.active().has_value());
+  GRAPH_CHECK(graph.fit_requested());
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 2U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"axis channels read red, green, blue",
      &axis_channels_read_red_green_blue},
     {"other channels listed together never share a colour",
      &other_channels_listed_together_never_share_a_colour},
+    {"the value axis maps values and pixels both ways",
+     &the_value_axis_maps_values_and_pixels_both_ways},
+    {"fitting pads a tenth and keeps a flat channel visible",
+     &fitting_pads_a_tenth_and_keeps_a_flat_channel_visible},
+    {"zooming keeps the anchor and panning moves by pixels",
+     &zooming_keeps_the_anchor_and_panning_moves_by_pixels},
+    {"ticks are round steps at least the spacing apart",
+     &ticks_are_round_steps_at_least_the_spacing_apart},
+    {"curves follow the evaluator, not an easing guess",
+     &curves_follow_the_evaluator_not_an_easing_guess},
+    {"zoomed-out curves take one sample per column",
+     &zoomed_out_curves_take_one_sample_per_column},
+    {"fitting channels includes curve overshoot",
+     &fitting_channels_includes_curve_overshoot},
+    {"zoom and pan are reported against the last fit",
+     &zoom_and_pan_are_reported_against_the_last_fit},
+    {"channel visibility and the active channel reset together",
+     &channel_visibility_and_the_active_channel_reset_together},
 }};
 
 } // namespace

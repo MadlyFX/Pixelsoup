@@ -19,6 +19,7 @@ add_library(mediaserver_editor STATIC
     src/timeline_panel.cpp
     src/timeline/timeline_rows.cpp
     src/timeline/timeline_row_cells.cpp
+    src/timeline/timeline_graph_view.cpp
     src/timeline/timeline_toolbar.cpp
     src/timeline/timeline_actions.cpp
     src/timeline/timeline_key_tools.cpp
