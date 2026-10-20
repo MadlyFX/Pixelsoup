@@ -7,6 +7,7 @@
 #include <mediaserver/editor/cues_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 
+#include "timeline_hits.hpp"
 #include "timeline_layout.hpp"
 
 #include <algorithm>
@@ -821,6 +822,35 @@ struct RowsInput final {
                                  const gui::Theme &theme);
 
 // A track band a clip or layer drag can land in.
+// Which part of a row's lane a pointer target is.
+enum class RowPart : core::u8 {
+  Lane,
+  ClipBody,
+  TrimIn,
+  TrimOut,
+  FadeIn,
+  FadeOut,
+  Key,
+};
+
+// A lane target's tag: the row it belongs to, the part, and for a key its
+// index in the channel.
+[[nodiscard]] inline core::u64 row_part_tag(std::size_t row, RowPart part,
+                                            std::size_t item = 0U) noexcept {
+  return (static_cast<core::u64>(row) << 32U) |
+         (static_cast<core::u64>(part) << 24U) |
+         (static_cast<core::u64>(item) & 0xFFFFFFU);
+}
+[[nodiscard]] inline std::size_t tag_row(core::u64 tag) noexcept {
+  return static_cast<std::size_t>(tag >> 32U);
+}
+[[nodiscard]] inline RowPart tag_part(core::u64 tag) noexcept {
+  return static_cast<RowPart>((tag >> 24U) & 0xFFU);
+}
+[[nodiscard]] inline std::size_t tag_item(core::u64 tag) noexcept {
+  return static_cast<std::size_t>(tag & 0xFFFFFFU);
+}
+
 struct LaneDropTarget final {
   doc::NodeId lane{};
   gui::Rect bounds{};
@@ -926,6 +956,12 @@ struct TimelinePanel::Pass final {
   bool lane_drag_active{};
   const timeline::LaneDropTarget *clip_drop_hovered{};
   const timeline::LaneDropTarget *layer_lane_hovered{};
+
+  // The visible rows' lane targets, gathered before any row draws, and the
+  // one target that owns this frame's press and the one under the pointer.
+  timeline::HitCollector hits;
+  std::optional<timeline::HitTarget> press_owner;
+  std::optional<timeline::HitTarget> hover_owner;
 };
 
 
@@ -967,6 +1003,12 @@ struct TimelinePanel::RowContext final {
   std::vector<float> component_x;
   std::vector<float> component_y;
   scene::TransformChannel channel{};
+  // The channel's keys as drawn, and in Curves mode the value range its
+  // curve is plotted over.
+  const scene::ChannelKeyframes *component_channel{};
+  double minimum_value{};
+  double maximum_value{};
+  bool plotted{};
 };
 
 } // namespace mediaserver::editor

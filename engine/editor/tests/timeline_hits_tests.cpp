@@ -112,12 +112,22 @@ void distance_is_measured_to_the_mark_not_the_bounds() {
                                     7.0F, 9.0F) == 3.0F);
 }
 
+void a_target_answers_only_within_its_reach_of_its_mark() {
+  HitCollector hits;
+  HitTarget disc = point(1U, HitPriority::Key, 50.0F, 50.0F, 10.0F);
+  disc.reach = 10.0F;
+  hits.add(disc);
+  // Inside the square that holds it, but past the disc's edge.
+  HIT_CHECK(hits.owner(58.0F, 58.0F) == nullptr);
+  HIT_CHECK(hits.owner(56.0F, 56.0F) != nullptr);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"nothing owns a point outside every target",
      &nothing_owns_a_point_outside_every_target},
     {"a key over a trim edge takes the point even when farther",
@@ -130,6 +140,8 @@ constexpr std::array<Case, 6U> cases{{
      &an_exact_tie_goes_to_the_first_registered},
     {"distance is measured to the mark, not the bounds",
      &distance_is_measured_to_the_mark_not_the_bounds},
+    {"a target answers only within its reach of its mark",
+     &a_target_answers_only_within_its_reach_of_its_mark},
 }};
 
 } // namespace

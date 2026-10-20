@@ -770,6 +770,8 @@ private:
   struct RowContext;
   // Each row kind's list cell and lane cell, the clip bar's parts, and the
   // presses the row label and then the lane take, in draw_rows() order.
+  void layout_row(RowContext &rc);
+  void collect_row_hits(RowContext &rc);
   void begin_row(RowContext &rc);
   void track_header_list_cell(RowContext &rc);
   void layer_list_cell(RowContext &rc);

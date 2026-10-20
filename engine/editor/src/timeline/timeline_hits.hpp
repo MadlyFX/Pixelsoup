@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,9 @@ struct HitTarget final {
   gui::Rect mark{};
   // The caller's own description of the target.
   core::u64 tag{};
+  // How far from its mark the target answers, within its bounds: a key is a
+  // disc around its centre rather than the square that holds it.
+  float reach{std::numeric_limits<float>::infinity()};
 };
 
 // The distance from (x, y) to the nearest point of `mark`; zero inside it.
@@ -66,6 +70,9 @@ public:
         continue;
       }
       const float distance = mark_distance(target.mark, x, y);
+      if (distance > target.reach) {
+        continue;
+      }
       if (best == nullptr || target.priority > best->priority ||
           (target.priority == best->priority && distance < best_distance)) {
         best = &target;
