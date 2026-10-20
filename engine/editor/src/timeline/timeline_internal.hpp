@@ -748,6 +748,27 @@ nearest_snap(core::i64 value, std::span<const core::i64> candidates,
   return seconds.back() * rate;
 }
 
+// The identity a row's widgets are keyed by: what the row shows, never where
+// it sits in the list. A row therefore keeps its hover, press and capture
+// while rows above it open, close or arrive mid-gesture.
+[[nodiscard]] inline core::u64 row_identity(const Row &row) noexcept {
+  core::u64 hash = 0xCBF29CE484222325ULL;
+  const auto add = [&hash](core::u64 value) noexcept {
+    for (int byte = 0; byte < 8; ++byte) {
+      hash ^= (value >> (byte * 8)) & 0xFFU;
+      hash *= 0x100000001B3ULL;
+    }
+  };
+  add(static_cast<core::u64>(row.kind));
+  add(row.node.value());
+  add(row.group);
+  add(row.component);
+  add(static_cast<core::u64>(row.property));
+  add(row.property_target.value());
+  add(row.surface ? 1U : 0U);
+  return hash;
+}
+
 // How tall the whole stack of rows is.
 [[nodiscard]] inline float rows_extent(std::span<const Row> rows) noexcept {
   return rows.empty() ? 0.0F : rows.back().top + rows.back().height;

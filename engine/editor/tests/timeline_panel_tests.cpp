@@ -3073,12 +3073,79 @@ void keys_act_on_the_playhead_just_asked_for() {
   UI_CHECK(h.type("q").marker_edits.front().marker.frame == 60);
 }
 
+// Rows opening above a key drag - a selection elsewhere revealing a group's
+// children - must neither drop the drag nor turn it into a scrub. The drag
+// is keyed by the row it began on, not by where that row now sits.
+void expanding_rows_above_a_key_drag_keeps_the_drag() {
+  Harness h;
+  editor::ElementInfo group{};
+  group.node = doc::NodeId{700U};
+  group.kind = editor::ElementKind::Group;
+  group.display_name = "Rig";
+  group.group_order = 10;
+  editor::ElementInfo child = make_object();
+  child.node = doc::NodeId{701U};
+  child.display_name = "Rig light";
+  child.parent_group = group.node;
+  h.elements.push_back(group);
+  h.elements.push_back(child);
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  // The collapsed group heads the stack, so the object is the second row:
+  // open it and its Position group, putting Position X at y=148..172.
+  static_cast<void>(h.click(42.0F, 112.0F));
+  static_cast<void>(h.click(58.0F, 136.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  // Grab Position X's frame-10 key and start moving it.
+  static_cast<void>(h.frame(334.0F, 160.0F, false));
+  static_cast<void>(h.frame(334.0F, 160.0F, true));
+  static_cast<void>(h.frame(352.0F, 160.0F, true));
+
+  // Selecting the group's child elsewhere opens the group above: its
+  // Properties foldout and the child push the dragged row down two rows.
+  h.selection = {child.node};
+  h.primary = child.node;
+  const editor::TimelinePanelFrame shifted = h.frame(371.0F, 208.0F, true);
+  UI_CHECK(!shifted.seek_to_frame.has_value());
+  UI_CHECK(!shifted.selection.has_value());
+
+  const editor::TimelinePanelFrame released = h.frame(371.0F, 208.0F, false);
+  UI_CHECK(released.key_batch.has_value());
+  UI_CHECK(released.key_batch->action == editor::TimelineKeyBatchAction::Move);
+  UI_CHECK(released.key_batch->delta == 5);
+  UI_CHECK(released.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 10}}));
+  UI_CHECK(!released.seek_to_frame.has_value());
+}
+
+// A row's press belongs to that row. When a layer arrives above it - a live
+// update between press and release - the release must not click whichever
+// row now sits under the pointer.
+void a_row_press_released_after_rows_shift_clicks_no_other_row() {
+  Harness h;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  static_cast<void>(h.frame(150.0F, 88.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(150.0F, 88.0F, true);
+  UI_CHECK(pressed.selection.has_value());
+  UI_CHECK(pressed.selection->node == object_node);
+
+  editor::ElementInfo arrived = make_object();
+  arrived.node = doc::NodeId{702U};
+  arrived.display_name = "Arrived";
+  arrived.group_order = 10;
+  h.elements.push_back(arrived);
+  const editor::TimelinePanelFrame released = h.frame(150.0F, 88.0F, false);
+  UI_CHECK(!released.selection.has_value() ||
+           released.selection->node == object_node);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 94U> cases{{
+constexpr std::array<Case, 96U> cases{{
     {"tool cursors follow selection and captured gestures",
      &tool_cursors_follow_selection_and_captured_gestures},
     {"extreme imported timing is refused visibly and cannot overflow snapping",
@@ -3257,6 +3324,10 @@ constexpr std::array<Case, 94U> cases{{
      &a_scene_switch_clears_only_the_typed_key_context},
     {"a panel with no room reports nothing",
      &a_panel_with_no_room_reports_nothing},
+    {"expanding rows above a key drag keeps the drag",
+     &expanding_rows_above_a_key_drag_keeps_the_drag},
+    {"a row press released after rows shift clicks no other row",
+     &a_row_press_released_after_rows_shift_clicks_no_other_row},
 }};
 
 #if defined(MEDIASERVER_TIMELINE_GOLDEN)

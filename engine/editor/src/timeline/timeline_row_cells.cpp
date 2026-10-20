@@ -438,7 +438,7 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
   const gui::Rect &graph = p.layout.graph;
-  const std::size_t index = rc.index;
+  const Row &row = rc.row;
   auto &row_channel_identity = rc.row_channel_identity;
   auto &interaction_y = rc.interaction_y;
   auto &interaction_height = rc.interaction_height;
@@ -451,7 +451,7 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
         interaction_y + std::max((interaction_height - 14.0F) * 0.5F, 0.0F),
         14.0F, std::min(interaction_height, 14.0F)};
     const gui::Interaction visibility = ctx.grab(
-        mix(id_, "channel visibility", static_cast<core::u64>(index)),
+        mix(id_, "channel visibility", row_identity(row)),
         visibility_bounds);
     ctx.panel(visibility_bounds,
               channel_hidden ? alpha(ctx.theme().track, 0.82F)
@@ -506,7 +506,6 @@ void TimelinePanel::row_key_button(RowContext &rc) {
   TimelinePanelFrame &frame = p.frame;
   const gui::Rect &graph = p.layout.graph;
   const Row &row = rc.row;
-  const std::size_t index = rc.index;
   auto &background = rc.background;
   auto &interaction_y = rc.interaction_y;
   auto &interaction_height = rc.interaction_height;
@@ -552,7 +551,7 @@ void TimelinePanel::row_key_button(RowContext &rc) {
           graph.x - 22.0F,
           interaction_y + std::max((interaction_height - 18.0F) * 0.5F, 0.0F),
           18.0F, std::min(interaction_height, 18.0F)};
-      if (key_button(ctx, mix(id_, "row key", static_cast<core::u64>(index)),
+      if (key_button(ctx, mix(id_, "row key", row_identity(row)),
                      key_bounds, animated, keyed_here, background)) {
         for (core::u8 offset = 0U; offset < component_count; ++offset) {
           const auto component =
@@ -585,7 +584,6 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
   const gui::Rect &rows_bounds = p.layout.rows;
   const std::vector<doc::NodeId> &visible_order = p.built.visible_order;
   const Row &row = rc.row;
-  const std::size_t index = rc.index;
   auto &row_group = rc.row_group;
   auto &open = rc.open;
   auto &content_x = rc.content_x;
@@ -602,7 +600,7 @@ bool TimelinePanel::row_label_press(RowContext &rc) {
           ? std::max(name_x - rows_bounds.x - 4.0F, 0.0F)
           : list_width;
   const gui::Interaction label_it =
-      ctx.grab(mix(id_, "row", static_cast<core::u64>(index)),
+      ctx.grab(mix(id_, "row", row_identity(row)),
                gui::Rect{rows_bounds.x, interaction_y, label_width,
                          interaction_height});
   if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked) {
@@ -1403,7 +1401,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
   auto &channel = rc.channel;
 
   const gui::Interaction lane_it = ctx.grab(
-      mix(id_, "lane", static_cast<core::u64>(index)),
+      mix(id_, "lane", row_identity(row)),
       gui::Rect{graph.x, interaction_y, graph.width, interaction_height});
   if (ctx.secondary_pointer_pressed() && interaction_height > 0.0F &&
       ctx.pointer_y() >= interaction_y &&
