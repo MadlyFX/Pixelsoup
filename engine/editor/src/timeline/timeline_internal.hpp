@@ -752,21 +752,19 @@ nearest_snap(core::i64 value, std::span<const core::i64> candidates,
 // it sits in the list. A row therefore keeps its hover, press and capture
 // while rows above it open, close or arrive mid-gesture.
 [[nodiscard]] inline core::u64 row_identity(const Row &row) noexcept {
-  core::u64 hash = 0xCBF29CE484222325ULL;
-  const auto add = [&hash](core::u64 value) noexcept {
-    for (int byte = 0; byte < 8; ++byte) {
-      hash ^= (value >> (byte * 8)) & 0xFFU;
-      hash *= 0x100000001B3ULL;
-    }
+  // splitmix64's finaliser, applied once per word of identity.
+  const auto mix64 = [](core::u64 value) noexcept {
+    value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31U);
   };
-  add(static_cast<core::u64>(row.kind));
-  add(row.node.value());
-  add(row.group);
-  add(row.component);
-  add(static_cast<core::u64>(row.property));
-  add(row.property_target.value());
-  add(row.surface ? 1U : 0U);
-  return hash;
+  const core::u64 shape = (static_cast<core::u64>(row.kind) << 56U) |
+                          (static_cast<core::u64>(row.group) << 48U) |
+                          (static_cast<core::u64>(row.component) << 40U) |
+                          (static_cast<core::u64>(row.property) << 32U) |
+                          (row.surface ? 1U : 0U);
+  return mix64(mix64(mix64(row.node.value()) ^ shape) ^
+               row.property_target.value());
 }
 
 // How tall the whole stack of rows is.
