@@ -109,6 +109,12 @@ if(BUILD_TESTING)
     add_test(NAME mediaserver.show_frame_waiter COMMAND mediaserver_frame_waiter_tests)
     set_target_properties(mediaserver_frame_waiter_tests PROPERTIES FOLDER "tests")
 
+    add_executable(mediaserver_presenter_tests tests/presenter_tests.cpp)
+    target_link_libraries(mediaserver_presenter_tests PRIVATE MediaServer::Show)
+    mediaserver_set_project_options(mediaserver_presenter_tests)
+    add_test(NAME mediaserver.show_presenter COMMAND mediaserver_presenter_tests)
+    set_target_properties(mediaserver_presenter_tests PROPERTIES FOLDER "tests")
+
     add_executable(mediaserver_switcher_tests tests/switcher_tests.cpp)
     target_link_libraries(mediaserver_switcher_tests PRIVATE MediaServer::Show)
     mediaserver_set_project_options(mediaserver_switcher_tests)

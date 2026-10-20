@@ -1,17 +1,12 @@
 #include <mediaserver/show/presenter.hpp>
 
+#include <mediaserver/core/output_limits.hpp>
+
 #include <new>
 #include <span>
 #include <utility>
 
 namespace mediaserver::show {
-namespace {
-
-// An output surface far larger than any display this shell drives is a
-// configuration mistake, not a request worth honouring.
-inline constexpr core::u32 max_surface_extent = 7'680U;
-
-} // namespace
 
 PresenterSurface::PresenterSurface(
     std::unique_ptr<core::u8[]> storage,
@@ -49,8 +44,10 @@ core::Result<PresenterSurface, PresenterError> PresenterSurface::create(
     core::u32 width,
     core::u32 height) noexcept {
     using CreateResult = core::Result<PresenterSurface, PresenterError>;
-    if (width == 0U || height == 0U || width > max_surface_extent
-        || height > max_surface_extent) {
+    // The window extent is the authored output extent, which may span a
+    // Mosaic desktop; the shared limit keeps the two from disagreeing.
+    if (width == 0U || height == 0U || width > core::max_output_dimension
+        || height > core::max_output_dimension) {
         return CreateResult::failure(PresenterError::InvalidConfiguration);
     }
 
