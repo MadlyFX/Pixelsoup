@@ -18,6 +18,7 @@ document or scanning binary model assets to understand a small change.
 | GPU abstraction, renderer and HLSL | `engine/rhi`, `engine/render`, `engine/shaders` |
 | Editor panels, widgets and SDL presentation | `engine/editor`, `engine/gui`, `engine/ui` |
 | Director/node entry points and Blender service | `apps/server` |
+| Director frame-loop phases and editor command authoring | `apps/server/director_show_loop.hpp`, `apps/server/director_*.cpp` |
 | Offline lighting bake | `apps/bake` |
 | Blender publisher | `integrations/blender`, `tests/blender`, `scripts/test-blender-livelink.py` |
 

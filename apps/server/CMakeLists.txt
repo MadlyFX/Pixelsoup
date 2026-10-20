@@ -25,6 +25,10 @@ add_executable(media-server
     ffmpeg_waveform_decoder.cpp
     ffmpeg_proxy_encoder.cpp
     cluster_observability.cpp
+    director_documents.cpp
+    director_frame_evaluation.cpp
+    director_show_loop.cpp
+    director_show_status.cpp
     lifecycle_agent.cpp
     managed_process.cpp
     render_machine.cpp
@@ -32,6 +36,8 @@ add_executable(media-server
     output_deployment.cpp
     output_window_config.cpp
     playback.cpp
+    playback_media.cpp
+    playback_runtime.cpp
     proxy_generation_service.cpp
     proxy_playback.cpp
     renderer_lockstep.cpp
@@ -81,6 +87,20 @@ if(MEDIASERVER_ENABLE_GUI)
     target_sources(media-server PRIVATE
         blender_links.cpp
         cluster_lifecycle_controller.cpp
+        director_clip_authoring.cpp
+        director_compositor_authoring.cpp
+        director_editor_intents.cpp
+        director_editor_view.cpp
+        director_effect_authoring.cpp
+        director_feed_map_authoring.cpp
+        director_hardware_authoring.cpp
+        director_key_authoring.cpp
+        director_linked_scenes.cpp
+        director_live_data.cpp
+        director_operator_edits.cpp
+        director_operator_input.cpp
+        director_project_load.cpp
+        director_scene_authoring.cpp
         render_machine_panel.cpp
         render_machine_window.cpp
         mask_edit_integration.cpp
@@ -103,11 +123,6 @@ if(MEDIASERVER_ENABLE_GUI)
 endif()
 
 mediaserver_set_project_options(media-server)
-# playback.cpp is the Director's whole control loop in one translation unit,
-# and a Debug build of it outgrows the default COFF section count.
-if(MSVC)
-    set_source_files_properties(playback.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
-endif()
 
 set_target_properties(media-server PROPERTIES FOLDER "apps")
 

@@ -1,0 +1,1418 @@
+// Queued editor edits authored at the frame boundary, one phase per domain.
+
+#include "director_show_loop.hpp"
+
+#include "clip_clipboard.hpp"
+#include "director_clip_authoring.hpp"
+#include "director_compositor_authoring.hpp"
+#include "director_effect_authoring.hpp"
+#include "director_feed_map_authoring.hpp"
+#include "director_hardware_authoring.hpp"
+#include "director_key_authoring.hpp"
+#include "director_scene_authoring.hpp"
+#include "key_clipboard.hpp"
+#include "mask_edit_integration.hpp"
+#include "project_asset_import.hpp"
+#include "source_replacement_authoring.hpp"
+#include "timeline_edit_integration.hpp"
+#include "timeline_lane_authoring.hpp"
+#include "timeline_marker_authoring.hpp"
+
+#include <mediaserver/cmd/command.hpp>
+#include <mediaserver/doc/document.hpp>
+#include <mediaserver/doc/ids.hpp>
+#include <mediaserver/doc/node.hpp>
+#include <mediaserver/editor/editor_shell.hpp>
+#include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/key_edit.hpp>
+#include <mediaserver/scene/mask_authoring.hpp>
+#include <mediaserver/scene/scene.hpp>
+#include <mediaserver/scene/scene_model.hpp>
+#include <mediaserver/scene/scene_project.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/selection_set.hpp>
+#include <mediaserver/topology/hardware_map.hpp>
+
+#include <algorithm>
+#include <iostream>
+#include <new>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace mediaserver::app {
+
+PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    auto &scene_edits_locked = op.scene_edits_locked;
+    if (scene_edits_locked) {
+        if (!pending_edits.empty() || !pending_world_edits.empty() || !pending_properties.empty() || !pending_generics.empty() || !pending_locks.empty())
+            project_message="Scene edits wait for the running dissolve to finish.";
+        pending_locks.clear();
+        pending_edits.clear();
+        pending_world_edits.clear();
+        pending_keys.clear();
+        pending_key_moves.clear();
+        pending_key_duplicate.reset();
+        pending_key_batch.reset();
+        key_scale_preview.reset();
+        pending_clip_timings.clear();
+        pending_clip_splits.clear();
+        pending_lane_edits.clear();
+        pending_marker_edits.clear();
+        pending_layer_orders.clear();
+        pending_element_flags.clear();
+        pending_renames.clear();
+        pending_timeline_edits.clear();
+        pending_group_edit.reset();
+        pending_selection_set_edit.reset();
+        pending_mask_edit.reset();
+        pending_clip_paste.reset();
+        pending_key_paste.reset();
+        pending_project_settings.reset();
+        pending_properties.clear();
+        pending_generics.clear();
+        pending_adds.clear();
+        pending_effects.clear();
+        pending_film_grain_effect_edits.clear();
+        pending_effect_deletes.clear();
+        pending_deletes.clear();
+        pending_compositor_adds.clear();
+        pending_source_replacements.clear();
+        pending_compositor_move.reset();
+        pending_compositor_connect.reset();
+        pending_compositor_property.reset();
+        pending_compositor_delete.reset();
+        pending_history.reset();
+    }
+    for (const auto &edit : pending_locks) {
+        if (!schedule_lock_edit(scheduler, edit, frame)) {
+            std::cerr
+                << "could not author an element lock for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_locks.clear();
+    for (const auto &edit : pending_edits) {
+        if (!schedule_scene_edit(scheduler, edit, frame)) {
+            std::cerr << "could not author a scene edit for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_edits.clear();
+    for (const auto &edit : pending_world_edits) {
+        if (!schedule_world_edit(scheduler, edit, frame)) {
+            std::cerr << "could not author a linked placement for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_world_edits.clear();
+    for (const auto &key : pending_keys) {
+        if (!schedule_key_edit(scheduler, key, frame,
+                               coalescing_for(key.gesture))) {
+            std::cerr << "could not author a keyframe for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_keys.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_asset_imports(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    // Import is a live path reference plus a metadata-only source
+    // revision. No media payload bytes are read on this loop.
+    for (auto &imported : pending_asset_imports) {
+        auto prepared =
+            prepare_project_asset_import(std::move(imported.asset));
+        if (!prepared) {
+            discard_gesture_requests(pending_feed_surface_adds,
+                                     imported.gesture);
+            discard_gesture_requests(pending_feed_surface_edits,
+                                     imported.gesture);
+            const std::string_view label =
+                project_asset_import_error_label(
+                    prepared.error().code);
+            project_message = "ASSET IMPORT FAILED - ";
+            project_message.append(label);
+            std::cerr << "asset import rejected: " << label << '\n';
+            continue;
+        }
+
+        PendingAssetImportAuthoring authoring{};
+        authoring.gesture = imported.gesture;
+        try {
+            extract_gesture_requests(pending_feed_surface_adds,
+                                     imported.gesture,
+                                     authoring.surface_adds);
+            extract_gesture_requests(pending_feed_surface_edits,
+                                     imported.gesture,
+                                     authoring.surface_edits);
+        } catch (const std::bad_alloc &) {
+            discard_gesture_requests(pending_feed_surface_adds,
+                                     imported.gesture);
+            discard_gesture_requests(pending_feed_surface_edits,
+                                     imported.gesture);
+            project_message =
+                "ASSET IMPORT FAILED - NOT ENOUGH MEMORY";
+            std::cerr << "could not queue an asset import: "
+                         "allocation failed\n";
+            continue;
+        }
+
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId asset_id{next_new_node++};
+        const editor::AssetImportIntent verified{
+            std::move(prepared).value(), imported.gesture};
+        if (!schedule_asset_import(scheduler, verified, asset_id,
+                                   frame)) {
+            project_message =
+                "ASSET IMPORT FAILED - SCHEDULER REJECTED ASSET";
+            std::cerr
+                << "could not author a completed asset import "
+                   "for frame "
+                << frame.value() << '\n';
+            continue;
+        }
+
+        bool companion_failed = false;
+        for (const auto &request : authoring.surface_edits) {
+            if (!schedule_feed_surface_edit(scheduler, request,
+                                            frame)) {
+                companion_failed = true;
+                break;
+            }
+        }
+        if (!companion_failed) {
+            for (const auto &request : authoring.surface_adds) {
+                while (scheduler.projected_document().contains(
+                    doc::NodeId{next_new_node})) {
+                    ++next_new_node;
+                }
+                const doc::NodeId surface_id{next_new_node++};
+                if (!schedule_feed_surface_add(scheduler, request,
+                                               surface_id, frame)) {
+                    companion_failed = true;
+                    break;
+                }
+                if (request.assign_map_node.has_value()) {
+                    const editor::FeedProjectionEdit assignment{
+                        *request.assign_map_node,
+                        output::FeedProjection::PlanarSurface,
+                        surface_id,
+                        scene::whole(request.surface.raster),
+                        request.gesture};
+                    if (!schedule_feed_projection_edit(
+                            scheduler, assignment, frame)) {
+                        companion_failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (companion_failed) {
+            project_message =
+                "ASSET IMPORTED - SURFACE UPDATE FAILED";
+            std::cerr << "could not author the projection surface "
+                         "paired with an asset import for frame "
+                      << frame.value() << '\n';
+        } else {
+            project_message = "ASSET IMPORTED";
+        }
+    }
+    pending_asset_imports.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_key_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    // A mixed surface drag can emit animated-axis keys and one
+    // masked base edit for the remaining axes. Schedule that base
+    // immediately after its keys so their shared scene transaction
+    // stays on top and undoes atomically.
+    for (const auto &request : pending_feed_surface_edits) {
+        if (!schedule_feed_surface_edit(scheduler, request,
+                                        frame)) {
+            std::cerr
+                << "could not edit a projection surface for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_surface_edits.clear();
+    for (const auto &moved : pending_key_moves) {
+        if (!schedule_key_move(scheduler, moved, frame)) {
+            std::cerr
+                << "could not author a keyframe move for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_key_moves.clear();
+    if (pending_key_batch.has_value()) {
+        const editor::KeyBatchRequest request =
+            std::move(*pending_key_batch);
+        pending_key_batch.reset();
+        const std::vector<scene::KeyAddress> selection =
+            scene_key_addresses(request.edit.keys);
+        scene::KeyEditResult planned = [&]() {
+            switch (request.edit.action) {
+            case editor::TimelineKeyBatchAction::Move:
+                return scene::plan_key_move(
+                    scheduler.projected_document(), selection,
+                    request.edit.delta);
+            case editor::TimelineKeyBatchAction::Duplicate:
+                return scene::plan_key_duplicate(
+                    scheduler.projected_document(), selection,
+                    request.edit.delta);
+            case editor::TimelineKeyBatchAction::Delete:
+                return scene::plan_key_delete(
+                    scheduler.projected_document(), selection);
+            case editor::TimelineKeyBatchAction::Scale:
+                return scene::plan_key_scale(
+                    scheduler.projected_document(), selection,
+                    request.edit.scale);
+            }
+            return scene::KeyEditResult::failure(
+                scene::KeyEditError::InvalidScale);
+        }();
+        if (!planned) {
+            switch (planned.error()) {
+            case scene::KeyEditError::InvalidScale:
+                project_message = "KEY SCALE REJECTED - "
+                                  "DENOMINATOR MUST BE POSITIVE";
+                break;
+            case scene::KeyEditError::IntegerOverflow:
+                project_message = "KEY EDIT REJECTED - DESTINATION "
+                                  "FRAME OVERFLOW";
+                break;
+            case scene::KeyEditError::AllocationFailed:
+                std::cerr << "could not allocate an atomic key "
+                             "edit plan\n";
+                return 1;
+            }
+        } else {
+            scene::KeyEditPlan plan = std::move(planned).value();
+            const doc::Delta delta = doc::diff(
+                scheduler.projected_document(), plan.after);
+            if (!delta.changes.empty()) {
+                auto scheduled =
+                    scheduler.schedule_document_replace(
+                        plan.after, cmd::UndoContextId{2U},
+                        cmd::TransactionId{request.transaction},
+                        frame);
+                if (!scheduled) {
+                    std::cerr << "could not author an atomic key "
+                                 "edit for frame "
+                              << frame.value() << '\n';
+                    return 1;
+                }
+            }
+            std::vector<editor::TimelineKeyAddress> selection_after;
+            selection_after.reserve(plan.selection_after.size());
+            for (const scene::KeyRecord &key :
+                 plan.selection_after) {
+                selection_after.push_back(
+                    editor::TimelineKeyAddress{key.address.target,
+                                               key.address.property,
+                                               key.address.frame});
+            }
+            if (!editor->apply_key_edit_selection(
+                    request.scene, selection_after)) {
+                project_message = "KEY EDIT APPLIED - LOCAL "
+                                  "SELECTION COULD NOT BE UPDATED";
+            } else {
+                project_message = key_batch_message(
+                    request.edit.action, plan.report);
+            }
+        }
+    }
+    if (pending_key_duplicate.has_value()) {
+        try {
+            const std::vector<KeyAddress> selection =
+                key_addresses(pending_key_duplicate->selection);
+            auto planned = duplicate_keys(
+                scheduler.projected_document(),
+                pending_key_duplicate->scene, selection,
+                pending_key_duplicate->delta);
+            if (planned) {
+                const KeyEditReport &report =
+                    planned.value().report;
+                if (report.applied != 0U) {
+                    auto scheduled =
+                        scheduler.schedule_document_replace(
+                            planned.value().document,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{
+                                pending_key_duplicate->transaction},
+                            frame);
+                    if (!scheduled) {
+                        std::cerr
+                            << "could not author a key duplicate "
+                               "for frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                project_message = key_operation_message(
+                    "DUPLICATE", report.applied, "APPLIED",
+                    report.locked_targets, report.incompatible);
+            } else {
+                project_message =
+                    "KEY DUPLICATE REJECTED - FRAME OUT OF RANGE";
+            }
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not plan a key duplicate\n";
+            return 1;
+        }
+        pending_key_duplicate.reset();
+    }
+    if (pending_key_paste.has_value()) {
+        try {
+            auto planned = pending_key_paste->snapshot.paste(
+                scheduler.projected_document(),
+                pending_key_paste->request.scene,
+                pending_key_paste->request.playhead);
+            if (planned) {
+                const KeyEditReport &report =
+                    planned.value().report;
+                if (report.applied != 0U) {
+                    auto scheduled =
+                        scheduler.schedule_document_replace(
+                            planned.value().document,
+                            cmd::UndoContextId{2U},
+                            cmd::TransactionId{
+                                pending_key_paste->request
+                                    .transaction},
+                            frame);
+                    if (!scheduled) {
+                        std::cerr
+                            << "could not author a key paste for "
+                               "frame "
+                            << frame.value() << '\n';
+                        return 1;
+                    }
+                }
+                project_message = key_operation_message(
+                    "PASTE", report.applied, "APPLIED",
+                    report.locked_targets, report.incompatible);
+            } else if (planned.error() == KeyPasteError::Empty) {
+                project_message = "KEY PASTE - CLIPBOARD EMPTY";
+            } else {
+                project_message =
+                    "KEY PASTE REJECTED - FRAME OUT OF RANGE";
+            }
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not plan a key paste\n";
+            return 1;
+        }
+        pending_key_paste.reset();
+    }
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    for (const auto &edit : pending_clip_timings) {
+        if (!schedule_clip_timing(scheduler, edit, frame)) {
+            std::cerr
+                << "could not author a clip placement for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_clip_timings.clear();
+    for (const auto &edit : pending_layer_orders) {
+        const scene::LayerOrderPlacement placement =
+            edit.placement == editor::TimelineLayerPlacement::Before
+                ? scene::LayerOrderPlacement::Before
+                : scene::LayerOrderPlacement::After;
+        auto planned = scene::plan_reorder_layer(
+            scheduler.projected_document(), edit.scene, edit.layer,
+            edit.destination, placement);
+        if (!planned) {
+            if (planned.error() ==
+                scene::LayerOrderError::AllocationFailed) {
+                std::cerr
+                    << "could not allocate a layer reorder plan\n";
+                return 1;
+            }
+            project_message = "LAYER REORDER REJECTED";
+            continue;
+        }
+        const doc::Delta delta = doc::diff(
+            scheduler.projected_document(), planned.value().after);
+        if (!delta.changes.empty()) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().after, cmd::UndoContextId{2U},
+                cmd::TransactionId{edit.gesture}, frame);
+            if (!scheduled) {
+                std::cerr
+                    << "could not author a layer reorder for frame "
+                    << frame.value() << '\n';
+                return 1;
+            }
+        }
+    }
+    pending_layer_orders.clear();
+    for (const auto &split : pending_clip_splits) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_clip_split(scheduler, split, id, frame,
+                scene::MediaFrameRate{transport.anchor().rate.numerator,
+                                       transport.anchor().rate.denominator})) {
+            std::cerr << "could not split a clip for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_clip_splits.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    // Mute and lock are one boolean on the element's own node,
+    // so they need no planner - but they do need the same undo
+    // grouping, which the shared gesture id gives them.
+    for (const auto &edit : pending_element_flags) {
+        const auto *const existing =
+            scheduler.projected_document().get(edit.element);
+        if (existing == nullptr) {
+            // Deleted under the click. Benign.
+            continue;
+        }
+        doc::Node updated = *existing;
+        const bool track =
+            existing->type == scene::schema::timeline_lane_type;
+        const bool showing =
+            edit.flag == editor::TimelineElementFlag::Visible;
+        // A track spells both of these differently and spells
+        // visibility inside out - it is muted rather than hidden.
+        // Translating here keeps one control in the timeline and
+        // one in the Inspector writing the same state instead of
+        // each owning half of it.
+        updated.properties.insert_or_assign(
+            std::string{track
+                            ? (showing ? scene::schema::lane_muted
+                                       : scene::schema::lane_locked)
+                            : (showing ? scene::schema::visible
+                                       : scene::schema::locked)},
+            doc::PropertyValue{track && showing ? !edit.value
+                                                : edit.value});
+        if (updated == *existing) {
+            continue;
+        }
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{std::move(updated)},
+            cmd::PutNode{*existing}, cmd::UndoContextId{2U},
+            cmd::TransactionId{edit.gesture}, frame);
+        if (!scheduled) {
+            std::cerr
+                << "could not author an element flag for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_element_flags.clear();
+    // A rename is one string on the node's own record. Each node
+    // type keeps its name under its own property, so the one
+    // in-place field in every list writes the right one.
+    for (const auto &edit : pending_renames) {
+        const auto *const existing =
+            scheduler.projected_document().get(edit.node);
+        if (existing == nullptr || edit.name.empty()) {
+            continue;
+        }
+        const std::string_view property =
+            existing->type == scene::schema::stage_type
+                ? scene::schema::scene_name
+            : existing->type == scene::schema::timeline_lane_type
+                ? scene::schema::lane_name
+            : existing->type == scene::schema::timeline_marker_type
+                ? scene::schema::marker_name
+                : scene::schema::group_name;
+        doc::Node updated = *existing;
+        updated.properties.insert_or_assign(
+            std::string{property}, doc::PropertyValue{edit.name});
+        if (updated == *existing) {
+            continue;
+        }
+        auto scheduled = scheduler.schedule_edit(
+            cmd::PutNode{std::move(updated)},
+            cmd::PutNode{*existing}, cmd::UndoContextId{2U},
+            cmd::TransactionId{edit.gesture}, frame);
+        if (!scheduled) {
+            std::cerr << "could not author a rename for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_renames.clear();
+    for (const auto &edit : pending_lane_edits) {
+        LaneAuthorAction action{};
+        switch (edit.action) {
+        case editor::TimelineLaneAction::Create:
+            action = LaneAuthorAction::Create;
+            break;
+        case editor::TimelineLaneAction::Rename:
+            action = LaneAuthorAction::Rename;
+            break;
+        case editor::TimelineLaneAction::MoveEarlier:
+            action = LaneAuthorAction::MoveEarlier;
+            break;
+        case editor::TimelineLaneAction::MoveLater:
+            action = LaneAuthorAction::MoveLater;
+            break;
+        case editor::TimelineLaneAction::MoveTo:
+            action = LaneAuthorAction::MoveTo;
+            break;
+        case editor::TimelineLaneAction::ToggleMute:
+            action = LaneAuthorAction::ToggleMute;
+            break;
+        case editor::TimelineLaneAction::ToggleLock:
+            action = LaneAuthorAction::ToggleLock;
+            break;
+        case editor::TimelineLaneAction::DeleteEmpty:
+            action = LaneAuthorAction::DeleteEmpty;
+            break;
+        case editor::TimelineLaneAction::DeleteClips:
+            action = LaneAuthorAction::DeleteClips;
+            break;
+        case editor::TimelineLaneAction::DeleteMoveClips:
+            action = LaneAuthorAction::DeleteMoveClips;
+            break;
+        }
+        auto planned = plan_lane_authoring(
+            scheduler.projected_document(),
+            LaneAuthorRequest{action, edit.scene, edit.lane,
+                              edit.destination, edit.name},
+            next_new_node);
+        if (!planned) {
+            // Stale selection and a lane becoming non-empty are
+            // benign operator races. The planner has not authored
+            // anything, so history and redo remain untouched.
+            project_message =
+                planned.error() == LaneAuthorError::NonEmptyLane
+                    ? "TRACK DELETE REJECTED - TRACK IS NOT EMPTY"
+                    : "TRACK EDIT REJECTED";
+            continue;
+        }
+        const doc::Delta delta =
+            doc::diff(scheduler.projected_document(),
+                      planned.value().document);
+        if (!delta.changes.empty()) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{edit.gesture}, frame);
+            if (!scheduled) {
+                std::cerr
+                    << "could not author a timeline lane for frame "
+                    << frame.value() << '\n';
+                return 1;
+            }
+        }
+        next_new_node = planned.value().next_node;
+    }
+    pending_lane_edits.clear();
+    for (const auto &edit : pending_marker_edits) {
+        MarkerAuthorAction action{};
+        switch (edit.action) {
+        case editor::TimelineMarkerAction::Create:
+            action = MarkerAuthorAction::Create;
+            break;
+        case editor::TimelineMarkerAction::Update:
+            action = MarkerAuthorAction::Update;
+            break;
+        case editor::TimelineMarkerAction::Delete:
+            action = MarkerAuthorAction::Delete;
+            break;
+        }
+        auto planned = plan_marker_authoring(
+            scheduler.projected_document(),
+            MarkerAuthorRequest{action, edit.scene, edit.marker},
+            next_new_node);
+        if (!planned) {
+            // A cue deleted on one surface while another still
+            // showed it is a benign race; nothing was authored.
+            project_message =
+                planned.error() == MarkerAuthorError::MarkerLimit
+                    ? "CUE REJECTED - THE SCENE HOLDS THE MOST "
+                      "MARKERS IT CAN"
+                    : "MARKER EDIT REJECTED";
+            continue;
+        }
+        const doc::Delta delta =
+            doc::diff(scheduler.projected_document(),
+                      planned.value().document);
+        if (!delta.changes.empty()) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{edit.gesture}, frame);
+            if (!scheduled) {
+                std::cerr
+                    << "could not author a timeline marker for "
+                       "frame "
+                    << frame.value() << '\n';
+                return 1;
+            }
+        }
+        next_new_node = planned.value().next_node;
+    }
+    pending_marker_edits.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_group_selection_and_mask_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    if (pending_group_edit.has_value()) {
+        const editor::GroupEditIntent request =
+            std::move(*pending_group_edit);
+        pending_group_edit.reset();
+        core::Result<scene::GroupEditPlan, scene::GroupEditError>
+            planned =
+                request.action == editor::GroupEditAction::Group
+                    ? scene::plan_group_nodes(
+                          scheduler.projected_document(),
+                          request.scene, request.selection,
+                          doc::NodeId{next_new_node}, "Group")
+                : request.action ==
+                        editor::GroupEditAction::MoveInto
+                    ? scene::plan_move_into_group(
+                          scheduler.projected_document(),
+                          request.scene, request.selection,
+                          request.group != doc::NodeId{}
+                              ? std::optional<doc::NodeId>{
+                                    request.group}
+                              : std::nullopt,
+                          request.anchor != doc::NodeId{}
+                              ? std::optional<doc::NodeId>{
+                                    request.anchor}
+                              : std::nullopt,
+                          request.before)
+                    : scene::plan_ungroup_nodes(
+                          scheduler.projected_document(),
+                          request.scene, request.group);
+        if (!planned) {
+            project_message = group_edit_error_message(
+                request.action, planned.error());
+        } else {
+            const doc::Delta delta =
+                doc::diff(scheduler.projected_document(),
+                          planned.value().after);
+            if (!delta.changes.empty()) {
+                auto scheduled =
+                    scheduler.schedule_document_replace(
+                        planned.value().after,
+                        cmd::UndoContextId{2U},
+                        cmd::TransactionId{request.gesture}, frame);
+                if (!scheduled) {
+                    std::cerr << "could not author a Scene group "
+                                 "edit for frame "
+                              << frame.value() << '\n';
+                    return 1;
+                }
+            }
+            if (request.action == editor::GroupEditAction::Group) {
+                next_new_node =
+                    std::max(next_new_node,
+                             planned.value().group.value() + 1U);
+                project_message = "GROUP CREATED";
+            } else if (request.action ==
+                       editor::GroupEditAction::MoveInto) {
+                project_message = request.group != doc::NodeId{}
+                                      ? "MOVED INTO GROUP"
+                                      : "MOVED TO TOP LEVEL";
+            } else {
+                project_message =
+                    "GROUP REMOVED; CHILDREN PRESERVED";
+            }
+        }
+    }
+    if (pending_selection_set_edit.has_value()) {
+        const editor::SelectionSetEditIntent request =
+            std::move(*pending_selection_set_edit);
+        pending_selection_set_edit.reset();
+        const scene::SelectionSetPlanResult planned = [&]() {
+            switch (request.action) {
+            case editor::SelectionSetEditAction::Create:
+                return scene::plan_create_selection_set(
+                    scheduler.projected_document(), request.scene,
+                    request.name, request.members,
+                    doc::NodeId{next_new_node});
+            case editor::SelectionSetEditAction::ReplaceMembers:
+                return scene::plan_replace_selection_set(
+                    scheduler.projected_document(), request.scene,
+                    request.set, request.members,
+                    doc::NodeId{next_new_node});
+            case editor::SelectionSetEditAction::Rename:
+                return scene::plan_rename_selection_set(
+                    scheduler.projected_document(), request.scene,
+                    request.set, request.name);
+            case editor::SelectionSetEditAction::Delete:
+                return scene::plan_delete_selection_set(
+                    scheduler.projected_document(), request.scene,
+                    request.set);
+            case editor::SelectionSetEditAction::Recall:
+                return scene::SelectionSetPlanResult::failure(
+                    scene::SelectionSetError{
+                        scene::SelectionSetErrorCode::InvalidSet,
+                        request.set});
+            }
+            return scene::SelectionSetPlanResult::failure(
+                scene::SelectionSetError{
+                    scene::SelectionSetErrorCode::InvalidSet,
+                    request.set});
+        }();
+        if (!planned) {
+            project_message = selection_set_error_message(
+                request.action, planned.error());
+        } else {
+            const doc::Delta delta =
+                doc::diff(scheduler.projected_document(),
+                          planned.value().after);
+            if (!delta.changes.empty()) {
+                auto scheduled =
+                    scheduler.schedule_document_replace(
+                        planned.value().after,
+                        cmd::UndoContextId{2U},
+                        cmd::TransactionId{request.gesture}, frame);
+                if (!scheduled) {
+                    std::cerr << "could not author a Selection Set "
+                                 "edit for frame "
+                              << frame.value() << '\n';
+                    return 1;
+                }
+            }
+            if (request.action ==
+                    editor::SelectionSetEditAction::Create ||
+                request.action == editor::SelectionSetEditAction::
+                                      ReplaceMembers) {
+                for (const doc::Node &node : planned.value().puts) {
+                    next_new_node = std::max(next_new_node,
+                                             node.id.value() + 1U);
+                }
+            }
+            switch (request.action) {
+            case editor::SelectionSetEditAction::Create:
+                project_message =
+                    "SELECTION SET SAVED - " +
+                    std::to_string(planned.value().members.size()) +
+                    " MEMBERS";
+                break;
+            case editor::SelectionSetEditAction::ReplaceMembers:
+                project_message =
+                    "SELECTION SET REPLACED - " +
+                    std::to_string(planned.value().members.size()) +
+                    " MEMBERS";
+                break;
+            case editor::SelectionSetEditAction::Rename:
+                project_message = "SELECTION SET RENAMED";
+                break;
+            case editor::SelectionSetEditAction::Delete:
+                project_message = "SELECTION SET DELETED";
+                break;
+            case editor::SelectionSetEditAction::Recall:
+                break;
+            }
+        }
+    }
+    if (pending_mask_edit.has_value()) {
+        const editor::MaskEditIntent request =
+            std::move(*pending_mask_edit);
+        pending_mask_edit.reset();
+        auto planned = plan_mask_edit_integration(
+            scheduler.projected_document(), request, next_new_node);
+        if (!planned) {
+            if (planned.error().code ==
+                scene::MaskAuthoringErrorCode::AllocationFailed) {
+                std::cerr
+                    << "could not allocate a mask authoring plan\n";
+                return 1;
+            }
+            project_message =
+                mask_edit_error_message(planned.error().code);
+        } else {
+            const doc::Delta delta =
+                doc::diff(scheduler.projected_document(),
+                          planned.value().document);
+            if (!delta.changes.empty()) {
+                auto scheduled =
+                    scheduler.schedule_document_replace(
+                        planned.value().document,
+                        cmd::UndoContextId{2U},
+                        cmd::TransactionId{request.transaction},
+                        frame);
+                if (!scheduled) {
+                    std::cerr
+                        << "could not author a mask edit for frame "
+                        << frame.value() << '\n';
+                    return 1;
+                }
+            }
+            next_new_node = planned.value().next_node;
+            project_message = "MASK EDIT APPLIED";
+        }
+    }
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    for (const editor::TimelineEditIntent &request :
+         pending_timeline_edits) {
+        scene::SceneModel current_model;
+        current_model.reset(scheduler.projected_document());
+        const std::vector<scene::ClipPlacement> current_clips =
+            current_model.clips(request.scene);
+        auto planned = plan_timeline_edit_integration(
+            scheduler.projected_document(), current_clips, request,
+            clip_clipboard, next_new_node);
+        if (!planned) {
+            switch (planned.error()) {
+            case TimelineEditIntegrationError::
+                ClipboardIncompatible:
+                project_message =
+                    "TIMELINE EDIT REJECTED - CLIPBOARD "
+                    "MUST "
+                    "CONTAIN ONE SOURCE TRACK";
+                break;
+            case TimelineEditIntegrationError::
+                TargetLaneUnavailable:
+                project_message = "TIMELINE EDIT REJECTED - TARGET "
+                                  "TRACK IS LOCKED OR STALE";
+                break;
+            case TimelineEditIntegrationError::TimelineRejected:
+            case TimelineEditIntegrationError::AuthoringRejected:
+                project_message = "TIMELINE EDIT REJECTED - CLIPS "
+                                  "OR HANDLES CHANGED";
+                break;
+            case TimelineEditIntegrationError::PasteRejected:
+                project_message = "TIMELINE EDIT REJECTED - "
+                                  "CLIPBOARD PASTE FAILED";
+                break;
+            case TimelineEditIntegrationError::AllocationFailed:
+                std::cerr << "could not allocate an advanced "
+                             "timeline edit plan\n";
+                return 1;
+            }
+            continue;
+        }
+        const doc::Delta delta =
+            doc::diff(scheduler.projected_document(),
+                      planned.value().document);
+        if (!delta.changes.empty()) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{request.transaction}, frame);
+            if (!scheduled) {
+                std::cerr << "could not author an advanced "
+                             "timeline edit for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+        }
+        next_new_node = planned.value().next_node;
+        project_message = "TIMELINE EDIT APPLIED";
+    }
+    pending_timeline_edits.clear();
+    if (pending_clip_paste.has_value()) {
+        auto planned = pending_clip_paste->snapshot.paste(
+            scheduler.projected_document(),
+            pending_clip_paste->request.scene,
+            pending_clip_paste->request.playhead, next_new_node);
+        if (planned) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{
+                    pending_clip_paste->request.transaction},
+                frame);
+            if (!scheduled) {
+                std::cerr
+                    << "could not author a clip paste for frame "
+                    << frame.value() << '\n';
+                return 1;
+            }
+            next_new_node = planned.value().next_node;
+        } else if (planned.error() != ClipPasteError::Empty &&
+                   planned.error() !=
+                       ClipPasteError::InvalidTargetScene) {
+            std::cerr
+                << "ignored invalid clip clipboard paste (code "
+                << static_cast<unsigned>(planned.error()) << ")\n";
+        }
+        pending_clip_paste.reset();
+    }
+    if (pending_project_settings.has_value()) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node};
+        if (!schedule_project_settings(
+                scheduler, *pending_project_settings, id, frame)) {
+            std::cerr
+                << "could not author project settings for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+        if (pending_project_settings->node == doc::NodeId{}) {
+            ++next_new_node;
+        }
+        pending_project_settings.reset();
+    }
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    for (const auto &edit : pending_properties) {
+        if (!schedule_property_edit(scheduler, edit, frame,
+                                    coalescing_for(edit.gesture))) {
+            std::cerr
+                << "could not author an inspector edit for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_properties.clear();
+    for (const auto &edit : pending_generics) {
+        if (!schedule_generic_edit(scheduler, edit, frame,
+                                   coalescing_for(edit.gesture), &project_message)) {
+            std::cerr
+                << "could not author an inspector edit for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_generics.clear();
+    for (const auto &add : pending_adds) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_add(
+                scheduler, add, id, frame,
+                transport.anchor().rate,
+                scene_model.renderer_settings()
+                    .icvfx.camera_defaults)) {
+            std::cerr
+                << "could not author an element add for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_adds.clear();
+    for (const auto &request : pending_asset_deletes) {
+        if (!schedule_asset_delete(scheduler, request, frame)) {
+            std::cerr << "could not delete an asset for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_asset_deletes.clear();
+    for (const auto &request : pending_source_replacements) {
+        if (!schedule_source_replacement(scheduler, request, frame)) {
+            std::cerr << "could not replace an object source for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_source_replacements.clear();
+    for (const auto &request : pending_asset_proxy_edits) {
+        if (!schedule_asset_proxy_edit(scheduler, request, frame)) {
+            std::cerr << "could not author an asset proxy policy "
+                         "for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_asset_proxy_edits.clear();
+    for (const auto &effect : pending_effects) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_effect(scheduler, effect, id, frame)) {
+            std::cerr << "could not author an effect for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_effects.clear();
+    for (const auto &request : pending_film_grain_effect_edits) {
+        if (!schedule_film_grain_effect_edit(
+                scheduler, request, frame,
+                coalescing_for(request.gesture))) {
+            std::cerr << "could not author Film Grain parameters "
+                         "for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_film_grain_effect_edits.clear();
+    for (const auto &request : pending_effect_deletes) {
+        if (!schedule_effect_delete(scheduler, request, frame)) {
+            std::cerr << "could not delete an effect for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_effect_deletes.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_hardware_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    for (const auto &request : pending_hardware_places) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_hardware_place(scheduler, request, id,
+                                     frame)) {
+            std::cerr
+                << "could not author a hardware device for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_places.clear();
+    for (const auto &request : pending_hardware_moves) {
+        if (!schedule_hardware_move(scheduler, request, frame)) {
+            std::cerr
+                << "could not author a hardware move for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_moves.clear();
+    for (const auto &edit : pending_hardware_properties) {
+        if (!schedule_hardware_property(scheduler, edit, frame)) {
+            std::cerr
+                << "could not author hardware properties for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_properties.clear();
+    if (pending_hardware_control_port.has_value()) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_hardware_control_port(
+                scheduler, *pending_hardware_control_port, id,
+                frame)) {
+            std::cerr << "could not author hardware control "
+                         "settings for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_hardware_control_port.reset();
+    }
+    if (pending_sync_policy.has_value()) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_sync_policy(scheduler, *pending_sync_policy,
+                                  id, frame)) {
+            std::cerr << "could not author the sync policy for "
+                         "frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_sync_policy.reset();
+    }
+    for (const auto &edit : pending_hardware_output_binding_edits) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_hardware_output_binding(scheduler, edit, id,
+                                              frame)) {
+            std::cerr << "could not author an output binding for "
+                         "frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_output_binding_edits.clear();
+    for (const auto &request :
+         pending_hardware_output_binding_deletes) {
+        if (!schedule_hardware_output_binding_delete(
+                scheduler, request, frame)) {
+            std::cerr << "could not remove an output binding for "
+                         "frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_output_binding_deletes.clear();
+    for (const auto &request : pending_hardware_links) {
+        if (request.output_binding.has_value()) {
+            const topology::HardwareOutputBinding &binding =
+                *request.output_binding;
+            if (binding.node == doc::NodeId{}) {
+                while (scheduler.projected_document().contains(
+                    doc::NodeId{next_new_node})) {
+                    ++next_new_node;
+                }
+                const doc::NodeId binding_id{next_new_node++};
+                if (!schedule_hardware_output_binding(
+                        scheduler,
+                        editor::HardwareOutputBindingEdit{
+                            binding, request.gesture},
+                        binding_id, frame)) {
+                    std::cerr << "could not bind a wired hardware "
+                                 "output for frame "
+                              << frame.value() << '\n';
+                    return 1;
+                }
+            }
+            if (find_feed_map_node(scheduler.projected_document(),
+                                   binding.feed_index) == nullptr) {
+                while (scheduler.projected_document().contains(
+                    doc::NodeId{next_new_node})) {
+                    ++next_new_node;
+                }
+                const doc::NodeId feed_id{next_new_node++};
+                const editor::FeedMapAddRequest feed{
+                    binding.feed_index, request.output_region,
+                    scene::whole(scene::Canvas{binding.width,
+                                               binding.height}),
+                    request.gesture};
+                if (!schedule_feed_map_add(
+                        scheduler, feed, feed_id, frame,
+                        cmd::UndoContextId{3U})) {
+                    std::cerr << "could not create a region for a "
+                                 "wired hardware "
+                                 "output at frame "
+                              << frame.value() << '\n';
+                    return 1;
+                }
+            }
+        }
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_hardware_link(scheduler, request, id,
+                                    frame)) {
+            std::cerr
+                << "could not author a hardware link for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_links.clear();
+    for (const auto &request : pending_hardware_deletes) {
+        if (!schedule_hardware_delete(scheduler, request, frame)) {
+            std::cerr << "could not delete hardware for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_deletes.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_feed_map_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    for (const auto &request : pending_feed_surface_adds) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_feed_surface_add(scheduler, request, id,
+                                       frame)) {
+            std::cerr
+                << "could not add a projection surface for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+        if (request.assign_map_node.has_value()) {
+            const editor::FeedProjectionEdit assignment{
+                *request.assign_map_node,
+                output::FeedProjection::PlanarSurface, id,
+                scene::whole(request.surface.raster),
+                request.gesture};
+            if (!schedule_feed_projection_edit(scheduler,
+                                               assignment, frame)) {
+                std::cerr << "could not assign a UV projection "
+                             "mesh for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+        }
+    }
+    pending_feed_surface_adds.clear();
+    for (const auto &request : pending_feed_map_adds) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_feed_map_add(scheduler, request, id, frame)) {
+            std::cerr << "could not add a feed map for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_map_adds.clear();
+    for (const auto &edit : pending_feed_map_edits) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_feed_map_edit(scheduler, edit, id, frame)) {
+            std::cerr
+                << "could not author a feed map edit for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_map_edits.clear();
+    for (const auto &edit : pending_feed_projection_edits) {
+        if (!schedule_feed_projection_edit(scheduler, edit,
+                                           frame)) {
+            std::cerr
+                << "could not edit a feed projection for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_projection_edits.clear();
+    for (const auto &request : pending_feed_surface_deletes) {
+        if (!schedule_feed_surface_delete(scheduler, request,
+                                          frame)) {
+            std::cerr << "could not delete a projection surface "
+                         "for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_surface_deletes.clear();
+    for (const auto &request : pending_feed_map_deletes) {
+        if (!schedule_feed_map_delete(scheduler, request, frame)) {
+            std::cerr << "could not delete a feed map for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_map_deletes.clear();
+    return std::nullopt;
+}
+
+PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &op) {
+    const auto &frame = op.frame;
+    const auto authoring_scene = [&]() -> doc::NodeId {
+        return scene_being_authored(op);
+    };
+    for (const auto &request : pending_compositor_adds) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_compositor_add(
+                scheduler, request, id,
+                authoring_scene(), pending_compositor_gesture,
+                frame)) {
+            std::cerr
+                << "could not add a compositor node for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_compositor_adds.clear();
+    if (pending_compositor_move.has_value()) {
+        if (!schedule_compositor_move(
+                scheduler, *pending_compositor_move,
+                pending_compositor_gesture, frame)) {
+            std::cerr
+                << "could not move a compositor node for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_move.reset();
+    }
+    if (pending_compositor_property.has_value()) {
+        if (!schedule_compositor_property(
+                scheduler, *pending_compositor_property,
+                pending_compositor_gesture, frame,
+                coalescing_for(pending_compositor_gesture))) {
+            std::cerr << "could not edit a compositor parameter "
+                         "for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_property.reset();
+    }
+    if (pending_compositor_connect.has_value()) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node++};
+        if (!schedule_compositor_connect(
+                scheduler, *pending_compositor_connect, id,
+                pending_compositor_gesture, frame)) {
+            std::cerr
+                << "could not connect compositor nodes for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_connect.reset();
+    }
+    if (pending_compositor_delete.has_value()) {
+        if (!schedule_compositor_delete(
+                scheduler, *pending_compositor_delete,
+                pending_compositor_gesture, frame)) {
+            std::cerr
+                << "could not delete a compositor item for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_delete.reset();
+    }
+    pending_compositor_gesture = 0U;
+    for (const auto node : pending_deletes) {
+        if (!schedule_delete(scheduler, node,
+                             pending_delete_gesture, frame)) {
+            std::cerr
+                << "could not author an element delete for frame "
+                << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_deletes.clear();
+    return std::nullopt;
+}
+
+} // namespace mediaserver::app
