@@ -137,9 +137,47 @@ point_in_polygon(float x, float y,
   return inside;
 }
 
+// The colour a channel's name, swatch, keys and curve are drawn in. The three
+// axes of a position, rotation or scale - and a light's red, green and blue -
+// read as red, green and blue, by axis: pitch turns about X, yaw about Y and
+// roll about Z. Every other channel takes one of nine further hues in
+// enumeration order, so channels listed together never share one.
 [[nodiscard]] inline gui::UiColor
-channel_color(scene::PropertyChannel) noexcept {
-  return gui::UiColor{0.67F, 0.73F, 0.80F, 1.0F};
+channel_color(scene::PropertyChannel property) noexcept {
+  constexpr gui::UiColor red{0.96F, 0.38F, 0.36F, 1.0F};
+  constexpr gui::UiColor green{0.46F, 0.86F, 0.42F, 1.0F};
+  constexpr gui::UiColor blue{0.40F, 0.62F, 1.00F, 1.0F};
+  switch (property) {
+  case scene::PropertyChannel::PositionX:
+  case scene::PropertyChannel::ScaleX:
+  case scene::PropertyChannel::RotationPitch:
+  case scene::PropertyChannel::LightColorR:
+    return red;
+  case scene::PropertyChannel::PositionY:
+  case scene::PropertyChannel::ScaleY:
+  case scene::PropertyChannel::RotationYaw:
+  case scene::PropertyChannel::LightColorG:
+    return green;
+  case scene::PropertyChannel::PositionZ:
+  case scene::PropertyChannel::ScaleZ:
+  case scene::PropertyChannel::RotationRoll:
+  case scene::PropertyChannel::LightColorB:
+    return blue;
+  default:
+    break;
+  }
+  constexpr std::array<gui::UiColor, 9U> hues{{
+      {0.98F, 0.78F, 0.32F, 1.0F}, // amber
+      {0.92F, 0.46F, 0.88F, 1.0F}, // magenta
+      {0.36F, 0.86F, 0.92F, 1.0F}, // cyan
+      {0.98F, 0.58F, 0.28F, 1.0F}, // orange
+      {0.68F, 0.56F, 1.00F, 1.0F}, // violet
+      {0.76F, 0.92F, 0.36F, 1.0F}, // lime
+      {1.00F, 0.56F, 0.70F, 1.0F}, // pink
+      {0.30F, 0.78F, 0.66F, 1.0F}, // teal
+      {0.86F, 0.76F, 0.62F, 1.0F}, // sand
+  }};
+  return hues[static_cast<std::size_t>(property) % hues.size()];
 }
 
 [[nodiscard]] inline std::string_view

@@ -338,6 +338,22 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_editor_timeline_hits_tests PROPERTIES FOLDER "tests")
 
+    # The Timeline's curve view on its own: channel colours, the value axis
+    # and curves sampled from the scene's evaluator.
+    add_executable(mediaserver_editor_timeline_graph_tests
+        tests/timeline_graph_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_timeline_graph_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_timeline_graph_tests)
+    add_test(
+        NAME mediaserver.editor_timeline_graph
+        COMMAND mediaserver_editor_timeline_graph_tests
+    )
+    set_target_properties(mediaserver_editor_timeline_graph_tests PROPERTIES FOLDER "tests")
+
     # Not a test: times TimelinePanel::draw() on a large expanded scene,
     # using the timeline tests' harness. Run it before and after a change to
     # the panel's per-frame work.
