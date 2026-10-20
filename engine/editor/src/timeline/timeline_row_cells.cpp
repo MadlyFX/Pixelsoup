@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -33,8 +34,6 @@ void TimelinePanel::draw_rows(Pass &p) {
       }
     }
   }
-  // A right press on a row opens that row's menu once the rows are drawn.
-
   // Lay every visible row out and gather its lane's pointer targets before
   // any row draws, so one owner can be named for the press and the hover.
   p.hits.clear();
@@ -51,7 +50,12 @@ void TimelinePanel::draw_rows(Pass &p) {
     rc.y = y;
     rc.track_number = track_numbers[index];
     layout_row(rc);
-    collect_row_hits(rc);
+    if (!graph_mode_) {
+      collect_row_hits(rc);
+    }
+  }
+  if (graph_mode_) {
+    collect_graph(p);
   }
   if (ctx.pointer_pressed()) {
     if (const HitTarget *const owner =
@@ -92,6 +96,11 @@ void TimelinePanel::draw_rows(Pass &p) {
     if (!row_label_press(rc)) {
       continue;
     }
+    // In Curves mode the graph replaces every row's lane.
+    if (graph_mode_) {
+      note_row_menu_press(rc);
+      continue;
+    }
     ctx.push_clip(gui::Rect{graph.x, y, graph.width, row.height});
     switch (row.kind) {
     case Row::Kind::Layer:
@@ -110,6 +119,9 @@ void TimelinePanel::draw_rows(Pass &p) {
     }
     lane_press(rc);
     ctx.pop_clip();
+  }
+  if (graph_mode_) {
+    draw_graph(p);
   }
 
   ctx.pop_clip();
@@ -199,7 +211,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
   const ChannelIdentity identity = *rc.row_channel_identity;
   rc.channel = identity.property;
   rc.component_channel =
-      hidden_channels_.contains(identity)
+      !graph_->visible(identity)
           ? nullptr
           : channel_for(keyframes, identity.target, identity.property);
   rc.component_frames = rc.component_channel != nullptr
@@ -209,22 +221,6 @@ void TimelinePanel::layout_row(RowContext &rc) {
     return;
   }
   const scene::ChannelKeyframes &channel = *rc.component_channel;
-  double minimum_value = std::numeric_limits<double>::infinity();
-  double maximum_value = -std::numeric_limits<double>::infinity();
-  const bool has_values = channel.values.size() == channel.frames.size();
-  if (graph_mode_ && has_values) {
-    for (const double value : channel.values) {
-      if (std::isfinite(value)) {
-        minimum_value = std::min(minimum_value, value);
-        maximum_value = std::max(maximum_value, value);
-      }
-    }
-  }
-  const double value_span = maximum_value - minimum_value;
-  rc.minimum_value = minimum_value;
-  rc.maximum_value = maximum_value;
-  rc.plotted = graph_mode_ && has_values && std::isfinite(value_span) &&
-               value_span > 1.0e-12;
   rc.component_x.reserve(channel.frames.size());
   rc.component_y.reserve(channel.frames.size());
   for (std::size_t key_index = 0U; key_index < channel.frames.size();
@@ -238,16 +234,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
     const core::i64 shown_frame =
         moving && !keys_.duplicate ? key_frame + keys_.drag_delta : key_frame;
     rc.component_x.push_back(frame_to_x(static_cast<double>(shown_frame)));
-    float key_y = rc.centre_y;
-    if (rc.plotted && std::isfinite(channel.values[key_index])) {
-      const double normal =
-          0.5 +
-          (((maximum_value - channel.values[key_index]) / value_span) - 0.5) *
-              static_cast<double>(curve_value_zoom_) +
-          static_cast<double>(curve_value_pan_);
-      key_y = y + 4.0F + static_cast<float>(normal) * (row.height - 8.0F);
-    }
-    rc.component_y.push_back(key_y);
+    rc.component_y.push_back(rc.centre_y);
   }
 }
 
@@ -638,7 +625,7 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
 
   if (row_channel_identity.has_value()) {
     const bool channel_hidden =
-        hidden_channels_.contains(*row_channel_identity);
+        !graph_->visible(*row_channel_identity);
     const gui::Rect visibility_bounds{
         graph.x - 41.0F,
         interaction_y + std::max((interaction_height - 14.0F) * 0.5F, 0.0F),
@@ -656,11 +643,11 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
                                1.0F, ctx.theme().warning);
     }
     if (visibility.clicked) {
-      active_channel_ = *row_channel_identity;
+      graph_->set_active(*row_channel_identity);
       if (channel_hidden) {
-        hidden_channels_.erase(*row_channel_identity);
+        graph_->set_visible(*row_channel_identity, true);
       } else {
-        hidden_channels_.insert(*row_channel_identity);
+        graph_->set_visible(*row_channel_identity, false);
         keys_.selected.erase(
             std::remove_if(keys_.selected.begin(), keys_.selected.end(),
                            [&](const SelectedKey &key) {
@@ -1340,7 +1327,7 @@ void TimelinePanel::property_group_lane_cell(RowContext &rc) {
   for (core::u8 component = 0U; component < row.component_count;
        ++component) {
     const auto aggregate = group_channel(row.group, component);
-    if (hidden_channels_.contains(ChannelIdentity{row.node, aggregate})) {
+    if (!graph_->visible(ChannelIdentity{row.node, aggregate})) {
       continue;
     }
     draw_frames(frames_for(keyframes, row.node, aggregate),
@@ -1349,8 +1336,8 @@ void TimelinePanel::property_group_lane_cell(RowContext &rc) {
 
 }
 
-// One channel's lane: its keys where layout_row() placed them, joined in
-// Curves mode by the curve between them.
+// One channel's lane in the dope sheet: its keys where layout_row() placed
+// them. Curves mode draws its curve on the graph instead.
 void TimelinePanel::channel_lane_cell(RowContext &rc) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
@@ -1360,8 +1347,6 @@ void TimelinePanel::channel_lane_cell(RowContext &rc) {
     return time_axis_.x(value, graph.x);
   };
   const Row &row = rc.row;
-  const float y = rc.y;
-  const float centre_y = rc.centre_y;
   const scene::ChannelKeyframes *const component_channel =
       rc.component_channel;
   if (component_channel == nullptr) {
@@ -1371,34 +1356,6 @@ void TimelinePanel::channel_lane_cell(RowContext &rc) {
   const scene::TransformChannel channel = rc.channel;
   const gui::UiColor component_color = channel_color(channel);
 
-  if (rc.plotted) {
-    ctx.draw_list().add_line(graph.x, centre_y, graph.x + graph.width,
-                             centre_y, 1.0F, alpha(component_color, 0.18F));
-    std::array<char, 32U> maximum_label{};
-    std::array<char, 32U> minimum_label{};
-    const int maximum_length =
-        std::snprintf(maximum_label.data(), maximum_label.size(), "%.3g",
-                      rc.maximum_value);
-    const int minimum_length =
-        std::snprintf(minimum_label.data(), minimum_label.size(), "%.3g",
-                      rc.minimum_value);
-    ctx.label(gui::Rect{graph.x + 3.0F, y, std::min(graph.width, 52.0F),
-                        row.height * 0.5F},
-              std::string_view{
-                  maximum_label.data(),
-                  static_cast<std::size_t>(std::max(maximum_length, 0))},
-              alpha(component_color, 0.68F));
-    ctx.label(gui::Rect{graph.x + 3.0F, centre_y,
-                        std::min(graph.width, 52.0F), row.height * 0.5F},
-              std::string_view{
-                  minimum_label.data(),
-                  static_cast<std::size_t>(std::max(minimum_length, 0))},
-              alpha(component_color, 0.68F));
-  }
-
-  float previous_x = 0.0F;
-  float previous_y = centre_y;
-  bool have_previous = false;
   for (std::size_t key_index = 0U; key_index < component_channel->frames.size();
        ++key_index) {
     const core::i64 key_frame = component_channel->frames[key_index];
@@ -1408,41 +1365,6 @@ void TimelinePanel::channel_lane_cell(RowContext &rc) {
     const bool moving_key = keys_.dragging && moving != keys_.drag_keys.end();
     const float key_x = rc.component_x[key_index];
     const float key_y = rc.component_y[key_index];
-    if (graph_mode_ && have_previous) {
-      const auto interpolation =
-          component_channel->interpolations.size() ==
-                  component_channel->frames.size()
-              ? component_channel->interpolations[key_index - 1U]
-              : scene::KeyInterpolation::Linear;
-      if (interpolation == scene::KeyInterpolation::Hold) {
-        ctx.draw_list().add_line(previous_x, previous_y, key_x, previous_y,
-                                 1.0F, alpha(component_color, 0.72F));
-        ctx.draw_list().add_line(key_x, previous_y, key_x, key_y, 1.0F,
-                                 alpha(component_color, 0.72F));
-      } else if (interpolation == scene::KeyInterpolation::Cubic) {
-        float curve_x = previous_x;
-        float curve_y = previous_y;
-        constexpr std::size_t samples = 8U;
-        for (std::size_t sample = 1U; sample <= samples; ++sample) {
-          const float t =
-              static_cast<float>(sample) / static_cast<float>(samples);
-          const float eased = t * t * (3.0F - 2.0F * t);
-          const float next_x = previous_x + (key_x - previous_x) * t;
-          const float next_y = previous_y + (key_y - previous_y) * eased;
-          ctx.draw_list().add_line(curve_x, curve_y, next_x, next_y, 1.0F,
-                                   alpha(component_color, 0.72F));
-          curve_x = next_x;
-          curve_y = next_y;
-        }
-      } else {
-        ctx.draw_list().add_line(previous_x, previous_y, key_x, key_y, 1.0F,
-                                 alpha(component_color, 0.72F));
-      }
-    }
-    have_previous = true;
-    previous_x = key_x;
-    previous_y = key_y;
-
     const bool is_key_selected = key_selected(identity);
     if (is_key_selected) {
       draw_diamond(ctx, key_x, key_y, key_radius + 2.0F,
@@ -1469,11 +1391,8 @@ void TimelinePanel::channel_lane_cell(RowContext &rc) {
 void TimelinePanel::lane_press(RowContext &rc) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
-  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
   const std::span<const ElementInfo> elements = p.input.elements;
   TimelinePanelFrame &frame = p.frame;
-  FrameScratch &scratch = p.scratch;
-  const gui::Rect &rows_bounds = p.layout.rows;
   const gui::Rect &graph = p.layout.graph;
   const std::vector<doc::NodeId> &visible_order = p.built.visible_order;
   const auto x_to_frame = [&](float x) noexcept {
@@ -1494,13 +1413,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
   const gui::Interaction lane_it = ctx.grab(
       mix(id_, "lane", row_identity(row)),
       gui::Rect{graph.x, interaction_y, graph.width, interaction_height});
-  if (ctx.secondary_pointer_pressed() && interaction_height > 0.0F &&
-      ctx.pointer_y() >= interaction_y &&
-      ctx.pointer_y() < interaction_y + interaction_height &&
-      ctx.pointer_x() >= rows_bounds.x &&
-      ctx.pointer_x() < rows_bounds.x + rows_bounds.width) {
-    scratch.right_row = index;
-  }
+  note_row_menu_press(rc);
   // The razor cuts where it lands and starts no drag; Shift cuts every
   // unlocked clip under that frame, on every track.
   // A native event batch may already contain motion or release after the
@@ -1653,104 +1566,278 @@ void TimelinePanel::lane_press(RowContext &rc) {
     }
     frame.selection = std::move(next);
   } else if (owned_here) {
-    bool hit_key = false;
     if ((row.kind == Row::Kind::Component ||
          row.kind == Row::Kind::Property) &&
-        component_frames != nullptr) {
-      for (std::size_t key_index = 0U; key_index < component_frames->size();
-           ++key_index) {
-        const core::i64 key_frame = (*component_frames)[key_index];
-        if (owned == RowPart::Key && owned_item == key_index) {
-          const SelectedKey hit{row.kind == Row::Kind::Property
-                                    ? row.property_target
-                                    : row.node,
-                                channel, key_frame};
-          active_channel_ = ChannelIdentity{hit.target, hit.component};
-          bool begin_drag = true;
-          const auto selected_it =
-              std::find(keys_.selected.begin(), keys_.selected.end(), hit);
-          if (ctx.ctrl_held()) {
-            if (selected_it != keys_.selected.end()) {
-              keys_.selected.erase(selected_it);
-              begin_drag = false;
-            } else {
-              keys_.selected.push_back(hit);
-            }
-          } else if (ctx.shift_held()) {
-            if (selected_it == keys_.selected.end()) {
-              keys_.selected.push_back(hit);
-            }
-          } else if (selected_it == keys_.selected.end()) {
-            keys_.selected.assign(1U, hit);
-          }
-          canonicalize_key_selection();
-
-          if (begin_drag) {
-            keys_.drag_keys.clear();
-            for (const SelectedKey &selected_key : keys_.selected) {
-              const auto *const authored = frames_for(
-                  keyframes, selected_key.target, selected_key.component);
-              if (authored != nullptr &&
-                  std::find(authored->begin(), authored->end(),
-                            selected_key.frame) != authored->end()) {
-                keys_.drag_keys.push_back(selected_key);
-              }
-            }
-            if (keys_.drag_keys.empty()) {
-              keys_.drag_keys.push_back(hit);
-            }
-            keys_.dragging = true;
-            // Alt is latched at press: releasing the modifier
-            // before the pointer does not turn a duplicate into
-            // a destructive retime halfway through the gesture.
-            keys_.duplicate = ctx.alt_held();
-            keys_.drag_anchor_frame = key_frame;
-            keys_.drag_delta = 0;
-            keys_.marquee_tracking = false;
-            keys_.marquee_active = false;
-            keys_.lasso_points.clear();
-          }
-          hit_key = true;
-          markers_.selected.clear();
-          break;
-        }
+        component_frames != nullptr && owned == RowPart::Key &&
+        owned_item < component_frames->size()) {
+      press_key(p, SelectedKey{row.kind == Row::Kind::Property
+                                   ? row.property_target
+                                   : row.node,
+                               channel, (*component_frames)[owned_item]});
+      if (row.locked) {
+        frame.seek_to_frame =
+            rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
       }
-    }
-    if (!hit_key && !ctx.ctrl_held() && !ctx.shift_held()) {
-      TimelineSelectionRequest clear{};
-      clear.action = SelectionAction::Clear;
-      frame.selection = std::move(clear);
-    }
-    if (!hit_key && !row.locked) {
-      keys_.marquee_base = keys_.selected;
-      keys_.marquee_shift = ctx.shift_held();
-      keys_.marquee_ctrl = ctx.ctrl_held();
-      if (!keys_.marquee_shift && !keys_.marquee_ctrl) {
-        keys_.selected.clear();
-      }
-      keys_.marquee_tracking = true;
-      keys_.marquee_active = false;
-      keys_.marquee_start_x = press_x;
-      keys_.marquee_start_y = press_y;
-      keys_.lasso_points.clear();
-      if (keys_.lasso_mode) {
-        keys_.lasso_points.push_back(
-            gui::UiPoint{keys_.marquee_start_x, keys_.marquee_start_y});
-      }
-      frame.seek_to_frame =
-          rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
-    } else if (row.locked) {
-      frame.seek_to_frame =
-          rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+    } else {
+      press_lane_background(p, row.locked);
     }
   }
-  if (lane_it.held && !keys_.dragging && !keys_.marquee_active &&
+  scrub_held_lane(p, lane_it);
+}
+
+void TimelinePanel::note_row_menu_press(RowContext &rc) {
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  if (ctx.secondary_pointer_pressed() && rc.interaction_height > 0.0F &&
+      ctx.pointer_y() >= rc.interaction_y &&
+      ctx.pointer_y() < rc.interaction_y + rc.interaction_height &&
+      ctx.pointer_x() >= rows_bounds.x &&
+      ctx.pointer_x() < rows_bounds.x + rows_bounds.width) {
+    p.scratch.right_row = rc.index;
+  }
+}
+
+// A press on a key: it becomes the active channel, the selection takes the
+// key (Ctrl toggles it, Shift adds it), and unless Ctrl just dropped it the
+// whole selection lifts for a shared-delta drag.
+void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
+  gui::UiContext &ctx = p.ctx;
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+
+  graph_->set_active(ChannelIdentity{hit.target, hit.component});
+  bool begin_drag = true;
+  const auto selected_it =
+      std::find(keys_.selected.begin(), keys_.selected.end(), hit);
+  if (ctx.ctrl_held()) {
+    if (selected_it != keys_.selected.end()) {
+      keys_.selected.erase(selected_it);
+      begin_drag = false;
+    } else {
+      keys_.selected.push_back(hit);
+    }
+  } else if (ctx.shift_held()) {
+    if (selected_it == keys_.selected.end()) {
+      keys_.selected.push_back(hit);
+    }
+  } else if (selected_it == keys_.selected.end()) {
+    keys_.selected.assign(1U, hit);
+  }
+  canonicalize_key_selection();
+
+  if (begin_drag) {
+    keys_.drag_keys.clear();
+    for (const SelectedKey &selected_key : keys_.selected) {
+      const auto *const authored =
+          frames_for(keyframes, selected_key.target, selected_key.component);
+      if (authored != nullptr &&
+          std::find(authored->begin(), authored->end(), selected_key.frame) !=
+              authored->end()) {
+        keys_.drag_keys.push_back(selected_key);
+      }
+    }
+    if (keys_.drag_keys.empty()) {
+      keys_.drag_keys.push_back(hit);
+    }
+    keys_.dragging = true;
+    // Alt is latched at press: releasing the modifier before the pointer
+    // does not turn a duplicate into a destructive retime halfway through
+    // the gesture.
+    keys_.duplicate = ctx.alt_held();
+    keys_.drag_anchor_frame = hit.frame;
+    keys_.drag_delta = 0;
+    keys_.marquee_tracking = false;
+    keys_.marquee_active = false;
+    keys_.lasso_points.clear();
+  }
+  markers_.selected.clear();
+}
+
+// A press on an empty lane or graph: without a modifier it clears the scene
+// selection; unless the row is locked it starts a marquee (or lasso) from the
+// press; and it seeks to the frame under the pointer.
+void TimelinePanel::press_lane_background(Pass &p, bool locked) {
+  gui::UiContext &ctx = p.ctx;
+  TimelinePanelFrame &frame = p.frame;
+  const gui::Rect &graph = p.layout.graph;
+
+  if (!ctx.ctrl_held() && !ctx.shift_held()) {
+    TimelineSelectionRequest clear{};
+    clear.action = SelectionAction::Clear;
+    frame.selection = std::move(clear);
+  }
+  if (!locked) {
+    keys_.marquee_base = keys_.selected;
+    keys_.marquee_shift = ctx.shift_held();
+    keys_.marquee_ctrl = ctx.ctrl_held();
+    if (!keys_.marquee_shift && !keys_.marquee_ctrl) {
+      keys_.selected.clear();
+    }
+    keys_.marquee_tracking = true;
+    keys_.marquee_active = false;
+    keys_.marquee_start_x = ctx.pointer_press_x();
+    keys_.marquee_start_y = ctx.pointer_press_y();
+    keys_.lasso_points.clear();
+    if (keys_.lasso_mode) {
+      keys_.lasso_points.push_back(
+          gui::UiPoint{keys_.marquee_start_x, keys_.marquee_start_y});
+    }
+  }
+  frame.seek_to_frame = rounded_frame(time_axis_.frame(ctx.pointer_x(), graph.x),
+                                      p.first, p.last);
+}
+
+// Holding a press on an empty lane or graph scrubs, unless a key, clip,
+// marquee or row lift has taken the gesture.
+void TimelinePanel::scrub_held_lane(Pass &p, const gui::Interaction &lane) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &graph = p.layout.graph;
+  if (lane.held && !keys_.dragging && !keys_.marquee_active &&
       clip_.drag == ClipDrag::None && !clip_.press_consumed &&
       reorder_.layer_node == doc::NodeId{} &&
       reorder_.lane_node == doc::NodeId{}) {
-    frame.seek_to_frame =
-        rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+    p.frame.seek_to_frame = rounded_frame(
+        time_axis_.frame(ctx.pointer_x(), graph.x), p.first, p.last);
   }
+}
+
+gui::Rect TimelinePanel::graph_area(const Pass &p) const noexcept {
+  const gui::Rect &graph = p.layout.graph;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  return gui::Rect{graph.x, rows_bounds.y, graph.width, rows_bounds.height};
+}
+
+// What the Curves graph shows: every channel listed in the rows, then each
+// selected layer's own animated channels, once each, if shown and sampleable;
+// and each of their keys where it draws - at its frame on the shared time
+// axis, shifted by a key drag, and at its value on the graph's value axis.
+// Keys of unlocked targets are registered as pointer targets over the graph
+// itself, and offered to the marquee.
+void TimelinePanel::collect_graph(Pass &p) {
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  const std::vector<Row> &rows = p.built.rows;
+  const gui::Rect area = graph_area(p);
+  std::vector<GraphChannel> &channels = p.graph_channels;
+  std::vector<GraphKey> &graph_keys = p.graph_keys;
+  channels.clear();
+  graph_keys.clear();
+
+  std::set<ChannelIdentity> seen;
+  const auto add = [&](const ChannelIdentity &id, bool locked) {
+    if (!graph_->visible(id) || !seen.insert(id).second) {
+      return;
+    }
+    const scene::ChannelKeyframes *const keys =
+        channel_for(keyframes, id.target, id.property);
+    if (keys == nullptr || keys->frames.empty() ||
+        keys->values.size() != keys->frames.size()) {
+      return;
+    }
+    channels.push_back(GraphChannel{id, keys, channel_color(id.property),
+                                    graph_->active() == id, locked});
+  };
+  for (const Row &row : rows) {
+    if (row.kind == Row::Kind::Component || row.kind == Row::Kind::Property) {
+      add(ChannelIdentity{row.kind == Row::Kind::Property ? row.property_target
+                                                          : row.node,
+                          row.kind == Row::Kind::Property
+                              ? row.property
+                              : group_channel(row.group, row.component)},
+          row.locked);
+    }
+  }
+  for (const doc::NodeId node : selection) {
+    const ElementInfo *const element = find_element(elements, node);
+    for (const scene::ChannelKeyframes &channel : keyframes) {
+      if (channel.target == node) {
+        add(ChannelIdentity{channel.target, channel.component},
+            element != nullptr && element->locked);
+      }
+    }
+  }
+  if (graph_->fit_requested() && !channels.empty()) {
+    graph_->fit(channels, p.first_i, p.last_i);
+  }
+
+  const timeline::ValueAxis &axis = graph_->axis();
+  for (std::size_t index = 0U; index < channels.size(); ++index) {
+    const GraphChannel &channel = channels[index];
+    const scene::ChannelKeyframes &keys = *channel.keys;
+    for (std::size_t key = 0U; key < keys.frames.size(); ++key) {
+      if (!std::isfinite(keys.values[key])) {
+        continue;
+      }
+      const SelectedKey identity{channel.id.target, channel.id.property,
+                                 keys.frames[key]};
+      const bool moving =
+          keys_.dragging && std::find(keys_.drag_keys.begin(),
+                                      keys_.drag_keys.end(),
+                                      identity) != keys_.drag_keys.end();
+      const core::i64 shown = moving && !keys_.duplicate
+                                  ? identity.frame + keys_.drag_delta
+                                  : identity.frame;
+      GraphKey drawn{index,
+                     key,
+                     identity.frame,
+                     time_axis_.x(static_cast<double>(shown), area.x),
+                     axis.y(keys.values[key], area),
+                     key_selected(identity)};
+      if (moving && keys_.duplicate && keys_.drag_delta != 0) {
+        drawn.duplicate_x = time_axis_.x(
+            static_cast<double>(identity.frame + keys_.drag_delta), area.x);
+      }
+      graph_keys.push_back(drawn);
+    }
+  }
+
+  p.hits.add(HitTarget{mix(id_, "graph"), area, HitPriority::Lane, area,
+                       row_part_tag(graph_row, RowPart::Lane)});
+  for (std::size_t index = 0U; index < graph_keys.size(); ++index) {
+    const GraphKey &key = graph_keys[index];
+    const GraphChannel &channel = channels[key.channel];
+    if (channel.locked) {
+      continue;
+    }
+    HitTarget target{
+        mix(mix(mix(id_, "graph key", channel.id.target.value()), "property",
+                static_cast<core::u64>(channel.id.property)),
+            "frame", static_cast<core::u64>(key.frame)),
+        gui::Rect{key.x - key_hit_radius, key.y - key_hit_radius,
+                  key_hit_radius * 2.0F, key_hit_radius * 2.0F},
+        HitPriority::Key, gui::Rect{key.x, key.y, 0.0F, 0.0F},
+        row_part_tag(graph_row, RowPart::Key, index)};
+    target.reach = key_hit_radius;
+    p.hits.add(target);
+    p.scratch.visible_keys.push_back(FrameScratch::VisibleKeyPoint{
+        SelectedKey{channel.id.target, channel.id.property, key.frame}, key.x,
+        key.y});
+  }
+}
+
+// The Curves graph over the rows' lanes, and a press on it: a key selects
+// and lifts like a dope-sheet key, anywhere else clears, seeks and starts a
+// marquee, and holding scrubs.
+void TimelinePanel::draw_graph(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect area = graph_area(p);
+  graph_->draw(ctx, area, time_axis_, p.graph_channels, p.graph_keys);
+  const gui::Interaction graph_it = ctx.grab(mix(id_, "graph"), area);
+  const bool owned_here = graph_it.pressed && p.press_owner.has_value() &&
+                          tag_row(p.press_owner->tag) == graph_row;
+  if (owned_here) {
+    if (tag_part(p.press_owner->tag) == RowPart::Key &&
+        tag_item(p.press_owner->tag) < p.graph_keys.size()) {
+      const GraphKey &key = p.graph_keys[tag_item(p.press_owner->tag)];
+      const GraphChannel &channel = p.graph_channels[key.channel];
+      press_key(p, SelectedKey{channel.id.target, channel.id.property,
+                               key.frame});
+    } else {
+      press_lane_background(p, false);
+    }
+  }
+  scrub_held_lane(p, graph_it);
 }
 
 } // namespace mediaserver::editor

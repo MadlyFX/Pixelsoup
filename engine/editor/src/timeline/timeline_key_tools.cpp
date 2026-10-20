@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -77,8 +78,30 @@ void TimelinePanel::draw_key_tools(Pass &p) {
                      static_cast<double>(selected_last) + padding);
         const double fitted_span = std::max(fitted_end - fitted_begin, 1.0);
         time_axis_.fit(fitted_begin, fitted_span, graph.width);
-        curve_value_zoom_ = 1.0F;
-        curve_value_pan_ = 0.0F;
+        // And the values they hold, bottom to top of the Curves graph.
+        double lowest = std::numeric_limits<double>::infinity();
+        double highest = -std::numeric_limits<double>::infinity();
+        for (const TimelineKeyAddress &key : keys) {
+          const scene::ChannelKeyframes *const channel =
+              channel_for(keyframes, key.target, key.property);
+          if (channel == nullptr ||
+              channel->values.size() != channel->frames.size()) {
+            continue;
+          }
+          const auto found = std::find(channel->frames.begin(),
+                                       channel->frames.end(), key.frame);
+          if (found != channel->frames.end()) {
+            const double value = channel->values[static_cast<std::size_t>(
+                found - channel->frames.begin())];
+            if (std::isfinite(value)) {
+              lowest = std::min(lowest, value);
+              highest = std::max(highest, value);
+            }
+          }
+        }
+        if (lowest <= highest) {
+          graph_->fit_values(lowest, highest);
+        }
       }
     } else {
       const gui::Rect disabled{tool_x, tool_y, 59.0F, 22.0F};
@@ -95,45 +118,50 @@ void TimelinePanel::draw_key_tools(Pass &p) {
           std::max(static_cast<double>(last_i) - static_cast<double>(first_i),
                    1.0);
       time_axis_.fit(static_cast<double>(first_i), span, graph.width);
-      curve_value_zoom_ = 1.0F;
-      curve_value_pan_ = 0.0F;
+      // Curves mode fits to what it already shows; otherwise the graph fits
+      // when it is next drawn.
+      if (graph_mode_ && !p.graph_channels.empty()) {
+        graph_->fit(p.graph_channels, first_i, last_i);
+      } else {
+        graph_->request_fit();
+      }
     }
 
     const float channel_y = tool_y + 28.0F;
-    if (active_channel_.has_value()) {
+    if (graph_->active().has_value()) {
       std::array<char, 128U> active_label{};
       const int active_length = std::snprintf(
           active_label.data(), active_label.size(), "%s - #%llu",
-          channel_label(active_channel_->property).data(),
-          static_cast<unsigned long long>(active_channel_->target.value()));
+          channel_label(graph_->active()->property).data(),
+          static_cast<unsigned long long>(graph_->active()->target.value()));
       ctx.label(gui::Rect{key_tools_popup.x + 6.0F, channel_y, 170.0F, 22.0F},
                 std::string_view{
                     active_label.data(),
                     static_cast<std::size_t>(std::max(active_length, 0))},
-                channel_color(active_channel_->property));
-      const bool hidden = hidden_channels_.contains(*active_channel_);
+                channel_color(graph_->active()->property));
+      const bool hidden = !graph_->visible(*graph_->active());
       if (ctx.button(
               mix(id_, "active channel visibility"),
               gui::Rect{key_tools_popup.x + 178.0F, channel_y, 50.0F, 22.0F},
               hidden ? "SHOW" : "HIDE")) {
         if (hidden) {
-          hidden_channels_.erase(*active_channel_);
+          graph_->set_visible(*graph_->active(), true);
         } else {
-          hidden_channels_.insert(*active_channel_);
+          graph_->set_visible(*graph_->active(), false);
           keys_.selected.erase(
               std::remove_if(keys_.selected.begin(), keys_.selected.end(),
                              [&](const SelectedKey &key) {
-                               return key.target == active_channel_->target &&
+                               return key.target == graph_->active()->target &&
                                       key.component ==
-                                          active_channel_->property;
+                                          graph_->active()->property;
                              }),
               keys_.selected.end());
           keys_.drag_keys.erase(
               std::remove_if(keys_.drag_keys.begin(), keys_.drag_keys.end(),
                              [&](const SelectedKey &key) {
-                               return key.target == active_channel_->target &&
+                               return key.target == graph_->active()->target &&
                                       key.component ==
-                                          active_channel_->property;
+                                          graph_->active()->property;
                              }),
               keys_.drag_keys.end());
           if (keys_.drag_keys.empty()) {
@@ -143,7 +171,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         }
       }
       const scene::ChannelKeyframes *const active_keyframes = channel_for(
-          keyframes, active_channel_->target, active_channel_->property);
+          keyframes, graph_->active()->target, graph_->active()->property);
       const std::optional<double> sampled =
           sample_channel_at(active_keyframes, timeline.show_frame);
       if (sampled.has_value() && std::isfinite(*sampled)) {
@@ -155,7 +183,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
                           key_tools_popup.width - 238.0F, 22.0F},
                 "", *sampled, speed, changed_value, 4)) {
           frame.keys.push_back(TimelineKeyEdit{
-              active_channel_->target, active_channel_->property,
+              graph_->active()->target, graph_->active()->property,
               timeline.show_frame, changed_value, false, false});
         }
       } else {

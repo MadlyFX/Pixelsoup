@@ -17,6 +17,7 @@
 
 #include <compare>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -53,6 +54,8 @@ struct ChannelId final {
 
   auto operator<=>(const ChannelId &) const = default;
 };
+
+class TimelineGraphView;
 } // namespace timeline
 
 // A transport action the operator asked for. The Director owns transport, so
@@ -633,8 +636,10 @@ struct TimelinePanelFrame final {
 
 class TimelinePanel final {
 public:
-  explicit TimelinePanel(gui::UiId id) noexcept
-      : id_(id), rename_(id ^ 0x54494D454E414D45ULL) {}
+  explicit TimelinePanel(gui::UiId id);
+  ~TimelinePanel();
+  TimelinePanel(const TimelinePanel &) = delete;
+  TimelinePanel &operator=(const TimelinePanel &) = delete;
 
   // Draws the toolbar, time ruler, layer tree, key lanes, and playhead into
   // `bounds`.
@@ -727,17 +732,14 @@ public:
   // do, which lets it follow the panel's own width.
   [[nodiscard]] float list_width() const noexcept { return list_width_; }
   [[nodiscard]] bool scale_open() const noexcept { return key_tools_.scale_open; }
-  [[nodiscard]] float curve_value_zoom() const noexcept {
-    return curve_value_zoom_;
-  }
-  [[nodiscard]] float curve_value_pan() const noexcept {
-    return curve_value_pan_;
-  }
-  [[nodiscard]] bool
-  channel_visible(doc::NodeId target,
-                  scene::PropertyChannel property) const noexcept {
-    return !hidden_channels_.contains(ChannelIdentity{target, property});
-  }
+  [[nodiscard]] bool curves_mode() const noexcept { return graph_mode_; }
+  // The Curves view's value zoom and pan since its last fit: 1 and 0 right
+  // after one.
+  [[nodiscard]] float curve_value_zoom() const noexcept;
+  [[nodiscard]] float curve_value_pan() const noexcept;
+  [[nodiscard]] bool channel_visible(doc::NodeId target,
+                                     scene::PropertyChannel property) const
+      noexcept;
 
   // A successful project replacement invalidates document-addressed UI
   // state and requests a fresh fit on the next draw. View preferences such
@@ -801,6 +803,13 @@ private:
   void property_group_lane_cell(RowContext &rc);
   void channel_lane_cell(RowContext &rc);
   void lane_press(RowContext &rc);
+  // A right press anywhere across the row opens the row's menu.
+  void note_row_menu_press(RowContext &rc);
+
+  // Curves mode: where the graph is, what it shows, and the graph itself.
+  [[nodiscard]] gui::Rect graph_area(const Pass &p) const noexcept;
+  void collect_graph(Pass &p);
+  void draw_graph(Pass &p);
 
   // Queries and gestures more than one section reaches.
   std::string timecode(Pass &p, core::u64 value);
@@ -850,12 +859,14 @@ private:
     bool operator==(const SelectedKey &) const = default;
   };
 
-  struct ChannelIdentity final {
-    doc::NodeId target{};
-    scene::PropertyChannel property{};
+  using ChannelIdentity = timeline::ChannelId;
 
-    auto operator<=>(const ChannelIdentity &) const = default;
-  };
+  // Presses in a lane or on the graph: a key selects and lifts the
+  // selection, an empty lane or graph clears the selection, seeks and starts
+  // a marquee, and holding it scrubs.
+  void press_key(Pass &p, const SelectedKey &hit);
+  void press_lane_background(Pass &p, bool locked);
+  void scrub_held_lane(Pass &p, const gui::Interaction &lane);
 
   [[nodiscard]] bool
   selected(doc::NodeId node,
@@ -951,10 +962,10 @@ private:
     NumberField value_field;
   };
   KeyToolsState key_tools_;
-  float curve_value_zoom_{1.0F};
-  float curve_value_pan_{};
-  std::set<ChannelIdentity> hidden_channels_;
-  std::optional<ChannelIdentity> active_channel_;
+  // The Curves view: its value axis, which channels are shown and which one
+  // is active. It shares time_axis_ and keys_ with the dope sheet, so the
+  // two zoom, pan and select together.
+  std::unique_ptr<timeline::TimelineGraphView> graph_;
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
   bool timeline_focused_{};
   bool panning_{};

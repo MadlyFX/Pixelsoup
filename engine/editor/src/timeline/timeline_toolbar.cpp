@@ -288,6 +288,10 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                   "Curves", graph_mode_,
                   "Draw animated values as curves instead of keys")) {
     graph_mode_ = !graph_mode_;
+    // Entering Curves shows every value the graph will draw.
+    if (graph_mode_) {
+      graph_->request_fit();
+    }
   }
   bar_x += curves_width + 2.0F;
 

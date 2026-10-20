@@ -66,6 +66,8 @@ struct GraphChannel final {
   gui::UiColor color{};
   // The channel the KEYS popup edits: drawn heavier.
   bool active{};
+  // A locked target's keys are drawn but cannot be picked.
+  bool locked{};
 };
 
 // One key as the graph draws it. A key drag shows the key at its proposed

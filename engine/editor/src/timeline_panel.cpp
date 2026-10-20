@@ -127,6 +127,23 @@ std::optional<core::u64> parse_timecode(std::string_view text,
   return frames;
 }
 
+TimelinePanel::TimelinePanel(gui::UiId id)
+    : id_(id), rename_(id ^ 0x54494D454E414D45ULL),
+      graph_(std::make_unique<timeline::TimelineGraphView>()) {}
+
+TimelinePanel::~TimelinePanel() = default;
+
+float TimelinePanel::curve_value_zoom() const noexcept {
+  return graph_->zoom();
+}
+
+float TimelinePanel::curve_value_pan() const noexcept { return graph_->pan(); }
+
+bool TimelinePanel::channel_visible(
+    doc::NodeId target, scene::PropertyChannel property) const noexcept {
+  return graph_->visible(ChannelIdentity{target, property});
+}
+
 bool TimelinePanel::selected(
     doc::NodeId node, std::span<const doc::NodeId> selection) const noexcept {
   return std::find(selection.begin(), selection.end(), node) != selection.end();
@@ -141,8 +158,7 @@ void TimelinePanel::clear_key_context() noexcept {
   keys_.snap_guide.reset();
   key_tools_.open = false;
   key_tools_.scale_open = false;
-  hidden_channels_.clear();
-  active_channel_.reset();
+  graph_->reset();
   key_tools_.value_field = NumberField{};
   keys_.marquee_tracking = false;
   keys_.marquee_active = false;
@@ -496,36 +512,17 @@ void TimelinePanel::navigate(Pass &p) {
       ctx.pointer_y() >= ruler.y && ctx.wheel() != 0.0F) {
     if (graph_mode_ && ctx.pointer_x() >= graph.x && ctx.alt_held()) {
       // Hold the value under the pointer still, exactly as the time zoom below
-      // holds the frame under it. A curve band is normalised inside its own
-      // row, so the fixed point is where the pointer sits in that row's band:
-      // with normal = 0.5 + deviation * zoom + pan, keeping normal fixed while
-      // zoom scales by k means pan becomes pan * k + (normal - 0.5) * (1 - k).
-      const float previous = curve_value_zoom_;
-      curve_value_zoom_ = std::clamp(
-          curve_value_zoom_ * static_cast<float>(std::pow(
-                                  1.15, static_cast<double>(ctx.wheel()))),
-          0.25F, 16.0F);
-      const float local = ctx.pointer_y() - rows_bounds.y + row_scroll_;
-      const std::optional<std::size_t> under = row_at(rows, local);
-      const float band =
-          (under.has_value() ? rows[*under].height : row_height) - 8.0F;
-      if (previous > 0.0F && band > 0.0F &&
-          ctx.pointer_y() >= rows_bounds.y) {
-        const float row_top =
-            rows_bounds.y - row_scroll_ +
-            (under.has_value() ? rows[*under].top
-                               : std::floor(local / row_height) * row_height);
-        const float normal =
-            std::clamp((ctx.pointer_y() - row_top - 4.0F) / band, 0.0F, 1.0F);
-        const float ratio = curve_value_zoom_ / previous;
-        curve_value_pan_ =
-            std::clamp(curve_value_pan_ * ratio +
-                           (normal - 0.5F) * (1.0F - ratio),
-                       -4.0F, 4.0F);
-      }
+      // holds the frame under it.
+      const gui::Rect area = graph_area(p);
+      timeline::ValueAxis &axis = graph_->axis();
+      const float anchor_y = std::clamp(ctx.pointer_y(), area.y,
+                                        area.y + area.height);
+      axis.zoom_about(axis.value(anchor_y, area),
+                      std::pow(1.15, static_cast<double>(ctx.wheel())));
     } else if (graph_mode_ && ctx.pointer_x() >= graph.x && ctx.ctrl_held()) {
-      curve_value_pan_ =
-          std::clamp(curve_value_pan_ + ctx.wheel() * 0.08F, -4.0F, 4.0F);
+      // A notch moves the values by a twelfth of the graph's height.
+      const gui::Rect area = graph_area(p);
+      graph_->axis().pan(ctx.wheel() * area.height / 12.0F, area);
     } else if (ctx.shift_held()) {
       time_axis_.pan(-(static_cast<double>(ctx.wheel()) * 80.0));
     } else if (ctx.pointer_x() >= graph.x) {
@@ -547,8 +544,7 @@ void TimelinePanel::navigate(Pass &p) {
   if (panning_ && ctx.middle_pointer_down() && !began_pan) {
     time_axis_.pan(-static_cast<double>(ctx.pointer_dx()));
     if (graph_mode_ && ctx.ctrl_held()) {
-      curve_value_pan_ =
-          std::clamp(curve_value_pan_ + ctx.pointer_dy() / 100.0F, -4.0F, 4.0F);
+      graph_->axis().pan(ctx.pointer_dy(), graph_area(p));
     } else {
       row_scroll_ -= ctx.pointer_dy();
     }

@@ -474,13 +474,31 @@ and readout remain after release as the edit reaches the Director. The Stage
 updates when the edit is committed. **Slide (`U`)** is a separate operation
 that adjusts the neighboring cuts; use Selection to freely move a clip.
 
+**Curves** turns the lanes into one graph the full height of the layer
+list. Every channel listed below an open layer - and every animated channel
+of a selected layer - is drawn there as its curve, overlaid against one value
+scale whose round values are labelled down the graph's left edge. The curve is
+the one playback evaluates, Hold steps, Cubic tangents and weights included,
+sampled at every show frame on screen. Each channel keeps its colour: the X,
+Y and Z of a position, rotation or scale - and a light's red, green and blue -
+are red, green and blue, and every other channel has its own hue, shown on
+its name and its swatch in the list. The list stays on the left as the
+channel picker: a channel's swatch shows or hides it on the graph and in the
+dope sheet alike. Entering Curves fits the value scale to everything shown,
+overshoot included. Curves and the dope sheet share one time view and one key
+selection, so zooming either moves the other, and keys chosen in one are still
+chosen after switching. On the graph a key is pressed, Shift- or Ctrl-clicked,
+boxed and dragged in time exactly as in the dope sheet; its value is typed in
+the KEYS popup.
+
 Navigating the timeline is the wheel and the middle button, on both axes.
 Wheel zooms time about the frame under the pointer and Shift+wheel pans it; in
 `CURVES` mode Alt+wheel zooms values about the value under the pointer and
 Ctrl+wheel pans them, and a middle drag pans time with rows or, held with Ctrl,
 values. Because all six of those are gestures, the `KEYS` panel carries no
 stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
-`FIT ALL`, which put a selection or the whole animation back on screen. Track
+`FIT ALL`, which put a selection or the whole animation back on screen, in
+time and on the Curves graph in value. Track
 mute and lock are the layer list's eye and padlock rather than a letter, so the
 state of a stack reads from across a stage. The stage's LED surfaces follow the
 scene's elements in both the Timeline and the Scene outliner, each with the same

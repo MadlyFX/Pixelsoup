@@ -1226,22 +1226,30 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
                               scene::KeyInterpolation::Hold};
   static_cast<void>(h.frame(0.0F, 0.0F, false));
   h.open_position_components();
-  // Curves is the text toggle at x=582..634.
+  // Curves is the text toggle at x=582..634. Entering it fits the one
+  // plottable channel, Position X with values 1..3, to [0.8, 3.2] over the
+  // full rows area, y=76..400: value v draws at y = 76 + 135 * (3.2 - v).
+  // Its keys at frames 10, 20 and 50 are at (334, 373), (408, 238) and
+  // (630, 103).
   static_cast<void>(h.click(608.0F, 17.0F));
-  static_cast<void>(h.click(334.0F, 136.0F));
-  static_cast<void>(h.click(408.0F, 136.0F, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.curves_mode());
+  static_cast<void>(h.click(334.0F, 373.0F));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  static_cast<void>(h.click(408.0F, 238.0F, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.selected_key_count() == 2U);
   static_cast<void>(h.click(659.0F, 17.0F));
 
   // Alt/Ctrl wheel address the value axis without changing row scroll. Alt
-  // also holds the value under the pointer still, so zooming off the middle of
-  // a row shifts the pan rather than sliding the curve out from under it.
-  static_cast<void>(h.frame(500.0F, 136.0F, false, gui::KeyMods::Alt, 1.0F));
+  // also holds the value under the pointer still, so zooming away from the
+  // middle of the graph shifts the pan.
+  static_cast<void>(h.frame(500.0F, 238.0F, false, gui::KeyMods::Alt, 1.0F));
   UI_CHECK(h.panel.curve_value_zoom() > 1.0F);
   const float anchored_pan = h.panel.curve_value_pan();
-  static_cast<void>(h.frame(500.0F, 127.27F, false, gui::KeyMods::Alt, 1.0F));
+  static_cast<void>(h.frame(500.0F, 330.0F, false, gui::KeyMods::Alt, 1.0F));
   UI_CHECK(h.panel.curve_value_pan() != anchored_pan);
-  static_cast<void>(h.frame(500.0F, 136.0F, false, gui::KeyMods::Ctrl, 1.0F));
-  UI_CHECK(h.panel.curve_value_pan() > 0.0F);
+  const float before_ctrl = h.panel.curve_value_pan();
+  static_cast<void>(h.frame(500.0F, 238.0F, false, gui::KeyMods::Ctrl, 1.0F));
+  UI_CHECK(h.panel.curve_value_pan() > before_ctrl);
 
   // FIT ALL is the only view button the popup still carries: every zoom step
   // it used to hold is a wheel gesture over the graph.
@@ -1269,7 +1277,9 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
   // Re-selecting a key makes the channel active. The numeric field samples at
   // the playhead and an absolute typed commit authors that exact property at
   // the playhead; target/property are never inferred from another row.
-  static_cast<void>(h.click(322.0F, 136.0F));
+  // FIT SEL showed frames 9..21 and values [0.9, 2.1]: the frame-10 key,
+  // value 1, sits at x=321.7, y=373.
+  static_cast<void>(h.click(322.0F, 373.0F));
   static_cast<void>(h.click(659.0F, 17.0F));
   static_cast<void>(h.frame(918.0F, 77.09F, false));
   static_cast<void>(h.frame(918.0F, 77.09F, true));
@@ -3242,12 +3252,77 @@ void a_marker_answers_ten_units_from_its_line() {
   UI_CHECK(h.panel.selected_markers().front() == doc::NodeId{60U});
 }
 
+// The dope sheet and the Curves graph share one key selection: keys chosen
+// in either stay chosen across the switch, and Delete after it removes what
+// was chosen before it.
+void key_selection_carries_across_the_curves_switch() {
+  Harness h;
+  h.keys[0].values = {1.0, 2.0, 3.0};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  // Dope sheet: Position X's frame-10 key at (334, 136).
+  static_cast<void>(h.click(334.0F, 136.0F));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  static_cast<void>(h.click(608.0F, 17.0F));
+  UI_CHECK(h.panel.curves_mode());
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  // On the graph, fitted to [0.8, 3.2] over y=76..400, add the frame-50 key,
+  // value 3, at (630, 103).
+  static_cast<void>(h.click(630.0F, 103.0F, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.selected_key_count() == 2U);
+  static_cast<void>(h.click(608.0F, 17.0F));
+  UI_CHECK(!h.panel.curves_mode());
+  UI_CHECK(h.panel.selected_key_count() == 2U);
+  const editor::TimelinePanelFrame deleted = h.key(gui::Key::Delete);
+  UI_CHECK(deleted.key_batch.has_value());
+  UI_CHECK(deleted.key_batch->action == editor::TimelineKeyBatchAction::Delete);
+  UI_CHECK(deleted.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 10},
+               {object_node, scene::PropertyChannel::PositionX, 50}}));
+}
+
+// The dope sheet and the Curves graph read time from one axis, so a zoom in
+// either places keys where the other expects them.
+void the_dope_sheet_and_the_graph_share_one_time_axis() {
+  Harness h;
+  h.keys[0].values = {1.0, 2.0, 3.0};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  h.open_position_components();
+  // One wheel notch at x=500 in the dope sheet: 7.4 px a frame becomes
+  // 8.51 and frame 32.43 stays at x=500, so frame 20 moves from x=408 to
+  // 500 - 12.43 * 8.51 = 394.2.
+  static_cast<void>(h.frame(500.0F, 136.0F, false, gui::KeyMods::None, 1.0F));
+  static_cast<void>(h.click(608.0F, 17.0F));
+  // The graph draws the frame-20 key, value 2, there: at y=238, not at the
+  // unzoomed x=408, 14 units away.
+  static_cast<void>(h.click(394.0F, 238.0F));
+  UI_CHECK(h.panel.selected_key_count() == 1U);
+  const editor::TimelinePanelFrame twenty = h.key(gui::Key::Delete);
+  UI_CHECK(twenty.key_batch.has_value());
+  UI_CHECK(twenty.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 20}}));
+
+  // Another notch, on the graph about frame 20: 9.79 px a frame, so back in
+  // the dope sheet frame 10 sits at 394.2 - 10 * 9.79 = 296.3.
+  static_cast<void>(h.frame(394.2F, 238.0F, false, gui::KeyMods::None, 1.0F));
+  static_cast<void>(h.click(608.0F, 17.0F));
+  UI_CHECK(!h.panel.curves_mode());
+  static_cast<void>(h.click(296.0F, 136.0F));
+  const editor::TimelinePanelFrame ten = h.key(gui::Key::Delete);
+  UI_CHECK(ten.key_batch.has_value());
+  UI_CHECK(ten.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{
+               {object_node, scene::PropertyChannel::PositionX, 10}}));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 101U> cases{{
+constexpr std::array<Case, 103U> cases{{
     {"tool cursors follow selection and captured gestures",
      &tool_cursors_follow_selection_and_captured_gestures},
     {"extreme imported timing is refused visibly and cannot overflow snapping",
@@ -3440,6 +3515,10 @@ constexpr std::array<Case, 101U> cases{{
      &range_handles_answer_down_the_full_ruler},
     {"a marker answers ten units from its line",
      &a_marker_answers_ten_units_from_its_line},
+    {"key selection carries across the Curves switch",
+     &key_selection_carries_across_the_curves_switch},
+    {"the dope sheet and the graph share one time axis",
+     &the_dope_sheet_and_the_graph_share_one_time_axis},
 }};
 
 } // namespace

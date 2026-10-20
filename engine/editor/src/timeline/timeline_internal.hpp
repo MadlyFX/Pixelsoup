@@ -7,6 +7,7 @@
 #include <mediaserver/editor/cues_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 
+#include "timeline_graph_view.hpp"
 #include "timeline_hits.hpp"
 #include "timeline_layout.hpp"
 
@@ -886,6 +887,8 @@ enum class RowPart : core::u8 {
          (static_cast<core::u64>(part) << 24U) |
          (static_cast<core::u64>(item) & 0xFFFFFFU);
 }
+// The row number a Curves-mode graph target carries in its tag.
+inline constexpr std::size_t graph_row = 0xFFFFFFFFU;
 [[nodiscard]] inline std::size_t tag_row(core::u64 tag) noexcept {
   return static_cast<std::size_t>(tag >> 32U);
 }
@@ -1007,6 +1010,10 @@ struct TimelinePanel::Pass final {
   timeline::HitCollector hits;
   std::optional<timeline::HitTarget> press_owner;
   std::optional<timeline::HitTarget> hover_owner;
+
+  // Curves mode: the channels the graph overlays and their keys as drawn.
+  std::vector<timeline::GraphChannel> graph_channels;
+  std::vector<timeline::GraphKey> graph_keys;
 };
 
 
@@ -1048,12 +1055,8 @@ struct TimelinePanel::RowContext final {
   std::vector<float> component_x;
   std::vector<float> component_y;
   scene::TransformChannel channel{};
-  // The channel's keys as drawn, and in Curves mode the value range its
-  // curve is plotted over.
+  // The channel's keys as the dope sheet draws them.
   const scene::ChannelKeyframes *component_channel{};
-  double minimum_value{};
-  double maximum_value{};
-  bool plotted{};
 };
 
 } // namespace mediaserver::editor
