@@ -323,27 +323,21 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_editor_timeline_tests PROPERTIES FOLDER "tests")
 
-    # The same scenarios, digested frame by frame: draw list, panel requests,
-    # and hot/active/focus/cursor. Pins TimelinePanel's exact output while it is
-    # split into components; see tests/timeline_golden.hpp.
-    add_executable(mediaserver_editor_timeline_golden_tests
+    # Not a test: times TimelinePanel::draw() on a large expanded scene,
+    # using the timeline tests' harness. Run it before and after a change to
+    # the panel's per-frame work.
+    add_executable(mediaserver_editor_timeline_bench
         tests/timeline_panel_tests.cpp
     )
-    target_compile_definitions(mediaserver_editor_timeline_golden_tests
-        PRIVATE MEDIASERVER_TIMELINE_GOLDEN=1
+    target_compile_definitions(mediaserver_editor_timeline_bench
+        PRIVATE MEDIASERVER_TIMELINE_BENCH=1
     )
-    target_link_libraries(mediaserver_editor_timeline_golden_tests
+    target_link_libraries(mediaserver_editor_timeline_bench
         PRIVATE
             MediaServer::Editor
     )
-    mediaserver_set_project_options(mediaserver_editor_timeline_golden_tests)
-
-    add_test(
-        NAME mediaserver.editor_timeline_golden
-        COMMAND mediaserver_editor_timeline_golden_tests
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/timeline_panel_digests.txt
-    )
-    set_target_properties(mediaserver_editor_timeline_golden_tests PROPERTIES FOLDER "tests")
+    mediaserver_set_project_options(mediaserver_editor_timeline_bench)
+    set_target_properties(mediaserver_editor_timeline_bench PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_cues_tests
         tests/cues_panel_tests.cpp

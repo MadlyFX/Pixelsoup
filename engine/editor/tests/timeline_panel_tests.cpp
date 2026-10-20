@@ -18,14 +18,10 @@
 #include <string_view>
 #include <vector>
 
-#if defined(MEDIASERVER_TIMELINE_GOLDEN)
-#include "timeline_golden.hpp"
-
+#if defined(MEDIASERVER_TIMELINE_BENCH)
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
 #endif
 
 // The bespoke timeline's proof, with no window and no GPU. Its contract is the
@@ -119,7 +115,7 @@ waveform_key(mediaserver::core::u64 revision = 1U) {
 struct Harness final {
   gui::InputState input;
   gui::UiDrawList list;
-#if defined(MEDIASERVER_TIMELINE_GOLDEN)
+#if defined(MEDIASERVER_TIMELINE_BENCH)
   // Lays out exactly like empty(), but draws which text went where.
   gui::FontAtlas font{gui::FontAtlas::placeholder()};
 #else
@@ -158,9 +154,6 @@ struct Harness final {
         surfaces, selected_surface, lanes, clipboard_span, key_scale_preview,
         filmstrips, waveforms, markers);
     ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
-#if defined(MEDIASERVER_TIMELINE_GOLDEN)
-    timeline_golden::observe(ctx, list, out);
-#endif
     return out;
   }
 
@@ -3330,179 +3323,17 @@ constexpr std::array<Case, 96U> cases{{
      &a_row_press_released_after_rows_shift_clicks_no_other_row},
 }};
 
-#if defined(MEDIASERVER_TIMELINE_GOLDEN)
-// Golden-only scenarios: one dense show that puts every row kind, track band,
-// marker, cue, effect, interpolation and tangent on screen at once, drawn at
-// several sizes, UI scales and scroll positions, in Keys and Curves modes.
-void golden_rich_show(Harness &h) {
-  linked_hierarchy(h);
-  editor::ElementInfo environment{};
-  environment.node = doc::NodeId{1201U};
-  environment.kind = editor::ElementKind::Environment;
-  environment.display_name = "Environment";
-  environment.environment.fog_density = 0.25F;
-  editor::ElementInfo camera = make_object();
-  camera.node = doc::NodeId{1301U};
-  camera.kind = editor::ElementKind::Camera;
-  camera.display_name = "Camera";
-  editor::ElementInfo tracked = make_clip();
-  tracked.node = doc::NodeId{1401U};
-  tracked.timeline_lane = lane_node;
-  tracked.timing = scene::ClipTiming{30, 50, 4, 6, 8};
-  editor::ElementInfo loose = make_clip();
-  loose.timing = scene::ClipTiming{-10, 30, 0, 0, 5};
-  loose.visible = false;
-  editor::ElementInfo locked = make_object();
-  locked.node = doc::NodeId{1501U};
-  locked.locked = true;
-  locked.display_name = "Locked";
-  h.elements.push_back(environment);
-  h.elements.push_back(camera);
-  h.elements.push_back(tracked);
-  h.elements.push_back(loose);
-  h.elements.push_back(locked);
-  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
-                                        "Foreground", false, false,
-                                        scene::BlendMode::Normal, false});
-  h.lanes.push_back(scene::TimelineLane{
-      destination_lane_node, scene::SceneId{100U}, 20, "Background", true,
-      true, scene::BlendMode::Normal, false});
-  h.surfaces.push_back(make_surface());
-  h.effects.push_back(scene::EffectInstance{doc::NodeId{77U}, object_node,
-                                            scene::EffectKind::Saturation, 0,
-                                            true, 1.5F});
-  h.markers = {timeline_marker(60U, 12, scene::CueAction::None, "Intro"),
-               timeline_marker(61U, 40, scene::CueAction::Hold, "Band"),
-               timeline_marker(62U, 80, scene::CueAction::Loop, "Vamp")};
-  scene::ChannelKeyframes x{object_node, scene::PropertyChannel::PositionX,
-                            {10, 20, 50, 70}, {1.0, -2.0, 3.0, 3.5},
-                            {scene::KeyInterpolation::Linear,
-                             scene::KeyInterpolation::Cubic,
-                             scene::KeyInterpolation::Hold,
-                             scene::KeyInterpolation::Cubic}};
-  x.tangents = {std::nullopt,
-                scene::KeyTangent{scene::KeyTangentMode::Broken, 0.0, 0.2,
-                                  std::nullopt, 4.0},
-                std::nullopt,
-                scene::KeyTangent{scene::KeyTangentMode::Auto, 0.0, 0.0,
-                                  std::nullopt, std::nullopt}};
-  h.keys = {x,
-            {object_node, scene::PropertyChannel::PositionY, {25, 50},
-             {0.0, 4.0}},
-            {object_node, scene::PropertyChannel::Opacity, {0, 90},
-             {1.0, 0.0}},
-            {environment.node, scene::PropertyChannel::FogDensity, {0, 100},
-             {0.0, 0.5}},
-            {camera.node, scene::PropertyChannel::CameraFieldOfView, {5, 60},
-             {0.4, 0.9}}};
-  h.selection = {object_node};
-  h.primary = object_node;
-  h.timeline.show_frame = 33U;
-}
-
-void golden_rich_show_in_every_view() {
-  Harness h;
-  golden_rich_show(h);
-  static_cast<void>(h.frame(0.0F, 0.0F, false));
-  // Expand every layer the list shows; twirls sit left of each name.
-  for (int pass = 0; pass < 12; ++pass) {
-    static_cast<void>(h.click(42.0F, 88.0F + 24.0F * static_cast<float>(pass)));
-  }
-  static_cast<void>(h.frame(500.0F, 150.0F, false));
-  for (const gui::Rect size :
-       {gui::Rect{0.0F, 0.0F, 1000.0F, 400.0F},
-        gui::Rect{0.0F, 0.0F, 1600.0F, 900.0F},
-        gui::Rect{0.0F, 0.0F, 560.0F, 260.0F}}) {
-    h.bounds = size;
-    static_cast<void>(h.frame(size.width * 0.6F, size.height * 0.5F, false));
-    // Scroll the rows, then zoom and pan time.
-    static_cast<void>(h.frame(size.width * 0.2F, 150.0F, false,
-                              gui::KeyMods::None, -2.0F));
-    static_cast<void>(h.frame(size.width * 0.6F, 150.0F, false,
-                              gui::KeyMods::None, 1.0F));
-    static_cast<void>(h.frame(size.width * 0.6F, 150.0F, false,
-                              gui::KeyMods::Shift, 1.0F));
-  }
-  h.bounds = gui::Rect{0.0F, 0.0F, 1000.0F, 400.0F};
-  // Curves mode, with its value navigation, then the KEYS popup.
-  static_cast<void>(h.click(608.0F, 17.0F));
-  static_cast<void>(h.frame(500.0F, 136.0F, false, gui::KeyMods::Alt, 1.0F));
-  static_cast<void>(h.frame(500.0F, 136.0F, false, gui::KeyMods::Ctrl, 1.0F));
-  static_cast<void>(h.click(659.0F, 17.0F));
-  static_cast<void>(h.frame(500.0F, 200.0F, false));
-  static_cast<void>(h.click(659.0F, 17.0F));
-  static_cast<void>(h.click(608.0F, 17.0F));
-  // A context menu over each region.
-  for (const gui::UiPoint at : {gui::UiPoint{500.0F, 45.0F},
-                                gui::UiPoint{500.0F, 66.0F},
-                                gui::UiPoint{80.0F, 88.0F},
-                                gui::UiPoint{500.0F, 112.0F}}) {
-    static_cast<void>(h.right_click(at.x, at.y));
-    static_cast<void>(h.frame(at.x + 10.0F, at.y + 20.0F, false));
-    static_cast<void>(h.key(gui::Key::Escape));
-  }
-}
-
-void golden_rich_show_at_display_scales() {
-  for (const float scale : {1.0F, 1.5F, 2.0F}) {
-    Harness h;
-    h.list.set_scale(scale);
-    golden_rich_show(h);
-    static_cast<void>(h.frame(0.0F, 0.0F, false));
-    static_cast<void>(h.click(42.0F, 88.0F));
-    static_cast<void>(h.frame(450.0F, 120.0F, false));
-    // A key drag and a clip drag, held mid-gesture.
-    static_cast<void>(h.frame(600.0F, 140.0F, true));
-    static_cast<void>(h.frame(650.0F, 150.0F, true));
-    static_cast<void>(h.frame(650.0F, 150.0F, false));
-  }
-}
-
-constexpr std::array<Case, 2U> golden_cases{{
-    {"golden: rich show in every view", &golden_rich_show_in_every_view},
-    {"golden: rich show at display scales",
-     &golden_rich_show_at_display_scales},
-}};
-#endif
-
 } // namespace
 
-#if defined(MEDIASERVER_TIMELINE_GOLDEN)
+#if defined(MEDIASERVER_TIMELINE_BENCH)
 namespace {
-
-struct GoldenRun final {
-  std::string name;
-  std::vector<std::uint64_t> frames;
-  std::uint64_t digest{};
-};
-
-std::string hex(std::uint64_t value, int digits) {
-  std::array<char, 24U> text{};
-  std::snprintf(text.data(), text.size(), "%0*llx", digits,
-                static_cast<unsigned long long>(value));
-  return std::string{text.data()};
-}
-
-// One line per case: case digest, frame count, name, then each frame's digest
-// truncated to 32 bits so a mismatch names the first frame that diverged.
-std::string golden_line(const GoldenRun &run) {
-  std::string line = hex(run.digest, 16) + '\t' +
-                     std::to_string(run.frames.size()) + '\t' + run.name +
-                     '\t';
-  for (std::size_t index = 0U; index < run.frames.size(); ++index) {
-    if (index != 0U) line += ',';
-    line += hex(run.frames[index] & 0xffffffffULL, 8);
-  }
-  return line;
-}
 
 // Times TimelinePanel::draw() on a large, fully expanded scene: `layers`
 // top-level objects and clips, each keyed on Position, Opacity and an effect,
 // each twirled open with its Position group open too. Reports the median and
 // fastest per-frame time over batches of idle frames and of frames with the
 // pointer sweeping the lanes, in the panel's typical 1920x1080 bounds.
-int golden_bench(std::size_t layers) {
-  timeline_golden::observing() = false;
+int bench(std::size_t layers) {
   Harness h;
   h.timeline = editor::EditorTimeline{600U, 600U, 0U, 7'200U, false, false,
                                       false};
@@ -3605,101 +3436,14 @@ int golden_bench(std::size_t layers) {
   return 0;
 }
 
-int golden_main(int argc, char **argv) {
-  if (argc >= 2 && std::string_view{argv[1]} == "--bench") {
-    return golden_bench(argc == 3 ? std::stoul(argv[2]) : 400U);
-  }
-  const bool record = argc == 3 && std::string_view{argv[1]} == "--record";
-  if (!(argc == 2 || record)) {
-    std::cerr << "usage: " << argv[0] << " [--record] <digests.txt>\n";
-    return 2;
-  }
-  const std::string path = argv[argc - 1];
-
-  std::vector<GoldenRun> runs;
-  std::size_t failures = 0U;
-  const auto run_all = [&](std::span<const Case> list) {
-    for (const Case &entry : list) {
-      timeline_golden::recorded_frames().clear();
-      try {
-        entry.function();
-      } catch (const std::exception &error) {
-        ++failures;
-        std::cerr << "[fail] " << entry.name << ": " << error.what() << '\n';
-      }
-      GoldenRun run{entry.name, timeline_golden::recorded_frames(), 0U};
-      timeline_golden::Digest digest;
-      for (const std::uint64_t frame : run.frames) digest.u64(frame);
-      run.digest = digest.value();
-      runs.push_back(std::move(run));
-    }
-  };
-  run_all(cases);
-  run_all(golden_cases);
-  if (failures != 0U) {
-    std::cerr << failures << " cases failed; digests are not meaningful\n";
-    return 1;
-  }
-
-  if (record) {
-    std::ofstream out{path, std::ios::binary};
-    out << "# TimelinePanel characterization digests. Regenerate only for an\n"
-           "# intended visual or behavioural change:\n"
-           "#   mediaserver_editor_timeline_golden_tests --record <this file>\n";
-    for (const GoldenRun &run : runs) out << golden_line(run) << '\n';
-    std::cout << "recorded " << runs.size() << " cases to " << path << '\n';
-    return out ? 0 : 1;
-  }
-
-  std::ifstream in{path, std::ios::binary};
-  if (!in) {
-    std::cerr << "cannot read " << path << '\n';
-    return 1;
-  }
-  std::vector<std::string> expected;
-  for (std::string line; std::getline(in, line);) {
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    if (!line.empty() && line.front() != '#') expected.push_back(line);
-  }
-  std::size_t mismatches = 0U;
-  for (std::size_t index = 0U; index < runs.size(); ++index) {
-    const std::string actual = golden_line(runs[index]);
-    const std::string wanted =
-        index < expected.size() ? expected[index] : std::string{};
-    if (actual == wanted) continue;
-    ++mismatches;
-    const auto frames_of = [](const std::string &line) {
-      std::vector<std::string> out;
-      const std::size_t tab = line.rfind('\t');
-      std::stringstream list{tab == std::string::npos ? std::string{}
-                                                      : line.substr(tab + 1U)};
-      for (std::string item; std::getline(list, item, ',');) out.push_back(item);
-      return out;
-    };
-    const auto want = frames_of(wanted);
-    const auto got = frames_of(actual);
-    std::size_t first = 0U;
-    while (first < want.size() && first < got.size() &&
-           want[first] == got[first]) {
-      ++first;
-    }
-    std::cerr << "[golden] " << runs[index].name << ": frame " << first
-              << " differs (" << got.size() << " frames, expected "
-              << want.size() << ")\n";
-  }
-  if (expected.size() != runs.size()) {
-    ++mismatches;
-    std::cerr << "[golden] expected " << expected.size() << " cases, ran "
-              << runs.size() << '\n';
-  }
-  std::cout << (runs.size() - std::min(mismatches, runs.size())) << '/'
-            << runs.size() << " golden cases match\n";
-  return mismatches == 0U ? 0 : 1;
-}
-
 } // namespace
 
-int main(int argc, char **argv) { return golden_main(argc, argv); }
+// mediaserver_editor_timeline_bench [layers]
+int main(int argc, char **argv) {
+  // The behaviour cases share this file; the benchmark does not run them.
+  static_cast<void>(cases);
+  return bench(argc == 2 ? std::stoul(argv[1]) : 400U);
+}
 #else
 int main() {
   std::size_t failures = 0U;
