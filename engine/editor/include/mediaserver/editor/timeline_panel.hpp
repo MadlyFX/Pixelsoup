@@ -766,6 +766,32 @@ private:
   void handle_actions(Pass &p);
   void close_pass(Pass &p);
 
+  // One visible row, handed from draw_rows() to its cell renderers.
+  struct RowContext;
+  // Each row kind's list cell and lane cell, the clip bar's parts, and the
+  // presses the row label and then the lane take, in draw_rows() order.
+  void begin_row(RowContext &rc);
+  void track_header_list_cell(RowContext &rc);
+  void layer_list_cell(RowContext &rc);
+  void properties_header_list_cell(RowContext &rc);
+  void property_group_list_cell(RowContext &rc);
+  void channel_list_cell(RowContext &rc);
+  void property_label(RowContext &rc);
+  void channel_visibility_toggle(RowContext &rc);
+  void row_key_button(RowContext &rc);
+  bool row_label_press(RowContext &rc);
+  void layer_lane_cell(RowContext &rc);
+  void clip_bar_cell(RowContext &rc);
+  bool draw_clip_filmstrip(RowContext &rc, bool live);
+  void draw_clip_waveform(RowContext &rc, bool drew_filmstrip);
+  void draw_clip_edges(RowContext &rc);
+  void draw_clip_ramps(RowContext &rc);
+  void draw_clip_label(RowContext &rc);
+  void draw_clip_hover(RowContext &rc);
+  void property_group_lane_cell(RowContext &rc);
+  void channel_lane_cell(RowContext &rc);
+  void lane_press(RowContext &rc);
+
   // Queries and gestures more than one section reaches.
   std::string timecode(Pass &p, core::u64 value);
   std::optional<std::size_t> marker_index(Pass &p, doc::NodeId id);

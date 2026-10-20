@@ -909,4 +909,45 @@ struct TimelinePanel::Pass final {
   const timeline::LaneDropTarget *layer_lane_hovered{};
 };
 
+
+// One visible row as draw_rows() hands it to the row's cell renderers: the
+// frame it belongs to, its geometry, its selection and fold state, and what
+// its lane cell settled for the lane press.
+struct TimelinePanel::RowContext final {
+  RowContext(Pass &pass, const timeline::Row &shown,
+             std::size_t position) noexcept
+      : p(pass), row(shown), index(position) {}
+
+  Pass &p;
+  const timeline::Row &row;
+  std::size_t index{};
+  std::size_t track_number{};
+  float y{};
+  float centre_y{};
+  std::optional<ChannelIdentity> row_channel_identity;
+  bool is_selected{};
+  bool layer_like{};
+  bool row_hovered{};
+  gui::UiColor background{};
+  core::u64 row_group{};
+  bool open{};
+  float content_x{};
+  float name_x{};
+  gui::Rect name_bounds{};
+  float lock_x{};
+  gui::Rect eye_bounds{};
+  gui::Rect lock_bounds{};
+  float interaction_y{};
+  float interaction_height{};
+  const ElementInfo *clip_element{};
+  scene::ClipTiming clip_timing{};
+  gui::Rect clip_bar{};
+  float clip_fade_in_x{};
+  float clip_fade_out_x{};
+  const std::vector<core::i64> *component_frames{};
+  std::vector<float> component_x;
+  std::vector<float> component_y;
+  scene::TransformChannel channel{};
+};
+
 } // namespace mediaserver::editor
