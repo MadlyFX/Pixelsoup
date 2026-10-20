@@ -741,6 +741,51 @@ private:
   // rows draw, right-click targets the context menu reads, and the drag
   // feedback drawn last. Rebuilt on every draw; never outlives it.
   struct FrameScratch;
+  // One draw's working state, handed from each section of draw() to the next.
+  struct Pass;
+
+  // The sections of draw(), in the order it runs them.
+  [[nodiscard]] bool open_pass(Pass &p);
+  void prune_key_selection(Pass &p);
+  void navigate(Pass &p);
+  void request_derivatives(Pass &p);
+  void draw_toolbar(Pass &p);
+  void draw_ruler(Pass &p);
+  void draw_marker_strip(Pass &p);
+  void track_key_drag(Pass &p);
+  void resolve_clip_gesture(Pass &p);
+  void resolve_reorder_targets(Pass &p);
+  void draw_rows(Pass &p);
+  void resolve_track_drop(Pass &p);
+  void finish_marquee(Pass &p);
+  void draw_time_overlays(Pass &p);
+  void commit_key_drag(Pass &p);
+  void draw_key_tools(Pass &p);
+  void draw_rate_menu(Pass &p);
+  void draw_drag_feedback(Pass &p);
+  void handle_actions(Pass &p);
+  void close_pass(Pass &p);
+
+  // Queries and gestures more than one section reaches.
+  std::string timecode(Pass &p, core::u64 value);
+  std::optional<std::size_t> marker_index(Pass &p, doc::NodeId id);
+  void capture_layer_drag(Pass &p, doc::NodeId grabbed);
+  std::vector<TimelineKeyAddress> selected_addresses() const;
+  const TimelineFilmstripObservation *
+  filmstrip_for_clip(Pass &p, doc::NodeId clip) noexcept;
+  const TimelineWaveformObservation *
+  waveform_for_clip(Pass &p, doc::NodeId clip) noexcept;
+  void zoom_to_fit(Pass &p) noexcept;
+  void create_marker(Pass &p, core::i64 at, scene::CueAction cue);
+  std::string cue_label(Pass &p, doc::NodeId id);
+  std::string seconds_label(Pass &p, core::u64 frames);
+  std::vector<core::i64> edit_points(Pass &p,
+                                     doc::NodeId exclude_clip,
+                                     bool include_markers);
+  core::i64 razor_frame(Pass &p, float px);
+  core::i64 shown_marker_frame(const scene::TimelineMarker &marker) const;
+  void update_key_drag(Pass &p);
+  std::optional<doc::NodeId> clip_lane_under_pointer(Pass &p, float pointer_y);
 
   std::vector<ReplacementTarget> replacement_targets_;
 

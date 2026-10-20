@@ -277,36 +277,6 @@ void TimelinePanel::reset_project_state() noexcept {
   clip_snap_guide_.reset();
 }
 
-struct TimelinePanel::FrameScratch final {
-  // Unlocked keys as drawn this frame, for the marquee and lasso to test.
-  struct VisibleKeyPoint final {
-    SelectedKey key;
-    float x{};
-    float y{};
-  };
-  std::vector<VisibleKeyPoint> visible_keys;
-  // What a right press landed on, for the context menu built after the rows.
-  std::optional<std::size_t> right_row;
-  std::optional<std::size_t> right_marker;
-  // The layer drag that ended this frame, so the row it began on does not
-  // also take the release as a click.
-  doc::NodeId released_layer_drag_node{};
-  bool released_layer_drag_moved{};
-  // Drag feedback, resolved with the targets and drawn over everything.
-  bool layer_drag_active{};
-  bool clip_move_feedback{};
-  std::string clip_drag_label;
-  std::optional<float> layer_drop_landing_y;
-  std::string layer_drag_label{"LAYER"};
-  bool layer_assignment_feedback{};
-  std::optional<float> lane_drop_landing_y;
-  std::string lane_drag_label{"TRACK"};
-  bool lane_drag_feedback{};
-  // An open popup masks the pointer for what lies under it.
-  bool popup_pointer_blocked{};
-  bool key_popup_pointer_blocked{};
-};
-
 void TimelineTimeAxis::fit(double begin, double span, float width) noexcept {
   pixels_per_frame =
       std::clamp(static_cast<float>(static_cast<double>(width) / span),
@@ -348,31 +318,54 @@ TimelinePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                                        const gui::Rect &bounds,
                                        const TimelineDrawInput &input) {
-  const EditorTimeline &timeline = input.timeline;
-  const std::span<const scene::ChannelKeyframes> keyframes = input.keyframes;
-  const std::span<const ElementInfo> elements = input.elements;
-  const std::span<const doc::NodeId> selection = input.selection;
-  const doc::NodeId primary = input.primary;
-  const std::span<const scene::EffectInstance> effects = input.effects;
-  const std::span<const output::ProjectionSurface> surfaces = input.surfaces;
-  const doc::NodeId selected_surface = input.selected_surface;
-  const std::span<const scene::TimelineLane> lanes = input.lanes;
-  const std::optional<core::i64> &clipboard_span = input.clipboard_span;
-  const std::optional<TimelineKeyScalePreview> &key_scale_preview =
-      input.key_scale_preview;
-  const std::span<const TimelineFilmstripObservation> filmstrips =
-      input.filmstrips;
-  const std::span<const TimelineWaveformObservation> waveforms =
-      input.waveforms;
-  const std::span<const scene::TimelineMarker> markers = input.markers;
   replacement_targets_.clear();
-  FrameScratch scratch{};
-  TimelinePanelFrame frame{};
-  const float gesture_x = ctx.pointer_released()
+  Pass p{ctx, bounds, input};
+  if (!open_pass(p)) {
+    return std::move(p.frame);
+  }
+  prune_key_selection(p);
+  navigate(p);
+  request_derivatives(p);
+  draw_toolbar(p);
+  draw_ruler(p);
+  draw_marker_strip(p);
+  track_key_drag(p);
+  resolve_clip_gesture(p);
+  resolve_reorder_targets(p);
+  draw_rows(p);
+  resolve_track_drop(p);
+  finish_marquee(p);
+  draw_time_overlays(p);
+  commit_key_drag(p);
+  draw_key_tools(p);
+  draw_rate_menu(p);
+  draw_drag_feedback(p);
+  handle_actions(p);
+  close_pass(p);
+  return std::move(p.frame);
+}
+
+bool TimelinePanel::open_pass(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &bounds = p.bounds;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  const std::span<const scene::EffectInstance> effects = p.input.effects;
+  const std::span<const output::ProjectionSurface> surfaces = p.input.surfaces;
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  const doc::NodeId primary = p.input.primary;
+  const std::optional<core::i64> &clipboard_span = p.input.clipboard_span;
+  TimelinePanelFrame &frame = p.frame;
+  const gui::Rect &graph = p.layout.graph;
+
+  p.gesture_x = ctx.pointer_released()
       ? ctx.pointer_release_x() : ctx.pointer_x();
-  const float gesture_y = ctx.pointer_released()
+  p.gesture_y = ctx.pointer_released()
       ? ctx.pointer_release_y() : ctx.pointer_y();
-  const bool typing_at_start = ctx.typing();
+  p.typing_at_start = ctx.typing();
   frame.filmstrip_retain = TimelineFilmstripRetainIntent{};
   frame.waveform_retain = TimelineWaveformRetainIntent{};
   ctx.panel(bounds, ctx.theme().panel);
@@ -382,18 +375,21 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   }
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     range_fields_.cancel(ctx);
-    return frame;
+    return false;
   }
   ctx.push_clip(bounds);
 
-  const core::u64 first = std::min(timeline.first_frame, timeline.last_frame);
-  const core::u64 last = std::max(timeline.first_frame, timeline.last_frame);
-  const core::i64 first_i = signed_frame(first);
-  const core::i64 last_i = signed_frame(last);
+  p.first = std::min(timeline.first_frame, timeline.last_frame);
+  auto &first = p.first;
+  p.last = std::max(timeline.first_frame, timeline.last_frame);
+  auto &last = p.last;
+  p.first_i = signed_frame(first);
+  p.last_i = signed_frame(last);
 
   // The anchor must actually belong to the selection. A stale primary falls
   // back to the first selected element, exactly as the shell's viewport does.
-  doc::NodeId anchor = primary;
+  p.anchor = primary;
+  auto &anchor = p.anchor;
   if (!selected(anchor, selection)) {
     anchor = selection.empty() ? doc::NodeId{} : selection.front();
   }
@@ -403,9 +399,10 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   // selection has the shape their planner requires; the Director validates
   // the same identities again against its projected document before it
   // authors anything.
-  std::vector<const ElementInfo *> selected_clips;
+  auto &selected_clips = p.selected_clips;
   selected_clips.reserve(selection.size());
-  bool clip_selection_valid = !selection.empty();
+  p.clip_selection_valid = !selection.empty();
+  auto &clip_selection_valid = p.clip_selection_valid;
   for (const doc::NodeId id : selection) {
     const ElementInfo *const element = find_element(elements, id);
     if (element == nullptr || !editable_clip(*element) ||
@@ -432,7 +429,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                            selected_clips.front()->timeline_lane;
                   });
 
-  std::optional<doc::NodeId> target_lane;
+  auto &target_lane = p.target_lane;
   const auto explicit_lane = std::find_if(
       lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
         return !lane.implicit && lane.id == selected_lane_;
@@ -442,33 +439,20 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   } else if (same_selected_lane) {
     target_lane = selected_clips.front()->timeline_lane;
   }
-  const bool paste_ready = clipboard_span.has_value() && *clipboard_span > 0 &&
+  p.paste_ready = clipboard_span.has_value() && *clipboard_span > 0 &&
                            target_lane.has_value();
 
-  const timeline::TimelineLayout layout =
+  p.layout =
       timeline::layout_timeline(bounds, list_width_);
-  const float list_width = layout.list_width;
-  const gui::Rect &toolbar = layout.toolbar;
-  const gui::Rect &ruler = layout.ruler;
-  const gui::Rect &strip = layout.strip;
-  const gui::Rect &rows_bounds = layout.rows;
-  const gui::Rect &graph = layout.graph;
   // The part of the graph that is time rather than the ruler's own band.
-  const gui::Rect &strip_graph = layout.strip_graph;
-  const core::u64 fps =
+  p.fps =
       nominal_rate(timeline.rate_numerator, timeline.rate_denominator);
-  const auto timecode = [&](core::u64 value) {
-    if (ruler_frames_) {
-      return std::to_string(value);
-    }
-    return format_timecode(value, timeline.rate_numerator,
-                           timeline.rate_denominator);
-  };
 
   // Markers arrive in (frame, id) order. A cue's number is its place among
   // the cues alone, which is the number a stage manager calls.
-  std::vector<std::size_t> cue_numbers(markers.size(), 0U);
-  bool any_cue{};
+  p.cue_numbers.assign(markers.size(), 0U);
+  auto &cue_numbers = p.cue_numbers;
+  auto &any_cue = p.any_cue;
   {
     std::size_t number = 0U;
     for (std::size_t index = 0U; index < markers.size(); ++index) {
@@ -478,24 +462,16 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       }
     }
   }
-  const auto marker_index = [&](doc::NodeId id) -> std::optional<std::size_t> {
-    for (std::size_t index = 0U; index < markers.size(); ++index) {
-      if (markers[index].id == id) {
-        return index;
-      }
-    }
-    return std::nullopt;
-  };
   selected_markers_.erase(
       std::remove_if(selected_markers_.begin(), selected_markers_.end(),
-                     [&](doc::NodeId id) { return !marker_index(id); }),
+                     [&](doc::NodeId id) { return !marker_index(p, id); }),
       selected_markers_.end());
-  if (marker_drag_ != doc::NodeId{} && !marker_index(marker_drag_)) {
+  if (marker_drag_ != doc::NodeId{} && !marker_index(p, marker_drag_)) {
     marker_drag_ = doc::NodeId{};
     marker_drag_moved_ = false;
     marker_drag_delta_ = 0;
   }
-  if (marker_name_node_ != doc::NodeId{} && !marker_index(marker_name_node_)) {
+  if (marker_name_node_ != doc::NodeId{} && !marker_index(p, marker_name_node_)) {
     marker_name_node_ = doc::NodeId{};
     marker_name_draft_.clear();
   }
@@ -514,54 +490,83 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     time_axis_.pixels_per_frame = 1.0F;
   }
 
-  const auto frame_to_x = [&](double value) noexcept {
-    return time_axis_.x(value, graph.x);
-  };
-  const auto x_to_frame = [&](float x) noexcept {
-    return time_axis_.frame(x, graph.x);
-  };
 
   // The rows this frame lists, from the operator's twirls and search.
-  RowList built = build_rows(
+  p.built = build_rows(
       rows_state_,
       RowsInput{elements, lanes, surfaces, effects, keyframes,
                 timeline.show_frame, search_, anchor},
       ctx.theme());
-  std::vector<Row> &rows = built.rows;
-  const std::vector<doc::NodeId> &visible_order = built.visible_order;
 
-  const auto capture_layer_drag = [&](doc::NodeId grabbed) {
-    layer_drag_nodes_.clear();
-    if (!selected(grabbed, selection)) {
-      layer_drag_nodes_.push_back(grabbed);
+
+  return true;
+}
+
+std::string TimelinePanel::timecode(Pass &p, core::u64 value) {
+  const EditorTimeline &timeline = p.input.timeline;
+
+  if (ruler_frames_) {
+    return std::to_string(value);
+  }
+  return format_timecode(value, timeline.rate_numerator,
+                         timeline.rate_denominator);
+}
+
+std::optional<std::size_t>
+TimelinePanel::marker_index(Pass &p, doc::NodeId id) {
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    if (markers[index].id == id) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
+void TimelinePanel::capture_layer_drag(Pass &p, doc::NodeId grabbed) {
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  const std::vector<doc::NodeId> &visible_order = p.built.visible_order;
+
+  layer_drag_nodes_.clear();
+  if (!selected(grabbed, selection)) {
+    layer_drag_nodes_.push_back(grabbed);
+    return;
+  }
+  const auto append_selected = [&](doc::NodeId node) {
+    if (!selected(node, selection)) {
       return;
     }
-    const auto append_selected = [&](doc::NodeId node) {
-      if (!selected(node, selection)) {
-        return;
-      }
-      const ElementInfo *const element = find_element(elements, node);
-      const bool layer = element != nullptr && !element->locked &&
-                         (orderable_layer(*element) ||
-                          element->kind == ElementKind::Track);
-      const bool track = std::any_of(lanes.begin(), lanes.end(),
-          [&](const scene::TimelineLane &lane) {
-            return !lane.implicit && !lane.locked && lane.id == node;
-          });
-      if ((layer || track) &&
-          std::find(layer_drag_nodes_.begin(), layer_drag_nodes_.end(), node) ==
-              layer_drag_nodes_.end()) {
-        layer_drag_nodes_.push_back(node);
-      }
-    };
-    for (const doc::NodeId node : visible_order) {
-      append_selected(node);
-    }
-    // A collapsed parent does not remove its children from selection.
-    for (const ElementInfo &element : elements) {
-      append_selected(element.node);
+    const ElementInfo *const element = find_element(elements, node);
+    const bool layer = element != nullptr && !element->locked &&
+                       (orderable_layer(*element) ||
+                        element->kind == ElementKind::Track);
+    const bool track = std::any_of(lanes.begin(), lanes.end(),
+        [&](const scene::TimelineLane &lane) {
+          return !lane.implicit && !lane.locked && lane.id == node;
+        });
+    if ((layer || track) &&
+        std::find(layer_drag_nodes_.begin(), layer_drag_nodes_.end(), node) ==
+            layer_drag_nodes_.end()) {
+      layer_drag_nodes_.push_back(node);
     }
   };
+  for (const doc::NodeId node : visible_order) {
+    append_selected(node);
+  }
+  // A collapsed parent does not remove its children from selection.
+  for (const ElementInfo &element : elements) {
+    append_selected(element.node);
+  }
+}
+
+void TimelinePanel::prune_key_selection(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const scene::EffectInstance> effects = p.input.effects;
+  const std::span<const output::ProjectionSurface> surfaces = p.input.surfaces;
 
   const auto target_locked = [&](doc::NodeId target) noexcept {
     if (const ElementInfo *const element = find_element(elements, target)) {
@@ -601,22 +606,38 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     drag_delta_ = 0;
     snap_guide_.reset();
   }
-  const auto selected_addresses = [&] {
-    std::vector<TimelineKeyAddress> addresses;
-    addresses.reserve(selected_keys_.size());
-    for (const SelectedKey &key : selected_keys_) {
-      addresses.push_back(
-          TimelineKeyAddress{key.target, key.component, key.frame});
-    }
-    std::sort(addresses.begin(), addresses.end());
-    addresses.erase(std::unique(addresses.begin(), addresses.end()),
-                    addresses.end());
-    return addresses;
+
+}
+
+std::vector<TimelineKeyAddress> TimelinePanel::selected_addresses() const {
+  std::vector<TimelineKeyAddress> addresses;
+  addresses.reserve(selected_keys_.size());
+  for (const SelectedKey &key : selected_keys_) {
+    addresses.push_back(
+        TimelineKeyAddress{key.target, key.component, key.frame});
+  }
+  std::sort(addresses.begin(), addresses.end());
+  addresses.erase(std::unique(addresses.begin(), addresses.end()),
+                  addresses.end());
+  return addresses;
+}
+
+void TimelinePanel::navigate(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &bounds = p.bounds;
+  const gui::Rect &ruler = p.layout.ruler;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  std::vector<Row> &rows = p.built.rows;
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
   };
 
-  const float content_height = static_cast<float>(rows.size()) * row_height;
-  const float maximum_row_scroll =
+  p.content_height = static_cast<float>(rows.size()) * row_height;
+  auto &content_height = p.content_height;
+  p.maximum_row_scroll =
       std::max(content_height - rows_bounds.height, 0.0F);
+  auto &maximum_row_scroll = p.maximum_row_scroll;
 
   // Wheel gestures have the compositor convention: over the graph, wheel
   // zooms about the pointer and Shift+wheel pans. In curve mode Alt+wheel
@@ -706,28 +727,18 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       static_cast<double>(std::numeric_limits<core::i64>::max() / 4));
   row_scroll_ = std::clamp(row_scroll_, 0.0F, maximum_row_scroll);
 
+}
+
+void TimelinePanel::request_derivatives(Pass &p) {
+  const std::span<const ElementInfo> elements = p.input.elements;
+  TimelinePanelFrame &frame = p.frame;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  std::vector<Row> &rows = p.built.rows;
+
   // The panel owns visibility, so it is the only layer that can truthfully
   // distinguish visible work from adjacent-row prefetch. Keys are still
   // deduplicated by full derivative identity: two clips borrowing one Asset
   // revision schedule and retain one atlas.
-  const auto filmstrip_for_clip = [&](doc::NodeId clip) noexcept
-      -> const TimelineFilmstripObservation * {
-    const auto found = std::find_if(
-        filmstrips.begin(), filmstrips.end(),
-        [clip](const TimelineFilmstripObservation &observation) noexcept {
-          return observation.clip == clip;
-        });
-    return found != filmstrips.end() ? std::addressof(*found) : nullptr;
-  };
-  const auto waveform_for_clip = [&](doc::NodeId clip) noexcept
-      -> const TimelineWaveformObservation * {
-    const auto found = std::find_if(
-        waveforms.begin(), waveforms.end(),
-        [clip](const TimelineWaveformObservation &observation) noexcept {
-          return observation.clip == clip;
-        });
-    return found != waveforms.end() ? std::addressof(*found) : nullptr;
-  };
   TimelineFilmstripRetainIntent &filmstrip_retain = *frame.filmstrip_retain;
   const auto append_filmstrip_candidate =
       [&](const TimelineFilmstripObservation &observation,
@@ -800,11 +811,11 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     const ElementInfo *const element = find_element(elements, row.node);
     const TimelineFilmstripObservation *const observation =
         element != nullptr && element->timing.placed()
-            ? filmstrip_for_clip(row.node)
+            ? filmstrip_for_clip(p, row.node)
             : nullptr;
     const TimelineWaveformObservation *const waveform =
         element != nullptr && element->timing.placed()
-            ? waveform_for_clip(row.node)
+            ? waveform_for_clip(p, row.node)
             : nullptr;
     if (observation == nullptr && waveform == nullptr) {
       continue;
@@ -839,481 +850,60 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     }
   }
 
-  // ---------------------------------------------------------------------
-  // Toolbar. Left to right: transport, where the show is, its rate, the
-  // pointer tools, view toggles, and the two things the timeline creates at
-  // the playhead. GO and the cue arm sit hard against the right edge, where a
-  // hand running a live show finds them without reading; exact In/Out entry
-  // takes the space between when there is room for it.
+}
+
+const TimelineFilmstripObservation *
+TimelinePanel::filmstrip_for_clip(Pass &p, doc::NodeId clip) noexcept {
+  const std::span<const TimelineFilmstripObservation> filmstrips = p.input.filmstrips;
+
+  const auto found = std::find_if(
+      filmstrips.begin(), filmstrips.end(),
+      [clip](const TimelineFilmstripObservation &observation) noexcept {
+        return observation.clip == clip;
+      });
+  return found != filmstrips.end() ? std::addressof(*found) : nullptr;
+}
+
+const TimelineWaveformObservation *
+TimelinePanel::waveform_for_clip(Pass &p, doc::NodeId clip) noexcept {
+  const std::span<const TimelineWaveformObservation> waveforms = p.input.waveforms;
+
+  const auto found = std::find_if(
+      waveforms.begin(), waveforms.end(),
+      [clip](const TimelineWaveformObservation &observation) noexcept {
+        return observation.clip == clip;
+      });
+  return found != waveforms.end() ? std::addressof(*found) : nullptr;
+}
+
+void TimelinePanel::draw_ruler(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &bounds = p.bounds;
+  const EditorTimeline &timeline = p.input.timeline;
+  TimelinePanelFrame &frame = p.frame;
+  const float &list_width = p.layout.list_width;
+  const gui::Rect &ruler = p.layout.ruler;
+  const gui::Rect &strip = p.layout.strip;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
   const gui::Theme &theme = ctx.theme();
-  ctx.panel(toolbar, theme.header);
-  ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
-                      toolbar.width, 1.0F},
-            theme.divider);
-  const float control_y = toolbar.y + 6.0F;
-  constexpr float button_height = 22.0F;
-  const bool show_key_tools = !keyframes.empty() || !selected_keys_.empty();
-
-  float right_x = toolbar.x + toolbar.width - 6.0F;
-  gui::Rect go_button{};
-  gui::Rect armed_button{};
-  if (any_cue) {
-    go_button = gui::Rect{right_x - 100.0F, control_y, 100.0F, button_height};
-    armed_button = gui::Rect{go_button.x - 4.0F - icon_button_width,
-                             control_y, icon_button_width, button_height};
-    right_x = armed_button.x - 8.0F;
-  }
-  // Everything left of the marker group, measured from the panel's edge.
-  const float left_extent = show_key_tools ? 740.0F : 692.0F;
-  constexpr float range_field_width = 96.0F;
-  const bool show_range =
-      right_x - (toolbar.x + left_extent) >= range_field_width * 2.0F + 12.0F;
-  gui::Rect in_field{};
-  gui::Rect out_field{};
-  if (show_range) {
-    out_field = gui::Rect{right_x - range_field_width, control_y,
-                          range_field_width, button_height};
-    in_field = gui::Rect{out_field.x - 4.0F - range_field_width, control_y,
-                         range_field_width, button_height};
-    right_x = in_field.x - 8.0F;
-  }
-  const auto fits = [&](float x, float width) noexcept {
-    return x + width <= right_x;
-  };
-
-  // A time field: drag sideways to scrub a frame per pixel, click to type a
-  // timecode or a frame count. Reports a value on every frame a drag changes
-  // it, and once when typed text is committed.
-  const auto time_field = [&](gui::UiId id, const gui::Rect &field,
-                              std::string_view caption, core::u64 value,
-                              core::u64 maximum,
-                              gui::UiColor color) -> std::optional<core::u64> {
-    const gui::UiId text_id = mix(id, "text");
-    std::optional<core::u64> result;
-    if (time_edit_id_ == id) {
-      static_cast<void>(ctx.text_field(text_id, field, time_draft_));
-      if (ctx.focus() != text_id) {
-        // Enter, Tab, or a press elsewhere commits; Escape has already put
-        // the original text back, which parses to the value unchanged.
-        if (const auto parsed =
-                parse_timecode(time_draft_, timeline.rate_numerator,
-                               timeline.rate_denominator, value);
-            parsed.has_value() && std::min(*parsed, maximum) != value) {
-          result = std::min(*parsed, maximum);
-        }
-        time_edit_id_ = gui::UiId{};
-        time_draft_.clear();
-      }
-      return result;
-    }
-    const gui::Interaction interaction = ctx.grab(id, field);
-    if (interaction.pressed) {
-      time_drag_id_ = id;
-      time_drag_start_x_ = ctx.pointer_press_x();
-      time_drag_origin_ = value;
-      time_drag_moved_ = false;
-    }
-    if (time_drag_id_ == id && interaction.held) {
-      const float dx = ctx.pointer_x() - time_drag_start_x_;
-      time_drag_moved_ = time_drag_moved_ || std::fabs(dx) >= 3.0F;
-      if (time_drag_moved_) {
-        const core::i64 moved =
-            signed_frame(time_drag_origin_) + std::llround(dx);
-        const core::u64 next = static_cast<core::u64>(std::clamp<core::i64>(
-            moved, 0, signed_frame(maximum)));
-        if (next != value) {
-          result = next;
-        }
-      }
-      if (interaction.released) {
-        if (!time_drag_moved_ && interaction.clicked) {
-          time_edit_id_ = id;
-          time_draft_ = timecode(value);
-          ctx.focus_text_field(text_id, time_draft_);
-        }
-        time_drag_id_ = gui::UiId{};
-        time_drag_moved_ = false;
-      }
-    }
-    ctx.panel(field, interaction.hovered ? theme.widget_hover : theme.track);
-    ctx.panel(gui::Rect{field.x, field.y, 2.0F, field.height}, color);
-    float text_x = field.x + 8.0F;
-    if (!caption.empty()) {
-      ctx.label(gui::Rect{text_x, field.y, 28.0F, field.height}, caption,
-                theme.text_muted);
-      text_x += ctx.font_width(caption) + 6.0F;
-    }
-    ctx.label(gui::Rect{text_x, field.y,
-                        std::max(field.x + field.width - text_x - 2.0F, 0.0F),
-                        field.height},
-              timecode(value), color);
-    ctx.tooltip(field, "Drag to scrub, click to type a timecode or frame");
-    return result;
-  };
-
-  float bar_x = toolbar.x + 6.0F;
-  const auto transport_icon = [&](std::string_view name, float width,
-                                  gui::Icon icon, TransportRequest request,
-                                  std::string_view tip, bool engaged = false) {
-    if (fits(bar_x, width) &&
-        icon_button(ctx, mix(id_, name),
-                    gui::Rect{bar_x, control_y, width, button_height}, icon,
-                    engaged, tip, theme.playhead)) {
-      frame.transport = request;
-    }
-    bar_x += width + 2.0F;
-  };
-  transport_icon("to start", icon_button_width, gui::Icon::ToStart,
-                 TransportRequest::GoToStart, "Go to In (Home)");
-  transport_icon("step back", icon_button_width, gui::Icon::StepBack,
-                 TransportRequest::StepBack,
-                 "Back one frame (Left), one second (Shift+Left)");
-  transport_icon("play", 30.0F,
-                 timeline.playing ? gui::Icon::Pause : gui::Icon::Play,
-                 TransportRequest::TogglePlay, "Play / Pause (Space)",
-                 timeline.playing);
-  transport_icon("step forward", icon_button_width, gui::Icon::StepForward,
-                 TransportRequest::StepForward,
-                 "Forward one frame (Right), one second (Shift+Right)");
-  transport_icon("to end", icon_button_width, gui::Icon::ToEnd,
-                 TransportRequest::GoToEnd, "Go to Out (End)");
-  bar_x += 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "loop"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Loop, timeline.loop,
-                  "Loop the In/Out range", theme.accent)) {
-    frame.range = RangeRequest{first, last, !timeline.loop};
-  }
-  bar_x += icon_button_width + 8.0F;
-
-  // Where the Stage playhead is. Typing a time goes there; dragging scrubs.
-  constexpr float readout_width = 110.0F;
-  if (fits(bar_x, readout_width)) {
-    if (const auto moved = time_field(
-            mix(id_, "playhead time"),
-            gui::Rect{bar_x, control_y, readout_width, button_height}, {},
-            timeline.show_frame, std::max(last, timeline.show_frame),
-            theme.playhead)) {
-      frame.seek_to_frame = std::clamp(*moved, first, last);
-    }
-  }
-  bar_x += readout_width + 4.0F;
-
-  constexpr float rate_width = 70.0F;
-  gui::Rect rate_button{};
-  gui::Rect rate_popup{};
-  if (fits(bar_x, rate_width)) {
-    rate_button = gui::Rect{bar_x, control_y, rate_width, button_height};
-    if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
-      rate_menu_open_ = !rate_menu_open_;
-      key_tools_open_ = false;
-    }
-    constexpr float popup_width = 104.0F;
-    constexpr float choice_height = 21.0F;
-    rate_popup = gui::Rect{rate_button.x, toolbar.y + toolbar.height - 2.0F,
-                           popup_width,
-                           8.0F + choice_height *
-                                      static_cast<float>(common_rates.size())};
-    if (rate_menu_open_ && ctx.pointer_pressed() &&
-        !rate_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-        !rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-      rate_menu_open_ = false;
-    }
-    if (rate_menu_open_ &&
-        rate_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-      // Process and draw the menu after the timeline. Until then, mask
-      // the graph underneath it so choosing a rate cannot also scrub.
-      ctx.push_pointer_block();
-      scratch.popup_pointer_blocked = true;
-    }
-  } else {
-    rate_menu_open_ = false;
-  }
-  bar_x += rate_width + 4.0F;
-
-  // The pointer tools. Each acts on the clip it is pressed on.
-  struct ToolChoice final {
-    TimelineEditTool tool;
-    gui::Icon icon;
-    std::string_view name;
-    std::string_view tip;
-  };
-  constexpr std::array<ToolChoice, 6U> tool_choices{{
-      {TimelineEditTool::Standard, gui::Icon::Select, "tool select",
-       "Selection: move, trim and fade clips (V)"},
-      {TimelineEditTool::RippleTrim, gui::Icon::Ripple, "tool ripple",
-       "Ripple Trim: trim an edge and pull what follows along (B)"},
-      {TimelineEditTool::Roll, gui::Icon::Roll, "tool roll",
-       "Roll: move the cut between two butted clips (N)"},
-      {TimelineEditTool::Slip, gui::Icon::Slip, "tool slip",
-       "Slip: change the source frames a clip shows (Y)"},
-      {TimelineEditTool::Slide, gui::Icon::Slide, "tool slide",
-       "Slide: move a clip between its neighbours (U)"},
-      {TimelineEditTool::Razor, gui::Icon::Razor, "tool razor",
-       "Razor: cut a clip where clicked; Shift cuts every track (C)"},
-  }};
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
-  for (const ToolChoice &choice : tool_choices) {
-    // The enlarged marks still fit the existing width, keeping transport and
-    // editing controls reachable at the same compact panel sizes.
-    constexpr float tool_width = icon_button_width;
-    constexpr float tool_height = button_height * edit_tool_scale;
-    if (fits(bar_x, tool_width) &&
-        icon_button(ctx, mix(id_, choice.name),
-                    gui::Rect{bar_x, toolbar.y + (toolbar.height - tool_height) * 0.5F,
-                              tool_width, tool_height},
-                    choice.icon, edit_tool_ == choice.tool, choice.tip,
-                    theme.accent, edit_tool_scale)) {
-      edit_tool_ = choice.tool;
-    }
-    bar_x += tool_width + 2.0F;
-  }
-  bar_x += 2.0F;
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
-
-  const auto zoom_to_fit = [&]() noexcept {
-    const double span =
-        std::max(static_cast<double>(last) - static_cast<double>(first), 1.0);
-    time_axis_.fit(static_cast<double>(first), span, graph.width);
-  };
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "snap"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Snap, snapping_,
-                  "Snapping to the playhead, cuts, keys and markers (S)",
-                  theme.accent)) {
-    snapping_ = !snapping_;
-  }
-  bar_x += icon_button_width + 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "fit"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Fit, false, "Zoom to fit the range (\\)",
-                  theme.accent)) {
-    zoom_to_fit();
-  }
-  bar_x += icon_button_width + 2.0F;
-  constexpr float curves_width = 52.0F;
-  if (fits(bar_x, curves_width) &&
-      text_toggle(ctx, mix(id_, "graph mode"),
-                  gui::Rect{bar_x, control_y, curves_width, button_height},
-                  "Curves", graph_mode_,
-                  "Draw animated values as curves instead of keys")) {
-    graph_mode_ = !graph_mode_;
-  }
-  bar_x += curves_width + 2.0F;
-
-  // Key selection tools live behind one button, shown only when there is
-  // animation to use them on.
-  constexpr float keys_width = 46.0F;
-  gui::Rect key_tools_button{};
-  if (show_key_tools && fits(bar_x, keys_width)) {
-    key_tools_button = gui::Rect{bar_x, control_y, keys_width, button_height};
-    if (text_toggle(ctx, mix(id_, "key tools"), key_tools_button, "Keys",
-                    key_tools_open_,
-                    "Key selection, value and time-scale tools")) {
-      key_tools_open_ = !key_tools_open_;
-      rate_menu_open_ = false;
-      if (!key_tools_open_) {
-        scale_open_ = false;
-      }
-    }
-    bar_x += keys_width + 2.0F;
-  } else {
-    key_tools_open_ = false;
-    scale_open_ = false;
-  }
-  const float key_popup_width = std::min(338.0F, bounds.width);
-  const gui::Rect key_tools_popup{
-      std::clamp(key_tools_button.x, bounds.x,
-                 std::max(bounds.x, bounds.x + bounds.width - key_popup_width)),
-      toolbar.y + toolbar.height - 2.0F, key_popup_width, 224.0F};
-  const gui::UiId scale_numerator_id = mix(id_, "scale numerator");
-  const gui::UiId scale_denominator_id = mix(id_, "scale denominator");
-  const gui::UiId scale_user_anchor_id = mix(id_, "scale user anchor");
-  if (key_tools_open_ && ctx.pointer_pressed() &&
-      !key_tools_button.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-      !key_tools_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    if (ctx.focus() == scale_numerator_id ||
-        ctx.focus() == scale_denominator_id ||
-        ctx.focus() == scale_user_anchor_id) {
-      ctx.clear_focus();
-    }
-    key_tools_open_ = false;
-    scale_open_ = false;
-  }
-  if (key_tools_open_ &&
-      key_tools_popup.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    ctx.push_pointer_block();
-    scratch.key_popup_pointer_blocked = true;
-  }
-  bar_x += 2.0F;
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
-
-  // New markers take the next number and a colour that says what they are:
-  // plain markers green, holds red, loops purple. The operator recolours and
-  // renames from the marker itself.
-  const auto create_marker = [&](core::i64 at, scene::CueAction cue) {
-    TimelineMarkerEdit edit{};
-    edit.action = TimelineMarkerAction::Create;
-    edit.marker.frame = std::max<core::i64>(at, 0);
-    edit.marker.cue = cue;
-    if (cue == scene::CueAction::None) {
-      const auto plain = static_cast<std::size_t>(std::count_if(
-          markers.begin(), markers.end(),
-          [](const scene::TimelineMarker &marker) noexcept {
-            return !marker.is_cue();
-          }));
-      edit.marker.name = "Marker " + std::to_string(plain + 1U);
-      edit.marker.color = 3U;
-    } else {
-      edit.marker.color = cue == scene::CueAction::Hold ? 0U : 6U;
-    }
-    frame.marker_edits.push_back(std::move(edit));
-  };
-  // The playhead an operator just put somewhere is where the next key acts,
-  // even before the Director's answer has come back round: a click on the
-  // ruler followed at once by Q must cue the frame clicked, not the one the
-  // playhead was leaving.
-  if (requested_playhead_.has_value() &&
-      (timeline.show_frame == *requested_playhead_ || timeline.playing ||
-       requested_playhead_frames_ == 0U)) {
-    requested_playhead_.reset();
-  } else if (requested_playhead_.has_value()) {
-    --requested_playhead_frames_;
-  }
-  const core::u64 acting_frame =
-      requested_playhead_.value_or(timeline.show_frame);
-  const core::i64 playhead = signed_frame(acting_frame);
-  // Snapping pulls onto the playhead the operator can see.
-  const core::i64 shown_playhead = signed_frame(timeline.show_frame);
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "add marker"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Marker, false, "Add a marker at the playhead (M)",
-                  theme.accent)) {
-    create_marker(playhead, scene::CueAction::None);
-  }
-  bar_x += icon_button_width + 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "add cue"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Hold, false,
-                  "Add a hold cue at the playhead (Q); Shift+Q adds a loop",
-                  theme.accent)) {
-    create_marker(playhead, scene::CueAction::Hold);
-  }
-  bar_x += icon_button_width + 2.0F;
-
-  if (show_range) {
-    if (const auto entered = time_field(mix(id_, "range first"), in_field,
-                                        "IN", first, last, theme.text)) {
-      frame.range = RangeRequest{*entered, std::max(last, *entered),
-                                 timeline.loop};
-    }
-    if (const auto entered =
-            time_field(mix(id_, "range last"), out_field, "OUT", last,
-                       static_cast<core::u64>(
-                           std::numeric_limits<core::i64>::max()),
-                       theme.text)) {
-      frame.range = RangeRequest{std::min(first, *entered), *entered,
-                                 timeline.loop};
-    }
-  }
-
-  // The cue being acted on, and the one GO reaches next.
-  const auto cue_label = [&](doc::NodeId id) {
-    std::string label;
-    if (const auto index = marker_index(id); index.has_value()) {
-      label = cue_tag(cue_numbers[*index]);
-      if (!markers[*index].name.empty()) {
-        label += ' ';
-        label += markers[*index].name;
-      }
-    }
-    return label;
-  };
-  const auto seconds_label = [&](core::u64 frames) {
-    const double rate =
-        static_cast<double>(timeline.rate_numerator) /
-        static_cast<double>(std::max(timeline.rate_denominator, 1U));
-    std::array<char, 32U> text{};
-    const int length = std::snprintf(
-        text.data(), text.size(), "%.1fs",
-        rate > 0.0 ? static_cast<double>(frames) / rate : 0.0);
-    return std::string{text.data(),
-                       static_cast<std::size_t>(std::max(length, 0))};
-  };
-  if (any_cue) {
-    if (icon_button(ctx, mix(id_, "cues armed"), armed_button, gui::Icon::Hold,
-                    timeline.cues_armed,
-                    timeline.cues_armed
-                        ? "Cues armed: the show stops and loops on cues"
-                        : "Cues off: the show plays straight through them",
-                    timeline_marker_color(0U))) {
-      frame.cues_armed = !timeline.cues_armed;
-    }
-    // GO does something when the show is held, looping, or stopped short of
-    // a cue; while it runs towards one, the button counts down instead.
-    const bool running = timeline.playing && timeline.looping_cue == doc::NodeId{};
-    const gui::Interaction go = ctx.grab(mix(id_, "go"), go_button);
-    if (go.clicked) {
-      frame.transport = TransportRequest::Go;
-    }
-    const gui::UiColor go_color =
-        timeline.held_cue != doc::NodeId{} ? theme.playhead : theme.good;
-    ctx.panel(go_button,
-              running ? (go.hovered ? theme.widget_hover : theme.widget)
-                      : alpha(go_color,
-                              (go.held && !go.released)
-                                  ? 0.55F
-                                  : (go.hovered ? 0.40F : 0.28F)));
-    if (!running) {
-      draw_border(ctx, go_button, go_color);
-    }
-    std::string go_text;
-    if (running) {
-      go_text = timeline.next_cue != doc::NodeId{}
-                    ? cue_tag(cue_numbers[marker_index(timeline.next_cue)
-                                              .value_or(0U)]) +
-                          " in " +
-                          seconds_label(timeline.frames_to_next_cue.value_or(0U))
-                    : "RUNNING";
-    } else if (timeline.looping_cue != doc::NodeId{}) {
-      go_text = "GO  release";
-    } else if (timeline.next_cue != doc::NodeId{}) {
-      go_text = "GO  " + cue_tag(cue_numbers[marker_index(timeline.next_cue)
-                                                 .value_or(0U)]);
-    } else {
-      go_text = "GO";
-    }
-    ctx.label(gui::Rect{go_button.x + 9.0F, go_button.y,
-                        go_button.width - 12.0F, go_button.height},
-              go_text, running ? theme.text_muted : theme.text);
-    ctx.tooltip(go_button,
-                "GO (Enter): run from a hold, release a loop, or play to the "
-                "next cue");
-  }
-
-  // A track that went away under the panel takes its selection with it.
-  if (selected_lane_ != doc::NodeId{} &&
-      std::none_of(lanes.begin(), lanes.end(),
-                   [&](const scene::TimelineLane &lane) {
-                     return !lane.implicit && lane.id == selected_lane_;
-                   })) {
-    selected_lane_ = doc::NodeId{};
-    lane_destination_ = doc::NodeId{};
-  }
+  auto &first = p.first;
+  auto &last = p.last;
+  auto &fps = p.fps;
+  auto &shown_playhead = p.shown_playhead;
 
   // ---------------------------------------------------------------------
   // The ruler. Its left end heads the layer list: search, and a new track.
   // Over the graph it reads in timecode, carries the In/Out range as a bar
   // with a handle at each end, and scrubs everywhere else.
-  const gui::UiId search_id = mix(id_, "search");
+  p.search_id = mix(id_, "search");
+  auto &search_id = p.search_id;
   ctx.panel(ruler, theme.header);
   ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
             theme.row_alt);
@@ -1377,48 +967,16 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
 
   // Edit points: where a cut, a range end, or a marker sits. Snapping and
   // Up/Down navigation share the one list.
-  const auto edit_points = [&](doc::NodeId exclude_clip,
-                               bool include_markers) {
-    std::vector<core::i64> points{first_i, last_i + 1};
-    for (const ElementInfo &element : elements) {
-      if (element.node == exclude_clip || element.kind != ElementKind::Media ||
-          !element.timing.placed()) {
-        continue;
-      }
-      points.push_back(element.timing.start);
-      points.push_back(element.timing.start + element.timing.duration);
-    }
-    if (include_markers) {
-      for (const scene::TimelineMarker &marker : markers) {
-        if (std::find(selected_markers_.begin(), selected_markers_.end(),
-                      marker.id) == selected_markers_.end() ||
-            marker_drag_ == doc::NodeId{}) {
-          points.push_back(marker.frame);
-        }
-      }
-    }
-    return points;
-  };
-  const core::i64 snap_tolerance = static_cast<core::i64>(std::max(
+  p.snap_tolerance = static_cast<core::i64>(std::max(
       1.0, std::ceil(8.0 / static_cast<double>(time_axis_.pixels_per_frame))));
+  auto &snap_tolerance = p.snap_tolerance;
   // Where a razor pressed at `px` cuts: the frame under it, pulled onto the
   // playhead, a marker, or another cut when snapping.
-  const auto razor_frame = [&](float px) {
-    core::i64 cut = static_cast<core::i64>(std::llround(x_to_frame(px)));
-    if (snapping_ && !ctx.alt_held()) {
-      std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
-      targets.push_back(shown_playhead);
-      if (const auto snapped = nearest_snap(cut, targets, snap_tolerance)) {
-        cut = *snapped;
-      }
-    }
-    return cut;
-  };
 
   ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
   {
     const float minimum_spacing =
-        std::max(76.0F, ctx.font_width(timecode(last)) + 14.0F);
+        std::max(76.0F, ctx.font_width(timecode(p, last)) + 14.0F);
     const core::i64 step =
         ruler_frames_ ? ruler_step(time_axis_.pixels_per_frame)
                       : timecode_step(time_axis_.pixels_per_frame, fps, minimum_spacing);
@@ -1455,16 +1013,18 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       ctx.label(gui::Rect{tick_x + 4.0F, ruler.y, minimum_spacing,
                           ruler.height - 5.0F},
                 tick < 0
-                    ? "-" + timecode(static_cast<core::u64>(-tick))
-                    : timecode(static_cast<core::u64>(tick)), theme.text_muted);
+                    ? "-" + timecode(p, static_cast<core::u64>(-tick))
+                    : timecode(p, static_cast<core::u64>(tick)), theme.text_muted);
     }
   }
   ctx.pop_clip();
 
   // The range bar and its handles. A handle drag previews locally and
   // reports once, on release, like every other drag here.
-  core::u64 shown_first = first;
-  core::u64 shown_last = last;
+  p.shown_first = first;
+  auto &shown_first = p.shown_first;
+  p.shown_last = last;
+  auto &shown_last = p.shown_last;
   {
     // Each handle sits on the frame it names, where the playhead stands on
     // that frame, so a fitted view shows both.
@@ -1489,7 +1049,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       core::i64 wanted =
           static_cast<core::i64>(std::llround(x_to_frame(ctx.pointer_x())));
       if (snapping_ && !ctx.alt_held()) {
-        std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
+        std::vector<core::i64> targets = edit_points(p, doc::NodeId{}, true);
         targets.push_back(shown_playhead);
         if (range_drag_ == RangeHandle::Out) {
           // A clip's exclusive end is the frame after its last; Out lands on
@@ -1550,6 +1110,82 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
   }
 
+}
+
+std::vector<core::i64>
+TimelinePanel::edit_points(Pass &p,
+                           doc::NodeId exclude_clip,
+                           bool include_markers) {
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  auto &first_i = p.first_i;
+  auto &last_i = p.last_i;
+
+  std::vector<core::i64> points{first_i, last_i + 1};
+  for (const ElementInfo &element : elements) {
+    if (element.node == exclude_clip || element.kind != ElementKind::Media ||
+        !element.timing.placed()) {
+      continue;
+    }
+    points.push_back(element.timing.start);
+    points.push_back(element.timing.start + element.timing.duration);
+  }
+  if (include_markers) {
+    for (const scene::TimelineMarker &marker : markers) {
+      if (std::find(selected_markers_.begin(), selected_markers_.end(),
+                    marker.id) == selected_markers_.end() ||
+          marker_drag_ == doc::NodeId{}) {
+        points.push_back(marker.frame);
+      }
+    }
+  }
+  return points;
+}
+
+core::i64 TimelinePanel::razor_frame(Pass &p, float px) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &graph = p.layout.graph;
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  auto &shown_playhead = p.shown_playhead;
+  auto &snap_tolerance = p.snap_tolerance;
+
+  core::i64 cut = static_cast<core::i64>(std::llround(x_to_frame(px)));
+  if (snapping_ && !ctx.alt_held()) {
+    std::vector<core::i64> targets = edit_points(p, doc::NodeId{}, true);
+    targets.push_back(shown_playhead);
+    if (const auto snapped = nearest_snap(cut, targets, snap_tolerance)) {
+      cut = *snapped;
+    }
+  }
+  return cut;
+}
+
+void TimelinePanel::draw_marker_strip(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const float &list_width = p.layout.list_width;
+  const gui::Rect &strip = p.layout.strip;
+  const gui::Rect &graph = p.layout.graph;
+  const gui::Rect &strip_graph = p.layout.strip_graph;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  const gui::Theme &theme = ctx.theme();
+  auto &first = p.first;
+  auto &last = p.last;
+  auto &cue_numbers = p.cue_numbers;
+  auto &any_cue = p.any_cue;
+  auto &shown_playhead = p.shown_playhead;
+  auto &snap_tolerance = p.snap_tolerance;
+
   // ---------------------------------------------------------------------
   // The marker strip. Its list end reports where the show stands against
   // its cues; over the graph each marker is a flag and each cue a numbered
@@ -1566,18 +1202,18 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     if (!timeline.cues_armed) {
       status = "CUES OFF";
     } else if (timeline.held_cue != doc::NodeId{}) {
-      status = "HOLD  " + cue_label(timeline.held_cue);
+      status = "HOLD  " + cue_label(p, timeline.held_cue);
       status_color = theme.playhead;
     } else if (timeline.looping_cue != doc::NodeId{}) {
-      status = "LOOP  " + cue_label(timeline.looping_cue);
+      status = "LOOP  " + cue_label(p, timeline.looping_cue);
       if (timeline.frames_to_loop_restart.has_value()) {
-        status += "  again in " + seconds_label(*timeline.frames_to_loop_restart);
+        status += "  again in " + seconds_label(p, *timeline.frames_to_loop_restart);
       }
       status_color = theme.accent;
     } else if (timeline.next_cue != doc::NodeId{}) {
-      status = "NEXT  " + cue_label(timeline.next_cue);
+      status = "NEXT  " + cue_label(p, timeline.next_cue);
       if (timeline.playing && timeline.frames_to_next_cue.has_value()) {
-        status += "  " + seconds_label(*timeline.frames_to_next_cue);
+        status += "  " + seconds_label(p, *timeline.frames_to_next_cue);
       }
       status_color = theme.text;
     }
@@ -1587,14 +1223,6 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   }
 
   // Where each marker draws this frame: a drag previews from the panel.
-  const auto shown_marker_frame = [&](const scene::TimelineMarker &marker) {
-    if (marker_drag_moved_ &&
-        std::find(selected_markers_.begin(), selected_markers_.end(),
-                  marker.id) != selected_markers_.end()) {
-      return std::max<core::i64>(marker.frame + marker_drag_delta_, 0);
-    }
-    return marker.frame;
-  };
   struct MarkerHit final {
     std::size_t index{};
     gui::Rect bounds{};
@@ -1641,7 +1269,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         marker_snap_guide_.reset();
         const scene::TimelineMarker &dragged = markers[hit->index];
         if (snapping_ && !ctx.alt_held()) {
-          std::vector<core::i64> targets = edit_points(doc::NodeId{}, true);
+          std::vector<core::i64> targets = edit_points(p, doc::NodeId{}, true);
           targets.push_back(shown_playhead);
           if (const auto snapped =
                   nearest_snap(dragged.frame + delta, targets, snap_tolerance)) {
@@ -1651,7 +1279,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         }
         // No selected marker may pass frame zero.
         for (const doc::NodeId id : selected_markers_) {
-          if (const auto moving = marker_index(id)) {
+          if (const auto moving = marker_index(p, id)) {
             delta = std::max(delta, -markers[*moving].frame);
           }
         }
@@ -1661,7 +1289,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       if (interaction.released) {
         if (marker_drag_moved_ && marker_drag_delta_ != 0) {
           for (const doc::NodeId id : selected_markers_) {
-            if (const auto moving = marker_index(id)) {
+            if (const auto moving = marker_index(p, id)) {
               TimelineMarkerEdit edit{TimelineMarkerAction::Update,
                                       markers[*moving]};
               edit.marker.frame += marker_drag_delta_;
@@ -1740,7 +1368,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     if (now >= strip_click_time_ &&
         now - strip_click_time_ <= double_click_seconds &&
         std::fabs(ctx.pointer_x() - strip_click_x_) <= 4.0F) {
-      create_marker(
+      create_marker(p, 
           static_cast<core::i64>(rounded_frame(x_to_frame(ctx.pointer_x()),
                                                0U, std::max(last, first))),
           scene::CueAction::None);
@@ -1864,7 +1492,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                           : "Marker ";
     tip += label;
     tip += " at ";
-    tip += timecode(static_cast<core::u64>(std::max<core::i64>(marker.frame, 0)));
+    tip += timecode(p, static_cast<core::u64>(std::max<core::i64>(marker.frame, 0)));
     if (marker.cue == scene::CueAction::Loop) {
       if (marker.loop_wait_ms != 0U) {
         tip += ", waits " + format_cue_seconds(marker.loop_wait_ms);
@@ -1883,7 +1511,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
 
   // The inline name field sits on its marker's tag.
   if (marker_name_node_ != doc::NodeId{}) {
-    if (const auto index = marker_index(marker_name_node_)) {
+    if (const auto index = marker_index(p, marker_name_node_)) {
       const gui::UiId name_id =
           mix(id_, "marker name", marker_name_node_.value());
       const float field_x = std::clamp(
@@ -1909,71 +1537,28 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     }
   }
 
+}
+
+core::i64
+TimelinePanel::shown_marker_frame(const scene::TimelineMarker &marker) const {
+  if (marker_drag_moved_ &&
+      std::find(selected_markers_.begin(), selected_markers_.end(),
+                marker.id) != selected_markers_.end()) {
+    return std::max<core::i64>(marker.frame + marker_drag_delta_, 0);
+  }
+  return marker.frame;
+}
+
+void TimelinePanel::track_key_drag(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+
   // A selected key drag follows time even when the pointer wanders into
   // another lane. Every selected diamond shares one delta, and any one of
   // them may magnetise to the playhead, range edges, or an unselected key.
   snap_guide_.reset();
-  const auto update_key_drag = [&] {
-    if (!dragging_key_) {
-      return;
-    }
-    const core::i64 pointer_frame =
-        signed_frame(rounded_frame(x_to_frame(gesture_x), first, last));
-    core::i64 proposed_delta = pointer_frame - drag_anchor_frame_;
-
-    core::i64 earliest = drag_anchor_frame_;
-    core::i64 latest = drag_anchor_frame_;
-    for (const SelectedKey &key : drag_keys_) {
-      earliest = std::min(earliest, key.frame);
-      latest = std::max(latest, key.frame);
-    }
-    proposed_delta =
-        std::clamp(proposed_delta, first_i - earliest, last_i - latest);
-
-    if (snapping_ && !duplicate_drag_ && !ctx.alt_held() &&
-        !drag_keys_.empty()) {
-      float best_distance = snap_distance + 1.0F;
-      core::i64 best_adjustment = 0;
-      std::optional<core::i64> best_target;
-      const auto consider = [&](core::i64 moving, core::i64 target) noexcept {
-        const core::i64 adjustment = target - moving;
-        const float distance =
-            std::fabs(static_cast<float>(adjustment) * time_axis_.pixels_per_frame);
-        if (distance <= snap_distance && distance < best_distance) {
-          best_distance = distance;
-          best_adjustment = adjustment;
-          best_target = target;
-        }
-      };
-
-      for (const SelectedKey &moving : drag_keys_) {
-        const core::i64 proposed = moving.frame + proposed_delta;
-        consider(proposed, signed_frame(timeline.show_frame));
-        consider(proposed, first_i);
-        consider(proposed, last_i);
-        for (const scene::TimelineMarker &marker : markers) {
-          consider(proposed, marker.frame);
-        }
-        for (const scene::ChannelKeyframes &channel : keyframes) {
-          for (const core::i64 candidate : channel.frames) {
-            const SelectedKey identity{channel.target, channel.component,
-                                       candidate};
-            if (std::find(drag_keys_.begin(), drag_keys_.end(), identity) ==
-                drag_keys_.end()) {
-              consider(proposed, candidate);
-            }
-          }
-        }
-      }
-      if (best_target.has_value()) {
-        proposed_delta = std::clamp(proposed_delta + best_adjustment,
-                                    first_i - earliest, last_i - latest);
-        snap_guide_ = best_target;
-      }
-    }
-    drag_delta_ = proposed_delta;
-  };
-  update_key_drag();
+  update_key_drag(p);
 
   if (marquee_tracking_ && ctx.pointer_down()) {
     const float travel = std::fabs(ctx.pointer_x() - marquee_start_x_) +
@@ -1996,6 +1581,98 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       }
     }
   }
+
+}
+
+void TimelinePanel::update_key_drag(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  const gui::Rect &graph = p.layout.graph;
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  auto &gesture_x = p.gesture_x;
+  auto &first = p.first;
+  auto &last = p.last;
+  auto &first_i = p.first_i;
+  auto &last_i = p.last_i;
+
+  if (!dragging_key_) {
+    return;
+  }
+  const core::i64 pointer_frame =
+      signed_frame(rounded_frame(x_to_frame(gesture_x), first, last));
+  core::i64 proposed_delta = pointer_frame - drag_anchor_frame_;
+
+  core::i64 earliest = drag_anchor_frame_;
+  core::i64 latest = drag_anchor_frame_;
+  for (const SelectedKey &key : drag_keys_) {
+    earliest = std::min(earliest, key.frame);
+    latest = std::max(latest, key.frame);
+  }
+  proposed_delta =
+      std::clamp(proposed_delta, first_i - earliest, last_i - latest);
+
+  if (snapping_ && !duplicate_drag_ && !ctx.alt_held() &&
+      !drag_keys_.empty()) {
+    float best_distance = snap_distance + 1.0F;
+    core::i64 best_adjustment = 0;
+    std::optional<core::i64> best_target;
+    const auto consider = [&](core::i64 moving, core::i64 target) noexcept {
+      const core::i64 adjustment = target - moving;
+      const float distance =
+          std::fabs(static_cast<float>(adjustment) * time_axis_.pixels_per_frame);
+      if (distance <= snap_distance && distance < best_distance) {
+        best_distance = distance;
+        best_adjustment = adjustment;
+        best_target = target;
+      }
+    };
+
+    for (const SelectedKey &moving : drag_keys_) {
+      const core::i64 proposed = moving.frame + proposed_delta;
+      consider(proposed, signed_frame(timeline.show_frame));
+      consider(proposed, first_i);
+      consider(proposed, last_i);
+      for (const scene::TimelineMarker &marker : markers) {
+        consider(proposed, marker.frame);
+      }
+      for (const scene::ChannelKeyframes &channel : keyframes) {
+        for (const core::i64 candidate : channel.frames) {
+          const SelectedKey identity{channel.target, channel.component,
+                                     candidate};
+          if (std::find(drag_keys_.begin(), drag_keys_.end(), identity) ==
+              drag_keys_.end()) {
+            consider(proposed, candidate);
+          }
+        }
+      }
+    }
+    if (best_target.has_value()) {
+      proposed_delta = std::clamp(proposed_delta + best_adjustment,
+                                  first_i - earliest, last_i - latest);
+      snap_guide_ = best_target;
+    }
+  }
+  drag_delta_ = proposed_delta;
+}
+
+void TimelinePanel::resolve_clip_gesture(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  TimelinePanelFrame &frame = p.frame;
+  const gui::Rect &graph = p.layout.graph;
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  auto &gesture_x = p.gesture_x;
+  auto &gesture_y = p.gesture_y;
+  auto &first_i = p.first_i;
+  auto &last_i = p.last_i;
 
   // Every boundary a clip gesture may land on: the show range, the playhead,
   // and the ends of every other clip. Butt-joining two clips and cutting on
@@ -2023,32 +1700,6 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   // outside every band. Locked tracks are not destinations. Keeping this
   // resolver independent of the graph lets the same gesture begin on a media
   // row when its bar is short or off screen.
-  const auto clip_lane_under_pointer = [&](float pointer_y) -> std::optional<doc::NodeId> {
-    if (pointer_y < rows_bounds.y ||
-        pointer_y >= rows_bounds.y + rows_bounds.height) {
-      return std::nullopt;
-    }
-    const float local = pointer_y - rows_bounds.y + row_scroll_;
-    if (local < 0.0F) {
-      return std::nullopt;
-    }
-    const auto row_index = static_cast<std::size_t>(local / row_height);
-    const doc::NodeId target =
-        row_index < rows.size() && rows[row_index].lane_member
-            ? rows[row_index].lane_owner
-            : doc::NodeId{};
-    if (target == doc::NodeId{}) {
-      return target;
-    }
-    const auto lane = std::find_if(
-        lanes.begin(), lanes.end(), [&](const scene::TimelineLane &candidate) {
-          return !candidate.implicit && candidate.id == target;
-        });
-    if (lane == lanes.end() || lane->locked) {
-      return std::nullopt;
-    }
-    return target;
-  };
 
   if (pending_clip_edit_.has_value()) {
     const ElementInfo *const target =
@@ -2068,10 +1719,11 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     clip_drag_moved_ = clip_drag_moved_ ||
                        dx * dx + dy * dy >= lane_drag_threshold_squared;
   }
-  const bool clip_drag_active =
+  p.clip_drag_active =
       clip_drag_ != ClipDrag::None && clip_drag_moved_;
+  auto &clip_drag_active = p.clip_drag_active;
   if (clip_drag_ == ClipDrag::Move) {
-    clip_drop_lane_ = clip_drag_active ? clip_lane_under_pointer(clip_pointer.y)
+    clip_drop_lane_ = clip_drag_active ? clip_lane_under_pointer(p, clip_pointer.y)
                                        : std::optional<doc::NodeId>{};
   }
 
@@ -2383,17 +2035,56 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   }
 
 
+}
+
+std::optional<doc::NodeId>
+TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  std::vector<Row> &rows = p.built.rows;
+
+  if (pointer_y < rows_bounds.y ||
+      pointer_y >= rows_bounds.y + rows_bounds.height) {
+    return std::nullopt;
+  }
+  const float local = pointer_y - rows_bounds.y + row_scroll_;
+  if (local < 0.0F) {
+    return std::nullopt;
+  }
+  const auto row_index = static_cast<std::size_t>(local / row_height);
+  const doc::NodeId target =
+      row_index < rows.size() && rows[row_index].lane_member
+          ? rows[row_index].lane_owner
+          : doc::NodeId{};
+  if (target == doc::NodeId{}) {
+    return target;
+  }
+  const auto lane = std::find_if(
+      lanes.begin(), lanes.end(), [&](const scene::TimelineLane &candidate) {
+        return !candidate.implicit && candidate.id == target;
+      });
+  if (lane == lanes.end() || lane->locked) {
+    return std::nullopt;
+  }
+  return target;
+}
+
+void TimelinePanel::resolve_reorder_targets(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  std::vector<Row> &rows = p.built.rows;
+  auto &gesture_y = p.gesture_y;
+  auto &clip_drag_active = p.clip_drag_active;
+
   // Track reordering deliberately mirrors the Feed Mapping surface drop:
   // movement lifts the source, every complete track band is a target, and the
   // document changes only once the pointer is released. A band includes its
   // clips and expanded property rows, so there are no narrow dead zones.
-  struct LaneDropTarget final {
-    doc::NodeId lane{};
-    gui::Rect bounds{};
-    std::string_view label;
-    bool locked{};
-  };
-  std::vector<LaneDropTarget> lane_drop_targets;
+  auto &lane_drop_targets = p.lane_drop_targets;
   lane_drop_targets.reserve(lanes.size());
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     if (rows[index].kind != Row::Kind::LaneHeader) {
@@ -2461,7 +2152,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     lane_drag_moved_ = lane_drag_moved_ ||
                        dx * dx + dy * dy >= lane_drag_threshold_squared;
   }
-  const bool lane_drag_active =
+  p.lane_drag_active =
       lane_drag_node_ != doc::NodeId{} && lane_drag_moved_;
 
   if (layer_drag_node_ != doc::NodeId{} && ctx.pointer_down()) {
@@ -2479,7 +2170,8 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   // separate prevents a reorder from looking like nesting.
   scratch.clip_move_feedback =
       clip_drag_active && clip_drag_ == ClipDrag::Move;
-  const LaneDropTarget *clip_drop_hovered = nullptr;
+  p.clip_drop_hovered = nullptr;
+  auto &clip_drop_hovered = p.clip_drop_hovered;
   if (scratch.clip_move_feedback && clip_drop_lane_.has_value() &&
       *clip_drop_lane_ != doc::NodeId{}) {
     const auto target = std::find_if(
@@ -2510,7 +2202,8 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   };
 
   const LayerDropTarget *layer_drop_hovered = nullptr;
-  const LaneDropTarget *layer_lane_hovered = nullptr;
+  p.layer_lane_hovered = nullptr;
+  auto &layer_lane_hovered = p.layer_lane_hovered;
   bool layer_drop_committed{};
   if (layer_drag_node_ != doc::NodeId{}) {
     const ElementInfo *const source =
@@ -2529,7 +2222,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         std::optional<doc::NodeId> assignment;
         if (source->kind == ElementKind::Media &&
             rows_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-          assignment = clip_lane_under_pointer(gesture_y);
+          assignment = clip_lane_under_pointer(p, gesture_y);
           if (assignment.has_value() && *assignment != source->timeline_lane) {
             scratch.layer_assignment_feedback = true;
             if (*assignment != doc::NodeId{}) {
@@ -2591,6 +2284,35 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       }
     }
   }
+
+}
+
+void TimelinePanel::draw_rows(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  const std::span<const output::ProjectionSurface> surfaces = p.input.surfaces;
+  const doc::NodeId selected_surface = p.input.selected_surface;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const float &list_width = p.layout.list_width;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  std::vector<Row> &rows = p.built.rows;
+  const std::vector<doc::NodeId> &visible_order = p.built.visible_order;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  auto &first = p.first;
+  auto &last = p.last;
+  auto &first_i = p.first_i;
+  auto &last_i = p.last_i;
+  auto &anchor = p.anchor;
 
   std::vector<std::size_t> track_numbers(rows.size(), 0U);
   {
@@ -2962,7 +2684,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                            interaction_height});
     if (label_it.pressed && row.kind == Row::Kind::LaneHeader && !row.locked) {
       lane_drag_node_ = row.node;
-      capture_layer_drag(row.node);
+      capture_layer_drag(p, row.node);
       lane_drag_start_x_ = ctx.pointer_press_x();
       lane_drag_start_y_ = ctx.pointer_press_y();
       lane_drag_moved_ = false;
@@ -2978,7 +2700,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         duplicate_drag_ = false;
         layer_drag_node_ = row.node;
         const bool preserve_selection = selected(row.node, selection);
-        capture_layer_drag(row.node);
+        capture_layer_drag(p, row.node);
         layer_drag_start_x_ = ctx.pointer_press_x();
         layer_drag_start_y_ = ctx.pointer_press_y();
         layer_drag_moved_ = false;
@@ -3122,7 +2844,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       ctx.panel(clip_bar, alpha(row.color, live ? 0.42F : 0.30F));
       bool drew_filmstrip = false;
       if (const TimelineFilmstripObservation *const observation =
-              filmstrip_for_clip(row.node);
+              filmstrip_for_clip(p, row.node);
           observation != nullptr &&
           observation->state == assets::DerivativeState::Ready &&
           observation->texture != nullptr) {
@@ -3205,7 +2927,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         drew_filmstrip = true;
       }
       if (const TimelineWaveformObservation *const waveform =
-              waveform_for_clip(row.node);
+              waveform_for_clip(p, row.node);
           waveform != nullptr &&
           waveform->state == assets::DerivativeState::Ready &&
           waveform->bins.size() == assets::waveform_peak_rms_bins &&
@@ -3352,7 +3074,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         const float px = ctx.pointer_x();
         if (edit_tool_ == TimelineEditTool::Razor) {
           const float cut_x =
-              frame_to_x(static_cast<double>(razor_frame(px)));
+              frame_to_x(static_cast<double>(razor_frame(p, px)));
           ctx.panel(gui::Rect{cut_x - 0.5F, clip_bar.y - 2.0F, 1.5F,
                               clip_bar.height + 4.0F},
                     ctx.theme().warning);
@@ -3597,7 +3319,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                              clip_bar.contains(press_x, press_y);
     if (razor_press) {
       clip_press_consumed_ = true;
-      const core::i64 cut = razor_frame(press_x);
+      const core::i64 cut = razor_frame(p, press_x);
       for (const ElementInfo &element : elements) {
         if (!editable_clip(element) ||
             (element.node != row.node && !ctx.shift_held())) {
@@ -3857,6 +3579,16 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     }
   }
 
+}
+
+void TimelinePanel::resolve_track_drop(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  auto &lane_drop_targets = p.lane_drop_targets;
+  auto &lane_drag_active = p.lane_drag_active;
+
   // Resolve the track drop after every band has been drawn. Reordering is an
   // insertion between peers, never a drop into a peer, so the only destination
   // feedback is the exact landing edge. Crossing several tracks still reports
@@ -3926,6 +3658,14 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       lane_drag_moved_ = false;
     }
   }
+
+}
+
+void TimelinePanel::finish_marquee(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
 
   if (marquee_tracking_ && marquee_active_ && ctx.pointer_down()) {
     ctx.push_clip(rows_bounds);
@@ -4006,6 +3746,25 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     marquee_base_.clear();
     lasso_points_.clear();
   }
+
+}
+
+void TimelinePanel::draw_time_overlays(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &bounds = p.bounds;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  const gui::Rect &ruler = p.layout.ruler;
+  const gui::Rect &strip = p.layout.strip;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  auto &content_height = p.content_height;
+  auto &maximum_row_scroll = p.maximum_row_scroll;
+  auto &shown_first = p.shown_first;
+  auto &shown_last = p.shown_last;
 
   // Over the rows: what lies outside the In/Out range is dimmed rather than
   // hidden, cues and markers run their line down through the clips they are
@@ -4092,12 +3851,18 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     ctx.pop_clip();
   }
 
+}
+
+void TimelinePanel::commit_key_drag(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  TimelinePanelFrame &frame = p.frame;
+
   // Commit the complete selection once, on release. Moving positive time is
   // authored from the last key backwards (and negative time first-key
   // forwards), preventing one destination from hiding another source key in
   // the same channel while the batch is applied.
   if (dragging_key_ && !ctx.pointer_down()) {
-    update_key_drag();
+    update_key_drag(p);
     if (drag_delta_ != 0) {
       TimelineKeyBatchEdit batch{};
       batch.action = duplicate_drag_ ? TimelineKeyBatchAction::Duplicate
@@ -4119,6 +3884,24 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     drag_delta_ = 0;
     snap_guide_.reset();
   }
+
+}
+
+void TimelinePanel::draw_key_tools(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
+  const std::optional<TimelineKeyScalePreview> &key_scale_preview =
+      p.input.key_scale_preview;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &graph = p.layout.graph;
+  auto &first_i = p.first_i;
+  auto &last_i = p.last_i;
+  auto &key_tools_popup = p.key_tools_popup;
+  auto &scale_numerator_id = p.scale_numerator_id;
+  auto &scale_denominator_id = p.scale_denominator_id;
+  auto &scale_user_anchor_id = p.scale_user_anchor_id;
 
   if (scratch.key_popup_pointer_blocked) {
     ctx.pop_pointer_block();
@@ -4407,43 +4190,22 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       }
     }
   }
-  if (scratch.popup_pointer_blocked) {
-    ctx.pop_pointer_block();
-  }
-  if (rate_menu_open_) {
-    ctx.panel(rate_popup, ctx.theme().background);
-    ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, rate_popup.width, 1.0F},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, 1.0F, rate_popup.height},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{rate_popup.x + rate_popup.width - 1.0F, rate_popup.y,
-                        1.0F, rate_popup.height},
-              ctx.theme().divider);
-    float choice_y = rate_popup.y + 4.0F;
-    for (std::size_t index = 0U; index < common_rates.size(); ++index) {
-      const RateChoice &choice = common_rates[index];
-      const gui::Rect row{rate_popup.x + 4.0F, choice_y,
-                          rate_popup.width - 8.0F, 21.0F};
-      const gui::Interaction interaction =
-          ctx.grab(mix(id_, "show rate choice", index), row);
-      ctx.panel(row, same_rate(timeline, choice.rate)
-                         ? ctx.theme().selection
-                         : (interaction.hovered ? ctx.theme().widget_hover
-                                                : ctx.theme().row));
-      ctx.label(gui::Rect{row.x + 7.0F, row.y, std::max(row.width - 7.0F, 0.0F),
-                          row.height},
-                choice.label,
-                same_rate(timeline, choice.rate) ? ctx.theme().text
-                                                 : ctx.theme().text_muted);
-      if (interaction.clicked) {
-        if (!same_rate(timeline, choice.rate)) {
-          frame.show_rate = choice.rate;
-        }
-        rate_menu_open_ = false;
-      }
-      choice_y += 21.0F;
-    }
-  }
+}
+
+void TimelinePanel::draw_drag_feedback(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &bounds = p.bounds;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  auto &lane_drop_targets = p.lane_drop_targets;
+  auto &clip_drop_hovered = p.clip_drop_hovered;
+  auto &layer_lane_hovered = p.layer_lane_hovered;
 
   // Drag feedback is the panel's final visual layer, just as it is in Feed
   // Mapping. The playhead, filmstrips, scroll thumb, and popups therefore
@@ -4595,6 +4357,43 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                                                : ctx.theme().text);
   }
 
+}
+
+void TimelinePanel::handle_actions(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  const std::span<const doc::NodeId> selection = p.input.selection;
+  const std::span<const scene::EffectInstance> effects = p.input.effects;
+  const std::span<const scene::TimelineLane> lanes = p.input.lanes;
+  const std::span<const scene::TimelineMarker> markers = p.input.markers;
+  const std::optional<core::i64> &clipboard_span = p.input.clipboard_span;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &ruler = p.layout.ruler;
+  const gui::Rect &graph = p.layout.graph;
+  const gui::Rect &strip_graph = p.layout.strip_graph;
+  std::vector<Row> &rows = p.built.rows;
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  const auto x_to_frame = [&](float x) noexcept {
+    return time_axis_.frame(x, graph.x);
+  };
+  auto &typing_at_start = p.typing_at_start;
+  auto &first = p.first;
+  auto &last = p.last;
+  auto &selected_clips = p.selected_clips;
+  auto &clip_selection_valid = p.clip_selection_valid;
+  auto &target_lane = p.target_lane;
+  auto &paste_ready = p.paste_ready;
+  auto &scale_numerator_id = p.scale_numerator_id;
+  auto &scale_denominator_id = p.scale_denominator_id;
+  auto &scale_user_anchor_id = p.scale_user_anchor_id;
+  auto &acting_frame = p.acting_frame;
+  auto &playhead = p.playhead;
+  auto &search_id = p.search_id;
+
   // Choosing a layer, clip, or track leaves the marker domain, so Delete and
   // the menus aim at what was just chosen.
   if (frame.selection.has_value()) {
@@ -4737,7 +4536,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     }
   };
   const auto update_marker = [&](doc::NodeId id, auto &&change) {
-    if (const auto index = marker_index(id)) {
+    if (const auto index = marker_index(p, id)) {
       TimelineMarkerEdit edit{TimelineMarkerAction::Update, markers[*index]};
       change(edit.marker);
       if (edit.marker != markers[*index]) {
@@ -4747,14 +4546,14 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   };
   const auto delete_markers = [&](std::span<const doc::NodeId> ids) {
     for (const doc::NodeId id : ids) {
-      if (const auto index = marker_index(id)) {
+      if (const auto index = marker_index(p, id)) {
         frame.marker_edits.push_back(
             TimelineMarkerEdit{TimelineMarkerAction::Delete, markers[*index]});
       }
     }
   };
   const auto open_marker_name = [&](doc::NodeId id) {
-    if (const auto index = marker_index(id)) {
+    if (const auto index = marker_index(p, id)) {
       marker_name_node_ = id;
       marker_name_draft_ = markers[*index].name;
       ctx.focus_text_field(mix(id_, "marker name", id.value()),
@@ -5010,13 +4809,13 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
             TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
         break;
       case MenuCommand::AddMarker:
-        create_marker(entry.frame, scene::CueAction::None);
+        create_marker(p, entry.frame, scene::CueAction::None);
         break;
       case MenuCommand::AddHoldCue:
-        create_marker(entry.frame, scene::CueAction::Hold);
+        create_marker(p, entry.frame, scene::CueAction::Hold);
         break;
       case MenuCommand::AddLoopCue:
-        create_marker(entry.frame, scene::CueAction::Loop);
+        create_marker(p, entry.frame, scene::CueAction::Loop);
         break;
       case MenuCommand::SetIn:
         set_in(static_cast<core::u64>(std::max<core::i64>(entry.frame, 0)));
@@ -5025,7 +4824,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         set_out(static_cast<core::u64>(std::max<core::i64>(entry.frame, 0)));
         break;
       case MenuCommand::ZoomFit:
-        zoom_to_fit();
+        zoom_to_fit(p);
         break;
       case MenuCommand::ToggleRulerUnits:
         ruler_frames_ = !ruler_frames_;
@@ -5055,7 +4854,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         });
         break;
       case MenuCommand::GoToMarker:
-        if (const auto index = marker_index(entry.node)) {
+        if (const auto index = marker_index(p, entry.node)) {
           frame.seek_to_frame = std::clamp(
               static_cast<core::u64>(
                   std::max<core::i64>(markers[*index].frame, 0)),
@@ -5103,7 +4902,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
       // Previous or next edit point: a cut, a range end, or a marker.
       const bool forward = ctx.key_pressed(gui::Key::Down);
       std::optional<core::i64> target;
-      for (const core::i64 point : edit_points(doc::NodeId{}, true)) {
+      for (const core::i64 point : edit_points(p, doc::NodeId{}, true)) {
         if (forward ? point > playhead : point < playhead) {
           if (!target.has_value() ||
               (forward ? point < *target : point > *target)) {
@@ -5179,15 +4978,15 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
           selected_markers_.assign(1U, here->id);
           open_marker_name(here->id);
         } else {
-          create_marker(playhead, scene::CueAction::None);
+          create_marker(p, playhead, scene::CueAction::None);
         }
         break;
       }
       case 'q':
-        create_marker(playhead, scene::CueAction::Hold);
+        create_marker(p, playhead, scene::CueAction::Hold);
         break;
       case 'Q':
-        create_marker(playhead, scene::CueAction::Loop);
+        create_marker(p, playhead, scene::CueAction::Loop);
         break;
       case 's':
       case 'S':
@@ -5222,7 +5021,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
         edit_tool_ = TimelineEditTool::Razor;
         break;
       case '\\':
-        zoom_to_fit();
+        zoom_to_fit(p);
         break;
       case '=':
       case '+':
@@ -5278,6 +5077,15 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
     frame.key_batch = std::move(batch);
     frame.consume_delete = true;
   }
+}
+
+void TimelinePanel::close_pass(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  TimelinePanelFrame &frame = p.frame;
+  FrameScratch &scratch = p.scratch;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+
   if (!ctx.pointer_down()) {
     clip_press_consumed_ = false;
   }
@@ -5304,7 +5112,6 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                                                : gui::Cursor::ResizeHorizontal);
     }
   }
-  return frame;
 }
 
 } // namespace mediaserver::editor

@@ -770,4 +770,112 @@ struct RowsInput final {
 [[nodiscard]] RowList build_rows(RowsState &state, const RowsInput &input,
                                  const gui::Theme &theme);
 
+// A track band a clip or layer drag can land in.
+struct LaneDropTarget final {
+  doc::NodeId lane{};
+  gui::Rect bounds{};
+  std::string_view label;
+  bool locked{};
+};
+
 } // namespace mediaserver::editor::timeline
+
+namespace mediaserver::editor {
+
+struct TimelinePanel::FrameScratch final {
+  // Unlocked keys as drawn this frame, for the marquee and lasso to test.
+  struct VisibleKeyPoint final {
+    SelectedKey key;
+    float x{};
+    float y{};
+  };
+  std::vector<VisibleKeyPoint> visible_keys;
+  // What a right press landed on, for the context menu built after the rows.
+  std::optional<std::size_t> right_row;
+  std::optional<std::size_t> right_marker;
+  // The layer drag that ended this frame, so the row it began on does not
+  // also take the release as a click.
+  doc::NodeId released_layer_drag_node{};
+  bool released_layer_drag_moved{};
+  // Drag feedback, resolved with the targets and drawn over everything.
+  bool layer_drag_active{};
+  bool clip_move_feedback{};
+  std::string clip_drag_label;
+  std::optional<float> layer_drop_landing_y;
+  std::string layer_drag_label{"LAYER"};
+  bool layer_assignment_feedback{};
+  std::optional<float> lane_drop_landing_y;
+  std::string lane_drag_label{"TRACK"};
+  bool lane_drag_feedback{};
+  // An open popup masks the pointer for what lies under it.
+  bool popup_pointer_blocked{};
+  bool key_popup_pointer_blocked{};
+};
+
+// One draw of the panel. Each section of TimelinePanel::draw() reads what the
+// sections before it settled here and adds what later ones need; nothing in
+// it outlives the frame.
+struct TimelinePanel::Pass final {
+  Pass(gui::UiContext &context, const gui::Rect &panel_bounds,
+       const TimelineDrawInput &draw_input) noexcept
+      : ctx(context), bounds(panel_bounds), input(draw_input) {}
+
+  gui::UiContext &ctx;
+  const gui::Rect &bounds;
+  const TimelineDrawInput &input;
+  TimelinePanelFrame frame;
+  FrameScratch scratch;
+
+  // Where the pointer gesture is, as of this frame's input.
+  float gesture_x{};
+  float gesture_y{};
+  bool typing_at_start{};
+
+  // The show range, the selection's anchor and its clip-edit context.
+  core::u64 first{};
+  core::u64 last{};
+  core::i64 first_i{};
+  core::i64 last_i{};
+  doc::NodeId anchor{};
+  std::vector<const ElementInfo *> selected_clips;
+  bool clip_selection_valid{};
+  std::optional<doc::NodeId> target_lane;
+  bool paste_ready{};
+
+  timeline::TimelineLayout layout;
+  core::u64 fps{};
+  // Each marker's number among the cues alone, zero for a plain marker.
+  std::vector<std::size_t> cue_numbers;
+  bool any_cue{};
+  timeline::RowList built;
+  float content_height{};
+  float maximum_row_scroll{};
+
+  // Settled by the toolbar: its popups' bounds and field ids, and the
+  // playhead the next key acts on and the one snapping pulls onto.
+  gui::Rect rate_popup{};
+  gui::Rect key_tools_popup{};
+  gui::UiId scale_numerator_id{};
+  gui::UiId scale_denominator_id{};
+  gui::UiId scale_user_anchor_id{};
+  core::u64 acting_frame{};
+  core::i64 playhead{};
+  core::i64 shown_playhead{};
+
+  // Settled by the ruler: the search field, the snap reach in frames, and
+  // the In/Out range as a handle drag currently shows it.
+  gui::UiId search_id{};
+  core::i64 snap_tolerance{};
+  core::u64 shown_first{};
+  core::u64 shown_last{};
+
+  // Drop targets for a clip, layer or track drag, resolved before the rows
+  // draw and outlined after them.
+  bool clip_drag_active{};
+  std::vector<timeline::LaneDropTarget> lane_drop_targets;
+  bool lane_drag_active{};
+  const timeline::LaneDropTarget *clip_drop_hovered{};
+  const timeline::LaneDropTarget *layer_lane_hovered{};
+};
+
+} // namespace mediaserver::editor
