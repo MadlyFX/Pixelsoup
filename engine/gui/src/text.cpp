@@ -69,6 +69,16 @@ FontAtlas FontAtlas::empty(float line_height, float ascent) {
     return atlas;
 }
 
+FontAtlas FontAtlas::placeholder(float line_height, float ascent) {
+    FontAtlas atlas = empty(line_height, ascent);
+    for (int code = 32; code < 127; ++code) {
+        const float u = static_cast<float>(code) / 128.0F;
+        atlas.glyphs_.emplace(static_cast<char>(code),
+                              Glyph{u, 0.0F, u, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F});
+    }
+    return atlas;
+}
+
 std::optional<FontAtlas> FontAtlas::create(
     std::string_view font_path, core::u32 pixel_height, float scale) {
     if (!std::isfinite(scale) || scale <= 0.0F) {

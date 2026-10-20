@@ -1,0 +1,99 @@
+# TimelinePanel characterization digests. Regenerate only for an
+# intended visual or behavioural change:
+#   mediaserver_editor_timeline_golden_tests --record <this file>
+6bcdbbe68da2b2e6	30	tool cursors follow selection and captured gestures	de1eb3fb,de1eb3fb,de1eb3fb,de1eb3fb,da1983f8,da1983f8,aa0a6ee7,aa0a6ee7,2d547cbf,2d547cbf,66cf4fa3,66cf4fa3,ecd9254e,ecd9254e,8ccf1cd3,8ccf1cd3,635f2e01,635f2e01,840ec437,840ec437,745b1832,aba98c26,9e582ebd,9e582ebd,4a5f7919,dacc8b46,b4373995,a1823961,e93c25d6,8e77f5f1
+416bc32be4e0547c	6	extreme imported timing is refused visibly and cannot overflow snapping	27fdc91f,53cfe75a,ba95bfd5,72eb096f,f4561554,74c92e94
+40be5bbde076e840	6	clips move across zero and past Out without trimming source	f7b70375,832f133a,90981f64,f7b70375,832f133a,334cb295
+0b7a64f0558c3bc7	12	negative workspace supports picking and signed razor cuts	025b047e,025b047e,8fb6fffc,8fb6fffc,5ddc118d,59b8078d,877ab513,57fbecf4,a3e7444e,b00537a8,a3e7444e,ce12a695
+d7af2c27128d642d	9	head trim converts source rate and wraps before zero	112cebd8,6818dac7,4cb13a96,112cebd8,6818dac7,470d1f34,112cebd8,6818dac7,b7d6c39d
+1f2d00b0114bd6e8	31	Slip wraps looping sources and keeps feedback after release	286fce68,90a0a1ef,286fce68,4a5f7919,d7c5f261,b3c5c13c,215ea89c,286fce68,90a0a1ef,286fce68,4a5f7919,fb3e6c53,9235e59b,76cfe77e,286fce68,90a0a1ef,286fce68,4a5f7919,fb3e6c53,973a37fc,76cfe77e,286fce68,90a0a1ef,286fce68,4a5f7919,5a1e691a,a812cac8,69046c8f,a812cac8,dfe2c091,44734a36
+6b51e0af7abe6519	10	Slip explains invalid metadata and single frame media	286fce68,90a0a1ef,286fce68,4a5f7919,3d3f5dd6,286fce68,90a0a1ef,286fce68,4a5f7919,23dd918f
+1a6587c1718ba1c8	12	looping filmstrip preview changes source and stays bounded	f07e7460,2b410417,f07e7460,0d592ebb,8f85a598,c41d0294,0f0fb897,0f0fb897,0f0fb897,0f0fb897,7d745ac5,d1761348
+9ca32bbd396c344b	12	timeline camera keys preserve cubic evaluated values	4248a34e,8f27a247,4248a34e,718d4b9a,3a5f5230,d25a8733,a1d54e37,1731489a,a1d54e37,0b0d77d6,db14d790,1749a88f
+73034297eaa7dd9f	27	clip and key releases ignore later uncaptured motion	f7b70375,832f133a,293891ea,de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,f795ad00,f7b70375,0059a0db,293891ea,de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,d3db1ca3
+49479773dde51a44	16	batched clip gestures keep the original press target and anchor	de1eb3fb,832f133a,fe9c606b,8b5a5153,de1eb3fb,b9518df6,a6777f0c,648666c4,de1eb3fb,f7b6aa07,fe9c606b,8b5a5153,de1eb3fb,0059a0db,a6777f0c,648666c4
+65e30e70c7c55fa5	3	fade handles accept the visible outer knobs	ea30ab98,f18cfd07,c9660183
+efe7d3d86d732bba	5	clip release uses final pointer and waits for authority	f7b70375,832f133a,fe9c606b,8b5a5153,217b5b2a
+703d98a289389e2d	8	clips move before In and workspace pans past Out	f7b70375,da17c0ec,bcae819d,de1eb3fb,e73ecb2f,345ccb38,345ccb38,b6d7ff45
+ad79b9b3fa12a378	19	auto key toggle and camera lens rows	0a6e9dd7,1ee3798b,0a6e9dd7,80a9181a,a1888c82,276180cb,a1888c82,634d8e2d,46818fce,16afe50d,27d629cd,96881cca,45b48650,3ec13f24,fa61e35e,f5e09c96,e3851efc,0192b58f,1a844cce
+f6536e3d1934d377	15	light rows key intensity colour and position	c624b176,3b79833f,c624b176,21c75732,63cae5c2,d1e6ec43,0d601230,6f273656,929b8ce6,521ee506,aaf9e8c1,7e0bdad6,37bd50cc,5a6d3b2a,4fda2575
+786a26b878672b12	8	a layer renames in place	5a452c0b,bcb55d82,e2bb66ef,5a452c0b,bcb55d82,0fe1c773,25d2f35d,662430d4
+19e45ac3001412cd	27	linked models fold into their collection and object hierarchy	df0d46f7,1fa6e9b6,6cb336a9,c252f783,b94055a6,c252f783,46ee66a0,689cb8a5,7ca73348,8b997040,ea6ac73d,8b997040,77e289e3,5d4a7109,caba7f45,472d7581,8bde6214,472d7581,df0d46f7,6d4ba95a,ed48fa4b,c252f783,b94055a6,c252f783,965db913,153a6a39,10fbff02
+ef559471128eabbc	21	parent properties fold separately and key the parent	c252f783,b94055a6,c252f783,8b997040,ea6ac73d,8b997040,cedc8aab,4cd2aa0c,cedc8aab,5742a299,f310cdd9,417a5b45,0ee05a50,6bb6a0d3,1a65180d,940bf9a5,8a507616,940bf9a5,965db913,153a6a39,10fbff02
+445da14e5d866201	18	hierarchy search reveals matching parts with parent context	04a9c339,9e2105ce,26966734,0269695a,122d367d,2bf5adb4,9be3ec8d,b68521a7,d1b04707,d2ee630d,d2ee630d,49b1234d,7c35f9c5,c7a4c1f9,8cf135b4,430e6ae6,6d4ba95a,ed48fa4b
+6fadc722d5e3d29a	10	selecting a hidden part reveals ancestors without forcing them open	54822a91,508d0b56,f71ff904,35d4a4b1,4bc81c69,2d89dbac,4bc81c69,df0d46f7,6d4ba95a,ed48fa4b
+549109639e8d6e44	15	live hierarchy updates preserve folds and project reset clears them	c252f783,b94055a6,c252f783,f5fe7e51,8b4cc2ea,08c794ef,8b997040,ea6ac73d,8b997040,b5578afc,69230b3c,574ccaf7,df0d46f7,6d4ba95a,ed48fa4b
+94503b468f71bac4	15	authored groups keep sibling order and reorder only among peers	c252f783,b94055a6,c252f783,8b997040,ea6ac73d,8b997040,17012088,469151bc,c7720477,469151bc,672d1c36,da31101d,469151bc,5579f2f0,f064c91f
+af8800e10831e136	36	environment rows key scene values and preserve animation	6519b7db,3ba0a04e,6519b7db,d68a4f62,e1423f02,26bddbff,cd8e8816,a46edc9e,f2a0b8db,3b86c27c,dfa82ec2,59dd620f,c501ab68,072368ea,e17cd0eb,1157f9d1,9f7e51da,3a9eff18,a83381fd,fc20c28e,934c2289,aa0ac2c9,c7b898b6,c43f9f9a,22d6b9d1,ceb8d3e2,c819eee6,88cb3cf5,5370546e,f732cd71,d8e5fe42,3215f250,305a5b4a,776fb674,50243804,a5aa433a
+b55686c9507b4276	18	transport controls report their action	06bd939d,b6dc6a83,4e1e29f8,fa11f295,0d67d4a3,b7adf10f,9d447816,8347a2cf,73b7596c,5de48016,2d17cb3f,4b3f6681,db6e00f5,db4a4b4b,e115bb6a,8f46550d,4d06dc57,07c89ee9
+3a86e967d8ac1d57	8	dragging a clip body moves the placement	f7b70375,832f133a,6abddefd,acee1821,f7b70375,832f133a,c4936168,f7b70375
+08212a992e308b5c	8	dragging a clip edge trims without moving the rest	033a0fde,4a2f1115,95b93ffc,3b6aaa3c,770332d7,06573101,5034347e,fb21e050
+b73661f13d16e750	4	a clip fade handle sets the head ramp	ea30ab98,f18cfd07,c75698ed,c9660183
+8b94a355a914d641	4	a clip move snaps to the playhead	f7b70375,832f133a,6eac16b8,4f5e236b
+58075f476ba29171	38	pointer tools act on the clip they are pressed on	41e50741,e2d5c1b3,41e50741,da1983f8,1cc6b92f,fa78f3eb,1963bb87,286fce68,90a0a1ef,286fce68,ecd9254e,4a5f7919,0bb8378d,a345f0c0,3efee191,2597a225,3efee191,352ecbf3,65ed82ac,e7e90af8,a1696b52,2882bd14,92146802,938c9dbd,7e2ae894,c553c47b,42d52ff3,c553c47b,58da2d68,623d7a0e,2d547cbf,3d172529,b9b9808e,3d172529,75f5ad58,55a24061,04153785,9fb9552f
+1a33e93905fc259e	10	tool keys choose the tool an editor expects	de1eb3fb,de1eb3fb,de1eb3fb,de1eb3fb,aa0a6ee7,66cf4fa3,8ccf1cd3,840ec437,9e582ebd,de1eb3fb
+51429f2223cfe507	13	the razor cuts where it lands and Shift cuts every track	f5f79088,f5f79088,f5f79088,f5f79088,d379c0af,01de4102,a6e6a3ec,40ba1b35,d379c0af,99f00977,d379c0af,8a8fedf5,5e17fe2c
+e8b0b1ddc34b06ab	30	clip menus offer only what applies to the clip	79cb470a,7c27e154,bd3f29fd,bd3f29fd,d54d336e,79cb470a,7c27e154,264a61e7,264a61e7,b9ea559c,8694bf58,d1e8d3bf,4bd044a5,4bd044a5,3f2540de,8694bf58,d1e8d3bf,1a5428ac,1a5428ac,1afa86bd,8694bf58,d1e8d3bf,f83925e8,f83925e8,0ddef3f4,fa3ce630,2b2e8228,0619c42f,0619c42f,91c7cefa
+20584fb8d6bf5194	11	the split chord and comma and period edit at the playhead	d553b7f5,d553b7f5,d553b7f5,7510d7a1,ac9a6291,04412c72,ea884b67,ea884b67,ea884b67,ea884b67,ea884b67
+a644b6910e173790	23	markers and cues are added at the playhead and where double-clicked	9c23ec20,96144c53,0dd02031,d77a0783,9a6314ff,cf371b89,de1eb3fb,de1eb3fb,de1eb3fb,cb0f26ae,e47b6fc9,211207ec,d2445ca1,b4db6920,555f0c96,7b83bb39,555f0c96,73f5181b,73f5181b,73f5181b,6ee8fb86,5e6cf0b1,3c96a554
+a8ac2df67326bad6	18	a marker is chosen, moved, renamed, and deleted on the strip	0ea48408,0948cec3,5ffc5a5d,54640b61,0948cec3,df0d022e,7c440b70,f43021c3,0948cec3,ebd2ffd8,6cf41981,0948cec3,d80a4194,556554a5,f2a0943e,8d949274,21243f01,148178ec
+6ae625b773e4d342	45	marker and ruler menus convert, recolour, and add	d08fce03,08bfa0c5,e5b3bd26,e5b3bd26,8e1c16d2,a578b537,08bfa0c5,c7f127f9,c7f127f9,a4a54d71,a578b537,08bfa0c5,424b2ff2,424b2ff2,1b37bcf2,a578b537,08bfa0c5,8fbb6f29,8fbb6f29,a796b7cd,a578b537,08bfa0c5,386e59d5,386e59d5,45ecb55e,67bb0554,bd93175a,9e3662df,9e3662df,3b58037a,c631d4a0,d7b5575d,a756e718,a756e718,8dfe18c8,c631d4a0,d7b5575d,7c7ec40a,7c7ec40a,d2f6666d,c631d4a0,d7b5575d,b19189f3,b19189f3,8f006e49
+a20599b1326c034d	17	GO and the arm follow the cues and their status	aab06e87,76830e62,c22bdd6f,0991a269,e1e0df56,ef5a0b44,659dc835,48795cea,eadfee15,6ef2a486,6ef2a486,6ef2a486,5f3c078e,7dd3f427,3ca43baf,524c23a2,191e05a5
+485c874be885cdbd	4	a clip move snaps to a marker	aff18bbb,3d3e1730,1a59f9db,036f11f1
+127195d4da89037f	7	keys act on the playhead just asked for	a09fc50a,9659f50b,1368f842,253e3c02,56952b87,77f51771,a486f317
+13610ba001bf1155	9	arrows, Home, End, and Up/Down navigate time	3d757beb,3d757beb,3d757beb,41632329,26b8ddce,3987d4ad,2aa6850c,127a50b4,a7f0e256
+f13ff0751a996f46	38	the playhead readout takes typed timecode and frames	b3068e15,6f1673ee,0d753a9d,326d2a13,99ecb1c8,b07fea5f,0225d0fe,d17b8fa0,7d764bd3,017e8d72,b950ee99,1d39eecb,47f4e828,ead7f686,648ee5e6,648ee5e6,58767e89,4b5ac8d8,b3068e15,6f1673ee,0d753a9d,99ecb1c8,b07fea5f,0225d0fe,d17b8fa0,7d764bd3,017e8d72,b950ee99,1d39eecb,47f4e828,ead7f686,648ee5e6,648ee5e6,aadb60c1,7f70f561,6f1673ee,256b7113,6df7d9f0
+cbf29ce484222325	0	timecode reads and writes the forms an operator types	
+df28bd1062e1abe1	55	track rows and toolbar emit typed lane actions	d64d4dcf,d6000b8e,91872ee2,3ffdd704,cda58229,db2c7978,8136e91d,d6a62994,0d29c002,952d5160,7b13e8f9,cc45dc99,402fde06,85f1dcb7,31175a0d,31175a0d,934d0025,402fde06,85f1dcb7,5ad51877,5ad51877,8f07f7ad,402fde06,85f1dcb7,a684f775,a684f775,6ccb1d28,b93fc983,7759e5bb,79cfca25,79cfca25,a2aff48b,c0b61d9c,80f6bb0d,1db43481,fd52dbd6,d021da40,9752fc86,52120728,494301e5,494301e5,402fde06,85f1dcb7,2e0a2e5e,2e0a2e5e,e2951e14,f3c70192,2416ffdf,402fde06,85f1dcb7,2e0a2e5e,2e0a2e5e,e2951e14,be7d7e2e,6916004d
+c431904776be89b0	12	every listed element carries its own mute and lock	5361bf7c,6555bf45,4efabe28,9b35fc33,5891713e,ac6a7e2f,219b3967,512bae5a,c6d5d7ad,a86a36de,b2c133cf,c7ade997
+f4ef716ddba20d35	14	dragging a track header reorders the stack	d64d4dcf,d6000b8e,26eedd9b,f1cea40e,b3548147,71fed452,1f2e5249,d6000b8e,d6000b8e,91872ee2,ff69a359,df1c2304,fd100b40,8f3f94e5
+f9e633d30617b401	4	a track drop crosses multiple bands in one transaction	8b27f669,f8a081ac,15f311b4,05658f36
+93265a37254470ba	4	dragging a clip across rows moves it between tracks	84e2973b,a5958242,f99bec08,a0cf51f8
+59bd750b29f832a6	4	dragging a media row moves it without hunting for its bar	9fe0b617,c316716c,c9af8d2e,307078f9
+eb93467464b466bd	4	dragging object and model rows reorders the layer stack	7a462269,c766c9b0,a5bf7721,33bd6240
+8e38a1d463463cbc	4	dragging a layer out reports one screen space drop	13487129,ae439470,3d1bc03d,845a31eb
+4c1567a33bbfdf49	4	dragging a track out reports one screen space drop	6287540f,a91f3c62,963e8af2,ea920129
+7859def9fbbe701d	8	dragging selected layers preserves the group in timeline order	5d44b283,543210a6,b372ba40,01de38ee,5ec131be,5d44b283,543210a6,0c7ae007
+51377e680104dbb5	8	layer drags exclude locked selection and reset the payload	74b77e5f,c941e0f2,d00bd645,8e1476c3,4a881d07,42ccda20,132eb236,7914f72a
+fcde69285fc22c59	10	modifier layer clicks select once per gesture	2dbb25a8,883edf40,56428ae1,895511b7,fa4e7a92,533a95c7,0a4d82d5,883edf40,56428ae1,77cc77cc
+04eba144ce591228	4	dragging selected media outside the timeline does not reassign tracks	7f3bd1ee,2e220673,0e708da3,f8cdc7c1
+9e679d60371fe5a3	9	track headers support group selection and group drops	e586b5eb,80c203ba,78620df3,34530c3c,2f93d56d,5e87e8e4,a4e0a140,cbc1f7a0,61a58c01
+ccbf830a01a19c17	4	dragging clip rows reorders clips inside one track	ed293975,aaeaf376,e4720134,88cdf3d3
+621172980401004d	4	an explicit track does not steal loose clip ordering	3e7fc850,e7fa1f77,60e01481,7364f58a
+87847a0b59e432e2	5	a locked track refuses a clip, a drop outside leaves every track	4355fa93,95b494fa,60054645,f571d9d5,c5432a48
+013ae383927704d9	4	filmstrips request exact visible keys and do not retry failures	bc8384bb,c4886bc6,c4886bc6,bc8384bb
+b5b462cc3f023439	3	waveforms request exact keys and draw only valid ready envelopes	8bdf0cc3,bd6766fa,ee0aef51
+412159c8eecd8a04	3	the ruler scrubs and clamps to the show range	a09fc50a,9659f50b,859d4187
+21a2167fa6659679	6	a layer row selects and Ctrl click toggles exactly	5a452c0b,bcb55d82,e2bb66ef,5a452c0b,734e81be,7a0e228a
+87a50d78a474e24a	3	a Shift layer click carries only visible top-level rows	a3e12297,21e9dc96,7a2e488b
+c7808881a5802567	13	physical surface rows author position and yaw keys	f5044f10,6499f4e4,a44ebdfd,6d87dcbe,0e506394,521360ed,0e506394,b49d46e9,c77e0aed,df338894,0cb5f825,d9853f7d,cf85bcb7
+35f587ac27a1c67a	10	a surface row carries its own lock	f5044f10,8c2249b9,1ca6bc30,35bf8c26,df69af65,b12463a4,f967495f,0fcca080,d51454a9,0fcca080
+cbf29ce484222325	0	surface transform edits key only animated components	
+d908c64697db35a0	8	timeline search filters scene layers and surfaces	2c8e5e40,6e377157,521a679d,52e987d1,cec4f573,bc606297,f88cd5ae,2879eac1
+2146c2cbee86bd42	6	clear emits every layer channel	31c3c3c6,c6476be2,610e00fb,3001b328,3001b328,444a90ec
+42c4c85c5259a69c	6	clear routes saturation to its first-class effect node	bec52b0b,ee22beb6,d4a45f6f,36ea3b4d,36ea3b4d,c7259b67
+6028bd12099f958e	15	spatial property rows key typed effect nodes	371b3ffb,e52dd52e,371b3ffb,0bb0ccb3,31bf874e,b4f6ea70,e83bc6a3,917508cf,0499f0ff,ec2e278f,3221d998,a518eaef,4b995aab,6bec0f74,234c4109
+9edbfa2ba6bad32a	10	range controls report loop and exact bounds	de1eb3fb,8f46550d,4d06dc57,07c89ee9,7e665c1b,8396c7da,a6cb49eb,3ca43baf,524c23a2,d5b38203
+99ad7b2d35e4bdd5	13	I and O set the range from the show frame and preserve loop	287727d8,287727d8,287727d8,e53c329a,287727d8,287727d8,287727d8,287727d8,08c91bde,de1eb3fb,de1eb3fb,de1eb3fb,de1eb3fb
+6edce4860cd23734	16	I and O keep stale playheads in a valid range	28277ce8,28277ce8,28277ce8,f4e41c89,229bc660,229bc660,229bc660,e1d6bd9b,229bc660,229bc660,229bc660,929d2381,28277ce8,28277ce8,28277ce8,33393ca5
+df2894c3d57ddea4	9	the range handles on the ruler drag In and Out	6eae321b,9a575bc2,6780c672,d55ea393,9963e86f,398803d6,3ac6acfe,516337d0,43e8c77a
+3502406dd43ebd32	54	show rate menu reports exact common rates	2627952e,6756f4f3,41301e0a,d04ec480,768f2c33,f59095fb,2627952e,6756f4f3,41301e0a,a45e7905,9f180bcf,7b5948b0,2627952e,6756f4f3,41301e0a,ecac70e1,bb680df3,ba9e14b9,2627952e,6756f4f3,41301e0a,586d63de,0f86dcf3,5fa1e119,2627952e,6756f4f3,41301e0a,df849685,a00a5983,4a6c1282,4c45b9ab,10e2d1fa,0da913a7,6b5f2d57,fff9e8c6,a24de8b8,2627952e,6756f4f3,41301e0a,c0628982,129e6813,639b1a50,2627952e,6756f4f3,41301e0a,c65042b2,d07ceb2b,be1b58bb,4c45b9ab,10e2d1fa,0da913a7,b5fe3b30,c4d64546,27eb40dd
+a808738495726e8b	13	a key drag retimes once on release	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,7f0e220a,0f782027,5b457094
+99e4580e93a75060	18	Alt drag duplicates the complete key selection	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,5b457094,3bde8ddb,0ca2ef05,0ca2ef05,8ad1e8aa,3883cdc1,74a6194f
+c06ce55bc26efedb	13	focused key selection consumes copy and paste shortcuts	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,4718243a,18504195
+9639ac824d873321	15	selecting a clip exits the key clipboard domain	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,e8096d7f,940455c2,0ba9aac6,3c851439
+7cf2f2e490d0e49a	17	modifier clicks build and trim a key selection	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,5b457094,3bde8ddb,0ca2ef05,0ca2ef05,9da10ef1,d46171cb
+d17375bc5af84da7	22	property diamonds key groups and individual channels	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,b77f0aa8,a032ce96,92d035f1,de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,479bd974,975f9f56,97477765
+8423391cec0cf6d8	16	a marquee selects keys and the group retimes together	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,5c11c382,4308cbb9,8d76693e,0ca2ef05,8ad1e8aa,2a2d748b,1f3cb82c
+4a8bbe172597901b	12	key drags snap to nearby channel keys	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,c5fd6cd1,a14aafb6
+8452553847fd60a4	12	delete erases selected keys not the whole channel	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,5450b970
+f6d0a89a83b19b06	26	lasso selection preserves add and subtract modifiers	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,40e5d5d2,9344afe5,6efc6f1c,3c9adbf1,c7682e28,3c9adbf1,392e60c3,efb23fff,892087d3,068795cd,9738900c,8d76693e,0ca2ef05,12b0e6e3,0c731688,865d3a6a,08a596bf,0ca2ef05
+b99553ab242e1cb0	29	scale requires a matching preview and emits one atomic batch	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,5b457094,3bde8ddb,0ca2ef05,df482aa5,6e57579e,ac62929e,c6c349f2,bb81caec,058e9acb,8b87b03d,8b87b03d,8b87b03d,d4732ee6,4843f4a5,97b95a1e,2442f9c9,cb4f6d15,70d6b01b
+fa06290ae6530ad2	50	curve tools fit navigate hide and author the active channel	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,3c8c825e,adbdd185,8d2e92f1,60fabacc,2ebfc993,f82499ae,f82499ae,17b2f0a9,d8db8a08,3a542718,d98cf783,aebcc00c,a77d767a,f72d7e86,56805e62,66e44689,d4602c61,66e44689,a77d767a,06ac1872,c6299771,06ac1872,49baeab4,93b55807,6cd27fea,669f10b6,e49d5dc7,dad38a56,bd93fc2c,e8f1236d,139d5369,a44e7c55,4520ac3a,96ccac2d,2a70968d,7239841e,d70c7583,f7ba407c,b89fa3e5,53978464,d9fa0e1b,cb4007a3
+4f4207aed25f73f3	8	middle mouse pans time without seeking	de1eb3fb,de1eb3fb,de1eb3fb,e56ebdbf,e56ebdbf,c661d77e,01ff2d76,47e38f47
+5ec244002da1cf65	9	clicking an empty lane clears layers and scrubs	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,e34939e2
+9bdf67947006165d	23	a project replacement clears stale keys and refits the new range	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,4902f179,2d550021,1dfc0cb5,2d550021,56d3262e,b0b931d7,0e2d3eda,3c93080b,0ea90cda,a741fdf3,19c8d0f0,f548b0a5
+808b733c7fa53c7c	17	a scene switch clears only the typed key context	de1eb3fb,371b3ffb,e52dd52e,371b3ffb,2f3243f1,34b2825c,2f3243f1,fd139389,8d76693e,a059d839,5b457094,90e7d83c,e7d5272f,d9d6bedf,f12ffea0,2de037ba,18922392
+cbf29ce484222325	0	a panel with no room reports nothing	
+522bd58ae0571809	81	golden: rich show in every view	a0ff2af3,2f4b1a3d,b64d7470,2f4b1a3d,5be08773,cfb4f1e2,ea2da386,306cf193,c05226d6,306cf193,1228e6a2,7be000e9,1228e6a2,35498658,e8f3aed3,daaa4a07,4eacef81,b10d5ff3,4ec8cbc6,6ca00275,f24a48ef,2c4d110a,0b76b9c1,e15d927f,0b76b9c1,de156be8,e891fa1e,a18c25f3,a5f7eb6c,bb732382,57ac9343,8638ba7d,e22f5a76,b824a726,d02145fb,a71ce796,d02145fb,177faba0,4f9361c7,021cee7b,858d2ee7,f2123a0c,647067cf,9dc14bb7,e063afcc,597a13ed,5623d964,69c8ab6e,69cf3596,1669f92d,2132c5b7,2773a86c,2132c5b7,39bd5b13,39bd5b13,ca164e76,1bd3ef51,51811898,770b1718,5b7920a4,b92e6387,0c031ed4,7e69229e,0ec98215,7e69229e,613b3b05,d8390228,38b93615,d81d6e89,035cd81e,166024e8,4d5249e3,d81d6e89,b1560ba6,b1560ba6,5313c08a,5313c08a,8095b9a8,8095b9a8,439bbdc6,439bbdc6
+2240fa1fd6aa9f08	24	golden: rich show at display scales	a0ff2af3,2f4b1a3d,b64d7470,2f4b1a3d,b8eb42b7,1afb5a7f,ea61bf65,494f4e2b,7a5f4a6b,cc5f87cd,9cb75000,cc5f87cd,2bde95de,9eef1b55,8b2b039a,1a9f56ad,3cfa1384,fba9210f,42410962,fba9210f,00d9c0b1,efc37482,8ad73e2c,b7fbc892

@@ -54,6 +54,12 @@ public:
     // are nominal so layout that centres against them stays sane.
     [[nodiscard]] static FontAtlas empty(
         float line_height = 14.0F, float ascent = 11.0F);
+    // Lays out exactly like empty() - every glyph advances zero - but each
+    // printable ASCII character draws one texel-sized quad whose uv names the
+    // character. Headless characterization tests can then see which text was
+    // drawn where without a font file changing their layout.
+    [[nodiscard]] static FontAtlas placeholder(
+        float line_height = 14.0F, float ascent = 11.0F);
 
     [[nodiscard]] const Glyph* glyph(char character) const noexcept;
     // Logical units, like everything a layout reads.
