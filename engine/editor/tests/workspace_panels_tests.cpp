@@ -2954,6 +2954,20 @@ void environment_keys_preserve_interpolation_and_authored_base() {
   UI_CHECK(h.state.environment.fog_density==0.0F);
 }
 
+// An environment key added between weighted Cubic keys keeps the value
+// playback shows there, tangents and weights included.
+void environment_keys_sample_weighted_cubic_tangents() {
+  LiveSettingsHarness h;h.environment_section(1);
+  scene::ChannelKeyframes channel{};channel.target=h.state.stage_node;channel.component=scene::PropertyChannel::FogDensity;
+  channel.frames={0,32};channel.values={0.1,0.2};
+  channel.interpolations={scene::KeyInterpolation::Cubic,scene::KeyInterpolation::Cubic};
+  channel.tangents={scene::KeyTangent{scene::KeyTangentMode::Broken,0.0,0.02,{},4.0},
+                    scene::KeyTangent{scene::KeyTangentMode::Broken,-0.005,0.0,12.0,{}}};
+  h.keys={channel};h.time=13;
+  auto key=h.click(130.0,306);
+  UI_CHECK(key.keys.size()==1 && std::abs(key.keys[0].value-0.2025)<1e-6 && !key.keys[0].erase);
+}
+
 // Small physical-lighting scales retain their precision in numeric fields.
 void photometric_scale_accepts_precise_numeric_input() {
   LiveSettingsHarness h;h.advanced_section(1);
@@ -3095,7 +3109,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 109U> cases{{
+constexpr std::array<Case, 110U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3120,6 +3134,8 @@ constexpr std::array<Case, 109U> cases{{
     {"physical sky controls apply and author time keys", &physical_sky_controls_apply_and_author_a_time_key},
     {"environment keys preserve interpolation and authored base",
      &environment_keys_preserve_interpolation_and_authored_base},
+    {"environment keys sample weighted cubic tangents",
+     &environment_keys_sample_weighted_cubic_tangents},
     {"a scene row reports the clicked node",
      &a_scene_row_reports_the_clicked_node},
     {"LED surfaces list after the scene with a lock",

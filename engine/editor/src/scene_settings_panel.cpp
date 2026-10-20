@@ -4,36 +4,21 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 #include <type_traits>
 
 namespace mediaserver::editor {
 namespace {
+// The value playback shows at `frame`: the scene's own sampler, with its
+// tangents and weights, so a key added here keeps the evaluated value.
 double sample(const scene::ChannelKeyframes &channel, core::u64 frame,
               double base) {
-  if (channel.frames.empty() ||
-      channel.frames.size() != channel.values.size() ||
-      frame > static_cast<core::u64>(std::numeric_limits<core::i64>::max()))
+  if (frame > static_cast<core::u64>(std::numeric_limits<core::i64>::max()))
     return base;
-  const auto time = static_cast<core::i64>(frame);
-  if (time <= channel.frames.front())
-    return channel.values.front();
-  if (time >= channel.frames.back())
-    return channel.values.back();
-  const auto high = static_cast<std::size_t>(
-      std::upper_bound(channel.frames.begin(), channel.frames.end(), time) -
-      channel.frames.begin());
-  const auto low = high - 1U;
-  const auto interpolation = low < channel.interpolations.size()
-                                 ? channel.interpolations[low]
-                                 : scene::KeyInterpolation::Linear;
-  if (interpolation == scene::KeyInterpolation::Hold)
-    return channel.values[low];
-  double t = static_cast<double>(time - channel.frames[low]) /
-             static_cast<double>(channel.frames[high] - channel.frames[low]);
-  if (interpolation == scene::KeyInterpolation::Cubic)
-    t = t * t * (3.0 - 2.0 * t);
-  return channel.values[low] + (channel.values[high] - channel.values[low]) * t;
+  const std::optional<double> value =
+      scene::sample_keyframes(channel, static_cast<core::i64>(frame));
+  return value.has_value() && std::isfinite(*value) ? *value : base;
 }
 } // namespace
 
