@@ -323,6 +323,21 @@ if(BUILD_TESTING)
     )
     set_target_properties(mediaserver_editor_timeline_tests PROPERTIES FOLDER "tests")
 
+    # Which of several overlapping Timeline pointer targets owns a point.
+    add_executable(mediaserver_editor_timeline_hits_tests
+        tests/timeline_hits_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_timeline_hits_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_timeline_hits_tests)
+    add_test(
+        NAME mediaserver.editor_timeline_hits
+        COMMAND mediaserver_editor_timeline_hits_tests
+    )
+    set_target_properties(mediaserver_editor_timeline_hits_tests PROPERTIES FOLDER "tests")
+
     # Not a test: times TimelinePanel::draw() on a large expanded scene,
     # using the timeline tests' harness. Run it before and after a change to
     # the panel's per-frame work.
