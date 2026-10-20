@@ -457,7 +457,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                      return !lane.implicit && lane.id == selected_lane_;
                    })) {
     selected_lane_ = doc::NodeId{};
-    lane_destination_ = doc::NodeId{};
+    reorder_.lane_destination = doc::NodeId{};
   }
 
 }

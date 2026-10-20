@@ -683,20 +683,20 @@ public:
     return clip_.drag != ClipDrag::None;
   }
   [[nodiscard]] bool dragging_layer() const noexcept {
-    return layer_drag_node_ != doc::NodeId{};
+    return reorder_.layer_node != doc::NodeId{};
   }
   [[nodiscard]] doc::NodeId dragging_layer_node() const noexcept {
-    return layer_drag_node_;
+    return reorder_.layer_node;
   }
   [[nodiscard]] bool dragging_compositor_source() const noexcept {
-    return lane_drag_node_ != doc::NodeId{} || dragging_layer();
+    return reorder_.lane_node != doc::NodeId{} || dragging_layer();
   }
   [[nodiscard]] doc::NodeId dragging_compositor_source_node() const noexcept {
-    return lane_drag_node_ != doc::NodeId{} ? lane_drag_node_
-                                            : layer_drag_node_;
+    return reorder_.lane_node != doc::NodeId{} ? reorder_.lane_node
+                                            : reorder_.layer_node;
   }
   [[nodiscard]] std::size_t dragging_compositor_source_count() const noexcept {
-    return layer_drag_nodes_.size();
+    return reorder_.layer_nodes.size();
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
@@ -840,14 +840,6 @@ private:
   // start closed, and selecting a descendant elsewhere reveals its ancestors.
   timeline::RowsState rows_state_;
   doc::NodeId selected_lane_{};
-  // A track drag follows the same lift/target/drop contract as Feed Mapping,
-  // but uses an insertion cursor rather than target-band highlighting because
-  // tracks reorder between peers; they never nest inside one another.
-  doc::NodeId lane_drag_node_{};
-  float lane_drag_start_x_{};
-  float lane_drag_start_y_{};
-  bool lane_drag_moved_{};
-  doc::NodeId lane_destination_{};
   // Renaming any row - a layer or a track - is a double-click or F2, so a
   // single click can mean what it means everywhere else: select the thing.
   InlineRename rename_;
@@ -855,16 +847,30 @@ private:
   // The operator's width for the layer list; zero follows the panel.
   float list_width_{};
 
-  // Objects, models, lights, loose clips, groups, and clips inside one track
-  // share the same lift/insert gesture. The Director decides which order
-  // domain applies; this state remains pointer-local.
-  doc::NodeId layer_drag_node_{};
-  // Snapshot the selected rows at lift, in timeline order. Selection may be
-  // updated by the shell while the pointer is travelling between panels.
-  std::vector<doc::NodeId> layer_drag_nodes_;
-  float layer_drag_start_x_{};
-  float layer_drag_start_y_{};
-  bool layer_drag_moved_{};
+  // Lifted layers and tracks.
+  struct ReorderState final {
+    // A track drag follows the same lift/target/drop contract as Feed
+    // Mapping, but uses an insertion cursor rather than target-band
+    // highlighting because tracks reorder between peers; they never nest
+    // inside one another.
+    doc::NodeId lane_node{};
+    float lane_start_x{};
+    float lane_start_y{};
+    bool lane_moved{};
+    doc::NodeId lane_destination{};
+    // Objects, models, lights, loose clips, groups, and clips inside one
+    // track share the same lift/insert gesture. The Director decides which
+    // order domain applies; this state remains pointer-local.
+    doc::NodeId layer_node{};
+    // Snapshot the selected rows at lift, in timeline order. Selection may
+    // be updated by the shell while the pointer is travelling between
+    // panels.
+    std::vector<doc::NodeId> layer_nodes;
+    float layer_start_x{};
+    float layer_start_y{};
+    bool layer_moved{};
+  };
+  ReorderState reorder_;
 
   NumberField range_fields_;
 
