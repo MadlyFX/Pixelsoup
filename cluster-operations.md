@@ -110,6 +110,14 @@ JSON Lines beside the Director WAL:
 
 The stream is flushed at the normal status cadence and at clean shutdown. It
 rotates at 32 MiB; one `<director-wal>.cluster.jsonl.previous` file is retained.
+The console status lines of the Director and of each node also report how
+late that process's frame loop ran after the boundaries it waited for, over
+the status interval: `wake-max-us`, `wake-mean-us`, and `wake-late=N/M` (N of
+M boundaries over 2 ms). Loops wait on a high-resolution OS timer, so on an
+unloaded machine the maximum stays near a millisecond. A sustained higher
+figure means the loop's own work, or competing load on the machine, is
+delaying frame sealing or rendering.
+
 The log contains no lifecycle secret or asset source path. Copy the WAL,
 release ledger, both diagnostic files, project, and relevant node logs before
 restarting a failed show if post-show analysis is required.

@@ -12,6 +12,7 @@
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/show/frame_boundary_driver.hpp>
+#include <mediaserver/show/frame_waiter.hpp>
 #include <mediaserver/show/presenter.hpp>
 #include <mediaserver/show/show_clock.hpp>
 #include <mediaserver/show/transport_authority.hpp>
@@ -54,7 +55,8 @@ constexpr std::chrono::milliseconds library_proxy_retry_interval{500};
 [[nodiscard]] bool parse_u64(std::string_view value,
                              core::u64 &parsed) noexcept;
 
-void sleep_until_boundary(Clock::time_point boundary) noexcept;
+void sleep_until_boundary(show::FrameWaiter &waiter,
+                          Clock::time_point boundary) noexcept;
 
 [[nodiscard]] const char *transport_label(show::TransportState state) noexcept;
 
@@ -71,6 +73,10 @@ presenter_error_text(show::PresenterError error) noexcept;
 
 [[nodiscard]] show::ShowClockConfig
 clock_config(const PlaybackOptions &options) noexcept;
+
+// How late this loop woke for the boundaries since the last status line.
+[[nodiscard]] std::string
+boundary_wake_text(const show::BoundaryLateness::Window &window);
 
 [[nodiscard]] std::string gpu_timing_text(const show::PresenterTiming &timing);
 

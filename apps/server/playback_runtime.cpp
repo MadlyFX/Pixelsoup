@@ -25,15 +25,9 @@ namespace mediaserver::app {
     return result.ec == std::errc{} && result.ptr == end;
 }
 
-void sleep_until_boundary(Clock::time_point boundary) noexcept {
-    const auto now = Clock::now();
-    if (boundary <= now) {
-        std::this_thread::yield();
-        return;
-    }
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(boundary - now);
-    std::this_thread::sleep_for(std::min(remaining, max_sleep));
+void sleep_until_boundary(show::FrameWaiter &waiter,
+                          Clock::time_point boundary) noexcept {
+    waiter.wait_until(boundary, max_sleep);
 }
 
 [[nodiscard]] const char *transport_label(show::TransportState state) noexcept {
@@ -126,6 +120,14 @@ clock_config(const PlaybackOptions &options) noexcept {
 
 // Per-frame presentation cost, reported only where there is one to report.
 // The CPU path has no submission to time and says nothing rather than zero.
+[[nodiscard]] std::string
+boundary_wake_text(const show::BoundaryLateness::Window &window) {
+    return " wake-max-us=" + std::to_string(window.max.count()) +
+           " wake-mean-us=" + std::to_string(window.mean.count()) +
+           " wake-late=" + std::to_string(window.late) + '/' +
+           std::to_string(window.boundaries);
+}
+
 [[nodiscard]] std::string gpu_timing_text(const show::PresenterTiming &timing) {
     if (!timing.gpu) {
         return {};

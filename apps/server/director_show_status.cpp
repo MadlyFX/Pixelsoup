@@ -37,6 +37,7 @@ void DirectorShowLoop::print_status(DirectorTick &tick) {
                   << " transport=" << transport_label(transport.state())
                   << " sealed=" << sealed << " anchors=" << anchors
                   << " pacer-lag=" << cluster.pacer_lag_frames
+                  << boundary_wake_text(boundary_lateness.take())
                   << " tracked=" << tracked.size()
                   // Poses replaced in a session's mailbox before that
                   // session drained them. Nonzero means some node's plate

@@ -412,6 +412,10 @@ struct DirectorShowLoop final {
     core::u64 &compositor_version;
     bool &compositor_loaded;
 
+    // Owned by the loop rather than bound to playback.cpp locals.
+    show::FrameWaiter frame_waiter{};
+    show::BoundaryLateness boundary_lateness{};
+
     // Runs until stopped, closed or out of run frames; returns the exit code.
     [[nodiscard]] int run();
 

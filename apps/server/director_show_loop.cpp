@@ -83,12 +83,13 @@ int DirectorShowLoop::run() {
             break;
         }
         auto next_wake = pacer.next_boundary_at();
+        boundary_lateness.arm(next_wake);
 #if defined(MEDIASERVER_HAS_GUI)
         if (editor) {
             next_wake = std::min(next_wake, next_editor_refresh);
         }
 #endif
-        sleep_until_boundary(next_wake);
+        sleep_until_boundary(frame_waiter, next_wake);
     }
     report_stopping();
     return 0;
@@ -98,6 +99,7 @@ PaceOutcome DirectorShowLoop::pace(DirectorTick &tick) {
     auto &now = tick.now;
     auto &due = tick.due;
     now = Clock::now();
+    boundary_lateness.observe(now);
 #if defined(MEDIASERVER_HAS_GUI)
     if (editor_coalescing_policy.expire(now)) {
         scheduler.end_coalescing();

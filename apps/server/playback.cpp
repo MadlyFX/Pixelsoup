@@ -665,8 +665,11 @@ int run_node_playback(net::NodeSessionService &service,
         publish_output_sync(true);
     };
 
+    show::FrameWaiter frame_waiter;
+    show::BoundaryLateness boundary_lateness;
     while (stop_requested == 0 && !closed) {
         const auto now = Clock::now();
+        boundary_lateness.observe(now);
         if (driver.config().timing_authority ==
             show::FrameBoundaryDriverConfig::TimingAuthority::VideoReference) {
             latest_video_reference = read_video_reference();
@@ -1508,6 +1511,7 @@ int run_node_playback(net::NodeSessionService &service,
                 std::cout << gpu_timing_text(
                     output_presenters.front().presenter->timing());
             }
+            std::cout << boundary_wake_text(boundary_lateness.take());
             std::cout << " sync=" << sync_mode_label(node_sync_policy.mode)
                       << " barrier="
                       << runtime_barrier_label(node_output_sync.barrier) << '/'
@@ -1541,9 +1545,11 @@ int run_node_playback(net::NodeSessionService &service,
             // This is merely a responsive poll for the hardware counter, not
             // a pacing source. The counter above remains the only way a frame
             // boundary is created in external-reference mode.
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            frame_waiter.sleep_for(std::chrono::milliseconds{1});
         } else {
-            sleep_until_boundary(driver.clock().next_boundary_at());
+            boundary_lateness.arm(driver.clock().next_boundary_at());
+            sleep_until_boundary(frame_waiter,
+                                 driver.clock().next_boundary_at());
         }
     }
 
