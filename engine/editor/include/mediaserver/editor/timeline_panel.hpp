@@ -702,10 +702,10 @@ public:
   [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
   [[nodiscard]] std::span<const doc::NodeId> selected_markers() const noexcept {
-    return selected_markers_;
+    return markers_.selected;
   }
   [[nodiscard]] bool dragging_marker() const noexcept {
-    return marker_drag_ != doc::NodeId{};
+    return markers_.drag != doc::NodeId{};
   }
   // Selects one marker from outside the panel - the Cue Stack's row click -
   // so both views agree on which cue the operator is working on.
@@ -943,30 +943,32 @@ private:
   // must not turn into a scrub while the button stays down.
   bool clip_press_consumed_{};
 
-  // Markers keep their own selection, separate from scene layers: selecting
-  // a cue to move it must not take the Inspector away from the clip being
-  // timed against it. Sorted and unique.
-  std::vector<doc::NodeId> selected_markers_;
-  // A marker drag. Like a clip, the dragged markers preview from the panel
-  // and the document changes once, on release.
-  doc::NodeId marker_drag_{};
-  float marker_drag_start_x_{};
-  core::i64 marker_drag_anchor_{};
-  core::i64 marker_drag_delta_{};
-  bool marker_drag_moved_{};
-  std::optional<core::i64> marker_snap_guide_;
-  // Double-click detection and the inline name field, for markers.
-  doc::NodeId marker_click_{};
-  double marker_click_time_{};
-  double strip_click_time_{-1.0};
-  float strip_click_x_{};
-  doc::NodeId marker_name_node_{};
-  std::string marker_name_draft_;
+  // The marker strip's state.
+  struct MarkerState final {
+    // Markers keep their own selection, separate from scene layers:
+    // selecting a cue to move it must not take the Inspector away from the
+    // clip being timed against it. Sorted and unique.
+    std::vector<doc::NodeId> selected;
+    // A marker drag. Like a clip, the dragged markers preview from the panel
+    // and the document changes once, on release.
+    doc::NodeId drag{};
+    float drag_start_x{};
+    core::i64 drag_anchor{};
+    core::i64 drag_delta{};
+    bool drag_moved{};
+    std::optional<core::i64> snap_guide;
+    // Double-click detection and the inline name field, for markers.
+    doc::NodeId click{};
+    double click_time{};
+    double strip_click_time{-1.0};
+    float strip_click_x{};
+    doc::NodeId name_node{};
+    std::string name_draft;
+  };
+  MarkerState markers_;
 
   // The In/Out handles on the ruler, dragged locally and committed once.
   enum class RangeHandle : core::u8 { None, In, Out };
-  RangeHandle range_drag_{RangeHandle::None};
-  core::u64 range_drag_value_{};
 
   // The toolbar's own state: the show-rate menu, and typed time entry - the
   // playhead readout and the In/Out fields all scrub on a drag and open for
@@ -982,8 +984,14 @@ private:
   };
   ToolbarState toolbar_;
 
-  // The ruler reads in timecode or in frames; both are the same show frames.
-  bool ruler_frames_{};
+  struct RulerState final {
+    RangeHandle range_drag{RangeHandle::None};
+    core::u64 range_drag_value{};
+    // The ruler reads in timecode or in frames; both are the same show
+    // frames.
+    bool frames{};
+  };
+  RulerState ruler_;
 
   // The last seek this panel asked for, until the Director's playhead
   // arrives there. Keys act on it so they never lag the hand.
