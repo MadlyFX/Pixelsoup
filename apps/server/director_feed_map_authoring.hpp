@@ -84,6 +84,15 @@ schedule_feed_map_add(cmd::DirectorScheduler &scheduler,
                       doc::NodeId allocated_id, cmd::FrameNumber apply_at,
                       cmd::UndoContextId context = cmd::UndoContextId{4U});
 
+// Renames, reorders or duplicates a viewport or surface. A duplicate takes
+// `allocated_id` and is placed directly after its original; a request naming
+// something that no longer exists, or an order that is not exactly the
+// current list, authors nothing.
+[[nodiscard]] bool
+schedule_feed_organize(cmd::DirectorScheduler &scheduler,
+                       const editor::FeedOrganizeRequest &request,
+                       doc::NodeId allocated_id, cmd::FrameNumber apply_at);
+
 [[nodiscard]] bool
 schedule_feed_map_delete(cmd::DirectorScheduler &scheduler,
                          const editor::FeedMapDeleteRequest &request,

@@ -217,6 +217,64 @@ void physical_surfaces_are_locked_by_default_and_can_be_unlocked() {
     OUTPUT_CHECK(!unlocked->locked);
 }
 
+// Authored list order decides the order of a window's viewports, which is
+// their compositing order, and of the surfaces; ties keep document id order.
+// Names and order are authored state, so both reach the digest.
+void list_order_and_names_are_authored_and_digested() {
+    const auto viewport = [](core::u64 id, std::int64_t window,
+                             std::int64_t order) {
+        return node(id, schema::map_type,
+                    {whole(schema::node_index, window),
+                     whole(schema::source_x, 0), whole(schema::source_y, 0),
+                     whole(schema::source_width, 640),
+                     whole(schema::source_height, 360),
+                     whole(schema::list_order, order)});
+    };
+    doc::Node named = viewport(7U, 0, 1);
+    named.properties.insert_or_assign(std::string{schema::map_name},
+                                      doc::PropertyValue{std::string{"Proc A"}});
+    doc::Node first_surface = front_surface(60U);
+    first_surface.properties.insert_or_assign(
+        std::string{schema::list_order}, doc::PropertyValue{std::int64_t{5}});
+    doc::Node second_surface = front_surface(61U);
+    second_surface.properties.insert_or_assign(
+        std::string{schema::list_order}, doc::PropertyValue{std::int64_t{-2}});
+
+    output::FeedMapModel model;
+    model.reset(root_of({viewport(5U, 1, 0), viewport(6U, 0, 3), named,
+                         viewport(8U, 0, 1), first_surface,
+                         second_surface}));
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.maps.size() == 4U);
+    // Window 0 by order (1, 1, 3) with the tie in id order, then window 1.
+    OUTPUT_CHECK(built.maps[0].node == doc::NodeId{7U});
+    OUTPUT_CHECK(built.maps[1].node == doc::NodeId{8U});
+    OUTPUT_CHECK(built.maps[2].node == doc::NodeId{6U});
+    OUTPUT_CHECK(built.maps[3].node == doc::NodeId{5U});
+    OUTPUT_CHECK(built.maps[0].name == "Proc A");
+    OUTPUT_CHECK(built.maps[1].name.empty());
+    OUTPUT_CHECK(built.maps_for(0U).size() == 3U);
+    OUTPUT_CHECK(built.surfaces.size() == 2U);
+    OUTPUT_CHECK(built.surfaces[0].node == doc::NodeId{61U});
+    OUTPUT_CHECK(built.surfaces[1].node == doc::NodeId{60U});
+
+    named.properties.insert_or_assign(std::string{schema::map_name},
+                                      doc::PropertyValue{std::string{"Proc B"}});
+    output::FeedMapModel renamed;
+    renamed.reset(root_of({viewport(5U, 1, 0), viewport(6U, 0, 3), named,
+                           viewport(8U, 0, 1), first_surface,
+                           second_surface}));
+    OUTPUT_CHECK(output::digest(renamed.evaluate()) != output::digest(built));
+
+    output::FeedMapModel reordered;
+    reordered.reset(root_of({viewport(5U, 1, 0), viewport(6U, 0, 0), named,
+                             viewport(8U, 0, 1), first_surface,
+                             second_surface}));
+    const output::FeedMap moved = reordered.evaluate();
+    OUTPUT_CHECK(moved.maps[0].node == doc::NodeId{6U});
+    OUTPUT_CHECK(output::digest(moved) != output::digest(renamed.evaluate()));
+}
+
 void a_checkpoint_and_a_stream_of_deltas_agree_exactly() {
     // The replication claim: a node handed the whole document and a node that
     // folded in deltas must hold the same feed map, or their regions of the wall
@@ -713,7 +771,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 18U> cases{{
+constexpr std::array<Case, 19U> cases{{
+    {"list order and names are authored and digested",
+     &list_order_and_names_are_authored_and_digested},
     {"a document becomes the feed map it describes",
      &a_document_becomes_the_feed_map_it_describes},
     {"physical surface channels evaluate at the show frame",

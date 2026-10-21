@@ -1,5 +1,6 @@
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
+#include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/editor/workspace_panels.hpp>
 #include <mediaserver/gui/input.hpp>
@@ -27,7 +28,9 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|feed]
+//   feed draws Feed Mapping for one 15360x2160 Mosaic window carrying four
+//   2880x1536 wall sections, two of them named, with the first selected;
 //   curves draws the editor with the Timeline switched to Curves mode;
 //   handles does too, with two Opacity keys selected - one Aligned, one
 //   Broken with authored weights - so their tangent handles show;
@@ -39,7 +42,9 @@ namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
 namespace rhi = mediaserver::rhi;
+namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
+namespace topology = mediaserver::topology;
 
 [[nodiscard]] std::optional<gui::FontAtlas> load_font(float scale) {
   constexpr std::array<const char *, 2U> candidates{
@@ -250,7 +255,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|feed]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -264,8 +269,9 @@ int main(int argc, char **argv) {
   const bool handles = view == "handles";
   const bool curves = view == "curves" || handles;
   const bool summaries = view == "summaries";
+  const bool feed = view == "feed";
   const std::string_view properties =
-      curves || summaries ? std::string_view{} : view;
+      curves || summaries || feed ? std::string_view{} : view;
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -312,6 +318,32 @@ int main(int argc, char **argv) {
   editor::OutputMonitorPanel output_panel{gui::ui_id("snapshot.output")};
   editor::InspectorPanel inspector_panel{gui::ui_id("snapshot.inspector")};
   editor::SceneSettingsPanel settings_panel;
+  editor::FeedMappingPanel feed_panel{gui::ui_id("snapshot.feed")};
+  const scene::Canvas wall_canvas{11'520U, 1'536U};
+  output::FeedMap feed_map;
+  for (core::u32 index = 0U; index < 4U; ++index) {
+    output::OutputMap section{};
+    section.node = doc::NodeId{500U + index};
+    section.order = index;
+    section.source = scene::CanvasRect{index * 2'880U, 0U, 2'880U, 1'536U};
+    section.viewport = scene::CanvasRect{index * 3'840U, 0U, 2'880U, 1'536U};
+    feed_map.maps.push_back(section);
+  }
+  feed_map.maps[0].name = "Processor A - Stage Left";
+  feed_map.maps[1].name = "Processor B";
+  for (core::u32 index = 0U; index < 2U; ++index) {
+    output::ProjectionSurface surface{};
+    surface.node = doc::NodeId{600U + index};
+    surface.name = index == 0U ? "LED Surface 1" : "Upstage Header";
+    surface.locked = index == 1U;
+    surface.geometry.raster = scene::Canvas{2'880U, 1'536U};
+    feed_map.surfaces.push_back(surface);
+  }
+  topology::HardwareMap feed_hardware;
+  topology::HardwareOutputBinding mosaic{};
+  mosaic.width = 15'360U;
+  mosaic.height = 2'160U;
+  feed_hardware.output_bindings.push_back(mosaic);
   auto inspected = show.elements[4];
   if (properties == "model") inspected = show.elements[2];
   if (properties == "light") inspected = show.elements[7];
@@ -348,18 +380,26 @@ int main(int argc, char **argv) {
   // Timeline toolbar's Curves toggle, pressed and released over two frames.
   // The LED Wall closes the same way, by a click on its twirl, its row
   // being the Timeline's second.
-  const bool clicks = curves || summaries;
+  const bool clicks = curves || summaries || feed;
   const int passes = clicks ? 5 : 3;
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
     const bool clicking = clicks && pass < 2;
+    // Feed selects its first viewport row the same way.
     input.set_mouse_position(
-        clicking ? timeline_bounds.x + (curves ? 608.0F : 38.0F) : hover_x,
-        clicking ? timeline_bounds.y + (curves ? 17.0F : 112.0F) : hover_y);
+        clicking ? (feed ? 60.0F
+                         : timeline_bounds.x + (curves ? 608.0F : 38.0F))
+                 : hover_x,
+        clicking ? (feed ? 101.0F
+                         : timeline_bounds.y + (curves ? 17.0F : 112.0F))
+                 : hover_y);
     input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);
     ctx.new_frame(1.0);
     ctx.panel(window, ctx.theme().background);
-    if (!properties.empty()) {
+    if (feed) {
+      static_cast<void>(feed_panel.draw(ctx, window, wall_canvas, feed_map, 0U,
+                                        &feed_hardware));
+    } else if (!properties.empty()) {
       if (properties == "renderer" || properties == "environment")
         static_cast<void>(settings_panel.draw(ctx, window,
             properties == "renderer" ? editor::SceneSettingsTarget::Renderer : editor::SceneSettingsTarget::Environment,

@@ -499,6 +499,7 @@ if(BUILD_TESTING)
         tests/mapping_panels_tests.cpp
         src/mapping_panels.cpp
         src/number_field.cpp
+        src/operator_widgets.cpp
     )
     target_include_directories(mediaserver_editor_mapping_tests
         PRIVATE

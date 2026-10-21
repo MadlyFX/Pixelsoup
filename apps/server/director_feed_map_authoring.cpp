@@ -11,12 +11,14 @@
 #include <mediaserver/scene/lens.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace mediaserver::app {
 
@@ -465,6 +467,179 @@ schedule_feed_map_add(cmd::DirectorScheduler &scheduler,
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(node)}, cmd::EraseNode{allocated_id}, context,
         cmd::TransactionId{request.gesture}, apply_at));
+}
+
+namespace {
+
+[[nodiscard]] std::int64_t integer_property(const doc::Node &node,
+                                            std::string_view key,
+                                            std::int64_t fallback) {
+    const auto found = node.properties.find(key);
+    if (found == node.properties.end()) {
+        return fallback;
+    }
+    const auto *const value = std::get_if<std::int64_t>(&found->second);
+    return value != nullptr ? *value : fallback;
+}
+
+// The list `member` is shown in, in the feed model's order: every surface, or
+// the viewports of its window, by list order and then document id.
+[[nodiscard]] std::vector<const doc::Node *>
+feed_list_for(const doc::Root &root, const doc::Node &member) {
+    const bool viewport = member.type == output::schema::map_type;
+    const std::int64_t window =
+        integer_property(member, output::schema::node_index, 0);
+    std::vector<const doc::Node *> list;
+    const doc::Delta contents = doc::diff(doc::Root{}, root);
+    for (const doc::NodeChange &change : contents.changes) {
+        if (!change.after || change.after->type != member.type) {
+            continue;
+        }
+        if (viewport &&
+            integer_property(*change.after, output::schema::node_index, 0) !=
+                window) {
+            continue;
+        }
+        list.push_back(change.after.get());
+    }
+    // The diff is in id order, so a stable sort leaves ties there.
+    std::stable_sort(list.begin(), list.end(),
+                     [](const doc::Node *left, const doc::Node *right) {
+                         return integer_property(*left,
+                                                 output::schema::list_order,
+                                                 0) <
+                                integer_property(*right,
+                                                 output::schema::list_order, 0);
+                     });
+    return list;
+}
+
+[[nodiscard]] std::size_t count_of_type(const doc::Root &root,
+                                        std::string_view type) {
+    std::size_t count = 0U;
+    const doc::Delta contents = doc::diff(doc::Root{}, root);
+    for (const doc::NodeChange &change : contents.changes) {
+        count += change.after && change.after->type == type ? 1U : 0U;
+    }
+    return count;
+}
+
+// Writes dense list positions in `order`, touching only nodes whose position
+// actually changes, all in one transaction.
+[[nodiscard]] bool schedule_list_order(cmd::DirectorScheduler &scheduler,
+                                       const std::vector<doc::Node> &order,
+                                       const editor::FeedOrganizeRequest &request,
+                                       doc::NodeId inserted,
+                                       cmd::FrameNumber apply_at) {
+    for (std::size_t index = 0U; index < order.size(); ++index) {
+        doc::Node updated = order[index];
+        updated.properties.insert_or_assign(
+            std::string{output::schema::list_order},
+            doc::PropertyValue{static_cast<std::int64_t>(index)});
+        const bool created = inserted != doc::NodeId{} && updated.id == inserted;
+        if (!created && updated == order[index]) {
+            continue;
+        }
+        const cmd::Payload inverse =
+            created ? cmd::Payload{cmd::EraseNode{inserted}}
+                    : cmd::Payload{cmd::PutNode{order[index]}};
+        if (!scheduler.schedule_edit(cmd::PutNode{std::move(updated)}, inverse,
+                                     cmd::UndoContextId{4U},
+                                     cmd::TransactionId{request.gesture},
+                                     apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+[[nodiscard]] bool
+schedule_feed_organize(cmd::DirectorScheduler &scheduler,
+                       const editor::FeedOrganizeRequest &request,
+                       doc::NodeId allocated_id, cmd::FrameNumber apply_at) {
+    const doc::Root &root = scheduler.projected_document();
+    const doc::Node *source = find_feed_map_node(root, request.node);
+    if (source == nullptr) {
+        source = find_feed_surface_node(root, request.node);
+    }
+    if (source == nullptr) {
+        return true;
+    }
+    const bool viewport = source->type == output::schema::map_type;
+    const std::string_view name_key =
+        viewport ? output::schema::map_name : output::schema::surface_name;
+
+    switch (request.action) {
+    case editor::FeedOrganizeAction::Rename: {
+        constexpr std::size_t max_name_bytes = 256U;
+        if (request.name.empty() || request.name.size() > max_name_bytes) {
+            return true;
+        }
+        doc::Node updated = *source;
+        updated.properties.insert_or_assign(std::string{name_key},
+                                            doc::PropertyValue{request.name});
+        if (updated == *source) {
+            return true;
+        }
+        return static_cast<bool>(scheduler.schedule_edit(
+            cmd::PutNode{std::move(updated)}, cmd::PutNode{*source},
+            cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture},
+            apply_at));
+    }
+    case editor::FeedOrganizeAction::Reorder: {
+        const std::vector<const doc::Node *> list = feed_list_for(root, *source);
+        if (request.order.size() != list.size()) {
+            return true;
+        }
+        std::vector<doc::Node> order;
+        order.reserve(list.size());
+        for (const doc::NodeId id : request.order) {
+            const auto found =
+                std::find_if(list.begin(), list.end(),
+                             [id](const doc::Node *node) { return node->id == id; });
+            if (found == list.end() ||
+                std::any_of(order.begin(), order.end(),
+                            [id](const doc::Node &node) { return node.id == id; })) {
+                return true;
+            }
+            order.push_back(**found);
+        }
+        return schedule_list_order(scheduler, order, request, {}, apply_at);
+    }
+    case editor::FeedOrganizeAction::Duplicate: {
+        // A copy past the cap would be dropped by evaluation; refuse it here
+        // rather than author an object nobody can see.
+        if (count_of_type(root, source->type) >=
+            (viewport ? output::max_output_maps
+                      : output::max_projection_surfaces)) {
+            return true;
+        }
+        doc::Node copy = *source;
+        copy.id = allocated_id;
+        const auto named = source->properties.find(name_key);
+        const auto *const name =
+            named != source->properties.end()
+                ? std::get_if<std::string>(&named->second)
+                : nullptr;
+        // An unnamed viewport stays unnamed and shows its own ordinal.
+        if (name != nullptr && !name->empty()) {
+            copy.properties.insert_or_assign(
+                std::string{name_key}, doc::PropertyValue{*name + " copy"});
+        }
+        std::vector<doc::Node> order;
+        for (const doc::Node *node : feed_list_for(root, *source)) {
+            order.push_back(*node);
+            if (node->id == source->id) {
+                order.push_back(copy);
+            }
+        }
+        return schedule_list_order(scheduler, order, request, allocated_id,
+                                   apply_at);
+    }
+    }
+    return true;
 }
 
 [[nodiscard]] bool

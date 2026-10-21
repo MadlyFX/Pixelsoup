@@ -5358,6 +5358,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         mapping.projection_edit->gesture = impl.feed_mapping_edit_gesture;
         result.feed_projection_edits.push_back(mapping.projection_edit.value());
       }
+      if (mapping.organize.has_value()) {
+        mapping.organize->gesture = impl.next_edit_gesture++;
+        result.feed_organize.push_back(std::move(*mapping.organize));
+      }
       if (mapping.surface_add.has_value()) {
         auto request = std::move(*mapping.surface_add);
         if (request.shape == output::ProjectionSurfaceShape::ImportedMesh) {

@@ -794,6 +794,7 @@ struct EditorFrame final {
   // mesh browse requests are resolved and validated inside EditorShell, so
   // these vectors never expose a cancelled or invalid native-file choice.
   std::vector<FeedProjectionEdit> feed_projection_edits;
+  std::vector<FeedOrganizeRequest> feed_organize;
   std::vector<FeedSurfaceAddRequest> feed_surface_adds;
   std::vector<FeedSurfaceEditRequest> feed_surface_edits;
   std::vector<FeedSurfaceDeleteRequest> feed_surface_deletes;

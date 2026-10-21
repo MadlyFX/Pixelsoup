@@ -1333,6 +1333,22 @@ PhaseExit DirectorShowLoop::apply_feed_map_requests(OperatorFrame &op) {
         }
     }
     pending_feed_projection_edits.clear();
+    for (const auto &request : pending_feed_organize) {
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        const doc::NodeId id{next_new_node};
+        if (request.action == editor::FeedOrganizeAction::Duplicate) {
+            ++next_new_node;
+        }
+        if (!schedule_feed_organize(scheduler, request, id, frame)) {
+            std::cerr << "could not organize the feed map for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_feed_organize.clear();
     for (const auto &request : pending_feed_surface_deletes) {
         if (!schedule_feed_surface_delete(scheduler, request,
                                           frame)) {

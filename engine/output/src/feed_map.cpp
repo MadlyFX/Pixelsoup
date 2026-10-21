@@ -124,6 +124,8 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
     for (const auto& map : feed_map.maps) {
         mix(state, map.node.value());
         mix(state, static_cast<core::u64>(map.node_index));
+        mix(state, map.name);
+        mix(state, static_cast<core::u64>(map.order));
         mix(state, map.source);
         mix(state, static_cast<core::u64>(map.projection));
         mix(state, map.surface.value());
@@ -139,6 +141,7 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
     for (const auto& surface : feed_map.surfaces) {
         mix(state, surface.node.value());
         mix(state, surface.name);
+        mix(state, static_cast<core::u64>(surface.order));
         mix(state, static_cast<core::u64>(surface.locked));
         mix(state, surface.geometry);
         mix(state, static_cast<core::u64>(surface.shape));

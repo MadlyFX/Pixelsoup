@@ -59,6 +59,12 @@ inline constexpr std::string_view viewport_height = "viewport_height";
 // the referenced surface's `shape` selects planar versus mesh-warp geometry.
 inline constexpr std::string_view projection = "projection";
 inline constexpr std::string_view surface_id = "surface_id";
+// Operator label for the viewport. Empty shows the window/viewport ordinal.
+inline constexpr std::string_view map_name = "name";
+// Position in its list: viewports within their window, surfaces among all
+// surfaces. Ties fall back to document id, so an unordered project keeps its
+// creation order.
+inline constexpr std::string_view list_order = "order";
 
 // ---------------------------------------------------------------------------
 // output.surface

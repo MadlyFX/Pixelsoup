@@ -74,6 +74,8 @@ struct ProjectionSurface final {
     // manipulation unless the operator explicitly unlocks it in Feed Mapping.
     bool locked{};
     scene::WallColorSettings color;
+    // Operator list position; see schema::list_order.
+    core::i64 order{};
 
     bool operator==(const ProjectionSurface&) const = default;
 };
@@ -106,6 +108,11 @@ struct OutputMap final {
     // logical output window, so the window index is not an object identity.
     doc::NodeId node{};
     core::u32 node_index{};
+    // Operator label; empty shows the window/viewport ordinal.
+    std::string name;
+    // Position among the viewports of this window, which is also their
+    // compositing order: later viewports draw over earlier ones.
+    core::i64 order{};
     // CanvasSlice: the region of the scene canvas this node outputs.
     // PlanarSurface: the region of the referenced surface raster this node
     // owns. The same rectangle vocabulary makes port partitioning and the
@@ -141,12 +148,13 @@ inline constexpr core::u32 max_output_maps = 256U;
 inline constexpr core::u32 max_projection_surfaces = 256U;
 
 struct FeedMap final {
-    // Sorted by logical output-window index, then stable document id. Every
+    // Sorted by logical output-window index, list order, then stable document
+    // id. Every
     // map in a same-index run is an independent viewport composited into that
     // one application window.
     std::vector<OutputMap> maps;
 
-    // Stable document-id order. Surfaces are project setup data and remain in
+    // List order, then document id. Surfaces are project setup data and remain in
     // the evaluated value even when no feed currently references them.
     std::vector<ProjectionSurface> surfaces;
 

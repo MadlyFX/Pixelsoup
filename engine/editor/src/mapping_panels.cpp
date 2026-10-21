@@ -882,7 +882,9 @@ input_occupied(const topology::HardwareMap &map,
   if (bounds.width <= 0.0F) {
     return 0.0F;
   }
-  return std::min(std::clamp(bounds.width * 0.24F, 148.0F, 196.0F),
+  // Wide enough at a full-size panel for a row's whole destination; the
+  // narrow end is unchanged so a small panel keeps its work area.
+  return std::min(std::clamp(bounds.width * 0.24F, 148.0F, 280.0F),
                   bounds.width * 0.46F);
 }
 
@@ -940,11 +942,72 @@ input_occupied(const topology::HardwareMap &map,
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
+// An unnamed viewport inside its window's frame, where the window is shown.
+[[nodiscard]] std::string feed_viewport_short_name(core::u32 viewport_ordinal) {
+  std::array<char, 24U> text{};
+  const int length = std::snprintf(text.data(), text.size(), "VIEWPORT %02u",
+                                   viewport_ordinal);
+  return std::string{text.data(),
+                     static_cast<std::size_t>(std::max(length, 0))};
+}
+
+// The operator's name for a viewport, or its window and position there.
+[[nodiscard]] std::string feed_viewport_title(const output::OutputMap &map,
+                                              core::u32 viewport_ordinal) {
+  return map.name.empty() ? feed_viewport_name(map.node_index, viewport_ordinal)
+                          : map.name;
+}
+
 [[nodiscard]] std::string feed_row_details(const output::OutputMap &map) {
   const std::string domain{
       map.projection == output::FeedProjection::PlanarSurface ? "PHYSICAL  "
                                                                : "CANVAS  "};
-  return domain + "VIEWPORT " + feed_dimensions(map.viewport);
+  return domain + feed_dimensions(map.viewport);
+}
+
+// Everything a row abbreviates, for the hover: where the picture comes from
+// and where it lands.
+[[nodiscard]] std::string feed_row_tooltip(const output::OutputMap &map,
+                                           std::string_view title,
+                                           const output::FeedMap &feed_map) {
+  std::string source;
+  if (map.projection == output::FeedProjection::PlanarSurface) {
+    const output::ProjectionSurface *const surface =
+        feed_map.surface_for(map.surface);
+    source = "surface " + (surface != nullptr ? surface->name
+                                               : std::string{"(missing)"}) +
+             " " + feed_dimensions(map.source);
+  } else {
+    source = "canvas " + feed_dimensions(map.source);
+  }
+  std::array<char, 24U> window{};
+  const int length = std::snprintf(window.data(), window.size(), "window %02u",
+                                   map.node_index + 1U);
+  return std::string{title} + "  |  from " + source + "  |  to " +
+         std::string{window.data(),
+                     static_cast<std::size_t>(std::max(length, 0))} +
+         " " + feed_dimensions(map.viewport);
+}
+
+// `nodes` with `moved` taken out and put back just before or after `target`.
+[[nodiscard]] std::vector<doc::NodeId>
+reordered(const std::vector<doc::NodeId> &nodes, doc::NodeId moved,
+          doc::NodeId target, bool after) {
+  std::vector<doc::NodeId> order;
+  order.reserve(nodes.size());
+  for (const doc::NodeId node : nodes) {
+    if (node == moved) {
+      continue;
+    }
+    if (node == target && !after) {
+      order.push_back(moved);
+    }
+    order.push_back(node);
+    if (node == target && after) {
+      order.push_back(moved);
+    }
+  }
+  return order;
 }
 
 struct FeedWindowLayout final {
@@ -1343,6 +1406,18 @@ hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
                    details_row_height - 2.0F};
 }
 
+gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
+                                       bool height) noexcept {
+  const float palette_width = hardware_palette_width(bounds);
+  const float setup_y = bounds.y + title_height + palette_header_height +
+                        static_cast<float>(device_kinds.size()) *
+                            palette_row_step +
+                        4.0F;
+  return gui::Rect{bounds.x + 86.0F,
+                   setup_y + 70.0F + (height ? details_row_height : 0.0F),
+                   std::max(palette_width - 95.0F, 0.0F), details_row_height};
+}
+
 gui::Rect
 hardware_discovery_strip_bounds(const gui::Rect &bounds,
                                 const topology::HardwareDiscovery &discovery) noexcept {
@@ -1405,18 +1480,6 @@ hardware_discovered_status_text(const topology::HardwareMap &map,
                                 const topology::HardwareDiscovery &discovery,
                                 const topology::HardwareDiscoveredMachine &machine) {
   return discovered_status(map, discovery, machine).text;
-}
-
-gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
-                                       bool height) noexcept {
-  const float palette_width = hardware_palette_width(bounds);
-  const float setup_y = bounds.y + title_height + palette_header_height +
-                        static_cast<float>(device_kinds.size()) *
-                            palette_row_step +
-                        4.0F;
-  return gui::Rect{bounds.x + 86.0F,
-                   setup_y + 70.0F + (height ? details_row_height : 0.0F),
-                   std::max(palette_width - 95.0F, 0.0F), details_row_height};
 }
 
 gui::Rect
@@ -3283,6 +3346,11 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         surface_or_null(feed_map, selected_surface_node_);
     const doc::NodeId next = surface != nullptr ? surface->node : doc::NodeId{};
     if (next == surface_details_node_) {
+      if (surface != nullptr && surface->name != surface_name_ &&
+          !surface_name_dirty_ &&
+          ctx.focus() != mix(id_, "feed.surface.name", next.value())) {
+        surface_name_ = surface->name;
+      }
       const auto camera_field = mix(id_, "feed.surface.camera-inverse", next.value());
       if (surface != nullptr && surface->color != surface_color_observed_
           && !surface_numbers_.live() && ctx.focus() != camera_field) {
@@ -3463,59 +3531,129 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   std::vector<std::pair<gui::Rect, doc::NodeId>> surface_drop_targets;
   surface_drop_targets.reserve(feed_map.maps.size() * 2U);
 
+  // A viewport row dragged up or down its window's rows reorders it there,
+  // which is also its compositing order. Only its own window's rows are
+  // targets: moving between windows is a placement change, not a reorder.
+  struct ViewportRow final {
+    gui::Rect bounds;
+    doc::NodeId node;
+    core::u32 window{};
+  };
+  std::vector<ViewportRow> viewport_rows;
+  viewport_rows.reserve(feed_map.maps.size());
+  if (row_drag_node_ != doc::NodeId{} &&
+      feed_map.map_node(row_drag_node_) == nullptr) {
+    row_drag_node_ = {};
+    row_drag_moved_ = false;
+  }
+  if (row_drag_node_ != doc::NodeId{} && ctx.pointer_down()) {
+    row_drag_moved_ = row_drag_moved_ ||
+                      std::abs(ctx.pointer_y() - row_drag_start_y_) >= 4.0F;
+  }
+  // F2 names whichever row was clicked last, as in every layer list.
+  if (focused_ && !ctx.typing() && !rename_.active() &&
+      ctx.key_pressed(gui::Key::Rename)) {
+    if (const output::OutputMap *const map = feed_map.map_node(rename_row_)) {
+      rename_.begin(ctx, map->node.value(),
+                    feed_viewport_title(*map,
+                                        feed_viewport_ordinal(feed_map, *map)));
+    } else if (const output::ProjectionSurface *const surface =
+                   feed_map.surface_for(rename_row_);
+               surface != nullptr && !surface->locked) {
+      rename_.begin(ctx, surface->node.value(), surface->name);
+    }
+  }
+
   for (std::size_t index = 0U; index < feed_map.maps.size(); ++index) {
     const output::OutputMap &map = feed_map.maps[index];
     const core::u32 viewport_ordinal =
         feed_viewport_ordinal(feed_map, map);
+    const std::string title = feed_viewport_title(map, viewport_ordinal);
     const gui::Rect row{list.x + 6.0F,
                         list.y + feed_list_header_height +
                             feed_add_button_step +
                             static_cast<float>(index) * feed_row_step,
                         std::max(list.width - 12.0F, 0.0F), feed_row_height};
-    const float action_width = std::min(28.0F, row.width);
-    const gui::Rect row_content{row.x, row.y,
-                                std::max(row.width - action_width, 0.0F),
-                                row.height};
-    const gui::Rect remove{row_content.x + row_content.width, row.y,
-                           action_width, row.height};
+    const float action_width = std::min(26.0F, row.width * 0.25F);
+    const gui::Rect row_content{
+        row.x, row.y, std::max(row.width - action_width * 2.0F, 0.0F),
+        row.height};
+    const gui::Rect duplicate{row_content.x + row_content.width, row.y,
+                              action_width, row.height};
+    const gui::Rect remove{duplicate.x + duplicate.width, row.y, action_width,
+                           row.height};
+    const bool renaming = rename_.editing(map.node.value());
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "feed.row", map.node.value()), row_content);
+        renaming ? gui::Interaction{}
+                 : ctx.grab(mix(id_, "feed.row", map.node.value()),
+                            row_content);
+    const gui::Interaction duplicate_interaction = ctx.grab(
+        mix(id_, "feed.row.duplicate", map.node.value()), duplicate);
     const gui::Interaction remove_interaction =
         ctx.grab(mix(id_, "feed.row.remove", map.node.value()), remove);
     const bool selected = selected_map_node_ == map.node;
     ctx.panel(row,
               selected ? ctx.theme().selection
-                       : (interaction.hovered || remove_interaction.hovered
+                       : (interaction.hovered || remove_interaction.hovered ||
+                                  duplicate_interaction.hovered
                               ? ctx.theme().widget_hover
                               : ctx.theme().row));
     ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
               feed_color(ctx.theme(), map.node_index));
-    ctx.label(gui::Rect{row.x + 10.0F, row.y + 1.0F,
-                        std::max(row_content.width - 14.0F, 0.0F), 17.0F},
-              feed_viewport_name(map.node_index, viewport_ordinal),
-              ctx.theme().text);
+    const gui::Rect title_bounds{row.x + 10.0F, row.y + 1.0F,
+                                 std::max(row_content.width - 14.0F, 0.0F),
+                                 17.0F};
+    if (renaming) {
+      if (auto name = rename_.draw(ctx, title_bounds)) {
+        frame.organize = FeedOrganizeRequest{FeedOrganizeAction::Rename,
+                                             map.node, std::move(*name)};
+      }
+    } else {
+      ctx.label(title_bounds, title, ctx.theme().text);
+    }
     ctx.label(gui::Rect{row.x + 10.0F, row.y + 16.0F,
                         std::max(row_content.width - 14.0F, 0.0F), 15.0F},
               feed_row_details(map), ctx.theme().text_muted);
-    ctx.panel(gui::Rect{remove.x, remove.y + 6.0F, 1.0F,
-                        std::max(remove.height - 12.0F, 0.0F)},
+    ctx.tooltip(row_content, feed_row_tooltip(map, title, feed_map));
+    ctx.panel(gui::Rect{duplicate.x, duplicate.y + 6.0F, 1.0F,
+                        std::max(duplicate.height - 12.0F, 0.0F)},
               ctx.theme().divider);
+    gui::draw_icon(ctx.draw_list(), gui::Icon::Duplicate,
+                   duplicate.x + duplicate.width * 0.5F,
+                   duplicate.y + duplicate.height * 0.5F,
+                   duplicate_interaction.hovered ? ctx.theme().text
+                                                 : ctx.theme().text_muted);
+    ctx.tooltip(duplicate, "Duplicate viewport");
     draw_remove(ctx, remove.x + remove.width * 0.5F,
                 remove.y + remove.height * 0.5F,
                 remove_interaction.hovered ? ctx.theme().warning
                                            : ctx.theme().text_muted);
+    if (interaction.pressed) {
+      row_drag_node_ = map.node;
+      row_drag_start_y_ = ctx.pointer_y();
+      row_drag_moved_ = false;
+    }
     if (interaction.clicked) {
       selected_map_node_ = map.node;
       frame.selection = map.node;
+      rename_row_ = map.node;
       if (map.projection == output::FeedProjection::PlanarSurface &&
           feed_map.surface_for(map.surface) != nullptr) {
         selected_surface_node_ = map.surface;
         frame.surface_selection = map.surface;
       }
+      if (clicks_.double_click(map.node.value(), ctx.time_seconds())) {
+        rename_.begin(ctx, map.node.value(), title);
+      }
+    }
+    if (duplicate_interaction.clicked) {
+      frame.organize =
+          FeedOrganizeRequest{FeedOrganizeAction::Duplicate, map.node};
     }
     if (remove_interaction.clicked) {
       frame.remove = FeedMapDeleteRequest{map.node};
     }
+    viewport_rows.push_back(ViewportRow{row, map.node, map.node_index});
     if (surface_drag_active) {
       surface_drop_targets.emplace_back(row, map.node);
       border(ctx, row,
@@ -3523,6 +3661,44 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                  ? ctx.theme().accent
                  : alpha(ctx.theme().accent, 0.35F),
              row.contains(ctx.pointer_x(), ctx.pointer_y()) ? 2.0F : 1.0F);
+    }
+  }
+
+  if (row_drag_node_ != doc::NodeId{}) {
+    const output::OutputMap *const dragged = feed_map.map_node(row_drag_node_);
+    if (row_drag_moved_ && dragged != nullptr) {
+      for (const ViewportRow &target : viewport_rows) {
+        if (target.window != dragged->node_index ||
+            !target.bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+          continue;
+        }
+        const bool after =
+            ctx.pointer_y() >= target.bounds.y + target.bounds.height * 0.5F;
+        const float line_y = after
+                                 ? target.bounds.y + target.bounds.height + 1.0F
+                                 : target.bounds.y - 2.0F;
+        ctx.panel(gui::Rect{target.bounds.x, line_y, target.bounds.width,
+                            2.0F},
+                  ctx.theme().accent);
+        if (!ctx.pointer_down() && target.node != dragged->node) {
+          std::vector<doc::NodeId> current;
+          for (const output::OutputMap &map :
+               feed_map.maps_for(dragged->node_index)) {
+            current.push_back(map.node);
+          }
+          frame.organize = FeedOrganizeRequest{
+              FeedOrganizeAction::Reorder, dragged->node, {},
+              reordered(current, dragged->node, target.node, after)};
+          if (frame.organize->order == current) {
+            frame.organize.reset();
+          }
+        }
+        break;
+      }
+    }
+    if (!ctx.pointer_down()) {
+      row_drag_node_ = {};
+      row_drag_moved_ = false;
     }
   }
 
@@ -3596,26 +3772,38 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     frame.surface_add = std::move(request);
   }
   surface_y += feed_surface_row_step;
+  // Collected for the drag resolution below: a surface dropped on another
+  // surface row reorders the list instead of assigning it to an output.
+  std::vector<std::pair<gui::Rect, doc::NodeId>> surface_rows;
+  surface_rows.reserve(feed_map.surfaces.size());
   for (const output::ProjectionSurface &surface : feed_map.surfaces) {
     const gui::Rect row{list.x + 6.0F, surface_y,
                         std::max(list.width - 12.0F, 0.0F),
                         feed_surface_row_height};
-    const float remove_width = std::min(28.0F, row.width);
+    const float remove_width = std::min(26.0F, row.width);
     const float lock_width =
-        std::min(48.0F, std::max(row.width - remove_width, 0.0F));
-    const float action_width = remove_width + lock_width;
+        std::min(26.0F, std::max(row.width - remove_width, 0.0F));
+    const float duplicate_width = std::min(
+        26.0F, std::max(row.width - remove_width - lock_width, 0.0F));
+    const float action_width = remove_width + lock_width + duplicate_width;
     const gui::Rect row_content{row.x, row.y,
                                 std::max(row.width - action_width, 0.0F),
                                 row.height};
-    const gui::Rect lock{row_content.x + row_content.width, row.y, lock_width,
+    const gui::Rect duplicate{row_content.x + row_content.width, row.y,
+                              duplicate_width, row.height};
+    const gui::Rect lock{duplicate.x + duplicate.width, row.y, lock_width,
                          row.height};
     const gui::Rect remove{lock.x + lock.width, row.y, remove_width,
                            row.height};
+    const bool renaming = rename_.editing(surface.node.value());
     const gui::Interaction interaction =
-        surface.locked
+        surface.locked || renaming
             ? gui::Interaction{}
             : ctx.grab(mix(id_, "feed.surface.row", surface.node.value()),
                        row_content);
+    const gui::Interaction duplicate_interaction = ctx.grab(
+        mix(id_, "feed.surface.row.duplicate", surface.node.value()),
+        duplicate);
     const gui::Interaction lock_interaction = ctx.grab(
         mix(id_, "feed.surface.row.lock", surface.node.value()), lock);
     const gui::Interaction remove_interaction =
@@ -3627,26 +3815,50 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     ctx.panel(row,
               selected ? ctx.theme().selection
                        : (interaction.hovered || lock_interaction.hovered ||
-                                  remove_interaction.hovered
+                                  remove_interaction.hovered ||
+                                  duplicate_interaction.hovered
                               ? ctx.theme().widget_hover
                               : ctx.theme().row));
     ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
               selected ? ctx.theme().accent : ctx.theme().keyframe);
-    ctx.label(gui::Rect{row.x + 10.0F, row.y,
-                        std::max(row_content.width - 14.0F, 0.0F), row.height},
-              surface.name.empty() ? std::string_view{"UNTITLED SURFACE"}
-                                   : std::string_view{surface.name},
-              surface.locked
-                  ? ctx.theme().text_muted
-                  : (selected ? ctx.theme().text : ctx.theme().text_muted));
+    const gui::Rect name_bounds{row.x + 10.0F, row.y,
+                                std::max(row_content.width - 14.0F, 0.0F),
+                                row.height};
+    if (renaming) {
+      if (auto name = rename_.draw(ctx, name_bounds)) {
+        frame.organize = FeedOrganizeRequest{FeedOrganizeAction::Rename,
+                                             surface.node, std::move(*name)};
+      }
+    } else {
+      ctx.label(name_bounds,
+                surface.name.empty() ? std::string_view{"UNTITLED SURFACE"}
+                                     : std::string_view{surface.name},
+                surface.locked
+                    ? ctx.theme().text_muted
+                    : (selected ? ctx.theme().text : ctx.theme().text_muted));
+    }
+    ctx.tooltip(row_content, surface.locked
+                                 ? std::string_view{"Unlock to rename or move"}
+                                 : std::string_view{surface.name});
+    ctx.panel(gui::Rect{duplicate.x, duplicate.y + 5.0F, 1.0F,
+                        std::max(duplicate.height - 10.0F, 0.0F)},
+              ctx.theme().divider);
+    gui::draw_icon(ctx.draw_list(), gui::Icon::Duplicate,
+                   duplicate.x + duplicate.width * 0.5F,
+                   duplicate.y + duplicate.height * 0.5F,
+                   duplicate_interaction.hovered ? ctx.theme().text
+                                                 : ctx.theme().text_muted);
+    ctx.tooltip(duplicate, "Duplicate surface");
     ctx.panel(gui::Rect{lock.x, lock.y + 5.0F, 1.0F,
                         std::max(lock.height - 10.0F, 0.0F)},
               ctx.theme().divider);
-    ctx.label(lock, surface.locked ? std::string_view{"LOCKED"}
-                                   : std::string_view{"LOCK"},
-              surface.locked || lock_interaction.hovered
-                  ? ctx.theme().warning
-                  : ctx.theme().text_muted);
+    gui::draw_padlock_glyph(ctx.draw_list(), lock.x + lock.width * 0.5F,
+                            lock.y + lock.height * 0.5F, surface.locked,
+                            surface.locked || lock_interaction.hovered
+                                ? ctx.theme().warning
+                                : ctx.theme().text_muted);
+    ctx.tooltip(lock, surface.locked ? std::string_view{"Unlock surface"}
+                                     : std::string_view{"Lock surface"});
     ctx.panel(gui::Rect{remove.x, remove.y + 5.0F, 1.0F,
                         std::max(remove.height - 10.0F, 0.0F)},
               ctx.theme().divider);
@@ -3663,6 +3875,14 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     if (interaction.clicked) {
       selected_surface_node_ = surface.node;
       frame.surface_selection = surface.node;
+      rename_row_ = surface.node;
+      if (clicks_.double_click(surface.node.value(), ctx.time_seconds())) {
+        rename_.begin(ctx, surface.node.value(), surface.name);
+      }
+    }
+    if (duplicate_interaction.clicked) {
+      frame.organize =
+          FeedOrganizeRequest{FeedOrganizeAction::Duplicate, surface.node};
     }
     if (lock_interaction.clicked) {
       frame.surface_lock =
@@ -3674,8 +3894,10 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     if (remove_interaction.clicked) {
       frame.surface_remove = FeedSurfaceDeleteRequest{surface.node};
     }
+    surface_rows.emplace_back(row, surface.node);
     surface_y += feed_surface_row_step;
   }
+  rename_.end_frame(ctx);
   sync_surface_details();
 
   ctx.panel(work, scale(ctx.theme().background, 0.76F));
@@ -3848,8 +4070,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                 alpha(color, selected ? 0.78F : 0.56F));
       ctx.label(gui::Rect{rectangle.x + 7.0F, rectangle.y + 1.0F,
                           std::max(rectangle.width - 14.0F, 0.0F), 17.0F},
-                feed_viewport_name(map.node_index, viewport_ordinal),
+                map.name.empty() ? feed_viewport_short_name(viewport_ordinal)
+                                 : map.name,
                 ctx.theme().text);
+      ctx.tooltip(rectangle,
+                  feed_row_tooltip(map,
+                                   feed_viewport_title(map, viewport_ordinal),
+                                   feed_map));
       if (selected) {
         const gui::Rect current_handle{rectangle.x + rectangle.width - 5.0F,
                                        rectangle.y + rectangle.height - 5.0F,
@@ -4520,9 +4747,40 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   if (surface_drag_node_ != doc::NodeId{}) {
     const output::ProjectionSurface *const dragged =
         feed_map.surface_for(surface_drag_node_);
+    bool over_surface_list = false;
+    if (surface_drag_active && dragged != nullptr) {
+      for (const auto &[row_bounds, node] : surface_rows) {
+        if (!row_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+          continue;
+        }
+        over_surface_list = true;
+        const bool after =
+            ctx.pointer_y() >= row_bounds.y + row_bounds.height * 0.5F;
+        ctx.panel(gui::Rect{row_bounds.x,
+                            after ? row_bounds.y + row_bounds.height + 1.0F
+                                  : row_bounds.y - 2.0F,
+                            row_bounds.width, 2.0F},
+                  ctx.theme().accent);
+        if (!ctx.pointer_down() && node != dragged->node) {
+          std::vector<doc::NodeId> current;
+          current.reserve(feed_map.surfaces.size());
+          for (const output::ProjectionSurface &surface : feed_map.surfaces) {
+            current.push_back(surface.node);
+          }
+          frame.organize = FeedOrganizeRequest{
+              FeedOrganizeAction::Reorder, dragged->node, {},
+              reordered(current, dragged->node, node, after)};
+          if (frame.organize->order == current) {
+            frame.organize.reset();
+          }
+        }
+        break;
+      }
+    }
     if (surface_drag_active && dragged != nullptr) {
       for (const auto &[target_bounds, map_node] : surface_drop_targets) {
-        if (!target_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+        if (over_surface_list ||
+            !target_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
           continue;
         }
         if (!ctx.pointer_down()) {
@@ -4553,7 +4811,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     }
   }
 
-  frame.dragging = drag_kind_ != DragKind::None || surface_drag_active;
+  frame.dragging = drag_kind_ != DragKind::None || surface_drag_active ||
+                   (row_drag_node_ != doc::NodeId{} && row_drag_moved_);
+  frame.editing = frame.editing || rename_.active();
   ctx.pop_clip();
   return frame;
 }

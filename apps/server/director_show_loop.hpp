@@ -291,6 +291,7 @@ struct DirectorShowLoop final {
     std::vector<editor::FeedMapRectEdit> &pending_feed_map_edits;
     std::vector<editor::FeedMapDeleteRequest> &pending_feed_map_deletes;
     std::vector<editor::FeedProjectionEdit> &pending_feed_projection_edits;
+    std::vector<editor::FeedOrganizeRequest> &pending_feed_organize;
     std::vector<editor::FeedSurfaceAddRequest> &pending_feed_surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> &pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> &pending_feed_surface_deletes;

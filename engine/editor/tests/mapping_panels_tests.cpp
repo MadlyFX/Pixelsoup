@@ -1198,10 +1198,50 @@ struct FeedHarness final {
     if (key.has_value()) {
       input.add_key(*key);
     }
-    ctx.new_frame();
+    ctx.new_frame(time += frame_seconds);
     return panel.draw(ctx, draw_bounds, canvas, map, show_frame, hardware);
   }
+
+  editor::FeedMappingFrame type(std::string_view text,
+                                const output::FeedMap &map) {
+    input.new_frame();
+    input.add_text(text);
+    ctx.new_frame(time += frame_seconds);
+    return panel.draw(ctx, bounds, canvas, map);
+  }
+
+  editor::FeedMappingFrame click(float x, float y,
+                                 const output::FeedMap &map) {
+    static_cast<void>(frame(x, y, false, map));
+    static_cast<void>(frame(x, y, true, map));
+    return frame(x, y, false, map);
+  }
+
+  // Separate clicks are a second apart unless a test asks for a
+  // double-click, which is what an operator's two deliberate clicks are.
+  double time{};
+  double frame_seconds{1.0};
 };
+
+// Feed list rows at the harness size: viewport row n starts at 84 + 37n;
+// with two viewports the first surface row starts at 243, 31 apart. A row
+// ends in 26-pixel actions: duplicate then remove for viewports, duplicate,
+// padlock, remove for surfaces.
+constexpr float feed_row_x = 70.0F;
+constexpr float feed_viewport_duplicate_x = 147.0F;
+constexpr float feed_surface_duplicate_x = 121.0F;
+
+[[nodiscard]] output::FeedMap feed_one_window_demo() {
+  output::FeedMap map{};
+  for (core::u64 id : {20U, 21U, 22U}) {
+    output::OutputMap viewport{};
+    viewport.node = doc::NodeId{id};
+    viewport.source = scene::CanvasRect{0U, 0U, 640U, 360U};
+    viewport.viewport = viewport.source;
+    map.maps.push_back(viewport);
+  }
+  return map;
+}
 
 void feed_rectangles_move_in_canvas_pixels_and_clamp() {
   FeedHarness harness;
@@ -1586,6 +1626,94 @@ void output_identity_is_explicit_and_the_empty_surface_prompt_is_inert() {
   MAPPING_CHECK(repaired.projection_edit->node == doc::NodeId{40U});
   MAPPING_CHECK(repaired.projection_edit->projection ==
                 output::FeedProjection::CanvasSlice);
+}
+
+// A double-click on a viewport row, or F2 after clicking a surface row, opens
+// the name in place; Enter commits exactly the typed name.
+void feed_rows_rename_in_place() {
+  const output::FeedMap map = feed_surface_demo();
+  FeedHarness harness;
+  harness.frame_seconds = 0.05;
+  static_cast<void>(harness.click(feed_row_x, 101.0F, map));
+  static_cast<void>(harness.click(feed_row_x, 101.0F, map));
+  static_cast<void>(harness.type("Processor A", map));
+  const auto viewport =
+      harness.frame(feed_row_x, 101.0F, false, map, gui::Key::Enter);
+  MAPPING_CHECK(viewport.organize ==
+                (editor::FeedOrganizeRequest{
+                    editor::FeedOrganizeAction::Rename, doc::NodeId{10U},
+                    "Processor A"}));
+
+  harness.frame_seconds = 1.0;
+  static_cast<void>(harness.click(feed_row_x, 286.0F, map));
+  static_cast<void>(
+      harness.frame(feed_row_x, 286.0F, false, map, gui::Key::Rename));
+  static_cast<void>(harness.type("Left Wing", map));
+  const auto surface =
+      harness.frame(feed_row_x, 286.0F, false, map, gui::Key::Enter);
+  MAPPING_CHECK(surface.organize ==
+                (editor::FeedOrganizeRequest{
+                    editor::FeedOrganizeAction::Rename, doc::NodeId{71U},
+                    "Left Wing"}));
+
+  // A single click, a second later, is a selection and nothing more.
+  const auto single = harness.click(feed_row_x, 101.0F, map);
+  MAPPING_CHECK(!single.organize.has_value());
+  MAPPING_CHECK(!harness.ctx.typing());
+}
+
+void feed_rows_duplicate_from_their_action() {
+  const output::FeedMap map = feed_surface_demo();
+  FeedHarness harness;
+  const auto viewport =
+      harness.click(feed_viewport_duplicate_x, 101.0F, map);
+  MAPPING_CHECK(viewport.organize ==
+                (editor::FeedOrganizeRequest{
+                    editor::FeedOrganizeAction::Duplicate, doc::NodeId{10U}}));
+  MAPPING_CHECK(!viewport.remove.has_value());
+  const auto surface = harness.click(feed_surface_duplicate_x, 257.0F, map);
+  MAPPING_CHECK(surface.organize ==
+                (editor::FeedOrganizeRequest{
+                    editor::FeedOrganizeAction::Duplicate, doc::NodeId{70U}}));
+  MAPPING_CHECK(!surface.surface_remove.has_value());
+  MAPPING_CHECK(!surface.surface_lock.has_value());
+}
+
+// Dragging a row within its list reorders the whole list; releasing it where
+// it started authors nothing.
+void feed_rows_reorder_by_dragging() {
+  const output::FeedMap viewports = feed_one_window_demo();
+  FeedHarness harness;
+  static_cast<void>(harness.frame(feed_row_x, 101.0F, false, viewports));
+  static_cast<void>(harness.frame(feed_row_x, 101.0F, true, viewports));
+  static_cast<void>(harness.frame(feed_row_x, 150.0F, true, viewports));
+  const auto moving = harness.frame(feed_row_x, 185.0F, true, viewports);
+  MAPPING_CHECK(moving.dragging && !moving.organize.has_value());
+  const auto dropped = harness.frame(feed_row_x, 185.0F, false, viewports);
+  MAPPING_CHECK(dropped.organize.has_value());
+  MAPPING_CHECK(dropped.organize->action ==
+                editor::FeedOrganizeAction::Reorder);
+  MAPPING_CHECK(dropped.organize->order ==
+                (std::vector<doc::NodeId>{doc::NodeId{21U}, doc::NodeId{22U},
+                                          doc::NodeId{20U}}));
+
+  static_cast<void>(harness.frame(feed_row_x, 101.0F, true, viewports));
+  static_cast<void>(harness.frame(feed_row_x, 108.0F, true, viewports));
+  const auto unmoved = harness.frame(feed_row_x, 108.0F, false, viewports);
+  MAPPING_CHECK(!unmoved.organize.has_value());
+
+  const output::FeedMap surfaces = feed_surface_demo();
+  FeedHarness list;
+  static_cast<void>(list.frame(feed_row_x, 250.0F, false, surfaces));
+  static_cast<void>(list.frame(feed_row_x, 250.0F, true, surfaces));
+  static_cast<void>(list.frame(feed_row_x, 270.0F, true, surfaces));
+  static_cast<void>(list.frame(feed_row_x, 295.0F, true, surfaces));
+  const auto reordered = list.frame(feed_row_x, 295.0F, false, surfaces);
+  MAPPING_CHECK(reordered.organize.has_value());
+  MAPPING_CHECK(reordered.organize->order ==
+                (std::vector<doc::NodeId>{doc::NodeId{71U}, doc::NodeId{70U}}));
+  // Dropped on the surface list, it is not also assigned to an output.
+  MAPPING_CHECK(!reordered.projection_edit.has_value());
 }
 
 void selected_feed_regions_return_undoable_delete_requests() {
@@ -2459,7 +2587,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 47U> cases{{
+constexpr std::array<Case, 50U> cases{{
     {"UV mesh source crop is hidden while destination stays editable",
      &imported_mesh_hides_source_crop_but_keeps_destination_fields},
     {"numeric rectangles release focus when removed or hidden",
@@ -2519,6 +2647,10 @@ constexpr std::array<Case, 47U> cases{{
      &feed_mapping_adds_another_viewport_to_the_current_window},
     {"output identity is explicit and the empty surface prompt is inert",
      &output_identity_is_explicit_and_the_empty_surface_prompt_is_inert},
+    {"feed rows rename in place", &feed_rows_rename_in_place},
+    {"feed rows duplicate from their action",
+     &feed_rows_duplicate_from_their_action},
+    {"feed rows reorder by dragging", &feed_rows_reorder_by_dragging},
     {"selected feed regions return undoable delete requests",
      &selected_feed_regions_return_undoable_delete_requests},
     {"feed mapping creates a canvas sized front surface",

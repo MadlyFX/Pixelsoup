@@ -463,6 +463,9 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
             pending_feed_projection_edits.end(),
             editor_frame.feed_projection_edits.begin(),
             editor_frame.feed_projection_edits.end());
+        pending_feed_organize.insert(pending_feed_organize.end(),
+                                     editor_frame.feed_organize.begin(),
+                                     editor_frame.feed_organize.end());
         pending_feed_surface_adds.insert(
             pending_feed_surface_adds.end(),
             editor_frame.feed_surface_adds.begin(),

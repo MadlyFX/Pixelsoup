@@ -312,6 +312,7 @@ void FeedMapModel::put(const doc::Node& node) {
         surface.node = node.id;
         surface.name = std::string{reader.text(schema::surface_name, "Surface")};
         surface.locked = reader.boolean(schema::locked, true);
+        surface.order = reader.integer(schema::list_order, 0);
         surface.color.enabled = reader.boolean(schema::wall_color_enabled, false);
         surface.color.camera_inverse_lut_source = reader.text(schema::camera_inverse_lut, "");
         for (std::size_t i = 0; i < surface.color.primaries.size(); ++i)
@@ -435,6 +436,8 @@ void FeedMapModel::put(const doc::Node& node) {
     OutputMap map{};
     map.node = node.id;
     map.node_index = index;
+    map.name = std::string{reader.text(schema::map_name, "")};
+    map.order = reader.integer(schema::list_order, 0);
     map.source = scene::CanvasRect{x, y, width, height};
     map.viewport = scene::CanvasRect{viewport_x, viewport_y, viewport_width,
                                      viewport_height};
@@ -504,6 +507,14 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
         }
         feed_map.surfaces.push_back(surface);
     }
+    // Operator order. The cap above already chose which surfaces survive by
+    // document id, so a reorder can never change which ones exist.
+    std::stable_sort(
+        feed_map.surfaces.begin(), feed_map.surfaces.end(),
+        [](const ProjectionSurface& left,
+           const ProjectionSurface& right) noexcept {
+            return left.order < right.order;
+        });
 
     // Surface transform channels use the same document vocabulary and
     // interpolation as scene objects. Channel source ids are ordered, so the
@@ -593,15 +604,20 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
         feed_map.maps.push_back(std::move(resolved));
     }
 
-    // By window index and then document id, which makes each window's maps a
-    // contiguous span and gives compositing/digesting a stable order.
+    // By window index, list order and then document id, which makes each
+    // window's maps a contiguous span and gives compositing/digesting a stable
+    // order the operator chose.
     std::sort(
         feed_map.maps.begin(),
         feed_map.maps.end(),
         [](const OutputMap& left, const OutputMap& right) noexcept {
-            return left.node_index < right.node_index ||
-                (left.node_index == right.node_index &&
-                 left.node.value() < right.node.value());
+            if (left.node_index != right.node_index) {
+                return left.node_index < right.node_index;
+            }
+            if (left.order != right.order) {
+                return left.order < right.order;
+            }
+            return left.node.value() < right.node.value();
         });
 
     return feed_map;

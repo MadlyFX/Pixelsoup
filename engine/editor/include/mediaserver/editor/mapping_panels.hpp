@@ -4,6 +4,7 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
@@ -18,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 // Authoring surfaces for the document-backed hardware and output maps.
 //
@@ -574,6 +576,30 @@ struct FeedSurfaceDeleteRequest final {
   bool operator==(const FeedSurfaceDeleteRequest &) const = default;
 };
 
+// List housekeeping for viewports and surfaces: names, order and copies.
+// One request type because all three are the same kind of edit - they change
+// how the operator finds an item, never what it calibrates - and they reach
+// the document through the same authoring boundary.
+enum class FeedOrganizeAction : core::u8 {
+  // Sets `name` on the viewport or surface `node`.
+  Rename,
+  // `order` is the complete list in its new order: every viewport of one
+  // window, or every surface.
+  Reorder,
+  // Copies `node` and places the copy directly after it.
+  Duplicate,
+};
+
+struct FeedOrganizeRequest final {
+  FeedOrganizeAction action{FeedOrganizeAction::Rename};
+  doc::NodeId node{};
+  std::string name;
+  std::vector<doc::NodeId> order;
+  core::u64 gesture{};
+
+  bool operator==(const FeedOrganizeRequest &) const = default;
+};
+
 struct FeedSurfaceLockRequest final {
   doc::NodeId node{};
   bool locked{};
@@ -602,6 +628,7 @@ struct FeedMappingFrame final {
   std::optional<FeedSurfaceEditRequest> mesh_browse;
   std::optional<FeedSurfaceDeleteRequest> surface_remove;
   std::optional<FeedSurfaceLockRequest> surface_lock;
+  std::optional<FeedOrganizeRequest> organize;
   // Delete was handled by this focused panel, so the shell must not also
   // delete the current scene selection.
   bool consume_delete{};
@@ -681,6 +708,11 @@ public:
     rectangle_numbers_ = NumberField{};
     rectangle_mesh_domain_ = false;
     focused_ = false;
+    rename_.reset();
+    clicks_.reset();
+    row_drag_node_ = {};
+    row_drag_moved_ = false;
+    rename_row_ = {};
   }
 
 private:
@@ -705,6 +737,15 @@ private:
   float surface_drag_start_x_{};
   float surface_drag_start_y_{};
   bool surface_drag_moved_{};
+  // A viewport row dragged within its window's rows to reorder it.
+  doc::NodeId row_drag_node_{};
+  float row_drag_start_y_{};
+  bool row_drag_moved_{};
+  // Double-click or F2 on a viewport or surface row names it in place.
+  InlineRename rename_{gui::ui_id("feed.mapping.rename")};
+  ClickTracker clicks_;
+  // The viewport or surface row clicked last: what F2 names.
+  doc::NodeId rename_row_{};
   doc::NodeId surface_details_node_{};
   core::u64 surface_details_show_frame_{};
   std::string surface_name_;

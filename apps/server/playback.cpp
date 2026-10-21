@@ -1958,6 +1958,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::FeedMapRectEdit> pending_feed_map_edits;
     std::vector<editor::FeedMapDeleteRequest> pending_feed_map_deletes;
     std::vector<editor::FeedProjectionEdit> pending_feed_projection_edits;
+    std::vector<editor::FeedOrganizeRequest> pending_feed_organize;
     std::vector<editor::FeedSurfaceAddRequest> pending_feed_surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> pending_feed_surface_deletes;
@@ -2392,6 +2393,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_feed_map_edits = pending_feed_map_edits,
         .pending_feed_map_deletes = pending_feed_map_deletes,
         .pending_feed_projection_edits = pending_feed_projection_edits,
+        .pending_feed_organize = pending_feed_organize,
         .pending_feed_surface_adds = pending_feed_surface_adds,
         .pending_feed_surface_edits = pending_feed_surface_edits,
         .pending_feed_surface_deletes = pending_feed_surface_deletes,

@@ -1140,6 +1140,21 @@ surface an output is on rather than offering a stepper to hunt through them:
 cycling blindly past eight walls to find the ninth is what a control looks like
 when the gesture was never decided.
 
+Viewport and surface rows can be named, reordered and copied in the list.
+Double-click a row, or click it and press F2, to type a name; Enter keeps it
+and Escape leaves the old one. An unnamed viewport is listed by its window and
+position, such as `WINDOW 01 | VIEWPORT 03`. Drag a viewport row up or down
+among the rows of its own window to reorder it - that order is also the order
+viewports draw in, so a later viewport covers an earlier one where they
+overlap. Drag a surface row onto another surface row to reorder the surfaces;
+dropping it on a viewport instead still assigns it. The copy icon on a row
+duplicates it directly below with every setting the same, including source
+crop, destination and surface calibration; a named item's copy is named
+"<name> copy". Each row's second line shows its domain and destination
+rectangle, and hovering a row or its rectangle shows the whole source and
+destination. A locked surface is unlocked with its padlock before it can be
+renamed or dragged.
+
 Feed Mapping treats application windows and viewports as separate spaces. A
 window's raster comes from its Hardware Map output binding and stays fixed;
 the colored rectangle inside it is the feed's destination viewport. Moving or
