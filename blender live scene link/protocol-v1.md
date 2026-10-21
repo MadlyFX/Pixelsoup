@@ -145,8 +145,9 @@ candidate mailbox and one resolution slot bound pending work. At most 256 final
 Director receipts are retained per pairing; reaching capacity requires re-pairing
 and a fresh snapshot rather than silently evicting replay history.
 
-Storage defaults to `out/scene-link-resources` under the application working
-directory. Every pairing, including the concurrent links of different scenes,
+Storage is `<project> Blender/Link Resources` beside the saved project; an
+unsaved project uses `Documents/Media Server/Blender/Link Resources`. Every
+pairing, including the concurrent links of different scenes,
 shares one content-addressed store, `shared/`, which grows only with distinct
 content. Completed resources are `<hash>.glb` and the store is also the ingest
 package cache: a stored resource is its own frozen copy and one package index

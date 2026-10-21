@@ -14,14 +14,13 @@ build.ninja
 .ninja_log
 .ninja_deps
 compile_commands.json
-# Dear ImGui writes its window/docking layout here at runtime; per-user state,
-# not source.
-imgui.ini
-
 # Local operator state and design references are not project source.
 /media-server.wal
 /media-server.wal.release
 /example UI images/
+
+# Blender writes the previous save beside a .blend; Git already keeps history.
+*.blend1
 
 # Derived import/lighting packages are recreated from their source assets.
 .mslink-cache-v1/
@@ -33,4 +32,3 @@ imgui.ini
 # Python caches are disposable regardless of which working directory runs them.
 __pycache__/
 *.py[cod]
-/test_media/

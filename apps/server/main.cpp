@@ -1420,9 +1420,9 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         return 2;
     }
     if (playback.edit && !mediaserver::app::editor_available()) {
-        std::cerr << "this build has no operator editor: it needs the editor "
-                     "module (ImGui and the scene shaders) and a GPU this "
-                     "machine can open\n";
+        std::cerr << "this build has no operator editor: it needs a GUI "
+                     "build with the editor module and scene shaders, and a "
+                     "GPU this machine can open\n";
         return 2;
     }
     if (playback.enabled && is_director && !director_listen) {
