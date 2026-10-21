@@ -173,7 +173,9 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_BINARY_DIR}/animation-fixture" "${CMAKE_CURRENT_BINARY_DIR}/animation-evidence")
         add_test(NAME mediaserver.linked_animation_stage_gpu COMMAND mediaserver_linked_animation_stage_tests
             "${CMAKE_CURRENT_BINARY_DIR}/animation-fixture" "${CMAKE_CURRENT_BINARY_DIR}/animation-gpu-evidence" --gpu)
-        set_tests_properties(mediaserver.linked_animation_stage mediaserver.linked_animation_stage_gpu PROPERTIES FIXTURES_REQUIRED animation_stage TIMEOUT 120)
+        # Each pair ingests one fixture manifest, which keeps its package cache beside
+        # it. Two processes filling a cold cache collide, so a pair runs one at a time.
+        set_tests_properties(mediaserver.linked_animation_stage mediaserver.linked_animation_stage_gpu PROPERTIES FIXTURES_REQUIRED animation_stage RESOURCE_LOCK animation-fixture TIMEOUT 120)
         add_test(NAME mediaserver.look_fixture COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/blender/test_materials_lighting.py" --fixture "${CMAKE_CURRENT_BINARY_DIR}/look-fixture")
         set_tests_properties(mediaserver.look_fixture PROPERTIES FIXTURES_SETUP look)
@@ -182,7 +184,7 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_BINARY_DIR}/look-fixture" "${CMAKE_CURRENT_BINARY_DIR}/look-evidence")
         add_test(NAME mediaserver.linked_look_gpu COMMAND mediaserver_linked_look_tests
             "${CMAKE_CURRENT_BINARY_DIR}/look-fixture" "${CMAKE_CURRENT_BINARY_DIR}/look-gpu-evidence" --gpu)
-        set_tests_properties(mediaserver.linked_look mediaserver.linked_look_gpu PROPERTIES FIXTURES_REQUIRED look TIMEOUT 120)
+        set_tests_properties(mediaserver.linked_look mediaserver.linked_look_gpu PROPERTIES FIXTURES_REQUIRED look RESOURCE_LOCK look-fixture TIMEOUT 120)
         add_test(NAME mediaserver.environment_fixture COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/blender/test_environment_scale.py" --fixture "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture")
         set_tests_properties(mediaserver.environment_fixture PROPERTIES FIXTURES_SETUP environment)
@@ -192,9 +194,15 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture" "${CMAKE_CURRENT_BINARY_DIR}/environment-evidence")
         add_test(NAME mediaserver.linked_environment_gpu COMMAND mediaserver_linked_environment_tests
             "${CMAKE_CURRENT_BINARY_DIR}/environment-fixture" "${CMAKE_CURRENT_BINARY_DIR}/environment-gpu-evidence" --gpu)
-        set_tests_properties(mediaserver.linked_environment mediaserver.linked_environment_gpu PROPERTIES FIXTURES_REQUIRED environment TIMEOUT 120)
+        set_tests_properties(mediaserver.linked_environment mediaserver.linked_environment_gpu PROPERTIES FIXTURES_REQUIRED environment RESOURCE_LOCK environment-fixture TIMEOUT 120)
         add_test(NAME mediaserver.blender_publisher_unit
             COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/blender/test_publisher_core.py")
+        # The rest of the publisher that runs without Blender: discovery records,
+        # image sizing, large-mesh splitting and tangent export.
+        foreach(_publisher_suite IN ITEMS discovery image_resize large_meshes shading_export)
+            add_test(NAME mediaserver.blender_${_publisher_suite}_unit COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/blender/test_${_publisher_suite}.py")
+        endforeach()
     endif()
     add_executable(mediaserver_director_link_service_tests tests/director_link_service_tests.cpp)
     target_link_libraries(mediaserver_director_link_service_tests PRIVATE MediaServer::Render MediaServer::Net MediaServer::Assets MediaServer::Cmd)

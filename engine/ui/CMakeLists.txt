@@ -73,6 +73,11 @@ if(BUILD_TESTING)
             NAME mediaserver.ui_native_scene_presenter
             COMMAND mediaserver_native_scene_presenter_tests
         )
+        # It checks which window holds keyboard focus, and only one window on
+        # the desktop can; a window another test opens alongside takes it.
+        set_tests_properties(mediaserver.ui_native_scene_presenter
+            PROPERTIES RUN_SERIAL TRUE
+        )
         set_target_properties(mediaserver_native_scene_presenter_tests
             PROPERTIES FOLDER "tests"
         )

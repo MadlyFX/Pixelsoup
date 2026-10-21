@@ -21,6 +21,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -150,35 +151,48 @@ void aces_reference() {
     }
 }
 
+// observe() never waits: while the worker holds the cache, for a moment after
+// every bake, it answers Busy and admits nothing. A check that means "this
+// request, now" asks again until it gets an answer.
+render::DisplayLutObservation observed(render::DisplayLutCache& cache, const render::DisplayLutRequest& request) {
+    for (;;) {
+        auto result = cache.observe(request);
+        if (result.state != render::DisplayLutState::Busy) return result;
+        std::this_thread::yield();
+    }
+}
+
 void wall_residency() {
     render::DisplayLutCache cache;
     render::DisplayLutRequest red{scene::DisplayTransform::Srgb,{},33U,30001U};
     red.wall.enabled=true; red.wall.primaries[0]=0.25F;
     auto green=red; green.wall.primaries[0]=1; green.wall.primaries[4]=0.25F;
-    static_cast<void>(cache.observe(red)); static_cast<void>(cache.observe(green)); CHECK(cache.wait_for_test());
-    const auto a=cache.observe(red), b=cache.observe(green);
+    static_cast<void>(observed(cache, red)); static_cast<void>(observed(cache, green)); CHECK(cache.wait_for_test());
+    const auto a=observed(cache, red), b=observed(cache, green);
     CHECK(a.state==render::DisplayLutState::Ready && b.state==render::DisplayLutState::Ready);
     const float white[3]{0.5F,0.5F,0.5F}; float r[3]{},g[3]{};
     render::sample_display_lut(*a.table,white,r); render::sample_display_lut(*b.table,white,g);
     CHECK(std::abs(r[0]-0.5370987F)<0.00001F && r[1]>0.999F);
     CHECK(std::abs(g[1]-0.5370987F)<0.00001F && g[0]>0.999F);
-    for(unsigned i=0;i<30;++i) { CHECK(cache.observe(red).generation==a.generation); CHECK(cache.observe(green).generation==b.generation); }
-    CHECK(cache.refresh(red) && cache.wait_for_test()); CHECK(cache.observe(red).generation>a.generation);
-    CHECK(cache.observe(green).generation==b.generation);
+    for(unsigned i=0;i<30;++i) { CHECK(observed(cache, red).generation==a.generation); CHECK(observed(cache, green).generation==b.generation); }
+    CHECK(cache.refresh(red) && cache.wait_for_test()); CHECK(observed(cache, red).generation>a.generation);
+    CHECK(observed(cache, green).generation==b.generation);
     auto broken=red; broken.wall.camera_inverse_lut_source="missing-step30-inverse.cube";
-    static_cast<void>(cache.observe(broken)); CHECK(cache.wait_for_test()); CHECK(cache.observe(broken).state==render::DisplayLutState::Failed);
+    static_cast<void>(observed(cache, broken)); CHECK(cache.wait_for_test()); CHECK(observed(cache, broken).state==render::DisplayLutState::Failed);
 
     const std::string inverse = "LUT_3D_SIZE 2\n0 0 0\n0.5 0 0\n0 1 0\n0.5 1 0\n0 0 1\n0.5 0 1\n0 1 1\n0.5 1 1\n";
     CHECK(render::parse_cube_lut("DOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n" + inverse).valid());
     CHECK(!render::parse_cube_lut("DOMAIN_MIN -1 0 0\n" + inverse).valid());
     CHECK(!render::parse_cube_lut(inverse + "nan 0 0\n").valid());
     CHECK(!render::parse_cube_lut(inverse + "LUT_3D_SIZE 2\n").valid());
-    const auto path = std::filesystem::temp_directory_path() / "mediaserver-step30-camera-inverse.cube";
+    // Unique per run: the Debug and Release suites may run this at the same time.
+    const auto path = std::filesystem::temp_directory_path() / ("mediaserver-camera-inverse-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".cube");
     { std::ofstream file{path}; file << inverse; }
     auto calibrated = red; calibrated.wall.primaries[0] = 1.0F;
     calibrated.wall.camera_inverse_lut_source = path.string();
-    static_cast<void>(cache.observe(calibrated)); CHECK(cache.wait_for_test());
-    const auto camera = cache.observe(calibrated); CHECK(camera.state == render::DisplayLutState::Ready);
+    static_cast<void>(observed(cache, calibrated)); CHECK(cache.wait_for_test());
+    const auto camera = observed(cache, calibrated); CHECK(camera.state == render::DisplayLutState::Ready);
     float result[3]{}; render::sample_display_lut(*camera.table, white, result);
     CHECK(std::abs(result[0]-0.5F) < 0.00001F && result[1] > 0.999F);
     std::filesystem::remove(path);

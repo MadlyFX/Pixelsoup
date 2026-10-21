@@ -50,7 +50,7 @@ void check(bool condition, const char* expression, int line) {
 
 const doc::NodeId subject{5U};
 
-// Where the panel puts things, given a 300x600 panel at the origin and an empty
+// Where the panel puts things, given a 300x900 panel at the origin and an empty
 // font (every string measures zero, so nothing shifts with the glyph metrics).
 // Header 10..40, section 44..68, then 22-pixel rows four pixels apart.
 constexpr float section_y = 50.0F;
@@ -96,6 +96,14 @@ constexpr float tracker_state_y = 371.0F;
 constexpr float tracker_protocol_y = 397.0F;
 constexpr float tracker_port_y = 423.0F;
 constexpr float well_x = 150.0F;
+// An object's EFFECTS section follows MATERIAL, which ends in five texture
+// rows (Base color, Metal / rough, Normal, Occlusion, Emission). The first
+// effect's title row lands here, with its eye at the left and REMOVE at the
+// right; the effect clicks are measured from it so a row added above moves
+// them together.
+constexpr float effect_title_y = 570.0F;
+// The first parameter row below the title: key diamond, then the field.
+constexpr float effect_value_y = effect_title_y + 23.0F;
 
 const doc::NodeId feed{42U};
 const doc::NodeId other_feed{43U};
@@ -172,7 +180,7 @@ struct Harness final {
     std::vector<scene::TrackingSource> sources;
     core::u64 show_frame{50U};
 
-    static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 600.0F};
+    static constexpr gui::Rect bounds{0.0F, 0.0F, 300.0F, 900.0F};
 
     float control_y(std::string_view name, std::size_t salt = 1000U, float x = 40.0F) {
         core::u64 id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
@@ -674,7 +682,7 @@ void an_effect_remove_button_requests_true_node_deletion() {
     // row. It reports the first-class effect identity, not an enabled=false
     // property edit, so the authoring boundary can erase it and its channels.
     constexpr float remove_x = 250.0F;
-    constexpr float remove_y = 440.0F;
+    constexpr float remove_y = effect_title_y;
     static_cast<void>(h.frame(remove_x, remove_y, false));
     static_cast<void>(h.frame(remove_x, remove_y, true));
     const editor::InspectorFrame released =
@@ -696,7 +704,7 @@ void an_effect_eye_switches_it_off_without_deleting_it() {
     // it. It authors the document's own enabled flag, so the effect, its
     // parameters, and its key channels all survive being switched off.
     constexpr float eye_x = 15.0F;
-    constexpr float eye_y = 440.0F;
+    constexpr float eye_y = effect_title_y;
     static_cast<void>(h.frame(eye_x, eye_y, false));
     static_cast<void>(h.frame(eye_x, eye_y, true));
     const editor::InspectorFrame off = h.frame(eye_x, eye_y, false);
@@ -734,7 +742,6 @@ void an_animated_effect_displays_and_keys_its_evaluated_value() {
     // The Blur radius row follows its title row near the bottom of the panel.
     // At frame 50 its evaluated radius is 5, even though the base is 1.
     constexpr float effect_key_x = 90.0F;
-    constexpr float effect_value_y = 463.0F;
     static_cast<void>(h.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(h.frame(effect_key_x, effect_value_y, true));
     const editor::InspectorFrame keyed =
@@ -775,7 +782,6 @@ void saturation_amount_clamps_and_its_filled_key_erases() {
 
     constexpr float effect_key_x = 90.0F;
     constexpr float effect_field_x = 150.0F;
-    constexpr float effect_value_y = 463.0F;
     static_cast<void>(
         keyed_harness.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(
@@ -828,7 +834,6 @@ void film_grain_amount_uses_its_typed_value_and_keyframe_channel() {
 
     constexpr float effect_key_x = 90.0F;
     constexpr float effect_field_x = 150.0F;
-    constexpr float effect_value_y = 463.0F;
     static_cast<void>(keyed.frame(effect_key_x, effect_value_y, false));
     static_cast<void>(keyed.frame(effect_key_x, effect_value_y, true));
     const editor::InspectorFrame request =
@@ -859,7 +864,7 @@ void structured_effect_notes_open_their_dedicated_tabs() {
     levels.kind = scene::EffectKind::Levels;
     color.effects.push_back(levels);
     constexpr float open_x = 250.0F;
-    constexpr float color_open_y = 475.0F;
+    constexpr float color_open_y = effect_title_y + 35.0F;
     static_cast<void>(color.frame(open_x, color_open_y, false));
     static_cast<void>(color.frame(open_x, color_open_y, true));
     const editor::InspectorFrame color_opened =
@@ -874,7 +879,7 @@ void structured_effect_notes_open_their_dedicated_tabs() {
     grain.kind = scene::EffectKind::FilmGrain;
     grain.film_grain.amount = 0.25F;
     texture.effects.push_back(grain);
-    constexpr float texture_open_y = 490.0F;
+    constexpr float texture_open_y = effect_title_y + 50.0F;
     static_cast<void>(texture.frame(open_x, texture_open_y, false));
     static_cast<void>(texture.frame(open_x, texture_open_y, true));
     const editor::InspectorFrame texture_opened =
@@ -896,12 +901,11 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
 
     Harness color;
     color.effects.push_back(key);
-    constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 900.0F};
-    constexpr float key_rgb_y = 485.0F;
-    static_cast<void>(color.frame(field_x0, key_rgb_y, false, tall));
-    static_cast<void>(color.frame(field_x0, key_rgb_y, true, tall));
+    constexpr float key_rgb_y = effect_title_y + 45.0F;
+    static_cast<void>(color.frame(field_x0, key_rgb_y, false));
+    static_cast<void>(color.frame(field_x0, key_rgb_y, true));
     const editor::InspectorFrame changed =
-        color.frame(field_x0 + 20.0F, key_rgb_y, true, tall);
+        color.frame(field_x0 + 20.0F, key_rgb_y, true);
     UI_CHECK(changed.named_edits.size() == 1U);
     UI_CHECK(changed.named_edits.front().node == key.source);
     UI_CHECK(changed.named_edits.front().property ==
@@ -910,11 +914,11 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
 
     Harness edge;
     edge.effects.push_back(key);
-    constexpr float edge_y = 563.0F;
-    static_cast<void>(edge.frame(150.0F, edge_y, false, tall));
-    static_cast<void>(edge.frame(150.0F, edge_y, true, tall));
+    constexpr float edge_y = effect_title_y + 123.0F;
+    static_cast<void>(edge.frame(150.0F, edge_y, false));
+    static_cast<void>(edge.frame(150.0F, edge_y, true));
     const editor::InspectorFrame grown =
-        edge.frame(155.0F, edge_y, true, tall);
+        edge.frame(155.0F, edge_y, true);
     UI_CHECK(grown.named_edits.size() == 1U);
     UI_CHECK(grown.named_edits.front().property ==
              scene::schema::chroma_key_morphology_px);
@@ -924,11 +928,11 @@ void chroma_key_exposes_color_tolerance_softness_edge_and_spill() {
     eyedropper.effects.push_back(key);
     // The compact icon button sits immediately beside the colour well.
     constexpr float pick_view_x = 279.0F;
-    constexpr float pick_view_y = 462.0F;
-    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, false, tall));
-    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, true, tall));
+    constexpr float pick_view_y = effect_title_y + 22.0F;
+    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, false));
+    static_cast<void>(eyedropper.frame(pick_view_x, pick_view_y, true));
     const editor::InspectorFrame requested =
-        eyedropper.frame(pick_view_x, pick_view_y, false, tall);
+        eyedropper.frame(pick_view_x, pick_view_y, false);
     UI_CHECK(requested.color_sample_request.has_value());
     UI_CHECK(requested.color_sample_request->node == key.source);
     UI_CHECK(requested.color_sample_request->properties[0] ==
@@ -950,12 +954,11 @@ void luma_key_exposes_threshold_softness_invert_and_mix() {
     key.luma_key.low_softness = 0.1F;
     key.luma_key.high_softness = 0.15F;
     h.effects.push_back(key);
-    constexpr gui::Rect tall{0.0F, 0.0F, 300.0F, 720.0F};
-    constexpr float invert_y = 567.0F;
-    static_cast<void>(h.frame(180.0F, invert_y, false, tall));
-    static_cast<void>(h.frame(180.0F, invert_y, true, tall));
+    constexpr float invert_y = effect_title_y + 127.0F;
+    static_cast<void>(h.frame(180.0F, invert_y, false));
+    static_cast<void>(h.frame(180.0F, invert_y, true));
     const editor::InspectorFrame inverted =
-        h.frame(180.0F, invert_y, false, tall);
+        h.frame(180.0F, invert_y, false);
     UI_CHECK(inverted.named_edits.size() == 1U);
     UI_CHECK(inverted.named_edits.front().node == key.source);
     UI_CHECK(inverted.named_edits.front().property ==
@@ -1107,7 +1110,7 @@ void named_and_effect_fields_share_the_multi_edit_contract() {
     UI_CHECK(near(material_edit.named_edits[0].value, 0.3));
     UI_CHECK(near(material_edit.named_edits[1].value, 0.8));
 
-    constexpr float effect_value_y = 485.0F;
+    constexpr float multi_effect_value_y = 485.0F;
     MultiHarness effect;
     effect.elements = {first, second};
     effect.primary = first.node;
@@ -1116,10 +1119,10 @@ void named_and_effect_fields_share_the_multi_edit_contract() {
                               scene::EffectKind::Brightness, 0, true, 2.0F},
         scene::EffectInstance{doc::NodeId{81U}, second.node,
                               scene::EffectKind::Brightness, 0, true, 3.0F}};
-    static_cast<void>(effect.frame(150.0F, effect_value_y, false));
-    static_cast<void>(effect.frame(150.0F, effect_value_y, true));
+    static_cast<void>(effect.frame(150.0F, multi_effect_value_y, false));
+    static_cast<void>(effect.frame(150.0F, multi_effect_value_y, true));
     const editor::InspectorFrame effect_edit =
-        effect.frame(160.0F, effect_value_y, true);
+        effect.frame(160.0F, multi_effect_value_y, true);
     UI_CHECK(effect_edit.component_edits.size() == 2U);
     UI_CHECK(effect_edit.component_edits[0].node == doc::NodeId{80U});
     UI_CHECK(near(effect_edit.component_edits[0].value, 2.1));

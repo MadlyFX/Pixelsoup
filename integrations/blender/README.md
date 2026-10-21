@@ -162,6 +162,10 @@ python tests/blender/test_discovery.py
 python tests/blender/test_publisher_core.py
 python tests/blender/test_environment_scale.py
 python tests/blender/test_materials_lighting.py
+python tests/blender/test_image_resize.py
+python tests/blender/test_large_meshes.py
+python tests/blender/test_shading_export.py
+& "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe" --factory-startup --background --python tests/blender/exercise_shading.py
 python scripts/test-blender-livelink.py --build debug --workflow
 python scripts/test-blender-livelink.py --build debug
 python scripts/test-blender-livelink.py --build debug --writeback
@@ -174,4 +178,6 @@ actual C++ discovery, instance selection, full-scene import/update/removal, mate
 fallback, light conversion, reconnect, resync, and credential cleanup. The writeback
 suite drives Media Server edits into Blender objects and back. Use `--build release`
 to run them against the optimized build. Other suites cover collection publishing and
-native material fidelity.
+native material fidelity; `exercise_shading.py` checks material alpha modes, UV maps
+and mirrored tangent frames against Blender itself. The Python unit tests also run in
+CTest (`-R "_unit|_fixture"`) and need an interpreter with numpy.
