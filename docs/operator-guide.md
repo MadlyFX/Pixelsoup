@@ -1167,6 +1167,17 @@ right margin and 10 black rows below the viewports. The source crops are
 independent: use consecutive 3456-pixel crops for continuous canvas content,
 or assign individual calibrated surfaces.
 
+Canvas crops are measured in the scene's canvas, so a wall wider than one
+connector needs a canvas as large as the wall's whole raster. Set it in
+Hardware Map under **PROJECT SETUP** with **Canvas W** and **Canvas H** (up to
+16384 pixels per axis). The value applies to every scene, so Program
+transitions always join scenes of one size; the edit replicates to every node
+and one undo restores the previous size.
+For four 2880x1536 wall sections, an 11520x1536 canvas with canvas crops at
+x=0, 2880, 5760 and 8640 shows one continuous image across the wall. Shrinking
+the canvas below an existing crop leaves that feed refused until the crop is
+corrected.
+
 Window setup, launch arguments and synchronization timing accept dimensions up
 to 16384 pixels per axis. GPU allocation and physical display-mode support are
 still required; dimension acceptance does not establish Mosaic or genlock

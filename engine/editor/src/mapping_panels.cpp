@@ -1,5 +1,6 @@
 #include <mediaserver/editor/mapping_panels.hpp>
 
+#include <mediaserver/core/output_limits.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
 
 #include <algorithm>
@@ -1337,7 +1338,7 @@ hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
                         static_cast<float>(device_kinds.size()) *
                             palette_row_step +
                         4.0F;
-  return gui::Rect{bounds.x + 9.0F, setup_y + 92.0F,
+  return gui::Rect{bounds.x + 9.0F, setup_y + 138.0F,
                    std::max(palette_width - 18.0F, 0.0F),
                    details_row_height - 2.0F};
 }
@@ -1404,6 +1405,18 @@ hardware_discovered_status_text(const topology::HardwareMap &map,
                                 const topology::HardwareDiscovery &discovery,
                                 const topology::HardwareDiscoveredMachine &machine) {
   return discovered_status(map, discovery, machine).text;
+}
+
+gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
+                                       bool height) noexcept {
+  const float palette_width = hardware_palette_width(bounds);
+  const float setup_y = bounds.y + title_height + palette_header_height +
+                        static_cast<float>(device_kinds.size()) *
+                            palette_row_step +
+                        4.0F;
+  return gui::Rect{bounds.x + 86.0F,
+                   setup_y + 70.0F + (height ? details_row_height : 0.0F),
+                   std::max(palette_width - 95.0F, 0.0F), details_row_height};
 }
 
 gui::Rect
@@ -1476,6 +1489,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            const topology::HardwareMap &map,
                            const topology::HardwareRuntimeSnapshot &runtime,
                            const sync::SyncPolicy &sync_policy) {
+  return draw(ctx, bounds, map, runtime, sync_policy, scene::Canvas{});
+}
+
+HardwareMappingFrame
+HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
+                           const topology::HardwareMap &map,
+                           const topology::HardwareRuntimeSnapshot &runtime,
+                           const sync::SyncPolicy &sync_policy,
+                           scene::Canvas scene_canvas) {
   HardwareMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     return frame;
@@ -1768,10 +1790,45 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               setup_status, ctx.theme().text_muted);
   }
 
+  // The canvas every scene renders, which canvas feed mappings crop. Its
+  // rows are reserved even without a scene so the sync controls below never
+  // move under the pointer when one appears.
+  if (scene::valid(scene_canvas)) {
+    const auto canvas_row = [&](bool height) {
+      const gui::Rect field = hardware_canvas_field_bounds(bounds, height);
+      if (field.y + field.height > palette.y + palette.height) {
+        return;
+      }
+      ctx.label(gui::Rect{palette.x + 9.0F, field.y, 74.0F, field.height},
+                height ? "Canvas H" : "Canvas W", ctx.theme().text_muted);
+      const core::u32 current =
+          height ? scene_canvas.height : scene_canvas.width;
+      double edited{};
+      if (!canvas_numbers_.draw(
+              ctx,
+              mix(id_, height ? "hardware.settings.canvas-height"
+                              : "hardware.settings.canvas-width"),
+              field, "px", static_cast<double>(current), 1.0, edited, 0)) {
+        return;
+      }
+      const auto rounded = static_cast<core::u32>(std::llround(std::clamp(
+          edited, 1.0, static_cast<double>(core::max_output_dimension))));
+      scene::Canvas next = frame.canvas_edit.has_value()
+                               ? frame.canvas_edit->canvas
+                               : scene_canvas;
+      (height ? next.height : next.width) = rounded;
+      if (next != scene_canvas) {
+        frame.canvas_edit = HardwareCanvasEdit{next};
+      }
+    };
+    canvas_row(false);
+    canvas_row(true);
+  }
+
   // The project synchronization policy sits directly under the control port
   // because both are project settings, and because the sync groups this
   // policy governs are derived from the very cables drawn in this panel.
-  const float sync_y = setup_y + 72.0F;
+  const float sync_y = setup_y + 118.0F;
   const gui::Rect sync_mode_button = hardware_sync_mode_button_bounds(bounds);
   if (sync_y + 24.0F <= palette.y + palette.height) {
     const float rail_x = palette.x + 9.0F;
@@ -3111,7 +3168,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   frame.dragging = drag_kind_ != DragKind::None || link_dragging_;
   frame.editing = frame.editing || settings_numbers_.live() ||
-                  sync_numbers_.live();
+                  canvas_numbers_.live() || sync_numbers_.live();
   ctx.pop_clip();
   return frame;
 }

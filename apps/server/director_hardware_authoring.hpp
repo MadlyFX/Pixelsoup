@@ -47,6 +47,13 @@ schedule_hardware_control_port(cmd::DirectorScheduler &scheduler,
                                doc::NodeId allocated_id,
                                cmd::FrameNumber apply_at);
 
+// Writes the canvas to every scene's stage node in one transaction. A canvas
+// outside the output limits is refused without an edit.
+[[nodiscard]] bool
+schedule_hardware_canvas(cmd::DirectorScheduler &scheduler,
+                         const editor::HardwareCanvasEdit &edit,
+                         cmd::FrameNumber apply_at);
+
 [[nodiscard]] bool
 schedule_sync_policy(cmd::DirectorScheduler &scheduler,
                      const editor::HardwareSyncPolicyEdit &edit,

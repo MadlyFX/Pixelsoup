@@ -127,6 +127,7 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_hardware_links.clear();
     pending_hardware_properties.clear();
     pending_hardware_control_port.reset();
+    pending_hardware_canvas.reset();
     pending_sync_policy.reset();
     pending_hardware_output_binding_edits.clear();
     pending_hardware_output_binding_deletes.clear();

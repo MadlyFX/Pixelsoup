@@ -777,6 +777,8 @@ struct EditorFrame final {
   // Project-wide lifecycle listener range. Empty settings provenance in the
   // request means the authoring boundary must create hardware.settings.
   std::optional<HardwareControlPortEdit> hardware_control_port_edit;
+  // The canvas every scene renders, authored from Hardware Map.
+  std::optional<HardwareCanvasEdit> hardware_canvas_edit;
   // Project-wide output synchronization policy. An empty policy provenance in
   // the request means the authoring boundary must create sync.policy.
   std::optional<HardwareSyncPolicyEdit> sync_policy_edit;

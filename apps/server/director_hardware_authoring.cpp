@@ -3,8 +3,11 @@
 #include "director_compositor_authoring.hpp"
 #include "director_feed_map_authoring.hpp"
 
+#include <mediaserver/core/output_limits.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/node.hpp>
+#include <mediaserver/scene/canvas.hpp>
+#include <mediaserver/scene/scene_schema.hpp>
 #include <mediaserver/sync/sync_policy.hpp>
 #include <mediaserver/sync/sync_policy_model.hpp>
 #include <mediaserver/sync/sync_schema.hpp>
@@ -269,6 +272,49 @@ schedule_hardware_control_port(cmd::DirectorScheduler &scheduler,
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(updated)}, std::move(inverse),
         cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
+}
+
+// The canvas is a per-scene property, but it is authored once for the whole
+// wall: every stage is written in the same transaction, so one undo restores
+// them all and a Program transition never meets two different canvases.
+[[nodiscard]] bool
+schedule_hardware_canvas(cmd::DirectorScheduler &scheduler,
+                         const editor::HardwareCanvasEdit &edit,
+                         cmd::FrameNumber apply_at) {
+    if (!scene::valid(edit.canvas) ||
+        edit.canvas.width > core::max_output_dimension ||
+        edit.canvas.height > core::max_output_dimension) {
+        return true;
+    }
+    std::vector<doc::Node> stages;
+    const doc::Delta contents =
+        doc::diff(doc::Root{}, scheduler.projected_document());
+    for (const doc::NodeChange &change : contents.changes) {
+        if (change.after &&
+            change.after->type == scene::schema::stage_type) {
+            stages.push_back(*change.after);
+        }
+    }
+    for (const doc::Node &existing : stages) {
+        doc::Node updated = existing;
+        updated.properties.insert_or_assign(
+            std::string{scene::schema::canvas_width},
+            doc::PropertyValue{static_cast<std::int64_t>(edit.canvas.width)});
+        updated.properties.insert_or_assign(
+            std::string{scene::schema::canvas_height},
+            doc::PropertyValue{
+                static_cast<std::int64_t>(edit.canvas.height)});
+        if (updated == existing) {
+            continue;
+        }
+        if (!scheduler.schedule_edit(
+                cmd::PutNode{std::move(updated)}, cmd::PutNode{existing},
+                cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture},
+                apply_at)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Authors the project-wide synchronization policy exactly like every other

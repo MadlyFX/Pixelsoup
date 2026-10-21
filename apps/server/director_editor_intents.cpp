@@ -486,6 +486,9 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
     if (editor_frame.sync_policy_edit.has_value()) {
         pending_sync_policy = editor_frame.sync_policy_edit;
     }
+    if (editor_frame.hardware_canvas_edit.has_value()) {
+        pending_hardware_canvas = editor_frame.hardware_canvas_edit;
+    }
     if (!editor_frame.compositor_adds.empty()) {
         pending_compositor_adds.insert(pending_compositor_adds.end(),
             editor_frame.compositor_adds.begin(),

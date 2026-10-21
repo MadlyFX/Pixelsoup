@@ -1947,6 +1947,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::HardwarePropertyEdit> pending_hardware_properties;
     std::optional<editor::HardwareControlPortEdit>
         pending_hardware_control_port;
+    std::optional<editor::HardwareCanvasEdit> pending_hardware_canvas;
     std::optional<editor::HardwareSyncPolicyEdit> pending_sync_policy;
     std::vector<editor::HardwareOutputBindingEdit>
         pending_hardware_output_binding_edits;
@@ -2382,6 +2383,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_hardware_links = pending_hardware_links,
         .pending_hardware_properties = pending_hardware_properties,
         .pending_hardware_control_port = pending_hardware_control_port,
+        .pending_hardware_canvas = pending_hardware_canvas,
         .pending_sync_policy = pending_sync_policy,
         .pending_hardware_output_binding_edits = pending_hardware_output_binding_edits,
         .pending_hardware_output_binding_deletes = pending_hardware_output_binding_deletes,

@@ -5197,7 +5197,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_hardware_mapping) {
       HardwareMappingFrame mapping =
           impl.hardware_mapping_panel.draw(ui, bounds, hardware_map,
-                                           hardware_runtime, sync_policy);
+                                           hardware_runtime, sync_policy,
+                                           stage_scene.canvas);
       if (mapping.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Hardware;
       }
@@ -5264,6 +5265,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           mapping.control_port_edit->gesture = impl.hardware_edit_gesture;
         }
         result.hardware_control_port_edit = mapping.control_port_edit;
+      }
+      if (mapping.canvas_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.canvas_edit->gesture = impl.hardware_edit_gesture;
+        result.hardware_canvas_edit = mapping.canvas_edit;
       }
       if (mapping.sync_policy_edit.has_value()) {
         if (impl.hardware_edit_gesture == 0U) {

@@ -1146,6 +1146,15 @@ PhaseExit DirectorShowLoop::apply_hardware_requests(OperatorFrame &op) {
         }
         pending_hardware_control_port.reset();
     }
+    if (pending_hardware_canvas.has_value()) {
+        if (!schedule_hardware_canvas(scheduler, *pending_hardware_canvas,
+                                      frame)) {
+            std::cerr << "could not author the scene canvas for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_hardware_canvas.reset();
+    }
     if (pending_sync_policy.has_value()) {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {

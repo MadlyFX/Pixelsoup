@@ -282,6 +282,7 @@ struct DirectorShowLoop final {
     std::vector<editor::HardwareLinkRequest> &pending_hardware_links;
     std::vector<editor::HardwarePropertyEdit> &pending_hardware_properties;
     std::optional<editor::HardwareControlPortEdit> &pending_hardware_control_port;
+    std::optional<editor::HardwareCanvasEdit> &pending_hardware_canvas;
     std::optional<editor::HardwareSyncPolicyEdit> &pending_sync_policy;
     std::vector<editor::HardwareOutputBindingEdit> &pending_hardware_output_binding_edits;
     std::vector<editor::HardwareOutputBindingDelete> &pending_hardware_output_binding_deletes;

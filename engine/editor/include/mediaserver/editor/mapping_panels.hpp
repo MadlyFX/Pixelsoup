@@ -68,6 +68,10 @@ hardware_palette_item_bounds(const gui::Rect &bounds,
 [[nodiscard]] gui::Rect
 hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept;
 
+// The Canvas W (or, with `height`, Canvas H) field of PROJECT SETUP.
+[[nodiscard]] gui::Rect
+hardware_canvas_field_bounds(const gui::Rect &bounds, bool height) noexcept;
+
 // The DETECTED ON NETWORK strip along the bottom of the canvas, and one of
 // its cards (unscrolled). Empty while discovery is off, or when the canvas is
 // too short to give it room. The map is navigated and edited only above it.
@@ -227,6 +231,18 @@ struct HardwareControlPortEdit final {
   bool operator==(const HardwareControlPortEdit &) const = default;
 };
 
+// The pixel size of the picture every scene renders. It is authored with the
+// hardware because canvas feed mappings crop it: a wall wider than one
+// connector needs a canvas as large as the wall's whole raster. The authoring
+// boundary writes it to every scene, since a Program transition is only
+// defined between scenes that share one canvas.
+struct HardwareCanvasEdit final {
+  scene::Canvas canvas{};
+  core::u64 gesture{};
+
+  bool operator==(const HardwareCanvasEdit &) const = default;
+};
+
 // One explicit process/feed/display deployment binding. A zero binding node
 // creates a new persistent hardware.output_binding; a non-zero node replaces
 // that binding atomically. The observed target identity is copied only after
@@ -279,6 +295,7 @@ struct HardwareMappingFrame final {
   std::optional<HardwareLinkRequest> link;
   std::optional<HardwarePropertyEdit> property_edit;
   std::optional<HardwareControlPortEdit> control_port_edit;
+  std::optional<HardwareCanvasEdit> canvas_edit;
   std::optional<HardwareSyncPolicyEdit> sync_policy_edit;
   std::optional<HardwareOutputBindingEdit> output_binding_edit;
   std::optional<HardwareOutputBindingDelete> output_binding_delete;
@@ -317,6 +334,14 @@ public:
        const topology::HardwareRuntimeSnapshot &runtime,
        const sync::SyncPolicy &sync_policy);
 
+  // As above, plus the canvas the project's scenes render. A zero canvas
+  // means there is no scene to write it to, and its fields are not offered.
+  [[nodiscard]] HardwareMappingFrame
+  draw(gui::UiContext &ctx, const gui::Rect &bounds,
+       const topology::HardwareMap &map,
+       const topology::HardwareRuntimeSnapshot &runtime,
+       const sync::SyncPolicy &sync_policy, scene::Canvas canvas);
+
   [[nodiscard]] HardwareSelection selection() const noexcept {
     return selection_;
   }
@@ -351,6 +376,7 @@ public:
     focused_ = false;
     details_numbers_ = NumberField{};
     settings_numbers_ = NumberField{};
+    canvas_numbers_ = NumberField{};
     sync_numbers_ = NumberField{};
   }
 
@@ -404,6 +430,7 @@ private:
   bool focused_{};
   NumberField details_numbers_;
   NumberField settings_numbers_;
+  NumberField canvas_numbers_;
   NumberField sync_numbers_;
 };
 

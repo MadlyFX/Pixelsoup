@@ -201,6 +201,17 @@ struct HardwareHarness final {
     return panel.draw(ctx, bounds, map,
                       topology::HardwareRuntimeSnapshot{}, policy);
   }
+
+  editor::HardwareMappingFrame canvas_frame(float x, float y, bool down,
+                                            scene::Canvas canvas) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(gui::MouseButton::Left, down);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, topology::HardwareMap{},
+                      topology::HardwareRuntimeSnapshot{}, sync::SyncPolicy{},
+                      canvas);
+  }
 };
 
 // The synchronization policy is a project setting authored beside the control
@@ -690,6 +701,51 @@ void project_setup_authors_one_control_port_range() {
   MAPPING_CHECK(edit.control_port_edit ==
                 editor::HardwareControlPortEdit{doc::NodeId{88U}, 50'005U});
   MAPPING_CHECK(!edit.property_edit.has_value());
+}
+
+// The scene canvas is authored beside the control port: each axis scrubs on
+// its own, the other axis is carried unchanged, and the output limit holds.
+void project_setup_authors_the_scene_canvas() {
+  const scene::Canvas canvas{1'920U, 1'080U};
+  for (const bool height : {false, true}) {
+    HardwareHarness harness;
+    const gui::Rect field =
+        editor::hardware_canvas_field_bounds(HardwareHarness::bounds, height);
+    const float x = field.x + 20.0F;
+    const float y = field.y + field.height * 0.5F;
+    static_cast<void>(harness.canvas_frame(x, y, false, canvas));
+    static_cast<void>(harness.canvas_frame(x, y, true, canvas));
+    const auto edit = harness.canvas_frame(x + 12.0F, y, true, canvas);
+    MAPPING_CHECK(edit.canvas_edit.has_value());
+    MAPPING_CHECK(edit.canvas_edit->canvas ==
+                  (height ? scene::Canvas{1'920U, 1'092U}
+                          : scene::Canvas{1'932U, 1'080U}));
+    MAPPING_CHECK(edit.editing);
+    MAPPING_CHECK(!edit.control_port_edit.has_value());
+    MAPPING_CHECK(!edit.sync_policy_edit.has_value());
+    static_cast<void>(harness.canvas_frame(x + 12.0F, y, false, canvas));
+  }
+
+  // Scrubbing past the limit authors the limit, not the scrubbed value.
+  HardwareHarness limit;
+  const gui::Rect width_field =
+      editor::hardware_canvas_field_bounds(HardwareHarness::bounds, false);
+  const float x = width_field.x + 20.0F;
+  const float y = width_field.y + width_field.height * 0.5F;
+  const scene::Canvas wide{16'380U, 1'536U};
+  static_cast<void>(limit.canvas_frame(x, y, false, wide));
+  static_cast<void>(limit.canvas_frame(x, y, true, wide));
+  const auto clamped = limit.canvas_frame(x + 40.0F, y, true, wide);
+  MAPPING_CHECK(clamped.canvas_edit.has_value());
+  MAPPING_CHECK(clamped.canvas_edit->canvas ==
+                (scene::Canvas{16'384U, 1'536U}));
+
+  // With no scene there is nothing to author; the same gesture edits nothing.
+  HardwareHarness empty;
+  static_cast<void>(empty.canvas_frame(x, y, false, scene::Canvas{}));
+  static_cast<void>(empty.canvas_frame(x, y, true, scene::Canvas{}));
+  const auto none = empty.canvas_frame(x + 12.0F, y, true, scene::Canvas{});
+  MAPPING_CHECK(!none.canvas_edit.has_value());
 }
 
 void render_server_details_author_launch_geometry_and_not_control_targets() {
@@ -2403,7 +2459,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 46U> cases{{
+constexpr std::array<Case, 47U> cases{{
     {"UV mesh source crop is hidden while destination stays editable",
      &imported_mesh_hides_source_crop_but_keeps_destination_fields},
     {"numeric rectangles release focus when removed or hidden",
@@ -2420,6 +2476,8 @@ constexpr std::array<Case, 46U> cases{{
      &dragging_a_device_requests_one_document_move},
     {"compatible ports create a link request",
      &compatible_ports_create_a_link_request},
+    {"project setup authors the scene canvas",
+     &project_setup_authors_the_scene_canvas},
     {"the sync policy mode cycles through every state",
      &the_sync_policy_mode_cycles_through_every_state},
     {"drawing the sync section authors nothing without a click",
