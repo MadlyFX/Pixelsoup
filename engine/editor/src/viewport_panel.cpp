@@ -281,7 +281,7 @@ void draw_grid(gui::UiDrawList& list, const gui::Rect& image,
 
 void draw_camera_overlay(gui::UiDrawList& list, const gui::Rect& image,
                          const scene::Scene& view,
-                         const scene::Camera& camera) {
+                         const scene::Camera& camera, bool selected = false) {
     const scene::Vec3 forward = scene::normalize(camera.target - camera.eye);
     const scene::Vec3 right = scene::normalize(scene::cross(forward, camera.up),
                                                scene::Vec3{1.0F, 0.0F, 0.0F});
@@ -301,12 +301,15 @@ void draw_camera_overlay(gui::UiDrawList& list, const gui::Rect& image,
         centre + right * half_width - up * half_height,
         centre + right * half_width + up * half_height,
         centre - right * half_width + up * half_height};
-    const gui::UiColor frustum{0.55F, 0.62F, 0.76F, 0.72F};
+    const gui::UiColor frustum = selected
+                                     ? outline_primary
+                                     : gui::UiColor{0.55F, 0.62F, 0.76F, 0.72F};
+    const float width = selected ? 1.8F : 1.2F;
     for (std::size_t index = 0U; index < corners.size(); ++index) {
-        projected_line(list, image, view, camera.eye, corners[index], 1.2F,
+        projected_line(list, image, view, camera.eye, corners[index], width,
                        frustum);
         projected_line(list, image, view, corners[index],
-                       corners[(index + 1U) % corners.size()], 1.2F, frustum);
+                       corners[(index + 1U) % corners.size()], width, frustum);
     }
     draw_light_icon(list, image, view, camera.eye, frustum, false);
 }
@@ -3209,7 +3212,16 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
              scene.tracked_cameras) {
             draw_tracked_camera_overlay(list, frame.image, scene, tracked);
         }
-        if (camera_overlay != nullptr) {
+        // Every camera of the scene on Stage, so a selected one has its gizmo
+        // on something visible. A hand-built scene that lists none still
+        // shows the viewpoint it was given.
+        for (const scene::SceneCamera& placed : scene.cameras) {
+            draw_camera_overlay(
+                list, frame.image, scene, placed.camera,
+                std::find(selection.begin(), selection.end(), placed.node) !=
+                    selection.end());
+        }
+        if (camera_overlay != nullptr && scene.cameras.empty()) {
             draw_camera_overlay(list, frame.image, scene, *camera_overlay);
         }
         draw_light_overlays(ctx, list, frame.image, scene, selection, primary);

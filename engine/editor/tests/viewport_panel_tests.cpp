@@ -1180,6 +1180,57 @@ void the_stage_x_gizmo_constrains_a_drag_to_world_x() {
     UI_CHECK(near(dragged.translation.z, 0.0F, 0.001F));
 }
 
+// A camera draws nothing, so only the gizmo puts a selected one in reach of
+// the pointer - whichever camera of the scene it is.
+void a_selected_camera_has_a_stage_gizmo() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    rhi::Texture target;
+    editor::ViewportPanel panel{gui::ui_id("stage.camera"),
+                                editor::ViewportRole::Stage};
+    scene::Scene scn = make_scene();
+    scn.media.clear();
+    const doc::NodeId camera_node{77U};
+    scene::SceneCamera placed{camera_node, {}};
+    scene::place_camera(placed.camera, scene::Vec3{}, 0.0F, 0.0F, 0.0F);
+    scn.cameras.push_back(placed);
+    const std::array<doc::NodeId, 1U> selection{camera_node};
+
+    const auto draw = [&](float x, float y, bool down, bool selected) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        return panel.draw(ctx, Harness::bounds, target, scn,
+                          selected ? std::span<const doc::NodeId>{selection}
+                                   : std::span<const doc::NodeId>{},
+                          selected ? camera_node : doc::NodeId{});
+    };
+
+    const editor::ViewportFrame frame = draw(0.0F, 0.0F, false, true);
+    const float centre_x = frame.image.x + frame.image.width * 0.5F;
+    const float centre_y = frame.image.y + frame.image.height * 0.5F;
+
+    // Unselected, the same press along where the X arrow would be is a bare
+    // canvas press that moves nothing.
+    static_cast<void>(draw(centre_x + 42.0F, centre_y, true, false));
+    const editor::ViewportFrame bare =
+        draw(centre_x + 92.0F, centre_y, true, false);
+    UI_CHECK(bare.gizmo_axis == editor::GizmoAxis::None);
+    static_cast<void>(draw(centre_x + 92.0F, centre_y, false, false));
+
+    static_cast<void>(draw(centre_x + 42.0F, centre_y, true, true));
+    const editor::ViewportFrame dragged =
+        draw(centre_x + 92.0F, centre_y, true, true);
+    UI_CHECK(dragged.dragging);
+    UI_CHECK(dragged.gizmo_axis == editor::GizmoAxis::X);
+    UI_CHECK(dragged.translation.x > 0.0F);
+    UI_CHECK(near(dragged.translation.y, 0.0F, 0.001F));
+    UI_CHECK(near(dragged.translation.z, 0.0F, 0.001F));
+}
+
 void a_rotated_stage_gizmo_moves_along_the_displayed_local_axis() {
     gui::InputState input;
     gui::UiDrawList list;
@@ -2573,7 +2624,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 64U> cases{{
+constexpr std::array<Case, 65U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2640,6 +2691,8 @@ constexpr std::array<Case, 64U> cases{{
      &imported_model_bounds_drive_picking_and_the_selected_outline},
     {"the stage x gizmo constrains a drag to world x",
      &the_stage_x_gizmo_constrains_a_drag_to_world_x},
+    {"a selected camera has a Stage gizmo",
+     &a_selected_camera_has_a_stage_gizmo},
     {"a rotated Stage gizmo moves along the displayed local axis",
      &a_rotated_stage_gizmo_moves_along_the_displayed_local_axis},
     {"the move gizmo defaults to world axes like blender",

@@ -59,10 +59,35 @@ settings beside the backend: a node choosing either for itself would light its
 share of the wall differently from the node beside it. Every cascade is fitted
 from the authored full-canvas camera and the complete caster set - never from
 the node's own slice - and a receiver picks its cascade by world position, so
-two nodes read the same texels for the same point. IBL, local-light shadows,
-and multi-bounce transport are named absences, not oversights: each needs
-authored data (filtered cubemaps) or a different pass this slice does not try
-to fake.
+two nodes read the same texels for the same point.
+
+**Directional soft shadows (PCSS).** In Advanced, select the first directional
+light and increase **Sun radius** in its Inspector. The light Inspector uses
+turns: `0.000739` is approximately a 0.266-degree angular radius (a 0.532-degree
+diameter). The physical sky's Sun radius control shows degrees. Larger sources
+produce wider soft edges; shadows tighten as a caster approaches its receiver.
+Zero source radius uses the existing fixed-width shadow filter. **Scene Settings
+> Shadows > Filter radius** controls the minimum filtering footprint in shadow
+texels, rather than the physical size of the sun.
+The default minimum is two texels; lowering it toward 0.5-1 texel makes contact
+hardening easier to see for a small, realistic sun, at the cost of less edge
+antialiasing.
+
+The directional filter uses 33 blocker-depth samples (the centre plus a fixed
+32-point disk) and 32 manually bilinear comparison taps. Its search footprint
+depends on source size and available light-space depth. Penumbra size uses
+linear receiver/blocker separation and each projection axis's world texel size,
+including rectangular full-scene fits. Search and filter radii are bounded at
+16 texels per axis; very large sources or distant receivers saturate that bound.
+Receiver-plane correction and cascade guard bands protect slopes and edges.
+Sampling has no frame-varying noise or temporal history, and all nodes use the
+same fixed work budget. PCSS adds no shadow maps, frame allocations or screen-space
+apron requirement. It is an approximation: thin blockers between search samples
+and large penumbras remain limited by shadow-map resolution and sample density.
+
+Spotlight shadows retain their fixed-width atlas filter; spotlight PCSS is not
+implemented. Point/area-light shadow maps also remain unsupported. IBL and
+offline baked lighting have separate paths described below.
 
 Brightness and Saturation are inline material/media operations, so active
 values stay in the ordinary shared-depth draw. Saturation is colourfulness

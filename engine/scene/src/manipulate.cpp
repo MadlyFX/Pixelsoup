@@ -627,6 +627,11 @@ std::optional<Mat4> world_for(const Scene& scene, doc::NodeId node) noexcept {
             return translation(light.position);
         }
     }
+    for (const auto& camera : scene.cameras) {
+        if (camera.node == node) {
+            return camera_world(camera.camera);
+        }
+    }
     return std::nullopt;
 }
 

@@ -5740,6 +5740,41 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_inspector || panel == panel_inspector_overview) {
+      // A surface selection replaces the Scene selection wherever it is made,
+      // so while one is held it is what Properties shows.
+      const output::ProjectionSurface *const inspected_surface =
+          impl.stage_surface_selection.has_value() &&
+                  impl.scene_selection.empty()
+              ? feed_map.surface_for(*impl.stage_surface_selection)
+              : nullptr;
+      if (inspected_surface != nullptr) {
+        inspector_panel_bounds = bounds;
+        inspector_panel_drawn = true;
+        // The feed map is evaluated at the Program playhead, so that is
+        // where these keys are read and authored, as route_surface_edit does.
+        InspectorFrame inspector = impl.inspector_panel.draw_surface(
+            ui, bounds, *inspected_surface, keyframes,
+            timeline.program_frame);
+        if (switcher.rehearsal_locked) {
+          return;
+        }
+        if (inspector.surface_edit.has_value()) {
+          FeedSurfaceEditRequest &edit = *inspector.surface_edit;
+          impl.feed_mapping_panel.preview_surface_geometry(edit.node,
+                                                           edit.surface);
+          edit.gesture = impl.begin_gesture();
+          route_surface_edit(std::move(edit));
+        }
+        if (!inspector.key_edits.empty()) {
+          const core::u64 gesture = impl.next_edit_gesture++;
+          for (const InspectorKeyEdit &key : inspector.key_edits) {
+            result.keys.push_back(KeyIntent{key.node, key.component,
+                                            timeline.program_frame, key.value,
+                                            false, gesture, key.erase});
+          }
+        }
+        return;
+      }
       const auto settings_target = impl.anchor() == project_settings.stage_node && project_settings.stage_node != doc::NodeId{}
           ? SceneSettingsTarget::Environment : impl.scene_selection.empty() ? impl.scene_settings_selection : SceneSettingsTarget::None;
       if (settings_target != SceneSettingsTarget::None) {

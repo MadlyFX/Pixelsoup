@@ -18,7 +18,8 @@ different build.
 - Fixed-capacity render-graph execution, explicit D3D12 texture transitions,
   direct-queue compute/storage images, bounded transient pools and pass timing
   support the production Advanced scene/post path.
-- Raster cascades and spot shadows, temporal AA/AO, contact shadows, bloom,
+- Raster cascades with bounded directional PCSS and fixed-filter spot shadows,
+  temporal AA/AO, contact shadows, bloom,
   fog, object motion blur and physical lens depth of field use replicated
   settings and guarded image neighborhoods. Shader compilation pins DXC and
   strict floating-point inputs; the cohort self-check reports pass digests.

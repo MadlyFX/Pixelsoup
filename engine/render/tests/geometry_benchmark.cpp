@@ -294,13 +294,15 @@ int main(int argc, char** argv) {
     scn.environment.ambient = 0.6F;
     scn.renderer_settings.backend = scene::RendererBackend::Advanced;
     scn.renderer_settings.shadow_cascades = cascades;
-    // Look overrides for experiments; the digests use the defaults.
+    // Look overrides for reproducible timing and image experiments.
     if (const auto gi = environment_float("MS_BENCH_GI")) scn.renderer_settings.gi_strength = *gi;
     if (const auto radius = environment_float("MS_BENCH_FILTER")) scn.renderer_settings.shadow_filter_radius = *radius;
     scene::DirectionalLight sun{};
     sun.direction = scene::Vec3{-0.4F, -1.0F, -0.3F};
     sun.color = scene::Vec3{1.0F, 0.97F, 0.9F};
     sun.intensity = 3.0F;
+    // Angular radius in turns, matching the light Inspector.
+    if (const auto radius = environment_float("MS_BENCH_SUN_RADIUS")) sun.angular_radius = *radius;
     scn.directional_lights.push_back(sun);
     for (std::uint32_t part = 0U; part < parts; ++part) {
         scene::ModelInstance model{};

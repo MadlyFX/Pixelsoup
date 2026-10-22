@@ -4165,9 +4165,19 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                      scene::CanvasRect original,
                                      scene::Canvas extent, float y) {
       scene::CanvasRect edited = original;
+      // The extent bounds every field below, so it is stated beside them: a
+      // crop that stops short is otherwise a silent clamp against a raster
+      // authored somewhere else in the panel.
+      std::array<char, 40U> bound{};
+      const int bound_length =
+          std::snprintf(bound.data(), bound.size(), "  |  WITHIN %u x %u",
+                        extent.width, extent.height);
       ctx.label(gui::Rect{rectangle_controls.x, y,
                           rectangle_controls.width, 17.0F},
-                label, ctx.theme().text_muted);
+                std::string{label} +
+                    std::string{bound.data(), static_cast<std::size_t>(
+                                                  std::max(bound_length, 0))},
+                ctx.theme().text_muted);
       const float field_width = (rectangle_controls.width - 9.0F) / 4.0F;
       const std::array<std::string_view, 4U> names{"X", "Y", "W", "H"};
       const std::array<core::u32, 4U> values{

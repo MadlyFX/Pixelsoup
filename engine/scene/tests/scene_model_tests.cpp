@@ -1,3 +1,4 @@
+#include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_project.hpp>
 
@@ -4188,6 +4189,84 @@ void a_camera_bound_to_a_feed_is_the_tracked_camera() {
 // accident of how the document was walked. Bigger render order draws over, and
 // two cameras that share one break the tie on node id - so every node in the
 // cohort builds the same stack in the same order.
+// A tracked camera shows its authored pose whenever its tracker is not live,
+// so that pose follows its keys - for every tracked camera, not just the
+// scene's first camera.
+void every_tracked_camera_follows_its_position_keys() {
+    scene::SceneModel model;
+    model.reset(
+        doc::Root{}
+            .set(node(2U, schema::tracking_source_type,
+                      {flag(schema::tracking_enabled, true),
+                       whole(schema::tracking_port, 6301)}))
+            .set(node(10U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       real(schema::position_z, 4.0)}))
+            .set(node(11U, schema::camera_type,
+                      {whole(schema::camera_tracking_source, 2),
+                       real(schema::position_z, 4.0)}))
+            .set(channel_node(20U, 11U, schema::position_x,
+                              {{0, -2.0, schema::interp_linear},
+                               {20, 6.0, schema::interp_linear}}))
+            .set(channel_node(21U, 11U, schema::rotation_yaw,
+                              {{0, 0.0, schema::interp_linear},
+                               {20, 0.5, schema::interp_linear}})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::Scene middle =
+        model.evaluate(scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(middle.tracked_cameras.size() == 2U);
+    const scene::TrackedCameraView& still = middle.tracked_cameras[0U];
+    const scene::TrackedCameraView& keyed = middle.tracked_cameras[1U];
+    MODEL_CHECK(still.camera == doc::NodeId{10U});
+    MODEL_CHECK(keyed.camera == doc::NodeId{11U});
+    MODEL_CHECK(std::abs(still.authored.eye.x) < 1.0e-6F);
+    MODEL_CHECK(std::abs(keyed.authored.eye.x - 2.0F) < 1.0e-5F);
+    MODEL_CHECK(std::abs(keyed.authored.eye.z - 4.0F) < 1.0e-5F);
+    // A quarter turn of yaw: no longer looking down -Z.
+    const scene::Vec3 forward = keyed.authored.target - keyed.authored.eye;
+    MODEL_CHECK(std::abs(forward.z) < 1.0e-4F);
+    MODEL_CHECK(std::abs(forward.x) > 0.5F);
+}
+
+// Every camera of a scene is in the evaluated scene, placed at the frame,
+// whether or not it is the one rendered from - the editor finds a selected
+// camera's gizmo there.
+void every_camera_is_placed_in_the_evaluated_scene() {
+    scene::SceneModel model;
+    model.reset(
+        doc::Root{}
+            .set(node(10U, schema::camera_type,
+                      {real(schema::position_z, 4.0)}))
+            .set(node(11U, schema::camera_type,
+                      {real(schema::position_y, 1.5)}))
+            .set(channel_node(20U, 11U, schema::position_x,
+                              {{0, -2.0, schema::interp_linear},
+                               {20, 6.0, schema::interp_linear}}))
+            .set(channel_node(21U, 11U, schema::rotation_yaw,
+                              {{0, 0.0, schema::interp_linear},
+                               {20, 0.5, schema::interp_linear}})));
+    MODEL_CHECK(model.counters().rejected == 0U);
+
+    const scene::Scene middle =
+        model.evaluate(scene::SceneTime{10U, 60U, 1U});
+    MODEL_CHECK(middle.camera_source == doc::NodeId{10U});
+    MODEL_CHECK(middle.cameras.size() == 2U);
+    MODEL_CHECK(middle.cameras[0U].node == doc::NodeId{10U});
+    MODEL_CHECK(middle.cameras[0U].camera == middle.camera);
+    MODEL_CHECK(middle.cameras[1U].node == doc::NodeId{11U});
+
+    const auto world = scene::world_for(middle, doc::NodeId{11U});
+    MODEL_CHECK(world.has_value());
+    const scene::Vec3 at = scene::translation_of(*world);
+    MODEL_CHECK(std::abs(at.x - 2.0F) < 1.0e-5F);
+    MODEL_CHECK(std::abs(at.y - 1.5F) < 1.0e-5F);
+    // A quarter turn of yaw sends the camera's -Z to world -X: the matrix the
+    // gizmo reads is the pose the camera looks from.
+    MODEL_CHECK(std::abs(world->at(0U, 2U) - 1.0F) < 1.0e-4F);
+    MODEL_CHECK(std::abs(world->at(1U, 1U) - 1.0F) < 1.0e-4F);
+}
+
 void tracked_cameras_stack_in_one_replicated_order() {
     const auto feed = [](core::u64 id) {
         return node(id, schema::tracking_source_type,
@@ -4860,7 +4939,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 84U> cases{{
+constexpr std::array<Case, 86U> cases{{
     {"negative native placements keep exact source mapping and safe bounds",
      &negative_native_placements_keep_exact_source_mapping_and_safe_bounds},
     {"published keyframes use the canonical cubic sampler",
@@ -4947,6 +5026,10 @@ constexpr std::array<Case, 84U> cases{{
      &background_fog_distance_is_authored_bounded_and_digested},
     {"project effect settings are clamped and replicated",
      &project_effect_settings_are_clamped_and_replicated},
+    {"every tracked camera follows its position keys",
+     &every_tracked_camera_follows_its_position_keys},
+    {"every camera is placed in the evaluated scene",
+     &every_camera_is_placed_in_the_evaluated_scene},
     {"tracking sources round trip and are clamped",
      &tracking_sources_round_trip_and_are_clamped},
     {"a camera bound to a feed is the tracked camera",

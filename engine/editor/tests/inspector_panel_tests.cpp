@@ -1718,7 +1718,160 @@ void add_effect_picker_authors_a_choice_and_keeps_an_existing_stack() {
     UI_CHECK(h.effects.size() == 1 && near(h.effects[0].value, 1.5));
 }
 
-constexpr std::array<Case, 48U> cases{{
+// A projection surface's form: header 10..40, the "LED surface" line 44..66,
+// TRANSFORM 74..98, then Position, Yaw and Size rows 26 pixels apart. The
+// one-field Yaw row starts at the same x as Position; Size's two fields are
+// 93.2 wide from x = 99.6.
+constexpr float surface_position_y = 113.0F;
+constexpr float surface_yaw_y = 139.0F;
+constexpr float surface_size_y = 165.0F;
+constexpr float surface_height_x = 243.0F;
+
+[[nodiscard]] mediaserver::output::ProjectionSurface make_surface() {
+    mediaserver::output::ProjectionSurface surface{};
+    surface.node = doc::NodeId{77U};
+    surface.name = "Upstage Wall";
+    surface.geometry.center = scene::Vec3{1.5F, 2.0F, -3.0F};
+    surface.geometry.width = 6.0F;
+    surface.geometry.height = 3.5F;
+    surface.geometry.raster = scene::Canvas{1920U, 1080U};
+    surface.mesh_columns = 48U;
+    return surface;
+}
+
+struct SurfaceHarness final {
+    gui::InputState input;
+    gui::UiDrawList list;
+    gui::FontAtlas font{gui::FontAtlas::empty()};
+    gui::UiContext ctx{input, list, font};
+    editor::InspectorPanel panel{gui::ui_id("surface-inspector")};
+    mediaserver::output::ProjectionSurface surface{make_surface()};
+    std::vector<scene::ChannelKeyframes> keyframes;
+    core::u64 frame_number{40U};
+
+    editor::InspectorFrame frame(float x, float y, bool down) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Left, down);
+        ctx.new_frame();
+        return panel.draw_surface(ctx, Harness::bounds, surface, keyframes,
+                                  frame_number);
+    }
+
+    // Press, then drag `travel` pixels to the right with the button held.
+    editor::InspectorFrame scrub(float x, float y, float travel) {
+        static_cast<void>(frame(x, y, false));
+        static_cast<void>(frame(x, y, true));
+        return frame(x + travel, y, true);
+    }
+};
+
+void a_surface_position_scrub_moves_only_that_axis() {
+    SurfaceHarness h;
+    const editor::InspectorFrame dragged =
+        h.scrub(field_x2, surface_position_y, 50.0F);
+    UI_CHECK(dragged.surface_edit.has_value());
+    const editor::FeedSurfaceEditRequest& edit = *dragged.surface_edit;
+    UI_CHECK(edit.node == doc::NodeId{77U});
+    UI_CHECK(edit.name == "Upstage Wall");
+    UI_CHECK(edit.transform_components == editor::FeedSurfaceTransform::PositionZ);
+    UI_CHECK(near(edit.surface.center.z, -2.5));
+    UI_CHECK(near(edit.surface.center.x, 1.5));
+    UI_CHECK(near(edit.surface.center.y, 2.0));
+    UI_CHECK(near(edit.surface.width, 6.0));
+    UI_CHECK(edit.surface.raster == scene::Canvas{1920U, 1080U});
+    UI_CHECK(edit.mesh_columns == 48U);
+    UI_CHECK(!edit.color.has_value());
+    UI_CHECK(dragged.editing);
+}
+
+void a_surface_yaw_is_in_turns_and_keeps_the_wall_upright() {
+    SurfaceHarness h;
+    // 50 pixels at 0.002 turns per pixel.
+    const editor::InspectorFrame dragged =
+        h.scrub(field_x0, surface_yaw_y, 50.0F);
+    UI_CHECK(dragged.surface_edit.has_value());
+    const editor::FeedSurfaceEditRequest& edit = *dragged.surface_edit;
+    UI_CHECK(edit.transform_components == editor::FeedSurfaceTransform::Yaw);
+    const double radians = 0.1 * 6.28318530717958647692;
+    UI_CHECK(near(edit.surface.right.x, std::cos(radians)));
+    UI_CHECK(near(edit.surface.right.z, -std::sin(radians)));
+    UI_CHECK(near(edit.surface.up.y, 1.0));
+    UI_CHECK(near(edit.surface.center.x, 1.5));
+}
+
+void a_surface_size_is_calibration_not_a_transform_channel() {
+    SurfaceHarness h;
+    const editor::InspectorFrame dragged =
+        h.scrub(surface_height_x, surface_size_y, 50.0F);
+    UI_CHECK(dragged.surface_edit.has_value());
+    const editor::FeedSurfaceEditRequest& edit = *dragged.surface_edit;
+    UI_CHECK(edit.transform_components == editor::FeedSurfaceTransform::None);
+    UI_CHECK(near(edit.surface.height, 4.0));
+    UI_CHECK(near(edit.surface.width, 6.0));
+}
+
+// The diamond sits at the right of the label column, 81.6..99.6.
+constexpr float surface_key_x = 90.0F;
+
+void a_surface_diamond_keys_its_position_at_the_playhead() {
+    SurfaceHarness h;
+    static_cast<void>(h.frame(surface_key_x, surface_position_y, false));
+    static_cast<void>(h.frame(surface_key_x, surface_position_y, true));
+    const editor::InspectorFrame pressed =
+        h.frame(surface_key_x, surface_position_y, false);
+    UI_CHECK(!pressed.surface_edit.has_value());
+    UI_CHECK(pressed.key_edits.size() == 3U);
+    UI_CHECK(pressed.key_edits[0].node == doc::NodeId{77U});
+    UI_CHECK(pressed.key_edits[0].component ==
+             scene::TransformChannel::PositionX);
+    UI_CHECK(near(pressed.key_edits[0].value, 1.5));
+    UI_CHECK(pressed.key_edits[2].component ==
+             scene::TransformChannel::PositionZ);
+    UI_CHECK(near(pressed.key_edits[2].value, -3.0));
+    UI_CHECK(!pressed.key_edits[0].erase);
+}
+
+void a_filled_surface_diamond_removes_the_yaw_key_there() {
+    SurfaceHarness h;
+    // A quarter turn: right points down -Z.
+    h.surface.geometry.right = scene::Vec3{0.0F, 0.0F, -1.0F};
+    h.keyframes.push_back(scene::ChannelKeyframes{
+        doc::NodeId{77U}, scene::TransformChannel::RotationYaw, {120}, {0.25},
+        {scene::KeyInterpolation::Linear}});
+    h.frame_number = 120U;
+    static_cast<void>(h.frame(surface_key_x, surface_yaw_y, false));
+    static_cast<void>(h.frame(surface_key_x, surface_yaw_y, true));
+    const editor::InspectorFrame pressed =
+        h.frame(surface_key_x, surface_yaw_y, false);
+    UI_CHECK(pressed.key_edits.size() == 1U);
+    UI_CHECK(pressed.key_edits[0].component ==
+             scene::TransformChannel::RotationYaw);
+    UI_CHECK(near(pressed.key_edits[0].value, 0.25));
+    UI_CHECK(pressed.key_edits[0].erase);
+}
+
+void an_imported_surface_without_its_mesh_authors_nothing() {
+    SurfaceHarness h;
+    h.surface.shape = mediaserver::output::ProjectionSurfaceShape::ImportedMesh;
+    const editor::InspectorFrame dragged =
+        h.scrub(field_x0, surface_position_y, 50.0F);
+    UI_CHECK(!dragged.surface_edit.has_value());
+}
+
+constexpr std::array<Case, 54U> cases{{
+    {"a surface diamond keys its position at the playhead",
+     &a_surface_diamond_keys_its_position_at_the_playhead},
+    {"a filled surface diamond removes the yaw key there",
+     &a_filled_surface_diamond_removes_the_yaw_key_there},
+    {"a surface position scrub moves only that axis",
+     &a_surface_position_scrub_moves_only_that_axis},
+    {"a surface yaw is in turns and keeps the wall upright",
+     &a_surface_yaw_is_in_turns_and_keeps_the_wall_upright},
+    {"a surface size is calibration, not a transform channel",
+     &a_surface_size_is_calibration_not_a_transform_channel},
+    {"an imported surface without its mesh authors nothing",
+     &an_imported_surface_without_its_mesh_authors_nothing},
     {"camera key buttons preserve cubic evaluated values",
      &camera_key_buttons_preserve_cubic_evaluated_values},
     {"numeric capture ignores press travel and keeps release travel",

@@ -23,7 +23,10 @@ float shadow_compare(Texture2D<float> map, int2 pixel, int2 origin, int2 extent,
     // Missing samples are lit. Never read the next atlas tile or clamp a
     // border caster into an otherwise empty part of the light projection.
     if (any(pixel < origin) || any(pixel >= origin + extent)) return 1.0;
-    return map.Load(int3(pixel, 0)) <= receiver ? 1.0 : 0.0;
+    const float stored = map.Load(int3(pixel, 0));
+    // Reversed-depth clear is empty, including when a sloping receiver's
+    // extrapolated comparison depth falls beyond the light's far plane.
+    return stored == 0.0 || stored <= receiver ? 1.0 : 0.0;
 }
 
 float shadow_bilinear(Texture2D<float> map, float2 uv, float depth, float bias,
@@ -59,26 +62,98 @@ float shadow_kernel(Texture2D<float> map, float2 uv, float depth, float bias,
     return visible / 81.0;
 }
 
-// Nine blocker taps, always the same count. Sun size turns light-space
-// receiver/blocker separation into a PCSS-shaped radius, capped at 16 texels.
-float shadow_penumbra(Texture2D<float> map, float2 uv, float depth, float bias,
-                      float2 gradient, float texel_depth, int2 extent) {
-    float separation = 0.0, blockers = 0.0;
-    [unroll] for (int y = -1; y <= 1; ++y) {
-        [unroll] for (int x = -1; x <= 1; ++x) {
-            const int2 tap = int2(floor(uv * float2(extent))) + int2(x, y) * 8;
-            if (any(tap < 0) || any(tap >= extent)) continue;
-            const float stored = map.Load(int3(tap, 0));
-            const float plane = depth + dot(gradient, (float2(tap) + 0.5) / float2(extent) - uv);
-            if (stored > plane + bias) {
-                separation += stored - plane;
-                blockers += 1.0;
-            }
-        }
+// Directional PCSS, implemented here from the blocker-search / penumbra /
+// variable-filter algorithm. No upstream shader or sampling table is used.
+// Sixteen antipodal pairs: r=sqrt((i+0.5)/16), angle=i*pi*(3-sqrt(5))+pi/8.
+// Equal-area radial strata and paired offsets avoid a preferred edge direction.
+// Fixed shadow-space offsets keep subpixel motion continuous without per-pixel
+// noise, trigonometric hashes, frame history or node-local seeds.
+static const float2 directional_shadow_disk[32] = {
+    float2(0.163320371, 0.067649513),
+    float2(-0.163320371, -0.067649513),
+    float2(-0.287735118, 0.104682865),
+    float2(0.287735118, -0.104682865),
+    float2(0.182617183, -0.350572338),
+    float2(-0.182617183, 0.350572338),
+    float2(0.120867858, 0.451819611),
+    float2(-0.120867858, -0.451819611),
+    float2(-0.447121342, -0.285188544),
+    float2(0.447121342, 0.285188544),
+    float2(0.577463574, -0.101419037),
+    float2(-0.577463574, 0.101419037),
+    float2(-0.388421803, 0.505349881),
+    float2(0.388421803, -0.505349881),
+    float2(-0.059024469, -0.682104180),
+    float2(0.059024469, 0.682104180),
+    float2(0.536844458, 0.492999014),
+    float2(-0.536844458, -0.492999014),
+    float2(-0.770551177, -0.000939745),
+    float2(0.770551177, 0.000939745),
+    float2(0.598003981, -0.546480777),
+    float2(-0.598003981, 0.546480777),
+    float2(-0.075148694, 0.844454068),
+    float2(0.075148694, -0.844454068),
+    float2(-0.536933185, -0.702105943),
+    float2(0.536933185, 0.702105943),
+    float2(0.904321293, 0.161099344),
+    float2(-0.904321293, -0.161099344),
+    float2(-0.803853654, 0.509969904),
+    float2(0.803853654, -0.509969904),
+    float2(0.256674815, -0.950193685),
+    float2(-0.256674815, 0.950193685)
+};
+static const float directional_shadow_max_radius = 16.0;
+
+float directional_blocker(Texture2D<float> map, float2 uv, float depth, float bias,
+                          float2 gradient, int2 extent, float2 offset) {
+    const int2 tap = int2(floor(uv * float2(extent) + offset));
+    if (any(tap < 0) || any(tap >= extent)) return 0.0;
+    const float stored = map.Load(int3(tap, 0));
+    const float plane = depth + dot(gradient, (float2(tap) + 0.5) / float2(extent) - uv);
+    // Zero is empty reversed depth, even if an extrapolated receiver plane
+    // goes outside the light volume. Bias rejects self-shadowing only; it
+    // must not shrink the physical receiver/blocker separation.
+    return stored > 0.0 && stored > plane + bias ? stored - plane : 0.0;
+}
+
+float2 directional_penumbra(Texture2D<float> map, float2 uv, float depth, float bias,
+                            float2 gradient, float2 texel_depth, int2 extent) {
+    const float minimum_depth = max(min(texel_depth.x, texel_depth.y), 1e-8);
+    const float2 shape = minimum_depth / max(texel_depth, 1e-8);
+    const float to_texels = shadow_quality.z / minimum_depth;
+    // Reversed orthographic depth is linear. The light near plane bounds the
+    // possible separation; include the receiver-plane slope over the bounded
+    // footprint. Unlike the old fixed eight-texel grid this search contracts
+    // with the source size and the available blocker depth.
+    const float maximum_separation = saturate(1.0 - depth)
+        + dot(abs(gradient), directional_shadow_max_radius / float2(extent));
+    const float search_radius = min(maximum_separation * to_texels, directional_shadow_max_radius);
+    const float2 search = max(shadow_quality.y, search_radius * shape);
+    // Always sample the receiver itself as well: a thin caster directly over
+    // it must not be missed between the disk samples.
+    float separation = directional_blocker(map, uv, depth, bias, gradient, extent, 0.0);
+    float blockers = separation > 0.0 ? 1.0 : 0.0;
+    [loop] for (uint i = 0u; i < 32u; ++i) {
+        const float distance = directional_blocker(map, uv, depth, bias,
+            gradient, extent, directional_shadow_disk[i] * search);
+        separation += distance;
+        blockers += distance > 0.0 ? 1.0 : 0.0;
     }
-    const float radius = separation / max(blockers, 1.0)
-        * shadow_quality.z / max(texel_depth, 1e-8);
-    return clamp(radius, shadow_quality.y, 16.0);
+    const float radius = min(separation / max(blockers, 1.0) * to_texels,
+        directional_shadow_max_radius);
+    // No blockers still gets the minimum filter, rather than declaring the
+    // pixel lit: finite searches can miss thin off-centre silhouettes.
+    return max(shadow_quality.y, radius * shape);
+}
+
+float directional_disk_filter(Texture2D<float> map, float2 uv, float depth, float bias,
+                              float2 gradient, float2 radius, int2 extent) {
+    float visible = 0.0;
+    [loop] for (uint i = 0u; i < 32u; ++i) {
+        visible += shadow_bilinear(map, uv + directional_shadow_disk[i] * radius / float2(extent),
+            depth, bias, gradient, uv, int2(0, 0), extent);
+    }
+    return visible * (1.0 / 32.0);
 }
 
 float filtered_cascade(Texture2D<float> map, uint index, float2 uv, float depth,
@@ -86,10 +161,17 @@ float filtered_cascade(Texture2D<float> map, uint index, float2 uv, float depth,
     uint w, h; map.GetDimensions(w, h);
     const int2 extent = int2(w, h);
     const float2 gradient = shadow_receiver_gradient(shadow_view_projection[index], position, normal);
-    float radius = shadow_quality.y;
-    if (shadow_quality.z > 0.0) radius = shadow_penumbra(map, uv, depth, bias,
-        gradient, shadow_cascade_texel_depth[index], extent);
-    return shadow_kernel(map, uv, depth, bias, gradient, radius, int2(0, 0), extent);
+    if (shadow_quality.z <= 0.0)
+        return shadow_kernel(map, uv, depth, bias, gradient, shadow_quality.y, int2(0, 0), extent);
+    // The full-scene cascade can be rectangular in world space. Convert the
+    // stored depth of the larger world texel into a separate scale per axis,
+    // so a circular sun does not acquire an elliptical penumbra on that map.
+    const float2 density = float2(length(shadow_view_projection[index][0].xyz),
+        length(shadow_view_projection[index][1].xyz)) * float2(extent);
+    const float2 texel_depth = shadow_cascade_texel_depth[index]
+        * min(density.x, density.y) / max(density, 1e-8);
+    const float2 radius = directional_penumbra(map, uv, depth, bias, gradient, texel_depth, extent);
+    return directional_disk_filter(map, uv, depth, bias, gradient, radius, extent);
 }
 
 // How much of cascade `index` this point takes: zero outside the map or its
@@ -106,7 +188,8 @@ float cascade_weight(uint index, uint cascades, float3 position,
     depth = ndc.z;
     if (any(uv <= 0.0) || any(uv >= 1.0) || ndc.z <= 0.0 || ndc.z >= 1.0) return 0.0;
     const float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-    const float guard = (shadow_quality.z > 0.0 ? 16.5 : shadow_quality.y + 0.5) * shadow_parameters.x;
+    const float guard = (shadow_quality.z > 0.0 ? directional_shadow_max_radius + 0.5
+        : shadow_quality.y + 0.5) * shadow_parameters.x;
     const float blend = shadow_quality.x > 0.0
         ? smoothstep(guard, guard + shadow_quality.x, edge) : (edge > guard ? 1.0 : 0.0);
     return index + 1u == cascades ? 1.0 : blend;

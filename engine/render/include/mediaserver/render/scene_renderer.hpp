@@ -890,7 +890,8 @@ private:
     // First advanced raster visibility product: cascaded, output-slice-
     // independent directional shadow maps encoded as reversed depth in R32F.
     // They are rendered before the lit pass and sampled there with
-    // deterministic fixed-kernel PCF. The last cascade a frame uses is always
+    // deterministic bounded PCSS for a finite sun, fixed-kernel PCF otherwise.
+    // The last cascade a frame uses is always
     // the full-scene fit, so it is also the reflective-shadow-map depth.
     //
     // Each shadow product - a cascade, the reflective-shadow-map pair, the

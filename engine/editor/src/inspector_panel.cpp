@@ -2910,4 +2910,227 @@ InspectorFrame InspectorPanel::draw_selection(
     return frame;
 }
 
+InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
+                                            const gui::Rect& bounds,
+                                            const output::ProjectionSurface&
+                                                surface,
+                                            std::span<const scene::
+                                                          ChannelKeyframes>
+                                                keyframes,
+                                            core::u64 frame_number) {
+    InspectorFrame frame{};
+
+    ctx.panel(bounds, ctx.theme().panel);
+    if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
+        return frame;
+    }
+    // Same rule as an element selection: switching surfaces ends a live edit
+    // instead of landing it on the newly selected wall.
+    if (selection_signature_.size() != 1U ||
+        selection_signature_.front() != surface.node ||
+        primary_signature_ != surface.node) {
+        fields_.cancel(ctx);
+        drag_capture_ = {};
+        selection_signature_.assign(1U, surface.node);
+        primary_signature_ = surface.node;
+        scroll_ = 0.0F;
+        content_height_ = 0.0F;
+    }
+    selected_.clear();
+
+    if (bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        ctx.wheel() != 0.0F) {
+        scroll_ -= ctx.wheel() * 32.0F;
+    }
+    scroll_ = std::clamp(scroll_, 0.0F,
+                         std::max(content_height_ - bounds.height, 0.0F));
+
+    ctx.push_clip(bounds);
+    Cursor cursor{gui::Rect{bounds.x + panel_inset, bounds.y,
+                            std::max(bounds.width - panel_inset * 2.0F, 1.0F),
+                            0.0F},
+                  bounds.y + panel_inset - scroll_};
+
+    const gui::Rect header = take_row(cursor, 30.0F);
+    cursor.y += row_gap;
+    ctx.label(gui::Rect{header.x + 8.0F, header.y, header.width - 8.0F,
+                        header.height},
+              surface.name.empty() ? std::string_view{"LED surface"}
+                                   : std::string_view{surface.name},
+              ctx.theme().text);
+    ctx.label(take_row(cursor, row_height), "LED surface",
+              ctx.theme().text_muted);
+    cursor.y += row_gap;
+
+    output::PhysicalSurface geometry = surface.geometry;
+    FeedSurfaceTransform changed = FeedSurfaceTransform::None;
+    bool edited = false;
+
+    // A labelled row of `count` numeric fields, stacked under its label when
+    // the dock is too narrow for both, matching vector_row's layout. A row
+    // whose components are keyable carries the same diamond as an element's:
+    // hollow keys the shown values at the playhead, filled removes that key.
+    const auto fields_row = [&](std::string_view label, std::size_t count,
+                                std::span<const scene::TransformChannel>
+                                    channels = {},
+                                std::span<const double> values = {}) {
+        gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        float label_width =
+            std::clamp(row.width * label_fraction, label_min, label_max);
+        const float key_width = channels.empty() ? 0.0F : 18.0F;
+        const float field_min = ctx.font_width("X -0.000") + 14.0F;
+        const bool stacked =
+            ctx.font_width(label) + key_width + 10.0F > label_width ||
+            row.width - label_width -
+                    field_gap * static_cast<float>(count - 1U) <
+                static_cast<float>(count) * field_min;
+        if (stacked) {
+            label_width = row.width;
+        }
+        ctx.label(gui::Rect{row.x, row.y,
+                            std::max(label_width - key_width, 0.0F),
+                            row.height},
+                  label, ctx.theme().text_muted);
+        if (!channels.empty()) {
+            bool animated = false;
+            bool keyed_here = true;
+            for (const scene::TransformChannel channel : channels) {
+                const scene::ChannelKeyframes* const keys =
+                    channel_for(keyframes, surface.node, channel);
+                animated = animated || (keys != nullptr && !keys->frames.empty());
+                keyed_here = keyed_here && keyed_at(keys, frame_number);
+            }
+            const gui::Rect key_bounds{row.x + label_width - key_width, row.y,
+                                       key_width, row.height};
+            if (key_button(ctx, mix(id_, label, 9'000U + surface.node.value()),
+                           key_bounds, animated, keyed_here,
+                           ctx.theme().panel)) {
+                for (std::size_t index = 0U;
+                     index < channels.size() && index < values.size();
+                     ++index) {
+                    frame.key_edits.push_back(InspectorKeyEdit{
+                        surface.node, channels[index], values[index],
+                        keyed_here});
+                }
+            }
+        }
+        if (stacked) {
+            row = take_row(cursor, 26.0F);
+            cursor.y += 6.0F;
+        }
+        const gui::Rect fields{row.x + (stacked ? 0.0F : label_width), row.y,
+                               std::max(row.width -
+                                            (stacked ? 0.0F : label_width),
+                                        1.0F),
+                               row.height};
+        std::array<gui::Rect, 3U> boxes{};
+        columns(fields, count, field_gap, boxes);
+        return boxes;
+    };
+    const auto number = [&](std::string_view name, const gui::Rect& box,
+                            std::string_view axis, double value, double speed,
+                            double& out, int precision = 3) {
+        return fields_.draw(ctx, mix(id_, name, surface.node.value()), box,
+                            axis, value, speed, out, precision);
+    };
+
+    if (section(ctx, cursor, "TRANSFORM", transform_open_)) {
+        const bool mesh =
+            surface.shape == output::ProjectionSurfaceShape::ImportedMesh;
+        constexpr std::array<FeedSurfaceTransform, 3U> position_bits{
+            FeedSurfaceTransform::PositionX, FeedSurfaceTransform::PositionY,
+            FeedSurfaceTransform::PositionZ};
+        std::array<float*, 3U> center{&geometry.center.x, &geometry.center.y,
+                                      &geometry.center.z};
+        constexpr std::array<scene::TransformChannel, 3U> position_channels{
+            scene::TransformChannel::PositionX,
+            scene::TransformChannel::PositionY,
+            scene::TransformChannel::PositionZ};
+        const std::array<double, 3U> position_values{
+            geometry.center.x, geometry.center.y, geometry.center.z};
+        const auto position = fields_row(mesh ? "Origin" : "Position", 3U,
+                                         position_channels, position_values);
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            double out{};
+            if (number(std::string{"surface.position."} + xyz[axis][0],
+                       position[axis], xyz[axis], *center[axis], 0.01, out)) {
+                *center[axis] = static_cast<float>(
+                    std::clamp(out, -1'000'000.0, 1'000'000.0));
+                changed |= position_bits[axis];
+                edited = true;
+            }
+        }
+
+        // Turns, like every other rotation in the Inspector; surfaces stand
+        // upright, so yaw is their whole orientation.
+        constexpr double tau = 6.28318530717958647692;
+        const double yaw_turns =
+            std::atan2(-static_cast<double>(geometry.right.z),
+                       static_cast<double>(geometry.right.x)) /
+            tau;
+        constexpr std::array<scene::TransformChannel, 1U> yaw_channel{
+            scene::TransformChannel::RotationYaw};
+        const std::array<double, 1U> yaw_value{yaw_turns};
+        const auto rotation =
+            fields_row("Yaw (turns)", 1U, yaw_channel, yaw_value);
+        double yaw{};
+        if (number("surface.yaw", rotation[0U], "Y", yaw_turns, 0.002, yaw)) {
+            const double radians = std::clamp(yaw, -10.0, 10.0) * tau;
+            geometry.right = scene::Vec3{static_cast<float>(std::cos(radians)),
+                                         0.0F,
+                                         static_cast<float>(-std::sin(radians))};
+            geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+            changed |= FeedSurfaceTransform::Yaw;
+            edited = true;
+        }
+
+        // Size is calibration, not a keyable transform channel, so it marks no
+        // component. A UV mesh carries its own extents.
+        if (!mesh) {
+            const auto size = fields_row("Size (m)", 2U);
+            double width{};
+            if (number("surface.width", size[0U], "W", geometry.width, 0.01,
+                       width)) {
+                geometry.width =
+                    static_cast<float>(std::clamp(width, 0.01, 1'000'000.0));
+                edited = true;
+            }
+            double height{};
+            if (number("surface.height", size[1U], "H", geometry.height, 0.01,
+                       height)) {
+                geometry.height =
+                    static_cast<float>(std::clamp(height, 0.01, 1'000'000.0));
+                edited = true;
+            }
+        }
+        ctx.label(take_row(cursor, row_height),
+                  "Shape, pixels and colour are in Feed Mapping",
+                  ctx.theme().text_muted);
+    }
+
+    // An imported surface without its UV mesh is not document-valid; Feed
+    // Mapping refuses to publish one, and so does this.
+    if (edited &&
+        !(surface.shape == output::ProjectionSurfaceShape::ImportedMesh &&
+          surface.mesh_source.empty())) {
+        frame.surface_edit = FeedSurfaceEditRequest{
+            surface.node,         surface.name,
+            geometry,             0U,
+            surface.shape,        surface.horizontal_arc_turns,
+            surface.mesh_columns, surface.mesh_source,
+            surface.mesh_scale,   changed};
+    }
+
+    cursor.y += panel_inset;
+    content_height_ = cursor.y + scroll_ - bounds.y;
+    ctx.pop_clip();
+
+    frame.editing = fields_.live();
+    if (!frame.editing) {
+        drag_capture_ = {};
+    }
+    return frame;
+}
+
 } // namespace mediaserver::editor

@@ -568,11 +568,17 @@ state of a stack reads from across a stage. The stage's LED surfaces follow the
 scene's elements in both the Timeline and the Scene outliner, each with the same
 padlock - the lock Feed Mapping and Stage picking already honour. A surface has
 no eye, and clicking its Scene row selects it on Stage.
-To animate an LED surface, select its row in **Scene** and unlock its padlock
-if needed. Expand that surface in **Timeline**, park the playhead, then click
-the diamond beside **Position** or **Yaw** to add a key. Use these Timeline
-controls for surface animation; the object Properties inspector does not show
-surface controls. These keys support the same
+A selected, unlocked surface shows its **Position**, **Yaw** (in turns) and
+**Size** in **Properties**; a UV-mesh surface shows its **Origin** and Yaw and
+takes its size from the mesh. Shape, pixels and wall colour stay in Feed
+Mapping. With Auto Key on, Properties edits to an animated Position or Yaw key
+it at the Program playhead, as Stage drags do.
+To animate an LED surface, select it on Stage or its row in **Scene** and
+unlock its padlock if needed. Park the playhead, then click the diamond beside
+**Position** or **Yaw** in **Properties**, or on the expanded surface in
+**Timeline**, to add a key; a filled diamond removes the key there. Cameras
+key the same way from their Properties diamonds. A tracked camera follows the
+tracker while it is live and falls back to its keyed pose when it is not. These keys support the same
 selection, dragging, scaling, copying, and deletion as scene-element keys.
 
 A ramp *scales* whatever opacity was authored or keyed rather than replacing
@@ -1035,6 +1041,9 @@ CAMERA section exposes field of view, shutter time, focus distance, and aperture
 with explicit key diamonds. The same four channels appear when the camera is
 expanded in Timeline and evaluate at the exact show frame. A camera saved with the older eye
 and look-at target reads as the rotation that gives the same view.
+Every camera of the scene on Stage draws its frustum there, highlighted while
+selected. Select a camera in Scene and it takes the Stage gizmo and the G/R
+keys like any element; it has no scale.
 
 On Stage a click picks the nearest element under the pointer. Press and hold
 still for about half a second to choose instead: a menu lists everything under
@@ -1172,7 +1181,11 @@ all four viewport properties.
 Select a viewport and use the **OUTPUT WINDOW / DESTINATION PIXELS** fields
 below the mapping canvas to enter its X, Y, W and H exactly. The separate
 **CANVAS / SOURCE PIXELS** or **LED SURFACE / SOURCE PIXELS** fields control
-the content crop without moving the viewport. Imported UV meshes use their full
+the content crop without moving the viewport. Each heading states the extent
+its fields are held within: the output window's raster, the scene canvas, or
+the assigned LED surface's **RASTER** (set under Surface Calibration, and
+independent of the canvas). A physical crop that stops short means that
+surface's raster is smaller than the region wanted. Imported UV meshes use their full
 surface raster, so source crop fields are hidden for those mappings. Click a
 number to type or drag it to scrub. **+ ADD VIEWPORT** duplicates the selected
 source and viewport size in the same window; set each copy's destination X to

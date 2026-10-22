@@ -112,6 +112,11 @@ void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
 // reads as zero rotation.
 [[nodiscard]] Vec3 camera_rotation(const Camera& camera) noexcept;
 
+// The rigid placement `place_camera` describes, as a matrix: translation to
+// the eye, +Y the camera's up and -Z where it looks. Unit scale, so the gizmo
+// and a transform gesture see a camera exactly as they see any element.
+[[nodiscard]] Mat4 camera_world(const Camera& camera) noexcept;
+
 // Relative photographic exposure used by the Advanced renderer. The default
 // camera is neutral (1.0), preserving today's unitless-light look while
 // aperture, shutter duration, ISO, and compensation gain their proper stop

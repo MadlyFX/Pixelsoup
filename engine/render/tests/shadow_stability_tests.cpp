@@ -91,35 +91,60 @@ struct ProbeConstants {
 };
 static_assert(sizeof(ProbeConstants)==608U);
 
-void analytic_gpu_filters(rhi::Device& device) {
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
-    constexpr core::u32 size=128U;
-    auto near_map=texture(device,size,size,rhi::TextureFormat::R32Float);
-    auto far_map=texture(device,size,size,rhi::TextureFormat::R32Float);
-    auto depth=texture(device,size,1U,rhi::TextureFormat::R32Float);
-    auto atlas=texture(device,size,size,rhi::TextureFormat::R32Float);
-    auto target=texture(device,size,1U,rhi::TextureFormat::Rgba32Float);
-    rhi::ShaderDesc vertex; vertex.stage=rhi::ShaderStage::Vertex; vertex.format=rhi::ShaderFormat::Dxil;
-    vertex.bytecode={mediaserver_output_vert_dxil,sizeof(mediaserver_output_vert_dxil)};
-    rhi::ShaderDesc fragment; fragment.stage=rhi::ShaderStage::Fragment; fragment.format=rhi::ShaderFormat::Dxil;
-    fragment.bytecode={mediaserver_shadow_probe_frag_dxil,sizeof(mediaserver_shadow_probe_frag_dxil)};
-    fragment.sampler_count=4U; fragment.uniform_buffer_count=1U;
-    auto pipeline=device.create_pipeline(vertex,fragment,rhi::TextureFormat::Rgba32Float,rhi::ColorBlend::Disabled); CHECK(pipeline);
-    auto sampler=device.create_sampler(rhi::Filter::Nearest); CHECK(sampler);
-    const std::array<rhi::SampledTexture,4U> textures{{{&near_map,&sampler.value()},
-        {&far_map,&sampler.value()},{&depth,&sampler.value()},{&atlas,&sampler.value()}}};
-    std::vector<float> near_depth(size*size,0.0F),far_depth(size*size,0.0F),scene_depth(size,0.4F),atlas_depth(size*size,1.0F);
+struct ShadowProbe {
+    rhi::Device& device;
+    rhi::Texture near_map, far_map, depth, atlas, target;
+    rhi::GraphicsPipeline pipeline;
+    rhi::Sampler sampler;
+    std::vector<float> near_depth, far_depth, scene_depth, atlas_depth;
     ProbeConstants constants;
-    const auto draw=[&] {
+
+    explicit ShadowProbe(rhi::Device& gpu, core::u32 size=128U)
+        : device(gpu), near_map(texture(device,size,size,rhi::TextureFormat::R32Float)),
+          far_map(texture(device,size,size,rhi::TextureFormat::R32Float)),
+          depth(texture(device,128U,1U,rhi::TextureFormat::R32Float)),
+          atlas(texture(device,size,size,rhi::TextureFormat::R32Float)),
+          target(texture(device,128U,1U,rhi::TextureFormat::Rgba32Float)),
+          near_depth(size*size,0.0F), far_depth(size*size,0.0F),
+          scene_depth(128U,0.4F), atlas_depth(size*size,1.0F) {
+        constants.texel[0]=constants.texel[1]=2.0F/static_cast<float>(size);
+        constants.parameters[0]=constants.parameters[1]=1.0F/static_cast<float>(size);
+        rhi::ShaderDesc vertex; vertex.stage=rhi::ShaderStage::Vertex; vertex.format=rhi::ShaderFormat::Dxil;
+        vertex.bytecode={mediaserver_output_vert_dxil,sizeof(mediaserver_output_vert_dxil)};
+        rhi::ShaderDesc fragment; fragment.stage=rhi::ShaderStage::Fragment; fragment.format=rhi::ShaderFormat::Dxil;
+        fragment.bytecode={mediaserver_shadow_probe_frag_dxil,sizeof(mediaserver_shadow_probe_frag_dxil)};
+        fragment.sampler_count=4U; fragment.uniform_buffer_count=1U;
+        auto created=device.create_pipeline(vertex,fragment,rhi::TextureFormat::Rgba32Float,rhi::ColorBlend::Disabled); CHECK(created);
+        pipeline=std::move(created).value();
+        auto sampled=device.create_sampler(rhi::Filter::Nearest); CHECK(sampled);
+        sampler=std::move(sampled).value();
+    }
+
+    std::vector<float> draw() {
+        const std::array<rhi::SampledTexture,4U> textures{{{&near_map,&sampler},
+            {&far_map,&sampler},{&depth,&sampler},{&atlas,&sampler}}};
         auto cmd=acquire(device);
         CHECK(cmd.upload(near_map,bytes(near_depth))); CHECK(cmd.upload(far_map,bytes(far_depth)));
         CHECK(cmd.upload(depth,bytes(scene_depth))); CHECK(cmd.upload(atlas,bytes(atlas_depth)));
-        CHECK(cmd.draw_output_transform(target,rhi::Color{},pipeline.value(),textures,bytes(constants)));
+        CHECK(cmd.draw_output_transform(target,rhi::Color{},pipeline,textures,bytes(constants)));
         const auto raw=download(device,std::move(cmd),target,16U);
-        std::vector<float> result(size);
-        for (core::u32 x=0;x<size;++x) std::memcpy(&result[x],raw.data()+x*16U,4U);
+        std::vector<float> result(static_cast<std::size_t>(target.width())*target.height());
+        for (std::size_t x=0;x<result.size();++x) std::memcpy(&result[x],raw.data()+x*16U,4U);
         return result;
-    };
+    }
+};
+#endif
+
+void analytic_gpu_filters(rhi::Device& device) {
+#if defined(MEDIASERVER_HAS_DXIL_SHADERS)
+    constexpr core::u32 size=128U;
+    ShadowProbe fixture(device);
+    auto& constants=fixture.constants;
+    auto& near_depth=fixture.near_depth;
+    auto& scene_depth=fixture.scene_depth;
+    auto& atlas_depth=fixture.atlas_depth;
+    const auto draw=[&] { return fixture.draw(); };
     // No caster, every kernel including the largest sun. A sloped receiver
     // rendered into the map also stays entirely lit with plane correction.
     for (float slope : {0.0F,0.25F,-0.25F}) for (float radius : {0.0F,2.0F,4.0F}) {
@@ -140,15 +165,17 @@ void analytic_gpu_filters(rhi::Device& device) {
     // is continuous, stays in its authored edge band and has no discontinuity
     // when a dolly translates that band over a stationary world receiver.
     std::fill(near_depth.begin(),near_depth.end(),0.7F);
-    constants.counts[2]=2U; constants.quality={0.2F,2.0F,0.0F,0.0F};
-    const auto blended=draw();
-    CHECK(blended[0]==1.0F && blended[32]==0.0F && blended[64]==0.0F);
-    for (std::size_t x=1;x<32;++x) { CHECK(blended[x]<=blended[x-1]); CHECK(blended[x-1]-blended[x]<0.08F); }
-    float previous=1.0F;
-    for (int step=0;step<=64;++step) {
-        constants.matrices[0].set(0U,3U,1.0F-static_cast<float>(step)*0.008F);
-        const auto moved=draw(); CHECK(std::abs(moved[64]-previous)<0.04F); previous=moved[64];
-        CHECK(moved[32]==0.0F); // Well away from the moving blend band.
+    for (const float sun_size : {0.0F,0.4F}) {
+        constants.matrices[0]=scene::identity();
+        constants.counts[2]=2U; constants.quality={0.2F,2.0F,sun_size,0.0F};
+        const auto blended=draw();
+        CHECK(blended[0]==1.0F && blended[64]==0.0F);
+        for (std::size_t x=1;x<64;++x) { CHECK(blended[x]<=blended[x-1]); CHECK(blended[x-1]-blended[x]<0.08F); }
+        float previous=1.0F;
+        for (int step=0;step<=64;++step) {
+            constants.matrices[0].set(0U,3U,1.0F-static_cast<float>(step)*0.008F);
+            const auto moved=draw(); CHECK(std::abs(moved[64]-previous)<0.04F); previous=moved[64];
+        }
     }
     // An empty tile bordered by fully occluded tiles must never borrow them,
     // even at the last half-texel with the widest kernel.
@@ -160,6 +187,102 @@ void analytic_gpu_filters(rhi::Device& device) {
     for (core::u32 x=68U;x<76U;++x) scene_depth[x]=0.53F;
     const auto contact=draw(); CHECK(contact[62]<0.5F); CHECK(contact[90]==1.0F); CHECK(contact==draw());
     std::cout << "[pass] analytic slopes, kernel/sun widths, cascade dolly, atlas isolation and contact rays\n";
+#else
+    (void)device;
+#endif
+}
+
+void directional_pcss_properties(rhi::Device& device) {
+#if defined(MEDIASERVER_HAS_DXIL_SHADERS)
+    // Independent continuous-area reference: fraction of a circular emitter
+    // visible past a straight blocker edge. It contains no shader sample table.
+    const auto disk_visibility=[](float x, float radius) {
+        const double t=std::clamp(static_cast<double>(x/radius),-1.0,1.0);
+        return static_cast<float>(1.0-(std::acos(t)-t*std::sqrt(1.0-t*t))/3.141592653589793);
+    };
+    std::vector<float> reference;
+    for (const core::u32 resolution : {128U,256U}) {
+        ShadowProbe fixture(device,resolution);
+        auto& constants=fixture.constants;
+        constants.quality={0.1F,0.5F,0.4F,0.0F};
+        for (const float x_scale : {1.0F,0.5F}) for (const float angle : {0.0F,0.53F,1.570796327F}) {
+            const float c=std::cos(angle),s=std::sin(angle);
+            auto& matrix=constants.matrices[0];
+            matrix=scene::identity();
+            matrix.set(0,0,x_scale*c); matrix.set(0,1,x_scale*s);
+            matrix.set(1,0,-s); matrix.set(1,1,c);
+            constants.texel[0]=2.0F/(static_cast<float>(resolution)*x_scale);
+            for (core::u32 y=0;y<resolution;++y) for (core::u32 x=0;x<resolution;++x) {
+                const float u=(static_cast<float>(x)+0.5F)*2.0F/static_cast<float>(resolution)-1.0F;
+                const float v=1.0F-(static_cast<float>(y)+0.5F)*2.0F/static_cast<float>(resolution);
+                fixture.near_depth[y*resolution+x]=(c*u/x_scale-s*v)<0.0F?0.6F:0.0F;
+            }
+            const auto pixels=fixture.draw();
+            for (core::u32 x=24;x<104;++x) {
+                const float world_x=(static_cast<float>(x)+0.5F)/64.0F-1.0F;
+                // Separation 0.2 world units and tan(source radius) 0.4
+                // give a world penumbra radius of 0.08 at every resolution.
+                CHECK(std::abs(pixels[x]-disk_visibility(world_x,0.08F))<0.09F);
+                if (!reference.empty()) CHECK(std::abs(pixels[x]-reference[x])<0.09F);
+            }
+            if (reference.empty()) reference=pixels;
+            CHECK(pixels==fixture.draw());
+        }
+    }
+    ShadowProbe fixture(device);
+    auto& constants=fixture.constants;
+    constants.quality={0.1F,0.5F,0.4F,0.0F};
+    const auto edge=[&](float depth) {
+        for (core::u32 y=0;y<128U;++y) for (core::u32 x=0;x<128U;++x)
+            fixture.near_depth[y*128U+x]=x<64U?depth:0.0F;
+        return fixture.draw();
+    };
+    const auto width=[](const auto& pixels) {
+        return std::count_if(pixels.begin()+24,pixels.end()-24,[](float v){return v>0.05F&&v<0.95F;});
+    };
+    const auto contact=edge(0.405F),near=edge(0.5F),far=edge(0.6F);
+    CHECK(width(contact)<width(near)); CHECK(width(near)<width(far));
+    constants.quality[2]=0.2F;
+    CHECK(width(edge(0.6F))<width(far));
+    // Bias changes cannot change emitter size once the blocker passes the
+    // acne test. Separation is measured before applying receiver bias.
+    constants.quality[2]=0.4F; constants.parameters[2]=2.0F;
+    CHECK(edge(0.6F)==far); constants.parameters[2]=0.1F;
+
+    // A narrow off-centre blocker is missed by the old +/-8 texel grid.
+    // The disk must find it and soften the shadow across the receiver.
+    for (core::u32 y=0;y<128U;++y) for (core::u32 x=0;x<128U;++x)
+        fixture.near_depth[y*128U+x]=(x>=65U&&x<67U)?0.8F:0.0F;
+    constants.quality[2]=0.25F;
+    const auto thin=fixture.draw();
+    CHECK(thin[64]<0.9F); CHECK(thin[68]<0.95F);
+    CHECK(thin==fixture.draw());
+
+    // The cap is explicit and finite, including extreme sun sizes. Changing
+    // blocker separation after saturation must not widen the filter further.
+    constants.quality[2]=8.0F;
+    const auto capped=edge(0.7F); CHECK(edge(0.95F)==capped);
+    CHECK(std::all_of(capped.begin(),capped.end(),[](float v){return std::isfinite(v)&&v>=0&&v<=1;}));
+    constants.quality[2]=0.4F;
+    auto previous=edge(0.6F);
+    for (int step=1;step<=32;++step) {
+        constants.matrices[0].set(0,3,static_cast<float>(step)/2048.0F);
+        const auto moved=fixture.draw();
+        for (std::size_t x=24;x<104;++x) CHECK(std::abs(moved[x]-previous[x])<0.04F);
+        previous=moved;
+    }
+    constants.matrices[0]=scene::identity();
+    std::fill(fixture.near_depth.begin(),fixture.near_depth.end(),0.0F);
+    constants.probe[2]=0.5F;
+    const auto empty=fixture.draw();
+    CHECK(std::all_of(empty.begin(),empty.end(),[](float v){return v==1.0F;}));
+    // Sun size never enters spotlight filtering, including a non-empty tile.
+    constants.probe={1,0.4F,0,0}; constants.quality[2]=0;
+    for (core::u32 y=0;y<64U;++y) for (core::u32 x=0;x<64U;++x)
+        fixture.atlas_depth[y*128U+x]=x<32U?0.7F:0.0F;
+    const auto spot=fixture.draw(); constants.quality[2]=0.8F;
+    CHECK(spot==fixture.draw());
+    std::cout << "[pass] PCSS disk-area reference, rectangular fits, resolution/orientation invariance, contact hardening, thin casters, radius cap and subpixel motion\n";
 #else
     (void)device;
 #endif
@@ -245,8 +368,10 @@ void native_cutouts_and_slices(rhi::Device& device) {
     CHECK(draw(0)!=masked);
     CHECK(renderer.stats().contact_shadow_lights==2U);
     frame.renderer_settings.shadow_blend_band=0.18F; frame.renderer_settings.shadow_filter_radius=3.5F;
-    const auto full=draw(0);
-    for (const scene::CanvasRect slice : {scene::CanvasRect{0U,0U,63U,64U},scene::CanvasRect{63U,0U,65U,64U}}) {
+    for (const float sun_radius : {0.000739F,0.04F}) {
+      frame.directional_lights[0].angular_radius=sun_radius;
+      const auto full=draw(0);
+      for (const scene::CanvasRect slice : {scene::CanvasRect{0U,0U,63U,64U},scene::CanvasRect{63U,0U,65U,64U}}) {
         const auto padded=render::padded_slice_for(frame,slice,slice.width,slice.height,true); CHECK(padded);
         const auto region=padded.value();
         auto node=render::SceneRenderer::create(device,region.render.width,region.render.height,small_limits(),render::SceneRendererMode::AdvancedLinear); CHECK(node);
@@ -258,6 +383,7 @@ void native_cutouts_and_slices(rhi::Device& device) {
             CHECK(std::equal(image.begin()+local,image.begin()+local+8U,full.begin()+global));
         }
         CHECK(node.value().stats().directional_shadow_fit==renderer.stats().directional_shadow_fit);
+      }
     }
     // Moving only the camera must preserve the shadow texel scale/depth basis.
     const auto fit=renderer.stats().directional_shadow_fit;
@@ -274,11 +400,12 @@ int main() {
         settings_contract();
         if (!render::SceneRenderer::shaders_available() || !rhi::Device::available(rhi::BackendKind::D3d12)) {
             std::cout << "[skip] native D3D12 shadow images unavailable; CPU settings/apron contracts passed\n";
-            return 0;
+            return 77;
         }
         rhi::DeviceConfig config; config.backend=rhi::BackendKind::D3d12;
         auto opened=rhi::Device::create(config); CHECK(opened);
         analytic_gpu_filters(opened.value());
+        directional_pcss_properties(opened.value());
         native_cutouts_and_slices(opened.value());
     } catch (const std::exception& error) { std::cerr << "[fail] " << error.what() << '\n'; return 1; }
 }

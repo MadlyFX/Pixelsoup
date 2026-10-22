@@ -4,6 +4,7 @@
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/file_picker.hpp>
+#include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -128,6 +129,11 @@ struct InspectorFrame final {
     // field-incompatible targets explicit to the operator.
     std::vector<doc::NodeId> skipped_locked;
     std::vector<doc::NodeId> skipped_incompatible;
+    // A Feed Mapping surface's placement or size changed. Carries the whole
+    // surface with only the changed transform components marked, the same
+    // request the Stage gizmo and Feed Mapping author, so animated axes route
+    // to keys there too.
+    std::optional<FeedSurfaceEditRequest> surface_edit;
 };
 
 // An element's authored values with its keyed transform and look channels
@@ -164,6 +170,18 @@ class InspectorPanel final {
                         core::u64 show_frame = 0U,
                         std::span<const scene::EffectInstance> effects = {},
                         std::span<const scene::TrackingSource> sources = {});
+
+    // A projection surface selected on Stage or in Feed Mapping. It is show
+    // geometry rather than a scene element, so it has its own short form:
+    // where the wall stands, which way it faces, and how big it is. Shape,
+    // raster and colour stay in Feed Mapping beside the outputs they feed.
+    // `surface` is already evaluated at `frame`, the playhead its keys are
+    // read and authored at; Position and Yaw carry key diamonds.
+    InspectorFrame draw_surface(
+        gui::UiContext& ctx, const gui::Rect& bounds,
+        const output::ProjectionSurface& surface,
+        std::span<const scene::ChannelKeyframes> keyframes = {},
+        core::u64 frame = 0U);
 
   private:
     // A vertical cursor down the panel, so a section that collapses simply

@@ -140,8 +140,8 @@ directional_light_anchor(const Scene& scene,
                                   doc::NodeId node) noexcept;
 
 // The world transform of any movable element a node produced this frame - a
-// group, clip, object, model, or point light (whose position becomes a
-// translation) - or nullopt. Lets the editor manipulate a selection by node
+// group, clip, object, model, point light (whose position becomes a
+// translation) or camera (its rigid placement) - or nullopt. Lets the editor manipulate a selection by node
 // id regardless of its kind. Returned by value because a point light has a
 // position but no stored matrix. Directional lights have no position and are
 // absent.

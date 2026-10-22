@@ -1252,6 +1252,14 @@ struct TrackedCameraView final {
 // an unbounded stack of render targets on every node.
 inline constexpr std::size_t max_tracked_cameras = 4U;
 
+// One authored camera, placed at the evaluated frame.
+struct SceneCamera final {
+    doc::NodeId node{};
+    Camera camera{};
+
+    bool operator==(const SceneCamera&) const = default;
+};
+
 // One authored tracking feed, with the identity an operator names it by.
 //
 // Feeds are project state, like the renderer settings - not objects in the
@@ -2306,6 +2314,13 @@ struct Scene final {
     // authored one, and they are not the same objects: the outer frustum
     // lights the room, the inner ones are the plates.
     std::vector<TrackedCameraView> tracked_cameras;
+    // Every authored camera in this scene, placed at this frame (channels,
+    // orbit and lens applied), in node id order. Carrier data for the editor,
+    // the way `screens` is: it is how a selected camera gets a gizmo and a
+    // frustum on Stage whether or not it is the one this scene renders from.
+    // Outside the digest - `camera` and `tracked_cameras` already carry every
+    // camera that decides the picture.
+    std::vector<SceneCamera> cameras;
     Environment environment{};
     // Project-wide, not scene-scoped: every scene of one show renders its
     // effects the same way. Carried on the evaluated value rather than read

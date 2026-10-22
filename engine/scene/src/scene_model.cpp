@@ -3882,11 +3882,14 @@ Scene SceneModel::evaluate(
     }
     // A camera follows its position and rotation channels like any element,
     // then an orbit carries it round the stage's vertical axis, turning it
-    // with the sweep.
-    if (scene_camera != nullptr) {
-        Vec3 position = scene_camera->position;
-        Vec3 turns = scene_camera->rotation;
-        if (const auto found = overrides.find(scene.camera_source);
+    // with the sweep. Every tracked camera is placed the same way: its
+    // authored pose is what it shows whenever its tracker is not live, so a
+    // keyed camera must not fall back to an unkeyed one.
+    const auto place_keyed = [&](const CameraEntry& entry, doc::NodeId id,
+                                 Camera& camera) {
+        Vec3 position = entry.position;
+        Vec3 turns = entry.rotation;
+        if (const auto found = overrides.find(id);
             found != overrides.end()) {
             const auto& ov = found->second;
             const auto at = [&ov](PropertyChannel channel) {
@@ -3899,14 +3902,37 @@ Scene SceneModel::evaluate(
             if (const auto v = at(PropertyChannel::RotationPitch)) turns.y = *v;
             if (const auto v = at(PropertyChannel::RotationRoll)) turns.z = *v;
         }
-        if (scene_camera->orbit_turns_per_second != 0.0F) {
+        if (entry.orbit_turns_per_second != 0.0F) {
             const Turns orbit = wrap_turns(
-                static_cast<double>(scene_camera->orbit_turns_per_second)
+                static_cast<double>(entry.orbit_turns_per_second)
                 * seconds);
             position = rotate_around(position, Vec3{0.0F, 1.0F, 0.0F}, orbit);
             turns.x += orbit;
         }
-        place_camera(scene.camera, position, turns.x, turns.y, turns.z);
+        place_camera(camera, position, turns.x, turns.y, turns.z);
+    };
+    if (scene_camera != nullptr) {
+        place_keyed(*scene_camera, scene.camera_source, scene.camera);
+    }
+    for (TrackedCameraView& view : scene.tracked_cameras) {
+        const auto held = entries_.find(view.camera);
+        if (held == entries_.end()) {
+            continue;
+        }
+        if (const auto* const camera = std::get_if<CameraEntry>(&held->second)) {
+            place_keyed(*camera, view.camera, view.authored);
+        }
+    }
+    for (const auto& held : entries_) {
+        const auto* const camera = std::get_if<CameraEntry>(&held.second);
+        if (camera == nullptr
+            || scope_of(held.first, default_scene) != scene_id) {
+            continue;
+        }
+        SceneCamera placed{held.first, camera->camera};
+        apply_camera_lens(placed.node, placed.camera);
+        place_keyed(*camera, placed.node, placed.camera);
+        scene.cameras.push_back(std::move(placed));
     }
     if (const auto found = overrides.find(scene_id); found != overrides.end()) {
         for (auto index = static_cast<std::size_t>(PropertyChannel::SkyTimeOfDay);

@@ -23,6 +23,15 @@ revision. The native RHI and Advanced raster implementation were written for
 Media Server against public D3D12/DXGI APIs after the references were studied.
 There is consequently no donor file in the product build or release payload.
 
+Directional PCSS in `engine/shaders/shadow_filter.hlsli` is an original
+implementation of the blocker-search, penumbra-estimation and variable-filter
+technique described in NVIDIA's [PCSS integration paper](https://developer.download.nvidia.com/whitepapers/2008/PCSS_Integration.pdf)
+(Myers, Fernando and Bavoil, 2008). Its antipodal disk table is generated from
+the formula documented beside it; no sample table or shader code was copied.
+Flax's [PCSS addition](https://github.com/FlaxEngine/FlaxEngine/commit/9a85ae71428ef6ff68b672f1fcd88f26829214d5)
+was reviewed for feature comparison. Flax is governed by its own EULA; none of
+its source, shaders, tables or assets is incorporated or required at runtime.
+
 Before any donor file is added, this section must gain one row per file with:
 
 | Upstream path | Upstream revision | Local path | License/notice | Modifications | Conformance evidence |

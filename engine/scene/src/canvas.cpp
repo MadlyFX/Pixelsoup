@@ -148,6 +148,22 @@ void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
     camera.up = Vec3{turned.at(0U, 1U), turned.at(1U, 1U), turned.at(2U, 1U)};
 }
 
+Mat4 camera_world(const Camera& camera) noexcept {
+    const Vec3 forward =
+        normalize(camera.target - camera.eye, Vec3{0.0F, 0.0F, -1.0F});
+    const Vec3 right =
+        normalize(cross(forward, camera.up), Vec3{1.0F, 0.0F, 0.0F});
+    const Vec3 up = cross(right, forward);
+    Mat4 world = translation(camera.eye);
+    const std::array<Vec3, 3U> axes{right, up, -forward};
+    for (core::u32 column = 0U; column < 3U; ++column) {
+        world.set(0U, column, axes[column].x);
+        world.set(1U, column, axes[column].y);
+        world.set(2U, column, axes[column].z);
+    }
+    return world;
+}
+
 Vec3 camera_rotation(const Camera& camera) noexcept {
     constexpr double turn = 6.283185307179586;
     const Vec3 forward = normalize(camera.target - camera.eye, Vec3{});

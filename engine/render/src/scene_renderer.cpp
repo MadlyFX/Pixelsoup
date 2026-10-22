@@ -4666,9 +4666,10 @@ bool SceneRenderer::render(
     scene_constants.texture_sampling[0] = scene.renderer_settings.texture_lod_bias;
     scene_constants.shadow_quality[0] = renderer_settings.shadow_blend_band;
     scene_constants.shadow_quality[1] = renderer_settings.shadow_filter_radius;
-    scene_constants.shadow_quality[2] = scene.directional_lights.empty() ? 0.0F
-        : std::tan(std::clamp(scene.directional_lights.front().angular_radius, 0.0F, 0.249F)
-            * 6.283185307179586F);
+    const float sun_radius = scene.directional_lights.empty() ? 0.0F
+        : std::clamp(scene.directional_lights.front().angular_radius, 0.0F, 0.249F);
+    scene_constants.shadow_quality[2] = scene::deterministic::sin_turns(sun_radius)
+        / scene::deterministic::cos_turns(sun_radius);
     scene_constants.contact_shadow[0] = renderer_settings.contact_shadow_length;
     scene_constants.contact_shadow[1] = renderer_settings.contact_shadow_thickness;
     scene_constants.contact_shadow[2] = 32.0F;

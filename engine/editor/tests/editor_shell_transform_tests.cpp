@@ -237,6 +237,38 @@ void transforms() {
   key(SDLK_R, SDL_KMOD_LALT);
   check(!worlds.empty() && near(worlds.back().world.at(0U, 0U), 1.0), "Alt+R clears a linked rotation");
 
+  // A camera other than the one the scene renders from: selected in Scene, it
+  // moves from the Stage like anything else and has no scale.
+  editor::ElementInfo camera;
+  camera.node = doc::NodeId{7U};
+  camera.kind = editor::ElementKind::Camera;
+  camera.display_name = "Camera B";
+  camera.position = scene::Vec3{0.0F, 1.0F, 4.0F};
+  scene::SceneCamera placed{camera.node, {}};
+  scene::place_camera(placed.camera, camera.position, 0.0F, 0.0F, 0.0F);
+  show.cameras.push_back(placed);
+  elements.push_back(camera);
+  const doc::NodeId camera_selection[]{camera.node};
+  check(shell->apply_selection_set_recall(show.id, camera_selection), "select camera");
+  frame();
+  move(over_x, over_y);
+  edits.clear();
+  properties.clear();
+  type("g");
+  type("x");
+  type("2");
+  key(SDLK_RETURN);
+  check(!edits.empty() && edits.back().node == camera.node, "G moves a camera");
+  check(edits.back().position == (scene::Vec3{2.0F, 1.0F, 4.0F}), "camera moves two metres along X");
+  type("s");
+  type("2");
+  key(SDLK_RETURN);
+  for (const auto& edit : properties)
+    check(edit.node != camera.node || (edit.component != scene::TransformChannel::ScaleX &&
+                                       edit.component != scene::TransformChannel::ScaleY &&
+                                       edit.component != scene::TransformChannel::ScaleZ),
+          "a camera takes no scale");
+
   // Off the Stage, G is not a transform.
   edits.clear();
   move(stage.x - 40.0F, stage.y - 20.0F);
