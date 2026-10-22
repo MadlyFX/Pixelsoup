@@ -1283,6 +1283,36 @@ DirectorResumeSession::send_tracked_camera_pose(
     return Result::success(TrackedPoseReport{sequence, frame});
 }
 
+core::Result<PriorityTransportReport, ResumeSessionError>
+DirectorResumeSession::send_priority_transport(
+    const show::TransportAnchor& anchor) {
+    using Result = core::Result<PriorityTransportReport, ResumeSessionError>;
+    const std::lock_guard send_lock{send_mutex_};
+    if (state() != DirectorSessionState::Live) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::WrongState));
+    }
+    if (!valid_priority_anchor(anchor)
+        || next_sequence_ == std::numeric_limits<core::u64>::max()) {
+        return Result::failure(
+            protocol_failure(SessionProtocolErrorCode::InvalidConfiguration));
+    }
+    const auto sequence = next_sequence_;
+    PriorityTransport priority{};
+    priority.session_id = config_.session_id;
+    priority.director_epoch = config_.director_epoch;
+    priority.sequence = sequence;
+    priority.anchor = anchor;
+    auto sent =
+        send_message(stream_, SessionMessage{priority}, config_.codec_limits);
+    if (!sent) {
+        close();
+        return Result::failure(std::move(sent.error()));
+    }
+    ++next_sequence_;
+    return Result::success(PriorityTransportReport{sequence, anchor});
+}
+
 core::Result<HeartbeatSendReport, ResumeSessionError>
 DirectorResumeSession::send_heartbeat(
     const cmd::StreamCursor& released_through,
@@ -2173,6 +2203,14 @@ NodeResumeSession::receive_live_message() {
         }
         return Result::success(NodeLiveInboundReport{processed.value()});
     }
+    if (const auto* priority =
+            std::get_if<PriorityTransport>(&received.value())) {
+        auto processed = receive_decoded_priority_transport(*priority);
+        if (!processed) {
+            return Result::failure(std::move(processed.error()));
+        }
+        return Result::success(NodeLiveInboundReport{processed.value()});
+    }
     if (const auto* goodbye = std::get_if<Goodbye>(&received.value())) {
         auto processed = receive_decoded_goodbye(*goodbye);
         if (!processed) {
@@ -2319,6 +2357,54 @@ NodeResumeSession::receive_decoded_tracked_pose(
         return Result::failure(protocol_failure(*failure));
     }
     return Result::success(report);
+}
+
+core::Result<PriorityTransportReport, ResumeSessionError>
+NodeResumeSession::receive_decoded_priority_transport(
+    const PriorityTransport& priority) {
+    using Result = core::Result<PriorityTransportReport, ResumeSessionError>;
+    std::optional<SessionProtocolErrorCode> failure;
+    PriorityTransportReport report{};
+    {
+        const std::lock_guard inflight_lock{inflight_mutex_};
+        if (state() != NodeSessionState::Live) {
+            failure = SessionProtocolErrorCode::WrongState;
+        } else if (priority.session_id != session_id_) {
+            failure = SessionProtocolErrorCode::SessionMismatch;
+        } else if (priority.director_epoch != director_epoch_) {
+            failure = SessionProtocolErrorCode::EpochMismatch;
+        } else if (expected_sequence_
+                       == std::numeric_limits<core::u64>::max()
+                   || priority.sequence != expected_sequence_) {
+            failure = SessionProtocolErrorCode::SequenceMismatch;
+        } else {
+            // No acknowledgement: the sealed frame carrying the same anchor
+            // is acknowledged like any other frame.
+            ++expected_sequence_;
+            // Newest by the control frame it was authored on. The stream is
+            // ordered, so an older one can only arrive if the Director
+            // re-sent; it must never rewind a stop the node already shows.
+            if (!priority_transport_
+                || priority_transport_->anchor_control_frame
+                    < priority.anchor.anchor_control_frame) {
+                priority_transport_ = priority.anchor;
+            }
+            report = PriorityTransportReport{priority.sequence, priority.anchor};
+        }
+    }
+    if (failure) {
+        if (*failure != SessionProtocolErrorCode::WrongState) {
+            close();
+        }
+        return Result::failure(protocol_failure(*failure));
+    }
+    return Result::success(report);
+}
+
+std::optional<show::TransportAnchor>
+NodeResumeSession::priority_transport() const noexcept {
+    const std::lock_guard inflight_lock{inflight_mutex_};
+    return priority_transport_;
 }
 
 std::optional<TrackedCameraFrame>

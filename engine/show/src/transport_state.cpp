@@ -160,6 +160,18 @@ bool valid_transport_anchor(const TransportAnchor& anchor) noexcept {
         && anchor.last_frame.value() <= max_document_integer;
 }
 
+std::optional<TransportAnchor> presented_anchor(
+    const std::optional<TransportAnchor>& committed,
+    const std::optional<TransportAnchor>& priority) noexcept {
+    if (priority
+        && (!committed
+            || committed->anchor_control_frame
+                < priority->anchor_control_frame)) {
+        return priority;
+    }
+    return committed;
+}
+
 ShowFrame derive_show_frame(
     const TransportAnchor& anchor,
     cmd::FrameNumber control_frame) noexcept {

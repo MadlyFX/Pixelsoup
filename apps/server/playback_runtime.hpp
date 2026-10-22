@@ -41,11 +41,6 @@ constexpr std::chrono::milliseconds max_sleep{10};
 // Bound on the frames one Director iteration will seal after a late wake-up.
 constexpr core::u64 max_director_catch_up = 8U;
 
-// Barrier records are diagnostic slots that must be retired once their cohort
-// completes; this is the backlog the Director tolerates before refusing to
-// seal further.
-constexpr std::size_t max_tracked_frames = 64U;
-
 // How often a process re-stats required paths while any of them is missing.
 // A file can appear after start-up - a share mounts, or the media is copied in
 // late - and the report has to follow. Nothing is re-checked once everything

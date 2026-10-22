@@ -115,6 +115,74 @@ void DirectorShowLoop::print_status(DirectorTick &tick) {
     }
 }
 
+// A full backlog seals nothing, so nothing the operator does is applied. Say
+// so where the operator is looking - the console for a headless Director, the
+// status bar for an editor - and name what the oldest frame is waiting for.
+void DirectorShowLoop::report_backlog(ControlBacklogEvent event) {
+    if (event == ControlBacklogEvent::None) {
+        return;
+    }
+    if (event == ControlBacklogEvent::Recovered) {
+        std::cerr << "Director resumed sealing control frames; operator "
+                     "edits apply again\n";
+#if defined(MEDIASERVER_HAS_GUI)
+        project_message = "EDITS RESUMED";
+#endif
+        return;
+    }
+    std::cerr << "Director stalled: " << tracked.size()
+              << " control frames are unretired, so no frame is sealed and "
+                 "operator edits are not applied. released-through="
+              << barrier.released_through().through_frame.value();
+    bool waiting_on_nodes = false;
+    if (!tracked.empty()) {
+        if (const auto oldest = barrier.snapshot(tracked.front())) {
+            const net::DirectorFrameBarrierSummary &summary = oldest.value();
+            waiting_on_nodes =
+                summary.prepared + summary.lost < summary.members;
+            std::cerr << " oldest-frame="
+                      << summary.after.through_frame.value()
+                      << " members=" << summary.members
+                      << " prepared=" << summary.prepared
+                      << " committed=" << summary.committed
+                      << " lost=" << summary.lost;
+        }
+    }
+    std::cerr << '\n' << std::flush;
+#if defined(MEDIASERVER_HAS_GUI)
+    project_message =
+        waiting_on_nodes
+            ? "EDITS PAUSED - a render node stopped acknowledging frames; "
+              "see Output Monitor"
+            : "EDITS PAUSED - the Director could not finish a frame; see "
+              "its console";
+#endif
+}
+
+// Every output waits for the slowest node, up to the barrier's lag limit.
+// A node that passes it is taken out of lockstep so the rest can move on, and
+// that is a real change on the wall - its outputs now trail the others - so
+// it is said once, by node, when it happens.
+void DirectorShowLoop::report_lockstep_demotions() {
+    const net::DirectorFrameBarrierObserverDiagnostics diagnostics =
+        barrier.observer_diagnostics();
+    if (diagnostics.lockstep_demotions == reported_lockstep_demotions) {
+        return;
+    }
+    reported_lockstep_demotions = diagnostics.lockstep_demotions;
+    std::cerr << "Director took node " << diagnostics.last_demoted_node
+              << " out of lockstep: it held every output more than "
+              << barrier.limits().max_cohort_lag_frames
+              << " frames behind. The other outputs continue; it rejoins "
+                 "once it catches up. lockstep-demotions="
+              << diagnostics.lockstep_demotions << '\n';
+#if defined(MEDIASERVER_HAS_GUI)
+    project_message = "NODE " + std::to_string(diagnostics.last_demoted_node) +
+                      " FELL BEHIND - outputs no longer wait for it until it "
+                      "catches up";
+#endif
+}
+
 void DirectorShowLoop::report_stopping() {
     ClusterObservation final_cluster =
         observe_cluster(transport.frame_at(scheduler.sealed_through()).value());

@@ -196,7 +196,7 @@ struct DirectorShowLoop final {
     persist::FrameDurability &frame_durability;
     net::DirectorSessionHub &hub;
     net::DirectorFrameBarrier &barrier;
-    const net::DirectorSessionService *const session_service;
+    net::DirectorSessionService *const session_service;
     const PlaybackOptions &options;
     const volatile std::sig_atomic_t &stop_requested;
 
@@ -417,6 +417,8 @@ struct DirectorShowLoop final {
     // Owned by the loop rather than bound to playback.cpp locals.
     show::FrameWaiter frame_waiter{};
     show::BoundaryLateness boundary_lateness{};
+    ControlBacklogWatch backlog_watch{};
+    core::u64 reported_lockstep_demotions{};
 
     // Runs until stopped, closed or out of run frames; returns the exit code.
     [[nodiscard]] int run();
@@ -446,6 +448,8 @@ struct DirectorShowLoop final {
 
     // director_show_status.cpp: console status lines.
     void print_status(DirectorTick &tick);
+    void report_backlog(ControlBacklogEvent event);
+    void report_lockstep_demotions();
     void report_stopping();
 
 #if defined(MEDIASERVER_HAS_GUI)

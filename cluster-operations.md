@@ -29,9 +29,49 @@ devices require a show-specific Release soak before use. Do not infer media or
 GPU capacity from the control-plane rate test.
 
 The node mailbox holds 16 published states and applies at most eight commits at
-one local boundary. The Director retains 256 replay frames by default and
-refuses to continue sealing when its bounded barrier backlog is exhausted.
-These are safety limits, not permission to run continuously at the limit.
+one local boundary. These are safety limits, not permission to run
+continuously at the limit.
+
+## Lockstep and cluster lag
+
+Outputs advance together, at the pace of the slowest render node. A node
+presents a control frame only once the Director has released it, and the
+Director releases a frame only when every live node has received it and no
+more than two released frames are still waiting for the slowest node to
+present them. A node that falls behind therefore holds every other output
+within two frames of it rather than letting the wall tear. When the slowest
+node recovers, the cohort catches up together: once every released frame has
+been presented, everything the nodes have already received is released at
+once and lands on one boundary, rather than one frame per boundary.
+
+The Director does not wait for the cluster. It keeps sealing control frames
+while the nodes are behind, so the operator's edits always apply in the
+editor at once and reach the outputs when the cluster catches up. The cluster
+may fall up to 1,024 control frames behind (about seventeen seconds at 60
+fps). At 960 frames behind, the node holding everyone back is taken out of
+lockstep: it stays connected and catches up on its own, the other outputs
+continue without it, and it rejoins at a later cut. The Director console
+prints `Director took node N out of lockstep`, the status bar shows `NODE N
+FELL BEHIND`, and the Output Monitor incident count includes it.
+
+An operator's transport change - stop, pause, seek or play - jumps the queue.
+The Director sends it to every node ahead of the frames they are still owed,
+and each node presents it at its next boundary: a stop or pause shows its own
+frame immediately, however far behind the cluster is, and a play holds on its
+first frame until the frames reach it. The same change is also in the sealed
+frame, which every node still reaches in order and which takes over once it
+arrives. Anchors the show authors itself - a cue's hold or loop, the end of
+the range - are not sent ahead, because outputs play the frames before them
+through. A priority message waits only behind a message already being written
+on that connection, so a very large frame in flight can still delay it.
+
+If the Director ever cannot seal at all, because the barrier has run out of
+records, that is a fault rather than a slow node. A full barrier that lasts
+more than a second is reported: the Director console prints `Director
+stalled:` with the oldest frame and its prepared, committed and lost member
+counts, the editor status bar shows `EDITS PAUSED`, and Output Monitor shows
+`FAULT` and an **Edits paused** chip. Clearing prints the recovery and shows
+`EDITS RESUMED`.
 
 ## Session transport round-trip latency
 
@@ -92,7 +132,9 @@ wakes blocked read` bounds the unwind of a parked read.
 Output Monitor reports three separate facts:
 
 - `CONTROL HEALTHY`, `DEGRADED`, or `FAULT` describes current session
-  membership, catch-up, release lag, pacer lag, and barrier health.
+  membership, catch-up, release lag, pacer lag, and barrier health. A
+  Director that has stopped sealing frames is always `FAULT`, with or without
+  configured nodes, and the diagnostic record carries `control_stalled`.
 - Node rows describe lifecycle/process state and content-store/runtime
   readiness.
 - The timing line describes physical output synchronization: the authored
@@ -187,7 +229,10 @@ acknowledged and target control frames. A node that was away for more than a
 few frames is handed the Director's current checkpoint rather than the frames
 it missed, and it rejoins the release cohort as soon as it has prepared to
 within two control frames of the newest seal, so CATCHING UP lasts a few
-frames however long it was gone. A node that stays in CATCHING UP is not
+frames however long it was gone. A node that leaves never holds back the
+nodes that stay: a frame it had not yet prepared is released once every
+remaining node has prepared it, or at once when none remain. A node taken out
+of lockstep for lagging also shows CATCHING UP until it rejoins. A node that stays in CATCHING UP is not
 receiving or acknowledging frames; check its link rather than waiting. Replacement windows start black, and
 disconnected outputs retain their last complete image. A restart tolerates
 up to fifteen seconds of overlap with an old connection's lease; a persistent
@@ -312,7 +357,7 @@ a service's configuration is exactly its command line.
 
 | Layer | What it prevents | Current state |
 | --- | --- | --- |
-| Show-frame synchronization | Nodes rendering different timeline frames | Implemented (sealed frames, durable release, commit permits) |
+| Show-frame synchronization | Nodes rendering different timeline frames | Implemented (sealed frames, durable release, commit permits, lockstep release within two frames) |
 | PTP / clock correlation | Clock and timestamp drift | Not implemented; owned by the operating system or a timing interface, not the document protocol |
 | Genlock (external reference) | Scan-out timing drifting between machines | Modelled, authored, reported, and gated; no vendor device provider yet |
 | Frame lock | GPU output heads drifting relative to each other | Modelled, authored, reported, and gated; no vendor device provider yet |

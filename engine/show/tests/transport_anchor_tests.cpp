@@ -823,7 +823,44 @@ void an_overlap_is_capped_and_a_late_arrival_fades_what_is_left() {
     SHOW_CHECK(guard.quiet());
 }
 
-constexpr std::array<show::test::Case, 29U> cases{{
+// A node behind on frames presents an operator anchor that arrived ahead of
+// them: a stop shows its own frame at once, a play holds its first frame until
+// the stream reaches it, and the committed document wins again as soon as it
+// carries that anchor or a newer one.
+void an_operator_anchor_ahead_of_the_stream_decides_the_position() {
+    const auto committed = playing_at(10U, 100U, 0U, 999U, false);
+    TransportAnchor stop = committed;
+    stop.anchor_control_frame = control(400U);
+    stop.anchor_show_frame = ShowFrame{377U};
+    stop.state = TransportState::Stopped;
+
+    const auto presented = show::presented_anchor(committed, stop);
+    SHOW_CHECK(presented == std::optional<TransportAnchor>{stop});
+    // Committed through control frame 40 - far short of 400 - and already
+    // showing the frame the operator stopped on.
+    SHOW_CHECK(show::derive_show_frame(*presented, control(40U))
+               == ShowFrame{377U});
+
+    TransportAnchor play = stop;
+    play.state = TransportState::Playing;
+    SHOW_CHECK(show::derive_show_frame(
+                   *show::presented_anchor(committed, play), control(40U))
+               == ShowFrame{377U});
+
+    // Once the document carries the anchor it is the authority again, and an
+    // older priority anchor can never rewind it.
+    SHOW_CHECK(show::presented_anchor(stop, stop)
+               == std::optional<TransportAnchor>{stop});
+    const auto newer = playing_at(401U, 377U, 0U, 999U, false);
+    SHOW_CHECK(show::presented_anchor(newer, stop)
+               == std::optional<TransportAnchor>{newer});
+    SHOW_CHECK(show::presented_anchor(committed, std::nullopt)
+               == std::optional<TransportAnchor>{committed});
+    SHOW_CHECK(show::presented_anchor(std::nullopt, stop)
+               == std::optional<TransportAnchor>{stop});
+}
+
+constexpr std::array<show::test::Case, 30U> cases{{
     {"a playing anchor advances one show frame per control frame",
      &a_playing_anchor_advances_one_show_frame_per_control_frame},
     {"a paused or stopped anchor suppresses the whole term",
@@ -882,6 +919,8 @@ constexpr std::array<show::test::Case, 29U> cases{{
      &a_crossfade_without_a_wait_overlaps_the_passes},
     {"an overlap is capped and a late arrival fades what is left",
      &an_overlap_is_capped_and_a_late_arrival_fades_what_is_left},
+    {"an operator anchor ahead of the stream decides the position",
+     &an_operator_anchor_ahead_of_the_stream_decides_the_position},
 }};
 
 } // namespace

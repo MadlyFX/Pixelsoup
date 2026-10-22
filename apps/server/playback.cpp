@@ -926,12 +926,21 @@ int run_node_playback(net::NodeSessionService &service,
             }
         }
 
-        const auto transport = presented.transport;
+        // An operator's stop, pause or seek can arrive ahead of the frames
+        // this node is still working through. It then decides the position
+        // until the committed document carries it, so the wall answers the
+        // operator however far behind on frames this node is.
+        const auto transport = show::presented_anchor(
+            presented.transport, service.priority_transport());
+        const bool priority_transport = transport != presented.transport;
         show::TestPatternInput input{};
         // The position was derived from the anchor at the exact control frame
         // that carried it, so the two can never be a mismatched pair.
         input.show_frame =
-            transport ? presented.show_frame : options.first_frame;
+            !transport ? options.first_frame
+            : priority_transport
+                ? show::derive_show_frame(*transport, presented.control_frame)
+                : presented.show_frame;
         input.control_frame = presented.control_frame;
         input.rate = transport ? transport->rate : options.rate;
         input.state =
@@ -1583,7 +1592,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
                       persist::FrameDurability frame_durability,
                       net::DirectorSessionHub &hub,
                       net::DirectorFrameBarrier &barrier,
-                      const net::DirectorSessionService *session_service,
+                      net::DirectorSessionService *session_service,
                       const PlaybackOptions &options,
                       const volatile std::sig_atomic_t &stop_requested) {
     // Recovery affects whether either build may author demo fallback content;

@@ -30,6 +30,10 @@ enum class DirectorSessionLeaveReason : std::uint8_t {
     ResyncRequired,
     SessionFailure,
     ObserverRejected,
+    // Still connected, but taken out of lockstep for holding the whole
+    // cohort back past the barrier's lag limit. It catches up on its own and
+    // rejoins at a later cut.
+    LockstepLag,
 };
 
 // Bounded acknowledgement-aggregation hook. Implementations may briefly
@@ -121,6 +125,25 @@ public:
         static_cast<void>(output);
         return TrackedPosePoll::Unsupported;
     }
+
+    enum class PriorityTransportPoll : std::uint8_t {
+        Unsupported,
+        Empty,
+        Ready,
+    };
+
+    // Takes the operator transport anchor owed to this session, if one is
+    // waiting. It is sent before anything else the session has queued, so a
+    // stop reaches a node that is far behind on frames without waiting for
+    // them. Newest wins and nothing is retried: the anchor is also in the
+    // sealed frame, which every node reaches in order regardless.
+    [[nodiscard]] virtual PriorityTransportPoll try_take_priority_transport(
+        Id128 session_id,
+        show::TransportAnchor& output) noexcept {
+        static_cast<void>(session_id);
+        static_cast<void>(output);
+        return PriorityTransportPoll::Unsupported;
+    }
 };
 
 struct DirectorSessionServiceConfig final {
@@ -177,6 +200,7 @@ struct DirectorSessionServiceCounters final {
     std::uint64_t validated_heartbeat_acknowledgements{};
     std::uint64_t sent_heartbeats{};
     std::uint64_t sent_tracked_poses{};
+    std::uint64_t sent_priority_transports{};
     std::uint64_t heartbeat_timeouts{};
     std::uint64_t graceful_goodbyes{};
     std::uint64_t resync_disconnects{};
@@ -220,6 +244,10 @@ public:
     [[nodiscard]] std::optional<asio::ip::tcp::endpoint> local_endpoint()
         const noexcept;
     [[nodiscard]] std::size_t active_workers() const noexcept;
+    // Wakes every session worker waiting on its in-flight window, so
+    // something published outside the frame stream - an operator's transport
+    // anchor - is sent now rather than on the worker's next poll.
+    void wake_workers() noexcept;
     [[nodiscard]] DirectorSessionServiceCounters counters() const noexcept;
     [[nodiscard]] std::size_t receive_capacity_bytes() const noexcept;
     [[nodiscard]] std::size_t reserved_receive_bytes() const noexcept;

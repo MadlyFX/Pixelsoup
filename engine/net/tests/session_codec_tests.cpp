@@ -23,6 +23,7 @@ namespace core = mediaserver::core;
 namespace command = mediaserver::cmd;
 namespace document = mediaserver::doc;
 namespace net = mediaserver::net;
+namespace show = mediaserver::show;
 namespace fb = mediaserver::net::protocol_fb::v1;
 
 void check(bool condition, const char* expression, int line) {
@@ -227,6 +228,25 @@ void check(bool condition, const char* expression, int line) {
     };
 }
 
+// Every field distinct and away from its default, so a swapped or dropped
+// field cannot round-trip by coincidence.
+[[nodiscard]] net::PriorityTransport priority_transport() {
+    net::PriorityTransport value{};
+    value.session_id = id(4U);
+    value.director_epoch = id(5U);
+    value.sequence = 17U;
+    value.anchor.anchor_control_frame = command::FrameNumber{4'099U};
+    value.anchor.anchor_show_frame = show::ShowFrame{213U};
+    value.anchor.state = show::TransportState::Paused;
+    value.anchor.direction = show::TransportDirection::Reverse;
+    value.anchor.rate = show::FrameRate{60'000U, 1'001U};
+    value.anchor.first_frame = show::ShowFrame{7U};
+    value.anchor.last_frame = show::ShowFrame{9'000U};
+    value.anchor.loop = true;
+    value.anchor.cues_armed = false;
+    return value;
+}
+
 [[nodiscard]] std::vector<net::SessionMessage> legacy_messages() {
     return {
         net::SessionMessage{client_hello()},
@@ -248,6 +268,7 @@ void check(bool condition, const char* expression, int line) {
     messages.push_back(net::SessionMessage{heartbeat_ack()});
     messages.push_back(net::SessionMessage{goodbye()});
     messages.push_back(net::SessionMessage{tracked_camera_pose()});
+    messages.push_back(net::SessionMessage{priority_transport()});
     return messages;
 }
 
@@ -408,6 +429,71 @@ void write_u32_le(std::span<std::byte> value, std::uint32_t number) {
             net::current_session_format_version,
             fb::SessionBody::Goodbye,
             body.Union()));
+}
+
+[[nodiscard]] std::vector<std::byte> raw_priority_transport_with_state(
+    std::uint8_t state) {
+    flatbuffers::FlatBufferBuilder builder;
+    const fb::Id128 session{0x1020304050607080ULL, 4U};
+    const fb::Id128 epoch{0x1020304050607080ULL, 5U};
+    const auto body = fb::CreatePriorityTransport(
+        builder, &session, &epoch, 17U, 4'099U, 213U, state, 0U, 60'000U,
+        1'001U, 7U, 9'000U, true, false);
+    return finish_raw(
+        builder,
+        fb::CreateSessionEnvelope(
+            builder,
+            net::current_session_format_version,
+            fb::SessionBody::PriorityTransport,
+            body.Union()));
+}
+
+// Only an operator's own anchor may jump the frame stream. A scheduled anchor
+// is the show re-anchoring itself and must play through in order, so it is
+// refused on both sides of the wire, as is anything a node could not present.
+void priority_transport_admits_only_operator_anchors() {
+    auto scheduled = priority_transport();
+    scheduled.anchor.scheduled = true;
+    auto refused = net::encode_session(net::SessionMessage{scheduled});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(
+        refused.error() == net::SessionEncodeError::InvalidPriorityTransport);
+
+    auto blended = priority_transport();
+    blended.anchor.blend_frames = 12U;
+    blended.anchor.blend_from = show::ShowFrame{8U};
+    refused = net::encode_session(net::SessionMessage{blended});
+    SESSION_CHECK(!refused.has_value());
+    SESSION_CHECK(
+        refused.error() == net::SessionEncodeError::InvalidPriorityTransport);
+
+    auto outside = priority_transport();
+    outside.anchor.anchor_show_frame = show::ShowFrame{9'001U};
+    refused = net::encode_session(net::SessionMessage{outside});
+    SESSION_CHECK(!refused.has_value());
+
+    auto unsequenced = priority_transport();
+    unsequenced.sequence = 0U;
+    refused = net::encode_session(net::SessionMessage{unsequenced});
+    SESSION_CHECK(!refused.has_value());
+
+    // A well-formed message decodes to exactly the anchor that was sent.
+    auto decoded = net::decode_session(raw_priority_transport_with_state(
+        static_cast<std::uint8_t>(show::TransportState::Stopped)));
+    SESSION_CHECK(decoded.has_value());
+    const auto* priority =
+        std::get_if<net::PriorityTransport>(&decoded.value());
+    SESSION_CHECK(priority != nullptr);
+    SESSION_CHECK(priority->anchor.state == show::TransportState::Stopped);
+    SESSION_CHECK(
+        priority->anchor.direction == show::TransportDirection::Forward);
+    SESSION_CHECK(priority->anchor.anchor_control_frame.value() == 4'099U);
+
+    // An enumerator past the last state is a corrupt message, not a state.
+    decoded = net::decode_session(raw_priority_transport_with_state(3U));
+    SESSION_CHECK(!decoded.has_value());
+    SESSION_CHECK(
+        decoded.error() == net::SessionDecodeError::InvalidPriorityTransport);
 }
 
 void every_message_round_trips() {
@@ -1150,60 +1236,64 @@ void runtime_media_status_round_trips_and_is_bounded() {
 }
 
 void current_version_messages_match_frozen_goldens() {
-    // Session v10 preserves physical lens units separately from raw encoders.
-    const std::array<std::string_view, 14U> expected{
-        "cc000000140000004d534e5000000a000c000600050008000a00000000010a001c0000001800940008000a000c001c00"
-        "2c0040004400540007006c0018000000000000010a000a00807060504030201001000000000000008070605040302010"
+    // Session v11 adds the priority transport message.
+    const std::array<std::string_view, 15U> expected{
+        "cc000000140000004d534e5000000a000c000600050008000a00000000010b001c0000001800940008000a000c001c00"
+        "2c0040004400540007006c0018000000000000010b000b00807060504030201001000000000000008070605040302010"
         "020000000000000080706050403020100300000000000000000000000700000000000000000000000000000000000000"
         "0a0000000000000014000000000000001e00000000000000000000010000000000000004000000000800000000000000"
         "00000008000000000000000400000000",
-        "c4000000140000004d534e5000000a000c000600050008000a00000000020a0018000000140090000600080018002800"
-        "05003800500068001400000000020a008070605040302010010000000000000080706050403020100400000000000000"
+        "c4000000140000004d534e5000000a000c000600050008000a00000000020b0018000000140090000600080018002800"
+        "05003800500068001400000000020b008070605040302010010000000000000080706050403020100400000000000000"
         "807060504030201005000000000000000a0000000000000014000000000000001e000000000000000c00000000000000"
         "170000000000000021000000000000000000000100000000000000040000000008000000000000000000000800000000"
         "0000000400000000",
-        "cc000000140000004d534e5000000a000e000600050008000a00000000030a001400000000000e00580004004c001400"
+        "cc000000140000004d534e5000000a000e000600050008000a00000000030b001400000000000e00580004004c001400"
         "2c0048000e000000807060504030201004000000000000000a0000000000000014000000000000001e00000000000000"
         "0b0000000000000016000000000000002000000000000000000000001000000007000000000000000000000003000000"
         "300000001800000004000000e2ffffff040000000200000005060000f2ffffff04000000010000000400060008000400"
         "06000000040000000300000001020300",
-        "74000000180000004d534e500000000000000a000c000600050008000a00000000040a00100000000c003c0004003400"
+        "74000000180000004d534e500000000000000a000c000600050008000a00000000040b00100000000c003c0004003400"
         "140030000c000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
         "000000000c00000008000000000000000400000010203040",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000050a001000000000000a0034000400"
+        "64000000180000004d534e500000000000000a000e000600050008000a00000000050b001000000000000a0034000400"
         "2c0014000a000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
         "0900000000000000",
-        "64000000180000004d534e500000000000000a000e000600050008000a00000000060a001000000000000a0034000400"
+        "64000000180000004d534e500000000000000a000e000600050008000a00000000060b001000000000000a0034000400"
         "2c0014000a000000807060504030201004000000000000000c0000000000000017000000000000002100000000000000"
         "0a00000000000000",
-        "6c000000140000004d534e5000000a000c000600050008000a00000000070a00100000000c0040000600080018002800"
+        "6c000000140000004d534e5000000a000c000600050008000a00000000070b00100000000c0040000600080018002800"
         "0c0000000000040080706050403020100100000000000000807060504030201005000000000000000c00000000000000"
         "17000000000000002100000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080a00100000000c003c0004002c00"
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000080b00100000000c003c0004002c00"
         "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
         "0b000000000000000700000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090a00100000000c003c0004002c00"
+        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090b00100000000c003c0004002c00"
         "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
         "0c000000000000000700000000000000",
-        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0a0018000000000012006c000400"
+        "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0b0018000000000012006c000400"
         "140054005c00640024003c00120000008070605040302010040000000000000080706050403020100500000000000000"
         "0a0000000000000014000000000000001e000000000000000b0000000000000016000000000000002000000000000000"
         "0d0000000000000007000000000000002900000000000000",
-        "7c000000140000004d534e5000000a000e000600050008000a000000000b0a001400000000000e004c00040014004400"
+        "7c000000140000004d534e5000000a000e000600050008000a000000000b0b001400000000000e004c00040014004400"
         "28002c000e00000080706050403020100400000000000000807060504030201005000000000000000000000088130000"
         "0b00000000000000160000000000000020000000000000000e00000000000000",
-        "8c000000140000004d534e5000000a000e000600050008000a000000000c0a0018000000000012005800080018004000"
+        "8c000000140000004d534e5000000a000e000600050008000a000000000c0b0018000000000012005800080018004000"
         "480028005000070012000000000000018070605040302010040000000000000080706050403020100500000000000000"
         "0b00000000000000160000000000000020000000000000000d000000000000000e000000000000008877665544332211",
-        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d0a001400000000000e0048000800"
+        "7c000000180000004d534e500000000000000a000e000600050008000a000000000d0b001400000000000e0048000800"
         "18004000070028000e000000000000028070605040302010040000000000000080706050403020100500000000000000"
         "0b00000000000000160000000000000020000000000000000f00000000000000",
-        "fc000000140000004d534e5000000a000c000600050008000a000000000e0a001400000010004400040014002c003400"
+        "fc000000140000004d534e5000000a000c000600050008000a000000000e0b001400000010004400040014002c003400"
         "3c002800100000008070605040302010040000000000000080706050403020100500000000000000000000001c000000"
         "10000000000000000900000000000000001000000000000001000000300000002c005400440008000c00100014001800"
         "1c00200024004c0028002c003000340005000600070038003c0040002c000000000101010000c03f000040bf00008840"
         "0000803e000000be0000803dcdcc4c3d398ee33f0300000000e440460031544700409a440000aa42000098406666e63f"
         "0010000000000000db03000000000000",
+        "94000000140000004d534e5000000a000c000600050008000a000000000f0b00200000001c0058000800180030003800"
+        "40000500060028002c004800500007001c00000000010101807060504030201004000000000000008070605040302010"
+        "050000000000000060ea0000e903000011000000000000000310000000000000d5000000000000000700000000000000"
+        "2823000000000000",
     };
     const auto messages = every_message();
     SESSION_CHECK(messages.size() == expected.size());
@@ -1214,12 +1304,15 @@ void current_version_messages_match_frozen_goldens() {
     SESSION_CHECK(net::SessionMessage{heartbeat_ack()}.index() == 11U);
     SESSION_CHECK(net::SessionMessage{goodbye()}.index() == 12U);
     SESSION_CHECK(net::SessionMessage{tracked_camera_pose()}.index() == 13U);
+    SESSION_CHECK(net::SessionMessage{priority_transport()}.index() == 14U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::FrameCommitPermit) == 10U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Heartbeat) == 11U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::HeartbeatAck) == 12U);
     SESSION_CHECK(static_cast<unsigned int>(fb::SessionBody::Goodbye) == 13U);
     SESSION_CHECK(
         static_cast<unsigned int>(fb::SessionBody::TrackedCameraPose) == 14U);
+    SESSION_CHECK(
+        static_cast<unsigned int>(fb::SessionBody::PriorityTransport) == 15U);
     bool all_match = true;
     for (std::size_t index = 0U; index < messages.size(); ++index) {
         const auto actual = to_hex(encode(messages[index]));
@@ -1256,6 +1349,8 @@ int main() {
         {"runtime media status round trip",
          &runtime_media_status_round_trips_and_is_bounded},
         {"runtime tracking round trip", &runtime_tracking_round_trips},
+        {"priority transport admits only operator anchors",
+         &priority_transport_admits_only_operator_anchors},
     };
 
     std::size_t failures = 0U;

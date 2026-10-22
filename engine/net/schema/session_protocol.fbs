@@ -213,6 +213,29 @@ table TrackedCameraPose {
   samples:[TrackedCameraSample];
 }
 
+// An operator transport anchor - stop, pause, seek, play - sent ahead of the
+// frame stream. The same anchor is also authored into the sealed frame at
+// anchor_control_frame, which stays the authority; this only lets a node that
+// is behind on frames answer the operator now. A node applies the newest one
+// it has seen until its committed document carries an anchor at least as new.
+// Operator anchors are never scheduled and never open a crossfade, so neither
+// is carried. sequence consumes the Director outbound stream.
+table PriorityTransport {
+  session_id:Id128 (required);
+  director_epoch:Id128 (required);
+  sequence:ulong;
+  anchor_control_frame:ulong;
+  anchor_show_frame:ulong;
+  state:ubyte;
+  direction:ubyte;
+  rate_numerator:uint;
+  rate_denominator:uint;
+  first_frame:ulong;
+  last_frame:ulong;
+  loop:bool;
+  cues_armed:bool;
+}
+
 // Director-to-node liveness probe. sequence consumes the Director outbound
 // stream. released_through is the contiguous durably released cursor, never
 // merely the WAL tail. response_timeout_ms is in the inclusive range
@@ -410,7 +433,8 @@ union SessionBody {
   Heartbeat = 11,
   HeartbeatAck = 12,
   Goodbye = 13,
-  TrackedCameraPose = 14
+  TrackedCameraPose = 14,
+  PriorityTransport = 15
 }
 
 table SessionEnvelope {

@@ -1609,7 +1609,19 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
                      "frontier pairing\n";
         return 1;
     }
-    constexpr mediaserver::net::DirectorSessionHubLimits hub_limits{};
+    // How far behind the Director a render cluster may fall while it waits
+    // for its slowest node: about seventeen seconds at 60 fps. The Director
+    // keeps sealing - and the operator keeps editing - throughout. Each
+    // session's queue holds that many frames; the barrier keeps a little more
+    // so a lagging node is taken out of lockstep, by lag, well before any
+    // queue overflows and forces every node to resynchronize at once.
+    constexpr std::size_t max_cluster_lag_frames = 1'024U;
+    constexpr std::size_t lockstep_demotion_frames =
+        max_cluster_lag_frames - 64U;
+    constexpr mediaserver::net::DirectorSessionHubLimits hub_limits{
+        .max_subscriptions = 64U,
+        .max_backlog_frames = max_cluster_lag_frames,
+    };
     if (!valid_hub_limits(hub_limits)) {
         std::cerr << "could not initialize Director session hub: invalid "
                      "capacity configuration\n";
@@ -1647,13 +1659,14 @@ run_node_service_loop(const mediaserver::net::NodeSessionService &service) {
         try {
             session_leases.emplace(max_session_workers);
             frame_release_authority.emplace(durable_director);
-            frame_barrier.emplace(command_log.tail_cursor(),
-                                  *frame_release_authority,
-                                  mediaserver::net::DirectorFrameBarrierLimits{
-                                      max_session_workers,
-                                      hub_limits.max_backlog_frames,
-                                      hub_limits.max_backlog_frames,
-                                  });
+            frame_barrier.emplace(
+                command_log.tail_cursor(), *frame_release_authority,
+                mediaserver::net::DirectorFrameBarrierLimits{
+                    .max_sessions = max_session_workers,
+                    .max_open_frames = max_cluster_lag_frames,
+                    .max_pending_per_session = max_cluster_lag_frames,
+                    .max_cohort_lag_frames = lockstep_demotion_frames,
+                });
 
             mediaserver::net::DirectorSessionConfig session_defaults;
             session_defaults.show_id = *show_id;

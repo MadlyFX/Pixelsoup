@@ -182,7 +182,7 @@ struct InitialFeedMapPlan final {
     persist::FrameDurability frame_durability,
     net::DirectorSessionHub& hub,
     net::DirectorFrameBarrier& barrier,
-    const net::DirectorSessionService* session_service,
+    net::DirectorSessionService* session_service,
     const PlaybackOptions& options,
     const volatile std::sig_atomic_t& stop_requested);
 

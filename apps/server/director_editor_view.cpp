@@ -1277,6 +1277,7 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     output_monitor.cluster.release_lag_frames =
         cluster.release_lag_frames;
     output_monitor.cluster.pacer_lag_frames = cluster.pacer_lag_frames;
+    output_monitor.cluster.control_stalled = cluster.control_stalled;
     output_monitor.cluster.asset_cohort = director_asset_cohort;
     output_monitor.cluster.asset_waiting_node = asset_waiting_node;
     output_monitor.cluster.renderer_headline =
@@ -1320,6 +1321,8 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     output_monitor.cluster.barrier_rejections =
         cluster.barrier.rejected_registrations +
         cluster.barrier.rejected_acknowledgements;
+    output_monitor.cluster.lockstep_demotions =
+        cluster.barrier.lockstep_demotions;
     output_monitor.cluster.present_failures = cluster.present_failures;
     output_monitor.cluster.diagnostics_recording =
         cluster.diagnostics_recording;

@@ -30,6 +30,21 @@ struct DirectorFrameBarrierLimits final {
     // Requiring the exact tail instead never converges while the Director
     // keeps sealing, because a node's acknowledgement always trails the seal.
     std::uint64_t max_join_prepared_lag{2U};
+    // Lockstep. Released frames are what nodes present, so a frame some
+    // member has not committed yet is a frame its neighbours may already be
+    // showing. At most this many such frames may be outstanding; beyond it,
+    // release waits for the slowest member. When none are outstanding, every
+    // frame the cohort has prepared is released at once, so a cohort that
+    // fell behind catches up together instead of one frame per boundary.
+    std::size_t lockstep_window{2U};
+    // How far the tracked tail may run ahead of the release frontier before
+    // the members holding it back are taken out of lockstep. Until then the
+    // whole cohort waits for its slowest member while the Director keeps
+    // sealing; past it, one stuck node would hold every output indefinitely.
+    // A demoted member stays connected, catches up on its own, and rejoins at
+    // a cut. Set it below max_open_frames so sealing never waits on records;
+    // a larger value is treated as max_open_frames.
+    std::size_t max_cohort_lag_frames{192U};
 };
 
 // Persistence boundary used by the permit coordinator until DurableDirector
@@ -152,6 +167,10 @@ struct DirectorFrameBarrierObserverDiagnostics final {
     std::uint64_t ignored_unregistrations{};
     std::size_t live_sessions{};
     std::size_t catching_up_sessions{};
+    // Members taken out of lockstep for exceeding max_cohort_lag_frames, and
+    // the node index of the most recent one.
+    std::uint64_t lockstep_demotions{};
+    core::u32 last_demoted_node{};
 };
 
 struct DirectorFrameBarrierSummary final {
@@ -203,7 +222,10 @@ struct DirectorTrackedSealOutcome final {
 // durable seal, and finalizes without allocation after success. Consequently:
 //
 //  * a join is either wholly before or wholly after a publication cohort;
-//  * a leave after the cut marks the retained member lost and never removes it;
+//  * a leave after the cut marks the retained member lost and never removes
+//    it. A lost member no longer holds back release: a frame releases once
+//    every surviving member has prepared, and the snapshot still reports it
+//    degraded so the loss stays visible;
 //  * a full barrier table rejects before the WAL or hub can advance.
 //
 // Registrations behind tracked_tail() are bounded CatchingUp sessions. They do
@@ -253,6 +275,15 @@ public:
         cmd::StreamCursor& output) const noexcept override;
     [[nodiscard]] TrackedPosePoll try_take_tracked_pose(
         Id128 session_id, TrackedCameraFrame& output) noexcept override;
+    [[nodiscard]] PriorityTransportPoll try_take_priority_transport(
+        Id128 session_id, show::TransportAnchor& output) noexcept override;
+
+    // Hands an operator transport anchor to every session, live or catching
+    // up, ahead of the frame stream, and returns how many were given it. A
+    // newer anchor replaces one not yet sent. Refuses anything but an
+    // operator anchor: a scheduled one plays through in order.
+    [[nodiscard]] std::size_t publish_priority_transport(
+        const show::TransportAnchor& anchor) noexcept;
 
     // Hands one tracked camera pose to every live session, and returns how
     // many were given it.

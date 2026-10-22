@@ -210,6 +210,13 @@ template <typename Acknowledgement>
         && valid_consecutive_frame_transition(value.before, value.after);
 }
 
+[[nodiscard]] bool valid_priority_transport(
+    const PriorityTransport& value) noexcept {
+    return static_cast<bool>(value.session_id)
+        && static_cast<bool>(value.director_epoch) && value.sequence != 0U
+        && valid_priority_anchor(value.anchor);
+}
+
 [[nodiscard]] bool valid_tracked_camera_pose(
     const TrackedCameraPose& value) noexcept {
     if (!static_cast<bool>(value.session_id)
@@ -517,6 +524,15 @@ template <typename Acknowledgement>
 
 } // namespace
 
+bool valid_priority_anchor(const show::TransportAnchor& anchor) noexcept {
+    // Only an operator's own anchor jumps the queue. A scheduled anchor or a
+    // crossfade is the show re-anchoring itself, and outputs play the frames
+    // before it through in order rather than cutting to it early.
+    return show::valid_transport_anchor(anchor)
+        && anchor.anchor_control_frame.value() != 0U && !anchor.scheduled
+        && anchor.blend_frames == 0U;
+}
+
 bool valid(const TrackedCameraSample& sample) noexcept {
     // Every number is bounded here rather than at the renderer. A sample that
     // survives this reaches every node in the cohort and decides where the
@@ -617,6 +633,10 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         valid = valid_goodbye(*goodbye);
         invalid_error = SessionEncodeError::InvalidGoodbye;
+    } else if (const auto* priority =
+                   std::get_if<PriorityTransport>(&message)) {
+        valid = valid_priority_transport(*priority);
+        invalid_error = SessionEncodeError::InvalidPriorityTransport;
     }
     if (!valid) {
         return core::Result<std::vector<std::byte>, SessionEncodeError>::failure(
@@ -934,6 +954,28 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    goodbye->sequence,
                    static_cast<fb::GoodbyeReason>(goodbye->reason),
                    &final_cursor)
+                   .Union();
+    } else if (const auto* priority =
+                   std::get_if<PriorityTransport>(&message)) {
+        const auto session = encode_id(priority->session_id);
+        const auto epoch = encode_id(priority->director_epoch);
+        const auto& anchor = priority->anchor;
+        body_type = fb::SessionBody::PriorityTransport;
+        body = fb::CreatePriorityTransport(
+                   builder,
+                   &session,
+                   &epoch,
+                   priority->sequence,
+                   anchor.anchor_control_frame.value(),
+                   anchor.anchor_show_frame.value(),
+                   static_cast<std::uint8_t>(anchor.state),
+                   static_cast<std::uint8_t>(anchor.direction),
+                   anchor.rate.numerator,
+                   anchor.rate.denominator,
+                   anchor.first_frame.value(),
+                   anchor.last_frame.value(),
+                   anchor.loop,
+                   anchor.cues_armed)
                    .Union();
     }
 
@@ -1470,6 +1512,47 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
         if (!valid_goodbye(value)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(
                 SessionDecodeError::InvalidGoodbye);
+        }
+        return core::Result<SessionMessage, SessionDecodeError>::success(
+            SessionMessage{value});
+    }
+    case fb::SessionBody::PriorityTransport: {
+        const auto* source = envelope->body_as_PriorityTransport();
+        if (source == nullptr || source->session_id() == nullptr
+            || source->director_epoch() == nullptr) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::MissingRequiredField);
+        }
+        // Checked before the casts: an out-of-range enumerator is a corrupt
+        // message, not a state a node should try to present.
+        if (source->state()
+                > static_cast<std::uint8_t>(show::TransportState::Playing)
+            || source->direction() > static_cast<std::uint8_t>(
+                   show::TransportDirection::Reverse)) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::InvalidPriorityTransport);
+        }
+        PriorityTransport value{};
+        value.session_id = decode_id(*source->session_id());
+        value.director_epoch = decode_id(*source->director_epoch());
+        value.sequence = source->sequence();
+        value.anchor.anchor_control_frame =
+            cmd::FrameNumber{source->anchor_control_frame()};
+        value.anchor.anchor_show_frame =
+            show::ShowFrame{source->anchor_show_frame()};
+        value.anchor.state =
+            static_cast<show::TransportState>(source->state());
+        value.anchor.direction =
+            static_cast<show::TransportDirection>(source->direction());
+        value.anchor.rate = show::FrameRate{
+            source->rate_numerator(), source->rate_denominator()};
+        value.anchor.first_frame = show::ShowFrame{source->first_frame()};
+        value.anchor.last_frame = show::ShowFrame{source->last_frame()};
+        value.anchor.loop = source->loop();
+        value.anchor.cues_armed = source->cues_armed();
+        if (!valid_priority_transport(value)) {
+            return core::Result<SessionMessage, SessionDecodeError>::failure(
+                SessionDecodeError::InvalidPriorityTransport);
         }
         return core::Result<SessionMessage, SessionDecodeError>::success(
             SessionMessage{value});

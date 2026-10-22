@@ -11,12 +11,14 @@
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/show/transport_state.hpp>
 
 namespace mediaserver::net {
 
-// Version 10 carries physical lens units independently of encoder counts and
-// the plate DOF conformance digest. All participants must upgrade together.
-inline constexpr core::u16 current_session_format_version = 10U;
+// Version 11 adds the priority transport message an operator's stop, pause or
+// seek travels in ahead of the frame stream. All participants must upgrade
+// together.
+inline constexpr core::u16 current_session_format_version = 11U;
 inline constexpr core::u32 min_heartbeat_response_timeout_ms = 250U;
 inline constexpr core::u32 max_heartbeat_response_timeout_ms = 120'000U;
 inline constexpr core::u32 max_session_node_index = 4'095U;
@@ -570,6 +572,25 @@ struct RuntimeAssetAdoption final {
     bool operator==(const RuntimeAssetAdoption&) const = default;
 };
 
+// An operator transport anchor sent ahead of the frame stream, so a cluster
+// that is behind on frames still stops, pauses or seeks when the operator
+// asks. The anchor is also authored into the sealed frame at its own control
+// frame, which remains the authority: a node uses this only until its
+// committed document carries an anchor at least as new. Never scheduled and
+// never a crossfade - those are the show re-anchoring itself, and must play
+// through in order.
+struct PriorityTransport final {
+    Id128 session_id;
+    Id128 director_epoch;
+    core::u64 sequence{};
+    show::TransportAnchor anchor;
+
+    bool operator==(const PriorityTransport&) const = default;
+};
+
+[[nodiscard]] bool valid_priority_anchor(
+    const show::TransportAnchor& anchor) noexcept;
+
 // A bidirectional graceful-close notice. sequence belongs to the sender's
 // stream and final_cursor is only that sender's safe externally visible
 // frontier. It must never be used to advance the peer's authoritative state.
@@ -597,7 +618,8 @@ using SessionMessage = std::variant<
     Heartbeat,
     HeartbeatAck,
     Goodbye,
-    TrackedCameraPose>;
+    TrackedCameraPose,
+    PriorityTransport>;
 
 enum class SessionEncodeError {
     InvalidClientHello,
@@ -615,6 +637,7 @@ enum class SessionEncodeError {
     InvalidHeartbeatAck,
     InvalidGoodbye,
     InvalidTrackedCameraPose,
+    InvalidPriorityTransport,
 };
 
 enum class SessionDecodeError {
@@ -638,6 +661,7 @@ enum class SessionDecodeError {
     InvalidHeartbeatAck,
     InvalidGoodbye,
     InvalidTrackedCameraPose,
+    InvalidPriorityTransport,
 };
 
 struct SessionDecodeLimits final {

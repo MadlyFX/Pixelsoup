@@ -186,6 +186,7 @@ public:
         std::atomic_uint64_t validated_heartbeat_acknowledgements{};
         std::atomic_uint64_t sent_heartbeats{};
         std::atomic_uint64_t sent_tracked_poses{};
+        std::atomic_uint64_t sent_priority_transports{};
         std::atomic_uint64_t heartbeat_timeouts{};
         std::atomic_uint64_t graceful_goodbyes{};
         std::atomic_uint64_t resync_disconnects{};
@@ -476,6 +477,41 @@ public:
             counters.sent_tracked_poses.fetch_add(
                 1U, std::memory_order_relaxed);
         }
+    }
+
+    // Sends the operator transport anchor this session is owed, ahead of
+    // permits, poses and frames. Like a pose it is never retried: the same
+    // anchor is in the sealed frame, which the node reaches in order anyway.
+    [[nodiscard]] bool drain_priority_transport(
+        Worker& worker,
+        Id128 session_id,
+        const std::shared_ptr<DirectorResumeSession>& session) noexcept {
+        show::TransportAnchor anchor{};
+        auto poll =
+            DirectorSessionObserver::PriorityTransportPoll::Unsupported;
+        {
+            const std::lock_guard observer_lock{worker.observer_mutex};
+            if (!worker.observer_registered || observer == nullptr) {
+                set_termination(worker, WorkerTermination::ObserverRejected);
+                return false;
+            }
+            poll = observer->try_take_priority_transport(session_id, anchor);
+        }
+        if (poll != DirectorSessionObserver::PriorityTransportPoll::Ready) {
+            return true;
+        }
+        if (worker.termination.load(std::memory_order_acquire)
+            != WorkerTermination::None) {
+            return false;
+        }
+        auto sent = session->send_priority_transport(anchor);
+        if (!sent) {
+            set_termination(worker, WorkerTermination::SessionFailure);
+            return false;
+        }
+        counters.sent_priority_transports.fetch_add(
+            1U, std::memory_order_relaxed);
+        return true;
     }
 
     [[nodiscard]] std::optional<Id128> next_session_id() noexcept {
@@ -890,6 +926,11 @@ public:
             std::optional<PublishedDirectorFrame> pending;
             while (worker.termination.load(std::memory_order_acquire)
                    == WorkerTermination::None) {
+                // First: an operator's stop is the one thing that must not
+                // wait behind anything this session already owes.
+                if (!drain_priority_transport(worker, session_id, session)) {
+                    break;
+                }
                 if (!drain_commit_permits(worker, session_id, session)) {
                     break;
                 }
@@ -1261,6 +1302,10 @@ std::size_t DirectorSessionService::active_workers() const noexcept {
     return state_->active_workers.load(std::memory_order_acquire);
 }
 
+void DirectorSessionService::wake_workers() noexcept {
+    state_->notify_all_worker_progress();
+}
+
 DirectorSessionServiceCounters DirectorSessionService::counters() const noexcept {
     return DirectorSessionServiceCounters{
         state_->counters.accepted_connections.load(std::memory_order_relaxed),
@@ -1277,6 +1322,8 @@ DirectorSessionServiceCounters DirectorSessionService::counters() const noexcept
             std::memory_order_relaxed),
         state_->counters.sent_heartbeats.load(std::memory_order_relaxed),
         state_->counters.sent_tracked_poses.load(std::memory_order_relaxed),
+        state_->counters.sent_priority_transports.load(
+            std::memory_order_relaxed),
         state_->counters.heartbeat_timeouts.load(std::memory_order_relaxed),
         state_->counters.graceful_goodbyes.load(std::memory_order_relaxed),
         state_->counters.resync_disconnects.load(std::memory_order_relaxed),

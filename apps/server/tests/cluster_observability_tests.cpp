@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -207,6 +208,62 @@ void active_diagnostics_rotate_before_crossing_the_limit() {
               app::ClusterDiagnosticLog::max_bytes);
 }
 
+// Full only briefly is backpressure and says nothing; full past the threshold
+// is reported exactly once, and draining reports the recovery exactly once.
+void a_backlog_that_stays_full_is_reported_once_and_recovers_once() {
+    using Event = app::ControlBacklogEvent;
+    using Clock = app::ControlBacklogWatch::Clock;
+    using std::chrono::milliseconds;
+    const Clock::time_point start{milliseconds{7'000}};
+    const milliseconds threshold = app::ControlBacklogWatch::stall_after;
+
+    app::ControlBacklogWatch watch;
+    OBS_CHECK(watch.observe(false, start) == Event::None);
+    OBS_CHECK(watch.observe(true, start) == Event::None);
+    OBS_CHECK(watch.observe(true, start + threshold - milliseconds{1}) ==
+              Event::None);
+    OBS_CHECK(!watch.stalled());
+    // A drain before the threshold restarts the measurement.
+    OBS_CHECK(watch.observe(false, start + threshold - milliseconds{1}) ==
+              Event::None);
+    const Clock::time_point refilled = start + milliseconds{2'500};
+    OBS_CHECK(watch.observe(true, refilled) == Event::None);
+    OBS_CHECK(watch.observe(true, refilled + threshold - milliseconds{1}) ==
+              Event::None);
+
+    OBS_CHECK(watch.observe(true, refilled + threshold) == Event::Stalled);
+    OBS_CHECK(watch.stalled());
+    OBS_CHECK(watch.observe(true, refilled + threshold * 5) == Event::None);
+    OBS_CHECK(watch.stalled());
+
+    OBS_CHECK(watch.observe(false, refilled + threshold * 6) ==
+              Event::Recovered);
+    OBS_CHECK(!watch.stalled());
+    OBS_CHECK(watch.observe(false, refilled + threshold * 7) == Event::None);
+}
+
+// A stalled Director applies no edits, so it is a fault even with no render
+// node configured, and the diagnostic log records it.
+void a_stalled_director_is_faulted_and_recorded() {
+    app::ClusterObservation observation{};
+    OBS_CHECK(app::cluster_control_health(observation) ==
+              app::ClusterControlHealth::Unmonitored);
+    observation.control_stalled = true;
+    OBS_CHECK(app::cluster_control_health(observation) ==
+              app::ClusterControlHealth::Faulted);
+    observation.health = app::cluster_control_health(observation);
+    const std::string json = app::cluster_observation_json(observation);
+    OBS_CHECK(json.find("\"health\":\"faulted\"") != std::string::npos);
+    OBS_CHECK(json.find("\"control_stalled\":true") != std::string::npos);
+
+    observation = healthy_observation();
+    OBS_CHECK(app::cluster_observation_json(observation).find(
+                  "\"control_stalled\":false") != std::string::npos);
+    observation.control_stalled = true;
+    OBS_CHECK(app::cluster_control_health(observation) ==
+              app::ClusterControlHealth::Faulted);
+}
+
 } // namespace
 
 int main() {
@@ -215,6 +272,8 @@ int main() {
     oversized_diagnostics_rotate_one_previous_file();
     active_diagnostics_rotate_before_crossing_the_limit();
     diagnostics_record_the_exact_sync_verdict();
-    std::cout << "5/5 cluster observability tests passed\n";
+    a_backlog_that_stays_full_is_reported_once_and_recovers_once();
+    a_stalled_director_is_faulted_and_recorded();
+    std::cout << "7/7 cluster observability tests passed\n";
     return 0;
 }

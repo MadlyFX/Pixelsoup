@@ -384,6 +384,12 @@ private:
             PLAYBACK_CHECK(authored);
             anchored_ = transport_.anchor();
             ++anchors_;
+            // As the Director does: an operator's anchor also goes ahead of
+            // the frame stream.
+            if (!anchored_->scheduled
+                && barrier_.publish_priority_transport(*anchored_) != 0U) {
+                service_.wake_workers();
+            }
         }
 
         auto sealed = barrier_.seal_and_track(hub_, frame);
@@ -510,6 +516,19 @@ public:
     }
     [[nodiscard]] core::u32 index() const noexcept { return index_; }
     [[nodiscard]] bool faulted() const noexcept { return bus_.needs_resync(); }
+
+    // The anchor this node's outputs present: the committed document's, or an
+    // operator anchor that arrived ahead of the frames - what the render loop
+    // draws from.
+    [[nodiscard]] std::optional<show::TransportAnchor> presented_anchor()
+        const noexcept {
+        return show::presented_anchor(
+            presented_.transport, service_.priority_transport());
+    }
+    [[nodiscard]] std::optional<show::TransportAnchor> priority_transport()
+        const noexcept {
+        return service_.priority_transport();
+    }
 
 private:
     static net::NodeSessionServiceConfig config(

@@ -5561,6 +5561,14 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
              std::to_string(state.cluster.live_sessions) + "/" +
              std::to_string(state.cluster.configured_nodes) + " live",
          health_color, control_tip);
+    // Next to the health chip so it is never the one squeezed off the row.
+    if (state.cluster.control_stalled) {
+      chip("Edits paused", theme.warning,
+           "The Director has stopped sealing frames because the oldest one "
+           "is still unfinished. Edits are not applied until it clears; "
+           "the Director console names the frame and what it is waiting "
+           "for.");
+    }
 
     const bool timing_verified =
         state.cluster.sync_satisfied && !state.cluster.sync_degraded &&
@@ -5634,7 +5642,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
     const core::u64 incidents =
         state.cluster.heartbeat_timeouts + state.cluster.session_failures +
-        state.cluster.barrier_rejections + state.cluster.present_failures;
+        state.cluster.barrier_rejections + state.cluster.present_failures +
+        state.cluster.lockstep_demotions;
     if (incidents != 0U) {
       chip(std::to_string(incidents) + " incidents", theme.warning,
            "Heartbeat timeouts " +
@@ -5644,7 +5653,9 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                ", barrier rejections " +
                std::to_string(state.cluster.barrier_rejections) +
                ", present failures " +
-               std::to_string(state.cluster.present_failures));
+               std::to_string(state.cluster.present_failures) +
+               ", nodes dropped from lockstep for lagging " +
+               std::to_string(state.cluster.lockstep_demotions));
     }
     if (state.cluster.diagnostics_recording) {
       chip("Recording", theme.warning, "Diagnostics log is recording");

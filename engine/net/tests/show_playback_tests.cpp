@@ -95,6 +95,83 @@ void two_nodes_play_pause_and_seek_to_the_same_frame() {
     director.stop();
 }
 
+// One node stalls. Lockstep holds the other with it instead of letting the
+// two outputs run apart, the Director keeps sealing regardless, and when the
+// operator pauses, both outputs show the paused frame at once - ahead of the
+// frames still queued for them - then converge on it in order once the
+// stalled node recovers.
+void a_pause_reaches_a_cohort_held_behind_its_slowest_node() {
+    DirectorShow director;
+    const auto endpoint = director.start();
+    NodeRig node_a{endpoint, 0U};
+    NodeRig node_b{endpoint, 1U};
+    node_a.start();
+    node_b.start();
+    PLAYBACK_CHECK(node_a.connected());
+    PLAYBACK_CHECK(node_b.connected());
+
+    director.play();
+    for (core::u64 index = 0U; index < 5U; ++index) {
+        static_cast<void>(director.publish_next());
+    }
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &node_b}));
+    assert_converged(node_a, node_b);
+
+    // Node B stops presenting. The Director seals forty more frames; node A
+    // keeps ticking but is held within the lockstep window of node B.
+    const auto stalled_at = node_b.presented().control_frame;
+    for (core::u64 index = 0U; index < 40U; ++index) {
+        static_cast<void>(director.publish_next());
+        node_a.tick();
+    }
+    for (int settle = 0; settle < 50; ++settle) {
+        node_a.tick();
+        std::this_thread::sleep_for(1ms);
+    }
+    PLAYBACK_CHECK(node_b.presented().control_frame == stalled_at);
+    PLAYBACK_CHECK(
+        node_a.presented().control_frame.value()
+        <= stalled_at.value() + 2U);
+
+    // The operator pauses. It reaches both nodes ahead of the frames they
+    // are still owed, and both present the paused frame now.
+    director.pause();
+    director.publish_held();
+    const auto paused_at = director.show_frame();
+    PLAYBACK_CHECK(wait_until([&]() {
+        const auto a = node_a.priority_transport();
+        const auto b = node_b.priority_transport();
+        return a && b && a->state == show::TransportState::Paused
+            && b->state == show::TransportState::Paused;
+    }));
+    for (const NodeRig* node : {&node_a, &node_b}) {
+        const auto anchor = node->presented_anchor();
+        PLAYBACK_CHECK(anchor.has_value());
+        PLAYBACK_CHECK(anchor->state == show::TransportState::Paused);
+        PLAYBACK_CHECK(
+            show::derive_show_frame(*anchor, node->presented().control_frame)
+            == paused_at);
+        PLAYBACK_CHECK(
+            node->presented().control_frame < director.sealed_through());
+    }
+
+    // Node B recovers. Both reach the pause frame in order, and the committed
+    // document now carries the same anchor the priority message did.
+    PLAYBACK_CHECK(NodeRig::advance_cohort_to(
+        director.sealed_through(), {&node_a, &node_b}));
+    assert_converged(node_a, node_b);
+    PLAYBACK_CHECK(node_a.presented().show_frame == paused_at);
+    PLAYBACK_CHECK(node_a.presented().transport == node_a.priority_transport());
+    PLAYBACK_CHECK(node_a.presented_anchor() == node_a.presented().transport);
+    PLAYBACK_CHECK(!node_a.faulted());
+    PLAYBACK_CHECK(!node_b.faulted());
+
+    node_a.stop();
+    node_b.stop();
+    director.stop();
+}
+
 void a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary() {
     DirectorShow director;
     const auto endpoint = director.start();
@@ -487,9 +564,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 9U> cases{{
     {"play, pause, and exact seek across two nodes",
      &two_nodes_play_pause_and_seek_to_the_same_frame},
+    {"a pause reaches a cohort held behind its slowest node",
+     &a_pause_reaches_a_cohort_held_behind_its_slowest_node},
     {"late node adopts a checkpoint at a boundary",
      &a_node_joining_a_running_show_adopts_its_checkpoint_at_a_boundary},
     {"lost node restarts and rejoins the running show",

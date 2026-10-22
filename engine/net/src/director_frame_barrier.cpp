@@ -68,6 +68,10 @@ struct SessionSlot final {
     // agreement for a resend nobody can use.
     bool has_pose{};
     TrackedCameraFrame pose{};
+    // The operator transport anchor this session has not been sent yet. One
+    // slot, newest wins, like the pose: only the latest stop or seek matters.
+    bool has_priority_transport{};
+    show::TransportAnchor priority_transport{};
 };
 
 struct FrameMember final {
@@ -194,6 +198,7 @@ struct DirectorFrameBarrierControl final {
     cmd::StreamCursor tracked_tail{};
     cmd::StreamCursor released_through{};
     DirectorFrameReleaseAuthority* release_authority{};
+    std::size_t lockstep_window{};
     std::uint64_t next_frame_ordinal{1U};
     // Numbers the pose stream, and counts the poses a session was handed but
     // never drained before the next one replaced it.
@@ -342,15 +347,74 @@ void pop_permit(SessionSlot& session) noexcept {
     --session.permit_size;
 }
 
-[[nodiscard]] bool exact_quorum_prepared(const FrameSlot& frame) noexcept {
+// Every member still in the cohort has prepared. A lost member can no longer
+// prepare, commit or claim a permit, so it cannot hold the frame back: it
+// rejoins by catching up from the released frontier like any other session.
+[[nodiscard]] bool surviving_quorum_prepared(const FrameSlot& frame) noexcept {
     return std::all_of(
         frame.members.begin(),
         frame.members.begin()
             + static_cast<std::ptrdiff_t>(frame.member_count),
         [](const FrameMember& member) {
             return member.state == MemberState::Prepared
-                || member.state == MemberState::Committed;
+                || member.state == MemberState::Committed
+                || member.state == MemberState::Lost;
         });
+}
+
+// Every member still in the cohort has committed: no output is still waiting
+// to present this frame.
+[[nodiscard]] bool surviving_cohort_committed(const FrameSlot& frame) noexcept {
+    return std::all_of(
+        frame.members.begin(),
+        frame.members.begin()
+            + static_cast<std::ptrdiff_t>(frame.member_count),
+        [](const FrameMember& member) {
+            return member.state == MemberState::Committed
+                || member.state == MemberState::Lost;
+        });
+}
+
+// Released (or being released) frames some member has yet to present. These
+// are the frames a faster node may already be showing while a slower one is
+// not, so their number is the lockstep skew.
+[[nodiscard]] std::size_t outstanding_releases(
+    const detail::DirectorFrameBarrierControl& control) noexcept {
+    return static_cast<std::size_t>(std::count_if(
+        control.frames.begin(),
+        control.frames.end(),
+        [](const FrameSlot& frame) {
+            return frame.active
+                && (frame.release_state == ReleaseState::Released
+                    || frame.release_state == ReleaseState::ReleasePersisting)
+                && !surviving_cohort_committed(frame);
+        }));
+}
+
+// How many frames, in order from the release frontier, every surviving member
+// has prepared and are waiting only on lockstep. Stops counting at two: only
+// "one" versus "more than one" matters.
+[[nodiscard]] std::size_t prepared_frames_waiting(
+    const detail::DirectorFrameBarrierControl& control) noexcept {
+    std::size_t waiting = 0U;
+    auto cursor = control.released_through;
+    while (waiting < 2U) {
+        const auto next = std::find_if(
+            control.frames.begin(),
+            control.frames.end(),
+            [&cursor](const FrameSlot& frame) {
+                return frame.active && frame.before == cursor;
+            });
+        if (next == control.frames.end()
+            || !(next->release_state == ReleaseState::QuorumPrepared
+                 || (next->release_state == ReleaseState::CollectingPrepared
+                     && surviving_quorum_prepared(*next)))) {
+            break;
+        }
+        ++waiting;
+        cursor = next->after;
+    }
+    return waiting;
 }
 
 void make_matching_permits_eligible(
@@ -379,6 +443,11 @@ void make_matching_permits_eligible(
         return true;
     }
 
+    // Counted once: commits arriving while a release is persisting only make
+    // this conservative, and releases themselves happen one at a time in
+    // frontier order.
+    std::size_t outstanding = outstanding_releases(control);
+    bool batch = false;
     for (;;) {
         auto candidate = std::find_if(
             control.frames.begin(),
@@ -390,7 +459,7 @@ void make_matching_permits_eligible(
             return true;
         }
         if (candidate->release_state == ReleaseState::CollectingPrepared
-            && exact_quorum_prepared(*candidate)) {
+            && surviving_quorum_prepared(*candidate)) {
             candidate->release_state = ReleaseState::QuorumPrepared;
         }
         if (candidate->release_state == ReleaseState::Released) {
@@ -402,6 +471,23 @@ void make_matching_permits_eligible(
             || !candidate->publication) {
             return true;
         }
+        // Lockstep. With nothing outstanding the cohort is level, and every
+        // prepared frame is released together so all of it can be committed
+        // on the same boundary. Otherwise only the steady-state pipeline is
+        // let out ahead of the slowest member: one frame waiting at a time,
+        // within the window. A cohort with several frames waiting is catching
+        // up, and releasing them one by one as each commit lands would keep it
+        // from ever levelling into a batch - it would crawl back one frame per
+        // boundary. So it waits to be level instead.
+        if (outstanding == 0U) {
+            batch = true;
+        }
+        if (!batch
+            && (outstanding >= control.lockstep_window
+                || prepared_frames_waiting(control) > 1U)) {
+            return true;
+        }
+        ++outstanding;
 
         candidate->release_state = ReleaseState::ReleasePersisting;
         const auto slot = static_cast<std::size_t>(
@@ -510,6 +596,89 @@ void make_matching_permits_eligible(
     return true;
 }
 
+// Takes one live session out of lockstep without disconnecting it. Its member
+// entries in open frames become lost, so they stop holding back release and
+// retirement; its acknowledgements are a catching-up session's from here, and
+// it rejoins at a cut once it has caught up like any other.
+void demote_from_lockstep(
+    detail::DirectorFrameBarrierControl& control,
+    std::size_t session_slot) noexcept {
+    auto& session = control.sessions[session_slot];
+    const DirectorFrameBarrierSessionId member_id{
+        session_slot,
+        session.generation,
+    };
+    for (auto& frame : control.frames) {
+        if (!frame.active) {
+            continue;
+        }
+        for (std::size_t index = 0U; index < frame.member_count; ++index) {
+            auto& member = frame.members[index];
+            if (member.id != member_id || member.state == MemberState::Lost
+                || member.state == MemberState::Committed) {
+                continue;
+            }
+            member.was_prepared = member.state == MemberState::Prepared;
+            member.state = MemberState::Lost;
+            member.leave_reason = DirectorSessionLeaveReason::LockstepLag;
+        }
+    }
+    session.readiness = SessionReadiness::CatchingUp;
+    --control.live_session_count;
+    ++control.catching_up_session_count;
+    control.diagnostics.live_sessions = control.live_session_count;
+    control.diagnostics.catching_up_sessions =
+        control.catching_up_session_count;
+    increment_saturated(control.diagnostics.lockstep_demotions);
+    control.diagnostics.last_demoted_node = session.node_index;
+}
+
+// Past the lag limit, the members holding the frontier are the ones a stuck
+// node would keep every output waiting on: the ones yet to commit a released
+// frame, or yet to prepare the next one. Only they are demoted; everyone who
+// kept up stays in lockstep.
+[[nodiscard]] bool demote_lagging_members(
+    detail::DirectorFrameBarrierControl& control,
+    std::size_t max_cohort_lag_frames) noexcept {
+    const auto tail = control.tracked_tail.through_frame.value();
+    const auto released = control.released_through.through_frame.value();
+    if (tail < released || tail - released < max_cohort_lag_frames) {
+        return false;
+    }
+    bool demoted = false;
+    for (const auto& frame : control.frames) {
+        if (!frame.active) {
+            continue;
+        }
+        const bool outstanding =
+            (frame.release_state == ReleaseState::Released
+             || frame.release_state == ReleaseState::ReleasePersisting)
+            && !surviving_cohort_committed(frame);
+        const bool next = frame.before == control.released_through
+            && frame.release_state == ReleaseState::CollectingPrepared;
+        if (!outstanding && !next) {
+            continue;
+        }
+        const auto holding = outstanding ? MemberState::Prepared
+                                         : MemberState::AwaitingPrepared;
+        for (std::size_t index = 0U; index < frame.member_count; ++index) {
+            const auto& member = frame.members[index];
+            if (member.state != holding
+                || member.id.slot >= control.sessions.size()) {
+                continue;
+            }
+            const auto& session = control.sessions[member.id.slot];
+            if (!session.active || session.generation != member.id.generation
+                || session.readiness != SessionReadiness::Live) {
+                continue;
+            }
+            demote_from_lockstep(control, member.id.slot);
+            demoted = true;
+        }
+    }
+    return demoted;
+}
+
 void promote_to_live(
     detail::DirectorFrameBarrierControl& control,
     SessionSlot& session) noexcept {
@@ -530,11 +699,15 @@ DirectorFrameBarrier::DirectorFrameBarrier(
       control_(std::make_unique<detail::DirectorFrameBarrierControl>()) {
     control_->valid = limits.max_sessions != 0U
         && limits.max_open_frames != 0U
-        && limits.max_pending_per_session != 0U && valid_cursor(initial_tail)
+        && limits.max_pending_per_session != 0U
+        && limits.lockstep_window != 0U
+        && limits.max_cohort_lag_frames != 0U
+        && valid_cursor(initial_tail)
         && initial_tail.through_frame.value()
             != std::numeric_limits<core::u64>::max();
     control_->tracked_tail = initial_tail;
     control_->released_through = initial_tail;
+    control_->lockstep_window = limits.lockstep_window;
     control_->next_frame_ordinal = initial_tail.through_frame.value() + 1U;
     if (!control_->valid) {
         return;
@@ -687,6 +860,8 @@ bool DirectorFrameBarrier::register_live(
         registration.last_node_control_sequence;
     available->permit_head = 0U;
     available->permit_size = 0U;
+    available->has_pose = false;
+    available->has_priority_transport = false;
     available->readiness = registration.committed_cursor == control.tracked_tail
         ? SessionReadiness::Live
         : SessionReadiness::CatchingUp;
@@ -770,8 +945,12 @@ bool DirectorFrameBarrier::on_ack(
             [member_id](const FrameMember& member) {
                 return member.id == member_id;
             });
+        // A lost member that is still acknowledging was taken out of
+        // lockstep, not disconnected. Its acknowledgements are a catching-up
+        // session's from then on, validated by its permits alone.
         if (found != frame->members.begin()
-                + static_cast<std::ptrdiff_t>(frame->member_count)) {
+                + static_cast<std::ptrdiff_t>(frame->member_count)
+            && found->state != MemberState::Lost) {
             exact_member = &*found;
         }
     }
@@ -845,11 +1024,11 @@ bool DirectorFrameBarrier::on_ack(
             exact_member->acknowledged_sequence =
                 acknowledgement.acknowledged_sequence;
             if (frame->release_state == ReleaseState::CollectingPrepared
-                && exact_quorum_prepared(*frame)) {
+                && surviving_quorum_prepared(*frame)) {
                 // Record this cohort's quorum independently of whether an
                 // earlier ordinal currently blocks durable release. A later
-                // disconnect must not erase a quorum that was exact when the
-                // final Prepared acknowledgement arrived.
+                // disconnect must not erase a quorum that was reached when
+                // the final Prepared acknowledgement arrived.
                 frame->release_state = ReleaseState::QuorumPrepared;
             }
         }
@@ -909,8 +1088,8 @@ bool DirectorFrameBarrier::on_ack(
     session->has_acknowledgement_sequence = true;
     session->last_acknowledgement_sequence = acknowledgement.sequence;
 
-    if (acknowledgement.kind == FrameAcknowledgementKind::Prepared
-        && !advance_ready_releases(control, lock)) {
+    // Prepared completes quorums; Committed is what lets lockstep move on.
+    if (!advance_ready_releases(control, lock)) {
         reject_acknowledgement(
             control,
             session_id,
@@ -994,7 +1173,7 @@ void DirectorFrameBarrier::unregister(
     Id128 session_id,
     DirectorSessionLeaveReason reason) noexcept {
     auto& control = *control_;
-    const std::lock_guard lock{control.mutex};
+    std::unique_lock lock{control.mutex};
     auto* session = find_session(control, session_id);
     if (session == nullptr) {
         increment_saturated(control.diagnostics.ignored_unregistrations);
@@ -1019,9 +1198,6 @@ void DirectorFrameBarrier::unregister(
             member.was_prepared = member.state == MemberState::Prepared;
             member.state = MemberState::Lost;
             member.leave_reason = reason;
-            if (frame.release_state == ReleaseState::CollectingPrepared) {
-                frame.release_state = ReleaseState::DegradedBeforeRelease;
-            }
         }
     }
 
@@ -1041,6 +1217,12 @@ void DirectorFrameBarrier::unregister(
     control.diagnostics.live_sessions = control.live_session_count;
     control.diagnostics.catching_up_sessions =
         control.catching_up_session_count;
+    // The departed member may have been the last one a frame was waiting on.
+    // Release on the survivors now; otherwise the frontier, and every frame
+    // behind it, would wait for a Prepared that can never arrive.
+    if (!advance_ready_releases(control, lock)) {
+        control.diagnostics.last_session_id = session_id;
+    }
     control.changed.notify_all();
 }
 
@@ -1098,6 +1280,42 @@ DirectorFrameBarrier::try_take_tracked_pose(
     session->has_pose = false;
     output = session->pose;
     return TrackedPosePoll::Ready;
+}
+
+DirectorSessionObserver::PriorityTransportPoll
+DirectorFrameBarrier::try_take_priority_transport(
+    Id128 session_id, show::TransportAnchor& output) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return PriorityTransportPoll::Empty;
+    }
+    auto* session = find_session(control, session_id);
+    if (session == nullptr || !session->has_priority_transport) {
+        return PriorityTransportPoll::Empty;
+    }
+    session->has_priority_transport = false;
+    output = session->priority_transport;
+    return PriorityTransportPoll::Ready;
+}
+
+std::size_t DirectorFrameBarrier::publish_priority_transport(
+    const show::TransportAnchor& anchor) noexcept {
+    auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted || !valid_priority_anchor(anchor)) {
+        return 0U;
+    }
+    std::size_t published = 0U;
+    for (auto& session : control.sessions) {
+        if (!session.active) {
+            continue;
+        }
+        session.has_priority_transport = true;
+        session.priority_transport = anchor;
+        ++published;
+    }
+    return published;
 }
 
 core::u64 DirectorFrameBarrier::tracked_poses_coalesced() const noexcept {
@@ -1168,6 +1386,20 @@ DirectorFrameBarrier::seal_and_track(
     if (control.faulted) {
         return Result::failure(
             barrier_error(DirectorFrameBarrierErrorCode::BarrierFaulted));
+    }
+    // A lag limit at or past the record budget still demotes, at the latest
+    // when the records run out, so the Director is never left unable to seal.
+    if (demote_lagging_members(
+            control,
+            std::min(limits_.max_cohort_lag_frames, limits_.max_open_frames))) {
+        // The demoted members' frames may now release, and retiring them is
+        // what keeps open records available for this seal and the next.
+        static_cast<void>(advance_ready_releases(control, lock));
+        control.changed.notify_all();
+        if (control.faulted) {
+            return Result::failure(
+                barrier_error(DirectorFrameBarrierErrorCode::BarrierFaulted));
+        }
     }
     if (control.open_frame_count == limits_.max_open_frames) {
         return Result::failure(

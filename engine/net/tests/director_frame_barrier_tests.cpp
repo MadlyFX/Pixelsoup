@@ -24,6 +24,7 @@ namespace core = mediaserver::core;
 namespace document = mediaserver::doc;
 namespace net = mediaserver::net;
 namespace persist = mediaserver::persist;
+namespace show = mediaserver::show;
 
 void check(bool condition, const char* expression, int line) {
     if (!condition) {
@@ -1087,58 +1088,357 @@ void durable_two_node_quorum_mints_only_exact_claimed_permits() {
         == net::DirectorFrameBarrierProgress::Complete);
 }
 
-void degraded_predecessor_freezes_a_later_prepared_quorum() {
-    GatedFixture fixture{{4U, 8U, 8U}};
+// A member that leaves before preparing can never prepare. Its frame releases
+// on the members that remain, still reported degraded, so the release
+// frontier - and every frame queued behind it - keeps moving.
+void a_lost_member_releases_on_the_surviving_quorum() {
+    GatedFixture fixture{{4U, 8U, 8U}, 53U};
     BARRIER_CHECK(fixture.barrier.register_live(
         registration(10U, 20U, genesis_cursor())));
     BARRIER_CHECK(fixture.barrier.register_live(
         registration(11U, 21U, genesis_cursor())));
     const auto first = fixture.seal(1U);
+    const auto first_after = first.seal.frame.after_cursor();
     BARRIER_CHECK(fixture.barrier.on_ack(
         id(10U),
         acknowledgement(
-            net::FrameAcknowledgementKind::Prepared,
-            2U,
-            101U,
-            first.seal.frame.after_cursor())));
+            net::FrameAcknowledgementKind::Prepared, 2U, 101U, first_after)));
+    const auto second = fixture.seal(2U);
+    const auto second_after = second.seal.frame.after_cursor();
+    BARRIER_CHECK(fixture.release.persist_calls() == 0U);
 
     fixture.barrier.unregister(
         id(11U), net::DirectorSessionLeaveReason::SessionFailure);
-    BARRIER_CHECK(fixture.barrier.snapshot(first.barrier).value().degraded());
 
-    const auto second = fixture.seal(2U);
-    BARRIER_CHECK(fixture.barrier.on_ack(
-        id(10U),
-        acknowledgement(
-            net::FrameAcknowledgementKind::Prepared,
-            3U,
-            102U,
-            second.seal.frame.after_cursor())));
-    BARRIER_CHECK(
-        fixture.barrier.snapshot(second.barrier).value().progress
-        == net::DirectorFrameBarrierProgress::AwaitingCommitted);
+    // F1 is released by the leave itself: no further acknowledgement comes.
+    BARRIER_CHECK(fixture.release.persist_calls() == 1U);
+    BARRIER_CHECK(fixture.release.decision_count() == 1U);
+    BARRIER_CHECK(fixture.release.frontier() == first_after);
+    BARRIER_CHECK(fixture.barrier.released_through() == first_after);
+    const auto lost_first = fixture.barrier.snapshot(first.barrier);
+    BARRIER_CHECK(lost_first);
+    BARRIER_CHECK(lost_first.value().lost == 1U);
+    BARRIER_CHECK(lost_first.value().prepared == 1U);
+    BARRIER_CHECK(lost_first.value().degraded());
 
-    // F2 reached Prepared first, but the unresolved F1 lineage prevents any
-    // release decision or later permit from becoming visible.
-    BARRIER_CHECK(fixture.release.persist_calls() == 0U);
-    BARRIER_CHECK(fixture.release.decision_count() == 0U);
-    BARRIER_CHECK(fixture.barrier.released_through() == genesis_cursor());
-    net::FrameCommitPermitIntent permit{};
-    BARRIER_CHECK(
-        fixture.barrier.try_take_commit_permit(id(10U), permit)
-        == net::DirectorSessionObserver::CommitPermitPoll::Empty);
-    auto retired = fixture.barrier.retire(first.barrier);
-    BARRIER_CHECK(!retired);
-    BARRIER_CHECK(
-        retired.error().code
-        == net::DirectorFrameBarrierErrorCode::FrameIncomplete);
-
-    // A reconnect cannot claim state beyond the durable release frontier.
-    BARRIER_CHECK(!fixture.barrier.register_live(registration(
-        12U, 22U, second.seal.frame.after_cursor())));
+    // F2 still waits for its surviving member, so the frontier stops at F1
+    // and a reconnect cannot claim state beyond it.
+    BARRIER_CHECK(!fixture.barrier.register_live(
+        registration(12U, 22U, second_after)));
     BARRIER_CHECK(
         fixture.barrier.observer_diagnostics().last_error
         == net::DirectorFrameBarrierObserverError::CursorAhead);
+
+    BARRIER_CHECK(fixture.barrier.on_ack(
+        id(10U),
+        acknowledgement(
+            net::FrameAcknowledgementKind::Prepared, 3U, 102U, second_after)));
+    BARRIER_CHECK(fixture.release.decision_count() == 2U);
+    BARRIER_CHECK(fixture.barrier.released_through() == second_after);
+
+    // The survivor commits both frames in order under their durable ordinals,
+    // after which each retires.
+    net::FrameCommitPermitIntent permit{};
+    BARRIER_CHECK(
+        fixture.barrier.try_take_commit_permit(id(10U), permit)
+        == net::DirectorSessionObserver::CommitPermitPoll::Ready);
+    BARRIER_CHECK(permit.barrier_ordinal == 53U);
+    BARRIER_CHECK(permit.after == first_after);
+    BARRIER_CHECK(fixture.barrier.on_ack(
+        id(10U),
+        acknowledgement(
+            net::FrameAcknowledgementKind::Committed, 4U, 101U, first_after)));
+    BARRIER_CHECK(
+        fixture.barrier.try_take_commit_permit(id(10U), permit)
+        == net::DirectorSessionObserver::CommitPermitPoll::Ready);
+    BARRIER_CHECK(permit.barrier_ordinal == 54U);
+    BARRIER_CHECK(permit.after == second_after);
+    BARRIER_CHECK(fixture.barrier.on_ack(
+        id(10U),
+        acknowledgement(
+            net::FrameAcknowledgementKind::Committed, 5U, 102U, second_after)));
+    const auto retired_first = fixture.barrier.retire(first.barrier);
+    BARRIER_CHECK(retired_first);
+    BARRIER_CHECK(retired_first.value().lost == 1U);
+    BARRIER_CHECK(
+        retired_first.value().progress
+        == net::DirectorFrameBarrierProgress::Complete);
+    BARRIER_CHECK(fixture.barrier.retire(second.barrier));
+    BARRIER_CHECK(fixture.barrier.open_frames() == 0U);
+}
+
+// The stall seen in the Director: its only node leaves with several frames
+// unprepared. Every one of them must release and retire, and frames sealed
+// afterwards, with no cohort at all, must keep doing so.
+void losing_the_only_member_releases_every_open_frame() {
+    GatedFixture fixture{{4U, 8U, 8U}};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    const auto first = fixture.seal(1U);
+    const auto second = fixture.seal(2U);
+    const auto third = fixture.seal(3U);
+    BARRIER_CHECK(!fixture.barrier.retire(first.barrier));
+
+    fixture.barrier.unregister(
+        id(10U), net::DirectorSessionLeaveReason::PeerGoodbye);
+
+    BARRIER_CHECK(fixture.release.decision_count() == 3U);
+    BARRIER_CHECK(
+        fixture.barrier.released_through() == third.seal.frame.after_cursor());
+    BARRIER_CHECK(fixture.barrier.coordinates_commit_permits());
+    for (const auto* sealed : {&first, &second, &third}) {
+        const auto retired = fixture.barrier.retire(sealed->barrier);
+        BARRIER_CHECK(retired);
+        BARRIER_CHECK(retired.value().members == 1U);
+        BARRIER_CHECK(retired.value().lost == 1U);
+        BARRIER_CHECK(retired.value().degraded());
+    }
+
+    const auto empty = fixture.seal(4U);
+    BARRIER_CHECK(fixture.release.decision_count() == 4U);
+    const auto retired_empty = fixture.barrier.retire(empty.barrier);
+    BARRIER_CHECK(retired_empty);
+    BARRIER_CHECK(
+        retired_empty.value().progress
+        == net::DirectorFrameBarrierProgress::EmptyCohort);
+    BARRIER_CHECK(fixture.barrier.open_frames() == 0U);
+}
+
+// Releasing on a leave persists like releasing on an acknowledgement, and a
+// failed write faults the barrier the same way rather than being skipped.
+void a_release_failure_on_leave_faults_the_barrier() {
+    GatedFixture fixture{{4U, 8U, 8U}};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    const auto first = fixture.seal(1U);
+    fixture.release.fail_persistence();
+
+    fixture.barrier.unregister(
+        id(10U), net::DirectorSessionLeaveReason::SessionFailure);
+
+    BARRIER_CHECK(fixture.release.persist_calls() == 1U);
+    BARRIER_CHECK(fixture.release.decision_count() == 0U);
+    BARRIER_CHECK(fixture.barrier.released_through() == genesis_cursor());
+    BARRIER_CHECK(!fixture.barrier.coordinates_commit_permits());
+    BARRIER_CHECK(
+        fixture.barrier.observer_diagnostics().last_error
+        == net::DirectorFrameBarrierObserverError::ReleaseFailed);
+    BARRIER_CHECK(fixture.barrier.snapshot(first.barrier).value().tracking_fault);
+    BARRIER_CHECK(!fixture.barrier.retire(first.barrier));
+}
+
+// One node's view of the acknowledgements it sends: Prepared on receipt, and
+// Committed only once its permit has been taken - the order a real node acks
+// a frame in. `batch` distinguishes the two nodes' acknowledged sequences.
+struct AckingNode final {
+    std::uint64_t session{};
+    std::uint64_t batch{};
+    std::uint64_t sequence{2U};
+
+    [[nodiscard]] bool prepare(
+        GatedFixture& fixture, const command::StreamCursor& after) {
+        return fixture.barrier.on_ack(
+            id(session),
+            acknowledgement(
+                net::FrameAcknowledgementKind::Prepared,
+                sequence++,
+                batch + after.through_frame.value(),
+                after));
+    }
+
+    [[nodiscard]] bool commit(
+        GatedFixture& fixture, const command::StreamCursor& after) {
+        net::FrameCommitPermitIntent permit{};
+        if (fixture.barrier.try_take_commit_permit(id(session), permit)
+                != net::DirectorSessionObserver::CommitPermitPoll::Ready
+            || permit.after != after) {
+            return false;
+        }
+        return fixture.barrier.on_ack(
+            id(session),
+            acknowledgement(
+                net::FrameAcknowledgementKind::Committed,
+                sequence++,
+                batch + after.through_frame.value(),
+                after));
+    }
+
+    [[nodiscard]] bool has_permit(GatedFixture& fixture) {
+        net::FrameCommitPermitIntent permit{};
+        return fixture.barrier.try_take_commit_permit(id(session), permit)
+            == net::DirectorSessionObserver::CommitPermitPoll::Ready;
+    }
+};
+
+// Outputs present released frames, so a released frame one node has not yet
+// committed is one its neighbour may already be showing. In steady state the
+// cohort may run at most the window ahead of its slowest member, and that
+// member's commit - not just every node's Prepared - lets the next frame out.
+void release_waits_for_the_slowest_commit_beyond_the_window() {
+    GatedFixture fixture{{4U, 8U, 8U}};
+    BARRIER_CHECK(fixture.barrier.limits().lockstep_window == 2U);
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(11U, 21U, genesis_cursor())));
+    AckingNode fast{10U, 100U};
+    AckingNode slow{11U, 200U};
+    std::vector<command::StreamCursor> after;
+    // One frame at a time, as a Director keeping pace seals them.
+    for (std::uint64_t frame = 1U; frame <= 3U; ++frame) {
+        after.push_back(fixture.seal(frame).seal.frame.after_cursor());
+        BARRIER_CHECK(fast.prepare(fixture, after.back()));
+        BARRIER_CHECK(slow.prepare(fixture, after.back()));
+    }
+    // Every node has prepared all three, but only two may be outstanding.
+    BARRIER_CHECK(fixture.release.decision_count() == 2U);
+    BARRIER_CHECK(fixture.barrier.released_through() == after[1]);
+
+    // The fast node presents both released frames and is then held: there
+    // is nothing more it may show until the slow node catches up.
+    BARRIER_CHECK(fast.commit(fixture, after[0]));
+    BARRIER_CHECK(fast.commit(fixture, after[1]));
+    BARRIER_CHECK(!fast.has_permit(fixture));
+    BARRIER_CHECK(fixture.release.decision_count() == 2U);
+
+    // The slow node presenting the oldest one is what moves the window.
+    BARRIER_CHECK(slow.commit(fixture, after[0]));
+    BARRIER_CHECK(fixture.release.decision_count() == 3U);
+    BARRIER_CHECK(fixture.barrier.released_through() == after[2]);
+}
+
+// A cohort held behind its slowest node must not crawl back one frame per
+// boundary. While several frames wait it is catching up, so nothing is let
+// out one at a time; once every released frame is committed, everything the
+// cohort has prepared is released together and lands on one boundary.
+void a_level_cohort_releases_everything_prepared_together() {
+    GatedFixture fixture{{4U, 16U, 16U}};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(11U, 21U, genesis_cursor())));
+    AckingNode fast{10U, 100U};
+    AckingNode slow{11U, 200U};
+    std::vector<command::StreamCursor> after;
+    after.push_back(fixture.seal(1U).seal.frame.after_cursor());
+    BARRIER_CHECK(fast.prepare(fixture, after[0]));
+    BARRIER_CHECK(slow.prepare(fixture, after[0]));
+    BARRIER_CHECK(fixture.release.decision_count() == 1U);
+
+    // The slow node stalls; the Director keeps sealing and both nodes keep
+    // receiving. The second frame goes out as the steady-state pipeline,
+    // the rest wait.
+    for (std::uint64_t frame = 2U; frame <= 6U; ++frame) {
+        after.push_back(fixture.seal(frame).seal.frame.after_cursor());
+        BARRIER_CHECK(fast.prepare(fixture, after.back()));
+        BARRIER_CHECK(slow.prepare(fixture, after.back()));
+    }
+    BARRIER_CHECK(fixture.release.decision_count() == 2U);
+
+    BARRIER_CHECK(fast.commit(fixture, after[0]));
+    BARRIER_CHECK(fast.commit(fixture, after[1]));
+    BARRIER_CHECK(slow.commit(fixture, after[0]));
+    // One outstanding, but four waiting: catching up, so nothing trickles.
+    BARRIER_CHECK(fixture.release.decision_count() == 2U);
+    BARRIER_CHECK(slow.commit(fixture, after[1]));
+    // Level: all four go together.
+    BARRIER_CHECK(fixture.release.decision_count() == 6U);
+    BARRIER_CHECK(fixture.barrier.released_through() == after[5]);
+    for (std::size_t index = 2U; index < after.size(); ++index) {
+        BARRIER_CHECK(fast.commit(fixture, after[index]));
+        BARRIER_CHECK(slow.commit(fixture, after[index]));
+    }
+}
+
+// Lockstep holds every output for the slowest node, but not forever: past the
+// lag limit the node holding the frontier is taken out of lockstep. It stays
+// connected, its later acknowledgements are accepted as a catching-up
+// session's, and the nodes that kept up move on together.
+void a_node_past_the_lag_limit_leaves_lockstep_without_disconnecting() {
+    GatedFixture fixture{net::DirectorFrameBarrierLimits{
+        .max_sessions = 4U,
+        .max_open_frames = 8U,
+        .max_pending_per_session = 8U,
+        .max_cohort_lag_frames = 3U,
+    }};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(11U, 21U, genesis_cursor(), 1U, 1U, 37U)));
+    AckingNode kept_up{10U, 100U};
+    AckingNode stuck{11U, 200U};
+    std::vector<command::StreamCursor> after;
+    after.push_back(fixture.seal(1U).seal.frame.after_cursor());
+    BARRIER_CHECK(kept_up.prepare(fixture, after[0]));
+    BARRIER_CHECK(stuck.prepare(fixture, after[0]));
+    BARRIER_CHECK(kept_up.commit(fixture, after[0]));
+    // The stuck node never presents frame 1 and never prepares frame 2.
+    for (std::uint64_t frame = 2U; frame <= 4U; ++frame) {
+        after.push_back(fixture.seal(frame).seal.frame.after_cursor());
+        BARRIER_CHECK(kept_up.prepare(fixture, after.back()));
+    }
+    BARRIER_CHECK(fixture.barrier.released_through() == after[0]);
+    BARRIER_CHECK(
+        fixture.barrier.observer_diagnostics().lockstep_demotions == 0U);
+
+    // Three frames behind: the next seal takes the stuck node out.
+    const auto fifth = fixture.seal(5U);
+    after.push_back(fifth.seal.frame.after_cursor());
+    const auto diagnostics = fixture.barrier.observer_diagnostics();
+    BARRIER_CHECK(diagnostics.lockstep_demotions == 1U);
+    BARRIER_CHECK(diagnostics.last_demoted_node == 37U);
+    BARRIER_CHECK(diagnostics.live_sessions == 1U);
+    BARRIER_CHECK(diagnostics.catching_up_sessions == 1U);
+    BARRIER_CHECK(fixture.barrier.active_sessions() == 2U);
+    BARRIER_CHECK(fixture.barrier.released_through() == after[3]);
+    BARRIER_CHECK(fixture.barrier.snapshot(fifth.barrier).value().members == 1U);
+
+    // It presents what it was already permitted, as a catching-up session.
+    BARRIER_CHECK(stuck.commit(fixture, after[0]));
+    BARRIER_CHECK(stuck.prepare(fixture, after[1]));
+    BARRIER_CHECK(stuck.commit(fixture, after[1]));
+    BARRIER_CHECK(
+        fixture.barrier.observer_diagnostics().rejected_acknowledgements == 0U);
+}
+
+// An operator's transport anchor reaches every session ahead of the frame
+// stream, newest wins, and only an operator anchor is accepted.
+void an_operator_anchor_is_handed_to_every_session_once() {
+    GatedFixture fixture{{4U, 8U, 8U}};
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(11U, 21U, genesis_cursor())));
+    show::TransportAnchor anchor{};
+    anchor.anchor_control_frame = command::FrameNumber{90U};
+    anchor.anchor_show_frame = show::ShowFrame{41U};
+    anchor.state = show::TransportState::Paused;
+    anchor.rate = show::FrameRate{50U, 1U};
+    anchor.first_frame = show::ShowFrame{1U};
+    anchor.last_frame = show::ShowFrame{500U};
+
+    auto scheduled = anchor;
+    scheduled.scheduled = true;
+    BARRIER_CHECK(fixture.barrier.publish_priority_transport(scheduled) == 0U);
+    show::TransportAnchor taken{};
+    BARRIER_CHECK(
+        fixture.barrier.try_take_priority_transport(id(10U), taken)
+        == net::DirectorSessionObserver::PriorityTransportPoll::Empty);
+
+    BARRIER_CHECK(fixture.barrier.publish_priority_transport(anchor) == 2U);
+    auto newer = anchor;
+    newer.anchor_control_frame = command::FrameNumber{91U};
+    newer.anchor_show_frame = show::ShowFrame{77U};
+    BARRIER_CHECK(fixture.barrier.publish_priority_transport(newer) == 2U);
+    for (const std::uint64_t session : {10U, 11U}) {
+        BARRIER_CHECK(
+            fixture.barrier.try_take_priority_transport(id(session), taken)
+            == net::DirectorSessionObserver::PriorityTransportPoll::Ready);
+        BARRIER_CHECK(taken == newer);
+        BARRIER_CHECK(
+            fixture.barrier.try_take_priority_transport(id(session), taken)
+            == net::DirectorSessionObserver::PriorityTransportPoll::Empty);
+    }
 }
 
 void catch_up_permit_is_held_then_reuses_the_durable_historical_ordinal() {
@@ -1465,8 +1765,20 @@ int main() {
          &postcommit_lineage_fault_preserves_the_durable_outcome},
         {"durable exact two-node permit quorum",
          &durable_two_node_quorum_mints_only_exact_claimed_permits},
-        {"degraded predecessor freezes later quorum",
-         &degraded_predecessor_freezes_a_later_prepared_quorum},
+        {"lost member releases on surviving quorum",
+         &a_lost_member_releases_on_the_surviving_quorum},
+        {"release waits for the slowest commit",
+         &release_waits_for_the_slowest_commit_beyond_the_window},
+        {"level cohort releases everything prepared together",
+         &a_level_cohort_releases_everything_prepared_together},
+        {"lagging node leaves lockstep without disconnecting",
+         &a_node_past_the_lag_limit_leaves_lockstep_without_disconnecting},
+        {"operator anchor handed to every session once",
+         &an_operator_anchor_is_handed_to_every_session_once},
+        {"losing the only member releases every open frame",
+         &losing_the_only_member_releases_every_open_frame},
+        {"release failure on leave faults the barrier",
+         &a_release_failure_on_leave_faults_the_barrier},
         {"catch-up held then historical permit",
          &catch_up_permit_is_held_then_reuses_the_durable_historical_ordinal},
         {"permit FIFO drain and commit order",

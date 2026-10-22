@@ -224,6 +224,7 @@ struct AtomicNodeServiceCounters final {
     std::atomic_uint64_t received_commit_permits{};
     std::atomic_uint64_t received_heartbeats{};
     std::atomic_uint64_t received_tracked_poses{};
+    std::atomic_uint64_t received_priority_transports{};
     std::atomic_uint64_t received_goodbyes{};
     std::atomic_uint64_t flushed_acknowledgements{};
     std::atomic_uint64_t graceful_goodbyes{};
@@ -593,6 +594,12 @@ public:
                         // alone.
                         counters.received_tracked_poses.fetch_add(
                             1U, std::memory_order_relaxed);
+                    } else if (
+                        std::get_if<PriorityTransportReport>(&inbound.value())
+                        != nullptr) {
+                        // Answered by presenting it, like a pose.
+                        counters.received_priority_transports.fetch_add(
+                            1U, std::memory_order_relaxed);
                     } else {
                         counters.received_goodbyes.fetch_add(
                             1U, std::memory_order_relaxed);
@@ -920,6 +927,19 @@ NodeSessionService::take_tracked_camera_pose() noexcept {
     }
 }
 
+std::optional<show::TransportAnchor>
+NodeSessionService::priority_transport() const noexcept {
+    std::shared_ptr<NodeResumeSession> session;
+    {
+        const std::lock_guard lock{state_->resource_mutex};
+        if (state_->stop_requested.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        session = state_->active_session;
+    }
+    return session ? session->priority_transport() : std::nullopt;
+}
+
 core::u64 NodeSessionService::tracked_poses_coalesced() const noexcept {
     std::shared_ptr<NodeResumeSession> session;
     {
@@ -1020,6 +1040,8 @@ NodeSessionServiceCounters NodeSessionService::counters() const noexcept {
         state_->counters.received_commit_permits.load(std::memory_order_relaxed),
         state_->counters.received_heartbeats.load(std::memory_order_relaxed),
         state_->counters.received_tracked_poses.load(
+            std::memory_order_relaxed),
+        state_->counters.received_priority_transports.load(
             std::memory_order_relaxed),
         state_->counters.received_goodbyes.load(std::memory_order_relaxed),
         state_->counters.flushed_acknowledgements.load(std::memory_order_relaxed),

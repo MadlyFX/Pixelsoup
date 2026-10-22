@@ -1009,7 +1009,12 @@ void stop_wakes_workers_with_a_commit_permit_held_at_quorum() {
     const auto stop_elapsed = std::chrono::steady_clock::now() - stop_start;
     SERVICE_CHECK(stop_elapsed < std::chrono::milliseconds{500});
     SERVICE_CHECK(fixture.service_.active_workers() == 0U);
-    SERVICE_CHECK(fixture.release_authority_.decision_count() == 0U);
+    // Both members are lost, so none is left to wait for: the frame is
+    // released on the empty surviving cohort and reported degraded.
+    SERVICE_CHECK(fixture.release_authority_.decision_count() == 1U);
+    SERVICE_CHECK(
+        fixture.barrier_.released_through()
+        == tracked.value().seal.frame.after_cursor());
     auto summary = fixture.barrier_.snapshot(tracked.value().barrier);
     SERVICE_CHECK(summary);
     SERVICE_CHECK(summary.value().degraded());

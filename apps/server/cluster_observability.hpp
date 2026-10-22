@@ -4,9 +4,11 @@
 #include <mediaserver/net/director_frame_barrier.hpp>
 #include <mediaserver/net/director_session_service.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace mediaserver::app {
@@ -37,6 +39,9 @@ struct ClusterObservation final {
     core::u64 pacer_lag_frames{};
     core::u64 open_barriers{};
     core::u64 present_failures{};
+    // The Director has sealed no control frame for longer than ordinary
+    // backpressure explains, so operator edits are not being applied.
+    bool control_stalled{};
     net::DirectorSessionServiceCounters sessions{};
     net::DirectorFrameBarrierObserverDiagnostics barrier{};
     bool diagnostics_recording{};
@@ -71,6 +76,34 @@ struct ClusterObservation final {
 
 [[nodiscard]] ClusterControlHealth
 cluster_control_health(const ClusterObservation& observation) noexcept;
+
+enum class ControlBacklogEvent : core::u8 {
+    None,
+    Stalled,
+    Recovered,
+};
+
+// The Director seals no control frame while its unretired-frame backlog is
+// full, and operator edits are applied only to a sealed frame. Full for a
+// moment is ordinary backpressure - a native file dialog leaves pacing debt
+// that the cohort then drains - so only a backlog that stays full past
+// `stall_after` is reported. Unreported, a stall looks like every edit
+// snapping back for no reason.
+class ControlBacklogWatch final {
+public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr std::chrono::milliseconds stall_after{1000};
+
+    // Each transition is returned once: Stalled when a full backlog first
+    // outlasts `stall_after`, Recovered when a stalled backlog drains.
+    [[nodiscard]] ControlBacklogEvent observe(bool full,
+                                              Clock::time_point now) noexcept;
+    [[nodiscard]] bool stalled() const noexcept { return stalled_; }
+
+private:
+    std::optional<Clock::time_point> full_since_;
+    bool stalled_{};
+};
 
 [[nodiscard]] std::string
 cluster_observation_json(const ClusterObservation& observation);

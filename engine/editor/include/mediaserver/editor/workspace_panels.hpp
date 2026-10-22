@@ -754,9 +754,13 @@ struct OutputMonitorState final {
     core::u32 catching_up_sessions{};
     core::u64 release_lag_frames{};
     core::u64 pacer_lag_frames{};
+    // The Director is sealing no control frames, so edits are not applied.
+    bool control_stalled{};
     core::u64 heartbeat_timeouts{};
     core::u64 session_failures{};
     core::u64 barrier_rejections{};
+    // Nodes taken out of lockstep for holding every output back too long.
+    core::u64 lockstep_demotions{};
     core::u64 present_failures{};
     bool diagnostics_recording{};
     // Render machines are controlled with no password: any Media Server on

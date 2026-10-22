@@ -133,6 +133,17 @@ struct TransportBlend final {
     const TransportAnchor& anchor,
     cmd::FrameNumber control_frame) noexcept;
 
+// The anchor a node presents: its committed document's, unless an operator
+// anchor that arrived ahead of the frame stream was authored on a later
+// control frame. A node behind on frames then answers a stop, pause or seek at
+// once - a stopped or paused anchor derives its position from nothing but
+// itself - and a play holds on its first frame until the stream reaches it.
+// Once the committed document carries that anchor, or a newer one, the
+// document wins again.
+[[nodiscard]] std::optional<TransportAnchor> presented_anchor(
+    const std::optional<TransportAnchor>& committed,
+    const std::optional<TransportAnchor>& priority) noexcept;
+
 // The crossfade in progress on `control_frame`, or nothing outside one.
 // Exact integer arithmetic on replicated state, like derive_show_frame.
 [[nodiscard]] std::optional<TransportBlend> derive_transport_blend(

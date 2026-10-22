@@ -178,11 +178,16 @@ PaceOutcome DirectorShowLoop::pace(DirectorTick &tick) {
         due =
             std::min(due, asset_frame - scheduler.sealed_through().value());
     // A native file dialog can leave a large pacing debt. Keep catch-up
-    // within the cohort queue's remaining capacity, then service node
-    // acknowledgements below before sealing another batch. A full queue
-    // is backpressure; it must not terminate the editor after Save As.
+    // within the barrier's remaining records, then service node
+    // acknowledgements below before sealing another batch. The barrier takes
+    // a lagging node out of lockstep well before its records run out, so a
+    // full barrier is a fault, not a slow node: it is reported, and it must
+    // not terminate the editor after Save As.
+    const std::size_t capacity = barrier.limits().max_open_frames;
     due = std::min(due, static_cast<core::u64>(
-        max_tracked_frames - std::min(tracked.size(), max_tracked_frames)));
+        capacity - std::min(tracked.size(), capacity)));
+    report_backlog(backlog_watch.observe(tracked.size() >= capacity, now));
+    report_lockstep_demotions();
     if (paced_by_reference) {
         director_clock.referenced_frames += due;
     } else if (director_clock.requires_reference) {
@@ -197,7 +202,7 @@ PhaseExit DirectorShowLoop::seal_due_frames(DirectorTick &tick) {
     auto &sealed_this_iteration = tick.sealed_this_iteration;
     auto &repace_after_seal = tick.repace_after_seal;
     for (core::u64 index = 0U; index < due; ++index) {
-        if (tracked.size() >= max_tracked_frames) {
+        if (tracked.size() >= barrier.limits().max_open_frames) {
             std::cerr << "Director cohort backlog reached "
                       << tracked.size()
                       << " unretired frames; refusing to seal further\n";
@@ -250,6 +255,15 @@ PhaseExit DirectorShowLoop::seal_due_frames(DirectorTick &tick) {
             }
             authored = transport.anchor();
             ++anchors;
+            // An operator's anchor also travels ahead of the frame stream, so
+            // a cluster held behind on frames stops, pauses or seeks now
+            // rather than when it reaches this frame. The show's own anchors
+            // - a cue, the end - play through in order and stay in the stream.
+            if (!authored->scheduled &&
+                barrier.publish_priority_transport(*authored) != 0U &&
+                session_service != nullptr) {
+                session_service->wake_workers();
+            }
             // Re-anchoring inside an outstanding permit's lead changes the
             // show frame its activation presents. Restate it in this same
             // control frame, so no node compares against the stale one.
@@ -614,6 +628,7 @@ ClusterObservation DirectorShowLoop::observe_cluster(core::u64 show_frame) {
     observation.open_barriers =
         static_cast<core::u64>(barrier.open_frames());
     observation.present_failures = present_failures;
+    observation.control_stalled = backlog_watch.stalled();
     if (session_service != nullptr) {
         observation.sessions = session_service->counters();
     }

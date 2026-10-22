@@ -118,6 +118,7 @@ struct NodeSessionServiceCounters final {
     std::uint64_t received_commit_permits{};
     std::uint64_t received_heartbeats{};
     std::uint64_t received_tracked_poses{};
+    std::uint64_t received_priority_transports{};
     std::uint64_t received_goodbyes{};
     std::uint64_t flushed_acknowledgements{};
     std::uint64_t graceful_goodbyes{};
@@ -190,6 +191,14 @@ public:
     // an ordinary re-read and counted.
     [[nodiscard]] std::optional<TrackedCameraFrame>
     take_tracked_camera_pose() noexcept;
+
+    // The newest operator transport anchor the live session received ahead
+    // of the frame stream, or nothing. Session-scoped: a new connection
+    // starts without one, so an anchor from an earlier Director never
+    // overrides the document of a later one. Non-blocking, like
+    // boundary_state(), so a render loop may read it on every boundary.
+    [[nodiscard]] std::optional<show::TransportAnchor>
+    priority_transport() const noexcept;
 
     // Poses this node received and overwrote before draining. See the note on
     // NodeResumeSession: this is the node's own backlog, not a lost pose.

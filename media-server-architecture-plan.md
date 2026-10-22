@@ -102,6 +102,12 @@ The Director frame barrier tracks the cohort for a sealed frame and
 acknowledgements for prepare/commit. With a release authority installed, it
 coordinates durable, cursor-bound commit permits; a loss or tracking failure is
 reported rather than silently treated as a successful synchronized commit.
+Release is held in lockstep with the slowest live node - at most two released
+frames may wait for it - while the Director keeps sealing, so editing never
+waits on the cluster; a node that lags past the barrier's limit is taken out of
+lockstep rather than holding every output. Operator transport anchors also
+travel ahead of the frame stream, so a stop reaches a cluster that is behind
+(see `cluster-operations.md`, "Lockstep and cluster lag").
 This is a control-plane/frame-boundary contract: it answers "are all nodes
 working on the same show state?". Whether every physical output presented that
 state on the same raster boundary is a separate question, owned by the

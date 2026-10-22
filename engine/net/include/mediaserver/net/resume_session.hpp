@@ -239,6 +239,15 @@ struct TrackedPoseReport final {
     bool operator==(const TrackedPoseReport&) const = default;
 };
 
+// An operator transport anchor sent or accepted ahead of the frame stream.
+// `sequence` is the Director outbound sequence it consumed.
+struct PriorityTransportReport final {
+    core::u64 sequence{};
+    show::TransportAnchor anchor;
+
+    bool operator==(const PriorityTransportReport&) const = default;
+};
+
 struct HeartbeatSendReport final {
     core::u64 sequence{};
     core::u32 response_timeout_ms{};
@@ -281,6 +290,7 @@ using NodeLiveInboundReport = std::variant<
     FrameCommitPermitReport,
     HeartbeatReceivedReport,
     TrackedPoseReport,
+    PriorityTransportReport,
     GoodbyeReport>;
 
 using DirectorLiveInboundReport = std::variant<
@@ -400,6 +410,12 @@ public:
     // An unusable sample is refused before any byte is written.
     [[nodiscard]] core::Result<TrackedPoseReport, ResumeSessionError>
     send_tracked_camera_pose(const TrackedCameraFrame& frame);
+
+    // An operator transport anchor, ahead of any frame still queued. Same
+    // writer lock and outbound sequence as everything else, so its position
+    // in the stream is exact; it is refused unless it is an operator anchor.
+    [[nodiscard]] core::Result<PriorityTransportReport, ResumeSessionError>
+    send_priority_transport(const show::TransportAnchor& anchor);
 
     // Heartbeat and Goodbye share the exact Director outbound sequence and
     // writer lock with frames and permits. released_through is diagnostic and
@@ -600,6 +616,12 @@ public:
     [[nodiscard]] std::optional<TrackedCameraFrame>
     take_tracked_camera_pose() noexcept;
 
+    // The newest operator transport anchor this session received ahead of
+    // the frame stream. Read, not taken: the render loop applies it on every
+    // boundary until its committed document carries an anchor as new.
+    [[nodiscard]] std::optional<show::TransportAnchor>
+    priority_transport() const noexcept;
+
     // Poses this node was sent but overwrote before the render loop drained
     // them. Its own counter, and not the same thing as a gap in the ordinal:
     // a gap means a pose never reached this node, this means one did and this
@@ -661,6 +683,8 @@ private:
     receive_decoded_heartbeat(const Heartbeat& heartbeat);
     [[nodiscard]] core::Result<TrackedPoseReport, ResumeSessionError>
     receive_decoded_tracked_pose(const TrackedCameraPose& pose);
+    [[nodiscard]] core::Result<PriorityTransportReport, ResumeSessionError>
+    receive_decoded_priority_transport(const PriorityTransport& priority);
     [[nodiscard]] core::Result<GoodbyeReport, ResumeSessionError>
     receive_decoded_goodbye(const Goodbye& goodbye);
 
@@ -693,6 +717,8 @@ private:
     // it costs nothing extra and can never see a torn value.
     std::optional<TrackedCameraFrame> tracked_camera_pose_;
     core::u64 tracked_poses_coalesced_{};
+    // Guarded by inflight_mutex_, like the pose.
+    std::optional<show::TransportAnchor> priority_transport_;
     // Latched by the writer when a local Goodbye leaves the socket, consumed
     // once by close(). Written and read from different threads.
     std::atomic_bool sent_goodbye_{};

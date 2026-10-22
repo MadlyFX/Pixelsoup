@@ -47,6 +47,11 @@ namespace {
 
 ClusterControlHealth
 cluster_control_health(const ClusterObservation& observation) noexcept {
+    // Checked before the node count: a stalled Director is faulted whether
+    // or not any render node is configured.
+    if (observation.control_stalled) {
+        return ClusterControlHealth::Faulted;
+    }
     if (observation.configured_nodes == 0U &&
         observation.live_sessions == 0U &&
         observation.catching_up_sessions == 0U) {
@@ -65,6 +70,27 @@ cluster_control_health(const ClusterObservation& observation) noexcept {
         return ClusterControlHealth::Degraded;
     }
     return ClusterControlHealth::Healthy;
+}
+
+ControlBacklogEvent ControlBacklogWatch::observe(
+    bool full,
+    Clock::time_point now) noexcept {
+    if (!full) {
+        full_since_.reset();
+        if (stalled_) {
+            stalled_ = false;
+            return ControlBacklogEvent::Recovered;
+        }
+        return ControlBacklogEvent::None;
+    }
+    if (!full_since_) {
+        full_since_ = now;
+    }
+    if (!stalled_ && now - *full_since_ >= stall_after) {
+        stalled_ = true;
+        return ControlBacklogEvent::Stalled;
+    }
+    return ControlBacklogEvent::None;
 }
 
 std::string cluster_observation_json(const ClusterObservation& observation) {
@@ -114,6 +140,9 @@ std::string cluster_observation_json(const ClusterObservation& observation) {
           barrier.ignored_unregistrations);
     field("barrier_last_error",
           static_cast<core::u64>(barrier.last_error));
+    field("lockstep_demotions", barrier.lockstep_demotions);
+    json += ",\"control_stalled\":";
+    json += observation.control_stalled ? "true" : "false";
     json += ",\"diagnostics_recording\":";
     json += observation.diagnostics_recording ? "true" : "false";
     json += ",\"external_time_sync_verified\":";
