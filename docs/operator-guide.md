@@ -848,6 +848,13 @@ cable removes its generated binding and region; a region shared by another
 binding is retained. Feed indices refer to the numbered rows in Feed Mapping
 and are never inferred from physical display order.
 
+Each binding drives the display its saved target names, chosen by that
+identity rather than by where the window happens to land. Two active displays
+can share a desktop position - a mirrored pair does exactly that - and a
+binding resolved by position alone would then drive whichever of them the
+machine listed first. A target that is mirroring another is refused with that
+reason instead; extend the desktop on that machine to drive it on its own.
+
 Fullscreen applies an exclusive native mode and refuses launch when the exact
 raster and rational refresh are not advertised. Windowed and borderless modes
 apply the saved raster at the detected target's desktop position. The Program
@@ -859,6 +866,14 @@ on its authored logical port and is labelled `MISSING` rather than compacting a
 different connector into its place. Select that binding and use `REPAIR WITH
 NEXT ACTIVE OUTPUT` to explicitly adopt a replacement. Discovery and hotplug
 never rewrite bindings, cables, or project files on their own.
+
+A node that could not open its displays reads `OUTPUT FAILED` in Output
+Monitor, and its row names the reason: the bound display not connected, present
+but switched off, mirroring another, claimed by two bindings, or not offering
+the saved mode. That is reported separately from asset readiness on purpose. A
+node with no outputs has no renderer to report either, which on the Director is
+indistinguishable from one still loading, so the row used to say the assets
+were not ready while the fault was a display.
 
 One lifecycle agent still supervises one fixed render-process identity. That
 child now opens one presenter per saved output binding and selects each binding's

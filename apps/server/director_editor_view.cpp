@@ -1280,8 +1280,22 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
     output_monitor.cluster.control_stalled = cluster.control_stalled;
     output_monitor.cluster.asset_cohort = director_asset_cohort;
     output_monitor.cluster.asset_waiting_node = asset_waiting_node;
+    // An output that never opened outranks every other reason here. It is
+    // upstream of all of them: a node with no presenters reports no renderer
+    // and no assets, so the cohort and lockstep headlines below would both
+    // describe the silence rather than its cause.
+    const auto failed_output = std::find_if(
+        output_nodes.begin(), output_nodes.end(),
+        [](const editor::OutputMonitorState::Node& row) noexcept {
+            return row.output_failed();
+        });
+    // The label is a view over a literal, which is what this field holds; the
+    // row beside it already names which node, so the headline carries the
+    // reason alone rather than owning a composed string for one frame.
     output_monitor.cluster.renderer_headline =
-        director_asset_cohort.digest != 0 && !director_asset_cohort.visible
+        failed_output != output_nodes.end()
+        ? editor::output_node_deployment_label(*failed_output)
+        : director_asset_cohort.digest != 0 && !director_asset_cohort.visible
             ? director_asset_cohort.some_visible
                 ? core::asset_commit_confirmation_expired(last_asset_commit_frame, control_frame.value())
                     ? "ASSET COMMIT MISSED - RETRY PENDING"

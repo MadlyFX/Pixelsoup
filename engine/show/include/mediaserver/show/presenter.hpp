@@ -42,6 +42,12 @@ enum class PresenterError : core::u8 {
     // A physical fullscreen binding requested a native size/rational refresh
     // combination the selected display did not advertise or apply exactly.
     ExactDisplayModeUnavailable,
+    // The binding named a display this machine no longer presents as its own
+    // desktop area. Distinct from the mode error: the mode was never reached
+    // because there was no display to ask. Refused rather than falling back
+    // to whichever display sits under the window's corner, which is how an
+    // output ends up driving the wrong screen.
+    DisplayTargetUnavailable,
 };
 
 // Operator intent read from an output window. A node ignores these: what it

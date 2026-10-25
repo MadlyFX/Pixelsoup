@@ -106,6 +106,9 @@ presenter_error_text(show::PresenterError error) noexcept {
     case show::PresenterError::ExactDisplayModeUnavailable:
         return "the selected display does not support the exact saved "
                "resolution and refresh rate";
+    case show::PresenterError::DisplayTargetUnavailable:
+        return "the display this output is bound to is not one this machine "
+               "presents as its own desktop area";
     case show::PresenterError::DisplayUnavailable:
         break;
     }
@@ -282,6 +285,11 @@ make_presenter(const PlaybackOptions &options, const std::string &title,
             config.output_bit_depth = applied_window->output_bit_depth;
             config.require_exact_display_mode =
                 applied_window->require_exact_display_mode;
+            config.display_bounds_x = applied_window->display_bounds_x;
+            config.display_bounds_y = applied_window->display_bounds_y;
+            config.display_bounds_width = applied_window->display_bounds_width;
+            config.display_bounds_height =
+                applied_window->display_bounds_height;
         }
         config.accepts_commands = accepts_commands;
         config.gpu = options.gpu;

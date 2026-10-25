@@ -13,6 +13,38 @@ namespace {
     return OutputDeploymentIssue{code, binding, target, std::move(message)};
 }
 
+// A desktop area is only comparable once the source mode is known. A probe
+// that could not read one reports zero extent, and a zero extent matches
+// nothing rather than matching everything.
+[[nodiscard]] bool same_desktop_area(
+    const net::ClusterDisplayTargetInfo& left,
+    const net::ClusterDisplayTargetInfo& right) noexcept {
+    return left.desktop_width != 0U && left.desktop_height != 0U &&
+        left.desktop_x == right.desktop_x &&
+        left.desktop_y == right.desktop_y &&
+        left.desktop_width == right.desktop_width &&
+        left.desktop_height == right.desktop_height;
+}
+
+[[nodiscard]] bool mirrors_another_active_target(
+    const net::ClusterMachineInfo& inventory,
+    const net::ClusterDisplayTargetInfo& target) noexcept {
+    for (const auto& candidate : inventory.display_targets) {
+        if (!candidate.active) {
+            continue;
+        }
+        if (candidate.adapter_id == target.adapter_id &&
+            candidate.target_id == target.target_id &&
+            candidate.connector_instance == target.connector_instance) {
+            continue;
+        }
+        if (same_desktop_area(candidate, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] bool valid_mode(
     const topology::HardwareOutputBinding& binding) noexcept {
     return binding.width > 0U && binding.height > 0U &&
@@ -30,6 +62,35 @@ bool display_target_matches(
     return observed.adapter_id == authored.adapter_id &&
         observed.target_id == authored.target_id &&
         observed.connector_instance == authored.connector_instance;
+}
+
+net::RuntimeOutputDeploymentState
+runtime_output_deployment_state(const OutputDeployment& deployment) noexcept {
+    using State = net::RuntimeOutputDeploymentState;
+    if (deployment.issues.empty()) {
+        return State::Ready;
+    }
+    switch (deployment.issues.front().code) {
+    case OutputDeploymentIssueCode::MissingRenderServer:
+        // Not a fault: no authored server is the legacy launch contract, and
+        // resolve_output_deployment returns a usable output for it.
+        return State::Ready;
+    case OutputDeploymentIssueCode::DuplicateRenderServer:
+        return State::DuplicateRenderServer;
+    case OutputDeploymentIssueCode::InventoryUnavailable:
+        return State::InventoryUnavailable;
+    case OutputDeploymentIssueCode::MissingDisplayTarget:
+        return State::MissingDisplayTarget;
+    case OutputDeploymentIssueCode::DuplicateDisplayTarget:
+        return State::DuplicateDisplayTarget;
+    case OutputDeploymentIssueCode::InactiveDisplayTarget:
+        return State::InactiveDisplayTarget;
+    case OutputDeploymentIssueCode::InvalidOutputMode:
+        return State::InvalidOutputMode;
+    case OutputDeploymentIssueCode::MirroredDisplayTarget:
+        return State::MirroredDisplayTarget;
+    }
+    return State::Unknown;
 }
 
 OutputDeployment resolve_output_deployment(
@@ -132,6 +193,17 @@ OutputDeployment resolve_output_deployment(
                 "saved display target is present but not active"));
             continue;
         }
+        // Two active targets occupying one desktop area are mirrored. Driving
+        // either of them separately is not possible, so say so rather than
+        // opening a window that lands on the other one.
+        if (mirrors_another_active_target(*local_inventory, *target)) {
+            result.issues.push_back(issue(
+                OutputDeploymentIssueCode::MirroredDisplayTarget,
+                binding->node, binding->target,
+                "saved display target mirrors another display on this "
+                "machine; extend the desktop to drive it on its own"));
+            continue;
+        }
 
         PresenterWindowSettings window{};
         window.width = binding->width;
@@ -139,6 +211,10 @@ OutputDeployment resolve_output_deployment(
         window.position_x = target->desktop_x;
         window.position_y = target->desktop_y;
         window.position_explicit = true;
+        window.display_bounds_x = target->desktop_x;
+        window.display_bounds_y = target->desktop_y;
+        window.display_bounds_width = target->desktop_width;
+        window.display_bounds_height = target->desktop_height;
         window.windowed = true;
         window.fullscreen =
             binding->window_mode == topology::HardwareWindowMode::Fullscreen;

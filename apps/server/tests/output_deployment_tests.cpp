@@ -64,6 +64,11 @@ namespace topology = mediaserver::topology;
     value.refresh_denominator = 1'001U;
     value.desktop_x = x;
     value.desktop_y = 0;
+    // Deliberately not the signal size above: the desktop extent is the
+    // source mode, and a driver that scales makes the two differ. Distinct
+    // values here keep a test from passing because they happened to match.
+    value.desktop_width = 2560U;
+    value.desktop_height = 1440U;
     value.name = "LED " + std::to_string(key.target_id);
     return value;
 }
@@ -110,6 +115,99 @@ void two_bindings_create_two_exact_outputs() {
     DEPLOY_CHECK(deployed.outputs[0U].window.require_exact_display_mode);
     DEPLOY_CHECK(deployed.outputs[0U].window.refresh_numerator == 60'000U);
     DEPLOY_CHECK(deployed.outputs[1U].feed_index == 8U);
+    // The display each output drives travels as the identified target's own
+    // desktop rectangle, not as the window size: a presenter that matched on
+    // the binding's raster would pick the wrong display the moment a driver
+    // scales, which is exactly when it matters.
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_x == -3840);
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_y == 0);
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_width == 2560U);
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_height == 1440U);
+    DEPLOY_CHECK(deployed.outputs[1U].window.display_bounds_x == 0);
+    DEPLOY_CHECK(app::runtime_output_deployment_state(deployed) ==
+                 net::RuntimeOutputDeploymentState::Ready);
+}
+
+// Two active targets occupying one desktop area are mirrored. The binding is
+// refused with a reason of its own rather than opening a window at a shared
+// origin, which is how an exclusive mode ends up applied to the other screen.
+void a_mirrored_display_is_refused_with_its_own_reason() {
+    constexpr topology::HardwareDisplayTargetKey bound{
+        0x5566778899aabbccULL, 11U, 0U};
+    constexpr topology::HardwareDisplayTargetKey panel{
+        0x00ddeeff00112233ULL, 12U, 0U};
+    topology::HardwareMap map{};
+    map.devices.push_back(server(1U, 3U));
+    map.output_bindings.push_back(binding(10U, 1U, 7U, bound));
+    net::ClusterMachineInfo inventory{};
+    inventory.availability = net::ClusterMachineInfoAvailability::Available;
+    inventory.display_state =
+        net::ClusterDisplayEnumerationState::Available;
+    inventory.display_targets.push_back(target(bound, 0));
+    inventory.display_targets.push_back(target(panel, 0));
+
+    const auto deployed =
+        app::resolve_output_deployment(options(), map, &inventory);
+    DEPLOY_CHECK(!deployed.ready());
+    DEPLOY_CHECK(deployed.outputs.empty());
+    DEPLOY_CHECK(deployed.issues.size() == 1U);
+    DEPLOY_CHECK(deployed.issues[0U].code ==
+                 app::OutputDeploymentIssueCode::MirroredDisplayTarget);
+    DEPLOY_CHECK(deployed.issues[0U].binding == doc::NodeId{10U});
+    // The reason is what the Director is told, so it can say "mirrored"
+    // rather than letting the node fall silent and reading that as loading.
+    DEPLOY_CHECK(app::runtime_output_deployment_state(deployed) ==
+                 net::RuntimeOutputDeploymentState::MirroredDisplayTarget);
+}
+
+// The same two displays at different origins are an extended desktop, which
+// is the configuration this refusal is asking the operator to move to.
+void extended_displays_at_distinct_origins_still_deploy() {
+    constexpr topology::HardwareDisplayTargetKey bound{
+        0x5566778899aabbccULL, 11U, 0U};
+    constexpr topology::HardwareDisplayTargetKey panel{
+        0x00ddeeff00112233ULL, 12U, 0U};
+    topology::HardwareMap map{};
+    map.devices.push_back(server(1U, 3U));
+    map.output_bindings.push_back(binding(10U, 1U, 7U, bound));
+    net::ClusterMachineInfo inventory{};
+    inventory.availability = net::ClusterMachineInfoAvailability::Available;
+    inventory.display_state =
+        net::ClusterDisplayEnumerationState::Available;
+    inventory.display_targets.push_back(target(bound, 2560));
+    inventory.display_targets.push_back(target(panel, 0));
+
+    const auto deployed =
+        app::resolve_output_deployment(options(), map, &inventory);
+    DEPLOY_CHECK(deployed.ready());
+    DEPLOY_CHECK(deployed.outputs.size() == 1U);
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_x == 2560);
+    DEPLOY_CHECK(deployed.outputs[0U].window.display_bounds_width == 2560U);
+}
+
+// An inactive neighbour is not a mirror. Windows reports every connector it
+// knows about, most of them switched off and all of them at the origin.
+void inactive_targets_at_the_origin_are_not_mirrors() {
+    constexpr topology::HardwareDisplayTargetKey bound{
+        0x5566778899aabbccULL, 11U, 0U};
+    constexpr topology::HardwareDisplayTargetKey spare{
+        0x5566778899aabbccULL, 13U, 1U};
+    topology::HardwareMap map{};
+    map.devices.push_back(server(1U, 3U));
+    map.output_bindings.push_back(binding(10U, 1U, 7U, bound));
+    net::ClusterMachineInfo inventory{};
+    inventory.availability = net::ClusterMachineInfoAvailability::Available;
+    inventory.display_state =
+        net::ClusterDisplayEnumerationState::Available;
+    inventory.display_targets.push_back(target(bound, 0));
+    auto unused = target(spare, 0);
+    unused.active = false;
+    inventory.display_targets.push_back(unused);
+
+    const auto deployed =
+        app::resolve_output_deployment(options(), map, &inventory);
+    DEPLOY_CHECK(deployed.ready());
+    DEPLOY_CHECK(deployed.outputs.size() == 1U);
 }
 
 void missing_and_duplicate_targets_fail_deterministically() {
@@ -201,9 +299,15 @@ struct Case final {
     void (*run)();
 };
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 7U> cases{{
     {"two bindings create two exact outputs",
      &two_bindings_create_two_exact_outputs},
+    {"a mirrored display is refused with its own reason",
+     &a_mirrored_display_is_refused_with_its_own_reason},
+    {"extended displays at distinct origins still deploy",
+     &extended_displays_at_distinct_origins_still_deploy},
+    {"inactive targets at the origin are not mirrors",
+     &inactive_targets_at_the_origin_are_not_mirrors},
     {"missing and duplicate targets fail deterministically",
      &missing_and_duplicate_targets_fail_deterministically},
     {"legacy projects keep one output",

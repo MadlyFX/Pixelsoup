@@ -1480,6 +1480,7 @@ DirectorResumeSession::receive_live_message() {
                         heartbeat_ack->asset_manifest_digest,
                         heartbeat_ack->asset_manifest_ready,
                         heartbeat_ack->media_assets,
+                        heartbeat_ack->output_deployment,
                     },
                     heartbeat_ack->output_sync,
                     heartbeat_ack->renderer,
@@ -2872,6 +2873,7 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.asset_adoption.media_assets,
                         pending.renderer,
                         pending.tracking,
+                        pending.asset_adoption.deployment,
                     }},
                     config_.codec_limits);
             case NodeControlKind::Goodbye:

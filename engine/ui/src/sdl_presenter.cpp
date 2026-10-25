@@ -657,6 +657,41 @@ bool SdlPresenter::build_gpu_resources(
     return true;
 }
 
+namespace {
+
+// The display whose desktop bounds are exactly the ones the authored binding
+// named. Exact because this is an identity check, not a search for something
+// close: a display that merely contains the origin is the failure this
+// replaces. Zero when the caller named no display, and zero when it named one
+// this machine is not presenting - the caller distinguishes those by whether
+// it supplied an extent.
+[[nodiscard]] SDL_DisplayID display_for_bounds(
+    core::i32 x, core::i32 y, core::u32 width, core::u32 height) noexcept {
+    if (width == 0U || height == 0U) {
+        return 0U;
+    }
+    int count{};
+    SDL_DisplayID *const displays = SDL_GetDisplays(&count);
+    SDL_DisplayID found = 0U;
+    for (int index = 0; displays != nullptr && index < count; ++index) {
+        SDL_Rect bounds{};
+        if (!SDL_GetDisplayBounds(displays[index], &bounds)) {
+            continue;
+        }
+        if (bounds.x == static_cast<int>(x) &&
+            bounds.y == static_cast<int>(y) &&
+            bounds.w == static_cast<int>(width) &&
+            bounds.h == static_cast<int>(height)) {
+            found = displays[index];
+            break;
+        }
+    }
+    SDL_free(displays);
+    return found;
+}
+
+} // namespace
+
 show::PresenterResult
 SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
     using Result = show::PresenterResult;
@@ -759,13 +794,29 @@ SdlPresenter::create(const SdlPresenterConfig &config) noexcept {
         if (!SDL_SyncWindow(platform->window)) {
             return fail(show::PresenterError::DisplayUnavailable);
         }
+        // Which display this output drives is decided by the authored target,
+        // not by where the window landed. A named display that is not here is
+        // refused outright: it is the same binding that would otherwise open
+        // silently on a neighbouring screen.
+        const bool display_named = config.display_bounds_width != 0U &&
+            config.display_bounds_height != 0U;
+        SDL_DisplayID bound_display = 0U;
+        if (display_named) {
+            bound_display = display_for_bounds(
+                config.display_bounds_x, config.display_bounds_y,
+                config.display_bounds_width, config.display_bounds_height);
+            if (bound_display == 0U) {
+                return fail(show::PresenterError::DisplayTargetUnavailable);
+            }
+        }
         if (config.fullscreen && config.require_exact_display_mode) {
             if (config.refresh_numerator == 0U ||
                 config.refresh_denominator == 0U) {
                 return fail(show::PresenterError::InvalidConfiguration);
             }
             const SDL_DisplayID display =
-                SDL_GetDisplayForWindow(platform->window);
+                display_named ? bound_display
+                              : SDL_GetDisplayForWindow(platform->window);
             int mode_count{};
             SDL_DisplayMode **const modes =
                 display != 0U

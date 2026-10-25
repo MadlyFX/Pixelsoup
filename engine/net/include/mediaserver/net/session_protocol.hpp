@@ -545,6 +545,26 @@ struct RuntimeTracking final {
 // the next item in the node control stream, while acknowledged_sequence binds
 // the Heartbeat in the opposite-direction stream. visible_through is the
 // node's last show-clock-committed cursor and is not release authority.
+// Whether this process opened the physical outputs its bindings name, and if
+// not, which specific thing stopped it. A node that cannot deploy its outputs
+// has no presenters, and a node with no presenters reports a default renderer
+// readiness - which on the Director is indistinguishable from a node that has
+// not finished loading. Without this the operator is told the assets are not
+// ready while the real fault is a display. Unknown says nothing and is never
+// evidence that the outputs opened.
+enum class RuntimeOutputDeploymentState : core::u8 {
+    Unknown = 0U,
+    Ready = 1U,
+    InventoryUnavailable = 2U,
+    InvalidOutputMode = 3U,
+    MissingDisplayTarget = 4U,
+    InactiveDisplayTarget = 5U,
+    DuplicateDisplayTarget = 6U,
+    MirroredDisplayTarget = 7U,
+    DuplicateRenderServer = 8U,
+    PresenterUnavailable = 9U,
+};
+
 struct HeartbeatAck final {
     Id128 session_id;
     Id128 director_epoch;
@@ -557,6 +577,8 @@ struct HeartbeatAck final {
     std::vector<RuntimeMediaAssetStatus> media_assets;
     RuntimeRendererReadiness renderer;
     RuntimeTracking tracking;
+    RuntimeOutputDeploymentState output_deployment{
+        RuntimeOutputDeploymentState::Unknown};
 
     bool operator==(const HeartbeatAck&) const = default;
 };
@@ -568,6 +590,13 @@ struct RuntimeAssetAdoption final {
     core::u64 manifest_digest{};
     bool ready{};
     std::vector<RuntimeMediaAssetStatus> media_assets;
+    // Carried here because this is the report the node already republishes
+    // whenever its runtime adoption changes, which includes every output
+    // deployment attempt. It is deliberately not folded into `ready`: a
+    // display fault and a missing asset are different things to fix, and an
+    // operator told the wrong one looks in the wrong place.
+    RuntimeOutputDeploymentState deployment{
+        RuntimeOutputDeploymentState::Unknown};
 
     bool operator==(const RuntimeAssetAdoption&) const = default;
 };

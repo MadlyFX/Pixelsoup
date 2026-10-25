@@ -309,6 +309,8 @@ void apply_source_position(
     }
     target.desktop_x = mode.sourceMode.position.x;
     target.desktop_y = mode.sourceMode.position.y;
+    target.desktop_width = mode.sourceMode.width;
+    target.desktop_height = mode.sourceMode.height;
     return;
   }
 }

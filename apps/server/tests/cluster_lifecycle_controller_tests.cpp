@@ -640,7 +640,7 @@ void machine_inventory_is_transient_retained_and_project_fenced() {
             info.display_targets.push_back(net::ClusterDisplayTargetInfo{
                 7U, 2U, 0U, 0U, 0U,
                 net::ClusterVideoOutputTechnology::DisplayPort,
-                true, true, 3840U, 2160U, 60U, 1U, 0, 0,
+                true, true, 3840U, 2160U, 60U, 1U, 0, 0, 3840U, 2160U,
                 "LED Processor"});
             return app::ClusterMachineInfoRequestResult::success(
                 std::move(info));
@@ -1324,7 +1324,7 @@ void program_gate_requires_bound_display_identity_and_exact_fullscreen_mode() {
             info.display_targets.push_back(net::ClusterDisplayTargetInfo{
                 7U, 2U, 0U, 0U, 0U,
                 net::ClusterVideoOutputTechnology::DisplayPort,
-                true, true, 3840U, 2160U, 60U, 1U, 0, 0, "LED"});
+                true, true, 3840U, 2160U, 60U, 1U, 0, 0, 3840U, 2160U, "LED"});
             return app::ClusterMachineInfoRequestResult::success(
                 std::move(info));
         },

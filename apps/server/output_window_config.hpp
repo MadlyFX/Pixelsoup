@@ -28,6 +28,21 @@ struct PresenterWindowSettings final {
     core::u32 refresh_denominator{};
     bool require_exact_display_mode{};
     core::u32 output_bit_depth{8U};
+    // The desktop rectangle of the display this binding names, resolved from
+    // the authored target identity rather than from where the window happens
+    // to land. Width zero means no identified display, which is the legacy
+    // launch contract: the presenter then keeps its position-based behavior.
+    //
+    // Position alone cannot select a display. Two active targets can share a
+    // desktop origin - a mirrored pair does exactly that - and asking the
+    // toolkit which display contains a point then answers with whichever one
+    // it enumerated first. The authored binding already knows which physical
+    // output it means, so the extent travels with the origin and the
+    // presenter matches a display instead of guessing one.
+    core::i32 display_bounds_x{};
+    core::i32 display_bounds_y{};
+    core::u32 display_bounds_width{};
+    core::u32 display_bounds_height{};
 
     bool operator==(const PresenterWindowSettings&) const = default;
 };

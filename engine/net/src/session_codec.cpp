@@ -940,7 +940,9 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    heartbeat_ack->tracking.plate_refusals,
                    heartbeat_ack->tracking.poses_coalesced,
                    heartbeat_ack->renderer.temporal_restarts,
-                   heartbeat_ack->renderer.temporal_restart_frame, encoded_proof, encoded_timing)
+                   heartbeat_ack->renderer.temporal_restart_frame, encoded_proof, encoded_timing,
+                   static_cast<fb::RuntimeOutputDeploymentState>(
+                       heartbeat_ack->output_deployment))
                    .Union();
     } else if (const auto* goodbye = std::get_if<Goodbye>(&message)) {
         const auto session = encode_id(goodbye->session_id);
@@ -1458,6 +1460,8 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->renderer_temporal_restarts(),
             source->renderer_temporal_restart_frame(),
         };
+        value.output_deployment = static_cast<RuntimeOutputDeploymentState>(
+            source->output_deployment());
         if (const auto* timing = source->renderer_timing()) {
             if (!timing->pass_ns() || timing->pass_ns()->size() != core::render_pass_count)
                 return core::Result<SessionMessage, SessionDecodeError>::failure(SessionDecodeError::InvalidHeartbeatAck);

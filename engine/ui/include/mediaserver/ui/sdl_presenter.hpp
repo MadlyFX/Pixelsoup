@@ -38,6 +38,20 @@ struct SdlPresenterConfig final {
     core::u32 refresh_numerator{};
     core::u32 refresh_denominator{};
     bool require_exact_display_mode{};
+    // The desktop rectangle of the display this output is bound to, resolved
+    // from the authored physical target by the caller. Width zero means the
+    // caller named no display and the legacy position-based behavior applies.
+    //
+    // With a rectangle, the presenter selects the display whose bounds equal
+    // it rather than asking which display contains the window's corner. The
+    // two differ exactly when it matters: mirrored or overlapping desktops
+    // share an origin, so a point lands on whichever display was enumerated
+    // first and an exclusive mode would be applied to the wrong screen. A
+    // rectangle that matches no display is refused, never approximated.
+    core::i32 display_bounds_x{};
+    core::i32 display_bounds_y{};
+    core::u32 display_bounds_width{};
+    core::u32 display_bounds_height{};
     // Physical output precision. Deeper formats require the native backend.
     core::u32 output_bit_depth{8U};
     // Only an operator surface reads the keyboard. A node output window is

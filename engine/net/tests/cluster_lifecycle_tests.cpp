@@ -203,7 +203,7 @@ public:
     value.display_targets.push_back(net::ClusterDisplayTargetInfo{
         0x1234U, 3U, 1U, 0x4c2dU, 0x1234U,
         net::ClusterVideoOutputTechnology::DisplayPort, true, true, 3840U,
-        2160U, 60'000U, 1'001U, 0, 0, "LED processor"});
+        2160U, 60'000U, 1'001U, 0, 0, 0U, 0U, "LED processor"});
     return value;
 }
 

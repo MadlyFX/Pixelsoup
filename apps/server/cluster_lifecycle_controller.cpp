@@ -1725,6 +1725,41 @@ ClusterLifecycleController::tracking_snapshot(
     return rows;
 }
 
+namespace {
+
+// The runtime vocabulary translated into the panel's. Kept here because this
+// is the seam that already turns cluster state into operator rows, and it
+// keeps the editor free of the session protocol.
+[[nodiscard]] editor::OutputMonitorState::Node::OutputStatus
+output_status_for(net::RuntimeOutputDeploymentState state) noexcept {
+    using Row = editor::OutputMonitorState::Node::OutputStatus;
+    switch (state) {
+    case net::RuntimeOutputDeploymentState::Unknown:
+        return Row::Unknown;
+    case net::RuntimeOutputDeploymentState::Ready:
+        return Row::Deployed;
+    case net::RuntimeOutputDeploymentState::InventoryUnavailable:
+        return Row::InventoryUnavailable;
+    case net::RuntimeOutputDeploymentState::InvalidOutputMode:
+        return Row::InvalidMode;
+    case net::RuntimeOutputDeploymentState::MissingDisplayTarget:
+        return Row::DisplayMissing;
+    case net::RuntimeOutputDeploymentState::InactiveDisplayTarget:
+        return Row::DisplayInactive;
+    case net::RuntimeOutputDeploymentState::DuplicateDisplayTarget:
+        return Row::DisplayDuplicated;
+    case net::RuntimeOutputDeploymentState::MirroredDisplayTarget:
+        return Row::DisplayMirrored;
+    case net::RuntimeOutputDeploymentState::DuplicateRenderServer:
+        return Row::DuplicateRenderServer;
+    case net::RuntimeOutputDeploymentState::PresenterUnavailable:
+        return Row::PresenterRefused;
+    }
+    return Row::Unknown;
+}
+
+} // namespace
+
 std::vector<editor::OutputMonitorState::Node>
 ClusterLifecycleController::snapshot(const net::DirectorFrameBarrier* barrier) const {
     const std::lock_guard lock{state_->mutex};
@@ -1754,6 +1789,8 @@ ClusterLifecycleController::snapshot(const net::DirectorFrameBarrier* barrier) c
                 : Connection::Disconnected;
             row.committed_frame = connection.committed_frame;
             row.target_frame = connection.target_frame;
+            row.output = output_status_for(
+                barrier->runtime_output_deployment(entry.node_index));
         }
         rows.push_back(std::move(row));
     }

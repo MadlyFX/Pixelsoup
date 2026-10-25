@@ -367,6 +367,13 @@ public:
     [[nodiscard]] bool runtime_asset_adoption(
         core::u32 node_index, core::u64 manifest_digest,
         RuntimeAssetAdoption& output) const noexcept;
+    // What this node did with its physical output bindings, independent of any
+    // manifest. Deliberately not digest-gated like the media report above: a
+    // node whose displays failed is exactly the one whose manifest will not
+    // match, and gating the reason on the digest would hide it precisely when
+    // it is needed. Unknown when the node is absent or has not reported.
+    [[nodiscard]] RuntimeOutputDeploymentState runtime_output_deployment(
+        core::u32 node_index) const noexcept;
     [[nodiscard]] std::size_t open_frames() const noexcept;
     [[nodiscard]] DirectorFrameBarrierObserverDiagnostics
     observer_diagnostics() const noexcept;

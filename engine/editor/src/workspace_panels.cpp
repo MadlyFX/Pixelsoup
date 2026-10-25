@@ -1089,6 +1089,33 @@ std::string_view output_node_connection_label(
   return "CONNECTING";
 }
 
+std::string_view output_node_deployment_label(
+    const OutputMonitorState::Node &node) noexcept {
+  using OutputStatus = OutputMonitorState::Node::OutputStatus;
+  switch (node.output) {
+  case OutputStatus::Unknown:
+  case OutputStatus::Deployed:
+    return {};
+  case OutputStatus::InventoryUnavailable:
+    return "NO DISPLAY INVENTORY ON THAT MACHINE";
+  case OutputStatus::InvalidMode:
+    return "SAVED OUTPUT MODE IS OUT OF RANGE";
+  case OutputStatus::DisplayMissing:
+    return "BOUND DISPLAY IS NOT CONNECTED";
+  case OutputStatus::DisplayInactive:
+    return "BOUND DISPLAY IS CONNECTED BUT SWITCHED OFF";
+  case OutputStatus::DisplayDuplicated:
+    return "TWO DISPLAYS CLAIM THE SAME BINDING";
+  case OutputStatus::DisplayMirrored:
+    return "BOUND DISPLAY MIRRORS ANOTHER - EXTEND THE DESKTOP";
+  case OutputStatus::DuplicateRenderServer:
+    return "TWO RENDER SERVERS CLAIM THIS NODE INDEX";
+  case OutputStatus::PresenterRefused:
+    return "DISPLAY DOES NOT OFFER THE SAVED MODE";
+  }
+  return "OUTPUT NOT DEPLOYED";
+}
+
 std::string output_node_content_label(const OutputMonitorState::Node &node) {
   using ContentStatus = OutputMonitorState::Node::ContentStatus;
   switch (node.content) {
@@ -5756,6 +5783,14 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       }
       lines.emplace_back("Editor connection", std::move(connection));
     }
+    // Above Assets deliberately. A node whose displays failed reports nothing
+    // for its renderer and its assets, so those rows read like a slow load;
+    // the operator should meet the actual reason first.
+    if (node.output_failed()) {
+      lines.emplace_back(
+          "Output", std::string{output_node_deployment_label(node)} +
+                        " - this node is not driving its displays");
+    }
     if (node.content != ContentStatus::NotRequired) {
       std::string content = output_node_content_label(node);
       if (!node.content_detail.empty()) {
@@ -6044,17 +6079,30 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
 
     const bool awaiting_connection = node.status == NodeStatus::Running &&
         node.connection != OutputMonitorState::Node::Connection::Live;
-    const gui::UiColor node_color = awaiting_connection ? theme.warning
-                                                       : status_color(node.status);
+    // A live session whose outputs never opened is the case this row used to
+    // read as healthy: the process is running and connected, and nothing it
+    // reports afterwards is true of a display. Say OUTPUT FAILED instead, and
+    // put the reason in the tooltip rather than only in the expanded detail.
+    const bool output_failed = node.output_failed();
+    const gui::UiColor node_color = output_failed ? theme.warning
+        : awaiting_connection ? theme.warning
+                              : status_color(node.status);
     std::string status_tip{status_label(node.status)};
     if (!node.detail.empty()) {
       status_tip += " - " + node.detail;
     }
-    const auto displayed_status = node.status == NodeStatus::Running
-        ? output_node_connection_label(node) : status_label(node.status);
+    const auto displayed_status = output_failed
+        ? std::string_view{"OUTPUT FAILED"}
+        : node.status == NodeStatus::Running
+            ? output_node_connection_label(node)
+            : status_label(node.status);
     if (node.status == NodeStatus::Running) {
       status_tip += " - ";
       status_tip += displayed_status;
+    }
+    if (output_failed) {
+      status_tip += " - ";
+      status_tip += output_node_deployment_label(node);
     }
     if (show_status) {
       const bool faulted = node.status == NodeStatus::Faulted ||

@@ -137,12 +137,18 @@ struct ClusterDisplayTargetInfo final {
     core::u32 height{};
     core::u32 refresh_numerator{};
     core::u32 refresh_denominator{};
-    // Local desktop placement of the active source path. These fields are
-    // consumed by the render child when it resolves project bindings on the
-    // same machine; the authenticated inventory wire intentionally omits
-    // coordinates because remote operators bind by stable target identity.
+    // Local desktop placement and extent of the active source path. These
+    // fields are consumed by the render child when it resolves project
+    // bindings on the same machine; the authenticated inventory wire
+    // intentionally omits them because remote operators bind by stable target
+    // identity. The extent is the source mode's size, which is what the
+    // desktop actually occupies - it is not the target signal size above when
+    // the driver scales, and it is what a window toolkit reports as this
+    // display's bounds.
     core::i32 desktop_x{};
     core::i32 desktop_y{};
+    core::u32 desktop_width{};
+    core::u32 desktop_height{};
     std::string name;
 
     bool operator==(const ClusterDisplayTargetInfo&) const = default;

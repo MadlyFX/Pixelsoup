@@ -181,6 +181,12 @@ int run_node_playback(net::NodeSessionService &service,
     active_deployment.legacy_single_output = true;
     active_deployment.outputs.push_back(output_presenters.front().output);
     bool node_deployment_runtime_ready = true;
+    // Reported separately from readiness so the Director can say which
+    // physical thing failed instead of inferring "not ready yet" from a
+    // process that has no presenters to report a renderer for.
+    net::RuntimeOutputDeploymentState node_output_deployment =
+        options.output ? net::RuntimeOutputDeploymentState::Unknown
+                       : net::RuntimeOutputDeploymentState::Ready;
     bool node_feed_bindings_runtime_ready = true;
     bool node_asset_runtime_ready = false;
     bool node_proxy_runtime_ready = true;
@@ -337,6 +343,7 @@ int run_node_playback(net::NodeSessionService &service,
                 node_asset_runtime_ready && node_proxy_runtime_ready &&
                     node_deployment_runtime_ready &&
                     node_feed_bindings_runtime_ready};
+            adoption.deployment = node_output_deployment;
             adoption.media_assets.assign(
                 node_media_status.begin(),
                 node_media_status.begin() +
@@ -835,6 +842,8 @@ int run_node_playback(net::NodeSessionService &service,
                                   << problem.message << '\n';
                     }
                     output_presenters.clear();
+                    node_output_deployment =
+                        runtime_output_deployment_state(wanted);
                     active_deployment = std::move(wanted);
                     node_deployment_runtime_ready = false;
                     node_feed_bindings_runtime_ready = false;
@@ -875,6 +884,13 @@ int run_node_playback(net::NodeSessionService &service,
                         // absent output is safer than driving the wrong wall.
                         output_presenters.clear();
                         node_deployment_runtime_ready = false;
+                        // The bindings resolved; the presenter refused them.
+                        // That is a different fault from a display that is
+                        // missing or mirrored, and it is the one an operator
+                        // reaches by checking the saved mode against what the
+                        // display actually advertises.
+                        node_output_deployment = net::
+                            RuntimeOutputDeploymentState::PresenterUnavailable;
                         node_feed_bindings_runtime_ready = false;
                         node_sync_request_pending = true;
                         std::cerr << "could not apply the complete output "
@@ -882,6 +898,8 @@ int run_node_playback(net::NodeSessionService &service,
                                   << options.node_index << '\n';
                     } else {
                         output_presenters = std::move(replacements);
+                        node_output_deployment =
+                            runtime_output_deployment_state(wanted);
                         active_deployment = std::move(wanted);
                         node_deployment_runtime_ready = true;
                         // A new swapchain is not a barrier member. Rejoin on
@@ -1437,6 +1455,10 @@ int run_node_playback(net::NodeSessionService &service,
         switch (status) {
         case show::PresenterStatus::Closed:
             node_deployment_runtime_ready = false;
+            // A window that went away is no longer driving its display, so
+            // the deployment is no longer in force either.
+            node_output_deployment =
+                net::RuntimeOutputDeploymentState::PresenterUnavailable;
             publish_runtime_adoption();
             closed = true;
             break;

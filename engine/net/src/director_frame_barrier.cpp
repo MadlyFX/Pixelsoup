@@ -1783,6 +1783,25 @@ bool DirectorFrameBarrier::runtime_asset_adoption(
     }
 }
 
+RuntimeOutputDeploymentState DirectorFrameBarrier::runtime_output_deployment(
+    core::u32 node_index) const noexcept {
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return RuntimeOutputDeploymentState::Unknown;
+    }
+    const auto session = std::find_if(
+        control.sessions.begin(), control.sessions.end(),
+        [node_index](const SessionSlot& candidate) noexcept {
+            return candidate.active && candidate.node_index == node_index;
+        });
+    if (session == control.sessions.end() ||
+        session->readiness != SessionReadiness::Live) {
+        return RuntimeOutputDeploymentState::Unknown;
+    }
+    return session->asset_adoption.deployment;
+}
+
 bool DirectorFrameBarrier::runtime_assets_ready(
     core::u64 manifest_digest,
     std::span<const core::u32> required_node_indices) const noexcept {

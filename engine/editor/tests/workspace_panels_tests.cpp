@@ -2140,6 +2140,48 @@ void content_labels_distinguish_missing_stale_and_verification_failures() {
   UI_CHECK(editor::output_node_content_label(node) == "ASSET VERIFY FAILED 4");
 }
 
+// A node whose displays never opened reports nothing for its renderer or its
+// assets, so every other row on it reads like a slow load. The output status
+// is the one field that separates "not driving its displays" from "not
+// finished yet", and each physical fault has to stay distinguishable: an
+// operator sent to check the assets when a display is mirrored looks in the
+// wrong place entirely.
+void output_failures_are_named_and_distinct_from_asset_failures() {
+  using OutputStatus = editor::OutputMonitorState::Node::OutputStatus;
+  editor::OutputMonitorState::Node node{};
+  // Nothing reported is not a failure, and is never evidence of success.
+  UI_CHECK(!node.output_failed());
+  UI_CHECK(editor::output_node_deployment_label(node).empty());
+
+  node.output = OutputStatus::Deployed;
+  UI_CHECK(!node.output_failed());
+  UI_CHECK(editor::output_node_deployment_label(node).empty());
+
+  node.output = OutputStatus::DisplayMirrored;
+  UI_CHECK(node.output_failed());
+  const auto mirrored = editor::output_node_deployment_label(node);
+  UI_CHECK(mirrored == "BOUND DISPLAY MIRRORS ANOTHER - EXTEND THE DESKTOP");
+
+  node.output = OutputStatus::PresenterRefused;
+  const auto refused = editor::output_node_deployment_label(node);
+  UI_CHECK(refused == "DISPLAY DOES NOT OFFER THE SAVED MODE");
+  UI_CHECK(refused != mirrored);
+
+  node.output = OutputStatus::DisplayMissing;
+  UI_CHECK(editor::output_node_deployment_label(node) !=
+           "BOUND DISPLAY IS CONNECTED BUT SWITCHED OFF");
+  node.output = OutputStatus::DisplayInactive;
+  UI_CHECK(editor::output_node_deployment_label(node) ==
+           "BOUND DISPLAY IS CONNECTED BUT SWITCHED OFF");
+
+  // A display fault says nothing about the assets, and the asset label must
+  // not start describing one.
+  node.content = editor::OutputMonitorState::Node::ContentStatus::Ready;
+  node.assets_required = 2U;
+  node.assets_ready = 2U;
+  UI_CHECK(editor::output_node_content_label(node) == "ASSETS 2/2 READY");
+}
+
 void process_running_is_distinct_from_editor_control() {
   editor::OutputMonitorState::Node node{};
   node.status = editor::OutputMonitorState::Node::Status::Running;
@@ -3109,7 +3151,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 110U> cases{{
+constexpr std::array<Case, 111U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3262,6 +3304,8 @@ constexpr std::array<Case, 110U> cases{{
     {"running process needs an editor connection", &process_running_is_distinct_from_editor_control},
     {"content labels distinguish missing stale and verification failures",
      &content_labels_distinguish_missing_stale_and_verification_failures},
+    {"output failures are named and distinct from asset failures",
+     &output_failures_are_named_and_distinct_from_asset_failures},
     {"output monitor scroll reaches later cluster nodes",
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",

@@ -733,6 +733,33 @@ struct OutputMonitorState final {
     core::RenderConformance conformance{};
     core::FrameTiming frame_timing{};
     core::u32 frame_budget_us{};
+    // Whether this node opened the physical outputs its bindings name. A node
+    // that could not has no presenters, so everything downstream of it -
+    // renderer evidence, asset readiness, the Program gate - reports the
+    // honest default and reads as "still loading". This is the one field that
+    // distinguishes the two, so it is shown on the row rather than inferred.
+    //
+    // Mirrors the runtime vocabulary rather than borrowing it, the way
+    // SyncStatus above does: a panel describes what an operator sees, and the
+    // editor does not depend on the session protocol.
+    enum class OutputStatus : core::u8 {
+      // Nothing reported. Never evidence that the outputs opened.
+      Unknown,
+      Deployed,
+      InventoryUnavailable,
+      InvalidMode,
+      DisplayMissing,
+      DisplayInactive,
+      DisplayDuplicated,
+      DisplayMirrored,
+      DuplicateRenderServer,
+      PresenterRefused,
+    } output{OutputStatus::Unknown};
+
+    [[nodiscard]] bool output_failed() const noexcept {
+      return output != OutputStatus::Unknown &&
+             output != OutputStatus::Deployed;
+    }
 
     [[nodiscard]] bool content_ready() const noexcept {
       return content == ContentStatus::NotRequired ||
@@ -845,6 +872,13 @@ output_node_content_label(const OutputMonitorState::Node &node);
 
 [[nodiscard]] std::string_view
 output_node_connection_label(const OutputMonitorState::Node &node) noexcept;
+
+// Why this node is not driving the displays its bindings name, in the words
+// an operator would use to go and fix it. Empty when nothing is wrong or
+// nothing has been reported. Kept public so tests can prove a display fault
+// stays distinguishable from an asset one without inspecting glyphs.
+[[nodiscard]] std::string_view
+output_node_deployment_label(const OutputMonitorState::Node &node) noexcept;
 
 enum class OutputLifecycleAction : core::u8 {
   Status,

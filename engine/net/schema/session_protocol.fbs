@@ -302,6 +302,28 @@ enum RuntimeRendererReadinessState:ubyte {
   InvalidPolicy = 5
 }
 
+// Whether this process actually opened the physical outputs its bindings
+// name, and if not, which specific thing stopped it.
+//
+// A node with no presenters reports a default renderer readiness, which is
+// indistinguishable from one that has simply not finished loading. The
+// Director then holds Program and tells the operator the assets are not
+// ready, while the real fault is a display that is missing, inactive,
+// mirrored, or does not offer the saved mode. These values exist so the
+// reason travels instead of being inferred from silence.
+enum RuntimeOutputDeploymentState:ubyte {
+  Unknown = 0,
+  Ready = 1,
+  InventoryUnavailable = 2,
+  InvalidOutputMode = 3,
+  MissingDisplayTarget = 4,
+  InactiveDisplayTarget = 5,
+  DuplicateDisplayTarget = 6,
+  MirroredDisplayTarget = 7,
+  DuplicateRenderServer = 8,
+  PresenterUnavailable = 9
+}
+
 table RuntimeMediaAssetStatus {
   asset_id:ulong;
   decode:RuntimeMediaDecodeState;
@@ -406,6 +428,9 @@ table HeartbeatAck {
   renderer_temporal_restart_frame:ulong;
   renderer_conformance:RenderConformance;
   renderer_timing:FrameTiming;
+  // Appended: an older peer reports Unknown, which is read as "says nothing"
+  // and never as evidence that the outputs opened.
+  output_deployment:RuntimeOutputDeploymentState;
 }
 
 // Bidirectional graceful-close notice. final_cursor is only the sender's safe
