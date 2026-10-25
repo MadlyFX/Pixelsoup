@@ -429,11 +429,10 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     // mismatch means the owner did not ask - refuse rather than render the
     // padded rectangle squashed into an unpadded target, which would look
     // almost right and be wrong everywhere.
-    const core::u32 required_width = request.output_width
-        + (padded.value().render.width - request.slice.width);
-    const core::u32 required_height = request.output_height
-        + (padded.value().render.height - request.slice.height);
-    if (width() != required_width || height() != required_height) {
+    const auto required = padded_target_extent(
+        padded.value(), request.slice, request.output_width,
+        request.output_height);
+    if (width() != required.width || height() != required.height) {
         ++diagnostics_.resource_refusals;
         return RenderProductsResult::failure(
             RenderError::InvalidConfiguration);

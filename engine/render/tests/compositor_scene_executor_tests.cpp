@@ -1765,6 +1765,79 @@ void an_apron_beyond_the_budget_is_refused_rather_than_reduced() {
     EXECUTOR_CHECK(std::move(submitted).value().wait());
 }
 
+// The target extent is one definition, shared by the compositor that sizes
+// the targets and the renderer that validates them. At a one-to-one pitch it
+// is the slice plus its apron; at any other scale the apron is already zero
+// and the extent is the output's own raster. The crop follows the same rule:
+// its offset is the apron, its extent is always the target's.
+void the_padded_target_extent_is_measured_in_target_pixels() {
+    // One-to-one: output equals the slice, so the apron is real and both the
+    // extent and the crop carry it.
+    const render::PaddedSlice padded{
+        scene::CanvasRect{0U, 0U, 40U, 36U},
+        scene::CanvasRect{4U, 2U, 32U, 32U}, 4U};
+    constexpr scene::CanvasRect slice{0U, 0U, 32U, 32U};
+    const auto one_to_one =
+        render::padded_target_extent(padded, slice, 32U, 32U);
+    EXECUTOR_CHECK(one_to_one.width == 40U);
+    EXECUTOR_CHECK(one_to_one.height == 36U);
+    const auto one_to_one_crop = render::padded_target_crop(padded, 32U, 32U);
+    EXECUTOR_CHECK(one_to_one_crop.x == 4U);
+    EXECUTOR_CHECK(one_to_one_crop.y == 2U);
+    EXECUTOR_CHECK(one_to_one_crop.width == 32U);
+    EXECUTOR_CHECK(one_to_one_crop.height == 32U);
+
+    // Scaled: padded_slice_for has already dropped the apron, so the extent
+    // is the output raster exactly - not the slice, which is what sizing the
+    // targets from the canvas rectangle used to produce.
+    const auto scaled = render::padded_target_extent(
+        render::unpadded(slice), slice, 21U, 19U);
+    EXECUTOR_CHECK(scaled.width == 21U);
+    EXECUTOR_CHECK(scaled.height == 19U);
+    const auto scaled_crop =
+        render::padded_target_crop(render::unpadded(slice), 21U, 19U);
+    EXECUTOR_CHECK(scaled_crop.x == 0U);
+    EXECUTOR_CHECK(scaled_crop.y == 0U);
+    EXECUTOR_CHECK(scaled_crop.width == 21U);
+    EXECUTOR_CHECK(scaled_crop.height == 19U);
+}
+
+// A Program preview is drawn at whatever raster its panel gives it, which is
+// routinely smaller than the slice it is showing. That is a resample: it takes
+// no apron, and its targets are its own raster rather than the slice's.
+//
+// Sizing them from the canvas-space slice refused the render on the target
+// size check instead - every frame, with the renderer reporting itself
+// satisfied. The Program then produced no picture and no asset digest, so the
+// cohort could never agree one and every output in the show held black.
+void a_slice_rendered_at_a_reduced_raster_still_draws() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 32U};
+    // A scene whose blur would demand a real apron at one-to-one, so this
+    // also proves the apron is dropped rather than merely fitting.
+    const scene::Scene value = blurred_wall_scene(canvas, 6.0F);
+    EXECUTOR_CHECK(render::apron_requirements(value).maximum() > 0U);
+    const scene::CanvasRect slice{0U, 0U, canvas.width / 2U, canvas.height};
+
+    // Deliberately not the slice extent, and not a whole-number ratio of it.
+    auto created =
+        render::CompositorSceneExecutor::create(device, 21U, 19U, test_limits());
+    EXECUTOR_CHECK(created.has_value());
+    auto executor = std::move(created).value();
+    auto acquired = device.acquire_commands();
+    EXECUTOR_CHECK(acquired.has_value());
+    auto commands = std::move(acquired).value();
+
+    const auto rendered = executor.execute(commands, value, slice);
+    EXECUTOR_CHECK(rendered.has_value());
+    EXECUTOR_CHECK(rendered.value() != nullptr);
+    EXECUTOR_CHECK(rendered.value()->width() == 21U);
+    EXECUTOR_CHECK(rendered.value()->height() == 19U);
+    auto submitted = device.submit(std::move(commands));
+    EXECUTOR_CHECK(submitted.has_value());
+    EXECUTOR_CHECK(std::move(submitted).value().wait());
+}
+
 // A D3D12 device, or none: these three cases drive the Advanced compute
 // passes, which the default backend cannot report and would skip vacuously.
 [[nodiscard]] std::optional<rhi::Device> open_advanced_device() {
@@ -2113,9 +2186,13 @@ void benchmark_led_car() {
     std::cout << " warm_median_ms=" << samples[6U] << '\n';
 }
 
-constexpr std::array<Case, 27U> cases{{
+constexpr std::array<Case, 29U> cases{{
     {"the compositor publishes what the renderer rendered",
      &the_compositor_publishes_what_the_renderer_rendered},
+    {"the padded target extent is measured in target pixels",
+     &the_padded_target_extent_is_measured_in_target_pixels},
+    {"a slice rendered at a reduced raster still draws",
+     &a_slice_rendered_at_a_reduced_raster_still_draws},
     {"a blurred wall splits across nodes byte exactly",
      &a_blurred_wall_splits_across_nodes_byte_exactly},
     {"a slice at the canvas edge clamps its apron and stays exact",

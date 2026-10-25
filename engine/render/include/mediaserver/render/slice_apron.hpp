@@ -61,6 +61,44 @@ struct PaddedSlice final {
         slice, scene::CanvasRect{0U, 0U, slice.width, slice.height}, 0U};
 }
 
+// The renderer target extent a padded slice needs, in **target** pixels.
+//
+// `render` and `crop` above are canvas-space rectangles. The targets they are
+// drawn into are not: a render whose output extent differs from its slice is a
+// resample, and its target is the output extent, not the slice. The apron is
+// the one part that is shared, and it is only ever non-zero at a one-to-one
+// pitch (see padded_slice_for), where the two spaces coincide anyway.
+//
+// This exists for the same reason padded_slice_for does. The compositor sizes
+// these targets and the renderer validates them, and when the two computed it
+// separately they agreed only at one-to-one: every scaled render - every
+// Program preview smaller than its output raster - was refused on the size
+// check, every frame, with no picture and no asset digest to show for it.
+struct PaddedTargetExtent final {
+    core::u32 width{};
+    core::u32 height{};
+
+    bool operator==(const PaddedTargetExtent&) const = default;
+};
+
+[[nodiscard]] constexpr PaddedTargetExtent padded_target_extent(
+    const PaddedSlice& padded, scene::CanvasRect frame,
+    core::u32 output_width, core::u32 output_height) noexcept {
+    return PaddedTargetExtent{
+        output_width + (padded.render.width - frame.width),
+        output_height + (padded.render.height - frame.height)};
+}
+
+// The rectangle to crop out of a padded target, in **target** pixels. The
+// offset is the apron, which is canvas-space only where the two grids
+// coincide; the extent is always the output's own, never the slice's.
+[[nodiscard]] constexpr scene::CanvasRect padded_target_crop(
+    const PaddedSlice& padded, core::u32 output_width,
+    core::u32 output_height) noexcept {
+    return scene::CanvasRect{padded.crop.x, padded.crop.y, output_width,
+                             output_height};
+}
+
 [[nodiscard]] SliceApronRequirements apron_requirements(
     const scene::Scene& scene) noexcept;
 

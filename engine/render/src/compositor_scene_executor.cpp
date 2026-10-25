@@ -1855,8 +1855,9 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         // permits: every neighbourhood pass in here clamps at its texture edge,
         // so the texture edge has to be the padded edge or a node at the canvas
         // boundary clamps somewhere the full-canvas render does not.
-        if (!reserve_padded(
-                padded.value().render.width, padded.value().render.height)) {
+        const auto padded_extent = padded_target_extent(
+            padded.value(), frame_rect, width(), height());
+        if (!reserve_padded(padded_extent.width, padded_extent.height)) {
             return CompositorSceneResult::failure(
                 RenderError::AllocationFailed);
         }
@@ -2470,9 +2471,13 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             temporal_restarts_ = restarts;
             temporal_restart_frame_ = plan.adjusted_scene.show_frame;
         }
-        const rhi::ViewportRect crop{
-            padded.value().crop.x, padded.value().crop.y,
-            padded.value().crop.width, padded.value().crop.height};
+        // Target pixels, not the canvas-space crop: a scaled render's output
+        // is its own raster, and cropping the slice's extent out of it would
+        // read past the accumulator it was just drawn into.
+        const auto target_crop =
+            padded_target_crop(padded.value(), width(), height());
+        const rhi::ViewportRect crop{target_crop.x, target_crop.y,
+                                     target_crop.width, target_crop.height};
         if (!graph_.copy(commands, core::RenderPass::Output, *accumulator, crop, output_)) {
             return CompositorSceneResult::failure(RenderError::BackendFailure);
         }
