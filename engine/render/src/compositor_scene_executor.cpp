@@ -1797,6 +1797,12 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         }
         // A scene with no drawable layers still has a renderer policy and an
         // environment clear. Enforce required Advanced and mark its colour domain.
+        //
+        // Prepared from the whole scene rather than the settings alone,
+        // because the sky this executor draws below goes through the
+        // Advanced renderer whatever backend the show selected. Asking for
+        // readiness would build only what the policy names.
+        layer_renderers_.front().prepare(plan.adjusted_scene);
         last_readiness_ = layer_renderers_.front().readiness(
             plan.adjusted_scene.renderer_settings);
         last_scene_linear_ =
@@ -1875,6 +1881,11 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 return CompositorSceneResult::failure(renderer.error());
             }
             layer_renderers_.push_back(std::move(renderer).value());
+            // Build this layer's backend here, beside the renderer that will
+            // use it, rather than leaving it to the layer's first readiness
+            // call further down the same frame. Both land on this frame; one
+            // keeps every allocation this executor makes in one place.
+            layer_renderers_.back().prepare(plan.adjusted_scene);
         }
         // Isolated layer renderers are deliberately transparent, so the
         // compositor owns the visible environment behind them. Use the one

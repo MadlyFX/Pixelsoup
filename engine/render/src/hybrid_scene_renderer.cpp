@@ -196,79 +196,120 @@ core::Result<HybridSceneRenderer, RenderError> HybridSceneRenderer::create(
                 ? RenderError::AllocationFailed
                 : RenderError::InvalidConfiguration);
     }
-    std::optional<SceneRenderer> advanced;
-    if (device.capabilities().advanced_raster()) {
-        auto created_advanced = SceneRenderer::create(
-            device, width, height, limits,
-            SceneRendererMode::AdvancedLinear);
-        if (created_advanced) {
-            advanced.emplace(std::move(created_advanced).value());
-        }
-    }
-    // The resolve, only where there is an Advanced renderer to feed it. Its
-    // absence is not an error here: a build without the shader, or a device
-    // without advanced raster, simply refuses an authored temporal request
-    // later rather than failing to construct a renderer that works fine
-    // without one.
-    std::optional<TemporalResolve> temporal;
-    if (advanced.has_value() && TemporalResolve::shaders_available()) {
-        TemporalResolveLimits temporal_limits{};
-        temporal_limits.max_targets = limits.max_temporal_history_targets;
-        auto created_temporal =
-            TemporalResolve::create(device, width, height, temporal_limits);
-        if (created_temporal) {
-            temporal.emplace(std::move(created_temporal).value());
-        }
-    }
-    std::optional<SpatialAntialias> spatial;
-    if (advanced.has_value() && SpatialAntialias::shaders_available()) {
-        auto created_spatial =
-            SpatialAntialias::create(device, width, height);
-        if (created_spatial) {
-            spatial.emplace(std::move(created_spatial).value());
-        }
-    }
-    // Bloom, on the same terms as the resolve above: present when there is an
-    // Advanced renderer and the shaders to drive it, absent without complaint
-    // otherwise, and refusing an authored request later rather than now.
-    std::optional<Bloom> bloom;
-    if (scene_effect_owner == SceneEffectOwner::Renderer && advanced.has_value() && Bloom::shaders_available()) {
-        auto created_bloom = Bloom::create(device, width, height);
-        if (created_bloom) {
-            bloom.emplace(std::move(created_bloom).value());
-        }
-    }
-    std::optional<VolumetricFog> fog;
-    if (scene_effect_owner == SceneEffectOwner::Renderer && advanced.has_value() && VolumetricFog::shaders_available()) {
-        auto created_fog =
-            VolumetricFog::create(device, width, height, FroxelGridLimits{});
-        if (created_fog) {
-            fog.emplace(std::move(created_fog).value());
-        }
-    }
     std::vector<HistorySlot> history_slots;
     try {
         history_slots.resize(limits.max_history_slots);
     } catch (const std::bad_alloc&) {
         return Result::failure(RenderError::AllocationFailed);
     }
+    // Basic only, here. The Advanced renderer and every pass that feeds off
+    // it allocate at construction and hold that memory for the renderer's
+    // life - full-extent targets, the cascade maps, the shadow atlas, the
+    // temporal history - and a show authored on Basic draws no pixel through
+    // any of it. Building them anyway cost a node its card: four of these
+    // renderers stand behind two outputs, and on six gigabytes that is the
+    // difference between media that fits and media that does not.
+    //
+    // Nothing above the renderer has to know. `readiness` builds on demand,
+    // so a scene that authors Advanced is answered with Advanced whether or
+    // not this is the first frame to ask it.
     HybridSceneRenderer renderer{
-        device, std::move(basic).value(), std::move(advanced),
+        device, std::move(basic).value(), std::nullopt,
         std::move(bridge).value(), std::move(history_slots)};
-    renderer.temporal_ = std::move(temporal);
-    renderer.spatial_ = std::move(spatial);
-    if (scene_effect_owner == SceneEffectOwner::Renderer && renderer.advanced_) {
-        auto motion = ObjectMotionBlur::create(device, width, height);
-        if (motion) renderer.motion_blur_.emplace(std::move(motion).value());
-    }
-    renderer.bloom_ = std::move(bloom);
-    renderer.fog_ = std::move(fog);
     renderer.scene_effect_owner_ = scene_effect_owner;
+    renderer.advanced_buildable_ = device.capabilities().advanced_raster();
     renderer.diagnostics_.scene_record_capacity =
         static_cast<core::u32>(records);
     renderer.diagnostics_.history_slot_capacity =
         limits.max_history_slots;
     return Result::success(std::move(renderer));
+}
+
+void HybridSceneRenderer::ensure_advanced() noexcept {
+    if (advanced_.has_value() || !advanced_buildable_ || device_ == nullptr) {
+        return;
+    }
+    // One attempt, whatever comes of it. A device that advertises advanced
+    // raster and then cannot build the renderer will not do better a frame
+    // later, and retrying would leave an allocation attempt on the frame path
+    // for as long as the show runs.
+    advanced_buildable_ = false;
+    const core::u32 width = basic_.width();
+    const core::u32 height = basic_.height();
+    const RendererLimits limits = basic_.limits();
+    auto created = SceneRenderer::create(
+        *device_, width, height, limits, SceneRendererMode::AdvancedLinear);
+    if (!created) {
+        return;
+    }
+    advanced_.emplace(std::move(created).value());
+    diagnostics_.advanced_resident = true;
+    // The resolve, only where there is an Advanced renderer to feed it. Its
+    // absence is not an error here: a build without the shader, or a device
+    // without advanced raster, simply refuses an authored temporal request
+    // later rather than failing to construct a renderer that works fine
+    // without one.
+    if (TemporalResolve::shaders_available()) {
+        TemporalResolveLimits temporal_limits{};
+        temporal_limits.max_targets = limits.max_temporal_history_targets;
+        auto created_temporal =
+            TemporalResolve::create(*device_, width, height, temporal_limits);
+        if (created_temporal) {
+            temporal_.emplace(std::move(created_temporal).value());
+        }
+    }
+    if (SpatialAntialias::shaders_available()) {
+        auto created_spatial =
+            SpatialAntialias::create(*device_, width, height);
+        if (created_spatial) {
+            spatial_.emplace(std::move(created_spatial).value());
+        }
+    }
+    if (scene_effect_owner_ != SceneEffectOwner::Renderer) {
+        return;
+    }
+    auto motion = ObjectMotionBlur::create(*device_, width, height);
+    if (motion) {
+        motion_blur_.emplace(std::move(motion).value());
+    }
+    // Bloom, on the same terms as the resolve above: present when there is an
+    // Advanced renderer and the shaders to drive it, absent without complaint
+    // otherwise, and refusing an authored request later rather than now.
+    if (Bloom::shaders_available()) {
+        auto created_bloom = Bloom::create(*device_, width, height);
+        if (created_bloom) {
+            bloom_.emplace(std::move(created_bloom).value());
+        }
+    }
+    if (VolumetricFog::shaders_available()) {
+        auto created_fog =
+            VolumetricFog::create(*device_, width, height, FroxelGridLimits{});
+        if (created_fog) {
+            fog_.emplace(std::move(created_fog).value());
+        }
+    }
+}
+
+void HybridSceneRenderer::prepare(
+    const scene::RendererSettings& settings) noexcept {
+    if (scene::clamped(settings).backend == scene::RendererBackend::Advanced) {
+        ensure_advanced();
+    }
+}
+
+void HybridSceneRenderer::prepare(const scene::Scene& value) noexcept {
+    prepare(value.renderer_settings);
+    // A sky is drawn through the Advanced renderer whichever backend the show
+    // selected - the compositor owns the environment behind its layers and
+    // reaches for `record_background` without consulting the selection. So a
+    // Basic show that authored one still needs the Advanced renderer built,
+    // and only a scene with no sky to draw may go without it. Deciding this
+    // from the authored fields rather than from residency is deliberate: an
+    // image that has not finished loading must not change what gets built.
+    if (!value.environment.map_source.empty()
+        || value.environment.physical_sky.enabled) {
+        ensure_advanced();
+    }
 }
 
 RenderFrameRequest HybridSceneRenderer::convenience_request(
@@ -309,7 +350,11 @@ RenderFrameRequest HybridSceneRenderer::convenience_request(
 }
 
 RendererReadiness HybridSceneRenderer::readiness(
-    const scene::RendererSettings& settings) const noexcept {
+    const scene::RendererSettings& settings) noexcept {
+    // Build before answering, so the answer describes what this renderer can
+    // actually do rather than what it happens to have built so far. Asking
+    // whether Advanced is available is the moment the owner commits to it.
+    prepare(settings);
     auto result = evaluate_renderer_readiness(
         settings,
         device_ != nullptr ? device_->capabilities()

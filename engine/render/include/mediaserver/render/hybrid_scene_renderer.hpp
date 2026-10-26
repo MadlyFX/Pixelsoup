@@ -258,6 +258,12 @@ struct RendererDiagnostics final {
     SceneBridgeUpdate last_bridge{};
     RendererReadiness last_readiness{};
     PaddedSlice last_padded{};
+    // Whether the Advanced renderer has been built. It is constructed the
+    // first time a scene asks for Advanced rather than alongside Basic, so a
+    // show authored on Basic never reserves its targets, cascade maps or
+    // shadow atlas. False on a device without advanced raster, and false on
+    // one that has it until something authors it.
+    bool advanced_resident{};
 
     bool operator==(const RendererDiagnostics&) const = default;
 };
@@ -424,7 +430,24 @@ public:
     // by an empty compositor plan, which still has to enforce required
     // Advanced and choose the correct colour domain without inventing a draw.
     [[nodiscard]] RendererReadiness readiness(
-        const scene::RendererSettings& settings) const noexcept;
+        const scene::RendererSettings& settings) noexcept;
+
+    // Build whatever these settings will need, before a frame needs it.
+    //
+    // The Advanced renderer is not constructed with this one. An owner that
+    // knows the policy ahead of the frame calls this at adoption and pays
+    // the allocation there; an owner that does not pays it inside the first
+    // `readiness` call instead, which is the same work one frame later.
+    // Idempotent, and a no-op for Basic or on a device that cannot run
+    // Advanced at all.
+    void prepare(const scene::RendererSettings& settings) noexcept;
+
+    // The same, for an owner holding the whole scene. It accounts for what
+    // the settings alone cannot say: a sky is drawn through the Advanced
+    // renderer whatever backend is selected, so a Basic show that authored
+    // one still needs it built. Prefer this overload wherever the scene is
+    // in hand.
+    void prepare(const scene::Scene& value) noexcept;
 
 private:
     struct HistorySlot final {
@@ -445,9 +468,16 @@ private:
           bridge_(std::move(bridge)),
           history_slots_(std::move(history_slots)) {}
 
+    // Builds the Advanced renderer and the passes that read its products.
+    // Tries once: a device that advertises advanced raster and then fails to
+    // build is not going to succeed on a later frame.
+    void ensure_advanced() noexcept;
+
     rhi::Device* device_{};
     SceneRenderer basic_;
     std::optional<SceneRenderer> advanced_;
+    // The device can run Advanced and it has not been tried yet.
+    bool advanced_buildable_{};
     // Present only when the Advanced renderer and the resolve shader both are.
     // Its absence is why an authored temporal request can still be refused.
     std::optional<TemporalResolve> temporal_;

@@ -107,6 +107,11 @@ public:
         auto created = HybridSceneRenderer::create(device_, width, height, fixture_limits());
         if (!created) return false;
         auto renderer = std::move(created).value();
+        // The Advanced renderer is built when a scene asks for it, and this
+        // harness asks by reaching for it directly rather than through a
+        // scene. Say so, or there is nothing here to compile the environment
+        // into.
+        renderer.ensure_advanced();
         if (!renderer.advanced_) return false;
         auto& raster = *renderer.advanced_;
         raster.conformance_ies_ = parse_ies_profile(

@@ -28,6 +28,30 @@ passes exist.
 See [advanced-renderer-status.md](../advanced-renderer-status.md) for the exact
 capability and integration matrix.
 
+**The Advanced renderer is built when a scene asks for it.** Every pass that
+hangs off it allocates at construction and holds that memory for the
+renderer's life - full-extent targets, the cascade maps, the shadow atlas, the
+temporal history - so building it for a show that never draws through it is a
+permanent cost for nothing. It used to be built whenever the *device* could
+run it, which meant choosing Basic in a project saved no memory at all. A
+presenter builds two of these renderers and a node builds one presenter per
+deployed output, so four of them stood behind a two-output node: on a 6 GB
+card the renderer held the whole card and media had nowhere to land.
+
+`HybridSceneRenderer::prepare` now builds it, from the adopted scene and
+outside frame recording; `readiness` prepares before it answers, so an owner
+that does not call `prepare` is still handed Advanced when it authors it,
+one frame later. Measured with `mediaserver_render_vram_benchmark` at
+1920x1080, four executors - a two-output node - a Basic show falls from
+8903 MiB to 4159 MiB. An Advanced show is unchanged at 8915 MiB, which is
+also what the Basic show used to cost, because the two were the same thing.
+
+A sky is the exception, and `prepare` takes the whole scene to catch it: the
+compositor draws the environment behind its layers through the Advanced
+renderer whatever backend the show selected, so a Basic show that authored
+`map_source` or a physical sky still builds it. Only a show with no sky to
+draw goes without.
+
 **One camera, many exact sub-frustums.** The camera is authored once, against
 the project's shared `Canvas`, and a render node never adjusts it. Instead each
 node narrows the camera to its own `CanvasRect` - an off-axis perspective

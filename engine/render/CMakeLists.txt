@@ -775,6 +775,18 @@ if(BUILD_TESTING)
     set_target_properties(mediaserver_render_geometry_benchmark PROPERTIES
         FOLDER "tests")
 
+    # Built but not registered with CTest: reports the device-local memory a
+    # scene renderer, hybrid renderer or compositor executor holds.
+    add_executable(mediaserver_render_vram_benchmark
+        tests/vram_benchmark.cpp
+    )
+    target_link_libraries(mediaserver_render_vram_benchmark
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_vram_benchmark)
+    set_target_properties(mediaserver_render_vram_benchmark PROPERTIES
+        FOLDER "tests")
+
     # Model loading is CPU-only too: it parses geometry, material parts, and
     # bounds into a ModelAsset with no GPU.
     add_executable(mediaserver_blender_scene_reference_tests

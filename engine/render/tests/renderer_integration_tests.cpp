@@ -5256,12 +5256,164 @@ void fog_settles_below_its_height() {
     RENDER_CHECK(settled_floor > settled_sky);
 }
 
+// Two of these renderers stand behind every output a node drives, and each
+// one used to build the Advanced renderer whether or not the show had any use
+// for it - full-extent targets, cascade maps, a shadow atlas and a temporal
+// history, held for the renderer's life. A node on a six-gigabyte card had
+// nothing left for media before a single plate was decoded, and choosing
+// Basic in the project bought back none of it, because the only question ever
+// asked was whether the *device* could run Advanced.
+//
+// So: a show authored on Basic leaves it unbuilt, a show that authors
+// Advanced is still answered with Advanced without its owner doing anything
+// new, and an owner that knows the policy early can pay for it early.
+void a_basic_show_builds_no_advanced_renderer() {
+    if (!render::HybridSceneRenderer::shaders_available()
+        || !rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto opened = rhi::Device::create(config);
+    RENDER_CHECK(opened);
+    auto device = std::move(opened).value();
+    if (!device.capabilities().advanced_raster()
+        || !device.capabilities().compute
+        || !device.capabilities().storage_images) {
+        return;
+    }
+
+    constexpr core::u32 width = 96U;
+    constexpr core::u32 height = 64U;
+    render::RendererLimits limits{};
+    limits.max_instances = 8U;
+    limits.max_vertices = 1024U;
+    limits.max_indices = 4096U;
+    limits.max_history_slots = 2U;
+    limits.max_temporal_history_targets = 1U;
+    limits.directional_shadow_resolution = 16U;
+    limits.shadow_atlas.extent = 32U;
+
+    scene::Scene base{};
+    base.id = scene::SceneId{911U};
+    base.document_version = doc::Version{1U};
+    base.camera_source = doc::NodeId{910U};
+    base.canvas = scene::Canvas{width, height};
+    base.camera.eye = scene::Vec3{0.0F, 0.0F, 3.0F};
+    base.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    base.camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    base.camera.field_of_view = 0.25F;
+    base.camera.near_plane = 0.1F;
+    base.camera.far_plane = 20.0F;
+    base.environment.ambient = 0.5F;
+    base.renderer_settings.shadow_cascades = 0U;
+    base.renderer_settings.gi_strength = 0.0F;
+    const auto slice = scene::whole(base.canvas);
+
+    const auto draw = [&](render::HybridSceneRenderer& renderer,
+                          const scene::Scene& value,
+                          scene::RendererBackend expected) {
+        auto acquired = device.acquire_commands();
+        RENDER_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        auto products = renderer.render_frame(
+            commands, renderer.convenience_request(value, slice, {}));
+        RENDER_CHECK(products);
+        RENDER_CHECK(products.value().readiness.selected == expected);
+        // Which renderer actually drew, rather than the same readiness field
+        // asserted twice: only the Advanced renderer works scene-linear, and
+        // this is read back off the renderer that recorded the frame.
+        RENDER_CHECK(products.value().scene_linear
+                     == (expected == scene::RendererBackend::Advanced));
+        auto submitted = device.submit(std::move(commands));
+        RENDER_CHECK(submitted);
+        RENDER_CHECK(std::move(submitted).value().wait());
+    };
+
+    {
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        RENDER_CHECK(created);
+        auto renderer = std::move(created).value();
+        RENDER_CHECK(!renderer.diagnostics().advanced_resident);
+        auto value = base;
+        value.renderer_settings.backend = scene::RendererBackend::Basic;
+        draw(renderer, value, scene::RendererBackend::Basic);
+        // A whole frame through the renderer and still nothing built. The
+        // planar target belongs to Advanced too, so it is absent with it.
+        RENDER_CHECK(!renderer.diagnostics().advanced_resident);
+        RENDER_CHECK(renderer.planar_target() == nullptr);
+    }
+
+    {
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        RENDER_CHECK(created);
+        auto renderer = std::move(created).value();
+        RENDER_CHECK(!renderer.diagnostics().advanced_resident);
+        auto value = base;
+        value.renderer_settings.backend = scene::RendererBackend::Advanced;
+        value.renderer_settings.required = true;
+        // Nothing prepared it: the first frame asks and is answered.
+        draw(renderer, value, scene::RendererBackend::Advanced);
+        RENDER_CHECK(renderer.diagnostics().advanced_resident);
+        // And a second frame reuses what the first built.
+        draw(renderer, value, scene::RendererBackend::Advanced);
+        RENDER_CHECK(renderer.diagnostics().advanced_resident);
+    }
+
+    {
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        RENDER_CHECK(created);
+        auto renderer = std::move(created).value();
+        scene::RendererSettings settings{};
+        settings.backend = scene::RendererBackend::Basic;
+        renderer.prepare(settings);
+        RENDER_CHECK(!renderer.diagnostics().advanced_resident);
+        settings.backend = scene::RendererBackend::Advanced;
+        renderer.prepare(settings);
+        RENDER_CHECK(renderer.diagnostics().advanced_resident);
+        RENDER_CHECK(renderer.readiness(settings).selected
+                     == scene::RendererBackend::Advanced);
+        // Idempotent: asking again is not a second allocation.
+        renderer.prepare(settings);
+        RENDER_CHECK(renderer.diagnostics().advanced_resident);
+    }
+
+    // The case that must not be optimised away. A compositor draws the sky
+    // behind its layers through the Advanced renderer whatever backend the
+    // show selected, so a Basic show that authored one still needs it built
+    // - and a Basic show that authored no sky is the only one that may go
+    // without. Each marker is checked on its own, against a renderer that
+    // has seen nothing else.
+    const auto resident_for = [&](const scene::Scene& value) {
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        RENDER_CHECK(created);
+        auto renderer = std::move(created).value();
+        renderer.prepare(value);
+        return renderer.diagnostics().advanced_resident;
+    };
+    auto plain = base;
+    plain.renderer_settings.backend = scene::RendererBackend::Basic;
+    RENDER_CHECK(!resident_for(plain));
+    auto mapped = plain;
+    mapped.environment.map_source = "environment/dome.exr";
+    RENDER_CHECK(resident_for(mapped));
+    auto sky = plain;
+    sky.environment.physical_sky.enabled = true;
+    RENDER_CHECK(resident_for(sky));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
 constexpr std::array cases{
+    Case{"a basic show builds no advanced renderer",
+         &a_basic_show_builds_no_advanced_renderer},
     Case{"photometric lights reach pixels and slices", &photometric_lights_reach_pixels_and_slices},
     Case{"temporal history holds repeats and resets discontinuities",
          &temporal_history_holds_repeats_and_resets_discontinuities},
