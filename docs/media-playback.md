@@ -179,6 +179,32 @@ Such a frame is held until the renderer is finished with it: releasing it
 would return the surface to the decoder's pool while a submitted command list
 is still reading it.
 
+## A clip shown smaller than its source
+
+Decoded frames carry one mip level - a decoder surface has no others - so a
+plate drawn smaller than its source is filtered in the media shader instead
+(`engine/shaders/scene_media_sampling.hlsli`). Each output pixel averages a
+grid of bilinear taps across its own footprint in the source, sized from the
+screen-space derivatives of its texture coordinate, so a 4K plate shown 100
+pixels wide reads all of the picture under each pixel instead of one texel in
+38, and fine detail averages out rather than shimmering as the plate moves.
+Each plane is filtered at its own size, and the clip's alpha coverage in the
+Advanced products uses the same filter as its colour.
+
+- A pixel at or above source size takes one tap at its own coordinate, the
+  same fetch as before; only minified pixels change.
+- Each screen axis takes its own tap count, so a plate at a grazing angle is
+  filtered along its length and stays sharp across it. A pixel takes at most
+  16 x 16 taps, which is enough for an exact average up to 32x reduction.
+- Total cost is set by the source, not the screen: one view of one plane
+  costs about a quarter of a fetch per source texel, however small the clip.
+- The result depends only on how canvas pixels map to the source, so every
+  node rendering the same canvas region at the same scale produces the same
+  pixels. A scaled preview of the canvas filters at its own scale.
+
+It does not reduce decode cost or decoded-frame memory: the full-resolution
+frame is still decoded and held.
+
 ## Clips the scene has stopped authoring
 
 A clip removed from a scene gives its memory back, which for a long time it

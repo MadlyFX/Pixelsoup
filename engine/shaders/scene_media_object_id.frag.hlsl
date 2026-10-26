@@ -11,6 +11,7 @@ Texture2D<float2> chroma_plane : register(t1, space2);
 SamplerState chroma_sampler : register(s1, space2);
 
 #include "scene_media_coverage.hlsli"
+#include "scene_media_sampling.hlsli"
 
 struct Input {
     float4 position : SV_Position;
@@ -31,8 +32,9 @@ struct Input {
 float sampled_alpha(Input input) {
     // DecodedPixelLayout::Rgba8. P010 is an opaque video plane and therefore
     // has no authored alpha channel to sample.
+    const MediaFootprint footprint = media_footprint(input.uv);
     return input.effect_range.z == 0u
-        ? primary_plane.Sample(primary_sampler, input.uv).a
+        ? media_sample_rgba(primary_plane, primary_sampler, footprint).a
         : 1.0;
 }
 

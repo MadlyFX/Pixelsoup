@@ -11,6 +11,7 @@ Texture2D<float2> chroma_plane : register(t1, space2);
 SamplerState chroma_sampler : register(s1, space2);
 
 #include "scene_media_coverage.hlsli"
+#include "scene_media_sampling.hlsli"
 #include "octahedral.hlsli"
 
 struct Input {
@@ -32,8 +33,9 @@ struct Input {
 // Chroma-keyed sources carry their coverage in the key, not in an alpha
 // channel, so a keyed clip is fully covered here and the key decides.
 float sampled_alpha(Input input) {
+    const MediaFootprint footprint = media_footprint(input.uv);
     return input.effect_range.z == 0u
-        ? primary_plane.Sample(primary_sampler, input.uv).a
+        ? media_sample_rgba(primary_plane, primary_sampler, footprint).a
         : 1.0;
 }
 

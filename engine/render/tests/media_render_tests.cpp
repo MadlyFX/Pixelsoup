@@ -2213,6 +2213,168 @@ void native_nv12_colors_match_rec709_reference_pixels() {
     }
 }
 
+// A plate far larger than the view, so clip_scene shows it about 26 source
+// texels to an output pixel. Its finest detail is one texel, which a single
+// bilinear fetch per pixel cannot represent: it lands on whatever texel the
+// pixel centre happens to hit.
+enum class FinePattern : core::u8 { Checker, Split };
+constexpr core::u32 fine_plate_size = 1024U;
+
+class FineRgbaSource final : public render::MediaSource {
+public:
+    explicit FineRgbaSource(FinePattern pattern) : pattern_(pattern) {}
+
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        render::DecodedFrame frame{};
+        frame.width = fine_plate_size;
+        frame.height = fine_plate_size;
+        frame.source_frame = frame_index;
+        frame.pixels.resize(
+            static_cast<std::size_t>(fine_plate_size) * fine_plate_size * 4U);
+        for (core::u32 y = 0U; y < fine_plate_size; ++y) {
+            for (core::u32 x = 0U; x < fine_plate_size; ++x) {
+                const auto offset =
+                    (static_cast<std::size_t>(y) * fine_plate_size + x) * 4U;
+                if (pattern_ == FinePattern::Checker) {
+                    const core::u8 value = ((x + y) % 2U) == 0U ? 255U : 0U;
+                    frame.pixels[offset + 0U] = value;
+                    frame.pixels[offset + 1U] = value;
+                    frame.pixels[offset + 2U] = value;
+                } else {
+                    const bool left = x < fine_plate_size / 2U;
+                    frame.pixels[offset + 0U] = left ? 255U : 0U;
+                    frame.pixels[offset + 1U] = left ? 0U : 255U;
+                    frame.pixels[offset + 2U] = 0U;
+                }
+                frame.pixels[offset + 3U] = 255U;
+            }
+        }
+        return frame;
+    }
+
+private:
+    FinePattern pattern_;
+};
+
+// Legal-range black and white luma alternating per texel, and chroma
+// alternating per chroma texel between two opposite colours. Each plane
+// averages to neutral grey; a pixel that reads one texel of either shows
+// black, white or a colour cast.
+class FineNv12Source final : public render::MediaSource {
+public:
+    [[nodiscard]] std::string key(
+        const std::string& source, core::u32 frame_index) const override {
+        return source + "#" + std::to_string(frame_index);
+    }
+
+    [[nodiscard]] render::MediaDecodeScheduling scheduling(
+        const std::string&) const noexcept override {
+        return render::MediaDecodeScheduling::SourceManaged;
+    }
+
+    [[nodiscard]] render::DecodedFrame decode(
+        const std::string&, core::u32 frame_index) override {
+        constexpr core::u32 size = fine_plate_size;
+        std::vector<core::u8> luma(static_cast<std::size_t>(size) * size);
+        std::vector<core::u8> chroma(static_cast<std::size_t>(size) * size / 2U);
+        for (core::u32 y = 0U; y < size; ++y) {
+            for (core::u32 x = 0U; x < size; ++x) {
+                luma[static_cast<std::size_t>(y) * size + x] =
+                    ((x + y) % 2U) == 0U ? 235U : 16U;
+            }
+        }
+        for (core::u32 y = 0U; y < size / 2U; ++y) {
+            for (core::u32 x = 0U; x < size / 2U; ++x) {
+                const bool even = ((x + y) % 2U) == 0U;
+                const auto offset = static_cast<std::size_t>(y) * size + x * 2U;
+                chroma[offset + 0U] = even ? 64U : 192U;
+                chroma[offset + 1U] = even ? 192U : 64U;
+            }
+        }
+        auto result = render::detail::pack_nv12_rec709(
+            size, size, true, luma, size, chroma, size);
+        result.source_frame = frame_index;
+        return result;
+    }
+};
+
+// Every pixel is within `tolerance` of mid grey in each colour channel.
+[[nodiscard]] bool uniformly_mid_grey(const Image& image, int tolerance) {
+    for (core::u32 y = 0U; y < image.height; ++y) {
+        for (core::u32 x = 0U; x < image.width; ++x) {
+            const auto pixel = image.at(x, y);
+            for (std::size_t channel = 0U; channel < 3U; ++channel) {
+                if (std::abs(static_cast<int>(image.rgba[pixel + channel]) - 128)
+                    > tolerance) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void a_minified_clip_averages_its_footprint_instead_of_aliasing() {
+    auto device = open_device();
+    render::MediaCache cache{
+        std::make_unique<FineRgbaSource>(FinePattern::Checker)};
+    constexpr scene::Canvas canvas{32U, 32U};
+    const Image image = render_clip(
+        device, clip_scene(canvas, "fine-checker.png"), cache);
+    // Black and white texels in equal measure under every pixel average to
+    // the code midway between them. One fetch per pixel lands on one texel
+    // or a two-texel blend, and the picture is a scatter of black, white and
+    // in-between values.
+    MEDIA_CHECK(uniformly_mid_grey(image, 4));
+}
+
+void minified_video_planes_average_their_own_footprints() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) return;
+    auto device = open_device(rhi::BackendKind::D3d12);
+    render::MediaCache cache{std::make_unique<FineNv12Source>()};
+    constexpr scene::Canvas canvas{32U, 32U};
+    const Image image = render_clip(
+        device, clip_scene(canvas, "fine-nv12.mp4"), cache);
+    MEDIA_CHECK(cache.stats().planar_uploads == 1U);
+    MEDIA_CHECK(uniformly_mid_grey(image, 4));
+}
+
+void a_minified_clip_keeps_its_edges() {
+    auto device = open_device();
+    render::MediaCache cache{
+        std::make_unique<FineRgbaSource>(FinePattern::Split)};
+    constexpr scene::Canvas canvas{32U, 32U};
+    const Image image = render_clip(
+        device, clip_scene(canvas, "fine-split.png"), cache);
+    // The filter covers one pixel's footprint and no more, so the red/green
+    // boundary stays within the pixel it falls in and at most one neighbour.
+    for (core::u32 y = 0U; y < canvas.height; ++y) {
+        core::u32 blended = 0U;
+        for (core::u32 x = 0U; x < canvas.width; ++x) {
+            const auto pixel = image.at(x, y);
+            if (image.rgba[pixel + 0U] > 20U && image.rgba[pixel + 1U] > 20U) {
+                ++blended;
+            }
+        }
+        MEDIA_CHECK(blended <= 2U);
+        const auto left = image.at(canvas.width / 4U, y);
+        const auto right = image.at((canvas.width * 3U) / 4U, y);
+        MEDIA_CHECK(image.rgba[left + 0U] > 250U && image.rgba[left + 1U] < 5U);
+        MEDIA_CHECK(image.rgba[right + 1U] > 250U && image.rgba[right + 0U] < 5U);
+    }
+}
+
 void read_ahead_wraps_at_the_loop_point() {
     auto device = open_device();
     const auto state = std::make_shared<ControlledSourceState>();
@@ -2764,11 +2926,16 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 43U> cases{{
+constexpr std::array<Case, 46U> cases{{
     {"a deleted clip releases its residency and tells its decoder",
      &a_deleted_clip_releases_its_residency_and_tells_its_decoder},
     {"native NV12 colors match Rec709 reference pixels",
      &native_nv12_colors_match_rec709_reference_pixels},
+    {"a_minified_clip_averages_its_footprint_instead_of_aliasing",
+     &a_minified_clip_averages_its_footprint_instead_of_aliasing},
+    {"minified_video_planes_average_their_own_footprints",
+     &minified_video_planes_average_their_own_footprints},
+    {"a_minified_clip_keeps_its_edges", &a_minified_clip_keeps_its_edges},
     {"a 6000 pixel still uploads across recordings without partial publication",
      &a_6000_pixel_still_uploads_across_recordings_without_partial_publication},
     {"three UHD playheads recover from shared upload budget exhaustion",

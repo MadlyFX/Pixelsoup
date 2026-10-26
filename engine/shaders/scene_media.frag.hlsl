@@ -30,6 +30,7 @@ StructuredBuffer<InlineEffectOp> inline_effects : register(t2, space2);
 StructuredBuffer<float4> inline_effect_parameters : register(t3, space2);
 
 #include "scene_media_coverage.hlsli"
+#include "scene_media_sampling.hlsli"
 
 // The same block the lit stage receives, so both agree about the project's
 // brightness curve. Only the curve selector is read here: a clip carries no
@@ -78,9 +79,10 @@ struct Input {
 };
 
 float4 sample_clip(Input input) {
+    const MediaFootprint footprint = media_footprint(input.uv);
     // DecodedPixelLayout::Rgba8.
     if (input.effect_range.z == 0u || input.effect_range.z == 3u) {
-        return primary_plane.Sample(primary_sampler, input.uv);
+        return media_sample_rgba(primary_plane, primary_sampler, footprint);
     }
 
     // Rec.709 video planes. P010 stores ten significant bits in the high bits
@@ -91,8 +93,10 @@ float4 sample_clip(Input input) {
     const bool eight_bit = input.effect_range.z >= 4u;
     const bool limited =
         input.effect_range.z == 1u || input.effect_range.z == 4u;
-    const float y_code = primary_plane.Sample(primary_sampler, input.uv).r;
-    const float2 uv_code = chroma_plane.Sample(chroma_sampler, input.uv);
+    const float y_code =
+        media_sample_rgba(primary_plane, primary_sampler, footprint).r;
+    const float2 uv_code =
+        media_sample_chroma(chroma_plane, chroma_sampler, footprint);
     const float y_offset =
         limited ? (eight_bit ? 16.0 / 255.0 : 64.0 / 1023.0) : 0.0;
     const float y_scale =
