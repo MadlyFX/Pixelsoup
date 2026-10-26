@@ -2529,6 +2529,120 @@ void authored_media_generation_refreshes_on_worker_and_replaces_cached_pixels() 
     MEDIA_CHECK(cache.stats().uploads == 1);
 }
 
+// A clip deleted from a scene has to give its memory back, and it did not.
+// The eviction that runs when the authored set changes hangs off the asset
+// generation key, and that key is zero for the entire life of any project
+// without a published package - so for those projects it never ran at all. A
+// node went up 800 MiB when one 4K plate was added and stayed there when the
+// plate was deleted, until the show was restarted. Residency is the half this
+// cache owns; the decoder behind it holds a frames pool at the clip's full
+// resolution, so it has to be told as well.
+void a_deleted_clip_releases_its_residency_and_tells_its_decoder() {
+    struct State final {
+        std::mutex guard;
+        std::vector<std::string> released;
+    };
+    class Source final : public render::MediaSource {
+    public:
+        explicit Source(std::shared_ptr<State> value)
+            : state(std::move(value)) {}
+        std::string key(const std::string& path,
+                        core::u32 frame) const override {
+            return path + "#" + std::to_string(frame);
+        }
+        bool refresh(const std::string& path) noexcept override {
+            try {
+                const std::lock_guard lock{state->guard};
+                state->released.push_back(path);
+            } catch (...) {
+                return false;
+            }
+            return true;
+        }
+        render::DecodedFrame decode(const std::string&, core::u32) override {
+            render::DecodedFrame frame;
+            frame.width = frame.height = 4;
+            frame.pixels.assign(64U, 255U);
+            return frame;
+        }
+        std::shared_ptr<State> state;
+    };
+    auto device = open_device();
+    const auto state = std::make_shared<State>();
+    render::MediaCache cache{std::make_unique<Source>(state)};
+
+    scene::MediaInstance kept;
+    kept.source = "kept.mp4";
+    scene::MediaInstance removed;
+    removed.source = "removed.mp4";
+    const std::array both{kept, removed};
+    const std::array one{kept};
+
+    // Generation zero throughout. That is the whole point: this is the
+    // project shape whose media was never reconciled against the scene.
+    // Both inside one frame, as two plates on screen together are: a clip
+    // resolved in a frame of its own is not on air in the next one.
+    const auto resolve = [&](std::span<const scene::MediaInstance> clips) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        for (;;) {
+            auto acquired = device.acquire_commands();
+            MEDIA_CHECK(acquired);
+            auto commands = std::move(acquired).value();
+            cache.begin_frame();
+            bool all = true;
+            core::u64 clip_id = 1U;
+            for (const auto& entry : clips) {
+                all = static_cast<bool>(cache.resolve(device, commands,
+                                                      entry.source, 0U,
+                                                      {0, 1}, clip_id))
+                      && all;
+                ++clip_id;
+            }
+            cache.end_frame();
+            auto submitted = device.submit(std::move(commands));
+            MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+            if (all) return;
+            MEDIA_CHECK(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::yield();
+        }
+    };
+    static_cast<void>(cache.adopt_generation(0U, both));
+    resolve(both);
+    const auto before = cache.stats();
+    MEDIA_CHECK(before.resident_frames == 2U && before.resident_bytes > 0U);
+
+    // The scene drops one clip and keeps the other.
+    static_cast<void>(cache.adopt_generation(0U, one));
+    const auto after = cache.stats();
+    MEDIA_CHECK(after.resident_frames == 1U);
+    MEDIA_CHECK(after.resident_bytes < before.resident_bytes);
+
+    // And the decoder for the departed clip was told to let go, while the
+    // one still on screen was left alone.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    for (;;) {
+        {
+            const std::lock_guard lock{state->guard};
+            if (std::find(state->released.begin(), state->released.end(),
+                          removed.source) != state->released.end()) {
+                MEDIA_CHECK(std::find(state->released.begin(),
+                                      state->released.end(), kept.source)
+                            == state->released.end());
+                break;
+            }
+        }
+        MEDIA_CHECK(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+    }
+
+    // The clip still authored keeps its frame: this released one source, not
+    // everything the cache happened to be holding.
+    resolve(one);
+    MEDIA_CHECK(cache.stats().uploads == 0U);
+}
+
 class LargeReadySource final : public render::MediaSource {
 public:
     LargeReadySource(core::u32 width, core::u32 height) {
@@ -2650,7 +2764,9 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 42U> cases{{
+constexpr std::array<Case, 43U> cases{{
+    {"a deleted clip releases its residency and tells its decoder",
+     &a_deleted_clip_releases_its_residency_and_tells_its_decoder},
     {"native NV12 colors match Rec709 reference pixels",
      &native_nv12_colors_match_rec709_reference_pixels},
     {"a 6000 pixel still uploads across recordings without partial publication",

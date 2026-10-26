@@ -86,6 +86,12 @@ struct MediaCache::AsyncDecodeState final
         bool urgent{};
         core::u64 generation{};
         std::shared_ptr<const std::vector<std::string>> refresh_sources;
+        // Paths the scene has stopped authoring. Releasing one retires its
+        // decoded frames and closes its decoder, and the decoder is where a
+        // removed plate's device memory actually sits: it holds a hardware
+        // frames pool at the clip's full resolution for as long as it is
+        // open, which on the device-decode path is dedicated video memory.
+        std::shared_ptr<const std::vector<std::string>> release_sources;
     };
 
     struct Ready final {
@@ -349,7 +355,13 @@ struct MediaCache::AsyncDecodeState final
                     if (source != nullptr) {
                         std::shared_ptr<const DecodedFrame> frame;
                         try {
-                            if(work.request.refresh_sources) {
+                            if(work.request.release_sources) {
+                                // Same teardown as an invalidation, for the
+                                // opposite reason: not because the file
+                                // changed, but because nothing refers to it.
+                                for(const auto& path : *work.request.release_sources)
+                                    static_cast<void>(source->refresh(path));
+                            } else if(work.request.refresh_sources) {
                                 for(const auto& path : *work.request.refresh_sources)
                                     static_cast<void>(source->refresh(path));
                             } else frame = std::make_shared<const DecodedFrame>(
@@ -419,6 +431,36 @@ struct MediaCache::AsyncDecodeState final
             Request request{"revision:"+std::to_string(generation_),{},0,true,generation_,refresh_sources_};
             executor_->enqueue(weak_from_this(),std::weak_ptr<MediaSource>{source_},identity_,maximum_pending_,std::move(request));
             return false;
+        } catch(...) { return false; }
+    }
+
+    // Let go of paths the scene has stopped authoring. False means the lock
+    // was busy and nothing was done, so the caller should ask again rather
+    // than record these as released: the decoded frames and the decoder
+    // behind them stay allocated until this runs.
+    [[nodiscard]] bool release_sources(
+        const std::vector<std::string>& paths) noexcept {
+        if (paths.empty()) return true;
+        try {
+            std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) return false;
+            for (auto entry = ready_.begin(); entry != ready_.end();) {
+                if (std::binary_search(paths.begin(), paths.end(),
+                                       entry->second.source)) {
+                    ready_bytes_ -= entry->second.bytes;
+                    entry = ready_.erase(entry);
+                } else {
+                    ++entry;
+                }
+            }
+            auto released =
+                std::make_shared<const std::vector<std::string>>(paths);
+            Request request{"release:" + std::to_string(generation_), {}, 0,
+                            true, generation_, {}, std::move(released)};
+            executor_->enqueue(weak_from_this(),
+                               std::weak_ptr<MediaSource>{source_}, identity_,
+                               maximum_pending_, std::move(request));
+            return true;
         } catch(...) { return false; }
     }
 
@@ -547,6 +589,8 @@ private:
             if (generation_ != request.generation) {
                 return;
             }
+            // A release carries no frame and settles no revision.
+            if(request.release_sources) { return; }
             if(request.refresh_sources) { refreshed_=true; return; }
             if (frame == nullptr
                 || frame->residency_bytes() > maximum_ready_bytes_) {
@@ -1122,8 +1166,82 @@ void MediaCache::prewarm(
     source_->prefetch(source_template, frame_index, clip);
 }
 
+void MediaCache::release_unauthored(
+    std::span<const scene::MediaInstance> media) noexcept {
+    try {
+        std::vector<std::string> authored;
+        authored.reserve(media.size());
+        for (const auto& clip : media) {
+            if (!clip.source.empty()) authored.push_back(clip.source);
+        }
+        std::sort(authored.begin(), authored.end());
+        authored.erase(std::unique(authored.begin(), authored.end()),
+                       authored.end());
+        if (authored == authored_sources_) return;
+        std::vector<std::string> departed;
+        std::set_difference(authored_sources_.begin(), authored_sources_.end(),
+                            authored.begin(), authored.end(),
+                            std::back_inserter(departed));
+        if (departed.empty()) {
+            authored_sources_ = std::move(authored);
+            return;
+        }
+        const auto gone = [&departed](const std::string& source) {
+            return std::binary_search(departed.begin(), departed.end(),
+                                      source);
+        };
+        reconcile_recordings();
+        for (auto entry = candidates_.begin(); entry != candidates_.end();) {
+            if (!gone(entry->source)) {
+                ++entry;
+                continue;
+            }
+            if (entry->state == CandidateUploadState::RecordingComplete
+                || entry->state == CandidateUploadState::RecordingPartial) {
+                // A recording in flight owns its texture until the GPU is
+                // finished with it. Mark it and let the usual path collect it.
+                entry->discard = true;
+                entry->claims.clear();
+                ++entry;
+            } else {
+                candidate_bytes_ -= entry->bytes;
+                entry = candidates_.erase(entry);
+            }
+        }
+        // Dropped outright, as a generation change drops the whole set: this
+        // is the same "the scene no longer refers to this" event, narrowed to
+        // the clips it actually happened to.
+        for (auto entry = resident_.begin(); entry != resident_.end();) {
+            const auto next = std::next(entry);
+            if (gone(entry->source)) {
+                erase(entry);
+            }
+            entry = next;
+        }
+        for (const auto& path : departed) {
+            decoded_frame_bytes_.erase(path);
+        }
+        // What was just given back should read as given back, rather than
+        // waiting for the next frame to notice.
+        refresh_resident_stats();
+        // Only remember these as gone once the decoder side has taken the
+        // list. If it was busy this frame, the same difference is computed
+        // again on the next one rather than being lost.
+        if (async_decode_->release_sources(departed)) {
+            authored_sources_ = std::move(authored);
+        }
+    } catch (...) {
+    }
+}
+
 bool MediaCache::adopt_generation(core::u64 generation,
     std::span<const scene::MediaInstance> media) noexcept {
+    // First, and whatever the generation says. A project with no published
+    // package has an asset generation key of zero for its whole life, so the
+    // early return below is this cache's ordinary path rather than a corner
+    // of it - and a plate deleted from such a scene would otherwise keep its
+    // textures, its decoded frames and its open decoder indefinitely.
+    release_unauthored(media);
     if(generation == 0) return true;
     if(authored_generation_ != generation) {
         preloaded_keys_.clear();

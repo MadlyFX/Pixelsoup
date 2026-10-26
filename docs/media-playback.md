@@ -179,6 +179,28 @@ Such a frame is held until the renderer is finished with it: releasing it
 would return the surface to the decoder's pool while a submitted command list
 is still reading it.
 
+## Clips the scene has stopped authoring
+
+A clip removed from a scene gives its memory back, which for a long time it
+did not. Removing one 4K plate from a show on a 6 GB node left around 800 MiB
+held until the show was restarted, because the only eviction keyed on a
+change of authored media hung off the asset generation key - and that key is
+zero for the whole life of any project without a published package, so for
+those projects it never ran at all.
+
+The cache now compares the authored source list against the one it last saw,
+whatever that key says. A source that has gone loses its resident textures,
+its pending uploads and its decoded-frame accounting here, and the decode
+side is asked to let go of it: that retires its ready frames and closes its
+decoder. Closing the decoder is the part that matters on a node, because an
+open one holds a hardware frames pool at the clip's full resolution, and on
+the device-decode path above that pool is dedicated video memory.
+
+The request travels the ordinary worker queue rather than blocking the frame
+path, and a source is recorded as released only once that queue has taken it,
+so a busy frame defers the work rather than losing it. The cost of letting go
+is that bringing the clip back reopens its decoder and walks to a keyframe.
+
 ## Performance qualification
 
 Video decoder continuity is retained per clip playhead; equal source-frame

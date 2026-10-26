@@ -1169,6 +1169,21 @@ class FfmpegSource final : public MediaSource {
         return source + "#f" + std::to_string(frame_index);
     }
 
+    // Close this source's decoder, whether the file changed underneath it or
+    // the scene simply stopped referring to it. An open decoder holds a
+    // hardware frames pool at the clip's full resolution, so one that nothing
+    // is going to ask for again is pure cost - and on the device-decode path
+    // that cost is dedicated video memory. Reopening walks to a keyframe,
+    // which is the price of letting go.
+    [[nodiscard]] bool refresh(const std::string &source) noexcept override {
+        try {
+            decoders_.erase(source);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     [[nodiscard]] DecodedFrame decode(const std::string &source,
                                       core::u32 frame_index) override {
         auto found = decoders_.find(source);

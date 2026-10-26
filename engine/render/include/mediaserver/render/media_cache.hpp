@@ -163,6 +163,18 @@ class MediaCache final {
   private:
     struct AsyncDecodeState;
     core::u64 authored_generation_{};
+    // Release everything held for clips the scene has stopped authoring:
+    // resident textures, pending uploads, decoded frames and the decoders
+    // behind them. Driven by the authored source list rather than by the
+    // asset generation key, because that key is zero for the whole life of
+    // any project without a published package, and a deleted plate has to
+    // give its memory back in those projects too.
+    void release_unauthored(
+        std::span<const scene::MediaInstance> media) noexcept;
+    // The distinct source paths the scene last authored, sorted. The only
+    // record of what was here before, and so the only way to notice a clip
+    // that has gone.
+    std::vector<std::string> authored_sources_;
 
     struct ResidentFrame final {
         std::string key;
