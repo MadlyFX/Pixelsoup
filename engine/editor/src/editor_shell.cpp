@@ -5196,9 +5196,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     if (panel == panel_hardware_mapping) {
       HardwareMappingFrame mapping =
+          // The authored canvas, as Feed Mapping uses: `stage_scene` carries
+          // the Stage viewport's own pixel size in its place.
           impl.hardware_mapping_panel.draw(ui, bounds, hardware_map,
                                            hardware_runtime, sync_policy,
-                                           stage_scene.canvas);
+                                           scene.canvas);
       if (mapping.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Hardware;
       }

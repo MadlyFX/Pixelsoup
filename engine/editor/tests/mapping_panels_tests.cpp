@@ -212,6 +212,24 @@ struct HardwareHarness final {
                       topology::HardwareRuntimeSnapshot{}, sync::SyncPolicy{},
                       canvas);
   }
+
+  editor::HardwareMappingFrame canvas_input(float x, float y,
+                                            std::string_view text,
+                                            std::optional<gui::Key> key,
+                                            scene::Canvas canvas) {
+    input.new_frame();
+    input.set_mouse_position(x, y);
+    if (!text.empty()) {
+      input.add_text(text);
+    }
+    if (key.has_value()) {
+      input.add_key(*key);
+    }
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, topology::HardwareMap{},
+                      topology::HardwareRuntimeSnapshot{}, sync::SyncPolicy{},
+                      canvas);
+  }
 };
 
 // The synchronization policy is a project setting authored beside the control
@@ -746,6 +764,20 @@ void project_setup_authors_the_scene_canvas() {
   static_cast<void>(empty.canvas_frame(x, y, true, scene::Canvas{}));
   const auto none = empty.canvas_frame(x + 12.0F, y, true, scene::Canvas{});
   MAPPING_CHECK(!none.canvas_edit.has_value());
+
+  // A wall-sized canvas is typed, not scrubbed: a click opens the field and
+  // Enter authors exactly the typed size.
+  HardwareHarness typed;
+  const scene::Canvas small{1'428U, 819U};
+  static_cast<void>(typed.canvas_frame(x, y, false, small));
+  static_cast<void>(typed.canvas_frame(x, y, true, small));
+  static_cast<void>(typed.canvas_frame(x, y, false, small));
+  MAPPING_CHECK(typed.ctx.typing());
+  static_cast<void>(typed.canvas_input(x, y, "11520", std::nullopt, small));
+  const auto entered =
+      typed.canvas_input(x, y, {}, gui::Key::Enter, small);
+  MAPPING_CHECK(entered.canvas_edit.has_value());
+  MAPPING_CHECK(entered.canvas_edit->canvas == (scene::Canvas{11'520U, 819U}));
 }
 
 void render_server_details_author_launch_geometry_and_not_control_targets() {
