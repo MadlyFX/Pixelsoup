@@ -108,9 +108,12 @@ enum class TextureFormat : core::u8 {
     // Stable document/object identity. Integer data is never color converted.
     R32Uint,
     // Video-plane sampling formats. R16 carries P010 luma and Rg16 its
-    // interleaved chroma; neither is a presentation format.
+    // interleaved chroma, R8 and Rg8 the same pair for eight-bit NV12; none of
+    // them is a presentation format.
     R16Unorm,
     Rg16Unorm,
+    R8Unorm,
+    Rg8Unorm,
     // A depth buffer. Never sampled and never presented; it exists so that
     // triangles occlude each other correctly, and it is the only non-colour
     // format this seam has a use for.
@@ -1391,6 +1394,15 @@ struct DeviceConfig final {
     BackendKind backend{BackendKind::SdlGpu};
 };
 
+// The two planes of a hardware-decoded video frame, as this device reads them.
+// Neither texture owns the decoded surface; both stop being valid when the
+// decoder reclaims it, which is why the caller holds the frame until both are
+// safe to release.
+struct ExternalVideoPlanes final {
+    Texture luma;
+    Texture chroma;
+};
+
 // The GPU device. One per process; every resource above is created from it and
 // must not outlive it.
 class Device final {
@@ -1411,6 +1423,12 @@ public:
 
     [[nodiscard]] core::RenderAdapterIdentity adapter_identity() const noexcept;
     [[nodiscard]] std::string_view driver_name() const noexcept;
+
+    // Memory the chosen adapter has to itself, in bytes. Zero on an
+    // integrated part and on backends that do not report it. Callers that
+    // size a GPU-resident budget need this rather than a fixed number: a
+    // laptop node and a workstation differ by an order of magnitude.
+    [[nodiscard]] core::u64 dedicated_video_memory_bytes() const noexcept;
     [[nodiscard]] bool supports(ShaderFormat format) const noexcept;
     [[nodiscard]] bool supports(TextureFormat format) const noexcept;
     [[nodiscard]] const DeviceCapabilities& capabilities() const noexcept {
@@ -1486,6 +1504,25 @@ public:
     // consumes the list either way: a command buffer cannot be re-submitted.
     [[nodiscard]] core::Result<SubmittedWork, RhiError> submit(
         CommandList commands) noexcept;
+
+    // Plane views of a frame a hardware video decoder wrote on this same
+    // device, so the picture is sampled where it was decoded instead of being
+    // read back to system memory and uploaded again. `resource` names the
+    // decoder's own NV12 surface; the two textures read its luma and chroma
+    // planes and never own, write, or outlive it - the caller keeps the frame
+    // alive until both report safe_to_release().
+    //
+    // Only a backend reporting `external_memory` can do this; the others
+    // refuse, and their callers keep decoding through system memory.
+    // `luma` and `chroma` say how deep the surface's samples are: R8/Rg8 for
+    // eight-bit NV12, R16/Rg16 for ten-bit P010. They have to match what the
+    // decoder actually produced; a pair that does not is refused rather than
+    // reinterpreted, because reading a ten-bit plane as eight bits is not a
+    // worse picture, it is a different one.
+    [[nodiscard]] core::Result<ExternalVideoPlanes, RhiError>
+    import_video_planes(const NativeHandle& resource, core::u32 width,
+                        core::u32 height, TextureFormat luma,
+                        TextureFormat chroma) noexcept;
 
     // Whether swapchains from this device can join a vendor present barrier,
     // and the operator-readable reason when they cannot.

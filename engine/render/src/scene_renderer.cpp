@@ -1605,6 +1605,10 @@ Result SceneRenderer::create(
     if (!blobs.present) {
         return Result::failure(RenderError::ShaderFormatUnsupported);
     }
+    // Every scene renderer names its device as a candidate for video decode.
+    // A scene is the only thing that samples media, so this is the complete
+    // set the decoder has to agree with.
+    offer_video_decode_device(device);
     if (width == 0U || height == 0U || limits.max_instances == 0U
         || limits.max_history_slots == 0U
         || limits.max_model_refresh_generations == 0U
@@ -1689,8 +1693,8 @@ Result SceneRenderer::create(
     }
 
     // Media uses the same pulled vertex stage and binds two source slots. RGBA
-    // clips use the first and ignore the fallback second slot; P010 clips bind
-    // luma and chroma directly and convert in this fragment stage. It always
+    // clips use the first and ignore the fallback second slot; planar video
+    // binds luma and chroma directly and converts in this fragment stage. It always
     // goes through a compositing pipeline because source pixels may have alpha.
     rhi::ShaderDesc media_fragment{};
     media_fragment.stage = rhi::ShaderStage::Fragment;

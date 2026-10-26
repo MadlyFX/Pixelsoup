@@ -52,7 +52,8 @@ struct MediaLoopWindow final {
 };
 
 // One frame in GPU residency. Ordinary decoded images use `primary` as RGBA.
-// P010 video uses it as the R16 luma plane and supplies an RG16 chroma plane;
+// Planar video uses it as the luma plane and supplies an interleaved chroma
+// plane beside it (R16/RG16 for P010, R8/RG8 for NV12);
 // the scene media shader samples both directly. The pointers remain valid for
 // the command-list frame bracketed by MediaCache::begin_frame/end_frame.
 struct ResolvedMediaFrame final {
@@ -61,8 +62,7 @@ struct ResolvedMediaFrame final {
     DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
 
     [[nodiscard]] bool planar() const noexcept {
-        return layout == DecodedPixelLayout::P010Rec709Limited ||
-               layout == DecodedPixelLayout::P010Rec709Full;
+        return planar_video(layout);
     }
 
     [[nodiscard]] explicit operator bool() const noexcept {
@@ -168,11 +168,15 @@ class MediaCache final {
         std::string key;
         std::string source;
         DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
-        // RGBA for ordinary frames; R16 luma for P010.
+        // RGBA for ordinary frames; the luma plane for planar video.
         rhi::Texture texture;
         rhi::Texture chroma_plane;
         std::size_t bytes{};
         bool pinned{};
+        // A frame decoded straight onto this device: these textures are plane
+        // views of the decoder's own surface, and this reference is what stops
+        // the decoder reusing it underneath them.
+        std::shared_ptr<void> retained;
     };
 
     enum class CandidateUploadState : core::u8 {
@@ -254,9 +258,17 @@ class MediaCache final {
     // need twelve reusable slots when the playheads differ, while identical
     // (source, frame) pairs collapse to one. Bytes include the sampled texture
     // and its same-sized persistent streaming-upload buffer.
-    static constexpr std::size_t max_resident_frames = 16U;
+    //
+    // The frame counts are slot bounds, not memory bounds - `max_resident_bytes`
+    // is what stops the cache growing. They have to clear a show's whole
+    // working set at once, which for frames the decoder keeps on the device is
+    // every read-ahead frame it holds and not merely the ones on screen: such a
+    // frame cannot be evicted while the GPU may still be reading it, so a slot
+    // count that only covers the visible clips leaves nowhere to put the next
+    // one and the placements hold instead.
+    static constexpr std::size_t max_resident_frames = 64U;
     static constexpr std::size_t max_resident_bytes = 512U * 1024U * 1024U;
-    static constexpr std::size_t max_upload_candidates = 16U;
+    static constexpr std::size_t max_upload_candidates = 32U;
     static constexpr std::size_t max_preloaded_frames = 8U;
     static constexpr std::size_t max_preloaded_bytes = 128U * 1024U * 1024U;
     // Valid backends expose at most four recording contexts. Extra slots make
@@ -284,6 +296,13 @@ class MediaCache final {
         rhi::Device& device, rhi::CommandList& commands,
         const std::string& source_template, const std::string& resolved_key,
         core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame);
+    // The same publication for a frame the decoder left on this device, which
+    // is adopted as plane views rather than uploaded.
+    [[nodiscard]] ResolvedMediaFrame import_decoded(
+        rhi::Device& device, rhi::CommandList& commands,
+        const std::string& source_template, const std::string& resolved_key,
+        core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame,
+        CandidateList::iterator candidate);
     [[nodiscard]] const DeferredSnapshot* recording_snapshot(
         const rhi::CommandRecordingToken &recording,
         const std::string &key, core::u64 clip) const noexcept;

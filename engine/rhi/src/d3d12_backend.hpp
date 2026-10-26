@@ -40,6 +40,7 @@ create_d3d12_device(const DeviceConfig& config) noexcept;
 void destroy_d3d12_device(void* state) noexcept;
 [[nodiscard]] core::RenderAdapterIdentity d3d12_adapter_identity(void* state) noexcept;
 [[nodiscard]] std::string_view d3d12_driver_name(void* state) noexcept;
+[[nodiscard]] core::u64 d3d12_dedicated_video_memory(void* state) noexcept;
 [[nodiscard]] bool d3d12_supports_shader(ShaderFormat format) noexcept;
 [[nodiscard]] bool d3d12_supports_texture(
     void* state, TextureFormat format) noexcept;
@@ -62,6 +63,10 @@ d3d12_present_barrier_images(void* swapchain) noexcept;
 
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
 d3d12_create_texture(void* state, const TextureDesc& desc) noexcept;
+[[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
+d3d12_import_video_plane(
+    void* state, void* resource, core::u32 width, core::u32 height,
+    TextureFormat format, core::u32 plane) noexcept;
 void d3d12_release_texture(void* state, void* texture) noexcept;
 
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>

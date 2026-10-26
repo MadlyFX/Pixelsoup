@@ -11,7 +11,8 @@
 // exposure are a later increment.
 //
 // Register spaces follow the SDL_GPU DXIL convention. Slot zero is either an
-// RGBA clip or P010 luma; slot one is P010 chroma and ignored for RGBA clips.
+// RGBA clip or video luma; slot one is the interleaved chroma plane and is
+// ignored for RGBA clips.
 
 Texture2D<float4> primary_plane : register(t0, space2);
 SamplerState primary_sampler : register(s0, space2);
@@ -82,18 +83,25 @@ float4 sample_clip(Input input) {
         return primary_plane.Sample(primary_sampler, input.uv);
     }
 
-    // P010 stores ten significant bits in the high bits of each R16/RG16
-    // texel. UNORM sampling reconstructs approximately code / 1023. The scene
-    // consumes encoded RGB, matching the old intermediate conversion texture.
+    // Rec.709 video planes. P010 stores ten significant bits in the high bits
+    // of each R16/RG16 texel, so UNORM sampling reconstructs approximately
+    // code / 1023; NV12 is plain eight-bit and reconstructs code / 255. The
+    // scene consumes encoded RGB, matching the old intermediate conversion
+    // texture.
+    const bool eight_bit = input.effect_range.z >= 4u;
+    const bool limited =
+        input.effect_range.z == 1u || input.effect_range.z == 4u;
     const float y_code = primary_plane.Sample(primary_sampler, input.uv).r;
     const float2 uv_code = chroma_plane.Sample(chroma_sampler, input.uv);
-    const bool limited = input.effect_range.z == 1u;
-    const float y_offset = limited ? 64.0 / 1023.0 : 0.0;
-    const float y_scale = limited ? 1023.0 / 876.0 : 1.0;
-    const float chroma_scale = limited ? 1023.0 / 896.0 : 1.0;
+    const float y_offset =
+        limited ? (eight_bit ? 16.0 / 255.0 : 64.0 / 1023.0) : 0.0;
+    const float y_scale =
+        limited ? (eight_bit ? 255.0 / 219.0 : 1023.0 / 876.0) : 1.0;
+    const float chroma_scale =
+        limited ? (eight_bit ? 255.0 / 224.0 : 1023.0 / 896.0) : 1.0;
+    const float chroma_centre = eight_bit ? 128.0 / 255.0 : 512.0 / 1023.0;
     const float y = (y_code - y_offset) * y_scale;
-    const float2 chroma =
-        (uv_code - 512.0 / 1023.0) * chroma_scale;
+    const float2 chroma = (uv_code - chroma_centre) * chroma_scale;
     const float3 encoded_rgb = float3(
         y + 1.5748 * chroma.y,
         y - 0.187324 * chroma.x - 0.468124 * chroma.y,

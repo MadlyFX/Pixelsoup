@@ -193,6 +193,17 @@ struct MediaDecodeConfig final {
 void configure_buffered_output_media_decode(
     MediaDecodeConfig config = MediaDecodeConfig{}) noexcept;
 
+// Offers the device a scene is rendered on as the one video is decoded onto,
+// so a hardware-decoded frame can be sampled where it was produced instead of
+// being read back to system memory and uploaded again. Every SceneRenderer
+// offers its device; the call is cheap and repeating it is harmless.
+//
+// Only a device that can read a decoder's surfaces is taken, and only while
+// every scene in the process renders on that same one: a decoded surface
+// belongs to the device that made it, so a second scene device retires the
+// path and leaves both rendering from system memory.
+void offer_video_decode_device(const rhi::Device &device) noexcept;
+
 // The number of frames a media file holds, for a clip's loop length: a video's
 // frame count, or 1 for a still image (and on any failure). Opens and probes
 // the file, so it is called once when a clip is added, not per frame.

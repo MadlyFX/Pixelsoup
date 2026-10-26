@@ -69,6 +69,10 @@ std::atomic<core::u64> next_recording_identity{1U};
         return SDL_GPU_TEXTUREFORMAT_R16_UNORM;
     case TextureFormat::Rg16Unorm:
         return SDL_GPU_TEXTUREFORMAT_R16G16_UNORM;
+    case TextureFormat::R8Unorm:
+        return SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    case TextureFormat::Rg8Unorm:
+        return SDL_GPU_TEXTUREFORMAT_R8G8_UNORM;
     case TextureFormat::Depth32Float:
         return SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     case TextureFormat::Rgba8Unorm:
@@ -83,7 +87,10 @@ std::atomic<core::u64> next_recording_identity{1U};
     case TextureFormat::Bc7Unorm:
     case TextureFormat::Bc5Unorm: return 0U;
     case TextureFormat::R16Unorm:
+    case TextureFormat::Rg8Unorm:
         return 2U;
+    case TextureFormat::R8Unorm:
+        return 1U;
     case TextureFormat::Rg16Float:
         return 4U;
     case TextureFormat::Rgba16Float:
@@ -1931,6 +1938,13 @@ std::string_view Device::driver_name() const noexcept {
     return name == nullptr ? std::string_view{} : std::string_view{name};
 }
 
+core::u64 Device::dedicated_video_memory_bytes() const noexcept {
+    if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
+        return 0U;
+    }
+    return detail::d3d12_dedicated_video_memory(handle_);
+}
+
 bool Device::supports(ShaderFormat format) const noexcept {
     if (handle_ == nullptr) {
         return false;
@@ -1954,6 +1968,55 @@ bool Device::supports(TextureFormat format) const noexcept {
         : SDL_GPU_TEXTUREUSAGE_SAMPLER;
     return SDL_GPUTextureSupportsFormat(
         as_device(handle_), as_format(format), SDL_GPU_TEXTURETYPE_2D, usage);
+}
+
+core::Result<ExternalVideoPlanes, RhiError> Device::import_video_planes(
+    const NativeHandle& resource, core::u32 width, core::u32 height,
+    TextureFormat luma_format, TextureFormat chroma_format) noexcept {
+    using Result = core::Result<ExternalVideoPlanes, RhiError>;
+    // A chroma plane is half-sized in both axes, so an odd extent has no
+    // plane to name. The two depths below are the only pairs any video
+    // surface this renderer reads is laid out in.
+    const bool eight_bit = luma_format == TextureFormat::R8Unorm
+        && chroma_format == TextureFormat::Rg8Unorm;
+    const bool ten_bit = luma_format == TextureFormat::R16Unorm
+        && chroma_format == TextureFormat::Rg16Unorm;
+    if (!capabilities_.external_memory || handle_ == nullptr ||
+        resource.backend != capabilities_.backend ||
+        resource.object != NativeObjectKind::Texture ||
+        resource.value == nullptr || width % 2U != 0U || height % 2U != 0U ||
+        (!eight_bit && !ten_bit)) {
+        return Result::failure(RhiError::Unavailable);
+    }
+    const auto plane = [&](core::u32 index, TextureFormat format,
+                           core::u32 plane_width, core::u32 plane_height) {
+        return detail::d3d12_import_video_plane(
+            handle_, resource.value, plane_width, plane_height, format, index);
+    };
+    auto luma = plane(0U, luma_format, width, height);
+    if (!luma) {
+        return Result::failure(luma.error());
+    }
+    auto chroma = plane(1U, chroma_format, width / 2U, height / 2U);
+    if (!chroma) {
+        Texture discarded{*this, luma.value().state, luma.value().native,
+                          capabilities_.backend, TextureDesc{}};
+        return Result::failure(chroma.error());
+    }
+    TextureDesc luma_desc{};
+    luma_desc.width = width;
+    luma_desc.height = height;
+    luma_desc.format = luma_format;
+    luma_desc.sampled = true;
+    TextureDesc chroma_desc = luma_desc;
+    chroma_desc.width = width / 2U;
+    chroma_desc.height = height / 2U;
+    chroma_desc.format = chroma_format;
+    return Result::success(ExternalVideoPlanes{
+        Texture{*this, luma.value().state, luma.value().native,
+                capabilities_.backend, luma_desc},
+        Texture{*this, chroma.value().state, chroma.value().native,
+                capabilities_.backend, chroma_desc}});
 }
 
 core::Result<Texture, RhiError> Device::create_texture(

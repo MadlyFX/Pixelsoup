@@ -41,6 +41,12 @@ also compete for this budget. Output dimensions, available GPU memory and
 actual decode/upload throughput remain separate limits. Increasing output
 resolution does not increase decode or upload capacity.
 
+A frame decoded onto the renderer's own device is exempt from that budget,
+because it occupies no memory the cache allocated: see the section below. The
+decode scheduler bounds those frames separately, at a sixth of the chosen
+adapter's own memory (clamped to 256 MiB … 2 GiB) — about 1 GiB on a 6 GB
+node, or twenty 4K frames of read-ahead for each of four plates.
+
 ## Professional codecs
 
 The Windows GUI dependency build includes FFmpeg decoders for ProRes,
@@ -56,16 +62,122 @@ there is no dedicated codec mode to enable.
 | NotchLC | FFmpeg decoder present; software path only. Representative production-file correctness and throughput have not been qualified. |
 
 These decoder entries are not a promise of real-time playback for every
-resolution or profile. The current generic software video conversion produces
-RGBA8, including high-bit-depth ProRes and DNxHR input. It does not preserve
-their full source precision through that conversion. Hardware-decoded Rec.709
+resolution or profile. None of the hardware paths below apply to them: they
+have no hardware decoder, so they neither reach the renderer's device
+directly nor avoid the CPU conversion.
+
+What they do share is the two-plane destination. A software conversion lands
+on luma plus one interleaved chroma plane, at the source's own depth and its
+own subsampling, rather than on eight-bit RGBA:
+
+| source | destination | bytes/pixel (RGBA8 was 4) |
+| --- | --- | --- |
+| 4:2:0 8-bit | NV12 | 1.5 |
+| 4:2:2 8-bit | NV16 | 2 |
+| 4:4:4 8-bit | NV24 | 3 |
+| 4:2:0 10/12-bit | P010 | 3 |
+| 4:2:2 10/12-bit | P210 | 4 |
+| 4:4:4 10/12-bit | P410 | 6 |
+
+Ten bits reach the GPU as ten bits, and a 4:2:2 master stays 4:2:2 instead of
+having half its chroma resolution resampled away to fit one fixed shape.
+Anything deeper than ten bits is carried at ten, which is what the media
+shader reads.
+
+Where the source already says what the destination says, the renderer does
+the conversion itself rather than calling libswscale: copy the luma rows,
+interleave U and V, and shift each sample so its top bit reaches the top of
+its word. That shift is what makes depth irrelevant - a code filling the top
+of a sixteen-bit word is the same fraction of full scale whether it came from
+ten bits or twelve - so there is no separate high-bit-depth path.
+
+It runs only when nothing but data movement is wanted: one plane per
+component, little-endian, no bit offsets, and a colour resolving to Rec.709,
+with the range choosing between the Limited and Full layouts so neither needs
+levelling. Another matrix, alpha, RGB or an unusual plane layout still goes
+through libswscale, and a frame the pack refuses hands its clip back to
+libswscale rather than failing.
+
+Measured on an RTX 3090 at 3840x2160, conversion time per frame:
+
+| | ProRes 422 HQ 10-bit | H.264 4:2:0 8-bit |
+| --- | --- | --- |
+| libswscale → RGBA8 | 16.9 ms | 5.9 ms |
+| libswscale → two planes | 19.5 ms | 3.3 ms |
+| the pack above | **7.0 ms** | **3.5 ms** |
+
+libswscale has no tuned ten-bit semi-planar converter, which is the whole of
+that difference; its eight-bit paths are good and show no gain. End to end,
+one 4K ProRes 422 HQ plate at 24 fps reaches `ready_ratio` 0.958. High
+-bit-depth 4:4:4 still uploads half as much again as RGBA8 did, which is the
+one shape that costs bandwidth to keep its depth.
+
+A source keeps the interleaved RGBA destination when it has an alpha channel,
+when it is already RGB, when its subsampling has no two-plane equivalent, or
+when its colour cannot be resolved to Rec.709 - which includes untagged
+standard definition, where guessing between the 601 variants would be worse
+than converting. Hardware-decoded Rec.709
 P010 has a separate two-plane 10-bit path on supported Advanced configurations.
-Hardware-decoded limited-range Rec.709 NV12 uses that same path: its 8-bit
-codes are promoted exactly on the decode worker, avoiding CPU colour
-conversion and reducing frame storage/upload from four to three bytes per
-pixel. Full-range, untagged and other colour spaces retain the generic path.
+Hardware-decoded Rec.709 NV12, in either range, travels as eight-bit video
+planes: no CPU colour conversion, and one and a half bytes per pixel stored
+and uploaded instead of four. Colour spaces other than Rec.709 retain the
+generic path.
+
+H.264 and HEVC omit their colour description unless an encoder writes one,
+which camera originals routinely do not. An unspecified range is limited by
+definition, and an unspecified matrix at 720 lines or more is read as
+Rec.709 - so such a plate takes the video-plane path rather than a CPU
+conversion, and is converted with the right matrix either way. Standard
+definition stays unresolved rather than guessing between the 601 variants.
 HDR transfer-function handling and additional high-bit-depth video layouts
 need explicit qualification before using them for precision-critical delivery.
+
+## Which GPU decodes and renders
+
+A machine with more than one adapter is the normal case for a laptop node, and
+the wrong choice is expensive: the integrated part has a fraction of the
+decode rate and, with 128 MiB of dedicated memory against a discrete card's
+several gigabytes, cannot hold even two 4K video surfaces.
+
+Both the D3D12 device and the hardware decoder therefore choose the adapter
+with the most memory of its own, rather than accepting a platform default.
+DXGI's `HIGH_PERFORMANCE` preference is not reliable for this: on at least one
+laptop in this cluster it answers with the integrated Intel part first, ahead
+of an RTX 2060. Dedicated memory is the honest discriminator, because an
+integrated adapter shares system memory and reports almost none of its own.
+
+The decode budget below is sized from that adapter in turn, so the same build
+reads a laptop node and a workstation differently instead of assuming either.
+
+## Decoding onto the renderer's device
+
+On the native D3D12 backend - the output nodes and scene views - plates are
+decoded straight onto the device the scene renders with, and the renderer
+samples the decoder's own surface as two plane views. Nothing is read back to
+system memory and nothing is uploaded, which removes both the largest cost in
+the media path and all of its PCIe traffic.
+
+This needs every one of the following, and falls back to the system-memory
+video-plane path per source when any of them is not true:
+
+- the renderer is on the native D3D12 backend; SDL Basic keeps the
+  system-memory path;
+- the process renders scenes on one device. A decoded surface belongs to the
+  device that made it, so a second scene device retires the path rather than
+  handing a surface to the wrong one;
+- the decoder's surface is exactly the picture size. A shader samples a whole
+  mip in normalized coordinates and no view can crop one, so a surface padded
+  out to a macroblock grid would stretch the picture;
+- the source resolves to Rec.709;
+- the surface is NV12 or P010. Both depths are carried: an eight-bit surface
+  is read as R8/Rg8 plane views and a ten-bit one as R16/Rg16, and the RHI
+  refuses a view whose depth does not match the surface rather than
+  reinterpreting the bytes. A 4:2:2 or twelve-bit hardware surface, should a
+  later codec produce one, goes back through system memory.
+
+Such a frame is held until the renderer is finished with it: releasing it
+would return the surface to the decoder's pool while a submitted command list
+is still reading it.
 
 ## Performance qualification
 

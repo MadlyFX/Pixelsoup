@@ -508,7 +508,8 @@ private:
     void publish(
         const Request& request,
         std::shared_ptr<const DecodedFrame> frame) {
-        const std::size_t bytes = frame == nullptr ? 0U : frame->pixels.size();
+        const std::size_t bytes =
+            frame == nullptr ? 0U : frame->residency_bytes();
         const core::u64 next_stamp = stamp_ + 1U;
         const auto [entry, inserted] = ready_.try_emplace(
             request.key,
@@ -548,7 +549,7 @@ private:
             }
             if(request.refresh_sources) { refreshed_=true; return; }
             if (frame == nullptr
-                || frame->pixels.size() > maximum_ready_bytes_) {
+                || frame->residency_bytes() > maximum_ready_bytes_) {
                 // Exceptions and hostile oversized assets become a completed
                 // failure marker. This keeps both memory and disk retries
                 // bounded until explicit refresh advances the generation.
@@ -1022,6 +1023,9 @@ void MediaCache::reconcile_recordings() noexcept {
             }
             resident->layout = entry->layout;
             resident->bytes = entry->bytes;
+            if (entry->decoded && entry->decoded->gpu.has_value()) {
+                resident->retained = entry->decoded->gpu->retained;
+            }
             resident->texture = std::move(entry->texture);
             resident->chroma_plane = std::move(entry->chroma_plane);
             resident->pinned = false;
@@ -1080,7 +1084,13 @@ void MediaCache::trim() noexcept {
            || resident_bytes_ > max_resident_bytes) {
         const auto candidate = std::find_if(
             resident_.begin(), resident_.end(),
-            [](const ResidentFrame& frame) { return !frame.pinned; });
+            [](const ResidentFrame& frame) {
+                // Dropping a decoder's surface while a submitted command list
+                // still samples it does not merely free memory: the decoder
+                // writes the next picture into it.
+                return !frame.pinned
+                    && (!frame.retained || frame.texture.safe_to_release());
+            });
         if (candidate == resident_.end()) {
             // Current-frame references are authoritative. A scene using more
             // than four independent clips may exceed the soft frame count, and
@@ -1146,7 +1156,7 @@ void MediaCache::prewarm(
         auto decoded = background ? async_decode_->poll(key)
                                   : source_->try_prefetched(source, first, clip);
         if (decoded && decoded->valid())
-            decoded_frame_bytes_[source] = decoded->pixels.size();
+            decoded_frame_bytes_[source] = decoded->residency_bytes();
 
         // Seed a short forward runway as well as the opening frame. Keep it
         // bounded independently of live read-ahead, and never walk the same
@@ -1175,9 +1185,9 @@ void MediaCache::prewarm(
         const std::size_t slot_bytes = resident != by_key_.end()
             ? resident->second->bytes : candidate != candidates_.end()
             ? candidate->bytes : decoded && decoded->valid()
-            ? (decoded->pixels.size() > std::numeric_limits<std::size_t>::max() / 2U
+            ? (decoded->residency_bytes() > std::numeric_limits<std::size_t>::max() / 2U
                 ? std::numeric_limits<std::size_t>::max()
-                : decoded->pixels.size() * 2U) : 0U;
+                : decoded->residency_bytes() * 2U) : 0U;
         if (slot_bytes == 0U || slot_bytes > max_preloaded_bytes
             || preloaded_now_.size() >= max_preloaded_frames
             || preload_bytes_ > max_preloaded_bytes - slot_bytes) return;
@@ -1496,7 +1506,7 @@ ResolvedMediaFrame MediaCache::resolve(
         }
     }
     if (frame != nullptr && frame->valid()) {
-        decoded_frame_bytes_[source_template] = frame->pixels.size();
+        decoded_frame_bytes_[source_template] = frame->residency_bytes();
     }
     remember_read_ahead(
         clip_key, source_template, frame_index, window, stride, clip);
@@ -1594,6 +1604,116 @@ ResolvedMediaFrame MediaCache::resolve(
     return candidate_frame(*candidate, clip_key, resolved_frame);
 }
 
+// A frame the decoder already left on this device. Nothing is uploaded: the
+// two plane views are built once and the candidate is complete from the start,
+// so the picture costs this command list no transfer bandwidth at all.
+//
+// The candidate still goes through the same admission, recording and
+// publication machinery as an uploaded frame, because the thing that must not
+// happen - releasing the picture while a submitted command list still samples
+// it - is exactly what that machinery exists to prevent.
+ResolvedMediaFrame MediaCache::import_decoded(
+    rhi::Device& device, rhi::CommandList& commands,
+    const std::string& source_template, const std::string& resolved_key,
+    core::u32 resolved_frame, std::shared_ptr<const DecodedFrame> frame,
+    CandidateList::iterator candidate) {
+    const auto recording = commands.recording_token();
+    const DecodedGpuFrame& gpu = *frame->gpu;
+    // A surface belongs to the device that decoded it. Another device cannot
+    // read it, and there is no CPU copy to fall back to, so the placement
+    // holds its previous picture instead.
+    if (gpu.device != device.native_handle()) {
+        return {};
+    }
+    if (candidate == candidates_.end()) {
+        // Adopting a frame allocates nothing: the planes are views of memory
+        // the decode registry already owns and already bounds. Charging the
+        // cache's byte budget for it would count the same video memory twice
+        // and evict pictures to make room for one that costs nothing.
+        constexpr std::size_t slot_bytes = 0U;
+        if (frame->residency_bytes() == 0U) {
+            return {};
+        }
+        while (resident_bytes_ + candidate_bytes_ >
+               max_resident_bytes - slot_bytes) {
+            const auto unused = std::find_if(
+                resident_.begin(), resident_.end(),
+                [this](const ResidentFrame& value) {
+                    return !value.pinned && !resident_is_held(value.key) &&
+                        (!value.retained || value.texture.safe_to_release());
+                });
+            if (unused == resident_.end()) {
+                return {};
+            }
+            erase(unused);
+        }
+        if (candidates_.size() >= max_upload_candidates) {
+            const auto reusable = std::find_if(
+                candidates_.begin(), candidates_.end(),
+                [](const UploadCandidate& value) {
+                    return value.state == CandidateUploadState::Retryable &&
+                        value.texture.safe_to_release() &&
+                        (!value.chroma_plane ||
+                         value.chroma_plane.safe_to_release());
+                });
+            if (reusable == candidates_.end()) {
+                return {};
+            }
+            candidate_bytes_ -= reusable->bytes;
+            candidates_.erase(reusable);
+        }
+        const bool eight_bit = video_sample_bytes(frame->layout) == 1U;
+        auto planes = device.import_video_planes(
+            gpu.resource, frame->width, frame->height,
+            eight_bit ? rhi::TextureFormat::R8Unorm
+                      : rhi::TextureFormat::R16Unorm,
+            eight_bit ? rhi::TextureFormat::Rg8Unorm
+                      : rhi::TextureFormat::Rg16Unorm);
+        if (!planes) {
+            return {};
+        }
+        try {
+            candidates_.emplace_back();
+            auto inserted = std::prev(candidates_.end());
+            try {
+                inserted->key = resolved_key;
+                inserted->source = source_template;
+            } catch (...) {
+                candidates_.erase(inserted);
+                throw;
+            }
+            inserted->resolved_frame = resolved_frame;
+            inserted->layout = frame->layout;
+            inserted->bytes = slot_bytes;
+            inserted->decoded = std::move(frame);
+            inserted->texture = std::move(planes.value().luma);
+            inserted->chroma_plane = std::move(planes.value().chroma);
+            ++candidate_stamp_;
+            if (candidate_stamp_ == 0U) {
+                ++candidate_stamp_;
+            }
+            inserted->stamp = candidate_stamp_;
+            candidate_bytes_ += inserted->bytes;
+            candidate = inserted;
+        } catch (...) {
+            return {};
+        }
+    }
+    if (!candidate->texture || !candidate->chroma_plane) {
+        candidate->state = CandidateUploadState::Quarantined;
+        return {};
+    }
+    candidate->recording = recording;
+    candidate->claims.clear();
+    candidate->discard = false;
+    candidate->state = CandidateUploadState::RecordingComplete;
+    refresh_resident_stats();
+    ++stats_.uploads;
+    ++stats_.planar_uploads;
+    return ResolvedMediaFrame{&candidate->texture, &candidate->chroma_plane,
+                              candidate->layout};
+}
+
 ResolvedMediaFrame MediaCache::upload_decoded(
     rhi::Device& device, rhi::CommandList& commands,
     const std::string& source_template, const std::string& resolved_key,
@@ -1612,15 +1732,25 @@ ResolvedMediaFrame MediaCache::upload_decoded(
         if (candidate->state != CandidateUploadState::Retryable) return {};
         frame = candidate->decoded;
     }
-    const bool p010 =
-        frame->layout == DecodedPixelLayout::P010Rec709Limited ||
-        frame->layout == DecodedPixelLayout::P010Rec709Full;
-    const std::size_t luma_bytes = p010
-        ? static_cast<std::size_t>(frame->width) * frame->height * 2U
+    if (frame->gpu.has_value()) {
+        return import_decoded(device, commands, source_template, resolved_key,
+                              resolved_frame, std::move(frame), candidate);
+    }
+    const bool planar = planar_video(frame->layout);
+    const core::u32 sample_bytes = video_sample_bytes(frame->layout);
+    const std::size_t luma_bytes = planar
+        ? static_cast<std::size_t>(frame->width) * frame->height * sample_bytes
         : 0U;
-    const std::size_t chroma_bytes = p010 ? luma_bytes / 2U : 0U;
-    if (p010 &&
-        (frame->width % 2U != 0U || frame->height % 2U != 0U ||
+    // Two interleaved samples per chroma texel, over whatever part of the
+    // picture this frame's subsampling gives it.
+    const std::size_t chroma_bytes = planar
+        ? static_cast<std::size_t>(frame->chroma.width) * frame->chroma.height
+              * 2U * sample_bytes
+        : 0U;
+    if (planar &&
+        (frame->chroma.width == 0U || frame->chroma.height == 0U ||
+         frame->chroma.width > frame->width ||
+         frame->chroma.height > frame->height ||
          frame->pixels.size() != luma_bytes + chroma_bytes)) {
         return {};
     }
@@ -1628,7 +1758,9 @@ ResolvedMediaFrame MediaCache::upload_decoded(
     rhi::TextureDesc desc{};
     desc.width = frame->width;
     desc.height = frame->height;
-    desc.format = p010 ? rhi::TextureFormat::R16Unorm : frame->format;
+    desc.format = planar ? (sample_bytes == 1U ? rhi::TextureFormat::R8Unorm
+                                             : rhi::TextureFormat::R16Unorm)
+                       : frame->format;
     desc.sampled = true;
     desc.streaming_upload = true;
     const std::size_t pixel_bytes = frame->pixels.size();
@@ -1667,7 +1799,7 @@ ResolvedMediaFrame MediaCache::upload_decoded(
                 return {};
             }
             if (reusable_candidate->texture.desc() == desc &&
-                static_cast<bool>(reusable_candidate->chroma_plane) == p010) {
+                static_cast<bool>(reusable_candidate->chroma_plane) == planar) {
                 texture = std::move(reusable_candidate->texture);
                 chroma_plane =
                     std::move(reusable_candidate->chroma_plane);
@@ -1682,10 +1814,11 @@ ResolvedMediaFrame MediaCache::upload_decoded(
         if (!texture) {
             const auto reusable = std::find_if(
                 resident_.begin(), resident_.end(),
-                [this, &desc, p010](const ResidentFrame& value) {
-                    return !value.pinned && !resident_is_held(value.key) &&
+                [this, &desc, planar](const ResidentFrame& value) {
+                    return !value.pinned && !value.retained &&
+                        !resident_is_held(value.key) &&
                         value.texture.desc() == desc &&
-                        static_cast<bool>(value.chroma_plane) == p010;
+                        static_cast<bool>(value.chroma_plane) == planar;
                 });
             if (reusable != resident_.end()) {
                 texture = std::move(reusable->texture);
@@ -1706,7 +1839,8 @@ ResolvedMediaFrame MediaCache::upload_decoded(
             const auto unused = std::find_if(
                 resident_.begin(), resident_.end(),
                 [this](const ResidentFrame& value) {
-                    return !value.pinned && !resident_is_held(value.key);
+                    return !value.pinned && !resident_is_held(value.key) &&
+                        (!value.retained || value.texture.safe_to_release());
                 });
             if (unused == resident_.end()) {
                 // A scrub can abandon several incomplete large frames before
@@ -1735,11 +1869,12 @@ ResolvedMediaFrame MediaCache::upload_decoded(
             texture = std::move(created).value();
         }
 
-        if (p010 && !chroma_plane) {
+        if (planar && !chroma_plane) {
             rhi::TextureDesc plane{};
-            plane.width = frame->width / 2U;
-            plane.height = frame->height / 2U;
-            plane.format = rhi::TextureFormat::Rg16Unorm;
+            plane.width = frame->chroma.width;
+            plane.height = frame->chroma.height;
+            plane.format = sample_bytes == 1U ? rhi::TextureFormat::Rg8Unorm
+                                              : rhi::TextureFormat::Rg16Unorm;
             plane.sampled = true;
             plane.streaming_upload = true;
             auto created = device.create_texture(plane);
@@ -1778,7 +1913,7 @@ ResolvedMediaFrame MediaCache::upload_decoded(
     }
 
     if (!candidate->texture ||
-        (p010 && !candidate->chroma_plane)) {
+        (planar && !candidate->chroma_plane)) {
         candidate->state = CandidateUploadState::Quarantined;
         return {};
     }
@@ -1809,7 +1944,7 @@ ResolvedMediaFrame MediaCache::upload_decoded(
         return completed == texture.height();
     };
     bool uploaded = false;
-    if (p010) {
+    if (planar) {
         const std::span<const core::u8> luma{
             frame->pixels.data(), luma_bytes};
         const std::span<const core::u8> chroma{
@@ -1833,7 +1968,7 @@ ResolvedMediaFrame MediaCache::upload_decoded(
     }
 
     ++stats_.uploads;
-    if (p010) {
+    if (planar) {
         ++stats_.planar_uploads;
     }
     return ResolvedMediaFrame{&candidate->texture,

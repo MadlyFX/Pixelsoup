@@ -197,34 +197,150 @@ void nv12_packing_preserves_codes_and_ignores_row_padding() {
       255U, 32U, 64U, 192U, 97U, 96U}};
   constexpr std::array<core::u8, 6U> chroma{{
       16U, 240U, 128U, 102U, 95U, 94U}};
-  const auto frame = render::detail::pack_nv12_rec709_limited(
-      4U, 2U, luma, 6U, chroma, 6U);
+  const auto frame = render::detail::pack_nv12_rec709(
+      4U, 2U, true, luma, 6U, chroma, 6U);
   IMAGE_CHECK(frame.valid());
-  IMAGE_CHECK(frame.layout == render::DecodedPixelLayout::P010Rec709Limited);
+  IMAGE_CHECK(frame.layout == render::DecodedPixelLayout::Nv12Rec709Limited);
   IMAGE_CHECK(frame.width == 4U && frame.height == 2U);
-  constexpr std::array<core::u16, 12U> expected{{
-      0x0000U, 0x1000U, 0x8000U, 0xeb00U,
-      0xff00U, 0x2000U, 0x4000U, 0xc000U,
-      0x1000U, 0xf000U, 0x8000U, 0x6600U}};
-  IMAGE_CHECK(frame.pixels.size() == expected.size() * sizeof(core::u16));
+  // The padding columns (99/98, 97/96, 95/94) are dropped; every other code
+  // reaches the plane unchanged, at its original eight bits.
+  constexpr std::array<core::u8, 12U> expected{{
+      0U, 16U, 128U, 235U,
+      255U, 32U, 64U, 192U,
+      16U, 240U, 128U, 102U}};
+  IMAGE_CHECK(frame.pixels.size() == expected.size());
   for (std::size_t index = 0U; index < expected.size(); ++index) {
-    IMAGE_CHECK(half_at(frame, index) == expected[index]);
+    IMAGE_CHECK(frame.pixels[index] == expected[index]);
   }
-  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
-      4U, 2U, luma, 3U, chroma, 6U).valid());
-  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
-      4U, 2U, std::span{luma}.first(11U), 6U, chroma, 6U).valid());
-  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
-      4U, 2U, luma, 6U, std::span{chroma}.first(5U), 6U).valid());
-  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
-      3U, 2U, luma, 6U, chroma, 6U).valid());
-  IMAGE_CHECK(!render::detail::pack_nv12_rec709_limited(
-      4U, 0U, luma, 6U, chroma, 6U).valid());
+  IMAGE_CHECK(render::detail::pack_nv12_rec709(
+      4U, 2U, false, luma, 6U, chroma, 6U).layout
+      == render::DecodedPixelLayout::Nv12Rec709Full);
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709(
+      4U, 2U, true, luma, 3U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709(
+      4U, 2U, true, std::span{luma}.first(11U), 6U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709(
+      4U, 2U, true, luma, 6U, std::span{chroma}.first(5U), 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709(
+      3U, 2U, true, luma, 6U, chroma, 6U).valid());
+  IMAGE_CHECK(!render::detail::pack_nv12_rec709(
+      4U, 0U, true, luma, 6U, chroma, 6U).valid());
 }
 
-constexpr std::array<Case, 6U> cases{{
+void planar_packing_interleaves_chroma_and_fills_the_word() {
+  // 4x2 luma with 4:2:2 chroma, so the chroma planes are 2x2, and every plane
+  // carries a padding column the pack must drop.
+  constexpr std::array<core::u8, 10U> luma{{
+      10U, 20U, 30U, 40U, 99U,
+      50U, 60U, 70U, 80U, 98U}};
+  constexpr std::array<core::u8, 6U> blue{{
+      1U, 2U, 97U,
+      3U, 4U, 96U}};
+  constexpr std::array<core::u8, 6U> red{{
+      5U, 6U, 95U,
+      7U, 8U, 94U}};
+  const auto eight = render::detail::pack_planar_rec709(
+      4U, 2U, render::ChromaExtent{2U, 2U}, 1U, 0U, true,
+      {{luma.data(), luma.size()}, 5U},
+      {{blue.data(), blue.size()}, 3U},
+      {{red.data(), red.size()}, 3U});
+  IMAGE_CHECK(eight.valid());
+  IMAGE_CHECK(eight.layout == render::DecodedPixelLayout::Nv12Rec709Limited);
+  IMAGE_CHECK(eight.chroma.width == 2U && eight.chroma.height == 2U);
+  // Luma tightly packed, then one chroma row per luma row at 4:2:2, each a
+  // blue sample followed by its red partner.
+  constexpr std::array<core::u8, 16U> expected{{
+      10U, 20U, 30U, 40U,
+      50U, 60U, 70U, 80U,
+      1U, 5U, 2U, 6U,
+      3U, 7U, 4U, 8U}};
+  IMAGE_CHECK(eight.pixels.size() == expected.size());
+  for (std::size_t index = 0U; index < expected.size(); ++index) {
+    IMAGE_CHECK(eight.pixels[index] == expected[index]);
+  }
+
+  // Full range picks the other layout without touching a sample.
+  const auto full = render::detail::pack_planar_rec709(
+      4U, 2U, render::ChromaExtent{2U, 2U}, 1U, 0U, false,
+      {{luma.data(), luma.size()}, 5U},
+      {{blue.data(), blue.size()}, 3U},
+      {{red.data(), red.size()}, 3U});
+  IMAGE_CHECK(full.layout == render::DecodedPixelLayout::Nv12Rec709Full);
+  IMAGE_CHECK(full.pixels == eight.pixels);
+}
+
+void planar_packing_lifts_deep_samples_to_the_top_of_the_word() {
+  // Ten-bit codes, little-endian, one padding sample per row. A code shifted
+  // to the top of its word reads as the same fraction of full scale whatever
+  // depth it came from, which is what the media shader samples.
+  constexpr core::u32 shift = 6U;
+  constexpr std::array<core::u16, 6U> luma_codes{{
+      64U, 512U, 940U, 1023U, 0U, 7U}};
+  constexpr std::array<core::u16, 4U> blue_codes{{100U, 200U, 0U, 300U}};
+  constexpr std::array<core::u16, 4U> red_codes{{400U, 500U, 0U, 600U}};
+  std::array<core::u8, 12U> luma{};
+  std::array<core::u8, 8U> blue{};
+  std::array<core::u8, 8U> red{};
+  const auto write = [](auto& bytes, std::size_t at, core::u16 code) {
+    bytes[at] = static_cast<core::u8>(code & 0xffU);
+    bytes[at + 1U] = static_cast<core::u8>(code >> 8U);
+  };
+  for (std::size_t index = 0U; index < luma_codes.size(); ++index) {
+    write(luma, index * 2U, luma_codes[index]);
+  }
+  for (std::size_t index = 0U; index < blue_codes.size(); ++index) {
+    write(blue, index * 2U, blue_codes[index]);
+    write(red, index * 2U, red_codes[index]);
+  }
+  // 2x2 luma, 4:2:0 chroma: one chroma sample, and a padding sample after it.
+  const auto frame = render::detail::pack_planar_rec709(
+      2U, 2U, render::ChromaExtent{1U, 1U}, 2U, shift, true,
+      {{luma.data(), luma.size()}, 6U},
+      {{blue.data(), blue.size()}, 4U},
+      {{red.data(), red.size()}, 4U});
+  IMAGE_CHECK(frame.valid());
+  IMAGE_CHECK(frame.layout == render::DecodedPixelLayout::P010Rec709Limited);
+  IMAGE_CHECK(frame.pixels.size() == (2U * 2U + 2U) * 2U);
+  const auto word_at = [&frame](std::size_t index) {
+    return static_cast<core::u16>(
+        (static_cast<core::u16>(frame.pixels[index * 2U + 1U]) << 8U)
+        | frame.pixels[index * 2U]);
+  };
+  IMAGE_CHECK(word_at(0U) == static_cast<core::u16>(64U << shift));
+  IMAGE_CHECK(word_at(1U) == static_cast<core::u16>(512U << shift));
+  // Row one begins after row zero's padding sample, so it is the fourth and
+  // fifth codes that land here, not the third.
+  IMAGE_CHECK(word_at(2U) == static_cast<core::u16>(1023U << shift));
+  IMAGE_CHECK(word_at(3U) == static_cast<core::u16>(0U << shift));
+  IMAGE_CHECK(word_at(4U) == static_cast<core::u16>(100U << shift));
+  IMAGE_CHECK(word_at(5U) == static_cast<core::u16>(400U << shift));
+
+  // What the pack refuses rather than guessing at.
+  const render::detail::SourcePlane ok_luma{{luma.data(), luma.size()}, 6U};
+  const render::detail::SourcePlane ok_blue{{blue.data(), blue.size()}, 4U};
+  const render::detail::SourcePlane ok_red{{red.data(), red.size()}, 4U};
+  IMAGE_CHECK(!render::detail::pack_planar_rec709(
+      2U, 2U, render::ChromaExtent{1U, 1U}, 2U, shift, true,
+      {{luma.data(), luma.size()}, 2U}, ok_blue, ok_red).valid());
+  IMAGE_CHECK(!render::detail::pack_planar_rec709(
+      2U, 2U, render::ChromaExtent{4U, 1U}, 2U, shift, true,
+      ok_luma, ok_blue, ok_red).valid());
+  IMAGE_CHECK(!render::detail::pack_planar_rec709(
+      2U, 2U, render::ChromaExtent{1U, 1U}, 3U, shift, true,
+      ok_luma, ok_blue, ok_red).valid());
+  // An eight-bit sample has no room to be shifted.
+  IMAGE_CHECK(!render::detail::pack_planar_rec709(
+      2U, 2U, render::ChromaExtent{1U, 1U}, 1U, shift, true,
+      ok_luma, ok_blue, ok_red).valid());
+}
+
+constexpr std::array<Case, 8U> cases{{
     {"NV12 packing preserves codes and ignores row padding",
      &nv12_packing_preserves_codes_and_ignores_row_padding},
+    {"planar packing interleaves chroma and ignores row padding",
+     &planar_packing_interleaves_chroma_and_fills_the_word},
+    {"planar packing lifts deep samples to the top of the word",
+     &planar_packing_lifts_deep_samples_to_the_top_of_the_word},
     {"radiance bytes decode to exact half floats",
      &radiance_bytes_decode_to_exact_half_floats},
     {"a low dynamic range image is not a radiance map",

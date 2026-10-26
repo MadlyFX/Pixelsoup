@@ -42,6 +42,26 @@ struct FrameGraph::Impl final {
             if (!access(source.texture, GraphState::ShaderRead, GraphAccessMode::Read)) return false;
         return true;
     }
+    [[nodiscard]] static const char* execution_error_name(
+        RenderGraphExecutionError error) noexcept {
+        switch (error) {
+        case RenderGraphExecutionError::BodyCountMismatch:
+            return "pass bodies do not match the compiled plan";
+        case RenderGraphExecutionError::UnboundResource:
+            return "a transitioned resource has no bound texture";
+        case RenderGraphExecutionError::QueueUnsupported:
+            return "the plan names a queue this device cannot run";
+        case RenderGraphExecutionError::StateUnsupported:
+            return "the plan names a state this RHI has no equivalent for";
+        case RenderGraphExecutionError::BarriersUnsupported:
+            return "this device exposes no explicit barrier";
+        case RenderGraphExecutionError::TransitionRefused:
+            return "the backend refused a resource transition";
+        case RenderGraphExecutionError::PassFailed:
+            return "a pass body failed to record";
+        }
+        return "pass execution or transition failed";
+    }
     bool refuse(const char* reason = "invalid or over-capacity texture accesses") noexcept {
         failed = true; ++stats.refusals;
         static_cast<void>(core::report_idle_once("render graph", reason));
@@ -67,8 +87,11 @@ struct FrameGraph::Impl final {
         const GraphPassBody pass{[](rhi::CommandList&, void* context) {
             return (*static_cast<Body*>(context))();
         }, &body, category};
-        if (!executor.execute(*commands.device(), commands, plan.value(),
-                {&pass, 1U}, plan.value().passes().size() - 1U)) return refuse("pass execution or transition failed");
+        const auto executed = executor.execute(*commands.device(), commands,
+                plan.value(), {&pass, 1U}, plan.value().passes().size() - 1U);
+        // Name which of them it was: "the graph refused" is not a diagnosis,
+        // and these cases are repaired in different places.
+        if (!executed) return refuse(execution_error_name(executed.error()));
         stats.passes += executor.recorded_passes();
         stats.transitions += executor.recorded_transitions();
         return true;

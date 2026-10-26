@@ -28,6 +28,20 @@ extern "C" {
 // media_source.cpp. Used here to read an image's dimensions for the aspect
 // probe.
 #include <stb_image.h>
+// Not inside the extern "C" block above: this one pulls in d3d12.h, whose COM
+// interfaces are C++ declarations. It defines types only, so it is safe to
+// include as ordinary C++ - with the Windows headers' min/max macros refused,
+// because the rest of this file calls std::min and std::max.
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <libavutil/hwcontext_d3d12va.h>
+#include <dxgi1_6.h>
+#endif
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
@@ -86,17 +100,45 @@ namespace {
            ends_with(source, ".wmv") || ends_with(source, ".mxf");
 }
 
+// Where a software conversion lands: two-plane Rec.709 when the source is
+// subsampled YUV without alpha, and interleaved RGBA otherwise. A decoder
+// keeps one of these for its whole clip, so it sits here beside the decoder
+// rather than being worked out per frame.
+struct ScalerTarget final {
+    AVPixelFormat format{AV_PIX_FMT_RGBA};
+    DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
+    // Zero on the RGBA target.
+    core::u32 sample_bytes{};
+    core::u32 chroma_log2_width{};
+    core::u32 chroma_log2_height{};
+    // How far a sample has to move to sit at the top of its word.
+    core::u32 shift{};
+    // The source's own planes already say what the destination says, so the
+    // conversion is data movement and this renderer does it itself. Where
+    // this is false the frame still goes through libswscale.
+    bool direct{};
+
+    [[nodiscard]] bool planar() const noexcept { return sample_bytes != 0U; }
+};
+
 // One open video file: the demux/decode/scale contexts and where the decoder is
 // positioned. Reused across frames so sequential playback does not reopen.
 struct Decoder final {
     AVFormatContext *format{};
     AVCodecContext *codec{};
     SwsContext *scaler{};
+    // What `scaler` was built to produce. A decoder keeps one scaler for its
+    // whole clip, so this is fixed once the first frame has been seen.
+    ScalerTarget target{};
+    bool target_chosen{};
     AVPacket *packet{};
     AVFrame *frame{};
     AVFrame *transferred_frame{};
     AVPixelFormat hardware_format{AV_PIX_FMT_NONE};
     bool hardware_active{};
+    // Decoding onto the renderer's device, so a decoded frame is handed over
+    // as a surface rather than as pixels in system memory.
+    bool resident_on_renderer{};
     int stream{-1};
     double fps{25.0};
     core::i64 start_pts{};
@@ -126,6 +168,129 @@ struct Decoder final {
     }
 };
 
+// The renderer's own GPU, when a scene renderer has offered it. Decoding onto
+// that device is what lets a frame be sampled where it was decoded: the
+// alternative is a read back to system memory and a second upload, which costs
+// more per 4K frame than the decode itself.
+//
+// Exactly one device qualifies. A process that renders scenes on two devices
+// cannot share decoded surfaces between them, so the second registration
+// retires the path for everybody rather than handing a surface to the wrong
+// device.
+class RendererDecodeDevice final {
+  public:
+    void offer(const rhi::NativeHandle &device) noexcept {
+        const std::lock_guard lock{mutex_};
+        if (retired_ || device.object != rhi::NativeObjectKind::Device ||
+            device.value == nullptr ||
+            device.backend != rhi::BackendKind::D3d12) {
+            return;
+        }
+        if (device_.value == nullptr) {
+            device_ = device;
+            return;
+        }
+        if (device_.value != device.value) {
+            retired_ = true;
+            av_buffer_unref(&context_);
+            device_ = rhi::NativeHandle{};
+        }
+    }
+
+    // A decoder context on that device, or null when there is none to use.
+    // Built once and shared, so the driver sees every plate as one workload.
+    [[nodiscard]] AVBufferRef *reference() noexcept {
+#ifdef _WIN32
+        const std::lock_guard lock{mutex_};
+        if (retired_ || device_.value == nullptr) {
+            return nullptr;
+        }
+        if (context_ == nullptr) {
+            AVBufferRef *allocated =
+                av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D12VA);
+            if (allocated == nullptr) {
+                retired_ = true;
+                return nullptr;
+            }
+            auto *const hardware =
+                reinterpret_cast<AVHWDeviceContext *>(allocated->data);
+            auto *const d3d12 =
+                static_cast<AVD3D12VADeviceContext *>(hardware->hwctx);
+            // The context releases this reference when it is destroyed, so it
+            // takes one of its own rather than consuming the renderer's.
+            auto *const native = static_cast<ID3D12Device *>(device_.value);
+            native->AddRef();
+            d3d12->device = native;
+            if (av_hwdevice_ctx_init(allocated) < 0) {
+                av_buffer_unref(&allocated);
+                retired_ = true;
+                return nullptr;
+            }
+            context_ = allocated;
+        }
+        return av_buffer_ref(context_);
+#else
+        return nullptr;
+#endif
+    }
+
+    [[nodiscard]] rhi::NativeHandle device() noexcept {
+        const std::lock_guard lock{mutex_};
+        return retired_ ? rhi::NativeHandle{} : device_;
+    }
+
+    ~RendererDecodeDevice() { av_buffer_unref(&context_); }
+
+  private:
+    std::mutex mutex_;
+    rhi::NativeHandle device_{};
+    AVBufferRef *context_{};
+    bool retired_{};
+};
+
+[[nodiscard]] RendererDecodeDevice &renderer_decode_device() {
+    static RendererDecodeDevice device;
+    return device;
+}
+
+#if defined(_WIN32)
+// The DXGI index of the adapter with the most memory of its own, as a string
+// for FFmpeg's device argument. Empty when DXGI says nothing useful, which
+// leaves the decoder on its own default.
+//
+// Dedicated memory is the discriminator rather than DXGI's "high performance"
+// order, which on at least one laptop in this cluster answers with the
+// integrated part first.
+[[nodiscard]] std::string largest_adapter_index() noexcept {
+    IDXGIFactory1 *factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        return {};
+    }
+    std::string chosen;
+    SIZE_T most = 0U;
+    for (UINT index = 0U;; ++index) {
+        IDXGIAdapter1 *adapter = nullptr;
+        if (factory->EnumAdapters1(index, &adapter) == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
+            (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0U &&
+            desc.DedicatedVideoMemory > most) {
+            most = desc.DedicatedVideoMemory;
+            try {
+                chosen = std::to_string(index);
+            } catch (...) {
+                chosen.clear();
+            }
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return chosen;
+}
+#endif
+
 // One D3D11 video device is shared by every decoder. Creating one device per
 // plate costs memory, duplicates driver scheduling state, and prevents the
 // driver from seeing the nine streams as one decode workload.
@@ -133,8 +298,17 @@ class SharedHardwareDevice final {
   public:
     SharedHardwareDevice() {
 #ifdef _WIN32
-        static_cast<void>(av_hwdevice_ctx_create(
-            &context_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0));
+        // Named by adapter index rather than left to the default, which on a
+        // laptop is the integrated part: a node would then decode on the chip
+        // it is not rendering with, at a fraction of the rate, however good
+        // the discrete GPU sitting next to it is.
+        const std::string adapter = largest_adapter_index();
+        if (av_hwdevice_ctx_create(&context_, AV_HWDEVICE_TYPE_D3D11VA,
+                                   adapter.empty() ? nullptr : adapter.c_str(),
+                                   nullptr, 0) < 0) {
+            static_cast<void>(av_hwdevice_ctx_create(
+                &context_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0));
+        }
 #endif
     }
 
@@ -175,33 +349,197 @@ select_decoder_format(AVCodecContext *context,
 }
 
 [[nodiscard]] bool configure_hardware_decoder(Decoder &decoder,
-                                              const AVCodec &codec) {
+                                              const AVCodec &codec,
+                                              bool allow_renderer_device) {
 #ifdef _WIN32
-    for (int index = 0;; ++index) {
-        const AVCodecHWConfig *const config =
-            avcodec_get_hw_config(&codec, index);
-        if (config == nullptr) {
-            return false;
+    // The renderer's own device first. Decoding there leaves the picture in
+    // video memory where the scene can sample it; D3D11VA has to come back
+    // through system memory whatever else is true, so it is the fallback.
+    const auto try_type = [&](AVHWDeviceType type) {
+        for (int index = 0;; ++index) {
+            const AVCodecHWConfig *const config =
+                avcodec_get_hw_config(&codec, index);
+            if (config == nullptr) {
+                return false;
+            }
+            if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+                    == 0 ||
+                config->device_type != type) {
+                continue;
+            }
+            AVBufferRef *const device =
+                type == AV_HWDEVICE_TYPE_D3D12VA
+                    ? renderer_decode_device().reference()
+                    : shared_hardware_device().reference();
+            if (device == nullptr) {
+                return false;
+            }
+            decoder.hardware_format = config->pix_fmt;
+            decoder.resident_on_renderer = type == AV_HWDEVICE_TYPE_D3D12VA;
+            decoder.codec->opaque = &decoder;
+            decoder.codec->get_format = &select_decoder_format;
+            decoder.codec->hw_device_ctx = device;
+            return true;
         }
-        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) == 0 ||
-            config->device_type != AV_HWDEVICE_TYPE_D3D11VA) {
-            continue;
-        }
-        AVBufferRef *const device = shared_hardware_device().reference();
-        if (device == nullptr) {
-            return false;
-        }
-        decoder.hardware_format = config->pix_fmt;
-        decoder.codec->opaque = &decoder;
-        decoder.codec->get_format = &select_decoder_format;
-        decoder.codec->hw_device_ctx = device;
-        return true;
-    }
+    };
+    return (allow_renderer_device && try_type(AV_HWDEVICE_TYPE_D3D12VA))
+        || try_type(AV_HWDEVICE_TYPE_D3D11VA);
 #else
     static_cast<void>(decoder);
     static_cast<void>(codec);
+    static_cast<void>(allow_renderer_device);
     return false;
 #endif
+}
+
+// What a decoded frame's colour description amounts to once the gaps are
+// filled in.
+struct FrameColour final {
+    bool rec709{};
+    bool limited{};
+    bool full{};
+};
+
+// H.264 and HEVC omit video_signal_type entirely unless an encoder chose to
+// write it, which camera-original files routinely do not: matrix_coefficients
+// then reads as unspecified and video_full_range_flag is absent. The format
+// defines the absent range flag as limited, and every HD or UHD plate this
+// renderer is given is Rec.709, so an unspecified matrix at 720 lines or more
+// resolves the same way. Standard-definition stays unresolved rather than
+// guessing between the two 601 variants.
+//
+// This is what decides whether a plate reaches the GPU as video planes or as a
+// full CPU colour conversion, so leaving it unresolved costs a whole swscale
+// pass per frame - and leaves the picture on libswscale's 601 default, which
+// is the wrong matrix for the material that most often arrives untagged.
+[[nodiscard]] FrameColour resolve_frame_colour(const AVCodecContext &codec,
+                                               const AVFrame &frame) noexcept {
+    AVColorSpace space = frame.colorspace != AVCOL_SPC_UNSPECIFIED
+                             ? frame.colorspace
+                             : codec.colorspace;
+    AVColorRange range = frame.color_range != AVCOL_RANGE_UNSPECIFIED
+                             ? frame.color_range
+                             : codec.color_range;
+    if (space == AVCOL_SPC_UNSPECIFIED && frame.height >= 720) {
+        space = AVCOL_SPC_BT709;
+    }
+    if (range == AVCOL_RANGE_UNSPECIFIED) {
+        range = AVCOL_RANGE_MPEG;
+    }
+    return FrameColour{space == AVCOL_SPC_BT709, range == AVCOL_RANGE_MPEG,
+                       range == AVCOL_RANGE_JPEG};
+}
+
+// RGBA used to be the only destination here, and it cost a professional
+// source both ways: a ten- or twelve-bit ProRes, DNxHR or NotchLC frame was
+// truncated to eight bits on the way to the GPU, and carried four bytes a
+// pixel to get there. The two-plane layouts keep ten bits and, for everything
+// but high-bit-depth 4:4:4, carry fewer bytes as well.
+//
+// The subsampling is preserved rather than normalised: converting a 4:2:2
+// master to 4:2:0 to fit one fixed shape would throw away half its chroma
+// resolution, which is not a trade this renderer gets to make silently.
+[[nodiscard]] ScalerTarget choose_scaler_target(AVPixelFormat source,
+                                                const FrameColour &colour) noexcept {
+    const ScalerTarget interleaved{};
+    const AVPixFmtDescriptor *const described = av_pix_fmt_desc_get(source);
+    // Alpha has nowhere to live in two planes, an RGB source would only be
+    // made worse by a trip through YUV, and the media shader's matrix is
+    // Rec.709. Each of those keeps the interleaved destination.
+    if (described == nullptr || described->nb_components < 3 ||
+        (described->flags & (AV_PIX_FMT_FLAG_ALPHA | AV_PIX_FMT_FLAG_RGB |
+                             AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_HWACCEL))
+            != 0 ||
+        !colour.rec709) {
+        return interleaved;
+    }
+    const bool eight = described->comp[0].depth <= 8;
+    ScalerTarget target{};
+    target.sample_bytes = eight ? 1U : 2U;
+    target.chroma_log2_width = described->log2_chroma_w;
+    target.chroma_log2_height = described->log2_chroma_h;
+    // Ten bits in the high bits of each sixteen-bit word is what the media
+    // shader reads, so anything deeper than eight lands on the P-series
+    // regardless of how much deeper it was.
+    if (described->log2_chroma_w == 1 && described->log2_chroma_h == 1) {
+        target.format = eight ? AV_PIX_FMT_NV12 : AV_PIX_FMT_P010LE;
+    } else if (described->log2_chroma_w == 1 && described->log2_chroma_h == 0) {
+        target.format = eight ? AV_PIX_FMT_NV16 : AV_PIX_FMT_P210LE;
+    } else if (described->log2_chroma_w == 0 && described->log2_chroma_h == 0) {
+        target.format = eight ? AV_PIX_FMT_NV24 : AV_PIX_FMT_P410LE;
+    } else {
+        // 4:1:1 and friends have no two-plane equivalent here.
+        return interleaved;
+    }
+    if (sws_isSupportedOutput(target.format) <= 0) {
+        return interleaved;
+    }
+    // The planes are produced in limited range, which is what these layouts
+    // and the shader's offsets mean.
+    target.layout = eight ? DecodedPixelLayout::Nv12Rec709Limited
+                          : DecodedPixelLayout::P010Rec709Limited;
+
+    // Nothing above needs libswscale when the source is already laid out the
+    // way the destination wants it and its colour already matches: one plane
+    // per component, each sample alone in its own byte or little-endian word
+    // with no bit offset. Then the whole conversion is a copy, an interleave
+    // and a shift, which this renderer does several times faster than
+    // libswscale manages for the ten-bit destinations.
+    const bool ordinary_planes =
+        (described->flags & AV_PIX_FMT_FLAG_PLANAR) != 0 &&
+        described->nb_components == 3 &&
+        (eight || (described->flags & AV_PIX_FMT_FLAG_BE) == 0) &&
+        described->comp[0].plane == 0 && described->comp[1].plane == 1 &&
+        described->comp[2].plane == 2;
+    bool component_aligned = ordinary_planes;
+    for (int index = 0; component_aligned && index < 3; ++index) {
+        component_aligned =
+            described->comp[index].offset == 0 &&
+            described->comp[index].shift == 0 &&
+            described->comp[index].depth == described->comp[0].depth &&
+            described->comp[index].step ==
+                static_cast<int>(target.sample_bytes);
+    }
+    // Full range keeps its own layout rather than being levelled to limited,
+    // so either range can be carried without touching a sample's value.
+    target.direct = component_aligned && described->comp[0].depth <= 16;
+    target.shift = eight
+        ? 0U
+        : static_cast<core::u32>(16 - described->comp[0].depth);
+    if (target.direct && colour.full) {
+        target.layout = eight ? DecodedPixelLayout::Nv12Rec709Full
+                              : DecodedPixelLayout::P010Rec709Full;
+    }
+    return target;
+}
+
+// The software fallback has to reach the same picture as the planar path, or
+// one plate changes colour when a profile is declined by get_format. libswscale
+// otherwise applies its 601 default to exactly the untagged sources resolved
+// above, and for a two-plane destination it also has to be told that the
+// result is the Rec.709 limited-range the layout claims.
+void apply_scaler_colour(SwsContext &scaler, const FrameColour &colour,
+                         const ScalerTarget &target) noexcept {
+    const int *const coefficients = sws_getCoefficients(
+        colour.rec709 ? SWS_CS_ITU709 : SWS_CS_DEFAULT);
+    int *source_table = nullptr;
+    int *destination_table = nullptr;
+    int brightness = 0;
+    int contrast = 0;
+    int saturation = 0;
+    int source_range = 0;
+    int destination_range = 0;
+    if (sws_getColorspaceDetails(&scaler, &source_table, &source_range,
+                                 &destination_table, &destination_range,
+                                 &brightness, &contrast, &saturation) < 0) {
+        return;
+    }
+    static_cast<void>(sws_setColorspaceDetails(
+        &scaler, coefficients, colour.full ? 1 : 0,
+        target.planar() ? sws_getCoefficients(SWS_CS_ITU709)
+                        : destination_table,
+        target.planar() ? 0 : destination_range, brightness, contrast,
+        saturation));
 }
 
 [[nodiscard]] std::optional<MediaFrameRate>
@@ -262,7 +600,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
     // limits unknown/software streams to two concurrent jobs while allowing
     // confirmed hardware streams to use its additional bounded lanes.
     const bool hardware_configured =
-        configure_hardware_decoder(*decoder, *codec);
+        configure_hardware_decoder(*decoder, *codec, true);
     const auto configure_software_threads = [&]() {
         const unsigned hardware_threads =
             std::max(1U, std::thread::hardware_concurrency());
@@ -279,16 +617,29 @@ stream_frame_rate(const AVStream *stream) noexcept {
         if (!hardware_configured) {
             return nullptr;
         }
-        // A decoder advertised D3D11VA but could not initialize it on this
-        // driver. Recreate the context cleanly and retain software playback.
-        avcodec_free_context(&decoder->codec);
-        decoder->hardware_format = AV_PIX_FMT_NONE;
-        decoder->hardware_active = false;
-        if (!allocate_context()) {
-            return nullptr;
-        }
-        configure_software_threads();
-        if (avcodec_open2(decoder->codec, codec, nullptr) < 0) {
+        // A backend was advertised but could not initialize on this driver.
+        // Recreate the context cleanly and try the next one down: a renderer
+        // -resident decoder that will not open still has D3D11VA behind it,
+        // and that in turn still has software playback behind it.
+        const auto reopen = [&](bool retry_hardware) {
+            avcodec_free_context(&decoder->codec);
+            decoder->hardware_format = AV_PIX_FMT_NONE;
+            decoder->hardware_active = false;
+            decoder->resident_on_renderer = false;
+            if (!allocate_context()) {
+                return false;
+            }
+            if (retry_hardware) {
+                static_cast<void>(
+                    configure_hardware_decoder(*decoder, *codec, false));
+            }
+            configure_software_threads();
+            return avcodec_open2(decoder->codec, codec, nullptr) >= 0;
+        };
+        // Only worth a second hardware attempt if the first one was the
+        // renderer-resident path, since that is the only one with another
+        // hardware backend beneath it.
+        if (!(decoder->resident_on_renderer && reopen(true)) && !reopen(false)) {
             return nullptr;
         }
     }
@@ -315,8 +666,107 @@ stream_frame_rate(const AVStream *stream) noexcept {
     return index < 0 ? 0 : index;
 }
 
-// Reads and decodes until a frame at or after `target` is produced, converting
-// it to RGBA. Returns an invalid frame at end of stream with nothing decoded.
+#if defined(_WIN32)
+// Hands the decoder's own surface to the renderer. The frame reference is
+// retained for as long as the cache holds the picture, because releasing it
+// would return the surface to the decoder's pool while the scene is still
+// sampling it.
+//
+// The decode is waited for here, on this worker, rather than ordered on the
+// render queue: the renderer then needs to know nothing about the decoder's
+// fences, and a worker that is already several frames ahead loses nothing by
+// waiting for work it has just submitted.
+[[nodiscard]] DecodedFrame adopt_renderer_frame(Decoder &decoder) noexcept {
+    auto *const hardware =
+        reinterpret_cast<AVD3D12VAFrame *>(decoder.frame->data[0]);
+    const rhi::NativeHandle device = renderer_decode_device().device();
+    if (hardware == nullptr || hardware->texture == nullptr ||
+        device.value == nullptr) {
+        return DecodedFrame{};
+    }
+    const FrameColour colour =
+        resolve_frame_colour(*decoder.codec, *decoder.frame);
+    const int width = decoder.frame->width;
+    const int height = decoder.frame->height;
+    if (!colour.rec709 || (!colour.limited && !colour.full) || width <= 0 ||
+        height <= 0 || width % 2 != 0 || height % 2 != 0) {
+        return DecodedFrame{};
+    }
+    // A shader samples the whole surface in normalized coordinates, so a
+    // picture that does not fill its own coded size cannot be read in place.
+    // The RHI refuses such a surface too; checking here keeps the frame
+    // reference and the fence wait off the path that is about to give up.
+    const D3D12_RESOURCE_DESC described = hardware->texture->GetDesc();
+    if (described.Width != static_cast<UINT64>(width) ||
+        described.Height != static_cast<UINT>(height)) {
+        return DecodedFrame{};
+    }
+    // The surface's own format decides how its planes are read, and the two
+    // this renderer knows are the two the media shader resolves. Anything
+    // else - 4:2:2, 12-bit, a format a later codec introduces - goes back
+    // through system memory rather than being read as something it is not.
+    const bool ten_bit = described.Format == DXGI_FORMAT_P010;
+    if (described.Format != DXGI_FORMAT_NV12 && !ten_bit) {
+        return DecodedFrame{};
+    }
+
+    ID3D12Fence *const fence = hardware->sync_ctx.fence;
+    const UINT64 target = hardware->sync_ctx.fence_value;
+    if (fence != nullptr && fence->GetCompletedValue() < target) {
+        if (hardware->sync_ctx.event == nullptr ||
+            FAILED(fence->SetEventOnCompletion(
+                target, hardware->sync_ctx.event))) {
+            return DecodedFrame{};
+        }
+        WaitForSingleObject(hardware->sync_ctx.event, INFINITE);
+    }
+
+    AVFrame *retained = av_frame_alloc();
+    if (retained == nullptr || av_frame_ref(retained, decoder.frame) < 0) {
+        av_frame_free(&retained);
+        return DecodedFrame{};
+    }
+    DecodedFrame out{};
+    try {
+        DecodedGpuFrame gpu{};
+        gpu.retained = std::shared_ptr<void>(
+            retained, [](void *value) noexcept {
+                auto *frame = static_cast<AVFrame *>(value);
+                av_frame_free(&frame);
+            });
+        gpu.device = device;
+        gpu.resource = rhi::NativeHandle{rhi::BackendKind::D3d12,
+                                         rhi::NativeObjectKind::Texture,
+                                         hardware->texture};
+        // Luma plus a half-height interleaved chroma plane, at this
+        // surface's own depth: the bytes the picture occupies, which is what
+        // the residency budgets bound.
+        gpu.bytes = static_cast<std::size_t>(width) *
+                    static_cast<std::size_t>(height) * 3U / 2U *
+                    (ten_bit ? 2U : 1U);
+        out.width = static_cast<core::u32>(width);
+        out.height = static_cast<core::u32>(height);
+        // A hardware decoder's surfaces are 4:2:0 in both the formats
+        // adopted here.
+        out.chroma = ChromaExtent{static_cast<core::u32>(width) / 2U,
+                                  static_cast<core::u32>(height) / 2U};
+        out.layout = ten_bit
+            ? (colour.limited ? DecodedPixelLayout::P010Rec709Limited
+                              : DecodedPixelLayout::P010Rec709Full)
+            : (colour.limited ? DecodedPixelLayout::Nv12Rec709Limited
+                              : DecodedPixelLayout::Nv12Rec709Full);
+        out.gpu = std::move(gpu);
+    } catch (...) {
+        av_frame_free(&retained);
+        return DecodedFrame{};
+    }
+    return out;
+}
+#endif
+
+// Reads and decodes until a frame at or after `target` is produced, in
+// whichever layout `choose_scaler_target` picked for the source. Returns an
+// invalid frame at end of stream with nothing decoded.
 [[nodiscard]] DecodedFrame decode_until(Decoder &decoder, core::i64 target) {
     bool packet_pending = false;
     bool drain_pending = false;
@@ -351,6 +801,25 @@ stream_frame_rate(const AVStream *stream) noexcept {
                 return DecodedFrame{};
             }
 
+#if defined(_WIN32)
+            if (decoder.resident_on_renderer && decoder.hardware_active &&
+                decoder.frame->format == decoder.hardware_format) {
+                DecodedFrame out = adopt_renderer_frame(decoder);
+                if (out.valid()) {
+                    out.source_frame = static_cast<core::u32>(index);
+                    decoder.next_index = index + 1;
+                    av_frame_unref(decoder.frame);
+                    return out;
+                }
+                // This clip's surfaces cannot be sampled where they lie - a
+                // coded size larger than the picture, or colour this renderer
+                // does not read as video planes. Stop offering them and read
+                // the rest of the clip back through system memory below,
+                // which the same decoder context still supports.
+                decoder.resident_on_renderer = false;
+            }
+#endif
+
             AVFrame *source_frame = decoder.frame;
             if (decoder.hardware_active &&
                 decoder.frame->format == decoder.hardware_format) {
@@ -369,20 +838,15 @@ stream_frame_rate(const AVStream *stream) noexcept {
                 av_frame_unref(decoder.frame);
                 return DecodedFrame{};
             }
+            const FrameColour colour =
+                resolve_frame_colour(*decoder.codec, *source_frame);
 #if defined(_WIN32) && defined(MEDIASERVER_HAS_DXIL_SHADERS)
-            const AVColorSpace color_space =
-                source_frame->colorspace != AVCOL_SPC_UNSPECIFIED
-                    ? source_frame->colorspace
-                    : decoder.codec->colorspace;
-            const AVColorRange color_range =
-                source_frame->color_range != AVCOL_RANGE_UNSPECIFIED
-                    ? source_frame->color_range
-                    : decoder.codec->color_range;
-            const bool rec709 = color_space == AVCOL_SPC_BT709;
-            const bool limited = color_range == AVCOL_RANGE_MPEG;
-            const bool full = color_range == AVCOL_RANGE_JPEG;
+            const bool rec709 = colour.rec709;
+            const bool limited = colour.limited;
+            const bool full = colour.full;
             if (decoder.hardware_active &&
-                source_frame->format == AV_PIX_FMT_NV12 && rec709 && limited &&
+                source_frame->format == AV_PIX_FMT_NV12 && rec709 &&
+                (limited || full) &&
                 width % 2 == 0 && height % 2 == 0 &&
                 source_frame->data[0] != nullptr &&
                 source_frame->data[1] != nullptr &&
@@ -392,9 +856,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     static_cast<std::size_t>(source_frame->linesize[0]);
                 const auto chroma_stride =
                     static_cast<std::size_t>(source_frame->linesize[1]);
-                DecodedFrame out = detail::pack_nv12_rec709_limited(
+                DecodedFrame out = detail::pack_nv12_rec709(
                     static_cast<core::u32>(width),
-                    static_cast<core::u32>(height),
+                    static_cast<core::u32>(height), limited,
                     {source_frame->data[0], luma_stride *
                         static_cast<std::size_t>(height)}, luma_stride,
                     {source_frame->data[1], chroma_stride *
@@ -422,6 +886,8 @@ stream_frame_rate(const AVStream *stream) noexcept {
                 out.width = static_cast<core::u32>(width);
                 out.height = static_cast<core::u32>(height);
                 out.format = rhi::TextureFormat::Rgba8Unorm;
+                out.chroma = ChromaExtent{static_cast<core::u32>(width) / 2U,
+                                          static_cast<core::u32>(height) / 2U};
                 out.layout = limited ? DecodedPixelLayout::P010Rec709Limited
                                      : DecodedPixelLayout::P010Rec709Full;
                 out.source_frame = static_cast<core::u32>(index);
@@ -448,6 +914,50 @@ stream_frame_rate(const AVStream *stream) noexcept {
                 return out;
             }
 #endif
+            const AVPixelFormat source_format =
+                static_cast<AVPixelFormat>(source_frame->format);
+            if (!decoder.target_chosen) {
+                decoder.target = choose_scaler_target(source_format, colour);
+                decoder.target_chosen = true;
+            }
+            if (decoder.target.direct) {
+                const ScalerTarget &direct = decoder.target;
+                const ChromaExtent extent{
+                    static_cast<core::u32>(width) >> direct.chroma_log2_width,
+                    static_cast<core::u32>(height) >> direct.chroma_log2_height};
+                const auto plane = [&](int index, core::u32 rows,
+                                       core::u32 row_samples) {
+                    const auto stride =
+                        static_cast<std::size_t>(source_frame->linesize[index]);
+                    return detail::SourcePlane{
+                        {source_frame->data[index],
+                         stride * (rows - 1U) +
+                             static_cast<std::size_t>(row_samples) *
+                                 direct.sample_bytes},
+                        stride};
+                };
+                DecodedFrame out = detail::pack_planar_rec709(
+                    static_cast<core::u32>(width),
+                    static_cast<core::u32>(height), extent,
+                    direct.sample_bytes, direct.shift,
+                    direct.layout == DecodedPixelLayout::Nv12Rec709Limited ||
+                        direct.layout == DecodedPixelLayout::P010Rec709Limited,
+                    plane(0, static_cast<core::u32>(height),
+                          static_cast<core::u32>(width)),
+                    plane(1, extent.height, extent.width),
+                    plane(2, extent.height, extent.width));
+                if (out.valid()) {
+                    out.source_frame = static_cast<core::u32>(index);
+                    decoder.next_index = index + 1;
+                    av_frame_unref(decoder.transferred_frame);
+                    av_frame_unref(decoder.frame);
+                    return out;
+                }
+                // Something about this frame did not match what the format
+                // promised. Hand the clip back to libswscale rather than
+                // retrying a pack that will refuse it again.
+                decoder.target.direct = false;
+            }
             if (decoder.scaler == nullptr) {
                 decoder.scaler = sws_alloc_context();
                 if (decoder.scaler == nullptr) {
@@ -458,8 +968,6 @@ stream_frame_rate(const AVStream *stream) noexcept {
                 // libswscale otherwise converts an entire UHD frame on one CPU
                 // core even when NVDEC supplied the YUV planes. Two slice
                 // workers keep each plate's conversion bounded and concurrent.
-                const AVPixelFormat source_format =
-                    static_cast<AVPixelFormat>(source_frame->format);
                 const bool configured =
                     av_opt_set_int(decoder.scaler, "srcw", width, 0) >= 0 &&
                     av_opt_set_int(decoder.scaler, "srch", height, 0) >= 0 &&
@@ -468,7 +976,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     av_opt_set_int(decoder.scaler, "dstw", width, 0) >= 0 &&
                     av_opt_set_int(decoder.scaler, "dsth", height, 0) >= 0 &&
                     av_opt_set_int(decoder.scaler, "dst_format",
-                                   AV_PIX_FMT_RGBA, 0) >= 0 &&
+                                   decoder.target.format, 0) >= 0 &&
                     av_opt_set_int(decoder.scaler, "sws_flags", SWS_BILINEAR,
                                    0) >= 0 &&
                     av_opt_set_int(decoder.scaler, "threads", 2, 0) >= 0;
@@ -480,18 +988,49 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     av_frame_unref(decoder.frame);
                     return DecodedFrame{};
                 }
+                apply_scaler_colour(*decoder.scaler, colour,
+                                    decoder.target);
             }
 
+            const ScalerTarget &conversion = decoder.target;
             DecodedFrame out{};
             out.width = static_cast<core::u32>(width);
             out.height = static_cast<core::u32>(height);
-            out.format = rhi::TextureFormat::Rgba8Unorm;
             out.source_frame = static_cast<core::u32>(index);
-            out.pixels.resize(static_cast<std::size_t>(width) *
-                              static_cast<std::size_t>(height) * 4U);
-            std::uint8_t *const dst[4]{out.pixels.data(), nullptr, nullptr,
+            if (!conversion.planar()) {
+                out.format = rhi::TextureFormat::Rgba8Unorm;
+                out.pixels.resize(static_cast<std::size_t>(width) *
+                                  static_cast<std::size_t>(height) * 4U);
+                std::uint8_t *const dst[4]{out.pixels.data(), nullptr, nullptr,
+                                           nullptr};
+                const int stride[4]{width * 4, 0, 0, 0};
+                sws_scale(decoder.scaler, source_frame->data,
+                          source_frame->linesize, 0, height, dst, stride);
+                decoder.next_index = index + 1;
+                av_frame_unref(decoder.transferred_frame);
+                av_frame_unref(decoder.frame);
+                return out;
+            }
+
+            // Written straight into the upload buffer at its own tight
+            // strides, so no plane is copied a second time to pack it.
+            out.layout = conversion.layout;
+            out.chroma = ChromaExtent{
+                static_cast<core::u32>(width) >> conversion.chroma_log2_width,
+                static_cast<core::u32>(height) >> conversion.chroma_log2_height};
+            const std::size_t luma_row =
+                static_cast<std::size_t>(width) * conversion.sample_bytes;
+            const std::size_t chroma_row =
+                static_cast<std::size_t>(out.chroma.width) * 2U *
+                conversion.sample_bytes;
+            const std::size_t luma_bytes =
+                luma_row * static_cast<std::size_t>(height);
+            out.pixels.resize(luma_bytes + chroma_row * out.chroma.height);
+            std::uint8_t *const dst[4]{out.pixels.data(),
+                                       out.pixels.data() + luma_bytes, nullptr,
                                        nullptr};
-            const int stride[4]{width * 4, 0, 0, 0};
+            const int stride[4]{static_cast<int>(luma_row),
+                                static_cast<int>(chroma_row), 0, 0};
             sws_scale(decoder.scaler, source_frame->data,
                       source_frame->linesize, 0, height, dst, stride);
             decoder.next_index = index + 1;
@@ -726,6 +1265,10 @@ struct ReadyFrame final {
     std::shared_ptr<const DecodedFrame> frame;
     std::size_t bytes{};
     core::u64 stamp{};
+    // Held in video memory on the renderer's device rather than in system
+    // memory, and so bounded separately: a node's GPU has to render with what
+    // is left, and it is a much smaller pool than the machine's RAM.
+    bool on_device{};
 };
 
 using DecodeStreamKey = std::pair<std::string, core::u64>;
@@ -910,7 +1453,7 @@ class SharedVideoRegistry final {
             const std::lock_guard lock{mutex_};
             for (auto frame = frames_.begin(); frame != frames_.end();) {
                 if (frame->first.first == key) {
-                    resident_bytes_ -= frame->second.bytes;
+                    retire_bytes_locked(frame->second);
                     frame = frames_.erase(frame);
                 } else {
                     ++frame;
@@ -1019,6 +1562,17 @@ class SharedVideoRegistry final {
         return result;
     }
 
+    // Sized from the adapter the decoder will produce frames on, once one
+    // is known. Never grows past what a show legitimately holds at once.
+    void configure_device_budget(core::u64 adapter_bytes) noexcept {
+        const std::lock_guard lock{mutex_};
+        constexpr std::size_t floor_bytes = 256U * 1024U * 1024U;
+        constexpr std::size_t ceiling_bytes = 2U * 1024U * 1024U * 1024U;
+        const auto share = static_cast<std::size_t>(adapter_bytes / 6U);
+        max_device_ready_bytes_ =
+            std::clamp(share, floor_bytes, ceiling_bytes);
+    }
+
     void configure_buffered_output(MediaDecodeConfig config) noexcept {
         const std::lock_guard lock{mutex_};
         // Configuration only changes ceilings; decoded memory remains lazy.
@@ -1093,32 +1647,51 @@ class SharedVideoRegistry final {
         }
     }
 
+    void retire_bytes_locked(const ReadyFrame &frame) noexcept {
+        resident_bytes_ -= frame.bytes;
+        if (frame.on_device) {
+            device_bytes_ -= frame.bytes;
+        }
+    }
+
     void publish_locked(const std::shared_ptr<AsyncVideoSourceState> &source,
                         core::u32 frame_index,
                         std::shared_ptr<const DecodedFrame> frame) {
         const FrameKey key{source->source_key, frame_index};
-        const std::size_t bytes = frame->valid() ? frame->pixels.size() : 0U;
+        const std::size_t bytes =
+            frame->valid() ? frame->residency_bytes() : 0U;
         const auto old = frames_.find(key);
         if (old != frames_.end()) {
-            resident_bytes_ -= old->second.bytes;
+            retire_bytes_locked(old->second);
             frames_.erase(old);
         }
+        const bool on_device = frame->gpu.has_value();
         frames_.emplace(
             key,
-            ReadyFrame{std::move(frame), bytes, ++stamp_});
+            ReadyFrame{std::move(frame), bytes, ++stamp_, on_device});
         resident_bytes_ += bytes;
+        if (on_device) {
+            device_bytes_ += bytes;
+        }
         // Explicit current-frame demand outranks trail retention and speculative
         // read-ahead. A speculative publication may evict itself: protecting it
         // unconditionally lets fast streams repeatedly displace another clip's
         // exact frame before the renderer can adopt it. All retention is soft
         // when the active working set itself exceeds the bounded cache.
         while ((resident_bytes_ > max_ready_bytes_ ||
+                device_bytes_ > max_device_ready_bytes_ ||
                 frames_.size() > max_ready_frames_) &&
                frames_.size() > 1U) {
+            // Over the video-memory bound, only a frame that holds video
+            // memory can relieve it; over the others, any frame will.
+            const bool device_only = device_bytes_ > max_device_ready_bytes_;
             auto oldest = frames_.end();
             unsigned oldest_priority = 3U;
             for (auto candidate = frames_.begin(); candidate != frames_.end();
                  ++candidate) {
+                if (device_only && !candidate->second.on_device) {
+                    continue;
+                }
                 const unsigned priority = retention_priority_locked(candidate->first);
                 if (oldest == frames_.end() || priority < oldest_priority ||
                     (priority == oldest_priority &&
@@ -1127,7 +1700,10 @@ class SharedVideoRegistry final {
                     oldest_priority = priority;
                 }
             }
-            resident_bytes_ -= oldest->second.bytes;
+            if (oldest == frames_.end()) {
+                break;
+            }
+            retire_bytes_locked(oldest->second);
             frames_.erase(oldest);
         }
         if (bytes != 0U && frames_.contains(key)) {
@@ -1182,7 +1758,7 @@ class SharedVideoRegistry final {
             }
             for (auto frame = frames_.begin(); frame != frames_.end();) {
                 if (frame->first.first == dead_key) {
-                    resident_bytes_ -= frame->second.bytes;
+                    retire_bytes_locked(frame->second);
                     frame = frames_.erase(frame);
                 } else {
                     ++frame;
@@ -1340,6 +1916,13 @@ class SharedVideoRegistry final {
     static constexpr std::size_t max_software_jobs = 2U;
     std::size_t software_jobs_in_flight_{};
     std::size_t resident_bytes_{};
+    std::size_t device_bytes_{};
+    // Decoded frames held on the renderer's device, bounded separately from
+    // the system-memory budget: the same GPU has to render the show out of
+    // what is left. A sixth of the adapter's own memory is ~1 GiB on a 6 GB
+    // node, which is about twenty 4K frames of read-ahead for each of four
+    // plates, and scales down with the hardware rather than assuming it.
+    std::size_t max_device_ready_bytes_{256U * 1024U * 1024U};
     core::u64 stamp_{};
     core::u64 completed_frames_{};
     core::u64 failed_frames_{};
@@ -1508,6 +2091,15 @@ std::unique_ptr<MediaSource> make_media_source() {
 }
 
 MediaDecodeStats media_decode_stats() { return video_registry().stats(); }
+
+void offer_video_decode_device(const rhi::Device &device) noexcept {
+    if (!device.capabilities().external_memory) {
+        return;
+    }
+    renderer_decode_device().offer(device.native_handle());
+    video_registry().configure_device_budget(
+        device.dedicated_video_memory_bytes());
+}
 
 void configure_buffered_output_media_decode(MediaDecodeConfig config) noexcept {
     try {

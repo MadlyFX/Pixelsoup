@@ -3,6 +3,8 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <cstddef>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -25,16 +27,74 @@ enum class DecodedPixelLayout : core::u8 {
   // Linear scene-referred half-float RGBA, retaining negative and HDR values.
   // Media uses straight alpha; environment decode forces opaque alpha.
   Rgba16FloatLinear,
+  // Rec.709 NV12, the same plane arrangement as P010 at eight bits: tightly
+  // packed luma followed by a plane of interleaved U/V. Eight-bit sources
+  // keep their own depth rather than being widened on the CPU, which halves
+  // both the conversion work and the bytes uploaded per frame.
+  Nv12Rec709Limited,
+  Nv12Rec709Full,
 };
 
-// One decoded frame in CPU memory, ready to upload. An invalid frame (no
-// pixels) is how the decoder reports malformed or unsupported input.
+// How much of the picture a chroma plane covers. The two-plane layouts above
+// name a sample depth, not a subsampling: 4:2:0, 4:2:2 and 4:4:4 all travel
+// as luma plus one interleaved chroma plane, and only its extent differs.
+// Keeping that extent on the frame is what lets a 4:2:2 source reach the GPU
+// without its chroma being thrown away to fit a 4:2:0 shape.
+struct ChromaExtent final {
+  core::u32 width{};
+  core::u32 height{};
+
+  bool operator==(const ChromaExtent&) const = default;
+};
+
+// Planar video, as opposed to an interleaved colour image. These layouts are
+// uploaded as two textures and resolved to RGB in the media shader; the shader
+// reads the same ordinal, so the order of this enum is part of that contract.
+[[nodiscard]] constexpr bool planar_video(DecodedPixelLayout layout) noexcept {
+  return layout == DecodedPixelLayout::P010Rec709Limited
+      || layout == DecodedPixelLayout::P010Rec709Full
+      || layout == DecodedPixelLayout::Nv12Rec709Limited
+      || layout == DecodedPixelLayout::Nv12Rec709Full;
+}
+
+// Bytes per luma sample. Chroma interleaves two of them per texel.
+[[nodiscard]] constexpr core::u32 video_sample_bytes(
+    DecodedPixelLayout layout) noexcept {
+  return layout == DecodedPixelLayout::Nv12Rec709Limited
+          || layout == DecodedPixelLayout::Nv12Rec709Full
+      ? 1U
+      : 2U;
+}
+
+// A frame a hardware decoder left in GPU memory, on the renderer's own device.
+// Nothing is read back and nothing is uploaded: the cache asks that device for
+// plane views of `resource` and samples the decoder's surface where it is.
+//
+// `retained` holds the decoder's reference to that surface. The decoder cannot
+// reuse the surface while it lives, so the cache keeps the whole DecodedFrame
+// until its plane views are safe to release.
+struct DecodedGpuFrame final {
+  rhi::NativeHandle device{};
+  rhi::NativeHandle resource{};
+  std::shared_ptr<void> retained;
+  // What this frame costs the decoded-residency budget. The budget bounds
+  // video memory on this path rather than system memory, so it is the size
+  // the planes occupy rather than anything held in `pixels`.
+  std::size_t bytes{};
+};
+
+// One decoded frame, in CPU memory or on the GPU. An invalid frame (no pixels
+// and no GPU surface) is how the decoder reports malformed or unsupported
+// input.
 struct DecodedFrame final {
   core::u32 width{};
   core::u32 height{};
   rhi::TextureFormat format{rhi::TextureFormat::Rgba8Unorm};
   DecodedPixelLayout layout{DecodedPixelLayout::Rgba8};
   std::vector<core::u8> pixels;
+  // Set on every planar frame; meaningless and zero on the others.
+  ChromaExtent chroma{};
+  std::optional<DecodedGpuFrame> gpu;
   // Video workers may satisfy a moving playhead with the most recently
   // completed frame while the exact request is still in flight. Stills leave
   // this empty; video decoders report the actual source ordinal so the GPU
@@ -43,7 +103,13 @@ struct DecodedFrame final {
   ImagePrimaries primaries{ImagePrimaries::Rec709};
 
   [[nodiscard]] bool valid() const noexcept {
-    return width > 0U && height > 0U && !pixels.empty();
+    return width > 0U && height > 0U && (!pixels.empty() || gpu.has_value());
+  }
+
+  // What holding this frame costs the decoded-residency budget, wherever the
+  // picture actually lives.
+  [[nodiscard]] std::size_t residency_bytes() const noexcept {
+    return gpu.has_value() ? gpu->bytes : pixels.size();
   }
 };
 

@@ -103,6 +103,10 @@ constexpr core::u32 max_storage_texture_table_size = 16U;
         return DXGI_FORMAT_R16_UNORM;
     case TextureFormat::Rg16Unorm:
         return DXGI_FORMAT_R16G16_UNORM;
+    case TextureFormat::R8Unorm:
+        return DXGI_FORMAT_R8_UNORM;
+    case TextureFormat::Rg8Unorm:
+        return DXGI_FORMAT_R8G8_UNORM;
     case TextureFormat::Depth32Float:
         return DXGI_FORMAT_D32_FLOAT;
     }
@@ -142,7 +146,10 @@ DXGI_FORMAT dxgi_resource_format(
     case TextureFormat::Rgba32Float:
         return 16U;
     case TextureFormat::R16Unorm:
+    case TextureFormat::Rg8Unorm:
         return 2U;
+    case TextureFormat::R8Unorm:
+        return 1U;
     case TextureFormat::Bc7Unorm:
     case TextureFormat::Bc5Unorm: return 0U;
     }
@@ -250,6 +257,11 @@ struct CommandContext;
 struct D3d12Texture final {
     ComPtr<ID3D12Resource> resource;
     TextureDesc desc{};
+    // A plane view of a hardware decoder's own output. This device never
+    // writes it and must never transition it: the decoder leaves it in COMMON,
+    // sampling promotes it implicitly, and it decays back when the submission
+    // completes, which is what lets the decoder write the surface again.
+    bool external{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     CommandContext* recording_owner{};
     core::u64 last_submission{};
@@ -430,6 +442,9 @@ struct D3d12Device final {
     DescriptorHeap samplers;
     std::array<D3d12Sampler*, cpu_sampler_capacity> sampler_cache{};
     std::string adapter_name;
+    // What the chosen adapter has to itself. Zero on an integrated part, and
+    // the measure the selection above uses to find the real GPU.
+    core::u64 dedicated_video_memory{};
     core::RenderAdapterIdentity identity{};
 };
 
@@ -569,6 +584,20 @@ void finish_texture_states(CommandContext& commands, bool commit) noexcept {
     CommandContext& commands,
     D3d12Texture& texture,
     D3D12_RESOURCE_STATES target) noexcept {
+    if (texture.external) {
+        // A read needs no barrier at all: the decoder leaves its surface in
+        // COMMON, reading promotes it implicitly, and it decays back when the
+        // submission completes - which is exactly what lets the decoder write
+        // the surface again. An explicit transition would defeat that decay,
+        // so a read-only target succeeds without recording one and anything
+        // that would write the surface is refused.
+        constexpr D3D12_RESOURCE_STATES readable =
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_COPY_SOURCE;
+        return target != D3D12_RESOURCE_STATE_COMMON
+            && (target & ~readable) == 0;
+    }
     if (texture.recording_owner != nullptr &&
         texture.recording_owner != &commands) {
         return false;
@@ -1196,6 +1225,17 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
             return Result::failure(RhiError::Unavailable);
         }
     }
+    // Every adapter is considered and the one with the most dedicated video
+    // memory wins, rather than taking DXGI's first "high performance" answer.
+    //
+    // On at least one laptop in this cluster that answer is the integrated
+    // Intel part - 128 MiB of dedicated memory next to a 6 GB RTX 2060 - and
+    // a render node that lands there cannot hold even two 4K video surfaces,
+    // let alone render a show. Dedicated memory is the honest discriminator:
+    // an integrated part shares system memory and reports almost none.
+    //
+    // Ties keep DXGI's preference order, which is what the enumeration below
+    // walks when the amounts are equal.
     for (UINT index = 0U;; ++index) {
         ComPtr<IDXGIAdapter1> candidate;
         const HRESULT enumerated = state->factory->EnumAdapterByGpuPreference(
@@ -1210,26 +1250,32 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
         DXGI_ADAPTER_DESC1 desc{};
         if (FAILED(candidate->GetDesc1(&desc)) ||
             (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0U ||
-            FAILED(D3D12CreateDevice(
-                candidate.Get(), D3D_FEATURE_LEVEL_12_0,
-                IID_PPV_ARGS(&state->device)))) {
+            desc.DedicatedVideoMemory <= state->dedicated_video_memory) {
             continue;
         }
-        static_cast<void>(candidate.As(&state->adapter));
+        ComPtr<ID3D12Device> device;
+        if (FAILED(D3D12CreateDevice(candidate.Get(), D3D_FEATURE_LEVEL_12_0,
+                                     IID_PPV_ARGS(&device)))) {
+            continue;
+        }
         D3D12_FEATURE_DATA_SHADER_MODEL shader_model{D3D_SHADER_MODEL_6_2};
-        if (FAILED(state->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,
+        if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,
                 &shader_model, sizeof(shader_model))) || shader_model.HighestShaderModel < D3D_SHADER_MODEL_6_2) {
-            state->device.Reset();
             continue;
         }
+        state->device = std::move(device);
+        state->adapter.Reset();
+        static_cast<void>(candidate.As(&state->adapter));
+        state->dedicated_video_memory =
+            static_cast<core::u64>(desc.DedicatedVideoMemory);
         state->adapter_name = narrow_adapter_name(desc.Description);
+        state->identity = core::RenderAdapterIdentity{};
         std::copy_n(state->adapter_name.data(), std::min(state->adapter_name.size(), state->identity.name.size() - 1U), state->identity.name.data());
         state->identity.vendor = desc.VendorId;
         state->identity.device = desc.DeviceId;
         LARGE_INTEGER driver_version{};
         if (SUCCEEDED(candidate->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver_version)))
             state->identity.driver_version = static_cast<core::u64>(driver_version.QuadPart);
-        break;
     }
     if (!state->device) {
         delete state;
@@ -1351,8 +1397,8 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     capabilities.indirect_draw = false;
     capabilities.acceleration_structures = false;
     capabilities.ray_queries = false;
-    // No external-memory import/export surface is exposed by this RHI yet.
-    capabilities.external_memory = false;
+    // Plane views of a decoder's own surfaces, through import_video_planes.
+    capabilities.external_memory = true;
     return Result::success(D3d12CreatedDevice{
         state, state->device.Get(), capabilities});
 }
@@ -1389,6 +1435,11 @@ core::RenderAdapterIdentity d3d12_adapter_identity(void* opaque) noexcept {
 std::string_view d3d12_driver_name(void* value) noexcept {
     const auto* state = as_device(value);
     return state == nullptr ? std::string_view{} : state->adapter_name;
+}
+
+core::u64 d3d12_dedicated_video_memory(void* value) noexcept {
+    const auto* state = as_device(value);
+    return state == nullptr ? 0U : state->dedicated_video_memory;
 }
 
 bool d3d12_supports_shader(ShaderFormat format) noexcept {
@@ -1759,6 +1810,72 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_texture(
             texture->resource.Get(), nullptr, &view,
             state->views.cpu(texture->uav));
     }
+    return Result::success(D3d12CreatedResource{
+        texture, texture->resource.Get()});
+}
+
+core::Result<D3d12CreatedResource, RhiError> d3d12_import_video_plane(
+    void* value, void* resource, core::u32 width, core::u32 height,
+    TextureFormat format, core::u32 plane) noexcept {
+    using Result = core::Result<D3d12CreatedResource, RhiError>;
+    auto* state = as_device(value);
+    auto* native = static_cast<ID3D12Resource*>(resource);
+    if (state == nullptr || native == nullptr || width == 0U || height == 0U) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    // The plane view has to name a real subresource of the decoder's texture,
+    // and the picture has to fill it exactly.
+    //
+    // A shader samples a whole mip in normalized coordinates and no view can
+    // crop one, so a surface the codec padded out to its macroblock grid -
+    // 1920x1088 for 1080p H.264, say - would stretch the picture by whatever
+    // the padding is. Refusing it here is what sends such a source back to the
+    // path that copies the visible rows out itself.
+    const D3D12_RESOURCE_DESC described = native->GetDesc();
+    if (described.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        described.MipLevels != 1U || described.DepthOrArraySize != 1U ||
+        plane > 1U ||
+        static_cast<core::u64>(width) << plane != described.Width ||
+        static_cast<core::u64>(height) << plane != described.Height) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    // The view has to name the plane's real format. D3D12 will create an
+    // R16 view over an eight-bit plane without complaint and hand back
+    // whatever those bytes happen to spell, so this is checked here rather
+    // than left to the runtime: reading a plane at the wrong depth is not a
+    // worse picture, it is a different one.
+    const DXGI_FORMAT expected = described.Format == DXGI_FORMAT_NV12
+        ? (plane == 0U ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8_UNORM)
+        : (described.Format == DXGI_FORMAT_P010
+               || described.Format == DXGI_FORMAT_P016)
+            ? (plane == 0U ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R16G16_UNORM)
+            : DXGI_FORMAT_UNKNOWN;
+    if (expected == DXGI_FORMAT_UNKNOWN || dxgi_shader_format(format) != expected) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    auto* texture = new (std::nothrow) D3d12Texture{};
+    if (texture == nullptr) {
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    texture->external = true;
+    texture->desc.width = width;
+    texture->desc.height = height;
+    texture->desc.format = format;
+    texture->desc.sampled = true;
+    texture->resource = native;
+    texture->srv = state->views.allocate();
+    if (texture->srv == invalid_descriptor) {
+        delete texture;
+        return Result::failure(RhiError::AllocationFailed);
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = dxgi_shader_format(format);
+    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view.Texture2D.MipLevels = 1U;
+    view.Texture2D.PlaneSlice = plane;
+    state->device->CreateShaderResourceView(
+        texture->resource.Get(), &view, state->views.cpu(texture->srv));
     return Result::success(D3d12CreatedResource{
         texture, texture->resource.Get()});
 }
@@ -3587,6 +3704,7 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
 void destroy_d3d12_device(void*) noexcept {}
 core::RenderAdapterIdentity d3d12_adapter_identity(void*) noexcept { return {}; }
 std::string_view d3d12_driver_name(void*) noexcept { return {}; }
+core::u64 d3d12_dedicated_video_memory(void*) noexcept { return 0U; }
 bool d3d12_supports_shader(ShaderFormat) noexcept { return false; }
 bool d3d12_supports_texture(void*, TextureFormat) noexcept { return false; }
 void d3d12_wait_idle(void*) noexcept {}
@@ -3610,6 +3728,11 @@ bool d3d12_present_swapchain(
 }
 core::Result<D3d12CreatedResource, RhiError> d3d12_create_texture(
     void*, const TextureDesc&) noexcept {
+    return core::Result<D3d12CreatedResource, RhiError>::failure(
+        RhiError::Unavailable);
+}
+core::Result<D3d12CreatedResource, RhiError> d3d12_import_video_plane(
+    void*, void*, core::u32, core::u32, TextureFormat, core::u32) noexcept {
     return core::Result<D3d12CreatedResource, RhiError>::failure(
         RhiError::Unavailable);
 }

@@ -984,6 +984,7 @@ public:
         frame.width = 2U;
         frame.height = 2U;
         frame.layout = layout_;
+        frame.chroma = render::ChromaExtent{1U, 1U};
         frame.source_frame = frame_index;
         // Four neutral-gray luma samples, followed by one neutral U/V pair.
         const core::u16 y = static_cast<core::u16>(y_code_ << 6U);
@@ -1025,8 +1026,8 @@ public:
         const std::array<core::u8, 4U> luma{{
             yuv_[0], yuv_[0], yuv_[0], yuv_[0]}};
         const std::array<core::u8, 2U> chroma{{yuv_[1], yuv_[2]}};
-        auto result = render::detail::pack_nv12_rec709_limited(
-            2U, 2U, luma, 2U, chroma, 2U);
+        auto result = render::detail::pack_nv12_rec709(
+            2U, 2U, true, luma, 2U, chroma, 2U);
         result.source_frame = frame_index;
         return result;
     }

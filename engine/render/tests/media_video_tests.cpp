@@ -1,5 +1,7 @@
 #include <mediaserver/render/media_source.hpp>
 
+#include <mediaserver/rhi/device.hpp>
+
 #include "../src/ffmpeg_source_test_support.hpp"
 
 extern "C" {
@@ -8,6 +10,7 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -34,6 +37,7 @@ extern "C" {
 namespace {
 
 namespace core = mediaserver::core;
+namespace rhi = mediaserver::rhi;
 namespace render = mediaserver::render;
 
 void check(bool condition, const char *expression, int line) {
@@ -117,6 +121,77 @@ void write_fixture(const std::string &path) {
     check(static_cast<bool>(out), "wrote MP4 fixture", __LINE__);
 }
 
+// What a decoded frame shows at one pixel, whatever layout it arrived in.
+//
+// The Rec.709 constants here are written from the specification rather than
+// taken from the renderer, so a test that uses this is still checking the
+// decoder against an independent expectation. It handles either sample depth
+// and any of the chroma extents the decoder produces, because a 4:2:2 source
+// no longer becomes 4:2:0 on its way to the GPU.
+struct DisplayRgb final {
+    int r{};
+    int g{};
+    int b{};
+};
+
+[[nodiscard]] DisplayRgb display_rgb(const render::DecodedFrame &frame,
+                                     core::u32 x, core::u32 y) {
+    // A frame the decoder left on the renderer's device has no CPU pixels to
+    // read. Callers check for that first; this keeps a mistake a failed
+    // expectation rather than a crash.
+    if (frame.pixels.empty() || x >= frame.width || y >= frame.height) {
+        return DisplayRgb{-1, -1, -1};
+    }
+    if (frame.layout == render::DecodedPixelLayout::Rgba8) {
+        const std::size_t at =
+            (static_cast<std::size_t>(y) * frame.width + x) * 4U;
+        return DisplayRgb{frame.pixels[at], frame.pixels[at + 1U],
+                          frame.pixels[at + 2U]};
+    }
+    const bool eight =
+        frame.layout == render::DecodedPixelLayout::Nv12Rec709Limited ||
+        frame.layout == render::DecodedPixelLayout::Nv12Rec709Full;
+    const std::size_t sample = eight ? 1U : 2U;
+    const auto code = [&](std::size_t at) {
+        return eight ? static_cast<int>(frame.pixels[at])
+                     : static_cast<int>(
+                           (static_cast<unsigned>(frame.pixels[at]) |
+                            (static_cast<unsigned>(frame.pixels[at + 1U])
+                             << 8U)) >> 6U);
+    };
+    const std::size_t luma_row = static_cast<std::size_t>(frame.width) * sample;
+    const std::size_t luma_bytes = luma_row * frame.height;
+    const std::size_t chroma_row =
+        static_cast<std::size_t>(frame.chroma.width) * 2U * sample;
+    const core::u32 cx = x * frame.chroma.width / frame.width;
+    const core::u32 cy = y * frame.chroma.height / frame.height;
+    const int luma = code(static_cast<std::size_t>(y) * luma_row + x * sample);
+    const std::size_t chroma_at =
+        luma_bytes + static_cast<std::size_t>(cy) * chroma_row
+        + static_cast<std::size_t>(cx) * 2U * sample;
+    const int blue_difference = code(chroma_at);
+    const int red_difference = code(chroma_at + sample);
+    // Legal-range Rec.709: luma 16..235 (64..940 at ten bits), chroma
+    // centred on 128 (512) with a 224 (896) excursion.
+    const double peak = eight ? 255.0 : 1023.0;
+    const double black = eight ? 16.0 : 64.0;
+    const double luma_span = eight ? 219.0 : 876.0;
+    const double centre = eight ? 128.0 : 512.0;
+    const double chroma_span = eight ? 224.0 : 896.0;
+    const double luminance = (luma - black) / luma_span;
+    const double cb = (blue_difference - centre) / chroma_span;
+    const double cr = (red_difference - centre) / chroma_span;
+    const auto encode = [peak](double value) {
+        const double clamped = value < 0.0 ? 0.0 : (value > 1.0 ? 1.0 : value);
+        return static_cast<int>(clamped * 255.0 + 0.5);
+    };
+    static_cast<void>(peak);
+    return DisplayRgb{
+        encode(luminance + 1.5748 * cr),
+        encode(luminance - 0.187324 * cb - 0.468124 * cr),
+        encode(luminance + 1.8556 * cb)};
+}
+
 [[nodiscard]] std::shared_ptr<const render::DecodedFrame>
 await_frame(render::MediaSource &source, const std::string &path,
             core::u32 frame_index, core::u64 stream = 0U,
@@ -165,37 +240,37 @@ void a_real_mp4_decodes_exact_frames_in_forward_and_reverse_order() {
     const auto red = await_frame(*source, path, 0U);
     VIDEO_CHECK(red->valid());
     VIDEO_CHECK(red->width == 16U && red->height == 16U);
-    VIDEO_CHECK(red->pixels[0U] > 170U);
-    VIDEO_CHECK(red->pixels[1U] < 80U);
+    VIDEO_CHECK(display_rgb(*red, 8U, 8U).r > 170);
+    VIDEO_CHECK(display_rgb(*red, 8U, 8U).g < 80);
 
     // Frame 2 is a small forward gap. The decoder must discard frame 1 rather
     // than seek/flush, yet still return the exact blue frame.
     const auto blue = await_frame(*source, path, 2U);
     VIDEO_CHECK(blue->valid());
-    VIDEO_CHECK(blue->pixels[2U] > 160U);
-    VIDEO_CHECK(blue->pixels[0U] < 90U);
+    VIDEO_CHECK(display_rgb(*blue, 8U, 8U).b > 160);
+    VIDEO_CHECK(display_rgb(*blue, 8U, 8U).r < 90);
 
     const auto yellow = await_frame(*source, path, 3U);
     VIDEO_CHECK(yellow->valid());
-    VIDEO_CHECK(yellow->pixels[0U] > 160U);
-    VIDEO_CHECK(yellow->pixels[1U] > 150U);
+    VIDEO_CHECK(display_rgb(*yellow, 8U, 8U).r > 160);
+    VIDEO_CHECK(display_rgb(*yellow, 8U, 8U).g > 150);
 
     // Reverse access still uses a bounded seek and reaches frame 1 exactly.
     const auto green = await_frame(*source, path, 1U);
     VIDEO_CHECK(green->valid());
-    VIDEO_CHECK(green->pixels[1U] > 150U);
-    VIDEO_CHECK(green->pixels[0U] < 90U);
+    VIDEO_CHECK(display_rgb(*green, 8U, 8U).g > 150);
+    VIDEO_CHECK(display_rgb(*green, 8U, 8U).r < 90);
 
     // Another far-forward then reverse-to-zero pair catches a seek that lands
     // later than requested being mislabeled under the requested cache key.
     const auto orange = await_frame(*source, path, 7U);
     VIDEO_CHECK(orange->valid());
-    VIDEO_CHECK(orange->pixels[0U] > 160U);
-    VIDEO_CHECK(orange->pixels[1U] > 70U);
+    VIDEO_CHECK(display_rgb(*orange, 8U, 8U).r > 160);
+    VIDEO_CHECK(display_rgb(*orange, 8U, 8U).g > 70);
     const auto red_again = await_frame(*source, path, 0U);
     VIDEO_CHECK(red_again->valid());
-    VIDEO_CHECK(red_again->pixels[0U] > 170U);
-    VIDEO_CHECK(red_again->pixels[1U] < 80U);
+    VIDEO_CHECK(display_rgb(*red_again, 8U, 8U).r > 170);
+    VIDEO_CHECK(display_rgb(*red_again, 8U, 8U).g < 80);
 }
 
 void decode_support_distinguishes_non_video_and_unavailable_video() {
@@ -512,8 +587,12 @@ void professional_intraframe_codec_decodes(AVCodecID id, int profile, bool ten_b
         VIDEO_CHECK(encoder != nullptr);
         writer.codec = avcodec_alloc_context3(encoder);
         VIDEO_CHECK(writer.codec != nullptr);
-        writer.codec->width = 256;
-        writer.codec->height = 128;
+        // Professional masters are not postage stamps, and the size
+        // matters to what this exercises: an untagged source is only read as
+        // Rec.709 from 720 lines up, and the ProRes encoder here does not
+        // preserve the colour tag the way DNxHD does.
+        writer.codec->width = 1'280;
+        writer.codec->height = 720;
         writer.codec->time_base = AVRational{1, 24};
         writer.codec->framerate = AVRational{24, 1};
         writer.codec->pix_fmt = ten_bit ? AV_PIX_FMT_YUV422P10LE : AV_PIX_FMT_YUV422P;
@@ -579,7 +658,7 @@ void professional_intraframe_codec_decodes(AVCodecID id, int profile, bool ten_b
         VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
     }
     const auto probe = render::probe_media(path);
-    VIDEO_CHECK(probe.width == 256U && probe.height == 128U);
+    VIDEO_CHECK(probe.width == 1'280U && probe.height == 720U);
     VIDEO_CHECK(probe.frame_count == 3U);
     VIDEO_CHECK(probe.frame_rate == render::MediaFrameRate{24U, 1U});
     VIDEO_CHECK(probe.codec == (id == AV_CODEC_ID_PRORES ? "prores" : "dnxhd"));
@@ -588,12 +667,125 @@ void professional_intraframe_codec_decodes(AVCodecID id, int profile, bool ten_b
     // Reverse order checks the decoder's frame-exact seek as well as ingestion.
     for (const core::u32 index : {2U, 0U, 1U}) {
         const auto frame = await_frame(*source, path, index);
-        VIDEO_CHECK(frame->valid() && frame->width == 256U && frame->height == 128U);
+        VIDEO_CHECK(frame->valid() && frame->width == 1'280U
+                    && frame->height == 720U);
         VIDEO_CHECK(frame->source_frame == index);
+        // These are 4:2:2 masters and reach the renderer as two planes at
+        // their own depth: ten bits stay ten bits, and the chroma keeps its
+        // full height instead of being resampled to 4:2:0 on the way.
+        VIDEO_CHECK(frame->layout
+                    == (ten_bit ? render::DecodedPixelLayout::P010Rec709Limited
+                                : render::DecodedPixelLayout::Nv12Rec709Limited));
+        VIDEO_CHECK(frame->chroma.width == 640U);
+        VIDEO_CHECK(frame->chroma.height == 720U);
+        VIDEO_CHECK(frame->pixels.size()
+                    == (ten_bit ? 1'280U * 720U * 4U : 1'280U * 720U * 2U));
         const int expected = static_cast<int>((16U + index * 96U) * 255U / 219U);
-        const int actual = frame->pixels[(64U * 256U + 128U) * 4U];
+        const int actual = display_rgb(*frame, 128U, 64U).r;
         VIDEO_CHECK(std::abs(expected - actual) <= 4);
     }
+}
+
+// A high-definition source that carries no colour description at all, which
+// is the normal state of a camera original. The decoder has to read it as
+// Rec.709 limited: libswscale's own default is Rec.601, and the two matrices
+// put red and green far enough apart to tell which one ran.
+void untagged_high_definition_is_read_as_rec709() {
+    const auto directory =
+        std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path = (directory / "untagged-hd.mov").string();
+    // Deliberately off-neutral chroma. Independently computed Rec.709 limited
+    // display values for Y'CbCr 100, 60, 200 (8-bit codes, written here at ten
+    // bits): R 227, G 74, B 0 - against Rec.601's R 213, G 66, B 0.
+    constexpr int luma_code = 400;
+    constexpr int blue_code = 240;
+    constexpr int red_code = 800;
+    {
+        CodecFixtureWriter writer;
+        const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_PRORES);
+        VIDEO_CHECK(encoder != nullptr);
+        writer.codec = avcodec_alloc_context3(encoder);
+        VIDEO_CHECK(writer.codec != nullptr);
+        writer.codec->width = 1'280;
+        writer.codec->height = 720;
+        writer.codec->time_base = AVRational{1, 24};
+        writer.codec->framerate = AVRational{24, 1};
+        writer.codec->pix_fmt = AV_PIX_FMT_YUV422P10LE;
+        writer.codec->profile = 2;
+        writer.codec->thread_count = 1;
+        // The point of the fixture: nothing is said about colour.
+        writer.codec->colorspace = AVCOL_SPC_UNSPECIFIED;
+        writer.codec->color_range = AVCOL_RANGE_UNSPECIFIED;
+        VIDEO_CHECK(avcodec_open2(writer.codec, encoder, nullptr) >= 0);
+        VIDEO_CHECK(avformat_alloc_output_context2(
+            &writer.format, nullptr, "mov", path.c_str()) >= 0);
+        VIDEO_CHECK(writer.format != nullptr);
+        AVStream* stream = avformat_new_stream(writer.format, nullptr);
+        VIDEO_CHECK(stream != nullptr);
+        stream->time_base = writer.codec->time_base;
+        stream->avg_frame_rate = writer.codec->framerate;
+        VIDEO_CHECK(
+            avcodec_parameters_from_context(stream->codecpar, writer.codec) >= 0);
+        VIDEO_CHECK(avio_open(&writer.format->pb, path.c_str(),
+                              AVIO_FLAG_WRITE) >= 0);
+        VIDEO_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+        writer.frame = av_frame_alloc();
+        writer.packet = av_packet_alloc();
+        VIDEO_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+        writer.frame->format = writer.codec->pix_fmt;
+        writer.frame->width = writer.codec->width;
+        writer.frame->height = writer.codec->height;
+        VIDEO_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+        VIDEO_CHECK(av_frame_make_writable(writer.frame) >= 0);
+        for (int plane = 0; plane < 3; ++plane) {
+            const int width = plane == 0 ? writer.frame->width
+                                         : writer.frame->width / 2;
+            const int level = plane == 0 ? luma_code
+                            : plane == 1 ? blue_code
+                                         : red_code;
+            for (int row = 0; row < writer.frame->height; ++row) {
+                auto* pixels =
+                    writer.frame->data[plane] + row * writer.frame->linesize[plane];
+                for (int column = 0; column < width; ++column) {
+                    pixels[column * 2] = static_cast<core::u8>(level & 255);
+                    pixels[column * 2 + 1] = static_cast<core::u8>(level >> 8);
+                }
+            }
+        }
+        writer.frame->pts = 0;
+        writer.frame->duration = 1;
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+        int status{};
+        while ((status = avcodec_receive_packet(writer.codec, writer.packet))
+               == 0) {
+            if (writer.packet->duration == 0) writer.packet->duration = 1;
+            av_packet_rescale_ts(writer.packet, writer.codec->time_base,
+                                 stream->time_base);
+            writer.packet->stream_index = stream->index;
+            VIDEO_CHECK(
+                av_interleaved_write_frame(writer.format, writer.packet) >= 0);
+            av_packet_unref(writer.packet);
+        }
+        VIDEO_CHECK(status == AVERROR_EOF);
+        VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
+    }
+
+    auto source = render::make_media_source();
+    const auto frame = await_frame(*source, path, 0U);
+    VIDEO_CHECK(frame->valid());
+    VIDEO_CHECK(frame->width == 1'280U && frame->height == 720U);
+    // ProRes has no hardware path here, so this is the software conversion -
+    // the one libswscale would otherwise do with the wrong matrix, into the
+    // eight-bit interleaved buffer it used to be the only destination for.
+    VIDEO_CHECK(frame->layout
+                == render::DecodedPixelLayout::P010Rec709Limited);
+    VIDEO_CHECK(frame->chroma.width == 640U && frame->chroma.height == 720U);
+    const DisplayRgb centre = display_rgb(*frame, 640U, 360U);
+    VIDEO_CHECK(std::abs(centre.r - 227) <= 4);
+    VIDEO_CHECK(std::abs(centre.g - 74) <= 4);
+    VIDEO_CHECK(centre.b <= 4);
 }
 
 void prores_422_decodes_exact_frames() {
@@ -606,10 +798,299 @@ void dnxhr_lb_decodes_exact_frames() {
     professional_intraframe_codec_decodes(AV_CODEC_ID_DNXHD, AV_PROFILE_DNXHR_LB, false, "dnxhr-lb");
 }
 
-constexpr std::array<Case, 12U> cases{{
+// A frame a hardware decoder produced on the renderer's own device is handed
+// over as that surface, not copied back through system memory. The assertion
+// is that nothing arrived in `pixels` and that the device can actually read
+// the surface it was given as two planes - a handle that cannot be sampled
+// would be worse than a copy, not better.
+//
+// Runs last, deliberately: offering a decode device is process-wide and
+// sticky, and every test above reads decoded pixels out of system memory.
+void a_decoded_frame_stays_on_the_renderers_device() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto created = rhi::Device::create(config);
+    if (!created || !created.value().capabilities().external_memory) {
+        return;
+    }
+    auto device = std::move(created).value();
+
+    // The same encoder preference the proxy service uses. A build with none of
+    // them cannot write the fixture, and there is nothing to test.
+    constexpr std::array<const char*, 5U> encoders{{
+        "h264_nvenc", "h264_mf", "libx264", "libopenh264", "h264"}};
+    const AVCodec* encoder = nullptr;
+    for (const char* name : encoders) {
+        encoder = avcodec_find_encoder_by_name(name);
+        if (encoder != nullptr) {
+            break;
+        }
+    }
+    if (encoder == nullptr) {
+        return;
+    }
+
+    const auto directory =
+        std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path = (directory / "device-resident-hd.mp4").string();
+    {
+        CodecFixtureWriter writer;
+        writer.codec = avcodec_alloc_context3(encoder);
+        VIDEO_CHECK(writer.codec != nullptr);
+        writer.codec->width = 1'280;
+        writer.codec->height = 720;
+        writer.codec->time_base = AVRational{1, 24};
+        writer.codec->framerate = AVRational{24, 1};
+        writer.codec->pix_fmt = AV_PIX_FMT_YUV420P;
+        writer.codec->gop_size = 4;
+        writer.codec->max_b_frames = 0;
+        writer.codec->colorspace = AVCOL_SPC_BT709;
+        writer.codec->color_range = AVCOL_RANGE_MPEG;
+        if (avcodec_open2(writer.codec, encoder, nullptr) < 0) {
+            return;
+        }
+        VIDEO_CHECK(avformat_alloc_output_context2(
+            &writer.format, nullptr, "mp4", path.c_str()) >= 0);
+        AVStream* stream = avformat_new_stream(writer.format, nullptr);
+        VIDEO_CHECK(stream != nullptr);
+        stream->time_base = writer.codec->time_base;
+        stream->avg_frame_rate = writer.codec->framerate;
+        VIDEO_CHECK(avcodec_parameters_from_context(
+            stream->codecpar, writer.codec) >= 0);
+        VIDEO_CHECK(
+            avio_open(&writer.format->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+        VIDEO_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+        writer.frame = av_frame_alloc();
+        writer.packet = av_packet_alloc();
+        VIDEO_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+        writer.frame->format = writer.codec->pix_fmt;
+        writer.frame->width = writer.codec->width;
+        writer.frame->height = writer.codec->height;
+        VIDEO_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+        const auto drain = [&] {
+            int status{};
+            while ((status = avcodec_receive_packet(
+                        writer.codec, writer.packet)) == 0) {
+                if (writer.packet->duration == 0) writer.packet->duration = 1;
+                av_packet_rescale_ts(writer.packet, writer.codec->time_base,
+                                     stream->time_base);
+                writer.packet->stream_index = stream->index;
+                VIDEO_CHECK(av_interleaved_write_frame(
+                    writer.format, writer.packet) >= 0);
+                av_packet_unref(writer.packet);
+            }
+            VIDEO_CHECK(status == AVERROR(EAGAIN) || status == AVERROR_EOF);
+        };
+        for (int index = 0; index < 8; ++index) {
+            VIDEO_CHECK(av_frame_make_writable(writer.frame) >= 0);
+            for (int plane = 0; plane < 3; ++plane) {
+                const int rows = plane == 0 ? writer.frame->height
+                                            : writer.frame->height / 2;
+                const int columns = plane == 0 ? writer.frame->width
+                                               : writer.frame->width / 2;
+                const int level = plane == 0 ? 40 + index * 20 : 128;
+                for (int row = 0; row < rows; ++row) {
+                    std::fill_n(writer.frame->data[plane]
+                                    + row * writer.frame->linesize[plane],
+                                columns, static_cast<core::u8>(level));
+                }
+            }
+            writer.frame->pts = index;
+            writer.frame->duration = 1;
+            VIDEO_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+            drain();
+        }
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+        drain();
+        VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
+    }
+
+    render::offer_video_decode_device(device);
+    auto source = render::make_media_source();
+    const auto frame = await_frame(*source, path, 0U);
+    VIDEO_CHECK(frame->valid());
+    if (render::probe_media_decode_support(path)
+        != render::MediaDecodeSupport::HardwareAccelerated) {
+        // No hardware decoder for this stream on this machine: the software
+        // path is correct and nothing about the device route applies.
+        return;
+    }
+    VIDEO_CHECK(frame->width == 1'280U && frame->height == 720U);
+    VIDEO_CHECK(frame->pixels.empty());
+    VIDEO_CHECK(frame->gpu.has_value());
+    VIDEO_CHECK(frame->gpu->device == device.native_handle());
+    VIDEO_CHECK(frame->gpu->resource.value != nullptr);
+    VIDEO_CHECK(frame->gpu->retained != nullptr);
+    VIDEO_CHECK(frame->gpu->bytes == 1'280U * 720U * 3U / 2U);
+    VIDEO_CHECK(frame->layout
+                == render::DecodedPixelLayout::Nv12Rec709Limited);
+    auto planes = device.import_video_planes(
+        frame->gpu->resource, frame->width, frame->height,
+        rhi::TextureFormat::R8Unorm, rhi::TextureFormat::Rg8Unorm);
+    VIDEO_CHECK(planes.has_value());
+    VIDEO_CHECK(planes.value().luma.width() == 1'280U
+                && planes.value().luma.height() == 720U);
+    VIDEO_CHECK(planes.value().chroma.width() == 640U
+                && planes.value().chroma.height() == 360U);
+    // An eight-bit surface read as ten-bit planes is a different picture, not
+    // a rougher one, so the depths have to agree.
+    VIDEO_CHECK(!device.import_video_planes(
+        frame->gpu->resource, frame->width, frame->height,
+        rhi::TextureFormat::R16Unorm, rhi::TextureFormat::Rg16Unorm));
+}
+
+// Ten-bit video keeps its depth all the way to the renderer: two sixteen-bit
+// planes, not the eight-bit pair the more common NV12 case uses and not the
+// eight-bit interleaved buffer every software conversion used to produce.
+//
+// Which route carries it depends on the machine. Where a hardware decoder
+// puts a P010 surface on the renderer's own device the frame is adopted
+// there; otherwise it arrives in system memory. Both are checked, so the
+// depth is asserted either way instead of the test quietly passing on a
+// machine that takes the other route.
+void ten_bit_video_keeps_its_depth() {
+    constexpr std::array<const char*, 4U> encoders{{
+        "hevc_nvenc", "hevc_mf", "libx265", "hevc"}};
+    const AVCodec* encoder = nullptr;
+    for (const char* name : encoders) {
+        encoder = avcodec_find_encoder_by_name(name);
+        if (encoder != nullptr) {
+            break;
+        }
+    }
+    if (encoder == nullptr) {
+        return;
+    }
+    const auto directory =
+        std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path = (directory / "device-resident-hd10.mp4").string();
+    {
+        CodecFixtureWriter writer;
+        writer.codec = avcodec_alloc_context3(encoder);
+        VIDEO_CHECK(writer.codec != nullptr);
+        writer.codec->width = 1'280;
+        writer.codec->height = 720;
+        writer.codec->time_base = AVRational{1, 24};
+        writer.codec->framerate = AVRational{24, 1};
+        writer.codec->pix_fmt = AV_PIX_FMT_P010LE;
+        writer.codec->gop_size = 4;
+        writer.codec->max_b_frames = 0;
+        writer.codec->colorspace = AVCOL_SPC_BT709;
+        writer.codec->color_range = AVCOL_RANGE_MPEG;
+        if (avcodec_open2(writer.codec, encoder, nullptr) < 0) {
+            return;
+        }
+        VIDEO_CHECK(avformat_alloc_output_context2(
+            &writer.format, nullptr, "mp4", path.c_str()) >= 0);
+        AVStream* stream = avformat_new_stream(writer.format, nullptr);
+        VIDEO_CHECK(stream != nullptr);
+        stream->time_base = writer.codec->time_base;
+        stream->avg_frame_rate = writer.codec->framerate;
+        VIDEO_CHECK(avcodec_parameters_from_context(
+            stream->codecpar, writer.codec) >= 0);
+        VIDEO_CHECK(
+            avio_open(&writer.format->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+        VIDEO_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+        writer.frame = av_frame_alloc();
+        writer.packet = av_packet_alloc();
+        VIDEO_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+        writer.frame->format = writer.codec->pix_fmt;
+        writer.frame->width = writer.codec->width;
+        writer.frame->height = writer.codec->height;
+        VIDEO_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+        const auto drain = [&] {
+            int status{};
+            while ((status = avcodec_receive_packet(
+                        writer.codec, writer.packet)) == 0) {
+                if (writer.packet->duration == 0) writer.packet->duration = 1;
+                av_packet_rescale_ts(writer.packet, writer.codec->time_base,
+                                     stream->time_base);
+                writer.packet->stream_index = stream->index;
+                VIDEO_CHECK(av_interleaved_write_frame(
+                    writer.format, writer.packet) >= 0);
+                av_packet_unref(writer.packet);
+            }
+            VIDEO_CHECK(status == AVERROR(EAGAIN) || status == AVERROR_EOF);
+        };
+        for (int index = 0; index < 8; ++index) {
+            VIDEO_CHECK(av_frame_make_writable(writer.frame) >= 0);
+            // P010 keeps ten bits in the high bits of each sixteen-bit word.
+            for (int plane = 0; plane < 2; ++plane) {
+                const int rows = plane == 0 ? writer.frame->height
+                                            : writer.frame->height / 2;
+                const auto level = static_cast<core::u16>(
+                    (plane == 0 ? 160 + index * 80 : 512) << 6U);
+                for (int row = 0; row < rows; ++row) {
+                    auto* pixels = writer.frame->data[plane]
+                        + row * writer.frame->linesize[plane];
+                    for (int word = 0; word < writer.frame->width; ++word) {
+                        pixels[word * 2] = static_cast<core::u8>(level & 0xffU);
+                        pixels[word * 2 + 1] =
+                            static_cast<core::u8>(level >> 8U);
+                    }
+                }
+            }
+            writer.frame->pts = index;
+            writer.frame->duration = 1;
+            VIDEO_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+            drain();
+        }
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+        drain();
+        VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
+    }
+
+    auto source = render::make_media_source();
+    const auto frame = await_frame(*source, path, 0U);
+    VIDEO_CHECK(frame->valid());
+    VIDEO_CHECK(frame->width == 1'280U && frame->height == 720U);
+    // Ten bits, whichever route carried it, and 4:2:0 as the source was.
+    VIDEO_CHECK(frame->layout
+                == render::DecodedPixelLayout::P010Rec709Limited);
+    VIDEO_CHECK(frame->chroma.width == 640U && frame->chroma.height == 360U);
+
+    if (!frame->gpu.has_value()) {
+        // System memory: three bytes a pixel, which is two per luma sample
+        // plus a quarter-sized interleaved chroma plane. Four would be the
+        // eight-bit interleaved buffer this used to produce.
+        VIDEO_CHECK(frame->pixels.size() == 1'280U * 720U * 3U);
+        // The authored picture is a flat mid grey with neutral chroma.
+        const DisplayRgb shown = display_rgb(*frame, 640U, 360U);
+        VIDEO_CHECK(std::abs(shown.r - shown.g) <= 3
+                    && std::abs(shown.g - shown.b) <= 3);
+        VIDEO_CHECK(shown.r > 20 && shown.r < 250);
+        return;
+    }
+    // Adopted on the renderer's device: nothing came back through system
+    // memory, and the surface reads as two sixteen-bit planes.
+    VIDEO_CHECK(frame->pixels.empty());
+    VIDEO_CHECK(frame->gpu->bytes == 1'280U * 720U * 3U);
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto created = rhi::Device::create(config);
+    VIDEO_CHECK(created.has_value());
+    auto device = std::move(created).value();
+    auto planes = device.import_video_planes(
+        frame->gpu->resource, frame->width, frame->height,
+        rhi::TextureFormat::R16Unorm, rhi::TextureFormat::Rg16Unorm);
+    VIDEO_CHECK(planes.has_value());
+    VIDEO_CHECK(planes.value().luma.desc().format
+                == rhi::TextureFormat::R16Unorm);
+    VIDEO_CHECK(planes.value().chroma.desc().format
+                == rhi::TextureFormat::Rg16Unorm);
+}
+
+constexpr std::array<Case, 15U> cases{{
     {"speculative publication preserves current frames with a full cache",
      &speculative_publication_preserves_current_frames_with_a_full_cache},
     {"ProRes 422 decodes exact frames", &prores_422_decodes_exact_frames},
+    {"untagged high definition is read as Rec.709",
+     &untagged_high_definition_is_read_as_rec709},
     {"DNxHR HQX decodes exact frames", &dnxhr_hqx_decodes_exact_frames},
     {"DNxHR LB decodes exact frames", &dnxhr_lb_decodes_exact_frames},
     {"speculative video frames can be polled without current frame demand",
@@ -628,6 +1109,11 @@ constexpr std::array<Case, 12U> cases{{
      &decode_support_distinguishes_non_video_and_unavailable_video},
     {"buffered output raises the decode cache without allocating it",
      &buffered_output_raises_the_decode_cache_without_allocating_it},
+    // Last: offering a decode device is process-wide and sticky.
+    {"a decoded frame stays on the renderer's device",
+     &a_decoded_frame_stays_on_the_renderers_device},
+    {"ten-bit video keeps its depth",
+     &ten_bit_video_keeps_its_depth},
 }};
 
 } // namespace
