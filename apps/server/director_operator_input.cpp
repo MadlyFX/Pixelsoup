@@ -143,6 +143,8 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_compositor_adds.clear();
     pending_compositor_move.reset();
     pending_compositor_connect.reset();
+    pending_compositor_rewire.reset();
+    pending_compositor_waypoints.reset();
     pending_compositor_property.reset();
     pending_compositor_delete.reset();
     pending_compositor_gesture = 0U;

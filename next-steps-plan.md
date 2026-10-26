@@ -328,32 +328,20 @@ resizable, scrollable Parameters panel. `CompositorPanel::input_port_at()`
 already answers which input a screen point is over, for drops from other
 panels.
 
-Wiring:
+Wiring is in place too: drops from the Timeline, Effects, and Library onto
+an input; the node search on Tab, right click, or a wire let go on empty
+canvas; splicing a free node into a wire; Alt-click to break and Ctrl-drag to
+move wires; reroute points stored as `point_N_x/y` on the wire's own node;
+refusal reasons, flow highlighting, and dimmed dead branches. Two pieces
+remain from it:
 
-- **Drop onto a port.** A Timeline layer, Effects entry, or Library asset
-  dropped on a compatible input port creates its node beside that port, aligned
-  to its row, and connects it. An occupied single input is replaced in the same
-  transaction. Library assets also need their scene element created in that
-  transaction. Drop precedence is port, then node body (the existing Replace
-  layer and Replace source), then wire, then empty canvas. While hovering, show
-  a ghost wire and name the target, for example "Connect to Plate Front".
-  Update the Operator Guide's drag-and-drop description.
-- **Connect from a port into empty space.** Releasing a wire on empty canvas
-  opens the node search at the pointer, filtered to compatible nodes, and the
-  chosen node is created already connected. Tab or right-click on the canvas
-  opens the same search. Enter adds the top result, and arrow keys move the
-  highlight.
-- **Insert on a wire.** Dropping a single-input, single-output node or effect
-  onto an existing edge splices it in as one transaction.
-- **Break and move links.** Alt-click a port to disconnect its edges, and
-  Ctrl-drag from a connected port to lift its edges onto another port.
-- **Reroute points.** Double-click a wire to add a waypoint, which the operator
-  can drag and delete. Waypoints are ordered layout data on the edge, not graph
-  nodes, so they never change evaluation.
-- **Refusal reasons and flow.** A refused connection says why, for example
-  that an Effect output cannot feed an Image input. Selecting a node highlights
-  its upstream and downstream edges. Branches that the existing dead-branch
-  diagnostic reports draw dimmed.
+- **Insert from a drop.** Dropping an Effects entry or Library asset onto a
+  wire should splice a new node in, as dragging a free node already does.
+  Effect nodes have no image input today, so this waits on an image-in,
+  image-out effect node kind.
+- **Right-click menu.** Right-click currently opens the node search. A
+  context menu with node and wire actions (rename, disconnect, add reroute
+  point) belongs with the selection work below.
 
 Selection and organization, using the selection contract above:
 

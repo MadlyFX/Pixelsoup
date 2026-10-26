@@ -506,6 +506,14 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
         pending_compositor_connect = editor_frame.compositor_connect;
         pending_compositor_gesture = editor_frame.compositor_gesture;
     }
+    if (editor_frame.compositor_rewire.has_value()) {
+        pending_compositor_rewire = editor_frame.compositor_rewire;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_waypoints.has_value()) {
+        pending_compositor_waypoints = editor_frame.compositor_waypoints;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
     if (editor_frame.compositor_property_edit.has_value()) {
         pending_compositor_property =
             editor_frame.compositor_property_edit;

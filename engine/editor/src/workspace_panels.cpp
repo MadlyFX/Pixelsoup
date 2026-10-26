@@ -1165,30 +1165,93 @@ find_port(std::span<const CompositorPortVisual> ports,
   return found == ports.end() ? nullptr : std::addressof(*found);
 }
 
-[[nodiscard]] bool can_connect(const compositor::CompositorGraph &graph,
-                               const CompositorPortVisual &from,
-                               const CompositorPortVisual &to) noexcept {
+[[nodiscard]] std::string_view
+port_type_name(compositor::PortValueType type) noexcept {
+  switch (type) {
+  case compositor::PortValueType::Image:
+    return "an image";
+  case compositor::PortValueType::Effect:
+    return "an effect";
+  case compositor::PortValueType::TransformSet:
+    return "array instances";
+  }
+  return "an image";
+}
+
+// Whether following wires downstream from `start` arrives at `target`.
+[[nodiscard]] bool reaches(const compositor::CompositorGraph &graph,
+                           doc::NodeId start, doc::NodeId target) {
+  std::vector<doc::NodeId> pending{start};
+  std::set<doc::NodeId> seen;
+  while (!pending.empty()) {
+    const doc::NodeId node = pending.back();
+    pending.pop_back();
+    if (node == target) {
+      return true;
+    }
+    if (!seen.insert(node).second) {
+      continue;
+    }
+    for (const compositor::GraphEdge &edge : graph.edges) {
+      if (edge.from.node == node) {
+        pending.push_back(edge.to.node);
+      }
+    }
+  }
+  return false;
+}
+
+// Why a wire from `from` cannot end at `to`, in words an operator can act
+// on; empty when it can. `ignored` are wires being moved, which do not count
+// as already there. An occupied single input is connectable on purpose: the
+// new wire replaces the old one in the same undo step.
+[[nodiscard]] std::string
+connection_refusal(const compositor::CompositorGraph &graph,
+                   const CompositorPortVisual &from,
+                   const CompositorPortVisual &to,
+                   std::span<const doc::NodeId> ignored = {}) {
   if (from.descriptor == nullptr || to.descriptor == nullptr ||
       from.descriptor->direction != compositor::PortDirection::Output ||
-      to.descriptor->direction != compositor::PortDirection::Input ||
-      from.descriptor->type != to.descriptor->type) {
-    return false;
+      to.descriptor->direction != compositor::PortDirection::Input) {
+    return "Connect an output to an input";
   }
-  const bool duplicate =
+  if (from.descriptor->type != to.descriptor->type) {
+    return std::string{"This input takes "} +
+           std::string{port_type_name(to.descriptor->type)} +
+           ", not " + std::string{port_type_name(from.descriptor->type)};
+  }
+  if (from.endpoint.node == to.endpoint.node) {
+    return "A node cannot feed itself";
+  }
+  const auto counts = [ignored](const compositor::GraphEdge &edge) {
+    return std::find(ignored.begin(), ignored.end(), edge.node) ==
+           ignored.end();
+  };
+  if (std::any_of(graph.edges.begin(), graph.edges.end(),
+                  [&](const compositor::GraphEdge &edge) {
+                    return counts(edge) && edge.from == from.endpoint &&
+                           edge.to == to.endpoint;
+                  })) {
+    return "Already connected here";
+  }
+  if (!from.descriptor->multiple &&
       std::any_of(graph.edges.begin(), graph.edges.end(),
-                  [&from, &to](const compositor::GraphEdge &edge) noexcept {
-                    return edge.from == from.endpoint && edge.to == to.endpoint;
-                  });
-  const bool output_occupied =
-      !from.descriptor->multiple &&
-      std::any_of(graph.edges.begin(), graph.edges.end(),
-                  [&from](const compositor::GraphEdge &edge) noexcept {
-                    return edge.from == from.endpoint;
-                  });
-  // An occupied single-input port is intentionally connectable: the emitted
-  // intent names its current edge so the authoring boundary can replace it in
-  // one transaction. This is the natural graph-editor rewire gesture.
-  return !duplicate && !output_occupied;
+                  [&](const compositor::GraphEdge &edge) {
+                    return counts(edge) && edge.from == from.endpoint;
+                  })) {
+    return "This output already has its one wire";
+  }
+  if (reaches(graph, to.endpoint.node, from.endpoint.node)) {
+    return "That would make a loop; wires flow toward Output";
+  }
+  return {};
+}
+
+[[nodiscard]] bool can_connect(const compositor::CompositorGraph &graph,
+                               const CompositorPortVisual &from,
+                               const CompositorPortVisual &to,
+                               std::span<const doc::NodeId> ignored = {}) {
+  return connection_refusal(graph, from, to, ignored).empty();
 }
 
 // Retained for the read-only scene-element compatibility adapter below. The
@@ -1279,6 +1342,22 @@ void wire(gui::UiContext &ctx, float from_x, float from_y, float to_x,
           float zoom = 1.0F) {
   const WirePath path = wire_path(from_x, from_y, to_x, to_y, zoom);
   ctx.draw_list().add_polyline(path.view(), thickness, color);
+}
+
+// A wire through its reroute points: one curve per stretch, each leaving
+// and entering horizontally, so a routed wire still reads as flowing right.
+[[nodiscard]] std::vector<WirePath>
+routed_wire(gui::UiPoint from, std::span<const gui::UiPoint> points,
+            gui::UiPoint to, float zoom) {
+  std::vector<WirePath> segments;
+  segments.reserve(points.size() + 1U);
+  gui::UiPoint start = from;
+  for (const gui::UiPoint point : points) {
+    segments.push_back(wire_path(start.x, start.y, point.x, point.y, zoom));
+    start = point;
+  }
+  segments.push_back(wire_path(start.x, start.y, to.x, to.y, zoom));
+  return segments;
 }
 
 // The pointer's distance from the drawn curve, for picking a wire.
@@ -3116,18 +3195,23 @@ std::optional<LibraryAddAction> LibraryPanel::draw(gui::UiContext &ctx,
   return std::nullopt;
 }
 
+gui::Rect CompositorPanel::node_screen_bounds(
+    const compositor::GraphNode &node) const noexcept {
+  const bool pending =
+      pending_move_.has_value() && pending_move_->node == node.node;
+  const gui::UiPoint size = node_size(node);
+  return gui::Rect{
+      last_canvas_.x + pan_x_ + (pending ? pending_move_->x : node.editor_x) * zoom_,
+      last_canvas_.y + pan_y_ + (pending ? pending_move_->y : node.editor_y) * zoom_,
+      size.x * zoom_, size.y * zoom_};
+}
+
 std::optional<std::pair<doc::NodeId, gui::Rect>>
 CompositorPanel::node_at(const compositor::CompositorGraph &graph,
                          float x, float y) const noexcept {
   if (!last_canvas_.contains(x, y)) return std::nullopt;
   for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
-    const bool pending =
-        pending_move_.has_value() && pending_move_->node == it->node;
-    const gui::UiPoint size = node_size(*it);
-    const gui::Rect bounds{
-        last_canvas_.x + pan_x_ + (pending ? pending_move_->x : it->editor_x) * zoom_,
-        last_canvas_.y + pan_y_ + (pending ? pending_move_->y : it->editor_y) * zoom_,
-        size.x * zoom_, size.y * zoom_};
+    const gui::Rect bounds = node_screen_bounds(*it);
     if (bounds.contains(x, y)) return std::pair{it->node, intersect(bounds, last_canvas_)};
   }
   return std::nullopt;
@@ -3168,14 +3252,7 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
   // Topmost node first, as node_at() does, so the answer is the port the
   // operator can see.
   for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
-    const bool pending =
-        pending_move_.has_value() && pending_move_->node == it->node;
-    const gui::UiPoint size = node_size(*it);
-    const float left =
-        last_canvas_.x + pan_x_ + (pending ? pending_move_->x : it->editor_x) * zoom_;
-    const float top =
-        last_canvas_.y + pan_y_ + (pending ? pending_move_->y : it->editor_y) * zoom_;
-    const gui::Rect bounds{left, top, size.x * zoom_, size.y * zoom_};
+    const gui::Rect bounds = node_screen_bounds(*it);
     const float reach = compositor_port_radius * zoom_ + 4.0F;
     const gui::Rect with_dots{bounds.x - reach, bounds.y,
                               bounds.width + reach, bounds.height};
@@ -3184,10 +3261,10 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
     }
     const auto ports = compositor::input_ports(it->kind);
     for (std::size_t index = 0U; index < ports.size(); ++index) {
-      const float row_top = top + (metrics_.header_height +
-                                   metrics_.row_height *
-                                       static_cast<float>(index)) * zoom_;
-      const gui::Rect row{left - reach, row_top,
+      const float row_top = bounds.y + (metrics_.header_height +
+                                        metrics_.row_height *
+                                            static_cast<float>(index)) * zoom_;
+      const gui::Rect row{bounds.x - reach, row_top,
                           bounds.width * 0.5F + reach,
                           metrics_.row_height * zoom_};
       if (row.contains(x, y)) {
@@ -3199,6 +3276,99 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
     }
   }
   return std::nullopt;
+}
+
+std::optional<CompositorPortDrop> CompositorPanel::port_drop_target(
+    const compositor::CompositorGraph &graph, float x, float y,
+    compositor::PortValueType type) const noexcept {
+  if (!last_canvas_.contains(x, y)) return std::nullopt;
+  std::optional<CompositorPortDrop> best;
+  float best_rank = std::numeric_limits<float>::infinity();
+  // Later nodes draw on top, so on a tie the topmost wins.
+  for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
+    const gui::Rect bounds = node_screen_bounds(*it);
+    const float reach = compositor_port_radius * zoom_ + 4.0F;
+    const auto ports = compositor::input_ports(it->kind);
+    for (std::size_t index = 0U; index < ports.size(); ++index) {
+      const compositor::PortDescriptor &port = ports[index];
+      if (port.type != type) {
+        continue;
+      }
+      const float row_top = bounds.y + (metrics_.header_height +
+                                        metrics_.row_height *
+                                            static_cast<float>(index)) * zoom_;
+      const float row_height = metrics_.row_height * zoom_;
+      const gui::Rect row{bounds.x - reach, row_top,
+                          bounds.width * 0.5F + reach, row_height};
+      const float dot_y = row_top + row_height * 0.5F;
+      const float distance = std::hypot(x - bounds.x, y - dot_y);
+      const bool over_row = row.contains(x, y);
+      if (!over_row && distance > compositor_port_snap_radius) {
+        continue;
+      }
+      const float rank = over_row ? distance - 1.0e6F : distance;
+      if (rank >= best_rank) {
+        continue;
+      }
+      best_rank = rank;
+      const compositor::EdgeEndpoint endpoint{it->node, port.index};
+      std::optional<doc::NodeId> occupied;
+      if (!port.multiple) {
+        const auto wired = std::find_if(
+            graph.edges.begin(), graph.edges.end(),
+            [endpoint](const compositor::GraphEdge &edge) noexcept {
+              return edge.to == endpoint;
+            });
+        if (wired != graph.edges.end()) {
+          occupied = wired->node;
+        }
+      }
+      best = CompositorPortDrop{endpoint, port.name, port.type, bounds.x,
+                                dot_y, occupied, port.multiple};
+    }
+  }
+  return best;
+}
+
+void CompositorPanel::draw_port_drop(gui::UiContext &ctx,
+                                     const CompositorPortDrop &drop,
+                                     std::string_view what) const {
+  ctx.push_clip(last_canvas_);
+  const gui::UiColor color = port_color(ctx, drop.type);
+  wire(ctx, ctx.pointer_x(), ctx.pointer_y(), drop.x, drop.y,
+       with_alpha(color, 0.9F), std::clamp(2.5F * zoom_, 2.0F, 4.0F), zoom_);
+  const float radius = std::max(2.5F, compositor_port_radius * zoom_) + 3.0F;
+  draw_port_shape(ctx, drop.type, drop.x, drop.y, radius + 1.5F,
+                  ctx.theme().text);
+  draw_port_shape(ctx, drop.type, drop.x, drop.y, radius, color);
+  // The label sits left of the port, where the new node will arrive.
+  std::string label{what};
+  label += drop.occupied.has_value() ? "  -  REPLACE " : "  -  CONNECT TO ";
+  label += drop.name;
+  const float width = std::ceil(ctx.font_width(label)) + 16.0F;
+  const float height = ctx.line_height() + 8.0F;
+  const gui::Rect badge{drop.x - radius - 10.0F - width,
+                        drop.y - height * 0.5F, width, height};
+  ctx.panel(badge, with_alpha(ctx.theme().background, 0.92F));
+  border(ctx, badge, color);
+  ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
+                      badge.height},
+            label, ctx.theme().text);
+  ctx.pop_clip();
+}
+
+gui::UiPoint CompositorPanel::node_position_feeding(
+    compositor::NodeKind kind, const CompositorPortDrop &drop) const noexcept {
+  const gui::UiPoint size = new_node_size(kind);
+  // A clear gap between the new node's output and the input it feeds.
+  constexpr float gap = 70.0F;
+  const float graph_x = zoom_ > 0.0F ? (drop.x - last_canvas_.x - pan_x_) / zoom_
+                                     : 0.0F;
+  const float graph_y = zoom_ > 0.0F ? (drop.y - last_canvas_.y - pan_y_) / zoom_
+                                     : 0.0F;
+  return gui::UiPoint{graph_x - gap - size.x,
+                      graph_y - metrics_.header_height -
+                          metrics_.row_height * 0.5F};
 }
 
 CompositorFrame
@@ -3279,6 +3449,38 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         moved->editor_y != pending_move_->from_y ||
         ++pending_move_->frames > compositor_pending_move_frames) {
       pending_move_.reset();
+    }
+  }
+
+  if (pending_points_.has_value()) {
+    const compositor::GraphEdge *const routed =
+        compositor_graph.edge(pending_points_->edge);
+    if (routed == nullptr || routed->points != pending_points_->from ||
+        ++pending_points_->frames > compositor_pending_move_frames) {
+      pending_points_.reset();
+    }
+  }
+  if (point_drag_.has_value() &&
+      compositor_graph.edge(point_drag_->edge) == nullptr) {
+    point_drag_.reset();
+  }
+  if (pending_wires_.has_value()) {
+    const bool arrived =
+        std::all_of(pending_wires_->added.begin(), pending_wires_->added.end(),
+                    [&](const CompositorWire &wire) {
+                      return std::any_of(
+                          compositor_graph.edges.begin(),
+                          compositor_graph.edges.end(),
+                          [&](const compositor::GraphEdge &edge) noexcept {
+                            return edge.from == wire.from && edge.to == wire.to;
+                          });
+                    }) &&
+        std::none_of(pending_wires_->removed.begin(),
+                     pending_wires_->removed.end(), [&](doc::NodeId id) {
+                       return compositor_graph.edge(id) != nullptr;
+                     });
+    if (arrived || ++pending_wires_->frames > compositor_pending_move_frames) {
+      pending_wires_.reset();
     }
   }
 
@@ -3481,6 +3683,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
            matches(category, node_search_) ||
            matches(item.search_terms, node_search_);
   };
+  const auto palette_matches_text = [&](const CompositorPaletteItem &item,
+                                        std::string_view search) {
+    const std::string_view category =
+        compositor_category_names[category_index(item.category)];
+    return matches(compositor::node_kind_name(item.kind), search) ||
+           matches(category, search) || matches(item.search_terms, search);
+  };
   const auto palette_direct_matches = [&](const CompositorPaletteItem &item) {
     return matches(compositor::node_kind_name(item.kind), node_search_) ||
            matches(item.search_terms, node_search_);
@@ -3610,9 +3819,74 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     frame.consume_delete = true;
   }
 
+  // The node search at the pointer: what it offers and where it sits. With a
+  // wire attached it offers only nodes with an input that wire can feed,
+  // each naming that input.
+  struct MenuItem final {
+    const CompositorPaletteItem *item{};
+    std::optional<core::u8> input;
+  };
+  std::vector<MenuItem> menu_items;
+  gui::Rect menu_bounds{};
+  constexpr float menu_row_height = 23.0F;
+  constexpr std::size_t menu_visible_rows = 12U;
+  if (node_menu_.has_value()) {
+    for (std::size_t pass = 0U; pass < 2U; ++pass) {
+      for (const CompositorPaletteItem &item : compositor_palette_items) {
+        const bool direct =
+            matches(compositor::node_kind_name(item.kind), node_menu_->search) ||
+            matches(item.search_terms, node_menu_->search);
+        if (!palette_matches_text(item, node_menu_->search) ||
+            direct != (pass == 0U) ||
+            (item.kind == compositor::NodeKind::Output && output_count != 0U)) {
+          continue;
+        }
+        std::optional<core::u8> input;
+        if (node_menu_->from.has_value()) {
+          const auto ports = compositor::input_ports(item.kind);
+          const auto port = std::find_if(
+              ports.begin(), ports.end(),
+              [&](const compositor::PortDescriptor &candidate) noexcept {
+                return candidate.type == node_menu_->type;
+              });
+          if (port == ports.end()) {
+            continue;
+          }
+          input = port->index;
+        }
+        menu_items.push_back(MenuItem{std::addressof(item), input});
+      }
+    }
+    if (!menu_items.empty()) {
+      node_menu_->highlight =
+          std::min(node_menu_->highlight, menu_items.size() - 1U);
+    }
+    const float width = std::min(300.0F, std::max(bounds.width - 16.0F, 0.0F));
+    const float height =
+        34.0F + menu_row_height *
+                    static_cast<float>(std::max<std::size_t>(
+                        std::min(menu_items.size(), menu_visible_rows), 1U));
+    // Kept inside the panel: shifted left or up from the pointer if needed.
+    menu_bounds = gui::Rect{
+        std::clamp(node_menu_->screen_x, bounds.x + 4.0F,
+                   std::max(bounds.x + bounds.width - width - 4.0F,
+                            bounds.x + 4.0F)),
+        std::clamp(node_menu_->screen_y, bounds.y + compositor_toolbar_height,
+                   std::max(bounds.y + bounds.height - height - 4.0F,
+                            bounds.y + compositor_toolbar_height)),
+        width, height};
+    if (ctx.pointer_pressed() &&
+        !menu_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      node_menu_.reset();
+      ctx.clear_focus();
+    }
+  }
+
   const bool palette_pointer_blocked =
-      add_menu_open_ &&
-      palette_bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+      (add_menu_open_ &&
+       palette_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) ||
+      (node_menu_.has_value() &&
+       menu_bounds.contains(ctx.pointer_x(), ctx.pointer_y()));
   if (palette_pointer_blocked) {
     ctx.push_pointer_block();
   }
@@ -3627,7 +3901,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   if (canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
       ctx.wheel() != 0.0F && dragging_node_ == doc::NodeId{} &&
-      !connecting_from_.has_value()) {
+      !connecting_from_.has_value() && !relink_.has_value() &&
+      !point_drag_.has_value()) {
     set_zoom(zoom_ * std::pow(compositor_zoom_step, ctx.wheel()),
              ctx.pointer_x(), ctx.pointer_y());
   }
@@ -3704,6 +3979,29 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   };
   build_visuals();
 
+  const auto to_screen = [&](compositor::WirePoint point) noexcept {
+    return gui::UiPoint{canvas.x + pan_x_ + point.x * zoom_,
+                        canvas.y + pan_y_ + point.y * zoom_};
+  };
+  const auto to_graph = [&](float x, float y) noexcept {
+    return compositor::WirePoint{(x - canvas.x - pan_x_) / zoom_,
+                                 (y - canvas.y - pan_y_) / zoom_};
+  };
+  const auto edges_at = [&](compositor::EdgeEndpoint endpoint, bool source) {
+    std::vector<doc::NodeId> found;
+    for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+      if ((source ? edge.from : edge.to) == endpoint) {
+        found.push_back(edge.node);
+      }
+    }
+    return found;
+  };
+  // Wires lifted by a Ctrl drag do not count as already there while the
+  // operator decides where they go.
+  const std::span<const doc::NodeId> lifted =
+      relink_.has_value() ? std::span<const doc::NodeId>{relink_->edges}
+                          : std::span<const doc::NodeId>{};
+
   // While a wire is being drawn, the input it would connect to: the
   // compatible port whose row is under the pointer, or failing that the
   // nearest compatible dot within snapping reach.
@@ -3720,7 +4018,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const CompositorPortVisual *best = nullptr;
     float best_rank = std::numeric_limits<float>::infinity();
     for (const CompositorPortVisual &to : inputs) {
-      if (!can_connect(compositor_graph, *from, to)) {
+      if (!can_connect(compositor_graph, *from, to, lifted)) {
         continue;
       }
       const float distance =
@@ -3738,32 +4036,120 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     return best;
   };
+  // While wires lifted off an output are being moved, the output they would
+  // move to: one every lifted wire's input could take.
+  const auto snapped_output = [&]() -> const CompositorPortVisual * {
+    if (!relink_.has_value() || !relink_->moving_source ||
+        !canvas.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      return nullptr;
+    }
+    const CompositorPortVisual *best = nullptr;
+    float best_rank = std::numeric_limits<float>::infinity();
+    for (const CompositorPortVisual &from : outputs) {
+      const bool accepts = std::all_of(
+          relink_->edges.begin(), relink_->edges.end(),
+          [&](doc::NodeId id) {
+            const compositor::GraphEdge *const edge = compositor_graph.edge(id);
+            const CompositorPortVisual *const to =
+                edge != nullptr ? find_port(inputs, edge->to) : nullptr;
+            return to != nullptr &&
+                   (from.endpoint == relink_->origin ||
+                    can_connect(compositor_graph, from, *to, lifted));
+          });
+      if (!accepts) {
+        continue;
+      }
+      const float distance =
+          std::hypot(ctx.pointer_x() - from.x, ctx.pointer_y() - from.y);
+      const bool over_row =
+          from.hit.contains(ctx.pointer_x(), ctx.pointer_y());
+      if (!over_row && distance > compositor_port_snap_radius) {
+        continue;
+      }
+      const float rank = over_row ? distance - 1.0e6F : distance;
+      if (rank < best_rank) {
+        best = std::addressof(from);
+        best_rank = rank;
+      }
+    }
+    return best;
+  };
 
   bool selection_pressed = false;
-  if (connecting_from_.has_value() && ctx.pointer_released()) {
-    const CompositorPortVisual *const from =
-        find_port(outputs, *connecting_from_);
-    const CompositorPortVisual *const to = snapped_input();
-    if (from != nullptr && to != nullptr) {
-      std::optional<doc::NodeId> replace_edge;
-      if (to->descriptor != nullptr && !to->descriptor->multiple) {
-        const auto occupied = std::find_if(
+  const bool pointer_over_any_node = std::any_of(
+      nodes.begin(), nodes.end(), [&ctx](const CompositorNodeVisual &visual) {
+        return visual.bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+      });
+  if ((connecting_from_.has_value() || relink_.has_value()) &&
+      ctx.pointer_released()) {
+    if (relink_.has_value() && relink_->moving_source) {
+      // Let go on another output: the wires move to it. On nothing: they
+      // are disconnected. Back on their own output: nothing changes.
+      const CompositorPortVisual *const target = snapped_output();
+      if (target == nullptr || target->endpoint != relink_->origin) {
+        CompositorRewireIntent rewire{relink_->edges, {}};
+        if (target != nullptr) {
+          for (const doc::NodeId id : relink_->edges) {
+            if (const compositor::GraphEdge *const edge =
+                    compositor_graph.edge(id)) {
+              rewire.add_edges.push_back(
+                  CompositorWire{target->endpoint, edge->to});
+            }
+          }
+        }
+        frame.rewire = std::move(rewire);
+      }
+    } else if (connecting_from_.has_value()) {
+      const CompositorPortVisual *const from =
+          find_port(outputs, *connecting_from_);
+      const CompositorPortVisual *const to = snapped_input();
+      std::optional<doc::NodeId> occupied;
+      if (to != nullptr && to->descriptor != nullptr &&
+          !to->descriptor->multiple) {
+        const auto wired = std::find_if(
             compositor_graph.edges.begin(), compositor_graph.edges.end(),
             [to](const compositor::GraphEdge &edge) noexcept {
               return edge.to == to->endpoint;
             });
-        if (occupied != compositor_graph.edges.end()) {
-          replace_edge = occupied->node;
+        if (wired != compositor_graph.edges.end()) {
+          occupied = wired->node;
         }
       }
-      frame.connect_ports =
-          CompositorConnectIntent{from->endpoint, to->endpoint, replace_edge};
+      if (relink_.has_value()) {
+        // A wire lifted off an input: it lands on another input, or is
+        // disconnected when let go on nothing; put back, nothing changes.
+        if (to == nullptr || to->endpoint != relink_->origin) {
+          CompositorRewireIntent rewire{relink_->edges, {}};
+          if (occupied.has_value() &&
+              std::find(lifted.begin(), lifted.end(), *occupied) ==
+                  lifted.end()) {
+            rewire.remove_edges.push_back(*occupied);
+          }
+          if (from != nullptr && to != nullptr) {
+            rewire.add_edges.push_back(
+                CompositorWire{from->endpoint, to->endpoint});
+          }
+          frame.rewire = std::move(rewire);
+        }
+      } else if (from != nullptr && to != nullptr) {
+        frame.connect_ports =
+            CompositorConnectIntent{from->endpoint, to->endpoint, occupied};
+      } else if (from != nullptr &&
+                 canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+                 !pointer_over_any_node) {
+        // Let go on empty canvas: offer the nodes that can take this wire,
+        // to be created here already connected.
+        node_menu_ = NodeMenu{ctx.pointer_x(), ctx.pointer_y(),
+                              from->endpoint, from->descriptor->type};
+      }
     }
     connecting_from_.reset();
+    relink_.reset();
   }
 
   bool layout_changed = false;
   bool drag_released = false;
+  doc::NodeId released_node{};
   for (const CompositorPortVisual &port : outputs) {
     const gui::Interaction interaction =
         clipped_grab(ctx,
@@ -3771,13 +4157,26 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          port.endpoint.node.value() * 16U + port.endpoint.port),
                      port.hit, canvas);
     ctx.cursor_for(interaction, gui::Cursor::Hand);
-    if (interaction.pressed) {
+    if (!interaction.pressed) {
+      continue;
+    }
+    selection_ =
+        CompositorSelection{CompositorSelectionKind::Node, port.endpoint.node};
+    frame.selection = selection_;
+    selection_pressed = true;
+    const std::vector<doc::NodeId> wired = edges_at(port.endpoint, true);
+    if (ctx.alt_held()) {
+      // Alt-click breaks every wire leaving this output.
+      if (!wired.empty()) {
+        frame.rewire = CompositorRewireIntent{wired, {}};
+      }
+    } else if (ctx.ctrl_held() && !wired.empty()) {
+      // Ctrl-drag lifts them to move to another output.
+      relink_ = Relink{wired, true, port.endpoint};
+      connecting_type_ = port.descriptor->type;
+    } else {
       connecting_from_ = port.endpoint;
       connecting_type_ = port.descriptor->type;
-      selection_ = CompositorSelection{CompositorSelectionKind::Node,
-                                       port.endpoint.node};
-      frame.selection = selection_;
-      selection_pressed = true;
     }
   }
   for (const CompositorNodeVisual &visual : nodes) {
@@ -3789,11 +4188,32 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           CompositorSelection{CompositorSelectionKind::Node, visual.node->node};
       frame.selection = selection_;
       selection_pressed = true;
-      dragging_node_ = visual.node->node;
-      drag_x_ = (visual.bounds.x - canvas.x - pan_x_) / zoom_;
-      drag_y_ = (visual.bounds.y - canvas.y - pan_y_) / zoom_;
-      drag_offset_x_ = ctx.pointer_x() - visual.bounds.x;
-      drag_offset_y_ = ctx.pointer_y() - visual.bounds.y;
+      // With Alt or Ctrl, a press on an input acts on that input's wire
+      // instead of moving the node: Alt breaks it, Ctrl lifts it to move.
+      const auto input = std::find_if(
+          inputs.begin(), inputs.end(), [&](const CompositorPortVisual &port) {
+            return port.endpoint.node == visual.node->node &&
+                   port.hit.contains(ctx.pointer_x(), ctx.pointer_y());
+          });
+      const std::vector<doc::NodeId> wired =
+          input != inputs.end() ? edges_at(input->endpoint, false)
+                                : std::vector<doc::NodeId>{};
+      const compositor::GraphEdge *const lifted_edge =
+          wired.empty() ? nullptr : compositor_graph.edge(wired.front());
+      if (input != inputs.end() && ctx.alt_held() && !wired.empty()) {
+        frame.rewire = CompositorRewireIntent{wired, {}};
+      } else if (input != inputs.end() && ctx.ctrl_held() &&
+                 lifted_edge != nullptr) {
+        relink_ = Relink{{lifted_edge->node}, false, input->endpoint};
+        connecting_from_ = lifted_edge->from;
+        connecting_type_ = input->descriptor->type;
+      } else {
+        dragging_node_ = visual.node->node;
+        drag_x_ = (visual.bounds.x - canvas.x - pan_x_) / zoom_;
+        drag_y_ = (visual.bounds.y - canvas.y - pan_y_) / zoom_;
+        drag_offset_x_ = ctx.pointer_x() - visual.bounds.x;
+        drag_offset_y_ = ctx.pointer_y() - visual.bounds.y;
+      }
     }
     if (interaction.held && dragging_node_ == visual.node->node) {
       ctx.set_cursor(gui::Cursor::Move);
@@ -3814,6 +4234,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           visual.node->editor_x, visual.node->editor_y, 0U};
         }
         drag_released = true;
+        released_node = visual.node->node;
       }
     }
   }
@@ -3821,12 +4242,24 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     build_visuals();
   }
 
-  // Each wire's curve, once, for both picking and drawing.
+  // Each wire's curve, once, for both picking and drawing: from its output
+  // through its reroute points to its input.
   struct EdgeVisual final {
     const compositor::GraphEdge *edge{};
     const CompositorPortVisual *from{};
     const CompositorPortVisual *to{};
-    WirePath path;
+    std::vector<compositor::WirePoint> points;
+    std::vector<WirePath> segments;
+  };
+  const auto edge_points =
+      [&](const compositor::GraphEdge &edge) -> std::vector<compositor::WirePoint> {
+    if (point_drag_.has_value() && point_drag_->edge == edge.node) {
+      return point_drag_->points;
+    }
+    if (pending_points_.has_value() && pending_points_->edge == edge.node) {
+      return pending_points_->points;
+    }
+    return edge.points;
   };
   std::vector<EdgeVisual> edges;
   edges.reserve(compositor_graph.edges.size());
@@ -3838,27 +4271,160 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         from->descriptor->type != to->descriptor->type) {
       continue;
     }
+    std::vector<compositor::WirePoint> points = edge_points(edge);
+    std::vector<gui::UiPoint> screen;
+    screen.reserve(points.size());
+    for (const compositor::WirePoint point : points) {
+      screen.push_back(to_screen(point));
+    }
     edges.push_back(EdgeVisual{std::addressof(edge), from, to,
-                               wire_path(from->x, from->y, to->x, to->y,
-                                         zoom_)});
+                               std::move(points),
+                               routed_wire(gui::UiPoint{from->x, from->y},
+                                           screen,
+                                           gui::UiPoint{to->x, to->y}, zoom_)});
   }
+  // Distance from the pointer to a wire, and the stretch it is nearest.
+  const auto nearest_segment = [&](const EdgeVisual &visual) {
+    float nearest = std::numeric_limits<float>::infinity();
+    std::size_t segment{};
+    for (std::size_t index = 0U; index < visual.segments.size(); ++index) {
+      const float distance = wire_distance(visual.segments[index],
+                                           ctx.pointer_x(), ctx.pointer_y());
+      if (distance < nearest) {
+        nearest = distance;
+        segment = index;
+      }
+    }
+    return std::pair{nearest, segment};
+  };
+
+  // A node being dragged that is free - no wires of its own - and has an
+  // input and an output of the same kind can be dropped onto a wire of that
+  // kind to splice itself in.
+  const EdgeVisual *insert_edge = nullptr;
+  std::optional<std::pair<core::u8, core::u8>> insert_ports;
+  if (dragging_node_ != doc::NodeId{}) {
+    const compositor::GraphNode *const dragged =
+        compositor_graph.node(dragging_node_);
+    const bool free =
+        dragged != nullptr &&
+        std::none_of(compositor_graph.edges.begin(),
+                     compositor_graph.edges.end(),
+                     [&](const compositor::GraphEdge &edge) noexcept {
+                       return edge.from.node == dragging_node_ ||
+                              edge.to.node == dragging_node_;
+                     });
+    float nearest = 12.0F;
+    for (const EdgeVisual &visual : edges) {
+      if (!free) {
+        break;
+      }
+      const compositor::PortValueType type = visual.from->descriptor->type;
+      const auto in = std::find_if(
+          compositor::input_ports(dragged->kind).begin(),
+          compositor::input_ports(dragged->kind).end(),
+          [type](const compositor::PortDescriptor &port) noexcept {
+            return port.type == type;
+          });
+      const auto out = std::find_if(
+          compositor::output_ports(dragged->kind).begin(),
+          compositor::output_ports(dragged->kind).end(),
+          [type](const compositor::PortDescriptor &port) noexcept {
+            return port.type == type;
+          });
+      if (in == compositor::input_ports(dragged->kind).end() ||
+          out == compositor::output_ports(dragged->kind).end()) {
+        continue;
+      }
+      const float distance = nearest_segment(visual).first;
+      if (distance <= nearest) {
+        nearest = distance;
+        insert_edge = std::addressof(visual);
+        insert_ports = std::pair{in->index, out->index};
+      }
+    }
+  }
+  if (released_node != doc::NodeId{} && insert_edge != nullptr &&
+      insert_ports.has_value()) {
+    frame.rewire = CompositorRewireIntent{
+        {insert_edge->edge->node},
+        {CompositorWire{insert_edge->edge->from,
+                        compositor::EdgeEndpoint{released_node,
+                                                 insert_ports->first}},
+         CompositorWire{compositor::EdgeEndpoint{released_node,
+                                                 insert_ports->second},
+                        insert_edge->edge->to}}};
+  }
+
+  // Reroute points: drag to move, double-click to remove. Each is claimed
+  // before the wires so a press on one never selects the wire under it.
+  const float point_radius = std::clamp(5.0F * zoom_, 4.0F, 7.0F);
+  const auto emit_points = [&](doc::NodeId edge,
+                               std::vector<compositor::WirePoint> points,
+                               const std::vector<compositor::WirePoint> &from) {
+    frame.waypoints = CompositorWaypointIntent{edge, points};
+    pending_points_ = PendingPoints{edge, std::move(points), from, 0U};
+  };
+  for (const EdgeVisual &visual : edges) {
+    for (std::size_t index = 0U; index < visual.points.size(); ++index) {
+      const gui::UiPoint centre = to_screen(visual.points[index]);
+      const gui::Rect handle{centre.x - point_radius - 2.0F,
+                             centre.y - point_radius - 2.0F,
+                             (point_radius + 2.0F) * 2.0F,
+                             (point_radius + 2.0F) * 2.0F};
+      const gui::Interaction interaction = clipped_grab(
+          ctx,
+          mix(id_, "compositor.wire_point",
+              visual.edge->node.value() * 32U + index),
+          handle, canvas);
+      ctx.cursor_for(interaction, gui::Cursor::Move);
+      if (interaction.pressed) {
+        selection_ =
+            CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
+        frame.selection = selection_;
+        selection_pressed = true;
+        if (clicks_.double_click(visual.edge->node.value() * 64U + 33U + index,
+                                 ctx.time_seconds())) {
+          std::vector<compositor::WirePoint> remaining = visual.points;
+          remaining.erase(remaining.begin() +
+                          static_cast<std::ptrdiff_t>(index));
+          emit_points(visual.edge->node, std::move(remaining),
+                      visual.edge->points);
+        } else {
+          point_drag_ = PointDrag{visual.edge->node, index, visual.points};
+        }
+      }
+      if (interaction.held && point_drag_.has_value() &&
+          point_drag_->edge == visual.edge->node &&
+          point_drag_->index == index) {
+        point_drag_->points[index] = to_graph(ctx.pointer_x(), ctx.pointer_y());
+        if (interaction.released) {
+          if (point_drag_->points != visual.edge->points) {
+            emit_points(visual.edge->node, point_drag_->points,
+                        visual.edge->points);
+          }
+          point_drag_.reset();
+        }
+      }
+    }
+  }
+
   // The wire nearest the pointer, within reach and not under a node, which
   // draws over it. Every wire still takes part in the interaction each
   // frame, so the one that was pressed always sees its release.
   const EdgeVisual *hovered_edge = nullptr;
-  const bool pointer_over_node = std::any_of(
-      nodes.begin(), nodes.end(), [&ctx](const CompositorNodeVisual &visual) {
-        return visual.bounds.contains(ctx.pointer_x(), ctx.pointer_y());
-      });
-  if (!connecting_from_.has_value() && dragging_node_ == doc::NodeId{} &&
-      !pointer_over_node && canvas.contains(ctx.pointer_x(), ctx.pointer_y())) {
+  std::size_t hovered_segment{};
+  const bool wiring = connecting_from_.has_value() || relink_.has_value();
+  if (!wiring && dragging_node_ == doc::NodeId{} && !point_drag_.has_value() &&
+      !pointer_over_any_node &&
+      canvas.contains(ctx.pointer_x(), ctx.pointer_y())) {
     float nearest = compositor_wire_hit_radius;
     for (const EdgeVisual &visual : edges) {
-      const float distance =
-          wire_distance(visual.path, ctx.pointer_x(), ctx.pointer_y());
+      const auto [distance, segment] = nearest_segment(visual);
       if (distance <= nearest) {
         nearest = distance;
         hovered_edge = std::addressof(visual);
+        hovered_segment = segment;
       }
     }
   }
@@ -3871,12 +4437,33 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Interaction interaction = ctx.grab(
         mix(id_, "compositor.edge", visual.edge->node.value()), pick);
     ctx.cursor_for(interaction, gui::Cursor::Hand);
-    if (interaction.pressed) {
-      selection_ =
-          CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
-      frame.selection = selection_;
-      selection_pressed = true;
+    if (!interaction.pressed) {
+      continue;
     }
+    selection_ =
+        CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
+    frame.selection = selection_;
+    selection_pressed = true;
+    if (ctx.alt_held()) {
+      // Alt-click a wire to break it.
+      frame.rewire = CompositorRewireIntent{{visual.edge->node}, {}};
+    } else if (clicks_.double_click(visual.edge->node.value() * 64U,
+                                    ctx.time_seconds()) &&
+               visual.points.size() < compositor::max_wire_points) {
+      // Double-click a wire to add a reroute point where it was clicked, in
+      // the stretch it was clicked on.
+      std::vector<compositor::WirePoint> points = visual.points;
+      points.insert(points.begin() +
+                        static_cast<std::ptrdiff_t>(hovered_segment),
+                    to_graph(ctx.pointer_x(), ctx.pointer_y()));
+      emit_points(visual.edge->node, std::move(points), visual.edge->points);
+    }
+  }
+  // Tab or a right click on the canvas opens the node search at the pointer.
+  if (!wiring && canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+      (ctx.secondary_pointer_pressed() ||
+       (focused_ && !ctx.typing() && ctx.key_pressed(gui::Key::Tab)))) {
+    node_menu_ = NodeMenu{ctx.pointer_x(), ctx.pointer_y()};
   }
   if (ctx.pointer_pressed() &&
       canvas.contains(ctx.pointer_x(), ctx.pointer_y()) && !selection_pressed &&
@@ -3941,29 +4528,90 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   // Wires scale with the graph but never thin below what reads on screen.
   const float wire_width = std::clamp(2.0F * zoom_, 1.5F, 3.5F);
-  const bool node_selected = selection_.kind == CompositorSelectionKind::Node;
+  // A selected node's flow stands out: every wire feeding it, directly or
+  // further upstream, and every wire it feeds on its way to Output.
+  std::set<doc::NodeId> upstream;
+  std::set<doc::NodeId> downstream;
+  if (selection_.kind == CompositorSelectionKind::Node) {
+    const auto walk = [&](std::set<doc::NodeId> &reached, bool forward) {
+      std::vector<doc::NodeId> pending{selection_.node};
+      while (!pending.empty()) {
+        const doc::NodeId node = pending.back();
+        pending.pop_back();
+        if (!reached.insert(node).second) {
+          continue;
+        }
+        for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+          if ((forward ? edge.from.node : edge.to.node) == node) {
+            pending.push_back(forward ? edge.to.node : edge.from.node);
+          }
+        }
+      }
+    };
+    walk(upstream, false);
+    walk(downstream, true);
+  }
+  const bool wires_held = pending_wires_.has_value();
   for (const EdgeVisual &visual : edges) {
+    if (std::find(lifted.begin(), lifted.end(), visual.edge->node) !=
+        lifted.end()) {
+      continue; // drawn following the pointer below
+    }
+    if (wires_held &&
+        std::find(pending_wires_->removed.begin(),
+                  pending_wires_->removed.end(),
+                  visual.edge->node) != pending_wires_->removed.end()) {
+      continue; // removed, and on its way out of the graph
+    }
     const bool selected =
         selection_ ==
         CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
-    // A selected node's own wires stand out from the rest of the graph.
-    const bool attached = node_selected &&
-                          (visual.edge->from.node == selection_.node ||
-                           visual.edge->to.node == selection_.node);
+    const bool in_flow = (upstream.contains(visual.edge->from.node) &&
+                          upstream.contains(visual.edge->to.node)) ||
+                         (downstream.contains(visual.edge->from.node) &&
+                          downstream.contains(visual.edge->to.node));
     const bool hovered = std::addressof(visual) == hovered_edge;
+    const bool splice = std::addressof(visual) == insert_edge;
     const gui::UiColor color = port_color(ctx, visual.from->descriptor->type);
     gui::UiColor stroke = with_alpha(color, 0.78F);
     float width = wire_width;
-    if (selected) {
+    if (selected || splice) {
       stroke = ctx.theme().text;
       width = wire_width + 1.5F;
-    } else if (hovered || attached) {
+    } else if (hovered || in_flow) {
       stroke = blend_color(color, ctx.theme().text, hovered ? 0.45F : 0.2F);
       width = wire_width + (hovered ? 1.0F : 0.5F);
     }
-    ctx.draw_list().add_polyline(visual.path.view(), width, stroke);
+    for (const WirePath &segment : visual.segments) {
+      ctx.draw_list().add_polyline(segment.view(), width, stroke);
+    }
+    // Reroute points are small handles on the wire itself.
+    for (const compositor::WirePoint point : visual.points) {
+      const gui::UiPoint centre = to_screen(point);
+      draw_circle(ctx, centre.x, centre.y, point_radius + 1.0F,
+                  scale(ctx.theme().panel, 0.8F));
+      draw_circle(ctx, centre.x, centre.y, point_radius,
+                  selected || hovered ? ctx.theme().text : color);
+    }
+  }
+  if (wires_held) {
+    for (const CompositorWire &held : pending_wires_->added) {
+      const bool present = std::any_of(
+          compositor_graph.edges.begin(), compositor_graph.edges.end(),
+          [&held](const compositor::GraphEdge &edge) noexcept {
+            return edge.from == held.from && edge.to == held.to;
+          });
+      const CompositorPortVisual *const from = find_port(outputs, held.from);
+      const CompositorPortVisual *const to = find_port(inputs, held.to);
+      if (!present && from != nullptr && to != nullptr) {
+        wire(ctx, from->x, from->y, to->x, to->y,
+             with_alpha(port_color(ctx, from->descriptor->type), 0.78F),
+             wire_width, zoom_);
+      }
+    }
   }
   const CompositorPortVisual *const snapped = snapped_input();
+  const CompositorPortVisual *const snapped_source = snapped_output();
   if (connecting_from_.has_value()) {
     const CompositorPortVisual *const from =
         find_port(outputs, *connecting_from_);
@@ -3974,6 +4622,30 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const float end_y = snapped != nullptr ? snapped->y : ctx.pointer_y();
       wire(ctx, from->x, from->y, end_x, end_y,
            port_color(ctx, connecting_type_), wire_width + 0.5F, zoom_);
+    }
+  }
+  if (node_menu_.has_value() && node_menu_->from.has_value()) {
+    // The wire waits at the search for the node it will feed.
+    if (const CompositorPortVisual *const from =
+            find_port(outputs, *node_menu_->from)) {
+      wire(ctx, from->x, from->y, node_menu_->screen_x, node_menu_->screen_y,
+           port_color(ctx, node_menu_->type), wire_width + 0.5F, zoom_);
+    }
+  }
+  if (relink_.has_value() && relink_->moving_source) {
+    // Wires lifted off an output follow the pointer from their inputs.
+    const float start_x =
+        snapped_source != nullptr ? snapped_source->x : ctx.pointer_x();
+    const float start_y =
+        snapped_source != nullptr ? snapped_source->y : ctx.pointer_y();
+    for (const doc::NodeId id : relink_->edges) {
+      const compositor::GraphEdge *const edge = compositor_graph.edge(id);
+      const CompositorPortVisual *const to =
+          edge != nullptr ? find_port(inputs, edge->to) : nullptr;
+      if (to != nullptr) {
+        wire(ctx, start_x, start_y, to->x, to->y,
+             port_color(ctx, connecting_type_), wire_width + 0.5F, zoom_);
+      }
     }
   }
 
@@ -4087,7 +4759,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (input != nullptr) {
         const bool compatible = connecting_source != nullptr &&
                                 can_connect(compositor_graph,
-                                            *connecting_source, *input);
+                                            *connecting_source, *input, lifted);
         const float limit =
             output != nullptr ? right - output_width - gap : right;
         static_cast<void>(compositor_label(
@@ -4123,7 +4795,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const bool connected = input_connected(port.endpoint);
       const bool compatible =
           connecting_source != nullptr &&
-          can_connect(compositor_graph, *connecting_source, port);
+          can_connect(compositor_graph, *connecting_source, port, lifted);
       const bool target = snapped == std::addressof(port);
       gui::UiColor color = port_color(ctx, port.descriptor->type);
       if (!connected && port.descriptor->required) {
@@ -4148,7 +4820,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       const bool hovered = port.hit.contains(ctx.pointer_x(), ctx.pointer_y()) &&
                            !connecting_from_.has_value();
-      const bool active = connecting_from_ == port.endpoint;
+      const bool active = connecting_from_ == port.endpoint ||
+                          snapped_source == std::addressof(port);
       const gui::UiColor color = port_color(ctx, port.descriptor->type);
       const float radius =
           hovered || active ? port_radius + 1.0F : port_radius;
@@ -4161,6 +4834,39 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     ? with_alpha(color, 0.3F)
                     : color,
                 output_connected(port.endpoint) || active, body);
+    }
+    // A node whose output never reaches Output is drawn faded: it costs
+    // nothing on screen until it is connected.
+    const bool dead = std::any_of(
+        compositor_graph.diagnostics.begin(), compositor_graph.diagnostics.end(),
+        [&visual](const compositor::GraphDiagnostic &diagnostic) noexcept {
+          return diagnostic.code == compositor::DiagnosticCode::DeadBranch &&
+                 diagnostic.subject == visual.node->node;
+        });
+    if (dead && !selected) {
+      ctx.panel(visual.bounds, with_alpha(ctx.theme().background, 0.45F));
+    }
+  }
+  if (connecting_source != nullptr && snapped == nullptr) {
+    const auto under = std::find_if(
+        inputs.begin(), inputs.end(), [&ctx](const CompositorPortVisual &port) {
+          return port.hit.contains(ctx.pointer_x(), ctx.pointer_y());
+        });
+    const std::string reason =
+        under != inputs.end()
+            ? connection_refusal(compositor_graph, *connecting_source, *under,
+                                 lifted)
+            : std::string{};
+    if (!reason.empty()) {
+      const float width = std::ceil(ctx.font_width(reason)) + 16.0F;
+      const float height = ctx.line_height() + 8.0F;
+      const gui::Rect badge{ctx.pointer_x() + 14.0F, ctx.pointer_y() + 10.0F,
+                            width, height};
+      ctx.panel(badge, with_alpha(ctx.theme().background, 0.94F));
+      border(ctx, badge, ctx.theme().warning);
+      ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
+                          badge.height},
+                reason, ctx.theme().warning);
     }
   }
   ctx.pop_clip();
@@ -5059,6 +5765,139 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
     ctx.pop_clip();
+  }
+
+  if (node_menu_.has_value() && menu_bounds.width > 0.0F) {
+    const gui::UiId search_id = mix(id_, "compositor.node_menu.search");
+    if (node_menu_->focus_pending) {
+      ctx.focus_text_field(search_id, node_menu_->search);
+      node_menu_->focus_pending = false;
+    }
+    // Arrows walk the list and Enter takes the highlighted node, even while
+    // the search field has the keyboard; Escape closes.
+    std::optional<std::size_t> chosen;
+    if (ctx.key_pressed(gui::Key::Escape)) {
+      node_menu_.reset();
+      ctx.clear_focus();
+    } else {
+      if (ctx.key_pressed(gui::Key::Down) && !menu_items.empty()) {
+        node_menu_->highlight =
+            std::min(node_menu_->highlight + 1U, menu_items.size() - 1U);
+      }
+      if (ctx.key_pressed(gui::Key::Up) && node_menu_->highlight > 0U) {
+        --node_menu_->highlight;
+      }
+      if (ctx.key_pressed(gui::Key::Enter) && !menu_items.empty()) {
+        chosen = node_menu_->highlight;
+      }
+    }
+    if (node_menu_.has_value()) {
+      ctx.push_clip(menu_bounds);
+      ctx.panel(menu_bounds, scale(ctx.theme().panel, 1.04F));
+      border(ctx, menu_bounds, ctx.theme().widget_hover);
+      const std::string placeholder =
+          node_menu_->from.has_value()
+              ? std::string{"Add a node taking "} +
+                    std::string{port_type_name(node_menu_->type)}
+              : std::string{"Search nodes and effects"};
+      const std::string before = node_menu_->search;
+      search_field(ctx, search_id,
+                   gui::Rect{menu_bounds.x + 4.0F, menu_bounds.y + 4.0F,
+                             std::max(menu_bounds.width - 8.0F, 0.0F), 27.0F},
+                   node_menu_->search, placeholder);
+      if (node_menu_->search != before) {
+        node_menu_->highlight = 0U;
+      }
+      // The highlighted row stays in view as the arrows move it.
+      const std::size_t first =
+          node_menu_->highlight >= menu_visible_rows
+              ? node_menu_->highlight - menu_visible_rows + 1U
+              : 0U;
+      float row_y = menu_bounds.y + 34.0F;
+      if (menu_items.empty()) {
+        ctx.label(gui::Rect{menu_bounds.x + 10.0F, row_y,
+                            std::max(menu_bounds.width - 20.0F, 0.0F),
+                            menu_row_height},
+                  "NO NODES FOUND", ctx.theme().text_muted);
+      }
+      for (std::size_t index = first;
+           index < menu_items.size() && index < first + menu_visible_rows;
+           ++index) {
+        const MenuItem &entry = menu_items[index];
+        const gui::Rect row{menu_bounds.x + 4.0F, row_y,
+                            std::max(menu_bounds.width - 8.0F, 0.0F),
+                            menu_row_height};
+        row_y += menu_row_height;
+        const gui::Interaction interaction = ctx.grab(
+            mix(id_, "compositor.node_menu.item",
+                static_cast<core::u64>(entry.item->kind)),
+            row);
+        if (interaction.hovered) {
+          node_menu_->highlight = index;
+        }
+        const bool highlighted = index == node_menu_->highlight;
+        ctx.panel(row, highlighted ? ctx.theme().widget_hover : ctx.theme().row);
+        ctx.panel(gui::Rect{row.x, row.y, 3.0F, row.height},
+                  compositor_node_color(ctx, entry.item->kind));
+        std::string label{compositor::node_kind_name(entry.item->kind)};
+        if (entry.input.has_value()) {
+          const auto ports = compositor::input_ports(entry.item->kind);
+          label += "  >  ";
+          label += ports[*entry.input].name;
+        }
+        ctx.label(gui::Rect{row.x + 10.0F, row.y,
+                            std::max(row.width - 14.0F, 0.0F), row.height},
+                  label,
+                  highlighted ? ctx.theme().text : ctx.theme().text_muted);
+        if (interaction.clicked) {
+          chosen = index;
+        }
+      }
+      ctx.pop_clip();
+    }
+    if (chosen.has_value() && node_menu_.has_value()) {
+      const MenuItem &entry = menu_items[*chosen];
+      const compositor::WirePoint at =
+          to_graph(node_menu_->screen_x, node_menu_->screen_y);
+      CompositorAddIntent add{entry.item->kind, at.x, at.y};
+      if (entry.input.has_value() && node_menu_->from.has_value()) {
+        // The new node's input lands where the wire was let go.
+        const auto ports = compositor::input_ports(entry.item->kind);
+        const auto row = static_cast<float>(std::distance(
+            ports.begin(),
+            std::find_if(ports.begin(), ports.end(),
+                         [&](const compositor::PortDescriptor &port) noexcept {
+                           return port.index == *entry.input;
+                         })));
+        add.editor_y = at.y - metrics_.header_height -
+                       metrics_.row_height * (row + 0.5F);
+        add.links.push_back(
+            CompositorAddLink{false, *entry.input, *node_menu_->from});
+      }
+      frame.add_node = std::move(add);
+      node_menu_.reset();
+      ctx.clear_focus();
+    }
+  }
+
+  // Hold what this frame authored on screen until the graph reports it.
+  if (frame.connect_ports.has_value() || frame.rewire.has_value()) {
+    PendingWires held;
+    if (frame.connect_ports.has_value()) {
+      held.added.push_back(
+          CompositorWire{frame.connect_ports->from, frame.connect_ports->to});
+      if (frame.connect_ports->replace_edge.has_value()) {
+        held.removed.push_back(*frame.connect_ports->replace_edge);
+      }
+    }
+    if (frame.rewire.has_value()) {
+      held.added.insert(held.added.end(), frame.rewire->add_edges.begin(),
+                        frame.rewire->add_edges.end());
+      held.removed.insert(held.removed.end(),
+                          frame.rewire->remove_edges.begin(),
+                          frame.rewire->remove_edges.end());
+    }
+    pending_wires_ = std::move(held);
   }
 
   frame.editing = parameter_fields_.live();

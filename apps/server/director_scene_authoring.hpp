@@ -83,7 +83,8 @@ placed_clip_duration(const editor::AddIntent &add,
 [[nodiscard]] bool schedule_add(
     cmd::DirectorScheduler &scheduler, const editor::AddIntent &add,
     doc::NodeId id, cmd::FrameNumber apply_at, show::FrameRate show_rate,
-    const scene::IcvfxCameraSettings &plate_defaults = {});
+    const scene::IcvfxCameraSettings &plate_defaults = {},
+    cmd::UndoContextId undo_context = cmd::UndoContextId{2U});
 
 [[nodiscard]] bool
 schedule_asset_import(cmd::DirectorScheduler &scheduler,

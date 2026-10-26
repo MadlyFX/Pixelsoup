@@ -373,14 +373,56 @@ private:
   std::string drag_label_;
 };
 
+// A wire authored with a new node, in the same transaction. One end is the
+// new node's own port, named by index because the node has no id yet; the
+// other end is a port of a node that already exists.
+struct CompositorAddLink final {
+  // True when the new node is the wire's source: new.port -> existing.
+  bool from_new{};
+  core::u8 port{};
+  compositor::EdgeEndpoint existing;
+
+  bool operator==(const CompositorAddLink &) const = default;
+};
+
 struct CompositorAddIntent final {
   compositor::NodeKind kind{compositor::NodeKind::Brightness};
   float editor_x{};
   float editor_y{};
   // SceneLayer binds the currently selected scene element; unused otherwise.
   doc::NodeId scene_node{};
+  // Wires the new node arrives with, and existing wires the same undo step
+  // removes - the one already on an occupied single input it is dropped on.
+  std::vector<CompositorAddLink> links;
+  std::vector<doc::NodeId> remove_edges;
 
   bool operator==(const CompositorAddIntent &) const = default;
+};
+
+struct CompositorWire final {
+  compositor::EdgeEndpoint from;
+  compositor::EdgeEndpoint to;
+
+  bool operator==(const CompositorWire &) const = default;
+};
+
+// Wires removed and added as one undo step: breaking a port's wires, moving
+// them to another port, splicing a node into a wire, or connecting a node
+// that already exists to a port something was dropped on.
+struct CompositorRewireIntent final {
+  std::vector<doc::NodeId> remove_edges;
+  std::vector<CompositorWire> add_edges;
+
+  bool operator==(const CompositorRewireIntent &) const = default;
+};
+
+// A wire's complete list of reroute points, in graph units, replacing the
+// list it had. Layout only: points never change what the graph computes.
+struct CompositorWaypointIntent final {
+  doc::NodeId edge{};
+  std::vector<compositor::WirePoint> points;
+
+  bool operator==(const CompositorWaypointIntent &) const = default;
 };
 
 struct CompositorMoveIntent final {
@@ -518,6 +560,8 @@ struct CompositorFrame final {
   std::optional<CompositorAddIntent> add_node;
   std::optional<CompositorMoveIntent> move_node;
   std::optional<CompositorConnectIntent> connect_ports;
+  std::optional<CompositorRewireIntent> rewire;
+  std::optional<CompositorWaypointIntent> waypoints;
   std::optional<CompositorPropertyEditIntent> property_edit;
   std::optional<NumericNudge> numeric_nudge;
   // Emitted by DELETE NODE / DISCONNECT in the graph toolbar.
@@ -558,6 +602,24 @@ struct CompositorNodeMetrics final {
   float header_height{};
   float row_height{};
   float footer_height{};
+};
+
+// An input that something dragged from another panel - a Timeline layer, a
+// Library asset, an effect - would be connected to if let go now.
+struct CompositorPortDrop final {
+  compositor::EdgeEndpoint endpoint;
+  std::string_view name;
+  compositor::PortValueType type{compositor::PortValueType::Image};
+  // The port's dot on screen.
+  float x{};
+  float y{};
+  // The wire already on this input when it takes only one, which the drop
+  // replaces in the same undo step.
+  std::optional<doc::NodeId> occupied;
+  // Whether the input takes more than one wire.
+  bool multiple{};
+
+  bool operator==(const CompositorPortDrop &) const = default;
 };
 
 // A headless immediate-mode editor for the persistent compositor graph. The
@@ -608,6 +670,26 @@ public:
   input_port_at(const compositor::CompositorGraph &graph, float x,
                 float y) const noexcept;
 
+  // The compatible input a drop of `type` at the screen point would connect
+  // to: the input whose row holds the point, or the nearest one whose dot is
+  // within snapping reach. An input that already has a wire from the same
+  // kind of source is still offered; one that takes a single wire reports
+  // the wire the drop would replace.
+  [[nodiscard]] std::optional<CompositorPortDrop>
+  port_drop_target(const compositor::CompositorGraph &graph, float x, float y,
+                   compositor::PortValueType type) const noexcept;
+
+  // Draws the drop's preview over the graph: the target port ringed, a wire
+  // from the pointer to it, and a label naming what will happen.
+  void draw_port_drop(gui::UiContext &ctx, const CompositorPortDrop &drop,
+                      std::string_view what) const;
+
+  // Where a new node of `kind` goes so that its first output faces the drop
+  // target from the left, in graph units: the top-left to author.
+  [[nodiscard]] gui::UiPoint
+  node_position_feeding(compositor::NodeKind kind,
+                        const CompositorPortDrop &drop) const noexcept;
+
   // The graph-space size a new node of `kind` is drawn at, so a drop can
   // centre it under the pointer. Measured from the editor font on each draw;
   // a Scene Layer can grow wider once it names its source.
@@ -643,6 +725,12 @@ public:
     panning_ = false;
     last_canvas_ = {};
     pending_move_.reset();
+    pending_points_.reset();
+    pending_wires_.reset();
+    point_drag_.reset();
+    relink_.reset();
+    node_menu_.reset();
+    clicks_.reset();
     node_sizes_.clear();
     parameter_scroll_ = 0.0F;
     parameter_content_height_ = 0.0F;
@@ -667,12 +755,65 @@ private:
     float width{};
     float height{};
   };
+  // Wires lifted off a port with Ctrl to be moved to another. Their free end
+  // follows the pointer: the source end when they were lifted off an output,
+  // the target end when lifted off an input.
+  struct Relink final {
+    std::vector<doc::NodeId> edges;
+    bool moving_source{};
+    compositor::EdgeEndpoint origin;
+  };
+  // The node search opened at the pointer - by Tab, by a right click on the
+  // canvas, or by letting a wire go on empty canvas. In the last case the
+  // node it adds arrives connected to that wire, and only nodes that can
+  // take it are offered.
+  struct NodeMenu final {
+    float screen_x{};
+    float screen_y{};
+    std::optional<compositor::EdgeEndpoint> from;
+    compositor::PortValueType type{compositor::PortValueType::Image};
+    std::string search;
+    std::size_t highlight{};
+    bool focus_pending{true};
+  };
+  // A reroute point being dragged, and the wire's whole list as it stands.
+  struct PointDrag final {
+    doc::NodeId edge{};
+    std::size_t index{};
+    std::vector<compositor::WirePoint> points;
+  };
+  // Reroute points authored but not yet back from the Director, held like a
+  // released node move so the wire never snaps back.
+  struct PendingPoints final {
+    doc::NodeId edge{};
+    std::vector<compositor::WirePoint> points;
+    std::vector<compositor::WirePoint> from;
+    core::u32 frames{};
+  };
+
+  // Wires authored but not yet back from the Director: the ones to keep
+  // drawing and the ones to stop drawing, so a connection never blinks.
+  struct PendingWires final {
+    std::vector<CompositorWire> added;
+    std::vector<doc::NodeId> removed;
+    core::u32 frames{};
+  };
+
+  // A node's bounds on screen as last laid out, honouring a held move.
+  [[nodiscard]] gui::Rect node_screen_bounds(
+      const compositor::GraphNode &node) const noexcept;
 
   [[nodiscard]] gui::UiPoint node_size(const compositor::GraphNode &node) const noexcept;
 
   gui::UiId id_{};
   CompositorSelection selection_{};
   std::optional<PendingMove> pending_move_;
+  std::optional<PendingPoints> pending_points_;
+  std::optional<PendingWires> pending_wires_;
+  std::optional<PointDrag> point_drag_;
+  std::optional<Relink> relink_;
+  std::optional<NodeMenu> node_menu_;
+  ClickTracker clicks_;
   // The last drawn size of each node, ascending by id, for the const queries.
   std::vector<NodeSize> node_sizes_;
   CompositorNodeMetrics metrics_{};

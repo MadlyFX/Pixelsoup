@@ -400,6 +400,15 @@ if(BUILD_TESTING)
         mediaserver_set_project_options(mediaserver_source_replacement_authoring_tests)
         add_test(NAME mediaserver.server_source_replacement_authoring COMMAND mediaserver_source_replacement_authoring_tests)
         set_target_properties(mediaserver_source_replacement_authoring_tests PROPERTIES FOLDER "tests")
+        add_executable(mediaserver_compositor_authoring_tests
+            director_compositor_authoring.cpp
+            edit_coalescing_policy.cpp
+            tests/compositor_authoring_tests.cpp)
+        target_include_directories(mediaserver_compositor_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(mediaserver_compositor_authoring_tests PRIVATE MediaServer::Editor MediaServer::Cmd)
+        mediaserver_set_project_options(mediaserver_compositor_authoring_tests)
+        add_test(NAME mediaserver.server_compositor_authoring COMMAND mediaserver_compositor_authoring_tests)
+        set_target_properties(mediaserver_compositor_authoring_tests PROPERTIES FOLDER "tests")
         add_executable(mediaserver_feed_map_authoring_tests
             director_feed_map_authoring.cpp
             director_compositor_authoring.cpp

@@ -249,11 +249,24 @@ struct EdgeEndpoint final {
     bool operator==(const EdgeEndpoint&) const = default;
 };
 
+// A reroute point a wire passes through, in graph units.
+struct WirePoint final {
+    float x{};
+    float y{};
+    bool operator==(const WirePoint&) const = default;
+};
+
+// More points than any readable wire needs; a list beyond it is refused.
+inline constexpr std::size_t max_wire_points = 16U;
+
 struct GraphEdge final {
     doc::NodeId node{};
     EdgeEndpoint from;
     EdgeEndpoint to;
     core::i64 order{};
+    // Editor layout only, in order from the source: where the operator has
+    // routed the wire. Never read by evaluation, planning or the digests.
+    std::vector<WirePoint> points;
     bool operator==(const GraphEdge&) const = default;
 };
 

@@ -2303,6 +2303,369 @@ void node_text_fits_unclipped_in_a_real_font() {
   UI_CHECK(layer.has_value() && layer->second.width > 176.0F);
 }
 
+// Headless geometry, as in the tests above: nodes are 176 wide with a 35
+// header and 22 rows, so input i's dot is at the node's left edge and
+// 46 + 22i below its top; the canvas starts at y=26.
+
+[[nodiscard]] compositor::GraphEdge graph_edge(core::u64 id, core::u64 from,
+                                               core::u8 from_port, core::u64 to,
+                                               core::u8 to_port) {
+  return compositor::GraphEdge{
+      doc::NodeId{id}, compositor::EdgeEndpoint{doc::NodeId{from}, from_port},
+      compositor::EdgeEndpoint{doc::NodeId{to}, to_port}, 0};
+}
+
+// Press at one point, drag to another, let go; the result of the release.
+[[nodiscard]] editor::CompositorFrame
+drag_in_graph(CompositorHarness &harness,
+              const compositor::CompositorGraph &graph, float from_x,
+              float from_y, float to_x, float to_y,
+              gui::KeyMods mods = gui::KeyMods::None) {
+  static_cast<void>(
+      harness.frame(graph, from_x, from_y, false, {}, std::nullopt, mods));
+  static_cast<void>(
+      harness.frame(graph, from_x, from_y, true, {}, std::nullopt, mods));
+  static_cast<void>(harness.frame(graph, to_x, to_y, true, {}, std::nullopt, mods));
+  return harness.frame(graph, to_x, to_y, false, {}, std::nullopt, mods);
+}
+
+// Letting a wire go on empty canvas opens the node search there, offering
+// only nodes that can take the wire. The one chosen arrives connected, its
+// input where the wire was let go.
+void a_wire_let_go_on_empty_canvas_offers_nodes_that_take_it() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Blur, 40.0F, 60.0F));
+  CompositorHarness harness;
+  // Blur's EFFECT output is at (216, 132).
+  const editor::CompositorFrame released =
+      drag_in_graph(harness, graph, 216.0F, 132.0F, 500.0F, 300.0F);
+  UI_CHECK(!released.connect_ports.has_value());
+  UI_CHECK(!released.add_node.has_value());
+  static_cast<void>(harness.frame(graph, 500.0F, 300.0F, false));
+  // "layer" matches Scene Layer and Composite; only Scene Layer has an input
+  // an effect can feed.
+  static_cast<void>(harness.frame(graph, 500.0F, 300.0F, false, "layer"));
+  const editor::CompositorFrame chosen = harness.frame(
+      graph, 500.0F, 300.0F, false, {}, gui::Key::Enter);
+  UI_CHECK(chosen.add_node.has_value());
+  UI_CHECK(chosen.add_node->kind == compositor::NodeKind::SceneLayer);
+  UI_CHECK(chosen.add_node->editor_x == 500.0F);
+  UI_CHECK(chosen.add_node->editor_y == 300.0F - 26.0F - 46.0F);
+  UI_CHECK(chosen.add_node->links ==
+           (std::vector<editor::CompositorAddLink>{
+               {false, 0U, compositor::EdgeEndpoint{doc::NodeId{1U}, 0U}}}));
+  // Taken, the search closes.
+  UI_CHECK(!harness.frame(graph, 500.0F, 300.0F, false, {}, gui::Key::Enter)
+                .add_node.has_value());
+
+  // Escape closes it without adding anything.
+  CompositorHarness escaped;
+  static_cast<void>(
+      drag_in_graph(escaped, graph, 216.0F, 132.0F, 500.0F, 300.0F));
+  static_cast<void>(escaped.frame(graph, 500.0F, 300.0F, false));
+  static_cast<void>(
+      escaped.frame(graph, 500.0F, 300.0F, false, {}, gui::Key::Escape));
+  UI_CHECK(!escaped.frame(graph, 500.0F, 300.0F, false, {}, gui::Key::Enter)
+                .add_node.has_value());
+}
+
+// Tab over the canvas opens the same search with nothing attached; the node
+// chosen is placed at the pointer.
+void tab_opens_the_node_search_at_the_pointer() {
+  const compositor::CompositorGraph graph;
+  CompositorHarness harness;
+  // A click on the graph gives it the keyboard.
+  static_cast<void>(harness.frame(graph, 400.0F, 300.0F, true));
+  static_cast<void>(harness.frame(graph, 400.0F, 300.0F, false));
+  static_cast<void>(
+      harness.frame(graph, 400.0F, 300.0F, false, {}, gui::Key::Tab));
+  static_cast<void>(harness.frame(graph, 400.0F, 300.0F, false));
+  static_cast<void>(harness.frame(graph, 400.0F, 300.0F, false, "gaussian"));
+  const editor::CompositorFrame chosen = harness.frame(
+      graph, 400.0F, 300.0F, false, {}, gui::Key::Enter);
+  UI_CHECK(chosen.add_node.has_value());
+  UI_CHECK(chosen.add_node->kind == compositor::NodeKind::Blur);
+  UI_CHECK(chosen.add_node->editor_x == 400.0F);
+  UI_CHECK(chosen.add_node->editor_y == 274.0F);
+  UI_CHECK(chosen.add_node->links.empty());
+}
+
+// Alt-click breaks wires: on an output, every wire leaving it; on an input,
+// the wire arriving; on a wire, that wire.
+void alt_click_breaks_wires() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 320.0F, 60.0F));
+  graph.edges.push_back(graph_edge(50U, 10U, 0U, 11U, 0U));
+  const editor::CompositorRewireIntent broken{{doc::NodeId{50U}}, {}};
+  const auto alt_click = [&](float x, float y) {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(graph, x, y, false, {}, std::nullopt,
+                                    gui::KeyMods::Alt));
+    return harness.frame(graph, x, y, true, {}, std::nullopt,
+                         gui::KeyMods::Alt);
+  };
+  UI_CHECK(alt_click(216.0F, 132.0F).rewire == broken);
+  const editor::CompositorFrame input = alt_click(330.0F, 132.0F);
+  UI_CHECK(input.rewire == broken);
+  UI_CHECK(!input.move_node.has_value());
+  UI_CHECK(alt_click(268.0F, 132.0F).rewire == broken);
+  // Without Alt the same presses do what they always did.
+  CompositorHarness plain;
+  static_cast<void>(plain.frame(graph, 268.0F, 132.0F, false));
+  UI_CHECK(!plain.frame(graph, 268.0F, 132.0F, true).rewire.has_value());
+}
+
+// Ctrl-drag lifts wires to move them: off an input, its wire's end moves to
+// another input; off an output, its wires' start moves to another output.
+// Let go on nothing, they are disconnected; put back, nothing changes.
+void ctrl_drag_moves_wires_between_ports() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(12U, compositor::NodeKind::Composite, 320.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 320.0F, 200.0F));
+  graph.edges.push_back(graph_edge(50U, 10U, 0U, 12U, 0U));
+  // Composite's LAYERS input at (320, 132); Output's IMAGE at (320, 272).
+  {
+    CompositorHarness harness;
+    const editor::CompositorFrame moved = drag_in_graph(
+        harness, graph, 330.0F, 132.0F, 330.0F, 272.0F, gui::KeyMods::Ctrl);
+    UI_CHECK(moved.rewire ==
+             (editor::CompositorRewireIntent{
+                 {doc::NodeId{50U}},
+                 {{compositor::EdgeEndpoint{doc::NodeId{10U}, 0U},
+                   compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}}}}));
+    UI_CHECK(!moved.move_node.has_value());
+  }
+  {
+    CompositorHarness harness;
+    UI_CHECK(drag_in_graph(harness, graph, 330.0F, 132.0F, 700.0F, 500.0F,
+                           gui::KeyMods::Ctrl)
+                 .rewire ==
+             (editor::CompositorRewireIntent{{doc::NodeId{50U}}, {}}));
+  }
+  {
+    CompositorHarness harness;
+    const editor::CompositorFrame put_back = drag_in_graph(
+        harness, graph, 330.0F, 132.0F, 325.0F, 134.0F, gui::KeyMods::Ctrl);
+    UI_CHECK(!put_back.rewire.has_value());
+    UI_CHECK(!put_back.connect_ports.has_value());
+  }
+
+  compositor::CompositorGraph sources;
+  sources.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  sources.nodes.push_back(
+      graph_node(13U, compositor::NodeKind::SceneLayer, 40.0F, 200.0F));
+  sources.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 320.0F, 60.0F));
+  sources.edges.push_back(graph_edge(50U, 10U, 0U, 11U, 0U));
+  CompositorHarness harness;
+  // From the first Layer's IMAGE output to the second's, at (216, 272).
+  UI_CHECK(drag_in_graph(harness, sources, 216.0F, 132.0F, 216.0F, 272.0F,
+                         gui::KeyMods::Ctrl)
+               .rewire ==
+           (editor::CompositorRewireIntent{
+               {doc::NodeId{50U}},
+               {{compositor::EdgeEndpoint{doc::NodeId{13U}, 0U},
+                 compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}}}}));
+}
+
+// A node with no wires of its own, dropped onto a wire it can carry, is
+// spliced into it: the wire's source feeds the node, the node feeds the
+// wire's old target, as one gesture with the move.
+void a_free_node_dropped_on_a_wire_splices_into_it() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 600.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(12U, compositor::NodeKind::Composite, 300.0F, 300.0F));
+  graph.edges.push_back(graph_edge(50U, 10U, 0U, 11U, 0U));
+  // The wire runs straight along y=132. Composite's header is grabbed 40 in
+  // and 9 down, and let go 9 below the wire.
+  CompositorHarness harness;
+  const editor::CompositorFrame dropped =
+      drag_in_graph(harness, graph, 340.0F, 335.0F, 400.0F, 141.0F);
+  UI_CHECK(dropped.move_node ==
+           (editor::CompositorMoveIntent{doc::NodeId{12U}, 360.0F, 106.0F}));
+  UI_CHECK(dropped.rewire ==
+           (editor::CompositorRewireIntent{
+               {doc::NodeId{50U}},
+               {{compositor::EdgeEndpoint{doc::NodeId{10U}, 0U},
+                 compositor::EdgeEndpoint{doc::NodeId{12U}, 0U}},
+                {compositor::EdgeEndpoint{doc::NodeId{12U}, 0U},
+                 compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}}}}));
+
+  // Let go well away from the wire, it is only a move.
+  CompositorHarness away;
+  const editor::CompositorFrame moved =
+      drag_in_graph(away, graph, 340.0F, 335.0F, 400.0F, 220.0F);
+  UI_CHECK(moved.move_node.has_value());
+  UI_CHECK(!moved.rewire.has_value());
+
+  // A node that already has a wire is not spliced in.
+  compositor::CompositorGraph wired = graph;
+  wired.nodes.push_back(
+      graph_node(13U, compositor::NodeKind::SceneLayer, 40.0F, 400.0F));
+  wired.edges.push_back(graph_edge(51U, 13U, 0U, 12U, 0U));
+  CompositorHarness busy;
+  UI_CHECK(!drag_in_graph(busy, wired, 340.0F, 335.0F, 400.0F, 141.0F)
+                .rewire.has_value());
+}
+
+// Double-click a wire to add a reroute point; drag a point to move it;
+// double-click a point to remove it. A routed wire is picked along its route.
+void reroute_points_are_added_moved_and_removed() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 600.0F, 60.0F));
+  graph.edges.push_back(graph_edge(50U, 10U, 0U, 11U, 0U));
+  {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(graph, 400.0F, 132.0F, false));
+    const editor::CompositorFrame first =
+        harness.frame(graph, 400.0F, 132.0F, true);
+    UI_CHECK(!first.waypoints.has_value());
+    static_cast<void>(harness.frame(graph, 400.0F, 132.0F, false));
+    UI_CHECK(harness.frame(graph, 400.0F, 132.0F, true).waypoints ==
+             (editor::CompositorWaypointIntent{doc::NodeId{50U},
+                                               {{400.0F, 106.0F}}}));
+  }
+
+  compositor::CompositorGraph routed = graph;
+  routed.edges.front().points = {{400.0F, 306.0F}};
+  // Through (400, 332) on screen: each stretch is a curve symmetric about
+  // its middle, so (308, 232) is on the first one and the straight path's
+  // middle is not on either.
+  {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(routed, 308.0F, 232.0F, false));
+    UI_CHECK(harness.frame(routed, 308.0F, 232.0F, true).selection ==
+             (editor::CompositorSelection{editor::CompositorSelectionKind::Edge,
+                                          doc::NodeId{50U}}));
+  }
+  {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(routed, 408.0F, 132.0F, false));
+    UI_CHECK(harness.frame(routed, 408.0F, 132.0F, true).selection ==
+             editor::CompositorSelection{});
+  }
+  {
+    CompositorHarness harness;
+    UI_CHECK(drag_in_graph(harness, routed, 400.0F, 332.0F, 420.0F, 400.0F)
+                 .waypoints ==
+             (editor::CompositorWaypointIntent{doc::NodeId{50U},
+                                               {{420.0F, 374.0F}}}));
+  }
+  {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(routed, 400.0F, 332.0F, false));
+    static_cast<void>(harness.frame(routed, 400.0F, 332.0F, true));
+    static_cast<void>(harness.frame(routed, 400.0F, 332.0F, false));
+    UI_CHECK(harness.frame(routed, 400.0F, 332.0F, true).waypoints ==
+             (editor::CompositorWaypointIntent{doc::NodeId{50U}, {}}));
+  }
+}
+
+// A wire that would make a loop is refused, rather than authored and then
+// reported by the graph.
+void a_wire_that_would_make_a_loop_is_refused() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Composite, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::Composite, 320.0F, 60.0F));
+  graph.edges.push_back(graph_edge(50U, 1U, 0U, 2U, 0U));
+  CompositorHarness harness;
+  const editor::CompositorFrame refused =
+      drag_in_graph(harness, graph, 496.0F, 132.0F, 50.0F, 132.0F);
+  UI_CHECK(!refused.connect_ports.has_value());
+  UI_CHECK(!refused.rewire.has_value());
+}
+
+// What other panels ask before a drop: the compatible input under or near
+// the pointer, the wire it would replace, and where a new node goes.
+void drops_from_other_panels_find_compatible_inputs() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::SceneLayer, 320.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 600.0F, 60.0F));
+  graph.edges.push_back(graph_edge(50U, 2U, 0U, 11U, 0U));
+  CompositorHarness harness;
+  static_cast<void>(harness.frame(graph, 0.0F, 0.0F, false));
+
+  const auto effects = harness.panel.port_drop_target(
+      graph, 330.0F, 132.0F, compositor::PortValueType::Effect);
+  UI_CHECK(effects.has_value());
+  UI_CHECK(effects->endpoint == (compositor::EdgeEndpoint{doc::NodeId{2U}, 0U}));
+  UI_CHECK(effects->x == 320.0F && effects->y == 132.0F);
+  UI_CHECK(effects->multiple && !effects->occupied.has_value());
+  // The row below takes array instances, and the effects dot is out of reach.
+  UI_CHECK(!harness.panel
+                .port_drop_target(graph, 330.0F, 158.0F,
+                                  compositor::PortValueType::Effect)
+                .has_value());
+  const auto image = harness.panel.port_drop_target(
+      graph, 610.0F, 132.0F, compositor::PortValueType::Image);
+  UI_CHECK(image.has_value());
+  UI_CHECK(image->endpoint == (compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}));
+  UI_CHECK(image->occupied == doc::NodeId{50U});
+  UI_CHECK(!image->multiple);
+  UI_CHECK(!harness.panel
+                .port_drop_target(graph, 610.0F, 132.0F,
+                                  compositor::PortValueType::Effect)
+                .has_value());
+
+  // A new Blur goes 70 left of the input with its output dot level with it.
+  const gui::UiPoint at = harness.panel.node_position_feeding(
+      compositor::NodeKind::Blur, *effects);
+  UI_CHECK(at.x + 176.0F + 70.0F == 320.0F);
+  UI_CHECK(at.y + 46.0F == 132.0F - 26.0F);
+}
+
+// A wire made by letting go on an input stays drawn until the graph reports
+// it, and is not drawn twice once it has: the connection never blinks.
+void a_new_wire_is_held_until_the_graph_reports_it() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Blur, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::SceneLayer, 320.0F, 60.0F));
+  CompositorHarness harness;
+  UI_CHECK(drag_in_graph(harness, graph, 216.0F, 132.0F, 320.0F, 132.0F)
+               .connect_ports.has_value());
+  static_cast<void>(harness.frame(graph, 600.0F, 500.0F, false));
+  const std::size_t held = harness.list.vertices().size();
+  for (int frame = 0; frame < 125; ++frame) {
+    static_cast<void>(harness.frame(graph, 600.0F, 500.0F, false));
+  }
+  const std::size_t refused = harness.list.vertices().size();
+  UI_CHECK(held > refused);
+
+  CompositorHarness arriving;
+  UI_CHECK(drag_in_graph(arriving, graph, 216.0F, 132.0F, 320.0F, 132.0F)
+               .connect_ports.has_value());
+  compositor::CompositorGraph connected = graph;
+  connected.edges.push_back(graph_edge(50U, 1U, 0U, 2U, 0U));
+  static_cast<void>(arriving.frame(connected, 600.0F, 500.0F, false));
+  const std::size_t arrived = arriving.list.vertices().size();
+  for (int frame = 0; frame < 125; ++frame) {
+    static_cast<void>(arriving.frame(connected, 600.0F, 500.0F, false));
+  }
+  UI_CHECK(arriving.list.vertices().size() == arrived);
+}
+
 void workspace_panels_draw_scene_relevant_content() {
   gui::InputState input;
   gui::UiDrawList list;
@@ -3477,7 +3840,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 120U> cases{{
+constexpr std::array<Case, 129U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3606,6 +3969,23 @@ constexpr std::array<Case, 120U> cases{{
      &parameter_sections_collapse},
     {"node text fits unclipped in a real font",
      &node_text_fits_unclipped_in_a_real_font},
+    {"a wire let go on empty canvas offers nodes that take it",
+     &a_wire_let_go_on_empty_canvas_offers_nodes_that_take_it},
+    {"Tab opens the node search at the pointer",
+     &tab_opens_the_node_search_at_the_pointer},
+    {"Alt-click breaks wires", &alt_click_breaks_wires},
+    {"Ctrl-drag moves wires between ports",
+     &ctrl_drag_moves_wires_between_ports},
+    {"a free node dropped on a wire splices into it",
+     &a_free_node_dropped_on_a_wire_splices_into_it},
+    {"reroute points are added, moved and removed",
+     &reroute_points_are_added_moved_and_removed},
+    {"a wire that would make a loop is refused",
+     &a_wire_that_would_make_a_loop_is_refused},
+    {"drops from other panels find compatible inputs",
+     &drops_from_other_panels_find_compatible_inputs},
+    {"a new wire is held until the graph reports it",
+     &a_new_wire_is_held_until_the_graph_reports_it},
     {"dropping on a single input reports an atomic rewire",
      &dropping_on_a_single_input_reports_an_atomic_rewire},
     {"incompatible ports are rejected and persisted edges draw wires",

@@ -1176,10 +1176,11 @@ placed_clip_duration(const editor::AddIntent &add,
 [[nodiscard]] bool schedule_add(
     cmd::DirectorScheduler &scheduler, const editor::AddIntent &add,
     doc::NodeId id, cmd::FrameNumber apply_at, show::FrameRate show_rate,
-    const scene::IcvfxCameraSettings &plate_defaults) {
+    const scene::IcvfxCameraSettings &plate_defaults,
+    cmd::UndoContextId undo_context) {
     auto scheduled = scheduler.schedule_edit(
         cmd::PutNode{make_added_node(id, add, show_rate, plate_defaults)},
-        cmd::EraseNode{id}, cmd::UndoContextId{2U},
+        cmd::EraseNode{id}, undo_context,
         cmd::TransactionId{add.gesture}, apply_at);
     return static_cast<bool>(scheduled);
 }

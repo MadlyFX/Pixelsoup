@@ -299,6 +299,8 @@ struct DirectorShowLoop final {
     std::vector<editor::CompositorAddIntent> &pending_compositor_adds;
     std::optional<editor::CompositorMoveIntent> &pending_compositor_move;
     std::optional<editor::CompositorConnectIntent> &pending_compositor_connect;
+    std::optional<editor::CompositorRewireIntent> &pending_compositor_rewire;
+    std::optional<editor::CompositorWaypointIntent> &pending_compositor_waypoints;
     std::optional<editor::CompositorPropertyEditIntent> &pending_compositor_property;
     std::optional<editor::CompositorDeleteIntent> &pending_compositor_delete;
     core::u64 &pending_compositor_gesture;

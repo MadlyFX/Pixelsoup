@@ -227,5 +227,10 @@ inline constexpr std::string_view from_port = "from_port";
 inline constexpr std::string_view to_node = "to_node";
 inline constexpr std::string_view to_port = "to_port";
 inline constexpr std::string_view order = "order";
+// A wire's reroute points use the bounded indexed-property form curves use:
+// point_0_x / point_0_y, contiguous from zero.
+inline constexpr std::string_view point_prefix = "point_";
+inline constexpr std::string_view point_x_suffix = "_x";
+inline constexpr std::string_view point_y_suffix = "_y";
 
 } // namespace mediaserver::compositor::schema

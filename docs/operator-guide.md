@@ -1024,6 +1024,17 @@ whole drop. Inputs already represented in the graph are skipped. A Track remains
 one stable graph input whose picture follows the clips currently on air, including transparent
 timeline gaps. Dragging from Effects creates the matching effect node there.
 Both gestures outline the graph and name the pending node before release.
+Drop onto an **input** instead and what you drop arrives connected to it: a
+Timeline layer or Library asset on an image input, an effect from Effects on
+an effect input. The input is ringed and labelled, for example **Connect to
+Back** or **Replace Image**, before release. The new node is placed to the
+input's left. A layer that already has a Scene Layer node is wired through
+that node rather than given a second one. An input that takes one wire takes
+the first dropped layer and replaces what it had; an input that takes several,
+such as Composite's Layers, takes them all. A Library asset dropped on an
+input becomes a placement in the scene with its Scene Layer node and wire, and
+one Undo in the graph takes all of it back. An input outranks the node around
+it, so drop on the node's header or detail line to replace a layer instead.
 Drag a **single Timeline layer onto an existing Scene Layer node** to replace
 that input's layer binding. Matching layer kinds are required: a video layer
 can replace another video layer, and a model can replace another model. The node
@@ -1053,8 +1064,24 @@ Wires are curves. To connect, drag from an output port - its dot or its name -
 and release over an input. The whole input row is the target, and the wire
 also snaps to a compatible port when released close to it. While a wire is
 being drawn it lands on the port it would connect to, and ports it cannot
-connect to fade back. Click a wire to select it; a selected node's own wires are
-highlighted.
+connect to fade back. Hold it over an input it cannot feed and a label says
+why: the wrong kind of value, a wire that is already there, or a loop.
+Let a wire go on empty canvas and the node search opens there, offering only
+nodes with an input the wire can feed; the one you pick arrives connected.
+Press **Tab** or right-click the canvas to open the same search with nothing
+attached. Type to filter, use the arrow keys and **Enter**, or click; **Escape**
+closes it.
+
+Click a wire to select it. Selecting a node highlights every wire on its way
+in and on to Output. **Alt**-click a port to break its wires, or Alt-click a
+wire to break that wire. **Ctrl**-drag from a connected input to move its wire
+to another input, or from a connected output to move all of its wires to
+another output; let go on empty canvas to disconnect them. Drag a node with no
+wires of its own onto a wire it can carry - Composite onto an image wire, say -
+and it is spliced in. Double-click a wire to add a reroute point where you
+clicked, drag a point to route the wire, and double-click a point to remove it.
+Reroute points are layout only and never change the picture. A node whose
+output reaches nothing is drawn faded.
 
 The **Parameters** panel beside the graph is resized by dragging its edge. Its
 width is kept with the workspace layout, so it survives a restart. Labels get

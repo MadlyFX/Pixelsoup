@@ -38,7 +38,12 @@
 //   compositor draws an LED Car Process graph - plates into the car, a blur
 //   feeding one plate, a composite into Output - with the car selected so
 //   its Parameters show; compositor-far and compositor-near draw it zoomed
-//   out and in; compositor-wire holds a wire being drawn, near a port.
+//   out and in; compositor-wire holds a wire being drawn, near a port;
+//   compositor-refuse holds one over an input it cannot feed;
+//   compositor-menu lets one go on empty canvas, opening the node search;
+//   compositor-drop previews a Library asset dropped on a car input. The
+//   car's wire to Composite is routed through a reroute point, and a
+//   spare Scene Layer that reaches nothing is drawn faded.
 namespace {
 
 namespace core = mediaserver::core;
@@ -269,7 +274,18 @@ struct CompositorSample final {
     connect(layers[index], 0U, car, plate_ports[index]);
   }
   connect(car, 0U, composite, 0U);
+  sample.graph.edges.back().points = {{720.0F, 420.0F}};
   connect(composite, 0U, out, 0U);
+  // A spare layer wired to nothing, which the graph reports as a dead branch.
+  editor::ElementInfo spare = element(950U, editor::ElementKind::Media,
+                                      "Plate_Spare_Wide.mov");
+  sample.elements.push_back(spare);
+  const doc::NodeId unused = add_node(
+      compositor::NodeKind::SceneLayer, 20.0F, 470.0F,
+      compositor::SceneLayerParameters{doc::NodeId{950U}});
+  sample.graph.diagnostics.push_back(compositor::GraphDiagnostic{
+      compositor::DiagnosticCode::DeadBranch, unused, {}, 0U,
+      compositor::DiagnosticSeverity::Warning});
   return sample;
 }
 
@@ -465,18 +481,37 @@ int main(int argc, char **argv) {
       // Select the car with a click, then zoom about the graph's middle or
       // begin a wire from the blur, as the view asks.
       const bool press = pass == 1;
-      const bool wire_view = view == "compositor-wire";
+      const bool wire_view = view == "compositor-wire" ||
+                             view == "compositor-refuse" ||
+                             view == "compositor-menu";
       float x = pass < 3 ? car_press_x : hover_x;
       float y = pass < 3 ? car_press_y : hover_y;
+      bool down = press;
       if (wire_view && pass >= 3) {
         // Blur EFFECT OUT sits at the right edge of its first row; drag
-        // from it to just short of the first Scene Layer's EFFECTS input.
-        x = pass == 3 ? 20.0F + 166.0F : 226.0F;
-        y = pass == 3 ? 26.0F + 70.0F + 56.0F : 26.0F + 30.0F + 58.0F;
+        // from it to just short of the first Scene Layer's EFFECTS input,
+        // over the car's FRONT image input, or out to empty canvas and let
+        // go there.
+        float target_x = 226.0F;
+        float target_y = 26.0F + 30.0F + 58.0F;
+        if (view == "compositor-refuse") {
+          target_x = 520.0F;
+          target_y = 26.0F + 40.0F + 56.0F;
+        } else if (view == "compositor-menu") {
+          target_x = 640.0F;
+          target_y = 520.0F;
+        }
+        x = pass == 3 ? 20.0F + 166.0F : target_x;
+        y = pass == 3 ? 26.0F + 70.0F + 56.0F : target_y;
+        down = view != "compositor-menu" || pass < 6;
+      }
+      if (view == "compositor-drop" && pass >= 3) {
+        // Over the car's BACK input, the fifth row.
+        x = 492.0F;
+        y = 26.0F + 40.0F + 44.0F + 25.0F * 4.0F + 12.0F;
       }
       input.set_mouse_position(x, y);
-      input.set_mouse_button(gui::MouseButton::Left,
-                             press || (wire_view && pass >= 3));
+      input.set_mouse_button(gui::MouseButton::Left, down);
       if (pass == 4 && (view == "compositor-far" || view == "compositor-near")) {
         input.set_mouse_position(logical_width * 0.35F, logical_height * 0.45F);
         input.add_wheel(view == "compositor-far" ? -4.0F : 3.0F);
@@ -486,6 +521,14 @@ int main(int argc, char **argv) {
       static_cast<void>(compositor_panel.draw(ctx, window,
                                               compositor_sample.graph,
                                               compositor_sample.elements));
+      if (view == "compositor-drop") {
+        if (const auto target = compositor_panel.port_drop_target(
+                compositor_sample.graph, x, y,
+                mediaserver::compositor::PortValueType::Image)) {
+          compositor_panel.draw_port_drop(ctx, *target,
+                                          "Plate_Rear_Long_Lens.mov");
+        }
+      }
       ctx.draw_overlays(window);
       continue;
     }

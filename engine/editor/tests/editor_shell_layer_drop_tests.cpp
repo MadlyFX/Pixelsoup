@@ -178,6 +178,49 @@ void layer_drop() {
   static_cast<void>(pointer(rows.x + rows.width - 10.0F, rows.y + 250.0F, true));
   check(pointer(rows.x + rows.width - 10.0F, rows.y + 250.0F, false)
             .compositor_adds.empty(), "release outside graph does not add nodes");
+
+  // Dropped on an input, the layers arrive wired to it. Both already have
+  // Scene Layer nodes (201, 202), so those are what get wired. The first
+  // input row starts one header below the node's top, under the 26-unit
+  // graph toolbar; 55 below the top lands in it at any font size the
+  // editor uses.
+  compositor::GraphNode composite;
+  composite.node = doc::NodeId{300U};
+  composite.kind = compositor::NodeKind::Composite;
+  composite.parameters = compositor::CompositeParameters{};
+  composite.editor_x = 300.0F;
+  composite.editor_y = 40.0F;
+  graph.nodes.push_back(composite);
+  compositor::GraphNode output;
+  output.node = doc::NodeId{301U};
+  output.kind = compositor::NodeKind::Output;
+  output.parameters = compositor::OutputParameters{};
+  output.editor_x = 300.0F;
+  output.editor_y = 300.0F;
+  graph.nodes.push_back(output);
+  const auto drop_on = [&](float graph_x, float graph_y) {
+    static_cast<void>(pointer(x, rows.y + 88.0F, true));
+    static_cast<void>(pointer(canvas.x + graph_x - 4.0F,
+                              canvas.y + 26.0F + graph_y + 55.0F, true));
+    return pointer(canvas.x + graph_x - 4.0F,
+                   canvas.y + 26.0F + graph_y + 55.0F, false);
+  };
+  const auto layers = drop_on(300.0F, 40.0F);
+  check(layers.compositor_adds.empty(), "existing layer nodes are reused");
+  check(layers.compositor_rewire.has_value() &&
+            layers.compositor_rewire->remove_edges.empty() &&
+            layers.compositor_rewire->add_edges ==
+                std::vector<editor::CompositorWire>{
+                    {{doc::NodeId{201U}, 0U}, {doc::NodeId{300U}, 0U}},
+                    {{doc::NodeId{202U}, 0U}, {doc::NodeId{300U}, 0U}}},
+        "every layer is wired to an input that takes several");
+  check(layers.compositor_gesture != 0U, "the wiring is one undo step");
+  const auto single = drop_on(300.0F, 300.0F);
+  check(single.compositor_rewire.has_value() &&
+            single.compositor_rewire->add_edges ==
+                std::vector<editor::CompositorWire>{
+                    {{doc::NodeId{201U}, 0U}, {doc::NodeId{301U}, 0U}}},
+        "an input that takes one wire takes the first layer");
 }
 } // namespace
 

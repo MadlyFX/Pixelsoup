@@ -12,6 +12,7 @@
 #include <mediaserver/editor/workspace_panels.hpp>
 
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace mediaserver::app {
@@ -44,6 +45,35 @@ schedule_compositor_connect(cmd::DirectorScheduler &scheduler,
                             const editor::CompositorConnectIntent &request,
                             doc::NodeId id, core::u64 gesture,
                             cmd::FrameNumber apply_at);
+
+// The document node of one wire, with no reroute points.
+[[nodiscard]] doc::Node make_compositor_edge(doc::NodeId id,
+                                             compositor::EdgeEndpoint from,
+                                             compositor::EdgeEndpoint to);
+
+// Adds a node with the wires it arrives with, removing the wires the request
+// names, as one undo step. `edge_ids` holds a fresh id for each link. When
+// the node cannot be added - a Scene Layer naming nothing - nothing is.
+[[nodiscard]] bool schedule_compositor_add_linked(
+    cmd::DirectorScheduler &scheduler,
+    const editor::CompositorAddIntent &request, doc::NodeId id,
+    doc::NodeId scene, std::span<const doc::NodeId> edge_ids,
+    core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Removes and adds wires as one undo step. `edge_ids` holds a fresh id for
+// each added wire. A wire to a node that no longer exists is skipped.
+[[nodiscard]] bool
+schedule_compositor_rewire(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorRewireIntent &request,
+                           std::span<const doc::NodeId> edge_ids,
+                           core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Replaces a wire's reroute points. A list past the cap, or with a
+// non-finite or out-of-range point, is ignored whole.
+[[nodiscard]] bool
+schedule_compositor_waypoints(cmd::DirectorScheduler &scheduler,
+                              const editor::CompositorWaypointIntent &request,
+                              core::u64 gesture, cmd::FrameNumber apply_at);
 
 [[nodiscard]] std::optional<doc::NodeId>
 node_reference(const doc::Node &node, std::string_view property) noexcept;

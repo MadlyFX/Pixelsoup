@@ -139,6 +139,10 @@ struct AddIntent final {
   // Exact native cadence for video. Absence deliberately means legacy/image
   // sequence 1:1 mapping, so old aggregate initializers remain compatible.
   std::optional<assets::MediaFrameRate> frame_rate;
+  // A Library asset dropped on a Compositor port: the Scene Layer node to
+  // create for the new element, with its wires, in the same undo step. Its
+  // scene_node is filled in with the element once that exists.
+  std::optional<CompositorAddIntent> graph_layer;
 
   bool operator==(const AddIntent &) const = default;
 };
@@ -802,6 +806,8 @@ struct EditorFrame final {
   std::vector<CompositorAddIntent> compositor_adds;
   std::optional<CompositorMoveIntent> compositor_move;
   std::optional<CompositorConnectIntent> compositor_connect;
+  std::optional<CompositorRewireIntent> compositor_rewire;
+  std::optional<CompositorWaypointIntent> compositor_waypoints;
   std::optional<CompositorPropertyEditIntent> compositor_property_edit;
   std::optional<CompositorDeleteIntent> compositor_delete;
   core::u64 compositor_gesture{};

@@ -17,6 +17,40 @@
 #include <vector>
 
 namespace mediaserver::app {
+namespace {
+
+constexpr core::u64 max_reference =
+    static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
+
+[[nodiscard]] bool referenceable(compositor::EdgeEndpoint endpoint) noexcept {
+    return endpoint.node != doc::NodeId{} &&
+           endpoint.node.value() <= max_reference;
+}
+
+} // namespace
+
+[[nodiscard]] doc::Node make_compositor_edge(doc::NodeId id,
+                                             compositor::EdgeEndpoint from,
+                                             compositor::EdgeEndpoint to) {
+    doc::Node edge{};
+    edge.id = id;
+    edge.type = std::string{compositor::schema::edge_type};
+    edge.properties.emplace(
+        std::string{compositor::schema::from_node},
+        doc::PropertyValue{static_cast<std::int64_t>(from.node.value())});
+    edge.properties.emplace(
+        std::string{compositor::schema::from_port},
+        doc::PropertyValue{static_cast<std::int64_t>(from.port)});
+    edge.properties.emplace(
+        std::string{compositor::schema::to_node},
+        doc::PropertyValue{static_cast<std::int64_t>(to.node.value())});
+    edge.properties.emplace(
+        std::string{compositor::schema::to_port},
+        doc::PropertyValue{static_cast<std::int64_t>(to.port)});
+    edge.properties.emplace(std::string{compositor::schema::order},
+                            doc::PropertyValue{std::int64_t{0}});
+    return edge;
+}
 
 [[nodiscard]] std::string_view
 compositor_type(compositor::NodeKind kind) noexcept {
@@ -757,8 +791,6 @@ schedule_compositor_connect(cmd::DirectorScheduler &scheduler,
                             const editor::CompositorConnectIntent &request,
                             doc::NodeId id, core::u64 gesture,
                             cmd::FrameNumber apply_at) {
-    constexpr core::u64 max_reference =
-        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
     if (request.from.node.value() > max_reference ||
         request.to.node.value() > max_reference) {
         return true;
@@ -798,26 +830,9 @@ schedule_compositor_connect(cmd::DirectorScheduler &scheduler,
             }
         }
     }
-    doc::Node edge{};
-    edge.id = id;
-    edge.type = std::string{compositor::schema::edge_type};
-    edge.properties.emplace(std::string{compositor::schema::from_node},
-                            doc::PropertyValue{static_cast<std::int64_t>(
-                                request.from.node.value())});
-    edge.properties.emplace(
-        std::string{compositor::schema::from_port},
-        doc::PropertyValue{static_cast<std::int64_t>(request.from.port)});
-    edge.properties.emplace(
-        std::string{compositor::schema::to_node},
-        doc::PropertyValue{static_cast<std::int64_t>(request.to.node.value())});
-    edge.properties.emplace(
-        std::string{compositor::schema::to_port},
-        doc::PropertyValue{static_cast<std::int64_t>(request.to.port)});
-    edge.properties.emplace(std::string{compositor::schema::order},
-                            doc::PropertyValue{std::int64_t{0}});
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{std::move(edge)}, cmd::EraseNode{id}, context, transaction,
-        apply_at));
+        cmd::PutNode{make_compositor_edge(id, request.from, request.to)},
+        cmd::EraseNode{id}, context, transaction, apply_at));
 }
 
 [[nodiscard]] std::optional<doc::NodeId>
@@ -905,6 +920,148 @@ schedule_compositor_delete(cmd::DirectorScheduler &scheduler,
     } catch (const std::bad_alloc &) {
         return false;
     }
+}
+
+namespace {
+
+// Erases each id that names a wire, as part of one transaction. Anything else
+// - a node, or an id already gone - is left alone.
+[[nodiscard]] bool erase_edges(cmd::DirectorScheduler &scheduler,
+                               std::span<const doc::NodeId> edges,
+                               cmd::TransactionId transaction,
+                               cmd::FrameNumber apply_at) {
+    for (const doc::NodeId edge : edges) {
+        const doc::Node *const existing =
+            scheduler.projected_document().get(edge);
+        if (existing == nullptr ||
+            existing->type != compositor::schema::edge_type) {
+            continue;
+        }
+        if (!schedule_erase_node(scheduler, edge, cmd::UndoContextId{6U},
+                                 transaction, apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool graph_node(const doc::Root &root, doc::NodeId id) noexcept {
+    const doc::Node *const node = root.get(id);
+    return node != nullptr && node->type != compositor::schema::edge_type &&
+           compositor::schema::is_node_type(node->type);
+}
+
+} // namespace
+
+[[nodiscard]] bool schedule_compositor_add_linked(
+    cmd::DirectorScheduler &scheduler,
+    const editor::CompositorAddIntent &request, doc::NodeId id,
+    doc::NodeId scene, std::span<const doc::NodeId> edge_ids,
+    core::u64 gesture, cmd::FrameNumber apply_at) {
+    if (edge_ids.size() < request.links.size()) {
+        return false;
+    }
+    if (!schedule_compositor_add(scheduler, request, id, scene, gesture,
+                                 apply_at)) {
+        return false;
+    }
+    // A node that could not be added - a Scene Layer with nothing to show,
+    // or no scene being authored - takes its wires and removals with it.
+    if (!graph_node(scheduler.projected_document(), id)) {
+        return true;
+    }
+    const cmd::TransactionId transaction{gesture};
+    if (!erase_edges(scheduler, request.remove_edges, transaction, apply_at)) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < request.links.size(); ++index) {
+        const editor::CompositorAddLink &link = request.links[index];
+        if (!referenceable(link.existing) ||
+            !graph_node(scheduler.projected_document(), link.existing.node)) {
+            continue;
+        }
+        const compositor::EdgeEndpoint fresh{id, link.port};
+        const doc::NodeId edge = edge_ids[index];
+        if (!scheduler.schedule_edit(
+                cmd::PutNode{make_compositor_edge(
+                    edge, link.from_new ? fresh : link.existing,
+                    link.from_new ? link.existing : fresh)},
+                cmd::EraseNode{edge}, cmd::UndoContextId{6U}, transaction,
+                apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+schedule_compositor_rewire(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorRewireIntent &request,
+                           std::span<const doc::NodeId> edge_ids,
+                           core::u64 gesture, cmd::FrameNumber apply_at) {
+    if (edge_ids.size() < request.add_edges.size()) {
+        return false;
+    }
+    const cmd::TransactionId transaction{gesture};
+    if (!erase_edges(scheduler, request.remove_edges, transaction, apply_at)) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < request.add_edges.size(); ++index) {
+        const editor::CompositorWire &wire = request.add_edges[index];
+        const doc::Root &root = scheduler.projected_document();
+        if (!referenceable(wire.from) || !referenceable(wire.to) ||
+            !graph_node(root, wire.from.node) ||
+            !graph_node(root, wire.to.node)) {
+            continue;
+        }
+        const doc::NodeId edge = edge_ids[index];
+        if (!scheduler.schedule_edit(
+                cmd::PutNode{make_compositor_edge(edge, wire.from, wire.to)},
+                cmd::EraseNode{edge}, cmd::UndoContextId{6U}, transaction,
+                apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+schedule_compositor_waypoints(cmd::DirectorScheduler &scheduler,
+                              const editor::CompositorWaypointIntent &request,
+                              core::u64 gesture, cmd::FrameNumber apply_at) {
+    const doc::Node *const existing =
+        scheduler.projected_document().get(request.edge);
+    if (existing == nullptr ||
+        existing->type != compositor::schema::edge_type ||
+        request.points.size() > compositor::max_wire_points) {
+        return true;
+    }
+    doc::Node routed = *existing;
+    std::erase_if(routed.properties, [](const auto &property) {
+        return property.first.starts_with(compositor::schema::point_prefix);
+    });
+    for (std::size_t index = 0U; index < request.points.size(); ++index) {
+        const compositor::WirePoint point = request.points[index];
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+            std::abs(point.x) > compositor::max_spatial_extent ||
+            std::abs(point.y) > compositor::max_spatial_extent) {
+            return true;
+        }
+        const std::string base = std::string{compositor::schema::point_prefix} +
+                                 std::to_string(index);
+        routed.properties.insert_or_assign(
+            base + std::string{compositor::schema::point_x_suffix},
+            doc::PropertyValue{static_cast<double>(point.x)});
+        routed.properties.insert_or_assign(
+            base + std::string{compositor::schema::point_y_suffix},
+            doc::PropertyValue{static_cast<double>(point.y)});
+    }
+    if (routed == *existing) {
+        return true;
+    }
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(routed)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
 }
 
 } // namespace mediaserver::app

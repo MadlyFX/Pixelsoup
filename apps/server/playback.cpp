@@ -2012,6 +2012,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::CompositorAddIntent> pending_compositor_adds;
     std::optional<editor::CompositorMoveIntent> pending_compositor_move;
     std::optional<editor::CompositorConnectIntent> pending_compositor_connect;
+    std::optional<editor::CompositorRewireIntent> pending_compositor_rewire;
+    std::optional<editor::CompositorWaypointIntent> pending_compositor_waypoints;
     std::optional<editor::CompositorPropertyEditIntent>
         pending_compositor_property;
     std::optional<editor::CompositorDeleteIntent> pending_compositor_delete;
@@ -2447,6 +2449,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_compositor_adds = pending_compositor_adds,
         .pending_compositor_move = pending_compositor_move,
         .pending_compositor_connect = pending_compositor_connect,
+        .pending_compositor_rewire = pending_compositor_rewire,
+        .pending_compositor_waypoints = pending_compositor_waypoints,
         .pending_compositor_property = pending_compositor_property,
         .pending_compositor_delete = pending_compositor_delete,
         .pending_compositor_gesture = pending_compositor_gesture,

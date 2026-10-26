@@ -59,6 +59,10 @@ public:
         return dragging_.has_value();
     }
     [[nodiscard]] std::string_view dragging_name() const noexcept;
+    // The effect being dragged, so a drop target can say what it will make.
+    [[nodiscard]] std::optional<scene::EffectKind> dragging_effect() const noexcept {
+        return dragging_;
+    }
     [[nodiscard]] std::string_view search() const noexcept { return search_; }
 
 private:

@@ -425,6 +425,39 @@ kind_for_type(std::string_view type) noexcept {
     return value >= -max_spatial_extent && value <= max_spatial_extent;
 }
 
+// A wire's reroute points. They are layout, not part of what the graph
+// computes, so a malformed list - a gap, a half point, a non-finite or
+// out-of-range coordinate, too many points - drops the points and keeps the
+// wire rather than refusing the connection.
+[[nodiscard]] std::vector<WirePoint>
+read_wire_points(const doc::PropertyMap& properties) {
+    std::vector<WirePoint> points;
+    Reader reader{properties};
+    bool gap{};
+    for (std::size_t index = 0U; index <= max_wire_points; ++index) {
+        const std::string base =
+            std::string{schema::point_prefix} + std::to_string(index);
+        const std::string x_name = base + std::string{schema::point_x_suffix};
+        const std::string y_name = base + std::string{schema::point_y_suffix};
+        const bool has_x = find(properties, x_name) != nullptr;
+        const bool has_y = find(properties, y_name) != nullptr;
+        if (!has_x && !has_y) {
+            gap = true;
+            continue;
+        }
+        if (!has_x || !has_y || gap || index == max_wire_points) {
+            return {};
+        }
+        const WirePoint point{reader.number(x_name, 0.0F),
+                              reader.number(y_name, 0.0F)};
+        if (!reader.ok() || !in_extent(point.x) || !in_extent(point.y)) {
+            return {};
+        }
+        points.push_back(point);
+    }
+    return points;
+}
+
 [[nodiscard]] GraphNode parse_node(const doc::Node& node, NodeKind kind,
                                    Reader& reader) {
     GraphNode parsed{};
@@ -835,6 +868,7 @@ void CompositorModel::put(const doc::Node& node) {
         ++counters_.rejected;
         return;
     }
+    edge.points = read_wire_points(node.properties);
     edges_.insert_or_assign(node.id, edge);
 }
 

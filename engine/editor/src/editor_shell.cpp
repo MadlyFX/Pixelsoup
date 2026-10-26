@@ -1378,6 +1378,45 @@ constexpr std::array<core::u16, 10U> ui_zoom_steps{
   return ui_zoom_steps.front();
 }
 
+// The Compositor node an Effects-panel effect becomes when it is dropped on
+// the graph, or nothing for an effect the graph has no node for.
+[[nodiscard]] std::optional<compositor::NodeKind>
+graph_effect_node(scene::EffectKind effect) noexcept {
+  switch (effect) {
+  case scene::EffectKind::Brightness:
+    return compositor::NodeKind::Brightness;
+  case scene::EffectKind::Saturation:
+    return compositor::NodeKind::Saturation;
+  case scene::EffectKind::Blur:
+    return compositor::NodeKind::Blur;
+  case scene::EffectKind::BoxBlur:
+    return compositor::NodeKind::BoxBlur;
+  case scene::EffectKind::DirectionalBlur:
+    return compositor::NodeKind::DirectionalBlur;
+  case scene::EffectKind::ChromaKey:
+    return compositor::NodeKind::ChromaKey;
+  case scene::EffectKind::LumaKey:
+    return compositor::NodeKind::LumaKey;
+  case scene::EffectKind::Levels:
+    return compositor::NodeKind::Levels;
+  case scene::EffectKind::LiftGammaGain:
+    return compositor::NodeKind::LiftGammaGain;
+  case scene::EffectKind::ContrastPivot:
+    return compositor::NodeKind::ContrastPivot;
+  case scene::EffectKind::ColorMatrix:
+    return compositor::NodeKind::ColorMatrix;
+  case scene::EffectKind::WhiteBalance:
+    return compositor::NodeKind::WhiteBalance;
+  case scene::EffectKind::Curves:
+    return compositor::NodeKind::Curves;
+  case scene::EffectKind::FilmGrain:
+    return compositor::NodeKind::FilmGrain;
+  case scene::EffectKind::Count:
+    break;
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] gui::FontAtlas load_editor_font(float scale) {
   // The first entries cover the supported desktop platforms; the empty atlas
   // keeps the editor operational (without glyphs) on an unusual install.
@@ -3956,7 +3995,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   const auto instantiate_asset = [&](doc::NodeId id,
-                                     std::optional<scene::Vec3> position) {
+                                     std::optional<scene::Vec3> position,
+                                     std::optional<CompositorAddIntent>
+                                         graph_layer = std::nullopt) {
     const assets::Asset *const found = asset_registry.asset(id);
     if (found == nullptr) {
       return;
@@ -3971,13 +4012,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                       media->frame_count.value_or(1U),
                                       impl.next_edit_gesture++, aspect,
                                       media->id, authored_stage.id, position,
-                                      media->frame_rate});
+                                      media->frame_rate, graph_layer});
       return;
     }
     const auto &model = std::get<assets::ModelAsset>(*found);
     result.adds.push_back(AddIntent{AddKind::Model, model.source, 1U,
                                     impl.next_edit_gesture++, 16.0F / 9.0F,
-                                    model.id, authored_stage.id, position});
+                                    model.id, authored_stage.id, position,
+                                    std::nullopt, graph_layer});
   };
 
   const auto draw_placeholder = [&](const gui::Rect &bounds,
@@ -5154,11 +5196,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         result.compositor_move = graph_frame.move_node;
         result.compositor_connect = graph_frame.connect_ports;
+        result.compositor_rewire = graph_frame.rewire;
+        result.compositor_waypoints = graph_frame.waypoints;
         result.compositor_property_edit = graph_frame.property_edit;
         result.compositor_delete = graph_frame.remove;
         if (graph_frame.add_node.has_value() ||
             graph_frame.move_node.has_value() ||
             graph_frame.connect_ports.has_value() ||
+            graph_frame.rewire.has_value() ||
+            graph_frame.waypoints.has_value() ||
             graph_frame.remove.has_value()) {
           result.compositor_gesture = impl.next_edit_gesture++;
         }
@@ -6053,11 +6099,62 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     return std::nullopt;
   };
+  // A drag from another panel can land on a Compositor input: an effect on
+  // an effect input, a Timeline layer or a Library asset on an image input.
+  // The input is resolved before the node around it, so landing on a port
+  // connects rather than replaces.
+  const auto port_drop_at = [&](float x, float y,
+                                compositor::PortValueType type)
+      -> std::optional<CompositorPortDrop> {
+    if (!compositor_panel_drawn || compositor_locked ||
+        switcher.rehearsal_locked) {
+      return std::nullopt;
+    }
+    return impl.compositor_panel.port_drop_target(compositor_graph, x, y,
+                                                  type);
+  };
+  std::optional<CompositorPortDrop> port_hover;
+  std::string port_hover_what;
+  if (!ui.pointer_blocked()) {
+    const std::optional<scene::EffectKind> dragged_effect =
+        impl.effects_panel.dragging_effect();
+    if (dragged_effect.has_value() &&
+        graph_effect_node(*dragged_effect).has_value()) {
+      port_hover = port_drop_at(ui.pointer_x(), ui.pointer_y(),
+                                compositor::PortValueType::Effect);
+      port_hover_what = impl.effects_panel.dragging_name();
+    } else if (impl.timeline_panel.dragging_compositor_source() ||
+               dragging_asset.has_value()) {
+      port_hover = port_drop_at(ui.pointer_x(), ui.pointer_y(),
+                                compositor::PortValueType::Image);
+      const std::size_t count =
+          impl.timeline_panel.dragging_compositor_source_count();
+      if (dragging_asset.has_value()) {
+        const assets::Asset *const asset = asset_registry.asset(*dragging_asset);
+        port_hover_what = asset != nullptr
+                              ? std::string{assets::asset_display_name(*asset)}
+                              : std::string{"Asset"};
+      } else if (count > 1U) {
+        port_hover_what = std::to_string(count) + " layers";
+      } else {
+        const ElementInfo *const dragged = find_element(
+            elements, impl.timeline_panel.dragging_compositor_source_node());
+        port_hover_what = dragged != nullptr ? dragged->display_name
+                                             : std::string{"Layer"};
+      }
+    }
+  }
   const doc::NodeId lifted_layer =
       impl.timeline_panel.dragging_compositor_source_count() == 1U
           ? impl.timeline_panel.dragging_compositor_source_node() : doc::NodeId{};
-  const auto replacement_hover = replacement_at(ui.pointer_x(), ui.pointer_y(),
-      dragging_asset.value_or(doc::NodeId{}), lifted_layer);
+  const auto replacement_hover =
+      port_hover.has_value()
+          ? std::nullopt
+          : replacement_at(ui.pointer_x(), ui.pointer_y(),
+                           dragging_asset.value_or(doc::NodeId{}), lifted_layer);
+  if (port_hover.has_value()) {
+    impl.compositor_panel.draw_port_drop(ui, *port_hover, port_hover_what);
+  }
   if (replacement_hover.has_value()) {
     const auto &bounds = replacement_hover->second;
     ui.panel(bounds, with_alpha(ui.theme().accent, 0.18F));
@@ -6070,7 +6167,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.label({badge.x + 8.0F, badge.y, badge.width - 8.0F, badge.height},
              label, ui.theme().background);
   }
-  if (compositor_panel_drawn && !compositor_locked) {
+  if (compositor_panel_drawn && !compositor_locked && !port_hover.has_value()) {
     if (impl.effects_panel.dragging()) {
       draw_compositor_drop_target(ui, compositor_panel_bounds,
                                   impl.effects_panel.dragging_name());
@@ -6143,53 +6240,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
   if (pending_effect_drop.has_value()) {
-    std::optional<compositor::NodeKind> graph_effect_kind;
-    switch (pending_effect_drop->effect) {
-    case scene::EffectKind::Brightness:
-      graph_effect_kind = compositor::NodeKind::Brightness;
-      break;
-    case scene::EffectKind::Saturation:
-      graph_effect_kind = compositor::NodeKind::Saturation;
-      break;
-    case scene::EffectKind::Blur:
-      graph_effect_kind = compositor::NodeKind::Blur;
-      break;
-    case scene::EffectKind::BoxBlur:
-      graph_effect_kind = compositor::NodeKind::BoxBlur;
-      break;
-    case scene::EffectKind::DirectionalBlur:
-      graph_effect_kind = compositor::NodeKind::DirectionalBlur;
-      break;
-    case scene::EffectKind::ChromaKey:
-      graph_effect_kind = compositor::NodeKind::ChromaKey;
-      break;
-    case scene::EffectKind::LumaKey:
-      graph_effect_kind = compositor::NodeKind::LumaKey;
-      break;
-    case scene::EffectKind::Levels:
-      graph_effect_kind = compositor::NodeKind::Levels;
-      break;
-    case scene::EffectKind::LiftGammaGain:
-      graph_effect_kind = compositor::NodeKind::LiftGammaGain;
-      break;
-    case scene::EffectKind::ContrastPivot:
-      graph_effect_kind = compositor::NodeKind::ContrastPivot;
-      break;
-    case scene::EffectKind::ColorMatrix:
-      graph_effect_kind = compositor::NodeKind::ColorMatrix;
-      break;
-    case scene::EffectKind::WhiteBalance:
-      graph_effect_kind = compositor::NodeKind::WhiteBalance;
-      break;
-    case scene::EffectKind::Curves:
-      graph_effect_kind = compositor::NodeKind::Curves;
-      break;
-    case scene::EffectKind::FilmGrain:
-      graph_effect_kind = compositor::NodeKind::FilmGrain;
-      break;
-    case scene::EffectKind::Count:
-      break;
-    }
+    const std::optional<compositor::NodeKind> graph_effect_kind =
+        graph_effect_node(pending_effect_drop->effect);
     const gui::UiPoint graph_effect_node_size =
         impl.compositor_panel.new_node_size(
             graph_effect_kind.value_or(compositor::NodeKind::Brightness));
@@ -6200,13 +6252,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                   pending_effect_drop->screen_y, graph_effect_node_size.x,
                   graph_effect_node_size.y)
             : std::optional<gui::UiPoint>{};
+    const std::optional<CompositorPortDrop> effect_port =
+        graph_effect_kind.has_value()
+            ? port_drop_at(pending_effect_drop->screen_x,
+                           pending_effect_drop->screen_y,
+                           compositor::PortValueType::Effect)
+            : std::nullopt;
     const bool graph_drop = graph_drop_position.has_value();
     const gui::Rect *const stage_drop_bounds =
         stage_viewport_drawn ? &stage_viewport_frame.image : nullptr;
     const gui::Rect *const inspector_drop_bounds =
         inspector_panel_drawn ? &inspector_panel_bounds : nullptr;
-    if (graph_drop && graph_effect_kind.has_value() && !compositor_locked &&
-        result.compositor_adds.empty()) {
+    if (effect_port.has_value() && result.compositor_adds.empty()) {
+      const gui::UiPoint at = impl.compositor_panel.node_position_feeding(
+          *graph_effect_kind, *effect_port);
+      CompositorAddIntent add{*graph_effect_kind, at.x, at.y};
+      add.links.push_back(CompositorAddLink{
+          true, compositor::output_ports(*graph_effect_kind).front().index,
+          effect_port->endpoint});
+      if (effect_port->occupied.has_value()) {
+        add.remove_edges.push_back(*effect_port->occupied);
+      }
+      result.compositor_adds.push_back(std::move(add));
+      result.compositor_gesture = impl.next_edit_gesture++;
+    } else if (graph_drop && graph_effect_kind.has_value() &&
+               !compositor_locked && result.compositor_adds.empty()) {
       result.compositor_adds.push_back(CompositorAddIntent{
           *graph_effect_kind,
           graph_drop_position->x,
@@ -6231,10 +6301,64 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.compositor_panel.node_drop_position(
             drop.screen_x, drop.screen_y, graph_layer_node_size.x,
             graph_layer_node_height);
-    const auto replacement = drop.layers.size() == 1U
-        ? replacement_at(drop.screen_x, drop.screen_y, {}, drop.layers.front())
-        : std::nullopt;
-    if (replacement.has_value()) {
+    const std::optional<CompositorPortDrop> layer_port = port_drop_at(
+        drop.screen_x, drop.screen_y, compositor::PortValueType::Image);
+    const auto replacement =
+        drop.layers.size() == 1U && !layer_port.has_value()
+            ? replacement_at(drop.screen_x, drop.screen_y, {},
+                             drop.layers.front())
+            : std::nullopt;
+    if (layer_port.has_value()) {
+      // Each layer feeds the input: through the Scene Layer node it already
+      // has, or a new one placed to its left. An input that takes one wire
+      // takes the first layer only, replacing what it had.
+      CompositorRewireIntent rewire;
+      if (layer_port->occupied.has_value()) {
+        rewire.remove_edges.push_back(*layer_port->occupied);
+      }
+      std::size_t placed{};
+      for (const doc::NodeId layer : drop.layers) {
+        const ElementInfo *const dropped = find_element(elements, layer);
+        if (dropped == nullptr || dropped->locked) {
+          continue;
+        }
+        const auto existing = std::find_if(
+            compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+            [layer](const compositor::GraphNode &node) {
+              const auto *parameters =
+                  std::get_if<compositor::SceneLayerParameters>(
+                      &node.parameters);
+              return node.kind == compositor::NodeKind::SceneLayer &&
+                     parameters != nullptr && parameters->scene_node == layer;
+            });
+        if (existing != compositor_graph.nodes.end()) {
+          rewire.add_edges.push_back(CompositorWire{
+              compositor::EdgeEndpoint{existing->node, 0U},
+              layer_port->endpoint});
+        } else {
+          gui::UiPoint at = impl.compositor_panel.node_position_feeding(
+              compositor::NodeKind::SceneLayer, *layer_port);
+          at.y += static_cast<float>(placed++) * (graph_layer_node_height + 16.0F);
+          CompositorAddIntent add{compositor::NodeKind::SceneLayer, at.x, at.y,
+                                  layer};
+          add.links.push_back(
+              CompositorAddLink{true, 0U, layer_port->endpoint});
+          result.compositor_adds.push_back(std::move(add));
+        }
+        if (!layer_port->multiple) {
+          break;
+        }
+      }
+      if (!rewire.add_edges.empty()) {
+        result.compositor_rewire = std::move(rewire);
+      } else if (!result.compositor_adds.empty() && !rewire.remove_edges.empty()) {
+        result.compositor_adds.front().remove_edges = rewire.remove_edges;
+      }
+      if (!result.compositor_adds.empty() ||
+          result.compositor_rewire.has_value()) {
+        result.compositor_gesture = impl.next_edit_gesture++;
+      }
+    } else if (replacement.has_value()) {
       auto intent = replacement->first;
       intent.gesture = impl.next_edit_gesture++;
       result.source_replacements.push_back(intent);
@@ -6287,6 +6411,23 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
+  if (pending_asset_drop.has_value()) {
+    const auto &drop = *pending_asset_drop;
+    if (const auto port = port_drop_at(drop.screen_x, drop.screen_y,
+                                       compositor::PortValueType::Image)) {
+      const gui::UiPoint at = impl.compositor_panel.node_position_feeding(
+          compositor::NodeKind::SceneLayer, *port);
+      CompositorAddIntent layer{compositor::NodeKind::SceneLayer, at.x, at.y};
+      layer.links.push_back(CompositorAddLink{true, 0U, port->endpoint});
+      if (port->occupied.has_value()) {
+        layer.remove_edges.push_back(*port->occupied);
+      }
+      instantiate_asset(drop.asset, std::nullopt, std::move(layer));
+      impl.history_context = HistoryContext::Compositor;
+      impl.semantic_boundary = true;
+      pending_asset_drop.reset();
+    }
+  }
   if (pending_asset_drop.has_value()) {
     const auto &drop = *pending_asset_drop;
     if (const auto replacement = replacement_at(drop.screen_x, drop.screen_y, drop.asset, {})) {
@@ -6601,6 +6742,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       !result.compositor_adds.empty() ||
       result.compositor_move.has_value() ||
       result.compositor_connect.has_value() ||
+      result.compositor_rewire.has_value() ||
+      result.compositor_waypoints.has_value() ||
       result.compositor_property_edit.has_value() ||
       result.compositor_delete.has_value();
   const bool selection_set_authored =

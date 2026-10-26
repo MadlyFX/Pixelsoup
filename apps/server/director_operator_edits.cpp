@@ -86,6 +86,8 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         pending_source_replacements.clear();
         pending_compositor_move.reset();
         pending_compositor_connect.reset();
+        pending_compositor_rewire.reset();
+        pending_compositor_waypoints.reset();
         pending_compositor_property.reset();
         pending_compositor_delete.reset();
         pending_history.reset();
@@ -1017,21 +1019,47 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
         }
     }
     pending_generics.clear();
-    for (const auto &add : pending_adds) {
+    const auto fresh_id = [&]() {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {
             ++next_new_node;
         }
-        const doc::NodeId id{next_new_node++};
+        return doc::NodeId{next_new_node++};
+    };
+    for (const auto &add : pending_adds) {
+        const doc::NodeId id = fresh_id();
+        // An asset dropped on a Compositor port lands in the graph's history,
+        // with the Scene Layer and wire made for it, so one Undo in the
+        // graph takes back everything the drop did.
+        const cmd::UndoContextId context{add.graph_layer.has_value() ? 6U
+                                                                     : 2U};
         if (!schedule_add(
                 scheduler, add, id, frame,
                 transport.anchor().rate,
                 scene_model.renderer_settings()
-                    .icvfx.camera_defaults)) {
+                    .icvfx.camera_defaults, context)) {
             std::cerr
                 << "could not author an element add for frame "
                 << frame.value() << '\n';
             return 1;
+        }
+        if (add.graph_layer.has_value()) {
+            editor::CompositorAddIntent layer = *add.graph_layer;
+            layer.kind = compositor::NodeKind::SceneLayer;
+            layer.scene_node = id;
+            const doc::NodeId node = fresh_id();
+            std::vector<doc::NodeId> edge_ids;
+            edge_ids.reserve(layer.links.size());
+            for (std::size_t index = 0U; index < layer.links.size(); ++index) {
+                edge_ids.push_back(fresh_id());
+            }
+            if (!schedule_compositor_add_linked(
+                    scheduler, layer, node, scene_being_authored(op),
+                    edge_ids, add.gesture, frame)) {
+                std::cerr << "could not wire a dropped asset for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
         }
     }
     pending_adds.clear();
@@ -1375,16 +1403,30 @@ PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &
     const auto authoring_scene = [&]() -> doc::NodeId {
         return scene_being_authored(op);
     };
-    for (const auto &request : pending_compositor_adds) {
+    const auto fresh_id = [&]() {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {
             ++next_new_node;
         }
-        const doc::NodeId id{next_new_node++};
-        if (!schedule_compositor_add(
-                scheduler, request, id,
-                authoring_scene(), pending_compositor_gesture,
-                frame)) {
+        return doc::NodeId{next_new_node++};
+    };
+    // Ids for wires authored together. Each is taken before any is
+    // scheduled, so the counter - not the document - keeps them distinct.
+    const auto fresh_ids = [&](std::size_t count) {
+        std::vector<doc::NodeId> ids;
+        ids.reserve(count);
+        for (std::size_t index = 0U; index < count; ++index) {
+            ids.push_back(fresh_id());
+        }
+        return ids;
+    };
+    for (const auto &request : pending_compositor_adds) {
+        const doc::NodeId id = fresh_id();
+        const std::vector<doc::NodeId> edge_ids =
+            fresh_ids(request.links.size());
+        if (!schedule_compositor_add_linked(
+                scheduler, request, id, authoring_scene(), edge_ids,
+                pending_compositor_gesture, frame)) {
             std::cerr
                 << "could not add a compositor node for frame "
                 << frame.value() << '\n';
@@ -1430,6 +1472,28 @@ PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &
             return 1;
         }
         pending_compositor_connect.reset();
+    }
+    if (pending_compositor_rewire.has_value()) {
+        const std::vector<doc::NodeId> edge_ids =
+            fresh_ids(pending_compositor_rewire->add_edges.size());
+        if (!schedule_compositor_rewire(scheduler, *pending_compositor_rewire,
+                                        edge_ids, pending_compositor_gesture,
+                                        frame)) {
+            std::cerr << "could not rewire compositor nodes for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_rewire.reset();
+    }
+    if (pending_compositor_waypoints.has_value()) {
+        if (!schedule_compositor_waypoints(scheduler,
+                                           *pending_compositor_waypoints,
+                                           pending_compositor_gesture, frame)) {
+            std::cerr << "could not route a compositor wire for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_waypoints.reset();
     }
     if (pending_compositor_delete.has_value()) {
         if (!schedule_compositor_delete(

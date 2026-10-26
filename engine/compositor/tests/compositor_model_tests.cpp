@@ -1990,12 +1990,69 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
     COMPOSITOR_CHECK(expensive_graph.plan.steps.empty());
 }
 
+// A wire's reroute points are layout: they read back in order, and a
+// malformed list costs the points, never the connection.
+void wire_points_are_layout_that_never_breaks_a_wire() {
+    const auto routed = [](std::vector<Property> points) {
+        doc::Node wire = edge(10U, 1U, 0U, 2U, 0U);
+        for (Property& point : points) {
+            wire.properties.insert_or_assign(point.first, point.second);
+        }
+        compositor::CompositorModel model;
+        model.reset(root_of({node(100U, "scene.object"), scene_layer(1U, 100U),
+                             node(2U, schema::output_type), wire}));
+        return model.evaluate();
+    };
+    const auto points_of = [](const compositor::CompositorGraph& graph) {
+        const compositor::GraphEdge* const wire = graph.edge(doc::NodeId{10U});
+        COMPOSITOR_CHECK(wire != nullptr);
+        return wire->points;
+    };
+
+    const auto plain = routed({});
+    const auto two = routed({real("point_0_x", 120.5), real("point_0_y", -40.0),
+                             real("point_1_x", 300.0), whole("point_1_y", 80)});
+    COMPOSITOR_CHECK(points_of(two) ==
+                     (std::vector<compositor::WirePoint>{{120.5F, -40.0F},
+                                                         {300.0F, 80.0F}}));
+    // Routing changes nothing the graph computes.
+    COMPOSITOR_CHECK(two.diagnostics.empty());
+    COMPOSITOR_CHECK(two.plan == plain.plan);
+    COMPOSITOR_CHECK(compositor::digest(two) == compositor::digest(plain));
+
+    const std::array<std::vector<Property>, 4U> malformed{{
+        // A gap before a later point.
+        {real("point_0_x", 1.0), real("point_0_y", 2.0), real("point_2_x", 3.0),
+         real("point_2_y", 4.0)},
+        // Half a point.
+        {real("point_0_x", 1.0)},
+        // Out of range, and the wrong type.
+        {real("point_0_x", 2.0e6), real("point_0_y", 0.0)},
+        {text("point_0_x", "left"), real("point_0_y", 0.0)},
+    }};
+    for (const std::vector<Property>& points : malformed) {
+        const auto graph = routed(points);
+        COMPOSITOR_CHECK(points_of(graph).empty());
+        COMPOSITOR_CHECK(graph.diagnostics.empty());
+        COMPOSITOR_CHECK(graph.plan == plain.plan);
+    }
+    // One point past the cap is too many.
+    std::vector<Property> crowded;
+    for (std::size_t index = 0U; index <= compositor::max_wire_points; ++index) {
+        crowded.push_back(real("point_" + std::to_string(index) + "_x", 1.0));
+        crowded.push_back(real("point_" + std::to_string(index) + "_y", 1.0));
+    }
+    COMPOSITOR_CHECK(points_of(routed(crowded)).empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 30U> cases{{
+constexpr std::array<Case, 31U> cases{{
+    {"wire points are layout that never breaks a wire",
+     &wire_points_are_layout_that_never_breaks_a_wire},
     {"a graph belongs to one scene", &a_graph_belongs_to_one_scene},
     {"editing one scene graph leaves the other untouched",
      &editing_one_scene_graph_leaves_the_other_untouched},
