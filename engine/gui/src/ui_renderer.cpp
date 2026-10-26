@@ -210,6 +210,88 @@ void UiDrawList::add_line(
     push_solid(x0 - nx, y0 - ny, color);
 }
 
+void UiDrawList::add_polyline(
+    std::span<const UiPoint> input, float thickness, UiColor color) {
+    if (input.size() < 2U || thickness <= 0.0F) {
+        return;
+    }
+    // Drop repeated points, which have no direction to offset along.
+    std::vector<UiPoint> points;
+    points.reserve(input.size());
+    for (const UiPoint& point : input) {
+        if (points.empty() || point.x != points.back().x ||
+            point.y != points.back().y) {
+            points.push_back(point);
+        }
+    }
+    if (points.size() < 2U) {
+        return;
+    }
+
+    // The solid core never thins below one physical pixel, like add_line; the
+    // fringe is one physical pixel more on each side, fading out.
+    const float half = std::max(thickness * scale_, 1.0F) * 0.5F / scale_;
+    const float fringe = 1.0F / scale_;
+
+    // One offset direction per point. An interior point takes the mitre of
+    // its two segments, so neighbouring quads meet without a gap or overlap;
+    // the mitre is capped where a sharp turn would spike far past the stroke.
+    std::vector<UiPoint> normals(points.size());
+    const auto segment_normal = [&points](std::size_t from) noexcept {
+        const float dx = points[from + 1U].x - points[from].x;
+        const float dy = points[from + 1U].y - points[from].y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        return UiPoint{-dy / length, dx / length};
+    };
+    normals.front() = segment_normal(0U);
+    normals.back() = segment_normal(points.size() - 2U);
+    for (std::size_t i = 1U; i + 1U < points.size(); ++i) {
+        const UiPoint before = segment_normal(i - 1U);
+        const UiPoint after = segment_normal(i);
+        UiPoint mitre{before.x + after.x, before.y + after.y};
+        const float length = std::sqrt(mitre.x * mitre.x + mitre.y * mitre.y);
+        if (length < 1.0e-4F) {
+            normals[i] = after; // a full reversal: no sensible mitre
+            continue;
+        }
+        mitre.x /= length;
+        mitre.y /= length;
+        // 1 / cos(half the turn), the mitre's stretch, limited to 2.
+        const float cosine = mitre.x * after.x + mitre.y * after.y;
+        const float stretch = 1.0F / std::max(cosine, 0.5F);
+        normals[i] = UiPoint{mitre.x * stretch, mitre.y * stretch};
+    }
+
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    const UiColor clear{color.r, color.g, color.b, 0.0F};
+    // A strip between offsets `inner` and `outer` (signed distances from the
+    // centre line) along one segment, shaded from the inner colour outward.
+    const auto band = [&](std::size_t i, float inner, float outer,
+                          UiColor inner_color, UiColor outer_color) {
+        const UiPoint& a = points[i];
+        const UiPoint& b = points[i + 1U];
+        const UiPoint& na = normals[i];
+        const UiPoint& nb = normals[i + 1U];
+        const UiPoint a_in{a.x + na.x * inner, a.y + na.y * inner};
+        const UiPoint a_out{a.x + na.x * outer, a.y + na.y * outer};
+        const UiPoint b_in{b.x + nb.x * inner, b.y + nb.y * inner};
+        const UiPoint b_out{b.x + nb.x * outer, b.y + nb.y * outer};
+        push_solid(a_in.x, a_in.y, inner_color);
+        push_solid(b_in.x, b_in.y, inner_color);
+        push_solid(b_out.x, b_out.y, outer_color);
+        push_solid(a_in.x, a_in.y, inner_color);
+        push_solid(b_out.x, b_out.y, outer_color);
+        push_solid(a_out.x, a_out.y, outer_color);
+    };
+    for (std::size_t i = 0U; i + 1U < points.size(); ++i) {
+        band(i, -half, half, color, color);
+        band(i, half, half + fringe, color, clear);
+        band(i, -half, -half - fringe, color, clear);
+    }
+}
+
 bool UiDrawList::begin_run(const rhi::Texture* texture) {
     const Clip clip = current_clip();
     // Fully-clipped geometry contributes nothing; skip it so an offscreen

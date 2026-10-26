@@ -25,6 +25,8 @@
 #include <cmath>
 #include <cstddef>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace mediaserver::gui {
 namespace {
@@ -35,6 +37,73 @@ namespace {
 constexpr core::u32 default_atlas_size = 512U;
 constexpr core::u32 large_atlas_size = 1'024U;
 constexpr core::u32 large_atlas_threshold_px = 22U;
+// Extra glyph sizes for a zooming surface grow the page. This caps it at
+// 64 MiB of RGBA, inside every supported GPU's 2D texture limit.
+constexpr core::u32 max_atlas_size = 4'096U;
+
+struct GlyphPen final {
+    core::u32 x{4U}; // past the white block
+    core::u32 y{0U};
+    core::u32 row_height{0U};
+};
+
+// Shelf-packs one glyph set at `height` physical pixels into a page of
+// `atlas_size` squared, continuing from `pen`. False when the page fills
+// before the set is complete; the caller decides what gives.
+bool bake_glyphs(FT_Face face, std::vector<core::u8>& pixels,
+                 core::u32 atlas_size, float scale, GlyphPen& pen,
+                 core::u32 height, std::map<char, Glyph>& glyphs,
+                 float& line_height, float& ascent) {
+    FT_Set_Pixel_Sizes(face, 0U, height);
+    line_height =
+        static_cast<float>(face->size->metrics.height) / 64.0F / scale;
+    ascent =
+        static_cast<float>(face->size->metrics.ascender) / 64.0F / scale;
+
+    for (char character = 32; character < 127; ++character) {
+        if (FT_Load_Char(face, static_cast<FT_ULong>(character), FT_LOAD_RENDER)
+            != 0) {
+            continue;
+        }
+        const FT_Bitmap& bitmap = face->glyph->bitmap;
+        const core::u32 glyph_w = bitmap.width;
+        const core::u32 glyph_h = bitmap.rows;
+        if (pen.x + glyph_w + 1U > atlas_size) {
+            pen.x = 0U;
+            pen.y += pen.row_height + 1U;
+            pen.row_height = 0U;
+        }
+        if (pen.y + glyph_h > atlas_size) {
+            return false;
+        }
+        for (core::u32 row = 0U; row < glyph_h; ++row) {
+            for (core::u32 col = 0U; col < glyph_w; ++col) {
+                const auto coverage = bitmap.buffer[
+                    static_cast<std::size_t>(row) * static_cast<std::size_t>(bitmap.pitch)
+                    + col];
+                pixels[(static_cast<std::size_t>(pen.y + row) * atlas_size
+                        + pen.x + col) * 4U + 3U] = coverage;
+            }
+        }
+        Glyph glyph{};
+        glyph.u0 = static_cast<float>(pen.x) / static_cast<float>(atlas_size);
+        glyph.v0 = static_cast<float>(pen.y) / static_cast<float>(atlas_size);
+        glyph.u1 =
+            static_cast<float>(pen.x + glyph_w) / static_cast<float>(atlas_size);
+        glyph.v1 =
+            static_cast<float>(pen.y + glyph_h) / static_cast<float>(atlas_size);
+        glyph.width = static_cast<float>(glyph_w);
+        glyph.height = static_cast<float>(glyph_h);
+        glyph.bearing_x = static_cast<float>(face->glyph->bitmap_left);
+        glyph.bearing_y = static_cast<float>(face->glyph->bitmap_top);
+        glyph.advance = static_cast<float>(face->glyph->advance.x) / 64.0F;
+        glyphs.emplace(character, glyph);
+
+        pen.x += glyph_w + 1U;
+        pen.row_height = std::max(pen.row_height, glyph_h);
+    }
+    return true;
+}
 
 } // namespace
 
@@ -80,7 +149,8 @@ FontAtlas FontAtlas::placeholder(float line_height, float ascent) {
 }
 
 std::optional<FontAtlas> FontAtlas::create(
-    std::string_view font_path, core::u32 pixel_height, float scale) {
+    std::string_view font_path, core::u32 pixel_height, float scale,
+    std::span<const float> extra_sizes) {
     if (!std::isfinite(scale) || scale <= 0.0F) {
         scale = 1.0F;
     }
@@ -93,70 +163,58 @@ std::optional<FontAtlas> FontAtlas::create(
         FT_Done_FreeType(library);
         return std::nullopt;
     }
-    const core::u32 physical_height = std::max<core::u32>(
-        1U, static_cast<core::u32>(
-                std::lround(static_cast<float>(pixel_height) * scale)));
-    FT_Set_Pixel_Sizes(face, 0U, physical_height);
-
-    FontAtlas atlas;
-    const core::u32 atlas_size = physical_height > large_atlas_threshold_px
-        ? large_atlas_size : default_atlas_size;
-    atlas.init_base(atlas_size);
-    atlas.scale_ = scale;
-    atlas.line_height_ =
-        static_cast<float>(face->size->metrics.height) / 64.0F / scale;
-    atlas.ascent_ =
-        static_cast<float>(face->size->metrics.ascender) / 64.0F / scale;
-
-    const auto set_alpha = [&atlas, atlas_size](
-                               core::u32 x, core::u32 y, core::u8 a) {
-        atlas.pixels_[(static_cast<std::size_t>(y) * atlas_size + x) * 4U + 3U] = a;
+    const auto physical_height_for = [pixel_height, scale](float size) {
+        return std::max<core::u32>(
+            1U, static_cast<core::u32>(std::lround(
+                    static_cast<float>(pixel_height) * scale * size)));
     };
 
-    // Shelf packing, starting past the white block.
-    core::u32 pen_x = 4U;
-    core::u32 pen_y = 0U;
-    core::u32 row_height = 0U;
-    for (char character = 32; character < 127; ++character) {
-        if (FT_Load_Char(face, static_cast<FT_ULong>(character), FT_LOAD_RENDER)
-            != 0) {
-            continue;
+    // Distinct, finite, positive sizes other than the base, smallest first.
+    std::vector<float> sizes;
+    for (const float size : extra_sizes) {
+        if (std::isfinite(size) && size > 0.0F && size != 1.0F &&
+            std::find(sizes.begin(), sizes.end(), size) == sizes.end()) {
+            sizes.push_back(size);
         }
-        const FT_Bitmap& bitmap = face->glyph->bitmap;
-        const core::u32 glyph_w = bitmap.width;
-        const core::u32 glyph_h = bitmap.rows;
-        if (pen_x + glyph_w + 1U > atlas_size) {
-            pen_x = 0U;
-            pen_y += row_height + 1U;
-            row_height = 0U;
-        }
-        if (pen_y + glyph_h > atlas_size) {
-            break; // atlas full; remaining glyphs are simply absent
-        }
-        for (core::u32 row = 0U; row < glyph_h; ++row) {
-            for (core::u32 col = 0U; col < glyph_w; ++col) {
-                const auto coverage = bitmap.buffer[
-                    static_cast<std::size_t>(row) * static_cast<std::size_t>(bitmap.pitch)
-                    + col];
-                set_alpha(pen_x + col, pen_y + row, coverage);
+    }
+    std::sort(sizes.begin(), sizes.end());
+
+    // Extra sets need a bigger page. Rather than estimate how the shelves
+    // will pack, start at the size the base alone needs and double it until
+    // every set fits. Past the largest page, sets are dropped largest first
+    // and their text falls back to the next smaller one.
+    const core::u32 physical_height = physical_height_for(1.0F);
+    core::u32 atlas_size = physical_height > large_atlas_threshold_px
+        ? large_atlas_size : default_atlas_size;
+    FontAtlas atlas;
+    for (;;) {
+        atlas = FontAtlas{};
+        atlas.init_base(atlas_size);
+        atlas.scale_ = scale;
+        GlyphPen pen{};
+        bool complete = bake_glyphs(face, atlas.pixels_, atlas_size, scale,
+                                    pen, physical_height, atlas.glyphs_,
+                                    atlas.line_height_, atlas.ascent_);
+        for (std::size_t index = 0U; complete && index < sizes.size(); ++index) {
+            SizedSet set{};
+            set.size = sizes[index];
+            complete = bake_glyphs(face, atlas.pixels_, atlas_size, scale, pen,
+                                   physical_height_for(set.size), set.glyphs,
+                                   set.line_height, set.ascent);
+            if (complete) {
+                atlas.sized_.push_back(std::move(set));
             }
         }
-        Glyph glyph{};
-        glyph.u0 = static_cast<float>(pen_x) / static_cast<float>(atlas_size);
-        glyph.v0 = static_cast<float>(pen_y) / static_cast<float>(atlas_size);
-        glyph.u1 =
-            static_cast<float>(pen_x + glyph_w) / static_cast<float>(atlas_size);
-        glyph.v1 =
-            static_cast<float>(pen_y + glyph_h) / static_cast<float>(atlas_size);
-        glyph.width = static_cast<float>(glyph_w);
-        glyph.height = static_cast<float>(glyph_h);
-        glyph.bearing_x = static_cast<float>(face->glyph->bitmap_left);
-        glyph.bearing_y = static_cast<float>(face->glyph->bitmap_top);
-        glyph.advance = static_cast<float>(face->glyph->advance.x) / 64.0F;
-        atlas.glyphs_.emplace(character, glyph);
-
-        pen_x += glyph_w + 1U;
-        row_height = std::max(row_height, glyph_h);
+        if (complete) {
+            break;
+        }
+        if (atlas_size < max_atlas_size) {
+            atlas_size *= 2U;
+        } else if (!sizes.empty()) {
+            sizes.pop_back();
+        } else {
+            break; // the base alone overflows: keep the glyphs that fit
+        }
     }
 
     FT_Done_Face(face);
@@ -180,6 +238,59 @@ float FontAtlas::measure(std::string_view text) const {
     return width / scale_;
 }
 
+const FontAtlas::SizedSet* FontAtlas::sized(float size) const noexcept {
+    const auto found = std::find_if(
+        sized_.begin(), sized_.end(),
+        [size](const SizedSet& set) noexcept { return set.size == size; });
+    return found == sized_.end() ? nullptr : &*found;
+}
+
+std::optional<float> FontAtlas::size_at_most(float size) const noexcept {
+    if (!std::isfinite(size)) {
+        return std::nullopt;
+    }
+    std::optional<float> best;
+    if (size >= 1.0F) {
+        best = 1.0F;
+    }
+    for (const SizedSet& set : sized_) {
+        if (set.size <= size && (!best.has_value() || set.size > *best)) {
+            best = set.size;
+        }
+    }
+    return best;
+}
+
+const Glyph* FontAtlas::glyph(char character, float size) const noexcept {
+    const SizedSet* const set = sized(size);
+    if (set == nullptr) {
+        return glyph(character);
+    }
+    const auto found = set->glyphs.find(character);
+    return found == set->glyphs.end() ? nullptr : &found->second;
+}
+
+float FontAtlas::line_height(float size) const noexcept {
+    const SizedSet* const set = sized(size);
+    return set == nullptr ? line_height_ : set->line_height;
+}
+
+float FontAtlas::ascent(float size) const noexcept {
+    const SizedSet* const set = sized(size);
+    return set == nullptr ? ascent_ : set->ascent;
+}
+
+float FontAtlas::measure(std::string_view text, float size) const {
+    float width = 0.0F;
+    for (const char character : text) {
+        const Glyph* const g = glyph(character, size);
+        if (g != nullptr) {
+            width += g->advance;
+        }
+    }
+    return width / scale_;
+}
+
 float draw_text(
     UiDrawList& list,
     const FontAtlas& atlas,
@@ -187,6 +298,17 @@ float draw_text(
     float y,
     std::string_view text,
     UiColor color) {
+    return draw_text(list, atlas, x, y, text, color, 1.0F);
+}
+
+float draw_text(
+    UiDrawList& list,
+    const FontAtlas& atlas,
+    float x,
+    float y,
+    std::string_view text,
+    UiColor color,
+    float size) {
     // FreeType has already rasterized and hinted these small glyphs for the
     // physical pixel grid. Putting that bitmap at a fractional screen position
     // makes the linear sampler filter it a second time, which is especially
@@ -200,9 +322,9 @@ float draw_text(
     const float scale = atlas.scale();
     const float origin = std::round(x * scale);
     float pen_x = origin;
-    const float baseline = std::round((y + atlas.ascent()) * scale);
+    const float baseline = std::round((y + atlas.ascent(size)) * scale);
     for (const char character : text) {
-        const Glyph* const g = atlas.glyph(character);
+        const Glyph* const g = atlas.glyph(character, size);
         if (g == nullptr) {
             continue;
         }

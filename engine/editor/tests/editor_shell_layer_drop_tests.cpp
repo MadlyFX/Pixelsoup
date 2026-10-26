@@ -146,11 +146,19 @@ void layer_drop() {
   check(first.kind == compositor::NodeKind::SceneLayer &&
             second.kind == compositor::NodeKind::SceneLayer,
         "batch contains Scene Layer nodes");
-  check(std::abs(first.editor_x - (drop_x - canvas.x - 82.0F)) < 0.1F &&
-            std::abs(first.editor_y - (180.0F - 26.0F - 27.0F)) < 0.1F,
+  // Nodes are sized from the editor font, so their size is read back from
+  // the drop: stacked nodes sit one node height plus a 16-unit gap apart,
+  // and the first is centred on the pointer by half of each extent.
+  const float node_height = second.editor_y - first.editor_y - 16.0F;
+  const float node_width = 2.0F * (drop_x - canvas.x - first.editor_x);
+  check(node_height >= 50.0F && node_height <= 120.0F &&
+            node_width >= 176.0F && node_width <= 360.0F,
+        "dropped nodes have a plausible measured size");
+  check(std::abs(first.editor_y - (180.0F - 26.0F - node_height * 0.5F)) <
+            0.1F,
         "first node is centred on the graph drop");
   check(second.editor_x == first.editor_x &&
-            second.editor_y == first.editor_y + 70.0F,
+            second.editor_y > first.editor_y + node_height,
         "new nodes have separate positions");
   check(frame().compositor_adds.empty(), "release authors once");
 

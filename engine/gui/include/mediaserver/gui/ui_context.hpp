@@ -226,6 +226,18 @@ public:
         return font_.measure(text);
     }
     [[nodiscard]] float line_height() const noexcept { return font_.line_height(); }
+    // Text for a zooming surface. `size` is a multiple of the UI font; the
+    // answer is the baked size that text is actually drawn and measured at,
+    // or nullopt when nothing small enough was baked - skip that text.
+    [[nodiscard]] std::optional<float> text_size_at_most(float size) const noexcept {
+        return font_.size_at_most(size);
+    }
+    [[nodiscard]] float font_width(std::string_view text, float size) const {
+        return font_.measure(text, size);
+    }
+    [[nodiscard]] float line_height(float size) const noexcept {
+        return font_.line_height(size);
+    }
 
     // Confines both drawing and pointer hit-testing to a layout rectangle.
     // Nested clips intersect, matching the draw list's clipping behavior.
@@ -242,6 +254,9 @@ public:
     // Left-aligned, vertically centred text inside `bounds`.
     void label(const Rect& bounds, std::string_view text);
     void label(const Rect& bounds, std::string_view text, UiColor color);
+    // The same, at a baked text size from text_size_at_most().
+    void label(const Rect& bounds, std::string_view text, UiColor color,
+               float size);
     // Hover details retain long paths and diagnostics without occupying rows.
     void tooltip(const Rect& bounds, std::string_view text);
 

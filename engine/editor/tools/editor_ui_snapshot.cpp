@@ -34,7 +34,11 @@
 //   curves draws the editor with the Timeline switched to Curves mode;
 //   handles does too, with two Opacity keys selected - one Aligned, one
 //   Broken with authored weights - so their tangent handles show;
-//   summaries closes the LED Wall group so its row summarises its clips.
+//   summaries closes the LED Wall group so its row summarises its clips;
+//   compositor draws an LED Car Process graph - plates into the car, a blur
+//   feeding one plate, a composite into Output - with the car selected so
+//   its Parameters show; compositor-far and compositor-near draw it zoomed
+//   out and in; compositor-wire holds a wire being drawn, near a port.
 namespace {
 
 namespace core = mediaserver::core;
@@ -50,7 +54,10 @@ namespace topology = mediaserver::topology;
   constexpr std::array<const char *, 2U> candidates{
       "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"};
   for (const char *path : candidates) {
-    auto atlas = gui::FontAtlas::create(path, 14U, scale);
+    // The editor's own extra sizes, for the Compositor's zoomed text.
+    constexpr std::array<float, 9U> sizes{0.5F, 0.625F, 0.75F, 0.875F, 1.25F,
+                                          1.5F, 1.75F, 2.0F, 2.5F};
+    auto atlas = gui::FontAtlas::create(path, 14U, scale, sizes);
     if (atlas.has_value()) {
       return atlas;
     }
@@ -203,6 +210,69 @@ struct Show final {
   return state;
 }
 
+// Plates into an LED Car Process, the car and a key into a Composite, and
+// Output - the graph whose labels are the longest the panel draws.
+struct CompositorSample final {
+  mediaserver::compositor::CompositorGraph graph;
+  std::vector<editor::ElementInfo> elements;
+};
+
+[[nodiscard]] CompositorSample sample_compositor() {
+  namespace compositor = mediaserver::compositor;
+  CompositorSample sample;
+  core::u64 next_id = 100U;
+  const auto add_node = [&](compositor::NodeKind kind, float x, float y,
+                            compositor::NodeParameters parameters) {
+    compositor::GraphNode node{};
+    node.node = doc::NodeId{next_id++};
+    node.kind = kind;
+    node.editor_x = x;
+    node.editor_y = y;
+    node.parameters = std::move(parameters);
+    sample.graph.nodes.push_back(node);
+    return node.node;
+  };
+  const auto connect = [&](doc::NodeId from, core::u8 from_port,
+                           doc::NodeId to, core::u8 to_port) {
+    sample.graph.edges.push_back(compositor::GraphEdge{
+        doc::NodeId{next_id++}, compositor::EdgeEndpoint{from, from_port},
+        compositor::EdgeEndpoint{to, to_port},
+        static_cast<core::i64>(sample.graph.edges.size())});
+  };
+  constexpr std::array<std::string_view, 4U> plates{
+      "Plate_Front_A_Cam.mov", "Plate_Front_Right_3-4.mov",
+      "Plate_Right_Long_Lens.mov", "Ceiling_Reflection_Pass.mov"};
+  constexpr std::array<core::u8, 4U> plate_ports{0U, 1U, 2U, 8U};
+  std::vector<doc::NodeId> layers;
+  for (std::size_t index = 0U; index < plates.size(); ++index) {
+    const core::u64 element_id = 900U + index;
+    editor::ElementInfo plate = element(element_id, editor::ElementKind::Media,
+                                        std::string{plates[index]});
+    sample.elements.push_back(plate);
+    layers.push_back(add_node(compositor::NodeKind::SceneLayer, 240.0F,
+                              30.0F + static_cast<float>(index) * 112.0F,
+                              compositor::SceneLayerParameters{
+                                  doc::NodeId{element_id}}));
+  }
+  const doc::NodeId blur = add_node(compositor::NodeKind::Blur, 20.0F, 70.0F,
+                                    compositor::BlurParameters{6.0F});
+  const doc::NodeId car =
+      add_node(compositor::NodeKind::LedCarProcess, 500.0F, 40.0F,
+               compositor::LedCarProcessParameters{});
+  const doc::NodeId composite = add_node(compositor::NodeKind::Composite,
+                                         780.0F, 120.0F,
+                                         compositor::CompositeParameters{});
+  const doc::NodeId out = add_node(compositor::NodeKind::Output, 1000.0F, 160.0F,
+                                   compositor::OutputParameters{});
+  connect(blur, 0U, layers[1], 0U);
+  for (std::size_t index = 0U; index < layers.size(); ++index) {
+    connect(layers[index], 0U, car, plate_ports[index]);
+  }
+  connect(car, 0U, composite, 0U);
+  connect(composite, 0U, out, 0U);
+  return sample;
+}
+
 bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
                const std::vector<core::u8> &rgba) {
   std::ofstream out{path, std::ios::binary};
@@ -270,8 +340,9 @@ int main(int argc, char **argv) {
   const bool curves = view == "curves" || handles;
   const bool summaries = view == "summaries";
   const bool feed = view == "feed";
+  const bool graph_view = view.substr(0U, 10U) == "compositor";
   const std::string_view properties =
-      curves || summaries || feed ? std::string_view{} : view;
+      curves || summaries || feed || graph_view ? std::string_view{} : view;
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -319,6 +390,12 @@ int main(int argc, char **argv) {
   editor::InspectorPanel inspector_panel{gui::ui_id("snapshot.inspector")};
   editor::SceneSettingsPanel settings_panel;
   editor::FeedMappingPanel feed_panel{gui::ui_id("snapshot.feed")};
+  editor::CompositorPanel compositor_panel{gui::ui_id("snapshot.compositor")};
+  const CompositorSample compositor_sample = sample_compositor();
+  // The car's position on screen at 100%: the graph canvas starts below the
+  // 26-unit toolbar.
+  constexpr float car_press_x = 500.0F + 60.0F;
+  constexpr float car_press_y = 26.0F + 40.0F + 10.0F;
   const scene::Canvas wall_canvas{11'520U, 1'536U};
   output::FeedMap feed_map;
   for (core::u32 index = 0U; index < 4U; ++index) {
@@ -381,9 +458,37 @@ int main(int argc, char **argv) {
   // The LED Wall closes the same way, by a click on its twirl, its row
   // being the Timeline's second.
   const bool clicks = curves || summaries || feed;
-  const int passes = clicks ? 5 : 3;
+  const int passes = clicks || graph_view ? 8 : 3;
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
+    if (graph_view) {
+      // Select the car with a click, then zoom about the graph's middle or
+      // begin a wire from the blur, as the view asks.
+      const bool press = pass == 1;
+      const bool wire_view = view == "compositor-wire";
+      float x = pass < 3 ? car_press_x : hover_x;
+      float y = pass < 3 ? car_press_y : hover_y;
+      if (wire_view && pass >= 3) {
+        // Blur EFFECT OUT sits at the right edge of its first row; drag
+        // from it to just short of the first Scene Layer's EFFECTS input.
+        x = pass == 3 ? 20.0F + 166.0F : 226.0F;
+        y = pass == 3 ? 26.0F + 70.0F + 56.0F : 26.0F + 30.0F + 58.0F;
+      }
+      input.set_mouse_position(x, y);
+      input.set_mouse_button(gui::MouseButton::Left,
+                             press || (wire_view && pass >= 3));
+      if (pass == 4 && (view == "compositor-far" || view == "compositor-near")) {
+        input.set_mouse_position(logical_width * 0.35F, logical_height * 0.45F);
+        input.add_wheel(view == "compositor-far" ? -4.0F : 3.0F);
+      }
+      ctx.new_frame(1.0);
+      ctx.panel(window, ctx.theme().background);
+      static_cast<void>(compositor_panel.draw(ctx, window,
+                                              compositor_sample.graph,
+                                              compositor_sample.elements));
+      ctx.draw_overlays(window);
+      continue;
+    }
     const bool clicking = clicks && pass < 2;
     // Feed selects its first viewport row the same way.
     input.set_mouse_position(

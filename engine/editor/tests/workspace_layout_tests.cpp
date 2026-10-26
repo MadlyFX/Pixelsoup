@@ -103,7 +103,7 @@ void version_one_layouts_still_restore_without_a_window_size() {
   legacy[9U] = std::byte{0U};
   legacy[10U] = std::byte{28U};
   legacy[11U] = std::byte{0U};
-  legacy.erase(legacy.begin() + 28, legacy.begin() + 40);
+  legacy.erase(legacy.begin() + 28, legacy.begin() + 44);
 
   const auto decoded = editor::decode_workspace_layout(legacy);
   LAYOUT_CHECK(decoded);
@@ -123,7 +123,7 @@ void version_two_layouts_restore_full_resolution_previews() {
       sample_layout().snapshot(), 1400U, 900U}).value();
   legacy[8U] = std::byte{2U};
   legacy[10U] = std::byte{36U};
-  legacy.erase(legacy.begin() + 36, legacy.begin() + 40);
+  legacy.erase(legacy.begin() + 36, legacy.begin() + 44);
   const auto decoded = editor::decode_workspace_layout(legacy);
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().window_width == 1400U);
@@ -145,9 +145,12 @@ void interface_zoom_round_trips_and_older_records_read_as_actual_size() {
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().ui_zoom_percent == 150U);
 
-  // A version three record held a reserved zero word where the zoom now is.
+  // A version three record held a reserved zero word where the zoom now is,
+  // and ended its header there.
   auto version_three = encoded;
   version_three[8U] = std::byte{3U};
+  version_three[10U] = std::byte{40U};
+  version_three.erase(version_three.begin() + 40, version_three.begin() + 44);
   version_three[38U] = std::byte{0U};
   version_three[39U] = std::byte{0U};
   const auto older = editor::decode_workspace_layout(version_three);
@@ -155,6 +158,41 @@ void interface_zoom_round_trips_and_older_records_read_as_actual_size() {
   LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
   version_three[38U] = std::byte{150U};
   LAYOUT_CHECK(!editor::decode_workspace_layout(version_three));
+}
+
+// The operator's Parameters width survives a restart; a record from before
+// the field opens the panel at its default, and nonsense is refused.
+void compositor_parameter_width_round_trips() {
+  editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
+  state.compositor_parameter_width = 312.5F;
+  const auto encoded = editor::encode_workspace_layout(state).value();
+  const auto decoded = editor::decode_workspace_layout(encoded);
+  LAYOUT_CHECK(decoded);
+  LAYOUT_CHECK(decoded.value().compositor_parameter_width == 312.5F);
+
+  auto version_four = encoded;
+  version_four[8U] = std::byte{4U};
+  version_four[10U] = std::byte{40U};
+  version_four.erase(version_four.begin() + 40, version_four.begin() + 44);
+  const auto older = editor::decode_workspace_layout(version_four);
+  LAYOUT_CHECK(older);
+  LAYOUT_CHECK(older.value().compositor_parameter_width == 0.0F);
+  LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
+
+  // NaN's bit pattern, then a negative width, in the header's last word.
+  auto not_a_number = encoded;
+  not_a_number[40U] = std::byte{0x00U};
+  not_a_number[41U] = std::byte{0x00U};
+  not_a_number[42U] = std::byte{0xc0U};
+  not_a_number[43U] = std::byte{0x7fU};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(not_a_number));
+  auto negative = encoded;
+  negative[43U] = std::byte{0xc3U};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(negative));
+  state.compositor_parameter_width = -1.0F;
+  LAYOUT_CHECK(!editor::encode_workspace_layout(state));
+  state.compositor_parameter_width = 5'000.0F;
+  LAYOUT_CHECK(!editor::encode_workspace_layout(state));
 }
 
 void corrupt_preview_settings_are_rejected() {
@@ -209,8 +247,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 9U> cases{{
     {"version two layouts restore full resolution previews", &version_two_layouts_restore_full_resolution_previews},
+    {"Compositor parameter width round-trips", &compositor_parameter_width_round_trips},
     {"corrupt preview settings are rejected", &corrupt_preview_settings_are_rejected},
     {"interface zoom round trips; older records read as actual size",
      &interface_zoom_round_trips_and_older_records_read_as_actual_size},

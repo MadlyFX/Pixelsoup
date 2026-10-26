@@ -41,11 +41,17 @@ struct WorkspaceLayoutState final {
   // as 100. Machine-local like the rest of the record: a 4K operator desk and
   // a laptop want different answers for the same project.
   core::u16 ui_zoom_percent{100U};
+  // The Compositor's Parameters panel width in UI units, as the operator
+  // last dragged it. Zero, and records older than the field, mean the
+  // panel's default width.
+  float compositor_parameter_width{};
 };
 
 // The zoom range the editor offers, in percent.
 inline constexpr core::u16 min_ui_zoom_percent = 50U;
 inline constexpr core::u16 max_ui_zoom_percent = 300U;
+// Wider than any panel the editor draws; the record refuses anything past it.
+inline constexpr float max_compositor_parameter_width = 4'096.0F;
 
 using WorkspaceLayoutEncodeResult =
     core::Result<WorkspaceLayoutBytes, WorkspaceLayoutError>;

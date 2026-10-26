@@ -310,6 +310,89 @@ Curve and dope-sheet work:
   skipped channel. All multi-key changes use one transaction and restore exact
   tangents and selection on undo/redo.
 
+#### Compositor graph editor
+
+The Compositor panel should reach the fluency of a mature node editor such as
+Unreal Blueprints. Node positions, wire waypoints, and comment boxes are
+authored editor layout: they save, undo, and replicate with the graph, but stay
+out of evaluation and the scene/settings digests. Every gesture below goes
+through the existing intent and Director authoring path as one transaction.
+Verify each step with `mediaserver_editor_ui_snapshot`'s `compositor`,
+`compositor-far`, `compositor-near`, and `compositor-wire` views, at 100% and
+150% display scale.
+
+The foundations are in place: node layout measured from the font, text that
+scales with zoom, curved wires picked along the curve, whole-row port targets
+with snapping, no jump on release, type colours and pin shapes, and a
+resizable, scrollable Parameters panel. `CompositorPanel::input_port_at()`
+already answers which input a screen point is over, for drops from other
+panels.
+
+Wiring:
+
+- **Drop onto a port.** A Timeline layer, Effects entry, or Library asset
+  dropped on a compatible input port creates its node beside that port, aligned
+  to its row, and connects it. An occupied single input is replaced in the same
+  transaction. Library assets also need their scene element created in that
+  transaction. Drop precedence is port, then node body (the existing Replace
+  layer and Replace source), then wire, then empty canvas. While hovering, show
+  a ghost wire and name the target, for example "Connect to Plate Front".
+  Update the Operator Guide's drag-and-drop description.
+- **Connect from a port into empty space.** Releasing a wire on empty canvas
+  opens the node search at the pointer, filtered to compatible nodes, and the
+  chosen node is created already connected. Tab or right-click on the canvas
+  opens the same search. Enter adds the top result, and arrow keys move the
+  highlight.
+- **Insert on a wire.** Dropping a single-input, single-output node or effect
+  onto an existing edge splices it in as one transaction.
+- **Break and move links.** Alt-click a port to disconnect its edges, and
+  Ctrl-drag from a connected port to lift its edges onto another port.
+- **Reroute points.** Double-click a wire to add a waypoint, which the operator
+  can drag and delete. Waypoints are ordered layout data on the edge, not graph
+  nodes, so they never change evaluation.
+- **Refusal reasons and flow.** A refused connection says why, for example
+  that an Effect output cannot feed an Image input. Selecting a node highlights
+  its upstream and downstream edges. Branches that the existing dead-branch
+  diagnostic reports draw dimmed.
+
+Selection and organization, using the selection contract above:
+
+- **Selection.** Marquee select, Ctrl- and Shift-click membership, moving a
+  multi-node selection as one transaction, and arrow-key nudging under the undo
+  coalescing rules.
+- **Copy, paste, duplicate.** Copy, Paste, and Duplicate of a node selection
+  extend `plan_clone_graph`, which today copies a whole scene's graph, to a
+  node subset with the same deterministic id allocation and reference
+  rewriting. Paste lands at the pointer. Edges internal to the selection are
+  copied, and edges to unselected nodes are dropped.
+- **Framing and minimap.** F frames the selection, Home frames the graph, and a
+  toggleable minimap shows the viewport.
+- **Layout tools.** Align and distribute, Straighten Connection, and
+  deterministic auto-arrange of a selection toward Output.
+- **Comment boxes.** Titled, coloured, resizable boxes that carry the nodes
+  inside them when moved. Double-click a node title to rename it inline.
+
+Richer nodes, last because each adds a model or render contract:
+
+- **Diagnostics on the node.** Show diagnostics as a badge on their subject
+  node, with the message on hover, rather than only as a border colour. Use
+  the code and severity contract under graph diagnostics.
+- **Output thumbnails.** Optional thumbnails of a node's output come from a
+  bounded, asynchronous preview path, never from frame recording, and show a
+  placeholder while unavailable.
+- **Inline parameters.** Show a node's key parameters on its body, and let a
+  node collapse to its header and connected pins.
+- **Bypass.** Bypass changes the rendered image, so it must be normalized,
+  replicated, digested, and evaluated as the effect's identity.
+- **Subgraphs and groups.** These wait until bypass and comment boxes have
+  settled.
+- **Cross-panel selection.** Selecting a Scene Layer node reveals its Timeline
+  row, and the other way round. Each panel keeps its own selection domain.
+
+Tests cover the pending-connect and pending-add hand-off, refused edits, the
+port-drop precedence and every drop source, and layout-only fields that do not
+change any digest. Each workflow is also exercised in the shipping editor.
+
 #### Manifest-backed thumbnails, proxies, and asset derivatives
 
 The persistent Library asset node remains the only asset identity. A thumbnail,

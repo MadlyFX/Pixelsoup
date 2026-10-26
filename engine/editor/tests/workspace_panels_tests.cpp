@@ -1286,8 +1286,8 @@ void selected_compositor_nodes_and_edges_return_delete_intents() {
       doc::NodeId{50U}, compositor::EdgeEndpoint{doc::NodeId{10U}, 0U},
       compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}, 0});
   CompositorHarness edge_harness;
-  constexpr float wire_x = 262.0F;
-  constexpr float wire_y = 122.0F;
+  constexpr float wire_x = 268.0F;
+  constexpr float wire_y = 132.0F;
   static_cast<void>(edge_harness.frame(edge_graph, wire_x, wire_y, false));
   const editor::CompositorFrame edge_selected =
       edge_harness.frame(edge_graph, wire_x, wire_y, true);
@@ -1409,7 +1409,7 @@ void compositor_replacement_picks_topmost_and_clips_feedback() {
   const auto hit = harness.panel.node_at(graph, 50.0F, 40.0F);
   UI_CHECK(hit.has_value() && hit->first == doc::NodeId{2U});
   UI_CHECK(hit->second.x == 0.0F && hit->second.y == 26.0F);
-  UI_CHECK(hit->second.width == 154.0F && hit->second.height == 44.0F);
+  UI_CHECK(hit->second.width == 166.0F && hit->second.height == 54.0F);
   UI_CHECK(!harness.panel.node_at(graph, -1.0F, 40.0F).has_value());
   UI_CHECK(!harness.panel.node_at(graph, 20.0F, 20.0F).has_value());
 }
@@ -1470,13 +1470,14 @@ void compatible_typed_ports_report_a_connection_intent() {
       graph_node(2U, compositor::NodeKind::SceneLayer, 320.0F, 60.0F));
   CompositorHarness harness;
 
-  // Both are EFFECT ports. Node width is 164; the first port centre is 36px
-  // below the node top, and the canvas begins at y=26.
-  static_cast<void>(harness.frame(graph, 204.0F, 122.0F, false));
-  static_cast<void>(harness.frame(graph, 204.0F, 122.0F, true));
-  static_cast<void>(harness.frame(graph, 320.0F, 122.0F, true));
+  // Both are EFFECT ports. With the headless font a node is its minimum 176
+  // wide, its header 35 tall and its port rows 22, so the first port centre
+  // is 46 below the node top; the canvas begins at y=26.
+  static_cast<void>(harness.frame(graph, 216.0F, 132.0F, false));
+  static_cast<void>(harness.frame(graph, 216.0F, 132.0F, true));
+  static_cast<void>(harness.frame(graph, 320.0F, 132.0F, true));
   const editor::CompositorFrame result =
-      harness.frame(graph, 320.0F, 122.0F, false);
+      harness.frame(graph, 320.0F, 132.0F, false);
   UI_CHECK(result.connect_ports.has_value());
   UI_CHECK(result.connect_ports->from ==
            compositor::EdgeEndpoint{doc::NodeId{1U}, 0U});
@@ -1501,11 +1502,11 @@ void dropping_on_a_single_input_reports_an_atomic_rewire() {
 
   // Composite IMAGE OUT replaces the existing Layer -> Output edge when it
   // is dropped on Output's occupied single IMAGE input.
-  static_cast<void>(harness.frame(graph, 204.0F, 122.0F, false));
-  static_cast<void>(harness.frame(graph, 204.0F, 122.0F, true));
-  static_cast<void>(harness.frame(graph, 320.0F, 122.0F, true));
+  static_cast<void>(harness.frame(graph, 216.0F, 132.0F, false));
+  static_cast<void>(harness.frame(graph, 216.0F, 132.0F, true));
+  static_cast<void>(harness.frame(graph, 320.0F, 132.0F, true));
   const editor::CompositorFrame result =
-      harness.frame(graph, 320.0F, 122.0F, false);
+      harness.frame(graph, 320.0F, 132.0F, false);
 
   UI_CHECK(result.connect_ports ==
            editor::CompositorConnectIntent{
@@ -1522,13 +1523,13 @@ void incompatible_ports_are_rejected_and_persisted_edges_draw_wires() {
       graph_node(2U, compositor::NodeKind::Output, 320.0F, 60.0F));
   CompositorHarness incompatible_harness;
   static_cast<void>(
-      incompatible_harness.frame(incompatible, 204.0F, 122.0F, false));
+      incompatible_harness.frame(incompatible, 216.0F, 132.0F, false));
   static_cast<void>(
-      incompatible_harness.frame(incompatible, 204.0F, 122.0F, true));
+      incompatible_harness.frame(incompatible, 216.0F, 132.0F, true));
   static_cast<void>(
-      incompatible_harness.frame(incompatible, 320.0F, 122.0F, true));
+      incompatible_harness.frame(incompatible, 320.0F, 132.0F, true));
   const editor::CompositorFrame rejected =
-      incompatible_harness.frame(incompatible, 320.0F, 122.0F, false);
+      incompatible_harness.frame(incompatible, 320.0F, 132.0F, false);
   UI_CHECK(!rejected.connect_ports.has_value());
 
   compositor::CompositorGraph connected;
@@ -1714,7 +1715,7 @@ void levels_parameter_typing_emits_the_exact_channel_property() {
   select_compositor_node(harness, graph);
 
   const editor::CompositorFrame result =
-      commit_compositor_field(harness, graph, 820.0F, 69.0F, "0.25");
+      commit_compositor_field(harness, graph, 820.0F, 99.0F, "0.25");
   UI_CHECK(result.property_edit.has_value());
   UI_CHECK(result.property_edit->node == doc::NodeId{74U});
   UI_CHECK(result.property_edit->property ==
@@ -1964,7 +1965,7 @@ void radial_array_parameters_emit_count_radius_angle_and_center_types() {
            editor::CompositorProperty::RadialStartAngleTurns);
   UI_CHECK(std::get<float>(result.property_edit->value) == 0.125F);
 
-  result = commit_compositor_field(harness, graph, 790.0F, 147.0F, "-2.25");
+  result = commit_compositor_field(harness, graph, 740.0F, 147.0F, "-2.25");
   UI_CHECK(result.property_edit.has_value());
   UI_CHECK(result.property_edit->property ==
            editor::CompositorProperty::RadialCenterX);
@@ -1975,6 +1976,331 @@ void radial_array_parameters_emit_count_radius_angle_and_center_types() {
   UI_CHECK(result.property_edit->property ==
            editor::CompositorProperty::RadialCenterY);
   UI_CHECK(std::get<float>(result.property_edit->value) == 3.5F);
+}
+
+// The authored move reaches the evaluated graph some frames after release.
+// Until it does the node stays where it was let go, rather than snapping back
+// to its old position for those frames and then jumping forward.
+void a_released_node_holds_its_position_until_the_graph_reports_it() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Brightness, 60.0F, 40.0F));
+  // Old screen bounds (60, 66)-(236, 130); after the drag, (120, 126)-(296,
+  // 190). Each point below is inside one and not the other, and in a header
+  // rather than on a port.
+  constexpr float old_only_x = 70.0F;
+  constexpr float old_only_y = 80.0F;
+  constexpr float new_only_x = 280.0F;
+  constexpr float new_only_y = 140.0F;
+
+  CompositorHarness harness;
+  static_cast<void>(harness.frame(graph, 100.0F, 75.0F, false));
+  static_cast<void>(harness.frame(graph, 100.0F, 75.0F, true));
+  static_cast<void>(harness.frame(graph, 160.0F, 135.0F, true));
+  const editor::CompositorFrame released =
+      harness.frame(graph, 160.0F, 135.0F, false);
+  UI_CHECK(released.move_node ==
+           (editor::CompositorMoveIntent{doc::NodeId{1U}, 120.0F, 100.0F}));
+
+  // The graph has not caught up: the node is drawn and picked where it was
+  // dropped, and pressing there selects it.
+  static_cast<void>(harness.frame(graph, 0.0F, 0.0F, false));
+  UI_CHECK(harness.panel.node_at(graph, new_only_x, new_only_y).has_value());
+  UI_CHECK(!harness.panel.node_at(graph, old_only_x, old_only_y).has_value());
+  const editor::CompositorFrame pressed =
+      harness.frame(graph, new_only_x, new_only_y, true);
+  UI_CHECK(pressed.selection ==
+           (editor::CompositorSelection{editor::CompositorSelectionKind::Node,
+                                        doc::NodeId{1U}}));
+  static_cast<void>(harness.frame(graph, new_only_x, new_only_y, false));
+
+  // The edit arrives, normalized to a slightly different value: the graph's
+  // own position takes over from then on.
+  graph.nodes.front().editor_x = 121.0F;
+  graph.nodes.front().editor_y = 100.0F;
+  static_cast<void>(harness.frame(graph, 0.0F, 0.0F, false));
+  UI_CHECK(harness.panel.node_at(graph, 296.5F, new_only_y).has_value());
+
+  // An edit that never arrives - refused - lets go after a bounded wait.
+  compositor::CompositorGraph refused;
+  refused.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Brightness, 60.0F, 40.0F));
+  CompositorHarness refused_harness;
+  static_cast<void>(refused_harness.frame(refused, 100.0F, 75.0F, false));
+  static_cast<void>(refused_harness.frame(refused, 100.0F, 75.0F, true));
+  static_cast<void>(refused_harness.frame(refused, 160.0F, 135.0F, true));
+  static_cast<void>(refused_harness.frame(refused, 160.0F, 135.0F, false));
+  for (int frame = 0; frame < 60; ++frame) {
+    static_cast<void>(refused_harness.frame(refused, 0.0F, 0.0F, false));
+  }
+  UI_CHECK(refused_harness.panel.node_at(refused, new_only_x, new_only_y)
+               .has_value());
+  for (int frame = 0; frame < 90; ++frame) {
+    static_cast<void>(refused_harness.frame(refused, 0.0F, 0.0F, false));
+  }
+  UI_CHECK(refused_harness.panel.node_at(refused, old_only_x, old_only_y)
+               .has_value());
+  UI_CHECK(!refused_harness.panel.node_at(refused, new_only_x, new_only_y)
+                .has_value());
+}
+
+// A wire is a curve now, so it is picked where it is drawn: through the
+// middle of its two ports, and not at the elbow a square wire used to turn.
+void wires_are_picked_along_their_curve() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(10U, compositor::NodeKind::SceneLayer, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(11U, compositor::NodeKind::Output, 320.0F, 200.0F));
+  graph.edges.push_back(compositor::GraphEdge{
+      doc::NodeId{50U}, compositor::EdgeEndpoint{doc::NodeId{10U}, 0U},
+      compositor::EdgeEndpoint{doc::NodeId{11U}, 0U}, 0});
+  // Layer IMAGE OUT at (216, 132); Output's IMAGE input at (320, 272). A
+  // curve leaving and entering horizontally is symmetric about the midpoint.
+  constexpr float middle_x = (216.0F + 320.0F) * 0.5F;
+  constexpr float middle_y = (132.0F + 272.0F) * 0.5F;
+
+  CompositorHarness elbow;
+  static_cast<void>(elbow.frame(graph, middle_x, 132.0F, false));
+  const editor::CompositorFrame missed = elbow.frame(graph, middle_x, 132.0F, true);
+  UI_CHECK(missed.selection == editor::CompositorSelection{});
+
+  CompositorHarness middle;
+  static_cast<void>(middle.frame(graph, middle_x, middle_y, false));
+  const editor::CompositorFrame picked =
+      middle.frame(graph, middle_x, middle_y + 3.0F, true);
+  UI_CHECK(picked.selection ==
+           (editor::CompositorSelection{editor::CompositorSelectionKind::Edge,
+                                        doc::NodeId{50U}}));
+  // The pressed wire keeps the pointer until release, wherever it wanders.
+  static_cast<void>(middle.frame(graph, 600.0F, 500.0F, true));
+  static_cast<void>(middle.frame(graph, 600.0F, 500.0F, false));
+  const editor::CompositorFrame next = middle.frame(graph, 100.0F, 100.0F, true);
+  UI_CHECK(next.selection ==
+           (editor::CompositorSelection{editor::CompositorSelectionKind::Node,
+                                        doc::NodeId{10U}}));
+}
+
+// Letting a wire go near a compatible port connects it: the operator does
+// not have to land on the dot.
+void a_wire_snaps_to_a_compatible_port_near_the_pointer() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::Blur, 40.0F, 60.0F));
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::SceneLayer, 320.0F, 60.0F));
+  // Blur EFFECT OUT at (216, 132); the Layer's EFFECTS input dot at (320,
+  // 132), its row target starting 9 to the left of the dot.
+  const auto release_at = [&](float x, float y) {
+    CompositorHarness harness;
+    static_cast<void>(harness.frame(graph, 216.0F, 132.0F, false));
+    static_cast<void>(harness.frame(graph, 216.0F, 132.0F, true));
+    static_cast<void>(harness.frame(graph, x, y, true));
+    return harness.frame(graph, x, y, false);
+  };
+  // 20 short of the dot and outside its row: within snapping reach.
+  const editor::CompositorFrame near = release_at(300.0F, 132.0F);
+  UI_CHECK(near.connect_ports ==
+           (editor::CompositorConnectIntent{
+               compositor::EdgeEndpoint{doc::NodeId{1U}, 0U},
+               compositor::EdgeEndpoint{doc::NodeId{2U}, 0U}, std::nullopt}));
+  // Well inside the row, far from the dot: the row is the target.
+  const editor::CompositorFrame over_row = release_at(390.0F, 140.0F);
+  UI_CHECK(over_row.connect_ports.has_value());
+  UI_CHECK(over_row.connect_ports->to ==
+           (compositor::EdgeEndpoint{doc::NodeId{2U}, 0U}));
+  // 30 short: out of reach, so nothing connects.
+  UI_CHECK(!release_at(290.0F, 132.0F).connect_ports.has_value());
+  // The INSTANCES row below is a TransformSet input; an effect never snaps
+  // to it, even with the pointer on it.
+  UI_CHECK(!release_at(330.0F, 158.0F).connect_ports.has_value());
+}
+
+// A drop from another panel can name the input it lands on, from the whole
+// row rather than the dot alone.
+void an_input_ports_target_covers_its_whole_row() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::SceneLayer, 320.0F, 60.0F));
+  CompositorHarness harness;
+  static_cast<void>(harness.frame(graph, 0.0F, 0.0F, false));
+  // Node (320, 86)-(496, 152): header to 121, EFFECTS row 121-143, INSTANCES
+  // row 143-165.
+  UI_CHECK(harness.panel.input_port_at(graph, 314.0F, 132.0F) ==
+           (compositor::EdgeEndpoint{doc::NodeId{2U}, 0U}));
+  UI_CHECK(harness.panel.input_port_at(graph, 400.0F, 125.0F) ==
+           (compositor::EdgeEndpoint{doc::NodeId{2U}, 0U}));
+  UI_CHECK(harness.panel.input_port_at(graph, 330.0F, 150.0F) ==
+           (compositor::EdgeEndpoint{doc::NodeId{2U}, 1U}));
+  UI_CHECK(!harness.panel.input_port_at(graph, 330.0F, 100.0F).has_value());
+  UI_CHECK(!harness.panel.input_port_at(graph, 470.0F, 132.0F).has_value());
+  UI_CHECK(!harness.panel.input_port_at(graph, 200.0F, 132.0F).has_value());
+}
+
+void the_parameters_panel_resizes_from_its_edge() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(70U, compositor::NodeKind::Brightness, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+  UI_CHECK(harness.panel.parameter_panel_width() == 0.0F);
+
+  // The panel's left edge is at 900 - 280. Press just on the graph side of
+  // it - the seam reaches 3 either way - and drag it 100 to the left.
+  static_cast<void>(harness.frame(graph, 618.0F, 400.0F, false));
+  const editor::CompositorFrame pressed =
+      harness.frame(graph, 618.0F, 400.0F, true);
+  static_cast<void>(harness.frame(graph, 518.0F, 400.0F, true));
+  const editor::CompositorFrame released =
+      harness.frame(graph, 518.0F, 400.0F, false);
+  UI_CHECK(harness.panel.parameter_panel_width() == 382.0F);
+  UI_CHECK(!released.move_node.has_value());
+  // Resizing is not a click on empty graph: the node stays selected.
+  UI_CHECK(!pressed.selection.has_value());
+  UI_CHECK(harness.panel.selection() ==
+           (editor::CompositorSelection{editor::CompositorSelectionKind::Node,
+                                        doc::NodeId{70U}}));
+
+  // The field moved with the edge: x=600 was graph canvas and is now the
+  // AMOUNT field.
+  const editor::CompositorFrame typed =
+      commit_compositor_field(harness, graph, 600.0F, 73.0F, "2.5");
+  UI_CHECK(typed.property_edit.has_value());
+  UI_CHECK(typed.property_edit->property ==
+           editor::CompositorProperty::BrightnessAmount);
+
+  // Dragged far left, it stops at its widest, still leaving the graph a
+  // usable 260.
+  static_cast<void>(harness.frame(graph, 518.0F, 400.0F, false));
+  static_cast<void>(harness.frame(graph, 518.0F, 400.0F, true));
+  static_cast<void>(harness.frame(graph, 10.0F, 400.0F, true));
+  static_cast<void>(harness.frame(graph, 10.0F, 400.0F, false));
+  UI_CHECK(harness.panel.parameter_panel_width() == 640.0F);
+}
+
+// Levels has four channels of five fields - taller than the panel. The list
+// scrolls, so the last field is still reachable.
+void long_parameter_lists_scroll_to_their_last_field() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(74U, compositor::NodeKind::Levels, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+  // Rows start at y=62, 26 apart: BLUE OUT WHITE is row 23, at 660, below
+  // the 640-high panel.
+  static_cast<void>(harness.navigation_frame(graph, 820.0F, 300.0F, false, -5.0F));
+  static_cast<void>(harness.frame(graph, 820.0F, 300.0F, false));
+  // Scrolled to the end: the list is 632 tall in a 582 body, so 50 up.
+  const editor::CompositorFrame last =
+      commit_compositor_field(harness, graph, 820.0F, 621.0F, "0.75");
+  UI_CHECK(last.property_edit.has_value());
+  UI_CHECK(last.property_edit->property ==
+           editor::CompositorProperty::LevelsBlueOutputWhite);
+  UI_CHECK(std::get<float>(last.property_edit->value) == 0.75F);
+}
+
+void parameter_sections_collapse() {
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(74U, compositor::NodeKind::Levels, 60.0F, 40.0F));
+  CompositorHarness harness;
+  select_compositor_node(harness, graph);
+  // Collapse MASTER: RED's heading moves up into the next row, and its
+  // first field below that.
+  static_cast<void>(harness.frame(graph, 820.0F, 73.0F, false));
+  static_cast<void>(harness.frame(graph, 820.0F, 73.0F, true));
+  static_cast<void>(harness.frame(graph, 820.0F, 73.0F, false));
+  const editor::CompositorFrame red =
+      commit_compositor_field(harness, graph, 820.0F, 125.0F, "0.125");
+  UI_CHECK(red.property_edit.has_value());
+  UI_CHECK(red.property_edit->property ==
+           editor::CompositorProperty::LevelsRedInputBlack);
+}
+
+// The fault this layout replaces: titles and port names drawn in boxes
+// shorter than the font, and nodes narrower than their names. With a real
+// font, every glyph a node draws lies inside the clip it is drawn under, and
+// every character of its title, source and port names is drawn - none was
+// shortened to an ellipsis.
+void node_text_fits_unclipped_in_a_real_font() {
+  constexpr std::array<std::string_view, 2U> candidates{
+      "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"};
+  constexpr std::array<float, 4U> sizes{0.5F, 0.75F, 0.875F, 1.25F};
+  std::optional<gui::FontAtlas> font;
+  for (const std::string_view path : candidates) {
+    font = gui::FontAtlas::create(path, 14U, 1.0F, sizes);
+    if (font.has_value()) {
+      break;
+    }
+  }
+  if (!font.has_value()) {
+    std::cout << "[skip] no system font; node text fit needs real glyphs\n";
+    return;
+  }
+  gui::InputState input;
+  gui::UiDrawList list;
+  list.set_white_texel(font->white_u(), font->white_v());
+  gui::UiContext ctx{input, list, *font};
+  editor::CompositorPanel panel{gui::ui_id("compositor.font.test")};
+
+  editor::ElementInfo plate{};
+  plate.node = doc::NodeId{1000U};
+  plate.kind = editor::ElementKind::Media;
+  plate.display_name = "Plate Front Driver Side 3/4 Long Lens";
+  const std::array<editor::ElementInfo, 1U> elements{plate};
+  compositor::CompositorGraph graph;
+  graph.nodes.push_back(
+      graph_node(1U, compositor::NodeKind::SceneLayer, 20.0F, 20.0F));
+  graph.nodes.push_back(
+      graph_node(2U, compositor::NodeKind::LedCarProcess, 420.0F, 20.0F));
+
+  input.new_frame();
+  input.set_mouse_position(890.0F, 630.0F);
+  ctx.new_frame();
+  static_cast<void>(panel.draw(ctx, CompositorHarness::bounds, graph, elements));
+
+  const auto non_space = [](std::string_view text) {
+    return static_cast<std::size_t>(
+        std::count_if(text.begin(), text.end(),
+                      [](char character) { return character != ' '; }));
+  };
+  std::size_t expected{};
+  for (const compositor::GraphNode &node : graph.nodes) {
+    expected += non_space(compositor::node_kind_name(node.kind));
+    for (const auto &port : compositor::input_ports(node.kind)) {
+      expected += non_space(port.name);
+    }
+    for (const auto &port : compositor::output_ports(node.kind)) {
+      expected += non_space(port.name);
+    }
+  }
+  expected += non_space(plate.display_name);
+  expected += non_space("8 WALL + CEILING  ARRAY 4.00");
+
+  // Glyphs sample the atlas away from its white texel; everything below the
+  // toolbar belongs to the two nodes.
+  std::size_t glyph_vertices{};
+  for (const gui::UiBatch &batch : list.batches()) {
+    for (core::u32 index = batch.first_vertex;
+         index < batch.first_vertex + batch.vertex_count; ++index) {
+      const gui::UiVertex &vertex = list.vertices()[index];
+      if ((vertex.u == font->white_u() && vertex.v == font->white_v()) ||
+          vertex.y < 26.0F) {
+        continue;
+      }
+      ++glyph_vertices;
+      UI_CHECK(vertex.x >= batch.clip_min_x - 0.01F &&
+               vertex.x <= batch.clip_max_x + 0.01F);
+      UI_CHECK(vertex.y >= batch.clip_min_y - 0.01F &&
+               vertex.y <= batch.clip_max_y + 0.01F);
+    }
+  }
+  UI_CHECK(glyph_vertices == expected * 6U);
+
+  // Both nodes grew past the minimum to fit their names.
+  UI_CHECK(panel.new_node_size(compositor::NodeKind::LedCarProcess).x > 176.0F);
+  const auto layer = panel.node_at(graph, 30.0F, 50.0F);
+  UI_CHECK(layer.has_value() && layer->second.width > 176.0F);
 }
 
 void workspace_panels_draw_scene_relevant_content() {
@@ -3151,7 +3477,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 111U> cases{{
+constexpr std::array<Case, 120U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -3262,6 +3588,24 @@ constexpr std::array<Case, 111U> cases{{
      &dragging_a_compositor_node_reports_its_authored_position_on_release},
     {"compatible typed ports report a connection intent",
      &compatible_typed_ports_report_a_connection_intent},
+    {"Compositor replacement picks the topmost node and clips feedback",
+     &compositor_replacement_picks_topmost_and_clips_feedback},
+    {"a released node holds its position until the graph reports it",
+     &a_released_node_holds_its_position_until_the_graph_reports_it},
+    {"wires are picked along their curve",
+     &wires_are_picked_along_their_curve},
+    {"a wire snaps to a compatible port near the pointer",
+     &a_wire_snaps_to_a_compatible_port_near_the_pointer},
+    {"an input port's target covers its whole row",
+     &an_input_ports_target_covers_its_whole_row},
+    {"the Parameters panel resizes from its edge",
+     &the_parameters_panel_resizes_from_its_edge},
+    {"long parameter lists scroll to their last field",
+     &long_parameter_lists_scroll_to_their_last_field},
+    {"parameter sections collapse",
+     &parameter_sections_collapse},
+    {"node text fits unclipped in a real font",
+     &node_text_fits_unclipped_in_a_real_font},
     {"dropping on a single input reports an atomic rewire",
      &dropping_on_a_single_input_reports_an_atomic_rewire},
     {"incompatible ports are rejected and persisted edges draw wires",

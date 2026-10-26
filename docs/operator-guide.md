@@ -1038,7 +1038,31 @@ The graph is an infinite canvas: use the mouse wheel to zoom around the point
 under the cursor and middle-mouse drag to pan. The toolbar also provides zoom
 buttons, a percentage reset, and a full view reset. Node moves and Effects or
 Timeline drops remain in graph coordinates, so navigating never changes the
-authored layout or makes a dropped node jump away from the cursor.
+authored layout or makes a dropped node jump away from the cursor. A node
+stays exactly where it is let go while the move is applied.
+
+Each node is sized to its own title, source name, and port names, and its text
+grows and shrinks with the zoom. Zoomed far out, the smaller lines (the
+detail under the title, then port names) are left out rather than squeezed.
+Ports are coloured and shaped by what they carry: blue circles for images,
+violet diamonds for effects, and green squares for array instances. A filled
+port is connected; a ring is open, and an open required input is drawn in the
+warning colour. A node's header carries the colour of its Add Node category.
+
+Wires are curves. To connect, drag from an output port - its dot or its name -
+and release over an input. The whole input row is the target, and the wire
+also snaps to a compatible port when released close to it. While a wire is
+being drawn it lands on the port it would connect to, and ports it cannot
+connect to fade back. Click a wire to select it; a selected node's own wires are
+highlighted.
+
+The **Parameters** panel beside the graph is resized by dragging its edge. Its
+width is kept with the workspace layout, so it survives a restart. Labels get
+the room they need, or move above their fields when the panel is narrow. The
+panel scrolls with the mouse wheel or its scrollbar when a node has more fields
+than fit. LED Car Process groups its fields into Position, Rotation, Plates,
+and Ceiling Reflection, and Levels has one section per channel. Click a
+section's heading to collapse or expand it.
 
 The Spatial / 3D category also contains **LED Car Process**, a purpose-built
 nine-socket virtual-production rig. Any subset of its optional Front, four

@@ -20,7 +20,10 @@
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <set>
@@ -549,6 +552,14 @@ void draw_compositor_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
 [[nodiscard]] std::string compositor_scene_layer_detail(
     doc::NodeId scene_node, std::span<const ElementInfo> elements);
 
+// Graph-space rows shared by every node, measured from the editor font so a
+// node's title and port names always have the height their text needs.
+struct CompositorNodeMetrics final {
+  float header_height{};
+  float row_height{};
+  float footer_height{};
+};
+
 // A headless immediate-mode editor for the persistent compositor graph. The
 // panel never mutates the evaluated projection: it reports compact intents for
 // the shell/authoring layer to turn into ordinary document commands.
@@ -590,6 +601,27 @@ public:
   [[nodiscard]] std::optional<std::pair<doc::NodeId, gui::Rect>>
   node_at(const compositor::CompositorGraph &graph, float x, float y) const noexcept;
 
+  // The input port whose drop target - its whole row, dot and label - holds
+  // the screen point, using the last drawn layout. A drop from another panel
+  // asks this before node_at(), so a port wins over the node around it.
+  [[nodiscard]] std::optional<compositor::EdgeEndpoint>
+  input_port_at(const compositor::CompositorGraph &graph, float x,
+                float y) const noexcept;
+
+  // The graph-space size a new node of `kind` is drawn at, so a drop can
+  // centre it under the pointer. Measured from the editor font on each draw;
+  // a Scene Layer can grow wider once it names its source.
+  [[nodiscard]] gui::UiPoint new_node_size(compositor::NodeKind kind) const noexcept;
+
+  // The Parameters panel's width beside the graph, in UI units. The operator
+  // drags its edge; zero means the default. Machine-local, like dock sizes.
+  [[nodiscard]] float parameter_panel_width() const noexcept {
+    return parameter_width_;
+  }
+  void set_parameter_panel_width(float width) noexcept {
+    parameter_width_ = std::isfinite(width) ? std::max(width, 0.0F) : 0.0F;
+  }
+
   [[nodiscard]] float graph_zoom() const noexcept { return zoom_; }
   [[nodiscard]] gui::UiPoint graph_pan() const noexcept {
     return gui::UiPoint{pan_x_, pan_y_};
@@ -610,11 +642,43 @@ public:
     zoom_ = 1.0F;
     panning_ = false;
     last_canvas_ = {};
+    pending_move_.reset();
+    node_sizes_.clear();
+    parameter_scroll_ = 0.0F;
+    parameter_content_height_ = 0.0F;
   }
 
 private:
+  // A released drag whose authored position has not reached the evaluated
+  // graph yet. Until it does, the node keeps drawing where it was let go, so
+  // the round trip through the Director never shows as a snap back.
+  struct PendingMove final {
+    doc::NodeId node{};
+    float x{};
+    float y{};
+    // The graph's position when the drag was released. Any change from it
+    // means the edit arrived (perhaps normalized) and the override ends.
+    float from_x{};
+    float from_y{};
+    core::u32 frames{};
+  };
+  struct NodeSize final {
+    doc::NodeId node{};
+    float width{};
+    float height{};
+  };
+
+  [[nodiscard]] gui::UiPoint node_size(const compositor::GraphNode &node) const noexcept;
+
   gui::UiId id_{};
   CompositorSelection selection_{};
+  std::optional<PendingMove> pending_move_;
+  // The last drawn size of each node, ascending by id, for the const queries.
+  std::vector<NodeSize> node_sizes_;
+  CompositorNodeMetrics metrics_{};
+  // Indexed by NodeKind.
+  std::array<gui::UiPoint, static_cast<std::size_t>(compositor::NodeKind::Output) + 1U>
+      new_node_sizes_{};
   doc::NodeId dragging_node_{};
   float drag_offset_x_{};
   float drag_offset_y_{};
@@ -628,6 +692,13 @@ private:
   std::optional<core::u8> add_category_;
   std::string node_search_;
   NumberField parameter_fields_;
+  float parameter_width_{};
+  float parameter_height_{};
+  float parameter_scroll_{};
+  float parameter_content_height_{};
+  float parameter_thumb_grab_{};
+  // One bit per collapsible Parameters section; set means collapsed.
+  core::u32 collapsed_sections_{};
   float pan_x_{};
   float pan_y_{};
   float zoom_{1.0F};

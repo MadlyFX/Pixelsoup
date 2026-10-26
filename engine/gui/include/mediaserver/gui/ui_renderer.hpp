@@ -141,6 +141,14 @@ public:
         float thickness,
         UiColor color);
 
+    // An open stroke through `points`, `thickness` units wide, with mitred
+    // joins and an anti-aliased edge: a one-pixel fringe fades to transparent
+    // either side. This is for curves - a graph wire tessellated into short
+    // segments - where add_line's hard diagonal edges would show every step.
+    // Fewer than two points draw nothing; repeated points are skipped.
+    void add_polyline(
+        std::span<const UiPoint> points, float thickness, UiColor color);
+
     // A rectangle sampling an arbitrary texture rather than the atlas - an
     // engine render target dropped into a panel. `tint` multiplies it, so white
     // shows it untouched. The texture is borrowed and must outlive the frame

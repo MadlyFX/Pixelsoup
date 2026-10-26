@@ -1391,8 +1391,20 @@ constexpr std::array<core::u16, 10U> ui_zoom_steps{
       "/usr/share/fonts/TTF/DejaVuSans.ttf",
       "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
       "/usr/local/share/fonts/DejaVuSans.ttf"};
+  // Extra sizes for the Compositor graph, whose text follows its zoom. A
+  // size past what a glyph page can hold at a dense display is left out; the
+  // graph then draws that text at the largest size that was baked.
+  constexpr std::array<float, 9U> graph_zoom_sizes{
+      0.5F, 0.625F, 0.75F, 0.875F, 1.25F, 1.5F, 1.75F, 2.0F, 2.5F};
+  constexpr float largest_glyph_px = 72.0F;
+  std::vector<float> sizes;
+  for (const float size : graph_zoom_sizes) {
+    if (static_cast<float>(editor_font_size) * scale * size <= largest_glyph_px) {
+      sizes.push_back(size);
+    }
+  }
   for (const char *path : candidates) {
-    auto atlas = gui::FontAtlas::create(path, editor_font_size, scale);
+    auto atlas = gui::FontAtlas::create(path, editor_font_size, scale, sizes);
     if (atlas.has_value()) {
       return std::move(atlas).value();
     }
@@ -1826,6 +1838,8 @@ struct EditorShell::Impl final {
       auto decoded = decode_workspace_layout(workspace_layout);
       if (decoded) {
         ui_zoom_percent = decoded.value().ui_zoom_percent;
+        compositor_panel.set_parameter_panel_width(
+            decoded.value().compositor_parameter_width);
       }
       if (decoded && docks.restore(decoded.value().docks)) {
         stage_panel.set_resolution(decoded.value().stage_resolution);
@@ -6176,14 +6190,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     case scene::EffectKind::Count:
       break;
     }
-    constexpr float graph_effect_node_width = 164.0F;
-    constexpr float graph_effect_node_height = 72.0F;
+    const gui::UiPoint graph_effect_node_size =
+        impl.compositor_panel.new_node_size(
+            graph_effect_kind.value_or(compositor::NodeKind::Brightness));
     const std::optional<gui::UiPoint> graph_drop_position =
         compositor_panel_drawn
             ? impl.compositor_panel.node_drop_position(
                   pending_effect_drop->screen_x,
-                  pending_effect_drop->screen_y, graph_effect_node_width,
-                  graph_effect_node_height)
+                  pending_effect_drop->screen_y, graph_effect_node_size.x,
+                  graph_effect_node_size.y)
             : std::optional<gui::UiPoint>{};
     const bool graph_drop = graph_drop_position.has_value();
     const gui::Rect *const stage_drop_bounds =
@@ -6209,11 +6224,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (pending_timeline_layer_drop.has_value() && compositor_panel_drawn &&
       !compositor_locked && result.compositor_adds.empty()) {
     const TimelineLayerDrop &drop = *pending_timeline_layer_drop;
-    constexpr float graph_layer_node_width = 164.0F;
-    constexpr float graph_layer_node_height = 54.0F;
+    const gui::UiPoint graph_layer_node_size =
+        impl.compositor_panel.new_node_size(compositor::NodeKind::SceneLayer);
+    const float graph_layer_node_height = graph_layer_node_size.y;
     const std::optional<gui::UiPoint> graph_drop_position =
         impl.compositor_panel.node_drop_position(
-            drop.screen_x, drop.screen_y, graph_layer_node_width,
+            drop.screen_x, drop.screen_y, graph_layer_node_size.x,
             graph_layer_node_height);
     const auto replacement = drop.layers.size() == 1U
         ? replacement_at(drop.screen_x, drop.screen_y, {}, drop.layers.front())
@@ -6652,7 +6668,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     auto encoded = encode_workspace_layout(WorkspaceLayoutState{
         impl.docks.snapshot(), impl.workspace_window_width,
         impl.workspace_window_height, impl.stage_panel.resolution(),
-        impl.program_panel.resolution(), impl.ui_zoom_percent});
+        impl.program_panel.resolution(), impl.ui_zoom_percent,
+        std::min(impl.compositor_panel.parameter_panel_width(),
+                 max_compositor_parameter_width)});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;

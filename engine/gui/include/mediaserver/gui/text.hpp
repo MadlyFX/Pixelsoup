@@ -44,8 +44,15 @@ public:
     // Bakes `font_path` at `pixel_height` logical units for a display of
     // `scale` physical pixels per unit. Returns nullopt if FreeType cannot
     // load the file, so the caller can fall back or skip text.
+    //
+    // `extra_sizes` bakes further glyph sets into the same page, each a
+    // multiple of `pixel_height` (0.75 is three-quarter size). A surface that
+    // zooms - the compositor graph - draws its text from the nearest set at or
+    // below the size it wants, so zoomed text is hinted for its own size
+    // rather than a small bitmap stretched by the sampler.
     [[nodiscard]] static std::optional<FontAtlas> create(
-        std::string_view font_path, core::u32 pixel_height, float scale = 1.0F);
+        std::string_view font_path, core::u32 pixel_height, float scale = 1.0F,
+        std::span<const float> extra_sizes = {});
 
     // An atlas with the reserved white texel but no glyphs, needing neither a
     // font file nor FreeType. It is the fallback when a font fails to load - the
@@ -69,6 +76,17 @@ public:
     // Physical pixels per logical unit the glyphs were baked for.
     [[nodiscard]] float scale() const noexcept { return scale_; }
 
+    // The largest baked size not above `size`, as a multiple of the base size
+    // (which is 1). Nullopt when even the smallest set is bigger than asked:
+    // that text cannot be drawn at the size its layout has room for.
+    [[nodiscard]] std::optional<float> size_at_most(float size) const noexcept;
+    // The same queries for one baked size. A size that was not baked reads as
+    // the base set, so pass a value size_at_most() returned.
+    [[nodiscard]] const Glyph* glyph(char character, float size) const noexcept;
+    [[nodiscard]] float line_height(float size) const noexcept;
+    [[nodiscard]] float ascent(float size) const noexcept;
+    [[nodiscard]] float measure(std::string_view text, float size) const;
+
     [[nodiscard]] float white_u() const noexcept { return white_u_; }
     [[nodiscard]] float white_v() const noexcept { return white_v_; }
     [[nodiscard]] std::span<const core::u8> pixels() const noexcept {
@@ -82,7 +100,19 @@ private:
     // texel, recording its uv. Shared by create() and empty().
     void init_base(core::u32 size);
 
+    // One extra glyph set from create()'s `extra_sizes`, sharing the page.
+    struct SizedSet final {
+        float size{};
+        float line_height{};
+        float ascent{};
+        std::map<char, Glyph> glyphs;
+    };
+    // The extra set baked at exactly `size`, or null for the base set.
+    [[nodiscard]] const SizedSet* sized(float size) const noexcept;
+
     std::map<char, Glyph> glyphs_;
+    // Ascending by size; never holds the base size itself.
+    std::vector<SizedSet> sized_;
     std::vector<core::u8> pixels_;
     core::u32 width_{};
     core::u32 height_{};
@@ -103,5 +133,14 @@ float draw_text(
     float y,
     std::string_view text,
     UiColor color);
+// The same, from the glyph set baked at `size` (see FontAtlas::size_at_most).
+float draw_text(
+    UiDrawList& list,
+    const FontAtlas& atlas,
+    float x,
+    float y,
+    std::string_view text,
+    UiColor color,
+    float size);
 
 } // namespace mediaserver::gui

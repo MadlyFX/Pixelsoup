@@ -20,9 +20,10 @@ void draw_label(
     const Rect& bounds,
     float x,
     std::string_view text,
-    UiColor color) {
-    const float y = bounds.y + (bounds.height - font.line_height()) * 0.5F;
-    static_cast<void>(draw_text(list, font, x, y, text, color));
+    UiColor color,
+    float size = 1.0F) {
+    const float y = bounds.y + (bounds.height - font.line_height(size)) * 0.5F;
+    static_cast<void>(draw_text(list, font, x, y, text, color, size));
 }
 
 // A number as a widget shows it: two decimals, which is the resolution an
@@ -583,30 +584,35 @@ void UiContext::label(const Rect& bounds, std::string_view text) {
 }
 
 void UiContext::label(const Rect& bounds, std::string_view text, UiColor color) {
+    label(bounds, text, color, 1.0F);
+}
+
+void UiContext::label(
+    const Rect& bounds, std::string_view text, UiColor color, float size) {
     if (bounds.width <= 0.0F || bounds.height <= 0.0F) return;
     list_.push_clip(bounds.x, bounds.y, std::max(bounds.width, 0.0F), std::max(bounds.height, 0.0F));
-    if (font_width(text) > bounds.width) {
+    if (font_.measure(text, size) > bounds.width) {
         // Never leave a half glyph at a dock edge. Keep the complete label on
         // hover, and shorten on UTF-8 boundaries for the visible line.
         constexpr std::string_view ellipsis{"..."};
-        const float room = bounds.width - font_width(ellipsis);
+        const float room = bounds.width - font_.measure(ellipsis, size);
         std::size_t end = 0U;
         float used = 0.0F;
         while (end < text.size()) {
             std::size_t next = end + 1U;
             while (next < text.size() && is_continuation(text[next])) ++next;
-            const float advance = font_width(text.substr(end, next - end));
+            const float advance = font_.measure(text.substr(end, next - end), size);
             if (used + advance > room) break;
             used += advance;
             end = next;
         }
         if (room >= 0.0F) {
-            draw_label(list_, font_, bounds, bounds.x, text.substr(0U, end), color);
-            draw_label(list_, font_, bounds, bounds.x + used, ellipsis, color);
+            draw_label(list_, font_, bounds, bounds.x, text.substr(0U, end), color, size);
+            draw_label(list_, font_, bounds, bounds.x + used, ellipsis, color, size);
         }
         tooltip(bounds, text);
     } else {
-        draw_label(list_, font_, bounds, bounds.x, text, color);
+        draw_label(list_, font_, bounds, bounds.x, text, color, size);
     }
     list_.pop_clip();
 }

@@ -293,6 +293,127 @@ void a_scaled_atlas_measures_in_logical_units() {
     }
 }
 
+// A zooming surface asks for text bigger or smaller than the UI font. Extra
+// sizes are baked as glyph sets of their own - hinted at that size, not the
+// base glyphs stretched - and a request between sizes takes the one below,
+// so text never outgrows the room its layout made for it.
+void extra_sizes_are_baked_glyph_sets_of_their_own() {
+    constexpr std::string_view path = "C:/Windows/Fonts/segoeui.ttf";
+    constexpr std::array<float, 3U> sizes{0.5F, 2.0F, 2.5F};
+    auto base = gui::FontAtlas::create(path, 14U, 1.5F);
+    auto zoomed = gui::FontAtlas::create(path, 14U, 1.5F, sizes);
+    if (!base.has_value() || !zoomed.has_value()) {
+        std::cout << "[skip] no Segoe UI; sized atlas suite skipped\n";
+        return;
+    }
+    // The base set is unchanged by the extras beside it.
+    UI_CHECK(zoomed->measure("Plate Front") == base->measure("Plate Front"));
+    UI_CHECK(zoomed->line_height() == base->line_height());
+    // Every set is complete, down to the last character baked: the page
+    // grows to fit them rather than leaving glyphs out.
+    UI_CHECK(zoomed->width() >= base->width());
+    for (const float size : sizes) {
+        UI_CHECK(zoomed->glyph('~', size) != nullptr);
+        UI_CHECK(zoomed->glyph('~', size) != zoomed->glyph('~'));
+    }
+
+    UI_CHECK(zoomed->size_at_most(1.0F) == 1.0F);
+    UI_CHECK(zoomed->size_at_most(1.9F) == 1.0F);
+    UI_CHECK(zoomed->size_at_most(2.2F) == 2.0F);
+    UI_CHECK(zoomed->size_at_most(9.0F) == 2.5F);
+    UI_CHECK(zoomed->size_at_most(0.7F) == 0.5F);
+    UI_CHECK(!zoomed->size_at_most(0.4F).has_value());
+    UI_CHECK(!base->size_at_most(0.9F).has_value());
+
+    const float plain = zoomed->measure("Plate Front");
+    const float twice = zoomed->measure("Plate Front", 2.0F);
+    UI_CHECK(std::fabs(twice - plain * 2.0F) <= plain * 0.12F);
+    UI_CHECK(std::fabs(zoomed->line_height(2.0F) -
+                       zoomed->line_height() * 2.0F) <= 2.0F);
+    const gui::Glyph* const small = zoomed->glyph('W');
+    const gui::Glyph* const large = zoomed->glyph('W', 2.0F);
+    UI_CHECK(small != nullptr && large != nullptr && small != large);
+    UI_CHECK(large->height >= small->height * 1.8F);
+    // An unbaked size reads as the base set rather than nothing.
+    UI_CHECK(zoomed->glyph('W', 1.25F) == small);
+
+    gui::UiDrawList list;
+    list.set_scale(1.5F);
+    list.set_white_texel(zoomed->white_u(), zoomed->white_v());
+    const float advance = gui::draw_text(
+        list, *zoomed, 4.2F, 3.9F, "Wall", gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F},
+        2.0F);
+    UI_CHECK(std::fabs(advance - zoomed->measure("Wall", 2.0F)) < 1.0F);
+    for (const gui::UiVertex& vertex : list.vertices()) {
+        UI_CHECK(std::fabs(vertex.x - std::round(vertex.x)) < 0.001F);
+        UI_CHECK(std::fabs(vertex.y - std::round(vertex.y)) < 0.001F);
+    }
+}
+
+// A wire is a curve tessellated into short segments. Its stroke must cover
+// the curve's own path with its full colour and fade out at the edge, rather
+// than stair-stepping the way hard diagonal quads do.
+void a_polyline_strokes_its_path_with_soft_edges() {
+    auto device = open_device();
+    auto atlas = load_font();
+    if (!atlas.has_value()) {
+        std::cout << "[skip] no system font; polyline suite needs the atlas's "
+                     "white texel\n";
+        return;
+    }
+    auto created = gui::UiRenderer::create(device, rhi::TextureFormat::Rgba8Unorm);
+    UI_CHECK(created.has_value());
+    auto renderer = std::move(created).value();
+
+    constexpr core::u32 width = 128U;
+    constexpr core::u32 height = 64U;
+    gui::UiDrawList list;
+    list.set_white_texel(atlas->white_u(), atlas->white_v());
+    // A gentle arc, as a wire is: up from (8, 48) to (64, 16), then down to
+    // (120, 48), in segments short enough that the joins matter.
+    std::vector<gui::UiPoint> arc;
+    for (int index = 0; index <= 28; ++index) {
+        const float t = static_cast<float>(index) / 28.0F;
+        const float x = 8.0F + 112.0F * t;
+        const float y = 48.0F - 32.0F * std::sin(t * 3.14159265F);
+        arc.push_back(gui::UiPoint{x, y});
+    }
+    // A repeated point has no direction and must not break the stroke.
+    arc.insert(arc.begin() + 10, arc[10]);
+    list.add_polyline(arc, 4.0F, gui::UiColor{0.0F, 1.0F, 0.0F, 1.0F});
+
+    // Every vertex is either full colour (the core) or fully clear (the
+    // outer edge of the fringe): the fade is interpolated between them.
+    bool clear_edge = false;
+    for (const gui::UiVertex& vertex : list.vertices()) {
+        UI_CHECK(vertex.a == 1.0F || vertex.a == 0.0F);
+        clear_edge = clear_edge || vertex.a == 0.0F;
+    }
+    UI_CHECK(clear_edge);
+
+    const auto image = render_ui(device, renderer, *atlas, list, width, height);
+    // On the arc: the top, and a point on its rising side.
+    const auto top = image.at(64U, 16U);
+    UI_CHECK(image.rgba[top + 1U] > 200U);
+    const float side_t = 0.25F;
+    const auto side = image.at(
+        static_cast<core::u32>(std::lround(8.0F + 112.0F * side_t)),
+        static_cast<core::u32>(
+            std::lround(48.0F - 32.0F * std::sin(side_t * 3.14159265F))));
+    UI_CHECK(image.rgba[side + 1U] > 200U);
+    // Off it: under the arc's peak, and beyond its ends.
+    const auto under = image.at(64U, 40U);
+    UI_CHECK(image.rgba[under + 1U] < 20U);
+    const auto beyond = image.at(124U, 48U);
+    UI_CHECK(image.rgba[beyond + 1U] < 20U);
+    // Partial coverage just outside the core: the fringe, neither the full
+    // stroke nor nothing.
+    const auto fringe = image.at(64U, 13U);
+    UI_CHECK(image.rgba[fringe + 1U] < 250U);
+    const auto inside_core = image.at(64U, 17U);
+    UI_CHECK(image.rgba[inside_core + 1U] > 200U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -479,9 +600,13 @@ void polygons_and_lines_cover_their_own_geometry() {
     UI_CHECK(image.rgba[off_line + 2U] < 20U);
 }
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 9U> cases{{
     {"a scaled atlas measures in logical units",
      &a_scaled_atlas_measures_in_logical_units},
+    {"extra sizes are baked glyph sets of their own",
+     &extra_sizes_are_baked_glyph_sets_of_their_own},
+    {"a polyline strokes its path with soft edges",
+     &a_polyline_strokes_its_path_with_soft_edges},
     {"a solid rect paints its exact colour",
      &a_solid_rect_paints_its_exact_colour},
     {"a clip rect confines a fill", &a_clip_rect_confines_a_fill},
