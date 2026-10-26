@@ -50,6 +50,7 @@ struct SessionSlot final {
     RuntimeAssetAdoption asset_adoption{};
     RuntimeOutputSync output_sync{};
     RuntimeTracking tracking{};
+    RuntimePlayhead playhead{};
     RuntimeRendererReadiness renderer{};
     cmd::StreamCursor prepared_cursor{};
     cmd::StreamCursor committed_cursor{};
@@ -1076,6 +1077,7 @@ bool DirectorFrameBarrier::on_ack(
             exact_member->state = MemberState::Committed;
         }
         session->committed_cursor = acknowledgement.after;
+        session->playhead = acknowledgement.playhead;
         break;
     default:
         reject_acknowledgement(
@@ -1211,6 +1213,7 @@ void DirectorFrameBarrier::unregister(
     session->asset_adoption = {};
     session->output_sync = {};
     session->tracking = {};
+    session->playhead = {};
     session->renderer = {};
     session->permit_head = 0U;
     session->permit_size = 0U;
@@ -1712,6 +1715,29 @@ bool DirectorFrameBarrier::runtime_tracking(
     }
     output = session->tracking;
     return true;
+}
+
+std::vector<DirectorNodePlayhead>
+DirectorFrameBarrier::runtime_playheads() const {
+    std::vector<DirectorNodePlayhead> result;
+    const auto& control = *control_;
+    const std::lock_guard lock{control.mutex};
+    if (!control.valid || control.faulted) {
+        return result;
+    }
+    for (const SessionSlot& session : control.sessions) {
+        if (session.active && session.readiness == SessionReadiness::Live
+            && session.playhead.presented) {
+            result.push_back(
+                DirectorNodePlayhead{session.node_index, session.playhead});
+        }
+    }
+    std::sort(result.begin(), result.end(),
+              [](const DirectorNodePlayhead& left,
+                 const DirectorNodePlayhead& right) noexcept {
+                  return left.node_index < right.node_index;
+              });
+    return result;
 }
 
 bool DirectorFrameBarrier::runtime_output_sync(

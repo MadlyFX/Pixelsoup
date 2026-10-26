@@ -437,6 +437,7 @@ public:
                         runtime_asset_adoption);
                     session->publish_runtime_output_sync(runtime_output_sync);
                     session->publish_runtime_tracking(runtime_tracking);
+                    session->publish_runtime_playhead(runtime_playhead);
                     session->publish_runtime_renderer_readiness(
                         runtime_renderer_readiness);
                     active_session = session;
@@ -674,6 +675,7 @@ public:
     RuntimeAssetAdoption runtime_asset_adoption{};
     RuntimeOutputSync runtime_output_sync{};
     RuntimeTracking runtime_tracking{};
+    RuntimePlayhead runtime_playhead{};
     RuntimeRendererReadiness runtime_renderer_readiness{};
     std::atomic<core::u64> conformance_request{};
     std::mutex backoff_mutex;
@@ -981,6 +983,15 @@ void NodeSessionService::publish_runtime_tracking(
     state_->runtime_tracking = tracking;
     if (state_->active_session) {
         state_->active_session->publish_runtime_tracking(tracking);
+    }
+}
+
+void NodeSessionService::publish_runtime_playhead(
+    RuntimePlayhead playhead) noexcept {
+    const std::lock_guard lock{state_->resource_mutex};
+    state_->runtime_playhead = playhead;
+    if (state_->active_session) {
+        state_->active_session->publish_runtime_playhead(playhead);
     }
 }
 

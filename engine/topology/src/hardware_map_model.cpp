@@ -51,6 +51,18 @@ class Reader final {
         return std::string{fallback};
     }
 
+    [[nodiscard]] bool boolean(std::string_view name, bool fallback) noexcept {
+        const doc::PropertyValue* const value = find(*properties_, name);
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (const auto* const flag = std::get_if<bool>(value)) {
+            return *flag;
+        }
+        ok_ = false;
+        return fallback;
+    }
+
     [[nodiscard]] bool ok() const noexcept { return ok_; }
     void fail() noexcept { ok_ = false; }
 
@@ -200,6 +212,7 @@ void HardwareMapModel::put(const doc::Node& node) {
         std::string address = reader.text(schema::address, "");
         std::string lifecycle_endpoint =
             reader.text(schema::lifecycle_endpoint, "");
+        const bool main_node = reader.boolean(schema::main_node, false);
         if (!reader.ok() || !parsed_kind.has_value()) {
             ++counters_.rejected;
             return;
@@ -213,7 +226,9 @@ void HardwareMapModel::put(const doc::Node& node) {
                            parsed_kind == HardwareDeviceKind::RenderServer
                                ? *window_mode
                                : HardwareWindowMode::Inherit,
-                           desktop_x, desktop_y});
+                           desktop_x, desktop_y,
+                           parsed_kind == HardwareDeviceKind::RenderServer &&
+                               main_node});
         return;
     }
 

@@ -796,6 +796,9 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
                                alpha(ctx.theme().accent, 0.72F));
     }
   }
+  if (playback_overlay_) {
+    draw_playback_overlay(p);
+  }
   if (playhead_x >= graph.x && playhead_x <= graph.x + graph.width) {
     ctx.draw_list().add_line(playhead_x, ruler.y, playhead_x,
                              rows_bounds.y + rows_bounds.height, 1.5F,
@@ -827,6 +830,66 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     ctx.pop_clip();
   }
 
+}
+
+void TimelinePanel::draw_playback_overlay(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const EditorTimeline &timeline = p.input.timeline;
+  const gui::Rect &ruler = p.layout.ruler;
+  const gui::Rect &strip = p.layout.strip;
+  const gui::Rect &rows_bounds = p.layout.rows;
+  const gui::Rect &graph = p.layout.graph;
+  const gui::Theme &theme = ctx.theme();
+  const auto frame_to_x = [&](double value) noexcept {
+    return time_axis_.x(value, graph.x);
+  };
+  const float graph_right = graph.x + graph.width;
+
+  // Each buffered run covers its frames edge to edge, so a single frame is
+  // as wide as the frame is at this zoom - and never thinner than a pixel.
+  for (const TimelineFrameRun &run : timeline.buffered) {
+    const float left = std::max(frame_to_x(static_cast<double>(run.first)),
+                                graph.x);
+    const float right = std::min(
+        frame_to_x(static_cast<double>(run.last) + 1.0), graph_right);
+    if (right < graph.x || left > graph_right) {
+      continue;
+    }
+    ctx.panel(gui::Rect{left, strip.y, std::max(right - left, 1.0F),
+                        playback_cache_bar_height},
+              theme.good);
+  }
+
+  // A node's playhead is thinner than the editor's and stops short of its
+  // shield, so the two read apart where they nearly coincide. Its tag on
+  // the ruler's lower edge carries the node's name and lag.
+  for (const TimelineNodePlayhead &node : timeline.node_playheads) {
+    const float node_x = frame_to_x(static_cast<double>(node.show_frame));
+    if (node_x < graph.x || node_x > graph_right) {
+      continue;
+    }
+    ctx.draw_list().add_line(node_x, ruler.y + ruler.height - 7.0F, node_x,
+                             rows_bounds.y + rows_bounds.height, 1.0F,
+                             alpha(theme.keyframe, 0.85F));
+    const std::array<gui::UiPoint, 3U> tag{{
+        {node_x - 4.0F, ruler.y + ruler.height - 7.0F},
+        {node_x + 4.0F, ruler.y + ruler.height - 7.0F},
+        {node_x, ruler.y + ruler.height - 1.0F},
+    }};
+    ctx.draw_list().add_convex_poly(tag, theme.keyframe);
+    std::string tip = node.name.empty()
+                          ? "Render node " + std::to_string(node.node_index)
+                          : node.name;
+    tip += " is presenting " + timecode(p, node.show_frame);
+    if (node.latency_frames > 0U) {
+      tip += ", " + std::to_string(node.latency_frames) +
+             (node.latency_frames == 1U ? " frame" : " frames") +
+             " behind what it has received";
+    }
+    ctx.tooltip(gui::Rect{node_x - 5.0F, ruler.y + ruler.height - 8.0F,
+                          10.0F, 8.0F},
+                tip);
+  }
 }
 
 void TimelinePanel::close_pass(Pass &p) {

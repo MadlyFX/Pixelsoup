@@ -542,6 +542,13 @@ void draw_icon(
         list.add_rect(x - 6.0F, y + 0.8F, 3.0F, 1.2F, color);
         list.add_rect(x - 2.0F, y - 2.0F, 8.0F, 8.0F, color);
         return;
+    case Icon::Cache:
+        list.add_rect(x - 7.0F, y + 2.0F, 8.0F, 3.0F, color);
+        list.add_rect(x + 1.0F, y + 3.0F, 6.0F, 1.0F, color);
+        list.add_triangle(x - 1.0F, y - 6.0F, x + 5.0F, y - 6.0F, x + 2.0F,
+                          y - 2.5F, color);
+        list.add_rect(x + 1.5F, y - 3.0F, 1.0F, 8.0F, color);
+        return;
     }
 }
 

@@ -1535,6 +1535,7 @@ DirectorResumeSession::receive_live_message() {
     core::u64 sequence = 0U;
     core::u64 acknowledged_sequence = 0U;
     cmd::StreamCursor after{};
+    RuntimePlayhead playhead{};
     if (const auto* prepared =
             std::get_if<FramePrepared>(&received.value())) {
         kind = FrameAcknowledgementKind::Prepared;
@@ -1549,6 +1550,7 @@ DirectorResumeSession::receive_live_message() {
         sequence = committed->sequence;
         acknowledged_sequence = committed->acknowledged_sequence;
         after = committed->after;
+        playhead = committed->playhead;
     } else {
         close();
         return Result::failure(
@@ -1617,6 +1619,7 @@ DirectorResumeSession::receive_live_message() {
                 after,
                 outstanding_frames_.size(),
                 outstanding_bytes_,
+                playhead,
             };
         }
     }
@@ -2722,7 +2725,8 @@ core::u64 NodeResumeSession::enqueue_control_locked(
     RuntimeOutputSync output_sync,
     RuntimeRendererReadiness renderer,
     RuntimeTracking tracking,
-    GoodbyeReason goodbye_reason) noexcept {
+    GoodbyeReason goodbye_reason,
+    RuntimePlayhead playhead) noexcept {
     const auto capacity = acknowledgement_intents_.size();
     auto tail = acknowledgement_head_;
     const auto until_wrap = capacity - acknowledgement_head_;
@@ -2742,6 +2746,7 @@ core::u64 NodeResumeSession::enqueue_control_locked(
         renderer,
         tracking,
         goodbye_reason,
+        playhead,
     };
     ++acknowledgement_size_;
     ++next_ack_sequence_;
@@ -2856,6 +2861,7 @@ NodeResumeSession::flush_frame_acknowledgements_through(
                         pending.sequence,
                         pending.acknowledged_sequence,
                         pending.after,
+                        pending.playhead,
                     }},
                     config_.codec_limits);
             case NodeControlKind::HeartbeatAcknowledgement:
@@ -3055,7 +3061,9 @@ NodeResumeSession::commit_prepared_frame(cmd::FrameNumber frame) {
     static_cast<void>(enqueue_control_locked(
         NodeControlKind::Committed,
         pending->acknowledged_sequence,
-        pending->after));
+        pending->after,
+        {}, {}, {}, {}, GoodbyeReason::None,
+        runtime_playhead_));
     return Result::success(committed);
 }
 
@@ -3143,6 +3151,15 @@ void NodeResumeSession::publish_runtime_tracking(
     RuntimeTracking tracking) noexcept {
     const std::lock_guard lock{inflight_mutex_};
     runtime_tracking_ = tracking;
+}
+
+void NodeResumeSession::publish_runtime_playhead(
+    RuntimePlayhead playhead) noexcept {
+    if (!playhead.presented) {
+        playhead = RuntimePlayhead{};
+    }
+    const std::lock_guard lock{inflight_mutex_};
+    runtime_playhead_ = playhead;
 }
 
 void NodeResumeSession::publish_runtime_output_sync(

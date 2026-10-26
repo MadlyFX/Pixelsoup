@@ -315,6 +315,7 @@ int run_node_playback(net::NodeSessionService &service,
     net::RuntimeOutputSync published_output_sync{};
     net::RuntimeTracking node_tracking{};
     net::RuntimeTracking published_tracking{};
+    net::RuntimePlayhead published_playhead{};
 #if defined(MEDIASERVER_HAS_GUI)
     render::RenderConformanceService node_conformance;
     render::PublicationVerification node_publication_verification;
@@ -1479,6 +1480,21 @@ int run_node_playback(net::NodeSessionService &service,
         }
         if (render_output && transport.has_value()) {
             output_playback_buffer.observe(output_frame_complete);
+            // The Director's Timeline draws this node where its wall is,
+            // which trails the control stream by the decode headroom. Only
+            // a complete frame moves it: a held boundary left the previous
+            // picture up, so the previous position still stands.
+            if (output_frame_complete) {
+                const net::RuntimePlayhead playhead{
+                    true, input.show_frame.value(),
+                    input.control_frame.value(),
+                    output_playback_buffer.latency_frames(
+                        presented.control_frame)};
+                if (playhead != published_playhead) {
+                    published_playhead = playhead;
+                    service.publish_runtime_playhead(playhead);
+                }
+            }
         }
 
         // Only on a real boundary: a vendor barrier query is a driver call,

@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 // The decode seam: a clip's (source, frame_index) turned into pixels.
 //
@@ -185,6 +187,26 @@ struct MediaDecodeConfig final {
 };
 
 [[nodiscard]] MediaDecodeStats media_decode_stats();
+
+// What process-wide CPU residency holds of one source. Stills and image
+// sequences are decoded by each MediaCache rather than by the shared video
+// scheduler, so `video` is false for them and `frames` is empty.
+struct MediaReadyFrames final {
+    bool video{};
+    // Source frame numbers decoded and ready to upload, ascending. A frame
+    // whose decode failed is not ready.
+    std::vector<core::u32> frames;
+
+    bool operator==(const MediaReadyFrames &) const = default;
+};
+
+// One answer per entry of `sources`, by the same paths a MediaInstance names.
+// Never waits: while a decode worker holds the scheduler this returns false
+// and leaves `ready` untouched, so an operator surface keeps its previous
+// picture rather than stalling its thread behind a publication.
+[[nodiscard]] bool media_decode_ready_frames(
+    std::span<const std::string> sources,
+    std::vector<MediaReadyFrames> &ready) noexcept;
 
 // Configures the process-wide video scheduler for a render node that
 // intentionally presents behind the control stream. Output presenters in one

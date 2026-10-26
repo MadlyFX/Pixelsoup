@@ -130,6 +130,15 @@ table FrameCommitted {
   sequence:ulong;
   acknowledged_sequence:ulong;
   after:StreamCursor (required);
+  // The frame this node's output last put on screen complete, which trails
+  // the control stream by its decode headroom. Rides every commit rather than
+  // the heartbeat so the Director's Timeline can follow it at the show rate.
+  // Diagnostics only: it never gates release. False with zeroes is a node
+  // that has presented nothing yet.
+  presented:bool;
+  presented_show_frame:ulong;
+  presented_control_frame:ulong;
+  presented_latency_frames:ulong;
 }
 
 // Sent by the Director after the software barrier has durably released the

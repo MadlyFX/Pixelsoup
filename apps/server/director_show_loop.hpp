@@ -58,6 +58,7 @@
 #include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/render/linked_publication.hpp>
 #include <mediaserver/render/linked_scene_ingest.hpp>
+#include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/render_conformance.hpp>
 #endif
 
@@ -419,6 +420,19 @@ struct DirectorShowLoop final {
     show::BoundaryLateness boundary_lateness{};
     ControlBacklogWatch backlog_watch{};
     core::u64 reported_lockstep_demotions{};
+#if defined(MEDIASERVER_HAS_GUI)
+    // The Timeline's cache bar. A placement off air has no evaluated media
+    // to say which file it decodes, so the last one seen on air is kept.
+    struct TimelineDecodeSource final {
+        std::string document_source;
+        std::string decode_source;
+        core::i64 offset{};
+    };
+    std::map<doc::NodeId, TimelineDecodeSource> timeline_decode_sources{};
+    // The newest decode-residency snapshot, held while the scheduler is busy.
+    std::vector<std::string> timeline_ready_sources{};
+    std::vector<render::MediaReadyFrames> timeline_ready_frames{};
+#endif
 
     // Runs until stopped, closed or out of run frames; returns the exit code.
     [[nodiscard]] int run();
@@ -501,6 +515,7 @@ struct DirectorShowLoop final {
     [[nodiscard]] PhaseExit observe_library_thumbnails(EditorViewInputs &inputs);
     [[nodiscard]] PhaseExit
     observe_timeline_filmstrips(EditorViewInputs &inputs);
+    void observe_timeline_playback(DirectorTick &tick, EditorViewInputs &inputs);
     [[nodiscard]] PhaseExit project_output_media(DirectorTick &tick);
     [[nodiscard]] PhaseExit
     apply_editor_services(EditorViewInputs &inputs,

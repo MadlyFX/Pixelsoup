@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/core/result.hpp>
@@ -203,6 +204,13 @@ struct DirectorFrameBarrierLostSessionsReport final {
     std::size_t copied{};
 };
 
+struct DirectorNodePlayhead final {
+    core::u32 node_index{};
+    RuntimePlayhead playhead{};
+
+    bool operator==(const DirectorNodePlayhead&) const = default;
+};
+
 struct DirectorFrameBarrierWaitReport final {
     DirectorFrameBarrierWaitStatus status{
         DirectorFrameBarrierWaitStatus::TimedOut};
@@ -353,6 +361,10 @@ public:
     // that node has no live session, which is itself the answer.
     [[nodiscard]] bool runtime_tracking(
         core::u32 node_index, RuntimeTracking& output) const noexcept;
+    // Where each live node's output last presented, from its newest frame
+    // commit, in node order. A node that has presented nothing yet is left
+    // out. Every live session counts, configured as a Render Server or not.
+    [[nodiscard]] std::vector<DirectorNodePlayhead> runtime_playheads() const;
 
     [[nodiscard]] bool runtime_output_sync(
         core::u32 node_index, RuntimeOutputSync& output) const noexcept;

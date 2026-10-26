@@ -991,8 +991,46 @@ void local_goodbye_uses_next_node_control_sequence() {
 
 } // namespace
 
+void a_commit_carries_the_playhead_the_node_last_presented() {
+    TcpPair pair;
+    command::NodeCommandBus bus;
+    net::NodeResumeSession node{pair.take_node(), bus, node_config()};
+    PeerCapture capture;
+    net::RuntimePlayhead received{};
+    auto peer = std::thread{
+        [socket = pair.take_director(), &capture, &received]() mutable {
+            try {
+                handshake(socket);
+                send_frame_and_wait_prepared(socket, 1U);
+                write_message(
+                    socket, net::SessionMessage{valid_permit(1U, 3U, 9U)});
+                const auto message = read_message(socket);
+                const auto* committed =
+                    std::get_if<net::FrameCommitted>(&message);
+                PERMIT_CHECK(committed != nullptr);
+                received = committed->playhead;
+            } catch (...) {
+                capture.exception = std::current_exception();
+            }
+        }};
+
+    PERMIT_CHECK(node.resume());
+    PERMIT_CHECK(node.receive_live_frame());
+    PERMIT_CHECK(node.receive_commit_permit());
+    // The newest publication before the commit is the one it carries.
+    node.publish_runtime_playhead(net::RuntimePlayhead{true, 11U, 1U, 3U});
+    node.publish_runtime_playhead(net::RuntimePlayhead{true, 2'468U, 7U, 12U});
+    PERMIT_CHECK(node.commit_prepared_frame(command::FrameNumber{1U}));
+    PERMIT_CHECK(node.flush_frame_acknowledgements());
+    finish_peer(peer, capture);
+    PERMIT_CHECK(received == (net::RuntimePlayhead{true, 2'468U, 7U, 12U}));
+    node.close();
+}
+
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
+        {"a commit carries the node's last presented playhead",
+         &a_commit_carries_the_playhead_the_node_last_presented},
         {"exact permit unlocks show-clock commit",
          &exact_permit_unlocks_show_clock_commit},
         {"malformed permit binding closes session", &malformed_binding_is_rejected},

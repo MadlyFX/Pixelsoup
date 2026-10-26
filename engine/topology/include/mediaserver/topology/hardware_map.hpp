@@ -112,6 +112,9 @@ struct HardwareDevice final {
   // primary display. They are applied only when window_mode is not Inherit.
   core::i32 desktop_x{};
   core::i32 desktop_y{};
+  // The Render Server whose playhead the editor's Timeline draws beside its
+  // own. One per show; the Director clears the others when one is chosen.
+  bool main_node{};
 
   bool operator==(const HardwareDevice &) const = default;
 };
@@ -251,6 +254,12 @@ render_server_for_node(const HardwareMap &map, core::u32 node_index) noexcept;
 // in map order.
 [[nodiscard]] std::vector<const HardwareDevice *>
 cluster_render_servers(const HardwareMap &map);
+
+// The node index of the active Render Server marked as the main node, or
+// nothing when none is. Should two be marked - edits from two operators
+// landing together - the lowest document id wins, so every reader agrees.
+[[nodiscard]] std::optional<core::u32>
+main_render_node(const HardwareMap &map) noexcept;
 
 // The lowest node index no Render Server card on the map uses, parked or not,
 // so a newly placed card never starts out sharing one.

@@ -15,6 +15,8 @@ inline constexpr float ruler_height = 22.0F;
 // Markers and cues get a band of their own under the ruler, so dragging one
 // never competes with scrubbing and a name has room to be read.
 inline constexpr float strip_height = 20.0F;
+// The cache bar's thickness along the top of the marker strip.
+inline constexpr float playback_cache_bar_height = 3.0F;
 // Every row - layer, track, or property - is a full list row high, so a
 // toggle or a key diamond is as easy to hit as the name beside it.
 inline constexpr float row_height = list_metrics::row_height;

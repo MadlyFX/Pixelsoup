@@ -26,6 +26,7 @@ inline constexpr std::string_view refresh_denominator = "refresh_denominator";
 inline constexpr std::string_view window_mode = "window_mode";
 inline constexpr std::string_view desktop_x = "desktop_x";
 inline constexpr std::string_view desktop_y = "desktop_y";
+inline constexpr std::string_view main_node = "main_node";
 inline constexpr std::string_view render_server = "render_server";
 inline constexpr std::string_view logical_port = "logical_port";
 inline constexpr std::string_view feed_index = "feed_index";

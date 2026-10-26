@@ -219,6 +219,9 @@ public:
     // next heartbeat, so the Director can tell a node holding a stale pose
     // from one that never received it - which from the wall look identical.
     void publish_runtime_tracking(RuntimeTracking tracking) noexcept;
+    // The frame this node's output last presented complete. Carried on every
+    // frame commit, so the Director's Timeline follows it while it plays.
+    void publish_runtime_playhead(RuntimePlayhead playhead) noexcept;
 
     // Publishes the already-observed Program renderer profile and selected
     // backend. This is an in-memory snapshot; network I/O remains on the

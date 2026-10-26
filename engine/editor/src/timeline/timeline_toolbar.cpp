@@ -54,7 +54,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     right_x = armed_button.x - 8.0F;
   }
   // Everything left of the marker group, measured from the panel's edge.
-  const float left_extent = show_key_tools ? 740.0F : 692.0F;
+  const float left_extent = show_key_tools ? 766.0F : 718.0F;
   constexpr float range_field_width = 96.0F;
   const bool show_range =
       right_x - (toolbar.x + left_extent) >= range_field_width * 2.0F + 12.0F;
@@ -383,6 +383,19 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                   "Add a hold cue at the playhead (Q); Shift+Q adds a loop",
                   theme.accent)) {
     create_marker(p, playhead, scene::CueAction::Hold);
+  }
+  bar_x += icon_button_width + 2.0F;
+  // Playback's own state, after what the operator authors: the cache bar
+  // and the render nodes' playheads.
+  if (fits(bar_x, icon_button_width) &&
+      icon_button(ctx, mix(id_, "playback overlay"),
+                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
+                  gui::Icon::Cache, playback_overlay_,
+                  "Show the frames this machine has decoded ready (green "
+                  "bar) and where each render node is playing (white "
+                  "playheads)",
+                  theme.accent)) {
+    playback_overlay_ = !playback_overlay_;
   }
   bar_x += icon_button_width + 2.0F;
 

@@ -1538,6 +1538,36 @@ class SharedVideoRegistry final {
         callback();
     }
 
+    // `keys` are canonical source keys; an empty key is not a video.
+    [[nodiscard]] bool try_ready_frames(
+        std::span<const std::string> keys,
+        std::vector<MediaReadyFrames> &ready) {
+        std::vector<MediaReadyFrames> result(keys.size());
+        {
+            const std::unique_lock lock{mutex_, std::try_to_lock};
+            if (!lock.owns_lock()) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < keys.size(); ++index) {
+                if (keys[index].empty()) {
+                    continue;
+                }
+                result[index].video = true;
+                for (auto frame = frames_.lower_bound(FrameKey{keys[index], 0U});
+                     frame != frames_.end() &&
+                     frame->first.first == keys[index];
+                     ++frame) {
+                    if (frame->second.frame != nullptr &&
+                        frame->second.frame->valid()) {
+                        result[index].frames.push_back(frame->first.second);
+                    }
+                }
+            }
+        }
+        ready = std::move(result);
+        return true;
+    }
+
     [[nodiscard]] MediaDecodeStats stats() {
         const std::lock_guard lock{mutex_};
         prune_inactive_locked();
@@ -2106,6 +2136,23 @@ std::unique_ptr<MediaSource> make_media_source() {
 }
 
 MediaDecodeStats media_decode_stats() { return video_registry().stats(); }
+
+bool media_decode_ready_frames(std::span<const std::string> sources,
+                               std::vector<MediaReadyFrames> &ready) noexcept {
+    try {
+        // Keyed outside the scheduler lock: normalising is lexical and
+        // touches no file, but it is still work the decoders need not wait on.
+        std::vector<std::string> keys;
+        keys.reserve(sources.size());
+        for (const std::string &source : sources) {
+            keys.push_back(is_video_path(source) ? canonical_source_key(source)
+                                                 : std::string{});
+        }
+        return video_registry().try_ready_frames(keys, ready);
+    } catch (...) {
+        return false;
+    }
+}
 
 void offer_video_decode_device(const rhi::Device &device) noexcept {
     if (!device.capabilities().external_memory) {

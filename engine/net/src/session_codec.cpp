@@ -200,6 +200,15 @@ template <typename Acknowledgement>
         && value.after.through_frame.value() != 0U;
 }
 
+// A node that has presented nothing reports nothing: a position beside
+// `presented == false` would be a frame no output ever showed.
+[[nodiscard]] bool valid_runtime_playhead(
+    const RuntimePlayhead& value) noexcept {
+    return value.presented
+        || (value.show_frame == 0U && value.control_frame == 0U
+            && value.latency_frames == 0U);
+}
+
 [[nodiscard]] bool valid_frame_commit_permit(
     const FrameCommitPermit& value) noexcept {
     return static_cast<bool>(value.session_id)
@@ -616,7 +625,8 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
         valid = valid_frame_acknowledgement(*prepared);
         invalid_error = SessionEncodeError::InvalidFramePrepared;
     } else if (const auto* committed = std::get_if<FrameCommitted>(&message)) {
-        valid = valid_frame_acknowledgement(*committed);
+        valid = valid_frame_acknowledgement(*committed)
+            && valid_runtime_playhead(committed->playhead);
         invalid_error = SessionEncodeError::InvalidFrameCommitted;
     } else if (const auto* permit = std::get_if<FrameCommitPermit>(&message)) {
         valid = valid_frame_commit_permit(*permit);
@@ -772,7 +782,11 @@ core::Result<std::vector<std::byte>, SessionEncodeError> encode_session(
                    &session,
                    committed->sequence,
                    committed->acknowledged_sequence,
-                   &after)
+                   &after,
+                   committed->playhead.presented,
+                   committed->playhead.show_frame,
+                   committed->playhead.control_frame,
+                   committed->playhead.latency_frames)
                    .Union();
     } else if (const auto* permit = std::get_if<FrameCommitPermit>(&message)) {
         const auto session = encode_id(permit->session_id);
@@ -1268,8 +1282,15 @@ core::Result<SessionMessage, SessionDecodeError> decode_session(
             source->sequence(),
             source->acknowledged_sequence(),
             decode_cursor(*source->after()),
+            RuntimePlayhead{
+                source->presented(),
+                source->presented_show_frame(),
+                source->presented_control_frame(),
+                source->presented_latency_frames(),
+            },
         };
-        if (!valid_frame_acknowledgement(value)) {
+        if (!valid_frame_acknowledgement(value)
+            || !valid_runtime_playhead(value.playhead)) {
             return core::Result<SessionMessage, SessionDecodeError>::failure(
                 SessionDecodeError::InvalidFrameCommitted);
         }

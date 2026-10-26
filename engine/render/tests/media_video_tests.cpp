@@ -301,6 +301,35 @@ void two_sources_share_one_in_process_decode() {
     VIDEO_CHECK(render::media_decode_stats().completed_frames - before == 1U);
 }
 
+void ready_frames_report_what_shared_residency_holds() {
+    const auto path = fixture_path("mediaserver_ready_frames_fixture.mp4");
+    write_fixture(path);
+    auto source = render::make_media_source();
+    VIDEO_CHECK(await_frame(*source, path, 4U)->valid());
+    VIDEO_CHECK(await_frame(*source, path, 7U)->valid());
+
+    const std::array<std::string, 2U> sources{path, "still.png"};
+    std::vector<render::MediaReadyFrames> ready;
+    // The query never waits on the scheduler, so a test retries it the way
+    // the Timeline simply asks again next frame.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!render::media_decode_ready_frames(sources, ready)) {
+        VIDEO_CHECK(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    VIDEO_CHECK(ready.size() == 2U);
+    VIDEO_CHECK(ready[0].video);
+    VIDEO_CHECK(std::is_sorted(ready[0].frames.begin(), ready[0].frames.end()));
+    VIDEO_CHECK(std::binary_search(ready[0].frames.begin(),
+                                   ready[0].frames.end(), 4U));
+    VIDEO_CHECK(std::binary_search(ready[0].frames.begin(),
+                                   ready[0].frames.end(), 7U));
+    // Stills are decoded by each cache, never by the shared video scheduler.
+    VIDEO_CHECK(!ready[1].video);
+    VIDEO_CHECK(ready[1].frames.empty());
+}
+
 void two_playheads_on_one_file_keep_independent_decode_continuity() {
     const auto path =
         fixture_path("mediaserver_independent_video_streams_fixture.mp4");
@@ -1085,7 +1114,9 @@ void ten_bit_video_keeps_its_depth() {
                 == rhi::TextureFormat::Rg16Unorm);
 }
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 16U> cases{{
+    {"ready frames report what shared residency holds",
+     &ready_frames_report_what_shared_residency_holds},
     {"speculative publication preserves current frames with a full cache",
      &speculative_publication_preserves_current_frames_with_a_full_cache},
     {"ProRes 422 decodes exact frames", &prores_422_decodes_exact_frames},

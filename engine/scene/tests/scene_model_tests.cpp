@@ -1112,6 +1112,16 @@ void native_media_rate_resamples_show_time_exactly() {
     const core::u32 longest_within = static_cast<core::u32>(
         ((longest / 5U) * 2U) % 97U);
     MODEL_CHECK(frame_at(longest) == 100U + longest_within);
+    // Either side of the last frame whose product still fits in 64 bits,
+    // where the direct quotient hands over to the recurrence: 2/5 of a frame
+    // is (f / 5) * 2 + (f % 5) * 2 / 5 without the product.
+    // The product is the frame times source numerator times show denominator.
+    constexpr core::u64 last_direct = longest / (24'000ULL * 1'001ULL);
+    for (const core::u64 frame : {last_direct, last_direct + 1U}) {
+        const core::u64 elapsed = (frame / 5U) * 2U + (frame % 5U) * 2U / 5U;
+        MODEL_CHECK(frame_at(frame) ==
+                    100U + static_cast<core::u32>(elapsed % 97U));
+    }
 
     // Source rates above the show rate can advance by multiple ordinals at a
     // boundary; the integer quotient portion participates in the same mapping.

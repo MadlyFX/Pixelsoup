@@ -685,6 +685,39 @@ void selected_device_details_author_exact_configuration_properties() {
   MAPPING_CHECK(*broad_value == 32'768);
 }
 
+void a_render_server_is_marked_as_the_timelines_main_node() {
+  HardwareHarness harness;
+  topology::HardwareMap map{};
+  map.devices.push_back(device(
+      6U, topology::HardwareDeviceKind::RenderServer, "Render A", 0, 0));
+  const editor::IsometricProjection projection =
+      editor::hardware_mapping_projection(HardwareHarness::bounds);
+  const editor::IsoPoint card = editor::project_isometric(projection, 0, 0);
+  static_cast<void>(harness.frame(card.x, card.y, false, map));
+  static_cast<void>(harness.frame(card.x, card.y, true, map));
+  static_cast<void>(harness.frame(card.x, card.y, false, map));
+
+  // Name, Host IP, Control and Node index rows start at y=57, 85, 113 and
+  // 140; the Timeline row with the checkbox is at y=167..190.
+  constexpr float main_x = 800.0F;
+  constexpr float main_y = 178.0F;
+  const auto click = [&]() {
+    static_cast<void>(harness.frame(main_x, main_y, false, map));
+    static_cast<void>(harness.frame(main_x, main_y, true, map));
+    return harness.frame(main_x, main_y, false, map);
+  };
+  const auto marked = click();
+  MAPPING_CHECK(marked.property_edit.has_value());
+  MAPPING_CHECK(marked.property_edit->device == doc::NodeId{6U});
+  MAPPING_CHECK(marked.property_edit->property == topology::schema::main_node);
+  MAPPING_CHECK(marked.property_edit->value == doc::PropertyValue{true});
+
+  map.devices.front().main_node = true;
+  const auto cleared = click();
+  MAPPING_CHECK(cleared.property_edit.has_value());
+  MAPPING_CHECK(cleared.property_edit->value == doc::PropertyValue{false});
+}
+
 void project_setup_authors_one_control_port_range() {
   constexpr float control_port_x = 132.0F;
   constexpr float control_port_y = 284.0F;
@@ -818,7 +851,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // The compact mode control cycles from legacy Inherit to an explicitly
   // persisted launch mode.
-  constexpr float window_mode_y = 220.0F;
+  constexpr float window_mode_y = 247.0F;
   static_cast<void>(harness.frame(field_x, window_mode_y, false, map));
   static_cast<void>(harness.frame(field_x, window_mode_y, true, map));
   const auto windowed = harness.frame(field_x, window_mode_y, false, map);
@@ -844,7 +877,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // Desktop coordinates are signed so a display left of the primary can be
   // authored without wrapping through an unsigned value.
-  constexpr float desktop_x_y = 265.0F;
+  constexpr float desktop_x_y = 292.0F;
   static_cast<void>(harness.frame(field_x, desktop_x_y, false, map));
   static_cast<void>(harness.frame(field_x, desktop_x_y, true, map));
   const auto moved_left =
@@ -861,7 +894,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
 
   // New values remain bounded to presenter limits, so scrubbing repairs the
   // retained legacy value instead of authoring another oversized value.
-  constexpr float width_y = 318.0F;
+  constexpr float width_y = 345.0F;
   static_cast<void>(harness.frame(field_x, width_y, false, map));
   static_cast<void>(harness.frame(field_x, width_y, true, map));
   const auto width_clamped =
@@ -875,7 +908,7 @@ void render_server_details_author_launch_geometry_and_not_control_targets() {
   MAPPING_CHECK(*width == topology::max_hardware_output_width);
   static_cast<void>(harness.frame(field_x + 10'000.0F, width_y, false, map));
 
-  constexpr float height_y = 345.0F;
+  constexpr float height_y = 372.0F;
   static_cast<void>(harness.frame(field_x, height_y, false, map));
   static_cast<void>(harness.frame(field_x, height_y, true, map));
   const auto height_clamped =
@@ -938,7 +971,7 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
   topology::HardwareOutputBinding authored = created;
   authored.node = doc::NodeId{77U};
   map.output_bindings.push_back(authored);
-  constexpr float binding_row_y = 197.0F;
+  constexpr float binding_row_y = 224.0F;
   static_cast<void>(harness.runtime_frame(details_x, binding_row_y, false,
                                           map, two_outputs));
   static_cast<void>(harness.runtime_frame(details_x, binding_row_y, true,
@@ -948,7 +981,7 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
 
   // The selected binding owns an exact feed field instead of inferring the
   // feed from display order.
-  constexpr float feed_y = 245.0F;
+  constexpr float feed_y = 272.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, feed_y, false, map, two_outputs));
   static_cast<void>(
@@ -964,9 +997,9 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
 
   // Precision belongs to this physical output; editing it preserves its target.
   for (const core::u32 depth : {10U, 16U, 8U}) {
-    static_cast<void>(harness.runtime_frame(details_x, 299.0F, false, map, two_outputs));
-    static_cast<void>(harness.runtime_frame(details_x, 299.0F, true, map, two_outputs));
-    const auto changed = harness.runtime_frame(details_x, 299.0F, false, map, two_outputs);
+    static_cast<void>(harness.runtime_frame(details_x, 326.0F, false, map, two_outputs));
+    static_cast<void>(harness.runtime_frame(details_x, 326.0F, true, map, two_outputs));
+    const auto changed = harness.runtime_frame(details_x, 326.0F, false, map, two_outputs);
     MAPPING_CHECK(changed.output_binding_edit.has_value());
     MAPPING_CHECK(changed.output_binding_edit->binding.output_bit_depth == depth);
     MAPPING_CHECK(changed.output_binding_edit->binding.target == authored.target);
@@ -978,7 +1011,7 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
   topology::HardwareRuntimeSnapshot replacement = render_runtime(1U, 1U);
   replacement.nodes[0U].video_outputs[0U] =
       two_outputs.nodes[0U].video_outputs[1U];
-  constexpr float repair_y = 435.0F;
+  constexpr float repair_y = 462.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, repair_y, false, map, replacement));
   static_cast<void>(
@@ -2619,7 +2652,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 50U> cases{{
+constexpr std::array<Case, 51U> cases{{
     {"UV mesh source crop is hidden while destination stays editable",
      &imported_mesh_hides_source_crop_but_keeps_destination_fields},
     {"numeric rectangles release focus when removed or hidden",
@@ -2655,6 +2688,8 @@ constexpr std::array<Case, 50U> cases{{
      &selected_hardware_objects_return_safe_delete_requests},
     {"selected device details author exact configuration properties",
      &selected_device_details_author_exact_configuration_properties},
+    {"a render server is marked as the Timeline's main node",
+     &a_render_server_is_marked_as_the_timelines_main_node},
     {"project setup authors one control port range",
      &project_setup_authors_one_control_port_range},
     {"render server details author launch geometry not control targets",

@@ -420,6 +420,40 @@ one click and preserve Loop. If a local Preview playhead is outside the old
 range, the other endpoint moves only as far as needed to keep the new range
 valid.
 
+### Cache bar and render-node playheads
+
+A green bar along the top of the marker strip marks frames this editor
+machine has already decoded, much like a RAM-preview bar. A frame is green
+when every video playing on it has its picture decoded and in memory, so it
+will play without waiting on the decoder. Frames with no video on them are
+never green, and stills and image sequences don't count. The bar covers about
+300 frames either side of the playhead. The editor keeps only a few dozen
+decoded frames (48 at most, fewer at 4K) and reads three frames ahead, so the
+bar usually runs a little ahead of the playhead and leaves a short trail
+behind it. A clip just placed or scrubbed to stays uncoloured until its
+frames are decoded.
+
+One render node's position is drawn as a thin white playhead, with a small
+tag on the ruler's lower edge. To choose the node, select its Render Server
+card in Hardware Map and tick **Main node** on the Timeline row under Node
+index. The first Render Server placed in a show is ticked for you. A show has
+one main node, so ticking it on one card clears it on the
+others, and one undo puts the previous choice back. The card must be cabled
+(or have an output) to count. With no main node chosen, the playhead appears
+only when exactly one node is connected.
+
+A node shows its pictures a little after the editor, by its output buffer
+(twelve frames by default), and further behind after it misses frames. Its
+playhead therefore trails the editor's while the show plays and meets it when
+the show stops. It appears once the node has put a complete frame on its
+outputs. Hover the tag to see the node's name, the frame it is showing, and
+how many received frames it still has to show. The node playhead appears only
+while the Stage shows the scene that is on Program.
+
+The playhead-over-bar button after the cue button in the Timeline toolbar
+turns both overlays on and off. The bar describes this machine only: it says
+nothing about what a render node has decoded.
+
 On a media layer row the Timeline draws that placement as a bar:
 
 - With **Selection (`V`)**, **drag the bar** to move the clip. **Drag either
@@ -833,7 +867,10 @@ Server no cable touches and no output binding names reads `PARKED` on the map -
 an alternative or future configuration - and is never launched, never holds the
 Program gate or the asset cohort for the rest of the cluster, and cannot make a
 cabled card's node index a duplicate. A newly placed card takes the next free
-node index. Display targets are observations, not persistent
+node index. **Main node**, under Node index, chooses the one render node whose
+playhead the Timeline draws beside the editor's; a parked card is never the
+main node. The first Render Server placed in a show starts ticked; later
+cards start unticked. Display targets are observations, not persistent
 project state; on Windows they are active DisplayConfig targets, not a promise
 of unused physical connectors.
 

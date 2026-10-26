@@ -11,6 +11,7 @@
 #include "proxy_generation_service.hpp"
 #include "renderer_lockstep.hpp"
 #include "thumbnail_service.hpp"
+#include "timeline_playback_cache.hpp"
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative.hpp>
@@ -34,6 +35,7 @@
 #include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/render/environment_cache.hpp>
 #include <mediaserver/render/hybrid_scene_renderer.hpp>
+#include <mediaserver/render/media_source.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/linked_publication.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
@@ -847,6 +849,7 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
                                input.control_frame.value(),
                                timeline.program_frame,
                                director_node_tracking);
+        observe_timeline_playback(tick, inputs);
         next_editor_refresh = Clock::now() + editor_refresh_interval;
         auto editor_frame = editor->frame(
             scene_frame, timeline, keyframes, elements, effects,
@@ -1558,6 +1561,169 @@ PhaseExit DirectorShowLoop::observe_library_thumbnails(EditorViewInputs &inputs)
         }
     }
     return std::nullopt;
+}
+
+void DirectorShowLoop::observe_timeline_playback(DirectorTick &tick,
+                                                 EditorViewInputs &inputs) {
+    const auto &stage_clips = inputs.stage_clips;
+    auto &timeline = inputs.timeline;
+    const scene::SceneTime rate{0U, timeline.rate_numerator,
+                                timeline.rate_denominator};
+    try {
+        // A placement on air names the file it really decodes - a proxy, or
+        // a source the asset overlay moved - and its numbering in that file.
+        for (const scene::MediaInstance &instance :
+             tick.stage_scene_frame.media) {
+            const auto clip = std::find_if(
+                stage_clips.begin(), stage_clips.end(),
+                [&](const scene::ClipPlacement &candidate) noexcept {
+                    return candidate.node == instance.source_node;
+                });
+            if (clip == stage_clips.end() || instance.offline) {
+                continue;
+            }
+            const core::u32 document_frame = scene::clip_source_frame(
+                *clip, rate, tick.stage_show_frame.value());
+            timeline_decode_sources[clip->node] = TimelineDecodeSource{
+                clip->source, instance.source,
+                static_cast<core::i64>(instance.frame_index) -
+                    static_cast<core::i64>(document_frame)};
+        }
+        std::erase_if(timeline_decode_sources, [&](const auto &entry) {
+            const auto clip = std::find_if(
+                stage_clips.begin(), stage_clips.end(),
+                [&](const scene::ClipPlacement &candidate) noexcept {
+                    return candidate.node == entry.first;
+                });
+            return clip == stage_clips.end() ||
+                   clip->source != entry.second.document_source;
+        });
+
+        // The window the bar can say anything about. Decode residency holds
+        // a few hundred frames at most, so a wider one only costs time.
+        constexpr core::u64 window_frames = 300U;
+        const core::u64 first_frame =
+            std::min(timeline.first_frame, timeline.last_frame);
+        const core::u64 last_frame =
+            std::max(timeline.first_frame, timeline.last_frame);
+        const core::u64 playhead =
+            std::clamp(timeline.show_frame, first_frame, last_frame);
+        const core::u64 window_first = std::max(
+            first_frame, playhead > window_frames ? playhead - window_frames
+                                                  : core::u64{0U});
+        const core::u64 window_last =
+            std::min(last_frame, playhead + window_frames);
+
+        // Only clips something would draw. A hidden clip or a muted track
+        // decodes nothing, and must not mark its frames as waiting.
+        struct Candidate final {
+            const scene::ClipPlacement *clip{};
+            std::string source;
+            core::i64 offset{};
+        };
+        std::vector<Candidate> candidates;
+        std::vector<std::string> sources;
+        for (const scene::ClipPlacement &clip : stage_clips) {
+            const auto element = std::find_if(
+                inputs.elements.begin(), inputs.elements.end(),
+                [&](const editor::ElementInfo &info) noexcept {
+                    return info.node == clip.node;
+                });
+            if (element != inputs.elements.end() &&
+                !element->effective_visible) {
+                continue;
+            }
+            const auto lane = std::find_if(
+                inputs.stage_lanes.begin(), inputs.stage_lanes.end(),
+                [&](const scene::TimelineLane &candidate) noexcept {
+                    return candidate.id == clip.lane;
+                });
+            if (lane != inputs.stage_lanes.end() && lane->muted) {
+                continue;
+            }
+            if (clip.timing.placed()) {
+                const core::i64 end = clip.timing.start + clip.timing.duration;
+                if (end <= static_cast<core::i64>(window_first) ||
+                    clip.timing.start > static_cast<core::i64>(window_last)) {
+                    continue;
+                }
+            }
+            const auto decoded = timeline_decode_sources.find(clip.node);
+            Candidate candidate{&clip, clip.source, 0};
+            if (decoded != timeline_decode_sources.end()) {
+                candidate.source = decoded->second.decode_source;
+                candidate.offset = decoded->second.offset;
+            }
+            if (std::find(sources.begin(), sources.end(), candidate.source) ==
+                sources.end()) {
+                sources.push_back(candidate.source);
+            }
+            candidates.push_back(std::move(candidate));
+        }
+        // A busy scheduler leaves the previous snapshot standing; it is a
+        // frame old, which is all the bar can claim anyway.
+        std::vector<render::MediaReadyFrames> ready;
+        if (render::media_decode_ready_frames(sources, ready)) {
+            timeline_ready_sources = std::move(sources);
+            timeline_ready_frames = std::move(ready);
+        }
+        std::vector<BufferedClip> videos;
+        videos.reserve(candidates.size());
+        for (const Candidate &candidate : candidates) {
+            const auto found =
+                std::find(timeline_ready_sources.begin(),
+                          timeline_ready_sources.end(), candidate.source);
+            if (found == timeline_ready_sources.end()) {
+                continue;
+            }
+            const render::MediaReadyFrames &frames =
+                timeline_ready_frames[static_cast<std::size_t>(
+                    found - timeline_ready_sources.begin())];
+            if (!frames.video) {
+                continue;
+            }
+            videos.push_back(
+                BufferedClip{candidate.clip, frames.frames, candidate.offset});
+        }
+        for (const ShowFrameRun &run :
+             buffered_show_frames(videos, rate, window_first, window_last)) {
+            timeline.buffered.push_back(
+                editor::TimelineFrameRun{run.first, run.last});
+        }
+    } catch (const std::bad_alloc &) {
+        timeline.buffered.clear();
+        std::cerr << "could not project the Timeline cache bar\n";
+    }
+
+    // The nodes play Program. Their position belongs on this timeline only
+    // while the Stage shows that same scene. One playhead, not one per node:
+    // the Render Server marked as the main node in Hardware Map, or the only
+    // live node when none is marked.
+    if (tick.stage_scene_frame.id == tick.scene_frame.id) {
+        try {
+            const std::vector<net::DirectorNodePlayhead> live =
+                barrier.runtime_playheads();
+            const std::optional<core::u32> main =
+                topology::main_render_node(tick.hardware_map);
+            const auto shown = std::find_if(
+                live.begin(), live.end(),
+                [&](const net::DirectorNodePlayhead &node) noexcept {
+                    return main.has_value() ? node.node_index == *main
+                                            : live.size() == 1U;
+                });
+            if (shown != live.end()) {
+                timeline.node_playheads.push_back(editor::TimelineNodePlayhead{
+                    shown->node_index,
+                    lifecycle_controller
+                        ? lifecycle_controller->node_name(shown->node_index)
+                        : std::string{},
+                    shown->playhead.show_frame,
+                    shown->playhead.latency_frames});
+            }
+        } catch (const std::bad_alloc &) {
+            timeline.node_playheads.clear();
+        }
+    }
 }
 
 PhaseExit DirectorShowLoop::observe_timeline_filmstrips(

@@ -1725,6 +1725,17 @@ ClusterLifecycleController::tracking_snapshot(
     return rows;
 }
 
+std::string ClusterLifecycleController::node_name(core::u32 node_index) const {
+    const std::lock_guard lock{state_->mutex};
+    for (const auto& [id, entry] : state_->entries) {
+        static_cast<void>(id);
+        if (entry.node_index == node_index) {
+            return entry.name;
+        }
+    }
+    return {};
+}
+
 namespace {
 
 // The runtime vocabulary translated into the panel's. Kept here because this

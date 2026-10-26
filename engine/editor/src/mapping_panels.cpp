@@ -2820,6 +2820,22 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     selected_device->node_index, 0U,
                     topology::max_hardware_node_index);
         y += 27.0F;
+        {
+          // Whose playhead the Timeline draws beside the editor's.
+          const gui::Rect main_bounds = labelled_bounds("Timeline");
+          bool main = selected_device->main_node;
+          if (ctx.checkbox(mix(id_, "hardware.details.main-node",
+                               details_node_.value()),
+                           main_bounds, main, "Main node")) {
+            frame.property_edit = HardwarePropertyEdit{
+                details_node_, std::string{topology::schema::main_node},
+                doc::PropertyValue{main}};
+          }
+          ctx.tooltip(main_bounds,
+                      "Show this node's playhead on the Timeline. One node "
+                      "per show; choosing it clears the others.");
+          y += 27.0F;
+        }
         std::vector<const topology::HardwareOutputBinding *> bindings;
         for (const topology::HardwareOutputBinding &binding :
              map.output_bindings) {

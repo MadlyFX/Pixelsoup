@@ -517,6 +517,13 @@ read_luma_key(Reader& reader) noexcept {
     const core::u64 denominator =
         static_cast<core::u64>(source_rate.denominator) *
         static_cast<core::u64>(time.rate_numerator);
+    // Every show a person will run keeps the product inside 64 bits, where
+    // the same exact quotient is one division. The recurrence below is for
+    // the frames that would overflow it.
+    if (time.frame <= std::numeric_limits<core::u64>::max() / numerator) {
+        return static_cast<core::u32>(
+            (time.frame * numerator / denominator) % sequence_count);
+    }
     const core::u64 quotient_step = numerator / denominator;
     const core::u64 remainder_step = numerator % denominator;
     const core::u64 modulus = sequence_count;
@@ -3539,6 +3546,12 @@ std::vector<TrackingSource> SceneModel::tracking_sources() const {
         sources.push_back(TrackingSource{id, source->name, source->settings});
     }
     return sources;
+}
+
+core::u32 clip_source_frame(const ClipPlacement& clip, SceneTime time,
+                            core::u64 show_frame) noexcept {
+    return clip_frame_at(time, show_frame, clip.timing, clip.frame_rate,
+                         clip.sequence_start, clip.sequence_count);
 }
 
 std::vector<ClipPlacement> SceneModel::clips(SceneId scene_id) const {

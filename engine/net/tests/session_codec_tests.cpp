@@ -144,7 +144,9 @@ void check(bool condition, const char* expression, int line) {
 }
 
 [[nodiscard]] net::FrameCommitted frame_committed() {
-    return net::FrameCommitted{id(4U), 12U, 7U, cursor(11U, 22U, 32U)};
+    // A node a dozen control frames behind what it holds, on show frame 1234.
+    return net::FrameCommitted{id(4U), 12U, 7U, cursor(11U, 22U, 32U),
+                               net::RuntimePlayhead{true, 1'234U, 5'678U, 13U}};
 }
 
 [[nodiscard]] net::FrameCommitPermit frame_commit_permit() {
@@ -735,6 +737,15 @@ void invalid_public_semantics_are_rejected() {
     SESSION_CHECK(!result.has_value());
     SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidFrameCommitted);
 
+    // A position beside "presented nothing" names a frame no output showed.
+    committed = frame_committed();
+    committed.playhead.presented = false;
+    result = net::encode_session(net::SessionMessage{committed});
+    SESSION_CHECK(!result.has_value());
+    SESSION_CHECK(result.error() == net::SessionEncodeError::InvalidFrameCommitted);
+    committed.playhead = net::RuntimePlayhead{};
+    SESSION_CHECK(net::encode_session(net::SessionMessage{committed}).has_value());
+
     decoded = net::decode_session(raw_prepared_with_zero_acknowledged_sequence());
     SESSION_CHECK(!decoded.has_value());
     SESSION_CHECK(decoded.error() == net::SessionDecodeError::InvalidFramePrepared);
@@ -1275,9 +1286,9 @@ void current_version_messages_match_frozen_goldens() {
         "6c000000180000004d534e500000000000000a000c000600050008000a00000000080b00100000000c003c0004002c00"
         "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
         "0b000000000000000700000000000000",
-        "6c000000180000004d534e500000000000000a000c000600050008000a00000000090b00100000000c003c0004002c00"
-        "340014000c000000807060504030201004000000000000000b0000000000000016000000000000002000000000000000"
-        "0c000000000000000700000000000000",
+        "8c000000140000004d534e5000000a000c000600050008000a00000000090b0018000000140058000800300038001800"
+        "07004000480050001400000000000001807060504030201004000000000000000b000000000000001600000000000000"
+        "20000000000000000c000000000000000700000000000000d2040000000000002e160000000000000d00000000000000",
         "a4000000180000004d534e500000000000000a000e000600050008000a000000000a0b0018000000000012006c000400"
         "140054005c00640024003c00120000008070605040302010040000000000000080706050403020100500000000000000"
         "0a0000000000000014000000000000001e000000000000000b0000000000000016000000000000002000000000000000"

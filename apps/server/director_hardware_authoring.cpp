@@ -106,14 +106,25 @@ schedule_hardware_place(cmd::DirectorScheduler &scheduler,
     // started with: that is the identity it will answer to.
     topology::HardwareMapModel model;
     model.reset(scheduler.projected_document());
+    const topology::HardwareMap map = model.evaluate();
     const core::u32 node_index =
-        request.machine.has_value()
-            ? request.machine->node_index
-            : topology::next_free_node_index(model.evaluate());
+        request.machine.has_value() ? request.machine->node_index
+                                    : topology::next_free_node_index(map);
+    doc::Node device = make_hardware_device(id, request, node_index);
+    // The show's first Render Server is its main node, so the Timeline has a
+    // node playhead without a trip to the checkbox. Later cards start off.
+    if (request.kind == topology::HardwareDeviceKind::RenderServer &&
+        std::none_of(map.devices.begin(), map.devices.end(),
+                     [](const topology::HardwareDevice &existing) noexcept {
+                         return existing.kind ==
+                                topology::HardwareDeviceKind::RenderServer;
+                     })) {
+        device.properties.insert_or_assign(
+            std::string{topology::schema::main_node}, doc::PropertyValue{true});
+    }
     return static_cast<bool>(scheduler.schedule_edit(
-        cmd::PutNode{make_hardware_device(id, request, node_index)},
-        cmd::EraseNode{id}, cmd::UndoContextId{3U},
-        cmd::TransactionId{request.gesture}, apply_at));
+        cmd::PutNode{std::move(device)}, cmd::EraseNode{id},
+        cmd::UndoContextId{3U}, cmd::TransactionId{request.gesture}, apply_at));
 }
 
 [[nodiscard]] bool
@@ -190,7 +201,8 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         edit.property == topology::schema::refresh_denominator ||
         edit.property == topology::schema::window_mode ||
         edit.property == topology::schema::desktop_x ||
-        edit.property == topology::schema::desktop_y;
+        edit.property == topology::schema::desktop_y ||
+        edit.property == topology::schema::main_node;
     const doc::Node *const existing =
         scheduler.projected_document().get(edit.device);
     if (!allowed || existing == nullptr ||
@@ -202,7 +214,8 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         edit.property == topology::schema::node_index ||
         edit.property == topology::schema::window_mode ||
         edit.property == topology::schema::desktop_x ||
-        edit.property == topology::schema::desktop_y;
+        edit.property == topology::schema::desktop_y ||
+        edit.property == topology::schema::main_node;
     const auto kind =
         existing->properties.find(std::string{topology::schema::kind});
     const auto *const kind_text = kind != existing->properties.end()
@@ -212,6 +225,41 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         (kind_text == nullptr ||
          *kind_text != topology::schema::render_server_kind)) {
         return true;
+    }
+    if (edit.property == topology::schema::main_node &&
+        std::get_if<bool>(&edit.value) == nullptr) {
+        return true;
+    }
+    // One main node per show: choosing one clears every other in the same
+    // transaction, so a single undo puts the previous choice back.
+    if (edit.property == topology::schema::main_node &&
+        std::get<bool>(edit.value)) {
+        const doc::Delta contents =
+            doc::diff(doc::Root{}, scheduler.projected_document());
+        for (const doc::NodeChange &change : contents.changes) {
+            const doc::Node *const other = change.after.get();
+            if (other == nullptr || other->id == edit.device ||
+                other->type != topology::schema::device_type) {
+                continue;
+            }
+            const auto flag = other->properties.find(
+                std::string{topology::schema::main_node});
+            if (flag == other->properties.end() ||
+                std::get_if<bool>(&flag->second) == nullptr ||
+                !std::get<bool>(flag->second)) {
+                continue;
+            }
+            doc::Node cleared = *other;
+            cleared.properties.insert_or_assign(
+                std::string{topology::schema::main_node},
+                doc::PropertyValue{false});
+            if (!scheduler.schedule_edit(
+                    cmd::PutNode{std::move(cleared)}, cmd::PutNode{*other},
+                    cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture},
+                    apply_at)) {
+                return false;
+            }
+        }
     }
     doc::Node updated = *existing;
     updated.properties.insert_or_assign(edit.property, edit.value);

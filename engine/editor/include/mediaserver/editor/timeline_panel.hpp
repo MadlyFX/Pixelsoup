@@ -78,6 +78,28 @@ enum class TransportRequest : core::u8 {
   Go,
 };
 
+// An inclusive run of show frames, `first` <= `last`.
+struct TimelineFrameRun final {
+  core::u64 first{};
+  core::u64 last{};
+
+  bool operator==(const TimelineFrameRun &) const = default;
+};
+
+// Where one render node's output last put a complete frame on screen. A node
+// presents behind the Director by its decode headroom, and further behind
+// after an underrun, so it is drawn as its own playhead rather than assumed to
+// sit under the editor's. `latency_frames` is how far it trails the newest
+// frame it has received.
+struct TimelineNodePlayhead final {
+  core::u32 node_index{};
+  std::string name;
+  core::u64 show_frame{};
+  core::u64 latency_frames{};
+
+  bool operator==(const TimelineNodePlayhead &) const = default;
+};
+
 // Where the editor is in time. It is passed in each frame because transport
 // owns it; the timeline only reflects it and asks to seek or change its range.
 //
@@ -112,6 +134,16 @@ struct EditorTimeline final {
   std::optional<core::u64> frames_to_next_cue;
   // Frames until the Loop cue holding out its wait goes round.
   std::optional<core::u64> frames_to_loop_restart;
+  // Show frames of the scene on the Stage whose video this machine has
+  // already decoded and holds ready, ascending and disjoint - the editor's
+  // equivalent of a RAM preview bar. A frame with no video on it needs
+  // nothing decoded and is never listed. Machine-local runtime truth: it says
+  // nothing about what a render node holds.
+  std::vector<TimelineFrameRun> buffered;
+  // Each live render node's playhead, when the Stage shows the scene on
+  // Program. Empty while rehearsing another scene, where the nodes' position
+  // belongs to a different timeline.
+  std::vector<TimelineNodePlayhead> node_playheads;
 };
 
 // The marker palette. The document stores the index; the editor owns the hue,
@@ -723,6 +755,10 @@ public:
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
+  // Whether the cache bar and the render nodes' playheads are drawn.
+  [[nodiscard]] bool playback_overlay_enabled() const noexcept {
+    return playback_overlay_;
+  }
   [[nodiscard]] std::string_view search() const noexcept { return search_; }
   [[nodiscard]] std::span<const doc::NodeId> selected_markers() const noexcept {
     return markers_.selected;
@@ -779,6 +815,9 @@ private:
   void resolve_track_drop(Pass &p);
   void finish_marquee(Pass &p);
   void draw_time_overlays(Pass &p);
+  // The cache bar along the top of the marker strip and each render node's
+  // playhead, under the editor's own.
+  void draw_playback_overlay(Pass &p);
   void commit_key_drag(Pass &p);
   void draw_key_tools(Pass &p);
   void draw_rate_menu(Pass &p);
@@ -994,6 +1033,8 @@ private:
 
   bool snapping_{true};
   bool graph_mode_{};
+  // The cache bar and node playheads. A view preference, like snapping.
+  bool playback_overlay_{true};
   // The KEYS popup and its time-scale fields.
   struct KeyToolsState final {
     bool open{};

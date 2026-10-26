@@ -184,6 +184,8 @@ enum class Icon : core::u8 {
     Details,
     // Two overlapping frames: make a copy.
     Duplicate,
+    // A playhead over a part-filled time bar: what playback has cached.
+    Cache,
 };
 void draw_icon(
     UiDrawList& list,

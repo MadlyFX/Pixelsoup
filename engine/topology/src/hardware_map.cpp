@@ -247,6 +247,19 @@ RenderServerLookup render_server_for_node(const HardwareMap &map,
   return result;
 }
 
+std::optional<core::u32> main_render_node(const HardwareMap &map) noexcept {
+  const HardwareDevice *main{};
+  for (const HardwareDevice &device : map.devices) {
+    if (device.kind == HardwareDeviceKind::RenderServer && device.main_node &&
+        render_server_active(map, device) &&
+        (main == nullptr || device.node < main->node)) {
+      main = &device;
+    }
+  }
+  return main != nullptr ? std::optional<core::u32>{main->node_index}
+                         : std::nullopt;
+}
+
 std::vector<const HardwareDevice *>
 cluster_render_servers(const HardwareMap &map) {
   std::vector<const HardwareDevice *> members;
@@ -297,6 +310,7 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_byte(hash, static_cast<core::u8>(device.window_mode));
     hash_i32(hash, device.desktop_x);
     hash_i32(hash, device.desktop_y);
+    hash_byte(hash, device.main_node ? 1U : 0U);
   }
   hash_u64(hash, static_cast<core::u64>(map.links.size()));
   for (const HardwareLink &link : map.links) {

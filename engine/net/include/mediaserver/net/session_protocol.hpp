@@ -165,13 +165,30 @@ struct FramePrepared final {
     bool operator==(const FramePrepared&) const = default;
 };
 
+// Where one node's output stands in the show: the last frame it put on screen
+// complete. An output node presents behind the control stream by its decode
+// headroom, and further behind after an underrun, so this is not the
+// Director's playhead. `latency_frames` is how many control frames the node
+// had received beyond the one it presented. Diagnostics only; it never
+// authorizes or holds a release.
+struct RuntimePlayhead final {
+    bool presented{};
+    core::u64 show_frame{};
+    core::u64 control_frame{};
+    core::u64 latency_frames{};
+
+    bool operator==(const RuntimePlayhead&) const = default;
+};
+
 // A node-to-Director acknowledgement that the referenced staged frame became
-// visible at the node's show-clock boundary.
+// visible at the node's show-clock boundary. It carries the node's playhead
+// because a commit is sent every frame, where the heartbeat is seconds apart.
 struct FrameCommitted final {
     Id128 session_id;
     core::u64 sequence{};
     core::u64 acknowledged_sequence{};
     cmd::StreamCursor after;
+    RuntimePlayhead playhead;
 
     bool operator==(const FrameCommitted&) const = default;
 };

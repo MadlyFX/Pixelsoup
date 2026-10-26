@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
+#include <optional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -595,12 +596,71 @@ void device_capacity_is_bounded_and_deterministic() {
                  topology::digest(map));
 }
 
+void the_main_node_is_one_active_render_server() {
+  const auto flag = [](bool value) {
+    return Property{std::string{schema::main_node}, doc::PropertyValue{value}};
+  };
+  // Two linked Render Servers, on node indices 2 and 5; the second is the
+  // eighth node in the list, after the chain and its links.
+  auto nodes = configured_chain();
+  doc::Node second = device(5U, schema::render_server_kind, "Render B", 0, 2);
+  second.properties.insert_or_assign(std::string{schema::node_index},
+                                     doc::PropertyValue{std::int64_t{5}});
+  nodes.push_back(second);
+  // Its control input is cabled from the operator machine.
+  nodes.push_back(link(14U, 1U, 0U, 5U, 0U));
+
+  topology::HardwareMapModel unmarked;
+  unmarked.reset(root_of(nodes));
+  TOPOLOGY_CHECK(!topology::main_render_node(unmarked.evaluate()).has_value());
+  const auto reference = topology::digest(unmarked.evaluate());
+
+  auto marked_nodes = nodes;
+  marked_nodes[7U].properties.insert(flag(true));
+  topology::HardwareMapModel marked;
+  marked.reset(root_of(marked_nodes));
+  TOPOLOGY_CHECK(marked.counters().rejected == 0U);
+  TOPOLOGY_CHECK(topology::main_render_node(marked.evaluate()) ==
+                 std::optional<core::u32>{5U});
+  TOPOLOGY_CHECK(topology::digest(marked.evaluate()) != reference);
+
+  // Two marked at once: the lower document id wins on every reader.
+  marked_nodes[1U].properties.insert(flag(true));
+  topology::HardwareMapModel both;
+  both.reset(root_of(marked_nodes));
+  TOPOLOGY_CHECK(topology::main_render_node(both.evaluate()) ==
+                 std::optional<core::u32>{2U});
+
+  // Only a Render Server can be one, and only while it is connected.
+  auto other_kind = nodes;
+  other_kind[2U].properties.insert(flag(true));
+  topology::HardwareMapModel processor;
+  processor.reset(root_of(other_kind));
+  TOPOLOGY_CHECK(!topology::main_render_node(processor.evaluate()).has_value());
+  auto unlinked = nodes;
+  unlinked.pop_back();
+  unlinked[7U].properties.insert(flag(true));
+  topology::HardwareMapModel spare;
+  spare.reset(root_of(unlinked));
+  TOPOLOGY_CHECK(!topology::main_render_node(spare.evaluate()).has_value());
+
+  // A flag that is not a boolean is malformed.
+  auto wrong = nodes;
+  wrong[7U].properties.insert_or_assign(std::string{schema::main_node},
+                                        doc::PropertyValue{std::int64_t{1}});
+  topology::HardwareMapModel rejected;
+  rejected.reset(root_of(wrong));
+  TOPOLOGY_CHECK(rejected.counters().rejected == 1U);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 14U> cases{{
+    {"the main node is one active render server",
+     &the_main_node_is_one_active_render_server},
     {"a document becomes the configured hardware chain",
      &a_document_becomes_the_configured_hardware_chain},
     {"checkpoint and streamed deltas agree",

@@ -1728,10 +1728,41 @@ void a_catching_up_session_joins_the_cut_within_the_prepared_lag() {
         fixture.barrier.node_connection(node_index).committed_frame == 9U);
 }
 
+void a_committed_acknowledgement_reports_the_nodes_playhead() {
+    Fixture fixture;
+    BARRIER_CHECK(fixture.barrier.register_live(
+        registration(10U, 20U, genesis_cursor())));
+    // Live and silent: a session, but nothing presented yet.
+    BARRIER_CHECK(fixture.barrier.runtime_playheads().empty());
+
+    auto first = fixture.seal(1U);
+    const auto after = first.seal.frame.after_cursor();
+    // Only a commit says where the wall is; Prepared is staging.
+    auto prepared = acknowledgement(
+        net::FrameAcknowledgementKind::Prepared, 2U, 1U, after);
+    prepared.playhead = net::RuntimePlayhead{true, 999U, 998U, 1U};
+    BARRIER_CHECK(fixture.barrier.on_ack(id(10U), prepared));
+    BARRIER_CHECK(fixture.barrier.runtime_playheads().empty());
+
+    auto committed = acknowledgement(
+        net::FrameAcknowledgementKind::Committed, 3U, 1U, after);
+    committed.playhead = net::RuntimePlayhead{true, 4'321U, 77U, 11U};
+    BARRIER_CHECK(fixture.barrier.on_ack(id(10U), committed));
+    const std::vector<net::DirectorNodePlayhead> expected{
+        {20U, net::RuntimePlayhead{true, 4'321U, 77U, 11U}}};
+    BARRIER_CHECK(fixture.barrier.runtime_playheads() == expected);
+
+    fixture.barrier.unregister(
+        id(10U), net::DirectorSessionLeaveReason::SessionFailure);
+    BARRIER_CHECK(fixture.barrier.runtime_playheads().empty());
+}
+
 } // namespace
 
 int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests{
+        {"committed acknowledgement reports the node playhead",
+         &a_committed_acknowledgement_reports_the_nodes_playhead},
         {"exact cohort retains lost generation",
          &exact_cohort_retains_a_lost_generation},
         {"prepared and committed phases",

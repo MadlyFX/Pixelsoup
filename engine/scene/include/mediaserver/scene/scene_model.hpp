@@ -128,6 +128,13 @@ struct ClipPlacement final {
     bool operator==(const ClipPlacement&) const = default;
 };
 
+// Which source frame `clip` shows at `show_frame`, by the same mapping the
+// drawing and warm-up paths use. `time` supplies the show rate; its frame is
+// not read.
+[[nodiscard]] core::u32 clip_source_frame(const ClipPlacement& clip,
+                                          SceneTime time,
+                                          core::u64 show_frame) noexcept;
+
 class SceneModel final {
 public:
     SceneModel() = default;

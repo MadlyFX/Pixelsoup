@@ -201,6 +201,8 @@ struct FrameAcknowledgementReport final {
     cmd::StreamCursor after{};
     std::size_t outstanding_frames{};
     core::u64 outstanding_bytes{};
+    // Committed only: what the node's output last presented.
+    RuntimePlayhead playhead{};
 };
 
 struct FrameAcknowledgementFlushReport final {
@@ -594,6 +596,10 @@ public:
     // asked to draw. Reported on the next heartbeat, like every other runtime
     // fact: a node's own view of its tracking is diagnostics, not authority.
     void publish_runtime_tracking(RuntimeTracking tracking) noexcept;
+    // The frame this node's output last presented complete. Unlike the
+    // heartbeat facts above it rides every FrameCommitted, so the Director
+    // can draw where this node is in the show while it plays.
+    void publish_runtime_playhead(RuntimePlayhead playhead) noexcept;
 
     // Last exact renderer policy/selection observed by the Program presenter.
     // Heartbeat receive snapshots it with output sync and asset adoption.
@@ -659,6 +665,7 @@ private:
         RuntimeRendererReadiness renderer;
         RuntimeTracking tracking;
         GoodbyeReason goodbye_reason{GoodbyeReason::None};
+        RuntimePlayhead playhead;
     };
 
     [[nodiscard]] core::u64 enqueue_control_locked(
@@ -669,7 +676,8 @@ private:
         RuntimeOutputSync output_sync = {},
         RuntimeRendererReadiness renderer = {},
         RuntimeTracking tracking = {},
-        GoodbyeReason goodbye_reason = GoodbyeReason::None) noexcept;
+        GoodbyeReason goodbye_reason = GoodbyeReason::None,
+        RuntimePlayhead playhead = {}) noexcept;
     [[nodiscard]] core::Result<FrameAcknowledgementFlushReport, ResumeSessionError>
     flush_frame_acknowledgements_through(
         std::optional<core::u64> through_sequence);
@@ -711,6 +719,7 @@ private:
     RuntimeAssetAdoption runtime_asset_adoption_{};
     RuntimeOutputSync runtime_output_sync_{};
     RuntimeTracking runtime_tracking_{};
+    RuntimePlayhead runtime_playhead_{};
     RuntimeRendererReadiness runtime_renderer_readiness_{};
     // The last accepted tracked pose. Guarded by inflight_mutex_, the same
     // lock the show-clock boundary already takes, so a render thread reading

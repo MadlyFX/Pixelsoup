@@ -47,6 +47,7 @@ add_executable(media-server
     project_assets.cpp
     sync_device_probe.cpp
     system_hardware_probe.cpp
+    timeline_playback_cache.cpp
     waveform_generation_service.cpp
 )
 target_link_libraries(media-server
@@ -227,6 +228,25 @@ if(BUILD_TESTING)
         PROPERTIES FOLDER "tests"
     )
 
+    add_executable(mediaserver_timeline_playback_cache_tests
+        timeline_playback_cache.cpp
+        tests/timeline_playback_cache_tests.cpp
+    )
+    target_include_directories(mediaserver_timeline_playback_cache_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_timeline_playback_cache_tests
+        PRIVATE MediaServer::Scene
+    )
+    mediaserver_set_project_options(mediaserver_timeline_playback_cache_tests)
+    add_test(
+        NAME mediaserver.server_timeline_playback_cache
+        COMMAND mediaserver_timeline_playback_cache_tests
+    )
+    set_target_properties(mediaserver_timeline_playback_cache_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_renderer_lockstep_tests
         renderer_lockstep.cpp
         tests/renderer_lockstep_tests.cpp
@@ -390,6 +410,18 @@ if(BUILD_TESTING)
         mediaserver_set_project_options(mediaserver_feed_map_authoring_tests)
         add_test(NAME mediaserver.server_feed_map_authoring COMMAND mediaserver_feed_map_authoring_tests)
         set_target_properties(mediaserver_feed_map_authoring_tests PROPERTIES FOLDER "tests")
+
+        add_executable(mediaserver_hardware_authoring_tests
+            director_hardware_authoring.cpp
+            director_feed_map_authoring.cpp
+            director_compositor_authoring.cpp
+            edit_coalescing_policy.cpp
+            tests/hardware_authoring_tests.cpp)
+        target_include_directories(mediaserver_hardware_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(mediaserver_hardware_authoring_tests PRIVATE MediaServer::Editor MediaServer::Cmd MediaServer::Assets MediaServer::Topology MediaServer::Sync)
+        mediaserver_set_project_options(mediaserver_hardware_authoring_tests)
+        add_test(NAME mediaserver.server_hardware_authoring COMMAND mediaserver_hardware_authoring_tests)
+        set_target_properties(mediaserver_hardware_authoring_tests PROPERTIES FOLDER "tests")
     endif()
 
     add_executable(mediaserver_model_source_authoring_tests

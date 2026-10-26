@@ -14,6 +14,7 @@
 #include <memory>
 #include <span>
 #include <stop_token>
+#include <string>
 #include <vector>
 
 namespace mediaserver::net {
@@ -111,6 +112,9 @@ public:
     // row would hide it. Passing no barrier yields every row unreported.
     [[nodiscard]] std::vector<editor::NodeTrackingObservation>
     tracking_snapshot(const net::DirectorFrameBarrier* barrier = nullptr) const;
+    // The Hardware Map name of the Render Server configured for a node index,
+    // or empty when none is.
+    [[nodiscard]] std::string node_name(core::u32 node_index) const;
     void submit(const editor::OutputLifecycleRequest& request);
     // Fail-closed promotion guard for the exact manifest last passed to sync.
     // No configured Render Servers and a manifest with no required assets are

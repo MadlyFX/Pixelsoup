@@ -3740,12 +3740,88 @@ void a_track_twirl_closes_it_to_its_header() {
            reopened.selection->node == clip_node);
 }
 
+// A vertex at (x, y) painted `color`: the cache bar and node tags are told
+// apart from the ruler under them by colour as well as by place.
+[[nodiscard]] bool has_vertex_in(const gui::UiDrawList &list, float x, float y,
+                                 gui::UiColor color) {
+  for (const gui::UiVertex &vertex : list.vertices()) {
+    if (std::fabs(vertex.x - x) < 0.01F && std::fabs(vertex.y - y) < 0.01F &&
+        std::fabs(vertex.r - color.r) < 0.001F &&
+        std::fabs(vertex.g - color.g) < 0.001F &&
+        std::fabs(vertex.b - color.b) < 0.001F) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void the_cache_bar_and_node_playheads_draw_until_toggled_off() {
+  Harness h;
+  // The playback toggle follows the cue button at x=742..766. At 1200px the
+  // list is 312px wide and the fitted graph holds 8.88 pixels per frame.
+  h.bounds.width = 1'200.0F;
+  h.timeline.buffered = {editor::TimelineFrameRun{30U, 34U},
+                         editor::TimelineFrameRun{70U, 70U}};
+  h.timeline.node_playheads = {
+      editor::TimelineNodePlayhead{2U, "andylaptop", 40U, 12U}};
+  const gui::Theme theme{};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.panel.playback_overlay_enabled());
+  // Frames 30-34 cover x=578.4..622.8 and frame 70 x=933.6..942.48, each
+  // along the top 3px of the marker strip, y=56..59; panels land on whole
+  // pixels.
+  UI_CHECK(has_vertex_in(h.list, 578.0F, 56.0F, theme.good));
+  UI_CHECK(has_vertex_in(h.list, 623.0F, 59.0F, theme.good));
+  UI_CHECK(has_vertex_in(h.list, 934.0F, 56.0F, theme.good));
+  UI_CHECK(has_vertex_in(h.list, 942.0F, 59.0F, theme.good));
+  UI_CHECK(!has_vertex_in(h.list, 632.0F, 56.0F, theme.good));
+  // Node 2 presents frame 40, x=667.2: its tag points down onto the ruler's
+  // lower edge, y=49..55.
+  UI_CHECK(has_vertex_in(h.list, 663.2F, 49.0F, theme.keyframe));
+  UI_CHECK(has_vertex_in(h.list, 667.2F, 55.0F, theme.keyframe));
+
+  static_cast<void>(h.click(754.0F, 17.0F));
+  UI_CHECK(!h.panel.playback_overlay_enabled());
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(!has_vertex_in(h.list, 578.0F, 56.0F, theme.good));
+  UI_CHECK(!has_vertex_in(h.list, 667.2F, 55.0F, theme.keyframe));
+
+  static_cast<void>(h.click(754.0F, 17.0F));
+  UI_CHECK(h.panel.playback_overlay_enabled());
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(has_vertex_in(h.list, 578.0F, 56.0F, theme.good));
+  UI_CHECK(has_vertex_in(h.list, 667.2F, 55.0F, theme.keyframe));
+}
+
+void a_node_playhead_off_the_view_and_an_empty_cache_draw_nothing() {
+  Harness h;
+  h.bounds.width = 1'200.0F;
+  const gui::Theme theme{};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  const std::size_t bare = h.list.vertices().size();
+  // A node far past the fitted range is outside the graph; no run is drawn
+  // for an empty cache.
+  h.timeline.node_playheads = {
+      editor::TimelineNodePlayhead{1U, "", 5'000U, 0U}};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.list.vertices().size() == bare);
+  for (const gui::UiVertex &vertex : h.list.vertices()) {
+    UI_CHECK(!(std::fabs(vertex.y - 56.0F) < 0.01F &&
+               std::fabs(vertex.g - theme.good.g) < 0.001F &&
+               std::fabs(vertex.r - theme.good.r) < 0.001F));
+  }
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 113U> cases{{
+constexpr std::array<Case, 115U> cases{{
+    {"the cache bar and node playheads draw until toggled off",
+     &the_cache_bar_and_node_playheads_draw_until_toggled_off},
+    {"a node playhead off the view and an empty cache draw nothing",
+     &a_node_playhead_off_the_view_and_an_empty_cache_draw_nothing},
     {"rows show each channel evaluated at the playhead",
      &rows_show_each_channel_evaluated_at_the_playhead},
     {"a narrow list shortens the name before the value",
