@@ -310,6 +310,18 @@ void HybridSceneRenderer::prepare(const scene::Scene& value) noexcept {
         || value.environment.physical_sky.enabled) {
         ensure_advanced();
     }
+    // The planar mirror is a second complete renderer inside the Advanced
+    // one, so it waits for a scene that authored a reflection. A planar pass
+    // is refused outright on Basic - it needs a scene-linear renderer - so a
+    // show that selected Basic is not given one even where a sky above has
+    // just built the Advanced renderer for its own reasons.
+    if (value.environment.planar.enabled && advanced_.has_value()
+        && scene::clamped(value.renderer_settings).backend
+               == scene::RendererBackend::Advanced) {
+        advanced_->ensure_planar();
+    }
+    diagnostics_.planar_resident =
+        advanced_.has_value() && advanced_->planar_resident();
 }
 
 RenderFrameRequest HybridSceneRenderer::convenience_request(

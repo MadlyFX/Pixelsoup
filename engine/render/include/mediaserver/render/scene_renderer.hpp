@@ -393,6 +393,15 @@ public:
     // caller blits it to a swapchain or reads it back.
     [[nodiscard]] rhi::Texture& target() noexcept { return color_; }
     [[nodiscard]] const rhi::Texture* planar_target() const noexcept { return planar_texture_; }
+    // Build the planar mirror, if these limits allow one and none exists yet.
+    // Call it from the scene's adoption and never from a recording: the
+    // mirror is a second complete SceneRenderer at this renderer's extent.
+    void ensure_planar() noexcept;
+    // Whether that mirror exists. A scene that authors no planar reflection
+    // leaves it absent, which is the point of building it on demand.
+    [[nodiscard]] bool planar_resident() const noexcept {
+        return planar_renderer_ != nullptr;
+    }
     // Exact depth tested while producing target(). Isolated colour processors
     // borrow this texture as a pair so subsequent keyed operations retain the
     // original per-fragment scene-depth relationship.
@@ -951,6 +960,9 @@ private:
     std::shared_ptr<const ProbeAsset> reflection_asset_;
     rhi::CommandRecordingToken reflection_upload_recording_;
     std::unique_ptr<SceneRenderer> planar_renderer_;
+    // These limits allow a mirror and none has been built yet. Cleared by the
+    // one attempt `ensure_planar` makes, so a failure is not retried per frame.
+    bool planar_buildable_{};
     bool planar_active_{};
     const rhi::Texture* planar_texture_{};
     // Generation of the map currently prefiltered. Zero means none, which is

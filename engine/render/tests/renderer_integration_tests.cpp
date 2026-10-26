@@ -5404,6 +5404,40 @@ void a_basic_show_builds_no_advanced_renderer() {
     auto sky = plain;
     sky.environment.physical_sky.enabled = true;
     RENDER_CHECK(resident_for(sky));
+
+    // The same bargain one level down. The planar mirror is a second complete
+    // renderer at this renderer's extent - it very nearly doubles an Advanced
+    // one, 559 MiB at 1080p and 1450 MiB at 4K - and the scene here has no
+    // reflective surface. Built from the authored flag rather than from a
+    // resolved receiver, for the same reason the sky is: what a frame can
+    // find must not decide what exists.
+    const auto mirror_resident_for = [&](const scene::Scene& value) {
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        RENDER_CHECK(created);
+        auto renderer = std::move(created).value();
+        renderer.prepare(value);
+        return renderer.diagnostics().planar_resident;
+    };
+    auto deep = base;
+    deep.renderer_settings.backend = scene::RendererBackend::Advanced;
+    deep.renderer_settings.required = true;
+    RENDER_CHECK(resident_for(deep));
+    RENDER_CHECK(!mirror_resident_for(deep));
+    auto mirrored = deep;
+    mirrored.environment.planar.enabled = true;
+    mirrored.environment.planar.receiver = doc::NodeId{912U};
+    RENDER_CHECK(mirror_resident_for(mirrored));
+
+    // A Basic show whose sky has already built the Advanced renderer still
+    // gets no mirror. The pass it would feed needs a scene-linear renderer
+    // and is refused outright on Basic, so paying for it would buy nothing.
+    auto sky_and_mirror = mirrored;
+    sky_and_mirror.renderer_settings.backend = scene::RendererBackend::Basic;
+    sky_and_mirror.renderer_settings.required = false;
+    sky_and_mirror.environment.map_source = "environment/dome.exr";
+    RENDER_CHECK(resident_for(sky_and_mirror));
+    RENDER_CHECK(!mirror_resident_for(sky_and_mirror));
 }
 
 struct Case final {

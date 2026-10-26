@@ -52,6 +52,17 @@ renderer whatever backend the show selected, so a Basic show that authored
 `map_source` or a physical sky still builds it. Only a show with no sky to
 draw goes without.
 
+**The planar mirror waits on the same terms, one level down.** It is a second
+complete `SceneRenderer` at the owner's extent - not a spare target - so it
+very nearly doubles an Advanced renderer: measured alone, an Advanced renderer
+holds 604 MiB at 1080p and 1497 MiB at 4K, and the mirror adds 559 MiB and
+1450 MiB on top. `SceneRenderer::ensure_planar` builds it for a scene that
+authored `environment.planar`, and `prepare` reaches it when it adopts that
+scene. A show that selected Basic never gets one: a planar pass needs a
+scene-linear renderer and is refused without it, so building the mirror would
+buy nothing. As with the sky, the decision reads the authored flag and not a
+resolved receiver - what a frame can find must not decide what exists.
+
 **One camera, many exact sub-frustums.** The camera is authored once, against
 the project's shared `Canvas`, and a render node never adjusts it. Instead each
 node narrows the camera to its own `CanvasRect` - an off-axis perspective

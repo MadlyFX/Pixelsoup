@@ -2318,14 +2318,37 @@ Result SceneRenderer::create(
             renderer.reflection_filters_[i] = std::move(filter).value();
             renderer.reflection_sources_[i] = std::move(source).value();
         }
-        if (limits.planar_reflections) {
-            auto nested_limits = limits; nested_limits.planar_reflections = false;
-            auto planar = SceneRenderer::create(device, width, height, nested_limits, mode);
-            if (!planar) return Result::failure(planar.error());
-            renderer.planar_renderer_ = std::make_unique<SceneRenderer>(std::move(planar).value());
-        }
+        // Not built here. The mirror is a second complete renderer at full
+        // extent - it very nearly doubles this one - and a scene with no
+        // reflective surface never draws a pixel through it. `ensure_planar`
+        // builds it when one is authored.
+        renderer.planar_buildable_ = limits.planar_reflections;
     }
     return Result::success(std::move(renderer));
+}
+
+void SceneRenderer::ensure_planar() noexcept {
+    if (planar_renderer_ || !planar_buildable_ || device_ == nullptr) {
+        return;
+    }
+    // One attempt. This is the same bargain the Advanced renderer strikes
+    // above it: a renderer that cannot build its mirror now will not manage
+    // it on the next frame, and retrying would put the construction of a
+    // whole nested renderer on the frame path for the life of the show.
+    planar_buildable_ = false;
+    auto nested_limits = limits_;
+    nested_limits.planar_reflections = false;
+    auto planar = SceneRenderer::create(*device_, color_.width(),
+                                        color_.height(), nested_limits, mode_);
+    if (!planar) {
+        return;
+    }
+    try {
+        planar_renderer_ =
+            std::make_unique<SceneRenderer>(std::move(planar).value());
+    } catch (const std::bad_alloc&) {
+        planar_renderer_.reset();
+    }
 }
 
 bool SceneRenderer::resize(

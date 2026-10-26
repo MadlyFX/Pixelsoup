@@ -264,6 +264,10 @@ struct RendererDiagnostics final {
     // shadow atlas. False on a device without advanced raster, and false on
     // one that has it until something authors it.
     bool advanced_resident{};
+    // Whether the Advanced renderer's planar mirror exists. It is a second
+    // complete renderer at full extent, built only for a scene that authored
+    // a planar reflection.
+    bool planar_resident{};
 
     bool operator==(const RendererDiagnostics&) const = default;
 };

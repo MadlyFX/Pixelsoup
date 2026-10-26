@@ -99,6 +99,12 @@ void gpu_contract(rhi::Device& device, const render::BakeResult& baked) {
     auto full=render::SceneRenderer::create(device,128,96,limits(),render::SceneRendererMode::AdvancedLinear); if (!full) std::cerr << "renderer creation error " << static_cast<int>(full.error()) << std::endl; CHECK(full);
     auto left=render::SceneRenderer::create(device,64,96,limits(),render::SceneRendererMode::AdvancedLinear); CHECK(left);
     auto right=render::SceneRenderer::create(device,64,96,limits(),render::SceneRendererMode::AdvancedLinear); CHECK(right);
+    // The mirror is a second complete renderer and is built when a scene
+    // authors a reflection, not with its owner. This fixture authors one
+    // below, so these say so; the production path says it through
+    // HybridSceneRenderer::prepare when it adopts the scene.
+    full.value().ensure_planar(); left.value().ensure_planar(); right.value().ensure_planar();
+    CHECK(full.value().planar_resident() && left.value().planar_resident() && right.value().planar_resident());
     auto s=fixture(); const auto whole=scene::whole(s.canvas);
     const auto draw=[&](render::SceneRenderer& renderer,scene::CanvasRect slice) {
         auto commands=acquire(device); CHECK(renderer.render(commands,s,slice)); return readback(device,std::move(commands),renderer.target(),8);
