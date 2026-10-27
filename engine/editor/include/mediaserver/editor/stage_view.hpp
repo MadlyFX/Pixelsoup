@@ -4,7 +4,9 @@
 #include <mediaserver/scene/canvas.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 
 namespace mediaserver::editor {
 
@@ -168,6 +170,19 @@ struct StageNavigationStep final {
 }
 
 // An axis-aligned world-space box, as the Stage frames a selection.
+// The Stage floor grid's spacing for a view `reach` metres from what it looks
+// at: a power of ten, about a quarter of the reach, so zooming out widens the
+// grid a decade at a time and a close view gets centimetres.
+[[nodiscard]] inline float stage_grid_step(float reach) noexcept {
+    constexpr std::array<float, 6U> steps{0.01F, 0.1F, 1.0F,
+                                          10.0F, 100.0F, 1000.0F};
+    std::size_t chosen = 0U;
+    while (chosen + 1U < steps.size() && steps[chosen + 1U] <= reach * 0.25F) {
+        ++chosen;
+    }
+    return steps[chosen];
+}
+
 struct WorldBounds final {
     scene::Vec3 minimum{};
     scene::Vec3 maximum{};

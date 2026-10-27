@@ -5,6 +5,7 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -258,6 +260,8 @@ void the_scene_reports_the_nearest_surface_and_its_world_normal() {
     const auto on_floor = scene::raycast_scene(scn, down);
     RAY_CHECK(on_floor.has_value());
     RAY_CHECK(on_floor->node == doc::NodeId{41U});
+    RAY_CHECK(on_floor->source == scene::SurfaceSource::Instance);
+    RAY_CHECK(on_floor->index == 0U);
     RAY_CHECK(near(on_floor->position, scene::Vec3{-3.0F, 0.0F, 1.0F}));
     RAY_CHECK(near(on_floor->normal, scene::Vec3{0.0F, 1.0F, 0.0F}));
     RAY_CHECK(near(on_floor->distance, 5.0F));
@@ -268,6 +272,8 @@ void the_scene_reports_the_nearest_surface_and_its_world_normal() {
     const auto on_screen = scene::raycast_scene(scn, across);
     RAY_CHECK(on_screen.has_value());
     RAY_CHECK(on_screen->node == doc::NodeId{42U});
+    RAY_CHECK(on_screen->source == scene::SurfaceSource::Media);
+    RAY_CHECK(on_screen->index == 0U);
     RAY_CHECK(near(on_screen->position, scene::Vec3{2.0F, 1.5F, 0.4F}));
     RAY_CHECK(near(on_screen->normal, scene::Vec3{1.0F, 0.0F, 0.0F}));
     RAY_CHECK(near(on_screen->distance, 4.0F));
@@ -358,12 +364,43 @@ void equal_distances_go_to_the_lower_node_and_zero_scale_is_skipped() {
     RAY_CHECK(hit->node == doc::NodeId{4U});
 }
 
+void nearby_triangles_are_those_whose_bounds_reach_the_point() {
+    // A strip of unit squares along X, two triangles each.
+    scene::MeshData strip;
+    for (int column = 0; column <= 8; ++column) {
+        const float x = static_cast<float>(column);
+        strip.vertices.push_back(scene::MeshVertex{scene::Vec3{x, 0.0F, 0.0F}});
+        strip.vertices.push_back(scene::MeshVertex{scene::Vec3{x, 0.0F, 1.0F}});
+    }
+    for (core::u32 column = 0U; column < 8U; ++column) {
+        const core::u32 a = column * 2U;
+        strip.indices.insert(strip.indices.end(),
+                             {a, a + 2U, a + 3U, a, a + 3U, a + 1U});
+    }
+    const scene::MeshBvh bvh = scene::build_mesh_bvh(strip);
+    std::vector<core::u32> near_three;
+    RAY_CHECK(scene::mesh_triangles_near(bvh, strip, scene::Vec3{3.0F, 0.0F, 0.5F},
+                                         0.25F, near_three, 64U));
+    // The squares either side of x = 3 (triangles 4..7), and nothing else.
+    std::sort(near_three.begin(), near_three.end());
+    RAY_CHECK((near_three == std::vector<core::u32>{4U, 5U, 6U, 7U}));
+
+    std::vector<core::u32> capped;
+    RAY_CHECK(!scene::mesh_triangles_near(bvh, strip, scene::Vec3{4.0F, 0.0F, 0.5F},
+                                          10.0F, capped, 5U));
+    RAY_CHECK(capped.size() == 5U);
+    std::vector<core::u32> none;
+    RAY_CHECK(scene::mesh_triangles_near(bvh, strip, scene::Vec3{4.0F, 3.0F, 0.5F},
+                                         0.5F, none, 64U));
+    RAY_CHECK(none.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"a canvas ray passes through the point drawn at that pixel",
      &a_canvas_ray_passes_through_the_point_drawn_at_that_pixel},
     {"a box is hit on its near face or from inside on its far wall",
@@ -382,6 +419,8 @@ constexpr std::array<Case, 9U> cases{{
      &non_uniform_scale_keeps_the_normal_perpendicular_to_the_surface},
     {"equal distances go to the lower node and zero scale is skipped",
      &equal_distances_go_to_the_lower_node_and_zero_scale_is_skipped},
+    {"nearby triangles are those whose bounds reach the point",
+     &nearby_triangles_are_those_whose_bounds_reach_the_point},
 }};
 
 } // namespace

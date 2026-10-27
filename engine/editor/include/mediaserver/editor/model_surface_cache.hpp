@@ -1,18 +1,20 @@
 #pragma once
 
-#include <mediaserver/render/model_loader.hpp>
+#include <mediaserver/scene/geometry.hpp>
 #include <mediaserver/scene/raycast.hpp>
 
 #include <cstddef>
 #include <memory>
 
-// Ray-cast hierarchies for decoded models, so the Stage can say exactly where
-// on a set piece the pointer is. The model cache already holds each model's
-// triangles in memory; what is missing is a hierarchy over them, and building
-// one for a large set is far too slow for the UI thread.
+// Ray-cast hierarchies for meshes the Stage hits - decoded models and the
+// generated primitives - so it can say exactly where on a set piece the
+// pointer is, and which vertex is nearest. The model cache already holds each
+// model's triangles in memory; what is missing is a hierarchy over them, and
+// building one for a large set is far too slow for the UI thread. A model's
+// mesh is passed as a pointer sharing ownership of its decoded asset.
 //
-// So `observe` never builds. The first sight of a model queues its hierarchy
-// for a background worker and returns nothing; the caller uses the model's
+// So `observe` never builds. The first sight of a mesh queues its hierarchy
+// for a background worker and returns nothing; the caller uses the mesh's
 // bounds until a later frame finds the hierarchy ready. A hierarchy belongs to
 // one decoded generation: a refreshed model is a new asset and is queued anew,
 // while the old one's hierarchy is released once that asset is gone.
@@ -56,7 +58,7 @@ public:
     // as not ready. Null until the hierarchy for exactly this asset is built,
     // and for a model with no usable triangles.
     [[nodiscard]] std::shared_ptr<const scene::MeshBvh>
-    observe(const std::shared_ptr<const render::ModelAsset>& asset);
+    observe(const std::shared_ptr<const scene::MeshData>& asset);
 
     // Project boundary: the worker drops every hierarchy and queued build.
     void request_reset() noexcept;

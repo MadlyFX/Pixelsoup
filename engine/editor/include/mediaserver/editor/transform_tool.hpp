@@ -46,6 +46,27 @@ inline constexpr float rotate_snap_fine_step_turns = 1.0F / 360.0F;
 inline constexpr float scale_snap_step = 0.1F;
 inline constexpr float scale_snap_fine_step = 0.01F;
 
+// The increments the Stage toolbar offers. Holding Shift uses a fifth of the
+// angle and a tenth of the distance and the scale step.
+inline constexpr std::array<float, 5U> move_snap_choices{0.01F, 0.1F, 0.5F,
+                                                         1.0F, 5.0F};
+inline constexpr std::array<float, 5U> rotate_snap_choices_degrees{
+    1.0F, 5.0F, 15.0F, 45.0F, 90.0F};
+
+struct SnapSteps final {
+    float move{move_snap_step};
+    float rotate_turns{rotate_snap_step_turns};
+    float scale{scale_snap_step};
+
+    [[nodiscard]] float fine_move() const noexcept { return move * 0.1F; }
+    [[nodiscard]] float fine_rotate_turns() const noexcept {
+        return rotate_turns * 0.2F;
+    }
+    [[nodiscard]] float fine_scale() const noexcept { return scale * 0.1F; }
+
+    bool operator==(const SnapSteps&) const = default;
+};
+
 // `value` rounded to the nearest multiple of `step`; unchanged for a
 // non-positive step.
 [[nodiscard]] float snap_to_step(float value, float step) noexcept;

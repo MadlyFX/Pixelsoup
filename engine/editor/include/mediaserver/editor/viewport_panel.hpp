@@ -4,6 +4,7 @@
 
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
+#include <mediaserver/editor/measurement.hpp>
 #include <mediaserver/editor/model_surface_cache.hpp>
 #include <mediaserver/editor/stage_placement.hpp>
 #include <mediaserver/editor/stage_view.hpp>
@@ -21,6 +22,7 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <array>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -326,6 +328,10 @@ namespace detail {
 [[nodiscard]] bool wait_for_viewport_projection_surface_for_test(
     ViewportPanel& panel, doc::NodeId surface) noexcept;
 
+// Blocks until no surface hierarchy is queued or building.
+[[nodiscard]] bool wait_for_viewport_surface_hierarchies_for_test(
+    ViewportPanel& panel) noexcept;
+
 } // namespace detail
 
 // One plate the wall is showing: where it is in canvas pixels, and how wide
@@ -392,6 +398,14 @@ class ViewportPanel final {
         if (valid(resolution)) resolution_ = resolution;
     }
     void draw_resolution_control(gui::UiContext& ctx, const gui::Rect& bounds);
+    void draw_snap_controls(gui::UiContext& ctx, const gui::Rect& bounds);
+    // Surface and vertex snapping for a Move drag: true when it placed the
+    // element exactly, so the grid step leaves `delta` alone.
+    [[nodiscard]] bool snap_drag(const gui::UiContext& ctx,
+                                 const scene::Scene& scene,
+                                 std::span<const doc::NodeId> selection,
+                                 const ViewportFrame& frame,
+                                 TransformDelta& delta);
     [[nodiscard]] bool grid_visible() const noexcept { return show_grid_; }
     [[nodiscard]] bool overlays_visible() const noexcept {
         return show_overlays_;
@@ -410,6 +424,19 @@ class ViewportPanel final {
     }
     [[nodiscard]] bool snapping() const noexcept { return snapping_; }
     void set_snapping(bool snapping) noexcept { snapping_ = snapping; }
+    // Surface snapping, as Unreal's: an element dragged by its body rides
+    // over whatever is under the pointer, resting on it.
+    [[nodiscard]] bool surface_snapping() const noexcept {
+        return surface_snapping_;
+    }
+    void set_surface_snapping(bool snapping) noexcept {
+        surface_snapping_ = snapping;
+    }
+    // The move, rotate and scale increments the toolbar chose.
+    [[nodiscard]] const SnapSteps& snap_steps() const noexcept {
+        return snap_steps_;
+    }
+    void set_snap_steps(const SnapSteps& steps) noexcept { snap_steps_ = steps; }
     // A keyboard transform is running: it owns the keyboard and pointer
     // until Enter or a left click confirms it, or Escape or a right click
     // cancels it.
@@ -435,7 +462,32 @@ class ViewportPanel final {
     // on their triangles once a background worker has built their hierarchy,
     // and on their bounds until then; nothing here waits or builds.
     [[nodiscard]] std::optional<scene::SurfaceHit>
-    surface_at(const scene::Scene& scene, float canvas_x, float canvas_y);
+    surface_at(const scene::Scene& scene, float canvas_x, float canvas_y,
+               const scene::SurfaceFilter& counts = {});
+
+    // The point the Measure tool would take at canvas pixel (x, y): the
+    // nearest vertex of the surface there within `reach` canvas pixels, else
+    // the nearest edge midpoint, else the surface point itself; with no
+    // surface, the stage floor. Vertices come from the same background
+    // hierarchies as `surface_at`; until one is ready the surface point
+    // stands in.
+    [[nodiscard]] std::optional<MeasurePoint>
+    measure_point_at(const scene::Scene& scene, float canvas_x, float canvas_y,
+                     float reach, const scene::SurfaceFilter& counts = {});
+
+    // The Measure tool (M over Stage, or the toolbar). Leaving it clears the
+    // measurement; nothing it shows is ever authored.
+    [[nodiscard]] bool measuring() const noexcept { return measuring_; }
+    void set_measuring(bool measuring) noexcept {
+        measuring_ = measuring;
+        if (!measuring) {
+            measure_.clear();
+            measure_hover_.reset();
+        }
+    }
+    [[nodiscard]] const MeasureChain& measurement() const noexcept {
+        return measure_;
+    }
 
     // Local bounds of the model at `source`, once the model cache has it.
     // Asking starts the decode of a model nothing in the scene uses yet.
@@ -518,6 +570,7 @@ class ViewportPanel final {
     TransformTool tool_{TransformTool::Move};
     TransformOrientation orientation_{TransformOrientation::Global};
     bool snapping_{};
+    SnapSteps snap_steps_{};
     KeyboardTransform keyboard_;
     // A keyboard transform ended on a button press: the press and its release
     // belong to it, not to picking or the camera.
@@ -572,6 +625,32 @@ class ViewportPanel final {
         projection_mesh_cache_;
     // Triangle hierarchies for `surface_at`, built on their own worker.
     ModelSurfaceCache surface_cache_;
+    // Generated primitive meshes, so vertex snapping reaches a box's corners.
+    std::map<scene::MeshKey, std::shared_ptr<const scene::MeshData>>
+        primitive_meshes_;
+    [[nodiscard]] std::shared_ptr<const scene::MeshData>
+    primitive_mesh(scene::MeshKey key);
+
+    bool measuring_{};
+    MeasureChain measure_;
+    std::optional<MeasurePoint> measure_hover_;
+
+    // The element a Move drag began on, as it stood at the press, for
+    // surface and vertex snapping. `drag_grab_` is where on it the pointer
+    // took hold; `drag_source_vertex_` its vertex nearest there, found the
+    // first time V is held.
+    bool surface_snapping_{};
+    doc::NodeId drag_node_{};
+    scene::Mat4 drag_start_world_{};
+    scene::ModelLocalBounds drag_start_bounds_{};
+    std::optional<scene::Vec3> drag_grab_;
+    std::optional<scene::Vec3> drag_source_vertex_;
+    std::optional<MeasurePoint> drag_snap_target_;
+    [[nodiscard]] scene::ModelLocalBounds
+    element_local_bounds(const scene::Scene& scene, doc::NodeId node);
+    [[nodiscard]] std::optional<scene::Vec3>
+    nearest_element_vertex(const scene::Scene& scene, doc::NodeId node,
+                           const scene::Mat4& world, scene::Vec3 near);
 
     bool mask_gesture_active_{};
     bool mask_gesture_cancelled_{};
@@ -588,6 +667,8 @@ class ViewportPanel final {
 
     friend bool detail::wait_for_viewport_projection_surface_for_test(
         ViewportPanel& panel, doc::NodeId surface) noexcept;
+    friend bool detail::wait_for_viewport_surface_hierarchies_for_test(
+        ViewportPanel& panel) noexcept;
 };
 
 } // namespace mediaserver::editor

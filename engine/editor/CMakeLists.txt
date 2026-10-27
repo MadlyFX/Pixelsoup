@@ -6,6 +6,7 @@ add_library(mediaserver_editor STATIC
     src/viewport_panel.cpp
     src/model_surface_cache.cpp
     src/stage_placement.cpp
+    src/measurement.cpp
     src/transform_tool.cpp
     src/light_guides.cpp
     src/inspector_panel.cpp
@@ -251,6 +252,21 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_stage_placement_tests
     )
     set_target_properties(mediaserver_editor_stage_placement_tests PROPERTIES FOLDER "tests")
+
+    # The Measure tool: readings, clicks, snapping and the Stage interaction.
+    add_executable(mediaserver_editor_measurement_tests
+        tests/measurement_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_measurement_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_measurement_tests)
+    add_test(
+        NAME mediaserver.editor_measurement
+        COMMAND mediaserver_editor_measurement_tests
+    )
+    set_target_properties(mediaserver_editor_measurement_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_viewport_tests
         tests/viewport_panel_tests.cpp

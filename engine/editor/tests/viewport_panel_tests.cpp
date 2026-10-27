@@ -577,16 +577,28 @@ void world_bounds_cover_the_selection_as_picked() {
     UI_CHECK(clip_box.has_value());
     UI_CHECK(near(clip_box->minimum.x, 1.0F) && near(clip_box->maximum.x, 5.0F));
     UI_CHECK(near(clip_box->minimum.y, -2.0F) && near(clip_box->maximum.y, 0.0F));
-    UI_CHECK(near(clip_box->minimum.z, 1.5F) && near(clip_box->maximum.z, 2.5F));
+    // A screen is flat: its box has no depth.
+    UI_CHECK(near(clip_box->minimum.z, 2.0F) && near(clip_box->maximum.z, 2.0F));
 
     const std::array<doc::NodeId, 2U> both{clip_node, other_node};
     const auto both_box = h.panel.world_bounds(framed, both);
     UI_CHECK(both_box.has_value());
     UI_CHECK(near(both_box->minimum.x, -6.0F) && near(both_box->maximum.y, 5.0F));
-    UI_CHECK(near(both_box->minimum.z, 0.5F) && near(both_box->maximum.z, 2.5F));
+    UI_CHECK(near(both_box->minimum.z, 0.5F) && near(both_box->maximum.z, 2.0F));
 
     const std::array<doc::NodeId, 1U> missing{doc::NodeId{404U}};
     UI_CHECK(!h.panel.world_bounds(framed, missing).has_value());
+}
+
+void the_floor_grid_widens_a_decade_at_a_time_with_distance() {
+    // The default free view, nine metres out: a one-metre grid.
+    UI_CHECK(editor::stage_grid_step(9.0F) == 1.0F);
+    UI_CHECK(editor::stage_grid_step(39.0F) == 1.0F);
+    UI_CHECK(editor::stage_grid_step(40.0F) == 10.0F);
+    UI_CHECK(editor::stage_grid_step(2.0F) == 0.1F);
+    // Close in, centimetres; never finer, and never wider than a kilometre.
+    UI_CHECK(editor::stage_grid_step(0.05F) == 0.01F);
+    UI_CHECK(editor::stage_grid_step(1.0e7F) == 1000.0F);
 }
 
 void stage_navigation_follows_unreal_chords() {
@@ -1446,6 +1458,17 @@ void snapping_rounds_a_gizmo_drag_and_ctrl_inverts_it() {
         h.frame(h.centre_x + 92.0F, h.centre_y, true, {}, {}, false,
                 gui::KeyMods::Ctrl);
     UI_CHECK(free.translation.x > 0.3F && free.translation.x < 0.9F);
+    static_cast<void>(h.frame(h.centre_x + 92.0F, h.centre_y, false));
+
+    // A half-metre step, as chosen from the toolbar, rounds the same drag
+    // to half a metre instead.
+    editor::SnapSteps half{};
+    half.move = 0.5F;
+    h.panel.set_snap_steps(half);
+    static_cast<void>(h.frame(h.centre_x + 42.0F, h.centre_y, true));
+    const editor::ViewportFrame stepped =
+        h.frame(h.centre_x + 92.0F, h.centre_y, true);
+    UI_CHECK(stepped.translation.x == 0.5F);
     static_cast<void>(h.frame(h.centre_x + 92.0F, h.centre_y, false));
 
     // Shift+Tab over the Stage flips the toggle, as in Blender.
@@ -2538,8 +2561,9 @@ void light_guides_respect_stage_selection_and_guides_toggle() {
     UI_CHECK(cutoff_vertices() == 0);
     draw(true);
     UI_CHECK(cutoff_vertices() > 0);
-    draw(true, 350, true);
-    draw(true, 350, false);
+    // GUIDES, past the tools, the snap steps and GRID.
+    draw(true, 614, true);
+    draw(true, 614, false);
     UI_CHECK(!stage.overlays_visible());
     UI_CHECK(cutoff_vertices() == 0);
     h.input.new_frame();
@@ -2624,7 +2648,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 65U> cases{{
+constexpr std::array<Case, 66U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2701,6 +2725,8 @@ constexpr std::array<Case, 65U> cases{{
      &a_rotate_ring_turns_about_its_axis_as_the_pointer_circles},
     {"scale handles follow the pointer and the ring scales uniformly",
      &scale_handles_follow_the_pointer_and_the_ring_scales_uniformly},
+    {"the floor grid widens a decade at a time with distance",
+     &the_floor_grid_widens_a_decade_at_a_time_with_distance},
     {"snapping rounds a gizmo drag and ctrl inverts it",
      &snapping_rounds_a_gizmo_drag_and_ctrl_inverts_it},
     {"g x and a typed distance move exactly and enter confirms",

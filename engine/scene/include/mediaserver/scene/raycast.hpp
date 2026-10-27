@@ -96,6 +96,13 @@ struct MeshBvh final {
 raycast_mesh(const MeshBvh& bvh, const MeshData& mesh, const Ray& ray,
              float max_distance = std::numeric_limits<float>::infinity()) noexcept;
 
+// Appends the triangles whose bounds come within `radius` of `centre`, at most
+// `limit` of them, nearest leaves first - the candidates a vertex snap looks at
+// around a surface hit. Returns false when the limit cut the search short.
+bool mesh_triangles_near(const MeshBvh& bvh, const MeshData& mesh,
+                         Vec3 centre, float radius,
+                         std::vector<core::u32>& out, std::size_t limit);
+
 // Supplies a hit for one imported model, against a ray already carried into
 // the model's local space. The geometry owner decides how exact it can be
 // right now (a mesh once its hierarchy is ready, its bounds until then).
@@ -103,8 +110,18 @@ using ModelRaycaster =
     std::function<std::optional<RayHit>(const ModelInstance&, const Ray& local,
                                         float max_distance)>;
 
+// Which list of the Scene a surface hit came from, so a caller can reach the
+// element's geometry (`Scene::instances`, `media` or `models` at `index`).
+enum class SurfaceSource : core::u8 {
+    Instance,
+    Media,
+    Model,
+};
+
 struct SurfaceHit final {
     doc::NodeId node{};
+    SurfaceSource source{SurfaceSource::Instance};
+    std::size_t index{};
     float distance{};
     Vec3 position{};
     Vec3 normal{};
@@ -112,14 +129,19 @@ struct SurfaceHit final {
     bool operator==(const SurfaceHit&) const = default;
 };
 
+// Says whether an element's surface takes part. Empty: every element does.
+using SurfaceFilter = std::function<bool(doc::NodeId)>;
+
 // The nearest surface along a world ray among procedural objects, media
 // quads and imported models. Locked elements still count: a locked floor is
 // still a floor to set things on. Lights and screens have no surface. Models
 // without a raycaster are their unit-cube proxy, as in picking. Ties go to
-// the lower node id.
+// the lower node id. `counts` leaves elements out - what is being dragged,
+// say, so it never lands on itself.
 [[nodiscard]] std::optional<SurfaceHit>
 raycast_scene(const Scene& scene, const Ray& world_ray,
               const ModelRaycaster& models = {},
-              float max_distance = std::numeric_limits<float>::infinity());
+              float max_distance = std::numeric_limits<float>::infinity(),
+              const SurfaceFilter& counts = {});
 
 } // namespace mediaserver::scene

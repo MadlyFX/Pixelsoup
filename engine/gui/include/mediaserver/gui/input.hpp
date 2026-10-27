@@ -83,6 +83,18 @@ enum class Key : core::u8 {
     EasyEase,
     // Ctrl+D: duplicate the selection in place, as in every node editor.
     Duplicate,
+    // Ctrl+1 to Ctrl+9: keep the 3D view in that slot, as Unreal's
+    // bookmarks; the bare digit returns to it. Contiguous, so slot n is
+    // SaveView1 + n.
+    SaveView1,
+    SaveView2,
+    SaveView3,
+    SaveView4,
+    SaveView5,
+    SaveView6,
+    SaveView7,
+    SaveView8,
+    SaveView9,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies
@@ -95,6 +107,9 @@ enum class MoveKey : core::u8 {
     D,
     Q,
     E,
+    // Held while moving: snap a vertex of what is dragged onto the vertex
+    // under the pointer, as Unreal's V.
+    V,
 };
 
 class InputState final {
@@ -175,7 +190,7 @@ public:
 
 private:
     static constexpr std::size_t button_count = 3U;
-    static constexpr std::size_t move_key_count = 6U;
+    static constexpr std::size_t move_key_count = 7U;
     [[nodiscard]] static std::size_t index(MouseButton button) noexcept {
         return static_cast<std::size_t>(button);
     }

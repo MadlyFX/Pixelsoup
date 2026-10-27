@@ -20,7 +20,6 @@ namespace {
 
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
-namespace render = mediaserver::render;
 namespace scene = mediaserver::scene;
 
 void check(bool condition, const char* expression, int line) {
@@ -68,7 +67,7 @@ void a_screen_stands_on_a_set_piece_and_turns_to_the_camera() {
     const scene::Vec3 contact{1.0F, 0.5F, -2.0F};
     editor::StagePlacementRequest request{};
     request.ray = ray_to(contact);
-    request.hit = scene::SurfaceHit{doc::NodeId{31U}, 6.0F, contact,
+    request.hit = scene::SurfaceHit{doc::NodeId{31U}, scene::SurfaceSource::Instance, 0U, 6.0F, contact,
                                     scene::Vec3{0.0F, 1.0F, 0.0F}};
     request.camera = camera();
     request.media = true;
@@ -91,7 +90,7 @@ void a_screen_hangs_flat_on_a_wall_facing_out_of_it() {
     const scene::Vec3 wall{-1.0F, 0.0F, 0.0F};
     editor::StagePlacementRequest request{};
     request.ray = ray_to(contact);
-    request.hit = scene::SurfaceHit{doc::NodeId{5U}, 5.0F, contact, wall};
+    request.hit = scene::SurfaceHit{doc::NodeId{5U}, scene::SurfaceSource::Instance, 0U, 5.0F, contact, wall};
     request.camera = camera();
     request.media = true;
     request.bounds = editor::media_placement_bounds(16.0F / 9.0F);
@@ -125,6 +124,12 @@ void a_model_rests_its_lowest_point_on_the_floor_with_nothing_underneath() {
     const auto snapped = editor::place_on_stage(request);
     PLACE_CHECK(snapped.has_value());
     PLACE_CHECK(near(snapped->position, scene::Vec3{1.0F, 0.3F, -3.0F}, 1.0e-3F));
+
+    // A finer chosen step lands nearer the pointer.
+    request.snap_move = 0.5F;
+    const auto finer = editor::place_on_stage(request);
+    PLACE_CHECK(finer.has_value());
+    PLACE_CHECK(near(finer->position, scene::Vec3{1.5F, 0.3F, -2.5F}, 1.0e-3F));
 }
 
 void a_model_hangs_below_a_ceiling() {
@@ -132,7 +137,7 @@ void a_model_hangs_below_a_ceiling() {
     editor::StagePlacementRequest request{};
     request.ray = scene::Ray{scene::Vec3{0.5F, 1.0F, -4.0F},
                              scene::Vec3{0.0F, 1.0F, 0.0F}};
-    request.hit = scene::SurfaceHit{doc::NodeId{2U}, 2.0F, contact,
+    request.hit = scene::SurfaceHit{doc::NodeId{2U}, scene::SurfaceSource::Instance, 0U, 2.0F, contact,
                                     scene::Vec3{0.0F, -1.0F, 0.0F}};
     request.camera = camera();
     request.bounds = scene::ModelLocalBounds{scene::Vec3{-0.2F, -0.3F, -0.2F},
@@ -172,15 +177,15 @@ void with_no_floor_in_view_it_falls_back_to_the_point_of_interest_depth() {
     PLACE_CHECK(!editor::place_on_stage(request).has_value());
 }
 
-[[nodiscard]] std::shared_ptr<const render::ModelAsset> floor_tile(float y) {
-    auto asset = std::make_shared<render::ModelAsset>();
-    asset->mesh.vertices = {
+[[nodiscard]] std::shared_ptr<const scene::MeshData> floor_tile(float y) {
+    auto asset = std::make_shared<scene::MeshData>();
+    asset->vertices = {
         scene::MeshVertex{scene::Vec3{-1.0F, y, -1.0F}},
         scene::MeshVertex{scene::Vec3{1.0F, y, -1.0F}},
         scene::MeshVertex{scene::Vec3{1.0F, y, 1.0F}},
         scene::MeshVertex{scene::Vec3{-1.0F, y, 1.0F}},
     };
-    asset->mesh.indices = {0U, 1U, 2U, 0U, 2U, 3U};
+    asset->indices = {0U, 1U, 2U, 0U, 2U, 3U};
     return asset;
 }
 
@@ -194,7 +199,7 @@ void the_surface_cache_builds_in_the_background_and_never_on_lookup() {
     PLACE_CHECK(bvh != nullptr);
     PLACE_CHECK(bvh->triangles.size() == 2U);
     const auto hit = scene::raycast_mesh(
-        *bvh, tile->mesh,
+        *bvh, *tile,
         scene::Ray{scene::Vec3{0.5F, 3.0F, 0.5F}, scene::Vec3{0.0F, -1.0F, 0.0F}});
     PLACE_CHECK(hit.has_value());
     PLACE_CHECK(near(hit->position.y, 0.25F));
@@ -221,7 +226,7 @@ void the_surface_cache_builds_in_the_background_and_never_on_lookup() {
 void the_surface_cache_keeps_to_its_budget_and_its_queue() {
     // Room for one tile's hierarchy, not two.
     const auto one = floor_tile(0.0F);
-    const std::size_t one_size = scene::build_mesh_bvh(one->mesh).bytes();
+    const std::size_t one_size = scene::build_mesh_bvh(*one).bytes();
     editor::ModelSurfaceCache cache{editor::ModelSurfaceCacheConfig{1U, one_size + one_size / 2U}};
     const auto other = floor_tile(1.0F);
     PLACE_CHECK(cache.observe(one) == nullptr);

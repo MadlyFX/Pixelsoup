@@ -1427,6 +1427,14 @@ cursor while a drag moves it.
 | Alt+right drag | Dolly toward or away from the pivot |
 | Wheel | Move forward or back |
 | F | Frame the selection |
+| Ctrl+1 to Ctrl+9 | Keep this view in that slot |
+| 1 to 9 | Return to the view kept in that slot |
+
+Kept views belong to this editor session, not to the show; the show's cameras
+are never moved by them. The floor grid follows the view: it centres under
+what the camera looks at and widens a decade at a time as you pull back, from
+1 cm close in to 1 km far out, with a brighter line every ten. The bottom
+right of Stage names the current spacing.
 
 Directional lights have no scene position. Stage draws their pickable marker
 near the world origin, offset opposite the light direction. The marker stays
@@ -1468,12 +1476,41 @@ The Blender keys work while the pointer is over Stage, with no button held:
 While a keyboard transform runs, a bar at the top of Stage names the tool,
 constraint and value, and the keyboard belongs to it: timeline, cue and fly
 keys stand down until it ends, and the whole transform is one undo step.
-`SNAP` rounds the change rather than the absolute value: moves to 1 m,
-rotation to 5 degrees, scale to 0.1, or 0.1 m, 1 degree and 0.01 with Shift
-held. A component that is keyed takes a key at the current frame, exactly as
+`SNAP` rounds the change rather than the absolute value. The two lists beside
+it choose the steps: a move step from 0.01 m to 5 m, and an angle from 1 to 90
+degrees (scale steps by 0.1). With Shift held the steps are a tenth of the
+distance and scale step and a fifth of the angle. A component that is keyed takes a key at the current frame, exactly as
 an Inspector edit would. A Blender-linked object takes a rotate or scale as
 a placement override on its occurrence, the same way it takes a move. Lights
 are only placed from the viewport, and a camera turns but has no scale.
+
+**Snapping to other elements.** With `SURFACE` on, an element dragged by its
+body rides over whatever is under the pointer and rests on it, as a Library
+asset does when dropped: its bounds touch the surface, and SNAP steps the
+landing point across a level or upright surface. Hold **V** while moving -
+dragging the body or a gizmo arrow - to put the dragged element's vertex
+nearest where you grabbed it onto the vertex (or edge midpoint) under the
+pointer, which lines up LED panels and set pieces corner to corner. A square
+marks the vertex it will meet. Neither ever lands on what is being dragged.
+
+With a selection, the bottom left of Stage shows its size along the world
+axes in metres (`W`, `H`, `D`). A screen is flat, so it has no depth.
+
+### Measuring on Stage
+
+`MEASURE` in the Stage toolbar, or **M** over Stage, picks up the Measure tool.
+Click two points and Stage draws the line between them with its length in
+metres, and under it the X, Y and Z parts and its slope. As the pointer nears a
+vertex it snaps to it, shown as a filled square; failing that it snaps to the
+middle of an edge (a triangle), and otherwise takes the surface itself (a hollow
+square) or, with nothing under it, the stage floor. A label beside the pointer
+names which. Shift+click adds points to a path and shows its total. A plain
+click after a finished measurement starts a new one. **Esc** clears the
+measurement and a second **Esc**, **M**, or another tool leaves. Measuring never
+selects or moves anything, and nothing measured is saved with the show.
+
+An imported model is measured on its own triangles once a moment has passed
+after it first appears; until then points land on its bounding box.
 
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 Ctrl toggles membership and Shift selects a visible range; the Inspector shows

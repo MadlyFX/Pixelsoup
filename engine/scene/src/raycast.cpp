@@ -475,13 +475,72 @@ std::optional<RayHit> raycast_mesh(const MeshBvh& bvh, const MeshData& mesh,
     return RayHit{best, at(ray, best), facing(cross(b - a, c - a), ray.direction)};
 }
 
+bool mesh_triangles_near(const MeshBvh& bvh, const MeshData& mesh,
+                         Vec3 centre, float radius,
+                         std::vector<core::u32>& out, std::size_t limit) {
+    if (bvh.empty()) {
+        return true;
+    }
+    const Vec3 reach{radius, radius, radius};
+    const Vec3 low = centre - reach;
+    const Vec3 high = centre + reach;
+    std::array<core::u32, bvh_stack_depth> stack{};
+    std::size_t depth = 0U;
+    stack[depth++] = 0U;
+    std::size_t found = 0U;
+    while (depth > 0U) {
+        const core::u32 index = stack[--depth];
+        const MeshBvhNode& node = bvh.nodes[index];
+        if (node.maximum.x < low.x || node.minimum.x > high.x ||
+            node.maximum.y < low.y || node.minimum.y > high.y ||
+            node.maximum.z < low.z || node.minimum.z > high.z) {
+            continue;
+        }
+        if (node.count > 0U) {
+            for (core::u32 slot = node.first; slot < node.first + node.count;
+                 ++slot) {
+                const core::u32 number = bvh.triangles[slot];
+                const Vec3 a = mesh.vertices[mesh.indices[number * 3U]].position;
+                const Vec3 b =
+                    mesh.vertices[mesh.indices[number * 3U + 1U]].position;
+                const Vec3 c =
+                    mesh.vertices[mesh.indices[number * 3U + 2U]].position;
+                const Vec3 lowest = minimum_of(a, minimum_of(b, c));
+                const Vec3 highest = maximum_of(a, maximum_of(b, c));
+                if (highest.x < low.x || lowest.x > high.x ||
+                    highest.y < low.y || lowest.y > high.y ||
+                    highest.z < low.z || lowest.z > high.z) {
+                    continue;
+                }
+                if (found == limit) {
+                    return false;
+                }
+                out.push_back(number);
+                ++found;
+            }
+            continue;
+        }
+        if (depth + 2U > stack.size()) {
+            return false;
+        }
+        stack[depth++] = node.first;
+        stack[depth++] = index + 1U;
+    }
+    return true;
+}
+
 std::optional<SurfaceHit> raycast_scene(const Scene& scene,
                                         const Ray& world_ray,
                                         const ModelRaycaster& models,
-                                        float max_distance) {
+                                        float max_distance,
+                                        const SurfaceFilter& counts) {
     std::optional<SurfaceHit> best;
-    const auto consider = [&](doc::NodeId node, const Mat4& world,
+    const auto consider = [&](doc::NodeId node, SurfaceSource source,
+                              std::size_t index, const Mat4& world,
                               const auto& local_hit) {
+        if (counts && !counts(node)) {
+            return;
+        }
         if (!(std::abs(determinant3(world)) > 1.0e-12F)) {
             // A zero scale draws nothing and has nothing to stand on.
             return;
@@ -496,27 +555,31 @@ std::optional<SurfaceHit> raycast_scene(const Scene& scene,
              !(node < best->node))) {
             return;
         }
-        best = SurfaceHit{node, hit->distance, transform_point(world, hit->position),
+        best = SurfaceHit{node, source, index, hit->distance,
+                          transform_point(world, hit->position),
                           facing(transform_normal(inverse, hit->normal),
                                  world_ray.direction)};
     };
 
-    for (const MeshInstance& object : scene.instances) {
-        consider(object.source, object.world,
+    for (std::size_t index = 0U; index < scene.instances.size(); ++index) {
+        const MeshInstance& object = scene.instances[index];
+        consider(object.source, SurfaceSource::Instance, index, object.world,
                  [&](const Ray& local, float limit) {
                      return raycast_primitive(local, object.mesh.primitive,
                                               limit);
                  });
     }
-    for (const MediaInstance& clip : scene.media) {
-        consider(clip.source_node, clip.world,
+    for (std::size_t index = 0U; index < scene.media.size(); ++index) {
+        const MediaInstance& clip = scene.media[index];
+        consider(clip.source_node, SurfaceSource::Media, index, clip.world,
                  [&](const Ray& local, float limit) {
                      return raycast_primitive(local, clip.mesh.primitive,
                                               limit);
                  });
     }
-    for (const ModelInstance& model : scene.models) {
-        consider(model.source_node, model.world,
+    for (std::size_t index = 0U; index < scene.models.size(); ++index) {
+        const ModelInstance& model = scene.models[index];
+        consider(model.source_node, SurfaceSource::Model, index, model.world,
                  [&](const Ray& local, float limit) -> std::optional<RayHit> {
                      if (models) {
                          return models(model, local, limit);

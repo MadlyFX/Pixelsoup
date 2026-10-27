@@ -38,8 +38,10 @@ struct StagePlacementRequest final {
     scene::ModelLocalBounds bounds{scene::Vec3{}, scene::Vec3{}};
     bool media{};
     // Snapping steps the contact point across an axis-aligned surface and a
-    // screen's turn towards the camera.
+    // screen's turn towards the camera, by the Stage's chosen increments.
     bool snap{};
+    float snap_move{1.0F};
+    scene::Turns snap_turns{5.0F / 360.0F};
 };
 
 struct StagePlacement final {
@@ -63,6 +65,20 @@ media_placement_bounds(float aspect) noexcept;
 
 [[nodiscard]] std::optional<StagePlacement>
 place_on_stage(const StagePlacementRequest& request) noexcept;
+
+// The origin that rests `bounds` on the surface at `contact` facing `normal`:
+// the corner deepest along the normal touches it. `linear` turns and scales
+// the bounds as the element's world does; its translation is ignored.
+[[nodiscard]] scene::Vec3
+resting_origin(scene::Vec3 contact, scene::Vec3 normal,
+               const scene::Mat4& linear,
+               const scene::ModelLocalBounds& bounds) noexcept;
+
+// `contact` stepped to `step` across a surface that faces along a world
+// axis, and left alone along that axis; a sloped surface has no grid to
+// step across and keeps it as it is.
+[[nodiscard]] scene::Vec3 snap_contact(scene::Vec3 contact, scene::Vec3 normal,
+                                       float step) noexcept;
 
 // The placement's transform, for drawing its bounds where it will land.
 [[nodiscard]] scene::Mat4 placement_world(const StagePlacement& placement) noexcept;

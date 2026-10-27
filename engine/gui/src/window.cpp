@@ -112,6 +112,10 @@ namespace {
         if (code == SDLK_0 || code == SDLK_KP_0) {
             return Key::ZoomReset;
         }
+        if (code >= SDLK_1 && code <= SDLK_9) {
+            return static_cast<Key>(static_cast<core::u8>(Key::SaveView1) +
+                                    static_cast<core::u8>(code - SDLK_1));
+        }
     }
     // Alt+G / Alt+R / Alt+S clear location, rotation and scale, as in
     // Blender. Alt with a letter produces no text, so these arrive as keys.
@@ -175,6 +179,8 @@ namespace {
         return MoveKey::Q;
     case SDL_SCANCODE_E:
         return MoveKey::E;
+    case SDL_SCANCODE_V:
+        return MoveKey::V;
     default:
         return std::nullopt;
     }

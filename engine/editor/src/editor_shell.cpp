@@ -1815,6 +1815,11 @@ struct EditorShell::Impl final {
   // joins a camera gesture only when it was pressed on the Stage, and the
   // gesture then follows whichever of those buttons are still held.
   StageOrbit stage_view{};
+  // Ctrl+1..9 camera bookmarks for the free view, and the note that
+  // confirms one was kept or recalled.
+  std::array<std::optional<StageOrbit>, 9U> stage_bookmarks{};
+  std::string stage_bookmark_note;
+  double stage_bookmark_note_until{};
   bool navigate_left{};
   bool navigate_middle{};
   bool navigate_right{};
@@ -3958,6 +3963,37 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.stage_view = stage_focus(impl.stage_view, *bounds);
         }
       }
+      // Ctrl+1..9 keeps this view in a slot and the digit returns to it, as
+      // Unreal's camera bookmarks. Editor-local: the show's cameras are
+      // untouched.
+      if (over && !impl.stage_panel.transforming()) {
+        for (std::size_t slot = 0U; slot < impl.stage_bookmarks.size();
+             ++slot) {
+          if (ui.key_pressed(static_cast<gui::Key>(
+                  static_cast<core::u8>(gui::Key::SaveView1) + slot))) {
+            impl.stage_bookmarks[slot] = impl.stage_view;
+            impl.stage_bookmark_note = "View " + std::to_string(slot + 1U) +
+                                       " saved";
+            impl.stage_bookmark_note_until = now + 1.5;
+          }
+        }
+        for (const char key : typed) {
+          if (key < '1' || key > '9') {
+            continue;
+          }
+          const auto slot = static_cast<std::size_t>(key - '1');
+          if (impl.stage_bookmarks[slot].has_value()) {
+            impl.stage_view = *impl.stage_bookmarks[slot];
+            impl.stage_bookmark_note =
+                "View " + std::string(1U, key);
+          } else {
+            impl.stage_bookmark_note = "No view " + std::string(1U, key) +
+                                       " yet: Ctrl+" + std::string(1U, key) +
+                                       " keeps one";
+          }
+          impl.stage_bookmark_note_until = now + 1.5;
+        }
+      }
     } else {
       StageNavigationStep step{};
       step.gesture = gesture;
@@ -4394,6 +4430,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             plate_overlay, elements);
       }
       stage_viewport_drawn = true;
+      if (!impl.stage_bookmark_note.empty() &&
+          impl.window.time_seconds() < impl.stage_bookmark_note_until) {
+        const gui::Rect &image = stage_viewport_frame.image;
+        const float width = ui.font_width(impl.stage_bookmark_note) + 20.0F;
+        const gui::Rect note{image.x + (image.width - width) * 0.5F,
+                             image.y + 10.0F, width, 24.0F};
+        ui.panel(note, with_alpha(ui.theme().background, 0.86F));
+        ui.label(gui::Rect{note.x + 10.0F, note.y, width - 10.0F, note.height},
+                 impl.stage_bookmark_note, ui.theme().text);
+      }
       // A passive notice leaves picking, framing and navigation available.
       // Retain the last submitted state when command acquisition is busy.
       if (!impl.stage_assets.headline.empty()) {
@@ -6411,6 +6457,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.stage_panel.surface_at(stage_interaction_scene, x, dropped.y);
       request.camera = stage_interaction_scene.camera;
       request.snap = snap;
+      request.snap_move = impl.stage_panel.snap_steps().move;
+      request.snap_turns = impl.stage_panel.snap_steps().rotate_turns;
       if (const auto *const media = std::get_if<assets::MediaAsset>(asset)) {
         request.media = true;
         float aspect = 16.0F / 9.0F;

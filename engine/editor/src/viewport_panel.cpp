@@ -126,6 +126,19 @@ to_ui(const gui::Rect& image, scene::Canvas canvas,
     return "Element  " + std::to_string(node.value());
 }
 
+// Plane and Quad are flat: their box has no depth, so a screen measures and
+// rests as the screen rather than as a cube.
+[[nodiscard]] scene::ModelLocalBounds
+primitive_local_bounds(scene::Primitive primitive) noexcept {
+    scene::ModelLocalBounds box{};
+    if (primitive == scene::Primitive::Plane) {
+        box.minimum.y = box.maximum.y = 0.0F;
+    } else if (primitive == scene::Primitive::Quad) {
+        box.minimum.z = box.maximum.z = 0.0F;
+    }
+    return box;
+}
+
 void line(gui::UiDrawList& list, gui::UiPoint a, gui::UiPoint b,
           float thickness, gui::UiColor color) {
     list.add_line(a.x, a.y, b.x, b.y, thickness, color);
@@ -258,25 +271,51 @@ void draw_light_icon(gui::UiDrawList& list, const gui::Rect& image,
     }
 }
 
-void draw_grid(gui::UiDrawList& list, const gui::Rect& image,
-               const scene::Scene& view) {
-    constexpr int half_grid = 10;
-    constexpr float spacing = 1.0F;
+// The floor grid follows the view: centred under what the camera looks at,
+// spaced by `stage_grid_step` with a brighter line every ten, and the world
+// X (red) and Z (blue) axes wherever they cross it. Each line is drawn in
+// pieces so the part in front of the camera still shows when the camera
+// stands on the grid. Returns the spacing, for the readout.
+float draw_grid(gui::UiDrawList& list, const gui::Rect& image,
+                const scene::Scene& view) {
+    const float reach =
+        std::max(scene::length(view.camera.eye - view.camera.target),
+                 std::abs(view.camera.eye.y));
+    const float step = stage_grid_step(reach);
+    const float major = step * 10.0F;
+    constexpr int half_grid = 40;
+    constexpr int pieces = 8;
+    const float centre_x = std::round(view.camera.target.x / major) * major;
+    const float centre_z = std::round(view.camera.target.z / major) * major;
+    const float extent = static_cast<float>(half_grid) * step;
+    const gui::UiColor minor_color{0.22F, 0.28F, 0.36F, 0.18F};
+    const gui::UiColor major_color{0.30F, 0.38F, 0.48F, 0.34F};
+    const gui::UiColor x_axis{0.72F, 0.18F, 0.18F, 0.45F};
+    const gui::UiColor z_axis{0.16F, 0.34F, 0.82F, 0.50F};
+    const auto pieced = [&](scene::Vec3 from, scene::Vec3 to, float thickness,
+                            gui::UiColor color) {
+        for (int piece = 0; piece < pieces; ++piece) {
+            const float a = static_cast<float>(piece) / pieces;
+            const float b = static_cast<float>(piece + 1) / pieces;
+            projected_line(list, image, view, from + (to - from) * a,
+                           from + (to - from) * b, thickness, color);
+        }
+    };
     for (int line_index = -half_grid; line_index <= half_grid; ++line_index) {
-        const float offset = static_cast<float>(line_index) * spacing;
-        const bool major = line_index == 0 || line_index % 5 == 0;
-        const gui::UiColor grid =
-            major ? gui::UiColor{0.30F, 0.38F, 0.48F, 0.34F}
-                  : gui::UiColor{0.22F, 0.28F, 0.36F, 0.18F};
-        projected_line(
-            list, image, view, scene::Vec3{-10.0F, 0.0F, offset},
-            scene::Vec3{10.0F, 0.0F, offset}, major ? 1.2F : 1.0F,
-            line_index == 0 ? gui::UiColor{0.72F, 0.18F, 0.18F, 0.45F} : grid);
-        projected_line(
-            list, image, view, scene::Vec3{offset, 0.0F, -10.0F},
-            scene::Vec3{offset, 0.0F, 10.0F}, major ? 1.2F : 1.0F,
-            line_index == 0 ? gui::UiColor{0.16F, 0.34F, 0.82F, 0.50F} : grid);
+        const float offset = static_cast<float>(line_index) * step;
+        const bool is_major = line_index % 10 == 0;
+        const float z = centre_z + offset;
+        const float x = centre_x + offset;
+        const float thickness = is_major ? 1.2F : 1.0F;
+        const gui::UiColor grid = is_major ? major_color : minor_color;
+        pieced(scene::Vec3{centre_x - extent, 0.0F, z},
+               scene::Vec3{centre_x + extent, 0.0F, z}, thickness,
+               std::abs(z) < step * 0.5F ? x_axis : grid);
+        pieced(scene::Vec3{x, 0.0F, centre_z - extent},
+               scene::Vec3{x, 0.0F, centre_z + extent}, thickness,
+               std::abs(x) < step * 0.5F ? z_axis : grid);
     }
+    return step;
 }
 
 void draw_camera_overlay(gui::UiDrawList& list, const gui::Rect& image,
@@ -1249,17 +1288,19 @@ std::optional<WorldBounds> ViewportPanel::world_bounds(
                             (corner & 4U) != 0U ? local.maximum.z : local.minimum.z}));
         }
     };
+    const auto primitive_bounds = primitive_local_bounds;
     for (const doc::NodeId node : nodes) {
         bool found = false;
         for (const auto& object : scene.instances) {
             if (object.source == node) {
-                include_box(object.world, scene::ModelLocalBounds{});
+                include_box(object.world,
+                            primitive_bounds(object.mesh.primitive));
                 found = true;
             }
         }
         for (const auto& clip : scene.media) {
             if (clip.source_node == node) {
-                include_box(clip.world, scene::ModelLocalBounds{});
+                include_box(clip.world, primitive_bounds(clip.mesh.primitive));
                 found = true;
             }
         }
@@ -1326,7 +1367,7 @@ ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
 
 std::optional<scene::SurfaceHit>
 ViewportPanel::surface_at(const scene::Scene& scene, float canvas_x,
-                          float canvas_y) {
+                          float canvas_y, const scene::SurfaceFilter& counts) {
     const auto ray =
         scene::canvas_ray(scene.camera, scene.canvas, canvas_x, canvas_y);
     if (!ray.has_value()) {
@@ -1349,14 +1390,219 @@ ViewportPanel::surface_at(const scene::Scene& scene, float canvas_x,
         const render::ModelCacheObservation observation =
             model_cache_.observe(model.source, model_publication_fence_);
         if (observation.ready()) {
-            if (const auto bvh = surface_cache_.observe(observation.asset)) {
-                return scene::raycast_mesh(*bvh, observation.asset->mesh,
-                                           local, limit);
+            const std::shared_ptr<const scene::MeshData> mesh{
+                observation.asset, &observation.asset->mesh};
+            if (const auto bvh = surface_cache_.observe(mesh)) {
+                return scene::raycast_mesh(*bvh, *mesh, local, limit);
             }
         }
         return outer;
     };
-    return scene::raycast_scene(scene, *ray, models, scene.camera.far_plane);
+    return scene::raycast_scene(scene, *ray, models, scene.camera.far_plane,
+                                counts);
+}
+
+std::shared_ptr<const scene::MeshData>
+ViewportPanel::primitive_mesh(scene::MeshKey key) {
+    key = scene::normalized(key);
+    const auto found = primitive_meshes_.find(key);
+    if (found != primitive_meshes_.end()) {
+        return found->second;
+    }
+    // Distinct primitive keys in a show are few; a scene that churns through
+    // tessellations starts the table again rather than growing it.
+    constexpr std::size_t maximum_primitive_meshes = 64U;
+    if (primitive_meshes_.size() >= maximum_primitive_meshes) {
+        primitive_meshes_.clear();
+    }
+    auto mesh = std::make_shared<scene::MeshData>();
+    if (!scene::build_mesh(key, *mesh)) {
+        return nullptr;
+    }
+    return primitive_meshes_.emplace(key, std::move(mesh)).first->second;
+}
+
+std::optional<MeasurePoint>
+ViewportPanel::measure_point_at(const scene::Scene& scene, float canvas_x,
+                                float canvas_y, float reach,
+                                const scene::SurfaceFilter& counts) {
+    const auto ray =
+        scene::canvas_ray(scene.camera, scene.canvas, canvas_x, canvas_y);
+    if (!ray.has_value()) {
+        return std::nullopt;
+    }
+    const std::optional<scene::SurfaceHit> hit =
+        surface_at(scene, canvas_x, canvas_y, counts);
+    if (!hit.has_value()) {
+        if (ray->direction.y < -1.0e-6F && ray->origin.y > 0.0F) {
+            const float distance = -ray->origin.y / ray->direction.y;
+            if (distance <= scene.camera.far_plane) {
+                scene::Vec3 floor = ray->origin + ray->direction * distance;
+                floor.y = 0.0F;
+                return MeasurePoint{floor, MeasureSnap::Floor, {}};
+            }
+        }
+        return std::nullopt;
+    }
+    const MeasurePoint point{hit->position, MeasureSnap::Surface, hit->node};
+
+    std::shared_ptr<const scene::MeshData> mesh;
+    scene::Mat4 world{};
+    switch (hit->source) {
+    case scene::SurfaceSource::Instance:
+        mesh = primitive_mesh(scene.instances[hit->index].mesh);
+        world = scene.instances[hit->index].world;
+        break;
+    case scene::SurfaceSource::Media:
+        mesh = primitive_mesh(scene.media[hit->index].mesh);
+        world = scene.media[hit->index].world;
+        break;
+    case scene::SurfaceSource::Model: {
+        const scene::ModelInstance& model = scene.models[hit->index];
+        const render::ModelCacheObservation observation =
+            model_cache_.observe(model.source, model_publication_fence_);
+        if (observation.ready()) {
+            mesh = std::shared_ptr<const scene::MeshData>{
+                observation.asset, &observation.asset->mesh};
+        }
+        world = model.world;
+        break;
+    }
+    }
+    const std::shared_ptr<const scene::MeshBvh> bvh =
+        mesh != nullptr ? surface_cache_.observe(mesh) : nullptr;
+    if (bvh == nullptr) {
+        return point;
+    }
+
+    // `reach` canvas pixels at the hit's depth, carried into the element's
+    // local space. The inverse's longest axis bounds how far that can stretch.
+    const float pixel_world =
+        hit->distance * 2.0F *
+        scene::deterministic::tan_half_turns(scene.camera.field_of_view) /
+        static_cast<float>(scene.canvas.height);
+    const scene::Mat4 inverse = scene::invert_affine(world);
+    float inverse_scale = 0.0F;
+    for (core::u32 column = 0U; column < 3U; ++column) {
+        inverse_scale = std::max(
+            inverse_scale,
+            scene::length(scene::Vec3{inverse.at(0U, column),
+                                      inverse.at(1U, column),
+                                      inverse.at(2U, column)}));
+    }
+    const float local_reach = reach * pixel_world * inverse_scale * 1.75F;
+    std::vector<core::u32> triangles;
+    static_cast<void>(scene::mesh_triangles_near(
+        *bvh, *mesh, scene::transform_point(inverse, hit->position),
+        local_reach, triangles, 512U));
+
+    // Nearest on screen wins; a vertex anywhere in reach beats a midpoint.
+    float vertex_reach = reach;
+    float midpoint_reach = reach;
+    std::optional<scene::Vec3> vertex;
+    std::optional<scene::Vec3> midpoint;
+    const auto screen_distance = [&](scene::Vec3 candidate) {
+        const auto projected =
+            scene::project_to_canvas(scene.camera, scene.canvas, candidate);
+        if (!projected.visible) {
+            return std::numeric_limits<float>::infinity();
+        }
+        const float dx = projected.x - canvas_x;
+        const float dy = projected.y - canvas_y;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    for (const core::u32 triangle : triangles) {
+        std::array<scene::Vec3, 3U> corners{};
+        for (core::u32 corner = 0U; corner < 3U; ++corner) {
+            corners[corner] = scene::transform_point(
+                world,
+                mesh->vertices[mesh->indices[triangle * 3U + corner]].position);
+        }
+        for (core::u32 corner = 0U; corner < 3U; ++corner) {
+            const float distance = screen_distance(corners[corner]);
+            if (distance < vertex_reach) {
+                vertex_reach = distance;
+                vertex = corners[corner];
+            }
+            const scene::Vec3 middle =
+                (corners[corner] + corners[(corner + 1U) % 3U]) * 0.5F;
+            const float middle_distance = screen_distance(middle);
+            if (middle_distance < midpoint_reach) {
+                midpoint_reach = middle_distance;
+                midpoint = middle;
+            }
+        }
+    }
+    if (vertex.has_value()) {
+        return MeasurePoint{*vertex, MeasureSnap::Vertex, hit->node};
+    }
+    if (midpoint.has_value()) {
+        return MeasurePoint{*midpoint, MeasureSnap::EdgeMidpoint, hit->node};
+    }
+    return point;
+}
+
+scene::ModelLocalBounds
+ViewportPanel::element_local_bounds(const scene::Scene& scene,
+                                    doc::NodeId node) {
+    for (const auto& object : scene.instances) {
+        if (object.source == node) {
+            return primitive_local_bounds(object.mesh.primitive);
+        }
+    }
+    for (const auto& clip : scene.media) {
+        if (clip.source_node == node) {
+            return primitive_local_bounds(clip.mesh.primitive);
+        }
+    }
+    for (const auto& model : scene.models) {
+        if (model.source_node == node) {
+            return model_bounds_for(model).value_or(scene::ModelLocalBounds{});
+        }
+    }
+    return scene::ModelLocalBounds{scene::Vec3{}, scene::Vec3{}};
+}
+
+std::optional<scene::Vec3> ViewportPanel::nearest_element_vertex(
+    const scene::Scene& scene, doc::NodeId node, const scene::Mat4& world,
+    scene::Vec3 near) {
+    std::shared_ptr<const scene::MeshData> mesh;
+    for (const auto& object : scene.instances) {
+        if (object.source == node) {
+            mesh = primitive_mesh(object.mesh);
+        }
+    }
+    for (const auto& clip : scene.media) {
+        if (mesh == nullptr && clip.source_node == node) {
+            mesh = primitive_mesh(clip.mesh);
+        }
+    }
+    for (const auto& model : scene.models) {
+        if (mesh == nullptr && model.source_node == node) {
+            const render::ModelCacheObservation observation =
+                model_cache_.observe(model.source, model_publication_fence_);
+            if (observation.ready()) {
+                mesh = std::shared_ptr<const scene::MeshData>{
+                    observation.asset, &observation.asset->mesh};
+            }
+        }
+    }
+    if (mesh == nullptr || mesh->vertices.empty()) {
+        return std::nullopt;
+    }
+    // Once per drag, when V is first held: a plain pass over the vertices.
+    const scene::MeshVertex* best = &mesh->vertices.front();
+    float best_distance = std::numeric_limits<float>::infinity();
+    for (const scene::MeshVertex& vertex : mesh->vertices) {
+        const scene::Vec3 offset =
+            scene::transform_point(world, vertex.position) - near;
+        const float distance = scene::dot(offset, offset);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = &vertex;
+        }
+    }
+    return scene::transform_point(world, best->position);
 }
 
 std::optional<scene::ModelLocalBounds>
@@ -1501,6 +1747,8 @@ void ViewportPanel::reset_project_state() noexcept {
     projection_mesh_stamp_ = 0U;
     projection_mesh_cache_.clear();
     surface_cache_.request_reset();
+    primitive_meshes_.clear();
+    set_measuring(false);
     mask_gesture_active_ = false;
     mask_gesture_cancelled_ = false;
     mask_gesture_hit_ = MaskViewportHit::None;
@@ -1519,6 +1767,11 @@ bool detail::wait_for_viewport_projection_surface_for_test(
     return found != panel.projection_mesh_cache_.end() &&
            render::detail::wait_for_output_projection_cache_for_test(
                found->second.cache);
+}
+
+bool detail::wait_for_viewport_surface_hierarchies_for_test(
+    ViewportPanel& panel) noexcept {
+    return detail::wait_for_model_surface_cache_for_test(panel.surface_cache_);
 }
 
 CanvasPoint to_canvas(const gui::Rect& image, scene::Canvas canvas,
@@ -2176,6 +2429,94 @@ void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
     }
 }
 
+bool ViewportPanel::snap_drag(const gui::UiContext& ctx,
+                              const scene::Scene& scene,
+                              std::span<const doc::NodeId> selection,
+                              const ViewportFrame& frame,
+                              TransformDelta& delta) {
+    drag_snap_target_.reset();
+    if (role_ != ViewportRole::Stage || frame.image.width <= 0.0F) {
+        return false;
+    }
+    // What moves never counts as somewhere to land.
+    const doc::NodeId dragged = drag_node_;
+    const scene::SurfaceFilter elsewhere =
+        [dragged, selection](doc::NodeId node) {
+            return node != dragged && !selected(selection, node);
+        };
+    if (ctx.move_key_down(gui::MoveKey::V)) {
+        if (!drag_source_vertex_.has_value() && drag_grab_.has_value()) {
+            drag_source_vertex_ =
+                nearest_element_vertex(scene, drag_node_, drag_start_world_,
+                                       *drag_grab_)
+                    .value_or(*drag_grab_);
+        }
+        const auto target = measure_point_at(
+            scene, frame.pointer.x, frame.pointer.y,
+            14.0F * static_cast<float>(scene.canvas.width) / frame.image.width,
+            elsewhere);
+        if (drag_source_vertex_.has_value() && target.has_value() &&
+            (target->snap == MeasureSnap::Vertex ||
+             target->snap == MeasureSnap::EdgeMidpoint)) {
+            delta.translation = target->position - *drag_source_vertex_;
+            drag_snap_target_ = target;
+            return true;
+        }
+        return false;
+    }
+    if (!surface_snapping_ || drag_axis_ != GizmoAxis::Screen) {
+        return false;
+    }
+    const auto hit =
+        surface_at(scene, frame.pointer.x, frame.pointer.y, elsewhere);
+    if (!hit.has_value()) {
+        return false;
+    }
+    const scene::Vec3 contact =
+        snapping_ != ctx.ctrl_held()
+            ? snap_contact(hit->position, hit->normal,
+                           ctx.shift_held() ? snap_steps_.fine_move()
+                                            : snap_steps_.move)
+            : hit->position;
+    delta.translation = resting_origin(contact, hit->normal, drag_start_world_,
+                                       drag_start_bounds_) -
+                        scene::translation_of(drag_start_world_);
+    return true;
+}
+
+void ViewportPanel::draw_snap_controls(gui::UiContext& ctx,
+                                       const gui::Rect& bounds) {
+    static constexpr std::array<std::string_view, move_snap_choices.size()>
+        distances{"0.01 m", "0.1 m", "0.5 m", "1 m", "5 m"};
+    static constexpr std::array<std::string_view,
+                                rotate_snap_choices_degrees.size()>
+        angles{"1 deg", "5 deg", "15 deg", "45 deg", "90 deg"};
+    const auto nearest = [](const auto& choices, float value) {
+        std::size_t best = 0U;
+        for (std::size_t index = 1U; index < choices.size(); ++index) {
+            if (std::abs(choices[index] - value) <
+                std::abs(choices[best] - value)) {
+                best = index;
+            }
+        }
+        return best;
+    };
+    const gui::Rect distance{bounds.x, bounds.y, 62.0F, bounds.height};
+    std::size_t move = nearest(move_snap_choices, snap_steps_.move);
+    if (ctx.dropdown(mix(id_, 16U), distance, distances, move)) {
+        snap_steps_.move = move_snap_choices[move];
+    }
+    ctx.tooltip(distance, "Move snap step.");
+    const gui::Rect angle{bounds.x + 64.0F, bounds.y, bounds.width - 64.0F,
+                          bounds.height};
+    std::size_t turn = nearest(rotate_snap_choices_degrees,
+                               snap_steps_.rotate_turns * 360.0F);
+    if (ctx.dropdown(mix(id_, 17U), angle, angles, turn)) {
+        snap_steps_.rotate_turns = rotate_snap_choices_degrees[turn] / 360.0F;
+    }
+    ctx.tooltip(angle, "Rotate snap step.");
+}
+
 TransformDelta ViewportPanel::snapped(const gui::UiContext& ctx,
                                      TransformDelta delta) const noexcept {
     if (snapping_ == ctx.ctrl_held()) {
@@ -2186,7 +2527,7 @@ TransformDelta ViewportPanel::snapped(const gui::UiContext& ctx,
     case TransformTool::Move: {
         // Per component of the gesture's own frame, so an axis-constrained
         // move snaps its length and a free one lands on the grid's steps.
-        const float step = fine ? move_snap_fine_step : move_snap_step;
+        const float step = fine ? snap_steps_.fine_move() : snap_steps_.move;
         scene::Vec3 result{};
         for (const scene::Vec3& axis : delta.basis) {
             result = result +
@@ -2198,11 +2539,12 @@ TransformDelta ViewportPanel::snapped(const gui::UiContext& ctx,
     }
     case TransformTool::Rotate:
         delta.turns = snap_to_step(delta.turns,
-                                   fine ? rotate_snap_fine_step_turns
-                                        : rotate_snap_step_turns);
+                                   fine ? snap_steps_.fine_rotate_turns()
+                                        : snap_steps_.rotate_turns);
         break;
     case TransformTool::Scale: {
-        const float step = fine ? scale_snap_fine_step : scale_snap_step;
+        const float step =
+            fine ? snap_steps_.fine_scale() : snap_steps_.scale;
         delta.factors = scene::Vec3{snap_to_step(delta.factors.x, step),
                                     snap_to_step(delta.factors.y, step),
                                     snap_to_step(delta.factors.z, step)};
@@ -2310,6 +2652,122 @@ void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
               status, ctx.theme().text);
 }
 
+namespace {
+
+constexpr gui::UiColor measure_color{1.0F, 0.80F, 0.22F, 1.0F};
+constexpr gui::UiColor measure_ink{0.06F, 0.05F, 0.02F, 1.0F};
+constexpr gui::UiColor measure_shade{0.04F, 0.05F, 0.06F, 0.86F};
+
+void measure_badge(gui::UiContext& ctx, float x, float y,
+                   std::string_view text, bool strong) {
+    const float width = ctx.font_width(text) + 12.0F;
+    const gui::Rect badge{x - width * 0.5F, y, width, 20.0F};
+    ctx.panel(badge, strong ? measure_color : measure_shade);
+    ctx.label(gui::Rect{badge.x + 6.0F, badge.y, badge.width - 6.0F,
+                        badge.height},
+              text, strong ? measure_ink : measure_color);
+}
+
+// The Measure tool's picture: each segment with its length at its middle,
+// the latest segment's axis parts and slope beneath, a path's total at its
+// end, and what the pointer would snap to.
+void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
+                       const gui::Rect& image, const scene::Scene& view,
+                       const MeasureChain& chain,
+                       const std::optional<MeasurePoint>& hover,
+                       bool hint_shown = true) {
+    std::vector<MeasurePoint> points = chain.points;
+    if (chain.open && hover.has_value() && !points.empty()) {
+        points.push_back(*hover);
+    }
+    const auto ui_of = [&](scene::Vec3 world) -> std::optional<gui::UiPoint> {
+        const auto projected =
+            scene::project_to_canvas(view.camera, view.canvas, world);
+        if (!projected.visible) {
+            return std::nullopt;
+        }
+        return to_ui(image, view.canvas, projected);
+    };
+    for (std::size_t index = 1U; index < points.size(); ++index) {
+        const scene::Vec3 from = points[index - 1U].position;
+        const scene::Vec3 to = points[index].position;
+        projected_line(list, image, view, from, to, 5.0F, outline_shadow);
+        projected_line(list, image, view, from, to, 2.0F, measure_color);
+        const auto middle = ui_of((from + to) * 0.5F);
+        if (!middle.has_value()) {
+            continue;
+        }
+        const MeasureReading reading = measure(from, to);
+        measure_badge(ctx, middle->x, middle->y - 26.0F,
+                      format_metres(reading.length), true);
+        if (index + 1U == points.size()) {
+            measure_badge(ctx, middle->x, middle->y - 4.0F,
+                          format_reading_detail(reading), false);
+        }
+    }
+    for (const MeasurePoint& point : chain.points) {
+        if (const auto at = ui_of(point.position)) {
+            list.add_rect(at->x - 4.0F, at->y - 4.0F, 8.0F, 8.0F,
+                          outline_shadow);
+            list.add_rect(at->x - 3.0F, at->y - 3.0F, 6.0F, 6.0F,
+                          measure_color);
+        }
+    }
+    if (points.size() > 2U) {
+        if (const auto end = ui_of(points.back().position)) {
+            measure_badge(ctx, end->x, end->y + 12.0F,
+                          "Total " + format_metres(path_length(points)), true);
+        }
+    }
+    if (hover.has_value()) {
+        if (const auto at = ui_of(hover->position)) {
+            switch (hover->snap) {
+            case MeasureSnap::Vertex:
+                list.add_rect(at->x - 6.0F, at->y - 6.0F, 12.0F, 12.0F,
+                              outline_shadow);
+                list.add_rect(at->x - 4.5F, at->y - 4.5F, 9.0F, 9.0F,
+                              measure_color);
+                break;
+            case MeasureSnap::EdgeMidpoint:
+                list.add_triangle(at->x, at->y - 7.0F, at->x + 7.0F,
+                                  at->y + 5.0F, at->x - 7.0F, at->y + 5.0F,
+                                  measure_color);
+                break;
+            case MeasureSnap::Surface:
+            case MeasureSnap::Floor: {
+                const std::array<gui::UiPoint, 4U> ring{
+                    gui::UiPoint{at->x - 5.0F, at->y - 5.0F},
+                    gui::UiPoint{at->x + 5.0F, at->y - 5.0F},
+                    gui::UiPoint{at->x + 5.0F, at->y + 5.0F},
+                    gui::UiPoint{at->x - 5.0F, at->y + 5.0F}};
+                for (std::size_t index = 0U; index < ring.size(); ++index) {
+                    line(list, ring[index], ring[(index + 1U) % ring.size()],
+                         1.5F, measure_color);
+                }
+                break;
+            }
+            }
+            ctx.label(gui::Rect{at->x + 10.0F, at->y + 4.0F, 120.0F, 18.0F},
+                      measure_snap_name(hover->snap), measure_color);
+        }
+    }
+    if (!hint_shown) {
+        return;
+    }
+    const std::string_view hint =
+        "MEASURE   Click two points.  Shift+click adds to a path.  "
+        "Esc clears; M or Esc again leaves.";
+    const float hint_width = ctx.font_width(hint);
+    ctx.panel(gui::Rect{image.x + 6.0F, image.y + 6.0F, hint_width + 14.0F,
+                        22.0F},
+              measure_shade);
+    ctx.label(gui::Rect{image.x + 13.0F, image.y + 6.0F, hint_width + 4.0F,
+                        22.0F},
+              hint, measure_color);
+}
+
+} // namespace
+
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
                                   const scene::Scene& scene,
@@ -2371,20 +2829,33 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 left += width + 4.0F;
                 return clicked;
             };
-            if (choice(10U, 46.0F, "MOVE", tool_ == TransformTool::Move,
+            if (choice(10U, 46.0F, "MOVE",
+                       !measuring_ && tool_ == TransformTool::Move,
                        "Move tool. G moves the selection from the keyboard; "
                        "X, Y or Z constrains it, Shift+X/Y/Z to a plane.")) {
                 tool_ = TransformTool::Move;
+                set_measuring(false);
             }
-            if (choice(11U, 56.0F, "ROTATE", tool_ == TransformTool::Rotate,
+            if (choice(11U, 56.0F, "ROTATE",
+                       !measuring_ && tool_ == TransformTool::Rotate,
                        "Rotate tool. R rotates the selection about the view, "
                        "or about X, Y or Z once one is typed.")) {
                 tool_ = TransformTool::Rotate;
+                set_measuring(false);
             }
-            if (choice(12U, 48.0F, "SCALE", tool_ == TransformTool::Scale,
+            if (choice(12U, 48.0F, "SCALE",
+                       !measuring_ && tool_ == TransformTool::Scale,
                        "Scale tool. S scales the selection; X, Y or Z scales "
                        "one axis, Shift+X/Y/Z the other two.")) {
                 tool_ = TransformTool::Scale;
+                set_measuring(false);
+            }
+            if (choice(15U, 64.0F, "MEASURE", measuring_,
+                       "Measure tool (M). Click two points for the distance "
+                       "between them in metres; points snap to vertices, then "
+                       "edge midpoints, then the surface. Shift+click adds "
+                       "to a path. Nothing measured is saved.")) {
+                set_measuring(!measuring_);
             }
             left += 6.0F;
             if (choice(13U, 56.0F,
@@ -2399,14 +2870,27 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                    : TransformOrientation::Global;
             }
             if (choice(14U, 44.0F, "SNAP", snapping_,
-                       "Snap moves to 1 m, rotation to 5 degrees and scale to "
-                       "0.1 (Shift: 0.1 m, 1 degree, 0.01). Shift+Tab "
-                       "toggles; hold Ctrl to invert while dragging.")) {
+                       "Snap moves, turns and scales to the steps beside "
+                       "this (Shift: a tenth of the distance and scale step, "
+                       "a fifth of the angle). Shift+Tab toggles; hold Ctrl "
+                       "to invert while dragging.")) {
                 snapping_ = !snapping_;
+            }
+            draw_snap_controls(ctx, gui::Rect{left, toolbar.y + 4.0F, 124.0F,
+                                              20.0F});
+            left += 128.0F;
+            if (choice(18U, 64.0F, "SURFACE", surface_snapping_,
+                       "Surface snapping: an element dragged by its body "
+                       "rides over whatever is under the pointer and rests on "
+                       "it. Hold V while moving to put the dragged element's "
+                       "vertex nearest the pointer onto the vertex under it.")) {
+                surface_snapping_ = !surface_snapping_;
             }
             left += 6.0F;
         }
-        if (toolbar.width >= 740.0F) {
+        // The display toggles, when they fit before the preview controls.
+        if (left + 162.0F <=
+            toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F) {
             float button_x = left;
             if (ctx.button(mix(id_, 1U),
                            gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
@@ -2586,7 +3070,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         interaction_occluder != nullptr &&
         interaction_occluder->contains(ctx.pointer_x(), ctx.pointer_y());
     GizmoAxis hovered_scene_axis = GizmoAxis::None;
-    if (!occluded) {
+    if (!occluded && !measuring_) {
         switch (gizmo_tool) {
         case TransformTool::Move:
             hovered_scene_axis =
@@ -2674,7 +3158,19 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         ctx.shift_held() && ctx.key_pressed(gui::Key::Tab)) {
         snapping_ = !snapping_;
     }
-    if (role_ == ViewportRole::Stage && !keyboard_.active &&
+    if (role_ == ViewportRole::Stage && pointer_over_image && !ctx.typing() &&
+        !keyboard_.active && !ctx.ctrl_held() && !ctx.alt_held()) {
+        if (ctx.shortcut_text().find_first_of("mM") != std::string_view::npos) {
+            set_measuring(!measuring_);
+        } else if (measuring_ && ctx.key_pressed(gui::Key::Escape)) {
+            if (measure_.points.empty()) {
+                set_measuring(false);
+            } else {
+                measure_.clear();
+            }
+        }
+    }
+    if (role_ == ViewportRole::Stage && !keyboard_.active && !measuring_ &&
         !swallow_pointer_ && !dragging_ && !surface_dragging_ &&
         !deep_select_open_ && pivot.has_value() && pointer_over_image &&
         !ctx.pointer_down() && !ctx.secondary_pointer_down() &&
@@ -2922,6 +3418,14 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     frame.pointer =
         to_canvas(frame.image, interaction_canvas, ctx.pointer_x(),
                   ctx.pointer_y());
+    measure_hover_.reset();
+    if (measuring_ && role_ == ViewportRole::Stage && projection == nullptr &&
+        it.hovered) {
+        // Twelve interface pixels of reach, as Unreal's vertex snap feels.
+        measure_hover_ = measure_point_at(
+            scene, frame.pointer.x, frame.pointer.y,
+            12.0F * canvas_width / frame.image.width);
+    }
 
     const auto scene_hits_under_pointer = [&]() {
         const float light_radius = 12.0F * canvas_width / frame.image.width;
@@ -2968,6 +3472,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
              ctx.middle_pointer_down());
         if (camera_chord) {
             // Left to the shell's camera navigation.
+        } else if (measuring_) {
+            if (measure_hover_.has_value()) {
+                measure_.click(*measure_hover_, ctx.shift_held());
+            }
         } else if (hovered_surface_axis != GizmoAxis::None &&
                    selected_surface_value != nullptr) {
             frame.surface_picked = selected_surface_value->node;
@@ -2999,6 +3507,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             frame.picked = primary;
             drag_axis_ = hovered_scene_axis;
             drag_tool_ = gizmo_tool;
+            drag_node_ = primary;
+            drag_start_world_ = primary_world.value_or(scene::identity());
+            drag_start_bounds_ = element_local_bounds(scene, primary);
+            drag_grab_ = *pivot;
+            drag_source_vertex_.reset();
             press_world_ = *pivot;
             drag_pivot_ = *pivot;
             drag_basis_ = scene_gizmo.world_axes;
@@ -3070,11 +3583,27 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     drag_basis_ = orientation_ == TransformOrientation::Local
                                       ? world_axes_of(*world)
                                       : world_basis;
+                    drag_node_ = front->node;
+                    drag_start_world_ = *world;
+                    drag_start_bounds_ = element_local_bounds(scene, front->node);
+                    const doc::NodeId grabbed = front->node;
+                    const auto grab = projection == nullptr
+                                          ? surface_at(scene, frame.pointer.x,
+                                                       frame.pointer.y,
+                                                       [grabbed](doc::NodeId node) {
+                                                           return node == grabbed;
+                                                       })
+                                          : std::nullopt;
+                    drag_grab_ = grab.has_value()
+                                     ? grab->position
+                                     : scene::translation_of(*world);
+                    drag_source_vertex_.reset();
                     dragging_ = true;
                 }
             }
         }
-        if (!frame.picked.has_value() && !frame.surface_picked.has_value()) {
+        if ((camera_chord || !measuring_) && !frame.picked.has_value() &&
+            !frame.surface_picked.has_value()) {
             frame.empty_canvas =
                 role_ == ViewportRole::Stage
                     ? EmptyCanvasInteraction::Navigate
@@ -3194,6 +3723,9 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             delta.tool = drag_tool_;
             delta.pivot = drag_pivot_;
             delta.basis = drag_basis_;
+            // A surface or vertex snap puts the element exactly; the grid
+            // step does not round it afterwards.
+            bool exact = false;
             switch (drag_tool_) {
             case TransformTool::Move:
                 if (drag_axis_ == GizmoAxis::Screen) {
@@ -3217,6 +3749,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                             axis_world_ * (along * axis_world_length_);
                     }
                 }
+                exact = snap_drag(ctx, scene, selection, frame, delta);
                 break;
             case TransformTool::Rotate:
                 drag_turns_ += sweep_turns(drag_centre_x_, drag_centre_y_,
@@ -3251,10 +3784,15 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 break;
             }
             }
-            delta = snapped(ctx, delta);
+            if (!exact) {
+                delta = snapped(ctx, delta);
+            }
             frame.transform = delta;
             frame.translation = delta.translation;
         }
+    }
+    if (!it.held || !dragging_) {
+        drag_snap_target_.reset();
     }
 
     if (it.released) {
@@ -3271,7 +3809,13 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     ctx.push_clip(frame.image);
     gui::UiDrawList& list = ctx.draw_list();
     if (role_ == ViewportRole::Stage && show_grid_) {
-        draw_grid(list, frame.image, scene);
+        const float step = draw_grid(list, frame.image, scene);
+        const std::string text = "Grid " + format_metres(step);
+        const float width = ctx.font_width(text) + 14.0F;
+        ctx.label(gui::Rect{frame.image.x + frame.image.width - width,
+                            frame.image.y + frame.image.height - 26.0F, width,
+                            22.0F},
+                  text, ctx.theme().text_muted);
     }
     if (role_ == ViewportRole::Stage && show_overlays_) {
         for (const scene::SceneScreen& screen : scene.screens) {
@@ -3334,6 +3878,29 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     draw_selection_outlines(list, frame.image, scene, selection, primary,
                             model_bounds, projection);
+    // The selection's size along the world axes, in metres.
+    if (role_ == ViewportRole::Stage && show_overlays_ && projection == nullptr &&
+        !selection.empty()) {
+        if (const auto box = world_bounds(scene, selection)) {
+            const scene::Vec3 size = box->maximum - box->minimum;
+            if (size.x > 0.0F || size.y > 0.0F || size.z > 0.0F) {
+                const std::string text =
+                    "W " + format_metres(size.x) + "   H " +
+                    format_metres(size.y) + "   D " + format_metres(size.z);
+                const float width = ctx.font_width(text) + 14.0F;
+                const gui::Rect badge{frame.image.x + 6.0F,
+                                      frame.image.y + frame.image.height - 28.0F,
+                                      width, 22.0F};
+                ctx.panel(badge, gui::UiColor{0.04F, 0.05F, 0.06F, 0.82F});
+                ctx.label(gui::Rect{badge.x + 7.0F, badge.y, width - 7.0F,
+                                    badge.height},
+                          text, ctx.theme().text);
+                ctx.tooltip(badge,
+                            "The selection's bounding box along the world X "
+                            "(W), Y (H) and Z (D) axes.");
+            }
+        }
+    }
     if (role_ == ViewportRole::Stage && show_gizmo_) {
         if (selected_surface_value != nullptr) {
             const GizmoAxis translation_hover =
@@ -3382,6 +3949,14 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     if (keyboard_.active) {
         draw_keyboard_transform(ctx, list, frame.image, scene, keyboard_centre,
                                 keyboard_reading);
+    }
+    if (measuring_ && role_ == ViewportRole::Stage && projection == nullptr) {
+        draw_measurements(ctx, list, frame.image, scene, measure_,
+                          measure_hover_);
+    }
+    if (drag_snap_target_.has_value()) {
+        draw_measurements(ctx, list, frame.image, scene, MeasureChain{},
+                          drag_snap_target_, false);
     }
     ctx.pop_clip();
 

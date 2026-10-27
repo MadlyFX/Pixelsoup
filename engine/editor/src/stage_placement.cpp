@@ -1,6 +1,5 @@
 #include <mediaserver/editor/stage_placement.hpp>
 
-#include <mediaserver/editor/transform_tool.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +24,11 @@ constexpr float flat_standoff_m = 0.001F;
 
 [[nodiscard]] float snap_to(float value, float step) noexcept {
     return std::round(value / step) * step;
+}
+
+// The world direction a turn sends the element's +Z face to.
+[[nodiscard]] scene::Vec3 facing_of(const scene::Mat4& turned) noexcept {
+    return scene::Vec3{turned.at(0U, 2U), turned.at(1U, 2U), turned.at(2U, 2U)};
 }
 
 } // namespace
@@ -69,20 +73,8 @@ place_on_stage(const StagePlacementRequest& request) noexcept {
     }
 
     const scene::Vec3 n = placement.normal;
-    // Snapping steps across an axis-aligned surface, never off it along its
-    // normal. A sloped surface has no grid to step across.
-    if (request.snap && placement.surface != StagePlacementSurface::ViewPlane &&
-        std::max({std::abs(n.x), std::abs(n.y), std::abs(n.z)}) >=
-            axis_aligned) {
-        if (std::abs(n.x) < axis_aligned) {
-            placement.contact.x = snap_to(placement.contact.x, move_snap_step);
-        }
-        if (std::abs(n.y) < axis_aligned) {
-            placement.contact.y = snap_to(placement.contact.y, move_snap_step);
-        }
-        if (std::abs(n.z) < axis_aligned) {
-            placement.contact.z = snap_to(placement.contact.z, move_snap_step);
-        }
+    if (request.snap && placement.surface != StagePlacementSurface::ViewPlane) {
+        placement.contact = snap_contact(placement.contact, n, request.snap_move);
     }
 
     if (request.media) {
@@ -95,7 +87,7 @@ place_on_stage(const StagePlacementRequest& request) noexcept {
             if (toward.x * toward.x + toward.z * toward.z > 1.0e-8F) {
                 scene::Turns yaw = heading(toward.x, toward.z);
                 if (request.snap) {
-                    yaw = snap_to(yaw, rotate_snap_step_turns);
+                    yaw = snap_to(yaw, request.snap_turns);
                 }
                 placement.rotation.x = yaw;
             }
@@ -107,28 +99,58 @@ place_on_stage(const StagePlacementRequest& request) noexcept {
         return placement;
     }
 
-    // Rest the turned bounds on the surface: the corner deepest along the
-    // normal touches it.
     const scene::Mat4 turned =
         scene::rotation(placement.rotation.x, placement.rotation.y,
                         placement.rotation.z);
-    float deepest = std::numeric_limits<float>::infinity();
-    float highest = -std::numeric_limits<float>::infinity();
-    const scene::ModelLocalBounds& box = request.bounds;
-    for (unsigned corner = 0U; corner < 8U; ++corner) {
-        const scene::Vec3 point = scene::transform_point(
-            turned,
-            scene::Vec3{(corner & 1U) != 0U ? box.maximum.x : box.minimum.x,
-                        (corner & 2U) != 0U ? box.maximum.y : box.minimum.y,
-                        (corner & 4U) != 0U ? box.maximum.z : box.minimum.z});
-        deepest = std::min(deepest, scene::dot(point, n));
-        highest = std::max(highest, scene::dot(point, n));
-    }
-    placement.position = placement.contact - n * deepest;
-    if (request.media && highest - deepest < 1.0e-4F) {
+    placement.position =
+        resting_origin(placement.contact, n, turned, request.bounds);
+    if (request.media && (request.bounds.maximum.z - request.bounds.minimum.z) <
+                             1.0e-4F &&
+        std::abs(scene::dot(n, facing_of(turned))) > 0.999F) {
+        // Flat against the surface: a millimetre proud of it.
         placement.position = placement.position + n * flat_standoff_m;
     }
     return placement;
+}
+
+scene::Vec3 resting_origin(scene::Vec3 contact, scene::Vec3 normal,
+                           const scene::Mat4& linear,
+                           const scene::ModelLocalBounds& bounds) noexcept {
+    float deepest = std::numeric_limits<float>::infinity();
+    for (unsigned corner = 0U; corner < 8U; ++corner) {
+        const scene::Vec3 local{
+            (corner & 1U) != 0U ? bounds.maximum.x : bounds.minimum.x,
+            (corner & 2U) != 0U ? bounds.maximum.y : bounds.minimum.y,
+            (corner & 4U) != 0U ? bounds.maximum.z : bounds.minimum.z};
+        const scene::Vec3 turned{
+            linear.at(0U, 0U) * local.x + linear.at(0U, 1U) * local.y +
+                linear.at(0U, 2U) * local.z,
+            linear.at(1U, 0U) * local.x + linear.at(1U, 1U) * local.y +
+                linear.at(1U, 2U) * local.z,
+            linear.at(2U, 0U) * local.x + linear.at(2U, 1U) * local.y +
+                linear.at(2U, 2U) * local.z};
+        deepest = std::min(deepest, scene::dot(turned, normal));
+    }
+    return contact - normal * deepest;
+}
+
+scene::Vec3 snap_contact(scene::Vec3 contact, scene::Vec3 normal,
+                         float step) noexcept {
+    if (!(step > 0.0F) ||
+        std::max({std::abs(normal.x), std::abs(normal.y), std::abs(normal.z)}) <
+            axis_aligned) {
+        return contact;
+    }
+    if (std::abs(normal.x) < axis_aligned) {
+        contact.x = snap_to(contact.x, step);
+    }
+    if (std::abs(normal.y) < axis_aligned) {
+        contact.y = snap_to(contact.y, step);
+    }
+    if (std::abs(normal.z) < axis_aligned) {
+        contact.z = snap_to(contact.z, step);
+    }
+    return contact;
 }
 
 scene::Mat4 placement_world(const StagePlacement& placement) noexcept {

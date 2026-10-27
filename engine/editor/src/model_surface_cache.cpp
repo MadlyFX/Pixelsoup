@@ -18,7 +18,7 @@ namespace mediaserver::editor {
 struct ModelSurfaceCache::State final {
     struct Entry final {
         // Identity: the pointer alone could be reused by a later asset.
-        std::weak_ptr<const render::ModelAsset> asset;
+        std::weak_ptr<const scene::MeshData> asset;
         std::shared_ptr<const scene::MeshBvh> bvh;
         bool pending{};
         core::u64 used{};
@@ -30,8 +30,8 @@ struct ModelSurfaceCache::State final {
     mutable std::mutex mutex;
     std::condition_variable_any wake;
     std::condition_variable idle;
-    std::unordered_map<const render::ModelAsset*, Entry> entries;
-    std::deque<std::shared_ptr<const render::ModelAsset>> queue;
+    std::unordered_map<const scene::MeshData*, Entry> entries;
+    std::deque<std::shared_ptr<const scene::MeshData>> queue;
     // Hierarchies the UI thread let go of, freed on the worker.
     std::vector<std::shared_ptr<const scene::MeshBvh>> retired;
     bool building{};
@@ -67,7 +67,7 @@ struct ModelSurfaceCache::State final {
 
     void run(std::stop_token stop) {
         while (!stop.stop_requested()) {
-            std::shared_ptr<const render::ModelAsset> job;
+            std::shared_ptr<const scene::MeshData> job;
             std::vector<std::shared_ptr<const scene::MeshBvh>> released;
             {
                 std::unique_lock lock{mutex};
@@ -104,7 +104,7 @@ struct ModelSurfaceCache::State final {
             }
 
             auto built = std::make_shared<scene::MeshBvh>(
-                scene::build_mesh_bvh(job->mesh, stop));
+                scene::build_mesh_bvh(*job, stop));
             builds.fetch_add(1U, std::memory_order_relaxed);
             {
                 std::lock_guard lock{mutex};
@@ -179,7 +179,7 @@ ModelSurfaceCache::~ModelSurfaceCache() {
 }
 
 std::shared_ptr<const scene::MeshBvh> ModelSurfaceCache::observe(
-    const std::shared_ptr<const render::ModelAsset>& asset) {
+    const std::shared_ptr<const scene::MeshData>& asset) {
     if (state_ == nullptr || asset == nullptr) {
         return nullptr;
     }
