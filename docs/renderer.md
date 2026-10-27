@@ -83,6 +83,15 @@ destination pixels (non-Normal blend modes, or any media clip, since a decoded
 frame may carry alpha even at full layer opacity) is queued instead, sorted
 back-to-front with document order and insertion order as tie-breakers, and
 drawn as its own depth-tested pass with its own fixed-function blend equation.
+Centres alone misorder a card standing in front of a large screen whose centre
+is nearer the camera than the card's, so the sort is then refined by planes. A
+layer with no thickness along one axis (a quad, a plane, a media screen) is
+drawn before any layer lying wholly on the viewer's side of it, and after any
+lying wholly behind it. Layers on one plane, and two that cross, have no such
+relation and keep the sorted order; a cycle falls back to it too. The
+refinement compares at most 32,768 layer pairs per recording, about 0.4 ms;
+flat layers beyond that keep centre order and are counted in
+`RenderStats::unordered_layers`.
 These layers write no depth while they composite, so the sort alone would
 draw two that cross through each other one wholly over the other, swapping as
 the camera moves. Before compositing, every Normal-blend layer at full layer

@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -1081,6 +1082,38 @@ struct SurfaceFillProgram final {
     return std::isfinite(result) ? result : 0.0F;
 }
 
+constexpr ModelBounds unit_bounds{
+    scene::Vec3{-0.5F, -0.5F, -0.5F}, scene::Vec3{0.5F, 0.5F, 0.5F}};
+
+// Where a procedural primitive lies before its world transform. The quad and
+// plane have no thickness, which is what marks them flat for layer ordering.
+[[nodiscard]] ModelBounds primitive_bounds(scene::Primitive primitive) noexcept {
+    switch (primitive) {
+    case scene::Primitive::Quad:
+        return ModelBounds{scene::Vec3{-0.5F, -0.5F, 0.0F},
+                           scene::Vec3{0.5F, 0.5F, 0.0F}};
+    case scene::Primitive::Plane:
+        return ModelBounds{scene::Vec3{-0.5F, 0.0F, -0.5F},
+                           scene::Vec3{0.5F, 0.0F, 0.5F}};
+    case scene::Primitive::Box:
+    case scene::Primitive::Sphere:
+    case scene::Primitive::Cylinder:
+        break;
+    }
+    return unit_bounds;
+}
+
+// How much plane-side layer ordering one recording may do: pairs of layers
+// compared, and relations kept, on average per layer. A frame needing more
+// keeps the remaining flat layers in centre order and counts them, so this
+// stays a fraction of a millisecond however many layers a show composites.
+constexpr std::size_t layer_pair_budget = 32'768U;
+constexpr std::size_t layer_edges_per_layer = 8U;
+
+[[nodiscard]] float component(scene::Vec3 value, std::size_t axis) noexcept {
+    return axis == 0U ? value.x : axis == 1U ? value.y : value.z;
+}
+
 [[nodiscard]] bool finite(scene::Vec3 value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y)
         && std::isfinite(value.z);
@@ -1588,6 +1621,181 @@ struct CascadeVolume final {
 
 bool SceneRenderer::shaders_available() noexcept {
     return shader_blobs().present;
+}
+
+void SceneRenderer::order_composites_by_planes(
+    const SceneRenderView& view) noexcept {
+    const auto count = composite_draws_.size();
+    if (count < 2U) return;
+    const bool orthographic = scene::orthographic(view.matrices.projection);
+    const auto forward =
+        scene::normalize(view.forward, scene::Vec3{0.0F, 0.0F, -1.0F});
+
+    layer_volumes_.clear();
+    for (const auto& draw : composite_draws_) {
+        LayerVolume volume{};
+        volume.nearest = std::numeric_limits<float>::infinity();
+        volume.farthest = -std::numeric_limits<float>::infinity();
+        const auto& bounds = draw.bounds;
+        for (std::size_t corner = 0U; corner < volume.corners.size(); ++corner) {
+            const scene::Vec3 local{
+                (corner & 1U) != 0U ? bounds.maximum.x : bounds.minimum.x,
+                (corner & 2U) != 0U ? bounds.maximum.y : bounds.minimum.y,
+                (corner & 4U) != 0U ? bounds.maximum.z : bounds.minimum.z};
+            volume.corners[corner] =
+                scene::transform_point(draw.instance.world, local);
+            const float depth =
+                scene::dot(volume.corners[corner] - view.eye, forward);
+            volume.nearest = std::min(volume.nearest, depth);
+            volume.farthest = std::max(volume.farthest, depth);
+        }
+        // No thickness along one local axis: the surface lies in the plane
+        // through the corners spanned by the other two.
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+            if (component(bounds.maximum, axis) != component(bounds.minimum, axis)) {
+                continue;
+            }
+            const std::size_t u = std::size_t{1} << ((axis + 1U) % 3U);
+            const std::size_t v = std::size_t{1} << ((axis + 2U) % 3U);
+            const auto origin = volume.corners[0U];
+            const auto normal = scene::cross(
+                volume.corners[u] - origin, volume.corners[v] - origin);
+            const float area = scene::length(normal);
+            if (!(area > 1.0e-12F)) break;
+            volume.normal = normal * (1.0F / area);
+            volume.offset = scene::dot(volume.normal, origin);
+            volume.viewer_side = orthographic
+                ? -scene::dot(volume.normal, forward)
+                : scene::dot(volume.normal, view.eye) - volume.offset;
+            // Seen edge on, a surface has no side the viewer is on.
+            volume.planar = std::isfinite(volume.viewer_side)
+                && std::abs(volume.viewer_side) > 1.0e-6F;
+            break;
+        }
+        layer_volumes_.push_back(volume);
+    }
+
+    // Whether every corner of `points` is on one side of `plane`: +1 the
+    // viewer's side, -1 the far side. Points within the tolerance count as
+    // on the plane, so coplanar layers are on neither side and keep their
+    // composite order.
+    const auto wholly = [](const LayerVolume& plane,
+                           const LayerVolume& points, float side) {
+        const float tolerance = 1.0e-4F + 1.0e-5F * std::abs(plane.offset);
+        const float facing = plane.viewer_side > 0.0F ? side : -side;
+        bool off_plane = false;
+        for (const auto& corner : points.corners) {
+            const float distance =
+                (scene::dot(plane.normal, corner) - plane.offset) * facing;
+            if (!(distance >= -tolerance)) return false;
+            off_plane = off_plane || distance > tolerance;
+        }
+        return off_plane;
+    };
+    // Whether `under` has to be drawn before `over`.
+    const auto beneath = [&](const LayerVolume& under, const LayerVolume& over) {
+        // Apart in depth, the centre order already draws the farther first.
+        if (over.farthest < under.nearest || under.farthest < over.nearest) {
+            return false;
+        }
+        return (under.planar && wholly(under, over, 1.0F))
+            || (over.planar && wholly(over, under, -1.0F));
+    };
+
+    // Each flat layer against every other layer, a pair of flat ones once,
+    // within a fixed budget of pairs and relations per recording.
+    layer_edges_.clear();
+    std::size_t pairs_left = layer_pair_budget;
+    for (std::size_t first = 0U; first < count; ++first) {
+        if (!layer_volumes_[first].planar) continue;
+        if (pairs_left < count || layer_edges_.size() + count
+                > layer_edges_.capacity()) {
+            // Out of budget: this flat layer and the ones after it keep the
+            // centre order against everything.
+            for (std::size_t rest = first; rest < count; ++rest) {
+                if (layer_volumes_[rest].planar) ++stats_.unordered_layers;
+            }
+            break;
+        }
+        pairs_left -= count;
+        const auto& a = layer_volumes_[first];
+        for (std::size_t second = 0U; second < count; ++second) {
+            const auto& b = layer_volumes_[second];
+            if (second == first || (b.planar && second < first)) continue;
+            const bool a_under = beneath(a, b);
+            // Both at once only for two that cross: leave those to the sort.
+            if (a_under == beneath(b, a)) continue;
+            const auto from = static_cast<core::u32>(a_under ? first : second);
+            const auto to = static_cast<core::u32>(a_under ? second : first);
+            layer_edges_.emplace_back(from, to);
+        }
+    }
+    if (layer_edges_.empty()) return;
+
+    // Kahn's algorithm, always taking the earliest ready layer in the sorted
+    // order, so layers with no relation keep exactly the order they had.
+    std::sort(layer_edges_.begin(), layer_edges_.end());
+    layer_edge_offsets_.assign(count + 1U, 0U);
+    layer_in_degree_.assign(count, 0U);
+    for (const auto& [from, to] : layer_edges_) {
+        ++layer_edge_offsets_[from + 1U];
+        ++layer_in_degree_[to];
+    }
+    for (std::size_t index = 0U; index < count; ++index) {
+        layer_edge_offsets_[index + 1U] += layer_edge_offsets_[index];
+    }
+    layer_placed_.assign(count, 0U);
+    layer_ready_.clear();
+    layer_order_.clear();
+    const auto earliest_first = std::greater<core::u32>{};
+    const auto make_ready = [&](core::u32 index) {
+        layer_ready_.push_back(index);
+        std::push_heap(layer_ready_.begin(), layer_ready_.end(), earliest_first);
+    };
+    for (std::size_t index = 0U; index < count; ++index) {
+        if (layer_in_degree_[index] == 0U) {
+            make_ready(static_cast<core::u32>(index));
+        }
+    }
+    std::size_t unplaced = 0U;
+    while (layer_order_.size() < count) {
+        if (layer_ready_.empty()) {
+            // A cycle: release the earliest layer still waiting on it.
+            while (layer_placed_[unplaced] != 0U) ++unplaced;
+            make_ready(static_cast<core::u32>(unplaced));
+        }
+        std::pop_heap(layer_ready_.begin(), layer_ready_.end(), earliest_first);
+        const auto next = layer_ready_.back();
+        layer_ready_.pop_back();
+        if (layer_placed_[next] != 0U) continue;
+        layer_placed_[next] = 1U;
+        layer_order_.push_back(next);
+        for (auto edge = layer_edge_offsets_[next];
+             edge < layer_edge_offsets_[next + 1U]; ++edge) {
+            const auto to = layer_edges_[edge].second;
+            if (layer_placed_[to] == 0U && layer_in_degree_[to] > 0U
+                && --layer_in_degree_[to] == 0U) {
+                make_ready(to);
+            }
+        }
+    }
+
+    // Apply the order in place, one permutation cycle at a time.
+    for (std::size_t start = 0U; start < count; ++start) {
+        if (layer_order_[start] == start) continue;
+        CompositeDraw held = std::move(composite_draws_[start]);
+        std::size_t at = start;
+        for (;;) {
+            const std::size_t from = layer_order_[at];
+            layer_order_[at] = static_cast<core::u32>(at);
+            if (from == start) {
+                composite_draws_[at] = std::move(held);
+                break;
+            }
+            composite_draws_[at] = std::move(composite_draws_[from]);
+            at = from;
+        }
+    }
 }
 
 void SceneRenderer::bind_material_textures(std::span<rhi::SampledTexture> into,
@@ -2433,6 +2641,15 @@ Result SceneRenderer::create(
     renderer.rsm_flux_textures_.reserve(limits.max_instances);
     renderer.camera_coverage_textures_.reserve(limits.max_instances);
     renderer.composite_draws_.reserve(limits.max_instances);
+    renderer.layer_volumes_.reserve(limits.max_instances);
+    renderer.layer_edges_.reserve(
+        static_cast<std::size_t>(limits.max_instances) * layer_edges_per_layer);
+    renderer.layer_edge_offsets_.reserve(
+        static_cast<std::size_t>(limits.max_instances) + 1U);
+    renderer.layer_in_degree_.reserve(limits.max_instances);
+    renderer.layer_ready_.reserve(limits.max_instances);
+    renderer.layer_order_.reserve(limits.max_instances);
+    renderer.layer_placed_.reserve(limits.max_instances);
     renderer.depth_only_media_.reserve(scene::max_scene_media);
     renderer.retired_models_.reserve(
         limits.max_model_refresh_generations);
@@ -3980,7 +4197,8 @@ bool SceneRenderer::render(
                                          std::nullopt,
                                      std::optional<SiblingOrder> sibling_order =
                                          std::nullopt,
-                                     std::array<ModelSampler, 14U> samplers = {}) {
+                                     std::array<ModelSampler, 14U> samplers = {},
+                                     ModelBounds bounds = unit_bounds) {
         if (held_instances() >= limits_.max_instances) {
             ++stats_.dropped_instances;
             return false;
@@ -3999,6 +4217,7 @@ bool SceneRenderer::render(
             draw.sibling_parent = sibling_order->parent;
             draw.sibling_order = sibling_order->order;
         }
+        draw.bounds = bounds;
         draw.ordinal = next_ordinal;
         ++next_ordinal;
         composite_draws_.push_back(draw);
@@ -4075,7 +4294,9 @@ bool SceneRenderer::render(
                              render_view.forward),
                 instance.source,
                 std::nullopt,
-                SiblingOrder{instance.parent_group, instance.group_order});
+                SiblingOrder{instance.parent_group, instance.group_order},
+                {},
+                primitive_bounds(key.primitive));
             continue;
         }
 
@@ -4276,7 +4497,8 @@ bool SceneRenderer::render(
                     depth,
                     model.source_node,
                     std::nullopt,
-                    SiblingOrder{model.parent_group, model.group_order}, part.samplers);
+                    SiblingOrder{model.parent_group, model.group_order}, part.samplers,
+                    animated_bounds);
                 continue;
             }
 
@@ -4440,7 +4662,9 @@ bool SceneRenderer::render(
             clip.timeline_lane == doc::NodeId{}
                 ? std::optional<SiblingOrder>{SiblingOrder{
                       clip.parent_group, clip.group_order}}
-                : std::nullopt);
+                : std::nullopt,
+            {},
+            primitive_bounds(key.primitive));
     }
     // Clips that are about to cut in. Named after the drawing pass, so a frame
     // the show needs now is always queued ahead of a frame it needs shortly.
@@ -4481,6 +4705,9 @@ bool SceneRenderer::render(
             }
             return left.ordinal < right.ordinal;
         });
+    // Centres alone misorder a layer standing in front of a large surface
+    // whose centre is nearer the camera than its own.
+    order_composites_by_planes(render_view);
     // Depth-only clips are recorded before every destination-reading draw, so
     // their instance slots are claimed first and in document order.
     for (auto& draw : depth_only_media_) {

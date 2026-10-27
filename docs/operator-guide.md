@@ -1114,11 +1114,11 @@ mean what they do on the node, measured on the card instead of the canvas:
 Center and Size are fractions of the card's own width and height in its real
 proportions, so a radial gradient on a wide card is a circle, and resizing the
 card scales the gradient with it. A colour with alpha below 1 blends the card
-over what is behind it. A card that passes through a media screen is hidden
-where it is behind the screen. The screen is hidden where it is behind the
-card's fully opaque part. Where a see-through part of the card is in front of
-the screen, it can still be drawn under the screen at some camera angles, so
-keep those parts clear of other screens.
+over what is behind it, including a card standing in front of several screens
+at once. A card that passes through a media screen is hidden where it is
+behind the screen. The screen is hidden where it is behind the card's fully
+opaque part. Where a see-through part of the card is in front of the screen it
+passes through, it can still be drawn under the screen at some camera angles.
 
 The fill multiplies the card's base and emissive colours. A new card has a
 black, non-reflective base and white emission, so it shows the fill as its own

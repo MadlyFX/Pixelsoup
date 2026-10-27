@@ -202,6 +202,10 @@ struct RenderStats final {
     // and no alpha, so they are counted separately from the drawables the pass
     // is actually responsible for.
     core::u32 depth_only_instances{};
+    // Flat blended layers (screens, cards) this recording had no budget left
+    // to order by which side of the others they are on. They keep the
+    // centre-distance order, which can draw a farther layer over a nearer one.
+    core::u32 unordered_layers{};
     // Instances not drawn because the mesh arena had no room for their
     // geometry, or because the instance array was full.
     core::u32 dropped_instances{};
@@ -725,7 +729,32 @@ private:
         core::u32 first_instance{};
         core::u32 first_effect{};
         core::u32 effect_count{};
+        // Where the geometry lies before `instance.world`; zero thickness
+        // along an axis marks a flat surface, which other layers can then be
+        // ordered against.
+        ModelBounds bounds{
+            scene::Vec3{-0.5F, -0.5F, -0.5F}, scene::Vec3{0.5F, 0.5F, 0.5F}};
     };
+
+    // A composited layer's world-space extent and, for a flat one, its plane,
+    // for ordering layers by which side of each other they are on.
+    struct LayerVolume final {
+        std::array<scene::Vec3, 8U> corners{};
+        scene::Vec3 normal{};
+        float offset{};
+        // Signed: which side of the plane the viewer is on.
+        float viewer_side{};
+        float nearest{};
+        float farthest{};
+        bool planar{};
+    };
+
+    // Refines the centre-distance order of composite_draws_: a layer lying
+    // wholly on the viewer's side of a flat layer's plane is drawn after it,
+    // and a layer wholly behind one is drawn before it. Pairs with no such
+    // relation - coplanar ones, or two that cross - keep the sorted order,
+    // and so does any cycle.
+    void order_composites_by_planes(const SceneRenderView& view) noexcept;
 
     struct InlineProgramRange final {
         core::u32 first{};
@@ -1084,6 +1113,14 @@ private:
     // composited clips because each needs its own depth-writing pass before
     // any destination-reading draw runs.
     std::vector<CompositeDraw> depth_only_media_;
+    // order_composites_by_planes scratch, sized once for max_instances.
+    std::vector<LayerVolume> layer_volumes_;
+    std::vector<std::pair<core::u32, core::u32>> layer_edges_;
+    std::vector<core::u32> layer_edge_offsets_;
+    std::vector<core::u32> layer_in_degree_;
+    std::vector<core::u32> layer_ready_;
+    std::vector<core::u32> layer_order_;
+    std::vector<core::u8> layer_placed_;
     ModelCache model_cache_;
     core::u64 authored_asset_generation_{};
     std::optional<TextureStreamer> texture_streamer_;

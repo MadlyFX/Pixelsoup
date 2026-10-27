@@ -422,6 +422,95 @@ void a_crossing_clip_and_card_each_hide_the_other() {
                 != green_wins(coplanar.image, 16U));
 }
 
+void a_card_in_front_of_two_screens_shows_over_both() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{128U, 128U};
+    // Two 16:9 screens side by side on one wall, and a green card standing in
+    // front of the seam between them. Seen from off to the side, the far
+    // screen's centre is nearer the camera than the card's, so ordering the
+    // layers by their centres alone draws that screen over the card.
+    const auto render_card = [&](float card_alpha) {
+        auto scn = clip_scene(
+            canvas, write_solid_tga("seam_red", 255U, 0U, 0U));
+        scn.environment.sky_color = scene::Vec3{};
+        scn.environment.ground_color = scene::Vec3{};
+        scn.environment.ambient = 0.0F;
+        scn.camera.eye = scene::Vec3{9.0F, 1.5F, 3.0F};
+        scn.camera.target = scene::Vec3{2.0F, 1.1F, 0.3F};
+        const scene::Vec3 screen_scale{3.556F, 2.0F, 1.0F};
+        auto& near_screen = scn.media.front();
+        near_screen.world = scene::multiply(
+            scene::translation(scene::Vec3{0.0F, 1.0F, 0.0F}),
+            scene::scaling(screen_scale));
+        near_screen.normal = scene::normal_basis(near_screen.world);
+        scene::MediaInstance far_screen = near_screen;
+        far_screen.source = write_solid_tga("seam_blue", 0U, 0U, 255U);
+        far_screen.source_node = mediaserver::doc::NodeId{2U};
+        far_screen.world = scene::multiply(
+            scene::translation(scene::Vec3{3.556F, 1.0F, 0.0F}),
+            scene::scaling(screen_scale));
+        far_screen.normal = scene::normal_basis(far_screen.world);
+        scn.media.push_back(far_screen);
+
+        scene::MeshInstance card{};
+        card.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+        card.source = mediaserver::doc::NodeId{3U};
+        card.world = scene::multiply(
+            scene::translation(scene::Vec3{1.974F, 1.211F, 0.589F}),
+            scene::scaling(screen_scale));
+        card.normal = scene::normal_basis(card.world);
+        card.material.base_color = scene::Vec3{};
+        card.material.emissive = scene::Vec3{0.0F, 1.0F, 0.0F};
+        card.material.alpha_mode = scene::MaterialAlphaMode::Blend;
+        card.material.double_sided = true;
+        scene::Fill fill{};
+        fill.color_a = scene::FillColor{1.0F, 1.0F, 1.0F, card_alpha};
+        card.material.fill = fill;
+        scn.instances.push_back(card);
+
+        // The scenario this is about: by centre, the blue screen is nearer.
+        const auto forward =
+            scene::normalize(scn.camera.target - scn.camera.eye);
+        MEDIA_CHECK(scene::dot(scene::Vec3{3.556F, 1.0F, 0.0F}
+                                   - scn.camera.eye, forward)
+                    < scene::dot(scene::Vec3{1.974F, 1.211F, 0.589F}
+                                     - scn.camera.eye, forward));
+        return std::pair{render_clip(device, scn, 2U), scn};
+    };
+    // Where a point on the card lands in the image.
+    const auto pixel_of = [&](const scene::Scene& scn, scene::Vec3 point) {
+        const auto view =
+            scene::view_for_slice(scn.camera, canvas, scene::whole(canvas));
+        const auto clip = scene::transform(
+            view.view_projection, scene::Vec4{point.x, point.y, point.z, 1.0F});
+        const float x = (clip.x / clip.w * 0.5F + 0.5F) * canvas.width;
+        const float y = (0.5F - clip.y / clip.w * 0.5F) * canvas.height;
+        return std::pair{static_cast<core::u32>(x), static_cast<core::u32>(y)};
+    };
+    // In front of the red screen, and in front of the blue one.
+    const std::array<scene::Vec3, 2U> on_card{{
+        scene::Vec3{1.0F, 1.2F, 0.589F}, scene::Vec3{3.5F, 1.2F, 0.589F}}};
+
+    // Opaque, the card hides both screens wherever it is in front of them.
+    const auto [opaque, opaque_scene] = render_card(1.0F);
+    for (const auto point : on_card) {
+        const auto [x, y] = pixel_of(opaque_scene, point);
+        const auto pixel = opaque.at(x, y);
+        MEDIA_CHECK(opaque.rgba[pixel + 1U] > 200U);
+        MEDIA_CHECK(opaque.rgba[pixel + 0U] < 40U);
+        MEDIA_CHECK(opaque.rgba[pixel + 2U] < 40U);
+    }
+    // Half transparent, it is blended over both rather than drawn under one.
+    const auto [half, half_scene] = render_card(0.5F);
+    for (std::size_t index = 0U; index < on_card.size(); ++index) {
+        const auto [x, y] = pixel_of(half_scene, on_card[index]);
+        const auto pixel = half.at(x, y);
+        const auto screen = half.rgba[pixel + (index == 0U ? 0U : 2U)];
+        MEDIA_CHECK(half.rgba[pixel + 1U] > 100U);
+        MEDIA_CHECK(screen > 100U);
+    }
+}
+
 [[nodiscard]] bool renderer_usable(rhi::Device& device) {
     auto probe = render::SceneRenderer::create(device, 16U, 16U, test_limits());
     if (probe) {
@@ -3123,7 +3212,7 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 48U> cases{{
+constexpr std::array<Case, 49U> cases{{
     {"a resolution switch holds the last picture until the new size is ready",
      &a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready},
     {"a deleted clip releases its residency and tells its decoder",
@@ -3158,6 +3247,8 @@ constexpr std::array<Case, 48U> cases{{
      &depth_orders_media_and_lane_order_breaks_ties},
     {"a crossing clip and card each hide the other",
      &a_crossing_clip_and_card_each_hide_the_other},
+    {"a card in front of two screens shows over both",
+     &a_card_in_front_of_two_screens_shows_over_both},
     {"clip saturation is identity-exact in both response domains",
      &clip_saturation_is_identity_exact_in_both_response_domains},
     {"clip Levels is identity-exact and authored order is visible",
