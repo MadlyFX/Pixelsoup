@@ -120,6 +120,10 @@ struct DirectorTick final {
     scene::Scene scene_frame;
     core::u64 authored_scene_digest{};
     scene::Scene stage_scene_frame;
+    // The Stage scene at a dragged Timeline edit's edit point with the edit
+    // applied, drawn by the Stage views in place of stage_scene_frame.
+    // Editor-only: never replicated, digested or put on an output.
+    std::optional<scene::Scene> stage_edit_frame;
     scene::Scene transition_from_frame;
     scene::Scene transition_to_frame;
     std::vector<scene::SceneInfo> scene_infos;
@@ -239,6 +243,7 @@ struct DirectorShowLoop final {
     std::optional<core::u64> &pending_seek;
     std::optional<core::u64> &pending_preview_seek;
     std::vector<show::PresenterCommand> &preview_commands;
+    std::optional<editor::TimelineEditPreview> &stage_edit_request;
     std::optional<editor::RangeRequest> &pending_range;
     std::optional<editor::ShowRateRequest> &pending_show_rate;
     std::vector<editor::KeyIntent> &pending_keys;

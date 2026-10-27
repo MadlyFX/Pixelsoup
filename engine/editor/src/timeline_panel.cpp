@@ -848,9 +848,19 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
   if (guide.has_value()) {
     const float guide_x = frame_to_x(static_cast<double>(*guide));
     if (guide_x >= graph.x && guide_x <= graph.x + graph.width) {
+      // A snap reads as a catch, not just a line: a pair of arrowheads
+      // pinch the frame it caught on, one under the ruler pointing down and
+      // one at the foot of the lanes pointing up, as an editor marks it.
+      const gui::UiColor color = ctx.theme().accent;
       ctx.draw_list().add_line(guide_x, ruler.y, guide_x,
-                               rows_bounds.y + rows_bounds.height, 1.0F,
-                               alpha(ctx.theme().accent, 0.72F));
+                               rows_bounds.y + rows_bounds.height, 1.5F,
+                               alpha(color, 0.85F));
+      const float top = strip.y;
+      const float bottom = rows_bounds.y + rows_bounds.height;
+      ctx.draw_list().add_triangle(guide_x - 5.0F, top, guide_x + 5.0F, top,
+                                   guide_x, top + 6.0F, color);
+      ctx.draw_list().add_triangle(guide_x - 5.0F, bottom, guide_x, bottom - 6.0F,
+                                   guide_x + 5.0F, bottom, color);
     }
   }
   if (playback_overlay_) {

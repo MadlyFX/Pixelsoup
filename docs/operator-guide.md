@@ -495,7 +495,23 @@ Editing the bar:
 - Drags snap to the playhead, the show range, and the ends of every other clip,
   so butt-joining two clips and cutting on the playhead do not need pixel
   accuracy. `SNAP` turns that off, and holding Alt suspends it for one gesture.
-  Move, trim, and fade bars preview during the lift and commit once on release.
+  A snap draws a line down the lanes with an arrowhead at each end, pinching
+  the frame it caught on. Move, trim, and fade bars preview during the lift
+  and commit once on release.
+- **A chip beside the pointer** reads out every clip, key and marker drag in
+  the ruler's units: how far it has gone and where it lands
+  (`+00:00:12  >  00:01:04:07`), the new length for a trim, and what a snap
+  caught (`SNAP playhead`, `SNAP In`, a marker's name, or `clip edge`). It
+  keeps inside the panel, flipping above the pointer at the foot.
+- **The Stage follows the edit point** while a trim, ripple trim, roll, slip
+  or slide is dragged. It shows the frame the edit now falls on, with the edit
+  applied exactly as release will author it, later clips moved by a ripple
+  included: an in point's first frame, an out point's last frame, the last
+  frame before a rolled cut, and a slipped or slid clip's new first frame. A
+  caption along the foot of the Stage names the frame. Letting go returns the
+  Stage to the playhead. Only the Stage picture changes: Program, the render
+  nodes, the Timeline and the Inspector stay on the playhead, and nothing is
+  authored until release. Moves and fades leave the Stage where it is.
 - Where these targets overlap - on a short clip, or a key close to another -
   one press goes to exactly one of them: a key, then a fade handle, then a trim
   end, then the bar, then the empty lane, and among two of the same kind the

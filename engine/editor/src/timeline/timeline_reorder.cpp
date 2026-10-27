@@ -359,6 +359,8 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   auto &lane_drop_targets = p.lane_drop_targets;
   auto &clip_drop_hovered = p.clip_drop_hovered;
   auto &layer_lane_hovered = p.layer_lane_hovered;
+  frame.drag_readout = drag_readout(p);
+  frame.edit_preview = edit_preview(p);
 
   // Drag feedback is the panel's final visual layer, just as it is in Feed
   // Mapping. The playhead, filmstrips, scroll thumb, and popups therefore
@@ -481,8 +483,10 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
         ghost_label += "  >  OWN TRANSFORM";
       }
     }
+    // Where it is going in time, after where it is going in the stack.
+    ghost_label += "   " + frame.drag_readout;
     const float ghost_width =
-        std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 300.0F);
+        std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 520.0F);
     const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
                           ghost_width, row_height};
     ctx.panel(ghost, ctx.theme().widget_active);
@@ -491,6 +495,29 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     ctx.label(gui::Rect{ghost.x + 10.0F, ghost.y,
                         std::max(ghost.width - 14.0F, 0.0F), ghost.height},
               ghost_label, ctx.theme().text);
+  }
+
+  // Every other clip, key or marker drag carries the same chip beside the
+  // pointer, with only the readout: how far, to where, and what it snapped
+  // to. It stays inside the panel, flipping above the pointer at the foot.
+  if (!scratch.clip_move_feedback && !frame.drag_readout.empty()) {
+    const float chip_width = std::clamp(
+        ctx.font_width(frame.drag_readout) + 22.0F, 96.0F, 520.0F);
+    float chip_x = ctx.pointer_x() + 14.0F;
+    float chip_y = ctx.pointer_y() + 10.0F;
+    if (chip_x + chip_width > bounds.x + bounds.width) {
+      chip_x = std::max(bounds.x, ctx.pointer_x() - 14.0F - chip_width);
+    }
+    if (chip_y + row_height > bounds.y + bounds.height) {
+      chip_y = ctx.pointer_y() - 10.0F - row_height;
+    }
+    const gui::Rect chip{chip_x, chip_y, chip_width, row_height};
+    ctx.panel(chip, ctx.theme().widget_active);
+    ctx.panel(gui::Rect{chip.x, chip.y, 3.0F, chip.height},
+              ctx.theme().accent);
+    ctx.label(gui::Rect{chip.x + 10.0F, chip.y,
+                        std::max(chip.width - 14.0F, 0.0F), chip.height},
+              frame.drag_readout, ctx.theme().text);
   }
 
   // Keep source feedback readable even for very short or partly hidden clips.

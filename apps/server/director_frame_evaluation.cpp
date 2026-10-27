@@ -297,6 +297,30 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             candidate->asset_cohort_required = true;
         }
 
+        // A Timeline edit being dragged: the Stage scene once more, at the
+        // edit point and with the edit applied, for the Stage views to draw.
+        // Program, the nodes and every panel keep the frames above.
+        tick.stage_edit_frame.reset();
+#if defined(MEDIASERVER_HAS_GUI)
+        if (options.edit && stage_edit_request.has_value()) {
+            tick.stage_edit_frame = scene_model.evaluate(
+                stage_scene,
+                scene::SceneTime{stage_edit_request->frame,
+                                 input.rate.numerator,
+                                 input.rate.denominator},
+                {}, stage_edit_request->timings);
+            scene::Scene &edited = *tick.stage_edit_frame;
+            edited.asset_commit = stage_scene_frame.asset_commit;
+            edited.asset_manifest_digest =
+                stage_scene_frame.asset_manifest_digest;
+            edited.asset_commit_released =
+                stage_scene_frame.asset_commit_released;
+            edited.control_frame = stage_scene_frame.control_frame;
+            edited.asset_cohort_required =
+                stage_scene_frame.asset_cohort_required;
+        }
+#endif
+
         // Camera tracking, at the frame boundary and not in the UI loop.
         //
         // This is the Director's one sample per frame per camera: each

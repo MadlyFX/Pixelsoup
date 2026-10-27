@@ -1057,6 +1057,12 @@ void DirectorShowLoop::project_switcher_and_links(DirectorTick &tick,
         switcher_anchor.has_value() ? switcher_anchor->rehearsal_scene
                                     : scene::SceneId{};
     switcher_view.stage_scene = &stage_scene_frame;
+    switcher_view.stage_edit_preview =
+        tick.stage_edit_frame.has_value() ? &*tick.stage_edit_frame : nullptr;
+    switcher_view.stage_edit_caption =
+        tick.stage_edit_frame.has_value() && stage_edit_request.has_value()
+            ? std::string_view{stage_edit_request->caption}
+            : std::string_view{};
     switcher_view.program_graph = &program_compositor_graph;
     const bool program_mixing =
         switcher_progress.active || loop_blend.has_value();

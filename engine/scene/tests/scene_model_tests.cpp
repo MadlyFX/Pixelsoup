@@ -3095,6 +3095,45 @@ void a_placed_clip_is_on_air_only_inside_its_own_span() {
                     .frame_index == 55U % 24U);
 }
 
+// An editor's trim preview: the same model evaluated as if a placement's
+// timing were the proposed one, leaving the authored evaluation alone.
+void a_timing_override_evaluates_a_placement_as_proposed() {
+    scene::SceneModel model;
+    model.reset(doc::Root{}.set(node(
+        1U, schema::media_type,
+        {text(schema::source, "plate_%04u.png"),
+         whole(schema::sequence_start, 100),
+         whole(schema::sequence_count, 24),
+         whole(schema::clip_start, 50),
+         whole(schema::clip_duration, 10)})));
+    const scene::SceneTime before{45U, 60U, 1U};
+    const scene::SceneId id = model.evaluate(before).id;
+    MODEL_CHECK(model.evaluate(before).media.empty());
+
+    // Trimmed out to start at 40: on air at 45, five frames into its source.
+    const std::array<scene::ClipTimingOverride, 1U> trimmed{
+        {{doc::NodeId{1U}, scene::ClipTiming{40, 20, 0, 0, 0}}}};
+    const scene::Scene previewed = model.evaluate(id, before, {}, trimmed);
+    MODEL_CHECK(previewed.media.size() == 1U);
+    MODEL_CHECK(previewed.media.front().frame_index == 105U);
+    MODEL_CHECK(model.evaluate(before).media.empty());
+
+    // Slipped seven source frames: the same show frame shows another picture.
+    const scene::SceneTime during{52U, 60U, 1U};
+    const std::array<scene::ClipTimingOverride, 1U> slipped{
+        {{doc::NodeId{1U}, scene::ClipTiming{50, 10, 7, 0, 0}}}};
+    MODEL_CHECK(model.evaluate(id, during, {}, slipped).media.front()
+                    .frame_index == 109U);
+    MODEL_CHECK(model.evaluate(during).media.front().frame_index == 102U);
+
+    // An override for a clip that is not there changes nothing.
+    const std::array<scene::ClipTimingOverride, 1U> elsewhere{
+        {{doc::NodeId{9U}, scene::ClipTiming{0, 100, 0, 0, 0}}}};
+    MODEL_CHECK(model.evaluate(id, before, {}, elsewhere).media.empty());
+    MODEL_CHECK(model.evaluate(id, during, {}, elsewhere).media.front()
+                    .frame_index == 102U);
+}
+
 void a_clip_trim_selects_which_source_frames_play() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -5193,7 +5232,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 89U> cases{{
+constexpr std::array<Case, 90U> cases{{
+    {"a timing override evaluates a placement as proposed",
+     &a_timing_override_evaluates_a_placement_as_proposed},
     {"a clip carries the size it is held at",
      &a_clip_carries_the_size_it_is_held_at},
     {"negative native placements keep exact source mapping and safe bounds",

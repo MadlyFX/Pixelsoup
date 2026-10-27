@@ -522,6 +522,20 @@ struct TimelineOverwriteRequest final {
   bool operator==(const TimelineOverwriteRequest &) const = default;
 };
 
+// The Stage's view of an edit under way, Premiere's trim monitor folded into
+// one picture: the frame the edit point now falls on, every placement the
+// edit changes as it would leave it (sorted by clip id, as
+// SceneModel::evaluate takes them), and a caption saying which frame it is.
+// Editor-local: the Director evaluates the Stage from it and authors nothing,
+// and Program and the outputs never see it.
+struct TimelineEditPreview final {
+  core::u64 frame{};
+  std::vector<scene::ClipTimingOverride> timings;
+  std::string caption;
+
+  bool operator==(const TimelineEditPreview &) const = default;
+};
+
 using TimelineEditRequest =
     std::variant<TimelineRippleTrimRequest, TimelineRippleDeleteRequest,
                  TimelineRollRequest, TimelineSlipRequest, TimelineSlideRequest,
@@ -665,6 +679,15 @@ struct TimelinePanelFrame final {
   // The visible gesture readout is independent of the clip bar's width.
   std::string clip_status;
   bool clip_status_error{};
+  // What the clip, key or marker drag under way is doing, as the chip
+  // beside the pointer reads it: "+00:00:12  >  00:01:04:07   SNAP cue".
+  // Empty while nothing is being dragged.
+  std::string drag_readout;
+  // While a trim, roll, slip or slide runs, what the Stage shows in place
+  // of the playhead's frame: the edit point, with the placements as the
+  // edit would leave them. Absent otherwise, which returns the Stage to the
+  // playhead.
+  std::optional<TimelineEditPreview> edit_preview;
   // Marker and cue changes from one gesture. A drag of several selected
   // markers reports one Update each, which the shell gives one undo step.
   std::vector<TimelineMarkerEdit> marker_edits;
@@ -870,6 +893,17 @@ private:
   void trim_to_playhead(Pass &p, scene::TimelineTrimEdge edge);
   // The keyboard reference, opened with ? or its button, over the panel.
   void draw_shortcut_sheet(Pass &p);
+  // What the drag under way is doing, in the operator's units - the change
+  // and where it lands, and what it snapped to - for the chip beside the
+  // pointer; empty when no clip, key or marker drag is moving.
+  [[nodiscard]] std::string drag_readout(Pass &p);
+  // A signed frame count in the ruler's units: "+12", or "+00:00:12".
+  [[nodiscard]] std::string signed_duration(Pass &p, core::i64 frames);
+  // What a snap guide at `frame` is lined up with.
+  [[nodiscard]] std::string snap_name(Pass &p, core::i64 frame);
+  // The Stage's edit preview for the clip drag under way, planned the way
+  // the Director will plan its edit; nothing for a move or a fade.
+  [[nodiscard]] std::optional<TimelineEditPreview> edit_preview(Pass &p);
   void resolve_track_drop(Pass &p);
   void finish_marquee(Pass &p);
   void draw_time_overlays(Pass &p);

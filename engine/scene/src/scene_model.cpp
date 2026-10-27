@@ -3827,7 +3827,22 @@ Scene SceneModel::evaluate(SceneTime time, ShowLoop loop) const {
 }
 
 Scene SceneModel::evaluate(
-    SceneId scene_id, SceneTime time, ShowLoop loop) const {
+    SceneId scene_id, SceneTime time, ShowLoop loop,
+    std::span<const ClipTimingOverride> timing_overrides) const {
+    // A placement's timing as this evaluation reads it: an override's for a
+    // clip one names, the authored one for every other.
+    const auto timing_of = [timing_overrides](doc::NodeId node,
+                                              const MediaEntry& clip) noexcept
+        -> const ClipTiming& {
+        const auto found = std::lower_bound(
+            timing_overrides.begin(), timing_overrides.end(), node,
+            [](const ClipTimingOverride& entry, doc::NodeId id) noexcept {
+                return entry.clip < id;
+            });
+        return found != timing_overrides.end() && found->clip == node
+            ? found->timing
+            : clip.timing;
+    };
     Scene scene{};
     scene.media_assets.emplace();
     scene.wall_colors.assign(wall_colors_.begin(), wall_colors_.end());
@@ -4628,7 +4643,7 @@ Scene SceneModel::evaluate(
         }
         MediaCandidate candidate{};
         candidate.node = id;
-        candidate.start = clip->timing.start;
+        candidate.start = timing_of(id, *clip).start;
         candidate.clip_order = clip->lane.has_value()
             ? clip->clip_order
             : clip->group_order;
@@ -4776,6 +4791,7 @@ Scene SceneModel::evaluate(
             if (scope_of(id, default_scene) != scene_id) {
                 continue;
             }
+            const ClipTiming& timing = timing_of(id, *clip);
             const auto projection = media_projection.find(id);
             if (projection == media_projection.end()) {
                 continue;
@@ -4825,7 +4841,7 @@ Scene SceneModel::evaluate(
                     MediaPrewarm request{
                         clip->source,
                         clip_frame_at(
-                            time, at, clip->timing, clip->frame_rate,
+                            time, at, timing, clip->frame_rate,
                             clip->sequence_start, clip->sequence_count),
                         id, clip->asset, clip->sequence_start,
                         clip->sequence_count, distance, clip->resolution};
@@ -4844,8 +4860,8 @@ Scene SceneModel::evaluate(
                     }
                 };
                 if (clip_starts_within(
-                        clip->timing, show_frame, media_prewarm_lead)) {
-                    warm(static_cast<core::u64>(clip->timing.start));
+                        timing, show_frame, media_prewarm_lead)) {
+                    warm(static_cast<core::u64>(timing.start));
                 }
                 if (show_wraps_within(
                         loop, show_frame, media_prewarm_lead)) {
@@ -4853,12 +4869,12 @@ Scene SceneModel::evaluate(
                         loop.first,
                         static_cast<core::u64>(
                             std::numeric_limits<core::i64>::max())));
-                    if (clip_visible(clip->timing, after)) {
+                    if (clip_visible(timing, after)) {
                         warm(loop.first);
                     }
                 }
             }
-            if (!clip_visible(clip->timing, show_frame)) {
+            if (!clip_visible(timing, show_frame)) {
                 continue;
             }
             if (scene.media.size() >= max_scene_media) {
@@ -4901,13 +4917,13 @@ Scene SceneModel::evaluate(
                 : (parent == nullptr ? local
                                      : multiply(parent->world, local));
             const auto frame_index = clip_frame_at(
-                time, time.frame, clip->timing, clip->frame_rate,
+                time, time.frame, timing, clip->frame_rate,
                 clip->sequence_start, clip->sequence_count);
             // The head and tail ramps multiply whatever opacity was authored
             // or keyed, so a dissolve composes with an animated layer instead
             // of replacing its animation.
-            if (clip->timing.placed()) {
-                style.opacity *= clip_fade(clip->timing, show_frame);
+            if (timing.placed()) {
+                style.opacity *= clip_fade(timing, show_frame);
             }
             scene.media.push_back(MediaInstance{
                 clip->mesh,

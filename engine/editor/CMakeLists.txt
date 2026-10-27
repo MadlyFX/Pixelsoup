@@ -33,6 +33,7 @@ add_library(mediaserver_editor STATIC
     src/timeline/timeline_ruler.cpp
     src/timeline/timeline_navigator.cpp
     src/timeline/timeline_keyboard.cpp
+    src/timeline/timeline_feedback.cpp
     src/cues_panel.cpp
     src/operator_widgets.cpp
     src/workspace_panels.cpp

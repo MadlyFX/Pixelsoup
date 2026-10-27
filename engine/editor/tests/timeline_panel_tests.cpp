@@ -4070,12 +4070,94 @@ void the_shortcut_sheet_opens_from_its_key_and_button_and_any_press_closes_it() 
            editor::TransportRequest::TogglePlay);
 }
 
+// The clip, frames 20..59 on the second row, at 7.4 px a frame and 50 fps:
+// a drag reports how far it has gone and where it lands, names what it
+// snapped to, and says nothing once it is let go.
+void a_clip_drag_reads_out_its_change_landing_and_snap() {
+  Harness h;
+  static_cast<void>(h.frame(500.0F, 113.0F, false));
+  static_cast<void>(h.frame(500.0F, 113.0F, true));
+  UI_CHECK(h.frame(574.0F, 113.0F, true).drag_readout ==
+           "+00:00:10  >  00:00:00:30");
+  // Thirty frames on, its start lands on the playhead at frame 50.
+  UI_CHECK(h.frame(722.0F, 113.0F, true).drag_readout ==
+           "+00:00:30  >  00:00:01:00   SNAP playhead");
+  // Back past where it began.
+  UI_CHECK(h.frame(463.0F, 113.0F, true).drag_readout ==
+           "-00:00:05  >  00:00:00:15");
+  UI_CHECK(h.frame(463.0F, 113.0F, false).drag_readout.empty());
+  UI_CHECK(h.frame(463.0F, 113.0F, false).drag_readout.empty());
+
+  // The out point names the clip's last frame and its new length.
+  Harness trim;
+  static_cast<void>(trim.frame(703.0F, 113.0F, false));
+  static_cast<void>(trim.frame(703.0F, 113.0F, true));
+  UI_CHECK(trim.frame(666.0F, 113.0F, true).drag_readout ==
+           "OUT -00:00:05  >  00:00:01:04   LENGTH 00:00:35");
+  static_cast<void>(trim.frame(666.0F, 113.0F, false));
+}
+
+// While an edit point is dragged the Stage is told the frame it now falls on
+// and every placement the edit changes; a move or nothing dragged tells it
+// nothing, which puts it back on the playhead.
+void a_dragged_edit_point_asks_the_stage_to_show_it() {
+  Harness h;
+  editor::ElementInfo next = make_clip();
+  next.node = doc::NodeId{8U};
+  next.timing = scene::ClipTiming{60, 20, 0, 0, 0};
+  h.elements.push_back(next);
+  UI_CHECK(!h.frame(0.0F, 0.0F, false).edit_preview.has_value());
+
+  // The out point dragged in five frames: the clip's new last frame, 54.
+  static_cast<void>(h.frame(703.0F, 113.0F, false));
+  static_cast<void>(h.frame(703.0F, 113.0F, true));
+  const editor::TimelinePanelFrame trimmed = h.frame(666.0F, 113.0F, true);
+  UI_CHECK(trimmed.edit_preview.has_value());
+  UI_CHECK(trimmed.edit_preview->frame == 54U);
+  UI_CHECK(trimmed.edit_preview->timings ==
+           (std::vector<scene::ClipTimingOverride>{
+               {clip_node, scene::ClipTiming{20, 35, 0, 0, 0}}}));
+  UI_CHECK(trimmed.edit_preview->caption ==
+           "OUT  LAST FRAME  00:00:01:04");
+  UI_CHECK(!h.frame(666.0F, 113.0F, false).edit_preview.has_value());
+
+  // A ripple out five frames longer pushes the next clip along with it, and
+  // the Stage is shown both as the edit will leave them. (A fresh harness:
+  // the trim above is still drawn as pending, since no Director adopts it.)
+  Harness ripple;
+  ripple.elements.push_back(next);
+  ripple.focus();
+  static_cast<void>(ripple.type("b"));
+  static_cast<void>(ripple.frame(703.0F, 113.0F, false));
+  static_cast<void>(ripple.frame(703.0F, 113.0F, true));
+  const editor::TimelinePanelFrame rippled =
+      ripple.frame(740.0F, 113.0F, true);
+  UI_CHECK(rippled.edit_preview.has_value());
+  UI_CHECK(rippled.edit_preview->frame == 64U);
+  UI_CHECK(rippled.edit_preview->timings ==
+           (std::vector<scene::ClipTimingOverride>{
+               {clip_node, scene::ClipTiming{20, 45, 0, 0, 0}},
+               {doc::NodeId{8U}, scene::ClipTiming{65, 20, 0, 0, 0}}}));
+  static_cast<void>(ripple.frame(740.0F, 113.0F, false));
+
+  // A move has no edit point to show.
+  Harness move;
+  static_cast<void>(move.frame(500.0F, 113.0F, false));
+  static_cast<void>(move.frame(500.0F, 113.0F, true));
+  UI_CHECK(!move.frame(574.0F, 113.0F, true).edit_preview.has_value());
+  static_cast<void>(move.frame(574.0F, 113.0F, false));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 122U> cases{{
+constexpr std::array<Case, 124U> cases{{
+    {"a dragged edit point asks the Stage to show it",
+     &a_dragged_edit_point_asks_the_stage_to_show_it},
+    {"a clip drag reads out its change, landing and snap",
+     &a_clip_drag_reads_out_its_change_landing_and_snap},
     {"J, K and L shuttle the playhead", &j_k_and_l_shuttle_the_playhead},
     {"Alt+arrows nudge the selection with the active tool",
      &alt_arrows_nudge_the_selection_with_the_active_tool},

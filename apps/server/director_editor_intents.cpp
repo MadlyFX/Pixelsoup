@@ -451,6 +451,9 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
 PhaseExit DirectorShowLoop::queue_editor_requests(
     DirectorTick &tick, editor::EditorFrame &editor_frame) {
     auto &stage_scene_frame = tick.stage_scene_frame;
+    // The Stage follows a dragged edit for as long as the editor reports
+    // one, and returns to its playhead the frame it stops.
+    stage_edit_request = std::move(editor_frame.stage_edit_preview);
     try {
         pending_hardware_places.insert(
             pending_hardware_places.end(),

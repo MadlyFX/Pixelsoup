@@ -128,6 +128,16 @@ struct ClipPlacement final {
     bool operator==(const ClipPlacement&) const = default;
 };
 
+// A placement evaluated as if its timing were `timing`: an editor's preview
+// of a trim before it is authored. Editor-local; nothing evaluated with one is
+// ever replicated, digested or drawn on an output.
+struct ClipTimingOverride final {
+    doc::NodeId clip{};
+    ClipTiming timing{};
+
+    bool operator==(const ClipTimingOverride&) const = default;
+};
+
 // Which source frame `clip` shows at `show_frame`, by the same mapping the
 // drawing and warm-up paths use. `time` supplies the show rate; its frame is
 // not read.
@@ -158,9 +168,14 @@ public:
     // warm-up in Scene::media_prewarm across the wrap; every drawn value is
     // identical with or without it, so a caller that has no transport may omit
     // it and lose nothing but a head start.
+    //
+    // `timing_overrides`, sorted by clip id, stand in for those placements'
+    // authored timing - where each starts and ends, which source frame it
+    // shows, its ramps - and change nothing else about the evaluation.
     [[nodiscard]] Scene evaluate(SceneTime time, ShowLoop loop = {}) const;
     [[nodiscard]] Scene evaluate(
-        SceneId scene, SceneTime time, ShowLoop loop = {}) const;
+        SceneId scene, SceneTime time, ShowLoop loop = {},
+        std::span<const ClipTimingOverride> timing_overrides = {}) const;
 
     // Valid authored scenes, in stage-node-id order. Documents with no stages
     // retain an implicit legacy evaluation scene but report no authored scene

@@ -2864,6 +2864,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
   stage_scene.camera = stage_camera;
   stage_scene.canvas = stage_view_canvas(impl.stage_views[0U]);
+  // While a Timeline edit is dragged the Stage views draw its edit point
+  // instead, set up exactly as the Stage scene is. Copied only then: the
+  // drag lasts a gesture, not a show.
+  std::optional<scene::Scene> stage_edit_scene;
+  if (switcher.stage_edit_preview != nullptr) {
+    stage_edit_scene = *switcher.stage_edit_preview;
+    bypass_sampled_chroma_key(*stage_edit_scene, impl.color_sample_request);
+    stage_edit_scene->camera = stage_scene.camera;
+    stage_edit_scene->canvas = stage_scene.canvas;
+  }
   // Keep the authored environment and lighting. Grid and guides are UI
   // overlays; making them readable must not change the scene's illumination.
 
@@ -3204,20 +3214,22 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       stage_view.clip_planes = render::SceneClipPlanes{
           view_camera.near_plane, view_camera.far_plane};
       stage_view.shading = view.shading;
+      scene::Scene &drawn_stage =
+          stage_edit_scene.has_value() ? *stage_edit_scene : stage_scene;
       auto geometry_camera = authored_stage.camera;
       auto geometry_canvas = authored_stage.canvas;
-      std::swap(stage_scene.camera, geometry_camera);
-      std::swap(stage_scene.canvas, geometry_canvas);
+      std::swap(drawn_stage.camera, geometry_camera);
+      std::swap(drawn_stage.canvas, geometry_canvas);
       const rhi::Texture *const rendered_stage =
           stage_targets_ready[index]
-              ? record_editor_scene(renderer, commands, stage_scene,
+              ? record_editor_scene(renderer, commands, drawn_stage,
                                     compositor_graph, &impl.frame_media_cache,
                                     &stage_view)
               : nullptr;
-      std::swap(stage_scene.camera, geometry_camera);
-      std::swap(stage_scene.canvas, geometry_canvas);
-      display.adopt_color(stage_scene.renderer_settings.color,
-                          scene::asset_generation_key(stage_scene));
+      std::swap(drawn_stage.camera, geometry_camera);
+      std::swap(drawn_stage.canvas, geometry_canvas);
+      display.adopt_color(drawn_stage.renderer_settings.color,
+                          scene::asset_generation_key(drawn_stage));
       const bool stage_ok =
           rendered_stage != nullptr &&
           display.render(commands, *rendered_stage,
@@ -4712,6 +4724,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           ui.panel(note, with_alpha(ui.theme().background, 0.86F));
           ui.label(gui::Rect{note.x + 10.0F, note.y, width - 10.0F, note.height},
                    impl.stage_bookmark_note, ui.theme().text);
+        }
+        // While a Timeline edit is dragged the picture is its edit point, not
+        // the playhead's frame; the caption says which, in the playhead's
+        // colour, along the foot where the bookmark note never sits.
+        if (stage_edit_scene.has_value() &&
+            !switcher.stage_edit_caption.empty()) {
+          const gui::Rect &image = view.frame.image;
+          const float width =
+              std::min(ui.font_width(switcher.stage_edit_caption) + 24.0F,
+                       std::max(image.width - 16.0F, 0.0F));
+          const gui::Rect note{image.x + (image.width - width) * 0.5F,
+                               image.y + image.height - 34.0F, width, 24.0F};
+          ui.push_clip(image);
+          ui.panel(note, with_alpha(ui.theme().background, 0.86F));
+          ui.panel(gui::Rect{note.x, note.y, 3.0F, note.height},
+                   ui.theme().playhead);
+          ui.label(gui::Rect{note.x + 12.0F, note.y,
+                             std::max(width - 14.0F, 0.0F), note.height},
+                   switcher.stage_edit_caption, ui.theme().playhead);
+          ui.pop_clip();
         }
         // A passive notice leaves picking, framing and navigation available.
         // Retain the last submitted state when command acquisition is busy.
@@ -6228,6 +6260,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       result.range = timeline_frame.range;
       result.show_rate = timeline_frame.show_rate;
+      result.stage_edit_preview = timeline_frame.edit_preview;
       pending_timeline_layer_drop = timeline_frame.layer_drop;
       editor_control_editing = editor_control_editing || timeline_frame.editing;
       delete_consumed = delete_consumed || timeline_frame.consume_delete;

@@ -447,6 +447,13 @@ struct EditorSwitcherState final {
   scene::SceneId program_scene{};
   scene::SceneId rehearsal_scene{};
   const scene::Scene *stage_scene{};
+  // The Stage scene evaluated at a Timeline edit's edit point with the edit
+  // applied, while a trim, roll, slip or slide is being dragged. The Stage
+  // views draw it in place of `stage_scene`; picking, gizmos and every panel
+  // keep reading `stage_scene`, so only the picture follows the edit.
+  const scene::Scene *stage_edit_preview{};
+  // What that picture is, captioned over the Stage: "OUT  LAST FRAME  ...".
+  std::string_view stage_edit_caption{};
   const scene::Scene *transition_from{};
   const scene::Scene *transition_to{};
   // Compositor graphs are scene-scoped, so Program and the scene on the Stage
@@ -788,6 +795,10 @@ struct EditorFrame final {
   std::vector<ClipTimingEdit> clip_timings;
   // Clips cut at the playhead this frame.
   std::vector<ClipSplitIntent> clip_splits;
+  // The Timeline edit being dragged, for the Director to evaluate the Stage
+  // at its edit point. Reported every frame the drag runs; absent returns
+  // the Stage to the playhead. Authors nothing.
+  std::optional<TimelineEditPreview> stage_edit_preview;
   std::vector<TimelineLaneEditIntent> lane_edits;
   std::vector<TimelineLayerOrderIntent> layer_orders;
   std::vector<ElementFlagIntent> element_flags;
