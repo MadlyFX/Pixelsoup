@@ -14,6 +14,7 @@ add_library(mediaserver_editor STATIC
     src/timeline_filmstrip_texture_cache.cpp
     src/live_data_panel.cpp
     src/selection_sets_panel.cpp
+    src/library_panel.cpp
     src/masks_panel.cpp
     src/effects_panel.cpp
     src/timeline_panel.cpp
@@ -415,6 +416,20 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_workspace_tests
     )
     set_target_properties(mediaserver_editor_workspace_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_library_tests
+        tests/library_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_library_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_library_tests)
+    add_test(
+        NAME mediaserver.editor_library
+        COMMAND mediaserver_editor_library_tests
+    )
+    set_target_properties(mediaserver_editor_library_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_live_data_tests
         tests/live_data_panel_tests.cpp

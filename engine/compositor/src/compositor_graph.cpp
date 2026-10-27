@@ -13,8 +13,10 @@
 namespace mediaserver::compositor {
 namespace {
 
-constexpr std::array<PortDescriptor, 2U> scene_layer_inputs{{
+constexpr std::array<PortDescriptor, 3U> scene_layer_inputs{{
     {0U, "EFFECTS", PortValueType::Effect, PortDirection::Input, true, false},
+    // Listed second, numbered after INSTANCES: an index is a wire's identity.
+    {2U, "FILTERS", PortValueType::Filter, PortDirection::Input, true, false},
     {1U, "INSTANCES", PortValueType::TransformSet, PortDirection::Input, false,
      false},
 }};
@@ -27,8 +29,9 @@ constexpr std::array<PortDescriptor, 1U> brightness_outputs{{
 constexpr std::array<PortDescriptor, 1U> saturation_outputs{{
     {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
 }};
+// Every spatial filter: the blurs and the keys.
 constexpr std::array<PortDescriptor, 1U> blur_outputs{{
-    {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
+    {0U, "FILTER", PortValueType::Filter, PortDirection::Output, true, false},
 }};
 constexpr std::array<PortDescriptor, 1U> levels_outputs{{
     {0U, "EFFECT", PortValueType::Effect, PortDirection::Output, true, false},
@@ -55,7 +58,7 @@ constexpr std::array<PortDescriptor, 1U> radial_outputs{{
     {0U, "INSTANCES", PortValueType::TransformSet, PortDirection::Output, true,
      false},
 }};
-constexpr std::array<PortDescriptor, 10U> led_car_process_inputs{{
+constexpr std::array<PortDescriptor, 11U> led_car_process_inputs{{
     {0U, "FRONT", PortValueType::Image, PortDirection::Input, false, false},
     {1U, "FRONT RIGHT 3/4", PortValueType::Image, PortDirection::Input, false,
      false},
@@ -71,6 +74,8 @@ constexpr std::array<PortDescriptor, 10U> led_car_process_inputs{{
     {8U, "CEILING REFLECTION", PortValueType::Image, PortDirection::Input,
      false, false},
     {9U, "SETUP EFFECTS", PortValueType::Effect, PortDirection::Input, true,
+     false},
+    {10U, "SETUP FILTERS", PortValueType::Filter, PortDirection::Input, true,
      false},
 }};
 constexpr std::array<PortDescriptor, 1U> led_car_process_outputs{{
@@ -89,6 +94,18 @@ constexpr std::array<PortDescriptor, 1U> composite_inputs{{
     {0U, "LAYERS", PortValueType::Image, PortDirection::Input, true, true},
 }};
 constexpr std::array<PortDescriptor, 1U> composite_outputs{{
+    {0U, "IMAGE", PortValueType::Image, PortDirection::Output, true, false},
+}};
+// BASE is the image the others land on. LAYERS land on it in wire order;
+// with none wired, BASE is blended against the node's constant instead.
+constexpr std::array<PortDescriptor, 2U> merge_inputs{{
+    {0U, "BASE", PortValueType::Image, PortDirection::Input, false, true},
+    {1U, "LAYERS", PortValueType::Image, PortDirection::Input, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> merge_outputs{{
+    {0U, "IMAGE", PortValueType::Image, PortDirection::Output, true, false},
+}};
+constexpr std::array<PortDescriptor, 1U> background_outputs{{
     {0U, "IMAGE", PortValueType::Image, PortDirection::Output, true, false},
 }};
 constexpr std::array<PortDescriptor, 1U> output_inputs{{
@@ -253,6 +270,10 @@ std::span<const PortDescriptor> input_ports(NodeKind kind) noexcept {
         return led_car_process_inputs;
     case NodeKind::Output:
         return output_inputs;
+    case NodeKind::Merge:
+        return merge_inputs;
+    case NodeKind::Background:
+        return {};
     case NodeKind::Brightness:
     case NodeKind::Saturation:
     case NodeKind::Blur:
@@ -310,6 +331,10 @@ std::span<const PortDescriptor> output_ports(NodeKind kind) noexcept {
         return led_car_process_outputs;
     case NodeKind::Composite:
         return composite_outputs;
+    case NodeKind::Merge:
+        return merge_outputs;
+    case NodeKind::Background:
+        return background_outputs;
     case NodeKind::Output:
         return {};
     }
@@ -337,6 +362,9 @@ const PortDescriptor* find_output_port(NodeKind kind, core::u8 index) noexcept {
 }
 
 bool effect_node_is_identity(const GraphNode& node) noexcept {
+    if (node.bypassed && node_kind_bypassable(node.kind)) {
+        return true;
+    }
     switch (node.kind) {
     case NodeKind::Brightness: {
         const auto* const parameters =
@@ -423,6 +451,8 @@ bool effect_node_is_identity(const GraphNode& node) noexcept {
     case NodeKind::LedCarProcess:
     case NodeKind::Composite:
     case NodeKind::Output:
+    case NodeKind::Merge:
+    case NodeKind::Background:
         return false;
     }
     return false;
@@ -490,6 +520,7 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
         hash_text(hash, node.label);
         hash_float(hash, node.editor_x);
         hash_float(hash, node.editor_y);
+        hash_byte(hash, node.bypassed ? 1U : 0U);
         std::visit(
             [&hash](const auto& parameters) noexcept {
                 using Parameters = std::decay_t<decltype(parameters)>;
@@ -575,6 +606,25 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
                 } else if constexpr (std::is_same_v<Parameters,
                                                     OutputParameters>) {
                     hash_byte(hash, parameters.replace_scene ? 1U : 0U);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    MergeParameters>) {
+                    hash_byte(hash, static_cast<core::u8>(parameters.blend));
+                    hash_float(hash, parameters.opacity);
+                    hash_float(hash, parameters.value);
+                } else if constexpr (std::is_same_v<Parameters,
+                                                    BackgroundParameters>) {
+                    hash_byte(hash, static_cast<core::u8>(parameters.mode));
+                    for (const BackgroundColor& color :
+                         {parameters.color_a, parameters.color_b}) {
+                        hash_float(hash, color.r);
+                        hash_float(hash, color.g);
+                        hash_float(hash, color.b);
+                        hash_float(hash, color.a);
+                    }
+                    hash_float(hash, parameters.angle);
+                    hash_float(hash, parameters.center_x);
+                    hash_float(hash, parameters.center_y);
+                    hash_float(hash, parameters.size);
                 }
             },
             node.parameters);
@@ -636,6 +686,9 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
     hash_u32(hash, graph.resources.chroma_keyed_scene_layers);
     hash_u32(hash, graph.resources.luma_keyed_scene_layers);
     hash_u32(hash, graph.resources.matte_nodes);
+    hash_u32(hash, graph.resources.merge_nodes);
+    hash_u32(hash, graph.resources.background_nodes);
+    hash_u32(hash, graph.resources.merge_nesting);
     hash_u32(hash, graph.resources.offscreen_textures);
     hash_u64(hash, graph.resources.bytes_per_texture);
     hash_u64(hash, graph.resources.offscreen_texture_bytes);
@@ -706,6 +759,7 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             if (upstream->kind == NodeKind::SceneLayer) {
                 active_layers.insert(upstream->node);
             } else if (upstream->kind == NodeKind::Composite ||
+                       upstream->kind == NodeKind::Merge ||
                        upstream->kind == NodeKind::Matte ||
                        upstream->kind == NodeKind::LedCarProcess) {
                 pending.push_back(upstream->node);
@@ -908,9 +962,10 @@ scene::Scene apply(const CompositorGraph& graph, const scene::Scene& source) {
             }
             adjustment.led_car_transform =
                 scene::multiply(setup_world, slot);
+            // Inputs arrive by port, so the setup's effects (9) are
+            // appended before its filters (10).
             for (const PlanConnection& effect : setup_step->inputs) {
-                if (effect.type != PortValueType::Effect ||
-                    effect.target_port != 9U) {
+                if (effect.target_port != 9U && effect.target_port != 10U) {
                     continue;
                 }
                 const GraphNode* const modifier = graph.node(effect.source);

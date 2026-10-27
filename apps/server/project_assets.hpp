@@ -119,4 +119,27 @@ struct ProjectAssetAvailability final {
 [[nodiscard]] ProjectAssetAvailability scan_project_assets(
     const ProjectAssetManifest& manifest);
 
+// A Library asset whose file is no longer the revision it recorded: what was
+// found at its source when the operator last asked.
+struct ChangedLibrarySource final {
+    doc::NodeId asset{};
+    assets::ContentFingerprint observed;
+
+    bool operator==(const ChangedLibrarySource&) const = default;
+};
+
+// Every fingerprinted Library asset - used or not - whose source now has a
+// different size or modification time than it recorded. One stat per asset
+// and no reads; a missing source is reported elsewhere, not here. Called
+// only when the operator asks (RESCAN), never on the frame path.
+[[nodiscard]] std::vector<ChangedLibrarySource> find_changed_library_sources(
+    const assets::AssetRegistry& registry);
+
+// The assets in `found` that still differ from what the registry records.
+// No file access: an accepted revision drops out as soon as the document
+// records the fingerprint that was found.
+[[nodiscard]] std::vector<doc::NodeId> still_changed_library_sources(
+    const assets::AssetRegistry& registry,
+    const std::vector<ChangedLibrarySource>& found);
+
 } // namespace mediaserver::app

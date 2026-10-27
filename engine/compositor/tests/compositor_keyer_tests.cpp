@@ -61,14 +61,20 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     return result;
 }
 
+// A Scene Layer takes effects on port 0 and filters on port 2.
+constexpr std::int64_t effects_port = 0;
+constexpr std::int64_t filters_port = 2;
+
 [[nodiscard]] doc::Node edge(core::u64 id, core::u64 from, core::u64 to,
-                             core::i64 order = 0) {
+                             core::i64 order = 0,
+                             std::int64_t to_port = effects_port) {
     return node(id, schema::edge_type,
                 {whole(schema::from_node,
                        static_cast<std::int64_t>(from)),
                  whole(schema::from_port, 0),
                  whole(schema::to_node, static_cast<std::int64_t>(to)),
-                 whole(schema::to_port, 0), whole(schema::order, order)});
+                 whole(schema::to_port, to_port),
+                 whole(schema::order, order)});
 }
 
 [[nodiscard]] doc::Node chroma_node(core::u64 id = 1U,
@@ -116,8 +122,8 @@ using Property = std::pair<std::string, doc::PropertyValue>;
         luma_node(2U, identities ? 0.0 : 0.5),
         node(3U, schema::scene_layer_type,
              {whole(schema::scene_node, 200)}),
-        node(4U, schema::output_type), edge(10U, 1U, 3U, 0),
-        edge(11U, 2U, 3U, 1), edge(12U, 3U, 4U),
+        node(4U, schema::output_type), edge(10U, 1U, 3U, 0, filters_port),
+        edge(11U, 2U, 3U, 1, filters_port), edge(12U, 3U, 4U),
     });
 }
 
@@ -231,25 +237,35 @@ void active_malformed_parameters_fail_closed() {
     KEY_GRAPH_CHECK(model.counters().rejected == 2U);
 }
 
-void inline_after_keyer_has_stable_order_diagnostic() {
+// An effect added to a keyed layer goes into EFFECTS and runs before
+// the keys however late it was wired. It cannot go into FILTERS.
+void an_effect_beside_keys_runs_before_them() {
     doc::Root root = key_graph();
     root = root.set(
         node(5U, schema::brightness_type, {real(schema::amount, 1.5)}));
-    root = root.set(edge(13U, 5U, 3U, 2));
+    doc::Root effect = root.set(edge(13U, 5U, 3U, 2, effects_port));
     compositor::CompositorModel model;
-    model.reset(root);
+    model.reset(effect);
     const compositor::CompositorGraph graph =
         model.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
-    KEY_GRAPH_CHECK(!graph.valid());
-    const auto found = std::find_if(
-        graph.diagnostics.begin(), graph.diagnostics.end(),
+    KEY_GRAPH_CHECK(graph.valid());
+    const compositor::PlanStep* const layer = graph.step(doc::NodeId{3U});
+    KEY_GRAPH_CHECK(layer != nullptr && layer->inputs.size() == 3U);
+    KEY_GRAPH_CHECK(layer->inputs[0].source == doc::NodeId{5U});
+    KEY_GRAPH_CHECK(layer->inputs[1].source == doc::NodeId{1U});
+    KEY_GRAPH_CHECK(layer->inputs[2].source == doc::NodeId{2U});
+
+    compositor::CompositorModel wrong;
+    wrong.reset(root.set(edge(13U, 5U, 3U, 2, filters_port)));
+    const compositor::CompositorGraph refused =
+        wrong.evaluate(doc::NodeId{100U}, doc::NodeId{100U});
+    KEY_GRAPH_CHECK(!refused.valid());
+    KEY_GRAPH_CHECK(std::any_of(
+        refused.diagnostics.begin(), refused.diagnostics.end(),
         [](const compositor::GraphDiagnostic& diagnostic) noexcept {
             return diagnostic.code ==
-                    compositor::DiagnosticCode::UnsupportedEffectOrder
-                && diagnostic.subject == doc::NodeId{3U}
-                && diagnostic.related == doc::NodeId{5U};
-        });
-    KEY_GRAPH_CHECK(found != graph.diagnostics.end());
+                compositor::DiagnosticCode::IncompatiblePorts;
+        }));
 }
 
 void every_key_parameter_participates_in_graph_digest() {
@@ -286,8 +302,8 @@ constexpr std::array<Case, 5U> cases{{
      &mix_zero_is_canonical_and_plan_resource_inert},
     {"active malformed parameters fail closed",
      &active_malformed_parameters_fail_closed},
-    {"inline after keyer has stable order diagnostic",
-     &inline_after_keyer_has_stable_order_diagnostic},
+    {"an effect beside keys runs before them",
+     &an_effect_beside_keys_runs_before_them},
     {"every key parameter participates in graph digest",
      &every_key_parameter_participates_in_graph_digest},
 }};

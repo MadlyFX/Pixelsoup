@@ -81,6 +81,8 @@ enum class Key : core::u8 {
     // F9: Easy Ease the selected keys, as in After Effects; Shift eases in
     // and Ctrl eases out.
     EasyEase,
+    // Ctrl+D: duplicate the selection in place, as in every node editor.
+    Duplicate,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies
@@ -112,6 +114,11 @@ public:
     // while the pointer is locked, which is what a camera drag reads.
     void add_mouse_motion(float dx, float dy) noexcept;
     void set_move_key(MoveKey key, bool down) noexcept;
+    // Files dragged in from the desktop. While a drag is over the window
+    // the host reports where it is; each dropped file arrives with the
+    // point it was let go at, and is kept for the one frame that reads it.
+    void set_file_drag(bool over, float x, float y) noexcept;
+    void add_dropped_file(std::string path, float x, float y);
     // The window lost the keyboard and mouse: whatever was held is released,
     // with release edges, so no drag or flight outlives the focus.
     void release_held() noexcept;
@@ -157,6 +164,14 @@ public:
     [[nodiscard]] std::string_view text() const noexcept { return text_; }
     [[nodiscard]] std::span<const Key> keys() const noexcept { return keys_; }
     [[nodiscard]] KeyMods mods() const noexcept { return mods_; }
+    [[nodiscard]] bool file_drag_over() const noexcept { return file_drag_; }
+    [[nodiscard]] float file_drag_x() const noexcept { return file_drag_x_; }
+    [[nodiscard]] float file_drag_y() const noexcept { return file_drag_y_; }
+    [[nodiscard]] std::span<const std::string> dropped_files() const noexcept {
+        return dropped_files_;
+    }
+    [[nodiscard]] float drop_x() const noexcept { return drop_x_; }
+    [[nodiscard]] float drop_y() const noexcept { return drop_y_; }
 
 private:
     static constexpr std::size_t button_count = 3U;
@@ -185,6 +200,12 @@ private:
     std::string text_;
     std::vector<Key> keys_;
     KeyMods mods_{KeyMods::None};
+    bool file_drag_{};
+    float file_drag_x_{};
+    float file_drag_y_{};
+    std::vector<std::string> dropped_files_;
+    float drop_x_{};
+    float drop_y_{};
 };
 
 } // namespace mediaserver::gui

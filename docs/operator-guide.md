@@ -699,6 +699,93 @@ same exact source updates the existing asset record without changing its stable
 project ID; accepting changed bytes is therefore an explicit new revision of
 that one identity, not a derivative asset.
 
+### The Library panel
+
+The Library has two views, switched from the icons at the left of its footer:
+
+- **List** is a table with one row per asset. Its columns show Type,
+  Resolution, Frame Rate, Duration, Start TC, End TC, Codec, Vertices,
+  Triangles, Texture Size (the model's largest texture), File Size, the Proxy
+  policy chip and runtime Status. Frames, Materials, Textures and Path are
+  hidden by default. Right-click the header to show or hide any column after
+  Name. Click a header to sort by it, and click it again to reverse the sort.
+  Drag a header's right edge to resize the column. When the columns are
+  wider than the panel, drag the scrollbar under the rows (or press its
+  track) or use Shift+wheel to scroll sideways. Generators, folders and
+  assets are separate groups with a gap between them, and folders always
+  come before assets. A value that was never probed always
+  sorts last. End TC is the last frame (start plus duration minus one). A
+  file with no timecode of its own starts at 00:00:00:00, and drop-frame
+  timecode uses `;` as editors do.
+- **Grid** shows one folder at a time as thumbnail tiles. The path above the
+  tiles goes back up a level (Backspace does too). Double-click a folder tile
+  to open it. Each tile names its duration and resolution, or its vertex
+  count and texture size.
+
+The footer slider sets the thumbnail size, and so does Ctrl+wheel over the
+content. Each view keeps its own size.
+
+Click an asset to select it. Ctrl toggles assets in and out of the selection,
+and Shift extends it. Double-click an asset, or press Enter, to place it in
+the scene. The Generators section lists the built-in primitives, lights and
+camera, and a single click adds one. Right-click an asset, folder or empty
+space for **Add to Scene**, **Rename** (F2), **New Folder**, **Move to Top
+Level**, **Remove from Library** (Delete), **Import Media...**, **Import
+Model...** and **Rescan Sources**.
+
+**Folders** are organisation only. A folder is an `asset.folder` document
+node, and an asset names its folder in a `folder` field. Neither changes how
+anything renders, but both are replicated and digested like every other
+asset field, and every folder edit is one Undo step. The toolbar's folder
+button makes a new folder, already open for naming. In List view the new
+folder goes inside the selected folder; in Grid view it goes in the folder on
+screen. Drag assets or folders onto a folder to file them there. In List view,
+releasing on empty space files them back at the top level; in Grid view, drop
+them on a step of the path instead. A folder can never be filed inside itself.
+Deleting a folder keeps everything it held, one level up. Reimporting a file
+the Library already holds keeps it in its folder.
+
+**Dragging out.** A selection dragged out of the Library carries a thumbnail of
+the asset you pressed on, with a count when more than one asset is dragged.
+What happens on release depends on where it lands:
+
+- **Stage:** each asset is placed where it was dropped, side by side.
+- **An empty part of the Timeline:** each asset becomes a new layer.
+- **A compatible Timeline row or Compositor Scene Layer:** the asset replaces
+  that source, as described below.
+- **A Compositor image input:** the asset is wired into it.
+
+**Files from the desktop** can be dragged straight into the window. Dropped on
+the Library, they are imported into the folder under the pointer. Dropped
+anywhere else, they are imported at the Library's top level. Video and images
+are probed. Models go through the model worker. Files that are neither are
+named in the status line rather than imported. Import also records the video
+codec, the file's start timecode, and a model's vertex count, texture count
+and largest texture size. Assets imported before this was recorded show those
+columns blank until they are imported again, or until a changed file is
+accepted as described below.
+
+**Changed source files.** When a file the Library holds is edited or replaced
+on disk, `RESCAN` notices. It checks every Library asset, used or not, with
+one stat per file: a size or modification time that differs from what was
+recorded marks the asset as changed. The asset gets an amber corner on its
+thumbnail and **SOURCE CHANGED** in its Status column, and an amber chip at
+the top left of the Library counts the changed files. Accept them with:
+
+- the chip, which accepts every changed source;
+- **Accept Changed Source** at the top of a changed asset's right-click
+  menu, which accepts every changed asset in the selection;
+- **Accept All Changed Sources** in the menu on the Library's empty space.
+
+Accepting re-reads each file on the same background workers import uses. It
+records the new duration, resolution, rate, codec, timecode, model counts and
+fingerprint on the same asset. The asset keeps its ID, name, folder and
+proxy policy, and its placements keep pointing at it; their clip timing and
+trims are not changed. Everything one Accept asked
+for is a single Undo. Thumbnails and proxies are keyed by the fingerprint, so
+they regenerate for the new revision. A file that has gone missing is not
+offered; it is reported as missing instead.
+
 To replace an existing source, drag a Library asset onto its **Timeline layer
 row** or the layer's **Scene Layer node in Compositor**. A compatible target is
 outlined and marked **Replace source** before release. Media assets replace
@@ -752,7 +839,9 @@ mismatch because it never looks at content.
 `RESCAN`, in the Library, is the other question: it streams each required file
 and reports wrong byte lengths, wrong hashes, and local verification failures.
 It is the only thing in the program that reads a source's bytes for this
-purpose, and the only place a mismatch can come from.
+purpose, and the only place a mismatch can come from. It also finds Library
+files that changed since they were recorded and offers to accept them; see
+[Changed source files](#the-library-panel).
 
 Nothing rescans on a timer. An earlier build re-verified every fingerprinted
 source every five seconds for as long as anything was missing, which on a 40 MB
@@ -1025,8 +1114,9 @@ one stable graph input whose picture follows the clips currently on air, includi
 timeline gaps. Dragging from Effects creates the matching effect node there.
 Both gestures outline the graph and name the pending node before release.
 Drop onto an **input** instead and what you drop arrives connected to it: a
-Timeline layer or Library asset on an image input, an effect from Effects on
-an effect input. The input is ringed and labelled, for example **Connect to
+Timeline layer or Library asset on an image input, an effect on an
+**EFFECTS** input and a blur or key on a **FILTERS** input. The input is
+ringed and labelled, for example **Connect to
 Back** or **Replace Image**, before release. The new node is placed to the
 input's left. A layer that already has a Scene Layer node is wired through
 that node rather than given a second one. An input that takes one wire takes
@@ -1035,6 +1125,32 @@ such as Composite's Layers, takes them all. A Library asset dropped on an
 input becomes a placement in the scene with its Scene Layer node and wire, and
 one Undo in the graph takes all of it back. An input outranks the node around
 it, so drop on the node's header or detail line to replace a layer instead.
+Drop an effect from Effects onto a wire of its own kind, away from any node,
+and the new effect joins that wire's input right after the wire's own effect:
+the wire is lit and labelled **Insert after Brightness**, for example. A
+Library asset cannot be dropped on an image wire, because no effect node takes
+an image in.
+
+**Effects and filters.** A Scene Layer has two inputs for them.
+**EFFECTS** (a violet diamond) takes Brightness, Saturation, Levels,
+Lift/Gamma/Gain, Contrast/Pivot, Colour Matrix, White Balance, Curves and Film
+Grain, which are applied as the layer is drawn. **FILTERS** (a green triangle)
+takes the blurs, Chroma Key and Luma Key, which work on the finished layer.
+Everything on EFFECTS always runs before everything on FILTERS, so, for
+example, a key and a blur can be used on a layer that is also colour corrected
+without any special wiring. An effect cannot be wired into FILTERS, or a
+filter into EFFECTS; the wire is refused with the reason. LED Car Process has
+the same pair, SETUP EFFECTS and SETUP FILTERS, applied to every plate after
+the plate's own. Projects made before this split show a filter wired into
+EFFECTS as an error until it is reconnected to FILTERS.
+
+Where an input takes several wires, each carries a number near the input
+giving the order it applies them, first to last; the order matters within
+FILTERS, since keying then blurring softens the keyed edge while blurring then
+keying keys a softened picture. To change it, drag a wire's number onto
+another number on the same input, and the wire takes that place; or
+right-click the wire and choose **Move Earlier** or **Move Later**. Each move
+is one Undo.
 Drag a **single Timeline layer onto an existing Scene Layer node** to replace
 that input's layer binding. Matching layer kinds are required: a video layer
 can replace another video layer, and a model can replace another model. The node
@@ -1081,7 +1197,75 @@ wires of its own onto a wire it can carry - Composite onto an image wire, say -
 and it is spliced in. Double-click a wire to add a reroute point where you
 clicked, drag a point to route the wire, and double-click a point to remove it.
 Reroute points are layout only and never change the picture. A node whose
-output reaches nothing is drawn faded.
+output reaches nothing is drawn faded. A node with a problem carries a mark
+beside its title - filled for an error, a ring for a warning - and hovering
+the mark names every problem; a problem with a wire is marked halfway along
+it.
+
+The values you reach for most are on the node itself: Brightness and
+Saturation's Amount, Blur's Radius, Contrast and Pivot, White Balance's
+Kelvin and Tint, and so on. Drag a value to scrub it or click it to type, as
+in Parameters; pressing one also selects its node. Zoomed out below 90%, the
+values are shown but not edited there. The chevron at the right of a node's
+title collapses the node to its title and the ports that are wired, and
+opens it again; with several nodes selected it collapses or opens them all,
+as does **Collapse** or **Expand** on the node's menu. Collapsing is layout
+only and never changes the picture.
+
+**Bypass** passes a node through as if it did nothing: press **D**, choose
+Bypass on the node's menu, or click **BYPASS** at the top of its Parameters.
+A bypassed node renders exactly as the node at its neutral settings - no
+change to the picture and no extra render pass - however its values are set,
+so you can compare with and without an effect while keeping its settings.
+It is marked **BYPASSED** under its title in amber, its body is dimmed and
+its wire fades. Press D again, or **Restore**, to put it back to work; with
+several nodes selected, D bypasses them all unless every one already is.
+Effects, Radial Array and Merge can be bypassed; a bypassed Merge passes its
+BASE through and draws nothing wired to its LAYERS. Scene Layer, Background,
+Matte, LED Car Process, Composite and Output cannot. Bypass is part of the
+project and reaches every render node, unlike collapsing.
+
+Choosing a layer on the Timeline brings its Scene Layer node - or the one for
+the Track it plays on - into view and outlines it for a moment, and choosing
+a Scene Layer node scrolls the Timeline to its layer or track, opening the
+track if it was closed. Neither changes the other panel's selection.
+
+**Selecting and arranging.** Click a node to select it. **Ctrl**-click adds
+or removes one node, and **Shift**-click adds one. Drag on empty canvas for a
+rubber band: dragged rightwards it takes the nodes it wholly contains, and
+leftwards every node it touches; hold Shift to add to the selection or Ctrl
+to take from it. Dragging any selected node moves them all together as one
+Undo. The arrow keys nudge the selection 10 units, or 1 with Shift, and a
+run of nudges in one direction is one Undo. **Delete** removes every selected
+node except Output.
+
+**Ctrl+C** copies the selected nodes, the wires between them, and a selected
+comment box. **Ctrl+V** pastes them at the pointer, and **Ctrl+D** duplicates
+the selection just below and to the right. Pasted or duplicated nodes become
+the selection. A graph has one Output and a source one Scene Layer, so those
+are not pasted or duplicated where they would be a second; a note says so.
+
+**F** frames the selection, or the whole graph when nothing is selected, and
+**Home** frames the whole graph. **MAP** in the toolbar shows a minimap of
+the graph in the canvas's corner: the outline is what is on screen, and
+pressing or dragging in it moves the view there. Whether it is shown is kept
+with the workspace layout.
+
+Right-click a node for its menu: Rename, Duplicate, Copy and Delete; Align
+Left, Right, Top or Bottom and Distribute Across or Down for a selection;
+**Straighten Connection** (also **Q**), which moves each selected node so its
+input wire runs level; **Arrange**, which lays the selection out in columns
+leading right to Output (the whole graph if one node is selected);
+**Comment Selection** (also **C**); **Collapse** or **Expand**; and
+**Bypass** or **Restore** (also **D**). A wire's menu adds a reroute point or
+disconnects it. Right-clicking empty canvas opens the node search.
+
+A comment box is a titled, coloured frame around part of the graph. Drag its
+title bar to move it and the nodes wholly inside it, drag its corner to
+resize it, double-click its title to rename it, and right-click its title to
+change its colour or delete it. Double-click a node's title, or press **F2**,
+to rename the node; **Enter** keeps the new name and **Escape** abandons it.
+Comment boxes are layout only and never change the picture.
 
 The **Parameters** panel beside the graph is resized by dragging its edge. Its
 width is kept with the workspace layout, so it survives a restart. Labels get
@@ -1090,6 +1274,53 @@ panel scrolls with the mouse wheel or its scrollbar when a node has more fields
 than fit. LED Car Process groups its fields into Position, Rotation, Plates,
 and Ceiling Reflection, and Levels has one section per channel. Click a
 section's heading to collapse or expand it.
+
+**Chroma Key** shows the key colour as a swatch above its Key Red, Green and
+Blue values, then Tolerance, Softness, Edge px (whole pixels: positive grows
+the kept area, negative shrinks it), Spill and Mix. **Luma Key** has Low and
+High thresholds, which stop at each other, Low and High Softness, a Matte
+switch between Normal and Inverted, and Mix. A Mix of zero passes a key
+through untouched. **Matte** cuts its **Source Image**, a Scene Layer, to the
+coverage of its **Matte Image**: another Scene Layer, or a Background. It
+switches between Alpha and Luma mode, Normal and Inverted, and whether its
+input is clamped first. The matte applies after the source layer's own
+filters and mask, and keeps the source's depth, so the cut layer still sits
+behind anything in front of it. A Scene Layer used as a matte is never shown
+itself; giving it a second, visible path to Output is marked as a problem.
+
+**Combining images.** **Composite** stacks its Layers in wire order, each
+landing with its own blend on whatever is below it. **Merge**, also under
+Combine & Output, lays images over another as one picture: wire what is
+underneath into **BASE** and what goes over it into **LAYERS**. Each layer
+lands in wire order with the Merge's **Blend** - Normal, Add, Multiply,
+Screen, Subtract, Overlay, Lighten, Darken or Difference - and **Opacity**,
+and the finished Merge then lands on what is below it as one image, so its
+blend never reaches anything outside it. With nothing wired to LAYERS, BASE
+is blended with the node's **Value** instead, only where BASE has coverage:
+Multiply by 0.5 halves its brightness, Add 0.1 lifts it, and Opacity mixes
+the result back toward BASE. Normal has nothing to lay over BASE, so a new
+Merge changes nothing until another blend is chosen. Opacity and Value are on
+the node; Value shows a dash while it does not apply, and Parameters says
+why. A Merge, or a Composite feeding a Merge or another Composite, renders
+into an intermediate image of its own. Up to four can be stacked inside one
+another; a deeper graph is marked on Output with the reason.
+
+**Background**, under Inputs, generates an image: a **Solid** colour, or a
+**Linear** or **Radial** gradient from Colour A to Colour B, each with its own
+alpha. Colours are picked as display colours and the ramp runs between them
+as picked. A Linear gradient runs along its Angle in turns, clockwise from
+left-to-right; Center places its midpoint and Size is its length as a
+fraction of the canvas measured along that angle. A Radial gradient runs from
+Colour A at its Center to Colour B at Size times half the canvas diagonal, so
+a Size of 1 reaches the corners. Positions are measured on the authored
+canvas, so every node of a wall draws exactly its own part of one gradient;
+an output view with no canvas, such as a tracked plate, spans its own raster.
+Use a Background as a Merge's BASE to put a colour or gradient behind layers,
+in its LAYERS with Multiply to tint or vignette them, or as a Matte's Matte
+Image to fade a layer out across the frame: a gradient from opaque to
+transparent in Alpha mode, or from white to black in Luma mode. Like any image on
+Output's path, an opaque Background covers the scene drawables the graph does
+not reference; give those Scene Layers of their own to place them over it.
 
 The Spatial / 3D category also contains **LED Car Process**, a purpose-built
 nine-socket virtual-production rig. Any subset of its optional Front, four
@@ -1228,11 +1459,27 @@ are only placed from the viewport, and a camera turns but has no scale.
 Scene, Stage, and Timeline share one typed multi-selection for scene elements.
 Ctrl toggles membership and Shift selects a visible range; the Inspector shows
 `MIXED` for disagreeing compatible values and applies an accepted edit only to
-unlocked compatible members. Select top-level elements and use `GROUP` in the
-Scene footer to create a replicated transform group without moving them in
-world space. Selecting that group enables `UNGROUP`, which preserves its direct
-children and selects them. Rejected hierarchy or transform operations create no
-history entry.
+unlocked compatible members. Select top-level elements, right-click one of
+them in the Scene panel and choose **Group** (or **Group Selection**) to create
+a replicated transform group without moving them in world space. A group's
+right-click menu offers **Ungroup**, which preserves its direct children and
+selects them. Rejected hierarchy or transform operations create no history
+entry. The Scene footer only names the selection.
+
+Groups can also start empty, as folders to file things into later.
+Right-click the Scene list's empty space for **New Group** or **New Vehicle
+Process Group** at the top level, or a group's row for **New Group Inside** and
+**New Vehicle Process Group Inside**. The new group lands at the front of its
+siblings, is selected, and opens its name for typing. Drag rows onto it to file
+them. A vehicle process group is shown with a vehicle icon and is otherwise an
+ordinary group for now; it is the container the vehicle processing workflow
+will build on.
+
+**Highlight Color...** in a row's right-click menu marks the selected rows with
+one of the eight marker colours - a tint across the row and a bar at its right
+edge that stays visible while it is selected - or **None** to clear it. A
+highlight is saved with the project, replicated and undoable, and never
+changes the picture. Blender-linked rows do not take one.
 
 Hardware Map and Feed Map are setup panels. Feed mappings support flat,
 horizontal-arc, and imported-mesh surfaces. For an imported projection mesh,

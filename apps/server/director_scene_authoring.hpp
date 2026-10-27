@@ -140,6 +140,14 @@ schedule_asset_proxy_edit(cmd::DirectorScheduler &scheduler,
                           const editor::AssetProxyEditIntent &request,
                           cmd::FrameNumber apply_at);
 
+// Plans a Library folder/filing/rename edit against the projected document
+// and schedules it as one undoable transaction. `new_folder` is the id a
+// CreateFolder takes. A request that would change nothing is accepted.
+[[nodiscard]] bool
+schedule_asset_library_edit(cmd::DirectorScheduler &scheduler,
+                            const editor::AssetLibraryEditIntent &request,
+                            doc::NodeId new_folder, cmd::FrameNumber apply_at);
+
 [[nodiscard]] bool schedule_delete(cmd::DirectorScheduler &scheduler,
                                    doc::NodeId node, core::u64 gesture,
                                    cmd::FrameNumber apply_at);

@@ -9,6 +9,7 @@
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -43,9 +44,19 @@
 //   compositor-menu lets one go on empty canvas, opening the node search;
 //   compositor-drop previews a Library asset dropped on a car input. The
 //   car's wire to Composite is routed through a reroute point, and a
-//   spare Scene Layer that reaches nothing is drawn faded.
+//   spare Scene Layer that reaches nothing is drawn faded;
+//   compositor-organise draws the plates' comment box and the minimap,
+//   rubber-bands three plates and opens their right-click menu;
+//   compositor-rich adds a bypassed effect and a key after the blur
+//   on the front-right plate, so its FILTERS wires are numbered, collapses the ceiling plate, marks an error
+//   on the right plate, and previews a Luma Key drop on the blur's wire
+//   at the hover point;
+//   compositor-merge screens a plate over a gradient Background with one
+//   Merge, selected, and darkens the result with a second whose LAYERS
+//   are unwired; compositor-background selects the Background instead.
 namespace {
 
+namespace assets = mediaserver::assets;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
@@ -255,7 +266,7 @@ struct CompositorSample final {
                                         std::string{plates[index]});
     sample.elements.push_back(plate);
     layers.push_back(add_node(compositor::NodeKind::SceneLayer, 240.0F,
-                              30.0F + static_cast<float>(index) * 112.0F,
+                              30.0F + static_cast<float>(index) * 124.0F,
                               compositor::SceneLayerParameters{
                                   doc::NodeId{element_id}}));
   }
@@ -269,7 +280,8 @@ struct CompositorSample final {
                                          compositor::CompositeParameters{});
   const doc::NodeId out = add_node(compositor::NodeKind::Output, 1000.0F, 160.0F,
                                    compositor::OutputParameters{});
-  connect(blur, 0U, layers[1], 0U);
+  // Blur is a filter: it goes into the plate's FILTERS input.
+  connect(blur, 0U, layers[1], 2U);
   for (std::size_t index = 0U; index < layers.size(); ++index) {
     connect(layers[index], 0U, car, plate_ports[index]);
   }
@@ -286,6 +298,63 @@ struct CompositorSample final {
   sample.graph.diagnostics.push_back(compositor::GraphDiagnostic{
       compositor::DiagnosticCode::DeadBranch, unused, {}, 0U,
       compositor::DiagnosticSeverity::Warning});
+  sample.graph.comments.push_back(compositor::GraphComment{
+      doc::NodeId{next_id++}, {}, "Plates into the car", 225.0F, -10.0F, 230.0F,
+      540.0F, 1U});
+  return sample;
+}
+
+// A plate screened over a gradient Background by one Merge, whose result a
+// second Merge - nothing on its LAYERS - darkens on its way to Output. The
+// first Merge, or the Background, sits where the car does, so the same press
+// selects it.
+[[nodiscard]] CompositorSample merge_compositor(bool select_background) {
+  namespace compositor = mediaserver::compositor;
+  CompositorSample sample;
+  sample.elements.push_back(element(900U, editor::ElementKind::Media,
+                                    "Plate_Front_A_Cam.mov"));
+  const auto add_node = [&](core::u64 id, compositor::NodeKind kind, float x,
+                            float y, compositor::NodeParameters parameters) {
+    compositor::GraphNode node{};
+    node.node = doc::NodeId{id};
+    node.kind = kind;
+    node.label = std::string{compositor::node_kind_name(kind)};
+    node.editor_x = x;
+    node.editor_y = y;
+    node.parameters = std::move(parameters);
+    sample.graph.nodes.push_back(node);
+  };
+  const auto connect = [&](core::u64 id, core::u64 from, core::u64 to,
+                           core::u8 to_port) {
+    sample.graph.edges.push_back(compositor::GraphEdge{
+        doc::NodeId{id}, compositor::EdgeEndpoint{doc::NodeId{from}, 0U},
+        compositor::EdgeEndpoint{doc::NodeId{to}, to_port},
+        static_cast<core::i64>(sample.graph.edges.size())});
+  };
+  compositor::BackgroundParameters gradient{};
+  gradient.mode = compositor::BackgroundMode::Linear;
+  gradient.color_a = compositor::BackgroundColor{0.05F, 0.10F, 0.30F, 1.0F};
+  gradient.color_b = compositor::BackgroundColor{0.90F, 0.45F, 0.20F, 1.0F};
+  gradient.angle = 0.25F;
+  add_node(100U, compositor::NodeKind::SceneLayer, 240.0F, 200.0F,
+           compositor::SceneLayerParameters{doc::NodeId{900U}});
+  add_node(101U, compositor::NodeKind::Background,
+           select_background ? 500.0F : 240.0F,
+           select_background ? 40.0F : 30.0F, gradient);
+  add_node(102U, compositor::NodeKind::Merge,
+           select_background ? 760.0F : 500.0F,
+           select_background ? 300.0F : 40.0F,
+           compositor::MergeParameters{compositor::MergeBlendMode::Screen,
+                                       0.8F, 1.0F});
+  add_node(103U, compositor::NodeKind::Merge, 760.0F, 120.0F,
+           compositor::MergeParameters{compositor::MergeBlendMode::Multiply,
+                                       1.0F, 0.75F});
+  add_node(104U, compositor::NodeKind::Output, 1000.0F, 160.0F,
+           compositor::OutputParameters{});
+  connect(105U, 101U, 102U, 0U);
+  connect(106U, 100U, 102U, 1U);
+  connect(107U, 102U, 103U, 0U);
+  connect(108U, 103U, 104U, 0U);
   return sample;
 }
 
@@ -338,6 +407,71 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 
 } // namespace
 
+// A small project for the Library views: plates and an interview in
+// folders, a still, and two models, with the metadata import records.
+[[nodiscard]] assets::AssetRegistry sample_library() {
+  assets::AssetRegistry registry;
+  const auto media = [&](core::u64 id, std::string name, core::u32 width,
+                         core::u32 height, core::u32 frames,
+                         assets::MediaFrameRate rate, std::string codec,
+                         std::string timecode, core::u64 bytes,
+                         core::u64 folder) {
+    assets::MediaAsset asset{};
+    asset.id = doc::NodeId{id};
+    asset.display_name = name;
+    asset.source = "D:/Show/Media/" + name;
+    asset.dimensions = assets::PixelDimensions{width, height};
+    asset.frame_count = frames;
+    if (rate.numerator != 0U) {
+      asset.frame_rate = rate;
+    }
+    asset.codec = std::move(codec);
+    asset.start_timecode = std::move(timecode);
+    asset.fingerprint = assets::ContentFingerprint{bytes, {}};
+    asset.folder = doc::NodeId{folder};
+    registry.assets.emplace_back(std::move(asset));
+  };
+  media(20U, "Opening_Plate_A001.mov", 3840U, 2160U, 1440U, {24'000U, 1'001U},
+        "prores", "14:22:05:11", 6'400'000'000U, 0U);
+  media(21U, "Drive_Rear_Long_Lens.mov", 3840U, 2160U, 8640U,
+        {24'000U, 1'001U}, "hevc", "09:41:00:00", 21'300'000'000U, 40U);
+  media(22U, "Interview_CamB.mxf", 1920U, 1080U, 26'973U, {30'000U, 1'001U},
+        "dnxhd", "01:00:00;00", 9'100'000'000U, 0U);
+  media(23U, "Show_Logo.png", 2048U, 1024U, 1U, {}, "", "", 1'840'000U, 0U);
+  assets::ModelAsset car{};
+  car.id = doc::NodeId{30U};
+  car.display_name = "Hero_Car.glb";
+  car.source = "D:/Show/Models/Hero_Car.glb";
+  car.vertex_count = 486'211U;
+  car.triangle_count = 812'004U;
+  car.material_count = 14U;
+  car.texture_count = 22U;
+  car.largest_texture = assets::PixelDimensions{8192U, 8192U};
+  car.fingerprint = assets::ContentFingerprint{412'000'000U, {}};
+  registry.assets.emplace_back(car);
+  assets::ModelAsset set{};
+  set.id = doc::NodeId{31U};
+  set.display_name = "Diner_Set.gltf";
+  set.source = "D:/Show/Models/Diner_Set.gltf";
+  set.vertex_count = 1'204'400U;
+  set.triangle_count = 1'960'118U;
+  set.material_count = 61U;
+  set.texture_count = 88U;
+  set.largest_texture = assets::PixelDimensions{4096U, 4096U};
+  set.fingerprint = assets::ContentFingerprint{1'210'000'000U, {}};
+  set.folder = doc::NodeId{41U};
+  registry.assets.emplace_back(set);
+  registry.folders.push_back(
+      assets::AssetFolder{doc::NodeId{40U}, "Plates", doc::NodeId{}});
+  registry.folders.push_back(
+      assets::AssetFolder{doc::NodeId{41U}, "Sets", doc::NodeId{}});
+  std::sort(registry.assets.begin(), registry.assets.end(),
+            [](const assets::Asset &left, const assets::Asset &right) {
+              return assets::asset_id(left) < assets::asset_id(right);
+            });
+  return registry;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
@@ -357,8 +491,13 @@ int main(int argc, char **argv) {
   const bool summaries = view == "summaries";
   const bool feed = view == "feed";
   const bool graph_view = view.substr(0U, 10U) == "compositor";
+  // The Library with a small sample project: `library` (List), then
+  // `library-grid` and `library-drag` (an asset carried out past the panel).
+  const bool library_view = view.substr(0U, 7U) == "library";
   const std::string_view properties =
-      curves || summaries || feed || graph_view ? std::string_view{} : view;
+      curves || summaries || feed || graph_view || library_view
+          ? std::string_view{}
+          : view;
 
   rhi::DeviceConfig config{};
   auto created = rhi::Device::create(config);
@@ -407,7 +546,42 @@ int main(int argc, char **argv) {
   editor::SceneSettingsPanel settings_panel;
   editor::FeedMappingPanel feed_panel{gui::ui_id("snapshot.feed")};
   editor::CompositorPanel compositor_panel{gui::ui_id("snapshot.compositor")};
-  const CompositorSample compositor_sample = sample_compositor();
+  CompositorSample compositor_sample =
+      view == "compositor-merge" || view == "compositor-background"
+          ? merge_compositor(view == "compositor-background")
+          : sample_compositor();
+  if (view == "compositor-rich") {
+    namespace compositor = mediaserver::compositor;
+    // Ids follow sample_compositor(): plates 100..103, Blur 104, the car 105;
+    // 117 onwards are free, keeping both lists in id order.
+    compositor::GraphNode brightness{};
+    brightness.node = doc::NodeId{117U};
+    brightness.kind = compositor::NodeKind::Brightness;
+    brightness.editor_x = 20.0F;
+    brightness.editor_y = 190.0F;
+    brightness.parameters = compositor::BrightnessParameters{1.2F};
+    brightness.bypassed = true;
+    compositor_sample.graph.nodes.push_back(brightness);
+    compositor_sample.graph.edges.push_back(compositor::GraphEdge{
+        doc::NodeId{118U}, compositor::EdgeEndpoint{brightness.node, 0U},
+        compositor::EdgeEndpoint{doc::NodeId{101U}, 0U}, 0});
+    // A key after the blur on the same FILTERS input, so the two are
+    // numbered.
+    compositor::GraphNode key{};
+    key.node = doc::NodeId{119U};
+    key.kind = compositor::NodeKind::ChromaKey;
+    key.editor_x = 20.0F;
+    key.editor_y = 310.0F;
+    key.parameters = compositor::ChromaKeyParameters{};
+    compositor_sample.graph.nodes.push_back(key);
+    compositor_sample.graph.edges.push_back(compositor::GraphEdge{
+        doc::NodeId{120U}, compositor::EdgeEndpoint{key.node, 0U},
+        compositor::EdgeEndpoint{doc::NodeId{101U}, 2U}, 1});
+    compositor_sample.graph.nodes[3].collapsed = true;
+    compositor_sample.graph.diagnostics.push_back(compositor::GraphDiagnostic{
+        compositor::DiagnosticCode::DuplicateSceneLayerReference,
+        doc::NodeId{102U}, {}, 0U, compositor::DiagnosticSeverity::Error});
+  }
   // The car's position on screen at 100%: the graph canvas starts below the
   // 26-unit toolbar.
   constexpr float car_press_x = 500.0F + 60.0F;
@@ -474,7 +648,7 @@ int main(int argc, char **argv) {
   // The LED Wall closes the same way, by a click on its twirl, its row
   // being the Timeline's second.
   const bool clicks = curves || summaries || feed;
-  const int passes = clicks || graph_view ? 8 : 3;
+  const int passes = clicks || graph_view || library_view ? 8 : 3;
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
     if (graph_view) {
@@ -505,6 +679,20 @@ int main(int argc, char **argv) {
         y = pass == 3 ? 26.0F + 70.0F + 56.0F : target_y;
         down = view != "compositor-menu" || pass < 6;
       }
+      if (view == "compositor-organise") {
+        compositor_panel.show_minimap(true);
+        // A band from right to left touches three plates; then a right
+        // click on the second opens the selection's menu.
+        constexpr std::array<std::array<float, 3U>, 8U> steps{{
+            {470.0F, 60.0F, 0.0F},  {470.0F, 60.0F, 1.0F},
+            {300.0F, 330.0F, 1.0F}, {300.0F, 330.0F, 0.0F},
+            {300.0F, 180.0F, 0.0F}, {300.0F, 180.0F, 0.0F},
+            {330.0F, 245.0F, 0.0F}, {330.0F, 245.0F, 0.0F}}};
+        x = steps[static_cast<std::size_t>(pass)][0];
+        y = steps[static_cast<std::size_t>(pass)][1];
+        down = steps[static_cast<std::size_t>(pass)][2] > 0.5F;
+        input.set_mouse_button(gui::MouseButton::Right, pass == 4);
+      }
       if (view == "compositor-drop" && pass >= 3) {
         // Over the car's BACK input, the fifth row.
         x = 492.0F;
@@ -529,6 +717,61 @@ int main(int argc, char **argv) {
                                           "Plate_Rear_Long_Lens.mov");
         }
       }
+      if (view == "compositor-rich" && pass >= 3) {
+        if (const auto drop = compositor_panel.effect_wire_at(
+                compositor_sample.graph, x, y,
+                mediaserver::compositor::PortValueType::Filter)) {
+          compositor_panel.draw_wire_drop(ctx, *drop, "LUMA KEY");
+        }
+      }
+      ctx.draw_overlays(window);
+      continue;
+    }
+    if (library_view) {
+      static editor::LibraryPanel library_panel{gui::ui_id("snapshot.library")};
+      static const assets::AssetRegistry library = sample_library();
+      const gui::Rect library_bounds{4.0F, 4.0F,
+                                     view == "library" ? logical_width - 8.0F
+                                                       : 520.0F,
+                                     logical_height - 8.0F};
+      if (pass == 0) {
+        // Two files changed on disk since import, as a RESCAN reports them.
+        const std::array<doc::NodeId, 2U> changed{
+            {doc::NodeId{20U}, doc::NodeId{22U}}};
+        library_panel.set_changed_sources(changed);
+        library_panel.set_view(view == "library-grid"
+                                   ? editor::LibraryView::Grid
+                                   : editor::LibraryView::List);
+        if (view == "library-grid") {
+          library_panel.set_icon_size(0.3F);
+        }
+      }
+      float x = hover_x;
+      float y = hover_y;
+      bool down = false;
+      if (view == "library-drag") {
+        // Opening Plate's row, pressed and carried out to the right.
+        constexpr std::array<std::array<float, 3U>, 3U> steps{{
+            {120.0F, 380.0F, 0.0F}, {120.0F, 380.0F, 1.0F},
+            {700.0F, 260.0F, 1.0F}}};
+        const auto &step = steps[std::min<std::size_t>(
+            static_cast<std::size_t>(pass), steps.size() - 1U)];
+        x = step[0];
+        y = step[1];
+        down = step[2] > 0.5F;
+      } else if (pass == 1 || pass == 2) {
+        // Collapse the generators so the assets lead.
+        x = 80.0F;
+        y = 85.0F;
+        down = pass == 1;
+      }
+      input.set_mouse_position(x, y);
+      input.set_mouse_button(gui::MouseButton::Left, down);
+      ctx.new_frame(1.0);
+      ctx.panel(window, ctx.theme().background);
+      static_cast<void>(library_panel.draw(ctx, library_bounds, library, {},
+                                           {}));
+      library_panel.draw_drag_ghost(ctx);
       ctx.draw_overlays(window);
       continue;
     }

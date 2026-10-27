@@ -315,6 +315,12 @@ namespace mediaserver::app {
         }
         info.parent_group = optional_reference(scene::schema::parent_group);
         info.group_order = signed_integer(scene::schema::group_order, 0);
+        // An index outside the palette is shown as no highlight rather than
+        // wrapped onto a colour nobody picked.
+        if (const auto highlight = signed_integer(scene::schema::outliner_color, -1);
+            highlight >= 0 && highlight < scene::timeline_marker_colors) {
+            info.highlight = static_cast<core::u8>(highlight);
+        }
         info.visible = boolean(scene::schema::visible, true);
         info.effective_visible = info.visible;
         return info;
@@ -576,6 +582,7 @@ namespace mediaserver::app {
     for (const scene::SceneGroup &group : scene.groups) {
         auto info = read(group.node, editor::ElementKind::Group);
         info.display_name = group.name;
+        info.group_kind = group.kind;
         info.parent_group = group.parent_group;
         info.group_order = group.group_order;
         info.locked = group.effective_locked;
@@ -1127,6 +1134,8 @@ void DirectorShowLoop::project_switcher_and_links(DirectorTick &tick,
             ? std::string{"Untitled Scene"} : saved->name);
     }
     publication_default_storage = default_publication_storage(project_path);
+    changed_library_assets = still_changed_library_sources(
+        director_asset_registry, changed_library_sources);
     project_view = editor::EditorProjectState{
         project_path, project_message,
         project_explicitly_dirty ||
@@ -1138,7 +1147,8 @@ void DirectorShowLoop::project_switcher_and_links(DirectorTick &tick,
         blender_state ? std::span<const render::BlenderInstance>{blender_state->instances} : std::span<const render::BlenderInstance>{},
         blender_preview_instance, blender_connection_error.empty() && blender_state ? std::string_view{blender_state->error} : std::string_view{blender_connection_error},
         preview_link && preview_link->connected, blender_scene_states, blender_bound_names,
-        publication_default_storage,recent_project_paths};
+        publication_default_storage,recent_project_paths,
+        changed_library_assets};
 }
 
 PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,

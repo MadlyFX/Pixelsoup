@@ -185,6 +185,52 @@ void reimport_replaces_metadata_on_the_stable_source_identity() {
                      std::string{assets::schema::media_frame_count})) == 999);
 }
 
+// The Library's columns read what import recorded, and an import of a file
+// the Library already holds keeps it in the folder the operator filed it in.
+void library_metadata_round_trips_and_reimport_keeps_the_folder() {
+    assets::MediaAsset clip = media(absolute_source("interview.mov"));
+    clip.codec = "prores";
+    clip.start_timecode = "01:00:00:00";
+    clip.folder = doc::NodeId{40U};
+    assets::ModelAsset car{};
+    car.display_name = "Car";
+    car.source = absolute_source("car.glb");
+    car.vertex_count = 64'000U;
+    car.triangle_count = 30'000U;
+    car.texture_count = 3U;
+    car.largest_texture = assets::PixelDimensions{4'096U, 4'096U};
+
+    doc::Root root;
+    root = root.set(app::make_project_asset_node(doc::NodeId{7U},
+                                                 assets::Asset{clip}));
+    root = root.set(app::make_project_asset_node(doc::NodeId{8U},
+                                                 assets::Asset{car}));
+    assets::AssetModel model;
+    model.reset(root);
+    const assets::AssetRegistry registry = model.evaluate();
+    const auto* const read_clip =
+        std::get_if<assets::MediaAsset>(registry.asset(doc::NodeId{7U}));
+    IMPORT_CHECK(read_clip != nullptr);
+    IMPORT_CHECK(read_clip->codec == "prores");
+    IMPORT_CHECK(read_clip->start_timecode == "01:00:00:00");
+    IMPORT_CHECK(read_clip->folder == doc::NodeId{40U});
+    const auto* const read_car =
+        std::get_if<assets::ModelAsset>(registry.asset(doc::NodeId{8U}));
+    IMPORT_CHECK(read_car != nullptr);
+    IMPORT_CHECK(read_car->vertex_count == 64'000U);
+    IMPORT_CHECK(read_car->texture_count == 3U);
+    IMPORT_CHECK((read_car->largest_texture ==
+                  assets::PixelDimensions{4'096U, 4'096U}));
+
+    assets::MediaAsset again = clip;
+    again.folder = {};
+    const auto upsert = app::make_project_asset_upsert(
+        root, assets::Asset{again}, doc::NodeId{99U});
+    IMPORT_CHECK(upsert.after.id == doc::NodeId{7U});
+    IMPORT_CHECK(std::get<std::int64_t>(upsert.after.properties.at(
+                     std::string{assets::schema::folder})) == 40);
+}
+
 void projection_meshes_are_first_class_asset_records() {
     assets::ModelAsset mesh{};
     mesh.display_name = "Wall patch";
@@ -370,6 +416,8 @@ constexpr Case cases[]{
      &a_directory_is_not_an_importable_asset},
     {"reimport replaces metadata on the stable source identity",
      &reimport_replaces_metadata_on_the_stable_source_identity},
+    {"Library metadata round-trips and reimport keeps the folder",
+     &library_metadata_round_trips_and_reimport_keeps_the_folder},
     {"projection meshes are first-class asset records",
      &projection_meshes_are_first_class_asset_records},
     {"one OBJ can be a scene model and a projection mesh",

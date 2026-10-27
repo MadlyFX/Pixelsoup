@@ -206,7 +206,8 @@ public:
     // Clears the per-frame hot state and resets the draw list. Call once at the
     // top of a frame, after InputState::new_frame() and after that frame's
     // events are applied. `active` and `focus` persist so a drag and an edit
-    // both survive the frame boundary.
+    // both survive the frame boundary; a capture whose widget was not drawn
+    // last frame is released once the button is up.
     //
     // `time_seconds` drives the caret blink only. It defaults to zero, which
     // holds the caret solid - what a test wants, since a blinking caret would
@@ -323,6 +324,12 @@ public:
     void open_context_menu(UiId id, float x, float y);
     [[nodiscard]] std::optional<std::size_t> context_menu(
         UiId id, std::span<const std::string_view> options);
+    // The same menu with a colour chip before each entry, for a choice that
+    // is a colour. `swatches` pairs with `options` by index; an entry whose
+    // swatch is fully transparent draws an empty chip ("None").
+    [[nodiscard]] std::optional<std::size_t> context_menu(
+        UiId id, std::span<const std::string_view> options,
+        std::span<const UiColor> swatches);
     [[nodiscard]] bool menu_open(UiId id) const noexcept {
         return dropdown_id_ == id;
     }
@@ -437,6 +444,22 @@ public:
     [[nodiscard]] float wheel() const noexcept {
         return pointer_blocked() ? 0.0F : input_.wheel();
     }
+    // Files dragged in from the desktop: whether a drag is over the window
+    // and where, and the paths let go this frame with where they landed.
+    [[nodiscard]] bool file_drag_over() const noexcept {
+        return input_.file_drag_over();
+    }
+    [[nodiscard]] float file_drag_x() const noexcept {
+        return input_.file_drag_x();
+    }
+    [[nodiscard]] float file_drag_y() const noexcept {
+        return input_.file_drag_y();
+    }
+    [[nodiscard]] std::span<const std::string> dropped_files() const noexcept {
+        return input_.dropped_files();
+    }
+    [[nodiscard]] float drop_x() const noexcept { return input_.drop_x(); }
+    [[nodiscard]] float drop_y() const noexcept { return input_.drop_y(); }
     [[nodiscard]] bool shift_held() const noexcept {
         return has_mod(input_.mods(), KeyMods::Shift);
     }
@@ -521,6 +544,8 @@ private:
     Theme theme_;
     UiId hot_{};
     UiId active_{};
+    // The capturing widget ran this frame; see new_frame().
+    bool active_seen_{};
     bool press_consumed_{};
     UiId focus_{};
     std::size_t caret_{};
@@ -543,6 +568,7 @@ private:
     std::size_t dropdown_first_{};
     std::size_t dropdown_pressed_{static_cast<std::size_t>(-1)};
     std::vector<std::string> dropdown_options_;
+    std::vector<UiColor> dropdown_swatches_;
     Rect dropdown_anchor_{};
     Rect dropdown_bounds_{};
     bool dropdown_dismissed_{};

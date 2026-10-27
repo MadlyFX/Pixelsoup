@@ -30,10 +30,61 @@ schedule_compositor_add(cmd::DirectorScheduler &scheduler,
                         doc::NodeId id, doc::NodeId scene, core::u64 gesture,
                         cmd::FrameNumber apply_at);
 
+// A keyboard nudge passes the coalescing plan so a run of nudges is one
+// undo step; every node it moves continues that same step.
 [[nodiscard]] bool
 schedule_compositor_move(cmd::DirectorScheduler &scheduler,
                          const editor::CompositorMoveIntent &request,
-                         core::u64 gesture, cmd::FrameNumber apply_at);
+                         core::u64 gesture, cmd::FrameNumber apply_at,
+                         EditCoalescingPlan *coalescing = nullptr);
+
+// Sets a node's or comment box's title, or clears a node's back to its
+// kind's name.
+[[nodiscard]] bool
+schedule_compositor_rename(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorRenameIntent &request,
+                           core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Creates a comment box at `id` in `scene` when the request names none, or
+// changes the one it names. A box smaller than the minimum, out of range, or
+// with an unknown colour is ignored.
+[[nodiscard]] bool
+schedule_compositor_comment(cmd::DirectorScheduler &scheduler,
+                            const editor::CompositorCommentIntent &request,
+                            doc::NodeId id, doc::NodeId scene,
+                            core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Collapses or opens nodes, as one undo step. Layout only.
+[[nodiscard]] bool
+schedule_compositor_collapse(cmd::DirectorScheduler &scheduler,
+                             const editor::CompositorCollapseIntent &request,
+                             core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Gives wires new places in their inputs' order, as one undo step. Anything
+// that is not a wire is left alone.
+[[nodiscard]] bool
+schedule_compositor_reorder(cmd::DirectorScheduler &scheduler,
+                            const editor::CompositorReorderIntent &request,
+                            core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Bypasses nodes or puts them back to work, as one undo step. Nodes that
+// cannot be bypassed are left alone.
+[[nodiscard]] bool
+schedule_compositor_bypass(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorBypassIntent &request,
+                           core::u64 gesture, cmd::FrameNumber apply_at);
+
+// Where a pasted snapshot's top-left is now: the smallest x and y of its
+// nodes and comment boxes, in graph units.
+[[nodiscard]] std::pair<float, float>
+compositor_snapshot_origin(std::span<const doc::Node> snapshot) noexcept;
+
+// Puts a planned paste as one undo step, and moves `next_id` past the ids it
+// used. Returns false only when the scheduler refuses a node.
+[[nodiscard]] bool
+schedule_compositor_paste(cmd::DirectorScheduler &scheduler,
+                          std::span<const doc::Node> puts, core::u64 gesture,
+                          cmd::FrameNumber apply_at, core::u64 &next_id);
 
 [[nodiscard]] bool schedule_compositor_property(
     cmd::DirectorScheduler &scheduler,

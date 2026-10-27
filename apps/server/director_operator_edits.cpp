@@ -19,6 +19,7 @@
 #include "timeline_marker_authoring.hpp"
 
 #include <mediaserver/cmd/command.hpp>
+#include <mediaserver/compositor/compositor_model.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/doc/node.hpp>
@@ -28,6 +29,7 @@
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/scene/canvas.hpp>
 #include <mediaserver/scene/key_edit.hpp>
+#include <mediaserver/scene/linked_scene.hpp>
 #include <mediaserver/scene/mask_authoring.hpp>
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/scene_model.hpp>
@@ -68,6 +70,7 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         pending_layer_orders.clear();
         pending_element_flags.clear();
         pending_renames.clear();
+        pending_highlights.clear();
         pending_timeline_edits.clear();
         pending_group_edit.reset();
         pending_selection_set_edit.reset();
@@ -84,7 +87,13 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         pending_deletes.clear();
         pending_compositor_adds.clear();
         pending_source_replacements.clear();
-        pending_compositor_move.reset();
+        pending_compositor_moves.clear();
+        pending_compositor_clipboard.reset();
+        pending_compositor_rename.reset();
+        pending_compositor_comment.reset();
+        pending_compositor_collapse.reset();
+        pending_compositor_bypass.reset();
+        pending_compositor_reorder.reset();
         pending_compositor_connect.reset();
         pending_compositor_rewire.reset();
         pending_compositor_waypoints.reset();
@@ -235,6 +244,48 @@ PhaseExit DirectorShowLoop::apply_asset_imports(OperatorFrame &op) {
         }
     }
     pending_asset_imports.clear();
+
+    // Accepted changed sources. Fingerprinting is a stat; the editor's
+    // workers already did the probing.
+    std::size_t revised = 0U;
+    std::size_t refused = 0U;
+    for (auto &revision : pending_asset_revisions) {
+        const doc::NodeId id = assets::asset_id(revision.asset);
+        auto prepared = prepare_project_asset_import(std::move(revision.asset));
+        if (!prepared) {
+            ++refused;
+            continue;
+        }
+        auto plan = plan_project_asset_revision(
+            scheduler.projected_document(), id, prepared.value(),
+            ProjectAssetRevisionMode::AcceptCurrentSource);
+        if (!plan) {
+            ++refused;
+            continue;
+        }
+        if (!plan.value().modified) {
+            continue;
+        }
+        if (!scheduler.schedule_edit(
+                cmd::PutNode{std::move(plan.value().changed)},
+                cmd::PutNode{std::move(plan.value().before)},
+                cmd::UndoContextId{2U},
+                cmd::TransactionId{revision.gesture}, frame)) {
+            ++refused;
+            continue;
+        }
+        ++revised;
+    }
+    if (revised > 0U || refused > 0U) {
+        project_message =
+            refused == 0U
+                ? std::string{"ACCEPTED "} + std::to_string(revised) +
+                      (revised == 1U ? " CHANGED SOURCE" : " CHANGED SOURCES")
+                : std::string{"COULD NOT ACCEPT "} + std::to_string(refused) +
+                      (refused == 1U ? " SOURCE" : " SOURCES") +
+                      " - CHECK THE FILE IS STILL THERE";
+    }
+    pending_asset_revisions.clear();
     return std::nullopt;
 }
 
@@ -582,6 +633,49 @@ PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
         }
     }
     pending_renames.clear();
+    // A Scene panel highlight is one palette index on each node's own
+    // record, every selected node in one undo step; None removes it.
+    for (const auto &edit : pending_highlights) {
+        if (edit.color.has_value() &&
+            *edit.color >= scene::timeline_marker_colors) {
+            continue;
+        }
+        doc::Root after = scheduler.projected_document();
+        bool changed = false;
+        for (const doc::NodeId node : edit.nodes) {
+            const auto *const existing = after.get(node);
+            if (existing == nullptr || scene::is_linked_occurrence(*existing)) {
+                continue;
+            }
+            doc::Node updated = *existing;
+            if (edit.color.has_value()) {
+                updated.properties.insert_or_assign(
+                    std::string{scene::schema::outliner_color},
+                    doc::PropertyValue{static_cast<std::int64_t>(*edit.color)});
+            } else if (const auto found = updated.properties.find(
+                           scene::schema::outliner_color);
+                       found != updated.properties.end()) {
+                updated.properties.erase(found);
+            }
+            if (updated == *existing) {
+                continue;
+            }
+            after = after.set(std::move(updated));
+            changed = true;
+        }
+        if (!changed) {
+            continue;
+        }
+        auto scheduled = scheduler.schedule_document_replace(
+            after, cmd::UndoContextId{2U},
+            cmd::TransactionId{edit.gesture}, frame);
+        if (!scheduled) {
+            std::cerr << "could not author a highlight for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_highlights.clear();
     for (const auto &edit : pending_lane_edits) {
         LaneAuthorAction action{};
         switch (edit.action) {
@@ -709,6 +803,18 @@ PhaseExit DirectorShowLoop::apply_group_selection_and_mask_requests(OperatorFram
                           scheduler.projected_document(),
                           request.scene, request.selection,
                           doc::NodeId{next_new_node}, "Group")
+                : request.action == editor::GroupEditAction::Create
+                    ? scene::plan_create_group(
+                          scheduler.projected_document(),
+                          request.scene,
+                          request.group != doc::NodeId{}
+                              ? std::optional<doc::NodeId>{request.group}
+                              : std::nullopt,
+                          doc::NodeId{next_new_node},
+                          request.kind == scene::GroupKind::VehicleProcess
+                              ? "Vehicle Process"
+                              : "Group",
+                          request.kind)
                 : request.action ==
                         editor::GroupEditAction::MoveInto
                     ? scene::plan_move_into_group(
@@ -751,6 +857,14 @@ PhaseExit DirectorShowLoop::apply_group_selection_and_mask_requests(OperatorFram
                     std::max(next_new_node,
                              planned.value().group.value() + 1U);
                 project_message = "GROUP CREATED";
+            } else if (request.action == editor::GroupEditAction::Create) {
+                next_new_node =
+                    std::max(next_new_node,
+                             planned.value().group.value() + 1U);
+                project_message =
+                    request.kind == scene::GroupKind::VehicleProcess
+                        ? "VEHICLE PROCESS GROUP CREATED"
+                        : "GROUP CREATED";
             } else if (request.action ==
                        editor::GroupEditAction::MoveInto) {
                 project_message = request.group != doc::NodeId{}
@@ -1088,6 +1202,22 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
         }
     }
     pending_asset_proxy_edits.clear();
+    for (const auto &request : pending_asset_library_edits) {
+        doc::NodeId folder{};
+        if (request.edit.kind == assets::LibraryEdit::Kind::CreateFolder) {
+            while (scheduler.projected_document().contains(
+                doc::NodeId{next_new_node})) {
+                ++next_new_node;
+            }
+            folder = doc::NodeId{next_new_node++};
+        }
+        if (!schedule_asset_library_edit(scheduler, request, folder, frame)) {
+            std::cerr << "could not author a Library edit for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_asset_library_edits.clear();
     for (const auto &effect : pending_effects) {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {
@@ -1434,16 +1564,106 @@ PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &
         }
     }
     pending_compositor_adds.clear();
-    if (pending_compositor_move.has_value()) {
+    for (const auto &move : pending_compositor_moves) {
         if (!schedule_compositor_move(
-                scheduler, *pending_compositor_move,
-                pending_compositor_gesture, frame)) {
+                scheduler, move, pending_compositor_gesture, frame,
+                coalescing_for(pending_compositor_gesture))) {
             std::cerr
                 << "could not move a compositor node for frame "
                 << frame.value() << '\n';
             return 1;
         }
-        pending_compositor_move.reset();
+    }
+    pending_compositor_moves.clear();
+    if (pending_compositor_rename.has_value()) {
+        if (!schedule_compositor_rename(scheduler, *pending_compositor_rename,
+                                        pending_compositor_gesture, frame)) {
+            std::cerr << "could not rename a compositor node for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_rename.reset();
+    }
+    if (pending_compositor_reorder.has_value()) {
+        if (!schedule_compositor_reorder(scheduler, *pending_compositor_reorder,
+                                         pending_compositor_gesture, frame)) {
+            std::cerr << "could not reorder compositor wires for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_reorder.reset();
+    }
+    if (pending_compositor_bypass.has_value()) {
+        if (!schedule_compositor_bypass(scheduler, *pending_compositor_bypass,
+                                        pending_compositor_gesture, frame)) {
+            std::cerr << "could not bypass compositor nodes for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_bypass.reset();
+    }
+    if (pending_compositor_collapse.has_value()) {
+        if (!schedule_compositor_collapse(scheduler,
+                                          *pending_compositor_collapse,
+                                          pending_compositor_gesture, frame)) {
+            std::cerr << "could not collapse compositor nodes for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_collapse.reset();
+    }
+    if (pending_compositor_comment.has_value()) {
+        const doc::NodeId id = pending_compositor_comment->node != doc::NodeId{}
+                                   ? pending_compositor_comment->node
+                                   : fresh_id();
+        if (!schedule_compositor_comment(scheduler, *pending_compositor_comment,
+                                         id, authoring_scene(),
+                                         pending_compositor_gesture, frame)) {
+            std::cerr << "could not author a compositor comment for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        pending_compositor_comment.reset();
+    }
+    if (pending_compositor_clipboard.has_value()) {
+        const editor::CompositorClipboardIntent request =
+            std::move(*pending_compositor_clipboard);
+        pending_compositor_clipboard.reset();
+        const doc::Root &root = scheduler.projected_document();
+        if (request.action == editor::CompositorClipboardAction::Copy) {
+            compositor_clipboard =
+                compositor::snapshot_graph_selection(root, request.nodes);
+        } else {
+            const std::vector<doc::Node> snapshot =
+                request.action == editor::CompositorClipboardAction::Duplicate
+                    ? compositor::snapshot_graph_selection(root, request.nodes)
+                    : compositor_clipboard;
+            float dx = request.x;
+            float dy = request.y;
+            if (request.action == editor::CompositorClipboardAction::Paste) {
+                const auto [left, top] = compositor_snapshot_origin(snapshot);
+                dx = request.x - left;
+                dy = request.y - top;
+            }
+            // Graph objects with no owner of their own belong to the
+            // lowest-id stage, as everywhere else.
+            scene::SceneModel stages;
+            stages.reset(root);
+            const auto scenes = stages.scenes();
+            const doc::NodeId legacy_owner =
+                scenes.empty() ? doc::NodeId{} : scenes.front().id;
+            auto planned = compositor::plan_paste_graph(
+                root, snapshot, authoring_scene(), legacy_owner, dx, dy,
+                doc::NodeId{std::max<core::u64>(next_new_node, 1U)});
+            if (planned && !schedule_compositor_paste(
+                               scheduler, planned.value().puts,
+                               pending_compositor_gesture, frame,
+                               next_new_node)) {
+                std::cerr << "could not paste compositor nodes for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+        }
     }
     if (pending_compositor_property.has_value()) {
         if (!schedule_compositor_property(

@@ -178,6 +178,10 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             }
             director_asset_availability = check_project_assets(
                 collect_project_asset_manifest(document, asset_registry));
+            // Every Library file, used or not, that is no longer the
+            // revision it recorded; the Library offers to accept it.
+            changed_library_sources =
+                find_changed_library_sources(asset_registry);
             project_message = director_asset_availability.ready()
                                   ? "ASSETS VERIFIED"
                                   : "ASSETS INCOMPLETE - SEE LIBRARY";

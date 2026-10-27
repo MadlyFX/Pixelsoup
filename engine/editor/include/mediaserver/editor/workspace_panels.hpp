@@ -10,6 +10,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/library_panel.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/selection.hpp>
@@ -67,9 +68,17 @@ struct SceneSelectionRequest final {
     // element where it is on the stage. When `reorder_destination` is set the
     // moved rows land beside that sibling rather than at the front.
     MoveInto,
+    // A new, empty group of `group_kind` under `destination` (zero: the top
+    // level).
+    Create,
   };
   std::optional<StructureAction> structure;
   doc::NodeId destination{};
+  scene::GroupKind group_kind{scene::GroupKind::Folder};
+  // The context menu's highlight colour, for every selected row: a
+  // marker-palette index, or none to clear it.
+  bool highlight_changed{};
+  std::optional<core::u8> highlight;
   std::vector<doc::NodeId> moved;
   // A drag between two siblings: `node` lands before or after
   // `reorder_destination` in the front-to-back stack.
@@ -91,7 +100,9 @@ struct SceneSelectionRequest final {
 // collections holding their children - with the same eye, padlock, icons and
 // names the Timeline's layer list uses. Rows rename in place (double-click or
 // F2), drag to reorder among siblings or onto a group to file under it, and
-// carry a right-click menu with everything else a row can do. The stage's LED
+// carry a right-click menu with everything else a row can do: grouping, a
+// highlight colour, and new empty groups inside a group. A right-click on the
+// list's empty space creates groups at the top level. The stage's LED
 // surfaces follow the scene's elements, as they do in the Timeline: physical
 // geometry rather than scene nodes, so they carry a padlock but no eye and
 // never file into the hierarchy.
@@ -134,243 +145,12 @@ private:
   // The open context menu's row and entries, fixed when it opened so what
   // the operator reads is what a choice does.
   doc::NodeId menu_node_{};
+  // A menu opened on the list's empty space rather than on a row.
+  bool menu_background_{};
   std::vector<std::string> menu_entries_;
   std::vector<core::u8> menu_commands_;
-};
-
-// Intentionally separate from AddKind in editor_shell.hpp: this header is a
-// leaf panel API and can therefore be included by the shell without a cycle.
-// Media and Model remain only for the transitional draw() wrapper used by the
-// current shell. The asset-aware LibraryFrame never returns either through
-// `add`; imports and existing-asset instantiation have distinct fields below.
-enum class LibraryAddAction : core::u8 {
-  Box,
-  Plane,
-  Sphere,
-  Media,
-  Model,
-  DirectionalLight,
-  PointLight,
-  SpotLight,
-  Camera,
-};
-
-enum class LibraryImportAction : core::u8 {
-  Media,
-  Model,
-};
-
-// Runtime-only projection of the app/server thumbnail service. These values
-// are observations, never document state and never an alternate Asset node.
-enum class LibraryThumbnailState : core::u8 {
-  Placeholder,
-  Queued,
-  Generating,
-  Ready,
-  Stale,
-  Failed,
-};
-
-struct LibraryThumbnailObservation final {
-  // Contains the persistent Asset NodeId plus its expected content fingerprint
-  // and the frozen thumbnail profile/generator versions.
-  assets::DerivativeKey key;
-  LibraryThumbnailState state{LibraryThumbnailState::Placeholder};
-  // Borrowed for this draw only. Ready without a texture remains a typed Ready
-  // status while the app finishes its CPU-to-GPU upload.
-  const rhi::Texture *texture{};
-
-  bool operator==(const LibraryThumbnailObservation &) const = default;
-};
-
-// Machine-local playback truth for one persistent Library MediaAsset. The
-// optional key names the exact requested source revision/profile/generator;
-// it remains a derivative cache key and never becomes another Asset identity.
-enum class LibraryProxyRuntimeState : core::u8 {
-  Source,
-  ProxyReady,
-  PreferFallback,
-  RequiredUnready,
-  Failed,
-};
-
-// Editor-owned mirror of app/server failures. Keeping this type in the editor
-// prevents the reusable panel API from depending on the executable layer.
-enum class LibraryProxyRuntimeIssue : core::u8 {
-  None,
-  MissingAssetIdentity,
-  AssetNotFound,
-  AssetKindMismatch,
-  PlacementSourceMismatch,
-  AvailabilityMissing,
-  CacheInspectionFailed,
-  ArtifactLoadFailed,
-  ArtifactMetadataMismatch,
-  FrameMappingFailed,
-  MaterializationFailed,
-};
-
-struct LibraryProxyTranscodeProgress final {
-  core::u64 completed_frames{};
-  core::u64 total_frames{};
-  // A serialized proxy worker can have several visible jobs waiting behind
-  // the active encode. Queued jobs retain a zero-width determinate track and
-  // an explicit label instead of pretending that encoding has begun.
-  bool queued{};
-
-  bool operator==(const LibraryProxyTranscodeProgress &) const = default;
-};
-
-enum class LibraryMediaDecodeState : core::u8 {
-  Unknown,
-  HardwareAccelerated,
-  CpuOnly,
-  Unavailable,
-};
-
-struct LibraryProxyRuntimeObservation final {
-  doc::NodeId asset{};
-  std::optional<assets::DerivativeKey> key;
-  LibraryProxyRuntimeState state{LibraryProxyRuntimeState::Source};
-  assets::ProxyPlaybackReason reason{assets::ProxyPlaybackReason::SourcePolicy};
-  LibraryProxyRuntimeIssue issue{LibraryProxyRuntimeIssue::None};
-  std::optional<LibraryProxyTranscodeProgress> transcode_progress;
-  LibraryMediaDecodeState media_decode{LibraryMediaDecodeState::Unknown};
-
-  bool operator==(const LibraryProxyRuntimeObservation &) const = default;
-};
-
-// Stable, concise text used by the Library row and by non-visual tests. The
-// authored SRC/AUTO/REQ control remains separate from this runtime status.
-[[nodiscard]] std::string
-library_proxy_runtime_status(const LibraryProxyRuntimeObservation &observation);
-
-enum class LibraryThumbnailRequestPriority : core::u8 {
-  Visible,
-  Prefetch,
-};
-
-struct LibraryThumbnailRequestIntent final {
-  assets::DerivativeKey key;
-  LibraryThumbnailRequestPriority priority{
-      LibraryThumbnailRequestPriority::Visible};
-
-  bool operator==(const LibraryThumbnailRequestIntent &) const = default;
-};
-
-// The exact desired set for this frame. Applying it to the service's retain()
-// API makes cancellation explicit when filtered, collapsed, or scrolled rows
-// leave both the visible region and bounded prefetch window.
-struct LibraryThumbnailRetainIntent final {
-  std::vector<assets::DerivativeKey> keys;
-
-  bool operator==(const LibraryThumbnailRetainIntent &) const = default;
-};
-
-struct LibraryThumbnailWindow final {
-  core::u32 prefetch_asset_rows{4U};
-  core::u32 maximum_request_intents{16U};
-
-  bool operator==(const LibraryThumbnailWindow &) const = default;
-};
-
-inline constexpr core::u32 maximum_library_thumbnail_prefetch_rows = 32U;
-inline constexpr core::u32 maximum_library_thumbnail_request_intents = 64U;
-
-struct LibraryAssetDrop final {
-  doc::NodeId asset{};
-  float screen_x{};
-  float screen_y{};
-
-  bool operator==(const LibraryAssetDrop &) const = default;
-};
-
-// One explicit authored proxy preference change. Availability and generation
-// remain machine-local observations; this carries only the profile request and
-// Source/Prefer/Require policy stored on the existing MediaAsset node.
-struct LibraryProxyPolicyIntent final {
-  doc::NodeId asset{};
-  std::optional<assets::DerivativeProfileId> requested_profile;
-  assets::ProxyPlaybackPolicy policy{assets::ProxyPlaybackPolicy::Source};
-
-  bool operator==(const LibraryProxyPolicyIntent &) const = default;
-};
-
-// One library interaction. The three intents are deliberately separate:
-// importing adds a persistent project asset, while instantiating places an
-// already-imported asset in the scene. Generator/light actions continue to
-// author scene elements directly.
-struct LibraryFrame final {
-  std::optional<LibraryAddAction> add;
-  std::optional<LibraryImportAction> import_asset;
-  std::optional<doc::NodeId> instantiate_asset;
-  // Removes only the persistent Library record. Existing scene placements
-  // keep their authored source fallback and therefore continue to render.
-  std::optional<doc::NodeId> remove_asset;
-  // A row dragged beyond the click threshold keeps its capture outside the
-  // Library. The shell resolves this screen-space release against Stage so a
-  // persistent asset can be placed where it was dropped.
-  std::optional<doc::NodeId> dragging_asset;
-  std::optional<LibraryAssetDrop> asset_drop;
-  std::optional<LibraryProxyPolicyIntent> proxy_policy;
-  // Look at the sources on disk again, reading their bytes. Nothing does this
-  // on a timer, so a file that arrived after the project opened is noticed
-  // when the operator says to look.
-  bool rescan_assets{};
-  std::vector<LibraryThumbnailRequestIntent> thumbnail_requests;
-  // Disengaged on the source-compatible draw overload. Engaged, including an
-  // empty key vector, on every thumbnail-aware draw.
-  std::optional<LibraryThumbnailRetainIntent> thumbnail_retain;
-
-  bool operator==(const LibraryFrame &) const = default;
-};
-
-class LibraryPanel final {
-public:
-  explicit LibraryPanel(gui::UiId id) noexcept : id_(id) {}
-
-  [[nodiscard]] LibraryFrame draw(gui::UiContext &ctx, const gui::Rect &bounds,
-                                  const assets::AssetRegistry &assets);
-
-  [[nodiscard]] LibraryFrame
-  draw(gui::UiContext &ctx, const gui::Rect &bounds,
-       const assets::AssetRegistry &assets,
-       std::span<const LibraryThumbnailObservation> thumbnails,
-       LibraryThumbnailWindow window = {});
-
-  [[nodiscard]] LibraryFrame
-  draw(gui::UiContext &ctx, const gui::Rect &bounds,
-       const assets::AssetRegistry &assets,
-       std::span<const LibraryThumbnailObservation> thumbnails,
-       LibraryThumbnailWindow window,
-       std::span<const LibraryProxyRuntimeObservation> proxy_runtime);
-
-  // Transitional wrapper for the current shell. It draws an empty registry
-  // and maps IMPORT MEDIA/MODEL back to the old Media/Model actions. New
-  // integrations should use the frame overload so import and instantiate
-  // can never be mistaken for the same operation.
-  [[nodiscard]] std::optional<LibraryAddAction> draw(gui::UiContext &ctx,
-                                                     const gui::Rect &bounds);
-
-  [[nodiscard]] std::string_view search() const noexcept { return search_; }
-
-private:
-  [[nodiscard]] LibraryFrame
-  draw_impl(gui::UiContext &ctx, const gui::Rect &bounds,
-            const assets::AssetRegistry &assets,
-            std::span<const LibraryThumbnailObservation> thumbnails,
-            const LibraryThumbnailWindow *thumbnail_window,
-            std::span<const LibraryProxyRuntimeObservation> proxy_runtime);
-
-  gui::UiId id_{};
-  std::string search_;
-  float scroll_{};
-  std::array<bool, 4U> category_open_{{true, true, true, true}};
-  doc::NodeId drag_asset_{};
-  float drag_start_x_{};
-  float drag_start_y_{};
-  bool drag_moved_{};
-  std::string drag_label_;
+  // The highlight colour menu, opened from the row menu at the same point.
+  bool color_menu_{};
 };
 
 // A wire authored with a new node, in the same transaction. One end is the
@@ -381,6 +161,9 @@ struct CompositorAddLink final {
   bool from_new{};
   core::u8 port{};
   compositor::EdgeEndpoint existing;
+  // Where the wire sorts among the others into the same input: effects on a
+  // layer run in this order.
+  core::i64 order{};
 
   bool operator==(const CompositorAddLink &) const = default;
 };
@@ -395,8 +178,35 @@ struct CompositorAddIntent final {
   // removes - the one already on an occupied single input it is dropped on.
   std::vector<CompositorAddLink> links;
   std::vector<doc::NodeId> remove_edges;
+  // Existing wires renumbered in the same step, to make room for a new one
+  // between two of them.
+  std::vector<std::pair<doc::NodeId, core::i64>> reorder;
 
   bool operator==(const CompositorAddIntent &) const = default;
+};
+
+// Nodes collapsed to their title and connected ports, or opened again.
+struct CompositorCollapseIntent final {
+  std::vector<doc::NodeId> nodes;
+  bool collapsed{};
+
+  bool operator==(const CompositorCollapseIntent &) const = default;
+};
+
+// Nodes passed through as their identity, or put back to work. Unlike
+// collapsing, this changes the picture.
+struct CompositorBypassIntent final {
+  std::vector<doc::NodeId> nodes;
+  bool bypassed{};
+
+  bool operator==(const CompositorBypassIntent &) const = default;
+};
+
+// Wires given new places in the order their input takes them: (wire, order).
+struct CompositorReorderIntent final {
+  std::vector<std::pair<doc::NodeId, core::i64>> orders;
+
+  bool operator==(const CompositorReorderIntent &) const = default;
 };
 
 struct CompositorWire final {
@@ -518,6 +328,45 @@ enum class CompositorProperty : core::u8 {
   LedCarReflectionHeight,
   LedCarReflectionScale,
   LedCarHorizontalBlend,
+  ChromaKeyRed,
+  ChromaKeyGreen,
+  ChromaKeyBlue,
+  ChromaKeyTolerance,
+  ChromaKeySoftness,
+  // Signed whole pixels: positive grows the matte, negative shrinks it.
+  // Sent as a float and rounded.
+  ChromaKeyEdgePx,
+  ChromaKeySpill,
+  ChromaKeyMix,
+  LumaKeyLow,
+  LumaKeyHigh,
+  LumaKeyLowSoftness,
+  LumaKeyHighSoftness,
+  // Switches, sent as 0 or 1.
+  LumaKeyInvert,
+  LumaKeyMix,
+  // 0 alpha, 1 luma.
+  MatteMode,
+  MatteInvert,
+  MatteClampInput,
+  // compositor::MergeBlendMode's value, sent as a whole number.
+  MergeBlendMode,
+  MergeOpacity,
+  MergeValue,
+  // compositor::BackgroundMode's value: 0 solid, 1 linear, 2 radial.
+  BackgroundMode,
+  BackgroundColorAR,
+  BackgroundColorAG,
+  BackgroundColorAB,
+  BackgroundColorAA,
+  BackgroundColorBR,
+  BackgroundColorBG,
+  BackgroundColorBB,
+  BackgroundColorBA,
+  BackgroundAngleTurns,
+  BackgroundCenterX,
+  BackgroundCenterY,
+  BackgroundSize,
 };
 
 using CompositorPropertyValue =
@@ -535,6 +384,7 @@ enum class CompositorSelectionKind : core::u8 {
   None,
   Node,
   Edge,
+  Comment,
 };
 
 struct CompositorSelection final {
@@ -545,12 +395,52 @@ struct CompositorSelection final {
 };
 
 // Edges are first-class document nodes, so disconnecting is the same compact
-// remove intent as deleting a node. When the target is a node, the authoring
-// boundary should erase incident edge nodes in the same transaction.
+// remove intent as deleting a node. When a target is a node, the authoring
+// boundary erases its incident edge nodes in the same transaction. Every
+// target goes in one undo step.
 struct CompositorDeleteIntent final {
-  CompositorSelection target;
+  std::vector<CompositorSelection> targets;
 
   bool operator==(const CompositorDeleteIntent &) const = default;
+};
+
+// Copy keeps a snapshot of the chosen nodes, their wires and comment boxes
+// with the Director; Paste places that snapshot's top-left at (x, y) in graph
+// units; Duplicate copies the chosen nodes straight back, moved by (x, y),
+// leaving the clipboard alone. Output, and a Scene Layer whose source already
+// has one, are not placed.
+enum class CompositorClipboardAction : core::u8 { Copy, Paste, Duplicate };
+
+struct CompositorClipboardIntent final {
+  CompositorClipboardAction action{CompositorClipboardAction::Copy};
+  std::vector<doc::NodeId> nodes;
+  float x{};
+  float y{};
+
+  bool operator==(const CompositorClipboardIntent &) const = default;
+};
+
+// A node's or comment box's new title. Empty gives a node back its kind's
+// name.
+struct CompositorRenameIntent final {
+  doc::NodeId node{};
+  std::string label;
+
+  bool operator==(const CompositorRenameIntent &) const = default;
+};
+
+// A comment box created (no node yet) or changed: where it is, its title and
+// its colour. Deleting one is an ordinary delete of a Comment selection.
+struct CompositorCommentIntent final {
+  doc::NodeId node{};
+  float x{};
+  float y{};
+  float width{};
+  float height{};
+  std::string title;
+  core::u8 color{};
+
+  bool operator==(const CompositorCommentIntent &) const = default;
 };
 
 struct CompositorFrame final {
@@ -558,7 +448,9 @@ struct CompositorFrame final {
   // the shell can make Compositor the active Delete-key domain.
   std::optional<CompositorSelection> selection;
   std::optional<CompositorAddIntent> add_node;
-  std::optional<CompositorMoveIntent> move_node;
+  // Every node a gesture moved: one for a drag, all of a dragged selection,
+  // the contents of a dragged comment box, or what a layout tool placed.
+  std::vector<CompositorMoveIntent> move_nodes;
   std::optional<CompositorConnectIntent> connect_ports;
   std::optional<CompositorRewireIntent> rewire;
   std::optional<CompositorWaypointIntent> waypoints;
@@ -566,6 +458,12 @@ struct CompositorFrame final {
   std::optional<NumericNudge> numeric_nudge;
   // Emitted by DELETE NODE / DISCONNECT in the graph toolbar.
   std::optional<CompositorDeleteIntent> remove;
+  std::optional<CompositorClipboardIntent> clipboard;
+  std::optional<CompositorRenameIntent> rename;
+  std::optional<CompositorCommentIntent> comment;
+  std::optional<CompositorCollapseIntent> collapse;
+  std::optional<CompositorBypassIntent> bypass;
+  std::optional<CompositorReorderIntent> reorder;
   // Delete was handled by this focused panel, so the shell must not also
   // delete the current scene selection.
   bool consume_delete{};
@@ -622,6 +520,27 @@ struct CompositorPortDrop final {
   bool operator==(const CompositorPortDrop &) const = default;
 };
 
+// An effect wire something dragged from Effects would be spliced into if
+// let go now: the new effect joins the same input, right after this wire's
+// effect in the order that input applies them.
+struct CompositorWireDrop final {
+  doc::NodeId edge{};
+  compositor::EdgeEndpoint input;
+  // Where the drop lands on screen, on the wire.
+  float x{};
+  float y{};
+  // The order for the new wire, and the renumbering of the input's other
+  // wires that makes room for it.
+  core::i64 order{};
+  std::vector<std::pair<doc::NodeId, core::i64>> reorder;
+  // The kind of effect it goes after, to name in the preview.
+  std::string_view after;
+  // Colour effects and filters each splice only into wires of their own.
+  compositor::PortValueType type{compositor::PortValueType::Effect};
+
+  bool operator==(const CompositorWireDrop &) const = default;
+};
+
 // A headless immediate-mode editor for the persistent compositor graph. The
 // panel never mutates the evaluated projection: it reports compact intents for
 // the shell/authoring layer to turn into ordinary document commands.
@@ -641,9 +560,20 @@ public:
             std::span<const ElementInfo> elements,
             doc::NodeId primary = {}) const;
 
+  // The primary selection: the one item the Parameters panel and a rename
+  // act on.
   [[nodiscard]] CompositorSelection selection() const noexcept {
     return selection_;
   }
+  // Every selected node, ascending, the primary among them. Empty when the
+  // primary selection is a wire or a comment box.
+  [[nodiscard]] std::span<const doc::NodeId> selected_nodes() const noexcept {
+    return selected_nodes_;
+  }
+  // What Delete removes: every selected node but Output, or the selected
+  // wire or comment box. Nothing when there is nothing it may remove.
+  [[nodiscard]] std::optional<CompositorDeleteIntent>
+  selection_delete(const compositor::CompositorGraph &graph) const;
 
   // Converts a screen-space drop into the graph-space top-left needed by a
   // newly created node, centring the node under the pointer. Effects and the
@@ -679,6 +609,27 @@ public:
   port_drop_target(const compositor::CompositorGraph &graph, float x, float y,
                    compositor::PortValueType type) const noexcept;
 
+  // The wire of `type` - effects or filters - within reach of a
+  // screen point, for an Effects drop.
+  [[nodiscard]] std::optional<CompositorWireDrop>
+  effect_wire_at(const compositor::CompositorGraph &graph, float x, float y,
+                 compositor::PortValueType type) const;
+  // Draws an effect wire drop's preview: the wire lit, and what will happen.
+  void draw_wire_drop(gui::UiContext &ctx, const CompositorWireDrop &drop,
+                      std::string_view what) const;
+
+  // Brings the Scene Layer node for a scene element - or for the Track it
+  // plays on - into the middle of the view, and outlines it for a moment.
+  // Nothing happens when the graph has none. The view's zoom is kept.
+  void reveal_element(doc::NodeId element, double now) noexcept {
+    reveal_element_ = element;
+    reveal_requested_at_ = now;
+  }
+  // The Scene Layer node most recently outlined this way, while it shows.
+  [[nodiscard]] doc::NodeId revealed_node(double now) const noexcept {
+    return now < reveal_until_ ? reveal_node_ : doc::NodeId{};
+  }
+
   // Draws the drop's preview over the graph: the target port ringed, a wire
   // from the pointer to it, and a label naming what will happen.
   void draw_port_drop(gui::UiContext &ctx, const CompositorPortDrop &drop,
@@ -704,6 +655,11 @@ public:
     parameter_width_ = std::isfinite(width) ? std::max(width, 0.0F) : 0.0F;
   }
 
+  // Whether the minimap is shown in the canvas's corner; the toolbar's MAP
+  // button toggles it.
+  [[nodiscard]] bool minimap_shown() const noexcept { return minimap_; }
+  void show_minimap(bool shown) noexcept { minimap_ = shown; }
+
   [[nodiscard]] float graph_zoom() const noexcept { return zoom_; }
   [[nodiscard]] gui::UiPoint graph_pan() const noexcept {
     return gui::UiPoint{pan_x_, pan_y_};
@@ -724,9 +680,28 @@ public:
     zoom_ = 1.0F;
     panning_ = false;
     last_canvas_ = {};
-    pending_move_.reset();
+    pending_moves_.clear();
+    selected_nodes_.clear();
+    drag_group_.clear();
+    marquee_.reset();
+    comment_drag_.reset();
+    pending_comment_.reset();
+    rename_.reset();
+    context_menu_.reset();
+    paste_baseline_.reset();
+    notice_.clear();
     pending_points_.reset();
     pending_wires_.reset();
+    pending_collapse_.clear();
+    pending_bypass_.clear();
+    pending_order_.clear();
+    order_discs_.clear();
+    order_drag_.reset();
+    drawn_wires_.clear();
+    reveal_element_ = {};
+    reveal_node_ = {};
+    reveal_until_ = 0.0;
+    inline_fields_ = NumberField{};
     point_drag_.reset();
     relink_.reset();
     node_menu_.reset();
@@ -799,6 +774,99 @@ private:
     core::u32 frames{};
   };
 
+  // A node moving with the one being dragged: where it started.
+  struct GroupMember final {
+    doc::NodeId node{};
+    float start_x{};
+    float start_y{};
+  };
+  // A rubber-band selection: where it started on screen, and whether it adds
+  // to the selection (Shift), takes from it (Ctrl), or replaces it.
+  struct Marquee final {
+    float start_x{};
+    float start_y{};
+    enum class Mode : core::u8 { Replace, Add, Subtract } mode{Mode::Replace};
+  };
+  // A comment box being moved by its title bar, carrying the nodes that sat
+  // wholly inside it when it was picked up, or resized by its corner.
+  struct CommentDrag final {
+    doc::NodeId comment{};
+    bool resizing{};
+    float press_x{};
+    float press_y{};
+    compositor::GraphComment start;
+    std::vector<GroupMember> carried;
+    // How far the pointer has taken it, in graph units.
+    float dx{};
+    float dy{};
+  };
+  // A comment box's authored rectangle not yet back from the Director.
+  struct PendingComment final {
+    compositor::GraphComment held;
+    compositor::GraphComment from;
+    core::u32 frames{};
+  };
+  // A title being typed over its node or comment box.
+  struct Rename final {
+    doc::NodeId node{};
+    std::string text;
+    bool focus_pending{true};
+  };
+  // The right-click menu of a node selection, a wire, or a comment box.
+  struct ContextMenu final {
+    float screen_x{};
+    float screen_y{};
+    CompositorSelectionKind kind{CompositorSelectionKind::Node};
+    doc::NodeId target{};
+    // The graph point a wire was right-clicked at, for a reroute point.
+    compositor::WirePoint at;
+    std::size_t segment{};
+  };
+  // A paste or duplicate on its way: the nodes there were before it, so the
+  // ones it adds can be selected when they arrive.
+  struct PasteBaseline final {
+    std::vector<doc::NodeId> nodes;
+    core::u32 frames{};
+  };
+
+  [[nodiscard]] std::optional<gui::UiPoint>
+  pending_position(doc::NodeId node) const noexcept;
+  void select_only(doc::NodeId node);
+
+  // A wire as last drawn, in screen space, for drops from other panels.
+  struct DrawnWire final {
+    doc::NodeId edge{};
+    compositor::PortValueType type{compositor::PortValueType::Image};
+    compositor::EdgeEndpoint input;
+    std::vector<gui::UiPoint> points;
+  };
+
+  // Whether a node is drawn collapsed, honouring a toggle on its way.
+  [[nodiscard]] bool collapsed(const compositor::GraphNode &node) const noexcept;
+  // Whether a node is drawn bypassed, likewise.
+  [[nodiscard]] bool bypassed(const compositor::GraphNode &node) const noexcept;
+  // A wire's place in its input's order, honouring a move on its way.
+  [[nodiscard]] core::i64 edge_order(const compositor::GraphEdge &edge) const noexcept;
+  // The wires into one input, in the order it takes them.
+  [[nodiscard]] std::vector<const compositor::GraphEdge *>
+  input_chain(const compositor::CompositorGraph &graph,
+              compositor::EdgeEndpoint input) const;
+
+  // A wire's order number as last drawn. Dragged onto another number on the
+  // same input, it moves its wire to that place.
+  struct OrderDisc final {
+    doc::NodeId edge{};
+    compositor::EdgeEndpoint input;
+    float x{};
+    float y{};
+    float radius{};
+  };
+  // The row a port sits on, or nothing when a collapsed node hides it.
+  [[nodiscard]] std::optional<float>
+  port_row(const compositor::CompositorGraph &graph,
+           const compositor::GraphNode &node, core::u8 port,
+           bool input) const;
+
   // A node's bounds on screen as last laid out, honouring a held move.
   [[nodiscard]] gui::Rect node_screen_bounds(
       const compositor::GraphNode &node) const noexcept;
@@ -807,9 +875,40 @@ private:
 
   gui::UiId id_{};
   CompositorSelection selection_{};
-  std::optional<PendingMove> pending_move_;
+  std::vector<PendingMove> pending_moves_;
+  // Ascending; holds the primary when the primary is a node.
+  std::vector<doc::NodeId> selected_nodes_;
+  std::vector<GroupMember> drag_group_;
+  bool drag_moved_{};
+  bool press_was_selected_{};
+  std::optional<Marquee> marquee_;
+  std::optional<CommentDrag> comment_drag_;
+  std::optional<PendingComment> pending_comment_;
+  std::optional<Rename> rename_;
+  std::optional<ContextMenu> context_menu_;
+  std::optional<PasteBaseline> paste_baseline_;
+  // A short note shown over the graph, and until when.
+  std::string notice_;
+  double notice_until_{};
+  bool minimap_{};
   std::optional<PendingPoints> pending_points_;
   std::optional<PendingWires> pending_wires_;
+  // Collapse toggles not yet back from the Director: (node, collapsed).
+  std::vector<std::pair<doc::NodeId, bool>> pending_collapse_;
+  // Bypass toggles not yet back from the Director: (node, bypassed).
+  std::vector<std::pair<doc::NodeId, bool>> pending_bypass_;
+  // Wire orders sent to the Director and not yet back: (wire, order).
+  std::vector<std::pair<doc::NodeId, core::i64>> pending_order_;
+  std::vector<OrderDisc> order_discs_;
+  // The wire whose number is being dragged.
+  std::optional<doc::NodeId> order_drag_;
+  std::vector<DrawnWire> drawn_wires_;
+  doc::NodeId reveal_element_{};
+  double reveal_requested_at_{};
+  doc::NodeId reveal_node_{};
+  double reveal_until_{};
+  // The value fields drawn on nodes themselves.
+  NumberField inline_fields_;
   std::optional<PointDrag> point_drag_;
   std::optional<Relink> relink_;
   std::optional<NodeMenu> node_menu_;
@@ -818,8 +917,7 @@ private:
   std::vector<NodeSize> node_sizes_;
   CompositorNodeMetrics metrics_{};
   // Indexed by NodeKind.
-  std::array<gui::UiPoint, static_cast<std::size_t>(compositor::NodeKind::Output) + 1U>
-      new_node_sizes_{};
+  std::array<gui::UiPoint, compositor::node_kind_count> new_node_sizes_{};
   doc::NodeId dragging_node_{};
   float drag_offset_x_{};
   float drag_offset_y_{};

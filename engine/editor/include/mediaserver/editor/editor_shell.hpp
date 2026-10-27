@@ -3,6 +3,7 @@
 #include <mediaserver/editor/source_replacement.hpp>
 
 #include <mediaserver/assets/asset_registry.hpp>
+#include <mediaserver/assets/library_edit.hpp>
 #include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -160,6 +161,17 @@ struct AssetImportIntent final {
 // Removes one persistent Library asset record. Scene placements are separate
 // document nodes with a source fallback, so they intentionally are not
 // cascaded when an import is removed from the Library.
+// A Library asset's file changed on disk and the operator accepted it: the
+// re-probed asset, carrying the existing id. The Director records the new
+// revision in place - same id, name, folder and proxy policy - and every
+// revision from one gesture undoes together.
+struct AssetRevisionIntent final {
+  assets::Asset asset;
+  core::u64 gesture{};
+
+  bool operator==(const AssetRevisionIntent &) const = default;
+};
+
 struct AssetDeleteIntent final {
   doc::NodeId asset{};
   core::u64 gesture{};
@@ -174,6 +186,16 @@ struct AssetProxyEditIntent final {
   core::u64 gesture{};
 
   bool operator==(const AssetProxyEditIntent &) const = default;
+};
+
+// Library organisation: a folder made, renamed, removed, or assets and
+// folders filed under another. The Director plans it against the document
+// it holds, so a stale request changes nothing.
+struct AssetLibraryEditIntent final {
+  assets::LibraryEdit edit;
+  core::u64 gesture{};
+
+  bool operator==(const AssetLibraryEditIntent &) const = default;
 };
 
 // Adds one first-class effect node targeting a scene element. The Director
@@ -300,6 +322,8 @@ enum class GroupEditAction : core::u8 {
   // of it on the stage. `anchor` names a sibling in the destination the moved
   // nodes land beside; without one they land at the front.
   MoveInto,
+  // A new, empty group of `kind` under `group` (zero: the top level).
+  Create,
 };
 
 // One semantic Scene hierarchy operation. Group carries the complete canonical
@@ -313,6 +337,7 @@ struct GroupEditIntent final {
   doc::NodeId group{};
   doc::NodeId anchor{};
   bool before{};
+  scene::GroupKind kind{scene::GroupKind::Folder};
   core::u64 gesture{};
 
   bool operator==(const GroupEditIntent &) const = default;
@@ -490,6 +515,9 @@ struct EditorProjectState final {
   std::string_view publication_default_storage;
   // Director-owned, most recently opened or saved first. UTF-8 absolute paths.
   std::span<const std::string> recent_projects;
+  // Library assets whose files changed since they were recorded, as of the
+  // last RESCAN.
+  std::span<const doc::NodeId> changed_assets;
 };
 
 struct ProjectFileRequest final {
@@ -520,6 +548,17 @@ struct ElementRenameIntent final {
   core::u64 gesture{};
 
   bool operator==(const ElementRenameIntent &) const = default;
+};
+
+// The Scene panel's highlight colour for every node in `nodes`, as one undo
+// step: a marker-palette index, or none to clear it. Editor-only organisation
+// that never changes the picture.
+struct ElementHighlightIntent final {
+  std::vector<doc::NodeId> nodes;
+  std::optional<core::u8> color;
+  core::u64 gesture{};
+
+  bool operator==(const ElementHighlightIntent &) const = default;
 };
 
 // Persisted editor-selection lock shared by scene elements and calibrated LED
@@ -735,6 +774,8 @@ struct EditorFrame final {
   std::vector<ElementFlagIntent> element_flags;
   // In-place renames from the outliner, the Timeline, or the scene list.
   std::vector<ElementRenameIntent> renames;
+  // Scene panel highlight colours.
+  std::vector<ElementHighlightIntent> highlights;
   // The operator asked the Library to look at the sources again.
   bool rescan_assets{};
   std::vector<TimelineEditIntent> timeline_edits;
@@ -762,8 +803,10 @@ struct EditorFrame final {
   std::vector<AddIntent> adds;
   std::vector<SourceReplacementIntent> source_replacements;
   std::vector<AssetImportIntent> asset_imports;
+  std::vector<AssetRevisionIntent> asset_revisions;
   std::vector<AssetDeleteIntent> asset_deletes;
   std::vector<AssetProxyEditIntent> asset_proxy_edits;
+  std::vector<AssetLibraryEditIntent> asset_library_edits;
   // Machine-local derivative work requested by visible Library rows. These
   // intents never author document nodes or substitute a placement's asset id.
   std::vector<LibraryThumbnailRequestIntent> thumbnail_requests;
@@ -804,12 +847,18 @@ struct EditorFrame final {
   std::vector<FeedSurfaceDeleteRequest> feed_surface_deletes;
   // All nodes from one drop share compositor_gesture for a single undo.
   std::vector<CompositorAddIntent> compositor_adds;
-  std::optional<CompositorMoveIntent> compositor_move;
+  std::vector<CompositorMoveIntent> compositor_moves;
   std::optional<CompositorConnectIntent> compositor_connect;
   std::optional<CompositorRewireIntent> compositor_rewire;
   std::optional<CompositorWaypointIntent> compositor_waypoints;
   std::optional<CompositorPropertyEditIntent> compositor_property_edit;
   std::optional<CompositorDeleteIntent> compositor_delete;
+  std::optional<CompositorClipboardIntent> compositor_clipboard;
+  std::optional<CompositorRenameIntent> compositor_rename;
+  std::optional<CompositorCommentIntent> compositor_comment;
+  std::optional<CompositorCollapseIntent> compositor_collapse;
+  std::optional<CompositorBypassIntent> compositor_bypass;
+  std::optional<CompositorReorderIntent> compositor_reorder;
   core::u64 compositor_gesture{};
   std::optional<ProjectFileRequest> save_project;
   std::optional<ProjectFileRequest> load_project;

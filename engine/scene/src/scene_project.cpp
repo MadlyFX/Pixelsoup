@@ -1258,6 +1258,132 @@ core::Result<GroupEditPlan, GroupEditError> plan_move_into_group(
     }
 }
 
+core::Result<GroupEditPlan, GroupEditError> plan_create_group(
+    const doc::Root& root,
+    SceneId scene,
+    std::optional<doc::NodeId> parent,
+    doc::NodeId first_id,
+    std::string_view name,
+    GroupKind kind) {
+    using Result = core::Result<GroupEditPlan, GroupEditError>;
+    constexpr core::u64 max_reference_id =
+        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
+    if (name.empty()) {
+        return Result::failure(GroupEditError::InvalidName);
+    }
+    if (first_id.value() == 0U || first_id.value() > max_reference_id) {
+        return Result::failure(GroupEditError::InvalidFirstId);
+    }
+    try {
+        SceneModel model;
+        model.reset(root);
+        const std::vector<SceneInfo> authored_scenes = model.scenes();
+        const SceneId default_scene = authored_scenes.empty()
+            ? legacy_scene_id
+            : authored_scenes.front().id;
+        const auto authored_scene_entry = std::lower_bound(
+            authored_scenes.begin(), authored_scenes.end(), scene,
+            [](const SceneInfo& info, SceneId id) noexcept {
+                return info.id < id;
+            });
+        const bool valid_scene = authored_scenes.empty()
+            ? scene == legacy_scene_id
+            : authored_scene_entry != authored_scenes.end()
+                && authored_scene_entry->id == scene;
+        if (!valid_scene) {
+            return Result::failure(GroupEditError::InvalidScene);
+        }
+
+        const std::map<doc::NodeId, doc::Node> nodes = document_nodes(root);
+        const auto in_scene = [&](const doc::Node& node) {
+            const auto owner = authored_scene(node, default_scene);
+            return owner.has_value() && *owner == scene;
+        };
+        if (parent.has_value()) {
+            const auto found = nodes.find(*parent);
+            if (found == nodes.end()) {
+                return Result::failure(GroupEditError::GroupNotFound);
+            }
+            if (found->second.type != schema::group_type
+                || is_linked_occurrence(found->second)) {
+                return Result::failure(GroupEditError::NotAGroup);
+            }
+            if (!in_scene(found->second)) {
+                return Result::failure(GroupEditError::CrossSceneSelection);
+            }
+            bool locked{};
+            if (!read_boolean_property(found->second, schema::locked, false,
+                                       locked)) {
+                return Result::failure(GroupEditError::InvalidHierarchy);
+            }
+            if (locked) {
+                return Result::failure(GroupEditError::Locked);
+            }
+        }
+
+        // In front of every sibling: one past the highest order among them.
+        std::optional<core::i64> front;
+        for (const auto& [id, node] : nodes) {
+            if (!is_groupable_type(node.type) || !in_scene(node)) {
+                continue;
+            }
+            std::optional<doc::NodeId> sibling_parent;
+            std::int64_t order{};
+            if (!read_optional_reference(node, schema::parent_group,
+                                         sibling_parent)
+                || sibling_parent != parent
+                || !read_integer_property(node, schema::group_order, 0,
+                                          order)) {
+                continue;
+            }
+            front = std::max(front.value_or(order), order);
+        }
+        if (front == std::numeric_limits<core::i64>::max()) {
+            return Result::failure(GroupEditError::OrderOverflow);
+        }
+
+        core::u64 candidate = first_id.value();
+        while (root.contains(doc::NodeId{candidate})) {
+            if (candidate == max_reference_id) {
+                return Result::failure(GroupEditError::IdExhausted);
+            }
+            ++candidate;
+        }
+        const doc::NodeId group_id{candidate};
+
+        doc::Node group{};
+        group.id = group_id;
+        group.type = std::string{schema::group_type};
+        write_reference(group.properties, schema::scene_id, scene);
+        if (parent.has_value()) {
+            write_reference(group.properties, schema::parent_group, *parent);
+        }
+        group.properties.emplace(std::string{schema::group_name},
+                                 std::string{name});
+        group.properties.emplace(
+            std::string{schema::group_order},
+            front.has_value() ? *front + 1 : core::i64{0});
+        group.properties.emplace(std::string{schema::locked}, false);
+        group.properties.emplace(std::string{schema::visible}, true);
+        if (kind == GroupKind::VehicleProcess) {
+            group.properties.emplace(
+                std::string{schema::group_kind},
+                std::string{schema::group_kind_vehicle_process});
+        }
+        write_group_transform(group, GroupTransform{});
+
+        GroupEditPlan plan{};
+        plan.scene = scene;
+        plan.group = group_id;
+        plan.primary_after = group_id;
+        plan.puts.push_back(std::move(group));
+        plan.after = apply_group_plan(root, plan.puts, plan.erases);
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(GroupEditError::AllocationFailed);
+    }
+}
+
 core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
     const doc::Root& root, SceneId scene, doc::NodeId source_id,
     doc::NodeId destination_id, LayerOrderPlacement placement) {

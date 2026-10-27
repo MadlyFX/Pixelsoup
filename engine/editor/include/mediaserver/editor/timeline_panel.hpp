@@ -787,6 +787,19 @@ public:
                                      scene::PropertyChannel property) const
       noexcept;
 
+  // Brings a layer's or track's row into view - opening the track and the
+  // groups it sits in - and outlines it for a moment. The selection is left
+  // as it is: this is how another panel points at a row, not a choice.
+  void reveal(doc::NodeId node, double now) noexcept {
+    reveal_node_ = node;
+    reveal_scroll_ = node != doc::NodeId{};
+    reveal_until_ = now + 1.5;
+  }
+  // The row most recently pointed at this way, while it is outlined.
+  [[nodiscard]] doc::NodeId revealed_row(double now) const noexcept {
+    return now < reveal_until_ ? reveal_node_ : doc::NodeId{};
+  }
+
   // A successful project replacement invalidates document-addressed UI
   // state and requests a fresh fit on the next draw. View preferences such
   // as snapping and graph/dope-sheet mode intentionally survive the load.
@@ -1093,6 +1106,11 @@ private:
   ClipGesture clip_;
   double previous_draw_time_{};
   bool auto_key_{true};
+  // A row another panel pointed at: still to be scrolled to, and outlined
+  // until reveal_until_.
+  doc::NodeId reveal_node_{};
+  bool reveal_scroll_{};
+  double reveal_until_{};
 
   // The marker strip's state.
   struct MarkerState final {

@@ -125,6 +125,23 @@ void TimelinePanel::draw_rows(Pass &p) {
   if (graph_mode_) {
     draw_graph(p);
   }
+  // A row another panel pointed at is outlined, fading.
+  if (ctx.time_seconds() < reveal_until_) {
+    for (const RowContext &rc : visible) {
+      if ((rc.row.kind == Row::Kind::Layer ||
+           rc.row.kind == Row::Kind::LaneHeader) &&
+          rc.row.node == reveal_node_) {
+        const float left = static_cast<float>(reveal_until_ - ctx.time_seconds());
+        gui::UiColor color = ctx.theme().accent;
+        color.a = std::clamp(left / 1.5F, 0.0F, 1.0F);
+        draw_border(ctx,
+                    gui::Rect{rows_bounds.x, rc.y,
+                              graph.x + graph.width - rows_bounds.x,
+                              rc.row.height},
+                    color, 2.0F);
+      }
+    }
+  }
 
   ctx.pop_clip();
   rename_.end_frame(ctx);

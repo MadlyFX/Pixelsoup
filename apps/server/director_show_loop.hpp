@@ -255,6 +255,7 @@ struct DirectorShowLoop final {
     std::vector<editor::TimelineLayerOrderIntent> &pending_layer_orders;
     std::vector<editor::ElementFlagIntent> &pending_element_flags;
     std::vector<editor::ElementRenameIntent> &pending_renames;
+    std::vector<editor::ElementHighlightIntent> &pending_highlights;
     bool &pending_asset_rescan;
     std::vector<editor::TimelineEditIntent> &pending_timeline_edits;
     std::optional<editor::GroupEditIntent> &pending_group_edit;
@@ -271,8 +272,10 @@ struct DirectorShowLoop final {
     std::vector<editor::LockEdit> &pending_locks;
     std::vector<editor::AddIntent> &pending_adds;
     std::vector<editor::AssetImportIntent> &pending_asset_imports;
+    std::vector<editor::AssetRevisionIntent> &pending_asset_revisions;
     std::vector<editor::AssetDeleteIntent> &pending_asset_deletes;
     std::vector<editor::AssetProxyEditIntent> &pending_asset_proxy_edits;
+    std::vector<editor::AssetLibraryEditIntent> &pending_asset_library_edits;
     std::vector<editor::SourceReplacementIntent> &pending_source_replacements;
     std::vector<editor::EffectIntent> &pending_effects;
     std::vector<editor::FilmGrainEffectEditIntent> &pending_film_grain_effect_edits;
@@ -297,7 +300,16 @@ struct DirectorShowLoop final {
     std::vector<editor::FeedSurfaceEditRequest> &pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> &pending_feed_surface_deletes;
     std::vector<editor::CompositorAddIntent> &pending_compositor_adds;
-    std::optional<editor::CompositorMoveIntent> &pending_compositor_move;
+    std::vector<editor::CompositorMoveIntent> &pending_compositor_moves;
+    std::optional<editor::CompositorClipboardIntent> &pending_compositor_clipboard;
+    std::optional<editor::CompositorRenameIntent> &pending_compositor_rename;
+    std::optional<editor::CompositorCommentIntent> &pending_compositor_comment;
+    std::optional<editor::CompositorCollapseIntent> &pending_compositor_collapse;
+    std::optional<editor::CompositorBypassIntent> &pending_compositor_bypass;
+    std::optional<editor::CompositorReorderIntent> &pending_compositor_reorder;
+    // The Compositor's copied nodes, wires and comment boxes: Director-local,
+    // never replicated, and cleared when another project is loaded.
+    std::vector<doc::Node> &compositor_clipboard;
     std::optional<editor::CompositorConnectIntent> &pending_compositor_connect;
     std::optional<editor::CompositorRewireIntent> &pending_compositor_rewire;
     std::optional<editor::CompositorWaypointIntent> &pending_compositor_waypoints;
@@ -409,6 +421,10 @@ struct DirectorShowLoop final {
     core::u64 &asset_manifest_digest;
     bool &assets_loaded;
     ProjectAssetAvailability &director_asset_availability;
+    // Library sources found changed by the last RESCAN, and those of them
+    // the document still records at their old revision.
+    std::vector<ChangedLibrarySource> &changed_library_sources;
+    std::vector<doc::NodeId> &changed_library_assets;
 #if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState &preferences_view;
     std::string &stored_password_key;

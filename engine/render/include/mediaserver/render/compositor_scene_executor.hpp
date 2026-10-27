@@ -19,13 +19,18 @@
 
 namespace mediaserver::render {
 
-// This executor accepts one flat image stack: Output <- SceneLayer,
-// Output <- Composite <- SceneLayer(s), or Output <- LED Car Process <- any
-// subset of its nine optional SceneLayers. Effect and RadialArray inputs remain
-// attached through typed ports. By default, source drawables absent from that Output path form an
-// implicit bottom stack; OutputParameters::replace_scene explicitly suppresses
-// it. Nested image composites need retained intermediate textures and are
-// rejected rather than silently flattened into different blend semantics.
+// This executor accepts an image tree under Output built from SceneLayer,
+// Matte, Background, Composite, LED Car Process and Merge. Effect and
+// RadialArray inputs remain attached through typed ports. By default, source
+// drawables absent from that Output path form an implicit bottom stack;
+// OutputParameters::replace_scene explicitly suppresses it.
+//
+// A Composite's layers land in order on whatever is below them, as does an
+// LED Car Process's plates. A Merge is an image of its own: its BASE and
+// LAYERS are composited into a transparent intermediate target, which then
+// lands as one image. So does a Composite or LED Car Process that a Merge
+// lands as one of its LAYERS. Intermediate targets stack at most
+// max_compositor_group_depth deep.
 enum class CompositorScenePlanError : core::u8 {
     InvalidGraph,
     // The authored effect order crosses execution domains in a sequence the
@@ -43,12 +48,71 @@ enum class CompositorScenePlanError : core::u8 {
 // immutable geometry arena can raise this without changing the graph API.
 inline constexpr core::u32 max_compositor_scene_layers = 16U;
 
+// The graph's own nesting limit, plus one: a Scene Layer whose drawable
+// carries a blend mode of its own is isolated once more before a Merge lands
+// it, which the graph cannot know about until the scene is evaluated.
+inline constexpr core::u32 max_compositor_group_depth =
+    compositor::max_merge_nesting + 1U;
+
+// A generated image, composited straight onto the accumulator: no renderer,
+// no depth, no target of its own.
+struct CompositorBackgroundPass final {
+    doc::NodeId graph_node{};
+    compositor::BackgroundParameters parameters{};
+
+    bool operator==(const CompositorBackgroundPass&) const = default;
+};
+
+enum class CompositorStepKind : core::u8 {
+    // Render plan.layers[index] and land it on the open accumulator.
+    Layer,
+    // Generate plan.backgrounds[index] and land it on the open accumulator.
+    Background,
+    // Open a transparent accumulator; the steps that follow land on it.
+    BeginGroup,
+    // Close the open accumulator and land it, as one image, on the one it
+    // was opened over.
+    EndGroup,
+};
+
+// A Merge with nothing wired to LAYERS: the group it closes is blended
+// against this constant before it lands, inside the group's own coverage.
+struct CompositorConstantBlend final {
+    compositor::MergeBlendMode blend{compositor::MergeBlendMode::Multiply};
+    float value{1.0F};
+    float opacity{1.0F};
+
+    bool operator==(const CompositorConstantBlend&) const = default;
+};
+
+struct CompositorStep final {
+    CompositorStepKind kind{CompositorStepKind::Layer};
+    core::u32 index{};
+    // How the image lands on the accumulator below it. BeginGroup ignores
+    // both.
+    compositor::MergeBlendMode blend{compositor::MergeBlendMode::Normal};
+    float opacity{1.0F};
+    // EndGroup only.
+    std::optional<CompositorConstantBlend> constant;
+    // The graph node this step realises, for diagnostics; zero for the
+    // implicit pass-through stack.
+    doc::NodeId graph_node{};
+
+    bool operator==(const CompositorStep&) const = default;
+};
+
+// The image a Matte reads its coverage from: a Scene Layer rendered in
+// isolation through its own filters and mask, or a generated Background.
 struct CompositorMatteBranch final {
     doc::NodeId graph_node{};
     doc::NodeId scene_node{};
+    // As CompositorLayerPass::scene_nodes: a Track's on-air clips.
+    std::vector<doc::NodeId> scene_nodes;
     float blur_radius_px{};
     std::vector<scene::SpatialEffectOperation> spatial_effects;
     std::optional<scene::MaskProgram> mask_program;
+    // Present when the matte is a Background; the scene fields are unused.
+    std::optional<compositor::BackgroundParameters> background;
 
     bool operator==(const CompositorMatteBranch&) const = default;
 };
@@ -99,6 +163,11 @@ struct CompositorScenePlan final {
     // Bottom-to-top order. Default graph plans begin with implicit pass-through
     // layers, then append the explicit Composite input edge order.
     std::vector<CompositorLayerPass> layers;
+    std::vector<CompositorBackgroundPass> backgrounds;
+    // The order images are produced and landed. Empty lands every layer, in
+    // order, with its own blend - the plan the scene alone makes. Layer steps
+    // name layers in ascending order, each exactly once.
+    std::vector<CompositorStep> steps;
     // True only for an authored Output that explicitly opts out of scene
     // pass-through. Execution then starts transparent, preserving the graph's
     // full-image-replacement contract.
@@ -135,6 +204,11 @@ struct CompositorSceneStats final {
     core::u64 mask_pixels{};
     core::u64 matte_passes{};
     core::u64 matte_pixels{};
+    // Intermediate images opened by Merges, and Background images generated.
+    core::u32 merge_groups{};
+    core::u32 background_passes{};
+    // The deepest intermediate stack this frame opened.
+    core::u32 group_depth{};
     // Frames whose background was the authored environment rather than the
     // flat clear. Counted because "the sky is missing" and "the sky is drawn
     // but looks flat" are different faults with the same symptom.
@@ -287,6 +361,7 @@ class CompositorSceneExecutor final {
                              rhi::Texture composite_b,
                              rhi::Texture output,
                              rhi::GraphicsPipeline composite_pipeline,
+                             rhi::GraphicsPipeline merge_pipeline,
                              rhi::Sampler sampler,
                              rhi::TextureFormat working_format) noexcept;
 
@@ -346,6 +421,20 @@ class CompositorSceneExecutor final {
     rhi::Texture scene_depth_;
     std::optional<rhi::ComputePipeline> depth_merge_;
     rhi::GraphicsPipeline composite_pipeline_;
+    // Merge blend modes, opacity, a constant, and generated Backgrounds. The
+    // four blends composite_pipeline_ also has go through it instead, so a
+    // graph without a Merge renders exactly as it always did.
+    rhi::GraphicsPipeline merge_pipeline_;
+    // Intermediate accumulators, a ping-pong pair per open group level, at
+    // the padded extent. Allocated the first frame a depth is needed and
+    // dropped whenever the padded extent changes.
+    std::vector<rhi::Texture> group_targets_;
+    // A Matte's coverage image, held apart from the filters' and keyers' own
+    // targets so filtering the source cannot overwrite it, and a transparent
+    // target a Background matte is generated over. Padded extent; allocated
+    // the first frame a Matte runs and dropped with the padded extent.
+    rhi::Texture matte_image_;
+    rhi::Texture matte_blank_;
     rhi::Sampler sampler_;
     rhi::TextureFormat working_format_{rhi::TextureFormat::Rgba8Unorm};
     CompositorSceneStats stats_{};

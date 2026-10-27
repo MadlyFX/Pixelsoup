@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <span>
+#include <string_view>
 #include <string>
 #include <utility>
 #include <variant>
@@ -50,6 +52,33 @@ constexpr core::u64 max_reference =
     edge.properties.emplace(std::string{compositor::schema::order},
                             doc::PropertyValue{std::int64_t{0}});
     return edge;
+}
+
+// Gives each existing wire its new order, skipping anything that is not a
+// wire or already has it.
+[[nodiscard]] bool
+renumber_edges(cmd::DirectorScheduler &scheduler,
+               std::span<const std::pair<doc::NodeId, core::i64>> orders,
+               cmd::TransactionId transaction, cmd::FrameNumber apply_at) {
+    for (const auto &[edge_id, order] : orders) {
+        const doc::Node *const existing =
+            scheduler.projected_document().get(edge_id);
+        if (existing == nullptr ||
+            existing->type != compositor::schema::edge_type) {
+            continue;
+        }
+        doc::Node renumbered = *existing;
+        renumbered.properties.insert_or_assign(
+            std::string{compositor::schema::order}, doc::PropertyValue{order});
+        if (renumbered != *existing &&
+            !scheduler.schedule_edit(cmd::PutNode{std::move(renumbered)},
+                                     cmd::PutNode{*existing},
+                                     cmd::UndoContextId{6U}, transaction,
+                                     apply_at)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 [[nodiscard]] std::string_view
@@ -95,6 +124,10 @@ compositor_type(compositor::NodeKind kind) noexcept {
         return compositor::schema::composite_type;
     case compositor::NodeKind::Output:
         return compositor::schema::output_type;
+    case compositor::NodeKind::Merge:
+        return compositor::schema::merge_type;
+    case compositor::NodeKind::Background:
+        return compositor::schema::background_type;
     }
     return compositor::schema::brightness_type;
 }
@@ -372,6 +405,52 @@ make_compositor_node(doc::NodeId id, const editor::CompositorAddIntent &request,
             std::string{compositor::schema::horizontal_blend},
             doc::PropertyValue{0.05});
         break;
+    case compositor::NodeKind::Merge:
+        // A Merge with only BASE wired changes nothing until a blend that
+        // uses its constant is chosen, so adding one never flashes Program.
+        node.properties.emplace(
+            std::string{compositor::schema::blend_mode},
+            doc::PropertyValue{std::string{compositor::schema::normal_blend}});
+        node.properties.emplace(std::string{compositor::schema::opacity},
+                                doc::PropertyValue{1.0});
+        node.properties.emplace(std::string{compositor::schema::value},
+                                doc::PropertyValue{1.0});
+        break;
+    case compositor::NodeKind::Background: {
+        const compositor::BackgroundParameters defaults{};
+        node.properties.emplace(
+            std::string{compositor::schema::background_mode},
+            doc::PropertyValue{
+                std::string{compositor::schema::solid_background}});
+        const auto color = [&node](const compositor::BackgroundColor& value,
+                                   std::string_view r, std::string_view g,
+                                   std::string_view b, std::string_view a) {
+            node.properties.emplace(std::string{r},
+                                    doc::PropertyValue{double{value.r}});
+            node.properties.emplace(std::string{g},
+                                    doc::PropertyValue{double{value.g}});
+            node.properties.emplace(std::string{b},
+                                    doc::PropertyValue{double{value.b}});
+            node.properties.emplace(std::string{a},
+                                    doc::PropertyValue{double{value.a}});
+        };
+        color(defaults.color_a, compositor::schema::color_a_r,
+              compositor::schema::color_a_g, compositor::schema::color_a_b,
+              compositor::schema::color_a_a);
+        color(defaults.color_b, compositor::schema::color_b_r,
+              compositor::schema::color_b_g, compositor::schema::color_b_b,
+              compositor::schema::color_b_a);
+        node.properties.emplace(std::string{compositor::schema::angle_turns},
+                                doc::PropertyValue{double{defaults.angle}});
+        node.properties.emplace(std::string{compositor::schema::center_x},
+                                doc::PropertyValue{double{defaults.center_x}});
+        node.properties.emplace(std::string{compositor::schema::center_y},
+                                doc::PropertyValue{double{defaults.center_y}});
+        node.properties.emplace(
+            std::string{compositor::schema::gradient_size},
+            doc::PropertyValue{double{defaults.size}});
+        break;
+    }
     case compositor::NodeKind::Composite:
     case compositor::NodeKind::Output:
         break;
@@ -421,7 +500,8 @@ schedule_compositor_add(cmd::DirectorScheduler &scheduler,
 [[nodiscard]] bool
 schedule_compositor_move(cmd::DirectorScheduler &scheduler,
                          const editor::CompositorMoveIntent &request,
-                         core::u64 gesture, cmd::FrameNumber apply_at) {
+                         core::u64 gesture, cmd::FrameNumber apply_at,
+                         EditCoalescingPlan *coalescing) {
     const doc::Node *const existing =
         scheduler.projected_document().get(request.node);
     if (existing == nullptr) {
@@ -434,9 +514,231 @@ schedule_compositor_move(cmd::DirectorScheduler &scheduler,
     moved.properties.insert_or_assign(
         std::string{compositor::schema::editor_y},
         doc::PropertyValue{static_cast<double>(request.editor_y)});
+    if (moved == *existing) {
+        return true;
+    }
+    if (coalescing != nullptr) {
+        return static_cast<bool>(schedule_editor_coalesced_edit(
+            scheduler, cmd::PutNode{std::move(moved)}, cmd::PutNode{*existing},
+            *coalescing, apply_at));
+    }
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(moved)}, cmd::PutNode{*existing},
         cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
+}
+
+[[nodiscard]] bool
+schedule_compositor_rename(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorRenameIntent &request,
+                           core::u64 gesture, cmd::FrameNumber apply_at) {
+    const doc::Node *const existing =
+        scheduler.projected_document().get(request.node);
+    if (existing == nullptr ||
+        (!compositor::schema::is_node_type(existing->type) &&
+         existing->type != compositor::schema::comment_type)) {
+        return true;
+    }
+    doc::Node renamed = *existing;
+    if (request.label.empty()) {
+        renamed.properties.erase(std::string{compositor::schema::label});
+    } else {
+        renamed.properties.insert_or_assign(
+            std::string{compositor::schema::label},
+            doc::PropertyValue{request.label});
+    }
+    if (renamed == *existing) {
+        return true;
+    }
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(renamed)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{6U}, cmd::TransactionId{gesture}, apply_at));
+}
+
+[[nodiscard]] bool
+schedule_compositor_comment(cmd::DirectorScheduler &scheduler,
+                            const editor::CompositorCommentIntent &request,
+                            doc::NodeId id, doc::NodeId scene,
+                            core::u64 gesture, cmd::FrameNumber apply_at) {
+    const auto within = [](float value) noexcept {
+        return std::isfinite(value) &&
+               std::abs(value) <= compositor::max_spatial_extent;
+    };
+    if (!within(request.x) || !within(request.y) || !within(request.width) ||
+        !within(request.height) ||
+        request.width < compositor::min_comment_extent ||
+        request.height < compositor::min_comment_extent ||
+        request.color >= compositor::comment_color_count) {
+        return true;
+    }
+    const doc::Node *const existing =
+        request.node == doc::NodeId{}
+            ? nullptr
+            : scheduler.projected_document().get(request.node);
+    if (request.node != doc::NodeId{} &&
+        (existing == nullptr ||
+         existing->type != compositor::schema::comment_type)) {
+        return true;
+    }
+    if (existing == nullptr && scene == doc::NodeId{}) {
+        return true;
+    }
+    doc::Node comment = existing != nullptr ? *existing : doc::Node{};
+    if (existing == nullptr) {
+        comment.id = id;
+        comment.type = std::string{compositor::schema::comment_type};
+        comment.properties.insert_or_assign(
+            std::string{compositor::schema::scene_id},
+            doc::PropertyValue{static_cast<std::int64_t>(scene.value())});
+    }
+    const auto put = [&comment](std::string_view name, doc::PropertyValue value) {
+        comment.properties.insert_or_assign(std::string{name}, std::move(value));
+    };
+    put(compositor::schema::label,
+        doc::PropertyValue{request.title.empty() ? std::string{"Comment"}
+                                                 : request.title});
+    put(compositor::schema::editor_x,
+        doc::PropertyValue{static_cast<double>(request.x)});
+    put(compositor::schema::editor_y,
+        doc::PropertyValue{static_cast<double>(request.y)});
+    put(compositor::schema::comment_width,
+        doc::PropertyValue{static_cast<double>(request.width)});
+    put(compositor::schema::comment_height,
+        doc::PropertyValue{static_cast<double>(request.height)});
+    put(compositor::schema::comment_color,
+        doc::PropertyValue{static_cast<std::int64_t>(request.color)});
+    if (existing != nullptr && comment == *existing) {
+        return true;
+    }
+    return static_cast<bool>(
+        existing != nullptr
+            ? scheduler.schedule_edit(cmd::PutNode{std::move(comment)},
+                                      cmd::PutNode{*existing},
+                                      cmd::UndoContextId{6U},
+                                      cmd::TransactionId{gesture}, apply_at)
+            : scheduler.schedule_edit(cmd::PutNode{std::move(comment)},
+                                      cmd::EraseNode{id},
+                                      cmd::UndoContextId{6U},
+                                      cmd::TransactionId{gesture}, apply_at));
+}
+
+[[nodiscard]] bool
+schedule_compositor_reorder(cmd::DirectorScheduler &scheduler,
+                            const editor::CompositorReorderIntent &request,
+                            core::u64 gesture, cmd::FrameNumber apply_at) {
+    return renumber_edges(scheduler, request.orders,
+                          cmd::TransactionId{gesture}, apply_at);
+}
+
+namespace {
+
+// Sets or clears one flag on each graph node `accepts`, in one transaction.
+// Clearing removes the property, so an untouched node reads as it was.
+template <typename Accepts>
+[[nodiscard]] bool schedule_node_flag(cmd::DirectorScheduler &scheduler,
+                                      std::span<const doc::NodeId> nodes,
+                                      std::string_view property, bool value,
+                                      Accepts accepts, core::u64 gesture,
+                                      cmd::FrameNumber apply_at) {
+    for (const doc::NodeId id : nodes) {
+        const doc::Node *const existing = scheduler.projected_document().get(id);
+        if (existing == nullptr ||
+            !compositor::schema::is_node_type(existing->type) ||
+            !accepts(*existing)) {
+            continue;
+        }
+        doc::Node changed = *existing;
+        if (value) {
+            changed.properties.insert_or_assign(std::string{property},
+                                                doc::PropertyValue{true});
+        } else {
+            changed.properties.erase(std::string{property});
+        }
+        if (changed == *existing) {
+            continue;
+        }
+        if (!scheduler.schedule_edit(cmd::PutNode{std::move(changed)},
+                                     cmd::PutNode{*existing},
+                                     cmd::UndoContextId{6U},
+                                     cmd::TransactionId{gesture}, apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+[[nodiscard]] bool
+schedule_compositor_collapse(cmd::DirectorScheduler &scheduler,
+                             const editor::CompositorCollapseIntent &request,
+                             core::u64 gesture, cmd::FrameNumber apply_at) {
+    return schedule_node_flag(
+        scheduler, request.nodes, compositor::schema::collapsed,
+        request.collapsed, [](const doc::Node &) noexcept { return true; },
+        gesture, apply_at);
+}
+
+[[nodiscard]] bool
+schedule_compositor_bypass(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorBypassIntent &request,
+                           core::u64 gesture, cmd::FrameNumber apply_at) {
+    return schedule_node_flag(
+        scheduler, request.nodes, compositor::schema::bypassed,
+        request.bypassed,
+        [](const doc::Node &node) noexcept {
+            for (std::size_t index = 0U; index < compositor::node_kind_count;
+                 ++index) {
+                const auto kind = static_cast<compositor::NodeKind>(index);
+                if (compositor_type(kind) == node.type) {
+                    return compositor::node_kind_bypassable(kind);
+                }
+            }
+            return false;
+        },
+        gesture, apply_at);
+}
+
+[[nodiscard]] std::pair<float, float>
+compositor_snapshot_origin(std::span<const doc::Node> snapshot) noexcept {
+    const auto number = [](const doc::Node &node, std::string_view name) {
+        const auto found = node.properties.find(name);
+        if (found == node.properties.end()) {
+            return 0.0F;
+        }
+        if (const auto *const real = std::get_if<double>(&found->second)) {
+            return static_cast<float>(*real);
+        }
+        if (const auto *const whole = std::get_if<std::int64_t>(&found->second)) {
+            return static_cast<float>(*whole);
+        }
+        return 0.0F;
+    };
+    float x = std::numeric_limits<float>::infinity();
+    float y = std::numeric_limits<float>::infinity();
+    for (const doc::Node &node : snapshot) {
+        if (node.type == compositor::schema::edge_type) {
+            continue;
+        }
+        x = std::min(x, number(node, compositor::schema::editor_x));
+        y = std::min(y, number(node, compositor::schema::editor_y));
+    }
+    return std::isfinite(x) && std::isfinite(y) ? std::pair{x, y}
+                                                : std::pair{0.0F, 0.0F};
+}
+
+[[nodiscard]] bool
+schedule_compositor_paste(cmd::DirectorScheduler &scheduler,
+                          std::span<const doc::Node> puts, core::u64 gesture,
+                          cmd::FrameNumber apply_at, core::u64 &next_id) {
+    for (const doc::Node &node : puts) {
+        if (!scheduler.schedule_edit(cmd::PutNode{node}, cmd::EraseNode{node.id},
+                                     cmd::UndoContextId{6U},
+                                     cmd::TransactionId{gesture}, apply_at)) {
+            return false;
+        }
+        next_id = std::max(next_id, node.id.value() + 1U);
+    }
+    return true;
 }
 
 [[nodiscard]] bool schedule_compositor_property(
@@ -525,6 +827,11 @@ schedule_compositor_move(cmd::DirectorScheduler &scheduler,
     std::string_view property;
     bool integer_value = false;
     bool film_grain_mode_value = false;
+    bool signed_integer_value = false;
+    bool switch_value = false;
+    bool matte_mode_value = false;
+    bool merge_blend_value = false;
+    bool background_mode_value = false;
     switch (request.property) {
     case editor::CompositorProperty::BrightnessAmount:
     case editor::CompositorProperty::SaturationAmount:
@@ -749,10 +1056,158 @@ schedule_compositor_move(cmd::DirectorScheduler &scheduler,
     case editor::CompositorProperty::LedCarHorizontalBlend:
         property = compositor::schema::horizontal_blend;
         break;
+    case editor::CompositorProperty::ChromaKeyRed:
+        property = compositor::schema::chroma_key_color_r;
+        break;
+    case editor::CompositorProperty::ChromaKeyGreen:
+        property = compositor::schema::chroma_key_color_g;
+        break;
+    case editor::CompositorProperty::ChromaKeyBlue:
+        property = compositor::schema::chroma_key_color_b;
+        break;
+    case editor::CompositorProperty::ChromaKeyTolerance:
+        property = compositor::schema::chroma_key_tolerance;
+        break;
+    case editor::CompositorProperty::ChromaKeySoftness:
+        property = compositor::schema::chroma_key_softness;
+        break;
+    case editor::CompositorProperty::ChromaKeyEdgePx:
+        property = compositor::schema::chroma_key_morphology_px;
+        signed_integer_value = true;
+        break;
+    case editor::CompositorProperty::ChromaKeySpill:
+        property = compositor::schema::chroma_key_spill_suppression;
+        break;
+    case editor::CompositorProperty::ChromaKeyMix:
+        property = compositor::schema::chroma_key_mix;
+        break;
+    case editor::CompositorProperty::LumaKeyLow:
+        property = compositor::schema::luma_key_low_threshold;
+        break;
+    case editor::CompositorProperty::LumaKeyHigh:
+        property = compositor::schema::luma_key_high_threshold;
+        break;
+    case editor::CompositorProperty::LumaKeyLowSoftness:
+        property = compositor::schema::luma_key_low_softness;
+        break;
+    case editor::CompositorProperty::LumaKeyHighSoftness:
+        property = compositor::schema::luma_key_high_softness;
+        break;
+    case editor::CompositorProperty::LumaKeyInvert:
+        property = compositor::schema::luma_key_invert;
+        switch_value = true;
+        break;
+    case editor::CompositorProperty::LumaKeyMix:
+        property = compositor::schema::luma_key_mix;
+        break;
+    case editor::CompositorProperty::MatteMode:
+        property = compositor::schema::matte_mode;
+        matte_mode_value = true;
+        break;
+    case editor::CompositorProperty::MatteInvert:
+        property = compositor::schema::matte_invert;
+        switch_value = true;
+        break;
+    case editor::CompositorProperty::MatteClampInput:
+        property = compositor::schema::matte_clamp_input;
+        switch_value = true;
+        break;
+    case editor::CompositorProperty::MergeBlendMode:
+        property = compositor::schema::blend_mode;
+        merge_blend_value = true;
+        break;
+    case editor::CompositorProperty::MergeOpacity:
+        property = compositor::schema::opacity;
+        break;
+    case editor::CompositorProperty::MergeValue:
+        property = compositor::schema::value;
+        break;
+    case editor::CompositorProperty::BackgroundMode:
+        property = compositor::schema::background_mode;
+        background_mode_value = true;
+        break;
+    case editor::CompositorProperty::BackgroundColorAR:
+        property = compositor::schema::color_a_r;
+        break;
+    case editor::CompositorProperty::BackgroundColorAG:
+        property = compositor::schema::color_a_g;
+        break;
+    case editor::CompositorProperty::BackgroundColorAB:
+        property = compositor::schema::color_a_b;
+        break;
+    case editor::CompositorProperty::BackgroundColorAA:
+        property = compositor::schema::color_a_a;
+        break;
+    case editor::CompositorProperty::BackgroundColorBR:
+        property = compositor::schema::color_b_r;
+        break;
+    case editor::CompositorProperty::BackgroundColorBG:
+        property = compositor::schema::color_b_g;
+        break;
+    case editor::CompositorProperty::BackgroundColorBB:
+        property = compositor::schema::color_b_b;
+        break;
+    case editor::CompositorProperty::BackgroundColorBA:
+        property = compositor::schema::color_b_a;
+        break;
+    case editor::CompositorProperty::BackgroundAngleTurns:
+        property = compositor::schema::angle_turns;
+        break;
+    case editor::CompositorProperty::BackgroundCenterX:
+        property = compositor::schema::center_x;
+        break;
+    case editor::CompositorProperty::BackgroundCenterY:
+        property = compositor::schema::center_y;
+        break;
+    case editor::CompositorProperty::BackgroundSize:
+        property = compositor::schema::gradient_size;
+        break;
     }
 
     doc::PropertyValue value;
-    if (film_grain_mode_value) {
+    if (merge_blend_value || background_mode_value) {
+        static constexpr std::array<std::string_view,
+                                    compositor::merge_blend_mode_count>
+            blends{{compositor::schema::normal_blend,
+                    compositor::schema::add_blend,
+                    compositor::schema::multiply_blend,
+                    compositor::schema::screen_blend,
+                    compositor::schema::subtract_blend,
+                    compositor::schema::overlay_blend,
+                    compositor::schema::lighten_blend,
+                    compositor::schema::darken_blend,
+                    compositor::schema::difference_blend}};
+        static constexpr std::array<std::string_view, 3U> backgrounds{
+            {compositor::schema::solid_background,
+             compositor::schema::linear_background,
+             compositor::schema::radial_background}};
+        const std::span<const std::string_view> names =
+            merge_blend_value ? std::span<const std::string_view>{blends}
+                              : std::span<const std::string_view>{backgrounds};
+        const auto *const number = std::get_if<core::u32>(&request.value);
+        if (number == nullptr || *number >= names.size()) {
+            return true;
+        }
+        value = std::string{names[*number]};
+    } else if (switch_value || matte_mode_value) {
+        const auto *const number = std::get_if<core::u32>(&request.value);
+        if (number == nullptr || *number > 1U) {
+            return true;
+        }
+        if (matte_mode_value) {
+            value = std::string{*number == 0U
+                                    ? compositor::schema::matte_alpha_mode
+                                    : compositor::schema::matte_luma_mode};
+        } else {
+            value = *number == 1U;
+        }
+    } else if (signed_integer_value) {
+        const auto *const number = std::get_if<float>(&request.value);
+        if (number == nullptr || !std::isfinite(*number)) {
+            return true;
+        }
+        value = static_cast<std::int64_t>(std::lround(*number));
+    } else if (film_grain_mode_value) {
         const auto *const number = std::get_if<core::u32>(&request.value);
         if (number == nullptr || *number > 1U) {
             return true;
@@ -776,6 +1231,22 @@ schedule_compositor_move(cmd::DirectorScheduler &scheduler,
     doc::Node changed = *existing;
     changed.properties.insert_or_assign(std::string{property},
                                         std::move(value));
+    // A luma key's low threshold may not pass its high one; the graph would
+    // refuse the node rather than guess which the operator meant.
+    if (changed.type == compositor::schema::luma_key_type) {
+        const auto threshold = [&](std::string_view name, double fallback) {
+            const auto found = changed.properties.find(name);
+            const auto *const real =
+                found != changed.properties.end()
+                    ? std::get_if<double>(&found->second)
+                    : nullptr;
+            return real != nullptr ? *real : fallback;
+        };
+        if (threshold(compositor::schema::luma_key_low_threshold, 0.0) >
+            threshold(compositor::schema::luma_key_high_threshold, 1.0)) {
+            return true;
+        }
+    }
     if (coalescing != nullptr) {
         return static_cast<bool>(schedule_editor_coalesced_edit(
             scheduler, cmd::PutNode{std::move(changed)},
@@ -862,16 +1333,18 @@ node_reference(const doc::Node &node, std::string_view property) noexcept {
                                 context, transaction, apply_at));
 }
 
+namespace {
+
 [[nodiscard]] bool
-schedule_compositor_delete(cmd::DirectorScheduler &scheduler,
-                           const editor::CompositorDeleteIntent &request,
-                           core::u64 gesture, cmd::FrameNumber apply_at) {
-    if (request.target.kind == editor::CompositorSelectionKind::None ||
-        request.target.node == doc::NodeId{}) {
+schedule_compositor_delete_one(cmd::DirectorScheduler &scheduler,
+                               const editor::CompositorSelection &selected,
+                               core::u64 gesture, cmd::FrameNumber apply_at) {
+    if (selected.kind == editor::CompositorSelectionKind::None ||
+        selected.node == doc::NodeId{}) {
         return true;
     }
     const doc::Root &root = scheduler.projected_document();
-    const doc::Node *const target = root.get(request.target.node);
+    const doc::Node *const target = root.get(selected.node);
     if (target == nullptr) {
         return true;
     }
@@ -879,8 +1352,13 @@ schedule_compositor_delete(cmd::DirectorScheduler &scheduler,
     const std::string target_type = target->type;
     const cmd::UndoContextId context{6U};
     const cmd::TransactionId transaction{gesture};
-    if (request.target.kind == editor::CompositorSelectionKind::Edge) {
+    if (selected.kind == editor::CompositorSelectionKind::Edge) {
         return target_type != compositor::schema::edge_type ||
+               schedule_erase_node(scheduler, target_id, context, transaction,
+                                   apply_at);
+    }
+    if (selected.kind == editor::CompositorSelectionKind::Comment) {
+        return target_type != compositor::schema::comment_type ||
                schedule_erase_node(scheduler, target_id, context, transaction,
                                    apply_at);
     }
@@ -920,6 +1398,21 @@ schedule_compositor_delete(cmd::DirectorScheduler &scheduler,
     } catch (const std::bad_alloc &) {
         return false;
     }
+}
+
+} // namespace
+
+[[nodiscard]] bool
+schedule_compositor_delete(cmd::DirectorScheduler &scheduler,
+                           const editor::CompositorDeleteIntent &request,
+                           core::u64 gesture, cmd::FrameNumber apply_at) {
+    for (const editor::CompositorSelection &target : request.targets) {
+        if (!schedule_compositor_delete_one(scheduler, target, gesture,
+                                            apply_at)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 namespace {
@@ -974,6 +1467,9 @@ namespace {
     if (!erase_edges(scheduler, request.remove_edges, transaction, apply_at)) {
         return false;
     }
+    if (!renumber_edges(scheduler, request.reorder, transaction, apply_at)) {
+        return false;
+    }
     for (std::size_t index = 0U; index < request.links.size(); ++index) {
         const editor::CompositorAddLink &link = request.links[index];
         if (!referenceable(link.existing) ||
@@ -982,12 +1478,15 @@ namespace {
         }
         const compositor::EdgeEndpoint fresh{id, link.port};
         const doc::NodeId edge = edge_ids[index];
-        if (!scheduler.schedule_edit(
-                cmd::PutNode{make_compositor_edge(
-                    edge, link.from_new ? fresh : link.existing,
-                    link.from_new ? link.existing : fresh)},
-                cmd::EraseNode{edge}, cmd::UndoContextId{6U}, transaction,
-                apply_at)) {
+        doc::Node wire = make_compositor_edge(
+            edge, link.from_new ? fresh : link.existing,
+            link.from_new ? link.existing : fresh);
+        wire.properties.insert_or_assign(std::string{compositor::schema::order},
+                                         doc::PropertyValue{link.order});
+        if (!scheduler.schedule_edit(cmd::PutNode{std::move(wire)},
+                                     cmd::EraseNode{edge},
+                                     cmd::UndoContextId{6U}, transaction,
+                                     apply_at)) {
             return false;
         }
     }

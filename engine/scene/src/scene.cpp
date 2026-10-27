@@ -952,6 +952,12 @@ core::u64 digest(const Scene& scene) noexcept {
             mix(state, static_cast<core::u64>(group.visible));
             mix(state, static_cast<core::u64>(group.effective_locked));
             mix(state, static_cast<core::u64>(group.effective_visible));
+            // Conditional, so a folder digests exactly as it did before
+            // groups had a kind.
+            if (group.kind != GroupKind::Folder) {
+                mix(state, core::u64{0x4B49'4E44ULL}); // "KIND"
+                mix(state, static_cast<core::u64>(group.kind));
+            }
         }
         mix(state,
             static_cast<core::u64>(scene.group_diagnostics.size()));

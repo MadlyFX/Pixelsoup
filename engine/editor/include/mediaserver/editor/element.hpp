@@ -159,6 +159,11 @@ struct ElementInfo final {
     std::string display_name;
     std::optional<doc::NodeId> parent_group;
     core::i64 group_order{};
+    // Group-only: a folder, or a vehicle process group.
+    scene::GroupKind group_kind{scene::GroupKind::Folder};
+    // The operator's Scene panel highlight, an index into the marker palette;
+    // absent for none.
+    std::optional<core::u8> highlight;
     bool visible{true};
     bool effective_visible{true};
     bool linked{}, linked_held{};
@@ -281,6 +286,10 @@ inline std::string_view kind_name(const ElementInfo& element) noexcept {
     }
     if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Rectangle) return "rectangle light";
     if (element.kind == ElementKind::PointLight && element.local_kind == scene::LocalLightKind::Sphere) return "sphere light";
+    if (element.kind == ElementKind::Group
+        && element.group_kind == scene::GroupKind::VehicleProcess) {
+        return "vehicle process group";
+    }
     return kind_name(element.kind);
 }
 

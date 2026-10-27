@@ -134,6 +134,15 @@ void UiContext::new_frame(double time_seconds) {
     time_ = time_seconds;
     pointer_block_depth_ = 0U;
     interaction_clip_stack_.clear();
+    // A capture whose widget was not drawn last frame - a wire removed by the
+    // press that captured it, say - would never see its release and would
+    // keep every other control from hovering or pressing. Once the button is
+    // up it is let go.
+    if (active_ != none && !active_seen_
+        && !input_.mouse_down(MouseButton::Left)) {
+        active_ = none;
+    }
+    active_seen_ = false;
     list_.reset();
     tooltip_text_.clear();
     dropdown_dismissed_ = false;
@@ -260,6 +269,7 @@ void UiContext::interact(
         press_consumed_ = true;
         pressed = true;
     }
+    active_seen_ = active_seen_ || (active_ != none && active_ == id);
     hovered_out = hovered;
     pressed_out = pressed;
 }
@@ -793,6 +803,7 @@ bool UiContext::dropdown(UiId id, const Rect& bounds,
         dropdown_seen_ = true;
         dropdown_anchor_ = bounds;
         dropdown_options_.clear();
+        dropdown_swatches_.clear();
         for (const auto option : options) dropdown_options_.emplace_back(option);
     }
     panel(bounds, it.hovered ? theme_.widget_hover : theme_.track);
@@ -817,11 +828,18 @@ void UiContext::open_context_menu(UiId id, float x, float y) {
     dropdown_first_ = 0U;
     dropdown_pressed_ = static_cast<std::size_t>(-1);
     dropdown_options_.clear();
+    dropdown_swatches_.clear();
     dropdown_seen_ = true;
 }
 
 std::optional<std::size_t> UiContext::context_menu(
     UiId id, std::span<const std::string_view> options) {
+    return context_menu(id, options, {});
+}
+
+std::optional<std::size_t> UiContext::context_menu(
+    UiId id, std::span<const std::string_view> options,
+    std::span<const UiColor> swatches) {
     if (dropdown_result_id_ == id) {
         dropdown_result_id_ = none;
         if (dropdown_result_ < options.size()) {
@@ -837,6 +855,7 @@ std::optional<std::size_t> UiContext::context_menu(
         dropdown_seen_ = true;
         dropdown_options_.clear();
         for (const auto option : options) dropdown_options_.emplace_back(option);
+        dropdown_swatches_.assign(swatches.begin(), swatches.end());
     }
     return std::nullopt;
 }
@@ -873,7 +892,8 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
     const float height = std::min(static_cast<float>(std::min(dropdown_options_.size(), std::size_t{10})) * 24.0F,
                                   std::max(24.0F, std::floor((window_bounds.height - 8.0F) / 24.0F) * 24.0F));
     float width = dropdown_anchor_.width;
-    for (const auto& option : dropdown_options_) width = std::max(width, font_width(option) + 36.0F);
+    const float chip = dropdown_swatches_.empty() ? 0.0F : 20.0F;
+    for (const auto& option : dropdown_options_) width = std::max(width, font_width(option) + 36.0F + chip);
     width = std::min(width, std::max(window_bounds.width - 8.0F, 1.0F));
     const float x = std::clamp(dropdown_anchor_.x, window_bounds.x + 4.0F, std::max(window_bounds.x + 4.0F, window_bounds.x + window_bounds.width - width - 4.0F));
     float y = dropdown_anchor_.y + dropdown_anchor_.height + 2.0F;
@@ -888,7 +908,13 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
         const std::size_t index = dropdown_first_ + row;
         const Rect cell{x, y + static_cast<float>(row) * 24.0F, width, 24.0F};
         if (index == dropdown_highlight_) panel(cell, theme_.selection);
-        label({x + 8.0F, cell.y, width - 16.0F, cell.height}, dropdown_options_[index]);
+        if (index < dropdown_swatches_.size()) {
+            const Rect swatch{x + 8.0F, cell.y + 6.0F, 12.0F, 12.0F};
+            list_.add_rect(swatch.x, swatch.y, swatch.width, swatch.height, theme_.text_muted);
+            list_.add_rect(swatch.x + 1.0F, swatch.y + 1.0F, swatch.width - 2.0F, swatch.height - 2.0F,
+                           dropdown_swatches_[index].a > 0.0F ? dropdown_swatches_[index] : theme_.panel);
+        }
+        label({x + 8.0F + chip, cell.y, width - 16.0F - chip, cell.height}, dropdown_options_[index]);
     }
     if (dropdown_options_.size() > visible) {
         const float thumb = height * static_cast<float>(visible) / static_cast<float>(dropdown_options_.size());

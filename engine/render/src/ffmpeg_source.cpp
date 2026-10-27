@@ -2229,6 +2229,28 @@ MediaProbe probe_media(const std::string &source) {
         result.width = static_cast<core::u32>(decoder->codec->width);
         result.height = static_cast<core::u32>(decoder->codec->height);
     }
+    // Camera and editorial files carry their start timecode on the video
+    // stream, the container, or a QuickTime `tmcd` data stream; the first
+    // one found is the file's own.
+    const auto timecode_in = [](const AVDictionary *metadata) -> const char * {
+        const AVDictionaryEntry *const entry =
+            av_dict_get(metadata, "timecode", nullptr, 0);
+        return entry != nullptr && entry->value != nullptr &&
+                       entry->value[0] != '\0'
+                   ? entry->value
+                   : nullptr;
+    };
+    const char *timecode = timecode_in(stream->metadata);
+    if (timecode == nullptr) {
+        timecode = timecode_in(decoder->format->metadata);
+    }
+    for (unsigned index = 0U;
+         timecode == nullptr && index < decoder->format->nb_streams; ++index) {
+        timecode = timecode_in(decoder->format->streams[index]->metadata);
+    }
+    if (timecode != nullptr) {
+        result.start_timecode = timecode;
+    }
     result.frame_rate = stream_frame_rate(stream);
     if (stream->nb_frames > 0) {
         result.frame_count = static_cast<core::u32>(std::min<core::i64>(

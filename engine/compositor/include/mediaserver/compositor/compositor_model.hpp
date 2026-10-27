@@ -52,6 +52,7 @@ class CompositorModel final {
   private:
     std::map<doc::NodeId, GraphNode> nodes_;
     std::map<doc::NodeId, GraphEdge> edges_;
+    std::map<doc::NodeId, GraphComment> comments_;
     // Every document node is recorded so a SceneLayer reference can be
     // checked without importing or duplicating scene schema knowledge.
     std::map<doc::NodeId, std::string> document_types_;
@@ -90,6 +91,34 @@ struct GraphClonePlan final {
 // outside the copied scene keeps its reference. Without this a duplicated
 // scene would render through no composite at all, so promoting it would change
 // the look of Program - the exact thing Preview exists to prevent.
+// The graph objects a copy carries: the chosen nodes and comment boxes as
+// they are now, and the wires running between two of them. Wires to anything
+// outside the set are left behind. Ids that name nothing in the graph are
+// ignored.
+[[nodiscard]] std::vector<doc::Node>
+snapshot_graph_selection(const doc::Root& root,
+                         std::span<const doc::NodeId> chosen);
+
+struct GraphPastePlan final {
+    // New nodes in ascending original-node-id order; none exist in `root`.
+    std::vector<doc::Node> puts;
+    // (original, copy), in the same order.
+    std::vector<std::pair<doc::NodeId, doc::NodeId>> remap;
+    // Copied nodes that could not be placed: Output, of which a graph has
+    // one, and a Scene Layer whose source already has a layer in the
+    // destination graph, of which a source has one. Their wires go too.
+    std::size_t skipped{};
+};
+
+// Pastes a snapshot into `destination`'s graph, every position moved by
+// (dx, dy) graph units: nodes, comment boxes, and wires' reroute points.
+// Ids are allocated as plan_clone_graph does, and each wire is rewritten to
+// the copies of its two ends.
+[[nodiscard]] core::Result<GraphPastePlan, GraphCloneError> plan_paste_graph(
+    const doc::Root& root, std::span<const doc::Node> snapshot,
+    doc::NodeId destination, doc::NodeId legacy_owner, float dx, float dy,
+    doc::NodeId first_id);
+
 [[nodiscard]] core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
     const doc::Root& root,
     doc::NodeId source,

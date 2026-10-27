@@ -120,8 +120,8 @@ using Property = std::pair<std::string, doc::PropertyValue>;
         scene_layer(4U, 101U),
         node(5U, schema::composite_type),
         node(6U, schema::output_type),
-        edge(20U, 1U, 0U, 3U, 0U),
-        edge(21U, 1U, 0U, 4U, 0U),
+        edge(20U, 1U, 0U, 3U, 2U),
+        edge(21U, 1U, 0U, 4U, 2U),
         edge(22U, 2U, 0U, 3U, 1U),
         edge(23U, 2U, 0U, 4U, 1U),
         edge(24U, 3U, 0U, 5U, 0U, 10),
@@ -282,19 +282,29 @@ void add_curve_properties(doc::Node& built, std::string_view prefix,
 void typed_ports_describe_the_editor_contract() {
     const auto layer_inputs =
         compositor::input_ports(compositor::NodeKind::SceneLayer);
-    COMPOSITOR_CHECK(layer_inputs.size() == 2U);
+    // EFFECTS, then FILTERS (numbered 2 so INSTANCES keeps 1), then
+    // INSTANCES.
+    COMPOSITOR_CHECK(layer_inputs.size() == 3U);
+    COMPOSITOR_CHECK(layer_inputs[0U].index == 0U);
+    COMPOSITOR_CHECK(layer_inputs[0U].name == "EFFECTS");
     COMPOSITOR_CHECK(layer_inputs[0U].type ==
                      compositor::PortValueType::Effect);
     COMPOSITOR_CHECK(layer_inputs[0U].multiple);
+    COMPOSITOR_CHECK(layer_inputs[1U].index == 2U);
+    COMPOSITOR_CHECK(layer_inputs[1U].name == "FILTERS");
     COMPOSITOR_CHECK(layer_inputs[1U].type ==
+                     compositor::PortValueType::Filter);
+    COMPOSITOR_CHECK(layer_inputs[1U].multiple);
+    COMPOSITOR_CHECK(layer_inputs[2U].index == 1U);
+    COMPOSITOR_CHECK(layer_inputs[2U].type ==
                      compositor::PortValueType::TransformSet);
-    COMPOSITOR_CHECK(!layer_inputs[1U].multiple);
+    COMPOSITOR_CHECK(!layer_inputs[2U].multiple);
 
     const auto blur_outputs =
         compositor::output_ports(compositor::NodeKind::Blur);
     COMPOSITOR_CHECK(blur_outputs.size() == 1U);
     COMPOSITOR_CHECK(blur_outputs.front().type ==
-                     compositor::PortValueType::Effect);
+                     compositor::PortValueType::Filter);
     COMPOSITOR_CHECK(blur_outputs.front().multiple);
 
     const auto saturation_outputs =
@@ -320,7 +330,7 @@ void typed_ports_describe_the_editor_contract() {
 
     const auto car_inputs =
             compositor::input_ports(compositor::NodeKind::LedCarProcess);
-    COMPOSITOR_CHECK(car_inputs.size() == 10U);
+    COMPOSITOR_CHECK(car_inputs.size() == 11U);
     for (core::u8 index = 0U; index < 9U; ++index) {
         COMPOSITOR_CHECK(car_inputs[index].index == index);
         COMPOSITOR_CHECK(car_inputs[index].type ==
@@ -332,6 +342,9 @@ void typed_ports_describe_the_editor_contract() {
     COMPOSITOR_CHECK(car_inputs[9U].type == compositor::PortValueType::Effect);
     COMPOSITOR_CHECK(car_inputs[9U].multiple);
     COMPOSITOR_CHECK(!car_inputs[9U].required);
+    COMPOSITOR_CHECK(car_inputs[10U].index == 10U);
+    COMPOSITOR_CHECK(car_inputs[10U].type == compositor::PortValueType::Filter);
+    COMPOSITOR_CHECK(car_inputs[10U].multiple);
     const auto car_outputs =
             compositor::output_ports(compositor::NodeKind::LedCarProcess);
     COMPOSITOR_CHECK(car_outputs.size() == 1U);
@@ -420,7 +433,7 @@ void saturation_identity_is_inert_and_nonidentity_folds_once() {
         node(5U, schema::output_type),
         edge(10U, 1U, 0U, 4U, 0U, 0),
         edge(11U, 2U, 0U, 4U, 0U, 1),
-        edge(12U, 3U, 0U, 4U, 0U, 2),
+        edge(12U, 3U, 0U, 4U, 2U, 2),
         edge(13U, 4U, 0U, 5U, 0U),
     }));
     const scene::Scene activated_all =
@@ -1171,67 +1184,64 @@ void film_grain_is_typed_ordered_digested_and_replicated() {
     COMPOSITOR_CHECK(rejected.size() == 0U);
 }
 
-void inline_effects_after_blur_are_diagnosed() {
-    compositor::CompositorModel invalid;
-    invalid.reset(root_of({
+// Effects and filters have inputs of their own on a Scene Layer: EFFECTS
+// (0) runs before FILTERS (2) however the wires were made, and each
+// kind is refused on the other's input.
+void effects_and_filters_take_their_own_inputs() {
+    const auto evaluate = [](std::vector<doc::Node> nodes) {
+        compositor::CompositorModel model;
+        model.reset(root_of(nodes));
+        return model.evaluate();
+    };
+    const std::vector<doc::Node> shared{
         node(100U, "scene.object"),
         node(1U, schema::blur_type, {real(schema::radius, 8.0)}),
         node(2U, schema::brightness_type, {real(schema::amount, 2.0)}),
         node(3U, schema::saturation_type, {real(schema::amount, 0.5)}),
         scene_layer(4U, 100U),
         node(5U, schema::output_type),
-        edge(10U, 1U, 0U, 4U, 0U, 0),
-        edge(11U, 2U, 0U, 4U, 0U, 1),
-        edge(12U, 3U, 0U, 4U, 0U, 2),
         edge(13U, 4U, 0U, 5U, 0U),
-    }));
-    const compositor::CompositorGraph graph = invalid.evaluate();
-    COMPOSITOR_CHECK(!graph.valid());
-    COMPOSITOR_CHECK(graph.plan.steps.empty());
-    COMPOSITOR_CHECK(graph.diagnostics.size() == 2U);
-    COMPOSITOR_CHECK(graph.diagnostics[0U] == compositor::GraphDiagnostic{
-                                                   compositor::DiagnosticCode::UnsupportedEffectOrder,
-                                                   doc::NodeId{4U},
-                                                   doc::NodeId{2U}, 0U});
-    COMPOSITOR_CHECK(graph.diagnostics[1U] == compositor::GraphDiagnostic{
-                                                   compositor::DiagnosticCode::UnsupportedEffectOrder,
-                                                   doc::NodeId{4U},
-                                                   doc::NodeId{3U}, 0U});
+    };
+    std::vector<doc::Node> split = shared;
+    // The blur was wired first and sorts first by order; it still runs last.
+    split.push_back(edge(10U, 1U, 0U, 4U, 2U, 0));
+    split.push_back(edge(11U, 2U, 0U, 4U, 0U, 1));
+    split.push_back(edge(12U, 3U, 0U, 4U, 0U, 2));
+    const compositor::CompositorGraph graph = evaluate(split);
+    COMPOSITOR_CHECK(graph.valid());
+    COMPOSITOR_CHECK(graph.diagnostics.empty());
+    const compositor::PlanStep* const layer = graph.step(doc::NodeId{4U});
+    COMPOSITOR_CHECK(layer != nullptr && layer->inputs.size() == 3U);
+    COMPOSITOR_CHECK(layer->inputs[0].source == doc::NodeId{2U} &&
+                     layer->inputs[0].type == compositor::PortValueType::Effect);
+    COMPOSITOR_CHECK(layer->inputs[1].source == doc::NodeId{3U});
+    COMPOSITOR_CHECK(layer->inputs[2].source == doc::NodeId{1U} &&
+                     layer->inputs[2].type == compositor::PortValueType::Filter);
 
-    compositor::CompositorModel supported;
-    supported.reset(root_of({
-        node(100U, "scene.object"),
-        node(1U, schema::blur_type, {real(schema::radius, 8.0)}),
-        node(2U, schema::brightness_type, {real(schema::amount, 2.0)}),
-        node(3U, schema::saturation_type, {real(schema::amount, 0.5)}),
-        scene_layer(4U, 100U),
-        node(5U, schema::output_type),
-        edge(10U, 1U, 0U, 4U, 0U, 2),
-        edge(11U, 2U, 0U, 4U, 0U, 0),
-        edge(12U, 3U, 0U, 4U, 0U, 1),
-        edge(13U, 4U, 0U, 5U, 0U),
-    }));
-    COMPOSITOR_CHECK(supported.evaluate().valid());
-    COMPOSITOR_CHECK(!supported.evaluate().plan.steps.empty());
+    const auto refused = [&](doc::Node wire) {
+        std::vector<doc::Node> nodes = shared;
+        nodes.push_back(std::move(wire));
+        const compositor::CompositorGraph wrong = evaluate(nodes);
+        return !wrong.valid() &&
+            std::any_of(wrong.diagnostics.begin(), wrong.diagnostics.end(),
+                        [](const compositor::GraphDiagnostic& diagnostic) {
+                            return diagnostic.code ==
+                                compositor::DiagnosticCode::IncompatiblePorts;
+                        });
+    };
+    COMPOSITOR_CHECK(refused(edge(10U, 1U, 0U, 4U, 0U)));
+    COMPOSITOR_CHECK(refused(edge(11U, 2U, 0U, 4U, 2U)));
 
-    // Identities are order-neutral. A zero-radius Blur does not force
-    // isolation, and an identity inline node after an active Blur does not
-    // claim that any colour operation occurs after the spatial pass.
+    // A zero-radius Blur is an identity and does not force isolation.
     compositor::CompositorModel identities;
     identities.reset(root_of({
         node(100U, "scene.object"),
         node(1U, schema::blur_type, {real(schema::radius, 0.0)}),
         node(2U, schema::saturation_type, {real(schema::amount, 0.5)}),
-        node(3U, schema::blur_type, {real(schema::radius, 8.0)}),
-        node(4U, schema::brightness_type, {real(schema::amount, 1.0)}),
-        node(5U, schema::saturation_type, {real(schema::amount, 1.0)}),
         scene_layer(6U, 100U),
         node(7U, schema::output_type),
-        edge(10U, 1U, 0U, 6U, 0U, 0),
+        edge(10U, 1U, 0U, 6U, 2U, 0),
         edge(11U, 2U, 0U, 6U, 0U, 1),
-        edge(12U, 3U, 0U, 6U, 0U, 2),
-        edge(13U, 4U, 0U, 6U, 0U, 3),
-        edge(14U, 5U, 0U, 6U, 0U, 4),
         edge(15U, 6U, 0U, 7U, 0U),
     }));
     const compositor::CompositorGraph identity_graph = identities.evaluate();
@@ -1240,6 +1250,53 @@ void inline_effects_after_blur_are_diagnosed() {
         identity_graph.step(doc::NodeId{1U});
     COMPOSITOR_CHECK(identity_blur != nullptr);
     COMPOSITOR_CHECK(!identity_blur->requires_offscreen);
+}
+
+// An LED Car Process takes setup effects (9) and setup filters (10) for
+// every plate: the effect joins each plate's pointwise operations and the
+// filter its spatial ones, after the plate's own.
+void led_car_setup_takes_effects_and_filters_apart() {
+    std::vector<doc::Node> nodes{
+        node(100U, "scene.object"),
+        scene_layer(1U, 100U),
+        node(2U, schema::led_car_process_type),
+        node(3U, schema::output_type),
+        node(4U, schema::brightness_type, {real(schema::amount, 2.0)}),
+        node(5U, schema::blur_type, {real(schema::radius, 6.0)}),
+        node(6U, schema::saturation_type, {real(schema::amount, 0.5)}),
+        edge(20U, 1U, 0U, 2U, 0U),
+        edge(21U, 2U, 0U, 3U, 0U),
+        edge(22U, 4U, 0U, 2U, 9U),
+        edge(23U, 5U, 0U, 2U, 10U),
+        edge(24U, 6U, 0U, 1U, 0U),
+    };
+    compositor::CompositorModel model;
+    model.reset(root_of(nodes));
+    const compositor::CompositorGraph graph = model.evaluate();
+    COMPOSITOR_CHECK(graph.valid());
+    scene::Scene source{};
+    scene::MeshInstance mesh{};
+    mesh.source = doc::NodeId{100U};
+    mesh.world = scene::identity();
+    mesh.normal = scene::identity();
+    source.instances.push_back(mesh);
+    const scene::Scene applied = compositor::apply(graph, source);
+    const scene::EffectStack& effects =
+        applied.instances.front().style.effects;
+    COMPOSITOR_CHECK(effects.inline_operations.size() == 2U);
+    COMPOSITOR_CHECK(effects.inline_operations[0U].kind ==
+                     scene::EffectKind::Saturation);
+    COMPOSITOR_CHECK(effects.inline_operations[1U].kind ==
+                     scene::EffectKind::Brightness);
+    COMPOSITOR_CHECK(effects.spatial_operations.size() == 1U);
+    COMPOSITOR_CHECK(effects.spatial_operations[0U].kind ==
+                     scene::EffectKind::Blur);
+
+    // The other way round, each is refused.
+    nodes[9] = edge(22U, 4U, 0U, 2U, 10U);
+    compositor::CompositorModel crossed;
+    crossed.reset(root_of(nodes));
+    COMPOSITOR_CHECK(!crossed.evaluate().valid());
 }
 
 void duplicate_active_scene_layer_sources_are_diagnosed() {
@@ -1253,7 +1310,7 @@ void duplicate_active_scene_layer_sources_are_diagnosed() {
         node(5U, schema::composite_type),
         node(6U, schema::output_type),
         edge(10U, 1U, 0U, 3U, 0U),
-        edge(11U, 2U, 0U, 4U, 0U),
+        edge(11U, 2U, 0U, 4U, 2U),
         edge(12U, 3U, 0U, 5U, 0U, 0),
         edge(13U, 4U, 0U, 5U, 0U, 1),
         edge(14U, 5U, 0U, 6U, 0U),
@@ -1561,7 +1618,7 @@ void malformed_values_and_capacity_are_bounded() {
     const core::u32 edge_count = compositor::max_graph_edges;
     for (core::u32 index = 0U; index < edge_count; ++index) {
         edge_root = edge_root.set(
-            edge(static_cast<core::u64>(index) + 20U, 2U, 0U, 1U, 0U));
+            edge(static_cast<core::u64>(index) + 20U, 2U, 0U, 1U, 2U));
     }
     compositor::CompositorModel edges_over;
     edges_over.reset(edge_root);
@@ -1690,7 +1747,7 @@ void disconnected_scene_layers_never_modify_program() {
         owned(5U, schema::output_type, 20U),
         // No scene_id: legacy content, and therefore scene 10's.
         node(6U, schema::brightness_type, {real(schema::amount, 0.5)}),
-        edge(30U, 3U, 0U, 1U, 0U),
+        edge(30U, 3U, 0U, 1U, 2U),
         edge(31U, 1U, 0U, 2U, 0U),
         edge(32U, 4U, 0U, 5U, 0U),
     };
@@ -1742,7 +1799,7 @@ void editing_one_scene_graph_leaves_the_other_untouched() {
     edited = edited.set(
         node(33U, schema::edge_type,
              {whole(schema::from_node, 7), whole(schema::from_port, 0),
-              whole(schema::to_node, 4), whole(schema::to_port, 0)}));
+              whole(schema::to_node, 4), whole(schema::to_port, 2)}));
     model.apply(doc::diff(root, edited));
 
     const auto after = model.evaluate(doc::NodeId{10U}, doc::NodeId{10U});
@@ -1916,7 +1973,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
         node(100U, "scene.object"),
         node(1U, schema::blur_type, {real(schema::radius, 16.0)}),
         scene_layer(2U, 100U), node(3U, schema::output_type),
-        edge(10U, 1U, 0U, 2U, 0U), edge(11U, 2U, 0U, 3U, 0U)};
+        edge(10U, 1U, 0U, 2U, 2U), edge(11U, 2U, 0U, 3U, 0U)};
     const doc::Root ordinary_root = root_of(ordinary);
     compositor::CompositorModel model;
     model.reset(ordinary_root);
@@ -1965,7 +2022,7 @@ void authored_resources_are_estimated_and_budgeted_without_machine_state() {
         const core::u64 layer = 10U + index;
         expensive.push_back(node(source, "scene.object"));
         expensive.push_back(scene_layer(layer, source));
-        expensive.push_back(edge(1000U + index, 1U, 0U, layer, 0U));
+        expensive.push_back(edge(1000U + index, 1U, 0U, layer, 2U));
         expensive.push_back(edge(1100U + index, layer, 0U, 50U, 0U,
                                  static_cast<core::i64>(index)));
     }
@@ -2045,12 +2102,542 @@ void wire_points_are_layout_that_never_breaks_a_wire() {
     COMPOSITOR_CHECK(points_of(routed(crowded)).empty());
 }
 
+// Bypass passes an effect or a Radial Array through as its identity: what
+// is applied matches the graph without it, and no pass is planned for it.
+// The flag is digested, and a kind with nothing to pass through as never
+// reads as bypassed.
+void bypass_renders_as_identity_and_is_digested() {
+    const auto evaluate = [](const std::vector<doc::Node>& nodes) {
+        compositor::CompositorModel model;
+        model.reset(root_of(nodes));
+        return model.evaluate();
+    };
+    const std::vector<doc::Node> active = shared_effect_graph();
+    std::vector<doc::Node> passed = active;
+    for (doc::Node& value : passed) {
+        // Blur, Radial Array, a Scene Layer and Output.
+        if (value.id == doc::NodeId{1U} || value.id == doc::NodeId{2U} ||
+            value.id == doc::NodeId{3U} || value.id == doc::NodeId{6U}) {
+            value.properties.insert_or_assign(std::string{schema::bypassed},
+                                              doc::PropertyValue{true});
+        }
+    }
+    std::vector<doc::Node> without;
+    for (const doc::Node& value : active) {
+        const core::u64 id = value.id.value();
+        if (id != 1U && id != 2U && (id < 20U || id > 23U)) {
+            without.push_back(value);
+        }
+    }
+    const compositor::CompositorGraph on = evaluate(active);
+    const compositor::CompositorGraph off = evaluate(passed);
+    const compositor::CompositorGraph bare = evaluate(without);
+    COMPOSITOR_CHECK(on.valid() && off.valid() && bare.valid());
+    COMPOSITOR_CHECK(off.node(doc::NodeId{1U})->bypassed);
+    COMPOSITOR_CHECK(off.node(doc::NodeId{2U})->bypassed);
+    COMPOSITOR_CHECK(!off.node(doc::NodeId{3U})->bypassed);
+    COMPOSITOR_CHECK(!off.node(doc::NodeId{6U})->bypassed);
+    COMPOSITOR_CHECK(on.metadata(doc::NodeId{1U})->identity ==
+                     compositor::EffectIdentityState::Active);
+    COMPOSITOR_CHECK(off.metadata(doc::NodeId{1U})->identity ==
+                     compositor::EffectIdentityState::Identity);
+    COMPOSITOR_CHECK(on.step(doc::NodeId{1U})->requires_offscreen);
+    COMPOSITOR_CHECK(!off.step(doc::NodeId{1U})->requires_offscreen);
+    COMPOSITOR_CHECK(on.step(doc::NodeId{2U})->radial_instances.size() == 9U);
+    COMPOSITOR_CHECK(off.step(doc::NodeId{2U})->radial_instances.empty());
+    COMPOSITOR_CHECK(off.resources.blurred_scene_layers ==
+                     bare.resources.blurred_scene_layers);
+    COMPOSITOR_CHECK(compositor::digest(off) != compositor::digest(on));
+
+    scene::Scene source{};
+    scene::MeshInstance mesh{};
+    mesh.source = doc::NodeId{100U};
+    mesh.world = scene::identity();
+    mesh.normal = scene::identity();
+    source.instances.push_back(mesh);
+    scene::MediaInstance media{};
+    media.source_node = doc::NodeId{101U};
+    media.world = scene::identity();
+    media.normal = scene::identity();
+    source.media.push_back(media);
+    const scene::Scene plain = compositor::apply(bare, source);
+    const scene::Scene bypassed = compositor::apply(off, source);
+    COMPOSITOR_CHECK(bypassed.instances == plain.instances);
+    COMPOSITOR_CHECK(bypassed.media == plain.media);
+    COMPOSITOR_CHECK(compositor::apply(on, source).instances != plain.instances);
+}
+
+// A collapsed node is drawn smaller and nothing else: the flag reads back,
+// and the plan and digest are the open graph's.
+void collapse_is_layout_only() {
+    const auto graph_of = [](bool folded) {
+        doc::Node layer = scene_layer(1U, 100U);
+        if (folded) {
+            layer.properties.insert_or_assign(std::string{schema::collapsed},
+                                              doc::PropertyValue{true});
+        }
+        compositor::CompositorModel model;
+        model.reset(root_of({node(100U, "scene.object"), layer,
+                             node(2U, schema::output_type),
+                             edge(10U, 1U, 0U, 2U, 0U)}));
+        return model.evaluate();
+    };
+    const auto open = graph_of(false);
+    const auto folded = graph_of(true);
+    COMPOSITOR_CHECK(!open.node(doc::NodeId{1U})->collapsed);
+    COMPOSITOR_CHECK(folded.node(doc::NodeId{1U})->collapsed);
+    COMPOSITOR_CHECK(!folded.node(doc::NodeId{2U})->collapsed);
+    COMPOSITOR_CHECK(folded.plan == open.plan);
+    COMPOSITOR_CHECK(folded.diagnostics == open.diagnostics);
+    COMPOSITOR_CHECK(compositor::digest(folded) == compositor::digest(open));
+}
+
+// Comment boxes belong to their scene's graph like nodes, read back as
+// authored, and change nothing the graph computes. A malformed box is
+// dropped quietly.
+void comment_boxes_are_layout_in_their_scene() {
+    const auto comment = [](core::u64 id, core::i64 scene,
+                            std::vector<Property> extra) {
+        doc::Node box = node(id, schema::comment_type,
+                             {whole(schema::scene_id, scene),
+                              text(schema::label, "Plates"),
+                              real(schema::editor_x, 10.0),
+                              real(schema::editor_y, -20.0),
+                              real(schema::comment_width, 400.0),
+                              real(schema::comment_height, 240.0),
+                              whole(schema::comment_color, 3)});
+        for (Property& property : extra) {
+            box.properties.insert_or_assign(property.first, property.second);
+        }
+        return box;
+    };
+    std::vector<doc::Node> plain{stage(5U, 1920U, 1080U),
+                                 node(1U, schema::output_type,
+                                      {whole(schema::scene_id, 5)})};
+    std::vector<doc::Node> boxed = plain;
+    boxed.push_back(comment(40U, 5, {}));
+    boxed.push_back(comment(41U, 6, {}));
+    boxed.push_back(comment(42U, 5, {real(schema::comment_width, 10.0)}));
+    boxed.push_back(comment(43U, 5, {whole(schema::comment_color, 9)}));
+
+    compositor::CompositorModel without;
+    without.reset(root_of(plain));
+    compositor::CompositorModel with;
+    with.reset(root_of(boxed));
+    const auto graph = with.evaluate(doc::NodeId{5U}, doc::NodeId{5U});
+    COMPOSITOR_CHECK(graph.comments ==
+                     (std::vector<compositor::GraphComment>{
+                         {doc::NodeId{40U}, doc::NodeId{5U}, "Plates", 10.0F,
+                          -20.0F, 400.0F, 240.0F, 3U}}));
+    const auto bare = without.evaluate(doc::NodeId{5U}, doc::NodeId{5U});
+    COMPOSITOR_CHECK(graph.plan == bare.plan);
+    COMPOSITOR_CHECK(graph.diagnostics == bare.diagnostics);
+    COMPOSITOR_CHECK(graph.nodes == bare.nodes);
+    COMPOSITOR_CHECK(with.counters().nodes == without.counters().nodes);
+}
+
+// Pasting a copied selection: new ids in order, wires rewritten to the
+// copies, everything moved together, and what a graph can hold only one of
+// left behind.
+void a_paste_copies_nodes_wires_and_boxes() {
+    doc::Node routed = edge(30U, 2U, 0U, 3U, 0U);
+    routed.properties.insert_or_assign("point_0_x", doc::PropertyValue{150.0});
+    routed.properties.insert_or_assign("point_0_y", doc::PropertyValue{75.0});
+    const doc::Root root = root_of({
+        stage(5U, 1920U, 1080U),
+        node(100U, "scene.object"),
+        node(1U, schema::scene_layer_type,
+             {whole(schema::scene_id, 5), whole(schema::scene_node, 100),
+              real(schema::editor_x, 0.0), real(schema::editor_y, 0.0)}),
+        node(2U, schema::brightness_type,
+             {whole(schema::scene_id, 5), real(schema::editor_x, 100.0),
+              real(schema::editor_y, 50.0), real(schema::amount, 1.5)}),
+        node(3U, schema::composite_type,
+             {whole(schema::scene_id, 5), real(schema::editor_x, 300.0),
+              real(schema::editor_y, 80.0)}),
+        node(4U, schema::output_type,
+             {whole(schema::scene_id, 5), real(schema::editor_x, 600.0),
+              real(schema::editor_y, 80.0)}),
+        edge(20U, 1U, 0U, 3U, 0U),
+        routed,
+        edge(31U, 3U, 0U, 4U, 0U),
+        node(40U, schema::comment_type,
+             {whole(schema::scene_id, 5), real(schema::editor_x, 80.0),
+              real(schema::editor_y, 20.0), real(schema::comment_width, 300.0),
+              real(schema::comment_height, 200.0)}),
+    });
+    const std::array<doc::NodeId, 5U> chosen{
+        doc::NodeId{1U}, doc::NodeId{2U}, doc::NodeId{3U}, doc::NodeId{4U},
+        doc::NodeId{40U}};
+    const std::vector<doc::Node> snapshot =
+        compositor::snapshot_graph_selection(root, chosen);
+    // The five, and the three wires between them; nothing outside.
+    COMPOSITOR_CHECK(snapshot.size() == 8U);
+
+    const auto planned = compositor::plan_paste_graph(
+        root, snapshot, doc::NodeId{5U}, doc::NodeId{5U}, 1000.0F, 500.0F,
+        doc::NodeId{200U});
+    COMPOSITOR_CHECK(planned.has_value());
+    const compositor::GraphPastePlan& plan = planned.value();
+    // The Scene Layer's source already has one, and the graph has its
+    // Output: both stay behind, with the wires to them.
+    COMPOSITOR_CHECK(plan.skipped == 2U);
+    COMPOSITOR_CHECK(plan.remap ==
+                     (std::vector<std::pair<doc::NodeId, doc::NodeId>>{
+                         {doc::NodeId{2U}, doc::NodeId{200U}},
+                         {doc::NodeId{3U}, doc::NodeId{201U}},
+                         {doc::NodeId{30U}, doc::NodeId{202U}},
+                         {doc::NodeId{40U}, doc::NodeId{203U}}}));
+    const auto put = [&](core::u64 id) -> const doc::Node& {
+        return *std::find_if(plan.puts.begin(), plan.puts.end(),
+                             [id](const doc::Node& one) {
+                                 return one.id == doc::NodeId{id};
+                             });
+    };
+    const auto number = [](const doc::Node& one, std::string_view name) {
+        return std::get<double>(one.properties.at(std::string{name}));
+    };
+    COMPOSITOR_CHECK(number(put(200U), schema::editor_x) == 1100.0);
+    COMPOSITOR_CHECK(number(put(200U), schema::editor_y) == 550.0);
+    COMPOSITOR_CHECK(number(put(200U), schema::amount) == 1.5);
+    COMPOSITOR_CHECK(number(put(203U), schema::editor_x) == 1080.0);
+    COMPOSITOR_CHECK(std::get<std::int64_t>(put(202U).properties.at(
+                         std::string{schema::from_node})) == 200);
+    COMPOSITOR_CHECK(std::get<std::int64_t>(put(202U).properties.at(
+                         std::string{schema::to_node})) == 201);
+    COMPOSITOR_CHECK(number(put(202U), "point_0_x") == 1150.0);
+    COMPOSITOR_CHECK(number(put(202U), "point_0_y") == 575.0);
+
+    // Pasted into another scene, the Scene Layer has no rival there and
+    // comes too, owned by that scene.
+    const doc::Root other = root.set(stage(6U, 1920U, 1080U));
+    const auto elsewhere = compositor::plan_paste_graph(
+        other, snapshot, doc::NodeId{6U}, doc::NodeId{5U}, 0.0F, 0.0F,
+        doc::NodeId{200U});
+    COMPOSITOR_CHECK(elsewhere.has_value());
+    COMPOSITOR_CHECK(elsewhere.value().skipped == 1U);
+    const auto layer = std::find_if(
+        elsewhere.value().puts.begin(), elsewhere.value().puts.end(),
+        [](const doc::Node& one) { return one.type == schema::scene_layer_type; });
+    COMPOSITOR_CHECK(layer != elsewhere.value().puts.end());
+    COMPOSITOR_CHECK(std::get<std::int64_t>(layer->properties.at(
+                         std::string{schema::scene_id})) == 6);
+}
+
+// Output <- Merge 4 (BASE <- layer 2, optionally LAYERS <- layer 3), with
+// `merge` authored on the Merge node.
+[[nodiscard]] std::vector<doc::Node>
+merge_nodes(const std::vector<Property>& merge, bool wire_layers) {
+    doc::Node merged = node(4U, schema::merge_type);
+    for (const Property& property : merge) {
+        merged.properties.insert_or_assign(property.first, property.second);
+    }
+    std::vector<doc::Node> nodes{
+        stage(1000U, 1920U, 1080U), node(100U, "scene.object"),
+        node(101U, "scene.object"), scene_layer(2U, 100U),
+        scene_layer(3U, 101U), std::move(merged),
+        node(5U, schema::output_type), edge(10U, 2U, 0U, 4U, 0U),
+        edge(12U, 4U, 0U, 5U, 0U)};
+    if (wire_layers) {
+        nodes.push_back(edge(11U, 3U, 0U, 4U, 1U));
+    }
+    return nodes;
+}
+
+[[nodiscard]] compositor::CompositorGraph
+evaluate_nodes(const std::vector<doc::Node>& nodes,
+               compositor::CompositorModel* model = nullptr) {
+    compositor::CompositorModel local;
+    compositor::CompositorModel& used = model != nullptr ? *model : local;
+    used.reset(root_of(nodes));
+    return used.evaluate(doc::NodeId{1000U}, doc::NodeId{1000U});
+}
+
+void merge_is_typed_bounded_and_digested() {
+    const auto inputs = compositor::input_ports(compositor::NodeKind::Merge);
+    COMPOSITOR_CHECK(inputs.size() == 2U);
+    COMPOSITOR_CHECK(inputs[0U].name == "BASE" && inputs[0U].required &&
+                     !inputs[0U].multiple);
+    COMPOSITOR_CHECK(inputs[1U].name == "LAYERS" && !inputs[1U].required &&
+                     inputs[1U].multiple);
+    COMPOSITOR_CHECK(
+        compositor::output_ports(compositor::NodeKind::Merge).size() == 1U);
+    COMPOSITOR_CHECK(compositor::node_kind_bypassable(
+        compositor::NodeKind::Merge));
+    COMPOSITOR_CHECK(compositor::schema::is_node_type(schema::merge_type));
+
+    // Nothing authored reads as Normal at full opacity with a unit constant,
+    // and an unwired LAYERS is not a problem.
+    const auto defaults = evaluate_nodes(merge_nodes({}, false));
+    COMPOSITOR_CHECK(defaults.valid());
+    const auto* const merge = defaults.node(doc::NodeId{4U});
+    COMPOSITOR_CHECK(merge != nullptr);
+    COMPOSITOR_CHECK(std::get<compositor::MergeParameters>(merge->parameters) ==
+                     compositor::MergeParameters{});
+
+    const std::vector<Property> authored{text(schema::blend_mode, "difference"),
+                                         real(schema::opacity, 0.25),
+                                         real(schema::value, 2.5)};
+    const auto graph = evaluate_nodes(merge_nodes(authored, true));
+    COMPOSITOR_CHECK(graph.valid());
+    const auto& parameters = std::get<compositor::MergeParameters>(
+        graph.node(doc::NodeId{4U})->parameters);
+    COMPOSITOR_CHECK(parameters.blend ==
+                     compositor::MergeBlendMode::Difference);
+    COMPOSITOR_CHECK(parameters.opacity == 0.25F);
+    COMPOSITOR_CHECK(parameters.value == 2.5F);
+
+    // Each control is its own digest input.
+    const core::u64 baseline = compositor::digest(graph);
+    for (const Property& changed :
+         {text(schema::blend_mode, "darken"), real(schema::opacity, 0.5),
+          real(schema::value, 3.0)}) {
+        std::vector<Property> edited = authored;
+        for (Property& property : edited) {
+            if (property.first == changed.first) {
+                property.second = changed.second;
+            }
+        }
+        COMPOSITOR_CHECK(compositor::digest(evaluate_nodes(
+                             merge_nodes(edited, true))) != baseline);
+    }
+
+    // Out-of-range values refuse the node rather than clamp it.
+    for (const Property& invalid :
+         {text(schema::blend_mode, "burn"), real(schema::opacity, 1.5),
+          real(schema::opacity, -0.25), real(schema::value, -0.1),
+          real(schema::value, 17.0)}) {
+        compositor::CompositorModel model;
+        const auto refused =
+            evaluate_nodes(merge_nodes({invalid}, true), &model);
+        COMPOSITOR_CHECK(refused.node(doc::NodeId{4U}) == nullptr);
+        COMPOSITOR_CHECK(model.counters().rejected == 1U);
+    }
+
+    // BASE is required; LAYERS is not.
+    auto unbased = merge_nodes({}, true);
+    unbased.erase(std::find_if(unbased.begin(), unbased.end(),
+                               [](const doc::Node& one) {
+                                   return one.id == doc::NodeId{10U};
+                               }));
+    const auto missing = evaluate_nodes(unbased);
+    COMPOSITOR_CHECK(has_diagnostic(
+        missing, compositor::DiagnosticCode::MissingRequiredInput,
+        doc::NodeId{4U}));
+
+    // The constant changes nothing under Normal, at zero opacity, or when it
+    // is the blend's own identity.
+    using Blend = compositor::MergeBlendMode;
+    COMPOSITOR_CHECK(compositor::merge_constant_is_identity({Blend::Normal,
+                                                            1.0F, 5.0F}));
+    COMPOSITOR_CHECK(compositor::merge_constant_is_identity({Blend::Multiply,
+                                                            0.0F, 5.0F}));
+    COMPOSITOR_CHECK(compositor::merge_constant_is_identity({Blend::Multiply,
+                                                            1.0F, 1.0F}));
+    COMPOSITOR_CHECK(compositor::merge_constant_is_identity({Blend::Add,
+                                                            1.0F, 0.0F}));
+    COMPOSITOR_CHECK(!compositor::merge_constant_is_identity({Blend::Multiply,
+                                                             1.0F, 0.5F}));
+    COMPOSITOR_CHECK(!compositor::merge_constant_is_identity({Blend::Add,
+                                                             0.5F, 0.1F}));
+}
+
+// Output <- Background 4.
+[[nodiscard]] std::vector<doc::Node>
+background_nodes(const std::vector<Property>& background) {
+    doc::Node generated = node(4U, schema::background_type);
+    for (const Property& property : background) {
+        generated.properties.insert_or_assign(property.first, property.second);
+    }
+    return {stage(1000U, 1920U, 1080U), std::move(generated),
+            node(5U, schema::output_type), edge(12U, 4U, 0U, 5U, 0U)};
+}
+
+void background_is_typed_bounded_and_digested() {
+    COMPOSITOR_CHECK(
+        compositor::input_ports(compositor::NodeKind::Background).empty());
+    const auto outputs =
+        compositor::output_ports(compositor::NodeKind::Background);
+    COMPOSITOR_CHECK(outputs.size() == 1U &&
+                     outputs[0U].type == compositor::PortValueType::Image);
+    COMPOSITOR_CHECK(!compositor::node_kind_bypassable(
+        compositor::NodeKind::Background));
+    COMPOSITOR_CHECK(compositor::schema::is_node_type(schema::background_type));
+
+    const auto defaults = evaluate_nodes(background_nodes({}));
+    COMPOSITOR_CHECK(defaults.valid());
+    COMPOSITOR_CHECK(defaults.plan.steps.size() == 2U);
+    COMPOSITOR_CHECK(std::get<compositor::BackgroundParameters>(
+                         defaults.node(doc::NodeId{4U})->parameters) ==
+                     compositor::BackgroundParameters{});
+    COMPOSITOR_CHECK(defaults.resources.background_nodes == 1U);
+
+    const std::vector<Property> authored{
+        text(schema::background_mode, "radial"),
+        real(schema::color_a_r, 0.25), real(schema::color_a_g, 0.5),
+        real(schema::color_a_b, 0.75), real(schema::color_a_a, 1.0),
+        real(schema::color_b_r, 0.125), real(schema::color_b_g, 0.0),
+        real(schema::color_b_b, 1.0), real(schema::color_b_a, 0.5),
+        real(schema::angle_turns, 0.375), real(schema::center_x, 0.25),
+        real(schema::center_y, -0.5), real(schema::gradient_size, 2.0)};
+    const auto graph = evaluate_nodes(background_nodes(authored));
+    COMPOSITOR_CHECK(graph.valid());
+    const auto& parameters = std::get<compositor::BackgroundParameters>(
+        graph.node(doc::NodeId{4U})->parameters);
+    COMPOSITOR_CHECK(parameters.mode == compositor::BackgroundMode::Radial);
+    COMPOSITOR_CHECK(parameters.color_a ==
+                     (compositor::BackgroundColor{0.25F, 0.5F, 0.75F, 1.0F}));
+    COMPOSITOR_CHECK(parameters.color_b ==
+                     (compositor::BackgroundColor{0.125F, 0.0F, 1.0F, 0.5F}));
+    COMPOSITOR_CHECK(parameters.angle == 0.375F);
+    COMPOSITOR_CHECK(parameters.center_x == 0.25F);
+    COMPOSITOR_CHECK(parameters.center_y == -0.5F);
+    COMPOSITOR_CHECK(parameters.size == 2.0F);
+
+    const core::u64 baseline = compositor::digest(graph);
+    for (std::size_t index = 0U; index < authored.size(); ++index) {
+        std::vector<Property> edited = authored;
+        edited[index].second =
+            edited[index].first == schema::background_mode
+            ? doc::PropertyValue{std::string{"linear"}}
+            : doc::PropertyValue{
+                  std::get<double>(edited[index].second) == 0.0 ? 0.0625
+                                                                : 0.0};
+        if (edited[index].first == schema::gradient_size) {
+            edited[index].second = doc::PropertyValue{3.0};
+        }
+        COMPOSITOR_CHECK(compositor::digest(evaluate_nodes(
+                             background_nodes(edited))) != baseline);
+    }
+
+    // A Background can be a Matte's matte; a Composite cannot.
+    const auto matte_of = [](core::u64 matte_source_id,
+                             std::string_view matte_source_type) {
+        std::vector<doc::Node> nodes{
+            stage(1000U, 1920U, 1080U), node(100U, "scene.object"),
+            scene_layer(2U, 100U), node(4U, schema::matte_type),
+            node(5U, schema::output_type),
+            node(matte_source_id, matte_source_type),
+            edge(10U, 2U, 0U, 4U, 0U),
+            edge(11U, matte_source_id, 0U, 4U, 1U),
+            edge(12U, 4U, 0U, 5U, 0U)};
+        if (matte_source_type == schema::composite_type) {
+            nodes.push_back(node(101U, "scene.object"));
+            nodes.push_back(scene_layer(3U, 101U));
+            nodes.push_back(edge(13U, 3U, 0U, matte_source_id, 0U));
+        }
+        return nodes;
+    };
+    const auto generated_matte =
+        evaluate_nodes(matte_of(6U, schema::background_type));
+    COMPOSITOR_CHECK(generated_matte.valid());
+    COMPOSITOR_CHECK(generated_matte.resources.matte_nodes == 1U);
+    const auto stacked_matte =
+        evaluate_nodes(matte_of(6U, schema::composite_type));
+    COMPOSITOR_CHECK(has_diagnostic(
+        stacked_matte, compositor::DiagnosticCode::UnsupportedMatteTopology,
+        doc::NodeId{4U}));
+
+    for (const Property& invalid :
+         {text(schema::background_mode, "conic"), real(schema::color_a_r, 1.25),
+          real(schema::color_b_a, -0.5), real(schema::gradient_size, 0.0),
+          real(schema::gradient_size, 65.0), real(schema::center_x, 100.0)}) {
+        compositor::CompositorModel model;
+        const auto refused = evaluate_nodes(background_nodes({invalid}), &model);
+        COMPOSITOR_CHECK(refused.node(doc::NodeId{4U}) == nullptr);
+        COMPOSITOR_CHECK(model.counters().rejected == 1U);
+    }
+}
+
+void merges_nest_into_intermediate_images_and_are_budgeted() {
+    // Output <- Merge 4 (BASE <- Background 6, LAYERS <- layer 3).
+    std::vector<doc::Node> nodes{
+        stage(1000U, 1920U, 1080U), node(101U, "scene.object"),
+        scene_layer(3U, 101U), node(4U, schema::merge_type),
+        node(5U, schema::output_type), node(6U, schema::background_type),
+        edge(10U, 6U, 0U, 4U, 0U), edge(11U, 3U, 0U, 4U, 1U),
+        edge(12U, 4U, 0U, 5U, 0U)};
+    const auto merged = evaluate_nodes(nodes);
+    COMPOSITOR_CHECK(merged.valid());
+    COMPOSITOR_CHECK(merged.resources.merge_nodes == 1U);
+    COMPOSITOR_CHECK(merged.resources.background_nodes == 1U);
+    COMPOSITOR_CHECK(merged.resources.merge_nesting == 1U);
+    // One layer and its depth, the frame's ping-pong pair, and the Merge's.
+    COMPOSITOR_CHECK(merged.resources.offscreen_textures == 6U);
+    COMPOSITOR_CHECK(merged.resources.offscreen_texture_bytes ==
+                     1920ULL * 1080ULL * 4ULL * 6ULL);
+    // The layer's render and landing, the layer landing on BASE, the
+    // Merge landing, and the Background.
+    COMPOSITOR_CHECK(merged.resources.render_passes == 5U);
+
+    // A Composite inside a Composite is an image of its own; the outer one,
+    // feeding Output, lands its stack straight on the frame.
+    const auto nested = evaluate_nodes({
+        stage(1000U, 1920U, 1080U), node(101U, "scene.object"),
+        scene_layer(3U, 101U), node(4U, schema::composite_type),
+        node(5U, schema::output_type), node(6U, schema::composite_type),
+        edge(10U, 3U, 0U, 6U, 0U), edge(11U, 6U, 0U, 4U, 0U),
+        edge(12U, 4U, 0U, 5U, 0U)});
+    COMPOSITOR_CHECK(nested.valid());
+    COMPOSITOR_CHECK(nested.resources.merge_nesting == 1U);
+
+    // A Merge with only BASE and a Normal blend is BASE: nothing to open.
+    const auto identity = evaluate_nodes(merge_nodes({}, false));
+    COMPOSITOR_CHECK(identity.valid());
+    COMPOSITOR_CHECK(identity.resources.merge_nesting == 0U);
+    COMPOSITOR_CHECK(identity.resources.render_passes == 2U);
+
+    // Each Merge holding the next as its BASE opens one more image.
+    const auto chain = [](core::u32 merges) {
+        std::vector<doc::Node> result{
+            stage(1000U, 640U, 360U), node(100U, "scene.object"),
+            scene_layer(2U, 100U), node(5U, schema::output_type)};
+        core::u64 below = 2U;
+        for (core::u32 index = 0U; index < merges; ++index) {
+            const core::u64 merge = 20U + index;
+            result.push_back(node(merge, schema::merge_type,
+                                  {text(schema::blend_mode, "multiply"),
+                                   real(schema::value, 0.5)}));
+            result.push_back(edge(40U + index, below, 0U, merge, 0U));
+            below = merge;
+        }
+        result.push_back(edge(60U, below, 0U, 5U, 0U));
+        return result;
+    };
+    const auto deepest = evaluate_nodes(chain(compositor::max_merge_nesting));
+    COMPOSITOR_CHECK(deepest.valid());
+    COMPOSITOR_CHECK(deepest.resources.merge_nesting ==
+                     compositor::max_merge_nesting);
+    const auto too_deep =
+        evaluate_nodes(chain(compositor::max_merge_nesting + 1U));
+    COMPOSITOR_CHECK(!too_deep.valid());
+    COMPOSITOR_CHECK(has_diagnostic(
+        too_deep, compositor::DiagnosticCode::MergeNestingTooDeep,
+        doc::NodeId{5U}));
+    COMPOSITOR_CHECK(too_deep.plan.steps.empty());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 31U> cases{{
+constexpr std::array<Case, 39U> cases{{
+    {"Merge is typed, bounded and digested",
+     &merge_is_typed_bounded_and_digested},
+    {"Background is typed, bounded and digested",
+     &background_is_typed_bounded_and_digested},
+    {"Merges nest into intermediate images and are budgeted",
+     &merges_nest_into_intermediate_images_and_are_budgeted},
+    {"LED Car setup takes effects and filters apart",
+     &led_car_setup_takes_effects_and_filters_apart},
+    {"bypass renders as identity and is digested",
+     &bypass_renders_as_identity_and_is_digested},
+    {"collapse is layout only", &collapse_is_layout_only},
+    {"comment boxes are layout in their scene",
+     &comment_boxes_are_layout_in_their_scene},
+    {"a paste copies nodes, wires and boxes",
+     &a_paste_copies_nodes_wires_and_boxes},
     {"wire points are layout that never breaks a wire",
      &wire_points_are_layout_that_never_breaks_a_wire},
     {"a graph belongs to one scene", &a_graph_belongs_to_one_scene},
@@ -2085,8 +2672,8 @@ constexpr std::array<Case, 31U> cases{{
      &curves_are_typed_ordered_digested_and_replicated},
     {"Film Grain is typed ordered digested and replicated",
      &film_grain_is_typed_ordered_digested_and_replicated},
-    {"inline effects after blur are diagnosed",
-     &inline_effects_after_blur_are_diagnosed},
+    {"effects and filters take their own inputs",
+     &effects_and_filters_take_their_own_inputs},
     {"duplicate active Scene Layer sources are diagnosed",
      &duplicate_active_scene_layer_sources_are_diagnosed},
     {"shared blur and nine-angle array produce an explicit plan",

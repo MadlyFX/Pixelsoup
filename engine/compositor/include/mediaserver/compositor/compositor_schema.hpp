@@ -33,13 +33,18 @@ inline constexpr std::string_view radial_array_type = "compositor.radial_array";
 inline constexpr std::string_view led_car_process_type =
     "compositor.led_car_process";
 inline constexpr std::string_view composite_type = "compositor.composite";
+inline constexpr std::string_view merge_type = "compositor.merge";
+inline constexpr std::string_view background_type = "compositor.background";
 inline constexpr std::string_view output_type = "compositor.output";
 inline constexpr std::string_view edge_type = "compositor.edge";
+// A titled box an operator draws around part of the graph. Layout only: it
+// belongs to its scene's graph like a node but is never evaluated.
+inline constexpr std::string_view comment_type = "compositor.comment";
 
 // The document command layer uses this catalog to distinguish persistent
 // compositor nodes from unrelated document objects. Keeping the node types in
 // one place prevents a newly-added node from becoming impossible to delete.
-inline constexpr std::array<std::string_view, 20U> node_types{{
+inline constexpr std::array<std::string_view, 22U> node_types{{
     scene_layer_type,      brightness_type,
     saturation_type,       blur_type,
     levels_type,           lift_gamma_gain_type,
@@ -50,6 +55,7 @@ inline constexpr std::array<std::string_view, 20U> node_types{{
     luma_key_type,         matte_type,
     radial_array_type,     led_car_process_type,
     composite_type,        output_type,
+    merge_type,            background_type,
 }};
 
 [[nodiscard]] constexpr bool is_node_type(std::string_view type) noexcept {
@@ -217,6 +223,37 @@ inline constexpr std::string_view reflection_height = "reflection_height";
 inline constexpr std::string_view reflection_scale = "reflection_scale";
 inline constexpr std::string_view horizontal_blend = "horizontal_blend";
 
+// Merge: how LAYERS (or, with nothing wired there, `value`) lands on BASE.
+inline constexpr std::string_view blend_mode = "blend_mode";
+inline constexpr std::string_view normal_blend = "normal";
+inline constexpr std::string_view add_blend = "add";
+inline constexpr std::string_view multiply_blend = "multiply";
+inline constexpr std::string_view screen_blend = "screen";
+inline constexpr std::string_view subtract_blend = "subtract";
+inline constexpr std::string_view overlay_blend = "overlay";
+inline constexpr std::string_view lighten_blend = "lighten";
+inline constexpr std::string_view darken_blend = "darken";
+inline constexpr std::string_view difference_blend = "difference";
+inline constexpr std::string_view opacity = "opacity";
+inline constexpr std::string_view value = "value";
+
+// Background: a solid colour, or a gradient from colour A to colour B.
+// Centre is normalized authored-canvas coordinates (center_x / center_y).
+inline constexpr std::string_view background_mode = "background_mode";
+inline constexpr std::string_view solid_background = "solid";
+inline constexpr std::string_view linear_background = "linear";
+inline constexpr std::string_view radial_background = "radial";
+inline constexpr std::string_view color_a_r = "color_a_r";
+inline constexpr std::string_view color_a_g = "color_a_g";
+inline constexpr std::string_view color_a_b = "color_a_b";
+inline constexpr std::string_view color_a_a = "color_a_a";
+inline constexpr std::string_view color_b_r = "color_b_r";
+inline constexpr std::string_view color_b_g = "color_b_g";
+inline constexpr std::string_view color_b_b = "color_b_b";
+inline constexpr std::string_view color_b_a = "color_b_a";
+inline constexpr std::string_view angle_turns = "angle_turns";
+inline constexpr std::string_view gradient_size = "gradient_size";
+
 // Output normally preserves scene drawables that are not represented by an
 // Output-reachable SceneLayer. Set this explicitly to make the graph a full
 // image replacement instead of a selective layer/effect override.
@@ -230,6 +267,15 @@ inline constexpr std::string_view order = "order";
 // A wire's reroute points use the bounded indexed-property form curves use:
 // point_0_x / point_0_y, contiguous from zero.
 inline constexpr std::string_view point_prefix = "point_";
+// A comment box: its title is `label`, its top-left `editor_x`/`editor_y`.
+inline constexpr std::string_view comment_width = "width";
+inline constexpr std::string_view comment_height = "height";
+inline constexpr std::string_view comment_color = "color";
+// A node drawn as its title and connected ports only. Layout, like position.
+inline constexpr std::string_view collapsed = "collapsed";
+// A node passed through as its identity. Unlike `collapsed`, this changes the
+// picture.
+inline constexpr std::string_view bypassed = "bypassed";
 inline constexpr std::string_view point_x_suffix = "_x";
 inline constexpr std::string_view point_y_suffix = "_y";
 

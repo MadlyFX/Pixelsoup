@@ -12,6 +12,10 @@ struct ModelIngestResult final {
     core::u64 triangle_count{};
     core::u32 material_count{};
     ModelBounds bounds{};
+    // The model's textures and the largest one's base level, for the Library.
+    core::u32 texture_count{};
+    core::u32 largest_texture_width{};
+    core::u32 largest_texture_height{};
 };
 
 [[nodiscard]] ModelIngestResult ingest_model(const std::string& source);

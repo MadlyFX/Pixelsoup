@@ -126,6 +126,18 @@ struct GroupEditPlan final {
     doc::NodeId first_id,
     std::string_view name = "Group");
 
+// Authors one new, empty identity group - a folder, or another GroupKind -
+// under `parent`, or at the scene's top level without one. It lands in front
+// of its new siblings. Refused for a parent that is missing, not a group, a
+// linked Blender collection, locked, or in another scene.
+[[nodiscard]] core::Result<GroupEditPlan, GroupEditError> plan_create_group(
+    const doc::Root& root,
+    SceneId scene,
+    std::optional<doc::NodeId> parent,
+    doc::NodeId first_id,
+    std::string_view name = "Group",
+    GroupKind kind = GroupKind::Folder);
+
 // Removes one group and reparents its direct children to the old parent. Each
 // child's new local is `group local * child local`; the plan rejects animated
 // transforms or matrices that this TRS schema cannot represent (notably

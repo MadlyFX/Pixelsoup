@@ -5,6 +5,7 @@
 
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/compositor_layer_frag_dxil.h>
+#include <mediaserver/shaders/compositor_merge_frag_dxil.h>
 #include <mediaserver/shaders/depth_merge_comp_dxil.h>
 #include <mediaserver/shaders/output_vert_dxil.h>
 #endif
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <new>
 #include <optional>
@@ -415,6 +417,8 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
         case compositor::NodeKind::LedCarProcess:
         case compositor::NodeKind::Composite:
         case compositor::NodeKind::Output:
+        case compositor::NodeKind::Merge:
+        case compositor::NodeKind::Background:
             return std::nullopt;
         }
         return std::nullopt;
@@ -450,7 +454,8 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
         }
         const auto observe_graph_modifier =
             [&](const compositor::PlanConnection& input) {
-            if (input.type != compositor::PortValueType::Effect) {
+            if (input.type != compositor::PortValueType::Effect &&
+                input.type != compositor::PortValueType::Filter) {
                 return true;
             }
             const compositor::GraphNode* const modifier = graph.node(input.source);
@@ -476,11 +481,22 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
             last_domain = current;
             return true;
         };
-        for (const compositor::PlanConnection& input : step->inputs) {
-            if (!observe_graph_modifier(input)) {
-                return false;
+        // Effects are applied as the drawable is shaded and filters on the
+        // finished layer: the layer's effects and every car
+        // setup's come first, then the layer's filters and the setups'.
+        std::vector<const compositor::PlanConnection*> effects;
+        std::vector<const compositor::PlanConnection*> filters;
+        const auto gather = [&](const compositor::PlanStep& from,
+                                core::u8 effect_port, core::u8 filter_port) {
+            for (const compositor::PlanConnection& input : from.inputs) {
+                if (input.target_port == effect_port) {
+                    effects.push_back(&input);
+                } else if (input.target_port == filter_port) {
+                    filters.push_back(&input);
+                }
             }
-        }
+        };
+        gather(*step, 0U, 2U);
         for (const compositor::GraphNode& setup : graph.nodes) {
             if (setup.kind != compositor::NodeKind::LedCarProcess) {
                 continue;
@@ -504,12 +520,16 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
             if (!uses_layer) {
                 continue;
             }
-            for (const compositor::PlanConnection& input :
-                 setup_step->inputs) {
-                if (input.target_port == 9U &&
-                    !observe_graph_modifier(input)) {
-                    return false;
-                }
+            gather(*setup_step, 9U, 10U);
+        }
+        for (const compositor::PlanConnection* const input : effects) {
+            if (!observe_graph_modifier(*input)) {
+                return false;
+            }
+        }
+        for (const compositor::PlanConnection* const input : filters) {
+            if (!observe_graph_modifier(*input)) {
+                return false;
             }
         }
     }
@@ -772,7 +792,15 @@ void assign_depth_only_nodes(const scene::Scene& adjusted,
                         [source_node](const CompositorLayerPass& pass) {
                             return pass_contains(pass, source_node);
                         });
-        if (rendered) {
+        // A matted layer's coverage is whatever its matte leaves, so it has
+        // no hard silhouette to hide anything else with.
+        const bool matted =
+            std::any_of(passes.begin(), passes.end(),
+                        [source_node](const CompositorLayerPass& pass) {
+                            return pass.matte.has_value() &&
+                                pass_contains(pass, source_node);
+                        });
+        if (rendered && !matted) {
             // The candidate map is keyed by node id, so this stays ascending.
             occluders.push_back(source_node);
         }
@@ -825,6 +853,7 @@ void assign_depth_only_nodes(const scene::Scene& adjusted,
 struct ShaderBlobs final {
     std::span<const core::u8> vertex;
     std::span<const core::u8> fragment;
+    std::span<const core::u8> merge;
     rhi::ShaderFormat format{rhi::ShaderFormat::Dxil};
     bool present{};
 };
@@ -839,6 +868,10 @@ struct ShaderBlobs final {
             reinterpret_cast<const core::u8*>(
                 mediaserver_compositor_layer_frag_dxil),
             sizeof(mediaserver_compositor_layer_frag_dxil)},
+        std::span<const core::u8>{
+            reinterpret_cast<const core::u8*>(
+                mediaserver_compositor_merge_frag_dxil),
+            sizeof(mediaserver_compositor_merge_frag_dxil)},
         rhi::ShaderFormat::Dxil,
         true,
     };
@@ -917,6 +950,77 @@ static_assert(static_cast<core::u8>(scene::BlendMode::Screen) == 3U);
 bytes(const CompositeUniform& value) noexcept {
     return std::span<const core::u8>{reinterpret_cast<const core::u8*>(&value),
                                      sizeof(value)};
+}
+
+// compositor_merge.frag.hlsl: cbuffer MergeConstants, row for row.
+struct alignas(16) MergeUniform final {
+    core::u32 blend_mode{};
+    float opacity{1.0F};
+    core::u32 scene_linear{};
+    core::u32 source{};
+    core::u32 constant_blend{};
+    float constant_value{};
+    float constant_opacity{};
+    core::u32 constant_enabled{};
+    core::u32 gradient{};
+    float inv_extent{};
+    std::array<float, 2U> direction{};
+    std::array<float, 2U> center{};
+    std::array<float, 2U> canvas_origin{};
+    std::array<float, 2U> canvas_step{};
+    std::array<float, 2U> padding{};
+    std::array<float, 4U> color_a{};
+    std::array<float, 4U> color_b{};
+};
+
+static_assert(sizeof(MergeUniform) == 112U);
+static_assert(static_cast<core::u8>(compositor::MergeBlendMode::Normal) ==
+              static_cast<core::u8>(scene::BlendMode::Normal));
+static_assert(static_cast<core::u8>(compositor::MergeBlendMode::Add) ==
+              static_cast<core::u8>(scene::BlendMode::Add));
+static_assert(static_cast<core::u8>(compositor::MergeBlendMode::Multiply) ==
+              static_cast<core::u8>(scene::BlendMode::Multiply));
+static_assert(static_cast<core::u8>(compositor::MergeBlendMode::Screen) ==
+              static_cast<core::u8>(scene::BlendMode::Screen));
+
+[[nodiscard]] std::span<const core::u8>
+bytes(const MergeUniform& value) noexcept {
+    return std::span<const core::u8>{reinterpret_cast<const core::u8*>(&value),
+                                     sizeof(value)};
+}
+
+// A Background's ramp, measured in canvas pixels on the CPU with the same
+// deterministic trigonometry every node uses, so the shader only interpolates.
+void generator_uniform(const compositor::BackgroundParameters& parameters,
+                       std::array<float, 2U> extent,
+                       std::array<float, 2U> origin,
+                       std::array<float, 2U> step,
+                       MergeUniform& uniform) noexcept {
+    uniform.gradient = static_cast<core::u32>(parameters.mode);
+    uniform.canvas_origin = origin;
+    uniform.canvas_step = step;
+    uniform.center = {parameters.center_x * extent[0U],
+                      parameters.center_y * extent[1U]};
+    if (parameters.mode == compositor::BackgroundMode::Linear) {
+        const float x = scene::deterministic::cos_turns(parameters.angle);
+        const float y = scene::deterministic::sin_turns(parameters.angle);
+        // The canvas's extent along the ramp, so a size of 1 runs exactly
+        // from one edge to the opposite one.
+        const float length =
+            (std::abs(x) * extent[0U] + std::abs(y) * extent[1U]) *
+            parameters.size;
+        uniform.direction = {x, y};
+        uniform.inv_extent = length > 0.0F ? 1.0F / length : 0.0F;
+    } else if (parameters.mode == compositor::BackgroundMode::Radial) {
+        const float radius = parameters.size * 0.5F *
+            std::sqrt(extent[0U] * extent[0U] + extent[1U] * extent[1U]);
+        uniform.inv_extent = radius > 0.0F ? 1.0F / radius : 0.0F;
+    }
+    const auto color = [](const compositor::BackgroundColor& value) noexcept {
+        return std::array<float, 4U>{value.r, value.g, value.b, value.a};
+    };
+    uniform.color_a = color(parameters.color_a);
+    uniform.color_b = color(parameters.color_b);
 }
 
 using LayerPassResult =
@@ -1053,16 +1157,43 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             const compositor::GraphNode* matte_node{};
             const compositor::GraphNode* matte_source{};
         };
+        // How an image lands where it is placed. Absent, its layers land one
+        // by one with their own blends - a Composite's stack. Present, it
+        // lands as one image with this blend and opacity.
+        struct Landing final {
+            compositor::MergeBlendMode blend{
+                compositor::MergeBlendMode::Normal};
+            float opacity{1.0F};
+        };
+        // A step before the implicit pass-through stack is known: Layer
+        // indexes image_layers, Background indexes backgrounds.
+        struct TopologyStep final {
+            CompositorStepKind kind{CompositorStepKind::Layer};
+            std::size_t index{};
+            std::optional<Landing> landing;
+            std::optional<CompositorConstantBlend> constant;
+            doc::NodeId graph_node{};
+        };
         std::vector<ImageLayerTopology> image_layers;
         std::vector<const compositor::GraphNode*> layer_nodes;
+        std::vector<TopologyStep> walk;
+        std::vector<CompositorBackgroundPass> backgrounds;
+        // Sources wired into a bypassed Merge's LAYERS. They are on the
+        // Output path, so they do not pass through below it, but the bypass
+        // draws nothing of them.
+        std::vector<doc::NodeId> withheld_sources;
         std::set<doc::NodeId> group_ids;
         for (const scene::SceneGroup& group : source.groups) {
             group_ids.insert(group.node);
         }
-        const auto append_image = [&](const compositor::GraphNode& node) {
+        const auto append_image = [&](const compositor::GraphNode& node,
+                                      std::optional<Landing> landing) {
             if (node.kind == compositor::NodeKind::SceneLayer) {
                 image_layers.push_back(ImageLayerTopology{&node, {}, {}});
                 layer_nodes.push_back(&node);
+                walk.push_back(TopologyStep{
+                    CompositorStepKind::Layer, image_layers.size() - 1U,
+                    landing, {}, node.node});
                 return true;
             }
             if (node.kind != compositor::NodeKind::Matte) {
@@ -1087,34 +1218,46 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             const compositor::GraphNode* const matte_layer =
                 graph.node(matte_step->inputs[1].source);
             if (source_layer == nullptr || matte_layer == nullptr ||
-                source_layer->kind != compositor::NodeKind::SceneLayer ||
-                matte_layer->kind != compositor::NodeKind::SceneLayer) {
+                source_layer->kind != compositor::NodeKind::SceneLayer) {
                 return false;
             }
             const auto* const source_parameters =
                 std::get_if<compositor::SceneLayerParameters>(
                     &source_layer->parameters);
-            const auto* const matte_parameters =
-                std::get_if<compositor::SceneLayerParameters>(
-                    &matte_layer->parameters);
-            if (source_parameters == nullptr || matte_parameters == nullptr ||
-                source_layer->node == matte_layer->node ||
-                source_parameters->scene_node == matte_parameters->scene_node ||
-                group_ids.contains(source_parameters->scene_node) ||
-                group_ids.contains(matte_parameters->scene_node)) {
+            if (source_parameters == nullptr ||
+                group_ids.contains(source_parameters->scene_node)) {
                 return false;
+            }
+            // The matte is a second isolated Scene Layer, or a Background
+            // generated on the spot.
+            const bool generated_matte =
+                matte_layer->kind == compositor::NodeKind::Background;
+            if (!generated_matte) {
+                const auto* const matte_parameters =
+                    std::get_if<compositor::SceneLayerParameters>(
+                        &matte_layer->parameters);
+                if (matte_layer->kind != compositor::NodeKind::SceneLayer ||
+                    matte_parameters == nullptr ||
+                    source_layer->node == matte_layer->node ||
+                    source_parameters->scene_node ==
+                        matte_parameters->scene_node ||
+                    group_ids.contains(matte_parameters->scene_node)) {
+                    return false;
+                }
             }
             image_layers.push_back(
                 ImageLayerTopology{source_layer, &node, matte_layer});
             layer_nodes.push_back(source_layer);
-            layer_nodes.push_back(matte_layer);
+            if (!generated_matte) {
+                layer_nodes.push_back(matte_layer);
+            }
+            walk.push_back(TopologyStep{
+                CompositorStepKind::Layer, image_layers.size() - 1U, landing,
+                {}, node.node});
             return true;
         };
         const auto append_led_car_process =
             [&](const compositor::GraphNode& setup) {
-            if (setup.kind != compositor::NodeKind::LedCarProcess) {
-                return false;
-            }
             const compositor::PlanStep* const setup_step =
                 graph.step(setup.node);
             if (setup_step == nullptr) {
@@ -1129,7 +1272,7 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                     graph.node(input.source);
                 if (input.target_port > 8U || image == nullptr ||
                     image->kind != compositor::NodeKind::SceneLayer ||
-                    !append_image(*image)) {
+                    !append_image(*image, std::nullopt)) {
                     return false;
                 }
             }
@@ -1138,47 +1281,180 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             // invalidating the entire setup.
             return true;
         };
+        const auto image_inputs = [&](const compositor::PlanStep& step,
+                                      core::u8 port) {
+            std::vector<const compositor::GraphNode*> found;
+            for (const compositor::PlanConnection& input : step.inputs) {
+                if (input.type == compositor::PortValueType::Image &&
+                    input.target_port == port) {
+                    found.push_back(graph.node(input.source));
+                }
+            }
+            return found;
+        };
+        std::function<void(const compositor::GraphNode&)> withhold =
+            [&](const compositor::GraphNode& node) {
+            if (const auto* const layer =
+                    std::get_if<compositor::SceneLayerParameters>(
+                        &node.parameters)) {
+                withheld_sources.push_back(layer->scene_node);
+                return;
+            }
+            const compositor::PlanStep* const step = graph.step(node.node);
+            if (step == nullptr) {
+                return;
+            }
+            for (const compositor::PlanConnection& input : step->inputs) {
+                const compositor::GraphNode* const upstream =
+                    graph.node(input.source);
+                if (input.type == compositor::PortValueType::Image &&
+                    upstream != nullptr) {
+                    withhold(*upstream);
+                }
+            }
+        };
+        // Appends the steps that land `node`'s image on the open accumulator.
+        std::function<bool(const compositor::GraphNode&,
+                           std::optional<Landing>)>
+            append_tree;
+        append_tree = [&](const compositor::GraphNode& node,
+                          std::optional<Landing> landing) -> bool {
+            switch (node.kind) {
+            case compositor::NodeKind::SceneLayer:
+            case compositor::NodeKind::Matte:
+                return append_image(node, landing);
+            case compositor::NodeKind::Background: {
+                backgrounds.push_back(CompositorBackgroundPass{
+                    node.node, std::get<compositor::BackgroundParameters>(
+                                   node.parameters)});
+                walk.push_back(TopologyStep{
+                    CompositorStepKind::Background, backgrounds.size() - 1U,
+                    landing.value_or(Landing{}), {}, node.node});
+                return true;
+            }
+            case compositor::NodeKind::Composite:
+            case compositor::NodeKind::LedCarProcess: {
+                // Landing as one image, the stack is composited by itself
+                // first; otherwise its layers land straight on what is below.
+                if (landing.has_value()) {
+                    walk.push_back(TopologyStep{
+                        CompositorStepKind::BeginGroup, 0U, {}, {}, node.node});
+                }
+                if (node.kind == compositor::NodeKind::LedCarProcess) {
+                    if (!append_led_car_process(node)) {
+                        return false;
+                    }
+                } else {
+                    const compositor::PlanStep* const composite_step =
+                        graph.step(node.node);
+                    if (composite_step == nullptr ||
+                        composite_step->inputs.empty()) {
+                        return false;
+                    }
+                    for (const compositor::PlanConnection& input :
+                         composite_step->inputs) {
+                        const compositor::GraphNode* const image =
+                            graph.node(input.source);
+                        if (input.type != compositor::PortValueType::Image ||
+                            image == nullptr) {
+                            return false;
+                        }
+                        // A Composite in a Composite is an image of its own.
+                        // Spilling its layers into this stack would blend
+                        // them against everything below instead.
+                        const std::optional<Landing> nested =
+                            image->kind == compositor::NodeKind::Composite
+                            ? std::optional<Landing>{Landing{}}
+                            : std::nullopt;
+                        if (!append_tree(*image, nested)) {
+                            return false;
+                        }
+                    }
+                }
+                if (landing.has_value()) {
+                    walk.push_back(TopologyStep{
+                        CompositorStepKind::EndGroup, 0U, landing, {},
+                        node.node});
+                }
+                return true;
+            }
+            case compositor::NodeKind::Merge: {
+                const compositor::PlanStep* const merge_step =
+                    graph.step(node.node);
+                if (merge_step == nullptr) {
+                    return false;
+                }
+                const auto& parameters =
+                    std::get<compositor::MergeParameters>(node.parameters);
+                const auto bases = image_inputs(*merge_step, 0U);
+                const auto layers = image_inputs(*merge_step, 1U);
+                if (bases.size() != 1U || bases.front() == nullptr) {
+                    return false;
+                }
+                // A Merge that changes nothing is its BASE, landing as one
+                // image: no intermediate target and no extra pass.
+                if (node.bypassed ||
+                    (layers.empty() &&
+                     compositor::merge_constant_is_identity(parameters))) {
+                    if (node.bypassed) {
+                        for (const compositor::GraphNode* const layer :
+                             layers) {
+                            if (layer != nullptr) {
+                                withhold(*layer);
+                            }
+                        }
+                    }
+                    return append_tree(*bases.front(),
+                                       landing.value_or(Landing{}));
+                }
+                walk.push_back(TopologyStep{
+                    CompositorStepKind::BeginGroup, 0U, {}, {}, node.node});
+                if (!append_tree(*bases.front(), std::nullopt)) {
+                    return false;
+                }
+                for (const compositor::GraphNode* const layer : layers) {
+                    if (layer == nullptr ||
+                        !append_tree(*layer, Landing{parameters.blend,
+                                                     parameters.opacity})) {
+                        return false;
+                    }
+                }
+                TopologyStep end{CompositorStepKind::EndGroup, 0U,
+                                 landing.value_or(Landing{}), {}, node.node};
+                if (layers.empty()) {
+                    end.constant = CompositorConstantBlend{
+                        parameters.blend, parameters.value,
+                        parameters.opacity};
+                }
+                walk.push_back(end);
+                return true;
+            }
+            case compositor::NodeKind::Brightness:
+            case compositor::NodeKind::Saturation:
+            case compositor::NodeKind::Blur:
+            case compositor::NodeKind::Levels:
+            case compositor::NodeKind::LiftGammaGain:
+            case compositor::NodeKind::ContrastPivot:
+            case compositor::NodeKind::ColorMatrix:
+            case compositor::NodeKind::WhiteBalance:
+            case compositor::NodeKind::Curves:
+            case compositor::NodeKind::FilmGrain:
+            case compositor::NodeKind::BoxBlur:
+            case compositor::NodeKind::DirectionalBlur:
+            case compositor::NodeKind::ChromaKey:
+            case compositor::NodeKind::LumaKey:
+            case compositor::NodeKind::RadialArray:
+            case compositor::NodeKind::Output:
+                return false;
+            }
+            return false;
+        };
         const compositor::GraphNode* const image_source =
             graph.node(output_step->inputs.front().source);
         if (image_source == nullptr) {
             return PlanResult::failure(CompositorScenePlanError::InvalidGraph);
         }
-        if (image_source->kind == compositor::NodeKind::SceneLayer ||
-            image_source->kind == compositor::NodeKind::Matte) {
-            if (!append_image(*image_source)) {
-                return PlanResult::failure(
-                    CompositorScenePlanError::UnsupportedTopology);
-            }
-        } else if (image_source->kind == compositor::NodeKind::Composite) {
-            const compositor::PlanStep* const composite_step =
-                graph.step(image_source->node);
-            if (composite_step == nullptr || composite_step->inputs.empty()) {
-                return PlanResult::failure(
-                    CompositorScenePlanError::UnsupportedTopology);
-            }
-            image_layers.reserve(composite_step->inputs.size());
-            layer_nodes.reserve(composite_step->inputs.size() * 2U);
-            for (const compositor::PlanConnection& input :
-                 composite_step->inputs) {
-                const compositor::GraphNode* const image =
-                    graph.node(input.source);
-                if (input.type != compositor::PortValueType::Image ||
-                    image == nullptr ||
-                    (!append_image(*image) &&
-                     !append_led_car_process(*image))) {
-                    return PlanResult::failure(
-                        CompositorScenePlanError::UnsupportedTopology);
-                }
-            }
-        } else if (image_source->kind ==
-                   compositor::NodeKind::LedCarProcess) {
-            image_layers.reserve(9U);
-            layer_nodes.reserve(9U);
-            if (!append_led_car_process(*image_source)) {
-                return PlanResult::failure(
-                    CompositorScenePlanError::UnsupportedTopology);
-            }
-        } else {
+        if (!append_tree(*image_source, std::nullopt)) {
             return PlanResult::failure(
                 CompositorScenePlanError::UnsupportedTopology);
         }
@@ -1194,7 +1470,9 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
         std::set<doc::NodeId> consumed_matte_layers;
         for (const ImageLayerTopology& topology : image_layers) {
             visible_graph_layers.insert(topology.source->node);
-            if (topology.matte_source != nullptr) {
+            if (topology.matte_source != nullptr &&
+                topology.matte_source->kind ==
+                    compositor::NodeKind::SceneLayer) {
                 consumed_matte_layers.insert(topology.matte_source->node);
             }
         }
@@ -1260,20 +1538,24 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                 return PlanResult::failure(
                     CompositorScenePlanError::InconsistentLayerStyle);
             }
+            std::vector<doc::NodeId> owned = withheld_sources;
             for (const compositor::GraphNode* const layer : layer_nodes) {
-                const auto& parameters =
-                    std::get<compositor::SceneLayerParameters>(
-                        layer->parameters);
-                pass_through.erase(parameters.scene_node);
+                owned.push_back(std::get<compositor::SceneLayerParameters>(
+                                    layer->parameters)
+                                    .scene_node);
+            }
+            for (const doc::NodeId scene_node : owned) {
+                pass_through.erase(scene_node);
                 for (const scene::MediaInstance& media :
                      plan.adjusted_scene.media) {
-                    if (media.timeline_lane == parameters.scene_node) {
+                    if (media.timeline_lane == scene_node) {
                         pass_through.erase(media.source_node);
                     }
                 }
             }
             append_source_passes(pass_through, mask_programs, plan.layers);
         }
+        const std::size_t pass_through_layers = plan.layers.size();
         plan.layers.reserve(plan.layers.size() + image_layers.size());
         for (const ImageLayerTopology& topology : image_layers) {
             auto built = make_graph_layer_pass(
@@ -1283,6 +1565,18 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             }
             CompositorLayerPass pass = std::move(built).value();
             if (topology.matte_node != nullptr &&
+                topology.matte_source != nullptr &&
+                topology.matte_source->kind ==
+                    compositor::NodeKind::Background) {
+                CompositorMatteBranch branch{};
+                branch.graph_node = topology.matte_source->node;
+                branch.background =
+                    std::get<compositor::BackgroundParameters>(
+                        topology.matte_source->parameters);
+                pass.matte_branch = std::move(branch);
+                pass.matte = std::get<compositor::MatteParameters>(
+                    topology.matte_node->parameters);
+            } else if (topology.matte_node != nullptr &&
                 topology.matte_source != nullptr) {
                 auto matte_built = make_graph_layer_pass(
                     *topology.matte_source, plan.adjusted_scene,
@@ -1295,6 +1589,7 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
                 CompositorMatteBranch branch{};
                 branch.graph_node = matte_pass.graph_node;
                 branch.scene_node = matte_pass.scene_node;
+                branch.scene_nodes = std::move(matte_pass.scene_nodes);
                 branch.blur_radius_px = matte_pass.blur_radius_px;
                 branch.spatial_effects =
                     std::move(matte_pass.spatial_effects);
@@ -1305,11 +1600,82 @@ PlanResult plan_compositor_scene(const compositor::CompositorGraph& graph,
             }
             plan.layers.push_back(std::move(pass));
         }
+        // The pass-through stack lands first, each layer with its own blend,
+        // then the graph's image tree in the order it was walked.
+        const auto own_blend = [](scene::BlendMode blend) noexcept {
+            return static_cast<compositor::MergeBlendMode>(
+                static_cast<core::u8>(valid_blend(blend)));
+        };
+        plan.backgrounds = std::move(backgrounds);
+        plan.steps.reserve(plan.layers.size() + walk.size() + 2U);
+        for (std::size_t index = 0U; index < pass_through_layers; ++index) {
+            plan.steps.push_back(CompositorStep{
+                CompositorStepKind::Layer, static_cast<core::u32>(index),
+                own_blend(plan.layers[index].blend), 1.0F, {}, {}});
+        }
+        for (const TopologyStep& step : walk) {
+            switch (step.kind) {
+            case CompositorStepKind::Layer: {
+                const std::size_t index = pass_through_layers + step.index;
+                const compositor::MergeBlendMode own =
+                    own_blend(plan.layers[index].blend);
+                const auto layer = static_cast<core::u32>(index);
+                if (!step.landing.has_value()) {
+                    plan.steps.push_back(CompositorStep{
+                        CompositorStepKind::Layer, layer, own, 1.0F, {},
+                        step.graph_node});
+                } else if (own == compositor::MergeBlendMode::Normal) {
+                    plan.steps.push_back(CompositorStep{
+                        CompositorStepKind::Layer, layer, step.landing->blend,
+                        step.landing->opacity, {}, step.graph_node});
+                } else {
+                    // The drawable's own blend belongs to the layer as an
+                    // image, so it is resolved against transparency before
+                    // the Merge's blend lands it.
+                    plan.steps.push_back(CompositorStep{
+                        CompositorStepKind::BeginGroup, 0U, {}, 1.0F, {},
+                        step.graph_node});
+                    plan.steps.push_back(CompositorStep{
+                        CompositorStepKind::Layer, layer, own, 1.0F, {},
+                        step.graph_node});
+                    plan.steps.push_back(CompositorStep{
+                        CompositorStepKind::EndGroup, 0U, step.landing->blend,
+                        step.landing->opacity, {}, step.graph_node});
+                }
+                break;
+            }
+            case CompositorStepKind::Background:
+            case CompositorStepKind::EndGroup: {
+                const Landing landing = step.landing.value_or(Landing{});
+                plan.steps.push_back(CompositorStep{
+                    step.kind, static_cast<core::u32>(step.index),
+                    landing.blend, landing.opacity, step.constant,
+                    step.graph_node});
+                break;
+            }
+            case CompositorStepKind::BeginGroup:
+                plan.steps.push_back(CompositorStep{
+                    step.kind, 0U, {}, 1.0F, {}, step.graph_node});
+                break;
+            }
+        }
+        core::u32 open_groups{};
+        for (const CompositorStep& step : plan.steps) {
+            if (step.kind == CompositorStepKind::BeginGroup &&
+                ++open_groups > max_compositor_group_depth) {
+                return PlanResult::failure(
+                    CompositorScenePlanError::UnsupportedTopology);
+            }
+            if (step.kind == CompositorStepKind::EndGroup) {
+                --open_groups;
+            }
+        }
         std::size_t renderer_count = plan.layers.size();
         renderer_count += static_cast<std::size_t>(std::count_if(
             plan.layers.begin(), plan.layers.end(),
             [](const CompositorLayerPass& pass) noexcept {
-                return pass.matte_branch.has_value();
+                return pass.matte_branch.has_value() &&
+                    !pass.matte_branch->background.has_value();
             }));
         if (renderer_count > max_compositor_scene_layers) {
             return PlanResult::failure(
@@ -1368,7 +1734,8 @@ CompositorSceneExecutor::CompositorSceneExecutor(
     SpatialBlur spatial_blur, LayerKeyer keyer, MaskRaster mask_raster,
     LayerMatte matte, rhi::Texture composite_a, rhi::Texture composite_b,
     rhi::Texture output, rhi::GraphicsPipeline composite_pipeline,
-    rhi::Sampler sampler, rhi::TextureFormat working_format) noexcept
+    rhi::GraphicsPipeline merge_pipeline, rhi::Sampler sampler,
+    rhi::TextureFormat working_format) noexcept
     : device_(&device), limits_(limits),
       layer_renderers_(std::move(layer_renderers)),
       media_cache_(media_cache), blur_(std::move(blur)),
@@ -1380,6 +1747,7 @@ CompositorSceneExecutor::CompositorSceneExecutor(
       composite_b_(std::move(composite_b)),
       output_(std::move(output)),
       composite_pipeline_(std::move(composite_pipeline)),
+      merge_pipeline_(std::move(merge_pipeline)),
       sampler_(std::move(sampler)), working_format_(working_format) {}
 
 CreateResult CompositorSceneExecutor::create(rhi::Device& device,
@@ -1452,9 +1820,16 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
     auto pipeline =
         device.create_pipeline(vertex, fragment, working_format, false,
                                rhi::DepthState{});
-    if (!pipeline) {
+    rhi::ShaderDesc merge_fragment = fragment;
+    merge_fragment.bytecode = blobs.merge;
+    auto landing_pipeline =
+        device.create_pipeline(vertex, merge_fragment, working_format, false,
+                               rhi::DepthState{});
+    if (!pipeline || !landing_pipeline) {
+        const rhi::RhiError error =
+            !pipeline ? pipeline.error() : landing_pipeline.error();
         return CreateResult::failure(
-            pipeline.error() == rhi::RhiError::ShaderFormatUnsupported
+            error == rhi::RhiError::ShaderFormatUnsupported
                 ? RenderError::ShaderFormatUnsupported
                 : RenderError::BackendFailure);
     }
@@ -1474,8 +1849,8 @@ CreateResult CompositorSceneExecutor::create(rhi::Device& device,
         std::move(mask_raster).value(), std::move(matte).value(),
         std::move(composite_a).value(), std::move(composite_b).value(),
         std::move(output).value(),
-        std::move(pipeline).value(), std::move(sampler).value(),
-        working_format};
+        std::move(pipeline).value(), std::move(landing_pipeline).value(),
+        std::move(sampler).value(), working_format};
 
     // The depth merge and the scene-level effects. Absent, not failed, where
     // the device cannot run compute: a Basic-only device has no Advanced frame
@@ -1569,6 +1944,10 @@ bool CompositorSceneExecutor::reserve_padded(core::u32 width,
         matte_ = std::move(matte).value();
         composite_a_ = std::move(composite_a).value();
         composite_b_ = std::move(composite_b).value();
+        // Reallocated at the new extent the next time a Merge opens one.
+        group_targets_.clear();
+        matte_image_ = rhi::Texture{};
+        matte_blank_ = rhi::Texture{};
         output_is_a_ = true;
         // The effects follow the accumulators to the padded extent. Left at
         // the authored one, every authored atmosphere is refused on an extent
@@ -1758,6 +2137,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
     last_scene_linear_ = false;
     keyer_.reset_stats();
     mask_raster_.reset_stats();
+    matte_.reset_stats();
     if ((!view.has_value() &&
          !scene::contains(plan.adjusted_scene.canvas, slice)) ||
         !scene::valid(plan.adjusted_scene.camera)) {
@@ -1867,7 +2247,16 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             return CompositorSceneResult::failure(
                 RenderError::AllocationFailed);
         }
-        while (layer_renderers_.size() < plan.layers.size()) {
+        // One renderer per visible layer, then one per Scene Layer matte.
+        const std::size_t renderers_needed =
+            plan.layers.size() +
+            static_cast<std::size_t>(std::count_if(
+                plan.layers.begin(), plan.layers.end(),
+                [](const CompositorLayerPass& pass) noexcept {
+                    return pass.matte_branch.has_value() &&
+                        !pass.matte_branch->background.has_value();
+                }));
+        while (layer_renderers_.size() < renderers_needed) {
             // The first layer captures the complete residency scene once and
             // every following layer samples that exact capture. Constructing
             // a nested full renderer for each borrower wasted GPU memory and
@@ -2062,10 +2451,217 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         };
 
         const rhi::Texture* shared_planar = nullptr;
-        for (std::size_t layer_index = 0U; layer_index < plan.layers.size();
-             ++layer_index) {
-            const CompositorLayerPass& pass = plan.layers[layer_index];
-            HybridSceneRenderer& renderer = layer_renderers_[layer_index];
+
+        // Where a generated image's pixels sit on the canvas. A wall slice
+        // names its rectangle of the authored canvas, so every node computes
+        // the same colour for the same canvas pixel; a view-driven frame has
+        // no canvas rectangle and spans its own raster instead.
+        const scene::CanvasRect& rendered = padded.value().render;
+        const bool raster_canvas = render_view.has_value();
+        const std::array<float, 2U> canvas_extent{
+            raster_canvas ? static_cast<float>(width())
+                          : static_cast<float>(plan.adjusted_scene.canvas.width),
+            raster_canvas
+                ? static_cast<float>(height())
+                : static_cast<float>(plan.adjusted_scene.canvas.height)};
+        const std::array<float, 2U> canvas_origin{
+            raster_canvas ? -static_cast<float>(padded.value().crop.x)
+                          : static_cast<float>(rendered.x),
+            raster_canvas ? -static_cast<float>(padded.value().crop.y)
+                          : static_cast<float>(rendered.y)};
+        const std::array<float, 2U> canvas_step{
+            raster_canvas ? 1.0F
+                          : static_cast<float>(rendered.width) /
+                                static_cast<float>(padded_width()),
+            raster_canvas ? 1.0F
+                          : static_cast<float>(rendered.height) /
+                                static_cast<float>(padded_height())};
+
+        // Which spatial processors touched a layer, for the frame's stats.
+        struct FilterUse final {
+            bool gaussian{};
+            bool box{};
+            bool directional{};
+            bool chroma_key{};
+            bool luma_key{};
+            bool masked{};
+        };
+        struct FilteredLayer final {
+            const rhi::Texture* color{};
+            const rhi::Texture* depth{};
+        };
+        using FilterResult = core::Result<FilteredLayer, RenderError>;
+        // A rendered layer's ordered spatial effects, then its mask. Every
+        // processor keeps the layer's tested depth; one that does not makes
+        // the layer uncompositable and fails closed.
+        const auto filter_layer =
+            [&](FilteredLayer layer,
+                const std::vector<scene::SpatialEffectOperation>& authored,
+                float blur_radius_px,
+                const std::optional<scene::MaskProgram>& mask_program,
+                FilterUse& used) -> FilterResult {
+            std::vector<scene::SpatialEffectOperation> operations = authored;
+            if (operations.empty() && blur_radius_px > 0.0F) {
+                operations.push_back(scene::SpatialEffectOperation{
+                    scene::EffectKind::Blur, blur_radius_px, {}, {}});
+            }
+            const rhi::Texture* above = layer.color;
+            const rhi::Texture* tested_depth = layer.depth;
+            for (const scene::SpatialEffectOperation& operation : operations) {
+                switch (operation.kind) {
+                case scene::EffectKind::Blur: {
+                    used.gaussian = used.gaussian || operation.value > 0.0F;
+                    // Gaussian sample layout is a show-wide setting.
+                    auto result = blur_.apply(
+                        commands, *above, operation.value,
+                        kernel_of(plan.adjusted_scene.effect_settings));
+                    if (!result) {
+                        return FilterResult::failure(result.error());
+                    }
+                    above = result.value();
+                    break;
+                }
+                case scene::EffectKind::BoxBlur: {
+                    used.box = used.box ||
+                        !scene::box_blur_is_identity(operation.box_blur);
+                    auto result = spatial_blur_.apply_box(
+                        commands, *above,
+                        BoxBlurKernel{operation.box_blur.radius_px,
+                                      operation.box_blur.passes});
+                    if (!result) {
+                        return FilterResult::failure(result.error());
+                    }
+                    above = result.value();
+                    break;
+                }
+                case scene::EffectKind::DirectionalBlur: {
+                    used.directional = used.directional ||
+                        !scene::directional_blur_is_identity(
+                            operation.directional_blur);
+                    auto result = spatial_blur_.apply_directional(
+                        commands, *above,
+                        DirectionalBlurKernel{
+                            operation.directional_blur.length_px,
+                            operation.directional_blur.angle_turns,
+                            scene::clamped(plan.adjusted_scene.effect_settings)
+                                .directional_blur_taps});
+                    if (!result) {
+                        return FilterResult::failure(result.error());
+                    }
+                    above = result.value();
+                    break;
+                }
+                case scene::EffectKind::ChromaKey: {
+                    used.chroma_key = used.chroma_key ||
+                        !scene::chroma_key_is_identity(
+                            operation.chroma_key);
+                    ChromaKeyParameters parameters{};
+                    parameters.key_color =
+                        rhi::Color{operation.chroma_key.key_color.x,
+                                   operation.chroma_key.key_color.y,
+                                   operation.chroma_key.key_color.z, 1.0F};
+                    parameters.tolerance = operation.chroma_key.tolerance;
+                    parameters.softness = operation.chroma_key.softness;
+                    parameters.morphology_px =
+                        operation.chroma_key.morphology_px;
+                    parameters.spill_suppression =
+                        operation.chroma_key.spill_suppression;
+                    parameters.mix = operation.chroma_key.mix;
+                    auto result = keyer_.apply_chroma(
+                        commands, *above, *tested_depth, parameters);
+                    if (!result || result.value().color == nullptr ||
+                        result.value().depth != tested_depth) {
+                        return FilterResult::failure(
+                            result ? RenderError::InvalidConfiguration
+                                   : result.error());
+                    }
+                    above = result.value().color;
+                    tested_depth = result.value().depth;
+                    break;
+                }
+                case scene::EffectKind::LumaKey: {
+                    used.luma_key = used.luma_key ||
+                        !scene::luma_key_is_identity(operation.luma_key);
+                    LumaKeyParameters parameters{};
+                    parameters.low_threshold =
+                        operation.luma_key.low_threshold;
+                    parameters.high_threshold =
+                        operation.luma_key.high_threshold;
+                    parameters.low_softness =
+                        operation.luma_key.low_softness;
+                    parameters.high_softness =
+                        operation.luma_key.high_softness;
+                    parameters.invert = operation.luma_key.invert;
+                    parameters.mix = operation.luma_key.mix;
+                    auto result = keyer_.apply_luma(
+                        commands, *above, *tested_depth, parameters);
+                    if (!result || result.value().color == nullptr ||
+                        result.value().depth != tested_depth) {
+                        return FilterResult::failure(
+                            result ? RenderError::InvalidConfiguration
+                                   : result.error());
+                    }
+                    above = result.value().color;
+                    tested_depth = result.value().depth;
+                    break;
+                }
+                case scene::EffectKind::Brightness:
+                case scene::EffectKind::Saturation:
+                case scene::EffectKind::Levels:
+                case scene::EffectKind::LiftGammaGain:
+                case scene::EffectKind::ContrastPivot:
+                case scene::EffectKind::ColorMatrix:
+                case scene::EffectKind::WhiteBalance:
+                case scene::EffectKind::Curves:
+                case scene::EffectKind::FilmGrain:
+                case scene::EffectKind::Count:
+                    return FilterResult::failure(
+                        RenderError::InvalidConfiguration);
+                }
+            }
+            // A layer mask owns final layer coverage, after the drawable's
+            // complete ordered effect stack. This preserves the ordinary
+            // editorial expectation that blur/key output is clipped by the
+            // layer mask rather than letting a later blur leak outside it.
+            if (mask_program.has_value()) {
+                const scene::MaskProgram& program = *mask_program;
+                used.masked = !mask_program_is_identity(program);
+                const auto mapping = source_layer_mapping(
+                    plan.adjusted_scene, program.target,
+                    render_view.has_value() ? &*render_view : nullptr,
+                    padded.value(), padded_width(), padded_height());
+                if (!mapping.has_value()) {
+                    // A volume or imported model has no one surface for the
+                    // mask's coordinates to name, so there is nowhere
+                    // honest to put it.
+                    static_cast<void>(core::report_idle_once(
+                        "layer mask",
+                        "masked layer has no source plane; masks need a "
+                        "quad or plane"));
+                    return FilterResult::failure(
+                        RenderError::CapabilityUnsupported);
+                }
+                auto result = mask_raster_.apply(
+                    commands, *above, *tested_depth, program, *mapping);
+                if (!result || result.value().color == nullptr ||
+                    result.value().depth != tested_depth) {
+                    return FilterResult::failure(
+                        result ? RenderError::InvalidConfiguration
+                               : result.error());
+                }
+                above = result.value().color;
+                tested_depth = result.value().depth;
+            }
+            return FilterResult::success(FilteredLayer{above, tested_depth});
+        };
+
+        // A layer's isolated render: the renderer's published colour and its
+        // tested depth. Readiness from every renderer holds presentation, and
+        // every renderer must have chosen the same backend.
+        const auto render_isolated =
+            [&](std::size_t renderer_index, const CompositorLayerPass& pass,
+                bool seeds_frame) -> FilterResult {
+            HybridSceneRenderer& renderer = layer_renderers_[renderer_index];
             scene::Scene layer = isolate(plan.adjusted_scene, pass);
             SceneRenderOptions options{};
             options.transparent_background = true;
@@ -2097,28 +2693,21 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 // A refusal's reason travels with it, so the operator is told
                 // why the frame stopped rather than that it did.
                 last_passes_ = renderer.last_products().passes;
-                return CompositorSceneResult::failure(
+                return FilterResult::failure(
                     last_readiness_.satisfied
                         ? RenderError::BackendFailure
                         : RenderError::CapabilityUnsupported);
             }
             if (!shared_planar) shared_planar = renderer.planar_target();
             const RenderProducts& products = renderer.last_products();
-            if (advanced && motion_authored) {
-                const bool still = coverage_processed(pass);
-                if (!products.object_velocity
-                    || !motion_blur_->merge(commands, *products.object_velocity, still))
-                    return refuse_motion("visible object motion could not be combined");
-                still_layers += still ? 1U : 0U;
-            }
-            if (layer_index == 0U) {
+            if (seeds_frame) {
                 last_readiness_ = products.readiness;
                 last_passes_ = products.passes;
                 last_scene_linear_ = products.scene_linear;
             } else if (products.scene_linear != last_scene_linear_ ||
                        products.readiness.selected !=
                            last_readiness_.selected) {
-                return CompositorSceneResult::failure(
+                return FilterResult::failure(
                     RenderError::InvalidConfiguration);
             }
             // Every layer owns its uploads. A later layer still loading must
@@ -2136,20 +2725,6 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
                 last_passes_.geometry.texture_streaming.state =
                     products.passes.geometry.texture_streaming.state;
             }
-            if (merge_depth) {
-                // The nearest surface so far, folded in as each layer lands.
-                if (products.depth == nullptr
-                    || !merge_layer_depth(*products.depth)) {
-                    if (dof_requested) return refuse_dof("plate scene depth is unavailable");
-                    return refuse_fog(fog_refusal_depth);
-                }
-            }
-            std::vector<scene::SpatialEffectOperation> operations =
-                pass.spatial_effects;
-            if (operations.empty() && pass.blur_radius_px > 0.0F) {
-                operations.push_back(scene::SpatialEffectOperation{
-                    scene::EffectKind::Blur, pass.blur_radius_px, {}, {}});
-            }
             // The *published* colour, not the renderer's own target.
             //
             // `target()` is the raw scene target - what the geometry pass drew,
@@ -2159,160 +2734,160 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             // three: an authored bloom at full strength changed nothing on
             // screen, and neither did antialiasing, because the frame the
             // compositor picked up was the one from before any of them ran.
-            const rhi::Texture* above =
-                products.color != nullptr ? products.color : &renderer.target();
+            return FilterResult::success(FilteredLayer{
+                products.color != nullptr ? products.color : &renderer.target(),
+                &renderer.depth_target()});
+        };
 
-            const rhi::Texture* tested_depth = &renderer.depth_target();
-            bool gaussian_layer{};
-            bool box_layer{};
-            bool directional_layer{};
-            bool chroma_key_layer{};
-            bool luma_key_layer{};
-            bool masked_layer{};
-            for (const scene::SpatialEffectOperation& operation : operations) {
-                switch (operation.kind) {
-                case scene::EffectKind::Blur: {
-                    gaussian_layer = gaussian_layer || operation.value > 0.0F;
-                    // Gaussian sample layout is a show-wide setting.
-                    auto result = blur_.apply(
-                        commands, *above, operation.value,
-                        kernel_of(plan.adjusted_scene.effect_settings));
-                    if (!result) {
-                        return CompositorSceneResult::failure(result.error());
-                    }
-                    above = result.value();
-                    break;
-                }
-                case scene::EffectKind::BoxBlur: {
-                    box_layer = box_layer ||
-                        !scene::box_blur_is_identity(operation.box_blur);
-                    auto result = spatial_blur_.apply_box(
-                        commands, *above,
-                        BoxBlurKernel{operation.box_blur.radius_px,
-                                      operation.box_blur.passes});
-                    if (!result) {
-                        return CompositorSceneResult::failure(result.error());
-                    }
-                    above = result.value();
-                    break;
-                }
-                case scene::EffectKind::DirectionalBlur: {
-                    directional_layer = directional_layer ||
-                        !scene::directional_blur_is_identity(
-                            operation.directional_blur);
-                    auto result = spatial_blur_.apply_directional(
-                        commands, *above,
-                        DirectionalBlurKernel{
-                            operation.directional_blur.length_px,
-                            operation.directional_blur.angle_turns,
-                            scene::clamped(plan.adjusted_scene.effect_settings)
-                                .directional_blur_taps});
-                    if (!result) {
-                        return CompositorSceneResult::failure(result.error());
-                    }
-                    above = result.value();
-                    break;
-                }
-                case scene::EffectKind::ChromaKey: {
-                    chroma_key_layer = chroma_key_layer ||
-                        !scene::chroma_key_is_identity(
-                            operation.chroma_key);
-                    ChromaKeyParameters parameters{};
-                    parameters.key_color =
-                        rhi::Color{operation.chroma_key.key_color.x,
-                                   operation.chroma_key.key_color.y,
-                                   operation.chroma_key.key_color.z, 1.0F};
-                    parameters.tolerance = operation.chroma_key.tolerance;
-                    parameters.softness = operation.chroma_key.softness;
-                    parameters.morphology_px =
-                        operation.chroma_key.morphology_px;
-                    parameters.spill_suppression =
-                        operation.chroma_key.spill_suppression;
-                    parameters.mix = operation.chroma_key.mix;
-                    auto result = keyer_.apply_chroma(
-                        commands, *above, *tested_depth, parameters);
-                    if (!result || result.value().color == nullptr ||
-                        result.value().depth != tested_depth) {
-                        return CompositorSceneResult::failure(
-                            result ? RenderError::InvalidConfiguration
-                                   : result.error());
-                    }
-                    above = result.value().color;
-                    tested_depth = result.value().depth;
-                    break;
-                }
-                case scene::EffectKind::LumaKey: {
-                    luma_key_layer = luma_key_layer ||
-                        !scene::luma_key_is_identity(operation.luma_key);
-                    LumaKeyParameters parameters{};
-                    parameters.low_threshold =
-                        operation.luma_key.low_threshold;
-                    parameters.high_threshold =
-                        operation.luma_key.high_threshold;
-                    parameters.low_softness =
-                        operation.luma_key.low_softness;
-                    parameters.high_softness =
-                        operation.luma_key.high_softness;
-                    parameters.invert = operation.luma_key.invert;
-                    parameters.mix = operation.luma_key.mix;
-                    auto result = keyer_.apply_luma(
-                        commands, *above, *tested_depth, parameters);
-                    if (!result || result.value().color == nullptr ||
-                        result.value().depth != tested_depth) {
-                        return CompositorSceneResult::failure(
-                            result ? RenderError::InvalidConfiguration
-                                   : result.error());
-                    }
-                    above = result.value().color;
-                    tested_depth = result.value().depth;
-                    break;
-                }
-                case scene::EffectKind::Brightness:
-                case scene::EffectKind::Saturation:
-                case scene::EffectKind::Levels:
-                case scene::EffectKind::LiftGammaGain:
-                case scene::EffectKind::ContrastPivot:
-                case scene::EffectKind::ColorMatrix:
-                case scene::EffectKind::WhiteBalance:
-                case scene::EffectKind::Curves:
-                case scene::EffectKind::FilmGrain:
-                case scene::EffectKind::Count:
-                    return CompositorSceneResult::failure(
-                        RenderError::InvalidConfiguration);
+        // The renderer each Scene Layer matte branch draws with: the ones
+        // after every visible layer's, in layer order.
+        std::vector<std::size_t> matte_renderers(plan.layers.size(),
+                                                 plan.layers.size());
+        {
+            std::size_t next = plan.layers.size();
+            for (std::size_t index = 0U; index < plan.layers.size(); ++index) {
+                const auto& branch = plan.layers[index].matte_branch;
+                if (branch.has_value() && !branch->background.has_value()) {
+                    matte_renderers[index] = next++;
                 }
             }
-            // A layer mask owns final layer coverage, after the drawable's
-            // complete ordered effect stack. This preserves the ordinary
-            // editorial expectation that blur/key output is clipped by the
-            // layer mask rather than letting a later blur leak outside it.
-            if (pass.mask_program.has_value()) {
-                const scene::MaskProgram& program = *pass.mask_program;
-                masked_layer = !mask_program_is_identity(program);
-                const auto mapping = source_layer_mapping(
-                    plan.adjusted_scene, program.target,
-                    render_view.has_value() ? &*render_view : nullptr,
-                    padded.value(), padded_width(), padded_height());
-                if (!mapping.has_value()) {
-                    // A volume or imported model has no one surface for the
-                    // mask's coordinates to name, so there is nowhere
-                    // honest to put it.
-                    static_cast<void>(core::report_idle_once(
-                        "layer mask",
-                        "masked layer has no source plane; masks need a "
-                        "quad or plane"));
-                    return CompositorSceneResult::failure(
-                        RenderError::CapabilityUnsupported);
+            if (next > layer_renderers_.size()) {
+                return CompositorSceneResult::failure(
+                    RenderError::InvalidConfiguration);
+            }
+        }
+        // A Matte's coverage image, finished into matte_image_ before the
+        // source is filtered: the filters' own targets are shared, and the
+        // source's would otherwise overwrite it.
+        const auto render_matte = [&](std::size_t layer_index)
+            -> CompositorSceneResult {
+            const CompositorMatteBranch& branch =
+                *plan.layers[layer_index].matte_branch;
+            for (rhi::Texture* target : {&matte_image_, &matte_blank_}) {
+                if (!*target || target->width() != padded_width() ||
+                    target->height() != padded_height()) {
+                    auto created = device_->create_texture(color_desc(
+                        padded_width(), padded_height(), working_format_));
+                    if (!created) {
+                        return CompositorSceneResult::failure(
+                            RenderError::AllocationFailed);
+                    }
+                    *target = std::move(created).value();
                 }
-                auto result = mask_raster_.apply(
-                    commands, *above, *tested_depth, program, *mapping);
-                if (!result || result.value().color == nullptr ||
-                    result.value().depth != tested_depth) {
+            }
+            if (branch.background.has_value()) {
+                // Generated over transparency, it is exactly the Background.
+                if (!graph_.clear(commands, core::RenderPass::Composite,
+                                  matte_blank_,
+                                  rhi::Color{0.0F, 0.0F, 0.0F, 0.0F})) {
                     return CompositorSceneResult::failure(
-                        result ? RenderError::InvalidConfiguration
-                               : result.error());
+                        RenderError::BackendFailure);
                 }
-                above = result.value().color;
-                tested_depth = result.value().depth;
+                MergeUniform uniform{};
+                uniform.scene_linear = last_scene_linear_ ? 1U : 0U;
+                uniform.source = 1U;
+                generator_uniform(*branch.background, canvas_extent,
+                                  canvas_origin, canvas_step, uniform);
+                const std::array<rhi::SampledTexture, 2U> inputs{{
+                    rhi::SampledTexture{&matte_blank_, &sampler_},
+                    rhi::SampledTexture{&matte_blank_, &sampler_},
+                }};
+                if (!graph_.fullscreen(commands, core::RenderPass::Composite,
+                                       matte_image_,
+                                       rhi::Color{0.0F, 0.0F, 0.0F, 0.0F},
+                                       merge_pipeline_, inputs,
+                                       bytes(uniform))) {
+                    return CompositorSceneResult::failure(
+                        RenderError::BackendFailure);
+                }
+                ++stats_.background_passes;
+                return CompositorSceneResult::success(&matte_image_);
+            }
+            CompositorLayerPass matte_pass{};
+            matte_pass.graph_node = branch.graph_node;
+            matte_pass.scene_node = branch.scene_node;
+            matte_pass.scene_nodes = branch.scene_nodes;
+            auto rendered_matte = render_isolated(
+                matte_renderers[layer_index], matte_pass, false);
+            if (!rendered_matte) {
+                return CompositorSceneResult::failure(rendered_matte.error());
+            }
+            FilterUse unused{};
+            auto filtered = filter_layer(
+                rendered_matte.value(), branch.spatial_effects,
+                branch.blur_radius_px, branch.mask_program, unused);
+            if (!filtered) {
+                return CompositorSceneResult::failure(filtered.error());
+            }
+            if (!graph_.copy(commands, core::RenderPass::Composite,
+                             *filtered.value().color,
+                             rhi::ViewportRect{0U, 0U, padded_width(),
+                                               padded_height()},
+                             matte_image_)) {
+                return CompositorSceneResult::failure(
+                    RenderError::BackendFailure);
+            }
+            return CompositorSceneResult::success(&matte_image_);
+        };
+
+        // Renders plan.layers[layer_index] in isolation and runs its spatial
+        // effects, mask and Matte: the image that lands on the accumulator.
+        const auto render_layer =
+            [&](std::size_t layer_index) -> CompositorSceneResult {
+            const CompositorLayerPass& pass = plan.layers[layer_index];
+            const rhi::Texture* matte_image{};
+            if (pass.matte.has_value() && pass.matte_branch.has_value()) {
+                auto matte = render_matte(layer_index);
+                if (!matte) {
+                    return matte;
+                }
+                matte_image = matte.value();
+            }
+            auto rendered_layer =
+                render_isolated(layer_index, pass, layer_index == 0U);
+            if (!rendered_layer) {
+                return CompositorSceneResult::failure(rendered_layer.error());
+            }
+            const RenderProducts& products =
+                layer_renderers_[layer_index].last_products();
+            if (advanced && motion_authored) {
+                const bool still = coverage_processed(pass);
+                if (!products.object_velocity
+                    || !motion_blur_->merge(commands, *products.object_velocity, still))
+                    return refuse_motion("visible object motion could not be combined");
+                still_layers += still ? 1U : 0U;
+            }
+            if (merge_depth) {
+                // The nearest surface so far, folded in as each layer lands.
+                if (products.depth == nullptr
+                    || !merge_layer_depth(*products.depth)) {
+                    if (dof_requested) return refuse_dof("plate scene depth is unavailable");
+                    return refuse_fog(fog_refusal_depth);
+                }
+            }
+            FilterUse used{};
+            auto filtered =
+                filter_layer(rendered_layer.value(), pass.spatial_effects,
+                             pass.blur_radius_px, pass.mask_program, used);
+            if (!filtered) {
+                return CompositorSceneResult::failure(filtered.error());
+            }
+            const rhi::Texture* above = filtered.value().color;
+            const rhi::Texture* tested_depth = filtered.value().depth;
+            // The Matte is the layer's last word on coverage, after its own
+            // filters and mask. It keeps the source's tested depth; the matte
+            // branch's depth was never part of it.
+            if (matte_image != nullptr) {
+                auto matted = matte_.apply(commands, *above, *tested_depth,
+                                           *matte_image, *pass.matte);
+                if (!matted || matted.value().color == nullptr ||
+                    matted.value().depth != tested_depth) {
+                    return CompositorSceneResult::failure(
+                        matted ? RenderError::InvalidConfiguration
+                               : matted.error());
+                }
+                above = matted.value().color;
+                ++stats_.matted_layers;
             }
             // The isolated colour was already tested against this exact depth
             // target while SceneRenderer produced it (including depth-only
@@ -2320,46 +2895,205 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             // card depth or re-test filtered coverage, but it does consume the
             // pair's provenance here: a processor that substitutes or drops
             // tested depth makes the layer uncompositable and fails closed.
-            if (tested_depth != &renderer.depth_target()) {
+            if (tested_depth != &layer_renderers_[layer_index].depth_target()) {
                 return CompositorSceneResult::failure(
                     RenderError::InvalidConfiguration);
             }
-            rhi::Texture& destination =
-                accumulator == &composite_a_ ? composite_b_ : composite_a_;
-            const std::array<rhi::SampledTexture, 2U> inputs{{
-                rhi::SampledTexture{accumulator, &sampler_},
-                rhi::SampledTexture{above, &sampler_},
-            }};
-            const CompositeUniform uniform{
-                static_cast<float>(static_cast<core::u8>(pass.blend)), {last_scene_linear_ ? 1.0F : 0.0F, 0.0F, 0.0F}};
-            if (!graph_.fullscreen(commands, core::RenderPass::Composite,
-                    destination, rhi::Color{0.0F, 0.0F, 0.0F, 0.0F},
-                    composite_pipeline_, inputs, bytes(uniform))) {
-                return CompositorSceneResult::failure(
-                    RenderError::BackendFailure);
-            }
-            accumulator = &destination;
             ++stats_.layers;
-            ++stats_.composite_passes;
-            if (gaussian_layer) {
+            if (used.gaussian) {
                 ++stats_.blurred_layers;
             }
-            if (box_layer) {
+            if (used.box) {
                 ++stats_.box_blurred_layers;
             }
-            if (directional_layer) {
+            if (used.directional) {
                 ++stats_.directional_blurred_layers;
             }
-            if (chroma_key_layer) {
+            if (used.chroma_key) {
                 ++stats_.chroma_keyed_layers;
             }
-            if (luma_key_layer) {
+            if (used.luma_key) {
                 ++stats_.luma_keyed_layers;
             }
-            if (masked_layer) {
+            if (used.masked) {
                 ++stats_.masked_layers;
             }
+            return CompositorSceneResult::success(above);
+        };
+
+        // The accumulator each open group lands on, the frame's own first.
+        struct Level final {
+            rhi::Texture* a{};
+            rhi::Texture* b{};
+            const rhi::Texture* accumulator{};
+        };
+        std::array<Level, max_compositor_group_depth + 1U> levels{};
+        levels[0U] = Level{&composite_a_, &composite_b_, accumulator};
+        std::size_t depth{};
+        // Lands one image on the open accumulator: a texture, or a Background
+        // generated in the same pass.
+        const auto land = [&](const rhi::Texture* above,
+                              const CompositorBackgroundPass* background,
+                              compositor::MergeBlendMode blend, float opacity,
+                              const std::optional<CompositorConstantBlend>&
+                                  constant) {
+            Level& level = levels[depth];
+            rhi::Texture& destination =
+                level.accumulator == level.a ? *level.b : *level.a;
+            // A Background reads nothing; the accumulator stands in for the
+            // texture it does not sample.
+            const rhi::Texture* const sampled =
+                background != nullptr ? level.accumulator : above;
+            const std::array<rhi::SampledTexture, 2U> inputs{{
+                rhi::SampledTexture{level.accumulator, &sampler_},
+                rhi::SampledTexture{sampled, &sampler_},
+            }};
+            bool recorded{};
+            if (background == nullptr && !constant.has_value() &&
+                opacity == 1.0F &&
+                static_cast<core::u8>(blend) <=
+                    static_cast<core::u8>(compositor::MergeBlendMode::Screen)) {
+                const CompositeUniform uniform{
+                    static_cast<float>(static_cast<core::u8>(blend)),
+                    {last_scene_linear_ ? 1.0F : 0.0F, 0.0F, 0.0F}};
+                recorded = graph_.fullscreen(
+                    commands, core::RenderPass::Composite, destination,
+                    rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, composite_pipeline_,
+                    inputs, bytes(uniform));
+            } else {
+                MergeUniform uniform{};
+                uniform.blend_mode = static_cast<core::u32>(blend);
+                uniform.opacity = std::clamp(opacity, 0.0F, 1.0F);
+                uniform.scene_linear = last_scene_linear_ ? 1U : 0U;
+                if (constant.has_value()) {
+                    uniform.constant_enabled = 1U;
+                    uniform.constant_blend =
+                        static_cast<core::u32>(constant->blend);
+                    uniform.constant_value = constant->value;
+                    uniform.constant_opacity =
+                        std::clamp(constant->opacity, 0.0F, 1.0F);
+                }
+                if (background != nullptr) {
+                    uniform.source = 1U;
+                    generator_uniform(background->parameters, canvas_extent,
+                                      canvas_origin, canvas_step, uniform);
+                }
+                recorded = graph_.fullscreen(
+                    commands, core::RenderPass::Composite, destination,
+                    rhi::Color{0.0F, 0.0F, 0.0F, 0.0F}, merge_pipeline_,
+                    inputs, bytes(uniform));
+            }
+            if (!recorded) {
+                return false;
+            }
+            level.accumulator = &destination;
+            ++stats_.composite_passes;
+            return true;
+        };
+
+        std::vector<CompositorStep> scene_steps;
+        if (plan.steps.empty()) {
+            scene_steps.reserve(plan.layers.size());
+            for (std::size_t index = 0U; index < plan.layers.size(); ++index) {
+                scene_steps.push_back(CompositorStep{
+                    CompositorStepKind::Layer, static_cast<core::u32>(index),
+                    static_cast<compositor::MergeBlendMode>(
+                        static_cast<core::u8>(
+                            valid_blend(plan.layers[index].blend))),
+                    1.0F, {}, {}});
+            }
         }
+        const std::vector<CompositorStep>& steps =
+            plan.steps.empty() ? scene_steps : plan.steps;
+        std::size_t next_layer{};
+        for (const CompositorStep& step : steps) {
+            switch (step.kind) {
+            case CompositorStepKind::Layer: {
+                // Renderers are bound to layers by index and the first one
+                // seeds the frame's readiness, so layers render in order.
+                if (step.index != next_layer ||
+                    step.index >= plan.layers.size()) {
+                    return CompositorSceneResult::failure(
+                        RenderError::InvalidConfiguration);
+                }
+                ++next_layer;
+                auto image = render_layer(step.index);
+                if (!image) {
+                    return image;
+                }
+                if (!land(image.value(), nullptr, step.blend, step.opacity,
+                          std::nullopt)) {
+                    return CompositorSceneResult::failure(
+                        RenderError::BackendFailure);
+                }
+                break;
+            }
+            case CompositorStepKind::Background: {
+                if (step.index >= plan.backgrounds.size()) {
+                    return CompositorSceneResult::failure(
+                        RenderError::InvalidConfiguration);
+                }
+                if (!land(nullptr, &plan.backgrounds[step.index], step.blend,
+                          step.opacity, std::nullopt)) {
+                    return CompositorSceneResult::failure(
+                        RenderError::BackendFailure);
+                }
+                ++stats_.background_passes;
+                break;
+            }
+            case CompositorStepKind::BeginGroup: {
+                if (depth >= max_compositor_group_depth) {
+                    return CompositorSceneResult::failure(
+                        RenderError::InvalidConfiguration);
+                }
+                // Reserved once, so the level pointers below never move.
+                group_targets_.reserve(2U * max_compositor_group_depth);
+                while (group_targets_.size() < 2U * (depth + 1U)) {
+                    auto target = device_->create_texture(color_desc(
+                        padded_width(), padded_height(), working_format_));
+                    if (!target) {
+                        return CompositorSceneResult::failure(
+                            RenderError::AllocationFailed);
+                    }
+                    group_targets_.push_back(std::move(target).value());
+                }
+                ++depth;
+                Level& level = levels[depth];
+                level.a = &group_targets_[2U * (depth - 1U)];
+                level.b = &group_targets_[2U * (depth - 1U) + 1U];
+                level.accumulator = level.a;
+                if (!graph_.clear(commands, core::RenderPass::Composite,
+                                  *level.a,
+                                  rhi::Color{0.0F, 0.0F, 0.0F, 0.0F})) {
+                    return CompositorSceneResult::failure(
+                        RenderError::BackendFailure);
+                }
+                ++stats_.merge_groups;
+                stats_.group_depth = std::max(
+                    stats_.group_depth, static_cast<core::u32>(depth));
+                break;
+            }
+            case CompositorStepKind::EndGroup: {
+                if (depth == 0U) {
+                    return CompositorSceneResult::failure(
+                        RenderError::InvalidConfiguration);
+                }
+                const rhi::Texture* const group = levels[depth].accumulator;
+                --depth;
+                if (!land(group, nullptr, step.blend, step.opacity,
+                          step.constant)) {
+                    return CompositorSceneResult::failure(
+                        RenderError::BackendFailure);
+                }
+                break;
+            }
+            }
+        }
+        if (depth != 0U || next_layer != plan.layers.size()) {
+            return CompositorSceneResult::failure(
+                RenderError::InvalidConfiguration);
+        }
+        accumulator = levels[0U].accumulator;
         // Atmosphere over the whole composite - sky and every layer alike -
         // resolved against the nearest surface any layer drew, then bloom
         // over that. Both at the padded extent, before the crop, in linear
@@ -2469,6 +3203,8 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         stats_.keyer_pixels = keyer_.stats().processed_pixels;
         stats_.mask_passes = mask_raster_.stats().recorded_passes;
         stats_.mask_pixels = mask_raster_.stats().processed_pixels;
+        stats_.matte_passes = matte_.stats().recorded_passes;
+        stats_.matte_pixels = matte_.stats().processed_pixels;
         output_is_a_ = accumulator == &composite_a_;
         // The one crop, after the last pass that reads a neighbouring pixel.
         // Cropping earlier would hand the next such pass a boundary again,

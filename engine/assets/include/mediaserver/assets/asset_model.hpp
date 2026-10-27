@@ -43,6 +43,7 @@ class AssetModel final {
     // (kind, source) wins deterministic regardless of checkpoint/delta
     // arrival order.
     std::map<doc::NodeId, Asset> entries_;
+    std::map<doc::NodeId, AssetFolder> folders_;
     AssetCounters counters_{};
 
     void put(const doc::Node& node);

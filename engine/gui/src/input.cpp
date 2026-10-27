@@ -1,5 +1,7 @@
 #include <mediaserver/gui/input.hpp>
 
+#include <utility>
+
 namespace mediaserver::gui {
 
 void InputState::new_frame() noexcept {
@@ -13,6 +15,19 @@ void InputState::new_frame() noexcept {
     motion_y_ = 0.0F;
     text_.clear();
     keys_.clear();
+    dropped_files_.clear();
+}
+
+void InputState::set_file_drag(bool over, float x, float y) noexcept {
+    file_drag_ = over;
+    file_drag_x_ = x;
+    file_drag_y_ = y;
+}
+
+void InputState::add_dropped_file(std::string path, float x, float y) {
+    dropped_files_.push_back(std::move(path));
+    drop_x_ = x;
+    drop_y_ = y;
 }
 
 void InputState::set_mouse_position(float x, float y) noexcept {

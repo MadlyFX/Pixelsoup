@@ -394,6 +394,7 @@ private:
         Vec3 scale{1.0F, 1.0F, 1.0F};
         bool locked{};
         bool visible{true};
+        GroupKind kind{GroupKind::Folder};
     };
 
     struct SettingsEntry final {

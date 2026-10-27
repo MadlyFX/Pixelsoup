@@ -7,6 +7,7 @@
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/derivative.hpp>
+#include <mediaserver/assets/library_edit.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/node.hpp>
@@ -30,7 +31,8 @@ namespace mediaserver::app {
 group_edit_error_message(editor::GroupEditAction action,
                          scene::GroupEditError error) {
     const std::string operation =
-        action == editor::GroupEditAction::Group     ? "GROUP"
+        action == editor::GroupEditAction::Group      ? "GROUP"
+        : action == editor::GroupEditAction::Create   ? "NEW GROUP"
         : action == editor::GroupEditAction::MoveInto ? "MOVE"
                                                       : "UNGROUP";
     std::string_view reason = "INVALID REQUEST";
@@ -1276,6 +1278,22 @@ schedule_asset_proxy_edit(cmd::DirectorScheduler &scheduler,
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(changed)}, cmd::PutNode{*existing},
         cmd::UndoContextId{2U}, cmd::TransactionId{request.gesture}, apply_at));
+}
+
+bool schedule_asset_library_edit(
+    cmd::DirectorScheduler &scheduler,
+    const editor::AssetLibraryEditIntent &request, doc::NodeId new_folder,
+    cmd::FrameNumber apply_at) {
+    const std::optional<doc::Root> planned = assets::plan_library_edit(
+        scheduler.projected_document(), request.edit, new_folder);
+    if (!planned.has_value()) {
+        return true;
+    }
+    // Organising the Library is a direct UI action, undone from the same
+    // globally reachable context as removing an asset.
+    return static_cast<bool>(scheduler.schedule_document_replace(
+        *planned, cmd::UndoContextId{2U},
+        cmd::TransactionId{request.gesture}, apply_at));
 }
 
 // Deletes one element: an EraseNode whose inverse restores it. A missing node

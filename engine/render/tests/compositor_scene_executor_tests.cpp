@@ -101,7 +101,7 @@ using Property = std::pair<std::string, doc::PropertyValue>;
     if (blur_red) {
         nodes.push_back(
             node(1U, schema::blur_type, {real(schema::radius, 6.0)}));
-        nodes.push_back(edge(23U, 1U, 0U, 10U, 0U));
+        nodes.push_back(edge(23U, 1U, 0U, 10U, 2U));
     }
     doc::Root root;
     for (const doc::Node& value : nodes) {
@@ -156,7 +156,7 @@ enum class KeyGraphKind : core::u8 {
              whole(schema::chroma_key_morphology_px, 0),
              real(schema::chroma_key_spill_suppression, 0.5),
              real(schema::chroma_key_mix, mix)}));
-        nodes.push_back(edge(21U, 1U, 0U, 10U, 0U));
+        nodes.push_back(edge(21U, 1U, 0U, 10U, 2U));
     } else if (kind == KeyGraphKind::Luma) {
         nodes.push_back(node(
             1U, schema::luma_key_type,
@@ -166,7 +166,7 @@ enum class KeyGraphKind : core::u8 {
              real(schema::luma_key_high_softness, 0.0),
              flag(schema::luma_key_invert, false),
              real(schema::luma_key_mix, mix)}));
-        nodes.push_back(edge(21U, 1U, 0U, 10U, 0U));
+        nodes.push_back(edge(21U, 1U, 0U, 10U, 2U));
     }
     doc::Root root;
     for (const doc::Node& value : nodes) {
@@ -742,6 +742,51 @@ void identity_effects_are_pixel_equivalent_to_no_effect() {
     EXECUTOR_CHECK(invalid_image.stats == plain_image.stats);
     EXECUTOR_CHECK(invalid_image.rgba == plain_image.rgba);
   }
+}
+
+// A bypassed node renders exactly as no node at all - the same pixels and no
+// extra pass - whatever its settings. Put back, it renders again.
+void a_bypassed_effect_renders_as_no_effect() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    const scene::Scene source = two_layer_scene(canvas);
+    const auto bypassable = [](bool bypassed) {
+        std::vector<doc::Node> nodes{
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            node(1U, schema::brightness_type,
+                 {real(schema::amount, 3.0), flag(schema::bypassed, bypassed)}),
+            node(2U, schema::blur_type,
+                 {real(schema::radius, 6.0), flag(schema::bypassed, bypassed)}),
+            layer(10U, 100U),
+            layer(11U, 101U),
+            node(12U, schema::composite_type),
+            node(13U, schema::output_type),
+            edge(20U, 10U, 0U, 12U, 0U, 0),
+            edge(21U, 11U, 0U, 12U, 0U, 1),
+            edge(22U, 12U, 0U, 13U, 0U),
+            edge(23U, 1U, 0U, 10U, 0U, 0),
+            edge(24U, 2U, 0U, 10U, 2U, 1),
+        };
+        doc::Root root;
+        for (const doc::Node& value : nodes) {
+            root = root.set(value);
+        }
+        compositor::CompositorModel model;
+        model.reset(root);
+        return model.evaluate();
+    };
+    const auto bypassed_graph = bypassable(true);
+    const auto active_graph = bypassable(false);
+    EXECUTOR_CHECK(bypassed_graph.valid());
+    EXECUTOR_CHECK(active_graph.valid());
+    const Image plain = execute_graph(device, graph(false), source);
+    const Image bypassed = execute_graph(device, bypassed_graph, source);
+    const Image active = execute_graph(device, active_graph, source);
+    EXECUTOR_CHECK(bypassed.stats == plain.stats);
+    EXECUTOR_CHECK(bypassed.rgba == plain.rgba);
+    EXECUTOR_CHECK(active.rgba != plain.rgba);
+    EXECUTOR_CHECK(active.stats.blurred_layers == 1U);
 }
 
 void saturation_changes_only_its_layer_without_adding_a_pass() {
@@ -2186,7 +2231,363 @@ void benchmark_led_car() {
     std::cout << " warm_median_ms=" << samples[6U] << '\n';
 }
 
-constexpr std::array<Case, 29U> cases{{
+[[nodiscard]] Property word(std::string_view name, std::string_view value) {
+    return {std::string{name}, doc::PropertyValue{std::string{value}}};
+}
+
+[[nodiscard]] compositor::CompositorGraph
+graph_from(const std::vector<doc::Node>& nodes) {
+    doc::Root root;
+    for (const doc::Node& value : nodes) {
+        root = root.set(value);
+    }
+    compositor::CompositorModel model;
+    model.reset(root);
+    return model.evaluate();
+}
+
+[[nodiscard]] Image execute_graph_slice(
+    rhi::Device& device, const compositor::CompositorGraph& graph_value,
+    const scene::Scene& scene_value, scene::CanvasRect slice) {
+    return capture_sized(
+        device, slice.width, slice.height,
+        [&graph_value, &scene_value, slice](
+            render::CompositorSceneExecutor& executor,
+            rhi::CommandList& commands) {
+            return executor.execute(commands, graph_value, scene_value, slice);
+        },
+        false);
+}
+
+// The pixels of the red quad in two_layer_scene that are fully inside it:
+// the brightest red the plain render has, so edge coverage stays out.
+[[nodiscard]] std::vector<std::size_t> red_interior(const Image& plain) {
+    core::u8 brightest{};
+    for (std::size_t index = 0U; index < plain.rgba.size(); index += 4U) {
+        if (plain.rgba[index + 2U] < 5U) {
+            brightest = std::max(brightest, plain.rgba[index]);
+        }
+    }
+    std::vector<std::size_t> interior;
+    for (std::size_t index = 0U; index < plain.rgba.size(); index += 4U) {
+        if (brightest > 20U && plain.rgba[index] == brightest &&
+            plain.rgba[index + 2U] < 5U) {
+            interior.push_back(index);
+        }
+    }
+    return interior;
+}
+
+// A Background is computed from each pixel's place on the authored canvas,
+// so a gradient ramps across the whole canvas and every node of a wall
+// computes exactly its own part of it.
+void a_background_gradient_spans_the_canvas_and_splits_byte_exactly() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 32U};
+    const scene::Scene source = two_layer_scene(canvas);
+    const auto graph_value = graph_from({
+        node(4U, schema::background_type,
+             {word(schema::background_mode, "linear"),
+              real(schema::color_a_r, 1.0), real(schema::color_a_g, 0.0),
+              real(schema::color_a_b, 0.0), real(schema::color_b_r, 0.0),
+              real(schema::color_b_g, 0.0), real(schema::color_b_b, 1.0)}),
+        node(5U, schema::output_type, {flag(schema::replace_scene, true)}),
+        edge(20U, 4U, 0U, 5U, 0U),
+    });
+    EXECUTOR_CHECK(graph_value.valid());
+    const Image whole = execute_graph(device, graph_value, source);
+    EXECUTOR_CHECK(whole.stats.background_passes == 1U);
+    EXECUTOR_CHECK(whole.stats.layers == 0U);
+    EXECUTOR_CHECK(whole.stats.merge_groups == 0U);
+
+    // Opaque everywhere, red at the left edge falling to blue at the right,
+    // and the same down every column.
+    for (core::u32 y = 0U; y < canvas.height; ++y) {
+        for (core::u32 x = 0U; x < canvas.width; ++x) {
+            const std::size_t here = whole.at(x, y);
+            EXECUTOR_CHECK(whole.rgba[here + 3U] == 255U);
+            EXECUTOR_CHECK(whole.rgba[here + 1U] == 0U);
+            for (std::size_t channel = 0U; channel < 4U; ++channel) {
+                EXECUTOR_CHECK(whole.rgba[here + channel] ==
+                               whole.rgba[whole.at(x, 0U) + channel]);
+            }
+            if (x != 0U) {
+                const std::size_t left = whole.at(x - 1U, y);
+                EXECUTOR_CHECK(whole.rgba[here] <= whole.rgba[left]);
+                EXECUTOR_CHECK(whole.rgba[here + 2U] >= whole.rgba[left + 2U]);
+            }
+        }
+    }
+    const std::size_t first = whole.at(0U, 0U);
+    const std::size_t last = whole.at(canvas.width - 1U, 0U);
+    EXECUTOR_CHECK(whole.rgba[first] > 240U && whole.rgba[first + 2U] < 15U);
+    EXECUTOR_CHECK(whole.rgba[last] < 15U && whole.rgba[last + 2U] > 240U);
+
+    const core::u32 half_w = canvas.width / 2U;
+    const core::u32 half_h = canvas.height / 2U;
+    const std::array<scene::CanvasRect, 4U> quadrants{{
+        {0U, 0U, half_w, half_h},
+        {half_w, 0U, half_w, half_h},
+        {0U, half_h, half_w, half_h},
+        {half_w, half_h, half_w, half_h},
+    }};
+    for (const scene::CanvasRect& quadrant : quadrants) {
+        assert_slice_matches(
+            whole, execute_graph_slice(device, graph_value, source, quadrant),
+            quadrant, __LINE__);
+    }
+}
+
+// With nothing wired to LAYERS, a Merge blends BASE against its constant
+// inside BASE's own coverage: Multiply scales it and Add lifts it, and the
+// drawables passing through below are untouched.
+void a_merge_constant_scales_and_lifts_only_its_base() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    const scene::Scene source = two_layer_scene(canvas);
+    const auto merged = [](std::string_view blend, double value) {
+        return graph_from({
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            layer(10U, 100U),
+            node(14U, schema::merge_type,
+                 {word(schema::blend_mode, blend), real(schema::value, value)}),
+            node(13U, schema::output_type),
+            edge(20U, 10U, 0U, 14U, 0U),
+            edge(21U, 14U, 0U, 13U, 0U),
+        });
+    };
+    const Image plain = execute_graph(device, single_layer_graph(false), source);
+    const Image identity = execute_graph(device, merged("normal", 1.0), source);
+    const Image halved = execute_graph(device, merged("multiply", 0.5), source);
+    const Image lifted = execute_graph(device, merged("add", 0.25), source);
+    EXECUTOR_CHECK(plain.stats.merge_groups == 0U);
+    // Normal has nothing to lay over BASE, so the Merge is not even opened.
+    EXECUTOR_CHECK(identity.stats.merge_groups == 0U);
+    EXECUTOR_CHECK(identity.rgba == plain.rgba);
+    EXECUTOR_CHECK(halved.stats.merge_groups == 1U);
+    EXECUTOR_CHECK(lifted.stats.merge_groups == 1U);
+
+    const auto interior = red_interior(plain);
+    EXECUTOR_CHECK(interior.size() > 50U);
+    for (const std::size_t index : interior) {
+        const int red = plain.rgba[index];
+        EXECUTOR_CHECK(difference(halved.rgba[index],
+                                  static_cast<core::u8>(red / 2)) <= 1);
+        EXECUTOR_CHECK(difference(lifted.rgba[index],
+                                  static_cast<core::u8>(
+                                      std::min(red + 64, 255))) <= 1);
+        EXECUTOR_CHECK(difference(lifted.rgba[index + 1U], 64U) <= 1);
+        EXECUTOR_CHECK(halved.rgba[index + 3U] == plain.rgba[index + 3U]);
+    }
+    // Outside BASE - the sky and the blue quad passing through - nothing
+    // changes at all.
+    core::u32 outside{};
+    for (std::size_t index = 0U; index < plain.rgba.size(); index += 4U) {
+        if (plain.rgba[index] != 0U) {
+            continue;
+        }
+        ++outside;
+        for (std::size_t channel = 0U; channel < 4U; ++channel) {
+            EXECUTOR_CHECK(halved.rgba[index + channel] ==
+                           plain.rgba[index + channel]);
+            EXECUTOR_CHECK(lifted.rgba[index + channel] ==
+                           plain.rgba[index + channel]);
+        }
+    }
+    EXECUTOR_CHECK(outside > 1000U);
+}
+
+// LAYERS land on BASE with the Merge's blend and opacity: a red layer at
+// half opacity over a green Background is half of each.
+void a_merge_lays_its_layers_over_its_base_at_its_opacity() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    const scene::Scene source = two_layer_scene(canvas);
+    const auto merged = [](double opacity) {
+        return graph_from({
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            layer(10U, 100U),
+            node(15U, schema::background_type,
+                 {real(schema::color_a_r, 0.0), real(schema::color_a_g, 1.0),
+                  real(schema::color_a_b, 0.0)}),
+            node(14U, schema::merge_type, {real(schema::opacity, opacity)}),
+            node(13U, schema::output_type, {flag(schema::replace_scene, true)}),
+            edge(20U, 15U, 0U, 14U, 0U),
+            edge(21U, 10U, 0U, 14U, 1U),
+            edge(22U, 14U, 0U, 13U, 0U),
+        });
+    };
+    const Image full = execute_graph(device, merged(1.0), source);
+    const Image half = execute_graph(device, merged(0.5), source);
+    EXECUTOR_CHECK(half.stats.merge_groups == 1U);
+    EXECUTOR_CHECK(half.stats.background_passes == 1U);
+    EXECUTOR_CHECK(half.stats.layers == 1U);
+
+    const auto interior = red_interior(full);
+    EXECUTOR_CHECK(interior.size() > 50U);
+    for (const std::size_t index : interior) {
+        EXECUTOR_CHECK(full.rgba[index + 1U] == 0U);
+        EXECUTOR_CHECK(difference(half.rgba[index],
+                                  static_cast<core::u8>(full.rgba[index] / 2U))
+                       <= 1);
+        EXECUTOR_CHECK(difference(half.rgba[index + 1U], 128U) <= 1);
+        EXECUTOR_CHECK(half.rgba[index + 3U] == 255U);
+    }
+    // Everywhere the layer is not, BASE alone: opaque green, and the blue
+    // quad the graph does not reference is replaced with the scene.
+    core::u32 green{};
+    for (std::size_t index = 0U; index < full.rgba.size(); index += 4U) {
+        if (full.rgba[index] != 0U) {
+            continue;
+        }
+        ++green;
+        EXECUTOR_CHECK(full.rgba[index + 1U] == 255U &&
+                       full.rgba[index + 2U] == 0U &&
+                       full.rgba[index + 3U] == 255U);
+        for (std::size_t channel = 0U; channel < 4U; ++channel) {
+            EXECUTOR_CHECK(half.rgba[index + channel] ==
+                           full.rgba[index + channel]);
+        }
+    }
+    EXECUTOR_CHECK(green > 1000U);
+}
+
+// A Matte cuts its source by its matte layer's coverage: the source shows
+// where the matte quad is and nowhere else, and the matte quad itself is
+// never shown.
+void a_scene_layer_matte_cuts_its_source_by_coverage() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    scene::Scene source{};
+    source.canvas = canvas;
+    source.camera = front_camera();
+    source.environment.sky_color = scene::Vec3{};
+    source.environment.ground_color = scene::Vec3{};
+    source.environment.ambient = 0.0F;
+    add_quad(source, 100U, 0.0F, scene::Vec3{0.25F, 0.0F, 0.0F});
+    // Overlapping about half of the red quad.
+    add_quad(source, 101U, 0.25F, scene::Vec3{0.0F, 0.0F, 0.25F});
+    const auto alone = [](core::u64 layer_id, core::u64 scene_id) {
+        return graph_from({
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            layer(layer_id, scene_id),
+            node(13U, schema::output_type, {flag(schema::replace_scene, true)}),
+            edge(20U, layer_id, 0U, 13U, 0U),
+        });
+    };
+    const auto matted_graph = graph_from({
+        node(100U, "scene.object"),
+        node(101U, "scene.object"),
+        layer(10U, 100U),
+        layer(11U, 101U),
+        node(14U, schema::matte_type),
+        node(13U, schema::output_type, {flag(schema::replace_scene, true)}),
+        edge(20U, 10U, 0U, 14U, 0U),
+        edge(21U, 11U, 0U, 14U, 1U),
+        edge(22U, 14U, 0U, 13U, 0U),
+    });
+    EXECUTOR_CHECK(matted_graph.valid());
+    const Image red = execute_graph(device, alone(10U, 100U), source);
+    const Image blue = execute_graph(device, alone(11U, 101U), source);
+    const Image matted = execute_graph(device, matted_graph, source);
+    EXECUTOR_CHECK(matted.stats.matted_layers == 1U);
+    EXECUTOR_CHECK(matted.stats.matte_passes == 1U);
+    EXECUTOR_CHECK(matted.stats.layers == 1U);
+
+    core::u32 kept{};
+    core::u32 cut{};
+    for (const std::size_t index : red_interior(red)) {
+        const core::u8 coverage = blue.rgba[index + 3U];
+        if (coverage == 255U) {
+            ++kept;
+            for (std::size_t channel = 0U; channel < 4U; ++channel) {
+                EXECUTOR_CHECK(difference(matted.rgba[index + channel],
+                                          red.rgba[index + channel]) <= 1);
+            }
+        } else if (coverage == 0U) {
+            ++cut;
+            EXECUTOR_CHECK(matted.rgba[index] == 0U);
+            EXECUTOR_CHECK(matted.rgba[index + 3U] == 0U);
+        }
+    }
+    EXECUTOR_CHECK(kept > 30U);
+    EXECUTOR_CHECK(cut > 30U);
+    // The matte is coverage, never colour.
+    for (std::size_t index = 0U; index < matted.rgba.size(); index += 4U) {
+        EXECUTOR_CHECK(matted.rgba[index + 2U] == 0U);
+    }
+}
+
+// A Background can be the matte: its alpha is the coverage, inverted on
+// request, so a translucent Background fades the source uniformly.
+void a_background_matte_fades_its_source_by_its_alpha() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{96U, 64U};
+    const scene::Scene source = two_layer_scene(canvas);
+    const auto matted = [](bool invert) {
+        return graph_from({
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            layer(10U, 100U),
+            node(14U, schema::matte_type,
+                 {flag(schema::matte_invert, invert)}),
+            node(13U, schema::output_type, {flag(schema::replace_scene, true)}),
+            node(15U, schema::background_type,
+                 {real(schema::color_a_a, 0.25)}),
+            edge(20U, 10U, 0U, 14U, 0U),
+            edge(21U, 15U, 0U, 14U, 1U),
+            edge(22U, 14U, 0U, 13U, 0U),
+        });
+    };
+    const auto plain_graph = graph_from({
+        node(100U, "scene.object"),
+        node(101U, "scene.object"),
+        layer(10U, 100U),
+        node(13U, schema::output_type, {flag(schema::replace_scene, true)}),
+        edge(20U, 10U, 0U, 13U, 0U),
+    });
+    const Image plain = execute_graph(device, plain_graph, source);
+    const Image quarter = execute_graph(device, matted(false), source);
+    const Image three_quarters = execute_graph(device, matted(true), source);
+    EXECUTOR_CHECK(quarter.stats.matted_layers == 1U);
+    EXECUTOR_CHECK(quarter.stats.layers == 1U);
+
+    const auto interior = red_interior(plain);
+    EXECUTOR_CHECK(interior.size() > 50U);
+    for (const std::size_t index : interior) {
+        const int red = plain.rgba[index];
+        EXECUTOR_CHECK(difference(quarter.rgba[index],
+                                  static_cast<core::u8>(red / 4)) <= 1);
+        EXECUTOR_CHECK(difference(quarter.rgba[index + 3U], 64U) <= 1);
+        EXECUTOR_CHECK(difference(three_quarters.rgba[index],
+                                  static_cast<core::u8>(red * 3 / 4)) <= 1);
+        EXECUTOR_CHECK(difference(three_quarters.rgba[index + 3U], 191U) <= 1);
+    }
+    // Nothing of the matte shows where the source has no coverage.
+    for (std::size_t index = 0U; index < plain.rgba.size(); index += 4U) {
+        if (plain.rgba[index + 3U] == 0U) {
+            EXECUTOR_CHECK(quarter.rgba[index + 3U] == 0U);
+            EXECUTOR_CHECK(three_quarters.rgba[index + 3U] == 0U);
+        }
+    }
+}
+
+constexpr std::array<Case, 35U> cases{{
+    {"a Scene Layer matte cuts its source by coverage",
+     &a_scene_layer_matte_cuts_its_source_by_coverage},
+    {"a Background matte fades its source by its alpha",
+     &a_background_matte_fades_its_source_by_its_alpha},
+    {"a Background gradient spans the canvas and splits byte exactly",
+     &a_background_gradient_spans_the_canvas_and_splits_byte_exactly},
+    {"a Merge constant scales and lifts only its base",
+     &a_merge_constant_scales_and_lifts_only_its_base},
+    {"a Merge lays its layers over its base at its opacity",
+     &a_merge_lays_its_layers_over_its_base_at_its_opacity},
+    {"a bypassed effect renders as no effect",
+     &a_bypassed_effect_renders_as_no_effect},
     {"the compositor publishes what the renderer rendered",
      &the_compositor_publishes_what_the_renderer_rendered},
     {"the padded target extent is measured in target pixels",

@@ -189,6 +189,9 @@ void TimelinePanel::reset_project_state() noexcept {
   rows_state_.expanded_groups.clear();
   rows_state_.expanded_hierarchies.clear();
   rows_state_.hierarchy_selection = doc::NodeId{};
+  reveal_node_ = doc::NodeId{};
+  reveal_scroll_ = false;
+  reveal_until_ = 0.0;
   selected_lane_ = doc::NodeId{};
   reorder_.lane_destination = doc::NodeId{};
   rename_.reset();
@@ -455,6 +458,26 @@ bool TimelinePanel::open_pass(Pass &p) {
   }
 
 
+  // A row pointed at from another panel is listed: its track open, and
+  // every group above it.
+  if (reveal_scroll_) {
+    if (const ElementInfo *const element = find_element(elements, reveal_node_)) {
+      if (element->timeline_lane != doc::NodeId{}) {
+        rows_state_.collapsed_lanes.erase(element->timeline_lane);
+      }
+      const ElementInfo *above = element;
+      for (std::size_t depth = 0U; above != nullptr && depth < elements.size();
+           ++depth) {
+        const doc::NodeId parent = layer_parent(*above);
+        if (parent == doc::NodeId{}) {
+          break;
+        }
+        rows_state_.expanded_hierarchies.insert(parent);
+        above = find_element(elements, parent);
+      }
+    }
+  }
+
   // The rows this frame lists, from the operator's twirls and search.
   p.built = build_rows(
       rows_state_,
@@ -575,6 +598,22 @@ void TimelinePanel::navigate(Pass &p) {
       -static_cast<double>(std::numeric_limits<core::i64>::max() / 4),
       static_cast<double>(std::numeric_limits<core::i64>::max() / 4));
   row_scroll_ = std::clamp(row_scroll_, 0.0F, maximum_row_scroll);
+  // Scrolled to once, and only when it is not already in view.
+  if (reveal_scroll_) {
+    reveal_scroll_ = false;
+    for (const Row &row : rows) {
+      if ((row.kind == Row::Kind::Layer || row.kind == Row::Kind::LaneHeader) &&
+          row.node == reveal_node_) {
+        if (row.top < row_scroll_ ||
+            row.top + row.height > row_scroll_ + rows_bounds.height) {
+          row_scroll_ = std::clamp(
+              row.top - (rows_bounds.height - row.height) * 0.5F, 0.0F,
+              maximum_row_scroll);
+        }
+        break;
+      }
+    }
+  }
 
 }
 

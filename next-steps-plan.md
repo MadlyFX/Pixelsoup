@@ -116,11 +116,6 @@ fields:
   colour and depth outside the mask; Bezier, feathered, or partially opaque
   masks rasterize to a bounded single-channel offscreen target. Disabled masks
   are identities; empty or malformed paths fail visibly.
-- Add a typed Matte compositor node with Source Image and Matte Image inputs,
-  Alpha/Luma mode, invert, and optional clamp. It outputs premultiplied colour,
-  coverage, and the source layer's tested depth. Fractional coverage is
-  translucent and must not become a hard occluder; a processor that cannot
-  carry colour-plus-depth is not allowed to execute it.
 - Add a dedicated Masks panel for the active Scene/Stage target. Its ordered
   rows expose visibility/enabled state, Rectangle/Ellipse/Pen creation, combine
   mode, invert, opacity, feather, expansion, and direct rename/reorder/delete;
@@ -264,6 +259,15 @@ Selection is editor-local; groups and authored edits are replicated:
   cross-scene parenting, or a child with two parents. Moving a group evaluates
   `group world * child local`; selection may enter the group or select it as one
   unit. Lock/visibility inheritance is explicit and model-tested.
+- Vehicle process groups. The groundwork is in place: `scene.group` carries
+  `group_kind` (`vehicle_process`; absent is a folder), the Scene panel creates
+  one empty from its right-click menus and marks it with a vehicle icon, and
+  the kind is parsed, replicated and part of the scene digest. It otherwise
+  behaves exactly as a folder. The vehicle processing workflow itself - what
+  such a group holds and what it adds to the Inspector and render path - is
+  still to be specified; any field it adds that changes the picture needs
+  normalisation, replication and digest coverage, and unsupported requests
+  must fail readiness with a specific reason.
 - Named Selection Sets use one selection-set node plus ordered member nodes
   carrying set id and target id. Recalling a set changes only editor-local
   selection. Missing members are reported and skipped. This avoids replicating
@@ -332,50 +336,41 @@ Wiring is in place too: drops from the Timeline, Effects, and Library onto
 an input; the node search on Tab, right click, or a wire let go on empty
 canvas; splicing a free node into a wire; Alt-click to break and Ctrl-drag to
 move wires; reroute points stored as `point_N_x/y` on the wire's own node;
-refusal reasons, flow highlighting, and dimmed dead branches. Two pieces
-remain from it:
+refusal reasons, flow highlighting, and dimmed dead branches. So is
+selection and organization: Ctrl/Shift clicks and a contain-or-intersect
+rubber band, group moves and coalesced arrow nudges, copy/paste/duplicate
+through `plan_paste_graph` with a Director-local clipboard, F/Home framing
+and a minimap, a right-click menu with align, distribute, Straighten
+Connection and Arrange, `compositor.comment` boxes, and inline renaming.
+Diagnostic badges sit on their subject node or wire with the messages on
+hover; key values are edited on the node body (`inline_values()`); nodes
+collapse to their title and wired ports through the layout-only `collapsed`
+flag; a Scene Layer node and its Timeline row reveal each other without
+sharing a selection; an Effects drop on an effect wire joins that input after
+the wire's effect, renumbering the input's `order`s in the same step; and the
+minimap flag is kept in workspace layout version 6. Bypass is the authored
+`bypassed` flag on effect and Radial Array nodes (normalized away on any
+other kind): `effect_node_is_identity()` treats a bypassed node as its
+identity, so application, ordering, offscreen passes and metadata follow,
+and the flag is digested. A Scene Layer's effects come in on two typed
+inputs, EFFECTS (port 0, `PortValueType::Effect`) and FILTERS (port 2,
+`PortValueType::Filter`), and LED Car Process has SETUP EFFECTS (9) and SETUP
+FILTERS (10), so the executor's effects-then-filters order is part of the
+wiring and `UnsupportedEffectOrder` is gone; wires on one input are
+reordered by dragging their numbers or from the wire menu. Chroma Key, Luma
+Key and Matte are edited in Parameters. What remains:
 
-- **Insert from a drop.** Dropping an Effects entry or Library asset onto a
-  wire should splice a new node in, as dragging a free node already does.
-  Effect nodes have no image input today, so this waits on an image-in,
+- **Library asset onto an image wire.** Effect nodes have no image input
+  today, so splicing an image source into an image wire waits on an image-in,
   image-out effect node kind.
-- **Right-click menu.** Right-click currently opens the node search. A
-  context menu with node and wire actions (rename, disconnect, add reroute
-  point) belongs with the selection work below.
-
-Selection and organization, using the selection contract above:
-
-- **Selection.** Marquee select, Ctrl- and Shift-click membership, moving a
-  multi-node selection as one transaction, and arrow-key nudging under the undo
-  coalescing rules.
-- **Copy, paste, duplicate.** Copy, Paste, and Duplicate of a node selection
-  extend `plan_clone_graph`, which today copies a whole scene's graph, to a
-  node subset with the same deterministic id allocation and reference
-  rewriting. Paste lands at the pointer. Edges internal to the selection are
-  copied, and edges to unselected nodes are dropped.
-- **Framing and minimap.** F frames the selection, Home frames the graph, and a
-  toggleable minimap shows the viewport.
-- **Layout tools.** Align and distribute, Straighten Connection, and
-  deterministic auto-arrange of a selection toward Output.
-- **Comment boxes.** Titled, coloured, resizable boxes that carry the nodes
-  inside them when moved. Double-click a node title to rename it inline.
 
 Richer nodes, last because each adds a model or render contract:
 
-- **Diagnostics on the node.** Show diagnostics as a badge on their subject
-  node, with the message on hover, rather than only as a border colour. Use
-  the code and severity contract under graph diagnostics.
 - **Output thumbnails.** Optional thumbnails of a node's output come from a
   bounded, asynchronous preview path, never from frame recording, and show a
   placeholder while unavailable.
-- **Inline parameters.** Show a node's key parameters on its body, and let a
-  node collapse to its header and connected pins.
-- **Bypass.** Bypass changes the rendered image, so it must be normalized,
-  replicated, digested, and evaluated as the effect's identity.
-- **Subgraphs and groups.** These wait until bypass and comment boxes have
-  settled.
-- **Cross-panel selection.** Selecting a Scene Layer node reveals its Timeline
-  row, and the other way round. Each panel keeps its own selection domain.
+- **Subgraphs and groups.** Bypass and comment boxes are in place, so
+  these can be planned next.
 
 Tests cover the pending-connect and pending-add hand-off, refused edits, the
 port-drop precedence and every drop source, and layout-only fields that do not
@@ -425,6 +420,16 @@ asset and never a replacement `asset_id` on a placement.
   prefetch window, cancels work after scrolling away, and uploads completed
   thumbnails through the existing GPU cache seam. Timeline clips reuse the same
   thumbnail/filmstrip key rather than decoding independently.
+- The Library's List/Grid view, column widths, hidden columns, sort and
+  thumbnail sizes are editor-local and reset on launch. They belong in the
+  workspace layout, next to the panel's dock state. Library folders are
+  already authored document state.
+- Assets imported before codec, start timecode, model vertex count and
+  texture size were recorded show those columns blank until a reimport or
+  an accepted change re-probes them. `RESCAN` should also offer to fill in
+  missing metadata for unchanged files, as one undoable edit. Thumbnails
+  exist for media only; models need a rendered turntable derivative under
+  the same keying rules.
 - Relink updates the existing asset node and invalidates its derivatives after
   one undoable confirmation. Delete Asset removes the document record only
   after reference analysis; cache cleanup is a separate recoverable maintenance

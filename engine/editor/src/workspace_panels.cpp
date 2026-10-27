@@ -3,12 +3,14 @@
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/timeline_panel.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -37,10 +39,6 @@ namespace {
 
 namespace gui = mediaserver::gui;
 
-constexpr float title_height = 25.0F;
-constexpr float search_height = 25.0F;
-constexpr float tree_row_height = 20.0F;
-constexpr float section_row_height = 21.0F;
 constexpr float inset = 6.0F;
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
@@ -120,27 +118,6 @@ void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
   return std::find(selection.begin(), selection.end(), node) != selection.end();
 }
 
-void panel_title(gui::UiContext &ctx, const gui::Rect &bounds,
-                 std::string_view title, std::string_view trailing = {}) {
-  const gui::Rect header{bounds.x, bounds.y, bounds.width,
-                         std::min(bounds.height, title_height)};
-  ctx.panel(header, ctx.theme().background);
-  ctx.panel(
-      gui::Rect{header.x, header.y + header.height - 1.0F, header.width, 1.0F},
-      ctx.theme().divider);
-  if (!title.empty()) {
-    ctx.label(gui::Rect{header.x + 8.0F, header.y, header.width - 16.0F,
-                        header.height},
-              title, ctx.theme().text);
-  }
-  if (!trailing.empty()) {
-    const float width = ctx.font_width(trailing);
-    ctx.label(gui::Rect{header.x + header.width - width - 8.0F, header.y, width,
-                        header.height},
-              trailing, ctx.theme().text_muted);
-  }
-}
-
 void search_field(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
                   std::string &value, std::string_view placeholder) {
   const gui::Rect field{bounds.x + inset, bounds.y + 3.0F,
@@ -163,170 +140,6 @@ void search_field(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
       field.y + field.height * 0.46F + 5.0F, 1.0F, ctx.theme().text_muted);
 }
 
-struct LibraryItem final {
-  std::string_view name;
-  std::string_view detail;
-  LibraryAddAction action;
-  std::size_t category;
-};
-
-enum class LibraryCategory : std::size_t {
-  Generators,
-  Media,
-  Models,
-  Lights,
-  Count,
-};
-
-constexpr std::array<std::string_view, 4U> library_category_names{
-    "GENERATORS", "MEDIA", "MODELS", "LIGHTS"};
-
-constexpr std::array<LibraryItem, 7U> library_items{{
-    {"Box", "3D primitive", LibraryAddAction::Box, 0U},
-    {"Plane", "2D surface", LibraryAddAction::Plane, 0U},
-    {"Sphere", "3D primitive", LibraryAddAction::Sphere, 0U},
-    {"Camera", "Tracked stage camera", LibraryAddAction::Camera, 0U},
-    {"Directional Light", "Global sun", LibraryAddAction::DirectionalLight, 3U},
-    {"Point Light", "Local emitter", LibraryAddAction::PointLight, 3U},
-    // A practical: the lamp, window or screen an interior set is actually lit
-    // by. Its own entry rather than a point the operator converts afterwards,
-    // because the cone and its aim are the whole point of placing one.
-    {"Spot Light", "Practical with a cone", LibraryAddAction::SpotLight, 3U},
-}};
-
-constexpr float asset_row_height = 48.0F;
-constexpr float thumbnail_asset_row_height = 68.0F;
-constexpr float thumbnail_preview_width = 96.0F;
-constexpr float thumbnail_preview_aspect = 16.0F / 9.0F;
-constexpr float import_row_height = 26.0F;
-constexpr float empty_row_height = 24.0F;
-
-[[nodiscard]] std::string_view
-library_thumbnail_status(LibraryThumbnailState state) noexcept {
-  switch (state) {
-  case LibraryThumbnailState::Placeholder:
-    return "THUMBNAIL";
-  case LibraryThumbnailState::Queued:
-    return "THUMBNAIL QUEUED";
-  case LibraryThumbnailState::Generating:
-    return "THUMBNAIL GENERATING";
-  case LibraryThumbnailState::Ready:
-    return "";
-  case LibraryThumbnailState::Stale:
-    return "THUMBNAIL STALE";
-  case LibraryThumbnailState::Failed:
-    return "THUMBNAIL FAILED";
-  }
-  return "THUMBNAIL";
-}
-
-[[nodiscard]] gui::UiColor
-library_thumbnail_color(const gui::UiContext &ctx,
-                        LibraryThumbnailState state) noexcept {
-  switch (state) {
-  case LibraryThumbnailState::Placeholder:
-    return ctx.theme().text_muted;
-  case LibraryThumbnailState::Queued:
-    return ctx.theme().accent;
-  case LibraryThumbnailState::Generating:
-    return ctx.theme().keyframe;
-  case LibraryThumbnailState::Ready:
-    return ctx.theme().good;
-  case LibraryThumbnailState::Stale:
-    return ctx.theme().playhead;
-  case LibraryThumbnailState::Failed:
-    return ctx.theme().warning;
-  }
-  return ctx.theme().text_muted;
-}
-
-[[nodiscard]] std::string_view
-library_proxy_reason_detail(assets::ProxyPlaybackReason reason) noexcept {
-  switch (reason) {
-  case assets::ProxyPlaybackReason::None:
-    return "READY";
-  case assets::ProxyPlaybackReason::SourcePolicy:
-    return "SOURCE POLICY";
-  case assets::ProxyPlaybackReason::SourceUnavailable:
-    return "SOURCE UNAVAILABLE";
-  case assets::ProxyPlaybackReason::InvalidConfiguration:
-    return "INVALID CONFIGURATION";
-  case assets::ProxyPlaybackReason::ProxyNotConfigured:
-    return "NOT CONFIGURED";
-  case assets::ProxyPlaybackReason::SourceFingerprintUnavailable:
-    return "FINGERPRINT UNAVAILABLE";
-  case assets::ProxyPlaybackReason::CacheObservationMissing:
-    return "CACHE UNAVAILABLE";
-  case assets::ProxyPlaybackReason::CacheKeyMismatch:
-    return "CACHE KEY MISMATCH";
-  case assets::ProxyPlaybackReason::CacheMissing:
-    return "MISSING";
-  case assets::ProxyPlaybackReason::CacheQueued:
-    return "QUEUED";
-  case assets::ProxyPlaybackReason::CacheGenerating:
-    return "GENERATING";
-  case assets::ProxyPlaybackReason::CacheStale:
-    return "STALE";
-  case assets::ProxyPlaybackReason::CacheFailed:
-    return "FAILED";
-  case assets::ProxyPlaybackReason::CacheCancelled:
-    return "CANCELLED";
-  case assets::ProxyPlaybackReason::FrameMapMissing:
-    return "FRAME MAP MISSING";
-  case assets::ProxyPlaybackReason::FrameMapKeyMismatch:
-    return "FRAME MAP KEY MISMATCH";
-  case assets::ProxyPlaybackReason::FrameMapInvalid:
-    return "FRAME MAP INVALID";
-  }
-  return "UNKNOWN";
-}
-
-[[nodiscard]] std::string_view
-library_proxy_issue_detail(LibraryProxyRuntimeIssue issue) noexcept {
-  switch (issue) {
-  case LibraryProxyRuntimeIssue::None:
-    return {};
-  case LibraryProxyRuntimeIssue::MissingAssetIdentity:
-    return "ASSET ID MISSING";
-  case LibraryProxyRuntimeIssue::AssetNotFound:
-    return "ASSET NOT FOUND";
-  case LibraryProxyRuntimeIssue::AssetKindMismatch:
-    return "ASSET KIND MISMATCH";
-  case LibraryProxyRuntimeIssue::PlacementSourceMismatch:
-    return "PLACEMENT SOURCE MISMATCH";
-  case LibraryProxyRuntimeIssue::AvailabilityMissing:
-    return "SOURCE STATUS UNAVAILABLE";
-  case LibraryProxyRuntimeIssue::CacheInspectionFailed:
-    return "CACHE INSPECTION FAILED";
-  case LibraryProxyRuntimeIssue::ArtifactLoadFailed:
-    return "ARTIFACT LOAD FAILED";
-  case LibraryProxyRuntimeIssue::ArtifactMetadataMismatch:
-    return "SOURCE METADATA MISMATCH";
-  case LibraryProxyRuntimeIssue::FrameMappingFailed:
-    return "FRAME MAPPING FAILED";
-  case LibraryProxyRuntimeIssue::MaterializationFailed:
-    return "MATERIALIZATION FAILED";
-  }
-  return "UNKNOWN";
-}
-
-[[nodiscard]] gui::UiColor
-library_proxy_runtime_color(const gui::UiContext &ctx,
-                            LibraryProxyRuntimeState state) noexcept {
-  switch (state) {
-  case LibraryProxyRuntimeState::Source:
-    return ctx.theme().text_muted;
-  case LibraryProxyRuntimeState::ProxyReady:
-    return ctx.theme().good;
-  case LibraryProxyRuntimeState::PreferFallback:
-    return ctx.theme().playhead;
-  case LibraryProxyRuntimeState::RequiredUnready:
-  case LibraryProxyRuntimeState::Failed:
-    return ctx.theme().warning;
-  }
-  return ctx.theme().text_muted;
-}
-
 [[nodiscard]] gui::Rect intersect(const gui::Rect &a,
                                   const gui::Rect &b) noexcept {
   const float left = std::max(a.x, b.x);
@@ -345,169 +158,6 @@ library_proxy_runtime_color(const gui::UiContext &ctx,
                                                : gui::Interaction{};
 }
 
-[[nodiscard]] std::string asset_detail(const assets::Asset &asset) {
-  std::array<char, 72U> text{};
-  int length = 0;
-  if (const auto *const media = std::get_if<assets::MediaAsset>(&asset)) {
-    if (media->dimensions.has_value() && media->frame_count.has_value()) {
-      length = std::snprintf(text.data(), text.size(), "%u x %u | %u FR",
-                             media->dimensions->width,
-                             media->dimensions->height, *media->frame_count);
-    } else if (media->dimensions.has_value()) {
-      length =
-          std::snprintf(text.data(), text.size(), "%u x %u",
-                        media->dimensions->width, media->dimensions->height);
-    } else if (media->frame_count.has_value()) {
-      length = std::snprintf(text.data(), text.size(), "%u FRAMES",
-                             *media->frame_count);
-    } else {
-      return "METADATA NOT PROBED";
-    }
-  } else {
-    const auto &model = std::get<assets::ModelAsset>(asset);
-    if (model.triangle_count.has_value() && model.material_count.has_value()) {
-      length =
-          std::snprintf(text.data(), text.size(), "%llu TRIS | %u MATS",
-                        static_cast<unsigned long long>(*model.triangle_count),
-                        *model.material_count);
-    } else if (model.triangle_count.has_value()) {
-      length =
-          std::snprintf(text.data(), text.size(), "%llu TRIANGLES",
-                        static_cast<unsigned long long>(*model.triangle_count));
-    } else if (model.material_count.has_value()) {
-      length = std::snprintf(text.data(), text.size(), "%u MATERIALS",
-                             *model.material_count);
-    } else if (model.bounds.has_value()) {
-      return "BOUNDS STORED";
-    } else {
-      return "METADATA NOT PROBED";
-    }
-  }
-  return std::string{text.data(),
-                     static_cast<std::size_t>(std::max(length, 0))};
-}
-
-[[nodiscard]] std::string_view
-library_proxy_label(assets::ProxyPlaybackPolicy policy) noexcept {
-  switch (policy) {
-  case assets::ProxyPlaybackPolicy::Source:
-    return "SRC";
-  case assets::ProxyPlaybackPolicy::PreferProxy:
-    return "AUTO";
-  case assets::ProxyPlaybackPolicy::RequireProxy:
-    return "REQ";
-  }
-  return "?";
-}
-
-[[nodiscard]] const LibraryProxyRuntimeObservation *
-library_proxy_runtime_observation(
-    const assets::MediaAsset &asset,
-    std::span<const LibraryProxyRuntimeObservation> observations) noexcept {
-  const std::optional<assets::DerivativeKey> requested =
-      assets::requested_proxy_key(asset);
-  const auto found = std::find_if(
-      observations.begin(), observations.end(),
-      [&](const LibraryProxyRuntimeObservation &observation) {
-        return observation.asset == asset.id && observation.key == requested;
-      });
-  return found == observations.end() ? nullptr : std::addressof(*found);
-}
-
-[[nodiscard]] bool asset_matches(const assets::Asset &asset,
-                                 std::string_view detail,
-                                 std::string_view query) {
-  return matches(assets::asset_display_name(asset), query) ||
-         matches(assets::asset_source(asset), query) ||
-         matches(detail, query) ||
-         matches(assets::asset_kind(asset) == assets::AssetKind::Media
-                     ? std::string_view{"media video image"}
-                     : std::string_view{"model 3d gltf obj"},
-                 query);
-}
-
-void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
-                       const gui::Rect &bounds) {
-  const gui::UiColor color =
-      action == LibraryAddAction::DirectionalLight ||
-              action == LibraryAddAction::PointLight ||
-              action == LibraryAddAction::SpotLight
-          ? ctx.theme().warning
-          : (action == LibraryAddAction::Media ? ctx.theme().accent
-                                               : ctx.theme().keyframe);
-  auto &draw = ctx.draw_list();
-  const float centre_x = bounds.x + bounds.width * 0.5F;
-  const float centre_y = bounds.y + bounds.height * 0.5F;
-  if (action == LibraryAddAction::DirectionalLight ||
-      action == LibraryAddAction::PointLight ||
-      action == LibraryAddAction::SpotLight) {
-    draw_circle(ctx, centre_x, centre_y, 4.0F, color);
-    draw.add_line(centre_x - 7.0F, centre_y, centre_x - 5.0F, centre_y, 1.0F,
-                  color);
-    draw.add_line(centre_x + 5.0F, centre_y, centre_x + 7.0F, centre_y, 1.0F,
-                  color);
-    return;
-  }
-  if (action == LibraryAddAction::Media) {
-    draw.add_rect(bounds.x + 2.0F, bounds.y + 3.0F, bounds.width - 4.0F,
-                  bounds.height - 6.0F, with_alpha(color, 0.24F));
-    border(ctx,
-           gui::Rect{bounds.x + 2.0F, bounds.y + 3.0F, bounds.width - 4.0F,
-                     bounds.height - 6.0F},
-           color);
-    draw.add_triangle(centre_x - 2.0F, centre_y - 4.0F, centre_x - 2.0F,
-                      centre_y + 4.0F, centre_x + 4.0F, centre_y, color);
-    return;
-  }
-  if (action == LibraryAddAction::Model) {
-    draw.add_line(bounds.x + 2.0F, bounds.y + bounds.height - 3.0F, centre_x,
-                  bounds.y + 2.0F, 1.0F, color);
-    draw.add_line(centre_x, bounds.y + 2.0F, bounds.x + bounds.width - 2.0F,
-                  bounds.y + bounds.height - 3.0F, 1.0F, color);
-    draw.add_line(bounds.x + 2.0F, bounds.y + bounds.height - 3.0F,
-                  bounds.x + bounds.width - 2.0F,
-                  bounds.y + bounds.height - 3.0F, 1.0F, color);
-    return;
-  }
-  const gui::Rect cube{bounds.x + 3.0F, bounds.y + 3.0F, bounds.width - 6.0F,
-                       bounds.height - 6.0F};
-  draw.add_rect(cube.x, cube.y, cube.width, cube.height,
-                with_alpha(color, 0.18F));
-  border(ctx, cube, color);
-  if (action == LibraryAddAction::Sphere) {
-    draw_circle(ctx, centre_x, centre_y, cube.width * 0.46F, color);
-    draw_circle(ctx, centre_x, centre_y, cube.width * 0.33F,
-                ctx.theme().widget);
-  } else if (action == LibraryAddAction::Plane) {
-    draw.add_line(cube.x, cube.y + cube.height, cube.x + cube.width, cube.y,
-                  1.0F, color);
-  }
-}
-
-void draw_cpu_decode_warning(gui::UiContext &ctx, const gui::Rect &bounds) {
-  auto &draw = ctx.draw_list();
-  const gui::UiColor red = ctx.theme().warning;
-  const gui::UiColor cutout = scale(ctx.theme().row, 0.72F);
-  const float centre_x = bounds.x + bounds.width * 0.5F;
-  draw.add_triangle(centre_x, bounds.y, bounds.x + bounds.width,
-                    bounds.y + bounds.height, bounds.x,
-                    bounds.y + bounds.height, red);
-  draw.add_line(centre_x, bounds.y + 4.0F, centre_x,
-                bounds.y + bounds.height - 4.5F, 1.5F, cutout);
-  draw.add_rect(centre_x - 0.8F, bounds.y + bounds.height - 3.0F, 1.6F, 1.6F,
-                cutout);
-}
-
-void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
-  ctx.draw_list().add_line(x - 3.0F, y, x + 3.0F, y, 1.0F, color);
-  ctx.draw_list().add_line(x, y - 3.0F, x, y + 3.0F, 1.0F, color);
-}
-
-void draw_remove(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
-  ctx.draw_list().add_line(x - 3.0F, y - 3.0F, x + 3.0F, y + 3.0F, 1.0F, color);
-  ctx.draw_list().add_line(x + 3.0F, y - 3.0F, x - 3.0F, y + 3.0F, 1.0F, color);
-}
-
 constexpr float compositor_toolbar_height = 26.0F;
 // Node layout, in graph units at 100% zoom. Widths fit each node's own title
 // and port names, and heights follow the editor font's line height, so no
@@ -517,6 +167,15 @@ constexpr float compositor_node_max_width = 360.0F;
 constexpr float compositor_node_padding = 10.0F;
 // From a port's dot to the start of its name.
 constexpr float compositor_pin_inset = 13.0F;
+// Room on a node's title line for its collapse toggle and problem badge.
+constexpr float compositor_header_chrome = 40.0F;
+// Below this zoom the toggle, badges and wire order numbers are left out, and
+// below the next the values on a node are shown but not edited there.
+constexpr float compositor_chrome_zoom = 0.6F;
+constexpr float compositor_inline_edit_zoom = 0.9F;
+// A bypassed node's amber: warm, so it reads apart from the cool selection
+// and type colours, and quieter than the warning red.
+constexpr gui::UiColor compositor_bypass_color{0.93F, 0.66F, 0.24F, 1.0F};
 // Between an input's name and an output's name on the same row.
 constexpr float compositor_pin_label_gap = 18.0F;
 constexpr float compositor_port_radius = 5.0F;
@@ -563,9 +222,11 @@ constexpr std::array<std::string_view, 7U> compositor_category_names{{
     "COMBINE & OUTPUT",
 }};
 
-constexpr std::array<CompositorPaletteItem, 20U> compositor_palette_items{{
+constexpr std::array<CompositorPaletteItem, 22U> compositor_palette_items{{
     {compositor::NodeKind::SceneLayer, CompositorNodeCategory::Input,
      "source object timeline layer"},
+    {compositor::NodeKind::Background, CompositorNodeCategory::Input,
+     "solid colour color gradient fill backdrop matte linear radial"},
     {compositor::NodeKind::Brightness, CompositorNodeCategory::Color,
      "exposure gain"},
     {compositor::NodeKind::Saturation, CompositorNodeCategory::Color,
@@ -600,10 +261,21 @@ constexpr std::array<CompositorPaletteItem, 20U> compositor_palette_items{{
     {compositor::NodeKind::LedCarProcess, CompositorNodeCategory::Spatial,
      "led virtual production car process plates volume reflection ceiling"},
     {compositor::NodeKind::Composite, CompositorNodeCategory::Combine,
-     "merge combine layers"},
+     "stack combine layers"},
+    {compositor::NodeKind::Merge, CompositorNodeCategory::Combine,
+     "mix blend overlay multiply add screen opacity brightness"},
     {compositor::NodeKind::Output, CompositorNodeCategory::Combine,
      "program final render"},
 }};
+
+// In compositor::MergeBlendMode order.
+constexpr std::array<std::string_view, compositor::merge_blend_mode_count>
+    merge_blend_labels{{"NORMAL", "ADD", "MULTIPLY", "SCREEN", "SUBTRACT",
+                        "OVERLAY", "LIGHTEN", "DARKEN", "DIFFERENCE"}};
+
+// In compositor::BackgroundMode order.
+constexpr std::array<std::string_view, 3U> background_mode_labels{
+    {"SOLID", "LINEAR GRADIENT", "RADIAL GRADIENT"}};
 
 [[nodiscard]] constexpr std::size_t
 category_index(CompositorNodeCategory category) noexcept {
@@ -638,8 +310,30 @@ struct CompositorPortVisual final {
     return gui::UiColor{0.722F, 0.580F, 0.976F, 1.0F};
   case compositor::PortValueType::TransformSet:
     return gui::UiColor{0.412F, 0.808F, 0.698F, 1.0F};
+  case compositor::PortValueType::Filter:
+    return gui::UiColor{0.471F, 0.851F, 0.384F, 1.0F};
   }
   return gui::UiColor{0.380F, 0.741F, 0.949F, 1.0F};
+}
+
+// The colours a comment box can take: muted, so a box frames nodes rather
+// than competing with them.
+[[nodiscard]] gui::UiColor comment_color(core::u8 index) noexcept {
+  constexpr std::array<gui::UiColor, compositor::comment_color_count> palette{{
+      {0.55F, 0.60F, 0.68F, 1.0F},
+      {0.36F, 0.58F, 0.92F, 1.0F},
+      {0.32F, 0.72F, 0.70F, 1.0F},
+      {0.45F, 0.74F, 0.42F, 1.0F},
+      {0.66F, 0.52F, 0.90F, 1.0F},
+      {0.88F, 0.47F, 0.60F, 1.0F},
+  }};
+  return palette[index < palette.size() ? index : 0U];
+}
+
+[[nodiscard]] constexpr std::string_view comment_color_name(core::u8 index) noexcept {
+  constexpr std::array<std::string_view, compositor::comment_color_count> names{
+      {"SLATE", "BLUE", "TEAL", "GREEN", "VIOLET", "ROSE"}};
+  return names[index < names.size() ? index : 0U];
 }
 
 [[nodiscard]] gui::UiColor blend_color(gui::UiColor from, gui::UiColor to,
@@ -652,7 +346,8 @@ struct CompositorPortVisual final {
 
 // Each value type has its own port shape as well as its own colour, so the
 // difference survives colour-blindness and a dimmed, incompatible port: an
-// image is a circle, an effect a diamond, a transform set a square.
+// image is a circle, an effect a diamond, a filter a triangle and a
+// transform set a square.
 void draw_port_shape(gui::UiContext &ctx, compositor::PortValueType type,
                      float x, float y, float radius, gui::UiColor color) {
   switch (type) {
@@ -675,6 +370,15 @@ void draw_port_shape(gui::UiContext &ctx, compositor::PortValueType type,
                                                {x + half, y + half},
                                                {x - half, y + half}}};
     ctx.draw_list().add_convex_poly(square, color);
+    return;
+  }
+  case compositor::PortValueType::Filter: {
+    // Pointing along the wire, the way the image flows through it.
+    const float reach = radius * 1.3F;
+    const std::array<gui::UiPoint, 3U> triangle{{{x - reach * 0.8F, y - reach},
+                                                 {x + reach, y},
+                                                 {x - reach * 0.8F, y + reach}}};
+    ctx.draw_list().add_convex_poly(triangle, color);
     return;
   }
   }
@@ -778,11 +482,200 @@ compositor_node_metrics(const gui::UiContext &ctx) {
                                std::max(22.0F, pin + 8.0F), 7.0F};
 }
 
+// A value shown, and editable, on a node's own body: the one or two values
+// an operator reaches for most, without opening Parameters.
+struct InlineValue final {
+  std::string_view label;
+  CompositorProperty property{CompositorProperty::BrightnessAmount};
+  double speed{};
+  double minimum{};
+  double maximum{};
+  int decimals{};
+  // Authored as a whole number.
+  bool whole{};
+  // The input this value stands in for: it applies, and is editable, only
+  // while that input is unwired. Negative for an ordinary value.
+  int unwired_input{-1};
+};
+
+[[nodiscard]] std::span<const InlineValue>
+inline_values(compositor::NodeKind kind) noexcept {
+  using P = CompositorProperty;
+  static constexpr std::array<InlineValue, 1U> brightness{
+      {{"AMOUNT", P::BrightnessAmount, 0.01, 0.0, compositor::max_brightness,
+        2}}};
+  static constexpr std::array<InlineValue, 1U> saturation{
+      {{"AMOUNT", P::SaturationAmount, 0.01, 0.0, compositor::max_saturation,
+        2}}};
+  static constexpr std::array<InlineValue, 1U> blur{
+      {{"RADIUS", P::BlurRadius, 0.10, 0.0, compositor::max_blur_radius, 1}}};
+  static constexpr std::array<InlineValue, 2U> box_blur{
+      {{"RADIUS PX", P::BoxBlurRadius, 1.0, 0.0,
+        compositor::max_box_blur_radius, 0, true},
+       {"PASSES", P::BoxBlurPasses, 1.0, 1.0, compositor::max_box_blur_passes,
+        0, true}}};
+  static constexpr std::array<InlineValue, 1U> directional_blur{
+      {{"LENGTH PX", P::DirectionalBlurLength, 0.10, 0.0,
+        compositor::max_directional_blur_length, 2}}};
+  static constexpr std::array<InlineValue, 2U> contrast_pivot{
+      {{"CONTRAST", P::ContrastPivotContrast, 0.01,
+        scene::min_contrast_pivot_contrast, scene::max_contrast_pivot_contrast,
+        3},
+       {"PIVOT", P::ContrastPivotPivot, 0.005, scene::min_contrast_pivot_pivot,
+        scene::max_contrast_pivot_pivot, 3}}};
+  static constexpr std::array<InlineValue, 2U> white_balance{
+      {{"KELVIN", P::WhiteBalanceTemperatureKelvin, 25.0,
+        scene::min_white_balance_temperature_kelvin,
+        scene::max_white_balance_temperature_kelvin, 0},
+       {"TINT", P::WhiteBalanceTint, 0.01, scene::min_white_balance_tint,
+        scene::max_white_balance_tint, 3}}};
+  static constexpr std::array<InlineValue, 1U> film_grain{
+      {{"AMOUNT", P::FilmGrainAmount, 0.005, scene::min_film_grain_amount,
+        scene::max_film_grain_amount, 3}}};
+  static constexpr std::array<InlineValue, 2U> radial_array{
+      {{"COUNT", P::RadialCount, 1.0, 1.0, compositor::max_radial_instances, 0,
+        true},
+       {"RADIUS", P::RadialRadius, 0.05, 0.0, compositor::max_spatial_extent,
+        2}}};
+  // VALUE is what LAYERS presents while nothing is wired to it.
+  static constexpr std::array<InlineValue, 2U> merge{
+      {{"OPACITY", P::MergeOpacity, 0.005, 0.0, 1.0, 2},
+       {"VALUE", P::MergeValue, 0.01, 0.0, compositor::max_merge_value, 2,
+        false, 1}}};
+  switch (kind) {
+  case compositor::NodeKind::Brightness:
+    return brightness;
+  case compositor::NodeKind::Saturation:
+    return saturation;
+  case compositor::NodeKind::Blur:
+    return blur;
+  case compositor::NodeKind::BoxBlur:
+    return box_blur;
+  case compositor::NodeKind::DirectionalBlur:
+    return directional_blur;
+  case compositor::NodeKind::ContrastPivot:
+    return contrast_pivot;
+  case compositor::NodeKind::WhiteBalance:
+    return white_balance;
+  case compositor::NodeKind::FilmGrain:
+    return film_grain;
+  case compositor::NodeKind::RadialArray:
+    return radial_array;
+  case compositor::NodeKind::Merge:
+    return merge;
+  default:
+    return {};
+  }
+}
+
+// An inline value that does nothing in the node's present wiring: one
+// standing in for a wired input, or a Merge's constant under Normal, which
+// has nothing to lay over BASE.
+[[nodiscard]] bool inline_value_idle(const compositor::CompositorGraph &graph,
+                                     const compositor::GraphNode &node,
+                                     const InlineValue &value) noexcept {
+  if (value.unwired_input >= 0) {
+    const compositor::EdgeEndpoint input{
+        node.node, static_cast<core::u8>(value.unwired_input)};
+    if (std::any_of(graph.edges.begin(), graph.edges.end(),
+                    [input](const compositor::GraphEdge &edge) noexcept {
+                      return edge.to == input;
+                    })) {
+      return true;
+    }
+  }
+  const auto *merge = std::get_if<compositor::MergeParameters>(&node.parameters);
+  return value.property == CompositorProperty::MergeValue &&
+         merge != nullptr &&
+         merge->blend == compositor::MergeBlendMode::Normal;
+}
+
+// The authored value an inline row shows.
+[[nodiscard]] double inline_value_of(const compositor::GraphNode &node,
+                                     CompositorProperty property) noexcept {
+  using P = CompositorProperty;
+  const auto &parameters = node.parameters;
+  switch (property) {
+  case P::BrightnessAmount:
+    if (const auto *value = std::get_if<compositor::BrightnessParameters>(&parameters))
+      return value->amount;
+    break;
+  case P::SaturationAmount:
+    if (const auto *value = std::get_if<compositor::SaturationParameters>(&parameters))
+      return value->amount;
+    break;
+  case P::BlurRadius:
+    if (const auto *value = std::get_if<compositor::BlurParameters>(&parameters))
+      return value->radius;
+    break;
+  case P::BoxBlurRadius:
+    if (const auto *value = std::get_if<compositor::BoxBlurParameters>(&parameters))
+      return value->radius_px;
+    break;
+  case P::BoxBlurPasses:
+    if (const auto *value = std::get_if<compositor::BoxBlurParameters>(&parameters))
+      return value->passes;
+    break;
+  case P::DirectionalBlurLength:
+    if (const auto *value =
+            std::get_if<compositor::DirectionalBlurParameters>(&parameters))
+      return value->length_px;
+    break;
+  case P::ContrastPivotContrast:
+    if (const auto *value =
+            std::get_if<compositor::ContrastPivotParameters>(&parameters))
+      return value->contrast;
+    break;
+  case P::ContrastPivotPivot:
+    if (const auto *value =
+            std::get_if<compositor::ContrastPivotParameters>(&parameters))
+      return value->pivot;
+    break;
+  case P::WhiteBalanceTemperatureKelvin:
+    if (const auto *value =
+            std::get_if<compositor::WhiteBalanceParameters>(&parameters))
+      return value->temperature_kelvin;
+    break;
+  case P::WhiteBalanceTint:
+    if (const auto *value =
+            std::get_if<compositor::WhiteBalanceParameters>(&parameters))
+      return value->tint;
+    break;
+  case P::FilmGrainAmount:
+    if (const auto *value = std::get_if<compositor::FilmGrainParameters>(&parameters))
+      return value->amount;
+    break;
+  case P::RadialCount:
+    if (const auto *value =
+            std::get_if<compositor::RadialArrayParameters>(&parameters))
+      return value->count;
+    break;
+  case P::RadialRadius:
+    if (const auto *value =
+            std::get_if<compositor::RadialArrayParameters>(&parameters))
+      return value->radius;
+    break;
+  case P::MergeOpacity:
+    if (const auto *value = std::get_if<compositor::MergeParameters>(&parameters))
+      return value->opacity;
+    break;
+  case P::MergeValue:
+    if (const auto *value = std::get_if<compositor::MergeParameters>(&parameters))
+      return value->value;
+    break;
+  default:
+    break;
+  }
+  return 0.0;
+}
+
+// An open node's height: its port rows, then its inline value rows.
 [[nodiscard]] float compositor_node_height(const CompositorNodeMetrics &metrics,
                                            compositor::NodeKind kind) noexcept {
   const std::size_t rows =
       std::max({compositor::input_ports(kind).size(),
-                compositor::output_ports(kind).size(), std::size_t{1U}});
+                compositor::output_ports(kind).size(), std::size_t{1U}}) +
+      inline_values(kind).size();
   return metrics.header_height +
          static_cast<float>(rows) * metrics.row_height + metrics.footer_height;
 }
@@ -814,10 +707,18 @@ compositor_node_metrics(const gui::UiContext &ctx) {
       compositor_pin_label_gap +
       (widest_output > 0.0F ? widest_output + compositor_pin_inset
                             : compositor_node_padding);
-  const float heading =
-      std::max(compositor_text_width(ctx, title, compositor_title_text),
+  // The title shares its line with the collapse toggle and a problem badge.
+  float heading =
+      std::max(compositor_text_width(ctx, title, compositor_title_text) +
+                   compositor_header_chrome,
                compositor_text_width(ctx, source, compositor_detail_text)) +
       compositor_node_padding * 2.0F;
+  // An inline row is its label then a field wide enough to scrub.
+  for (const InlineValue &value : inline_values(kind)) {
+    heading = std::max(heading,
+                       compositor_text_width(ctx, value.label, compositor_pin_text) +
+                           compositor_node_padding * 2.0F + 96.0F);
+  }
   const float content = std::ceil(std::max(pins, heading) / 8.0F) * 8.0F;
   return std::clamp(content, compositor_node_min_width,
                     compositor_node_max_width);
@@ -949,10 +850,28 @@ compositor_node_metrics(const gui::UiContext &ctx) {
                                                   : 0.0F));
     break;
   }
-  case compositor::NodeKind::ChromaKey:
-    return "COLOUR KEY + SPILL";
-  case compositor::NodeKind::LumaKey:
-    return "LUMINANCE KEY";
+  case compositor::NodeKind::ChromaKey: {
+    const auto *parameters =
+        std::get_if<compositor::ChromaKeyParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "TOLERANCE %.2f  MIX %.2f",
+        static_cast<double>(parameters != nullptr ? parameters->tolerance
+                                                  : 0.1F),
+        static_cast<double>(parameters != nullptr ? parameters->mix : 1.0F));
+    break;
+  }
+  case compositor::NodeKind::LumaKey: {
+    const auto *parameters =
+        std::get_if<compositor::LumaKeyParameters>(&node.parameters);
+    length = std::snprintf(
+        text.data(), text.size(), "%.2f - %.2f%s",
+        static_cast<double>(parameters != nullptr ? parameters->low_threshold
+                                                  : 0.0F),
+        static_cast<double>(parameters != nullptr ? parameters->high_threshold
+                                                  : 1.0F),
+        parameters != nullptr && parameters->invert ? "  INVERTED" : "");
+    break;
+  }
   case compositor::NodeKind::Matte: {
     const auto *parameters =
         std::get_if<compositor::MatteParameters>(&node.parameters);
@@ -982,6 +901,30 @@ compositor_node_metrics(const gui::UiContext &ctx) {
     return "COMBINES IMAGE LAYERS";
   case compositor::NodeKind::Output:
     return "PROGRAM IMAGE";
+  case compositor::NodeKind::Merge: {
+    const auto *parameters =
+        std::get_if<compositor::MergeParameters>(&node.parameters);
+    if (parameters == nullptr) {
+      return "NORMAL";
+    }
+    const std::string_view blend =
+        merge_blend_labels[static_cast<std::size_t>(parameters->blend) %
+                           merge_blend_labels.size()];
+    length = std::snprintf(
+        text.data(), text.size(), "%.*s  %d%%", static_cast<int>(blend.size()),
+        blend.data(),
+        static_cast<int>(std::lround(parameters->opacity * 100.0F)));
+    break;
+  }
+  case compositor::NodeKind::Background: {
+    const auto *parameters =
+        std::get_if<compositor::BackgroundParameters>(&node.parameters);
+    return std::string{background_mode_labels
+                           [parameters != nullptr
+                                ? static_cast<std::size_t>(parameters->mode) %
+                                      background_mode_labels.size()
+                                : 0U]};
+  }
   }
   return std::string{text.data(),
                      static_cast<std::size_t>(std::max(length, 0))};
@@ -1003,10 +946,12 @@ compositor_node_metrics(const gui::UiContext &ctx) {
   case compositor::NodeKind::DirectionalBlur:
   case compositor::NodeKind::RadialArray:
   case compositor::NodeKind::LedCarProcess:
-    return true;
   case compositor::NodeKind::ChromaKey:
   case compositor::NodeKind::LumaKey:
   case compositor::NodeKind::Matte:
+  case compositor::NodeKind::Merge:
+  case compositor::NodeKind::Background:
+    return true;
   case compositor::NodeKind::SceneLayer:
   case compositor::NodeKind::Composite:
   case compositor::NodeKind::Output:
@@ -1058,6 +1003,18 @@ compositor_parameter_labels(compositor::NodeKind kind) noexcept {
   static constexpr std::array<std::string_view, 11U> led_car{
       {"X", "Y", "Z", "YAW", "PITCH", "ROLL", "PLATE SCALE", "ARRAY SCALE",
        "HORIZONTAL BLEND", "HEIGHT", "SCALE"}};
+  static constexpr std::array<std::string_view, 9U> chroma_key{
+      {"KEY COLOUR", "KEY RED", "KEY GREEN", "KEY BLUE", "TOLERANCE",
+       "SOFTNESS", "EDGE PX", "SPILL", "MIX"}};
+  static constexpr std::array<std::string_view, 6U> luma_key{
+      {"LOW", "HIGH", "LOW SOFTNESS", "HIGH SOFTNESS", "MATTE", "MIX"}};
+  static constexpr std::array<std::string_view, 3U> matte{
+      {"MODE", "MATTE", "CLAMP INPUT"}};
+  static constexpr std::array<std::string_view, 3U> merge{
+      {"BLEND", "OPACITY", "VALUE"}};
+  static constexpr std::array<std::string_view, 11U> background{
+      {"TYPE", "COLOUR A", "COLOUR B", "RED", "GREEN", "BLUE", "ALPHA",
+       "ANGLE TURNS", "CENTER X", "CENTER Y", "SIZE"}};
   switch (kind) {
   case compositor::NodeKind::Brightness:
   case compositor::NodeKind::Saturation:
@@ -1086,10 +1043,17 @@ compositor_parameter_labels(compositor::NodeKind kind) noexcept {
     return radial_array;
   case compositor::NodeKind::LedCarProcess:
     return led_car;
-  case compositor::NodeKind::SceneLayer:
   case compositor::NodeKind::ChromaKey:
+    return chroma_key;
   case compositor::NodeKind::LumaKey:
+    return luma_key;
   case compositor::NodeKind::Matte:
+    return matte;
+  case compositor::NodeKind::Merge:
+    return merge;
+  case compositor::NodeKind::Background:
+    return background;
+  case compositor::NodeKind::SceneLayer:
   case compositor::NodeKind::Composite:
   case compositor::NodeKind::Output:
     break;
@@ -1128,15 +1092,34 @@ parameter_panel_height(const compositor::GraphNode &node) noexcept {
   }
   case compositor::NodeKind::FilmGrain:
     return header + footer + 5.0F * row;
+  case compositor::NodeKind::ChromaKey:
+    return header + footer + 9.0F * row;
+  case compositor::NodeKind::LumaKey:
+    return header + footer + 6.0F * row;
+  case compositor::NodeKind::Matte:
+    return header + footer + 3.0F * row;
+  case compositor::NodeKind::Merge:
+    // Three fields and the note saying when VALUE applies.
+    return header + footer + 4.0F * row;
+  case compositor::NodeKind::Background: {
+    const auto *parameters =
+        std::get_if<compositor::BackgroundParameters>(&node.parameters);
+    const auto mode = parameters != nullptr ? parameters->mode
+                                            : compositor::BackgroundMode::Solid;
+    // Type and one colour; a gradient adds a colour, its placement, and for
+    // Linear its angle.
+    const float rows =
+        mode == compositor::BackgroundMode::Solid
+            ? 6.0F
+            : (mode == compositor::BackgroundMode::Linear ? 15.0F : 14.0F);
+    return header + footer + rows * row;
+  }
   case compositor::NodeKind::BoxBlur:
   case compositor::NodeKind::DirectionalBlur:
     return header + footer + 2.0F * row;
   case compositor::NodeKind::Brightness:
   case compositor::NodeKind::Saturation:
   case compositor::NodeKind::Blur:
-  case compositor::NodeKind::ChromaKey:
-  case compositor::NodeKind::LumaKey:
-  case compositor::NodeKind::Matte:
   case compositor::NodeKind::SceneLayer:
   case compositor::NodeKind::Composite:
   case compositor::NodeKind::Output:
@@ -1174,6 +1157,8 @@ port_type_name(compositor::PortValueType type) noexcept {
     return "an effect";
   case compositor::PortValueType::TransformSet:
     return "array instances";
+  case compositor::PortValueType::Filter:
+    return "a filter (blur or key)";
   }
   return "an image";
 }
@@ -1360,6 +1345,107 @@ routed_wire(gui::UiPoint from, std::span<const gui::UiPoint> points,
   return segments;
 }
 
+// A node's box in graph units, for the layout tools.
+struct LayoutBox final {
+  doc::NodeId node{};
+  float x{};
+  float y{};
+  float width{};
+  float height{};
+};
+
+enum class AlignEdge : core::u8 { Left, Right, Top, Bottom };
+
+// Lines the boxes up on one edge of the outermost of them.
+[[nodiscard]] std::vector<CompositorMoveIntent>
+align_boxes(std::span<const LayoutBox> boxes, AlignEdge edge) {
+  std::vector<CompositorMoveIntent> moves;
+  if (boxes.size() < 2U) {
+    return moves;
+  }
+  float target = edge == AlignEdge::Left || edge == AlignEdge::Top
+                     ? std::numeric_limits<float>::infinity()
+                     : -std::numeric_limits<float>::infinity();
+  for (const LayoutBox &box : boxes) {
+    switch (edge) {
+    case AlignEdge::Left:
+      target = std::min(target, box.x);
+      break;
+    case AlignEdge::Right:
+      target = std::max(target, box.x + box.width);
+      break;
+    case AlignEdge::Top:
+      target = std::min(target, box.y);
+      break;
+    case AlignEdge::Bottom:
+      target = std::max(target, box.y + box.height);
+      break;
+    }
+  }
+  for (const LayoutBox &box : boxes) {
+    CompositorMoveIntent move{box.node, box.x, box.y};
+    switch (edge) {
+    case AlignEdge::Left:
+      move.editor_x = target;
+      break;
+    case AlignEdge::Right:
+      move.editor_x = target - box.width;
+      break;
+    case AlignEdge::Top:
+      move.editor_y = target;
+      break;
+    case AlignEdge::Bottom:
+      move.editor_y = target - box.height;
+      break;
+    }
+    if (move.editor_x != box.x || move.editor_y != box.y) {
+      moves.push_back(move);
+    }
+  }
+  return moves;
+}
+
+// Spaces three or more boxes evenly between the first and last along one
+// axis; the outer two stay where they are.
+[[nodiscard]] std::vector<CompositorMoveIntent>
+distribute_boxes(std::span<const LayoutBox> boxes, bool horizontal) {
+  std::vector<CompositorMoveIntent> moves;
+  if (boxes.size() < 3U) {
+    return moves;
+  }
+  std::vector<LayoutBox> sorted{boxes.begin(), boxes.end()};
+  std::sort(sorted.begin(), sorted.end(),
+            [horizontal](const LayoutBox &left, const LayoutBox &right) {
+              const float a = horizontal ? left.x : left.y;
+              const float b = horizontal ? right.x : right.y;
+              return a != b ? a < b : left.node < right.node;
+            });
+  const auto position = [horizontal](const LayoutBox &box) {
+    return horizontal ? box.x : box.y;
+  };
+  const auto extent = [horizontal](const LayoutBox &box) {
+    return horizontal ? box.width : box.height;
+  };
+  float occupied{};
+  for (const LayoutBox &box : sorted) {
+    occupied += extent(box);
+  }
+  const float span =
+      position(sorted.back()) + extent(sorted.back()) - position(sorted.front());
+  const float gap = (span - occupied) / static_cast<float>(sorted.size() - 1U);
+  float cursor = position(sorted.front()) + extent(sorted.front()) + gap;
+  for (std::size_t index = 1U; index + 1U < sorted.size(); ++index) {
+    const LayoutBox &box = sorted[index];
+    if (cursor != position(box)) {
+      moves.push_back(CompositorMoveIntent{box.node,
+                                           horizontal ? cursor : box.x,
+                                           horizontal ? box.y : cursor});
+    }
+    cursor += extent(box) + gap;
+  }
+  return moves;
+}
+
 // The pointer's distance from the drawn curve, for picking a wire.
 [[nodiscard]] float wire_distance(const WirePath &path, float x,
                                   float y) noexcept {
@@ -1421,7 +1507,7 @@ std::string_view compositor_diagnostic_message(
   case compositor::DiagnosticCode::UnknownPort:
     return "A wire references a missing port";
   case compositor::DiagnosticCode::IncompatiblePorts:
-    return "Port types do not match";
+    return "A wire joins different kinds of port; filters go into FILTERS";
   case compositor::DiagnosticCode::DuplicateInput:
     return "An input already has a connection";
   case compositor::DiagnosticCode::MissingRequiredInput:
@@ -1434,8 +1520,6 @@ std::string_view compositor_diagnostic_message(
     return "One active Scene Layer per source is supported";
   case compositor::DiagnosticCode::Cycle:
     return "Cycle detected; wires must flow toward Output";
-  case compositor::DiagnosticCode::UnsupportedEffectOrder:
-    return "Inline effects must run before spatial filters";
   case compositor::DiagnosticCode::DeadBranch:
     return "This branch does not reach Output";
   case compositor::DiagnosticCode::PassBudgetExceeded:
@@ -1444,6 +1528,15 @@ std::string_view compositor_diagnostic_message(
     return "Graph exceeds the offscreen texture budget";
   case compositor::DiagnosticCode::TapBudgetExceeded:
     return "Graph exceeds the blur tap budget";
+  case compositor::DiagnosticCode::MergeNestingTooDeep:
+    return "Merges are nested more than 4 deep; flatten one";
+  case compositor::DiagnosticCode::UnsupportedMatteTopology:
+    return "Matte needs a Scene Layer source and a Scene Layer or Background "
+           "matte";
+  case compositor::DiagnosticCode::UnsupportedMatteGroupSource:
+    return "A Matte cannot use a group";
+  case compositor::DiagnosticCode::MatteBranchAlsoOutputReachable:
+    return "A Matte's matte layer cannot also be shown";
   }
   return "Graph is not ready";
 }
@@ -1588,9 +1681,12 @@ enum class SceneMenuCommand : core::u8 {
   Rename,
   ToggleVisible,
   ToggleLocked,
+  Highlight,
   Group,
   Ungroup,
   MoveOut,
+  NewGroup,
+  NewVehicleProcessGroup,
   Delete,
 };
 
@@ -1970,8 +2066,18 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool is_drop_target_row =
         dragging_ && row_hovered && element.node != drag_node_;
 
-    // Background: selection, hover, nothing - no zebra; the hierarchy is the
-    // structure the eye follows, and alternating fills fight the guides.
+    // Background: selection, hover, the operator's highlight, nothing - no
+    // zebra; the hierarchy is the structure the eye follows, and alternating
+    // fills fight the guides. The highlight keeps a bar at the right edge so
+    // it still reads on a selected row.
+    if (element.highlight.has_value()) {
+      const gui::UiColor highlight = timeline_marker_color(*element.highlight);
+      if (!is_selected) {
+        ctx.panel(row, with_alpha(highlight, 0.2F));
+      }
+      ctx.panel(gui::Rect{row.x + row.width - 3.0F, row.y, 3.0F, row.height},
+                highlight);
+    }
     if (is_selected) {
       ctx.panel(row, element.node == primary ? scale(theme.selection, 1.2F)
                                               : theme.selection);
@@ -2191,6 +2297,10 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               theme.accent);
     draw_filled_circle(ctx, drop_line_x, drop_line_y, 3.0F, theme.accent);
   }
+  const bool background_menu = !ctx.pointer_blocked() && !dragging_ &&
+                               ctx.secondary_pointer_pressed() &&
+                               list_bounds.contains(pointer_x, pointer_y) &&
+                               !pointer_over_content;
   if (!request.has_value() && ctx.pointer_pressed() &&
       list_bounds.contains(pointer_x, pointer_y) && !pointer_over_content) {
     SceneSelectionRequest clear{};
@@ -2279,57 +2389,6 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         return found != nullptr && !found->locked &&
                outliner_groupable(*found);
       });
-  const bool can_ungroup = selection.size() == 1U &&
-                           primary_element != nullptr &&
-                           !primary_element->locked &&
-                           !primary_element->linked &&
-                           primary_element->visible &&
-                           primary_element->kind == ElementKind::Group;
-  constexpr float action_width = 70.0F;
-  constexpr float action_gap = 4.0F;
-  const gui::Rect ungroup_bounds{footer.x + footer.width - action_width - 5.0F,
-                                 footer.y + 4.0F, action_width,
-                                 std::max(footer.height - 8.0F, 0.0F)};
-  const gui::Rect group_bounds{ungroup_bounds.x - action_width - action_gap,
-                               ungroup_bounds.y, action_width,
-                               ungroup_bounds.height};
-  const auto structure_button = [&](gui::UiId button_id,
-                                    const gui::Rect &button_bounds,
-                                    std::string_view label,
-                                    std::string_view tip, bool enabled) {
-    const gui::Interaction interaction =
-        enabled ? ctx.grab(button_id, button_bounds) : gui::Interaction{};
-    ctx.panel(button_bounds,
-              !enabled ? with_alpha(theme.widget, 0.5F)
-                       : (interaction.held
-                              ? theme.widget_active
-                              : (interaction.hovered ? theme.widget_hover
-                                                     : theme.widget)));
-    border(ctx, button_bounds, enabled ? theme.border : theme.divider);
-    const float text_width = ctx.font_width(label);
-    ctx.label(gui::Rect{button_bounds.x +
-                            std::max((button_bounds.width - text_width) * 0.5F,
-                                     2.0F),
-                        button_bounds.y, button_bounds.width,
-                        button_bounds.height},
-              label, enabled ? theme.text : theme.text_muted);
-    ctx.tooltip(button_bounds, tip);
-    return enabled && interaction.clicked;
-  };
-  if (structure_button(mix(id_, "scene.structure.group"), group_bounds,
-                       "Group", "Put the selection in a new group",
-                       can_group)) {
-    SceneSelectionRequest next{};
-    next.structure = SceneSelectionRequest::StructureAction::Group;
-    request = std::move(next);
-  }
-  if (structure_button(mix(id_, "scene.structure.ungroup"), ungroup_bounds,
-                       "Ungroup", "Dissolve the group, keeping its contents",
-                       can_ungroup)) {
-    SceneSelectionRequest next{};
-    next.structure = SceneSelectionRequest::StructureAction::Ungroup;
-    request = std::move(next);
-  }
   std::string selection_text =
       selection.empty() ? std::string{"No selection"}
                         : (selection.size() == 1U && primary_element != nullptr
@@ -2337,22 +2396,24 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                : std::to_string(selection.size()) +
                                      " selected");
   ctx.label(gui::Rect{footer.x + 10.0F, footer.y,
-                      std::max(group_bounds.x - footer.x - 16.0F, 0.0F),
-                      footer.height},
+                      std::max(footer.width - 20.0F, 0.0F), footer.height},
             selection_text,
             selection.empty() ? theme.text_muted : theme.text);
 
   // ------------------------------------------------------ context menu
   const gui::UiId menu_id = mix(id_, "scene.menu");
+  const gui::UiId color_menu_id = mix(id_, "scene.color_menu");
+  const auto add = [&](std::string label, SceneMenuCommand command) {
+    menu_entries_.push_back(std::move(label));
+    menu_commands_.push_back(static_cast<core::u8>(command));
+  };
   if (menu_row.has_value()) {
     const ElementInfo &element = *rows[*menu_row].element;
     menu_node_ = element.node;
+    menu_background_ = false;
+    color_menu_ = false;
     menu_entries_.clear();
     menu_commands_.clear();
-    const auto add = [&](std::string label, SceneMenuCommand command) {
-      menu_entries_.push_back(std::move(label));
-      menu_commands_.push_back(static_cast<core::u8>(command));
-    };
     const bool in_selection =
         std::find(selection.begin(), selection.end(), element.node) !=
         selection.end();
@@ -2369,6 +2430,9 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     add(element.visible ? "Hide" : "Show", SceneMenuCommand::ToggleVisible);
     add("Lock", SceneMenuCommand::ToggleLocked);
+    if (!element.linked) {
+      add("Highlight Color...", SceneMenuCommand::Highlight);
+    }
     const bool group_ready =
         outliner_groupable(element) &&
         (!in_selection || can_group);
@@ -2377,27 +2441,47 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                                 : "Group",
           SceneMenuCommand::Group);
     }
-    if (element.kind == ElementKind::Group && !element.linked &&
-        element.visible) {
+    const bool own_group =
+        element.kind == ElementKind::Group && !element.linked;
+    if (own_group && element.visible) {
       add("Ungroup", SceneMenuCommand::Ungroup);
     }
     if (!element.linked && element.parent_group.has_value()) {
       add("Move Out of Group", SceneMenuCommand::MoveOut);
     }
+    if (own_group) {
+      add("New Group Inside", SceneMenuCommand::NewGroup);
+      add("New Vehicle Process Group Inside",
+          SceneMenuCommand::NewVehicleProcessGroup);
+    }
     if (!element.linked_collection) {
       add("Delete", SceneMenuCommand::Delete);
     }
     ctx.open_context_menu(menu_id, pointer_x, pointer_y);
+  } else if (background_menu) {
+    // The list's empty space: new groups at the top level.
+    menu_node_ = doc::NodeId{};
+    menu_background_ = true;
+    color_menu_ = false;
+    menu_entries_.clear();
+    menu_commands_.clear();
+    add("New Group", SceneMenuCommand::NewGroup);
+    add("New Vehicle Process Group",
+        SceneMenuCommand::NewVehicleProcessGroup);
+    ctx.open_context_menu(menu_id, pointer_x, pointer_y);
   }
-  if (menu_node_ != doc::NodeId{}) {
+  if (menu_node_ != doc::NodeId{} || menu_background_) {
     std::vector<std::string_view> labels(menu_entries_.begin(),
                                          menu_entries_.end());
     if (const auto chosen = ctx.context_menu(menu_id, labels)) {
       const ElementInfo *const element = find(menu_node_);
-      if (element != nullptr && *chosen < menu_commands_.size()) {
+      if ((element != nullptr || menu_background_) &&
+          *chosen < menu_commands_.size()) {
+        const auto command =
+            static_cast<SceneMenuCommand>(menu_commands_[*chosen]);
         SceneSelectionRequest next{};
-        next.node = element->node;
-        switch (static_cast<SceneMenuCommand>(menu_commands_[*chosen])) {
+        next.node = menu_node_;
+        switch (command) {
         case SceneMenuCommand::Rename:
           begin_rename(ctx, *element);
           break;
@@ -2410,6 +2494,12 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           next.lock_changed = true;
           next.locked = !element->locked;
           request = std::move(next);
+          break;
+        case SceneMenuCommand::Highlight:
+          // The colours open where the menu was, so the choice stays under
+          // the pointer.
+          color_menu_ = true;
+          ctx.open_context_menu(color_menu_id, pointer_x, pointer_y);
           break;
         case SceneMenuCommand::Group:
           next.structure = SceneSelectionRequest::StructureAction::Group;
@@ -2433,6 +2523,15 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           request = std::move(next);
           break;
         }
+        case SceneMenuCommand::NewGroup:
+        case SceneMenuCommand::NewVehicleProcessGroup:
+          next.structure = SceneSelectionRequest::StructureAction::Create;
+          next.destination = menu_node_;
+          next.group_kind = command == SceneMenuCommand::NewVehicleProcessGroup
+                                ? scene::GroupKind::VehicleProcess
+                                : scene::GroupKind::Folder;
+          request = std::move(next);
+          break;
         case SceneMenuCommand::Delete:
           next.delete_selection = true;
           request = std::move(next);
@@ -2440,8 +2539,35 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
       }
       menu_node_ = doc::NodeId{};
+      menu_background_ = false;
     } else if (!ctx.menu_open(menu_id)) {
       menu_node_ = doc::NodeId{};
+      menu_background_ = false;
+    }
+  }
+
+  // The highlight colours: None, then the marker palette, each with its chip.
+  // The choice applies to the whole selection, as Delete does.
+  if (color_menu_) {
+    std::array<std::string_view, scene::timeline_marker_colors + 1U> labels{};
+    std::array<gui::UiColor, scene::timeline_marker_colors + 1U> swatches{};
+    labels[0] = "None";
+    swatches[0] = gui::UiColor{0.0F, 0.0F, 0.0F, 0.0F};
+    for (core::u8 color = 0U; color < scene::timeline_marker_colors; ++color) {
+      labels[color + 1U] = timeline_marker_color_name(color);
+      swatches[color + 1U] = timeline_marker_color(color);
+    }
+    if (const auto chosen =
+            ctx.context_menu(color_menu_id, labels, swatches)) {
+      SceneSelectionRequest next{};
+      next.highlight_changed = true;
+      if (*chosen > 0U) {
+        next.highlight = static_cast<core::u8>(*chosen - 1U);
+      }
+      request = std::move(next);
+      color_menu_ = false;
+    } else if (!ctx.menu_open(color_menu_id)) {
+      color_menu_ = false;
     }
   }
 
@@ -2450,759 +2576,206 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   return request;
 }
 
-std::string library_proxy_runtime_status(
-    const LibraryProxyRuntimeObservation &observation) {
-  if (observation.transcode_progress.has_value()) {
-    const LibraryProxyTranscodeProgress &progress =
-        *observation.transcode_progress;
-    if (progress.queued) {
-      return "PROXY QUEUED";
-    }
-    if (progress.total_frames == 0U) {
-      return "TRANSCODING PROXY";
-    }
-    const core::u64 percent = std::min<core::u64>(
-        100U,
-        (std::min(progress.completed_frames, progress.total_frames) * 100U +
-         progress.total_frames / 2U) /
-            progress.total_frames);
-    return "TRANSCODING PROXY " + std::to_string(percent) + "%";
-  }
-  switch (observation.state) {
-  case LibraryProxyRuntimeState::Source:
-    return "SOURCE";
-  case LibraryProxyRuntimeState::ProxyReady:
-    return "PROXY READY";
-  case LibraryProxyRuntimeState::PreferFallback:
-    return "SOURCE (PROXY " +
-           std::string{library_proxy_reason_detail(observation.reason)} + ")";
-  case LibraryProxyRuntimeState::RequiredUnready:
-    return "REQUIRED - UNREADY (" +
-           std::string{library_proxy_reason_detail(observation.reason)} + ")";
-  case LibraryProxyRuntimeState::Failed: {
-    const std::string_view issue =
-        library_proxy_issue_detail(observation.issue);
-    const std::string_view detail =
-        issue.empty() ? library_proxy_reason_detail(observation.reason) : issue;
-    return "PROXY FAILED (" + std::string{detail} + ")";
-  }
-  }
-  return "PROXY FAILED (UNKNOWN)";
+std::optional<gui::UiPoint>
+CompositorPanel::pending_position(doc::NodeId node) const noexcept {
+  const auto found = std::find_if(
+      pending_moves_.begin(), pending_moves_.end(),
+      [node](const PendingMove &move) noexcept { return move.node == node; });
+  return found == pending_moves_.end()
+             ? std::nullopt
+             : std::optional<gui::UiPoint>{gui::UiPoint{found->x, found->y}};
 }
 
-LibraryFrame LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
-                                const assets::AssetRegistry &registry) {
-  return draw_impl(ctx, bounds, registry, {}, nullptr, {});
+void CompositorPanel::select_only(doc::NodeId node) {
+  selection_ = CompositorSelection{CompositorSelectionKind::Node, node};
+  selected_nodes_.assign(1U, node);
 }
 
-LibraryFrame
-LibraryPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
-                   const assets::AssetRegistry &registry,
-                   std::span<const LibraryThumbnailObservation> thumbnails,
-                   LibraryThumbnailWindow window) {
-  return draw_impl(ctx, bounds, registry, thumbnails, std::addressof(window),
-                   {});
+std::optional<CompositorDeleteIntent> CompositorPanel::selection_delete(
+    const compositor::CompositorGraph &graph) const {
+  CompositorDeleteIntent remove;
+  if (selection_.kind == CompositorSelectionKind::Edge ||
+      selection_.kind == CompositorSelectionKind::Comment) {
+    remove.targets.push_back(selection_);
+  }
+  for (const doc::NodeId node : selected_nodes_) {
+    const compositor::GraphNode *const found = graph.node(node);
+    // Output is structural: the graph keeps its one.
+    if (found != nullptr && found->kind != compositor::NodeKind::Output) {
+      remove.targets.push_back(
+          CompositorSelection{CompositorSelectionKind::Node, node});
+    }
+  }
+  return remove.targets.empty() ? std::nullopt
+                                : std::optional<CompositorDeleteIntent>{
+                                      std::move(remove)};
 }
 
-LibraryFrame LibraryPanel::draw(
-    gui::UiContext &ctx, const gui::Rect &bounds,
-    const assets::AssetRegistry &registry,
-    std::span<const LibraryThumbnailObservation> thumbnails,
-    LibraryThumbnailWindow window,
-    std::span<const LibraryProxyRuntimeObservation> proxy_runtime) {
-  return draw_impl(ctx, bounds, registry, thumbnails, std::addressof(window),
-                   proxy_runtime);
+bool CompositorPanel::collapsed(
+    const compositor::GraphNode &node) const noexcept {
+  const auto held = std::find_if(
+      pending_collapse_.begin(), pending_collapse_.end(),
+      [&node](const auto &entry) noexcept { return entry.first == node.node; });
+  return held != pending_collapse_.end() ? held->second : node.collapsed;
 }
 
-LibraryFrame LibraryPanel::draw_impl(
-    gui::UiContext &ctx, const gui::Rect &bounds,
-    const assets::AssetRegistry &registry,
-    std::span<const LibraryThumbnailObservation> thumbnails,
-    const LibraryThumbnailWindow *thumbnail_window,
-    std::span<const LibraryProxyRuntimeObservation> proxy_runtime) {
-  LibraryFrame frame;
-  if (thumbnail_window != nullptr) {
-    frame.thumbnail_retain.emplace();
-  }
-  if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
-    return frame;
-  }
-
-  const bool thumbnails_enabled = thumbnail_window != nullptr;
-  const float current_asset_row_height =
-      thumbnails_enabled ? thumbnail_asset_row_height : asset_row_height;
-
-  ctx.push_clip(bounds);
-  ctx.panel(bounds);
-  std::array<char, 32U> asset_count{};
-  const int asset_count_length =
-      std::snprintf(asset_count.data(), asset_count.size(), "%llu ASSETS",
-                    static_cast<unsigned long long>(registry.assets.size()));
-  panel_title(ctx, bounds, "",
-              std::string_view{
-                  asset_count.data(),
-                  static_cast<std::size_t>(std::max(asset_count_length, 0))});
-  constexpr float rescan_width = 68.0F;
-  const bool room_to_rescan = bounds.width > rescan_width * 2.0F;
-  const gui::Rect search_bounds{bounds.x, bounds.y + title_height,
-                                room_to_rescan ? bounds.width - rescan_width
-                                               : bounds.width,
-                                search_height};
-  search_field(ctx, mix(id_, "library.search"), search_bounds, search_,
-               "Search Assets and Generators...");
-  if (room_to_rescan &&
-      ctx.button(mix(id_, "library.rescan"),
-                 gui::Rect{search_bounds.x + search_bounds.width + 2.0F,
-                           search_bounds.y + 2.0F, rescan_width - 4.0F,
-                           search_height - 4.0F},
-                 "RESCAN")) {
-    frame.rescan_assets = true;
-  }
-  const gui::Rect list_bounds{
-      bounds.x, search_bounds.y + search_bounds.height, bounds.width,
-      std::max(bounds.height - title_height - search_height - 18.0F, 0.0F)};
-
-  struct AssetRow final {
-    const assets::Asset *asset{};
-    std::string detail;
-  };
-
-  constexpr std::size_t category_count =
-      static_cast<std::size_t>(LibraryCategory::Count);
-  constexpr std::size_t media_category =
-      static_cast<std::size_t>(LibraryCategory::Media);
-  constexpr std::size_t model_category =
-      static_cast<std::size_t>(LibraryCategory::Models);
-
-  std::array<bool, category_count> category_query{};
-  for (std::size_t category = 0U; category < category_count; ++category) {
-    category_query[category] =
-        matches(library_category_names[category], search_);
-  }
-
-  std::array<std::vector<const LibraryItem *>, category_count> items;
-  for (const LibraryItem &item : library_items) {
-    if (category_query[item.category] || matches(item.name, search_) ||
-        matches(item.detail, search_)) {
-      items[item.category].push_back(&item);
-    }
-  }
-
-  std::array<std::vector<AssetRow>, category_count> asset_rows;
-  std::array<std::size_t, category_count> total_assets{};
-  for (const assets::Asset &asset : registry.assets) {
-    const std::size_t category =
-        assets::asset_kind(asset) == assets::AssetKind::Media ? media_category
-                                                              : model_category;
-    ++total_assets[category];
-    std::string detail = asset_detail(asset);
-    if (category_query[category] || asset_matches(asset, detail, search_)) {
-      asset_rows[category].push_back(
-          AssetRow{std::addressof(asset), std::move(detail)});
-    }
-  }
-
-  std::array<bool, category_count> import_visible{};
-  import_visible[media_category] = category_query[media_category] ||
-                                   matches("Import Media Video Image", search_);
-  import_visible[model_category] =
-      category_query[model_category] || matches("Import Model 3D", search_);
-
-  std::array<bool, category_count> category_visible{};
-  bool has_results = false;
-  for (std::size_t category = 0U; category < category_count; ++category) {
-    category_visible[category] = search_.empty() || category_query[category] ||
-                                 !items[category].empty() ||
-                                 !asset_rows[category].empty() ||
-                                 import_visible[category];
-    has_results = has_results || category_visible[category];
-  }
-
-  float content_height = 0.0F;
-  for (std::size_t category = 0U; category < category_count; ++category) {
-    if (!category_visible[category]) {
-      continue;
-    }
-    content_height += section_row_height;
-    if (category_open_[category]) {
-      content_height +=
-          tree_row_height * static_cast<float>(items[category].size());
-      if (import_visible[category]) {
-        content_height += import_row_height;
-      }
-      content_height += current_asset_row_height *
-                        static_cast<float>(asset_rows[category].size());
-      if (search_.empty() &&
-          (category == media_category || category == model_category) &&
-          total_assets[category] == 0U) {
-        content_height += empty_row_height;
-      }
-    }
-  }
-  if (!has_results) {
-    content_height = empty_row_height;
-  }
-  const float maximum_scroll =
-      std::max(content_height - list_bounds.height, 0.0F);
-  if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * tree_row_height * 2.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-
-  struct ThumbnailCandidate final {
-    assets::DerivativeKey key;
-    LibraryThumbnailState state{LibraryThumbnailState::Placeholder};
-    bool visible{};
-    float distance_from_view{};
-  };
-  std::vector<ThumbnailCandidate> thumbnail_candidates;
-  if (thumbnails_enabled) {
-    thumbnail_candidates.reserve(registry.assets.size());
-  }
-  const assets::DerivativeProfile *const thumbnail_profile =
-      thumbnails_enabled
-          ? assets::derivative_profile(
-                assets::DerivativeProfileId::Thumbnail320x180Srgb)
-          : nullptr;
-  const auto thumbnail_observation =
-      [thumbnails](const assets::DerivativeKey &key)
-      -> const LibraryThumbnailObservation * {
-    const auto found =
-        std::find_if(thumbnails.begin(), thumbnails.end(),
-                     [&key](const LibraryThumbnailObservation &observation) {
-                       return observation.key == key;
-                     });
-    return found == thumbnails.end() ? nullptr : std::addressof(*found);
-  };
-
-  ctx.push_clip(list_bounds);
-  float y = list_bounds.y - scroll_;
-  if (!has_results) {
-    ctx.label(gui::Rect{list_bounds.x + 8.0F, y,
-                        std::max(list_bounds.width - 16.0F, 0.0F),
-                        empty_row_height},
-              "NO LIBRARY RESULTS", ctx.theme().text_muted);
-  }
-
-  for (std::size_t category = 0U; category < category_count; ++category) {
-    if (!category_visible[category]) {
-      continue;
-    }
-    const gui::Rect category_row{list_bounds.x, y, list_bounds.width,
-                                 section_row_height};
-    const gui::Interaction category_interaction = clipped_grab(
-        ctx, mix(id_, "library.category", category), category_row, list_bounds);
-    if (intersect(category_row, list_bounds).height > 0.0F) {
-      ctx.panel(category_row, category_interaction.hovered
-                                  ? ctx.theme().widget_hover
-                                  : ctx.theme().header);
-      draw_twirl(ctx, category_row.x + 11.0F,
-                 category_row.y + category_row.height * 0.5F,
-                 category_open_[category], ctx.theme().text_muted);
-      ctx.label(gui::Rect{category_row.x + 22.0F, category_row.y,
-                          std::max(category_row.width - 58.0F, 0.0F),
-                          category_row.height},
-                library_category_names[category], ctx.theme().text_muted);
-      const std::size_t visible_count =
-          items[category].size() + asset_rows[category].size();
-      if (visible_count > 0U && category_row.width > 90.0F) {
-        std::array<char, 16U> count{};
-        const int count_length =
-            std::snprintf(count.data(), count.size(), "%llu",
-                          static_cast<unsigned long long>(visible_count));
-        ctx.label(gui::Rect{category_row.x + category_row.width - 29.0F,
-                            category_row.y, 21.0F, category_row.height},
-                  std::string_view{
-                      count.data(),
-                      static_cast<std::size_t>(std::max(count_length, 0))},
-                  ctx.theme().text_muted);
-      }
-    }
-    if (category_interaction.clicked) {
-      category_open_[category] = !category_open_[category];
-    }
-    y += section_row_height;
-    if (!category_open_[category]) {
-      continue;
-    }
-
-    std::size_t item_index = 0U;
-    for (const LibraryItem *const item : items[category]) {
-      const gui::Rect row{list_bounds.x, y, list_bounds.width, tree_row_height};
-      const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "library.item", static_cast<core::u64>(item->action)),
-          row, list_bounds);
-      if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.panel(row, interaction.hovered
-                           ? scale(ctx.theme().widget_hover, 1.08F)
-                           : (item_index % 2U == 0U ? ctx.theme().row
-                                                    : ctx.theme().row_alt));
-        const gui::Rect icon{row.x + 8.0F, row.y + 2.0F, 16.0F, 16.0F};
-        draw_library_icon(ctx, item->action, icon);
-        ctx.label(gui::Rect{row.x + 31.0F, row.y,
-                            std::max(row.width * 0.54F, 0.0F), row.height},
-                  item->name, ctx.theme().text);
-        draw_plus(ctx, row.x + row.width - 12.0F, row.y + row.height * 0.5F,
-                  interaction.hovered ? ctx.theme().accent
-                                      : ctx.theme().text_muted);
-      }
-      if (interaction.clicked) {
-        frame.add = item->action;
-      }
-      y += tree_row_height;
-      ++item_index;
-    }
-
-    if (import_visible[category]) {
-      const gui::Rect row{list_bounds.x, y, list_bounds.width,
-                          import_row_height};
-      const gui::Rect button{row.x + 7.0F, row.y + 3.0F,
-                             std::max(row.width - 14.0F, 0.0F),
-                             row.height - 6.0F};
-      const gui::Interaction interaction = clipped_grab(
-          ctx, mix(id_, "library.import", category), button, list_bounds);
-      if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.panel(button, interaction.hovered
-                              ? ctx.theme().widget_hover
-                              : scale(ctx.theme().widget, 0.94F));
-        border(ctx, button,
-               interaction.hovered ? ctx.theme().accent : ctx.theme().divider);
-        draw_plus(ctx, button.x + 10.0F, button.y + button.height * 0.5F,
-                  interaction.hovered ? ctx.theme().accent
-                                      : ctx.theme().text_muted);
-        ctx.label(
-            gui::Rect{button.x + 20.0F, button.y,
-                      std::max(button.width - 25.0F, 0.0F), button.height},
-            category == media_category ? "IMPORT MEDIA" : "IMPORT MODEL",
-            interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
-      }
-      if (interaction.clicked) {
-        frame.import_asset = category == media_category
-                                 ? LibraryImportAction::Media
-                                 : LibraryImportAction::Model;
-      }
-      y += import_row_height;
-    }
-
-    std::size_t asset_index = 0U;
-    for (const AssetRow &entry : asset_rows[category]) {
-      const gui::Rect row{list_bounds.x, y, list_bounds.width,
-                          current_asset_row_height};
-      const doc::NodeId asset_id = assets::asset_id(*entry.asset);
-      const bool is_media =
-          assets::asset_kind(*entry.asset) == assets::AssetKind::Media;
-      const auto *const media = std::get_if<assets::MediaAsset>(entry.asset);
-      const LibraryProxyRuntimeObservation *const proxy_observation =
-          media != nullptr
-              ? library_proxy_runtime_observation(*media, proxy_runtime)
-              : nullptr;
-      const auto decode_observation =
-          std::find_if(proxy_runtime.begin(), proxy_runtime.end(),
-                       [&](const LibraryProxyRuntimeObservation &observation) {
-                         return observation.asset == asset_id;
-                       });
-      const bool cpu_decode_only =
-          decode_observation != proxy_runtime.end() &&
-          decode_observation->media_decode == LibraryMediaDecodeState::CpuOnly;
-      std::optional<assets::DerivativeKey> thumbnail_key;
-      const LibraryThumbnailObservation *observation = nullptr;
-      LibraryThumbnailState thumbnail_state =
-          LibraryThumbnailState::Placeholder;
-      if (thumbnail_profile != nullptr && is_media) {
-        const std::optional<assets::ContentFingerprint> &fingerprint =
-            assets::asset_fingerprint(*entry.asset);
-        if (fingerprint.has_value()) {
-          const assets::DerivativeKey candidate_key =
-              assets::make_derivative_key(asset_id, *fingerprint,
-                                          *thumbnail_profile);
-          if (assets::valid_derivative_key(candidate_key)) {
-            thumbnail_key = candidate_key;
-            observation = thumbnail_observation(*thumbnail_key);
-            if (observation != nullptr) {
-              thumbnail_state = observation->state;
-            }
-            const gui::Rect visible_row = intersect(row, list_bounds);
-            const bool visible =
-                visible_row.width > 0.0F && visible_row.height > 0.0F;
-            float distance_from_view = 0.0F;
-            if (!visible && row.y + row.height <= list_bounds.y) {
-              distance_from_view = list_bounds.y - row.y - row.height;
-            } else if (!visible) {
-              distance_from_view = row.y - (list_bounds.y + list_bounds.height);
-            }
-            thumbnail_candidates.push_back(ThumbnailCandidate{
-                *thumbnail_key, thumbnail_state, visible, distance_from_view});
-          }
-        }
-      }
-      const float action_width = std::min(28.0F, row.width);
-      const gui::Rect content{
-          row.x, row.y, std::max(row.width - action_width, 0.0F), row.height};
-      const float remove_height = is_media ? row.height * 0.5F : row.height;
-      const gui::Rect remove{content.x + content.width, row.y, action_width,
-                             remove_height};
-      const gui::Rect proxy{content.x + content.width, row.y + remove_height,
-                            action_width,
-                            std::max(row.height - remove_height, 0.0F)};
-      const gui::Interaction interaction =
-          clipped_grab(ctx, mix(id_, "library.asset", asset_id.value()),
-                       content, list_bounds);
-      const gui::Interaction remove_interaction =
-          clipped_grab(ctx, mix(id_, "library.asset.remove", asset_id.value()),
-                       remove, list_bounds);
-      const gui::Interaction proxy_interaction =
-          is_media
-              ? clipped_grab(ctx,
-                             mix(id_, "library.asset.proxy", asset_id.value()),
-                             proxy, list_bounds)
-              : gui::Interaction{};
-      if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.panel(row, interaction.hovered || remove_interaction.hovered ||
-                               proxy_interaction.hovered
-                           ? scale(ctx.theme().widget_hover, 1.06F)
-                           : (asset_index % 2U == 0U ? ctx.theme().row
-                                                     : ctx.theme().row_alt));
-        if (thumbnails_enabled) {
-          float preview_width = std::min(thumbnail_preview_width,
-                                         std::max(content.width - 14.0F, 0.0F));
-          float preview_height = preview_width / thumbnail_preview_aspect;
-          const float maximum_preview_height =
-              std::max(row.height - 8.0F, 0.0F);
-          if (preview_height > maximum_preview_height) {
-            preview_height = maximum_preview_height;
-            preview_width = preview_height * thumbnail_preview_aspect;
-          }
-          const gui::Rect preview{
-              row.x + 6.0F,
-              row.y + std::max((row.height - preview_height) * 0.5F, 0.0F),
-              preview_width, preview_height};
-          const gui::UiColor thumbnail_color =
-              library_thumbnail_color(ctx, thumbnail_state);
-          if (preview.width > 0.0F && preview.height > 0.0F) {
-            ctx.panel(preview, scale(ctx.theme().track, 0.84F));
-            if (observation != nullptr &&
-                observation->state == LibraryThumbnailState::Ready &&
-                observation->texture != nullptr) {
-              ctx.image(preview, *observation->texture);
-            } else if (preview.width >= 8.0F && preview.height >= 8.0F) {
-              const float icon_size =
-                  std::min({16.0F, preview.width, preview.height});
-              const gui::Rect icon{
-                  preview.x + (preview.width - icon_size) * 0.5F,
-                  preview.y + (preview.height - icon_size) * 0.5F, icon_size,
-                  icon_size};
-              draw_library_icon(ctx,
-                                is_media ? LibraryAddAction::Media
-                                         : LibraryAddAction::Model,
-                                icon);
-            }
-            border(ctx, preview, with_alpha(thumbnail_color, 0.78F));
-          }
-
-          const float text_x = preview.x + preview.width + 8.0F;
-          const float text_width =
-              std::max(content.x + content.width - text_x - 17.0F, 0.0F);
-          ctx.label(gui::Rect{text_x, row.y + 2.0F, text_width, 16.0F},
-                    assets::asset_display_name(*entry.asset), ctx.theme().text);
-          ctx.label(gui::Rect{text_x, row.y + 18.0F, text_width, 14.0F},
-                    entry.detail,
-                    scale(ctx.theme().text_muted, 0.90F));
-          ctx.label(gui::Rect{text_x, row.y + 33.0F, text_width, 14.0F},
-                    "", ctx.theme().text_muted);
-          std::string status{library_thumbnail_status(thumbnail_state)};
-          if (proxy_observation != nullptr) {
-            if (!status.empty()) {
-              status += " | ";
-            }
-            status += library_proxy_runtime_status(*proxy_observation);
-          } else if (media != nullptr) {
-            if (!status.empty()) {
-              status += " | ";
-            }
-            status += "PROXY ";
-            status += library_proxy_label(media->proxy_playback_policy);
-          }
-          if (cpu_decode_only) {
-            if (!status.empty()) {
-              status += " | ";
-            }
-            status += "OUTPUT CPU DECODE ONLY";
-          }
-          if (!status.empty()) {
-            ctx.label(
-                gui::Rect{text_x, row.y + 49.0F, text_width, 15.0F}, status,
-                proxy_observation != nullptr &&
-                        proxy_observation->transcode_progress.has_value()
-                    ? ctx.theme().accent
-                : proxy_observation != nullptr
-                    ? library_proxy_runtime_color(ctx, proxy_observation->state)
-                    : thumbnail_color);
-          }
-        } else {
-          const gui::Rect icon{row.x + 8.0F, row.y + 15.0F, 16.0F, 16.0F};
-          draw_library_icon(
-              ctx, is_media ? LibraryAddAction::Media : LibraryAddAction::Model,
-              icon);
-          ctx.label(gui::Rect{row.x + 31.0F, row.y + 1.0F,
-                              std::max(content.width - 48.0F, 0.0F), 15.0F},
-                    assets::asset_display_name(*entry.asset), ctx.theme().text);
-          ctx.label(gui::Rect{row.x + 31.0F, row.y + 16.0F,
-                              std::max(content.width - 48.0F, 0.0F), 15.0F},
-                    entry.detail,
-                    scale(ctx.theme().text_muted, 0.90F));
-          ctx.label(gui::Rect{row.x + 31.0F, row.y + 31.0F,
-                              std::max(content.width - 48.0F, 0.0F), 15.0F},
-                    "", ctx.theme().text_muted);
-        }
-        ctx.tooltip(content, assets::asset_source(*entry.asset));
-        if (cpu_decode_only) {
-          draw_cpu_decode_warning(ctx,
-                                  gui::Rect{content.x + content.width - 18.0F,
-                                            row.y + 4.0F, 12.0F, 11.0F});
-        }
-        if (proxy_observation != nullptr &&
-            proxy_observation->transcode_progress.has_value()) {
-          const LibraryProxyTranscodeProgress &progress =
-              *proxy_observation->transcode_progress;
-          const float fraction =
-              progress.total_frames == 0U
-                  ? 0.0F
-                  : std::clamp(static_cast<float>(progress.completed_frames) /
-                                   static_cast<float>(progress.total_frames),
-                               0.0F, 1.0F);
-          const gui::Rect progress_track{
-              content.x + 6.0F, row.y + row.height - 4.0F,
-              std::max(content.width - 12.0F, 0.0F), 3.0F};
-          ctx.panel(progress_track, scale(ctx.theme().track, 0.78F));
-          if (fraction > 0.0F) {
-            ctx.panel(gui::Rect{progress_track.x, progress_track.y,
-                                progress_track.width * fraction,
-                                progress_track.height},
-                      ctx.theme().accent);
-          }
-        }
-        draw_plus(
-            ctx, content.x + content.width - 10.0F, row.y + row.height * 0.5F,
-            interaction.hovered ? ctx.theme().accent : ctx.theme().text_muted);
-        ctx.panel(gui::Rect{remove.x, row.y + 6.0F, 1.0F,
-                            std::max(row.height - 12.0F, 0.0F)},
-                  ctx.theme().divider);
-        draw_remove(ctx, remove.x + remove.width * 0.5F,
-                    remove.y + remove.height * 0.5F,
-                    remove_interaction.hovered ? ctx.theme().warning
-                                               : ctx.theme().text_muted);
-        if (is_media) {
-          ctx.panel(gui::Rect{proxy.x + 4.0F, proxy.y,
-                              std::max(proxy.width - 8.0F, 0.0F), 1.0F},
-                    ctx.theme().divider);
-          ctx.label(proxy,
-                    media != nullptr
-                        ? library_proxy_label(media->proxy_playback_policy)
-                        : std::string_view{"SRC"},
-                    proxy_interaction.hovered ? ctx.theme().accent
-                                              : ctx.theme().text_muted);
-        }
-      }
-      if (interaction.pressed) {
-        drag_asset_ = asset_id;
-        drag_start_x_ = ctx.pointer_x();
-        drag_start_y_ = ctx.pointer_y();
-        drag_moved_ = false;
-        drag_label_ = std::string{assets::asset_display_name(*entry.asset)};
-      }
-      if (interaction.held && drag_asset_ == asset_id) {
-        const float dx = ctx.pointer_x() - drag_start_x_;
-        const float dy = ctx.pointer_y() - drag_start_y_;
-        drag_moved_ = drag_moved_ || dx * dx + dy * dy >= 16.0F;
-        if (drag_moved_) {
-          frame.dragging_asset = asset_id;
-        }
-      }
-      if (interaction.released && drag_asset_ == asset_id) {
-        if (drag_moved_) {
-          frame.asset_drop =
-              LibraryAssetDrop{asset_id, ctx.pointer_x(), ctx.pointer_y()};
-        } else if (interaction.clicked) {
-          frame.instantiate_asset = asset_id;
-        }
-        drag_asset_ = {};
-        drag_moved_ = false;
-        drag_label_.clear();
-      }
-      if (remove_interaction.clicked) {
-        frame.remove_asset = asset_id;
-        if (drag_asset_ == asset_id) {
-          drag_asset_ = {};
-          drag_moved_ = false;
-          drag_label_.clear();
-        }
-      }
-      if (proxy_interaction.clicked && media != nullptr) {
-        LibraryProxyPolicyIntent intent{};
-        intent.asset = asset_id;
-        switch (media->proxy_playback_policy) {
-        case assets::ProxyPlaybackPolicy::Source:
-          intent.requested_profile = media->requested_proxy_profile.value_or(
-              cpu_decode_only
-                  ? assets::DerivativeProfileId::ProxySourceCfrHevcMain10
-                  : assets::DerivativeProfileId::Proxy720pCfrH264);
-          intent.policy = assets::ProxyPlaybackPolicy::PreferProxy;
-          break;
-        case assets::ProxyPlaybackPolicy::PreferProxy:
-          intent.requested_profile = media->requested_proxy_profile.value_or(
-              assets::DerivativeProfileId::Proxy720pCfrH264);
-          intent.policy = assets::ProxyPlaybackPolicy::RequireProxy;
-          break;
-        case assets::ProxyPlaybackPolicy::RequireProxy:
-          intent.requested_profile.reset();
-          intent.policy = assets::ProxyPlaybackPolicy::Source;
-          break;
-        }
-        frame.proxy_policy = intent;
-      }
-      y += current_asset_row_height;
-      ++asset_index;
-    }
-
-    if (search_.empty() &&
-        (category == media_category || category == model_category) &&
-        total_assets[category] == 0U) {
-      const gui::Rect row{list_bounds.x, y, list_bounds.width,
-                          empty_row_height};
-      if (intersect(row, list_bounds).height > 0.0F) {
-        ctx.label(gui::Rect{row.x + 31.0F, row.y,
-                            std::max(row.width - 39.0F, 0.0F), row.height},
-                  category == media_category ? "NO MEDIA IMPORTED"
-                                             : "NO MODELS IMPORTED",
-                  scale(ctx.theme().text_muted, 0.82F));
-      }
-      y += empty_row_height;
-    }
-  }
-
-  if (thumbnail_window != nullptr) {
-    const std::size_t prefetch_limit = static_cast<std::size_t>(
-        std::min(thumbnail_window->prefetch_asset_rows,
-                 maximum_library_thumbnail_prefetch_rows));
-    const std::size_t request_limit = static_cast<std::size_t>(
-        std::min(thumbnail_window->maximum_request_intents,
-                 maximum_library_thumbnail_request_intents));
-    LibraryThumbnailRetainIntent &retain = *frame.thumbnail_retain;
-    const auto retain_contains = [&retain](const assets::DerivativeKey &key) {
-      return std::find(retain.keys.begin(), retain.keys.end(), key) !=
-             retain.keys.end();
-    };
-    const auto requests_contain = [&frame](const assets::DerivativeKey &key) {
-      return std::find_if(frame.thumbnail_requests.begin(),
-                          frame.thumbnail_requests.end(),
-                          [&key](const LibraryThumbnailRequestIntent &request) {
-                            return request.key == key;
-                          }) != frame.thumbnail_requests.end();
-    };
-    const auto append_candidate =
-        [&frame, &retain, &retain_contains, &requests_contain,
-         request_limit](const ThumbnailCandidate &candidate,
-                        LibraryThumbnailRequestPriority priority) {
-          if (!retain_contains(candidate.key)) {
-            retain.keys.push_back(candidate.key);
-          }
-          const bool needs_request =
-              candidate.state == LibraryThumbnailState::Placeholder ||
-              candidate.state == LibraryThumbnailState::Stale;
-          if (needs_request &&
-              frame.thumbnail_requests.size() < request_limit &&
-              !requests_contain(candidate.key)) {
-            frame.thumbnail_requests.push_back(
-                LibraryThumbnailRequestIntent{candidate.key, priority});
-          }
-        };
-
-    std::vector<const ThumbnailCandidate *> prefetch_candidates;
-    prefetch_candidates.reserve(thumbnail_candidates.size());
-    for (const ThumbnailCandidate &candidate : thumbnail_candidates) {
-      if (candidate.visible) {
-        append_candidate(candidate, LibraryThumbnailRequestPriority::Visible);
-      } else {
-        prefetch_candidates.push_back(std::addressof(candidate));
-      }
-    }
-    std::stable_sort(
-        prefetch_candidates.begin(), prefetch_candidates.end(),
-        [](const ThumbnailCandidate *left, const ThumbnailCandidate *right) {
-          if (left->distance_from_view != right->distance_from_view) {
-            return left->distance_from_view < right->distance_from_view;
-          }
-          return left->key.asset.value() < right->key.asset.value();
-        });
-    const std::size_t selected_prefetch =
-        std::min(prefetch_limit, prefetch_candidates.size());
-    for (std::size_t index = 0U; index < selected_prefetch; ++index) {
-      append_candidate(*prefetch_candidates[index],
-                       LibraryThumbnailRequestPriority::Prefetch);
-    }
-  }
-  ctx.pop_clip();
-
-  if (maximum_scroll > 0.0F && list_bounds.height > 0.0F) {
-    const gui::Rect track{list_bounds.x + list_bounds.width - 4.0F,
-                          list_bounds.y, 3.0F, list_bounds.height};
-    ctx.panel(track, scale(ctx.theme().divider, 0.75F));
-    const float thumb_height = std::max(
-        list_bounds.height * list_bounds.height / content_height, 20.0F);
-    const float thumb_range = std::max(list_bounds.height - thumb_height, 0.0F);
-    const float thumb_y =
-        list_bounds.y + thumb_range * (scroll_ / maximum_scroll);
-    ctx.panel(gui::Rect{track.x, thumb_y, track.width, thumb_height},
-              ctx.theme().text_muted);
-  }
-
-  const gui::Rect footer{bounds.x, bounds.y + bounds.height - 18.0F,
-                         bounds.width, 18.0F};
-  ctx.panel(footer, ctx.theme().background);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
-            ctx.theme().divider);
-  ctx.pop_clip();
-
-  if (frame.dragging_asset.has_value()) {
-    const float ghost_width = std::clamp(
-        static_cast<float>(drag_label_.size()) * 7.0F + 28.0F, 108.0F, 220.0F);
-    const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 10.0F,
-                          ghost_width, 24.0F};
-    ctx.panel(ghost, with_alpha(ctx.theme().background, 0.94F));
-    border(ctx, ghost, ctx.theme().accent);
-    draw_plus(ctx, ghost.x + 10.0F, ghost.y + ghost.height * 0.5F,
-              ctx.theme().accent);
-    ctx.label(gui::Rect{ghost.x + 21.0F, ghost.y,
-                        std::max(ghost.width - 25.0F, 0.0F), ghost.height},
-              drag_label_, ctx.theme().text);
-  }
-  return frame;
+bool CompositorPanel::bypassed(
+    const compositor::GraphNode &node) const noexcept {
+  const auto held = std::find_if(
+      pending_bypass_.begin(), pending_bypass_.end(),
+      [&node](const auto &entry) noexcept { return entry.first == node.node; });
+  return held != pending_bypass_.end() ? held->second : node.bypassed;
 }
 
-std::optional<LibraryAddAction> LibraryPanel::draw(gui::UiContext &ctx,
-                                                   const gui::Rect &bounds) {
-  static const assets::AssetRegistry empty_registry;
-  const LibraryFrame frame = draw(ctx, bounds, empty_registry);
-  if (frame.add.has_value()) {
-    return frame.add;
+core::i64 CompositorPanel::edge_order(
+    const compositor::GraphEdge &edge) const noexcept {
+  const auto held = std::find_if(
+      pending_order_.begin(), pending_order_.end(),
+      [&edge](const auto &entry) noexcept { return entry.first == edge.node; });
+  return held != pending_order_.end() ? held->second : edge.order;
+}
+
+std::vector<const compositor::GraphEdge *>
+CompositorPanel::input_chain(const compositor::CompositorGraph &graph,
+                             compositor::EdgeEndpoint input) const {
+  std::vector<const compositor::GraphEdge *> chain;
+  for (const compositor::GraphEdge &edge : graph.edges) {
+    if (edge.to == input) {
+      chain.push_back(std::addressof(edge));
+    }
   }
-  if (frame.import_asset == LibraryImportAction::Media) {
-    return LibraryAddAction::Media;
-  }
-  if (frame.import_asset == LibraryImportAction::Model) {
-    return LibraryAddAction::Model;
+  std::sort(chain.begin(), chain.end(),
+            [this](const compositor::GraphEdge *left,
+                   const compositor::GraphEdge *right) {
+              const core::i64 a = edge_order(*left);
+              const core::i64 b = edge_order(*right);
+              return a != b ? a < b : left->node < right->node;
+            });
+  return chain;
+}
+
+std::optional<float>
+CompositorPanel::port_row(const compositor::CompositorGraph &graph,
+                          const compositor::GraphNode &node, core::u8 port,
+                          bool input) const {
+  const auto ports = input ? compositor::input_ports(node.kind)
+                           : compositor::output_ports(node.kind);
+  const bool packed = collapsed(node);
+  std::size_t row{};
+  for (const compositor::PortDescriptor &descriptor : ports) {
+    const compositor::EdgeEndpoint endpoint{node.node, descriptor.index};
+    // A collapsed node keeps only its connected ports, packed together.
+    const bool shown =
+        !packed ||
+        std::any_of(graph.edges.begin(), graph.edges.end(),
+                    [&](const compositor::GraphEdge &edge) noexcept {
+                      return (input ? edge.to : edge.from) == endpoint;
+                    });
+    if (descriptor.index == port) {
+      return shown ? std::optional<float>{static_cast<float>(row)}
+                   : std::nullopt;
+    }
+    if (shown) {
+      ++row;
+    }
   }
   return std::nullopt;
 }
 
+std::optional<CompositorWireDrop>
+CompositorPanel::effect_wire_at(const compositor::CompositorGraph &graph,
+                                float x, float y,
+                                compositor::PortValueType type) const {
+  if (!last_canvas_.contains(x, y)) {
+    return std::nullopt;
+  }
+  const DrawnWire *best = nullptr;
+  float nearest = 8.0F;
+  gui::UiPoint at{};
+  for (const DrawnWire &drawn : drawn_wires_) {
+    if (drawn.type != type) {
+      continue;
+    }
+    for (std::size_t index = 0U; index + 1U < drawn.points.size(); ++index) {
+      const gui::UiPoint a = drawn.points[index];
+      const gui::UiPoint b = drawn.points[index + 1U];
+      const float sx = b.x - a.x;
+      const float sy = b.y - a.y;
+      const float length = sx * sx + sy * sy;
+      const float t =
+          length > 0.0F
+              ? std::clamp(((x - a.x) * sx + (y - a.y) * sy) / length, 0.0F,
+                           1.0F)
+              : 0.0F;
+      const gui::UiPoint closest{a.x + sx * t, a.y + sy * t};
+      const float distance = std::hypot(x - closest.x, y - closest.y);
+      if (distance <= nearest) {
+        nearest = distance;
+        best = std::addressof(drawn);
+        at = closest;
+      }
+    }
+  }
+  const compositor::GraphEdge *const edge =
+      best != nullptr ? graph.edge(best->edge) : nullptr;
+  if (edge == nullptr) {
+    return std::nullopt;
+  }
+  // The input's wires in the order it applies them; the new one goes right
+  // after this one, and the rest are spaced out to make room.
+  const std::vector<const compositor::GraphEdge *> chain =
+      input_chain(graph, edge->to);
+  CompositorWireDrop drop{edge->node, edge->to, at.x, at.y};
+  drop.type = type;
+  for (std::size_t index = 0U; index < chain.size(); ++index) {
+    const core::i64 spaced = static_cast<core::i64>(index) * 2;
+    if (edge_order(*chain[index]) != spaced) {
+      drop.reorder.emplace_back(chain[index]->node, spaced);
+    }
+    if (chain[index]->node == edge->node) {
+      drop.order = spaced + 1;
+    }
+  }
+  if (const compositor::GraphNode *const source = graph.node(edge->from.node)) {
+    drop.after = compositor::node_kind_name(source->kind);
+  }
+  return drop;
+}
+
+void CompositorPanel::draw_wire_drop(gui::UiContext &ctx,
+                                     const CompositorWireDrop &drop,
+                                     std::string_view what) const {
+  ctx.push_clip(last_canvas_);
+  for (const DrawnWire &drawn : drawn_wires_) {
+    if (drawn.edge == drop.edge) {
+      ctx.draw_list().add_polyline(drawn.points,
+                                   std::clamp(4.0F * zoom_, 3.0F, 6.0F),
+                                   ctx.theme().text);
+    }
+  }
+  draw_port_shape(ctx, drop.type, drop.x, drop.y,
+                  std::max(4.0F, 6.0F * zoom_), ctx.theme().text);
+  std::string label{what};
+  label += "  -  INSERT AFTER ";
+  label += drop.after;
+  const float width = std::ceil(ctx.font_width(label)) + 16.0F;
+  const float height = ctx.line_height() + 8.0F;
+  const gui::Rect badge{drop.x + 12.0F, drop.y + 10.0F, width, height};
+  ctx.panel(badge, with_alpha(ctx.theme().background, 0.92F));
+  border(ctx, badge, port_color(ctx, drop.type));
+  ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
+                      badge.height},
+            label, ctx.theme().text);
+  ctx.pop_clip();
+}
+
 gui::Rect CompositorPanel::node_screen_bounds(
     const compositor::GraphNode &node) const noexcept {
-  const bool pending =
-      pending_move_.has_value() && pending_move_->node == node.node;
+  const std::optional<gui::UiPoint> pending = pending_position(node.node);
   const gui::UiPoint size = node_size(node);
   return gui::Rect{
-      last_canvas_.x + pan_x_ + (pending ? pending_move_->x : node.editor_x) * zoom_,
-      last_canvas_.y + pan_y_ + (pending ? pending_move_->y : node.editor_y) * zoom_,
+      last_canvas_.x + pan_x_ + (pending ? pending->x : node.editor_x) * zoom_,
+      last_canvas_.y + pan_y_ + (pending ? pending->y : node.editor_y) * zoom_,
       size.x * zoom_, size.y * zoom_};
 }
 
@@ -3261,9 +2834,14 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
     }
     const auto ports = compositor::input_ports(it->kind);
     for (std::size_t index = 0U; index < ports.size(); ++index) {
-      const float row_top = bounds.y + (metrics_.header_height +
-                                        metrics_.row_height *
-                                            static_cast<float>(index)) * zoom_;
+      const std::optional<float> place =
+          port_row(graph, *it, ports[index].index, true);
+      if (!place.has_value()) {
+        continue;
+      }
+      const float row_top =
+          bounds.y +
+          (metrics_.header_height + metrics_.row_height * *place) * zoom_;
       const gui::Rect row{bounds.x - reach, row_top,
                           bounds.width * 0.5F + reach,
                           metrics_.row_height * zoom_};
@@ -3291,12 +2869,14 @@ std::optional<CompositorPortDrop> CompositorPanel::port_drop_target(
     const auto ports = compositor::input_ports(it->kind);
     for (std::size_t index = 0U; index < ports.size(); ++index) {
       const compositor::PortDescriptor &port = ports[index];
-      if (port.type != type) {
+      const std::optional<float> place =
+          port_row(graph, *it, port.index, true);
+      if (port.type != type || !place.has_value()) {
         continue;
       }
-      const float row_top = bounds.y + (metrics_.header_height +
-                                        metrics_.row_height *
-                                            static_cast<float>(index)) * zoom_;
+      const float row_top =
+          bounds.y +
+          (metrics_.header_height + metrics_.row_height * *place) * zoom_;
       const float row_height = metrics_.row_height * zoom_;
       const gui::Rect row{bounds.x - reach, row_top,
                           bounds.width * 0.5F + reach, row_height};
@@ -3382,11 +2962,48 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (ctx.pointer_pressed()) {
     focused_ = bounds.contains(ctx.pointer_x(), ctx.pointer_y());
   }
+  const auto comment_of =
+      [&compositor_graph](doc::NodeId id) -> const compositor::GraphComment * {
+    const auto found = std::find_if(
+        compositor_graph.comments.begin(), compositor_graph.comments.end(),
+        [id](const compositor::GraphComment &comment) noexcept {
+          return comment.node == id;
+        });
+    return found == compositor_graph.comments.end() ? nullptr
+                                                    : std::addressof(*found);
+  };
+  std::erase_if(selected_nodes_, [&](doc::NodeId node) {
+    return compositor_graph.node(node) == nullptr;
+  });
   if ((selection_.kind == CompositorSelectionKind::Node &&
        compositor_graph.node(selection_.node) == nullptr) ||
       (selection_.kind == CompositorSelectionKind::Edge &&
-       compositor_graph.edge(selection_.node) == nullptr)) {
-    selection_ = CompositorSelection{};
+       compositor_graph.edge(selection_.node) == nullptr) ||
+      (selection_.kind == CompositorSelectionKind::Comment &&
+       comment_of(selection_.node) == nullptr)) {
+    // The primary went away: another selected node takes its place.
+    selection_ = selected_nodes_.empty()
+                     ? CompositorSelection{}
+                     : CompositorSelection{CompositorSelectionKind::Node,
+                                           selected_nodes_.front()};
+  }
+  // A paste or duplicate selects what it added once that arrives.
+  if (paste_baseline_.has_value()) {
+    std::vector<doc::NodeId> added;
+    for (const compositor::GraphNode &node : compositor_graph.nodes) {
+      if (!std::binary_search(paste_baseline_->nodes.begin(),
+                              paste_baseline_->nodes.end(), node.node)) {
+        added.push_back(node.node);
+      }
+    }
+    if (!added.empty()) {
+      selected_nodes_ = std::move(added);
+      selection_ = CompositorSelection{CompositorSelectionKind::Node,
+                                       selected_nodes_.front()};
+      paste_baseline_.reset();
+    } else if (++paste_baseline_->frames > compositor_pending_move_frames) {
+      paste_baseline_.reset();
+    }
   }
 
   const gui::Rect toolbar{bounds.x, bounds.y, bounds.width,
@@ -3414,6 +3031,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     parameter_content_height_ = 0.0F;
   }
 
+  // Collapse and bypass toggles end once the graph shows them.
+  std::erase_if(pending_collapse_, [&](const auto &held) {
+    const compositor::GraphNode *const node = compositor_graph.node(held.first);
+    return node == nullptr || node->collapsed == held.second;
+  });
+  std::erase_if(pending_bypass_, [&](const auto &held) {
+    const compositor::GraphNode *const node = compositor_graph.node(held.first);
+    return node == nullptr || node->bypassed == held.second;
+  });
+  std::erase_if(pending_order_, [&](const auto &held) {
+    const compositor::GraphEdge *const edge = compositor_graph.edge(held.first);
+    return edge == nullptr || edge->order == held.second;
+  });
   // Every node's size this frame, from the font it is drawn in.
   metrics_ = compositor_node_metrics(ctx);
   for (const CompositorPaletteItem &item : compositor_palette_items) {
@@ -3432,9 +3062,30 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         node.kind == compositor::NodeKind::SceneLayer
             ? compositor_node_detail(node, elements)
             : std::string{};
+    float height = compositor_node_height(metrics_, node.kind);
+    if (collapsed(node)) {
+      std::size_t inputs_shown{};
+      std::size_t outputs_shown{};
+      for (const auto &port : compositor::input_ports(node.kind)) {
+        inputs_shown += port_row(compositor_graph, node, port.index, true)
+                            .has_value()
+                            ? 1U
+                            : 0U;
+      }
+      for (const auto &port : compositor::output_ports(node.kind)) {
+        outputs_shown += port_row(compositor_graph, node, port.index, false)
+                             .has_value()
+                             ? 1U
+                             : 0U;
+      }
+      height = metrics_.header_height +
+               static_cast<float>(std::max(inputs_shown, outputs_shown)) *
+                   metrics_.row_height +
+               metrics_.footer_height;
+    }
     node_sizes_.push_back(NodeSize{
         node.node, compositor_node_width(ctx, node.kind, title, source),
-        compositor_node_height(metrics_, node.kind)});
+        height});
   }
   std::sort(node_sizes_.begin(), node_sizes_.end(),
             [](const NodeSize &left, const NodeSize &right) noexcept {
@@ -3442,13 +3093,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             });
 
   // A released move keeps its position until the graph reports the edit.
-  if (pending_move_.has_value()) {
-    const compositor::GraphNode *const moved =
-        compositor_graph.node(pending_move_->node);
-    if (moved == nullptr || moved->editor_x != pending_move_->from_x ||
-        moved->editor_y != pending_move_->from_y ||
-        ++pending_move_->frames > compositor_pending_move_frames) {
-      pending_move_.reset();
+  std::erase_if(pending_moves_, [&](PendingMove &held) {
+    const compositor::GraphNode *const moved = compositor_graph.node(held.node);
+    return moved == nullptr || moved->editor_x != held.from_x ||
+           moved->editor_y != held.from_y ||
+           ++held.frames > compositor_pending_move_frames;
+  });
+  if (pending_comment_.has_value()) {
+    const compositor::GraphComment *const box =
+        comment_of(pending_comment_->held.node);
+    if (box == nullptr || *box != pending_comment_->from ||
+        ++pending_comment_->frames > compositor_pending_move_frames) {
+      pending_comment_.reset();
     }
   }
 
@@ -3665,11 +3321,22 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       pan_x_ = 0.0F;
       pan_y_ = 0.0F;
     }
+    const gui::Rect map_toggle{reset_view.x + reset_view.width + 4.0F,
+                               toolbar.y + 3.0F, button_width("MAP", 44.0F),
+                               button_height};
+    if (navigation_button("compositor.minimap_toggle", map_toggle, "MAP")) {
+      minimap_ = !minimap_;
+    }
+    if (minimap_) {
+      ctx.panel(gui::Rect{map_toggle.x, map_toggle.y + map_toggle.height - 2.0F,
+                          map_toggle.width, 2.0F},
+                ctx.theme().accent);
+    }
     // The navigation hint only where it cannot run into the graph status
     // and selection actions at the toolbar's other end.
     constexpr std::string_view hint = "WHEEL ZOOM  /  MIDDLE-DRAG PAN";
     if (toolbar.width >= 760.0F) {
-      ctx.label(gui::Rect{reset_view.x + reset_view.width + 10.0F, toolbar.y,
+      ctx.label(gui::Rect{map_toggle.x + map_toggle.width + 10.0F, toolbar.y,
                           std::ceil(ctx.font_width(hint)) + 2.0F,
                           toolbar.height},
                 hint, ctx.theme().text_muted);
@@ -3765,18 +3432,22 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       static_cast<std::size_t>(std::max(graph_status_length, 0))};
   const float status_width = ctx.font_width(graph_status_text);
   const bool has_selection = selection_.kind != CompositorSelectionKind::None;
-  const compositor::GraphNode *const selected_node =
-      selection_.kind == CompositorSelectionKind::Node
-          ? compositor_graph.node(selection_.node)
-          : nullptr;
-  const bool selected_required_output =
-      selected_node != nullptr &&
-      selected_node->kind == compositor::NodeKind::Output;
-  const std::string_view remove_label =
-      selection_.kind == CompositorSelectionKind::Edge
-          ? std::string_view{"DISCONNECT"}
-          : (selected_required_output ? std::string_view{"OUTPUT REQUIRED"}
-                                      : std::string_view{"DELETE NODE"});
+  const std::optional<CompositorDeleteIntent> removable =
+      selection_delete(compositor_graph);
+  const bool selected_required_output = has_selection && !removable.has_value();
+  std::string remove_label;
+  if (selection_.kind == CompositorSelectionKind::Edge) {
+    remove_label = "DISCONNECT";
+  } else if (selection_.kind == CompositorSelectionKind::Comment) {
+    remove_label = "DELETE COMMENT";
+  } else if (selected_required_output) {
+    remove_label = "OUTPUT REQUIRED";
+  } else if (removable.has_value() && removable->targets.size() > 1U) {
+    remove_label = "DELETE " + std::to_string(removable->targets.size()) +
+                   " NODES";
+  } else {
+    remove_label = "DELETE NODE";
+  }
   const float remove_width = button_width(remove_label, 86.0F);
   const float trailing_control_width =
       has_selection ? remove_width + 12.0F : 0.0F;
@@ -3807,15 +3478,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         remove_bounds.height},
               remove_label,
               interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
-    if (interaction.clicked && !selected_required_output) {
-      frame.remove = CompositorDeleteIntent{selection_};
+    if (interaction.clicked && removable.has_value()) {
+      frame.remove = removable;
     }
   }
   if (focused_ && has_selection && !ctx.typing() &&
       ctx.key_pressed(gui::Key::Delete)) {
-    if (!selected_required_output) {
-      frame.remove = CompositorDeleteIntent{selection_};
-    }
+    frame.remove = removable;
     frame.consume_delete = true;
   }
 
@@ -3882,11 +3551,210 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
+  // The right-click menu: what it offers for what was clicked, and where.
+  // Moves a wire to `target`'s place in their input's order; the wires
+  // between shift up or down one. The whole input is numbered afresh.
+  const auto move_in_order = [&](doc::NodeId moved, doc::NodeId target) {
+    const compositor::GraphEdge *const edge = compositor_graph.edge(moved);
+    if (edge == nullptr || moved == target) {
+      return;
+    }
+    std::vector<const compositor::GraphEdge *> chain =
+        input_chain(compositor_graph, edge->to);
+    const auto from = std::find(chain.begin(), chain.end(), edge);
+    const auto to = std::find_if(
+        chain.begin(), chain.end(),
+        [target](const compositor::GraphEdge *other) noexcept {
+          return other->node == target;
+        });
+    if (from == chain.end() || to == chain.end()) {
+      return;
+    }
+    const auto place = std::distance(chain.begin(), to);
+    chain.erase(from);
+    chain.insert(chain.begin() + place, edge);
+    CompositorReorderIntent reorder;
+    for (std::size_t index = 0U; index < chain.size(); ++index) {
+      const auto order = static_cast<core::i64>(index);
+      if (edge_order(*chain[index]) == order) {
+        continue;
+      }
+      reorder.orders.emplace_back(chain[index]->node, order);
+      std::erase_if(pending_order_, [&](const auto &held) noexcept {
+        return held.first == chain[index]->node;
+      });
+      pending_order_.emplace_back(chain[index]->node, order);
+    }
+    if (!reorder.orders.empty()) {
+      frame.reorder = std::move(reorder);
+    }
+  };
+  // The wire before or after one in its input's order, if any.
+  const auto order_neighbour = [&](doc::NodeId id,
+                                   int step) -> std::optional<doc::NodeId> {
+    const compositor::GraphEdge *const edge = compositor_graph.edge(id);
+    if (edge == nullptr) {
+      return std::nullopt;
+    }
+    const std::vector<const compositor::GraphEdge *> chain =
+        input_chain(compositor_graph, edge->to);
+    const auto at = std::find(chain.begin(), chain.end(), edge);
+    const auto index = std::distance(chain.begin(), at) + step;
+    if (at == chain.end() || index < 0 ||
+        index >= static_cast<std::ptrdiff_t>(chain.size())) {
+      return std::nullopt;
+    }
+    return chain[static_cast<std::size_t>(index)]->node;
+  };
+  // The selected nodes that can be bypassed, and whether all of them are.
+  const auto bypass_targets = [&]() {
+    std::vector<doc::NodeId> targets;
+    bool all_bypassed = true;
+    for (const doc::NodeId id : selected_nodes_) {
+      const compositor::GraphNode *const node = compositor_graph.node(id);
+      if (node != nullptr && compositor::node_kind_bypassable(node->kind)) {
+        targets.push_back(id);
+        all_bypassed = all_bypassed && bypassed(*node);
+      }
+    }
+    return std::pair{std::move(targets), all_bypassed};
+  };
+  // Bypasses the selection's bypassable nodes, or restores them when every
+  // one already is.
+  const auto toggle_bypass = [&]() {
+    auto [targets, all_bypassed] = bypass_targets();
+    if (targets.empty()) {
+      return;
+    }
+    const bool bypass = !all_bypassed;
+    for (const doc::NodeId target : targets) {
+      std::erase_if(pending_bypass_, [target](const auto &held) noexcept {
+        return held.first == target;
+      });
+      pending_bypass_.emplace_back(target, bypass);
+    }
+    frame.bypass = CompositorBypassIntent{std::move(targets), bypass};
+  };
+  enum class ContextAction : core::u8 {
+    Rename, Duplicate, Copy, Delete,
+    AlignLeft, AlignRight, AlignTop, AlignBottom,
+    DistributeHorizontal, DistributeVertical,
+    Straighten, Arrange, CommentSelection, Collapse, Bypass,
+    AddPoint, Disconnect, Colour, MoveEarlier, MoveLater,
+  };
+  struct ContextItem final {
+    std::string label;
+    std::string_view shortcut;
+    ContextAction action{ContextAction::Rename};
+    bool enabled{true};
+    core::u8 color{};
+    bool divided{};
+  };
+  std::vector<ContextItem> context_items;
+  gui::Rect context_bounds{};
+  constexpr float context_row_height = 23.0F;
+  constexpr float context_divider = 7.0F;
+  if (context_menu_.has_value()) {
+    const auto item = [&](std::string label, std::string_view shortcut,
+                          ContextAction action, bool enabled = true,
+                          bool divided = false) {
+      context_items.push_back(
+          ContextItem{std::move(label), shortcut, action, enabled, 0U, divided});
+    };
+    const std::size_t count = selected_nodes_.size();
+    switch (context_menu_->kind) {
+    case CompositorSelectionKind::Node:
+      item("RENAME", "F2", ContextAction::Rename);
+      item("DUPLICATE", "CTRL+D", ContextAction::Duplicate);
+      item("COPY", "CTRL+C", ContextAction::Copy);
+      item(count > 1U ? "DELETE " + std::to_string(count) + " NODES" : "DELETE",
+           "DEL", ContextAction::Delete,
+           selection_delete(compositor_graph).has_value());
+      item("ALIGN LEFT", {}, ContextAction::AlignLeft, count >= 2U, true);
+      item("ALIGN RIGHT", {}, ContextAction::AlignRight, count >= 2U);
+      item("ALIGN TOP", {}, ContextAction::AlignTop, count >= 2U);
+      item("ALIGN BOTTOM", {}, ContextAction::AlignBottom, count >= 2U);
+      item("DISTRIBUTE ACROSS", {}, ContextAction::DistributeHorizontal,
+           count >= 3U);
+      item("DISTRIBUTE DOWN", {}, ContextAction::DistributeVertical,
+           count >= 3U);
+      item("STRAIGHTEN CONNECTION", "Q", ContextAction::Straighten, true, true);
+      item(count >= 2U ? "ARRANGE SELECTION" : "ARRANGE GRAPH", {},
+           ContextAction::Arrange);
+      item("COMMENT SELECTION", "C", ContextAction::CommentSelection);
+      {
+        // Collapses them all unless every one already is.
+        const bool all_folded = std::all_of(
+            selected_nodes_.begin(), selected_nodes_.end(),
+            [&](doc::NodeId id) {
+              const compositor::GraphNode *const node =
+                  compositor_graph.node(id);
+              return node != nullptr && collapsed(*node);
+            });
+        item(std::string{all_folded ? "EXPAND" : "COLLAPSE"} +
+                 (count > 1U ? " NODES" : ""),
+             {}, ContextAction::Collapse, count >= 1U, true);
+        const auto [targets, all_bypassed] = bypass_targets();
+        item(!targets.empty() && all_bypassed ? "RESTORE" : "BYPASS", "D",
+             ContextAction::Bypass, !targets.empty());
+      }
+      break;
+    case CompositorSelectionKind::Edge: {
+      const compositor::GraphEdge *const edge =
+          compositor_graph.edge(context_menu_->target);
+      item("ADD REROUTE POINT", "DOUBLE-CLICK", ContextAction::AddPoint,
+           edge != nullptr && edge->points.size() < compositor::max_wire_points);
+      item("DISCONNECT", "ALT+CLICK", ContextAction::Disconnect);
+      // Where the wire shares its input, its place in the input's order.
+      const auto earlier = order_neighbour(context_menu_->target, -1);
+      const auto later = order_neighbour(context_menu_->target, 1);
+      if (earlier.has_value() || later.has_value()) {
+        item("MOVE EARLIER", {}, ContextAction::MoveEarlier,
+             earlier.has_value(), true);
+        item("MOVE LATER", {}, ContextAction::MoveLater, later.has_value());
+      }
+      break;
+    }
+    case CompositorSelectionKind::Comment:
+      item("RENAME", "F2", ContextAction::Rename);
+      for (core::u8 index = 0U; index < compositor::comment_color_count;
+           ++index) {
+        item(std::string{"COLOUR  "} + std::string{comment_color_name(index)},
+             {}, ContextAction::Colour, true, index == 0U);
+        context_items.back().color = index;
+      }
+      item("DELETE", "DEL", ContextAction::Delete, true, true);
+      break;
+    case CompositorSelectionKind::None:
+      break;
+    }
+    float height = 8.0F;
+    for (const ContextItem &entry : context_items) {
+      height += context_row_height + (entry.divided ? context_divider : 0.0F);
+    }
+    const float width = 250.0F;
+    context_bounds = gui::Rect{
+        std::clamp(context_menu_->screen_x, bounds.x + 4.0F,
+                   std::max(bounds.x + bounds.width - width - 4.0F,
+                            bounds.x + 4.0F)),
+        std::clamp(context_menu_->screen_y, bounds.y + compositor_toolbar_height,
+                   std::max(bounds.y + bounds.height - height - 4.0F,
+                            bounds.y + compositor_toolbar_height)),
+        width, height};
+    if ((ctx.pointer_pressed() || ctx.secondary_pointer_pressed()) &&
+        !context_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
+      context_menu_.reset();
+      context_items.clear();
+    }
+  }
+
   const bool palette_pointer_blocked =
       (add_menu_open_ &&
        palette_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) ||
       (node_menu_.has_value() &&
-       menu_bounds.contains(ctx.pointer_x(), ctx.pointer_y()));
+       menu_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) ||
+      (context_menu_.has_value() &&
+       context_bounds.contains(ctx.pointer_x(), ctx.pointer_y()));
   if (palette_pointer_blocked) {
     ctx.push_pointer_block();
   }
@@ -3918,6 +3786,55 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     panning_ = false;
   }
 
+  // An element chosen in another panel brings its Scene Layer - or the one
+  // for the Track it plays on - into view, outlined for a moment.
+  if (reveal_element_ != doc::NodeId{}) {
+    const auto layer_for =
+        [&](doc::NodeId scene) -> const compositor::GraphNode * {
+      const auto found = std::find_if(
+          compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+          [scene](const compositor::GraphNode &node) noexcept {
+            const auto *parameters =
+                std::get_if<compositor::SceneLayerParameters>(&node.parameters);
+            return node.kind == compositor::NodeKind::SceneLayer &&
+                   parameters != nullptr && parameters->scene_node == scene;
+          });
+      return found != compositor_graph.nodes.end() ? std::addressof(*found)
+                                                   : nullptr;
+    };
+    const compositor::GraphNode *layer = layer_for(reveal_element_);
+    if (layer == nullptr) {
+      const auto element = std::find_if(
+          elements.begin(), elements.end(),
+          [this](const ElementInfo &info) noexcept {
+            return info.node == reveal_element_;
+          });
+      if (element != elements.end() &&
+          element->timeline_lane != doc::NodeId{}) {
+        layer = layer_for(element->timeline_lane);
+      }
+    }
+    if (layer != nullptr) {
+      const gui::UiPoint size = node_size(*layer);
+      const gui::UiPoint at =
+          pending_position(layer->node)
+              .value_or(gui::UiPoint{layer->editor_x, layer->editor_y});
+      const gui::Rect shown{canvas.x + pan_x_ + at.x * zoom_,
+                            canvas.y + pan_y_ + at.y * zoom_, size.x * zoom_,
+                            size.y * zoom_};
+      // Already wholly in view, the view stays where the operator left it.
+      if (shown.x < canvas.x || shown.y < canvas.y ||
+          shown.x + shown.width > canvas.x + canvas.width ||
+          shown.y + shown.height > canvas.y + canvas.height) {
+        pan_x_ = canvas.width * 0.5F - (at.x + size.x * 0.5F) * zoom_;
+        pan_y_ = canvas.height * 0.5F - (at.y + size.y * 0.5F) * zoom_;
+      }
+      reveal_node_ = layer->node;
+      reveal_until_ = reveal_requested_at_ + 1.5;
+    }
+    reveal_element_ = {};
+  }
+
   std::vector<CompositorNodeVisual> nodes;
   std::vector<CompositorPortVisual> inputs;
   std::vector<CompositorPortVisual> outputs;
@@ -3932,12 +3849,36 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     for (const compositor::GraphNode &node : compositor_graph.nodes) {
       float editor_x = node.editor_x;
       float editor_y = node.editor_y;
-      if (dragging_node_ == node.node) {
-        editor_x = drag_x_;
-        editor_y = drag_y_;
-      } else if (pending_move_.has_value() && pending_move_->node == node.node) {
-        editor_x = pending_move_->x;
-        editor_y = pending_move_->y;
+      if (const std::optional<gui::UiPoint> held = pending_position(node.node)) {
+        editor_x = held->x;
+        editor_y = held->y;
+      }
+      const auto member = std::find_if(
+          drag_group_.begin(), drag_group_.end(),
+          [&node](const GroupMember &entry) noexcept {
+            return entry.node == node.node;
+          });
+      if (dragging_node_ != doc::NodeId{} && member != drag_group_.end()) {
+        const auto grabbed = std::find_if(
+            drag_group_.begin(), drag_group_.end(),
+            [this](const GroupMember &entry) noexcept {
+              return entry.node == dragging_node_;
+            });
+        if (grabbed != drag_group_.end()) {
+          editor_x = member->start_x + drag_x_ - grabbed->start_x;
+          editor_y = member->start_y + drag_y_ - grabbed->start_y;
+        }
+      }
+      if (comment_drag_.has_value() && !comment_drag_->resizing) {
+        const auto carried = std::find_if(
+            comment_drag_->carried.begin(), comment_drag_->carried.end(),
+            [&node](const GroupMember &entry) noexcept {
+              return entry.node == node.node;
+            });
+        if (carried != comment_drag_->carried.end()) {
+          editor_x = carried->start_x + comment_drag_->dx;
+          editor_y = carried->start_y + comment_drag_->dy;
+        }
       }
       const gui::UiPoint size = node_size(node);
       const gui::Rect node_bounds{canvas.x + pan_x_ + editor_x * zoom_,
@@ -3953,10 +3894,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               std::vector<CompositorPortVisual> &destination, bool input) {
             for (std::size_t index = 0U; index < descriptors.size(); ++index) {
               const compositor::PortDescriptor &descriptor = descriptors[index];
+              const std::optional<float> place = port_row(
+                  compositor_graph, node, descriptor.index, input);
+              if (!place.has_value()) {
+                continue;
+              }
               const float row_top =
                   node_bounds.y +
-                  (metrics_.header_height +
-                   metrics_.row_height * static_cast<float>(index)) *
+                  (metrics_.header_height + metrics_.row_height * *place) *
                       zoom_;
               const float row_height = metrics_.row_height * zoom_;
               const float x =
@@ -4147,6 +4092,140 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     relink_.reset();
   }
 
+  // A comment box as it is drawn: dragged, held after a release, or authored.
+  const auto drawn_comment = [&](const compositor::GraphComment &comment) {
+    compositor::GraphComment drawn = comment;
+    if (pending_comment_.has_value() &&
+        pending_comment_->held.node == comment.node) {
+      drawn = pending_comment_->held;
+    }
+    if (comment_drag_.has_value() && comment_drag_->comment == comment.node) {
+      drawn = comment_drag_->start;
+      if (comment_drag_->resizing) {
+        drawn.width = std::max(drawn.width + comment_drag_->dx,
+                               compositor::min_comment_extent);
+        drawn.height = std::max(drawn.height + comment_drag_->dy,
+                                compositor::min_comment_extent);
+      } else {
+        drawn.x += comment_drag_->dx;
+        drawn.y += comment_drag_->dy;
+      }
+    }
+    return drawn;
+  };
+  const auto union_rect = [](const gui::Rect &a, const gui::Rect &b) {
+    const float left = std::min(a.x, b.x);
+    const float top = std::min(a.y, b.y);
+    return gui::Rect{left, top,
+                     std::max(a.x + a.width, b.x + b.width) - left,
+                     std::max(a.y + a.height, b.y + b.height) - top};
+  };
+  // The graph's extent in graph units: every node and comment box, or only
+  // the selected nodes.
+  const auto graph_extent = [&](bool only_selected) -> std::optional<gui::Rect> {
+    std::optional<gui::Rect> extent;
+    for (const compositor::GraphNode &node : compositor_graph.nodes) {
+      if (only_selected &&
+          !std::binary_search(selected_nodes_.begin(), selected_nodes_.end(),
+                              node.node)) {
+        continue;
+      }
+      const std::optional<gui::UiPoint> held = pending_position(node.node);
+      const gui::UiPoint size = node_size(node);
+      const gui::Rect box{held ? held->x : node.editor_x,
+                          held ? held->y : node.editor_y, size.x, size.y};
+      extent = extent.has_value() ? union_rect(*extent, box) : box;
+    }
+    if (!only_selected) {
+      for (const compositor::GraphComment &comment : compositor_graph.comments) {
+        const compositor::GraphComment drawn = drawn_comment(comment);
+        const gui::Rect box{drawn.x, drawn.y, drawn.width, drawn.height};
+        extent = extent.has_value() ? union_rect(*extent, box) : box;
+      }
+    }
+    return extent;
+  };
+  // The minimap: the whole graph and the visible part of it, bottom-right of
+  // the canvas. Pressing or dragging in it centres the view there.
+  gui::Rect minimap{};
+  gui::Rect minimap_world{};
+  float minimap_scale{};
+  if (minimap_ && canvas.width >= 360.0F && canvas.height >= 220.0F) {
+    const gui::Rect view{-pan_x_ / zoom_, -pan_y_ / zoom_,
+                         canvas.width / zoom_, canvas.height / zoom_};
+    const std::optional<gui::Rect> extent = graph_extent(false);
+    minimap_world = extent.has_value() ? union_rect(view, *extent) : view;
+    constexpr float apron = 60.0F;
+    minimap_world = gui::Rect{minimap_world.x - apron, minimap_world.y - apron,
+                              minimap_world.width + apron * 2.0F,
+                              minimap_world.height + apron * 2.0F};
+    minimap = gui::Rect{canvas.x + canvas.width - 212.0F,
+                        canvas.y + canvas.height - 142.0F, 200.0F, 130.0F};
+    minimap_scale = std::min(minimap.width / minimap_world.width,
+                             minimap.height / minimap_world.height);
+    const gui::Interaction interaction =
+        clipped_grab(ctx, mix(id_, "compositor.minimap"), minimap, canvas);
+    if (interaction.pressed) {
+      selection_pressed = true;
+    }
+    if (interaction.held) {
+      const float graph_x =
+          minimap_world.x + (ctx.pointer_x() - minimap.x) / minimap_scale;
+      const float graph_y =
+          minimap_world.y + (ctx.pointer_y() - minimap.y) / minimap_scale;
+      pan_x_ = canvas.width * 0.5F - graph_x * zoom_;
+      pan_y_ = canvas.height * 0.5F - graph_y * zoom_;
+      build_visuals();
+    }
+  }
+
+  // A wire's order number is pressed to drag it, and let go on another
+  // number on the same input to move the wire to that place.
+  const auto order_target = [&](float x, float y) -> const OrderDisc * {
+    if (!order_drag_.has_value()) {
+      return nullptr;
+    }
+    const auto dragged = std::find_if(
+        order_discs_.begin(), order_discs_.end(),
+        [this](const OrderDisc &disc) { return disc.edge == *order_drag_; });
+    if (dragged == order_discs_.end()) {
+      return nullptr;
+    }
+    for (const OrderDisc &disc : order_discs_) {
+      if (disc.edge != dragged->edge && disc.input == dragged->input &&
+          std::hypot(x - disc.x, y - disc.y) <= disc.radius + 6.0F) {
+        return std::addressof(disc);
+      }
+    }
+    return nullptr;
+  };
+  for (const OrderDisc &disc : order_discs_) {
+    const float reach = disc.radius + 2.0F;
+    const gui::Interaction interaction = clipped_grab(
+        ctx, mix(id_, "compositor.order", disc.edge.value()),
+        gui::Rect{disc.x - reach, disc.y - reach, reach * 2.0F, reach * 2.0F},
+        canvas);
+    ctx.cursor_for(interaction, gui::Cursor::Move);
+    if (interaction.pressed) {
+      order_drag_ = disc.edge;
+      selection_ = CompositorSelection{CompositorSelectionKind::Edge, disc.edge};
+      selected_nodes_.clear();
+      frame.selection = selection_;
+      selection_pressed = true;
+    }
+    if (interaction.released && order_drag_ == disc.edge) {
+      if (const OrderDisc *const target =
+              order_target(ctx.pointer_x(), ctx.pointer_y())) {
+        move_in_order(disc.edge, target->edge);
+      }
+      order_drag_.reset();
+    }
+  }
+  if (order_drag_.has_value() && !ctx.pointer_down() &&
+      !ctx.pointer_released()) {
+    order_drag_.reset();
+  }
+
   bool layout_changed = false;
   bool drag_released = false;
   doc::NodeId released_node{};
@@ -4160,8 +4239,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (!interaction.pressed) {
       continue;
     }
-    selection_ =
-        CompositorSelection{CompositorSelectionKind::Node, port.endpoint.node};
+    select_only(port.endpoint.node);
     frame.selection = selection_;
     selection_pressed = true;
     const std::vector<doc::NodeId> wired = edges_at(port.endpoint, true);
@@ -4179,14 +4257,125 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       connecting_type_ = port.descriptor->type;
     }
   }
+  const auto is_selected = [this](doc::NodeId node) {
+    return std::binary_search(selected_nodes_.begin(), selected_nodes_.end(),
+                              node);
+  };
+  const auto add_to_selection = [this](doc::NodeId node) {
+    const auto at = std::lower_bound(selected_nodes_.begin(),
+                                     selected_nodes_.end(), node);
+    if (at == selected_nodes_.end() || *at != node) {
+      selected_nodes_.insert(at, node);
+    }
+  };
+  // Where a node is now in graph units: held, if a released move is still
+  // on its way, or as authored.
+  const auto graph_position = [&](const compositor::GraphNode &node) {
+    const std::optional<gui::UiPoint> held = pending_position(node.node);
+    return held.has_value() ? *held : gui::UiPoint{node.editor_x, node.editor_y};
+  };
+  // Collapses or opens nodes: the selection, when the toggled node is in it.
+  const auto toggle_collapse = [&](doc::NodeId node, bool fold) {
+    std::vector<doc::NodeId> targets =
+        is_selected(node) ? selected_nodes_ : std::vector<doc::NodeId>{node};
+    for (const doc::NodeId target : targets) {
+      std::erase_if(pending_collapse_, [target](const auto &held) noexcept {
+        return held.first == target;
+      });
+      pending_collapse_.emplace_back(target, fold);
+    }
+    frame.collapse = CompositorCollapseIntent{std::move(targets), fold};
+  };
+  const bool chrome_readable = zoom_ >= compositor_chrome_zoom;
+  const bool inline_editable = zoom_ >= compositor_inline_edit_zoom &&
+                               !node_menu_.has_value() &&
+                               !context_menu_.has_value();
+  // The toggle sits at the right end of the title line.
+  const auto toggle_bounds = [&](const CompositorNodeVisual &visual) {
+    const float side =
+        std::max(compositor_text_height(ctx, compositor_title_text), 14.0F) *
+        zoom_;
+    return gui::Rect{visual.bounds.x + visual.bounds.width - side -
+                         4.0F * zoom_,
+                     visual.bounds.y + 5.0F * zoom_, side, side};
+  };
+  // An inline value's row - below the port rows - and its field.
+  const auto inline_row = [&](const CompositorNodeVisual &visual,
+                              std::size_t index) {
+    const std::size_t port_rows =
+        std::max({compositor::input_ports(visual.node->kind).size(),
+                  compositor::output_ports(visual.node->kind).size(),
+                  std::size_t{1U}});
+    return gui::Rect{
+        visual.bounds.x,
+        visual.bounds.y + (metrics_.header_height +
+                           metrics_.row_height *
+                               static_cast<float>(port_rows + index)) *
+                              zoom_,
+        visual.bounds.width, metrics_.row_height * zoom_};
+  };
+  const auto inline_field = [&](const gui::Rect &row) {
+    const float width = std::min(84.0F * zoom_, row.width * 0.5F);
+    return gui::Rect{row.x + row.width - compositor_pin_inset * zoom_ - width,
+                     row.y + 2.0F * zoom_, width,
+                     std::max(row.height - 4.0F * zoom_, 0.0F)};
+  };
+  const auto inside_canvas = [&canvas](const gui::Rect &rect) noexcept {
+    return rect.x >= canvas.x && rect.y >= canvas.y &&
+           rect.x + rect.width <= canvas.x + canvas.width &&
+           rect.y + rect.height <= canvas.y + canvas.height;
+  };
+  // The inline field under the pointer, if it is editable there.
+  const auto over_inline_field = [&](const CompositorNodeVisual &visual) {
+    if (!inline_editable || collapsed(*visual.node)) {
+      return false;
+    }
+    const std::span<const InlineValue> values =
+        inline_values(visual.node->kind);
+    for (std::size_t index = 0U; index < values.size(); ++index) {
+      if (inline_value_idle(compositor_graph, *visual.node, values[index])) {
+        continue;
+      }
+      const gui::Rect field = inline_field(inline_row(visual, index));
+      if (inside_canvas(field) &&
+          field.contains(ctx.pointer_x(), ctx.pointer_y())) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (chrome_readable) {
+    for (const CompositorNodeVisual &visual : nodes) {
+      const gui::Interaction toggle = clipped_grab(
+          ctx, mix(id_, "compositor.collapse", visual.node->node.value()),
+          toggle_bounds(visual), canvas);
+      if (toggle.pressed) {
+        selection_pressed = true;
+      }
+      if (toggle.clicked) {
+        toggle_collapse(visual.node->node, !collapsed(*visual.node));
+      }
+    }
+  }
   for (const CompositorNodeVisual &visual : nodes) {
-    const gui::Interaction interaction = clipped_grab(
-        ctx, mix(id_, "compositor.node", visual.node->node.value()),
-        visual.bounds, canvas);
+    const gui::UiId node_id =
+        mix(id_, "compositor.node", visual.node->node.value());
+    if (ctx.active() != node_id && over_inline_field(visual)) {
+      // The field drawn on the node takes this press, and the node is chosen
+      // as if it had been pressed.
+      if (ctx.pointer_pressed()) {
+        selection_pressed = true;
+        if (!is_selected(visual.node->node)) {
+          select_only(visual.node->node);
+          frame.selection = selection_;
+        }
+      }
+      continue;
+    }
+    const gui::Interaction interaction =
+        clipped_grab(ctx, node_id, visual.bounds, canvas);
+    const doc::NodeId pressed_node = visual.node->node;
     if (interaction.pressed) {
-      selection_ =
-          CompositorSelection{CompositorSelectionKind::Node, visual.node->node};
-      frame.selection = selection_;
       selection_pressed = true;
       // With Alt or Ctrl, a press on an input acts on that input's wire
       // instead of moving the node: Alt breaks it, Ctrl lifts it to move.
@@ -4201,40 +4390,197 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const compositor::GraphEdge *const lifted_edge =
           wired.empty() ? nullptr : compositor_graph.edge(wired.front());
       if (input != inputs.end() && ctx.alt_held() && !wired.empty()) {
+        select_only(pressed_node);
         frame.rewire = CompositorRewireIntent{wired, {}};
       } else if (input != inputs.end() && ctx.ctrl_held() &&
                  lifted_edge != nullptr) {
+        select_only(pressed_node);
         relink_ = Relink{{lifted_edge->node}, false, input->endpoint};
         connecting_from_ = lifted_edge->from;
         connecting_type_ = input->descriptor->type;
+      } else if (ctx.ctrl_held()) {
+        // Ctrl-click toggles one node in or out of the selection.
+        if (is_selected(pressed_node)) {
+          std::erase(selected_nodes_, pressed_node);
+          selection_ = selected_nodes_.empty()
+                           ? CompositorSelection{}
+                           : CompositorSelection{CompositorSelectionKind::Node,
+                                                 selected_nodes_.front()};
+        } else {
+          add_to_selection(pressed_node);
+          selection_ =
+              CompositorSelection{CompositorSelectionKind::Node, pressed_node};
+        }
       } else {
-        dragging_node_ = visual.node->node;
-        drag_x_ = (visual.bounds.x - canvas.x - pan_x_) / zoom_;
-        drag_y_ = (visual.bounds.y - canvas.y - pan_y_) / zoom_;
-        drag_offset_x_ = ctx.pointer_x() - visual.bounds.x;
-        drag_offset_y_ = ctx.pointer_y() - visual.bounds.y;
+        // A press on a node already in a multiple selection keeps it, so the
+        // whole selection can be dragged; Shift adds the node to it.
+        const bool already = is_selected(pressed_node);
+        press_was_selected_ = already && selected_nodes_.size() > 1U;
+        if (selection_.kind != CompositorSelectionKind::Node) {
+          selected_nodes_.clear();
+        }
+        if (ctx.shift_held()) {
+          add_to_selection(pressed_node);
+        } else if (!already) {
+          selected_nodes_.assign(1U, pressed_node);
+        }
+        selection_ =
+            CompositorSelection{CompositorSelectionKind::Node, pressed_node};
+        const bool on_title =
+            ctx.pointer_y() < visual.bounds.y + metrics_.header_height * zoom_;
+        if (on_title && clicks_.double_click(pressed_node.value() * 64U + 7U,
+                                             ctx.time_seconds())) {
+          // Double-click a node's title to rename it.
+          rename_ = Rename{pressed_node,
+                           visual.node->label.empty()
+                               ? std::string{compositor::node_kind_name(
+                                     visual.node->kind)}
+                               : visual.node->label};
+        } else {
+          dragging_node_ = pressed_node;
+          drag_moved_ = false;
+          drag_x_ = (visual.bounds.x - canvas.x - pan_x_) / zoom_;
+          drag_y_ = (visual.bounds.y - canvas.y - pan_y_) / zoom_;
+          drag_offset_x_ = ctx.pointer_x() - visual.bounds.x;
+          drag_offset_y_ = ctx.pointer_y() - visual.bounds.y;
+          drag_group_.clear();
+          for (const doc::NodeId member : selected_nodes_) {
+            if (const compositor::GraphNode *const node =
+                    compositor_graph.node(member)) {
+              const gui::UiPoint at = graph_position(*node);
+              drag_group_.push_back(GroupMember{member, at.x, at.y});
+            }
+          }
+        }
       }
+      frame.selection = selection_;
     }
-    if (interaction.held && dragging_node_ == visual.node->node) {
+    if (interaction.held && dragging_node_ == pressed_node) {
       ctx.set_cursor(gui::Cursor::Move);
       const float next_x =
           (ctx.pointer_x() - canvas.x - pan_x_ - drag_offset_x_) / zoom_;
       const float next_y =
           (ctx.pointer_y() - canvas.y - pan_y_ - drag_offset_y_) / zoom_;
-      layout_changed = layout_changed || next_x != drag_x_ || next_y != drag_y_;
+      const bool stepped = next_x != drag_x_ || next_y != drag_y_;
+      layout_changed = layout_changed || stepped;
+      drag_moved_ = drag_moved_ || stepped;
       drag_x_ = next_x;
       drag_y_ = next_y;
       if (interaction.released) {
-        if (drag_x_ != visual.node->editor_x ||
-            drag_y_ != visual.node->editor_y) {
-          frame.move_node =
-              CompositorMoveIntent{visual.node->node, drag_x_, drag_y_};
-          pending_move_ =
-              PendingMove{visual.node->node, drag_x_, drag_y_,
-                          visual.node->editor_x, visual.node->editor_y, 0U};
+        const auto grabbed = std::find_if(
+            drag_group_.begin(), drag_group_.end(),
+            [pressed_node](const GroupMember &entry) noexcept {
+              return entry.node == pressed_node;
+            });
+        if (drag_moved_ && grabbed != drag_group_.end()) {
+          // Every node in the group moves by the same amount, in one step.
+          const float dx = drag_x_ - grabbed->start_x;
+          const float dy = drag_y_ - grabbed->start_y;
+          for (const GroupMember &member : drag_group_) {
+            const compositor::GraphNode *const node =
+                compositor_graph.node(member.node);
+            const float x = member.start_x + dx;
+            const float y = member.start_y + dy;
+            if (node == nullptr || (x == node->editor_x && y == node->editor_y)) {
+              continue;
+            }
+            frame.move_nodes.push_back(CompositorMoveIntent{member.node, x, y});
+            std::erase_if(pending_moves_, [&member](const PendingMove &held) {
+              return held.node == member.node;
+            });
+            pending_moves_.push_back(PendingMove{member.node, x, y,
+                                                 node->editor_x,
+                                                 node->editor_y, 0U});
+          }
+        } else if (!drag_moved_ && press_was_selected_ && !ctx.shift_held()) {
+          // A click, not a drag, on one of several selected nodes picks it
+          // out on its own.
+          select_only(pressed_node);
         }
         drag_released = true;
-        released_node = visual.node->node;
+        released_node = pressed_node;
+      }
+    }
+  }
+  const float comment_header = std::max(metrics_.row_height, 24.0F) * zoom_;
+  for (auto comment = compositor_graph.comments.rbegin();
+       comment != compositor_graph.comments.rend(); ++comment) {
+    const compositor::GraphComment drawn = drawn_comment(*comment);
+    const gui::Rect box{canvas.x + pan_x_ + drawn.x * zoom_,
+                        canvas.y + pan_y_ + drawn.y * zoom_,
+                        drawn.width * zoom_, drawn.height * zoom_};
+    const gui::Rect title{box.x, box.y, box.width,
+                          std::min(comment_header, box.height)};
+    const gui::Rect corner{box.x + box.width - 14.0F,
+                           box.y + box.height - 14.0F, 14.0F, 14.0F};
+    const gui::Interaction resize = clipped_grab(
+        ctx, mix(id_, "compositor.comment.size", comment->node.value()), corner,
+        canvas);
+    const gui::Interaction move = clipped_grab(
+        ctx, mix(id_, "compositor.comment", comment->node.value()), title,
+        canvas);
+    ctx.cursor_for(resize, gui::Cursor::ResizeDiagonal);
+    ctx.cursor_for(move, gui::Cursor::Move);
+    if (resize.pressed || move.pressed) {
+      selection_ =
+          CompositorSelection{CompositorSelectionKind::Comment, comment->node};
+      selected_nodes_.clear();
+      frame.selection = selection_;
+      selection_pressed = true;
+      if (move.pressed && clicks_.double_click(comment->node.value() * 64U + 9U,
+                                               ctx.time_seconds())) {
+        rename_ = Rename{comment->node, drawn.title};
+      } else {
+        CommentDrag drag{comment->node, resize.pressed, ctx.pointer_x(),
+                         ctx.pointer_y(), drawn, {}};
+        if (move.pressed) {
+          // It carries the nodes that sit wholly inside it.
+          for (const compositor::GraphNode &node : compositor_graph.nodes) {
+            const gui::UiPoint at = graph_position(node);
+            const gui::UiPoint size = node_size(node);
+            if (at.x >= drawn.x && at.y >= drawn.y &&
+                at.x + size.x <= drawn.x + drawn.width &&
+                at.y + size.y <= drawn.y + drawn.height) {
+              drag.carried.push_back(GroupMember{node.node, at.x, at.y});
+            }
+          }
+        }
+        comment_drag_ = std::move(drag);
+      }
+    }
+    if ((resize.held || move.held) && comment_drag_.has_value() &&
+        comment_drag_->comment == comment->node) {
+      const float dx = (ctx.pointer_x() - comment_drag_->press_x) / zoom_;
+      const float dy = (ctx.pointer_y() - comment_drag_->press_y) / zoom_;
+      layout_changed = layout_changed || dx != comment_drag_->dx ||
+                       dy != comment_drag_->dy;
+      comment_drag_->dx = dx;
+      comment_drag_->dy = dy;
+      if (resize.released || move.released) {
+        const compositor::GraphComment moved = drawn_comment(*comment);
+        if (moved != *comment) {
+          frame.comment = CompositorCommentIntent{
+              moved.node, moved.x,      moved.y,    moved.width,
+              moved.height, moved.title, moved.color};
+          pending_comment_ = PendingComment{moved, *comment, 0U};
+        }
+        for (const GroupMember &member : comment_drag_->carried) {
+          const compositor::GraphNode *const node =
+              compositor_graph.node(member.node);
+          const float x = member.start_x + dx;
+          const float y = member.start_y + dy;
+          if (node == nullptr || (x == node->editor_x && y == node->editor_y)) {
+            continue;
+          }
+          frame.move_nodes.push_back(CompositorMoveIntent{member.node, x, y});
+          std::erase_if(pending_moves_, [&member](const PendingMove &held) {
+            return held.node == member.node;
+          });
+          pending_moves_.push_back(PendingMove{member.node, x, y, node->editor_x,
+                                               node->editor_y, 0U});
+        }
+        comment_drag_.reset();
+        layout_changed = true;
       }
     }
   }
@@ -4303,7 +4649,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // kind to splice itself in.
   const EdgeVisual *insert_edge = nullptr;
   std::optional<std::pair<core::u8, core::u8>> insert_ports;
-  if (dragging_node_ != doc::NodeId{}) {
+  if (dragging_node_ != doc::NodeId{} && drag_group_.size() == 1U) {
     const compositor::GraphNode *const dragged =
         compositor_graph.node(dragging_node_);
     const bool free =
@@ -4381,6 +4727,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (interaction.pressed) {
         selection_ =
             CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
+        selected_nodes_.clear();
         frame.selection = selection_;
         selection_pressed = true;
         if (clicks_.double_click(visual.edge->node.value() * 64U + 33U + index,
@@ -4442,6 +4789,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     selection_ =
         CompositorSelection{CompositorSelectionKind::Edge, visual.edge->node};
+    selected_nodes_.clear();
     frame.selection = selection_;
     selection_pressed = true;
     if (ctx.alt_held()) {
@@ -4459,17 +4807,482 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       emit_points(visual.edge->node, std::move(points), visual.edge->points);
     }
   }
-  // Tab or a right click on the canvas opens the node search at the pointer.
+  // A right click on a node, a wire or a comment box's title opens its menu;
+  // anywhere else on the canvas, like Tab, it opens the node search.
   if (!wiring && canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-      (ctx.secondary_pointer_pressed() ||
-       (focused_ && !ctx.typing() && ctx.key_pressed(gui::Key::Tab)))) {
+      ctx.secondary_pointer_pressed() && !minimap.contains(ctx.pointer_x(),
+                                                           ctx.pointer_y())) {
+    node_menu_.reset();
+    const auto node_under = std::find_if(
+        nodes.rbegin(), nodes.rend(), [&ctx](const CompositorNodeVisual &visual) {
+          return visual.bounds.contains(ctx.pointer_x(), ctx.pointer_y());
+        });
+    const auto comment_under = std::find_if(
+        compositor_graph.comments.rbegin(), compositor_graph.comments.rend(),
+        [&](const compositor::GraphComment &comment) {
+          const compositor::GraphComment drawn = drawn_comment(comment);
+          return gui::Rect{canvas.x + pan_x_ + drawn.x * zoom_,
+                           canvas.y + pan_y_ + drawn.y * zoom_,
+                           drawn.width * zoom_, comment_header}
+              .contains(ctx.pointer_x(), ctx.pointer_y());
+        });
+    if (node_under != nodes.rend()) {
+      if (!is_selected(node_under->node->node)) {
+        select_only(node_under->node->node);
+      }
+      selection_ = CompositorSelection{CompositorSelectionKind::Node,
+                                       node_under->node->node};
+      frame.selection = selection_;
+      context_menu_ = ContextMenu{ctx.pointer_x(), ctx.pointer_y(),
+                                  CompositorSelectionKind::Node,
+                                  node_under->node->node};
+    } else if (hovered_edge != nullptr) {
+      selection_ = CompositorSelection{CompositorSelectionKind::Edge,
+                                       hovered_edge->edge->node};
+      selected_nodes_.clear();
+      frame.selection = selection_;
+      context_menu_ = ContextMenu{ctx.pointer_x(), ctx.pointer_y(),
+                                  CompositorSelectionKind::Edge,
+                                  hovered_edge->edge->node,
+                                  to_graph(ctx.pointer_x(), ctx.pointer_y()),
+                                  hovered_segment};
+    } else if (comment_under != compositor_graph.comments.rend()) {
+      selection_ = CompositorSelection{CompositorSelectionKind::Comment,
+                                       comment_under->node};
+      selected_nodes_.clear();
+      frame.selection = selection_;
+      context_menu_ = ContextMenu{ctx.pointer_x(), ctx.pointer_y(),
+                                  CompositorSelectionKind::Comment,
+                                  comment_under->node};
+    } else {
+      context_menu_.reset();
+      node_menu_ = NodeMenu{ctx.pointer_x(), ctx.pointer_y()};
+    }
+  }
+  if (!wiring && canvas.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+      focused_ && !ctx.typing() && ctx.key_pressed(gui::Key::Tab)) {
     node_menu_ = NodeMenu{ctx.pointer_x(), ctx.pointer_y()};
   }
+
+  // A press on empty canvas clears the selection and starts a rubber band;
+  // with Shift the band adds to the selection, with Ctrl it takes from it.
   if (ctx.pointer_pressed() &&
       canvas.contains(ctx.pointer_x(), ctx.pointer_y()) && !selection_pressed &&
       !parameter_resize_pressed) {
-    selection_ = CompositorSelection{};
-    frame.selection = selection_;
+    const Marquee::Mode mode = ctx.shift_held()  ? Marquee::Mode::Add
+                               : ctx.ctrl_held() ? Marquee::Mode::Subtract
+                                                 : Marquee::Mode::Replace;
+    if (mode == Marquee::Mode::Replace) {
+      selection_ = CompositorSelection{};
+      selected_nodes_.clear();
+      frame.selection = selection_;
+    }
+    marquee_ = Marquee{ctx.pointer_x(), ctx.pointer_y(), mode};
+  }
+  if (marquee_.has_value() && !ctx.pointer_down()) {
+    // Dragged rightwards, the band takes the nodes it wholly contains;
+    // leftwards, every node it touches.
+    const float left = std::min(marquee_->start_x, ctx.pointer_x());
+    const float top = std::min(marquee_->start_y, ctx.pointer_y());
+    const gui::Rect band{left, top,
+                         std::abs(ctx.pointer_x() - marquee_->start_x),
+                         std::abs(ctx.pointer_y() - marquee_->start_y)};
+    const bool containing = ctx.pointer_x() >= marquee_->start_x;
+    if (band.width > 3.0F || band.height > 3.0F) {
+      for (const CompositorNodeVisual &visual : nodes) {
+        const gui::Rect &b = visual.bounds;
+        const bool inside =
+            containing
+                ? b.x >= band.x && b.y >= band.y &&
+                      b.x + b.width <= band.x + band.width &&
+                      b.y + b.height <= band.y + band.height
+                : b.x < band.x + band.width && band.x < b.x + b.width &&
+                      b.y < band.y + band.height && band.y < b.y + b.height;
+        if (!inside) {
+          continue;
+        }
+        if (marquee_->mode == Marquee::Mode::Subtract) {
+          std::erase(selected_nodes_, visual.node->node);
+        } else {
+          add_to_selection(visual.node->node);
+        }
+      }
+      if (selection_.kind != CompositorSelectionKind::Node ||
+          !is_selected(selection_.node)) {
+        selection_ = selected_nodes_.empty()
+                         ? CompositorSelection{}
+                         : CompositorSelection{CompositorSelectionKind::Node,
+                                               selected_nodes_.front()};
+      }
+      frame.selection = selection_;
+    }
+    marquee_.reset();
+  }
+
+  // --- Layout tools, shared by the keyboard and the right-click menu. ---
+  // The selected nodes' boxes in graph units.
+  const auto selected_boxes = [&]() {
+    std::vector<LayoutBox> boxes;
+    for (const doc::NodeId id : selected_nodes_) {
+      if (const compositor::GraphNode *const node = compositor_graph.node(id)) {
+        const gui::UiPoint at = graph_position(*node);
+        const gui::UiPoint size = node_size(*node);
+        boxes.push_back(LayoutBox{id, at.x, at.y, size.x, size.y});
+      }
+    }
+    return boxes;
+  };
+  // Authors moves as one step, held on screen until they arrive.
+  const auto apply_moves = [&](const std::vector<CompositorMoveIntent> &moves) {
+    for (const CompositorMoveIntent &move : moves) {
+      const compositor::GraphNode *const node = compositor_graph.node(move.node);
+      if (node == nullptr) {
+        continue;
+      }
+      frame.move_nodes.push_back(move);
+      std::erase_if(pending_moves_, [&move](const PendingMove &held) {
+        return held.node == move.node;
+      });
+      pending_moves_.push_back(PendingMove{move.node, move.editor_x,
+                                           move.editor_y, node->editor_x,
+                                           node->editor_y, 0U});
+    }
+  };
+  // Fits a graph-space rectangle in the canvas, no closer than 150%.
+  const auto frame_view = [&](const gui::Rect &target) {
+    constexpr float margin = 48.0F;
+    const float fit = std::min(
+        (canvas.width - margin * 2.0F) / std::max(target.width, 1.0F),
+        (canvas.height - margin * 2.0F) / std::max(target.height, 1.0F));
+    zoom_ = std::clamp(fit, compositor_minimum_zoom, 1.5F);
+    pan_x_ = canvas.width * 0.5F - (target.x + target.width * 0.5F) * zoom_;
+    pan_y_ = canvas.height * 0.5F - (target.y + target.height * 0.5F) * zoom_;
+  };
+  // Straighten Connection: each selected node moves up or down so the wire
+  // into its first connected input runs level; a node with no input wire
+  // levels the wire out of its first connected output instead. Left to
+  // right, so a straightened chain stays straight.
+  const auto straightened = [&]() {
+    std::vector<LayoutBox> boxes = selected_boxes();
+    std::sort(boxes.begin(), boxes.end(),
+              [](const LayoutBox &left, const LayoutBox &right) {
+                return left.x != right.x ? left.x < right.x
+                                         : left.node < right.node;
+              });
+    std::map<doc::NodeId, float> placed;
+    const auto top_of = [&](const compositor::GraphNode &node) {
+      const auto found = placed.find(node.node);
+      return found != placed.end() ? found->second : graph_position(node).y;
+    };
+    const auto port_y = [&](const compositor::GraphNode &node, float row) {
+      return top_of(node) + metrics_.header_height +
+             metrics_.row_height * (row + 0.5F);
+    };
+    std::vector<CompositorMoveIntent> moves;
+    for (const LayoutBox &box : boxes) {
+      const compositor::GraphNode *const node = compositor_graph.node(box.node);
+      const compositor::GraphEdge *in{};
+      const compositor::GraphEdge *out{};
+      for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+        if (edge.to.node == box.node &&
+            (in == nullptr || edge.to.port < in->to.port)) {
+          in = std::addressof(edge);
+        }
+        if (edge.from.node == box.node &&
+            (out == nullptr || edge.from.port < out->from.port)) {
+          out = std::addressof(edge);
+        }
+      }
+      std::optional<float> y;
+      if (in != nullptr) {
+        if (const compositor::GraphNode *const source =
+                compositor_graph.node(in->from.node)) {
+          y = port_y(*source,
+                     port_row(compositor_graph, *source, in->from.port, false)
+                         .value_or(0.0F)) -
+              metrics_.header_height -
+              metrics_.row_height *
+                  (port_row(compositor_graph, *node, in->to.port, true)
+                       .value_or(0.0F) +
+                   0.5F);
+        }
+      } else if (out != nullptr) {
+        if (const compositor::GraphNode *const target =
+                compositor_graph.node(out->to.node)) {
+          y = port_y(*target,
+                     port_row(compositor_graph, *target, out->to.port, true)
+                         .value_or(0.0F)) -
+              metrics_.header_height -
+              metrics_.row_height *
+                  (port_row(compositor_graph, *node, out->from.port, false)
+                       .value_or(0.0F) +
+                   0.5F);
+        }
+      }
+      if (y.has_value()) {
+        placed[box.node] = *y;
+        if (*y != box.y) {
+          moves.push_back(CompositorMoveIntent{box.node, box.x, *y});
+        }
+      }
+    }
+    return moves;
+  };
+  // Arrange: columns by how many wires stand between a node and the end of
+  // its chain, right to left toward Output, each column ordered to follow
+  // what it feeds. The selection's top-right corner stays put. With fewer
+  // than two nodes selected it arranges the whole graph.
+  const auto arranged = [&]() {
+    std::vector<LayoutBox> boxes = selected_boxes();
+    if (boxes.size() < 2U) {
+      boxes.clear();
+      for (const compositor::GraphNode &node : compositor_graph.nodes) {
+        const gui::UiPoint at = graph_position(node);
+        const gui::UiPoint size = node_size(node);
+        boxes.push_back(LayoutBox{node.node, at.x, at.y, size.x, size.y});
+      }
+    }
+    std::vector<CompositorMoveIntent> moves;
+    if (boxes.empty()) {
+      return moves;
+    }
+    std::map<doc::NodeId, const LayoutBox *> chosen;
+    float right = -std::numeric_limits<float>::infinity();
+    float top = std::numeric_limits<float>::infinity();
+    for (const LayoutBox &box : boxes) {
+      chosen.emplace(box.node, std::addressof(box));
+      right = std::max(right, box.x + box.width);
+      top = std::min(top, box.y);
+    }
+    // Longest run of wires to a node with nothing downstream among those
+    // being arranged. A loop, which the graph refuses anyway, ends a run.
+    std::map<doc::NodeId, std::size_t> depth;
+    std::set<doc::NodeId> visiting;
+    const std::function<std::size_t(doc::NodeId)> depth_of =
+        [&](doc::NodeId id) -> std::size_t {
+      if (const auto known = depth.find(id); known != depth.end()) {
+        return known->second;
+      }
+      if (!visiting.insert(id).second) {
+        return 0U;
+      }
+      std::size_t deepest = 0U;
+      for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+        if (edge.from.node == id && chosen.contains(edge.to.node)) {
+          deepest = std::max(deepest, depth_of(edge.to.node) + 1U);
+        }
+      }
+      visiting.erase(id);
+      depth[id] = deepest;
+      return deepest;
+    };
+    std::map<std::size_t, std::vector<const LayoutBox *>> columns;
+    for (const auto &[id, box] : chosen) {
+      columns[depth_of(id)].push_back(box);
+    }
+    constexpr float column_gap = 80.0F;
+    constexpr float row_gap = 30.0F;
+    std::map<doc::NodeId, float> placed_y;
+    float column_right = right;
+    for (auto &[column, members] : columns) {
+      float width{};
+      for (const LayoutBox *box : members) {
+        width = std::max(width, box->width);
+      }
+      // Each node lines up with what it feeds, averaged; the first column
+      // keeps its current order.
+      const auto key = [&](const LayoutBox *box) {
+        float total{};
+        std::size_t count{};
+        for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+          if (edge.from.node == box->node && placed_y.contains(edge.to.node)) {
+            total += placed_y.at(edge.to.node);
+            ++count;
+          }
+        }
+        return count != 0U ? total / static_cast<float>(count) : box->y;
+      };
+      std::sort(members.begin(), members.end(),
+                [&](const LayoutBox *left, const LayoutBox *right_box) {
+                  const float a = key(left);
+                  const float b = key(right_box);
+                  return a != b ? a < b : left->node < right_box->node;
+                });
+      const float x = column_right - width;
+      float y = top;
+      for (const LayoutBox *box : members) {
+        placed_y[box->node] = y;
+        if (x != box->x || y != box->y) {
+          moves.push_back(CompositorMoveIntent{box->node, x, y});
+        }
+        y += box->height + row_gap;
+      }
+      column_right = x - column_gap;
+      static_cast<void>(column);
+    }
+    return moves;
+  };
+  // A comment box around the selected nodes, with room for its title.
+  const auto comment_selection = [&]() {
+    if (const std::optional<gui::Rect> around = graph_extent(true)) {
+      constexpr float margin = 28.0F;
+      frame.comment = CompositorCommentIntent{
+          doc::NodeId{},
+          around->x - margin,
+          around->y - margin - std::max(metrics_.row_height, 24.0F),
+          around->width + margin * 2.0F,
+          around->height + margin * 2.0F + std::max(metrics_.row_height, 24.0F),
+          "Comment",
+          0U};
+    }
+  };
+  // Copy, paste and duplicate: the Director keeps the copied nodes; the ones
+  // a paste or duplicate adds are selected when they arrive.
+  const auto expect_new_nodes = [&]() {
+    PasteBaseline baseline;
+    for (const compositor::GraphNode &node : compositor_graph.nodes) {
+      baseline.nodes.push_back(node.node);
+    }
+    std::sort(baseline.nodes.begin(), baseline.nodes.end());
+    paste_baseline_ = std::move(baseline);
+  };
+  const auto say = [&](std::string text) {
+    notice_ = std::move(text);
+    notice_until_ = ctx.time_seconds() + 3.0;
+  };
+  const auto unplaceable = [&]() {
+    return std::count_if(selected_nodes_.begin(), selected_nodes_.end(),
+                         [&](doc::NodeId id) {
+                           const compositor::GraphNode *const node =
+                               compositor_graph.node(id);
+                           return node != nullptr &&
+                                  (node->kind == compositor::NodeKind::Output ||
+                                   node->kind ==
+                                       compositor::NodeKind::SceneLayer);
+                         });
+  };
+  const auto copy_selection = [&]() {
+    std::vector<doc::NodeId> chosen = selected_nodes_;
+    if (selection_.kind == CompositorSelectionKind::Comment) {
+      chosen.push_back(selection_.node);
+    }
+    if (!chosen.empty()) {
+      frame.clipboard = CompositorClipboardIntent{
+          CompositorClipboardAction::Copy, std::move(chosen)};
+      say("Copied " + std::to_string(frame.clipboard->nodes.size()) +
+          (frame.clipboard->nodes.size() == 1U ? " item" : " items"));
+    }
+  };
+  const auto paste_here = [&]() {
+    const bool inside = canvas.contains(ctx.pointer_x(), ctx.pointer_y());
+    const compositor::WirePoint at =
+        to_graph(inside ? ctx.pointer_x() : canvas.x + canvas.width * 0.5F,
+                 inside ? ctx.pointer_y() : canvas.y + canvas.height * 0.5F);
+    frame.clipboard = CompositorClipboardIntent{
+        CompositorClipboardAction::Paste, {}, at.x, at.y};
+    expect_new_nodes();
+  };
+  const auto duplicate_selection = [&]() {
+    if (selected_nodes_.empty()) {
+      return;
+    }
+    if (unplaceable() != 0) {
+      say("Output and Scene Layers are not duplicated: one per graph, one per "
+          "source");
+    }
+    frame.clipboard = CompositorClipboardIntent{
+        CompositorClipboardAction::Duplicate, selected_nodes_, 32.0F, 32.0F};
+    expect_new_nodes();
+  };
+  const auto start_rename = [&]() {
+    if (selection_.kind == CompositorSelectionKind::Node) {
+      if (const compositor::GraphNode *const node =
+              compositor_graph.node(selection_.node)) {
+        rename_ = Rename{node->node,
+                         node->label.empty()
+                             ? std::string{compositor::node_kind_name(node->kind)}
+                             : node->label};
+      }
+    } else if (selection_.kind == CompositorSelectionKind::Comment) {
+      if (const compositor::GraphComment *const comment =
+              comment_of(selection_.node)) {
+        rename_ = Rename{comment->node, comment->title};
+      }
+    }
+  };
+
+  // The keyboard, while the graph has it and no title is being typed.
+  const bool pointer_in_canvas =
+      canvas.contains(ctx.pointer_x(), ctx.pointer_y());
+  if (focused_ && !ctx.typing() && !rename_.has_value() && !wiring &&
+      dragging_node_ == doc::NodeId{} && !node_menu_.has_value()) {
+    const std::string_view typed =
+        pointer_in_canvas ? ctx.shortcut_text() : std::string_view{};
+    if (ctx.key_pressed(gui::Key::Copy)) {
+      copy_selection();
+    } else if (ctx.key_pressed(gui::Key::Paste)) {
+      paste_here();
+    } else if (ctx.key_pressed(gui::Key::Duplicate)) {
+      duplicate_selection();
+    }
+    if (ctx.key_pressed(gui::Key::Rename)) {
+      start_rename();
+    }
+    // F frames the selection (or the graph), Home the whole graph.
+    if (typed.find_first_of("fF") != std::string_view::npos) {
+      std::optional<gui::Rect> target = graph_extent(true);
+      if (!target.has_value()) {
+        target = graph_extent(false);
+      }
+      if (target.has_value()) {
+        frame_view(*target);
+        build_visuals();
+      }
+    }
+    if (ctx.key_pressed(gui::Key::Home)) {
+      if (const std::optional<gui::Rect> target = graph_extent(false)) {
+        frame_view(*target);
+        build_visuals();
+      }
+    }
+    if (typed.find_first_of("qQ") != std::string_view::npos) {
+      apply_moves(straightened());
+    }
+    // D bypasses the selection, or restores it, as Disable does in other
+    // compositors.
+    if (typed.find_first_of("dD") != std::string_view::npos &&
+        !ctx.ctrl_held()) {
+      toggle_bypass();
+    }
+    if (typed.find_first_of("cC") != std::string_view::npos &&
+        !selected_nodes_.empty()) {
+      comment_selection();
+    }
+    // Arrows nudge the selection 10 units, or 1 with Shift. A run of
+    // nudges in one direction is one undo step.
+    const float step = ctx.shift_held() ? 1.0F : 10.0F;
+    float nudge_x{};
+    float nudge_y{};
+    if (ctx.key_pressed(gui::Key::Left)) nudge_x -= step;
+    if (ctx.key_pressed(gui::Key::Right)) nudge_x += step;
+    if (ctx.key_pressed(gui::Key::Up)) nudge_y -= step;
+    if (ctx.key_pressed(gui::Key::Down)) nudge_y += step;
+    if ((nudge_x != 0.0F || nudge_y != 0.0F) && !selected_nodes_.empty()) {
+      std::vector<CompositorMoveIntent> moves;
+      for (const LayoutBox &box : selected_boxes()) {
+        moves.push_back(
+            CompositorMoveIntent{box.node, box.x + nudge_x, box.y + nudge_y});
+      }
+      apply_moves(moves);
+      const bool horizontal = nudge_x != 0.0F;
+      frame.numeric_nudge = NumericNudge{
+          mix(id_, "compositor.nudge"), horizontal ? 1001U : 1002U,
+          (horizontal ? nudge_x : nudge_y) > 0.0F
+              ? NumberFieldNudgeDirection::Increase
+              : NumberFieldNudgeDirection::Decrease,
+          ctx.shift_held() ? gui::KeyMods::Shift : gui::KeyMods::None};
+      build_visuals();
+    }
   }
 
   ctx.push_clip(canvas);
@@ -4526,6 +5339,36 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.tooltip(guide, title + " · Connect the output on the right of a node to an input on the left. Layers feed Composite, then Output.");
   }
 
+  for (const compositor::GraphComment &comment : compositor_graph.comments) {
+    const compositor::GraphComment drawn = drawn_comment(comment);
+    const gui::Rect box{canvas.x + pan_x_ + drawn.x * zoom_,
+                        canvas.y + pan_y_ + drawn.y * zoom_,
+                        drawn.width * zoom_, drawn.height * zoom_};
+    const bool chosen = selection_ == CompositorSelection{
+                                          CompositorSelectionKind::Comment,
+                                          comment.node};
+    const gui::UiColor color = comment_color(drawn.color);
+    ctx.panel(box, with_alpha(color, 0.07F));
+    const gui::Rect title{box.x, box.y, box.width,
+                          std::min(comment_header, box.height)};
+    ctx.panel(title, with_alpha(blend_color(ctx.theme().header, color, 0.35F),
+                                0.92F));
+    border(ctx, box, chosen ? ctx.theme().accent : with_alpha(color, 0.55F),
+           chosen ? 2.0F : 1.0F);
+    static_cast<void>(compositor_label(
+        ctx,
+        gui::Rect{title.x + 8.0F * zoom_, title.y,
+                  std::max(title.width - 16.0F * zoom_, 0.0F), title.height},
+        drawn.title, ctx.theme().text, compositor_title_text, zoom_));
+    // The corner grip it resizes by.
+    const float grip_x = box.x + box.width - 4.0F;
+    const float grip_y = box.y + box.height - 4.0F;
+    for (float offset = 4.0F; offset <= 10.0F; offset += 3.0F) {
+      ctx.draw_list().add_line(grip_x - offset, grip_y, grip_x, grip_y - offset,
+                               1.0F, with_alpha(color, 0.8F));
+    }
+  }
+
   // Wires scale with the graph but never thin below what reads on screen.
   const float wire_width = std::clamp(2.0F * zoom_, 1.5F, 3.5F);
   // A selected node's flow stands out: every wire feeding it, directly or
@@ -4552,7 +5395,51 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     walk(downstream, true);
   }
   const bool wires_held = pending_wires_.has_value();
+  drawn_wires_.clear();
+  order_discs_.clear();
+  const OrderDisc *const order_drop =
+      order_target(ctx.pointer_x(), ctx.pointer_y());
+  std::optional<std::pair<std::string, gui::UiColor>> dragged_number;
+  // A small numbered disc on a wire, or a problem mark.
+  const auto wire_disc = [&](gui::UiPoint at, std::string_view text,
+                             gui::UiColor ring, gui::UiColor fill) {
+    const float radius = std::max(6.0F, 7.0F * zoom_);
+    draw_circle(ctx, at.x, at.y, radius + 1.0F, ring);
+    draw_circle(ctx, at.x, at.y, radius, fill);
+    const float width = ctx.font_width(text, 0.75F);
+    ctx.label(gui::Rect{at.x - width * 0.5F - 1.0F, at.y - radius,
+                        width + 2.0F, radius * 2.0F},
+              text, ctx.theme().text, 0.75F);
+    return gui::Rect{at.x - radius, at.y - radius, radius * 2.0F,
+                     radius * 2.0F};
+  };
+  // The point a distance back along a wire from its input end.
+  const auto back_along = [](std::span<const gui::UiPoint> points,
+                             float distance) {
+    for (std::size_t index = points.size(); index > 1U; --index) {
+      const gui::UiPoint a = points[index - 2U];
+      const gui::UiPoint b = points[index - 1U];
+      const float length = std::hypot(b.x - a.x, b.y - a.y);
+      if (length >= distance && length > 0.0F) {
+        const float t = distance / length;
+        return gui::UiPoint{b.x + (a.x - b.x) * t, b.y + (a.y - b.y) * t};
+      }
+      distance -= length;
+    }
+    return points.empty() ? gui::UiPoint{} : points.front();
+  };
   for (const EdgeVisual &visual : edges) {
+    DrawnWire &drawn = drawn_wires_.emplace_back(
+        DrawnWire{visual.edge->node, visual.from->descriptor->type,
+                  visual.edge->to, {}});
+    for (const WirePath &segment : visual.segments) {
+      const std::span<const gui::UiPoint> run = segment.view();
+      drawn.points.insert(drawn.points.end(),
+                          run.begin() + (drawn.points.empty() || run.empty()
+                                             ? 0
+                                             : 1),
+                          run.end());
+    }
     if (std::find(lifted.begin(), lifted.end(), visual.edge->node) !=
         lifted.end()) {
       continue; // drawn following the pointer below
@@ -4573,11 +5460,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool hovered = std::addressof(visual) == hovered_edge;
     const bool splice = std::addressof(visual) == insert_edge;
     const gui::UiColor color = port_color(ctx, visual.from->descriptor->type);
+    // A bypassed node's wire carries nothing, and says so by fading.
+    const compositor::GraphNode *const wire_source =
+        compositor_graph.node(visual.edge->from.node);
+    const bool carries_nothing =
+        wire_source != nullptr && bypassed(*wire_source);
     gui::UiColor stroke = with_alpha(color, 0.78F);
     float width = wire_width;
     if (selected || splice) {
       stroke = ctx.theme().text;
       width = wire_width + 1.5F;
+    } else if (carries_nothing) {
+      stroke = with_alpha(color, hovered ? 0.55F : 0.3F);
     } else if (hovered || in_flow) {
       stroke = blend_color(color, ctx.theme().text, hovered ? 0.45F : 0.2F);
       width = wire_width + (hovered ? 1.0F : 0.5F);
@@ -4592,6 +5486,57 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   scale(ctx.theme().panel, 0.8F));
       draw_circle(ctx, centre.x, centre.y, point_radius,
                   selected || hovered ? ctx.theme().text : color);
+    }
+    if (!chrome_readable || drawn.points.size() < 2U) {
+      continue;
+    }
+    // Where several wires feed one input, each is numbered in the order the
+    // input takes them: effects on a layer run first to last.
+    const std::vector<const compositor::GraphEdge *> chain =
+        input_chain(compositor_graph, visual.edge->to);
+    if (chain.size() >= 2U) {
+      const auto rank = static_cast<std::size_t>(
+          std::distance(chain.begin(),
+                        std::find(chain.begin(), chain.end(), visual.edge))) +
+                        1U;
+      const std::string number = std::to_string(rank);
+      const gui::UiPoint at =
+          back_along(drawn.points, std::max(30.0F * zoom_, 22.0F));
+      const float radius = std::max(6.0F, 7.0F * zoom_);
+      order_discs_.push_back(
+          OrderDisc{visual.edge->node, visual.edge->to, at.x, at.y, radius});
+      if (order_drag_ == visual.edge->node) {
+        // Drawn after the nodes, at the pointer.
+        dragged_number = std::pair{number, stroke};
+      } else {
+        const bool target = order_drop != nullptr &&
+                            order_drop->edge == visual.edge->node;
+        static_cast<void>(wire_disc(at, number,
+                                    target ? ctx.theme().text : stroke,
+                                    target ? ctx.theme().accent
+                                           : scale(ctx.theme().panel, 1.18F)));
+      }
+    }
+    // A problem with the wire itself is marked halfway along it.
+    std::string problems;
+    bool error = false;
+    for (const compositor::GraphDiagnostic &diagnostic :
+         compositor_graph.diagnostics) {
+      if (diagnostic.subject != visual.edge->node) {
+        continue;
+      }
+      if (!problems.empty()) {
+        problems += " | ";
+      }
+      problems += compositor_diagnostic_message(diagnostic);
+      error = error ||
+              diagnostic.severity == compositor::DiagnosticSeverity::Error;
+    }
+    if (!problems.empty()) {
+      const gui::Rect mark = wire_disc(
+          drawn.points[drawn.points.size() / 2U], "!", ctx.theme().warning,
+          error ? ctx.theme().warning : scale(ctx.theme().panel, 1.18F));
+      ctx.tooltip(mark, problems);
     }
   }
   if (wires_held) {
@@ -4673,9 +5618,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const float port_radius = std::max(2.5F, compositor_port_radius * zoom_);
 
   for (const CompositorNodeVisual &visual : nodes) {
-    const bool selected =
-        selection_ ==
-        CompositorSelection{CompositorSelectionKind::Node, visual.node->node};
+    const bool selected = std::binary_search(
+        selected_nodes_.begin(), selected_nodes_.end(), visual.node->node);
     const bool diagnostic =
         node_has_diagnostic(compositor_graph, visual.node->node);
     const gui::UiColor kind = compositor_node_color(ctx, visual.node->kind);
@@ -4711,16 +5655,26 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const float text_width =
         std::max(visual.bounds.width - compositor_node_padding * 2.0F * zoom_,
                  0.0F);
-    const gui::Rect title_bounds{text_x, visual.bounds.y + 5.0F * zoom_,
-                                 text_width, node_title_height};
+    const gui::Rect toggle = toggle_bounds(visual);
+    const gui::Rect title_bounds{
+        text_x, visual.bounds.y + 5.0F * zoom_,
+        chrome_readable
+            ? std::max(toggle.x - toggle.width - 6.0F * zoom_ - text_x, 0.0F)
+            : text_width,
+        node_title_height};
+    const bool passed_through = bypassed(*visual.node);
     if (compositor_label(ctx, title_bounds, title, ctx.theme().text,
                          compositor_title_text, zoom_)) {
-      const std::string detail = compositor_node_detail(*visual.node, elements);
+      const std::string detail =
+          passed_through ? std::string{"BYPASSED"}
+                         : compositor_node_detail(*visual.node, elements);
       static_cast<void>(compositor_label(
           ctx,
           gui::Rect{text_x, title_bounds.y + node_title_height, text_width,
                     node_detail_height},
-          detail, ctx.theme().text_muted, compositor_detail_text, zoom_));
+          detail,
+          passed_through ? compositor_bypass_color : ctx.theme().text_muted,
+          compositor_detail_text, zoom_));
     }
 
     // Names share a row: an input on the left, an output on the right. Each
@@ -4744,11 +5698,71 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       return nullptr;
     };
+    // The toggle: a chevron pointing down while open, right while collapsed.
+    const bool folded = collapsed(*visual.node);
+    if (chrome_readable) {
+      const bool over = toggle.contains(ctx.pointer_x(), ctx.pointer_y());
+      if (over) {
+        ctx.panel(toggle, with_alpha(ctx.theme().widget_hover, 0.9F));
+      }
+      draw_twirl(ctx, toggle.x + toggle.width * 0.5F,
+                 toggle.y + toggle.height * 0.5F, !folded,
+                 over ? ctx.theme().text : ctx.theme().text_muted);
+      ctx.tooltip(toggle, folded ? "Expand node" : "Collapse node");
+      // Problems with the node are marked beside it, and named on hover: a
+      // filled mark for an error, a ring for a warning.
+      std::string problems;
+      bool marked = false;
+      bool error = false;
+      for (const compositor::GraphDiagnostic &problem :
+           compositor_graph.diagnostics) {
+        if (problem.subject != visual.node->node &&
+            problem.related != visual.node->node) {
+          continue;
+        }
+        if (!problems.empty()) {
+          problems += " | ";
+        }
+        problems += compositor_diagnostic_severity_label(problem);
+        problems += ": ";
+        problems += compositor_diagnostic_message(problem);
+        // A branch that does not reach Output is already drawn faded.
+        marked = marked ||
+                 problem.code != compositor::DiagnosticCode::DeadBranch;
+        error = error ||
+                problem.severity == compositor::DiagnosticSeverity::Error;
+      }
+      if (marked) {
+        const gui::Rect badge{toggle.x - toggle.width - 3.0F * zoom_, toggle.y,
+                              toggle.width, toggle.height};
+        const float radius = badge.width * 0.42F;
+        const float centre_x = badge.x + badge.width * 0.5F;
+        const float centre_y = badge.y + badge.height * 0.5F;
+        draw_circle(ctx, centre_x, centre_y, radius, ctx.theme().warning);
+        if (!error) {
+          draw_circle(ctx, centre_x, centre_y,
+                      std::max(radius - std::max(1.5F, 2.0F * zoom_), 0.0F),
+                      blend_color(ctx.theme().header, kind, 0.16F));
+        }
+        const float mark_width = ctx.font_width("!", 0.75F);
+        ctx.label(gui::Rect{centre_x - mark_width * 0.5F - 1.0F, badge.y,
+                            mark_width + 2.0F, badge.height},
+                  "!", error ? ctx.theme().background : ctx.theme().warning,
+                  0.75F);
+        ctx.tooltip(badge, problems);
+      }
+    }
+
     const float pin_inset = compositor_pin_inset * zoom_;
     const float gap = compositor_pin_label_gap * zoom_;
-    const std::size_t rows =
-        std::max(compositor::input_ports(visual.node->kind).size(),
-                 compositor::output_ports(visual.node->kind).size());
+    const auto shown_ports = [&](const std::vector<CompositorPortVisual> &ports) {
+      return static_cast<std::size_t>(std::count_if(
+          ports.begin(), ports.end(),
+          [&visual](const CompositorPortVisual &port) noexcept {
+            return port.endpoint.node == visual.node->node;
+          }));
+    };
+    const std::size_t rows = std::max(shown_ports(inputs), shown_ports(outputs));
     for (std::size_t row = 0U; row < rows; ++row) {
       const CompositorPortVisual *const input = row_port(inputs, row);
       const CompositorPortVisual *const output = row_port(outputs, row);
@@ -4782,6 +5796,82 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       row_height},
             output->descriptor->name, ctx.theme().text_muted,
             compositor_pin_text, zoom_));
+      }
+    }
+
+    // The values shown on the node, editable there at a working zoom.
+    const std::span<const InlineValue> values =
+        folded ? std::span<const InlineValue>{}
+               : inline_values(visual.node->kind);
+    for (std::size_t index = 0U; index < values.size(); ++index) {
+      const InlineValue &value = values[index];
+      const gui::Rect row = inline_row(visual, index);
+      const gui::Rect field = inline_field(row);
+      const bool idle =
+          inline_value_idle(compositor_graph, *visual.node, value);
+      static_cast<void>(compositor_label(
+          ctx,
+          gui::Rect{visual.bounds.x + pin_inset, row.y,
+                    std::max(field.x - gap * 0.5F - visual.bounds.x - pin_inset,
+                             0.0F),
+                    row.height},
+          value.label,
+          idle ? with_alpha(ctx.theme().text_muted, 0.5F)
+               : ctx.theme().text_muted,
+          compositor_pin_text, zoom_));
+      const double current = inline_value_of(*visual.node, value.property);
+      if (idle || !inline_editable || !inside_canvas(field)) {
+        std::array<char, 32U> text{};
+        const int length =
+            idle ? std::snprintf(text.data(), text.size(), "-")
+                 : std::snprintf(text.data(), text.size(), "%.*f",
+                                 value.decimals, current);
+        const std::string_view shown{
+            text.data(), static_cast<std::size_t>(std::max(length, 0))};
+        const std::optional<float> baked =
+            ctx.text_size_at_most(compositor_pin_text * zoom_);
+        const float width =
+            baked.has_value() ? ctx.font_width(shown, *baked) : 0.0F;
+        static_cast<void>(compositor_label(
+            ctx,
+            gui::Rect{field.x + std::max(field.width - width, 0.0F), row.y,
+                      std::min(width, field.width), row.height},
+            shown, ctx.theme().text, compositor_pin_text, zoom_));
+        continue;
+      }
+      const gui::UiId field_id =
+          mix(id_, "compositor.inline",
+              visual.node->node.value() * 16U +
+                  static_cast<core::u64>(value.property));
+      double authored{};
+      NumberFieldEdit edit{};
+      if (!inline_fields_.draw(ctx, field_id, field, {}, current, value.speed,
+                               authored, value.decimals, &edit) ||
+          !std::isfinite(authored)) {
+        continue;
+      }
+      const double clamped = std::clamp(value.whole ? std::round(authored)
+                                                    : authored,
+                                        value.minimum, value.maximum);
+      if (value.whole) {
+        const auto whole = static_cast<core::u32>(clamped);
+        if (whole == static_cast<core::u32>(current)) {
+          continue;
+        }
+        frame.property_edit = CompositorPropertyEditIntent{
+            visual.node->node, value.property, CompositorPropertyValue{whole}};
+      } else {
+        const auto amount = static_cast<float>(clamped);
+        if (amount == static_cast<float>(current)) {
+          continue;
+        }
+        frame.property_edit = CompositorPropertyEditIntent{
+            visual.node->node, value.property, CompositorPropertyValue{amount}};
+      }
+      if (edit.kind == NumberFieldEditKind::Nudge) {
+        frame.numeric_nudge =
+            NumericNudge{field_id, static_cast<core::u64>(value.property) + 1U,
+                         edit.direction, edit.modifiers};
       }
     }
 
@@ -4846,6 +5936,35 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (dead && !selected) {
       ctx.panel(visual.bounds, with_alpha(ctx.theme().background, 0.45F));
     }
+    // A bypassed node's body is dimmed below its title, which stays
+    // readable, and edged in the transport's amber.
+    if (passed_through) {
+      const float below = std::min(metrics_.header_height * zoom_,
+                                   visual.bounds.height);
+      ctx.panel(gui::Rect{visual.bounds.x, visual.bounds.y + below,
+                          visual.bounds.width, visual.bounds.height - below},
+                with_alpha(ctx.theme().background, 0.5F));
+      border(ctx, visual.bounds, with_alpha(compositor_bypass_color, 0.8F),
+             std::max(1.0F, std::min(2.0F, 2.0F * zoom_)));
+    }
+    // Brought here from another panel: outlined, fading, for a moment.
+    if (visual.node->node == reveal_node_ && ctx.time_seconds() < reveal_until_) {
+      const float left = static_cast<float>(reveal_until_ - ctx.time_seconds());
+      const float grow = 3.0F;
+      border(ctx,
+             gui::Rect{visual.bounds.x - grow, visual.bounds.y - grow,
+                       visual.bounds.width + grow * 2.0F,
+                       visual.bounds.height + grow * 2.0F},
+             with_alpha(ctx.theme().accent, std::clamp(left / 1.5F, 0.0F, 1.0F)),
+             2.0F);
+    }
+  }
+  // An order number being dragged rides on the pointer, over the nodes.
+  if (dragged_number.has_value()) {
+    static_cast<void>(
+        wire_disc(gui::UiPoint{ctx.pointer_x(), ctx.pointer_y()},
+                  dragged_number->first, ctx.theme().text,
+                  dragged_number->second));
   }
   if (connecting_source != nullptr && snapped == nullptr) {
     const auto under = std::find_if(
@@ -4868,6 +5987,51 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           badge.height},
                 reason, ctx.theme().warning);
     }
+  }
+  if (marquee_.has_value() && ctx.pointer_down()) {
+    const gui::Rect band{std::min(marquee_->start_x, ctx.pointer_x()),
+                         std::min(marquee_->start_y, ctx.pointer_y()),
+                         std::abs(ctx.pointer_x() - marquee_->start_x),
+                         std::abs(ctx.pointer_y() - marquee_->start_y)};
+    ctx.panel(band, with_alpha(ctx.theme().accent, 0.10F));
+    border(ctx, band, with_alpha(ctx.theme().accent, 0.75F));
+  }
+  if (minimap.width > 0.0F && minimap_scale > 0.0F) {
+    const auto map = [&](float x, float y, float width, float height) {
+      return gui::Rect{minimap.x + (x - minimap_world.x) * minimap_scale,
+                       minimap.y + (y - minimap_world.y) * minimap_scale,
+                       std::max(width * minimap_scale, 1.0F),
+                       std::max(height * minimap_scale, 1.0F)};
+    };
+    ctx.panel(minimap, with_alpha(ctx.theme().background, 0.92F));
+    for (const compositor::GraphComment &comment : compositor_graph.comments) {
+      const compositor::GraphComment drawn = drawn_comment(comment);
+      border(ctx, map(drawn.x, drawn.y, drawn.width, drawn.height),
+             with_alpha(comment_color(drawn.color), 0.7F));
+    }
+    for (const CompositorNodeVisual &visual : nodes) {
+      ctx.panel(map((visual.bounds.x - canvas.x - pan_x_) / zoom_,
+                    (visual.bounds.y - canvas.y - pan_y_) / zoom_,
+                    visual.bounds.width / zoom_, visual.bounds.height / zoom_),
+                with_alpha(compositor_node_color(ctx, visual.node->kind), 0.8F));
+    }
+    border(ctx,
+           map(-pan_x_ / zoom_, -pan_y_ / zoom_, canvas.width / zoom_,
+               canvas.height / zoom_),
+           ctx.theme().text);
+    border(ctx, minimap, ctx.theme().border);
+  }
+  if (ctx.time_seconds() < notice_until_ && !notice_.empty()) {
+    const float width = std::ceil(ctx.font_width(notice_)) + 20.0F;
+    const float height = ctx.line_height() + 10.0F;
+    const gui::Rect badge{canvas.x + 10.0F,
+                          canvas.y + canvas.height - height - 10.0F, width,
+                          height};
+    ctx.panel(badge, with_alpha(ctx.theme().background, 0.94F));
+    border(ctx, badge, ctx.theme().border);
+    ctx.label(gui::Rect{badge.x + 10.0F, badge.y, badge.width - 10.0F,
+                        badge.height},
+              notice_, ctx.theme().text);
   }
   ctx.pop_clip();
 
@@ -4897,6 +6061,31 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   subheading_height},
         compositor::node_kind_name(parameter_node->kind), ctx.theme().text_muted,
         compositor_detail_text, 1.0F));
+    // Bypass is a node's own switch, beside its name.
+    if (compositor::node_kind_bypassable(parameter_node->kind)) {
+      const bool off = bypassed(*parameter_node);
+      const std::string_view caption = off ? "BYPASSED" : "BYPASS";
+      const float bypass_width = std::ceil(ctx.font_width(caption)) + 16.0F;
+      const gui::Rect button{
+          parameter_bounds.x + parameter_bounds.width - 8.0F - bypass_width,
+          parameter_bounds.y + 5.0F, bypass_width,
+          std::max(header_height - 10.0F, 18.0F)};
+      const gui::Interaction pressed = ctx.grab(
+          mix(id_, "compositor.parameters.bypass"), button);
+      if (pressed.clicked) {
+        if (!is_selected(parameter_node->node)) {
+          select_only(parameter_node->node);
+        }
+        toggle_bypass();
+      }
+      ctx.panel(button, off ? with_alpha(compositor_bypass_color, 0.85F)
+                            : (pressed.hovered ? ctx.theme().widget_hover
+                                               : ctx.theme().widget));
+      ctx.label(gui::Rect{button.x + 8.0F, button.y, button.width - 8.0F,
+                          button.height},
+                caption, off ? ctx.theme().background : ctx.theme().text);
+      ctx.tooltip(button, "Pass this node through as if it did nothing (D)");
+    }
 
     // The fields scroll beneath the heading. Their height is last frame's,
     // which is exact for every frame but the first after a selection - and
@@ -5024,6 +6213,39 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             record_nudge(property, numeric_id, edit);
           }
         };
+    // A two-state value shown as a button naming its state; a click flips it.
+    const auto switch_field = [&](std::string_view label,
+                                  CompositorProperty property, bool on,
+                                  std::string_view on_text,
+                                  std::string_view off_text) {
+      const gui::Rect button = next_field(label);
+      const gui::Interaction pressed = ctx.grab(field_id(property), button);
+      ctx.panel(button, pressed.hovered ? ctx.theme().widget_hover
+                                        : ctx.theme().widget);
+      ctx.label(gui::Rect{button.x + 6.0F, button.y,
+                          std::max(button.width - 6.0F, 0.0F), button.height},
+                on ? on_text : off_text,
+                pressed.hovered ? ctx.theme().accent : ctx.theme().text);
+      if (pressed.clicked) {
+        frame.property_edit = CompositorPropertyEditIntent{
+            parameter_node->node, property,
+            CompositorPropertyValue{on ? core::u32{0U} : core::u32{1U}}};
+      }
+    };
+    // One of several named values, chosen from a menu under the field.
+    const auto choice_field = [&](std::string_view label,
+                                  CompositorProperty property,
+                                  std::span<const std::string_view> options,
+                                  std::size_t current) {
+      const gui::Rect well = next_field(label);
+      std::size_t selected = current;
+      if (ctx.dropdown(field_id(property), well, options, selected) &&
+          selected != current && selected < options.size()) {
+        frame.property_edit = CompositorPropertyEditIntent{
+            parameter_node->node, property,
+            CompositorPropertyValue{static_cast<core::u32>(selected)}};
+      }
+    };
     const auto unsigned_field = [&](std::string_view label,
                                     CompositorProperty property,
                                     core::u32 value, double speed,
@@ -5408,6 +6630,92 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       break;
     }
+    case compositor::NodeKind::ChromaKey: {
+      const auto *parameters = std::get_if<compositor::ChromaKeyParameters>(
+          &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      // The colour being keyed out, as a swatch above its three channels.
+      const gui::Rect swatch = next_field("KEY COLOUR");
+      ctx.panel(swatch, gui::UiColor{parameters->key_color.x,
+                                     parameters->key_color.y,
+                                     parameters->key_color.z, 1.0F});
+      border(ctx, swatch, ctx.theme().border);
+      scalar_field("KEY RED", CompositorProperty::ChromaKeyRed,
+                   parameters->key_color.x, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("KEY GREEN", CompositorProperty::ChromaKeyGreen,
+                   parameters->key_color.y, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("KEY BLUE", CompositorProperty::ChromaKeyBlue,
+                   parameters->key_color.z, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("TOLERANCE", CompositorProperty::ChromaKeyTolerance,
+                   parameters->tolerance, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("SOFTNESS", CompositorProperty::ChromaKeySoftness,
+                   parameters->softness, 0.005, 0.0F, 1.0F, 3);
+      // Whole pixels either way: positive grows the matte, negative shrinks it.
+      const gui::Rect edge_field = next_field("EDGE PX");
+      double authored_edge{};
+      NumberFieldEdit edge_edit{};
+      const gui::UiId edge_id = field_id(CompositorProperty::ChromaKeyEdgePx);
+      if (parameter_fields_.draw(ctx, edge_id, edge_field, {},
+                                 static_cast<double>(parameters->morphology_px),
+                                 1.0, authored_edge, 0, &edge_edit) &&
+          std::isfinite(authored_edge)) {
+        constexpr auto reach =
+            static_cast<double>(scene::max_key_morphology_radius_px);
+        const double rounded =
+            std::clamp(std::round(authored_edge), -reach, reach);
+        if (rounded != static_cast<double>(parameters->morphology_px)) {
+          frame.property_edit = CompositorPropertyEditIntent{
+              parameter_node->node, CompositorProperty::ChromaKeyEdgePx,
+              CompositorPropertyValue{static_cast<float>(rounded)}};
+          record_nudge(CompositorProperty::ChromaKeyEdgePx, edge_id, edge_edit);
+        }
+      }
+      scalar_field("SPILL", CompositorProperty::ChromaKeySpill,
+                   parameters->spill_suppression, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("MIX", CompositorProperty::ChromaKeyMix, parameters->mix,
+                   0.005, 0.0F, 1.0F, 3);
+      break;
+    }
+    case compositor::NodeKind::LumaKey: {
+      const auto *parameters = std::get_if<compositor::LumaKeyParameters>(
+          &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      // Each threshold stops at the other, so the range never turns over.
+      scalar_field("LOW", CompositorProperty::LumaKeyLow,
+                   parameters->low_threshold, 0.005, 0.0F,
+                   parameters->high_threshold, 3);
+      scalar_field("HIGH", CompositorProperty::LumaKeyHigh,
+                   parameters->high_threshold, 0.005,
+                   parameters->low_threshold, 1.0F, 3);
+      scalar_field("LOW SOFTNESS", CompositorProperty::LumaKeyLowSoftness,
+                   parameters->low_softness, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("HIGH SOFTNESS", CompositorProperty::LumaKeyHighSoftness,
+                   parameters->high_softness, 0.005, 0.0F, 1.0F, 3);
+      switch_field("MATTE", CompositorProperty::LumaKeyInvert,
+                   parameters->invert, "INVERTED", "NORMAL");
+      scalar_field("MIX", CompositorProperty::LumaKeyMix, parameters->mix,
+                   0.005, 0.0F, 1.0F, 3);
+      break;
+    }
+    case compositor::NodeKind::Matte: {
+      const auto *parameters = std::get_if<compositor::MatteParameters>(
+          &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      switch_field("MODE", CompositorProperty::MatteMode,
+                   parameters->mode == compositor::MatteMode::Luma, "LUMA",
+                   "ALPHA");
+      switch_field("MATTE", CompositorProperty::MatteInvert,
+                   parameters->invert, "INVERTED", "NORMAL");
+      switch_field("CLAMP INPUT", CompositorProperty::MatteClampInput,
+                   parameters->clamp_input, "ON", "OFF");
+      break;
+    }
     case compositor::NodeKind::Blur: {
       const auto *parameters =
           std::get_if<compositor::BlurParameters>(&parameter_node->parameters);
@@ -5589,10 +6897,106 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       break;
     }
+    case compositor::NodeKind::Merge: {
+      const auto *parameters = std::get_if<compositor::MergeParameters>(
+          &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      choice_field("BLEND", CompositorProperty::MergeBlendMode,
+                   merge_blend_labels,
+                   static_cast<std::size_t>(parameters->blend));
+      scalar_field("OPACITY", CompositorProperty::MergeOpacity,
+                   parameters->opacity, 0.005, 0.0F, 1.0F, 3);
+      scalar_field("VALUE", CompositorProperty::MergeValue, parameters->value,
+                   0.01, 0.0F, compositor::max_merge_value, 3);
+      // Say when VALUE does nothing, rather than let a scrub look broken.
+      const bool layers_wired = std::any_of(
+          compositor_graph.edges.begin(), compositor_graph.edges.end(),
+          [node = parameter_node->node](const compositor::GraphEdge &edge) {
+            return edge.to == compositor::EdgeEndpoint{node, 1U};
+          });
+      const gui::Rect note = full_row();
+      ctx.label(note,
+                layers_wired ? "VALUE UNUSED: LAYERS IS WIRED"
+                : parameters->blend == compositor::MergeBlendMode::Normal
+                    ? "VALUE UNUSED WITH NORMAL"
+                    : "BASE IS BLENDED WITH VALUE",
+                ctx.theme().text_muted);
+      break;
+    }
+    case compositor::NodeKind::Background: {
+      const auto *parameters = std::get_if<compositor::BackgroundParameters>(
+          &parameter_node->parameters);
+      if (parameters == nullptr) {
+        break;
+      }
+      using Property = CompositorProperty;
+      choice_field("TYPE", Property::BackgroundMode, background_mode_labels,
+                   static_cast<std::size_t>(parameters->mode));
+      // A colour as a swatch above its four channels.
+      const auto colour_fields =
+          [&](std::string_view title, const compositor::BackgroundColor &colour,
+              const std::array<Property, 4U> &properties) {
+            const gui::Rect swatch = next_field(title);
+            ctx.panel(swatch,
+                      gui::UiColor{colour.r, colour.g, colour.b, 1.0F});
+            border(ctx, swatch, ctx.theme().border);
+            scalar_field("RED", properties[0U], colour.r, 0.005, 0.0F, 1.0F,
+                         3);
+            scalar_field("GREEN", properties[1U], colour.g, 0.005, 0.0F, 1.0F,
+                         3);
+            scalar_field("BLUE", properties[2U], colour.b, 0.005, 0.0F, 1.0F,
+                         3);
+            scalar_field("ALPHA", properties[3U], colour.a, 0.005, 0.0F, 1.0F,
+                         3);
+          };
+      colour_fields("COLOUR A", parameters->color_a,
+                    {Property::BackgroundColorAR, Property::BackgroundColorAG,
+                     Property::BackgroundColorAB,
+                     Property::BackgroundColorAA});
+      if (parameters->mode == compositor::BackgroundMode::Solid) {
+        break;
+      }
+      colour_fields("COLOUR B", parameters->color_b,
+                    {Property::BackgroundColorBR, Property::BackgroundColorBG,
+                     Property::BackgroundColorBB,
+                     Property::BackgroundColorBA});
+      if (parameters->mode == compositor::BackgroundMode::Linear) {
+        const gui::Rect field = next_field("ANGLE TURNS");
+        double authored{};
+        NumberFieldEdit edit{};
+        const gui::UiId numeric_id = field_id(Property::BackgroundAngleTurns);
+        if (parameter_fields_.draw(ctx, numeric_id, field, {},
+                                   static_cast<double>(parameters->angle),
+                                   0.001, authored, 3, &edit) &&
+            std::isfinite(authored)) {
+          double wrapped = authored - std::floor(authored);
+          if (wrapped < 0.0) {
+            wrapped += 1.0;
+          }
+          const float value = static_cast<float>(wrapped);
+          if (value != parameters->angle) {
+            frame.property_edit = CompositorPropertyEditIntent{
+                parameter_node->node, Property::BackgroundAngleTurns,
+                CompositorPropertyValue{value}};
+            record_nudge(Property::BackgroundAngleTurns, numeric_id, edit);
+          }
+        }
+      }
+      scalar_field("CENTER X", Property::BackgroundCenterX,
+                   parameters->center_x, 0.005,
+                   -compositor::max_background_center,
+                   compositor::max_background_center, 3);
+      scalar_field("CENTER Y", Property::BackgroundCenterY,
+                   parameters->center_y, 0.005,
+                   -compositor::max_background_center,
+                   compositor::max_background_center, 3);
+      scalar_field("SIZE", Property::BackgroundSize, parameters->size, 0.01,
+                   0.01F, compositor::max_background_gradient_size, 3);
+      break;
+    }
     case compositor::NodeKind::SceneLayer:
-    case compositor::NodeKind::ChromaKey:
-    case compositor::NodeKind::LumaKey:
-    case compositor::NodeKind::Matte:
     case compositor::NodeKind::Composite:
     case compositor::NodeKind::Output:
       break;
@@ -5880,6 +7284,200 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
+  if (context_menu_.has_value() && context_bounds.width > 0.0F) {
+    std::optional<ContextItem> chosen;
+    if (ctx.key_pressed(gui::Key::Escape)) {
+      context_menu_.reset();
+    } else {
+      ctx.push_clip(context_bounds);
+      ctx.panel(context_bounds, scale(ctx.theme().panel, 1.04F));
+      border(ctx, context_bounds, ctx.theme().widget_hover);
+      float row_y = context_bounds.y + 4.0F;
+      for (std::size_t index = 0U; index < context_items.size(); ++index) {
+        const ContextItem &entry = context_items[index];
+        if (entry.divided) {
+          ctx.panel(gui::Rect{context_bounds.x + 8.0F, row_y + 3.0F,
+                              context_bounds.width - 16.0F, 1.0F},
+                    ctx.theme().divider);
+          row_y += context_divider;
+        }
+        const gui::Rect row{context_bounds.x + 4.0F, row_y,
+                            context_bounds.width - 8.0F, context_row_height};
+        row_y += context_row_height;
+        gui::Interaction interaction{};
+        if (entry.enabled) {
+          interaction =
+              ctx.grab(mix(id_, "compositor.context_item", index), row);
+        }
+        if (interaction.hovered) {
+          ctx.panel(row, ctx.theme().widget_hover);
+        }
+        float text_x = row.x + 10.0F;
+        if (entry.action == ContextAction::Colour) {
+          ctx.panel(gui::Rect{row.x + 10.0F, row.y + 6.0F, 11.0F,
+                              row.height - 12.0F},
+                    comment_color(entry.color));
+          text_x += 18.0F;
+        }
+        const gui::UiColor text = !entry.enabled ? with_alpha(ctx.theme().text_muted, 0.5F)
+                                  : interaction.hovered ? ctx.theme().text
+                                                        : ctx.theme().text_muted;
+        const float shortcut_width = ctx.font_width(entry.shortcut);
+        ctx.label(gui::Rect{text_x, row.y,
+                            std::max(row.x + row.width - text_x -
+                                         shortcut_width - 14.0F,
+                                     0.0F),
+                            row.height},
+                  entry.label, text);
+        if (!entry.shortcut.empty()) {
+          ctx.label(gui::Rect{row.x + row.width - shortcut_width - 8.0F, row.y,
+                              shortcut_width + 2.0F, row.height},
+                    entry.shortcut, with_alpha(ctx.theme().text_muted, 0.8F));
+        }
+        if (interaction.clicked) {
+          chosen = entry;
+        }
+      }
+      ctx.pop_clip();
+    }
+    if (chosen.has_value() && context_menu_.has_value()) {
+      const ContextMenu menu = *context_menu_;
+      context_menu_.reset();
+      switch (chosen->action) {
+      case ContextAction::Rename:
+        start_rename();
+        break;
+      case ContextAction::Duplicate:
+        duplicate_selection();
+        break;
+      case ContextAction::Copy:
+        copy_selection();
+        break;
+      case ContextAction::Delete:
+        frame.remove = selection_delete(compositor_graph);
+        break;
+      case ContextAction::AlignLeft:
+        apply_moves(align_boxes(selected_boxes(), AlignEdge::Left));
+        break;
+      case ContextAction::AlignRight:
+        apply_moves(align_boxes(selected_boxes(), AlignEdge::Right));
+        break;
+      case ContextAction::AlignTop:
+        apply_moves(align_boxes(selected_boxes(), AlignEdge::Top));
+        break;
+      case ContextAction::AlignBottom:
+        apply_moves(align_boxes(selected_boxes(), AlignEdge::Bottom));
+        break;
+      case ContextAction::DistributeHorizontal:
+        apply_moves(distribute_boxes(selected_boxes(), true));
+        break;
+      case ContextAction::DistributeVertical:
+        apply_moves(distribute_boxes(selected_boxes(), false));
+        break;
+      case ContextAction::Straighten:
+        apply_moves(straightened());
+        break;
+      case ContextAction::Arrange:
+        apply_moves(arranged());
+        break;
+      case ContextAction::CommentSelection:
+        comment_selection();
+        break;
+      case ContextAction::Bypass:
+        toggle_bypass();
+        break;
+      case ContextAction::Collapse:
+        if (const compositor::GraphNode *const node =
+                compositor_graph.node(menu.target)) {
+          toggle_collapse(node->node, chosen->label.starts_with("COLLAPSE"));
+        }
+        break;
+      case ContextAction::AddPoint:
+        if (const compositor::GraphEdge *const edge =
+                compositor_graph.edge(menu.target)) {
+          std::vector<compositor::WirePoint> points = edge_points(*edge);
+          points.insert(points.begin() +
+                            static_cast<std::ptrdiff_t>(
+                                std::min(menu.segment, points.size())),
+                        menu.at);
+          emit_points(edge->node, std::move(points), edge->points);
+        }
+        break;
+      case ContextAction::MoveEarlier:
+        if (const auto earlier = order_neighbour(menu.target, -1)) {
+          move_in_order(menu.target, *earlier);
+        }
+        break;
+      case ContextAction::MoveLater:
+        if (const auto later = order_neighbour(menu.target, 1)) {
+          move_in_order(menu.target, *later);
+        }
+        break;
+      case ContextAction::Disconnect:
+        frame.rewire = CompositorRewireIntent{{menu.target}, {}};
+        break;
+      case ContextAction::Colour:
+        if (const compositor::GraphComment *const comment =
+                comment_of(menu.target)) {
+          compositor::GraphComment recoloured = drawn_comment(*comment);
+          recoloured.color = chosen->color;
+          frame.comment = CompositorCommentIntent{
+              recoloured.node,  recoloured.x,     recoloured.y,
+              recoloured.width, recoloured.height, recoloured.title,
+              recoloured.color};
+          pending_comment_ = PendingComment{recoloured, *comment, 0U};
+        }
+        break;
+      }
+    }
+  }
+
+  // A title being typed over its node or comment box: Enter or a click
+  // elsewhere keeps it, Escape abandons it.
+  if (rename_.has_value()) {
+    std::optional<gui::Rect> field;
+    if (const auto visual = std::find_if(
+            nodes.begin(), nodes.end(),
+            [this](const CompositorNodeVisual &entry) {
+              return entry.node->node == rename_->node;
+            });
+        visual != nodes.end()) {
+      field = gui::Rect{visual->bounds.x + 4.0F, visual->bounds.y + 3.0F,
+                        std::max(visual->bounds.width - 8.0F, 40.0F),
+                        std::max(ctx.line_height() + 6.0F, 22.0F)};
+    } else if (const compositor::GraphComment *const comment =
+                   comment_of(rename_->node)) {
+      const compositor::GraphComment drawn = drawn_comment(*comment);
+      field = gui::Rect{canvas.x + pan_x_ + drawn.x * zoom_ + 4.0F,
+                        canvas.y + pan_y_ + drawn.y * zoom_ + 2.0F,
+                        std::max(drawn.width * zoom_ - 8.0F, 60.0F),
+                        std::max(ctx.line_height() + 6.0F, 22.0F)};
+    }
+    const gui::UiId rename_id = mix(id_, "compositor.rename");
+    if (!field.has_value() || ctx.key_pressed(gui::Key::Escape)) {
+      rename_.reset();
+      ctx.clear_focus();
+    } else {
+      const bool commit =
+          ctx.key_pressed(gui::Key::Enter) ||
+          (!rename_->focus_pending && ctx.focus() != rename_id);
+      if (rename_->focus_pending) {
+        ctx.focus_text_field_selected(rename_id, rename_->text);
+        rename_->focus_pending = false;
+      }
+      ctx.push_clip(canvas);
+      ctx.panel(*field, ctx.theme().background);
+      static_cast<void>(ctx.text_field(rename_id, *field, rename_->text));
+      border(ctx, *field, ctx.theme().accent);
+      ctx.pop_clip();
+      if (commit) {
+        frame.rename = CompositorRenameIntent{rename_->node, rename_->text};
+        rename_.reset();
+        ctx.clear_focus();
+      }
+    }
+  }
+
   // Hold what this frame authored on screen until the graph reports it.
   if (frame.connect_ports.has_value() || frame.rewire.has_value()) {
     PendingWires held;
@@ -5900,7 +7498,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     pending_wires_ = std::move(held);
   }
 
-  frame.editing = parameter_fields_.live();
+  frame.editing = parameter_fields_.live() || inline_fields_.live();
   ctx.pop_clip();
   if (drag_released) {
     dragging_node_ = {};

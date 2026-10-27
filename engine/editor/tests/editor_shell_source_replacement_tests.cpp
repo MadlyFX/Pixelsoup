@@ -131,7 +131,8 @@ void source_replacement() {
     return frame();
   };
   // Filter Library to the two assets, making source positions independent of
-  // the built-in generator palette. The media row follows its category header.
+  // the built-in generator palette. The List view sorts them by name under
+  // its column header: the model's row is 70..103, the video's 103..136.
   static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, true));
   static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, false));
   SDL_Event text{};
@@ -140,8 +141,8 @@ void source_replacement() {
   check(SDL_PushEvent(&text), "filter Library");
   static_cast<void>(frame());
   const float asset_x = library.x + 80.0F;
-  const float media_y = library.y + 105.0F;
-  const float model_y = library.y + 194.0F;
+  const float media_y = library.y + 120.0F;
+  const float model_y = library.y + 86.0F;
   const float row_x = rows.x + 110.0F;
   const float media_row = rows.y + 88.0F;
   const float model_row = rows.y + 112.0F;

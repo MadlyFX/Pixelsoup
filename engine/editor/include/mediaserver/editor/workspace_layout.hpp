@@ -45,6 +45,9 @@ struct WorkspaceLayoutState final {
   // last dragged it. Zero, and records older than the field, mean the
   // panel's default width.
   float compositor_parameter_width{};
+  // Whether the Compositor shows its minimap. Records older than the field
+  // read as hidden, the panel's default.
+  bool compositor_minimap{};
 };
 
 // The zoom range the editor offers, in percent.

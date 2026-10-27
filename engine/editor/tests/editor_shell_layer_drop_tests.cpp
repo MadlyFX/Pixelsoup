@@ -151,7 +151,8 @@ void layer_drop() {
   // and the first is centred on the pointer by half of each extent.
   const float node_height = second.editor_y - first.editor_y - 16.0F;
   const float node_width = 2.0F * (drop_x - canvas.x - first.editor_x);
-  check(node_height >= 50.0F && node_height <= 120.0F &&
+  // A Scene Layer has three input rows: EFFECTS, FILTERS and INSTANCES.
+  check(node_height >= 50.0F && node_height <= 160.0F &&
             node_width >= 176.0F && node_width <= 360.0F,
         "dropped nodes have a plausible measured size");
   check(std::abs(first.editor_y - (180.0F - 26.0F - node_height * 0.5F)) <

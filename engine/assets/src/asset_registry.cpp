@@ -99,6 +99,45 @@ asset_fingerprint(const Asset& asset) noexcept {
         asset);
 }
 
+doc::NodeId asset_folder(const Asset& asset) noexcept {
+    return std::visit([](const auto& held) noexcept { return held.folder; },
+                      asset);
+}
+
+const AssetFolder* AssetRegistry::folder(doc::NodeId id) const noexcept {
+    if (id == doc::NodeId{}) {
+        return nullptr;
+    }
+    const auto found = std::lower_bound(
+        folders.begin(), folders.end(), id,
+        [](const AssetFolder& entry, doc::NodeId wanted) noexcept {
+            return entry.id < wanted;
+        });
+    return found != folders.end() && found->id == id ? &*found : nullptr;
+}
+
+doc::NodeId AssetRegistry::folder_of(const Asset& entry) const noexcept {
+    const doc::NodeId held = asset_folder(entry);
+    return folder(held) != nullptr ? held : doc::NodeId{};
+}
+
+bool AssetRegistry::folder_within(doc::NodeId candidate,
+                                  doc::NodeId ancestor) const noexcept {
+    // Evaluation made the folders acyclic; the bound keeps a hand-built
+    // registry from looping.
+    for (std::size_t steps = 0U; steps <= folders.size(); ++steps) {
+        if (candidate == ancestor) {
+            return true;
+        }
+        const AssetFolder* const held = folder(candidate);
+        if (held == nullptr) {
+            return false;
+        }
+        candidate = held->parent;
+    }
+    return false;
+}
+
 const Asset* AssetRegistry::asset(doc::NodeId id) const noexcept {
     const auto found =
         std::lower_bound(assets.begin(), assets.end(), id,
@@ -137,6 +176,7 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
         hash_byte(hash, static_cast<core::u8>(asset_kind(asset)));
         hash_text(hash, asset_display_name(asset));
         hash_text(hash, asset_source(asset));
+        hash_u64(hash, asset_folder(asset).value());
         std::visit(
             [&hash](const auto& held) noexcept {
                 using Held = std::remove_cvref_t<decltype(held)>;
@@ -162,6 +202,8 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                     }
                     hash_byte(hash, static_cast<core::u8>(
                                         held.proxy_playback_policy));
+                    hash_text(hash, held.codec);
+                    hash_text(hash, held.start_timecode);
                 } else {
                     hash_byte(hash, held.projection_mesh ? 1U : 0U);
                     hash_byte(hash, held.vertex_count.has_value() ? 1U : 0U);
@@ -183,9 +225,22 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                         hash_double(hash, held.bounds->maximum_z);
                     }
                     hash_fingerprint(hash, held.fingerprint);
+                    hash_optional_u32(hash, held.texture_count);
+                    hash_byte(hash,
+                              held.largest_texture.has_value() ? 1U : 0U);
+                    if (held.largest_texture.has_value()) {
+                        hash_u32(hash, held.largest_texture->width);
+                        hash_u32(hash, held.largest_texture->height);
+                    }
                 }
             },
             asset);
+    }
+    hash_u64(hash, static_cast<core::u64>(registry.folders.size()));
+    for (const AssetFolder& folder : registry.folders) {
+        hash_u64(hash, folder.id.value());
+        hash_text(hash, folder.display_name);
+        hash_u64(hash, folder.parent.value());
     }
     return hash;
 }

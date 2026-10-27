@@ -2146,6 +2146,40 @@ void the_split_chord_and_comma_and_period_edit_at_the_playhead() {
   UI_CHECK(outside.type(",").timeline_edits.empty());
 }
 
+// Another panel can point at a row: it is scrolled into view and outlined
+// for a moment, and the Timeline's selection is left alone.
+void a_revealed_row_scrolls_into_view_without_selecting() {
+  Harness h;
+  for (mediaserver::core::u64 index = 0U; index < 30U; ++index) {
+    editor::ElementInfo object = make_object();
+    object.node = doc::NodeId{500U + index};
+    h.elements.push_back(object);
+  }
+  const doc::NodeId target{529U};
+  // Clicks down the list find which layers are listed on screen.
+  const auto listed = [&h](doc::NodeId node) {
+    // One click a row, so none is taken for a double-click rename.
+    for (float y = 89.0F; y < 400.0F; y += 24.0F) {
+      const editor::TimelinePanelFrame clicked = h.click(80.0F, y);
+      if (clicked.selection.has_value() && clicked.selection->node == node) {
+        return true;
+      }
+    }
+    return false;
+  };
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(!listed(target));
+  h.selection.clear();
+  h.primary = doc::NodeId{};
+
+  h.panel.reveal(target, 0.0);
+  const editor::TimelinePanelFrame shown = h.frame(0.0F, 0.0F, false);
+  UI_CHECK(!shown.selection.has_value());
+  UI_CHECK(h.panel.revealed_row(1.0) == target);
+  UI_CHECK(h.panel.revealed_row(2.0) == doc::NodeId{});
+  UI_CHECK(listed(target));
+}
+
 void track_rows_and_toolbar_emit_typed_lane_actions() {
   Harness h;
   h.bounds.width = 1'400.0F;
@@ -3817,7 +3851,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 115U> cases{{
+constexpr std::array<Case, 116U> cases{{
     {"the cache bar and node playheads draw until toggled off",
      &the_cache_bar_and_node_playheads_draw_until_toggled_off},
     {"a node playhead off the view and an empty cache draw nothing",
@@ -3913,6 +3947,8 @@ constexpr std::array<Case, 115U> cases{{
      &the_playhead_readout_takes_typed_timecode_and_frames},
     {"timecode reads and writes the forms an operator types",
      &timecode_reads_and_writes_the_forms_an_operator_types},
+    {"a revealed row scrolls into view without selecting",
+     &a_revealed_row_scrolls_into_view_without_selecting},
     {"track rows and toolbar emit typed lane actions",
      &track_rows_and_toolbar_emit_typed_lane_actions},
     {"every listed element carries its own mute and lock",

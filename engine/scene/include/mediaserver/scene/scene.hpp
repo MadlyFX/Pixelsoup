@@ -351,6 +351,15 @@ struct GroupDiagnostic final {
 // position/rotation/scale are local values at the evaluated frame; world is
 // the recursively composed transform. `locked` and `visible` are authored on
 // this group, while the effective fields include every ancestor.
+// What a group is for. A folder only gathers, places and hides what it holds.
+// A vehicle process group is the container the vehicle processing workflow
+// will be built on; today it behaves exactly as a folder, and the kind is
+// authored, replicated and digested so that work lands on a stable base.
+enum class GroupKind : core::u8 {
+    Folder,
+    VehicleProcess,
+};
+
 struct SceneGroup final {
     doc::NodeId node{};
     SceneId scene{};
@@ -367,6 +376,7 @@ struct SceneGroup final {
     bool visible{true};
     bool effective_locked{};
     bool effective_visible{true};
+    GroupKind kind{GroupKind::Folder};
 
     bool operator==(const SceneGroup&) const = default;
 };

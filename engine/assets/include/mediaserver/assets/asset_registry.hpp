@@ -69,6 +69,14 @@ struct MediaAsset final {
     // generation state and cache paths never enter this persistent model.
     std::optional<DerivativeProfileId> requested_proxy_profile;
     ProxyPlaybackPolicy proxy_playback_policy{ProxyPlaybackPolicy::Source};
+    // Descriptive probe results the Library shows. Neither changes how the
+    // source decodes: the codec is FFmpeg's name for the video stream, and
+    // the start timecode is the container's own `HH:MM:SS:FF` (`;` before
+    // the frames for drop-frame), absent when the file carries none.
+    std::string codec;
+    std::string start_timecode;
+    // The Library folder holding this asset; zero is the Library's top level.
+    doc::NodeId folder{};
 
     bool operator==(const MediaAsset&) const = default;
 };
@@ -85,6 +93,11 @@ struct ModelAsset final {
     std::optional<core::u64> vertex_count;
     bool projection_mesh{};
     std::optional<ContentFingerprint> fingerprint;
+    // The model's own textures as imported: how many, and the largest one's
+    // size. Absent for an asset imported before these were recorded.
+    std::optional<core::u32> texture_count;
+    std::optional<PixelDimensions> largest_texture;
+    doc::NodeId folder{};
 
     bool operator==(const ModelAsset&) const = default;
 };
@@ -105,6 +118,20 @@ enum class AssetKind : core::u8 {
 [[nodiscard]] std::string_view asset_source(const Asset& asset) noexcept;
 [[nodiscard]] const std::optional<ContentFingerprint>&
 asset_fingerprint(const Asset& asset) noexcept;
+[[nodiscard]] doc::NodeId asset_folder(const Asset& asset) noexcept;
+
+// A Library folder: organisation only. It never changes what an asset is or
+// how it renders, and removing one never removes the assets inside it.
+// `parent` is zero at the Library's top level.
+struct AssetFolder final {
+    doc::NodeId id{};
+    std::string display_name;
+    doc::NodeId parent{};
+
+    bool operator==(const AssetFolder&) const = default;
+};
+
+inline constexpr core::u32 max_asset_folders = 512U;
 
 inline constexpr core::u32 max_project_assets = 1'024U;
 
@@ -114,8 +141,19 @@ struct AssetRegistry final {
     // performs no filesystem lookup or path canonicalisation. The lowest
     // NodeId wins within a kind; one source may have several manifest roles.
     std::vector<Asset> assets;
+    // Sorted by NodeId. Every `parent` names another folder here, and no
+    // folder is its own ancestor: a dangling or cyclic parent is evaluated
+    // as the top level, so one bad node never hides a branch.
+    std::vector<AssetFolder> folders;
 
     [[nodiscard]] const Asset* asset(doc::NodeId id) const noexcept;
+    [[nodiscard]] const AssetFolder* folder(doc::NodeId id) const noexcept;
+    // Where `asset` shows in the Library: its folder when that folder exists,
+    // otherwise the top level.
+    [[nodiscard]] doc::NodeId folder_of(const Asset& asset) const noexcept;
+    // True when `folder` is `ancestor` or sits anywhere beneath it.
+    [[nodiscard]] bool folder_within(doc::NodeId folder,
+                                     doc::NodeId ancestor) const noexcept;
     [[nodiscard]] const Asset*
     asset_for_source(std::string_view exact_source) const noexcept;
     // Kind-aware lookup for placements and reimports. This avoids treating a

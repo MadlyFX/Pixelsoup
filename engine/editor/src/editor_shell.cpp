@@ -1648,8 +1648,14 @@ struct EditorShell::Impl final {
     std::optional<FeedSurfaceEditRequest> surface_edit;
     doc::NodeId texture_target{};
     std::string expected_source;
+    doc::NodeId folder{};
+    // The Library asset this ingest re-reads for an accepted change.
+    doc::NodeId revise{};
   };
   std::vector<PendingModelIngest> pending_model_ingests;
+  // Re-probed assets waiting for the rest of their gesture, so everything
+  // one Accept asked for reaches the Director - and undoes - together.
+  std::vector<AssetRevisionIntent> pending_revisions;
   render::ModelCache inspector_model_cache;
   core::AssetPublicationGate asset_gate;
   core::AssetSetReadiness assets{};
@@ -1678,7 +1684,7 @@ struct EditorShell::Impl final {
   StageAssetStatus stage_assets{true, "LOADING STAGE ASSETS...",
                                 "Preparing the first Stage image."};
   std::string ingest_message;
-  enum class PendingMediaAction : core::u8 { Add, Import };
+  enum class PendingMediaAction : core::u8 { Add, Import, Revise };
 
   struct PendingMediaProbe final {
     PendingMediaAction action{};
@@ -1688,6 +1694,10 @@ struct EditorShell::Impl final {
     core::u64 gesture{};
     scene::SceneId scene{};
     core::u64 project_generation{};
+    // The Library folder an import lands in.
+    doc::NodeId folder{};
+    // The Library asset a Revise probe re-reads.
+    doc::NodeId revise{};
   };
 
   gui::FontAtlas font;
@@ -1770,6 +1780,13 @@ struct EditorShell::Impl final {
   // promote that parent to the canonical selection.
   std::vector<doc::NodeId> pending_group_members;
   core::u32 pending_group_frames{};
+  // A new empty group has no members to recognise it by, so keep the groups
+  // that existed when it was asked for: the first projected frame with one
+  // more under `pending_new_group_parent` (zero: the top level) selects it
+  // and opens its name.
+  std::optional<doc::NodeId> pending_new_group_parent;
+  std::set<doc::NodeId> pending_new_group_known;
+  core::u32 pending_new_group_frames{};
   std::optional<doc::NodeId> stage_surface_selection;
   std::optional<doc::NodeId> program_output_map_node;
   scene::SceneId displayed_scene{};
@@ -1879,6 +1896,7 @@ struct EditorShell::Impl final {
         ui_zoom_percent = decoded.value().ui_zoom_percent;
         compositor_panel.set_parameter_panel_width(
             decoded.value().compositor_parameter_width);
+        compositor_panel.show_minimap(decoded.value().compositor_minimap);
       }
       if (decoded && docks.restore(decoded.value().docks)) {
         stage_panel.set_resolution(decoded.value().stage_resolution);
@@ -2065,6 +2083,7 @@ struct EditorShell::Impl final {
     scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
+    pending_new_group_parent.reset();
     scene_selection.replace(node);
     delete_domain = DeleteDomain::Scene;
     history_context = HistoryContext::Scene;
@@ -2075,6 +2094,7 @@ struct EditorShell::Impl final {
     scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
+    pending_new_group_parent.reset();
     scene_selection.toggle(node);
     delete_domain = scene_selection.empty() ? DeleteDomain::Neutral
                                             : DeleteDomain::Scene;
@@ -2086,6 +2106,7 @@ struct EditorShell::Impl final {
                     std::span<const doc::NodeId> visible_order) {
     pending_group_members.clear();
     pending_group_frames = 0U;
+    pending_new_group_parent.reset();
     scene_selection.select_range(node, visible_order);
     delete_domain = DeleteDomain::Scene;
     history_context = HistoryContext::Scene;
@@ -2096,6 +2117,7 @@ struct EditorShell::Impl final {
     scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
     pending_group_frames = 0U;
+    pending_new_group_parent.reset();
     scene_selection.clear();
     delete_domain = DeleteDomain::Neutral;
     if (activate_scene_history) {
@@ -2487,6 +2509,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (impl.project_generation != project.generation) {
     impl.semantic_boundary = true;
     impl.pending_model_ingests.clear();
+    impl.pending_revisions.clear();
     if (impl.bake_job) impl.bake_job->cancel();
     impl.bake_job.reset();
     impl.bake_message.clear();
@@ -2534,6 +2557,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.hardware_mapping_panel.reset_project_state();
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
+    impl.library_panel.reset_project_state();
   }
 
   // Media stream discovery can take seconds for multi-gigabyte MOV files.
@@ -2595,8 +2619,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         asset.frame_count = metadata.frame_count;
         asset.frame_rate = rate;
-        result.asset_imports.push_back(AssetImportIntent{
-            assets::Asset{std::move(asset)}, probe->gesture});
+        asset.codec = metadata.codec;
+        asset.start_timecode = metadata.start_timecode;
+        asset.folder = probe->folder;
+        if (probe->action == Impl::PendingMediaAction::Revise) {
+          asset.id = probe->revise;
+          impl.pending_revisions.push_back(AssetRevisionIntent{
+              assets::Asset{std::move(asset)}, probe->gesture});
+        } else {
+          result.asset_imports.push_back(AssetImportIntent{
+              assets::Asset{std::move(asset)}, probe->gesture});
+        }
       }
     }
     probe = impl.pending_media_probes.erase(probe);
@@ -2737,6 +2770,23 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.pending_group_members.clear();
     } else {
       --impl.pending_group_frames;
+    }
+  }
+  if (impl.pending_new_group_parent.has_value()) {
+    const doc::NodeId parent = *impl.pending_new_group_parent;
+    const auto created = std::find_if(
+        elements.begin(), elements.end(), [&](const ElementInfo &candidate) {
+          return candidate.kind == ElementKind::Group && !candidate.linked &&
+                 candidate.parent_group.value_or(doc::NodeId{}) == parent &&
+                 !impl.pending_new_group_known.contains(candidate.node);
+        });
+    if (created != elements.end()) {
+      impl.select_only(created->node);
+      impl.scene_panel.begin_rename(impl.ui, *created);
+    } else if (impl.pending_new_group_frames == 0U) {
+      impl.pending_new_group_parent.reset();
+    } else {
+      --impl.pending_new_group_frames;
     }
   }
   scene::Scene stage_scene = authored_stage;
@@ -3657,7 +3707,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
   const auto enqueue_model = [&](std::string source, scene::SceneId add_scene,
       std::optional<FeedSurfaceAddRequest> surface_add,
-      std::optional<FeedSurfaceEditRequest> surface_edit) {
+      std::optional<FeedSurfaceEditRequest> surface_edit,
+      doc::NodeId folder = {}, doc::NodeId revise = {},
+      std::optional<core::u64> gesture = std::nullopt) {
     if (impl.pending_model_ingests.size() >= 16U) {
       impl.ingest_message = "Model import queue is full"; return;
     }
@@ -3673,8 +3725,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       });
     }
     impl.pending_model_ingests.push_back({std::move(job),
-        std::filesystem::path{source}.filename().string(), impl.next_edit_gesture++,
-        project.generation, add_scene, std::move(surface_add), std::move(surface_edit)});
+        std::filesystem::path{source}.filename().string(),
+        gesture.has_value() ? *gesture : impl.next_edit_gesture++,
+        project.generation, add_scene, std::move(surface_add), std::move(surface_edit),
+        {}, {}, folder, revise});
     impl.ingest_message.clear();
   };
   for (auto pending = impl.pending_model_ingests.begin(); pending != impl.pending_model_ingests.end();) {
@@ -3704,6 +3758,27 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       if (!completed->diagnostic.empty()) {
         impl.ingest_message = completed->diagnostic;
+      } else if (pending->revise != doc::NodeId{}) {
+        // An accepted change: the same model asset, re-read.
+        assets::ModelAsset asset{};
+        asset.id = pending->revise;
+        asset.display_name = pending->display_name;
+        asset.source = completed->source;
+        asset.vertex_count = completed->vertex_count;
+        asset.triangle_count = completed->triangle_count;
+        asset.material_count = completed->material_count;
+        asset.texture_count = completed->texture_count;
+        if (completed->largest_texture_width > 0U &&
+            completed->largest_texture_height > 0U) {
+          asset.largest_texture = assets::PixelDimensions{
+              completed->largest_texture_width,
+              completed->largest_texture_height};
+        }
+        const auto& bounds = completed->bounds;
+        asset.bounds = assets::ModelBounds{bounds.minimum.x, bounds.minimum.y, bounds.minimum.z,
+            bounds.maximum.x, bounds.maximum.y, bounds.maximum.z};
+        impl.pending_revisions.push_back(
+            AssetRevisionIntent{assets::Asset{std::move(asset)}, pending->gesture});
       } else {
         assets::ModelAsset asset{};
         asset.display_name = pending->display_name;
@@ -3711,6 +3786,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         asset.vertex_count = completed->vertex_count;
         asset.triangle_count = completed->triangle_count;
         asset.material_count = completed->material_count;
+        asset.texture_count = completed->texture_count;
+        if (completed->largest_texture_width > 0U &&
+            completed->largest_texture_height > 0U) {
+          asset.largest_texture = assets::PixelDimensions{
+              completed->largest_texture_width,
+              completed->largest_texture_height};
+        }
+        asset.folder = pending->folder;
         const auto& bounds = completed->bounds;
         asset.bounds = assets::ModelBounds{bounds.minimum.x, bounds.minimum.y, bounds.minimum.z,
             bounds.maximum.x, bounds.maximum.y, bounds.maximum.z};
@@ -3744,6 +3827,30 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
     }
     pending = impl.pending_model_ingests.erase(pending);
+  }
+
+  // Accepted changes go to the Director once every probe their gesture
+  // started has finished, so one Accept is one Undo.
+  if (!impl.pending_revisions.empty()) {
+    std::erase_if(impl.pending_revisions, [&](AssetRevisionIntent &revision) {
+      const core::u64 gesture = revision.gesture;
+      const bool waiting =
+          std::any_of(impl.pending_media_probes.begin(),
+                      impl.pending_media_probes.end(),
+                      [gesture](const Impl::PendingMediaProbe &probe) {
+                        return probe.gesture == gesture;
+                      }) ||
+          std::any_of(impl.pending_model_ingests.begin(),
+                      impl.pending_model_ingests.end(),
+                      [gesture](const Impl::PendingModelIngest &ingest) {
+                        return ingest.gesture == gesture;
+                      });
+      if (waiting) {
+        return false;
+      }
+      result.asset_revisions.push_back(std::move(revision));
+      return true;
+    });
   }
 
   const auto handle_viewport = [&](const ViewportFrame &viewport,
@@ -3958,7 +4065,46 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
-  const auto import_asset = [&](LibraryImportAction action) {
+  // Files become Library assets in `folder`: video and images are probed,
+  // models go through the model worker, and anything else is named in the
+  // status line rather than silently dropped.
+  const auto import_files = [&](std::span<const std::string> sources,
+                                doc::NodeId folder) {
+    const core::u64 gesture = impl.next_edit_gesture++;
+    std::size_t refused = 0U;
+    for (const std::string &source : sources) {
+      const std::optional<LibraryImportAction> kind =
+          library_import_kind(source);
+      if (kind == LibraryImportAction::Media) {
+        try {
+          impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
+              Impl::PendingMediaAction::Import, source, {}, false, gesture, {},
+              project.generation, folder});
+        } catch (...) {
+          assets::MediaAsset asset{};
+          asset.display_name =
+              std::filesystem::path{source}.filename().string();
+          asset.source = source;
+          asset.folder = folder;
+          result.asset_imports.push_back(AssetImportIntent{
+              assets::Asset{std::move(asset)}, gesture});
+        }
+      } else if (kind == LibraryImportAction::Model) {
+        enqueue_model(source, {}, {}, {}, folder);
+      } else {
+        ++refused;
+      }
+    }
+    if (refused > 0U) {
+      impl.ingest_message =
+          refused == 1U ? "Not a media or model file; nothing imported"
+                        : std::to_string(refused) +
+                              " files are not media or models; skipped";
+    }
+  };
+
+  const auto import_asset = [&](LibraryImportAction action,
+                                doc::NodeId folder) {
     const bool media = action == LibraryImportAction::Media;
     const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
                                       "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
@@ -3967,31 +4113,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const char *const path = tinyfd_openFileDialog(
         media ? "Import Media Asset" : "Import 3D Model Asset", "",
         media ? static_cast<int>(std::size(media_filters)) : 4, media ? media_filters : model_filters,
-        media ? "Video and images" : "3D models (glTF, OBJ)", media ? 1 : 0);
+        media ? "Video and images" : "3D models (glTF, OBJ)", 1);
     if (path == nullptr) {
       return;
     }
-    if (media) {
-      const std::vector<std::string> sources = selected_dialog_paths(path);
-      const core::u64 gesture = impl.next_edit_gesture++;
-      for (const std::string &source : sources) {
-        try {
-          impl.pending_media_probes.push_back(Impl::PendingMediaProbe{
-              Impl::PendingMediaAction::Import, source, {}, false, gesture, {},
-              project.generation});
-        } catch (...) {
-          assets::MediaAsset asset{};
-          asset.display_name =
-              std::filesystem::path{source}.filename().string();
-          asset.source = source;
-          result.asset_imports.push_back(AssetImportIntent{
-              assets::Asset{std::move(asset)}, gesture});
-        }
-      }
-      return;
-    }
-
-    enqueue_model(std::string{path}, {}, {}, {});
+    const std::vector<std::string> sources = selected_dialog_paths(path);
+    import_files(sources, folder);
   };
 
   const auto instantiate_asset = [&](doc::NodeId id,
@@ -4052,11 +4179,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
   std::optional<doc::NodeId> dragging_asset;
+  // Files dragged in from the desktop that the Library imported itself.
+  bool library_took_files = false;
   std::optional<EffectApplyRequest> pending_effect_drop;
   std::optional<TimelineLayerDrop> pending_timeline_layer_drop;
   gui::Rect compositor_panel_bounds{};
   bool compositor_panel_drawn = false;
   bool timeline_panel_drawn = false;
+  gui::Rect timeline_panel_bounds{};
   gui::Rect inspector_panel_bounds{};
   bool inspector_panel_drawn = false;
   SceneSettingsFrame live_scene_settings;
@@ -4952,6 +5082,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.history_context = HistoryContext::Scene;
           return;
         }
+        if (request->highlight_changed) {
+          if (!impl.scene_selection.empty()) {
+            result.highlights.push_back(ElementHighlightIntent{
+                {impl.scene_selection.members().begin(),
+                 impl.scene_selection.members().end()},
+                request->highlight,
+                impl.next_edit_gesture++});
+            impl.history_context = HistoryContext::Scene;
+          }
+          return;
+        }
         if (request->delete_selection) {
           delete_selection();
           return;
@@ -4985,6 +5126,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             edit.group = request->destination;
             edit.anchor = request->reorder_destination;
             edit.before = request->reorder_before;
+          } else if (*request->structure ==
+                     SceneSelectionRequest::StructureAction::Create) {
+            edit.action = GroupEditAction::Create;
+            edit.group = request->destination;
+            edit.kind = request->group_kind;
+            impl.pending_new_group_known.clear();
+            for (const ElementInfo &element : elements) {
+              if (element.kind == ElementKind::Group) {
+                impl.pending_new_group_known.insert(element.node);
+              }
+            }
+            impl.pending_new_group_parent = request->destination;
+            impl.pending_new_group_frames = 120U;
           } else if (*request->structure ==
               SceneSelectionRequest::StructureAction::Group) {
             edit.action = GroupEditAction::Group;
@@ -5115,6 +5269,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     if (panel == panel_library) {
+      impl.library_panel.set_changed_sources(project.changed_assets);
       const LibraryFrame library =
           impl.library_panel.draw(ui, bounds, asset_registry, thumbnails, {},
                                   library_proxy_runtime);
@@ -5125,15 +5280,54 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         handle_library_add(library.add.value());
       }
       if (library.import_asset.has_value()) {
-        import_asset(library.import_asset.value());
+        import_asset(library.import_asset.value(), library.import_folder);
+      }
+      if (!library.accept_sources.empty()) {
+        // Re-read each changed file on the workers that import uses; the
+        // results are held until the last one is back.
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const doc::NodeId id : library.accept_sources) {
+          const assets::Asset *const asset = asset_registry.asset(id);
+          if (asset == nullptr) {
+            continue;
+          }
+          const std::string source{assets::asset_source(*asset)};
+          if (std::holds_alternative<assets::MediaAsset>(*asset)) {
+            try {
+              Impl::PendingMediaProbe probe{
+                  Impl::PendingMediaAction::Revise, source, {}, false,
+                  gesture, {}, project.generation, assets::asset_folder(*asset)};
+              probe.revise = id;
+              impl.pending_media_probes.push_back(std::move(probe));
+            } catch (...) {
+              impl.ingest_message = "Could not queue a changed source";
+            }
+          } else {
+            enqueue_model(source, {}, {}, {}, assets::asset_folder(*asset), id,
+                          gesture);
+          }
+        }
+      }
+      if (!library.import_files.empty()) {
+        import_files(library.import_files, library.import_folder);
+        library_took_files = true;
       }
       if (library.instantiate_asset.has_value()) {
         instantiate_asset(library.instantiate_asset.value(), std::nullopt);
       }
-      if (library.remove_asset.has_value()) {
-        result.asset_deletes.push_back(AssetDeleteIntent{
-            library.remove_asset.value(), impl.next_edit_gesture++});
+      // One gesture for everything a single Delete or menu choice removed,
+      // so it undoes as one.
+      if (!library.remove_assets.empty() || !library.library_edits.empty()) {
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const doc::NodeId removed : library.remove_assets) {
+          result.asset_deletes.push_back(AssetDeleteIntent{removed, gesture});
+        }
+        for (const assets::LibraryEdit &edit : library.library_edits) {
+          result.asset_library_edits.push_back(
+              AssetLibraryEditIntent{edit, gesture});
+        }
       }
+      delete_consumed = delete_consumed || library.consume_delete;
       if (library.proxy_policy.has_value()) {
         result.asset_proxy_edits.push_back(AssetProxyEditIntent{
             library.proxy_policy->asset,
@@ -5174,6 +5368,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.compositor_panel.draw(ui, bounds, compositor_graph, elements);
       if (graph_frame.selection.has_value()) {
         impl.delete_domain = DeleteDomain::Compositor;
+        // One Scene Layer chosen points the Timeline at its layer or track.
+        // Each panel keeps its own selection.
+        if (graph_frame.selection->kind == CompositorSelectionKind::Node &&
+            impl.compositor_panel.selected_nodes().size() == 1U) {
+          if (const compositor::GraphNode *const chosen =
+                  compositor_graph.node(graph_frame.selection->node)) {
+            const auto *const layer =
+                std::get_if<compositor::SceneLayerParameters>(
+                    &chosen->parameters);
+            if (layer != nullptr && layer->scene_node != doc::NodeId{}) {
+              impl.timeline_panel.reveal(layer->scene_node, ui.time_seconds());
+            }
+          }
+        }
         // Selection presses are reported even when the same node is clicked
         // again (and when empty canvas clears selection). This gives the
         // operator a non-authoring way to choose which per-context redo stack
@@ -5194,19 +5402,45 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (add_node.has_value()) {
           result.compositor_adds.push_back(*add_node);
         }
-        result.compositor_move = graph_frame.move_node;
+        result.compositor_moves = graph_frame.move_nodes;
         result.compositor_connect = graph_frame.connect_ports;
         result.compositor_rewire = graph_frame.rewire;
         result.compositor_waypoints = graph_frame.waypoints;
         result.compositor_property_edit = graph_frame.property_edit;
         result.compositor_delete = graph_frame.remove;
+        result.compositor_clipboard = graph_frame.clipboard;
+        result.compositor_rename = graph_frame.rename;
+        result.compositor_comment = graph_frame.comment;
+        result.compositor_collapse = graph_frame.collapse;
+        result.compositor_bypass = graph_frame.bypass;
+        result.compositor_reorder = graph_frame.reorder;
         if (graph_frame.add_node.has_value() ||
-            graph_frame.move_node.has_value() ||
+            !graph_frame.move_nodes.empty() ||
             graph_frame.connect_ports.has_value() ||
             graph_frame.rewire.has_value() ||
             graph_frame.waypoints.has_value() ||
-            graph_frame.remove.has_value()) {
+            graph_frame.remove.has_value() ||
+            graph_frame.clipboard.has_value() ||
+            graph_frame.rename.has_value() ||
+            graph_frame.comment.has_value() ||
+            graph_frame.collapse.has_value() ||
+            graph_frame.bypass.has_value() ||
+            graph_frame.reorder.has_value()) {
           result.compositor_gesture = impl.next_edit_gesture++;
+        }
+        if (!graph_frame.move_nodes.empty() &&
+            graph_frame.numeric_nudge.has_value() &&
+            !graph_frame.property_edit.has_value()) {
+          // Arrow-key nudges of the same selection in the same direction
+          // join one undo step, as numeric nudges do.
+          core::u64 selection = 0xcbf29ce484222325ULL;
+          for (const doc::NodeId node :
+               impl.compositor_panel.selected_nodes()) {
+            selection = (selection ^ node.value()) * 0x100000001b3ULL;
+          }
+          result.compositor_gesture = begin_semantic_nudge(
+              *graph_frame.numeric_nudge, HistoryContext::Compositor,
+              selection);
         }
         if (graph_frame.property_edit.has_value()) {
           if (graph_frame.numeric_nudge.has_value()) {
@@ -5531,6 +5765,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     if (panel == panel_timeline) {
       timeline_panel_drawn = true;
+      timeline_panel_bounds = bounds;
       auto timeline_elements = elements;
       if (project_settings.stage_node != doc::NodeId{}) {
         ElementInfo environment{};
@@ -5585,6 +5820,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (timeline_frame.selection.has_value()) {
         const TimelineSelectionRequest request =
             timeline_frame.selection.value();
+        // A layer chosen on the Timeline brings its Scene Layer into view in
+        // the Compositor, without choosing it there.
+        if (request.action == SelectionAction::Replace && !request.surface) {
+          impl.compositor_panel.reveal_element(request.node, ui.time_seconds());
+        }
         if (request.action == SelectionAction::Clear) {
           impl.stage_surface_selection.reset();
           impl.clear_scene_selection(true);
@@ -6113,15 +6353,36 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     return impl.compositor_panel.port_drop_target(compositor_graph, x, y,
                                                   type);
   };
+  // An effect let go on an effect wire, away from any node, joins that
+  // wire's input right after the wire's own effect.
+  const auto wire_drop_at = [&](float x, float y,
+                                compositor::PortValueType type)
+      -> std::optional<CompositorWireDrop> {
+    if (!compositor_panel_drawn || compositor_locked ||
+        switcher.rehearsal_locked ||
+        impl.compositor_panel.node_at(compositor_graph, x, y).has_value()) {
+      return std::nullopt;
+    }
+    return impl.compositor_panel.effect_wire_at(compositor_graph, x, y, type);
+  };
+  // What a dragged effect's node puts out: an effect or a filter.
+  const auto effect_type = [](compositor::NodeKind kind) {
+    return compositor::output_ports(kind).front().type;
+  };
   std::optional<CompositorPortDrop> port_hover;
+  std::optional<CompositorWireDrop> wire_hover;
   std::string port_hover_what;
   if (!ui.pointer_blocked()) {
     const std::optional<scene::EffectKind> dragged_effect =
         impl.effects_panel.dragging_effect();
     if (dragged_effect.has_value() &&
         graph_effect_node(*dragged_effect).has_value()) {
-      port_hover = port_drop_at(ui.pointer_x(), ui.pointer_y(),
-                                compositor::PortValueType::Effect);
+      const compositor::PortValueType carried =
+          effect_type(*graph_effect_node(*dragged_effect));
+      port_hover = port_drop_at(ui.pointer_x(), ui.pointer_y(), carried);
+      if (!port_hover.has_value()) {
+        wire_hover = wire_drop_at(ui.pointer_x(), ui.pointer_y(), carried);
+      }
       port_hover_what = impl.effects_panel.dragging_name();
     } else if (impl.timeline_panel.dragging_compositor_source() ||
                dragging_asset.has_value()) {
@@ -6154,6 +6415,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                            dragging_asset.value_or(doc::NodeId{}), lifted_layer);
   if (port_hover.has_value()) {
     impl.compositor_panel.draw_port_drop(ui, *port_hover, port_hover_what);
+  } else if (wire_hover.has_value()) {
+    impl.compositor_panel.draw_wire_drop(ui, *wire_hover, port_hover_what);
   }
   if (replacement_hover.has_value()) {
     const auto &bounds = replacement_hover->second;
@@ -6167,7 +6430,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.label({badge.x + 8.0F, badge.y, badge.width - 8.0F, badge.height},
              label, ui.theme().background);
   }
-  if (compositor_panel_drawn && !compositor_locked && !port_hover.has_value()) {
+  if (compositor_panel_drawn && !compositor_locked && !port_hover.has_value() &&
+      !wire_hover.has_value()) {
     if (impl.effects_panel.dragging()) {
       draw_compositor_drop_target(ui, compositor_panel_bounds,
                                   impl.effects_panel.dragging_name());
@@ -6228,9 +6492,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (compositor_locked || result.compositor_delete.has_value()) {
         return;
       }
-      const CompositorSelection selected = impl.compositor_panel.selection();
-      if (selected.kind != CompositorSelectionKind::None) {
-        result.compositor_delete = CompositorDeleteIntent{selected};
+      if (auto removed =
+              impl.compositor_panel.selection_delete(compositor_graph)) {
+        result.compositor_delete = std::move(removed);
         result.compositor_gesture = impl.next_edit_gesture++;
       }
       return;
@@ -6256,7 +6520,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         graph_effect_kind.has_value()
             ? port_drop_at(pending_effect_drop->screen_x,
                            pending_effect_drop->screen_y,
-                           compositor::PortValueType::Effect)
+                           effect_type(*graph_effect_kind))
+            : std::nullopt;
+    const std::optional<CompositorWireDrop> effect_wire =
+        graph_effect_kind.has_value() && !effect_port.has_value()
+            ? wire_drop_at(pending_effect_drop->screen_x,
+                           pending_effect_drop->screen_y,
+                           effect_type(*graph_effect_kind))
             : std::nullopt;
     const bool graph_drop = graph_drop_position.has_value();
     const gui::Rect *const stage_drop_bounds =
@@ -6273,6 +6543,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (effect_port->occupied.has_value()) {
         add.remove_edges.push_back(*effect_port->occupied);
       }
+      result.compositor_adds.push_back(std::move(add));
+      result.compositor_gesture = impl.next_edit_gesture++;
+    } else if (effect_wire.has_value() && graph_drop &&
+               result.compositor_adds.empty()) {
+      CompositorAddIntent add{*graph_effect_kind, graph_drop_position->x,
+                              graph_drop_position->y};
+      add.links.push_back(CompositorAddLink{
+          true, compositor::output_ports(*graph_effect_kind).front().index,
+          effect_wire->input, effect_wire->order});
+      add.reorder = effect_wire->reorder;
       result.compositor_adds.push_back(std::move(add));
       result.compositor_gesture = impl.next_edit_gesture++;
     } else if (graph_drop && graph_effect_kind.has_value() &&
@@ -6440,6 +6720,24 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
+  // Let go anywhere else on the Timeline, assets become new layers, as a
+  // clip dragged into an editor's timeline does.
+  if (pending_asset_drop.has_value() && timeline_panel_drawn &&
+      !switcher.rehearsal_locked &&
+      timeline_panel_bounds.contains(pending_asset_drop->screen_x,
+                                     pending_asset_drop->screen_y)) {
+    const std::vector<doc::NodeId> dropped_assets =
+        pending_asset_drop->assets.empty()
+            ? std::vector<doc::NodeId>{pending_asset_drop->asset}
+            : pending_asset_drop->assets;
+    for (const doc::NodeId asset : dropped_assets) {
+      instantiate_asset(asset, std::nullopt);
+    }
+    impl.history_context = HistoryContext::Scene;
+    impl.semantic_boundary = true;
+    pending_asset_drop.reset();
+  }
+
   if (pending_asset_drop.has_value() && stage_viewport_drawn &&
       !switcher.rehearsal_locked) {
     const CanvasPoint dropped =
@@ -6450,11 +6748,33 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           stage_scene.camera, stage_scene.canvas, stage_scene.camera.target,
           dropped.x - static_cast<float>(stage_scene.canvas.width) * 0.5F,
           dropped.y - static_cast<float>(stage_scene.canvas.height) * 0.5F);
-      instantiate_asset(pending_asset_drop->asset,
-                        scene::Vec3{stage_scene.camera.target.x + offset.x,
-                                    stage_scene.camera.target.y + offset.y,
-                                    stage_scene.camera.target.z + offset.z});
+      // Several assets land side by side, a step apart, so none hides
+      // another.
+      const scene::Vec3 step = scene::screen_drag_to_translation(
+          stage_scene.camera, stage_scene.canvas, stage_scene.camera.target,
+          static_cast<float>(stage_scene.canvas.width) * 0.06F, 0.0F);
+      const std::vector<doc::NodeId> &dropped_assets =
+          pending_asset_drop->assets.empty()
+              ? std::vector<doc::NodeId>{pending_asset_drop->asset}
+              : pending_asset_drop->assets;
+      for (std::size_t index = 0U; index < dropped_assets.size(); ++index) {
+        const float along = static_cast<float>(index);
+        instantiate_asset(
+            dropped_assets[index],
+            scene::Vec3{stage_scene.camera.target.x + offset.x + step.x * along,
+                        stage_scene.camera.target.y + offset.y + step.y * along,
+                        stage_scene.camera.target.z + offset.z +
+                            step.z * along});
+      }
     }
+  }
+
+  // Files from the desktop let go anywhere but the Library still become
+  // Library assets, at the top level.
+  if (!library_took_files && !ui.dropped_files().empty()) {
+    const std::vector<std::string> dropped(ui.dropped_files().begin(),
+                                           ui.dropped_files().end());
+    import_files(dropped, doc::NodeId{});
   }
 
   // Global shortcuts stand down while a field owns the keyboard or a pointer
@@ -6740,7 +7060,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const bool compositor_authored = std::any_of(result.source_replacements.begin(),
       result.source_replacements.end(), [](const auto &edit) { return edit.layer != doc::NodeId{}; }) ||
       !result.compositor_adds.empty() ||
-      result.compositor_move.has_value() ||
+      !result.compositor_moves.empty() ||
+      result.compositor_clipboard.has_value() ||
+      result.compositor_rename.has_value() ||
+      result.compositor_comment.has_value() ||
+      result.compositor_collapse.has_value() ||
+      result.compositor_bypass.has_value() ||
+      result.compositor_reorder.has_value() ||
       result.compositor_connect.has_value() ||
       result.compositor_rewire.has_value() ||
       result.compositor_waypoints.has_value() ||
@@ -6755,6 +7081,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       !result.clip_timings.empty() ||
       !result.clip_splits.empty() || !result.lane_edits.empty() ||
       !result.element_flags.empty() || !result.renames.empty() ||
+      !result.highlights.empty() ||
       !result.timeline_edits.empty() ||
       result.group_edit.has_value() ||
       selection_set_authored ||
@@ -6762,6 +7089,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       !result.property_edits.empty() ||
       !result.generic_edits.empty() || !result.adds.empty() ||
       !result.asset_deletes.empty() || !result.asset_proxy_edits.empty() ||
+      !result.asset_revisions.empty() ||
+      !result.asset_library_edits.empty() ||
       !result.effects.empty() || !result.film_grain_effect_edits.empty() ||
       !result.effect_deletes.empty() || !result.deletes.empty() ||
       result.project_settings.has_value() ||
@@ -6813,7 +7142,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.workspace_window_height, impl.stage_panel.resolution(),
         impl.program_panel.resolution(), impl.ui_zoom_percent,
         std::min(impl.compositor_panel.parameter_panel_width(),
-                 max_compositor_parameter_width)});
+                 max_compositor_parameter_width),
+        impl.compositor_panel.minimap_shown()});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;
@@ -6833,6 +7163,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                     (stage_viewport_drawn && impl.stage_panel.transforming()));
   impl.window.set_pointer_locked(navigating && impl.navigation_moved);
 
+  // What is being dragged out of the Library rides above every panel.
+  impl.library_panel.draw_drag_ghost(ui);
   ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});
   impl.window.set_cursor(ui.cursor());
   static_cast<void>(impl.window.present(

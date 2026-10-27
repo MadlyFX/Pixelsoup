@@ -100,12 +100,14 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_marker_edits.clear();
     pending_layer_orders.clear();
     pending_renames.clear();
+    pending_highlights.clear();
     pending_timeline_edits.clear();
     pending_group_edit.reset();
     pending_selection_set_edit.reset();
     pending_mask_edit.reset();
     pending_clip_paste.reset();
     clip_clipboard.clear();
+    compositor_clipboard.clear();
     linked_clipboard.reset(); pending_linked_paste.reset();
     pending_key_paste.reset();
     key_clipboard.clear();
@@ -115,8 +117,10 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_locks.clear();
     pending_adds.clear();
     pending_asset_imports.clear();
+    pending_asset_revisions.clear();
     pending_asset_deletes.clear();
     pending_asset_proxy_edits.clear();
+    pending_asset_library_edits.clear();
     pending_source_replacements.clear();
     pending_effects.clear();
     pending_film_grain_effect_edits.clear();
@@ -141,7 +145,13 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_feed_surface_edits.clear();
     pending_feed_surface_deletes.clear();
     pending_compositor_adds.clear();
-    pending_compositor_move.reset();
+    pending_compositor_moves.clear();
+    pending_compositor_clipboard.reset();
+    pending_compositor_rename.reset();
+    pending_compositor_comment.reset();
+    pending_compositor_collapse.reset();
+    pending_compositor_bypass.reset();
+    pending_compositor_reorder.reset();
     pending_compositor_connect.reset();
     pending_compositor_rewire.reset();
     pending_compositor_waypoints.reset();
@@ -410,6 +420,10 @@ PhaseExit DirectorShowLoop::apply_project_load(DirectorTick &tick,
                         leave_preview();
                         next_new_node = 100'000U;
                         ++project_generation;
+                        // Ids from the last project's RESCAN mean
+                        // nothing in this one.
+                        changed_library_sources.clear();
+                        changed_library_assets.clear();
                         director_pose_predictors.reset();
                         pending_asset_commit.reset();
                         last_asset_commit_digest = 0;

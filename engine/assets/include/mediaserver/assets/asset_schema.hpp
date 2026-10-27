@@ -15,7 +15,14 @@ inline constexpr std::string_view model_type = "asset.model";
 inline constexpr std::string_view projection_mesh_type =
     "asset.projection_mesh";
 
+// A Library folder. It carries a display_name and an optional `folder`
+// naming its parent folder, exactly as an asset names the folder it is in.
+inline constexpr std::string_view folder_type = "asset.folder";
+
 inline constexpr std::string_view display_name = "display_name";
+// The asset.folder node an asset (or folder) is filed under. Absent: the
+// Library's top level. Organisation only; it never affects rendering.
+inline constexpr std::string_view folder = "folder";
 // The absolute path this asset lives at, on every machine in the show. It is
 // the content locator; the optional expected fingerprint below verifies that
 // every machine resolved that locator to the revision the project authored.
@@ -33,6 +40,9 @@ inline constexpr std::string_view media_rate_numerator =
     "media_rate_numerator";
 inline constexpr std::string_view media_rate_denominator =
     "media_rate_denominator";
+inline constexpr std::string_view media_codec = "media_codec";
+inline constexpr std::string_view media_start_timecode =
+    "media_start_timecode";
 // Profile names use the versioned derivative catalog vocabulary. Policy is
 // stored as text so project files remain stable if C++ enum layouts change.
 inline constexpr std::string_view requested_proxy_profile =
@@ -45,6 +55,11 @@ inline constexpr std::string_view proxy_policy_require = "require_proxy";
 
 inline constexpr std::string_view model_triangle_count = "model_triangle_count";
 inline constexpr std::string_view model_material_count = "model_material_count";
+inline constexpr std::string_view model_vertex_count = "model_vertex_count";
+inline constexpr std::string_view model_texture_count = "model_texture_count";
+inline constexpr std::string_view model_texture_width = "model_texture_width";
+inline constexpr std::string_view model_texture_height =
+    "model_texture_height";
 inline constexpr std::string_view projection_vertex_count =
     "projection_vertex_count";
 inline constexpr std::string_view projection_triangle_count =

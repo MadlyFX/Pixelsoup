@@ -1202,6 +1202,13 @@ void SceneModel::put(const doc::Node& node) {
             Vec3{1.0F, 1.0F, 1.0F});
         group.locked = reader.boolean(schema::locked, false);
         group.visible = reader.boolean(schema::visible, true);
+        const auto kind = reader.text(schema::group_kind,
+                                      schema::group_kind_folder);
+        if (kind == schema::group_kind_vehicle_process) {
+            group.kind = GroupKind::VehicleProcess;
+        } else if (kind != schema::group_kind_folder) {
+            reader.fail();
+        }
         parsed = Entry{std::move(group)};
     } else if (node.type == schema::settings_type || node.type == publication::settings_type) {
         SettingsEntry settings{};
@@ -2748,7 +2755,7 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
             id, scene_id, group.name, group.parent_group, group.group_order,
             local.position, local.yaw, local.pitch, local.roll, local.scale,
             resolved.world, group.locked, group.visible, resolved.locked,
-            resolved.visible});
+            resolved.visible, group.kind});
         const auto descendants = children.find(id);
         if (descendants != children.end()) {
             for (const doc::NodeId child : descendants->second) {

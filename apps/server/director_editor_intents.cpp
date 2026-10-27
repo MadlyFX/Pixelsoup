@@ -230,6 +230,14 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
             return 1;
         }
     }
+    for (const auto &edit : editor_frame.highlights) {
+        try {
+            pending_highlights.push_back(edit);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue a highlight\n";
+            return 1;
+        }
+    }
     for (const auto &edit : editor_frame.lane_edits) {
         try {
             pending_lane_edits.push_back(edit);
@@ -358,6 +366,14 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
             return 1;
         }
     }
+    for (const auto &revision : editor_frame.asset_revisions) {
+        try {
+            pending_asset_revisions.push_back(revision);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue an asset revision\n";
+            return 1;
+        }
+    }
     for (const auto &request : editor_frame.asset_deletes) {
         try {
             pending_asset_deletes.push_back(request);
@@ -379,6 +395,14 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
             pending_asset_proxy_edits.push_back(request);
         } catch (const std::bad_alloc &) {
             std::cerr << "could not queue an asset proxy policy\n";
+            return 1;
+        }
+    }
+    for (const auto &request : editor_frame.asset_library_edits) {
+        try {
+            pending_asset_library_edits.push_back(request);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue a Library edit\n";
             return 1;
         }
     }
@@ -498,8 +522,32 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
             editor_frame.compositor_adds.end());
         pending_compositor_gesture = editor_frame.compositor_gesture;
     }
-    if (editor_frame.compositor_move.has_value()) {
-        pending_compositor_move = editor_frame.compositor_move;
+    if (!editor_frame.compositor_moves.empty()) {
+        pending_compositor_moves = editor_frame.compositor_moves;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_clipboard.has_value()) {
+        pending_compositor_clipboard = editor_frame.compositor_clipboard;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_rename.has_value()) {
+        pending_compositor_rename = editor_frame.compositor_rename;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_reorder.has_value()) {
+        pending_compositor_reorder = editor_frame.compositor_reorder;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_bypass.has_value()) {
+        pending_compositor_bypass = editor_frame.compositor_bypass;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_collapse.has_value()) {
+        pending_compositor_collapse = editor_frame.compositor_collapse;
+        pending_compositor_gesture = editor_frame.compositor_gesture;
+    }
+    if (editor_frame.compositor_comment.has_value()) {
+        pending_compositor_comment = editor_frame.compositor_comment;
         pending_compositor_gesture = editor_frame.compositor_gesture;
     }
     if (editor_frame.compositor_connect.has_value()) {

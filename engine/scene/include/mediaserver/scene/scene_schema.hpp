@@ -152,12 +152,25 @@ inline constexpr std::string_view locked = "locked";
 // hierarchy/editor projections; node id is the final tie-break.
 inline constexpr std::string_view parent_group = "parent_group";
 inline constexpr std::string_view group_order = "group_order";
+// The operator's highlight on a Scene panel row: an index into the editor's
+// eight-colour palette (the same one timeline markers use), absent for none.
+// Editor-only organisation, like `locked`: it never changes a rendered pixel
+// and is not parsed into the Scene. Like every authored property it still
+// enters the document hash the scene digest carries.
+inline constexpr std::string_view outliner_color = "outliner_color";
 
 // ---------------------------------------------------------------------------
 // scene.group
 
 inline constexpr std::string_view group_name = "group_name";
 inline constexpr std::string_view visible = "visible";
+// What the group is for. Absent is an ordinary folder; a vehicle process
+// group is the container the vehicle processing workflow is built on. Any
+// other word is a damaged node, not a folder.
+inline constexpr std::string_view group_kind = "group_kind";
+inline constexpr std::string_view group_kind_folder = "folder";
+inline constexpr std::string_view group_kind_vehicle_process =
+    "vehicle_process";
 
 // ---------------------------------------------------------------------------
 // scene.timeline_lane

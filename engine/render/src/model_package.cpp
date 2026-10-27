@@ -277,6 +277,15 @@ ModelIngestResult ingest_model(const std::string& source) {
         result.triangle_count = asset.mesh.indices.size() / 3U;
         result.material_count = static_cast<core::u32>(asset.parts.size());
         result.bounds = asset.bounds;
+        result.texture_count = static_cast<core::u32>(asset.textures.size());
+        for (const ModelTexture& texture : asset.textures) {
+            if (static_cast<core::u64>(texture.width) * texture.height >
+                static_cast<core::u64>(result.largest_texture_width) *
+                    result.largest_texture_height) {
+                result.largest_texture_width = texture.width;
+                result.largest_texture_height = texture.height;
+            }
+        }
     } catch (const std::exception& e) { result.diagnostic = e.what(); }
     return result;
 }

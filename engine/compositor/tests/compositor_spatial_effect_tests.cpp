@@ -55,13 +55,17 @@ using Property = std::pair<std::string, doc::PropertyValue>;
   return result;
 }
 
+// A Scene Layer takes effects on port 0 and filters on port 2.
+constexpr std::int64_t filters_port = 2;
+
 [[nodiscard]] doc::Node edge(core::u64 id, core::u64 from, core::u64 to,
-                             core::i64 order = 0) {
+                             core::i64 order = 0, std::int64_t to_port = 0) {
   return node(id, schema::edge_type,
               {whole(schema::from_node, static_cast<std::int64_t>(from)),
                whole(schema::from_port, 0),
                whole(schema::to_node, static_cast<std::int64_t>(to)),
-               whole(schema::to_port, 0), whole(schema::order, order)});
+               whole(schema::to_port, to_port),
+               whole(schema::order, order)});
 }
 
 [[nodiscard]] doc::Root root_of(std::vector<doc::Node> nodes) {
@@ -89,8 +93,8 @@ using Property = std::pair<std::string, doc::PropertyValue>;
             real(schema::directional_blur_angle_turns, 1.25)}),
       node(3U, schema::scene_layer_type, {whole(schema::scene_node, 200)}),
       node(4U, schema::output_type),
-      edge(10U, 1U, 3U, 0),
-      edge(11U, 2U, 3U, 1),
+      edge(10U, 1U, 3U, 0, filters_port),
+      edge(11U, 2U, 3U, 1, filters_port),
       edge(12U, 3U, 4U),
   });
 }
@@ -188,10 +192,12 @@ void malformed_parameters_and_reverse_domain_order_fail_closed() {
   GRAPH_CHECK(malformed_model.size() == 0U);
   GRAPH_CHECK(malformed_model.counters().rejected == 2U);
 
+  // An effect has no place among the filters: wired into FILTERS
+  // after the blurs, it is refused rather than run out of order.
   doc::Root reversed = spatial_graph();
   reversed = reversed.set(
       node(5U, schema::brightness_type, {real(schema::amount, 2.0)}));
-  reversed = reversed.set(edge(13U, 5U, 3U, 2));
+  reversed = reversed.set(edge(13U, 5U, 3U, 2, filters_port));
   compositor::CompositorModel reversed_model;
   reversed_model.reset(reversed);
   const compositor::CompositorGraph graph =
@@ -201,7 +207,7 @@ void malformed_parameters_and_reverse_domain_order_fail_closed() {
       std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(),
                   [](const compositor::GraphDiagnostic &diagnostic) noexcept {
                     return diagnostic.code ==
-                           compositor::DiagnosticCode::UnsupportedEffectOrder;
+                           compositor::DiagnosticCode::IncompatiblePorts;
                   }));
 }
 

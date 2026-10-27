@@ -102,6 +102,47 @@ void releasing_off_the_button_is_not_a_click() {
     UI_CHECK(ctx.active() == 0U);
 }
 
+void a_capture_whose_widget_vanished_is_released() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    const gui::Rect gone{10.0F, 10.0F, 100.0F, 30.0F};
+    const gui::Rect other{10.0F, 60.0F, 100.0F, 30.0F};
+
+    // The press captures a control that is not drawn again, as a wire is
+    // when the press itself deletes it.
+    begin_frame(input, ctx, 50.0F, 20.0F, true);
+    UI_CHECK(ctx.grab(7U, gone).pressed);
+    // While the button is still down the capture is kept, so nothing else
+    // lights up under a drag.
+    begin_frame(input, ctx, 50.0F, 70.0F, true);
+    UI_CHECK(!ctx.grab(8U, other).hovered);
+    UI_CHECK(ctx.active() == 7U);
+    // Its widget will never see the release, so the frame the button comes
+    // up lets the capture go and the other control works again.
+    begin_frame(input, ctx, 50.0F, 70.0F, false);
+    UI_CHECK(ctx.active() == 0U);
+    UI_CHECK(ctx.grab(8U, other).hovered);
+    begin_frame(input, ctx, 50.0F, 70.0F, true);
+    UI_CHECK(ctx.grab(8U, other).pressed);
+    begin_frame(input, ctx, 50.0F, 70.0F, false);
+    UI_CHECK(ctx.grab(8U, other).clicked);
+
+    // A capture whose widget is still drawn survives a button-up frame
+    // boundary until it sees its own release.
+    input.new_frame();
+    input.set_mouse_position(50.0F, 20.0F);
+    input.set_mouse_button(gui::MouseButton::Left, true);
+    ctx.new_frame();
+    UI_CHECK(ctx.grab(7U, gone).pressed);
+    input.new_frame();
+    input.set_mouse_button(gui::MouseButton::Left, false);
+    ctx.new_frame();
+    UI_CHECK(ctx.active() == 7U);
+    UI_CHECK(ctx.grab(7U, gone).clicked);
+}
+
 void input_keeps_each_buttons_first_press_position() {
     gui::InputState input;
     input.new_frame();
@@ -1018,7 +1059,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 36U> cases{{
+constexpr std::array<Case, 37U> cases{{
     {"motion after release does not change the click endpoint", &motion_after_release_does_not_change_the_click_endpoint},
     {"a prior release does not end a new capture", &a_prior_release_does_not_end_a_new_capture},
     {"input keeps each button's first press position", &input_keeps_each_buttons_first_press_position},
@@ -1041,6 +1082,8 @@ constexpr std::array<Case, 36U> cases{{
      &a_click_is_a_press_then_a_release_over_the_button},
     {"releasing off the button is not a click",
      &releasing_off_the_button_is_not_a_click},
+    {"a capture whose widget vanished is released",
+     &a_capture_whose_widget_vanished_is_released},
     {"a press outside never activates", &a_press_outside_never_activates},
     {"a slider maps the pointer to its range",
      &a_slider_maps_the_pointer_to_its_range},

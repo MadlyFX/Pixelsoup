@@ -401,6 +401,10 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         compositor_layer.frag.hlsl ps_6_2
         mediaserver_compositor_layer_frag_dxil compositor_layer_frag_dxil.h)
+    # Merge blend modes, opacity and constant, and generated Backgrounds.
+    mediaserver_compile_dxil(
+        compositor_merge.frag.hlsl ps_6_2
+        mediaserver_compositor_merge_frag_dxil compositor_merge_frag_dxil.h)
     # A fullscreen triangle in one known colour. Not used by any renderer: it
     # is the minimal draw the RHI tests exercise the pipeline and viewport with,
     # kept here so it is built by the same pinned compiler and the same rules as

@@ -100,6 +100,9 @@ namespace {
         if (code == SDLK_K || code == SDLK_B) {
             return Key::Split;
         }
+        if (code == SDLK_D) {
+            return Key::Duplicate;
+        }
         if (code == SDLK_EQUALS || code == SDLK_PLUS || code == SDLK_KP_PLUS) {
             return Key::ZoomIn;
         }
@@ -273,6 +276,24 @@ bool translate_event(
         if (const auto move = move_key_of(event.key.scancode)) {
             input.set_move_key(move.value(), false);
         }
+        break;
+
+    case SDL_EVENT_DROP_BEGIN:
+    case SDL_EVENT_DROP_POSITION:
+        input.set_file_drag(true, event.drop.x * to_logical,
+                            event.drop.y * to_logical);
+        break;
+
+    case SDL_EVENT_DROP_FILE:
+        if (event.drop.data != nullptr && event.drop.data[0] != '\0') {
+            input.add_dropped_file(event.drop.data, event.drop.x * to_logical,
+                                   event.drop.y * to_logical);
+        }
+        break;
+
+    case SDL_EVENT_DROP_COMPLETE:
+        input.set_file_drag(false, event.drop.x * to_logical,
+                            event.drop.y * to_logical);
         break;
 
     case SDL_EVENT_WINDOW_FOCUS_LOST:

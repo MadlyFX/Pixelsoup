@@ -411,14 +411,92 @@ kind_for_type(std::string_view type) noexcept {
     if (type == schema::composite_type) {
         return NodeKind::Composite;
     }
+    if (type == schema::merge_type) {
+        return NodeKind::Merge;
+    }
+    if (type == schema::background_type) {
+        return NodeKind::Background;
+    }
     if (type == schema::output_type) {
         return NodeKind::Output;
     }
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<MergeBlendMode>
+merge_blend_for(std::string_view name) noexcept {
+    constexpr std::array<std::pair<std::string_view, MergeBlendMode>,
+                         merge_blend_mode_count>
+        modes{{
+            {schema::normal_blend, MergeBlendMode::Normal},
+            {schema::add_blend, MergeBlendMode::Add},
+            {schema::multiply_blend, MergeBlendMode::Multiply},
+            {schema::screen_blend, MergeBlendMode::Screen},
+            {schema::subtract_blend, MergeBlendMode::Subtract},
+            {schema::overlay_blend, MergeBlendMode::Overlay},
+            {schema::lighten_blend, MergeBlendMode::Lighten},
+            {schema::darken_blend, MergeBlendMode::Darken},
+            {schema::difference_blend, MergeBlendMode::Difference},
+        }};
+    for (const auto& [candidate, mode] : modes) {
+        if (candidate == name) {
+            return mode;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool in_unit(float value) noexcept {
+    return value >= 0.0F && value <= 1.0F;
+}
+
+[[nodiscard]] std::optional<BackgroundParameters>
+read_background(Reader& reader) {
+    BackgroundParameters value{};
+    const std::string mode =
+        reader.text(schema::background_mode, schema::solid_background);
+    if (mode == schema::solid_background) {
+        value.mode = BackgroundMode::Solid;
+    } else if (mode == schema::linear_background) {
+        value.mode = BackgroundMode::Linear;
+    } else if (mode == schema::radial_background) {
+        value.mode = BackgroundMode::Radial;
+    } else {
+        reader.fail();
+    }
+    const auto read_color = [&reader](BackgroundColor& color,
+                                      std::string_view r, std::string_view g,
+                                      std::string_view b, std::string_view a) {
+        color.r = reader.number(r, color.r);
+        color.g = reader.number(g, color.g);
+        color.b = reader.number(b, color.b);
+        color.a = reader.number(a, color.a);
+        if (!in_unit(color.r) || !in_unit(color.g) || !in_unit(color.b) ||
+            !in_unit(color.a)) {
+            reader.fail();
+        }
+    };
+    read_color(value.color_a, schema::color_a_r, schema::color_a_g,
+               schema::color_a_b, schema::color_a_a);
+    read_color(value.color_b, schema::color_b_r, schema::color_b_g,
+               schema::color_b_b, schema::color_b_a);
+    value.angle = reader.number(schema::angle_turns, value.angle);
+    value.center_x = reader.number(schema::center_x, value.center_x);
+    value.center_y = reader.number(schema::center_y, value.center_y);
+    value.size = reader.number(schema::gradient_size, value.size);
+    if (value.angle < -max_spatial_extent || value.angle > max_spatial_extent ||
+        std::abs(value.center_x) > max_background_center ||
+        std::abs(value.center_y) > max_background_center ||
+        !(value.size > 0.0F) || value.size > max_background_gradient_size) {
+        reader.fail();
+    }
+    return reader.ok() ? std::optional<BackgroundParameters>{value}
+                       : std::nullopt;
+}
+
 [[nodiscard]] bool is_compositor_type(std::string_view type) noexcept {
-    return type == schema::edge_type || kind_for_type(type).has_value();
+    return type == schema::edge_type || type == schema::comment_type ||
+           kind_for_type(type).has_value();
 }
 
 [[nodiscard]] bool in_extent(float value) noexcept {
@@ -470,6 +548,10 @@ read_wire_points(const doc::PropertyMap& properties) {
     parsed.label = reader.text(schema::label, node_kind_name(kind));
     parsed.editor_x = reader.number(schema::editor_x, 0.0F);
     parsed.editor_y = reader.number(schema::editor_y, 0.0F);
+    parsed.collapsed = reader.boolean(schema::collapsed, false);
+    // Normalized: a kind with nothing to pass through as is never bypassed.
+    parsed.bypassed =
+        reader.boolean(schema::bypassed, false) && node_kind_bypassable(kind);
     if (!in_extent(parsed.editor_x) || !in_extent(parsed.editor_y)) {
         reader.fail();
     }
@@ -701,6 +783,33 @@ read_wire_points(const doc::PropertyMap& properties) {
         parsed.parameters =
             OutputParameters{reader.boolean(schema::replace_scene, false)};
         break;
+    case NodeKind::Merge: {
+        MergeParameters parameters{};
+        const auto blend = merge_blend_for(
+            reader.text(schema::blend_mode, schema::normal_blend));
+        if (!blend.has_value()) {
+            reader.fail();
+        } else {
+            parameters.blend = *blend;
+        }
+        parameters.opacity = reader.number(schema::opacity, parameters.opacity);
+        parameters.value = reader.number(schema::value, parameters.value);
+        if (!in_unit(parameters.opacity) || parameters.value < 0.0F ||
+            parameters.value > max_merge_value) {
+            reader.fail();
+        }
+        parsed.parameters = parameters;
+        break;
+    }
+    case NodeKind::Background: {
+        const auto parameters = read_background(reader);
+        if (!parameters.has_value()) {
+            reader.fail();
+        } else {
+            parsed.parameters = *parameters;
+        }
+        break;
+    }
     }
     return parsed;
 }
@@ -744,6 +853,8 @@ execution_domain(NodeKind kind) noexcept {
     case NodeKind::SceneLayer:
     case NodeKind::Composite:
     case NodeKind::Output:
+    case NodeKind::Merge:
+    case NodeKind::Background:
         return GraphExecutionDomain::Structural;
     }
     return GraphExecutionDomain::Structural;
@@ -752,7 +863,8 @@ execution_domain(NodeKind kind) noexcept {
 [[nodiscard]] bool is_effect_node(NodeKind kind) noexcept {
     return kind != NodeKind::SceneLayer && kind != NodeKind::LedCarProcess &&
         kind != NodeKind::Composite && kind != NodeKind::Output &&
-        kind != NodeKind::Matte;
+        kind != NodeKind::Matte && kind != NodeKind::Merge &&
+        kind != NodeKind::Background;
 }
 
 [[nodiscard]] scene::EffectBoundsExpansion
@@ -832,6 +944,7 @@ core::u32 CompositorCounters::edges_over_capacity() const noexcept {
 void CompositorModel::forget(doc::NodeId id) noexcept {
     nodes_.erase(id);
     edges_.erase(id);
+    comments_.erase(id);
     document_types_.erase(id);
 }
 
@@ -847,6 +960,31 @@ void CompositorModel::put(const doc::Node& node) {
             return;
         }
         nodes_.insert_or_assign(node.id, std::move(parsed));
+        return;
+    }
+
+    if (node.type == schema::comment_type) {
+        // A malformed box is dropped, never diagnosed: it is layout, and the
+        // graph it sits on is unaffected either way.
+        Reader reader{node.properties};
+        GraphComment comment{};
+        comment.node = node.id;
+        static_cast<void>(as_node(reader.integer(schema::scene_id, 0),
+                                  comment.scene));
+        comment.title = reader.text(schema::label, "Comment");
+        comment.x = reader.number(schema::editor_x, 0.0F);
+        comment.y = reader.number(schema::editor_y, 0.0F);
+        comment.width = reader.number(schema::comment_width, 320.0F);
+        comment.height = reader.number(schema::comment_height, 200.0F);
+        const std::int64_t color = reader.integer(schema::comment_color, 0);
+        if (reader.ok() && in_extent(comment.x) && in_extent(comment.y) &&
+            comment.width >= min_comment_extent &&
+            comment.height >= min_comment_extent &&
+            in_extent(comment.width) && in_extent(comment.height) &&
+            color >= 0 && color < comment_color_count) {
+            comment.color = static_cast<core::u8>(color);
+            comments_.insert_or_assign(node.id, std::move(comment));
+        }
         return;
     }
 
@@ -962,6 +1100,13 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
         result.edges.push_back(edge);
     }
 
+    for (const auto& [id, comment] : comments_) {
+        static_cast<void>(id);
+        if (in_scope(comment.scene)) {
+            result.comments.push_back(comment);
+        }
+    }
+
     if (counters_.nodes_over_capacity() != 0U) {
         result.diagnostics.push_back(
             {DiagnosticCode::NodesOverCapacity, {}, {}, 0U});
@@ -1060,67 +1205,6 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
         }
     }
 
-    // The current executor has two effect phases: pointwise inline operations
-    // happen while the drawable is shaded, then spatial filters consume the isolated
-    // layer. Preserve that truthful order in the authored graph. A connection
-    // after Blur cannot be moved ahead of it silently merely because its node
-    // kind is inline, so retain the graph and diagnose the offending input.
-    for (const GraphNode& node : result.nodes) {
-        if (node.kind != NodeKind::SceneLayer &&
-            node.kind != NodeKind::LedCarProcess) {
-            continue;
-        }
-        const core::u8 effects_port =
-            node.kind == NodeKind::SceneLayer ? 0U : 9U;
-        std::vector<const AcceptedEdge*> effects;
-        for (const AcceptedEdge& value : accepted) {
-            if (value.type == PortValueType::Effect &&
-                value.edge->to.node == node.node &&
-                value.edge->to.port == effects_port) {
-                effects.push_back(&value);
-            }
-        }
-        std::sort(effects.begin(), effects.end(),
-                  [](const AcceptedEdge* left,
-                     const AcceptedEdge* right) noexcept {
-                      return std::tuple{left->edge->order, left->edge->node} <
-                          std::tuple{right->edge->order, right->edge->node};
-                  });
-        bool spatial_seen = false;
-        for (const AcceptedEdge* value : effects) {
-            const GraphNode* const effect = result.node(value->edge->from.node);
-            if (effect == nullptr) {
-                continue;
-            }
-            // Identity nodes are authored and editable but semantically inert:
-            // they neither establish nor violate an execution-domain order.
-            if (effect_node_is_identity(*effect)) {
-                continue;
-            }
-            if (effect->kind == NodeKind::Blur ||
-                effect->kind == NodeKind::BoxBlur ||
-                effect->kind == NodeKind::DirectionalBlur ||
-                effect->kind == NodeKind::ChromaKey ||
-                effect->kind == NodeKind::LumaKey) {
-                spatial_seen = true;
-                continue;
-            }
-            if (spatial_seen &&
-                (effect->kind == NodeKind::Brightness ||
-                 effect->kind == NodeKind::Saturation ||
-                 effect->kind == NodeKind::Levels ||
-                 effect->kind == NodeKind::LiftGammaGain ||
-                 effect->kind == NodeKind::ContrastPivot ||
-                 effect->kind == NodeKind::ColorMatrix ||
-                 effect->kind == NodeKind::WhiteBalance ||
-                 effect->kind == NodeKind::Curves ||
-                 effect->kind == NodeKind::FilmGrain)) {
-                result.diagnostics.push_back(
-                    {DiagnosticCode::UnsupportedEffectOrder, node.node,
-                     effect->node, 0U});
-            }
-        }
-    }
     const auto first_output =
         std::find_if(result.nodes.begin(), result.nodes.end(),
                      [](const GraphNode& node) noexcept {
@@ -1142,7 +1226,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
 
     // Reverse reachability is shared by dead-branch diagnostics, canonical
     // operator paths, and authored resource estimates. All accepted port types
-    // participate: an Effect or TransformSet feeding a live SceneLayer is just
+    // participate: an Effect, Filter or TransformSet feeding a live SceneLayer is just
     // as Output-reachable as the layer's Image connection.
     struct ForwardHop final {
         doc::NodeId target{};
@@ -1195,10 +1279,83 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
         }
     }
 
-    // Matte is a binary image processor, not a unary SceneLayer effect. The
-    // initial executable topology consumes two direct SceneLayer branches so
-    // each can be rendered once in authored-canvas isolation and the matte
-    // branch cannot accidentally become visible colour.
+    // Each Merge, and each Composite or LED Car Process that lands as one
+    // image on a Merge, renders into an intermediate image of its own, opened
+    // inside the one it lands on. This mirrors the executor's planning: a
+    // bypassed Merge, or one with nothing on LAYERS and an identity constant,
+    // is its BASE and opens nothing.
+    const auto image_inputs = [&](doc::NodeId node, core::u8 port) {
+        std::vector<const GraphNode*> found;
+        for (const AcceptedEdge& value : accepted) {
+            if (value.type == PortValueType::Image &&
+                value.edge->to.node == node && value.edge->to.port == port) {
+                found.push_back(result.node(value.edge->from.node));
+            }
+        }
+        return found;
+    };
+    std::set<doc::NodeId> nesting_visits;
+    const std::function<core::u32(const GraphNode*, bool)> nesting =
+        [&](const GraphNode* node, bool lands) -> core::u32 {
+        if (node == nullptr || !nesting_visits.insert(node->node).second) {
+            return 0U;
+        }
+        core::u32 depth{};
+        switch (node->kind) {
+        case NodeKind::Composite:
+        case NodeKind::LedCarProcess: {
+            for (core::u8 port = 0U; port < 9U; ++port) {
+                for (const GraphNode* input : image_inputs(node->node, port)) {
+                    // A Composite in a Composite is an image of its own.
+                    const bool nested = input != nullptr &&
+                        node->kind == NodeKind::Composite &&
+                        input->kind == NodeKind::Composite;
+                    depth = std::max(depth, nesting(input, nested));
+                }
+            }
+            depth += lands ? 1U : 0U;
+            break;
+        }
+        case NodeKind::Merge: {
+            const auto& parameters =
+                std::get<MergeParameters>(node->parameters);
+            const auto bases = image_inputs(node->node, 0U);
+            const auto layers = image_inputs(node->node, 1U);
+            const GraphNode* const base = bases.empty() ? nullptr : bases[0];
+            if (node->bypassed ||
+                (layers.empty() && merge_constant_is_identity(parameters))) {
+                depth = nesting(base, true);
+                break;
+            }
+            depth = nesting(base, false);
+            for (const GraphNode* layer : layers) {
+                depth = std::max(depth, nesting(layer, true));
+            }
+            ++depth;
+            break;
+        }
+        default:
+            break;
+        }
+        nesting_visits.erase(node->node);
+        return depth;
+    };
+    core::u32 merge_nesting{};
+    if (first_output != result.nodes.end()) {
+        for (const GraphNode* input : image_inputs(first_output->node, 0U)) {
+            merge_nesting = std::max(merge_nesting, nesting(input, false));
+        }
+        if (merge_nesting > max_merge_nesting) {
+            result.diagnostics.push_back(
+                {DiagnosticCode::MergeNestingTooDeep, first_output->node, {},
+                 0U});
+        }
+    }
+
+    // Matte is a binary image processor, not a unary SceneLayer effect. Its
+    // source is a direct SceneLayer, rendered once in authored-canvas
+    // isolation. Its matte is a second direct SceneLayer, which then cannot
+    // also become visible colour, or a Background generated for it.
     for (const GraphNode& node : result.nodes) {
         if (node.kind != NodeKind::Matte ||
             !output_distance.contains(node.node)) {
@@ -1219,14 +1376,18 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
             branches[value.edge->to.port] =
                 result.node(value.edge->from.node);
         }
-        for (const GraphNode* const branch : branches) {
-            topology_valid = topology_valid && branch != nullptr &&
-                branch->kind == NodeKind::SceneLayer;
-        }
+        topology_valid = topology_valid && branches[0] != nullptr &&
+            branches[0]->kind == NodeKind::SceneLayer &&
+            branches[1] != nullptr &&
+            (branches[1]->kind == NodeKind::SceneLayer ||
+             branches[1]->kind == NodeKind::Background);
         if (!topology_valid) {
             result.diagnostics.push_back(
                 {DiagnosticCode::UnsupportedMatteTopology, node.node, {},
                  0U});
+            continue;
+        }
+        if (branches[1]->kind == NodeKind::Background) {
             continue;
         }
         const auto& source_parameters =
@@ -1339,12 +1500,31 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
             resource_scene_model_.effect_settings();
         core::u64 spatial_render_passes{};
         core::u64 spatial_taps_per_pixel{};
+        // Image passes a Merge adds: one per layer landed on its BASE, one
+        // for the constant when nothing is wired there, and one to land the
+        // finished merge on what is below it. A Background is one pass.
+        core::u32 merge_passes{};
         for (const GraphNode& node : result.nodes) {
-            if (node.kind == NodeKind::Matte &&
-                output_distance.contains(node.node)) {
+            if (!output_distance.contains(node.node)) {
+                continue;
+            }
+            if (node.kind == NodeKind::Matte) {
                 ++result.resources.matte_nodes;
+            } else if (node.kind == NodeKind::Background) {
+                ++result.resources.background_nodes;
+            } else if (node.kind == NodeKind::Merge) {
+                ++result.resources.merge_nodes;
+                const auto layers = image_inputs(node.node, 1U);
+                if (!node.bypassed &&
+                    (!layers.empty() ||
+                     !merge_constant_is_identity(
+                         std::get<MergeParameters>(node.parameters)))) {
+                    merge_passes +=
+                        static_cast<core::u32>(layers.size()) + 1U;
+                }
             }
         }
+        result.resources.merge_nesting = merge_nesting;
         for (const GraphNode& node : result.nodes) {
             if (node.kind != NodeKind::SceneLayer ||
                 !output_distance.contains(node.node)) {
@@ -1357,8 +1537,11 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
             bool chroma_key{};
             bool luma_key{};
             scene::EffectBoundsExpansion layer_bounds{};
+            // The layer's EFFECTS and FILTERS inputs, and the same two on
+            // every LED Car Process it feeds.
             std::vector<std::pair<doc::NodeId, core::u8>> effect_targets{
-                {node.node, static_cast<core::u8>(0U)}};
+                {node.node, static_cast<core::u8>(0U)},
+                {node.node, static_cast<core::u8>(2U)}};
             for (const AcceptedEdge& image_edge : accepted) {
                 if (image_edge.type != PortValueType::Image ||
                     image_edge.edge->from.node != node.node ||
@@ -1371,10 +1554,13 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
                     target->kind == NodeKind::LedCarProcess) {
                     effect_targets.emplace_back(
                         target->node, static_cast<core::u8>(9U));
+                    effect_targets.emplace_back(
+                        target->node, static_cast<core::u8>(10U));
                 }
             }
             for (const AcceptedEdge& value : accepted) {
-                if (value.type != PortValueType::Effect ||
+                if ((value.type != PortValueType::Effect &&
+                     value.type != PortValueType::Filter) ||
                     std::find(effect_targets.begin(), effect_targets.end(),
                               std::pair{value.edge->to.node,
                                         value.edge->to.port}) ==
@@ -1485,6 +1671,18 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
                 result.resources.active_scene_layers * 2U +
                 static_cast<core::u32>(spatial_render_passes);
             result.resources.blur_taps_per_pixel = spatial_taps_per_pixel;
+        }
+        // Each open intermediate image holds a ping-pong pair.
+        result.resources.offscreen_textures += 2U * merge_nesting;
+        result.resources.render_passes +=
+            merge_passes + result.resources.background_nodes;
+        if (result.resources.offscreen_textures != 0U) {
+            result.resources.bytes_per_texture =
+                static_cast<core::u64>(result.resources.canvas.width) *
+                static_cast<core::u64>(result.resources.canvas.height) * 4ULL;
+            result.resources.offscreen_texture_bytes =
+                result.resources.bytes_per_texture *
+                result.resources.offscreen_textures;
         }
         const doc::NodeId budget_subject = first_output == result.nodes.end()
             ? doc::NodeId{}
@@ -1657,7 +1855,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
                   input_connection_less);
         std::sort(step.consumers.begin(), step.consumers.end(),
                   consumer_connection_less);
-        if (node->kind == NodeKind::RadialArray) {
+        if (node->kind == NodeKind::RadialArray && !node->bypassed) {
             step.radial_instances = radial_instances(
                 std::get<RadialArrayParameters>(node->parameters));
         }
@@ -1703,6 +1901,169 @@ void write_reference(doc::PropertyMap& properties, std::string_view name,
 
 } // namespace
 
+std::vector<doc::Node>
+snapshot_graph_selection(const doc::Root& root,
+                         std::span<const doc::NodeId> chosen) {
+    std::set<doc::NodeId> members;
+    std::vector<doc::Node> snapshot;
+    for (const doc::NodeId id : std::set<doc::NodeId>{chosen.begin(),
+                                                      chosen.end()}) {
+        const doc::Node* const node = root.get(id);
+        if (node == nullptr || (!kind_for_type(node->type).has_value() &&
+                                node->type != schema::comment_type)) {
+            continue;
+        }
+        members.insert(id);
+        snapshot.push_back(*node);
+    }
+    for (const doc::NodeChange& change : doc::diff(doc::Root{}, root).changes) {
+        if (!change.after || change.after->type != schema::edge_type) {
+            continue;
+        }
+        const auto from = reference(*change.after, schema::from_node);
+        const auto to = reference(*change.after, schema::to_node);
+        if (from.has_value() && to.has_value() && members.contains(*from) &&
+            members.contains(*to)) {
+            snapshot.push_back(*change.after);
+        }
+    }
+    return snapshot;
+}
+
+core::Result<GraphPastePlan, GraphCloneError> plan_paste_graph(
+    const doc::Root& root, std::span<const doc::Node> snapshot,
+    doc::NodeId destination, doc::NodeId legacy_owner, float dx, float dy,
+    doc::NodeId first_id) {
+    using Result = core::Result<GraphPastePlan, GraphCloneError>;
+    constexpr core::u64 max_reference_id =
+        static_cast<core::u64>(std::numeric_limits<std::int64_t>::max());
+    if (first_id.value() == 0U || first_id.value() > max_reference_id) {
+        return Result::failure(GraphCloneError::InvalidFirstId);
+    }
+    try {
+        std::map<doc::NodeId, doc::Node> copied;
+        for (const doc::Node& node : snapshot) {
+            copied.insert_or_assign(node.id, node);
+        }
+
+        // Sources that already have a Scene Layer in the destination graph.
+        std::set<doc::NodeId> layered;
+        for (const doc::NodeChange& change :
+             doc::diff(doc::Root{}, root).changes) {
+            if (change.after &&
+                change.after->type == schema::scene_layer_type &&
+                owner_of(*change.after, legacy_owner) == destination) {
+                if (const auto source =
+                        reference(*change.after, schema::scene_node)) {
+                    layered.insert(*source);
+                }
+            }
+        }
+
+        GraphPastePlan plan{};
+        std::set<doc::NodeId> placed;
+        for (const auto& [id, node] : copied) {
+            if (node.type == schema::edge_type) {
+                continue;
+            }
+            if (node.type == schema::output_type) {
+                ++plan.skipped;
+                continue;
+            }
+            if (node.type == schema::scene_layer_type) {
+                const auto source = reference(node, schema::scene_node);
+                if (!source.has_value() || !layered.insert(*source).second) {
+                    ++plan.skipped;
+                    continue;
+                }
+            }
+            placed.insert(id);
+        }
+        for (const auto& [id, node] : copied) {
+            if (node.type != schema::edge_type) {
+                continue;
+            }
+            const auto from = reference(node, schema::from_node);
+            const auto to = reference(node, schema::to_node);
+            if (from.has_value() && to.has_value() && placed.contains(*from) &&
+                placed.contains(*to)) {
+                placed.insert(id);
+            }
+        }
+
+        core::u64 candidate = first_id.value();
+        for (const doc::NodeId original : placed) {
+            while (root.contains(doc::NodeId{candidate})) {
+                if (candidate == max_reference_id) {
+                    return Result::failure(GraphCloneError::IdExhausted);
+                }
+                ++candidate;
+            }
+            plan.remap.emplace_back(original, doc::NodeId{candidate});
+            if (candidate != max_reference_id) {
+                ++candidate;
+            } else if (plan.remap.size() != placed.size()) {
+                return Result::failure(GraphCloneError::IdExhausted);
+            }
+        }
+        const auto copy_of = [&](doc::NodeId original) {
+            return std::lower_bound(
+                       plan.remap.begin(), plan.remap.end(), original,
+                       [](const auto& mapping, doc::NodeId id) noexcept {
+                           return mapping.first < id;
+                       })
+                ->second;
+        };
+        const auto shift = [](doc::Node& node, std::string_view name,
+                              float delta) {
+            const auto found = node.properties.find(name);
+            if (found == node.properties.end()) {
+                return;
+            }
+            double value{};
+            if (const auto* const real = std::get_if<double>(&found->second)) {
+                value = *real;
+            } else if (const auto* const whole =
+                           std::get_if<std::int64_t>(&found->second)) {
+                value = static_cast<double>(*whole);
+            } else {
+                return;
+            }
+            found->second = doc::PropertyValue{value + static_cast<double>(delta)};
+        };
+
+        plan.puts.reserve(plan.remap.size());
+        for (const auto& [original, copy] : plan.remap) {
+            doc::Node node = copied.at(original);
+            node.id = copy;
+            if (node.type == schema::edge_type) {
+                write_reference(node.properties, schema::from_node,
+                                copy_of(*reference(node, schema::from_node)));
+                write_reference(node.properties, schema::to_node,
+                                copy_of(*reference(node, schema::to_node)));
+                for (std::size_t index = 0U; index < max_wire_points; ++index) {
+                    const std::string base =
+                        std::string{schema::point_prefix} + std::to_string(index);
+                    shift(node, base + std::string{schema::point_x_suffix}, dx);
+                    shift(node, base + std::string{schema::point_y_suffix}, dy);
+                }
+            } else {
+                write_reference(node.properties, schema::scene_id, destination);
+                node.properties.try_emplace(std::string{schema::editor_x},
+                                            doc::PropertyValue{0.0});
+                node.properties.try_emplace(std::string{schema::editor_y},
+                                            doc::PropertyValue{0.0});
+                shift(node, schema::editor_x, dx);
+                shift(node, schema::editor_y, dy);
+            }
+            plan.puts.push_back(std::move(node));
+        }
+        return Result::success(std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result::failure(GraphCloneError::AllocationFailed);
+    }
+}
+
 core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
     const doc::Root& root,
     doc::NodeId source,
@@ -1730,7 +2091,8 @@ core::Result<GraphClonePlan, GraphCloneError> plan_clone_graph(
         // the graph objects this scene owns.
         std::set<doc::NodeId> selected;
         for (const auto& [id, node] : all) {
-            if (!kind_for_type(node.type).has_value() ||
+            if ((!kind_for_type(node.type).has_value() &&
+                 node.type != schema::comment_type) ||
                 owner_of(node, legacy_owner) != source) {
                 continue;
             }

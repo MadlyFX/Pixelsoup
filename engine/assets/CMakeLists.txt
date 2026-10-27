@@ -8,6 +8,7 @@ add_library(mediaserver_assets STATIC
     src/waveform.cpp
     src/asset_registry.cpp
     src/asset_model.cpp
+    src/library_edit.cpp
 )
 add_library(MediaServer::Assets ALIAS mediaserver_assets)
 

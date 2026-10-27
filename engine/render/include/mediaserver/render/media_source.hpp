@@ -254,6 +254,9 @@ struct MediaProbe final {
     std::string profile;
     std::string pixel_format;
     int bits_per_raw_sample{};
+    // The file's own start timecode as FFmpeg reports it ("01:00:00:00",
+    // ';' before the frames when drop-frame); empty when it carries none.
+    std::string start_timecode;
 
     [[nodiscard]] float aspect() const noexcept {
         return height > 0U

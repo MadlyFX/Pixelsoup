@@ -271,6 +271,44 @@ ProjectAssetAvailability check_project_assets(
     return availability;
 }
 
+std::vector<ChangedLibrarySource> find_changed_library_sources(
+    const assets::AssetRegistry& registry) {
+    std::vector<ChangedLibrarySource> changed;
+    for (const assets::Asset& asset : registry.assets) {
+        const std::optional<assets::ContentFingerprint>& recorded =
+            assets::asset_fingerprint(asset);
+        if (!recorded.has_value()) {
+            continue;
+        }
+        auto observed =
+            assets::source_fingerprint(assets::asset_source(asset));
+        if (!observed || observed.value() == *recorded) {
+            continue;
+        }
+        changed.push_back(ChangedLibrarySource{assets::asset_id(asset),
+                                               std::move(observed).value()});
+    }
+    return changed;
+}
+
+std::vector<doc::NodeId> still_changed_library_sources(
+    const assets::AssetRegistry& registry,
+    const std::vector<ChangedLibrarySource>& found) {
+    std::vector<doc::NodeId> changed;
+    for (const ChangedLibrarySource& entry : found) {
+        const assets::Asset* const asset = registry.asset(entry.asset);
+        if (asset == nullptr) {
+            continue;
+        }
+        const std::optional<assets::ContentFingerprint>& recorded =
+            assets::asset_fingerprint(*asset);
+        if (recorded.has_value() && *recorded != entry.observed) {
+            changed.push_back(entry.asset);
+        }
+    }
+    return changed;
+}
+
 ProjectAssetAvailability scan_project_assets(
     const ProjectAssetManifest& manifest) {
     ProjectAssetAvailability availability{};

@@ -4665,6 +4665,136 @@ void group_planning_is_canonical_and_preserves_world_transforms() {
     MODEL_CHECK(nested.error() == scene::GroupEditError::AlreadyGrouped);
 }
 
+// An empty group - a folder, or a vehicle process group - is authored in
+// front of its new siblings, at the top level or inside another group, and
+// carries its kind into the evaluated scene and its digest. A folder writes
+// no kind at all.
+void an_empty_group_is_created_in_front_with_its_kind() {
+    doc::Root root = doc::Root{}.set(node(1U, schema::stage_type, {}));
+    root = root.set(node(
+        10U, schema::group_type,
+        {whole(schema::scene_id, 1), text(schema::group_name, "Rig"),
+         whole(schema::group_order, 3)}));
+    root = root.set(node(
+        11U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::parent_group, 10),
+         whole(schema::group_order, 0)}));
+    root = root.set(node(
+        3U, schema::object_type,
+        {whole(schema::scene_id, 1), whole(schema::group_order, 1)}));
+    root = root.set(node(
+        20U, schema::group_type,
+        {whole(schema::scene_id, 1), text(schema::group_name, "Held"),
+         whole(schema::group_order, 0), flag(schema::locked, true)}));
+
+    const auto top = scene::plan_create_group(
+        root, doc::NodeId{1U}, std::nullopt, doc::NodeId{10U}, "Folder");
+    MODEL_CHECK(top.has_value());
+    MODEL_CHECK(top.value().group == doc::NodeId{12U});
+    MODEL_CHECK(top.value().primary_after == doc::NodeId{12U});
+    MODEL_CHECK(top.value().puts.size() == 1U);
+    MODEL_CHECK(top.value().erases.empty());
+    const doc::Node* const folder = top.value().after.get(doc::NodeId{12U});
+    MODEL_CHECK(folder != nullptr);
+    MODEL_CHECK(std::get<std::int64_t>(
+                    folder->properties.at(std::string{schema::group_order}))
+                == 4);
+    MODEL_CHECK(!folder->properties.contains(std::string{schema::parent_group}));
+    MODEL_CHECK(!folder->properties.contains(std::string{schema::group_kind}));
+
+    const auto inside = scene::plan_create_group(
+        top.value().after, doc::NodeId{1U}, doc::NodeId{10U},
+        doc::NodeId{30U}, "Vehicle Process",
+        scene::GroupKind::VehicleProcess);
+    MODEL_CHECK(inside.has_value());
+    MODEL_CHECK(inside.value().group == doc::NodeId{30U});
+    const doc::Node* const vehicle = inside.value().after.get(doc::NodeId{30U});
+    MODEL_CHECK(vehicle != nullptr);
+    MODEL_CHECK(std::get<std::int64_t>(
+                    vehicle->properties.at(std::string{schema::parent_group}))
+                == 10);
+    MODEL_CHECK(std::get<std::int64_t>(
+                    vehicle->properties.at(std::string{schema::group_order}))
+                == 1);
+    MODEL_CHECK(std::get<std::string>(
+                    vehicle->properties.at(std::string{schema::group_kind}))
+                == schema::group_kind_vehicle_process);
+
+    scene::SceneModel model;
+    model.reset(inside.value().after);
+    const scene::Scene evaluated = model.evaluate(doc::NodeId{1U}, at_start);
+    const auto group_of = [&](doc::NodeId id) {
+        return std::find_if(evaluated.groups.begin(), evaluated.groups.end(),
+                            [id](const scene::SceneGroup& group) {
+                                return group.node == id;
+                            });
+    };
+    MODEL_CHECK(group_of(doc::NodeId{12U}) != evaluated.groups.end());
+    MODEL_CHECK(group_of(doc::NodeId{12U})->name == "Folder");
+    MODEL_CHECK(group_of(doc::NodeId{12U})->kind == scene::GroupKind::Folder);
+    MODEL_CHECK(group_of(doc::NodeId{30U}) != evaluated.groups.end());
+    MODEL_CHECK(group_of(doc::NodeId{30U})->kind
+                == scene::GroupKind::VehicleProcess);
+    MODEL_CHECK(group_of(doc::NodeId{30U})->parent_group
+                == std::optional<doc::NodeId>{doc::NodeId{10U}});
+
+    // The kind itself is digested, apart from the document hash: the same
+    // evaluated scene with the vehicle group read as a folder differs.
+    scene::Scene as_folder = evaluated;
+    for (scene::SceneGroup& group : as_folder.groups) {
+        group.kind = scene::GroupKind::Folder;
+    }
+    MODEL_CHECK(scene::digest(as_folder) != scene::digest(evaluated));
+
+    // A spelled-out folder is a folder; an unknown kind is a damaged node.
+    {
+        doc::Node spelled = *inside.value().after.get(doc::NodeId{30U});
+        spelled.properties.insert_or_assign(
+            std::string{schema::group_kind},
+            std::string{schema::group_kind_folder});
+        scene::SceneModel variant;
+        variant.reset(inside.value().after.set(std::move(spelled)));
+        const scene::Scene read = variant.evaluate(doc::NodeId{1U}, at_start);
+        const auto found = std::find_if(
+            read.groups.begin(), read.groups.end(),
+            [](const scene::SceneGroup& group) {
+                return group.node == doc::NodeId{30U};
+            });
+        MODEL_CHECK(found != read.groups.end());
+        MODEL_CHECK(found->kind == scene::GroupKind::Folder);
+    }
+    {
+        doc::Node damaged = *inside.value().after.get(doc::NodeId{30U});
+        damaged.properties.insert_or_assign(std::string{schema::group_kind},
+                                            std::string{"truck"});
+        scene::SceneModel variant;
+        variant.reset(inside.value().after.set(std::move(damaged)));
+        const scene::Scene refused =
+            variant.evaluate(doc::NodeId{1U}, at_start);
+        MODEL_CHECK(std::none_of(refused.groups.begin(), refused.groups.end(),
+                                 [](const scene::SceneGroup& group) {
+                                     return group.node == doc::NodeId{30U};
+                                 }));
+    }
+
+    const auto locked = scene::plan_create_group(
+        root, doc::NodeId{1U}, doc::NodeId{20U}, doc::NodeId{40U});
+    MODEL_CHECK(!locked.has_value());
+    MODEL_CHECK(locked.error() == scene::GroupEditError::Locked);
+    const auto not_group = scene::plan_create_group(
+        root, doc::NodeId{1U}, doc::NodeId{3U}, doc::NodeId{40U});
+    MODEL_CHECK(!not_group.has_value());
+    MODEL_CHECK(not_group.error() == scene::GroupEditError::NotAGroup);
+    const auto missing = scene::plan_create_group(
+        root, doc::NodeId{1U}, doc::NodeId{99U}, doc::NodeId{40U});
+    MODEL_CHECK(!missing.has_value());
+    MODEL_CHECK(missing.error() == scene::GroupEditError::GroupNotFound);
+    const auto unnamed = scene::plan_create_group(
+        root, doc::NodeId{1U}, std::nullopt, doc::NodeId{40U}, "");
+    MODEL_CHECK(!unnamed.has_value());
+    MODEL_CHECK(unnamed.error() == scene::GroupEditError::InvalidName);
+}
+
 // Filing a node under a group - the outliner's drag onto a group row - keeps
 // it exactly where it is on the stage, even under a rotated and scaled
 // parent; it lands beside the sibling it was dropped by; and a group can never
@@ -4949,12 +5079,14 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 86U> cases{{
+constexpr std::array<Case, 87U> cases{{
     {"negative native placements keep exact source mapping and safe bounds",
      &negative_native_placements_keep_exact_source_mapping_and_safe_bounds},
     {"published keyframes use the canonical cubic sampler",
      &published_keyframes_use_the_canonical_cubic_sampler},
     {"camera lens channels evaluate and replicate", &camera_lens_channels_evaluate_and_replicate},
+    {"an empty group is created in front with its kind",
+     &an_empty_group_is_created_in_front_with_its_kind},
     {"moving into a group preserves world and order",
      &moving_into_a_group_preserves_world_and_order},
     {"prewarming uses show seconds and keeps the nearest cuts",

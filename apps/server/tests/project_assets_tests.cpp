@@ -351,6 +351,55 @@ void fingerprinted_readiness_distinguishes_size_and_revision_mismatches() {
         app::ProjectAssetPresence::State::ByteLengthMismatch);
 }
 
+// RESCAN also asks every Library asset - used or not - whether its file is
+// still the revision it recorded, and an accepted revision drops out of the
+// answer without touching the disk again.
+void rescan_finds_changed_library_sources_until_they_are_accepted() {
+    TemporaryDirectory temporary;
+    const fs::path changed_path = temporary.path() / "changed.mov";
+    const fs::path steady_path = temporary.path() / "steady.mov";
+    write(changed_path, "frames");
+    write(steady_path, "frames");
+    const std::string changed_source =
+        assets::asset_source_from_path(changed_path);
+    const std::string steady_source =
+        assets::asset_source_from_path(steady_path);
+    const auto recorded = assets::source_fingerprint(changed_source);
+    const auto steady = assets::source_fingerprint(steady_source);
+    PROJECT_ASSET_CHECK(recorded && steady);
+
+    doc::Root root;
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, changed_source, recorded.value()));
+    root = root.set(fingerprinted_asset_node(
+        11U, assets::schema::media_type, steady_source, steady.value()));
+    const auto registry_of = [](const doc::Root& document) {
+        assets::AssetModel model;
+        model.reset(document);
+        return model.evaluate();
+    };
+    PROJECT_ASSET_CHECK(
+        app::find_changed_library_sources(registry_of(root)).empty());
+
+    const auto original_time = fs::last_write_time(changed_path);
+    write(changed_path, "new frames");
+    fs::last_write_time(changed_path,
+                        original_time + std::chrono::seconds{2});
+    const auto found = app::find_changed_library_sources(registry_of(root));
+    PROJECT_ASSET_CHECK(found.size() == 1U);
+    PROJECT_ASSET_CHECK(found[0U].asset == doc::NodeId{10U});
+    PROJECT_ASSET_CHECK(found[0U].observed.byte_length == 10U);
+    PROJECT_ASSET_CHECK(
+        app::still_changed_library_sources(registry_of(root), found) ==
+        std::vector<doc::NodeId>{doc::NodeId{10U}});
+
+    // Accepting records what was found; the asset is no longer changed.
+    root = root.set(fingerprinted_asset_node(
+        10U, assets::schema::media_type, changed_source, found[0U].observed));
+    PROJECT_ASSET_CHECK(
+        app::still_changed_library_sources(registry_of(root), found).empty());
+}
+
 void the_routine_scan_never_reads_a_source_and_never_calls_it_stale() {
     TemporaryDirectory temporary;
     const fs::path settled_path = temporary.path() / "settled.mp4";
@@ -491,6 +540,8 @@ struct Case final {
 };
 
 constexpr Case cases[]{
+    {"RESCAN finds changed Library sources until they are accepted",
+     &rescan_finds_changed_library_sources_until_they_are_accepted},
     {"an image sequence is present when its first frame is",
      &an_image_sequence_is_present_when_its_first_frame_is},
     {"colour LUTs participate in the project manifest",

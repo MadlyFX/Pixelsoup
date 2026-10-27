@@ -70,6 +70,11 @@ doc::Node make_project_asset_node(doc::NodeId id,
             node.properties.emplace(
                 std::string{assets::schema::source},
                 doc::PropertyValue{asset.source});
+            if (asset.folder != doc::NodeId{}) {
+                node.properties.emplace(
+                    std::string{assets::schema::folder},
+                    integer(asset.folder.value()));
+            }
             if (asset.fingerprint.has_value()) {
                 node.properties.emplace(
                     std::string{assets::schema::expected_byte_length},
@@ -101,6 +106,16 @@ doc::Node make_project_asset_node(doc::NodeId id,
                         std::string{assets::schema::media_rate_denominator},
                         integer(asset.frame_rate->denominator));
                 }
+                if (!asset.codec.empty()) {
+                    node.properties.emplace(
+                        std::string{assets::schema::media_codec},
+                        doc::PropertyValue{asset.codec});
+                }
+                if (!asset.start_timecode.empty()) {
+                    node.properties.emplace(
+                        std::string{assets::schema::media_start_timecode},
+                        doc::PropertyValue{asset.start_timecode});
+                }
                 if (asset.requested_proxy_profile.has_value()) {
                     const assets::DerivativeProfile* const profile =
                         assets::derivative_profile(
@@ -131,7 +146,9 @@ doc::Node make_project_asset_node(doc::NodeId id,
                 }
                 if (asset.vertex_count.has_value()) {
                     node.properties.emplace(
-                        std::string{assets::schema::projection_vertex_count},
+                        std::string{asset.projection_mesh
+                            ? assets::schema::projection_vertex_count
+                            : assets::schema::model_vertex_count},
                         integer(*asset.vertex_count));
                 }
                 if (!asset.projection_mesh &&
@@ -139,6 +156,21 @@ doc::Node make_project_asset_node(doc::NodeId id,
                     node.properties.emplace(
                         std::string{assets::schema::model_material_count},
                         integer(*asset.material_count));
+                }
+                if (!asset.projection_mesh &&
+                    asset.texture_count.has_value()) {
+                    node.properties.emplace(
+                        std::string{assets::schema::model_texture_count},
+                        integer(*asset.texture_count));
+                }
+                if (!asset.projection_mesh &&
+                    asset.largest_texture.has_value()) {
+                    node.properties.emplace(
+                        std::string{assets::schema::model_texture_width},
+                        integer(asset.largest_texture->width));
+                    node.properties.emplace(
+                        std::string{assets::schema::model_texture_height},
+                        integer(asset.largest_texture->height));
                 }
                 if (asset.bounds.has_value()) {
                     node.properties.emplace(
@@ -178,7 +210,18 @@ ProjectAssetNodeUpsert make_project_asset_upsert(
     const doc::NodeId target =
         existing == nullptr ? allocated_id : assets::asset_id(*existing);
     ProjectAssetNodeUpsert result{};
-    result.after = make_project_asset_node(target, asset);
+    // Importing a file the Library already holds refreshes it where the
+    // operator filed it, unless this import names a folder of its own.
+    if (existing != nullptr && assets::asset_folder(asset) == doc::NodeId{} &&
+        assets::asset_folder(*existing) != doc::NodeId{}) {
+        assets::Asset refiled = asset;
+        std::visit([folder = assets::asset_folder(*existing)](
+                       auto& held) noexcept { held.folder = folder; },
+                   refiled);
+        result.after = make_project_asset_node(target, refiled);
+    } else {
+        result.after = make_project_asset_node(target, asset);
+    }
     if (existing != nullptr) {
         if (const doc::Node* const before = root.get(target);
             before != nullptr) {
@@ -208,7 +251,7 @@ namespace {
            static_cast<core::u64>(*reference) == asset.value();
 }
 
-constexpr std::array<std::string_view, 20U> asset_properties{{
+constexpr std::array<std::string_view, 26U> asset_properties{{
     assets::schema::display_name,
     assets::schema::source,
     assets::schema::expected_byte_length,
@@ -218,10 +261,16 @@ constexpr std::array<std::string_view, 20U> asset_properties{{
     assets::schema::media_frame_count,
     assets::schema::media_rate_numerator,
     assets::schema::media_rate_denominator,
+    assets::schema::media_codec,
+    assets::schema::media_start_timecode,
     assets::schema::requested_proxy_profile,
     assets::schema::proxy_playback_policy,
     assets::schema::model_triangle_count,
     assets::schema::model_material_count,
+    assets::schema::model_vertex_count,
+    assets::schema::model_texture_count,
+    assets::schema::model_texture_width,
+    assets::schema::model_texture_height,
     assets::schema::projection_vertex_count,
     assets::schema::projection_triangle_count,
     assets::schema::bounds_minimum_x,
@@ -339,6 +388,7 @@ ProjectAssetRevisionResult plan_project_asset_revision(
                 if (const auto* const prior =
                         std::get_if<Candidate>(existing)) {
                     candidate.display_name = prior->display_name;
+                    candidate.folder = prior->folder;
                     if constexpr (std::is_same_v<
                                       Candidate, assets::MediaAsset>) {
                         candidate.requested_proxy_profile =

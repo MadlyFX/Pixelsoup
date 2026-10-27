@@ -87,6 +87,21 @@ gui::UiColor element_kind_color(const ElementInfo &element) noexcept {
 
 void draw_element_icon(gui::UiContext &ctx, const ElementInfo &element,
                        float cx, float cy, gui::UiColor color) {
+  if (element.kind == ElementKind::Group &&
+      element.group_kind == scene::GroupKind::VehicleProcess) {
+    // A vehicle: a body, a cabin and two wheels - the group a vehicle's
+    // processing work is filed under.
+    auto &draw = ctx.draw_list();
+    const gui::Rect body{cx - 7.0F, cy - 2.0F, 14.0F, 5.0F};
+    const gui::Rect cabin{cx - 4.0F, cy - 5.5F, 7.0F, 3.5F};
+    draw.add_rect(body.x, body.y, body.width, body.height,
+                  with_alpha(color, 0.22F));
+    rect_outline(ctx, body, color);
+    rect_outline(ctx, cabin, color);
+    draw_filled_circle(ctx, cx - 4.0F, cy + 4.0F, 2.0F, color);
+    draw_filled_circle(ctx, cx + 4.0F, cy + 4.0F, 2.0F, color);
+    return;
+  }
   draw_kind_icon(ctx, element.kind, element.local_kind, cx, cy, color);
 }
 

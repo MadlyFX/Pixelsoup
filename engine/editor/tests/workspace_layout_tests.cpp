@@ -103,7 +103,7 @@ void version_one_layouts_still_restore_without_a_window_size() {
   legacy[9U] = std::byte{0U};
   legacy[10U] = std::byte{28U};
   legacy[11U] = std::byte{0U};
-  legacy.erase(legacy.begin() + 28, legacy.begin() + 44);
+  legacy.erase(legacy.begin() + 28, legacy.begin() + 48);
 
   const auto decoded = editor::decode_workspace_layout(legacy);
   LAYOUT_CHECK(decoded);
@@ -123,7 +123,7 @@ void version_two_layouts_restore_full_resolution_previews() {
       sample_layout().snapshot(), 1400U, 900U}).value();
   legacy[8U] = std::byte{2U};
   legacy[10U] = std::byte{36U};
-  legacy.erase(legacy.begin() + 36, legacy.begin() + 44);
+  legacy.erase(legacy.begin() + 36, legacy.begin() + 48);
   const auto decoded = editor::decode_workspace_layout(legacy);
   LAYOUT_CHECK(decoded);
   LAYOUT_CHECK(decoded.value().window_width == 1400U);
@@ -150,7 +150,7 @@ void interface_zoom_round_trips_and_older_records_read_as_actual_size() {
   auto version_three = encoded;
   version_three[8U] = std::byte{3U};
   version_three[10U] = std::byte{40U};
-  version_three.erase(version_three.begin() + 40, version_three.begin() + 44);
+  version_three.erase(version_three.begin() + 40, version_three.begin() + 48);
   version_three[38U] = std::byte{0U};
   version_three[39U] = std::byte{0U};
   const auto older = editor::decode_workspace_layout(version_three);
@@ -173,13 +173,13 @@ void compositor_parameter_width_round_trips() {
   auto version_four = encoded;
   version_four[8U] = std::byte{4U};
   version_four[10U] = std::byte{40U};
-  version_four.erase(version_four.begin() + 40, version_four.begin() + 44);
+  version_four.erase(version_four.begin() + 40, version_four.begin() + 48);
   const auto older = editor::decode_workspace_layout(version_four);
   LAYOUT_CHECK(older);
   LAYOUT_CHECK(older.value().compositor_parameter_width == 0.0F);
   LAYOUT_CHECK(older.value().ui_zoom_percent == 100U);
 
-  // NaN's bit pattern, then a negative width, in the header's last word.
+  // NaN's bit pattern, then a negative width, in the width's word.
   auto not_a_number = encoded;
   not_a_number[40U] = std::byte{0x00U};
   not_a_number[41U] = std::byte{0x00U};
@@ -193,6 +193,38 @@ void compositor_parameter_width_round_trips() {
   LAYOUT_CHECK(!editor::encode_workspace_layout(state));
   state.compositor_parameter_width = 5'000.0F;
   LAYOUT_CHECK(!editor::encode_workspace_layout(state));
+}
+
+// Whether the Compositor shows its minimap survives a restart; a record from
+// before the field leaves it hidden, and a flag the editor does not know is
+// refused rather than dropped.
+void compositor_minimap_round_trips() {
+  editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
+  state.compositor_parameter_width = 300.0F;
+  state.compositor_minimap = true;
+  const auto encoded = editor::encode_workspace_layout(state).value();
+  const auto decoded = editor::decode_workspace_layout(encoded);
+  LAYOUT_CHECK(decoded);
+  LAYOUT_CHECK(decoded.value().compositor_minimap);
+  LAYOUT_CHECK(decoded.value().compositor_parameter_width == 300.0F);
+  state.compositor_minimap = false;
+  const auto hidden = editor::decode_workspace_layout(
+      editor::encode_workspace_layout(state).value());
+  LAYOUT_CHECK(hidden);
+  LAYOUT_CHECK(!hidden.value().compositor_minimap);
+
+  auto version_five = encoded;
+  version_five[8U] = std::byte{5U};
+  version_five[10U] = std::byte{44U};
+  version_five.erase(version_five.begin() + 44, version_five.begin() + 48);
+  const auto older = editor::decode_workspace_layout(version_five);
+  LAYOUT_CHECK(older);
+  LAYOUT_CHECK(!older.value().compositor_minimap);
+  LAYOUT_CHECK(older.value().compositor_parameter_width == 300.0F);
+
+  auto unknown = encoded;
+  unknown[44U] = std::byte{0x03U};
+  LAYOUT_CHECK(!editor::decode_workspace_layout(unknown));
 }
 
 void corrupt_preview_settings_are_rejected() {
@@ -247,8 +279,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"version two layouts restore full resolution previews", &version_two_layouts_restore_full_resolution_previews},
+    {"Compositor minimap round-trips", &compositor_minimap_round_trips},
     {"Compositor parameter width round-trips", &compositor_parameter_width_round_trips},
     {"corrupt preview settings are rejected", &corrupt_preview_settings_are_rejected},
     {"interface zoom round trips; older records read as actual size",

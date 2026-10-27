@@ -1,6 +1,7 @@
 #include <mediaserver/assets/asset_model.hpp>
 
 #include <mediaserver/assets/asset_schema.hpp>
+#include <mediaserver/assets/library_edit.hpp>
 
 #include <array>
 #include <cstddef>
@@ -604,12 +605,200 @@ void capacity_truncation_is_node_ordered_and_replicable() {
     ASSET_CHECK(streamed.counters() == checkpointed.counters());
 }
 
+[[nodiscard]] doc::Node folder(core::u64 id, std::string_view name,
+                               core::u64 parent = 0U) {
+    doc::Node built = node(id, schema::folder_type,
+                           {text(schema::display_name, name)});
+    if (parent != 0U) {
+        built.properties.emplace(
+            std::string{schema::folder},
+            doc::PropertyValue{static_cast<std::int64_t>(parent)});
+    }
+    return built;
+}
+
+[[nodiscard]] doc::Node filed(doc::Node asset, core::u64 folder_id) {
+    asset.properties.insert_or_assign(
+        std::string{schema::folder},
+        doc::PropertyValue{static_cast<std::int64_t>(folder_id)});
+    return asset;
+}
+
+void library_metadata_and_folders_are_parsed_and_digested() {
+    auto plate = media(7U, "Opening Plate", src("media/opening.mov"));
+    plate.properties.emplace(std::string{schema::media_codec},
+                             doc::PropertyValue{std::string{"prores"}});
+    plate.properties.emplace(std::string{schema::media_start_timecode},
+                             doc::PropertyValue{std::string{"01:00:00:00"}});
+    auto car = model(11U, "Hero Car", src("models/hero_car.glb"));
+    car.properties.emplace(std::string{schema::model_vertex_count},
+                           doc::PropertyValue{std::int64_t{64'000}});
+    car.properties.emplace(std::string{schema::model_texture_count},
+                           doc::PropertyValue{std::int64_t{12}});
+    car.properties.emplace(std::string{schema::model_texture_width},
+                           doc::PropertyValue{std::int64_t{4'096}});
+    car.properties.emplace(std::string{schema::model_texture_height},
+                           doc::PropertyValue{std::int64_t{2'048}});
+    const std::vector<doc::Node> nodes{folder(40U, "Plates"),
+                                       folder(41U, "Day 1", 40U),
+                                       filed(plate, 41U), car};
+    assets::AssetModel view;
+    view.reset(root_of(nodes));
+    const assets::AssetRegistry registry = view.evaluate();
+    ASSET_CHECK(registry.folders.size() == 2U);
+    ASSET_CHECK(registry.folders[1U].parent == doc::NodeId{40U});
+    const auto* const media_asset =
+        std::get_if<assets::MediaAsset>(registry.asset(doc::NodeId{7U}));
+    ASSET_CHECK(media_asset != nullptr);
+    ASSET_CHECK(media_asset->codec == "prores");
+    ASSET_CHECK(media_asset->start_timecode == "01:00:00:00");
+    ASSET_CHECK(registry.folder_of(*registry.asset(doc::NodeId{7U})) ==
+                doc::NodeId{41U});
+    ASSET_CHECK(registry.folder_within(doc::NodeId{41U}, doc::NodeId{40U}));
+    ASSET_CHECK(!registry.folder_within(doc::NodeId{40U}, doc::NodeId{41U}));
+    const auto* const model_asset =
+        std::get_if<assets::ModelAsset>(registry.asset(doc::NodeId{11U}));
+    ASSET_CHECK(model_asset != nullptr);
+    ASSET_CHECK(model_asset->vertex_count == core::u64{64'000});
+    ASSET_CHECK(model_asset->texture_count == core::u32{12});
+    ASSET_CHECK(model_asset->largest_texture ==
+                assets::PixelDimensions{4'096U, 2'048U});
+
+    // Each of these is part of the digest.
+    const core::u64 reference = assets::digest(registry);
+    const auto digest_with = [&](std::size_t index, std::string_view name,
+                                 doc::PropertyValue value) {
+        auto changed = nodes;
+        changed[index].properties.insert_or_assign(std::string{name},
+                                                   std::move(value));
+        assets::AssetModel edited;
+        edited.reset(root_of(changed));
+        return assets::digest(edited.evaluate());
+    };
+    ASSET_CHECK(digest_with(0U, schema::display_name,
+                            doc::PropertyValue{std::string{"Shots"}}) !=
+                reference);
+    ASSET_CHECK(digest_with(2U, schema::folder,
+                            doc::PropertyValue{std::int64_t{40}}) != reference);
+    ASSET_CHECK(digest_with(2U, schema::media_start_timecode,
+                            doc::PropertyValue{std::string{"02:00:00:00"}}) !=
+                reference);
+    ASSET_CHECK(digest_with(3U, schema::model_texture_width,
+                            doc::PropertyValue{std::int64_t{8'192}}) !=
+                reference);
+
+    // A half-authored texture size is malformed, not half a size.
+    auto partial = car;
+    partial.properties.erase(std::string{schema::model_texture_height});
+    assets::AssetModel rejected;
+    rejected.reset(root_of({partial}));
+    ASSET_CHECK(rejected.counters().rejected == 1U);
+}
+
+void a_dangling_or_cyclic_folder_lists_at_the_top_level() {
+    // 50 names a parent that does not exist; 51 and 52 name each other.
+    const std::vector<doc::Node> nodes{
+        folder(50U, "Orphan", 99U), folder(51U, "A", 52U),
+        folder(52U, "B", 51U),
+        filed(media(7U, "Plate", src("plate.mov")), 98U)};
+    assets::AssetModel view;
+    view.reset(root_of(nodes));
+    const assets::AssetRegistry registry = view.evaluate();
+    ASSET_CHECK(registry.folders.size() == 3U);
+    ASSET_CHECK(registry.folder(doc::NodeId{50U})->parent == doc::NodeId{});
+    // At least one of the pair is lifted to the top level, breaking the loop.
+    const bool a_top =
+        registry.folder(doc::NodeId{51U})->parent == doc::NodeId{};
+    const bool b_top =
+        registry.folder(doc::NodeId{52U})->parent == doc::NodeId{};
+    ASSET_CHECK(a_top || b_top);
+    // The asset names a folder that is not there: it shows at the top level.
+    ASSET_CHECK(registry.folder_of(*registry.asset(doc::NodeId{7U})) ==
+                doc::NodeId{});
+}
+
+void library_edits_plan_folders_filing_and_names() {
+    const doc::Root root =
+        root_of({folder(40U, "Plates"), folder(41U, "Day 1", 40U),
+                 filed(media(7U, "Plate", src("plate.mov")), 41U),
+                 model(11U, "Car", src("car.glb"))});
+    const auto evaluate = [](const doc::Root& document) {
+        assets::AssetModel view;
+        view.reset(document);
+        return view.evaluate();
+    };
+
+    assets::LibraryEdit create{};
+    create.kind = assets::LibraryEdit::Kind::CreateFolder;
+    create.name = "Models";
+    const auto created =
+        assets::plan_library_edit(root, create, doc::NodeId{60U});
+    ASSET_CHECK(created.has_value());
+    ASSET_CHECK(evaluate(*created).folder(doc::NodeId{60U})->display_name ==
+                "Models");
+    // An id already in use, or no name, changes nothing.
+    ASSET_CHECK(!assets::plan_library_edit(root, create, doc::NodeId{40U}));
+    create.name.clear();
+    ASSET_CHECK(!assets::plan_library_edit(root, create, doc::NodeId{60U}));
+
+    assets::LibraryEdit move{};
+    move.kind = assets::LibraryEdit::Kind::Move;
+    move.destination = doc::NodeId{40U};
+    move.items = {doc::NodeId{11U}, doc::NodeId{7U}};
+    const auto moved = assets::plan_library_edit(root, move);
+    ASSET_CHECK(moved.has_value());
+    const assets::AssetRegistry after_move = evaluate(*moved);
+    ASSET_CHECK(after_move.folder_of(*after_move.asset(doc::NodeId{11U})) ==
+                doc::NodeId{40U});
+    ASSET_CHECK(after_move.folder_of(*after_move.asset(doc::NodeId{7U})) ==
+                doc::NodeId{40U});
+    // A folder is never filed inside itself or a folder within it.
+    move.items = {doc::NodeId{40U}};
+    move.destination = doc::NodeId{41U};
+    ASSET_CHECK(!assets::plan_library_edit(root, move));
+    // Nothing that is not an asset or folder is ever moved.
+    move.items = {doc::NodeId{999U}};
+    move.destination = {};
+    ASSET_CHECK(!assets::plan_library_edit(root, move));
+
+    assets::LibraryEdit rename{};
+    rename.kind = assets::LibraryEdit::Kind::Rename;
+    rename.target = doc::NodeId{7U};
+    rename.name = "Opening Plate";
+    const auto renamed = assets::plan_library_edit(root, rename);
+    ASSET_CHECK(renamed.has_value());
+    ASSET_CHECK(assets::asset_display_name(
+                    *evaluate(*renamed).asset(doc::NodeId{7U})) ==
+                "Opening Plate");
+
+    // Deleting a folder keeps what it held, one level up.
+    assets::LibraryEdit remove{};
+    remove.kind = assets::LibraryEdit::Kind::DeleteFolder;
+    remove.target = doc::NodeId{41U};
+    const auto removed = assets::plan_library_edit(root, remove);
+    ASSET_CHECK(removed.has_value());
+    const assets::AssetRegistry after_delete = evaluate(*removed);
+    ASSET_CHECK(after_delete.folder(doc::NodeId{41U}) == nullptr);
+    ASSET_CHECK(after_delete.asset(doc::NodeId{7U}) != nullptr);
+    ASSET_CHECK(after_delete.folder_of(*after_delete.asset(doc::NodeId{7U})) ==
+                doc::NodeId{40U});
+    // An asset is not a folder to delete.
+    remove.target = doc::NodeId{7U};
+    ASSET_CHECK(!assets::plan_library_edit(root, remove));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 11U> cases{{
+constexpr std::array<Case, 14U> cases{{
+    {"library metadata and folders are parsed and digested",
+     &library_metadata_and_folders_are_parsed_and_digested},
+    {"a dangling or cyclic folder lists at the top level",
+     &a_dangling_or_cyclic_folder_lists_at_the_top_level},
+    {"library edits plan folders filing and names",
+     &library_edits_plan_folders_filing_and_names},
     {"a document becomes the asset registry it describes",
      &a_document_becomes_the_asset_registry_it_describes},
     {"optional probe metadata can be absent",

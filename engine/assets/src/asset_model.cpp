@@ -204,6 +204,19 @@ read_fingerprint(Reader& reader) {
                               *sha256};
 }
 
+[[nodiscard]] doc::NodeId read_folder(Reader& reader) noexcept {
+    const std::optional<std::int64_t> value =
+        reader.optional_integer(schema::folder);
+    if (!value.has_value()) {
+        return {};
+    }
+    if (*value <= 0) {
+        reader.fail();
+        return {};
+    }
+    return doc::NodeId{static_cast<core::u64>(*value)};
+}
+
 } // namespace
 
 core::u32 AssetCounters::over_capacity() const noexcept {
@@ -218,10 +231,25 @@ core::u32 AssetCounters::over_capacity() const noexcept {
                : 0U;
 }
 
-void AssetModel::forget(doc::NodeId id) noexcept { entries_.erase(id); }
+void AssetModel::forget(doc::NodeId id) noexcept {
+    entries_.erase(id);
+    folders_.erase(id);
+}
 
 void AssetModel::put(const doc::Node& node) {
     forget(node.id);
+    if (node.type == schema::folder_type) {
+        Reader reader{node.properties};
+        std::string display_name = reader.text(schema::display_name, "");
+        const doc::NodeId parent = read_folder(reader);
+        if (!reader.ok() || display_name.empty() || parent == node.id) {
+            ++counters_.rejected;
+            return;
+        }
+        folders_.insert_or_assign(
+            node.id, AssetFolder{node.id, std::move(display_name), parent});
+        return;
+    }
     if (node.type != schema::media_type && node.type != schema::model_type &&
         node.type != schema::projection_mesh_type) {
         return;
@@ -230,6 +258,7 @@ void AssetModel::put(const doc::Node& node) {
     Reader reader{node.properties};
     auto [display_name, source] = read_identity(reader);
     const auto fingerprint = read_fingerprint(reader);
+    const doc::NodeId folder = read_folder(reader);
 
     if (node.type == schema::media_type) {
         std::optional<PixelDimensions> dimensions;
@@ -293,6 +322,9 @@ void AssetModel::put(const doc::Node& node) {
             fingerprint,
             requested_proxy_profile,
             proxy_playback_policy,
+            reader.text(schema::media_codec, ""),
+            reader.text(schema::media_start_timecode, ""),
+            folder,
         };
         if (!valid_media_proxy_preferences(media_asset)) {
             reader.fail();
@@ -312,9 +344,24 @@ void AssetModel::put(const doc::Node& node) {
     const auto material_count = projection_mesh
         ? std::optional<core::u32>{}
         : read_u32(reader, schema::model_material_count, true);
-    const auto vertex_count = projection_mesh
-        ? read_positive_u64(reader, schema::projection_vertex_count)
-        : std::optional<core::u64>{};
+    const auto vertex_count = read_positive_u64(
+        reader, projection_mesh ? schema::projection_vertex_count
+                                : schema::model_vertex_count);
+    const auto texture_count = projection_mesh
+        ? std::optional<core::u32>{}
+        : read_u32(reader, schema::model_texture_count, true);
+    std::optional<PixelDimensions> largest_texture;
+    const bool has_texture_width = reader.has(schema::model_texture_width);
+    if (has_texture_width != reader.has(schema::model_texture_height)) {
+        reader.fail();
+    } else if (has_texture_width && !projection_mesh) {
+        const auto width = read_u32(reader, schema::model_texture_width, false);
+        const auto height =
+            read_u32(reader, schema::model_texture_height, false);
+        if (width.has_value() && height.has_value()) {
+            largest_texture = PixelDimensions{*width, *height};
+        }
+    }
     const auto bounds = read_bounds(reader);
     if (!reader.ok()) {
         ++counters_.rejected;
@@ -324,7 +371,8 @@ void AssetModel::put(const doc::Node& node) {
         node.id,
         Asset{ModelAsset{node.id, std::move(display_name), std::move(source),
                          triangle_count, material_count, bounds, vertex_count,
-                         projection_mesh, fingerprint}});
+                         projection_mesh, fingerprint, texture_count,
+                         largest_texture, folder}});
 }
 
 void AssetModel::recount() noexcept {
@@ -356,6 +404,7 @@ void AssetModel::recount() noexcept {
 
 void AssetModel::reset(const doc::Root& root) {
     entries_.clear();
+    folders_.clear();
     counters_ = AssetCounters{};
     apply(diff(doc::Root{}, root));
 }
@@ -397,6 +446,32 @@ AssetRegistry AssetModel::evaluate() const {
             break;
         }
         registry.assets.push_back(asset);
+    }
+
+    registry.folders.reserve(
+        std::min<std::size_t>(folders_.size(), max_asset_folders));
+    for (const auto& [id, folder] : folders_) {
+        static_cast<void>(id);
+        if (registry.folders.size() >= max_asset_folders) {
+            break;
+        }
+        registry.folders.push_back(folder);
+    }
+    // A parent that is missing, over capacity, or that leads back round to
+    // the folder itself files the folder at the top level instead. Parents
+    // are fixed in id order, so the answer never depends on arrival order.
+    for (AssetFolder& folder : registry.folders) {
+        doc::NodeId walk = folder.parent;
+        std::size_t steps = 0U;
+        while (walk != doc::NodeId{}) {
+            const AssetFolder* const parent = registry.folder(walk);
+            if (parent == nullptr || walk == folder.id ||
+                ++steps > registry.folders.size()) {
+                folder.parent = {};
+                break;
+            }
+            walk = parent->parent;
+        }
     }
     return registry;
 }

@@ -1956,6 +1956,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::TimelineLayerOrderIntent> pending_layer_orders;
     std::vector<editor::ElementFlagIntent> pending_element_flags;
     std::vector<editor::ElementRenameIntent> pending_renames;
+    std::vector<editor::ElementHighlightIntent> pending_highlights;
     // Set by the Library's RESCAN control. Nothing rescans on a timer: on a
     // stage the files move under you constantly and a periodic disk read is a
     // periodic stall, so looking again is something the operator asks for.
@@ -1980,8 +1981,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // Pending element creations and deletions from the editor's Add/Edit menus.
     std::vector<editor::AddIntent> pending_adds;
     std::vector<editor::AssetImportIntent> pending_asset_imports;
+    std::vector<editor::AssetRevisionIntent> pending_asset_revisions;
     std::vector<editor::AssetDeleteIntent> pending_asset_deletes;
     std::vector<editor::AssetProxyEditIntent> pending_asset_proxy_edits;
+    std::vector<editor::AssetLibraryEditIntent> pending_asset_library_edits;
     std::vector<editor::SourceReplacementIntent> pending_source_replacements;
     std::vector<editor::EffectIntent> pending_effects;
     std::vector<editor::FilmGrainEffectEditIntent>
@@ -2010,7 +2013,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::FeedSurfaceEditRequest> pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> pending_feed_surface_deletes;
     std::vector<editor::CompositorAddIntent> pending_compositor_adds;
-    std::optional<editor::CompositorMoveIntent> pending_compositor_move;
+    std::vector<editor::CompositorMoveIntent> pending_compositor_moves;
+    std::optional<editor::CompositorClipboardIntent> pending_compositor_clipboard;
+    std::optional<editor::CompositorRenameIntent> pending_compositor_rename;
+    std::optional<editor::CompositorCommentIntent> pending_compositor_comment;
+    std::optional<editor::CompositorCollapseIntent> pending_compositor_collapse;
+    std::optional<editor::CompositorBypassIntent> pending_compositor_bypass;
+    std::optional<editor::CompositorReorderIntent> pending_compositor_reorder;
+    std::vector<doc::Node> compositor_clipboard;
     std::optional<editor::CompositorConnectIntent> pending_compositor_connect;
     std::optional<editor::CompositorRewireIntent> pending_compositor_rewire;
     std::optional<editor::CompositorWaypointIntent> pending_compositor_waypoints;
@@ -2266,6 +2276,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     core::u64 asset_manifest_digest = 0U;
     bool assets_loaded = false;
     ProjectAssetAvailability director_asset_availability;
+    std::vector<ChangedLibrarySource> changed_library_sources;
+    std::vector<doc::NodeId> changed_library_assets;
 #if defined(MEDIASERVER_HAS_GUI)
     editor::EditorPreferencesState preferences_view{};
     // The stored render node password, as its derived key. Saved from the
@@ -2405,6 +2417,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_layer_orders = pending_layer_orders,
         .pending_element_flags = pending_element_flags,
         .pending_renames = pending_renames,
+        .pending_highlights = pending_highlights,
         .pending_asset_rescan = pending_asset_rescan,
         .pending_timeline_edits = pending_timeline_edits,
         .pending_group_edit = pending_group_edit,
@@ -2421,8 +2434,10 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_locks = pending_locks,
         .pending_adds = pending_adds,
         .pending_asset_imports = pending_asset_imports,
+        .pending_asset_revisions = pending_asset_revisions,
         .pending_asset_deletes = pending_asset_deletes,
         .pending_asset_proxy_edits = pending_asset_proxy_edits,
+        .pending_asset_library_edits = pending_asset_library_edits,
         .pending_source_replacements = pending_source_replacements,
         .pending_effects = pending_effects,
         .pending_film_grain_effect_edits = pending_film_grain_effect_edits,
@@ -2447,7 +2462,14 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_feed_surface_edits = pending_feed_surface_edits,
         .pending_feed_surface_deletes = pending_feed_surface_deletes,
         .pending_compositor_adds = pending_compositor_adds,
-        .pending_compositor_move = pending_compositor_move,
+        .pending_compositor_moves = pending_compositor_moves,
+        .pending_compositor_clipboard = pending_compositor_clipboard,
+        .pending_compositor_rename = pending_compositor_rename,
+        .pending_compositor_comment = pending_compositor_comment,
+        .pending_compositor_collapse = pending_compositor_collapse,
+        .pending_compositor_bypass = pending_compositor_bypass,
+        .pending_compositor_reorder = pending_compositor_reorder,
+        .compositor_clipboard = compositor_clipboard,
         .pending_compositor_connect = pending_compositor_connect,
         .pending_compositor_rewire = pending_compositor_rewire,
         .pending_compositor_waypoints = pending_compositor_waypoints,
@@ -2559,6 +2581,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .asset_manifest_digest = asset_manifest_digest,
         .assets_loaded = assets_loaded,
         .director_asset_availability = director_asset_availability,
+        .changed_library_sources = changed_library_sources,
+        .changed_library_assets = changed_library_assets,
 #if defined(MEDIASERVER_HAS_GUI)
         .preferences_view = preferences_view,
         .stored_password_key = stored_password_key,

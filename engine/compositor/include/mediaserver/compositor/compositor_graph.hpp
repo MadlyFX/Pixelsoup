@@ -34,7 +34,16 @@ enum class NodeKind : core::u8 {
     LedCarProcess,
     Composite,
     Output,
+    // Lays images over a base with one blend mode and opacity, or - with
+    // nothing wired to LAYERS - blends the base against a constant.
+    Merge,
+    // A generated image: a solid colour or a gradient across the canvas.
+    Background,
 };
+
+// One past the last kind, for tables indexed by kind. Output is not last.
+inline constexpr std::size_t node_kind_count =
+    static_cast<std::size_t>(NodeKind::Background) + 1U;
 
 [[nodiscard]] constexpr std::string_view
 node_kind_name(NodeKind kind) noexcept {
@@ -79,14 +88,24 @@ node_kind_name(NodeKind kind) noexcept {
         return "Composite";
     case NodeKind::Output:
         return "Output";
+    case NodeKind::Merge:
+        return "Merge";
+    case NodeKind::Background:
+        return "Background";
     }
     return "Node";
 }
 
+// Effects come in two kinds, carried by different wires. An effect (Effect)
+// - colour, grain - is applied pointwise while a drawable is shaded; a
+// spatial filter (Filter) - a blur or a key - reads the finished, isolated
+// layer. Every effect therefore runs before every filter, and the separate
+// value types make that order part of how a graph is wired.
 enum class PortValueType : core::u8 {
     Image,
     Effect,
     TransformSet,
+    Filter,
 };
 
 enum class PortDirection : core::u8 {
@@ -201,6 +220,130 @@ struct CompositeParameters final {
     bool operator==(const CompositeParameters&) const = default;
 };
 
+// How one image lands on another. Normal, Add, Multiply and Screen share
+// scene::BlendMode's values; the rest exist only on a Merge.
+enum class MergeBlendMode : core::u8 {
+    Normal = 0U,
+    Add = 1U,
+    Multiply = 2U,
+    Screen = 3U,
+    Subtract = 4U,
+    Overlay = 5U,
+    Lighten = 6U,
+    Darken = 7U,
+    Difference = 8U,
+};
+
+inline constexpr core::u8 merge_blend_mode_count = 9U;
+
+[[nodiscard]] constexpr std::string_view
+merge_blend_mode_name(MergeBlendMode mode) noexcept {
+    switch (mode) {
+    case MergeBlendMode::Normal:
+        return "Normal";
+    case MergeBlendMode::Add:
+        return "Add";
+    case MergeBlendMode::Multiply:
+        return "Multiply";
+    case MergeBlendMode::Screen:
+        return "Screen";
+    case MergeBlendMode::Subtract:
+        return "Subtract";
+    case MergeBlendMode::Overlay:
+        return "Overlay";
+    case MergeBlendMode::Lighten:
+        return "Lighten";
+    case MergeBlendMode::Darken:
+        return "Darken";
+    case MergeBlendMode::Difference:
+        return "Difference";
+    }
+    return "Normal";
+}
+
+inline constexpr float max_merge_value = 16.0F;
+
+struct MergeParameters final {
+    MergeBlendMode blend{MergeBlendMode::Normal};
+    // [0, 1]: how much of each landed layer, or of the constant, shows.
+    float opacity{1.0F};
+    // What LAYERS presents while nothing is wired to it: BASE is blended
+    // against this constant, so Multiply scales its brightness and Add lifts
+    // it. Normal has no constant to lay over and leaves BASE unchanged.
+    // [0, max_merge_value].
+    float value{1.0F};
+
+    bool operator==(const MergeParameters&) const = default;
+};
+
+// True when a Merge with nothing wired to LAYERS leaves BASE exactly as it
+// is: nothing to blend against, or a constant that changes nothing.
+[[nodiscard]] constexpr bool
+merge_constant_is_identity(const MergeParameters& parameters) noexcept {
+    if (parameters.opacity <= 0.0F) {
+        return true;
+    }
+    switch (parameters.blend) {
+    case MergeBlendMode::Normal:
+        return true;
+    case MergeBlendMode::Multiply:
+        return parameters.value == 1.0F;
+    case MergeBlendMode::Add:
+    case MergeBlendMode::Subtract:
+    case MergeBlendMode::Lighten:
+        return parameters.value == 0.0F;
+    case MergeBlendMode::Screen:
+    case MergeBlendMode::Overlay:
+    case MergeBlendMode::Darken:
+    case MergeBlendMode::Difference:
+        return false;
+    }
+    return false;
+}
+
+enum class BackgroundMode : core::u8 {
+    Solid = 0U,
+    Linear = 1U,
+    Radial = 2U,
+};
+
+// Straight (unpremultiplied) colour as the operator picks it: display
+// referred, each channel [0, 1].
+struct BackgroundColor final {
+    float r{};
+    float g{};
+    float b{};
+    float a{1.0F};
+
+    bool operator==(const BackgroundColor&) const = default;
+};
+
+// Positions are in the authored canvas, so every node of a wall computes the
+// same colour for the same canvas pixel.
+struct BackgroundParameters final {
+    BackgroundMode mode{BackgroundMode::Solid};
+    // Solid uses A alone; a gradient runs from A at its start (Linear) or
+    // centre (Radial) to B.
+    BackgroundColor color_a{0.0F, 0.0F, 0.0F, 1.0F};
+    BackgroundColor color_b{1.0F, 1.0F, 1.0F, 1.0F};
+    // Linear direction from A to B, clockwise on the canvas: 0 runs left to
+    // right, a quarter turn top to bottom.
+    scene::Turns angle{};
+    // The gradient's midpoint (Linear) or centre (Radial), as fractions of
+    // the canvas width and height.
+    float center_x{0.5F};
+    float center_y{0.5F};
+    // Linear: the ramp's length as a fraction of the canvas measured along
+    // its direction. Radial: the radius as a fraction of half the canvas
+    // diagonal, so 1 reaches the corners. (0, max_background_gradient_size].
+    float size{1.0F};
+
+    bool operator==(const BackgroundParameters&) const = default;
+};
+
+inline constexpr float max_background_gradient_size = 64.0F;
+inline constexpr float max_background_center = 64.0F;
+
 struct OutputParameters final {
     // False is the non-destructive editor default: unconnected scene drawables
     // pass through below the graph-managed layers. True opts into the legacy
@@ -221,7 +364,9 @@ using NodeParameters =
                   RadialArrayParameters,
                   LedCarProcessParameters,
                   CompositeParameters,
-                 OutputParameters>;
+                 OutputParameters,
+                 MergeParameters,
+                 BackgroundParameters>;
 
 struct GraphNode final {
     doc::NodeId node{};
@@ -232,15 +377,33 @@ struct GraphNode final {
     std::string label;
     float editor_x{};
     float editor_y{};
+    // Editor layout: drawn as its title and connected ports. Not evaluated,
+    // planned or digested.
+    bool collapsed{};
+    // Passed through: the node renders exactly as its identity. Only effect
+    // and Radial Array nodes can be bypassed; on any other kind the authored
+    // flag reads as false. Render-affecting, so it is digested.
+    bool bypassed{};
     NodeParameters parameters{SceneLayerParameters{}};
 
     bool operator==(const GraphNode&) const = default;
 };
 
+// Effect nodes, Radial Array and Merge can be bypassed: each has an identity
+// to pass through as (a Merge passes its BASE). Scene Layer, Background,
+// Matte, LED Car Process, Composite and Output shape the image path itself
+// and cannot.
+[[nodiscard]] constexpr bool node_kind_bypassable(NodeKind kind) noexcept {
+    return kind != NodeKind::SceneLayer && kind != NodeKind::Matte &&
+        kind != NodeKind::LedCarProcess && kind != NodeKind::Composite &&
+        kind != NodeKind::Output && kind != NodeKind::Background;
+}
+
 // Returns true only for pointwise/spatial effect nodes whose validated
-// parameters request their documented identity operation. Structural nodes
-// are never identities here. Keeping this decision in the graph model makes
-// order validation and scene application agree exactly.
+// parameters request their documented identity operation, and for any
+// bypassed node. Structural nodes are never identities here. Keeping this
+// decision in the graph model makes order validation and scene application
+// agree exactly.
 [[nodiscard]] bool effect_node_is_identity(const GraphNode& node) noexcept;
 
 struct EdgeEndpoint final {
@@ -255,6 +418,25 @@ struct WirePoint final {
     float y{};
     bool operator==(const WirePoint&) const = default;
 };
+
+// A comment box drawn around part of a graph. Layout only: never part of
+// evaluation, planning, or the digests.
+struct GraphComment final {
+    doc::NodeId node{};
+    doc::NodeId scene{};
+    std::string title;
+    float x{};
+    float y{};
+    float width{};
+    float height{};
+    // An index into the editor's comment colours.
+    core::u8 color{};
+    bool operator==(const GraphComment&) const = default;
+};
+
+// Comment colours the editor offers, and the smallest box it draws.
+inline constexpr core::u8 comment_color_count = 6U;
+inline constexpr float min_comment_extent = 48.0F;
 
 // More points than any readable wire needs; a list beyond it is refused.
 inline constexpr std::size_t max_wire_points = 16U;
@@ -285,10 +467,8 @@ enum class DiagnosticCode : core::u8 {
     // active branches for the same drawable cannot yet carry branch-local
     // effects without leaking them into one another.
     DuplicateSceneLayerReference = 10U,
-    // SceneLayer effects execute inline before spatial isolation. An inline
-    // effect connected after Blur would therefore claim an order the executor
-    // cannot preserve, so the authored graph remains visible but unplannable.
-    UnsupportedEffectOrder = 11U,
+    // 11 was UnsupportedEffectOrder, before effects and filters had
+    // inputs of their own.
     Cycle = 12U,
     // A retained editor branch that cannot contribute to any Output. This is
     // informational: operators may keep alternatives parked in the graph.
@@ -308,6 +488,10 @@ enum class DiagnosticCode : core::u8 {
     // A consumed matte image must not also reach Output through another image
     // path, which would render it once as coverage and again as visible colour.
     MatteBranchAlsoOutputReachable = 19U,
+    // Merges, and Composites feeding another image node, each render into an
+    // intermediate image of their own. More than max_merge_nesting of them
+    // stacked inside one another is refused rather than flattened.
+    MergeNestingTooDeep = 20U,
 };
 
 enum class DiagnosticSeverity : core::u8 {
@@ -388,6 +572,11 @@ struct GraphResourceEstimate final {
     core::u32 chroma_keyed_scene_layers{};
     core::u32 luma_keyed_scene_layers{};
     core::u32 matte_nodes{};
+    core::u32 merge_nodes{};
+    core::u32 background_nodes{};
+    // The deepest stack of intermediate images on the way to Output: each
+    // Merge, and each Composite that feeds another image node, adds one.
+    core::u32 merge_nesting{};
     core::u32 offscreen_textures{};
     core::u64 bytes_per_texture{};
     // Sum of the full-canvas color/depth targets above. This is an authored
@@ -451,6 +640,9 @@ inline constexpr float max_directional_blur_length =
     scene::max_directional_blur_length_px;
 inline constexpr float max_spatial_extent = 1'000'000.0F;
 inline constexpr float max_led_car_horizontal_blend = 0.5F;
+// Intermediate images one Output path may stack. Each level holds a pair of
+// full-canvas targets while it is open.
+inline constexpr core::u32 max_merge_nesting = 4U;
 // Facility-independent graph budgets. They intentionally describe authored
 // work rather than querying one adapter's VRAM or driver limits.
 inline constexpr core::u32 max_graph_render_passes = 128U;
@@ -464,6 +656,8 @@ struct CompositorGraph final {
     std::vector<GraphNode> nodes;
     std::vector<GraphEdge> edges;
     std::vector<GraphDiagnostic> diagnostics;
+    // Ascending by document id, like nodes and edges.
+    std::vector<GraphComment> comments;
     CompositorPlan plan;
     std::vector<GraphNodeMetadata> node_metadata;
     GraphResourceEstimate resources;

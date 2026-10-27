@@ -116,6 +116,41 @@ void the_three_buttons_map_to_their_own_indices() {
     UI_CHECK(input.mouse_down(gui::MouseButton::Right));
 }
 
+// Files dragged in from the desktop: the drag is reported while it is over
+// the window, each file arrives with where it was let go (scaled like the
+// pointer), and the paths last exactly one frame.
+void dropped_files_arrive_with_their_drop_point_for_one_frame() {
+    gui::InputState input;
+    input.new_frame();
+    char first[] = "C:/shoot/A001.mov";
+    char second[] = "C:/shoot/A002.mov";
+    SDL_Event event{};
+    event.type = SDL_EVENT_DROP_POSITION;
+    event.drop.x = 300.0F;
+    event.drop.y = 120.0F;
+    UI_CHECK(gui::translate_event(&event, input, 0.5F));
+    UI_CHECK(input.file_drag_over());
+    UI_CHECK(near(input.file_drag_x(), 150.0F));
+    for (char* const path : {first, second}) {
+        event = SDL_Event{};
+        event.type = SDL_EVENT_DROP_FILE;
+        event.drop.x = 320.0F;
+        event.drop.y = 140.0F;
+        event.drop.data = path;
+        UI_CHECK(gui::translate_event(&event, input, 0.5F));
+    }
+    event = SDL_Event{};
+    event.type = SDL_EVENT_DROP_COMPLETE;
+    UI_CHECK(gui::translate_event(&event, input, 0.5F));
+    UI_CHECK(!input.file_drag_over());
+    UI_CHECK(input.dropped_files().size() == 2U);
+    UI_CHECK(input.dropped_files()[1] == "C:/shoot/A002.mov");
+    UI_CHECK(near(input.drop_x(), 160.0F));
+    UI_CHECK(near(input.drop_y(), 70.0F));
+    input.new_frame();
+    UI_CHECK(input.dropped_files().empty());
+}
+
 void one_native_batch_keeps_scaled_press_and_release_endpoints() {
     gui::InputState input;
     input.new_frame();
@@ -508,7 +543,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 19U> cases{{
+constexpr std::array<Case, 20U> cases{{
+    {"dropped files arrive with their drop point for one frame",
+     &dropped_files_arrive_with_their_drop_point_for_one_frame},
     {"one native batch keeps scaled press and release endpoints",
      &one_native_batch_keeps_scaled_press_and_release_endpoints},
     {"motion moves the pointer", &motion_moves_the_pointer},

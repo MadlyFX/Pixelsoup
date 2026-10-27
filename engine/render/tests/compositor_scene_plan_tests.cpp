@@ -98,7 +98,7 @@ graph_of(const std::vector<doc::Node>& nodes) {
         node(12U, schema::composite_type),
         node(13U, schema::output_type),
         edge(20U, 1U, 0U, 10U, 0U),
-        edge(21U, 2U, 0U, 10U, 0U),
+        edge(21U, 2U, 0U, 10U, 2U),
         edge(22U, 3U, 0U, 10U, 1U),
         edge(23U, 10U, 0U, 12U, 0U, 10),
         edge(24U, 11U, 0U, 12U, 0U, -5),
@@ -389,7 +389,10 @@ void output_can_explicitly_replace_the_whole_scene() {
         [](const auto& pass) { return pass.scene_node == doc::NodeId{999U}; }));
 }
 
-void nested_image_composites_are_rejected_explicitly() {
+// A Composite inside a Composite is composited by itself first and lands as
+// one image, never spilled into the outer stack where its layers would blend
+// against everything below.
+void a_nested_composite_lands_as_one_image() {
     auto nodes = flat_graph_nodes();
     // Remove Composite -> Output, then insert a nested Composite in between.
     nodes.pop_back();
@@ -399,12 +402,255 @@ void nested_image_composites_are_rejected_explicitly() {
     const auto graph = graph_of(nodes);
     PLAN_CHECK(graph.valid());
     scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Add));
+    source.instances.push_back(instance(101U, scene::BlendMode::Normal));
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    PLAN_CHECK(plan.layers.size() == 2U);
+    using Kind = render::CompositorStepKind;
+    using Blend = compositor::MergeBlendMode;
+    PLAN_CHECK(plan.steps.size() == 4U);
+    PLAN_CHECK(plan.steps[0U].kind == Kind::BeginGroup);
+    PLAN_CHECK(plan.steps[0U].graph_node == doc::NodeId{12U});
+    // Edge order puts 101 (order -5) below 100 (order 10), which keeps its
+    // own additive blend inside the inner image.
+    PLAN_CHECK(plan.steps[1U].kind == Kind::Layer);
+    PLAN_CHECK(plan.steps[1U].index == 0U);
+    PLAN_CHECK(plan.layers[0U].scene_node == doc::NodeId{101U});
+    PLAN_CHECK(plan.steps[2U].kind == Kind::Layer);
+    PLAN_CHECK(plan.steps[2U].index == 1U);
+    PLAN_CHECK(plan.steps[2U].blend == Blend::Add);
+    PLAN_CHECK(plan.steps[3U].kind == Kind::EndGroup);
+    PLAN_CHECK(plan.steps[3U].blend == Blend::Normal);
+    PLAN_CHECK(plan.steps[3U].opacity == 1.0F);
+    PLAN_CHECK(!plan.steps[3U].constant.has_value());
+}
+
+[[nodiscard]] Property word(std::string_view name, std::string_view value) {
+    return {std::string{name}, doc::PropertyValue{std::string{value}}};
+}
+
+// Output 13 <- Merge 14: BASE <- layer 10 (scene 100); LAYERS <- layer 11
+// (scene 101), then Background 15 when `background` is set.
+[[nodiscard]] std::vector<doc::Node>
+merge_graph_nodes(std::initializer_list<Property> merge, bool layers,
+                  bool background) {
+    std::vector<doc::Node> nodes{
+        node(100U, "scene.object"), node(101U, "scene.object"),
+        layer(10U, 100U),           layer(11U, 101U),
+        node(14U, schema::merge_type, merge),
+        node(13U, schema::output_type),
+        edge(20U, 10U, 0U, 14U, 0U), edge(23U, 14U, 0U, 13U, 0U),
+    };
+    if (layers) {
+        nodes.push_back(edge(21U, 11U, 0U, 14U, 1U, 0));
+    }
+    if (background) {
+        nodes.push_back(node(15U, schema::background_type));
+        nodes.push_back(edge(22U, 15U, 0U, 14U, 1U, 1));
+    }
+    return nodes;
+}
+
+void a_merge_lands_its_layers_on_its_base_as_one_image() {
+    const auto graph = graph_of(merge_graph_nodes(
+        {word(schema::blend_mode, "multiply"), real(schema::opacity, 0.5)},
+        true, true));
+    PLAN_CHECK(graph.valid());
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(101U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(999U, scene::BlendMode::Screen));
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    using Kind = render::CompositorStepKind;
+    using Blend = compositor::MergeBlendMode;
+    // The pass-through drawable lands first with its own blend, then the
+    // Merge opens an image of its own over it.
+    PLAN_CHECK(plan.layers.size() == 3U);
+    PLAN_CHECK(plan.layers[0U].scene_node == doc::NodeId{999U});
+    PLAN_CHECK(plan.layers[1U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(plan.layers[2U].scene_node == doc::NodeId{101U});
+    PLAN_CHECK(plan.backgrounds.size() == 1U);
+    PLAN_CHECK(plan.backgrounds[0U].graph_node == doc::NodeId{15U});
+    PLAN_CHECK(plan.steps.size() == 6U);
+    PLAN_CHECK(plan.steps[0U].kind == Kind::Layer &&
+               plan.steps[0U].index == 0U &&
+               plan.steps[0U].blend == Blend::Screen);
+    PLAN_CHECK(plan.steps[1U].kind == Kind::BeginGroup &&
+               plan.steps[1U].graph_node == doc::NodeId{14U});
+    // BASE lands on transparency as itself.
+    PLAN_CHECK(plan.steps[2U].kind == Kind::Layer &&
+               plan.steps[2U].index == 1U &&
+               plan.steps[2U].blend == Blend::Normal &&
+               plan.steps[2U].opacity == 1.0F);
+    // LAYERS land in wire order with the Merge's blend and opacity.
+    PLAN_CHECK(plan.steps[3U].kind == Kind::Layer &&
+               plan.steps[3U].index == 2U &&
+               plan.steps[3U].blend == Blend::Multiply &&
+               plan.steps[3U].opacity == 0.5F);
+    PLAN_CHECK(plan.steps[4U].kind == Kind::Background &&
+               plan.steps[4U].index == 0U &&
+               plan.steps[4U].blend == Blend::Multiply &&
+               plan.steps[4U].opacity == 0.5F);
+    // The finished Merge lands as one ordinary image, with no constant.
+    PLAN_CHECK(plan.steps[5U].kind == Kind::EndGroup &&
+               plan.steps[5U].blend == Blend::Normal &&
+               plan.steps[5U].opacity == 1.0F &&
+               !plan.steps[5U].constant.has_value());
+}
+
+void an_unwired_merge_blends_its_base_with_its_constant() {
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(101U, scene::BlendMode::Normal));
+    using Kind = render::CompositorStepKind;
+    using Blend = compositor::MergeBlendMode;
+
+    const auto scaled = graph_of(merge_graph_nodes(
+        {word(schema::blend_mode, "multiply"), real(schema::value, 0.5),
+         real(schema::opacity, 0.75)},
+        false, false));
+    PLAN_CHECK(scaled.valid());
+    const auto built = render::plan_compositor_scene(scaled, source);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    // 101 is not on the Output path, so it passes through below.
+    PLAN_CHECK(plan.layers.size() == 2U);
+    PLAN_CHECK(plan.steps.size() == 4U);
+    PLAN_CHECK(plan.steps[1U].kind == Kind::BeginGroup);
+    PLAN_CHECK(plan.steps[2U].kind == Kind::Layer &&
+               plan.steps[2U].index == 1U);
+    PLAN_CHECK(plan.steps[3U].kind == Kind::EndGroup &&
+               plan.steps[3U].blend == Blend::Normal &&
+               plan.steps[3U].opacity == 1.0F);
+    PLAN_CHECK(plan.steps[3U].constant ==
+               (render::CompositorConstantBlend{Blend::Multiply, 0.5F, 0.75F}));
+
+    // A constant that changes nothing opens nothing: BASE lands directly.
+    for (const auto& identity :
+         {merge_graph_nodes({}, false, false),
+          merge_graph_nodes({word(schema::blend_mode, "add"),
+                             real(schema::value, 0.0)},
+                            false, false),
+          merge_graph_nodes({word(schema::blend_mode, "multiply"),
+                             real(schema::opacity, 0.0)},
+                            false, false)}) {
+        const auto graph = graph_of(identity);
+        PLAN_CHECK(graph.valid());
+        const auto direct = render::plan_compositor_scene(graph, source);
+        PLAN_CHECK(direct.has_value());
+        PLAN_CHECK(direct.value().steps.size() == 2U);
+        PLAN_CHECK(std::none_of(
+            direct.value().steps.begin(), direct.value().steps.end(),
+            [](const render::CompositorStep& step) {
+                return step.kind != Kind::Layer;
+            }));
+    }
+}
+
+void a_bypassed_merge_is_its_base_and_shows_none_of_its_layers() {
+    const auto graph = graph_of(merge_graph_nodes(
+        {word(schema::blend_mode, "screen"),
+         {std::string{schema::bypassed}, doc::PropertyValue{true}}},
+        true, true));
+    PLAN_CHECK(graph.valid());
+    scene::Scene source{};
     source.instances.push_back(instance(100U, scene::BlendMode::Normal));
     source.instances.push_back(instance(101U, scene::BlendMode::Normal));
     const auto built = render::plan_compositor_scene(graph, source);
-    PLAN_CHECK(!built.has_value());
-    PLAN_CHECK(built.error() ==
-               render::CompositorScenePlanError::UnsupportedTopology);
+    PLAN_CHECK(built.has_value());
+    const auto& plan = built.value();
+    // 101 is wired into the bypassed LAYERS: it neither renders there nor
+    // falls through to the pass-through stack.
+    PLAN_CHECK(plan.layers.size() == 1U);
+    PLAN_CHECK(plan.layers[0U].scene_node == doc::NodeId{100U});
+    PLAN_CHECK(plan.backgrounds.empty());
+    PLAN_CHECK(plan.steps.size() == 1U);
+    PLAN_CHECK(plan.steps[0U].kind == render::CompositorStepKind::Layer);
+    PLAN_CHECK(plan.steps[0U].blend == compositor::MergeBlendMode::Normal);
+}
+
+void a_layer_blending_by_itself_is_resolved_before_a_merge_lands_it() {
+    const auto graph = graph_of(merge_graph_nodes(
+        {word(schema::blend_mode, "lighten")}, true, false));
+    PLAN_CHECK(graph.valid());
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(101U, scene::BlendMode::Add));
+    const auto built = render::plan_compositor_scene(graph, source);
+    PLAN_CHECK(built.has_value());
+    using Kind = render::CompositorStepKind;
+    using Blend = compositor::MergeBlendMode;
+    const auto& steps = built.value().steps;
+    PLAN_CHECK(steps.size() == 6U);
+    PLAN_CHECK(steps[0U].kind == Kind::BeginGroup);
+    PLAN_CHECK(steps[1U].kind == Kind::Layer && steps[1U].index == 0U);
+    PLAN_CHECK(steps[2U].kind == Kind::BeginGroup);
+    PLAN_CHECK(steps[3U].kind == Kind::Layer && steps[3U].index == 1U &&
+               steps[3U].blend == Blend::Add);
+    PLAN_CHECK(steps[4U].kind == Kind::EndGroup &&
+               steps[4U].blend == Blend::Lighten);
+    PLAN_CHECK(steps[5U].kind == Kind::EndGroup &&
+               steps[5U].blend == Blend::Normal);
+}
+
+// A Matte's matte is a second isolated Scene Layer, rendered by a renderer of
+// its own and never shown, or a Background generated for it.
+void a_matte_takes_a_scene_layer_or_a_background_as_its_matte() {
+    scene::Scene source{};
+    source.instances.push_back(instance(100U, scene::BlendMode::Normal));
+    source.instances.push_back(instance(101U, scene::BlendMode::Normal));
+    const auto matte_graph = [](core::u64 matte_source,
+                                std::string_view matte_type) {
+        std::vector<doc::Node> nodes{
+            node(100U, "scene.object"), node(101U, "scene.object"),
+            layer(10U, 100U),
+            node(14U, schema::matte_type, {word(schema::matte_mode, "luma")}),
+            node(13U, schema::output_type),
+            edge(20U, 10U, 0U, 14U, 0U),
+            edge(21U, matte_source, 0U, 14U, 1U),
+            edge(23U, 14U, 0U, 13U, 0U)};
+        nodes.push_back(matte_type == schema::scene_layer_type
+                            ? layer(matte_source, 101U)
+                            : node(matte_source, matte_type));
+        return graph_of(nodes);
+    };
+
+    const auto layered = matte_graph(11U, schema::scene_layer_type);
+    PLAN_CHECK(layered.valid());
+    const auto scene_plan = render::plan_compositor_scene(layered, source);
+    PLAN_CHECK(scene_plan.has_value());
+    // 101 is consumed as coverage: neither a visible layer nor pass-through.
+    PLAN_CHECK(scene_plan.value().layers.size() == 1U);
+    const auto& matted = scene_plan.value().layers[0U];
+    PLAN_CHECK(matted.scene_node == doc::NodeId{100U});
+    PLAN_CHECK(matted.matte.has_value() &&
+               matted.matte->mode == compositor::MatteMode::Luma);
+    PLAN_CHECK(matted.matte_branch.has_value());
+    PLAN_CHECK(matted.matte_branch->scene_node == doc::NodeId{101U});
+    PLAN_CHECK(!matted.matte_branch->background.has_value());
+
+    const auto generated = matte_graph(15U, schema::background_type);
+    PLAN_CHECK(generated.valid());
+    const auto background_plan =
+        render::plan_compositor_scene(generated, source);
+    PLAN_CHECK(background_plan.has_value());
+    // 101 is not on the Output path now, so it passes through below.
+    PLAN_CHECK(background_plan.value().layers.size() == 2U);
+    const auto& cut = background_plan.value().layers[1U];
+    PLAN_CHECK(cut.scene_node == doc::NodeId{100U});
+    PLAN_CHECK(cut.matte_branch.has_value());
+    PLAN_CHECK(cut.matte_branch->graph_node == doc::NodeId{15U});
+    PLAN_CHECK(cut.matte_branch->background ==
+               compositor::BackgroundParameters{});
+    // What the matte leaves of 100 is no hard silhouette, so the layer below
+    // never takes it as an occluder; 101 is still one for the matted layer.
+    PLAN_CHECK(background_plan.value().layers[0U].depth_only_nodes.empty());
+    PLAN_CHECK(cut.depth_only_nodes ==
+               std::vector<doc::NodeId>({doc::NodeId{101U}}));
 }
 
 void a_document_reference_must_resolve_to_a_drawable() {
@@ -902,7 +1148,7 @@ void scene_and_graph_effect_order_is_validated_as_one_stack() {
         node(1U, schema::blur_type, {real(schema::radius, 4.0)}),
         layer(2U, 10U),
         node(3U, schema::output_type),
-        edge(4U, 1U, 0U, 2U, 0U),
+        edge(4U, 1U, 0U, 2U, 2U),
         edge(5U, 2U, 0U, 3U, 0U),
     });
     source.effects.clear();
@@ -1192,7 +1438,17 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 31U> cases{{
+constexpr std::array<Case, 36U> cases{{
+    {"a Matte takes a Scene Layer or a Background as its matte",
+     &a_matte_takes_a_scene_layer_or_a_background_as_its_matte},
+    {"a Merge lands its layers on its base as one image",
+     &a_merge_lands_its_layers_on_its_base_as_one_image},
+    {"an unwired Merge blends its base with its constant",
+     &an_unwired_merge_blends_its_base_with_its_constant},
+    {"a bypassed Merge is its base and shows none of its layers",
+     &a_bypassed_merge_is_its_base_and_shows_none_of_its_layers},
+    {"a layer blending by itself is resolved before a Merge lands it",
+     &a_layer_blending_by_itself_is_resolved_before_a_merge_lands_it},
     {"a flat graph becomes an ordered layer plan",
      &a_flat_graph_becomes_an_ordered_layer_plan},
     {"a direct scene layer preserves unconnected drawables",
@@ -1205,8 +1461,8 @@ constexpr std::array<Case, 31U> cases{{
      &led_car_process_accepts_unpopulated_plate_sockets},
     {"Output can explicitly replace the whole scene",
      &output_can_explicitly_replace_the_whole_scene},
-    {"nested image composites are rejected explicitly",
-     &nested_image_composites_are_rejected_explicitly},
+    {"a nested Composite lands as one image",
+     &a_nested_composite_lands_as_one_image},
     {"a document reference must resolve to a drawable",
      &a_document_reference_must_resolve_to_a_drawable},
     {"invalid graphs never form partial render plans",
