@@ -11,6 +11,7 @@
 #include "director_key_authoring.hpp"
 #include "director_scene_authoring.hpp"
 #include "key_clipboard.hpp"
+#include "scene_duplicate.hpp"
 #include "mask_edit_integration.hpp"
 #include "project_asset_import.hpp"
 #include "source_replacement_authoring.hpp"
@@ -76,6 +77,7 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         pending_selection_set_edit.reset();
         pending_mask_edit.reset();
         pending_clip_paste.reset();
+        pending_scene_duplicates.clear();
         pending_key_paste.reset();
         pending_project_settings.reset();
         pending_properties.clear();
@@ -1090,6 +1092,24 @@ PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
         }
         pending_clip_paste.reset();
     }
+    for (const editor::SceneDuplicateRequest &request :
+         pending_scene_duplicates) {
+        // In place, before the drag that carries the originals away lands.
+        auto planned = duplicate_in_place(scheduler.projected_document(),
+                                          request.selection, next_new_node);
+        if (!planned.has_value()) {
+            continue;
+        }
+        if (!scheduler.schedule_document_replace(
+                planned->document, cmd::UndoContextId{2U},
+                cmd::TransactionId{request.transaction}, frame)) {
+            std::cerr << "could not author a duplicate for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        next_new_node = planned->next_node;
+    }
+    pending_scene_duplicates.clear();
     if (pending_project_settings.has_value()) {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {

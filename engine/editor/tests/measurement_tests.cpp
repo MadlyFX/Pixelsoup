@@ -9,6 +9,7 @@
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
@@ -187,20 +188,38 @@ struct Harness final {
     doc::NodeId primary{box_node};
     gui::Rect image{};
 
-    static constexpr gui::Rect bounds{0.0F, 0.0F, 1000.0F, 1000.0F};
+    gui::Rect bounds{0.0F, 0.0F, 1000.0F, 1000.0F};
 
     editor::ViewportFrame frame(float x, float y, bool down,
                                 std::string_view text = {},
-                                bool escape = false, bool shift = false) {
+                                bool escape = false, bool shift = false,
+                                gui::KeyMods mods = gui::KeyMods::None) {
         input.new_frame();
         input.set_mouse_position(x, y);
         input.set_mouse_button(gui::MouseButton::Left, down);
-        input.set_mods(shift ? gui::KeyMods::Shift : gui::KeyMods::None);
+        input.set_mods(shift ? mods | gui::KeyMods::Shift : mods);
         if (!text.empty()) {
             input.add_text(text);
         }
         if (escape) {
             input.add_key(gui::Key::Escape);
+        }
+        ctx.new_frame(0.0);
+        editor::ViewportFrame out =
+            panel.draw(ctx, bounds, target, view, selection, primary);
+        ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
+        image = out.image;
+        return out;
+    }
+
+    editor::ViewportFrame middle(float x, float y, bool down,
+                                 std::string_view text = {}) {
+        input.new_frame();
+        input.set_mouse_position(x, y);
+        input.set_mouse_button(gui::MouseButton::Middle, down);
+        input.set_mods(gui::KeyMods::None);
+        if (!text.empty()) {
+            input.add_text(text);
         }
         ctx.new_frame(0.0);
         editor::ViewportFrame out =
@@ -364,6 +383,141 @@ void holding_v_puts_the_dragged_vertex_on_the_vertex_under_the_pointer() {
     static_cast<void>(h.frame(onto.x, onto.y, false));
 }
 
+void ctrl_alt_drag_boxes_a_selection_and_alt_on_a_gizmo_duplicates() {
+    Harness h;
+    static_cast<void>(with_crate(h));
+    h.selection.clear();
+    h.primary = {};
+    static_cast<void>(h.frame(500.0F, 500.0F, false));
+    const gui::UiPoint crate = h.at(scene::Vec3{3.0F, 0.25F, 0.0F});
+    const auto boxed = [&](bool shift) {
+        const gui::KeyMods chord = gui::KeyMods::Ctrl | gui::KeyMods::Alt;
+        const auto pressed = h.frame(crate.x - 10.0F, crate.y - 10.0F, true, {},
+                                     false, shift, chord);
+        // A box never picks, and never hands the drag to the camera.
+        check(pressed.pressed, "box press registers", __LINE__);
+        check(!pressed.picked.has_value() &&
+                  pressed.empty_canvas == editor::EmptyCanvasInteraction::None,
+              "box press", __LINE__);
+        static_cast<void>(h.frame(crate.x + 10.0F, crate.y + 10.0F, true, {},
+                                  false, shift, chord));
+        return h.frame(crate.x + 10.0F, crate.y + 10.0F, false, {}, false,
+                       shift, chord);
+    };
+    const auto replaced = boxed(false);
+    MEASURE_CHECK(replaced.marquee.has_value());
+    MEASURE_CHECK((*replaced.marquee == std::vector<doc::NodeId>{crate_node}));
+    MEASURE_CHECK(!replaced.marquee_adds);
+    MEASURE_CHECK(boxed(true).marquee_adds);
+
+    // Alt on a gizmo handle duplicates what it moves; Alt elsewhere orbits.
+    h.selection = {box_node};
+    h.primary = box_node;
+    // Partway along the X arrow: the gizmo's middle is left to body drags.
+    const gui::UiPoint origin = h.at(scene::Vec3{});
+    const gui::UiPoint toward = h.at(scene::Vec3{0.1F, 0.0F, 0.0F});
+    const float run = std::sqrt((toward.x - origin.x) * (toward.x - origin.x) +
+                                (toward.y - origin.y) * (toward.y - origin.y));
+    const gui::UiPoint pivot{origin.x + (toward.x - origin.x) / run * 45.0F,
+                             origin.y + (toward.y - origin.y) / run * 45.0F};
+    static_cast<void>(h.frame(pivot.x, pivot.y, false));
+    const auto alt_gizmo = h.frame(pivot.x, pivot.y, true, {}, false, false,
+                                   gui::KeyMods::Alt);
+    MEASURE_CHECK(alt_gizmo.duplicate);
+    MEASURE_CHECK(alt_gizmo.picked.has_value() && *alt_gizmo.picked == box_node);
+    static_cast<void>(h.frame(pivot.x, pivot.y, false));
+    const auto plain = h.frame(pivot.x, pivot.y, true);
+    MEASURE_CHECK(!plain.duplicate);
+    static_cast<void>(h.frame(pivot.x, pivot.y, false));
+    const float sky_x = h.image.x + 20.0F;
+    const float sky_y = h.image.y + 20.0F;
+    static_cast<void>(h.frame(sky_x, sky_y, false));
+    const auto alt_canvas = h.frame(sky_x, sky_y, true, {}, false, false,
+                                    gui::KeyMods::Alt);
+    MEASURE_CHECK(!alt_canvas.duplicate);
+    MEASURE_CHECK(alt_canvas.empty_canvas ==
+                  editor::EmptyCanvasInteraction::Navigate);
+    static_cast<void>(h.frame(sky_x, sky_y, false));
+}
+
+void a_middle_drag_from_the_gizmo_centre_moves_the_pivot_to_a_vertex() {
+    Harness h;
+    static_cast<void>(h.frame(500.0F, 500.0F, false));
+    static_cast<void>(h.panel.measure_point_at(
+        h.view, 960.0F, 540.0F, 12.0F));
+    MEASURE_CHECK(editor::detail::wait_for_viewport_surface_hierarchies_for_test(
+        h.panel));
+    const gui::UiPoint centre = h.at(scene::Vec3{});
+    const gui::UiPoint corner = h.at(scene::Vec3{1.0F, 1.0F, 1.0F});
+    static_cast<void>(h.frame(centre.x, centre.y, false));
+    const auto pressed = h.middle(centre.x, centre.y, true);
+    MEASURE_CHECK(pressed.pivot_editing);
+    static_cast<void>(h.middle(corner.x + 3.0F, corner.y + 4.0F, true));
+    static_cast<void>(h.middle(corner.x + 3.0F, corner.y + 4.0F, false));
+    MEASURE_CHECK(h.panel.pivot_override().has_value());
+    MEASURE_CHECK(near(*h.panel.pivot_override(), scene::Vec3{1.0F, 1.0F, 1.0F}));
+
+    // R now turns the selection about that corner.
+    const auto turning = h.frame(500.0F, 500.0F, false, "r");
+    MEASURE_CHECK(turning.transform_began && turning.transform.has_value());
+    MEASURE_CHECK(near(turning.transform->pivot, scene::Vec3{1.0F, 1.0F, 1.0F}));
+    static_cast<void>(h.frame(500.0F, 500.0F, false, {}, true));
+
+    // A middle click on the moved gizmo's centre puts the pivot back.
+    static_cast<void>(h.middle(corner.x, corner.y, true));
+    static_cast<void>(h.middle(corner.x, corner.y, false));
+    MEASURE_CHECK(!h.panel.pivot_override().has_value());
+
+    // And a moved pivot is forgotten when the selection changes.
+    static_cast<void>(h.middle(centre.x, centre.y, true));
+    static_cast<void>(h.middle(corner.x + 3.0F, corner.y + 4.0F, true));
+    static_cast<void>(h.middle(corner.x + 3.0F, corner.y + 4.0F, false));
+    MEASURE_CHECK(h.panel.pivot_override().has_value());
+    h.selection.clear();
+    h.primary = {};
+    static_cast<void>(h.frame(500.0F, 500.0F, false));
+    MEASURE_CHECK(!h.panel.pivot_override().has_value());
+}
+
+void the_bounds_overlay_outlines_every_element_only_when_on() {
+    Harness h;
+    static_cast<void>(with_crate(h));
+    h.selection.clear();
+    h.primary = {};
+    const auto outline_vertices = [&] {
+        return std::count_if(h.list.vertices().begin(), h.list.vertices().end(),
+                             [](const auto& vertex) {
+                                 return near(vertex.r, 0.45F) &&
+                                        near(vertex.g, 0.78F) &&
+                                        near(vertex.b, 0.86F) &&
+                                        near(vertex.a, 0.55F);
+                             });
+    };
+    static_cast<void>(h.frame(500.0F, 500.0F, false));
+    MEASURE_CHECK(outline_vertices() == 0);
+    h.panel.set_bounds_visible(true);
+    static_cast<void>(h.frame(500.0F, 500.0F, false));
+    // Twelve edges a box, each a quad, for the box and the crate.
+    MEASURE_CHECK(outline_vertices() >= 2 * 12 * 4);
+}
+
+void a_narrow_stage_keeps_its_display_toggles_in_a_show_menu() {
+    Harness h;
+    h.bounds = gui::Rect{0.0F, 0.0F, 800.0F, 700.0F};
+    static_cast<void>(h.frame(400.0F, 400.0F, false));
+    MEASURE_CHECK(h.panel.grid_visible());
+    // SHOW sits after MOVE..MEASURE, GLOBAL, SNAP, the steps and SURFACE.
+    const float show_x = 7.0F + 50.0F + 60.0F + 52.0F + 68.0F + 6.0F + 60.0F +
+                         48.0F + 128.0F + 68.0F + 6.0F + 26.0F;
+    static_cast<void>(h.frame(show_x, 14.0F, true));
+    static_cast<void>(h.frame(show_x, 14.0F, false));
+    // The first entry, just under the button.
+    static_cast<void>(h.frame(show_x, 38.0F, false));
+    static_cast<void>(h.frame(show_x, 38.0F, true));
+    static_cast<void>(h.frame(show_x, 38.0F, false));
+    MEASURE_CHECK(!h.panel.grid_visible());
+}
+
 struct Case final {
     const char* name;
     void (*run)();
@@ -385,6 +539,14 @@ int main() {
              surface_snapping_rests_a_dragged_element_on_what_is_under_the_pointer},
         Case{"holding V puts the dragged vertex on the vertex under the pointer",
              holding_v_puts_the_dragged_vertex_on_the_vertex_under_the_pointer},
+        Case{"Ctrl+Alt drag boxes a selection and Alt on a gizmo duplicates",
+             ctrl_alt_drag_boxes_a_selection_and_alt_on_a_gizmo_duplicates},
+        Case{"a middle drag from the gizmo centre moves the pivot to a vertex",
+             a_middle_drag_from_the_gizmo_centre_moves_the_pivot_to_a_vertex},
+        Case{"the bounds overlay outlines every element only when on",
+             the_bounds_overlay_outlines_every_element_only_when_on},
+        Case{"a narrow Stage keeps its display toggles in a SHOW menu",
+             a_narrow_stage_keeps_its_display_toggles_in_a_show_menu},
     };
     int failures = 0;
     for (const Case& test : cases) {

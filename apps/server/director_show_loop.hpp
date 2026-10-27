@@ -265,6 +265,7 @@ struct DirectorShowLoop final {
     std::optional<doc::Root> &linked_clipboard;
     std::optional<editor::ClipClipboardRequest> &pending_linked_paste;
     std::optional<PendingClipPaste> &pending_clip_paste;
+    std::vector<editor::SceneDuplicateRequest> &pending_scene_duplicates;
     KeyClipboard &key_clipboard;
     std::optional<PendingKeyPaste> &pending_key_paste;
     std::vector<editor::PropertyEdit> &pending_properties;

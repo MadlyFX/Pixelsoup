@@ -1495,6 +1495,26 @@ marks the vertex it will meet. Neither ever lands on what is being dragged.
 
 With a selection, the bottom left of Stage shows its size along the world
 axes in metres (`W`, `H`, `D`). A screen is flat, so it has no depth.
+`BOUNDS` outlines every element's bounding box, selected or not. When Stage is
+too narrow for `GRID`, `GUIDES`, `GIZMO` and `BOUNDS`, they move into a `SHOW`
+menu in the toolbar.
+
+**Selecting with a box.** Ctrl+Alt+drag on Stage draws a selection box; every
+unlocked element it touches becomes the selection, or joins it with Shift
+held. An empty box clears the selection.
+
+**Duplicating as you move.** Alt+drag a gizmo arrow, ring or handle to leave
+a copy of the selection where it stood and carry the originals away, as in
+Unreal. The copies keep their effects, masks and animation. Groups and
+Blender-linked objects are not copied. The copy and the move undo
+separately.
+
+**Moving the pivot.** Middle-drag from the centre of the gizmo to move the
+point the selection turns and scales about. The pivot snaps like the Measure
+tool: to a vertex, an edge midpoint or a surface. A middle click on the
+gizmo's centre puts it back, and it is forgotten when the selection changes.
+Alt+middle still pans; it is Unreal's pivot chord, but here it was already
+the camera's.
 
 ### Measuring on Stage
 

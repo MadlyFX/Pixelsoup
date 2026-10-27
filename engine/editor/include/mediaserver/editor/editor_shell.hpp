@@ -688,6 +688,17 @@ struct ClipClipboardRequest final {
   bool operator==(const ClipClipboardRequest &) const = default;
 };
 
+// Alt+drag on a Stage gizmo: copy the selection exactly where it stands, as
+// the drag that then carries the originals away begins. The Director copies
+// each element with its effects, masks and animation under fresh ids.
+struct SceneDuplicateRequest final {
+  scene::SceneId scene{};
+  std::vector<doc::NodeId> selection;
+  core::u64 transaction{};
+
+  bool operator==(const SceneDuplicateRequest &) const = default;
+};
+
 // Director-local key clipboard requests. Copy carries only stable key
 // addresses; the Director snapshots value/interpolation from its projected
 // document at command time. Paste keeps the original target/property and
@@ -753,6 +764,7 @@ struct EditorFrame final {
   // either direction.
   std::optional<HistoryRequest> history;
   std::optional<ClipClipboardRequest> clip_clipboard;
+  std::vector<SceneDuplicateRequest> scene_duplicates;
   std::optional<KeyClipboardRequest> key_clipboard;
   std::optional<KeyDuplicateRequest> key_duplicate;
   std::optional<KeyBatchRequest> key_batch;

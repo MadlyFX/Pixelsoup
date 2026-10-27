@@ -106,6 +106,7 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_selection_set_edit.reset();
     pending_mask_edit.reset();
     pending_clip_paste.reset();
+    pending_scene_duplicates.clear();
     clip_clipboard.clear();
     compositor_clipboard.clear();
     linked_clipboard.reset(); pending_linked_paste.reset();

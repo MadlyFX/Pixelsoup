@@ -1605,6 +1605,77 @@ std::optional<scene::Vec3> ViewportPanel::nearest_element_vertex(
     return scene::transform_point(world, best->position);
 }
 
+std::vector<doc::NodeId>
+ViewportPanel::elements_in_marquee(const scene::Scene& scene,
+                                   const gui::Rect& image,
+                                   const gui::Rect& box) {
+    std::vector<doc::NodeId> inside;
+    if (image.width <= 0.0F || image.height <= 0.0F) {
+        return inside;
+    }
+    // An element counts when the screen box around its visible corners
+    // touches the drawn box, as Unreal's marquee does.
+    const auto touches = [&](const scene::Mat4& world,
+                             const scene::ModelLocalBounds& bounds) {
+        float left = std::numeric_limits<float>::infinity();
+        float top = left;
+        float right = -left;
+        float bottom = -left;
+        bool any = false;
+        for (unsigned corner = 0U; corner < 8U; ++corner) {
+            const scene::Vec3 local{
+                (corner & 1U) != 0U ? bounds.maximum.x : bounds.minimum.x,
+                (corner & 2U) != 0U ? bounds.maximum.y : bounds.minimum.y,
+                (corner & 4U) != 0U ? bounds.maximum.z : bounds.minimum.z};
+            const auto projected = scene::project_to_canvas(
+                scene.camera, scene.canvas, scene::transform_point(world, local));
+            if (!projected.visible) {
+                continue;
+            }
+            const gui::UiPoint at = to_ui(image, scene.canvas, projected);
+            left = std::min(left, at.x);
+            right = std::max(right, at.x);
+            top = std::min(top, at.y);
+            bottom = std::max(bottom, at.y);
+            any = true;
+        }
+        return any && right >= box.x && left <= box.x + box.width &&
+               bottom >= box.y && top <= box.y + box.height;
+    };
+    const auto add = [&inside](doc::NodeId node) {
+        if (std::find(inside.begin(), inside.end(), node) == inside.end()) {
+            inside.push_back(node);
+        }
+    };
+    for (const auto& object : scene.instances) {
+        if (!object.locked &&
+            touches(object.world, primitive_local_bounds(object.mesh.primitive))) {
+            add(object.source);
+        }
+    }
+    for (const auto& clip : scene.media) {
+        if (!clip.locked &&
+            touches(clip.world, primitive_local_bounds(clip.mesh.primitive))) {
+            add(clip.source_node);
+        }
+    }
+    for (const auto& model : scene.models) {
+        if (!model.locked &&
+            touches(model.world,
+                    model_bounds_for(model).value_or(scene::ModelLocalBounds{}))) {
+            add(model.source_node);
+        }
+    }
+    for (const auto& light : scene.point_lights) {
+        if (!light.locked &&
+            touches(scene::translation(light.position),
+                    scene::ModelLocalBounds{scene::Vec3{}, scene::Vec3{}})) {
+            add(light.source);
+        }
+    }
+    return inside;
+}
+
 std::optional<scene::ModelLocalBounds>
 ViewportPanel::model_source_bounds(const std::string& source) {
     scene::ModelInstance probe{};
@@ -1749,6 +1820,10 @@ void ViewportPanel::reset_project_state() noexcept {
     surface_cache_.request_reset();
     primitive_meshes_.clear();
     set_measuring(false);
+    pivot_override_.reset();
+    pivot_selection_.clear();
+    pivot_dragging_ = false;
+    marquee_active_ = false;
     mask_gesture_active_ = false;
     mask_gesture_cancelled_ = false;
     mask_gesture_hit_ = MaskViewportHit::None;
@@ -2698,10 +2773,12 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
             continue;
         }
         const MeasureReading reading = measure(from, to);
-        measure_badge(ctx, middle->x, middle->y - 26.0F,
+        const bool latest = index + 1U == points.size();
+        // Above the segment, so neither badge covers its end points.
+        measure_badge(ctx, middle->x, middle->y - (latest ? 52.0F : 30.0F),
                       format_metres(reading.length), true);
-        if (index + 1U == points.size()) {
-            measure_badge(ctx, middle->x, middle->y - 4.0F,
+        if (latest) {
+            measure_badge(ctx, middle->x, middle->y - 30.0F,
                           format_reading_detail(reading), false);
         }
     }
@@ -2888,9 +2965,37 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             }
             left += 6.0F;
         }
-        // The display toggles, when they fit before the preview controls.
-        if (left + 162.0F <=
-            toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F) {
+        // The display toggles, when they fit before the preview controls;
+        // otherwise one SHOW menu holds them, so they stay reachable.
+        const float preview_left =
+            toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F;
+        const gui::UiId show_menu = mix(id_, 20U);
+        float used_right = left;
+        if (left + 218.0F > preview_left && toolbar.width >= 520.0F) {
+            const gui::Rect show{left, toolbar.y + 4.0F, 52.0F, 20.0F};
+            used_right = show.x + show.width;
+            if (ctx.button(mix(id_, 21U), show, "SHOW")) {
+                ctx.open_context_menu(show_menu, show.x,
+                                      show.y + show.height);
+            }
+            ctx.tooltip(show, "Grid, guides, gizmo and bounds.");
+            const std::array<std::string, 4U> labels{
+                std::string{show_grid_ ? "[x] " : "[ ] "} + "Grid",
+                std::string{show_overlays_ ? "[x] " : "[ ] "} + "Guides",
+                std::string{show_gizmo_ ? "[x] " : "[ ] "} + "Gizmo",
+                std::string{show_bounds_ ? "[x] " : "[ ] "} + "Bounds"};
+            const std::array<std::string_view, 4U> options{
+                labels[0], labels[1], labels[2], labels[3]};
+            if (const auto chosen = ctx.context_menu(show_menu, options)) {
+                switch (*chosen) {
+                case 0U: show_grid_ = !show_grid_; break;
+                case 1U: show_overlays_ = !show_overlays_; break;
+                case 2U: show_gizmo_ = !show_gizmo_; break;
+                default: show_bounds_ = !show_bounds_; break;
+                }
+            }
+        }
+        if (left + 218.0F <= preview_left) {
             float button_x = left;
             if (ctx.button(mix(id_, 1U),
                            gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
@@ -2909,12 +3014,25 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                            show_gizmo_ ? "GIZMO" : "gizmo")) {
                 show_gizmo_ = !show_gizmo_;
             }
+            button_x += 54.0F;
+            const gui::Rect bounds_button{button_x, toolbar.y + 4.0F, 54.0F,
+                                          20.0F};
+            if (ctx.button(mix(id_, 19U), bounds_button,
+                           show_bounds_ ? "BOUNDS" : "bounds")) {
+                show_bounds_ = !show_bounds_;
+            }
+            ctx.tooltip(bounds_button,
+                        "Outline every element's bounding box, selected or "
+                        "not.");
         }
         const float quality_x = toolbar.x + std::max(64.0F, toolbar.width - 158.0F);
         {
-            ctx.label(
-                gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
-                "PREVIEW", ctx.theme().text_muted);
+            // The caption gives way to SHOW in a narrow dock; the list stays.
+            if (used_right + 4.0F <= quality_x - 58.0F) {
+                ctx.label(
+                    gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
+                    "PREVIEW", ctx.theme().text_muted);
+            }
             draw_resolution_control(ctx,
                 gui::Rect{quality_x, toolbar.y + 4.0F, 90.0F, 20.0F});
             ctx.panel(
@@ -3034,6 +3152,15 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         pivot = count > 0.0F ? sum * (1.0F / count)
                              : scene::translation_of(*primary_world);
     }
+    // A moved pivot belongs to the selection it was set for.
+    if (pivot_override_.has_value() &&
+        !std::equal(selection.begin(), selection.end(),
+                    pivot_selection_.begin(), pivot_selection_.end())) {
+        pivot_override_.reset();
+    }
+    if (pivot.has_value() && pivot_override_.has_value()) {
+        pivot = *pivot_override_;
+    }
     const std::array<scene::Vec3, 3U> primary_axes =
         primary_world.has_value() ? world_axes_of(*primary_world)
                                   : world_basis;
@@ -3094,6 +3221,48 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         hit_yaw_ring(surface_gizmo, ctx.pointer_x(), ctx.pointer_y());
     if (hovered_surface_yaw) {
         hovered_surface_axis = GizmoAxis::Yaw;
+    }
+
+    // A middle drag from the gizmo's centre moves the pivot, snapping like
+    // the Measure tool; a middle click there puts it back. Unreal does this
+    // with Alt+middle, which pans here.
+    if (role_ == ViewportRole::Stage && projection == nullptr && !occluded &&
+        scene_gizmo.visible && !keyboard_.active &&
+        ctx.middle_pointer_pressed()) {
+        const float dx = ctx.pointer_x() - scene_gizmo.origin.x;
+        const float dy = ctx.pointer_y() - scene_gizmo.origin.y;
+        if (dx * dx + dy * dy <= 12.0F * 12.0F) {
+            pivot_dragging_ = true;
+            pivot_moved_ = false;
+            pivot_press_x_ = ctx.pointer_x();
+            pivot_press_y_ = ctx.pointer_y();
+        }
+    }
+    if (pivot_dragging_) {
+        frame.pivot_editing = true;
+        if (ctx.middle_pointer_down()) {
+            const float dx = ctx.pointer_x() - pivot_press_x_;
+            const float dy = ctx.pointer_y() - pivot_press_y_;
+            pivot_moved_ = pivot_moved_ || dx * dx + dy * dy > 9.0F;
+            if (pivot_moved_) {
+                const CanvasPoint at = to_canvas(
+                    frame.image, interaction_canvas, ctx.pointer_x(),
+                    ctx.pointer_y());
+                if (const auto point = measure_point_at(
+                        scene, at.x, at.y,
+                        12.0F * canvas_width / frame.image.width)) {
+                    pivot_override_ = point->position;
+                    pivot_selection_.assign(selection.begin(), selection.end());
+                    drag_snap_target_ = point;
+                }
+            }
+        } else {
+            if (!pivot_moved_) {
+                pivot_override_.reset();
+            }
+            pivot_dragging_ = false;
+            drag_snap_target_.reset();
+        }
     }
 
     const ProjectedSurface* hit_surface = nullptr;
@@ -3466,11 +3635,25 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
 
         // On Stage, Alt+left orbits and left added to a right or middle drag
         // pans: camera chords that never pick, or drag, what is underneath.
+        // Two Unreal chords come first: Ctrl+Alt draws a selection box, and
+        // Alt on a gizmo handle duplicates what it moves.
+        const bool other_buttons =
+            ctx.secondary_pointer_down() || ctx.middle_pointer_down();
+        const bool marquee_chord = role_ == ViewportRole::Stage &&
+                                   ctx.ctrl_held() && ctx.alt_held() &&
+                                   !other_buttons && projection == nullptr;
+        const bool duplicate_chord =
+            role_ == ViewportRole::Stage && ctx.alt_held() &&
+            !ctx.ctrl_held() && !other_buttons && !measuring_ &&
+            hovered_scene_axis != GizmoAxis::None && pivot.has_value();
         const bool camera_chord =
-            role_ == ViewportRole::Stage &&
-            (ctx.alt_held() || ctx.secondary_pointer_down() ||
-             ctx.middle_pointer_down());
-        if (camera_chord) {
+            role_ == ViewportRole::Stage && !marquee_chord && !duplicate_chord &&
+            (ctx.alt_held() || other_buttons);
+        if (marquee_chord) {
+            marquee_active_ = true;
+            marquee_x_ = ctx.pointer_x();
+            marquee_y_ = ctx.pointer_y();
+        } else if (camera_chord) {
             // Left to the shell's camera navigation.
         } else if (measuring_) {
             if (measure_hover_.has_value()) {
@@ -3505,6 +3688,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         } else if (hovered_scene_axis != GizmoAxis::None &&
                    pivot.has_value()) {
             frame.picked = primary;
+            frame.duplicate = duplicate_chord;
             drag_axis_ = hovered_scene_axis;
             drag_tool_ = gizmo_tool;
             drag_node_ = primary;
@@ -3602,8 +3786,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 }
             }
         }
-        if ((camera_chord || !measuring_) && !frame.picked.has_value() &&
-            !frame.surface_picked.has_value()) {
+        if (!marquee_chord && (camera_chord || !measuring_) &&
+            !frame.picked.has_value() && !frame.surface_picked.has_value()) {
             frame.empty_canvas =
                 role_ == ViewportRole::Stage
                     ? EmptyCanvasInteraction::Navigate
@@ -3791,8 +3975,17 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             frame.translation = delta.translation;
         }
     }
-    if (!it.held || !dragging_) {
+    if ((!it.held || !dragging_) && !pivot_dragging_) {
         drag_snap_target_.reset();
+    }
+    if (marquee_active_ && (it.released || !it.held)) {
+        marquee_active_ = false;
+        const gui::Rect box{std::min(marquee_x_, ctx.pointer_x()),
+                            std::min(marquee_y_, ctx.pointer_y()),
+                            std::abs(ctx.pointer_x() - marquee_x_),
+                            std::abs(ctx.pointer_y() - marquee_y_)};
+        frame.marquee = elements_in_marquee(scene, frame.image, box);
+        frame.marquee_adds = ctx.shift_held();
     }
 
     if (it.released) {
@@ -3876,6 +4069,22 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             draw_inner_frustum_overlay(list, frame.image, scene, plate);
         }
     }
+    if (role_ == ViewportRole::Stage && show_bounds_) {
+        const gui::UiColor bounds_color{0.45F, 0.78F, 0.86F, 0.55F};
+        for (const auto& object : scene.instances) {
+            wire_box(list, frame.image, scene, object.world, bounds_color,
+                     primitive_local_bounds(object.mesh.primitive), projection);
+        }
+        for (const auto& clip : scene.media) {
+            wire_box(list, frame.image, scene, clip.world, bounds_color,
+                     primitive_local_bounds(clip.mesh.primitive), projection);
+        }
+        for (const auto& model : scene.models) {
+            wire_box(list, frame.image, scene, model.world, bounds_color,
+                     model_bounds_for(model).value_or(scene::ModelLocalBounds{}),
+                     projection);
+        }
+    }
     draw_selection_outlines(list, frame.image, scene, selection, primary,
                             model_bounds, projection);
     // The selection's size along the world axes, in metres.
@@ -3953,6 +4162,19 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     if (measuring_ && role_ == ViewportRole::Stage && projection == nullptr) {
         draw_measurements(ctx, list, frame.image, scene, measure_,
                           measure_hover_);
+    }
+    if (marquee_active_) {
+        const float x0 = std::min(marquee_x_, ctx.pointer_x());
+        const float y0 = std::min(marquee_y_, ctx.pointer_y());
+        const float x1 = std::max(marquee_x_, ctx.pointer_x());
+        const float y1 = std::max(marquee_y_, ctx.pointer_y());
+        list.add_rect(x0, y0, x1 - x0, y1 - y0,
+                      gui::UiColor{0.35F, 0.62F, 1.0F, 0.12F});
+        const gui::UiColor edge{0.45F, 0.70F, 1.0F, 0.95F};
+        line(list, gui::UiPoint{x0, y0}, gui::UiPoint{x1, y0}, 1.0F, edge);
+        line(list, gui::UiPoint{x1, y0}, gui::UiPoint{x1, y1}, 1.0F, edge);
+        line(list, gui::UiPoint{x1, y1}, gui::UiPoint{x0, y1}, 1.0F, edge);
+        line(list, gui::UiPoint{x0, y1}, gui::UiPoint{x0, y0}, 1.0F, edge);
     }
     if (drag_snap_target_.has_value()) {
         draw_measurements(ctx, list, frame.image, scene, MeasureChain{},

@@ -67,6 +67,14 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
     if (editor_frame.history.has_value()) {
         pending_history = editor_frame.history;
     }
+    try {
+        pending_scene_duplicates.insert(pending_scene_duplicates.end(),
+                                        editor_frame.scene_duplicates.begin(),
+                                        editor_frame.scene_duplicates.end());
+    } catch (const std::bad_alloc &) {
+        std::cerr << "could not queue a duplicate\n";
+        return 1;
+    }
     if (editor_frame.clip_clipboard.has_value()) {
         const editor::ClipClipboardRequest &request =
             *editor_frame.clip_clipboard;

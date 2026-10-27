@@ -169,6 +169,18 @@ struct ViewportFrame final {
     // The viewport capture ended this frame, whether it held an element drag,
     // a gizmo handle, or a bare-canvas gesture.
     bool released{};
+
+    // A Ctrl+Alt drag on Stage drew a box and let go: every unlocked element
+    // it touched. `marquee_adds` when Shift was held, to add rather than
+    // replace the selection.
+    std::optional<std::vector<doc::NodeId>> marquee;
+    bool marquee_adds{};
+    // Alt+drag began on a gizmo handle: copy the selection in place first, as
+    // Unreal does, and the drag carries the originals away.
+    bool duplicate{};
+    // A middle drag from the gizmo's centre is moving the pivot: the middle
+    // button is not the camera's until it is let go.
+    bool pivot_editing{};
 };
 
 // One canvas-space corner of a drawable's normalized source plane. Source
@@ -411,6 +423,9 @@ class ViewportPanel final {
         return show_overlays_;
     }
     [[nodiscard]] bool gizmo_visible() const noexcept { return show_gizmo_; }
+    // Every element's bounding box outlined, selected or not.
+    [[nodiscard]] bool bounds_visible() const noexcept { return show_bounds_; }
+    void set_bounds_visible(bool visible) noexcept { show_bounds_ = visible; }
     // The gizmo's tool, its orientation, and increment snapping. G, R and S
     // choose the tool as they start a keyboard transform; the Stage toolbar
     // sets all three.
@@ -487,6 +502,12 @@ class ViewportPanel final {
     }
     [[nodiscard]] const MeasureChain& measurement() const noexcept {
         return measure_;
+    }
+
+    // The pivot moved by a middle drag from the gizmo's centre, while the
+    // selection it was set for is still selected.
+    [[nodiscard]] std::optional<scene::Vec3> pivot_override() const noexcept {
+        return pivot_override_;
     }
 
     // Local bounds of the model at `source`, once the model cache has it.
@@ -640,12 +661,28 @@ class ViewportPanel final {
     // took hold; `drag_source_vertex_` its vertex nearest there, found the
     // first time V is held.
     bool surface_snapping_{};
+    bool show_bounds_{};
     doc::NodeId drag_node_{};
     scene::Mat4 drag_start_world_{};
     scene::ModelLocalBounds drag_start_bounds_{};
     std::optional<scene::Vec3> drag_grab_;
     std::optional<scene::Vec3> drag_source_vertex_;
     std::optional<MeasurePoint> drag_snap_target_;
+
+    // The pivot an operator moved for this selection, until it changes.
+    std::optional<scene::Vec3> pivot_override_;
+    std::vector<doc::NodeId> pivot_selection_;
+    bool pivot_dragging_{};
+    bool pivot_moved_{};
+    float pivot_press_x_{};
+    float pivot_press_y_{};
+
+    bool marquee_active_{};
+    float marquee_x_{};
+    float marquee_y_{};
+    [[nodiscard]] std::vector<doc::NodeId>
+    elements_in_marquee(const scene::Scene& scene, const gui::Rect& image,
+                        const gui::Rect& box);
     [[nodiscard]] scene::ModelLocalBounds
     element_local_bounds(const scene::Scene& scene, doc::NodeId node);
     [[nodiscard]] std::optional<scene::Vec3>

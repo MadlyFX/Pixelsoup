@@ -3861,6 +3861,29 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto handle_viewport = [&](const ViewportFrame &viewport,
                                    const scene::Scene &authored_view,
                                    const scene::Scene &display_view) {
+    // Ctrl+Alt box: the elements it touched become the selection, or join
+    // it with Shift. An empty box clears it, as in Unreal.
+    if (viewport.marquee.has_value()) {
+      impl.stage_surface_selection.reset();
+      if (!viewport.marquee_adds) {
+        impl.clear_scene_selection(true);
+      }
+      for (const doc::NodeId node : *viewport.marquee) {
+        if (!impl.is_selected(node)) {
+          impl.toggle(node);
+        }
+      }
+    }
+    // Alt on a gizmo handle: the copies stay where the selection stands.
+    if (viewport.duplicate && !impl.scene_selection.empty()) {
+      const auto members = impl.scene_selection.members();
+      result.scene_duplicates.push_back(SceneDuplicateRequest{
+          authored_stage.id,
+          std::vector<doc::NodeId>(members.begin(), members.end()),
+          impl.next_edit_gesture++});
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+    }
     if (viewport.pressed) {
       if (viewport.surface_picked.has_value()) {
         impl.stage_surface_selection = viewport.surface_picked;
@@ -3933,7 +3956,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     // middle press then leaves the camera alone.
     const bool element_drag =
         viewport.held && !impl.navigate_left && !left_press;
-    if ((over || already) && !element_drag) {
+    if ((over || already) && !element_drag && !viewport.pivot_editing) {
       impl.navigate_right = impl.navigate_right || ui.secondary_pointer_pressed();
       impl.navigate_middle = impl.navigate_middle || ui.middle_pointer_pressed();
       impl.navigate_left = impl.navigate_left || left_press;
@@ -7204,6 +7227,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.selection_set_edit->action != SelectionSetEditAction::Recall;
   const bool scene_authored = !result.source_replacements.empty() || !result.edits.empty() || !result.keys.empty() ||
       !result.key_moves.empty() || result.key_duplicate.has_value() ||
+      !result.scene_duplicates.empty() ||
       result.key_batch.has_value() ||
       !result.clip_timings.empty() ||
       !result.clip_splits.empty() || !result.lane_edits.empty() ||

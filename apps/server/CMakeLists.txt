@@ -103,6 +103,7 @@ if(MEDIASERVER_ENABLE_GUI)
         director_project_load.cpp
         director_scene_authoring.cpp
         render_machine_panel.cpp
+        scene_duplicate.cpp
         render_machine_window.cpp
         mask_edit_integration.cpp
         timeline_edit_integration.cpp
@@ -432,6 +433,15 @@ if(BUILD_TESTING)
         add_test(NAME mediaserver.server_hardware_authoring COMMAND mediaserver_hardware_authoring_tests)
         set_target_properties(mediaserver_hardware_authoring_tests PROPERTIES FOLDER "tests")
     endif()
+
+    add_executable(mediaserver_scene_duplicate_tests
+        scene_duplicate.cpp
+        tests/scene_duplicate_tests.cpp)
+    target_include_directories(mediaserver_scene_duplicate_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(mediaserver_scene_duplicate_tests PRIVATE MediaServer::Scene MediaServer::Doc)
+    mediaserver_set_project_options(mediaserver_scene_duplicate_tests)
+    add_test(NAME mediaserver.server_scene_duplicate COMMAND mediaserver_scene_duplicate_tests)
+    set_target_properties(mediaserver_scene_duplicate_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_model_source_authoring_tests
         edit_coalescing_policy.cpp
