@@ -2561,9 +2561,15 @@ void light_guides_respect_stage_selection_and_guides_toggle() {
     UI_CHECK(cutoff_vertices() == 0);
     draw(true);
     UI_CHECK(cutoff_vertices() > 0);
-    // GUIDES, past the tools, the snap steps and GRID.
-    draw(true, 614, true);
-    draw(true, 614, false);
+    // Guides, the second of the four display toggles. They end a group gap
+    // before the resolution menu, which ends 8 before the frame rate, which
+    // ends 8 before the toolbar's right edge.
+    const float right = Harness::bounds.width - 8.0F -
+                        h.ctx.font_width("60 fps") - 8.0F -
+                        (23.0F + h.ctx.font_width("Full") + 19.0F) - 9.0F;
+    const float guides_x = right - 4.0F * 26.0F + 26.0F + 13.0F;
+    draw(true, guides_x, true);
+    draw(true, guides_x, false);
     UI_CHECK(!stage.overlays_visible());
     UI_CHECK(cutoff_vertices() == 0);
     h.input.new_frame();
@@ -2589,12 +2595,17 @@ void preview_resolution_controls_preserve_logical_picking() {
     };
     const auto full = click(500.0F, 500.0F, false);
     UI_CHECK(stage.resolution() == editor::PreviewResolution::Full);
-    static_cast<void>(click(865.0F, 14.0F, true));
-    static_cast<void>(click(865.0F, 14.0F, false));
-    h.input.new_frame(); h.input.add_key(gui::Key::Down); h.ctx.new_frame();
-    static_cast<void>(draw());
-    h.input.new_frame(); h.input.add_key(gui::Key::Enter); h.ctx.new_frame();
-    UI_CHECK(!draw().pressed);
+    // The resolution menu sits 8 left of the frame rate, which ends 8 from
+    // the right; its second entry is Half.
+    const float menu_width = 23.0F + h.ctx.font_width("Full") + 19.0F;
+    const float menu_x = Harness::bounds.width - 8.0F -
+                         h.ctx.font_width("60 fps") - 8.0F - menu_width;
+    static_cast<void>(click(menu_x + menu_width * 0.5F, 14.0F, true));
+    static_cast<void>(click(menu_x + menu_width * 0.5F, 14.0F, false));
+    const float half_y = 3.0F + 22.0F + 2.0F + 24.0F + 12.0F;
+    static_cast<void>(click(menu_x + 20.0F, half_y, false));
+    UI_CHECK(!click(menu_x + 20.0F, half_y, true).pressed);
+    UI_CHECK(!click(menu_x + 20.0F, half_y, false).pressed);
     UI_CHECK(stage.resolution() == editor::PreviewResolution::Half);
     UI_CHECK(h.panel.resolution() == editor::PreviewResolution::Full);
     for (const auto resolution : {editor::PreviewResolution::Half, editor::PreviewResolution::Quarter}) {
@@ -2785,10 +2796,15 @@ void the_stage_view_menus_choose_projection_layout_and_shading() {
     };
 
     const editor::ViewportFrame placed = frame(0.0F, 0.0F, false);
-    const gui::Rect view_menu{placed.image.x + placed.image.width - 110.0F,
-                              placed.image.y + 6.0F, 104.0F, 22.0F};
-    const gui::Rect shading_menu{view_menu.x - 104.0F, view_menu.y, 100.0F,
-                                 22.0F};
+    // Each fits its icon, its current choice and a chevron; the view menu
+    // 6 in from the image's corner, the shading menu 4 left of it.
+    const float view_width = 23.0F + h.ctx.font_width("Perspective") + 19.0F;
+    const float shading_width = 23.0F + h.ctx.font_width("Lit") + 19.0F;
+    const gui::Rect view_menu{
+        placed.image.x + placed.image.width - 6.0F - view_width,
+        placed.image.y + 6.0F, view_width, 22.0F};
+    const gui::Rect shading_menu{view_menu.x - 4.0F - shading_width,
+                                 view_menu.y, shading_width, 22.0F};
 
     const editor::ViewportFrame top = choose(view_menu, 1U);
     UI_CHECK(top.projection_choice == editor::StageProjection::Top);

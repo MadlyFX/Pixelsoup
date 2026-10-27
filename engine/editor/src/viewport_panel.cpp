@@ -2538,16 +2538,6 @@ void draw_mask_point(gui::UiDrawList& list, gui::UiPoint point,
 
 } // namespace
 
-void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
-                                             const gui::Rect& bounds) {
-    static constexpr std::array<std::string_view, 3U> options{
-        "Full", "Half", "Quarter"};
-    std::size_t selected = static_cast<std::size_t>(resolution_);
-    if (ctx.dropdown(mix(id_, 4U), bounds, options, selected)) {
-        resolution_ = static_cast<PreviewResolution>(selected);
-    }
-}
-
 bool ViewportPanel::snap_drag(const gui::UiContext& ctx,
                               const scene::Scene& scene,
                               std::span<const doc::NodeId> selection,
@@ -2601,39 +2591,6 @@ bool ViewportPanel::snap_drag(const gui::UiContext& ctx,
                                        drag_start_bounds_) -
                         scene::translation_of(drag_start_world_);
     return true;
-}
-
-void ViewportPanel::draw_snap_controls(gui::UiContext& ctx,
-                                       const gui::Rect& bounds) {
-    static constexpr std::array<std::string_view, move_snap_choices.size()>
-        distances{"0.01 m", "0.1 m", "0.5 m", "1 m", "5 m"};
-    static constexpr std::array<std::string_view,
-                                rotate_snap_choices_degrees.size()>
-        angles{"1 deg", "5 deg", "15 deg", "45 deg", "90 deg"};
-    const auto nearest = [](const auto& choices, float value) {
-        std::size_t best = 0U;
-        for (std::size_t index = 1U; index < choices.size(); ++index) {
-            if (std::abs(choices[index] - value) <
-                std::abs(choices[best] - value)) {
-                best = index;
-            }
-        }
-        return best;
-    };
-    const gui::Rect distance{bounds.x, bounds.y, 62.0F, bounds.height};
-    std::size_t move = nearest(move_snap_choices, snap_steps_.move);
-    if (ctx.dropdown(mix(id_, 16U), distance, distances, move)) {
-        snap_steps_.move = move_snap_choices[move];
-    }
-    ctx.tooltip(distance, "Move snap step.");
-    const gui::Rect angle{bounds.x + 64.0F, bounds.y, bounds.width - 64.0F,
-                          bounds.height};
-    std::size_t turn = nearest(rotate_snap_choices_degrees,
-                               snap_steps_.rotate_turns * 360.0F);
-    if (ctx.dropdown(mix(id_, 17U), angle, angles, turn)) {
-        snap_steps_.rotate_turns = rotate_snap_choices_degrees[turn] / 360.0F;
-    }
-    ctx.tooltip(angle, "Rotate snap step.");
 }
 
 TransformDelta ViewportPanel::snapped(const gui::UiContext& ctx,
@@ -2887,10 +2844,9 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
               hint, measure_color);
 }
 
-// The corner of a Stage image its view menu occupies; empty when the image is
-// too small to spare it.
-gui::Rect stage_view_menu_bounds(const gui::Rect& image) noexcept {
-    constexpr float width = 104.0F;
+// The corner of a Stage image its view menu, `width` wide, occupies; empty
+// when the image is too small to spare it.
+gui::Rect stage_view_menu_bounds(const gui::Rect& image, float width) noexcept {
     if (image.width < width + 16.0F || image.height < 40.0F) {
         return gui::Rect{};
     }
@@ -2898,9 +2854,9 @@ gui::Rect stage_view_menu_bounds(const gui::Rect& image) noexcept {
                      width, 22.0F};
 }
 
-// The shading menu, left of the view menu; empty with it.
-gui::Rect stage_shading_menu_bounds(const gui::Rect& view_menu) noexcept {
-    constexpr float width = 100.0F;
+// The shading menu, `width` wide, left of the view menu; empty with it.
+gui::Rect stage_shading_menu_bounds(const gui::Rect& view_menu,
+                                    float width) noexcept {
     if (view_menu.width <= 0.0F) {
         return gui::Rect{};
     }
@@ -2911,29 +2867,107 @@ gui::Rect stage_shading_menu_bounds(const gui::Rect& view_menu) noexcept {
 std::string_view stage_shading_name(render::ViewShading shading) noexcept {
     switch (shading) {
     case render::ViewShading::Unlit:
-        return "UNLIT";
+        return "Unlit";
     case render::ViewShading::LightsOnly:
-        return "LIGHTS ONLY";
+        return "Lights only";
     case render::ViewShading::Wireframe:
-        return "WIREFRAME";
+        return "Wireframe";
     case render::ViewShading::Lit:
         break;
     }
-    return "LIT";
+    return "Lit";
 }
 
 std::string_view stage_projection_name(StageProjection projection) noexcept {
     switch (projection) {
     case StageProjection::Top:
-        return "TOP";
+        return "Top";
     case StageProjection::Front:
-        return "FRONT";
+        return "Front";
     case StageProjection::Side:
-        return "SIDE";
+        return "Side";
     case StageProjection::Perspective:
         break;
     }
-    return "PERSPECTIVE";
+    return "Perspective";
+}
+
+// The Stage toolbar's buttons: 26 wide, 22 high, three below its top.
+constexpr float toolbar_button = 26.0F;
+constexpr float toolbar_group_gap = 9.0F;
+
+gui::UiColor toolbar_ink(const gui::Theme& theme, float t) noexcept {
+    return gui::UiColor{
+        theme.text_muted.r + (theme.text.r - theme.text_muted.r) * t,
+        theme.text_muted.g + (theme.text.g - theme.text_muted.g) * t,
+        theme.text_muted.b + (theme.text.b - theme.text_muted.b) * t, 1.0F};
+}
+
+void draw_chevron(gui::UiDrawList& list, float x, float y, gui::UiColor color) {
+    list.add_line(x - 3.0F, y - 1.5F, x, y + 1.5F, 1.0F, color);
+    list.add_line(x, y + 1.5F, x + 3.0F, y - 1.5F, 1.0F, color);
+}
+
+// The width of a toolbar_menu showing `value`.
+float toolbar_menu_width(const gui::UiContext& ctx, std::string_view value,
+                         bool degrees = false) noexcept {
+    return 23.0F + ctx.font_width(value) + (degrees ? 5.0F : 0.0F) + 19.0F;
+}
+
+// A button that opens a menu, showing its icon and the current choice, so
+// the setting is read without opening it. `quiet` greys a value that is not
+// in force; `overlay` gives it a body of its own, for a menu that floats over
+// the picture rather than sitting in the toolbar.
+bool toolbar_menu(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds,
+                  gui::Icon icon, std::string_view value, bool open,
+                  bool degrees = false, bool quiet = false,
+                  bool overlay = false) {
+    const gui::Theme& theme = ctx.theme();
+    const gui::Interaction it = ctx.grab(id, bounds);
+    ctx.cursor_for(it, gui::Cursor::Hand);
+    if (overlay) {
+        ctx.panel(bounds, gui::UiColor{0.035F, 0.040F, 0.052F, 0.80F});
+    }
+    if (it.held && !it.released) {
+        ctx.panel(bounds, theme.widget_active);
+    } else if (open || it.hovered) {
+        ctx.panel(bounds, theme.widget_hover);
+    }
+    const bool lit = open || it.hovered;
+    const float middle = bounds.y + bounds.height * 0.5F;
+    gui::UiDrawList& list = ctx.draw_list();
+    gui::draw_icon(list, icon, bounds.x + 12.0F, middle,
+                   toolbar_ink(theme, lit ? 1.0F : (quiet ? 0.0F : 0.75F)));
+    const gui::UiColor ink = quiet && !lit ? theme.text_muted : theme.text;
+    const float text_width = ctx.font_width(value);
+    ctx.label(gui::Rect{bounds.x + 23.0F, bounds.y, text_width + 2.0F,
+                        bounds.height},
+              value, ink);
+    if (degrees) {
+        // The atlas is ASCII, so the degree sign is drawn.
+        const float ring_x = bounds.x + 23.0F + text_width + 1.5F;
+        const float ring_y = middle - 5.0F;
+        list.add_rect(ring_x, ring_y, 3.0F, 1.0F, ink);
+        list.add_rect(ring_x, ring_y + 2.0F, 3.0F, 1.0F, ink);
+        list.add_rect(ring_x, ring_y, 1.0F, 3.0F, ink);
+        list.add_rect(ring_x + 2.0F, ring_y, 1.0F, 3.0F, ink);
+    }
+    draw_chevron(list, bounds.x + bounds.width - 9.0F, middle + 1.0F,
+                 lit ? theme.text : theme.text_muted);
+    return it.clicked;
+}
+
+// The nearest of `choices` to `value`, by index.
+template <typename Choices>
+std::size_t nearest_choice(const Choices& choices, float value) noexcept {
+    std::size_t best = 0U;
+    for (std::size_t index = 1U; index < choices.size(); ++index) {
+        if (std::abs(choices[index] - value) <
+            std::abs(choices[best] - value)) {
+            best = index;
+        }
+    }
+    return best;
 }
 
 } // namespace
@@ -2945,8 +2979,9 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
         return;
     }
     const gui::UiId menu_id = mix(id_, 40U);
-    if (ctx.button(mix(id_, 41U), menu,
-                   stage_projection_name(stage_projection_))) {
+    if (toolbar_menu(ctx, mix(id_, 41U), menu, gui::Icon::Projection,
+                     stage_projection_name(stage_projection_),
+                     ctx.menu_open(menu_id), false, false, true)) {
         ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
     }
     ctx.tooltip(menu,
@@ -2954,9 +2989,13 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
                 "and Side are orthographic: drag to pan, wheel to zoom.");
     const std::array<std::string_view, 5U> options{
         "Perspective    Alt+P", "Top            Alt+J",
-        "Front          Alt+H", "Side           Alt+K",
-        stage_four_views_ ? "One view" : "Four views"};
-    if (const auto chosen = ctx.context_menu(menu_id, options)) {
+        "Front          Alt+H", "Side           Alt+K", "Four views"};
+    const std::array<bool, 5U> checked{
+        stage_projection_ == StageProjection::Perspective,
+        stage_projection_ == StageProjection::Top,
+        stage_projection_ == StageProjection::Front,
+        stage_projection_ == StageProjection::Side, stage_four_views_};
+    if (const auto chosen = ctx.context_menu(menu_id, options, checked)) {
         if (*chosen < 4U) {
             frame.projection_choice = static_cast<StageProjection>(*chosen);
         } else {
@@ -2967,114 +3006,223 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
 
 void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                                  float frames_per_second) {
-    ctx.panel(toolbar, ctx.theme().background);
+    const gui::Theme& theme = ctx.theme();
+    ctx.panel(toolbar, theme.background);
     ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
                         toolbar.width, 1.0F},
-              ctx.theme().divider);
-    // Keep preview resolution accessible even in a narrow dock: the
-    // transform tools go first, the display toggles only when there is
-    // room for them too.
-    float left = toolbar.x + 7.0F;
-    if (toolbar.width >= 520.0F) {
-        // A selected choice is drawn pressed; every one is a button, so a
-        // click on the current tool is harmless rather than dead.
-        const auto choice = [&](core::u64 salt, float width,
-                                std::string_view label, bool chosen,
-                                std::string_view hint) {
-            const gui::Rect rect{left, toolbar.y + 4.0F, width, 20.0F};
-            const bool clicked = ctx.button(mix(id_, salt), rect, label);
-            if (chosen) {
-                ctx.panel(rect, ctx.theme().widget_active);
-                ctx.label(gui::Rect{rect.x + 7.0F, rect.y,
-                                    std::max(rect.width - 7.0F, 0.0F),
-                                    rect.height},
-                          label, ctx.theme().text);
-            }
-            ctx.tooltip(rect, hint);
-            left += width + 4.0F;
-            return clicked;
+              theme.divider);
+    const float top = toolbar.y + 3.0F;
+    const float height = toolbar.height - 7.0F;
+    const auto separator = [&](float x) {
+        ctx.panel(gui::Rect{std::floor(x), toolbar.y + 8.0F, 1.0F,
+                            toolbar.height - 17.0F},
+                  theme.border);
+    };
+
+    // The preview's resolution and frame rate hold the right end at any
+    // width; the tools fill from the left, and the display toggles take what
+    // is left between them, folding into one menu when it is not enough.
+    std::array<char, 24U> fps_text{};
+    const int fps_length =
+        std::snprintf(fps_text.data(), fps_text.size(), "%.3g fps",
+                      std::max(frames_per_second, 0.0F));
+    const std::string_view fps{
+        fps_text.data(), static_cast<std::size_t>(std::max(fps_length, 0))};
+    const float fps_width = ctx.font_width(fps);
+    float right = toolbar.x + toolbar.width - 8.0F;
+    ctx.label(gui::Rect{right - fps_width, toolbar.y, fps_width + 2.0F,
+                        toolbar.height},
+              fps, theme.text_muted);
+    right -= fps_width + 8.0F;
+
+    const float resolution_width = resolution_control_width(ctx);
+    right -= resolution_width;
+    draw_resolution_control(ctx,
+                            gui::Rect{right, top, resolution_width, height});
+    right -= toolbar_group_gap;
+
+    static constexpr std::array<std::string_view, move_snap_choices.size()>
+        distances{"0.01 m", "0.1 m", "0.5 m", "1 m", "5 m"};
+    static constexpr std::array<std::string_view,
+                                rotate_snap_choices_degrees.size()>
+        degrees{"1", "5", "15", "45", "90"};
+    static constexpr std::array<std::string_view,
+                                rotate_snap_choices_degrees.size()>
+        angles{"1 degree", "5 degrees", "15 degrees", "45 degrees",
+               "90 degrees"};
+    const std::size_t move_step =
+        nearest_choice(move_snap_choices, snap_steps_.move);
+    const std::size_t turn_step = nearest_choice(
+        rotate_snap_choices_degrees, snap_steps_.rotate_turns * 360.0F);
+    const float distance_width = toolbar_menu_width(ctx, distances[move_step]);
+    const float angle_width =
+        toolbar_menu_width(ctx, degrees[turn_step], true);
+    constexpr float display_menu_width = 38.0F;
+    float left = toolbar.x + 6.0F;
+    const float tools_width = 4.0F * toolbar_button + toolbar_group_gap +
+                              toolbar_button + toolbar_group_gap +
+                              toolbar_button + 2.0F + distance_width + 2.0F +
+                              angle_width + 2.0F + toolbar_button;
+    if (left + tools_width + toolbar_group_gap + display_menu_width <= right) {
+        const auto tool = [&](core::u64 salt, gui::Icon icon, bool engaged,
+                              std::string_view hint) {
+            const gui::Rect rect{left, top, toolbar_button, height};
+            left += toolbar_button;
+            return icon_button(ctx, mix(id_, salt), rect, icon, hint, engaged);
         };
-        if (choice(10U, 46.0F, "MOVE",
-                   !measuring_ && tool_ == TransformTool::Move,
-                   "Move tool. G moves the selection from the keyboard; "
-                   "X, Y or Z constrains it, Shift+X/Y/Z to a plane.")) {
+        const auto next_group = [&] {
+            left += toolbar_group_gap;
+            separator(left - toolbar_group_gap * 0.5F);
+        };
+        if (tool(10U, gui::Icon::MoveTool,
+                 !measuring_ && tool_ == TransformTool::Move,
+                 "Move. G moves the selection from the keyboard; X, Y or Z "
+                 "constrains it, Shift+X/Y/Z to a plane.")) {
             tool_ = TransformTool::Move;
             set_measuring(false);
         }
-        if (choice(11U, 56.0F, "ROTATE",
-                   !measuring_ && tool_ == TransformTool::Rotate,
-                   "Rotate tool. R rotates the selection about the view, "
-                   "or about X, Y or Z once one is typed.")) {
+        if (tool(11U, gui::Icon::RotateTool,
+                 !measuring_ && tool_ == TransformTool::Rotate,
+                 "Rotate. R rotates the selection about the view, or about "
+                 "X, Y or Z once one is typed.")) {
             tool_ = TransformTool::Rotate;
             set_measuring(false);
         }
-        if (choice(12U, 48.0F, "SCALE",
-                   !measuring_ && tool_ == TransformTool::Scale,
-                   "Scale tool. S scales the selection; X, Y or Z scales "
-                   "one axis, Shift+X/Y/Z the other two.")) {
+        if (tool(12U, gui::Icon::ScaleTool,
+                 !measuring_ && tool_ == TransformTool::Scale,
+                 "Scale. S scales the selection; X, Y or Z scales one axis, "
+                 "Shift+X/Y/Z the other two.")) {
             tool_ = TransformTool::Scale;
             set_measuring(false);
         }
-        if (choice(15U, 64.0F, "MEASURE", measuring_,
-                   "Measure tool (M). Click two points for the distance "
-                   "between them in metres; points snap to vertices, then "
-                   "edge midpoints, then the surface. Shift+click adds "
-                   "to a path. Nothing measured is saved.")) {
+        if (tool(15U, gui::Icon::Measure, measuring_,
+                 "Measure (M). Click two points for the distance between "
+                 "them in metres; points snap to vertices, then edge "
+                 "midpoints, then the surface. Shift+click adds to a path. "
+                 "Nothing measured is saved.")) {
             set_measuring(!measuring_);
         }
-        left += 6.0F;
-        if (choice(13U, 56.0F,
-                   orientation_ == TransformOrientation::Global ? "GLOBAL"
-                                                                : "LOCAL",
-                   false,
-                   "Gizmo and axis-key orientation: world axes, or the "
-                   "selected element's own. Pressing an axis key twice "
-                   "uses the other one for that transform.")) {
-            orientation_ = orientation_ == TransformOrientation::Global
-                               ? TransformOrientation::Local
-                               : TransformOrientation::Global;
+        next_group();
+        const bool global = orientation_ == TransformOrientation::Global;
+        if (tool(13U, global ? gui::Icon::World : gui::Icon::Local, false,
+                 global ? "World axes: the gizmo and the axis keys follow the "
+                          "Stage. Click for the element's own axes; an axis "
+                          "key pressed twice uses the other for that "
+                          "transform."
+                        : "Local axes: the gizmo and the axis keys follow the "
+                          "selected element. Click for the Stage's axes; an "
+                          "axis key pressed twice uses the other for that "
+                          "transform.")) {
+            orientation_ = global ? TransformOrientation::Local
+                                  : TransformOrientation::Global;
         }
-        if (choice(14U, 44.0F, "SNAP", snapping_,
-                   "Snap moves, turns and scales to the steps beside "
-                   "this (Shift: a tenth of the distance and scale step, "
-                   "a fifth of the angle). Shift+Tab toggles; hold Ctrl "
-                   "to invert while dragging.")) {
+        next_group();
+        if (tool(14U, gui::Icon::Snap, snapping_,
+                 "Snap moves, turns and scales to the steps beside this "
+                 "(Shift: a tenth of the distance and scale step, a fifth "
+                 "of the angle). Shift+Tab toggles; hold Ctrl to invert "
+                 "while dragging.")) {
             snapping_ = !snapping_;
         }
-        draw_snap_controls(ctx, gui::Rect{left, toolbar.y + 4.0F, 124.0F,
-                                          20.0F});
-        left += 128.0F;
-        if (choice(18U, 64.0F, "SURFACE", surface_snapping_,
-                   "Surface snapping: an element dragged by its body "
-                   "rides over whatever is under the pointer and rests on "
-                   "it. Hold V while moving to put the dragged element's "
-                   "vertex nearest the pointer onto the vertex under it.")) {
+        left += 2.0F;
+        const gui::Rect distance{left, top, distance_width, height};
+        const gui::UiId distance_menu = mix(id_, 22U);
+        if (toolbar_menu(ctx, mix(id_, 16U), distance, gui::Icon::Grid,
+                         distances[move_step], ctx.menu_open(distance_menu),
+                         false, !snapping_)) {
+            ctx.open_context_menu(distance_menu, distance.x,
+                                  distance.y + distance.height);
+        }
+        ctx.tooltip(distance, "Move snap step.");
+        {
+            std::array<bool, move_snap_choices.size()> current{};
+            current[move_step] = true;
+            if (const auto chosen =
+                    ctx.context_menu(distance_menu, distances, current)) {
+                snap_steps_.move = move_snap_choices[*chosen];
+            }
+        }
+        left += distance_width + 2.0F;
+        const gui::Rect angle{left, top, angle_width, height};
+        const gui::UiId angle_menu = mix(id_, 23U);
+        if (toolbar_menu(ctx, mix(id_, 17U), angle, gui::Icon::Angle,
+                         degrees[turn_step], ctx.menu_open(angle_menu), true,
+                         !snapping_)) {
+            ctx.open_context_menu(angle_menu, angle.x,
+                                  angle.y + angle.height);
+        }
+        ctx.tooltip(angle, "Rotate snap step.");
+        {
+            std::array<bool, rotate_snap_choices_degrees.size()> current{};
+            current[turn_step] = true;
+            if (const auto chosen =
+                    ctx.context_menu(angle_menu, angles, current)) {
+                snap_steps_.rotate_turns =
+                    rotate_snap_choices_degrees[*chosen] / 360.0F;
+            }
+        }
+        left += angle_width + 2.0F;
+        if (tool(18U, gui::Icon::Surface, surface_snapping_,
+                 "Surface snapping: an element dragged by its body rides "
+                 "over whatever is under the pointer and rests on it. Hold "
+                 "V while moving to put the dragged element's vertex "
+                 "nearest the pointer onto the vertex under it.")) {
             surface_snapping_ = !surface_snapping_;
         }
-        left += 6.0F;
     }
-    // The display toggles, when they fit before the preview controls;
-    // otherwise one SHOW menu holds them, so they stay reachable.
-    const float preview_left =
-        toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F;
-    const gui::UiId show_menu = mix(id_, 20U);
-    float used_right = left;
-    if (left + 218.0F > preview_left && toolbar.width >= 520.0F) {
-        const gui::Rect show{left, toolbar.y + 4.0F, 52.0F, 20.0F};
-        used_right = show.x + show.width;
-        if (ctx.button(mix(id_, 21U), show, "SHOW")) {
-            ctx.open_context_menu(show_menu, show.x,
-                                  show.y + show.height);
+
+    // The display toggles, right-aligned before the preview controls.
+    constexpr float toggles_width = 4.0F * toolbar_button;
+    if (left + toolbar_group_gap + toggles_width <= right) {
+        separator(right + toolbar_group_gap * 0.5F);
+        float x = right - toggles_width;
+        const auto toggle = [&](core::u64 salt, gui::Icon icon, bool& shown,
+                                std::string_view hint) {
+            if (icon_button(ctx, mix(id_, salt),
+                            gui::Rect{x, top, toolbar_button, height}, icon,
+                            hint, shown)) {
+                shown = !shown;
+            }
+            x += toolbar_button;
+        };
+        toggle(1U, gui::Icon::Grid, show_grid_,
+               "Grid: the floor grid, its spacing following the zoom.");
+        toggle(2U, gui::Icon::Guides, show_overlays_,
+               "Guides: camera frustums, light reach and other helpers "
+               "drawn over the Stage.");
+        toggle(3U, gui::Icon::Gizmo, show_gizmo_,
+               "Gizmo: the selection's transform handles.");
+        toggle(19U, gui::Icon::Bounds, show_bounds_,
+               "Bounds: every element's bounding box, selected or not.");
+    } else if (left + toolbar_group_gap + display_menu_width <= right) {
+        separator(right + toolbar_group_gap * 0.5F);
+        // One menu holds them, so they stay reachable in a narrow dock.
+        const gui::Rect show{right - display_menu_width, top,
+                             display_menu_width, height};
+        const gui::UiId show_menu = mix(id_, 20U);
+        const gui::Interaction it = ctx.grab(mix(id_, 21U), show);
+        ctx.cursor_for(it, gui::Cursor::Hand);
+        const bool open = ctx.menu_open(show_menu);
+        if (it.held && !it.released) {
+            ctx.panel(show, theme.widget_active);
+        } else if (open || it.hovered) {
+            ctx.panel(show, theme.widget_hover);
         }
-        ctx.tooltip(show, "Grid, guides, gizmo and bounds.");
-        const std::array<std::string, 4U> labels{
-            std::string{show_grid_ ? "[x] " : "[ ] "} + "Grid",
-            std::string{show_overlays_ ? "[x] " : "[ ] "} + "Guides",
-            std::string{show_gizmo_ ? "[x] " : "[ ] "} + "Gizmo",
-            std::string{show_bounds_ ? "[x] " : "[ ] "} + "Bounds"};
-        const std::array<std::string_view, 4U> options{
-            labels[0], labels[1], labels[2], labels[3]};
-        if (const auto chosen = ctx.context_menu(show_menu, options)) {
+        const bool lit = open || it.hovered;
+        const float middle = show.y + show.height * 0.5F;
+        gui::draw_eye_glyph(ctx.draw_list(), show.x + 13.0F, middle, true,
+                            toolbar_ink(theme, lit ? 1.0F : 0.75F));
+        draw_chevron(ctx.draw_list(), show.x + show.width - 8.0F, middle,
+                     lit ? theme.text : theme.text_muted);
+        if (it.clicked) {
+            ctx.open_context_menu(show_menu, show.x, show.y + show.height);
+        }
+        ctx.tooltip(show, "Show: grid, guides, gizmo and bounds.");
+        constexpr std::array<std::string_view, 4U> options{
+            "Grid", "Guides", "Gizmo", "Bounds"};
+        const std::array<bool, 4U> shown{show_grid_, show_overlays_,
+                                         show_gizmo_, show_bounds_};
+        if (const auto chosen = ctx.context_menu(show_menu, options, shown)) {
             switch (*chosen) {
             case 0U: show_grid_ = !show_grid_; break;
             case 1U: show_overlays_ = !show_overlays_; break;
@@ -3083,59 +3231,36 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
             }
         }
     }
-    if (left + 218.0F <= preview_left) {
-        float button_x = left;
-        if (ctx.button(mix(id_, 1U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
-                       show_grid_ ? "GRID" : "grid")) {
-            show_grid_ = !show_grid_;
-        }
-        button_x += 48.0F;
-        if (ctx.button(mix(id_, 2U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 52.0F, 20.0F},
-                       show_overlays_ ? "GUIDES" : "guides")) {
-            show_overlays_ = !show_overlays_;
-        }
-        button_x += 56.0F;
-        if (ctx.button(mix(id_, 3U),
-                       gui::Rect{button_x, toolbar.y + 4.0F, 50.0F, 20.0F},
-                       show_gizmo_ ? "GIZMO" : "gizmo")) {
-            show_gizmo_ = !show_gizmo_;
-        }
-        button_x += 54.0F;
-        const gui::Rect bounds_button{button_x, toolbar.y + 4.0F, 54.0F,
-                                      20.0F};
-        if (ctx.button(mix(id_, 19U), bounds_button,
-                       show_bounds_ ? "BOUNDS" : "bounds")) {
-            show_bounds_ = !show_bounds_;
-        }
-        ctx.tooltip(bounds_button,
-                    "Outline every element's bounding box, selected or "
-                    "not.");
+}
+
+namespace {
+
+constexpr std::array<std::string_view, 3U> resolution_names{"Full", "Half",
+                                                          "Quarter"};
+
+} // namespace
+
+float ViewportPanel::resolution_control_width(
+    const gui::UiContext& ctx) const noexcept {
+    return toolbar_menu_width(
+        ctx, resolution_names[static_cast<std::size_t>(resolution_)]);
+}
+
+void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
+                                             const gui::Rect& bounds) {
+    const auto current_index = static_cast<std::size_t>(resolution_);
+    const gui::UiId menu = mix(id_, 24U);
+    if (toolbar_menu(ctx, mix(id_, 4U), bounds, gui::Icon::Screen,
+                     resolution_names[current_index], ctx.menu_open(menu))) {
+        ctx.open_context_menu(menu, bounds.x, bounds.y + bounds.height);
     }
-    const float quality_x = toolbar.x + std::max(64.0F, toolbar.width - 158.0F);
-    {
-        // The caption gives way to SHOW in a narrow dock; the list stays.
-        if (used_right + 4.0F <= quality_x - 58.0F) {
-            ctx.label(
-                gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
-                "PREVIEW", ctx.theme().text_muted);
-        }
-        draw_resolution_control(ctx,
-            gui::Rect{quality_x, toolbar.y + 4.0F, 90.0F, 20.0F});
-        ctx.panel(
-            gui::Rect{quality_x + 96.0F, toolbar.y + 4.0F, 54.0F, 20.0F},
-            ctx.theme().widget);
-        std::array<char, 24U> fps_text{};
-        const int fps_length = std::snprintf(
-            fps_text.data(), fps_text.size(), "%.3g FPS",
-            std::max(frames_per_second, 0.0F));
-        ctx.label(
-            gui::Rect{quality_x + 101.0F, toolbar.y + 4.0F, 49.0F, 20.0F},
-            std::string_view{
-                fps_text.data(), static_cast<std::size_t>(
-                                     std::max(fps_length, 0))},
-            ctx.theme().text);
+    ctx.tooltip(bounds,
+                "Preview resolution: lower renders this view faster. What "
+                "a click picks is unchanged.");
+    std::array<bool, 3U> current{};
+    current[current_index] = true;
+    if (const auto chosen = ctx.context_menu(menu, resolution_names, current)) {
+        resolution_ = static_cast<PreviewResolution>(*chosen);
     }
 }
 
@@ -3162,7 +3287,9 @@ void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
         return;
     }
     const gui::UiId menu_id = mix(id_, 42U);
-    if (ctx.button(mix(id_, 43U), menu, stage_shading_name(stage_shading_))) {
+    if (toolbar_menu(ctx, mix(id_, 43U), menu, gui::Icon::Shading,
+                     stage_shading_name(stage_shading_),
+                     ctx.menu_open(menu_id), false, false, true)) {
         ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
     }
     ctx.tooltip(menu,
@@ -3172,7 +3299,9 @@ void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
     constexpr std::array<std::string_view, 4U> options{
         "Lit            Alt+4", "Unlit          Alt+3",
         "Lights only    Alt+6", "Wireframe      Alt+2"};
-    if (const auto chosen = ctx.context_menu(menu_id, options)) {
+    std::array<bool, 4U> checked{};
+    checked[static_cast<std::size_t>(stage_shading_)] = true;
+    if (const auto chosen = ctx.context_menu(menu_id, options, checked)) {
         frame.shading_choice = static_cast<render::ViewShading>(*chosen);
     }
 }
@@ -3229,9 +3358,14 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     // pointer over it picks nothing underneath.
     const gui::Rect view_menu =
         role_ == ViewportRole::Stage && projection == nullptr && !drawing_masks_
-            ? stage_view_menu_bounds(frame.image)
+            ? stage_view_menu_bounds(
+                  frame.image,
+                  toolbar_menu_width(ctx,
+                                     stage_projection_name(stage_projection_)))
             : gui::Rect{};
-    const gui::Rect shading_menu = stage_shading_menu_bounds(view_menu);
+    const gui::Rect shading_menu = stage_shading_menu_bounds(
+        view_menu,
+        toolbar_menu_width(ctx, stage_shading_name(stage_shading_)));
 
     if (surface_preview_.has_value()) {
         const output::ProjectionSurface* const committed =

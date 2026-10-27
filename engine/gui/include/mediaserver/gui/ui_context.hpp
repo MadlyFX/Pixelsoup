@@ -186,6 +186,33 @@ enum class Icon : core::u8 {
     Duplicate,
     // A playhead over a part-filled time bar: what playback has cached.
     Cache,
+    // The Stage's transform tools: a four-way arrow moves, a turning arrow
+    // rotates, an arrow leaving a corner square scales, a ruler measures.
+    MoveTool,
+    RotateTool,
+    ScaleTool,
+    Measure,
+    // Gizmo orientation: a globe for world axes, a cube for the element's own.
+    World,
+    Local,
+    // A three-by-three grid: the Stage grid, and the move snap step.
+    Grid,
+    // Two rays and the arc between them: the rotate snap step.
+    Angle,
+    // A box come to rest on a floor line: surface snapping.
+    Surface,
+    // A frame around a centre cross: safe-area and light guides.
+    Guides,
+    // Three axes from one point: the transform gizmo.
+    Gizmo,
+    // Corner brackets around a dot: bounding boxes.
+    Bounds,
+    // A monitor on its stand: the preview's resolution.
+    Screen,
+    // A view frustum: a Stage view's projection.
+    Projection,
+    // A half-lit ball: how a Stage view shades.
+    Shading,
 };
 void draw_icon(
     UiDrawList& list,
@@ -330,6 +357,12 @@ public:
     [[nodiscard]] std::optional<std::size_t> context_menu(
         UiId id, std::span<const std::string_view> options,
         std::span<const UiColor> swatches);
+    // The same menu with a tick before each entry that is on, for a set of
+    // toggles or the current one of several choices. `checked` pairs with
+    // `options` by index.
+    [[nodiscard]] std::optional<std::size_t> context_menu(
+        UiId id, std::span<const std::string_view> options,
+        std::span<const bool> checked);
     [[nodiscard]] bool menu_open(UiId id) const noexcept {
         return dropdown_id_ == id;
     }
@@ -569,6 +602,7 @@ private:
     std::size_t dropdown_pressed_{static_cast<std::size_t>(-1)};
     std::vector<std::string> dropdown_options_;
     std::vector<UiColor> dropdown_swatches_;
+    std::vector<bool> dropdown_checks_;
     Rect dropdown_anchor_{};
     Rect dropdown_bounds_{};
     bool dropdown_dismissed_{};

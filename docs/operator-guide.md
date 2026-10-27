@@ -756,7 +756,7 @@ What happens on release depends on where it lands:
   screen stands on its bottom edge, turned to face the Stage camera. A
   screen dropped on a wall hangs flat against it, facing out. Locked set
   pieces still count as surfaces. With nothing under the pointer, the asset
-  rests on the stage floor where the grid is drawn. With **SNAP** on (or
+  rests on the stage floor where the grid is drawn. With snapping on (or
   **Ctrl** held while it is off), the landing point steps to the 1 m grid
   across a level or upright surface, and a screen's turn steps by 5
   degrees. An imported model is hit on its own triangles a moment after it
@@ -1437,7 +1437,8 @@ what the camera looks at and widens a decade at a time as you pull back, from
 right of Stage names the current spacing.
 
 **Top, Front and Side views.** The menu in the top-right corner of the Stage
-image names the view's projection (`PERSPECTIVE` at first) and switches it.
+image names the view's projection (**Perspective** at first) and switches it;
+a tick marks the current one.
 With the pointer over Stage the keys do the same:
 
 | Keys | View |
@@ -1459,8 +1460,8 @@ Ctrl+9) remembers its projection.
 
 **Four views.** Choose **Four views** in the same menu to split Stage into
 Top (top left), Front (top right), Side (bottom left) and the perspective
-view (bottom right); **One view** in any view's menu goes back to the single
-view, which is the bottom-right one. The first time, the three new views centre on what the
+view (bottom right); choosing the ticked **Four views** again in any view's
+menu goes back to the single view, which is the bottom-right one. The first time, the three new views centre on what the
 perspective view looks at, at its zoom. Each view has its own camera, menu
 and gizmo: the camera keys, F, Ctrl+1 to Ctrl+9 and the Alt projection keys
 act on the view under the pointer, a camera drag stays with the view it began
@@ -1471,7 +1472,8 @@ in use, Stage shows the bottom-right view alone. Each view renders separately,
 so four views cost about as much GPU time as one Stage of the same total
 size plus the fixed per-frame work of three more renders.
 
-**Shading.** The menu left of the view menu names how the view shades and
+**Shading.** The menu left of the view menu, marked by a half-lit ball, names
+how the view shades and
 switches it, and with the pointer over a view the Unreal keys do the same:
 
 | Keys | Shading |
@@ -1485,7 +1487,7 @@ Shading belongs to the view: in four views each can shade differently, and
 Program and the outputs always show the lit picture. Unlit and Wireframe draw
 no atmosphere (the renderer reports fog idle there), and nothing is mirrored
 in a planar reflection while they are on. Picking, the gizmo, Measure and
-snapping work the same in every shading. The existing `BOUNDS` toggle outlines
+snapping work the same in every shading. The Bounds toggle outlines
 bounding boxes in any of them.
 
 An orthographic view's eye stands 200 m behind what it shows, so atmosphere
@@ -1509,12 +1511,30 @@ is under the pointer.
 
 ### Moving, rotating and scaling on Stage
 
-The Stage toolbar's `MOVE`, `ROTATE` and `SCALE` choose the gizmo drawn on the
+The Stage toolbar is a row of icons; hover over one for its name and keys.
+From the left:
+
+| Icon | Does |
+| --- | --- |
+| Four-way arrow, turning arrow, arrow out of a corner | Move, Rotate and Scale tools |
+| Ruler | Measure tool (**M**) |
+| Globe / cube | Gizmo on world axes / on the element's own axes |
+| Magnet | Snapping on or off (Shift+Tab) |
+| Grid with a distance, angle with degrees | The move and rotate snap steps; greyed while snapping is off |
+| Box resting on a line | Surface snapping |
+| Grid, frame corners, three axes, corner brackets | Show the floor grid, guides, gizmo and every element's bounds |
+| Screen with Full / Half / Quarter | The resolution Stage renders at |
+
+The rate at the right end is how fast Stage is drawing. Over the image's
+top-right corner, the shading menu and the view menu name how this view
+shades and what it looks through.
+
+The Move, Rotate and Scale tools choose the gizmo drawn on the
 selection. It sits at the selection's median point, and everything selected
 moves, turns and scales about that point. Move shows axis arrows, Rotate shows
 an axis ring per axis plus an outer white ring that turns about your view, and
 Scale shows axis handles plus an outer ring that scales uniformly. A plain drag
-on an element still moves it across the view. `GLOBAL` / `LOCAL` sets whether
+on an element still moves it across the view. The globe / cube sets whether
 arrows and rings follow the world axes or the primary element's own; scale
 handles always use the element's own axes.
 
@@ -1531,22 +1551,22 @@ The Blender keys work while the pointer is over Stage, with no button held:
 | Enter or left click | Confirm |
 | Esc or right click | Cancel and put the selection back |
 | Alt+G / Alt+R / Alt+S | Clear position, rotation or scale |
-| Shift+Tab | Toggle `SNAP` |
+| Shift+Tab | Toggle snapping |
 
 While a keyboard transform runs, a bar at the top of Stage names the tool,
 constraint and value, and the keyboard belongs to it: timeline, cue and fly
 keys stand down until it ends, and the whole transform is one undo step.
-`SNAP` rounds the change rather than the absolute value. The two lists beside
-it choose the steps: a move step from 0.01 m to 5 m, and an angle from 1 to 90
+Snapping rounds the change rather than the absolute value. The two menus
+beside the magnet choose the steps: a move step from 0.01 m to 5 m, and an angle from 1 to 90
 degrees (scale steps by 0.1). With Shift held the steps are a tenth of the
 distance and scale step and a fifth of the angle. A component that is keyed takes a key at the current frame, exactly as
 an Inspector edit would. A Blender-linked object takes a rotate or scale as
 a placement override on its occurrence, the same way it takes a move. Lights
 are only placed from the viewport, and a camera turns but has no scale.
 
-**Snapping to other elements.** With `SURFACE` on, an element dragged by its
+**Snapping to other elements.** With surface snapping on, an element dragged by its
 body rides over whatever is under the pointer and rests on it, as a Library
-asset does when dropped: its bounds touch the surface, and SNAP steps the
+asset does when dropped: its bounds touch the surface, and snapping steps the
 landing point across a level or upright surface. Hold **V** while moving -
 dragging the body or a gizmo arrow - to put the dragged element's vertex
 nearest where you grabbed it onto the vertex (or edge midpoint) under the
@@ -1555,9 +1575,9 @@ marks the vertex it will meet. Neither ever lands on what is being dragged.
 
 With a selection, the bottom left of Stage shows its size along the world
 axes in metres (`W`, `H`, `D`). A screen is flat, so it has no depth.
-`BOUNDS` outlines every element's bounding box, selected or not. When Stage is
-too narrow for `GRID`, `GUIDES`, `GIZMO` and `BOUNDS`, they move into a `SHOW`
-menu in the toolbar.
+The Bounds toggle outlines every element's bounding box, selected or not.
+When Stage is too narrow for the four display toggles, they fold into one
+menu behind an eye, with a tick by each one that is on.
 
 **Selecting with a box.** Ctrl+Alt+drag on Stage draws a selection box; every
 unlocked element it touches becomes the selection, or joins it with Shift
@@ -1578,7 +1598,7 @@ the camera's.
 
 ### Measuring on Stage
 
-`MEASURE` in the Stage toolbar, or **M** over Stage, picks up the Measure tool.
+The ruler in the Stage toolbar, or **M** over Stage, picks up the Measure tool.
 Click two points and Stage draws the line between them with its length in
 metres, and under it the X, Y and Z parts and its slope. As the pointer nears a
 vertex it snaps to it, shown as a filled square; failing that it snaps to the

@@ -502,20 +502,34 @@ void the_bounds_overlay_outlines_every_element_only_when_on() {
     MEASURE_CHECK(outline_vertices() >= 2 * 12 * 4);
 }
 
-void a_narrow_stage_keeps_its_display_toggles_in_a_show_menu() {
+void a_narrow_stage_keeps_its_display_toggles_in_a_menu() {
     Harness h;
-    h.bounds = gui::Rect{0.0F, 0.0F, 800.0F, 700.0F};
-    static_cast<void>(h.frame(400.0F, 400.0F, false));
+    // The toolbar's widths: the tools from the left - four tools, the
+    // orientation, snapping, the two step menus and surface snapping, with
+    // two group gaps - and the frame rate and resolution menu from the
+    // right. A Stage just wide enough for the tools and the 38-wide display
+    // menu, but not the four 26-wide toggles, gets the menu.
+    const auto menu_width = [&](std::string_view value, float extra) {
+        return 23.0F + h.ctx.font_width(value) + extra + 19.0F;
+    };
+    const float tools_end = 6.0F + 4.0F * 26.0F + 9.0F + 26.0F + 9.0F +
+                            26.0F + 2.0F + menu_width("1 m", 0.0F) + 2.0F +
+                            menu_width("5", 5.0F) + 2.0F + 26.0F;
+    const float right_reserve = 8.0F + h.ctx.font_width("60 fps") + 8.0F +
+                                menu_width("Full", 0.0F) + 9.0F;
+    const float width = tools_end + 9.0F + 38.0F + 30.0F + right_reserve;
+    MEASURE_CHECK(tools_end + 9.0F + 4.0F * 26.0F > width - right_reserve);
+    h.bounds = gui::Rect{0.0F, 0.0F, width, 700.0F};
+    static_cast<void>(h.frame(width * 0.5F, 400.0F, false));
     MEASURE_CHECK(h.panel.grid_visible());
-    // SHOW sits after MOVE..MEASURE, GLOBAL, SNAP, the steps and SURFACE.
-    const float show_x = 7.0F + 50.0F + 60.0F + 52.0F + 68.0F + 6.0F + 60.0F +
-                         48.0F + 128.0F + 68.0F + 6.0F + 26.0F;
+    const float show_x = width - right_reserve - 19.0F;
     static_cast<void>(h.frame(show_x, 14.0F, true));
     static_cast<void>(h.frame(show_x, 14.0F, false));
-    // The first entry, just under the button.
-    static_cast<void>(h.frame(show_x, 38.0F, false));
-    static_cast<void>(h.frame(show_x, 38.0F, true));
-    static_cast<void>(h.frame(show_x, 38.0F, false));
+    // The first entry, Grid, just under the button.
+    const float grid_y = 3.0F + 22.0F + 2.0F + 12.0F;
+    static_cast<void>(h.frame(show_x, grid_y, false));
+    static_cast<void>(h.frame(show_x, grid_y, true));
+    static_cast<void>(h.frame(show_x, grid_y, false));
     MEASURE_CHECK(!h.panel.grid_visible());
 }
 
@@ -606,8 +620,8 @@ int main() {
              a_middle_drag_from_the_gizmo_centre_moves_the_pivot_to_a_vertex},
         Case{"the bounds overlay outlines every element only when on",
              the_bounds_overlay_outlines_every_element_only_when_on},
-        Case{"a narrow Stage keeps its display toggles in a SHOW menu",
-             a_narrow_stage_keeps_its_display_toggles_in_a_show_menu},
+        Case{"a narrow Stage keeps its display toggles in a menu",
+             a_narrow_stage_keeps_its_display_toggles_in_a_menu},
         Case{"every Stage view picks and snaps through its own camera",
              every_stage_view_picks_and_snaps_through_its_own_camera},
     };

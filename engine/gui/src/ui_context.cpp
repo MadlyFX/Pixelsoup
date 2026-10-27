@@ -393,6 +393,25 @@ void draw_icon(
         list.add_triangle(tip + half * 1.6F, y - half, tip + half * 1.6F,
                           y + half, tip, y, color);
     };
+    // An anti-aliased arc about the centre, and a rectangle's outline.
+    const auto arc = [&](float radius, float start, float sweep,
+                         float thickness) {
+        std::array<UiPoint, 25U> points{};
+        for (std::size_t index = 0U; index < points.size(); ++index) {
+            const float angle = start + sweep * static_cast<float>(index) /
+                                            static_cast<float>(points.size() - 1U);
+            points[index] = UiPoint{x + std::cos(angle) * radius,
+                                    y + std::sin(angle) * radius};
+        }
+        list.add_polyline(points, thickness, color);
+    };
+    const auto outline = [&](float left_x, float top, float width, float height,
+                             float thickness) {
+        list.add_rect(left_x, top, width, thickness, color);
+        list.add_rect(left_x, top + height - thickness, width, thickness, color);
+        list.add_rect(left_x, top, thickness, height, color);
+        list.add_rect(left_x + width - thickness, top, thickness, height, color);
+    };
     switch (icon) {
     case Icon::Play:
         right(x + 5.0F, 5.5F);
@@ -560,6 +579,180 @@ void draw_icon(
                           y - 2.5F, color);
         list.add_rect(x + 1.5F, y - 3.0F, 1.0F, 8.0F, color);
         return;
+    case Icon::MoveTool:
+        list.add_rect(x - 4.5F, y - 0.75F, 9.0F, 1.5F, color);
+        list.add_rect(x - 0.75F, y - 4.5F, 1.5F, 9.0F, color);
+        list.add_triangle(x + 7.0F, y, x + 3.5F, y - 3.5F, x + 3.5F, y + 3.5F,
+                          color);
+        list.add_triangle(x - 7.0F, y, x - 3.5F, y + 3.5F, x - 3.5F, y - 3.5F,
+                          color);
+        list.add_triangle(x, y - 7.0F, x + 3.5F, y - 3.5F, x - 3.5F, y - 3.5F,
+                          color);
+        list.add_triangle(x, y + 7.0F, x - 3.5F, y + 3.5F, x + 3.5F, y + 3.5F,
+                          color);
+        return;
+    case Icon::RotateTool: {
+        // Most of a ring, turning clockwise into its arrowhead, round a hub.
+        // The gap before the head is what makes it read as turning.
+        constexpr float start = -1.2F;
+        constexpr float sweep = 4.3F;
+        constexpr float radius = 5.0F;
+        arc(radius, start, sweep, 1.6F);
+        const float end = start + sweep;
+        const float ex = x + std::cos(end) * radius;
+        const float ey = y + std::sin(end) * radius;
+        // Along the turn, and out from the hub.
+        const float tx = -std::sin(end);
+        const float ty = std::cos(end);
+        const float ox = std::cos(end);
+        const float oy = std::sin(end);
+        list.add_triangle(ex + tx * 4.5F, ey + ty * 4.5F,
+                          ex + ox * 3.8F - tx * 0.5F, ey + oy * 3.8F - ty * 0.5F,
+                          ex - ox * 3.8F - tx * 0.5F, ey - oy * 3.8F - ty * 0.5F,
+                          color);
+        list.add_rect(x - 1.25F, y - 1.25F, 2.5F, 2.5F, color);
+        return;
+    }
+    case Icon::ScaleTool:
+        list.add_rect(x - 6.5F, y + 1.5F, 5.0F, 5.0F, color);
+        list.add_rect(x - 6.5F, y - 6.5F, 1.2F, 6.0F, color);
+        list.add_rect(x - 6.5F, y - 6.5F, 6.0F, 1.2F, color);
+        list.add_rect(x + 5.3F, y + 0.5F, 1.2F, 6.0F, color);
+        list.add_rect(x + 0.5F, y + 5.3F, 6.0F, 1.2F, color);
+        list.add_line(x - 1.0F, y + 1.0F, x + 3.0F, y - 3.0F, 1.6F, color);
+        list.add_triangle(x + 6.5F, y - 6.5F, x + 6.5F, y - 1.5F, x + 1.5F,
+                          y - 6.5F, color);
+        return;
+    case Icon::Measure:
+        // A ruler's edge with its graduations, longer at the middle.
+        outline(x - 7.0F, y - 3.5F, 14.0F, 7.0F, 1.2F);
+        for (int tick = 0; tick < 5; ++tick) {
+            const float tx = x - 4.5F + 2.25F * static_cast<float>(tick);
+            const float length = tick == 2 ? 3.5F : 2.0F;
+            list.add_rect(tx - 0.5F, y - 3.5F, 1.0F, length, color);
+        }
+        return;
+    case Icon::World: {
+        arc(6.0F, 0.0F, 6.2832F, 1.2F);
+        std::array<UiPoint, 17U> meridian{};
+        for (std::size_t index = 0U; index < meridian.size(); ++index) {
+            const float angle = 6.2832F * static_cast<float>(index) /
+                                static_cast<float>(meridian.size() - 1U);
+            meridian[index] =
+                UiPoint{x + std::cos(angle) * 2.6F, y + std::sin(angle) * 6.0F};
+        }
+        list.add_polyline(meridian, 1.1F, color);
+        list.add_rect(x - 6.0F, y - 0.5F, 12.0F, 1.0F, color);
+        return;
+    }
+    case Icon::Local: {
+        // An isometric cube: its outline, and the three edges meeting at the
+        // near corner.
+        const std::array<UiPoint, 7U> hull{
+            UiPoint{x, y - 6.5F},        UiPoint{x + 5.6F, y - 3.25F},
+            UiPoint{x + 5.6F, y + 3.25F}, UiPoint{x, y + 6.5F},
+            UiPoint{x - 5.6F, y + 3.25F}, UiPoint{x - 5.6F, y - 3.25F},
+            UiPoint{x, y - 6.5F}};
+        list.add_polyline(hull, 1.2F, color);
+        const std::array<UiPoint, 3U> near_top{
+            UiPoint{x - 5.6F, y - 3.25F}, UiPoint{x, y}, UiPoint{x + 5.6F, y - 3.25F}};
+        list.add_polyline(near_top, 1.2F, color);
+        list.add_rect(x - 0.6F, y, 1.2F, 6.5F, color);
+        return;
+    }
+    case Icon::Grid:
+        for (int line = 0; line < 4; ++line) {
+            const float at = -6.0F + 4.0F * static_cast<float>(line);
+            list.add_rect(x + at - 0.5F, y - 6.0F, 1.0F, 12.0F, color);
+            list.add_rect(x - 6.0F, y + at - 0.5F, 12.0F, 1.0F, color);
+        }
+        return;
+    case Icon::Angle: {
+        const float vx = x - 6.0F;
+        const float vy = y + 5.0F;
+        list.add_rect(vx, vy - 0.6F, 13.0F, 1.2F, color);
+        list.add_line(vx, vy, x + 3.5F, y - 6.5F, 1.3F, color);
+        std::array<UiPoint, 7U> sweep{};
+        for (std::size_t index = 0U; index < sweep.size(); ++index) {
+            const float angle = -0.88F * static_cast<float>(index) /
+                                static_cast<float>(sweep.size() - 1U);
+            sweep[index] = UiPoint{vx + std::cos(angle) * 7.0F,
+                                   vy + std::sin(angle) * 7.0F};
+        }
+        list.add_polyline(sweep, 1.2F, color);
+        return;
+    }
+    case Icon::Surface:
+        list.add_rect(x - 7.0F, y + 5.0F, 14.0F, 1.5F, color);
+        list.add_rect(x - 3.0F, y + 0.5F, 6.0F, 4.5F, color);
+        list.add_rect(x - 0.75F, y - 7.0F, 1.5F, 3.0F, color);
+        list.add_triangle(x - 3.0F, y - 4.5F, x + 3.0F, y - 4.5F, x, y - 1.5F,
+                          color);
+        return;
+    case Icon::Guides:
+        // The corners of a safe frame, and its centre.
+        for (const float sx : {-1.0F, 1.0F}) {
+            for (const float sy : {-1.0F, 1.0F}) {
+                const float cx = x + sx * 7.0F;
+                const float cy = y + sy * 5.0F;
+                list.add_rect(sx < 0.0F ? cx : cx - 4.0F, sy < 0.0F ? cy : cy - 1.2F,
+                              4.0F, 1.2F, color);
+                list.add_rect(sx < 0.0F ? cx : cx - 1.2F, sy < 0.0F ? cy : cy - 3.0F,
+                              1.2F, 3.0F, color);
+            }
+        }
+        list.add_rect(x - 2.5F, y - 0.5F, 5.0F, 1.0F, color);
+        list.add_rect(x - 0.5F, y - 2.5F, 1.0F, 5.0F, color);
+        return;
+    case Icon::Gizmo:
+        list.add_rect(x - 3.0F, y - 3.0F, 1.5F, 6.0F, color);
+        list.add_triangle(x - 2.25F, y - 7.0F, x + 0.25F, y - 3.0F,
+                          x - 4.75F, y - 3.0F, color);
+        list.add_rect(x - 3.0F, y + 1.5F, 6.5F, 1.5F, color);
+        list.add_triangle(x + 7.0F, y + 2.25F, x + 3.0F, y - 0.25F, x + 3.0F,
+                          y + 4.75F, color);
+        list.add_line(x - 2.5F, y + 2.5F, x - 6.5F, y + 6.5F, 1.5F, color);
+        return;
+    case Icon::Bounds:
+        for (const float sx : {-1.0F, 1.0F}) {
+            for (const float sy : {-1.0F, 1.0F}) {
+                const float cx = x + sx * 6.5F;
+                const float cy = y + sy * 6.5F;
+                list.add_rect(sx < 0.0F ? cx : cx - 4.0F, sy < 0.0F ? cy : cy - 1.2F,
+                              4.0F, 1.2F, color);
+                list.add_rect(sx < 0.0F ? cx : cx - 1.2F, sy < 0.0F ? cy : cy - 4.0F,
+                              1.2F, 4.0F, color);
+            }
+        }
+        list.add_rect(x - 2.0F, y - 2.0F, 4.0F, 4.0F, color);
+        return;
+    case Icon::Screen:
+        outline(x - 7.0F, y - 5.5F, 14.0F, 9.0F, 1.3F);
+        list.add_rect(x - 0.75F, y + 3.5F, 1.5F, 2.0F, color);
+        list.add_rect(x - 3.5F, y + 5.5F, 7.0F, 1.2F, color);
+        return;
+    case Icon::Projection: {
+        // A frustum opening away from its eye, with the eye as a dot.
+        const std::array<UiPoint, 5U> frustum{
+            UiPoint{x - 4.0F, y - 2.0F}, UiPoint{x + 6.5F, y - 6.0F},
+            UiPoint{x + 6.5F, y + 6.0F}, UiPoint{x - 4.0F, y + 2.0F},
+            UiPoint{x - 4.0F, y - 2.0F}};
+        list.add_polyline(frustum, 1.2F, color);
+        list.add_rect(x - 7.5F, y - 1.25F, 2.5F, 2.5F, color);
+        return;
+    }
+    case Icon::Shading: {
+        arc(6.0F, 0.0F, 6.2832F, 1.2F);
+        std::array<UiPoint, 10U> lit{};
+        for (std::size_t index = 0U; index < lit.size(); ++index) {
+            const float angle = -1.5708F + 3.1416F * static_cast<float>(index) /
+                                               static_cast<float>(lit.size() - 1U);
+            lit[index] = UiPoint{x + std::cos(angle) * 6.0F,
+                                 y + std::sin(angle) * 6.0F};
+        }
+        list.add_convex_poly(lit, color);
+        return;
+    }
     }
 }
 
@@ -804,6 +997,7 @@ bool UiContext::dropdown(UiId id, const Rect& bounds,
         dropdown_anchor_ = bounds;
         dropdown_options_.clear();
         dropdown_swatches_.clear();
+        dropdown_checks_.clear();
         for (const auto option : options) dropdown_options_.emplace_back(option);
     }
     panel(bounds, it.hovered ? theme_.widget_hover : theme_.track);
@@ -829,12 +1023,13 @@ void UiContext::open_context_menu(UiId id, float x, float y) {
     dropdown_pressed_ = static_cast<std::size_t>(-1);
     dropdown_options_.clear();
     dropdown_swatches_.clear();
+    dropdown_checks_.clear();
     dropdown_seen_ = true;
 }
 
 std::optional<std::size_t> UiContext::context_menu(
     UiId id, std::span<const std::string_view> options) {
-    return context_menu(id, options, {});
+    return context_menu(id, options, std::span<const UiColor>{});
 }
 
 std::optional<std::size_t> UiContext::context_menu(
@@ -856,8 +1051,19 @@ std::optional<std::size_t> UiContext::context_menu(
         dropdown_options_.clear();
         for (const auto option : options) dropdown_options_.emplace_back(option);
         dropdown_swatches_.assign(swatches.begin(), swatches.end());
+        dropdown_checks_.clear();
     }
     return std::nullopt;
+}
+
+std::optional<std::size_t> UiContext::context_menu(
+    UiId id, std::span<const std::string_view> options,
+    std::span<const bool> checked) {
+    const auto chosen = context_menu(id, options, std::span<const UiColor>{});
+    if (dropdown_id_ == id) {
+        dropdown_checks_.assign(checked.begin(), checked.end());
+    }
+    return chosen;
 }
 
 void UiContext::draw_overlays(const Rect& window_bounds) {
@@ -892,7 +1098,8 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
     const float height = std::min(static_cast<float>(std::min(dropdown_options_.size(), std::size_t{10})) * 24.0F,
                                   std::max(24.0F, std::floor((window_bounds.height - 8.0F) / 24.0F) * 24.0F));
     float width = dropdown_anchor_.width;
-    const float chip = dropdown_swatches_.empty() ? 0.0F : 20.0F;
+    const float chip =
+        dropdown_swatches_.empty() && dropdown_checks_.empty() ? 0.0F : 20.0F;
     for (const auto& option : dropdown_options_) width = std::max(width, font_width(option) + 36.0F + chip);
     width = std::min(width, std::max(window_bounds.width - 8.0F, 1.0F));
     const float x = std::clamp(dropdown_anchor_.x, window_bounds.x + 4.0F, std::max(window_bounds.x + 4.0F, window_bounds.x + window_bounds.width - width - 4.0F));
@@ -913,6 +1120,15 @@ void UiContext::draw_overlays(const Rect& window_bounds) {
             list_.add_rect(swatch.x, swatch.y, swatch.width, swatch.height, theme_.text_muted);
             list_.add_rect(swatch.x + 1.0F, swatch.y + 1.0F, swatch.width - 2.0F, swatch.height - 2.0F,
                            dropdown_swatches_[index].a > 0.0F ? dropdown_swatches_[index] : theme_.panel);
+        }
+        if (index < dropdown_checks_.size() && dropdown_checks_[index]) {
+            // A tick, drawn: the atlas holds ASCII only.
+            const float cx = x + 14.0F;
+            const float cy = cell.y + 12.0F;
+            const std::array<UiPoint, 3U> tick{
+                UiPoint{cx - 4.0F, cy}, UiPoint{cx - 1.0F, cy + 3.0F},
+                UiPoint{cx + 4.5F, cy - 3.5F}};
+            list_.add_polyline(tick, 1.8F, theme_.accent);
         }
         label({x + 8.0F + chip, cell.y, width - 16.0F - chip, cell.height}, dropdown_options_[index]);
     }

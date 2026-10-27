@@ -4942,15 +4942,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           std::min(190.0F, std::max(output_bar.width - 170.0F, 60.0F));
       const gui::Rect output_name{output_bar.x + 6.0F, output_bar.y + 3.0F,
                                   output_name_width, output_bar.height - 6.0F};
+      // The preview resolution, as on the Stage toolbar: a screen and the
+      // current choice.
+      const float resolution_width =
+          impl.program_panel.resolution_control_width(ui);
       const float resolution_x =
-          output_bar.x + std::max(output_bar.width - 96.0F, 64.0F);
-      if (output_bar.width > 300.0F) {
-        ui.label(gui::Rect{resolution_x - 62.0F, output_bar.y, 58.0F,
-                           output_bar.height},
-                 "Preview", ui.theme().text_muted);
-      }
-      impl.program_panel.draw_resolution_control(ui,
-          gui::Rect{resolution_x, output_bar.y + 3.0F, 90.0F, 20.0F});
+          output_bar.x +
+          std::max(output_bar.width - resolution_width - 6.0F, 64.0F);
+      impl.program_panel.draw_resolution_control(
+          ui, gui::Rect{resolution_x, output_bar.y + 3.0F, resolution_width,
+                        20.0F});
       std::array<char, 64U> output_identity{};
       if (program_output != nullptr) {
         static_cast<void>(std::snprintf(

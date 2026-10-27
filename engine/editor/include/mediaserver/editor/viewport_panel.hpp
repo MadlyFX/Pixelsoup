@@ -415,8 +415,11 @@ class ViewportPanel final {
     void set_resolution(PreviewResolution resolution) noexcept {
         if (valid(resolution)) resolution_ = resolution;
     }
+    // The preview-resolution menu: a screen icon and the current choice. Its
+    // width follows that choice.
+    [[nodiscard]] float resolution_control_width(
+        const gui::UiContext& ctx) const noexcept;
     void draw_resolution_control(gui::UiContext& ctx, const gui::Rect& bounds);
-    void draw_snap_controls(gui::UiContext& ctx, const gui::Rect& bounds);
     // Surface and vertex snapping for a Move drag: true when it placed the
     // element exactly, so the grid step leaves `delta` alone.
     [[nodiscard]] bool snap_drag(const gui::UiContext& ctx,

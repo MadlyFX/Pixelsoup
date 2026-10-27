@@ -215,12 +215,14 @@ void stage_views() {
   check(picks(editor::stage_camera_for(authored, orbit), whole, boxes[3]),
         "Alt+P returns to Perspective");
 
-  // The view menu, in the image's top-right corner, splits the Stage.
-  const gui::Rect menu{whole.x + whole.width - 110.0F, whole.y + 6.0F, 104.0F,
-                       22.0F};
-  click(menu.x + menu.width * 0.5F, menu.y + menu.height * 0.5F);
+  // The view menu, in the image's top-right corner, splits the Stage. It
+  // ends 6 in from the corner and is wider than 30 whatever its font; its
+  // menu opens under its left edge and is wider than the button.
+  const float menu_x = whole.x + whole.width - 6.0F - 24.0F;
+  const float menu_y = whole.y + 6.0F;
+  click(menu_x, menu_y + 11.0F);
   // The fifth entry, below the four projections.
-  click(menu.x + 30.0F, menu.y + menu.height + 2.0F + 24.0F * 4.0F + 12.0F);
+  click(menu_x, menu_y + 22.0F + 2.0F + 24.0F * 4.0F + 12.0F);
   frame();
 
   constexpr float gap = 2.0F;
