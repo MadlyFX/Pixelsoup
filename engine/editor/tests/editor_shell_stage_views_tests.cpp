@@ -97,11 +97,18 @@ void stage_views() {
   editor::EditorSwitcherState switcher;
 
   std::vector<editor::EditIntent> edits;
+  editor::StageAssetStatus stage_status;
   const auto frame = [&] {
     auto result = shell->frame(show, timeline, keys, elements, {}, {}, {},
                                switcher, registry);
     check(result.status == editor::EditorStatus::Running, "editor running");
     edits.insert(edits.end(), result.edits.begin(), result.edits.end());
+    stage_status = result.stage_assets;
+  };
+  // Every Stage view rendered: nothing failed or was refused.
+  const auto rendered = [&] {
+    return stage_status.headline.find("FAILED") == std::string::npos &&
+           stage_status.headline.find("UNAVAILABLE") == std::string::npos;
   };
   frame();
   SDL_Window *window = nullptr;
@@ -255,6 +262,22 @@ void stage_views() {
   check(picks(editor::stage_camera_for(authored, orbit),
               quadrants[1].image, boxes[1]),
         "the other views keep their projections");
+  check(rendered(), "all four views render");
+
+  // Alt+2, 3, 6 and 4 shade the view under the pointer as Wireframe, Unlit,
+  // Lights only and Lit; each renders, and picking still works through it.
+  const Quadrant &front = quadrants[1];
+  move(front.image.x + front.image.width * 0.5F,
+       front.image.y + front.image.height * 0.5F);
+  for (const SDL_Keycode shade : {SDLK_2, SDLK_3, SDLK_6, SDLK_4}) {
+    key(shade, SDL_KMOD_LALT);
+    frame();
+    frame();
+    check(rendered(), "each shading renders");
+    check(picks(editor::stage_camera_for(authored, orbit), front.image,
+                boxes[1]),
+          "a shaded view still picks");
+  }
 }
 } // namespace
 

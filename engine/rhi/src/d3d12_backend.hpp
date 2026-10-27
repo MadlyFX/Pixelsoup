@@ -93,7 +93,8 @@ void d3d12_release_readback(void* state, void* readback) noexcept;
     const ShaderDesc& fragment,
     std::span<const TextureFormat> target_formats,
     ColorBlend blend,
-    DepthState depth) noexcept;
+    DepthState depth,
+    RasterState raster) noexcept;
 void d3d12_release_pipeline(void* state, void* pipeline) noexcept;
 
 [[nodiscard]] core::Result<void*, RhiError> d3d12_create_compute_pipeline(

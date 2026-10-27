@@ -43,6 +43,9 @@ cbuffer SceneConstants : register(b0, space3) {
     uint4 counts;
     uint4 grain_context;
     uint4 grain_extent;
+    // x: how an editor view shades - 0 lit, 1 unlit, 2 lights only,
+    // 3 wireframe. A clip is unlit already; see main.
+    float4 view_mode;
 };
 
 // A clip's file is sRGB-encoded, so a scene-referred multiply has to happen in
@@ -299,6 +302,22 @@ float4 main(Input input) : SV_Target0 {
             discard;
         }
         return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    // Lights only shows a clip as a flat grey card - it is a picture, not a
+    // lit surface - and wireframe draws its edges in one clip colour.
+    if (view_mode.x > 1.5) {
+        const float3 aid = view_mode.x > 2.5 ? float3(0.95, 0.7, 0.3)
+                                             : float3(0.18, 0.18, 0.18);
+#if defined(MEDIASERVER_SCENE_LINEAR)
+        float3 aid_source = blend_source(aid, opacity, input.layer_style.z);
+        if (input.layer_style.z < 1.5) {
+            aid_source *= opacity;
+        }
+        return float4(aid_source, opacity);
+#else
+        return float4(blend_source(saturate(media_encode_srgb(aid)), opacity,
+                                   input.layer_style.z), opacity);
+#endif
     }
     // A display-referred gain scales the encoded picture directly. A
     // scene-referred clip effect has to linearise first. Camera exposure is

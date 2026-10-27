@@ -2745,12 +2745,87 @@ void an_orthographic_view_pans_and_zooms_but_never_turns() {
              3.0F * std::sqrt(12.0F));
 }
 
+// The Stage view's two menus, in the image's top-right corner: the view menu
+// chooses the projection and the layout, the shading menu how the view
+// shades. Each names the current choice, reports a new one in the frame, and
+// takes the press so nothing under it is picked.
+void the_stage_view_menus_choose_projection_layout_and_shading() {
+    Harness h;
+    editor::ViewportPanel stage{gui::ui_id("menus"), editor::ViewportRole::Stage};
+    const auto frame = [&](float x, float y, bool down) {
+        h.input.new_frame();
+        h.input.set_mouse_position(x, y);
+        h.input.set_mouse_button(gui::MouseButton::Left, down);
+        h.ctx.new_frame(0.0);
+        editor::ViewportFrame out = stage.draw(h.ctx, Harness::bounds,
+                                               h.target, h.scene);
+        h.ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
+        return out;
+    };
+    // Clicks `at`, then the menu entry `row` below `at`'s menu; returns
+    // every frame's report merged.
+    const auto choose = [&](const gui::Rect& menu, std::size_t row) {
+        editor::ViewportFrame merged{};
+        const auto take = [&](const editor::ViewportFrame& f) {
+            if (f.projection_choice) merged.projection_choice = f.projection_choice;
+            if (f.layout_choice) merged.layout_choice = f.layout_choice;
+            if (f.shading_choice) merged.shading_choice = f.shading_choice;
+            merged.pressed = merged.pressed || f.pressed;
+        };
+        const float x = menu.x + menu.width * 0.5F;
+        const float y = menu.y + menu.height * 0.5F;
+        take(frame(x, y, true));
+        take(frame(x, y, false));
+        const float row_y = menu.y + menu.height + 2.0F +
+                            24.0F * static_cast<float>(row) + 12.0F;
+        take(frame(menu.x + 20.0F, row_y, false));
+        take(frame(menu.x + 20.0F, row_y, true));
+        take(frame(menu.x + 20.0F, row_y, false));
+        return merged;
+    };
+
+    const editor::ViewportFrame placed = frame(0.0F, 0.0F, false);
+    const gui::Rect view_menu{placed.image.x + placed.image.width - 110.0F,
+                              placed.image.y + 6.0F, 104.0F, 22.0F};
+    const gui::Rect shading_menu{view_menu.x - 104.0F, view_menu.y, 100.0F,
+                                 22.0F};
+
+    const editor::ViewportFrame top = choose(view_menu, 1U);
+    UI_CHECK(top.projection_choice == editor::StageProjection::Top);
+    UI_CHECK(!top.layout_choice && !top.shading_choice);
+    // The menu took the press: nothing under it was picked or navigated.
+    UI_CHECK(!top.pressed);
+    UI_CHECK(choose(view_menu, 3U).projection_choice ==
+             editor::StageProjection::Side);
+    // The fifth entry offers the other layout.
+    UI_CHECK(choose(view_menu, 4U).layout_choice == std::optional<bool>{true});
+    stage.set_stage_four_views(true);
+    UI_CHECK(choose(view_menu, 4U).layout_choice == std::optional<bool>{false});
+
+    UI_CHECK(choose(shading_menu, 3U).shading_choice ==
+             mediaserver::render::ViewShading::Wireframe);
+    UI_CHECK(choose(shading_menu, 1U).shading_choice ==
+             mediaserver::render::ViewShading::Unlit);
+    UI_CHECK(choose(shading_menu, 2U).shading_choice ==
+             mediaserver::render::ViewShading::LightsOnly);
+    UI_CHECK(choose(shading_menu, 0U).shading_choice ==
+             mediaserver::render::ViewShading::Lit);
+
+    // The labels follow what the shell set.
+    stage.set_stage_projection(editor::StageProjection::Front);
+    stage.set_stage_shading(mediaserver::render::ViewShading::Wireframe);
+    static_cast<void>(frame(0.0F, 0.0F, false));
+    UI_CHECK(stage.stage_projection() == editor::StageProjection::Front);
+    UI_CHECK(stage.stage_shading() ==
+             mediaserver::render::ViewShading::Wireframe);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 68U> cases{{
+constexpr std::array<Case, 69U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2758,6 +2833,8 @@ constexpr std::array<Case, 68U> cases{{
      &orthographic_views_look_along_their_axis_at_the_same_scale},
     {"an orthographic view pans and zooms but never turns",
      &an_orthographic_view_pans_and_zooms_but_never_turns},
+    {"the stage view menus choose projection layout and shading",
+     &the_stage_view_menus_choose_projection_layout_and_shading},
     {"preview resolution controls preserve logical picking", &preview_resolution_controls_preserve_logical_picking},
     {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},
     {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},

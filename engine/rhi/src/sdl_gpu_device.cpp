@@ -1913,6 +1913,9 @@ core::Result<Device, RhiError> Device::create(const DeviceConfig& config) noexce
     capabilities.storage_images = false;
     capabilities.compute = false;
     capabilities.indirect_draw = false;
+    // Callable: RasterState::fill selects SDL_GPU_FILLMODE_LINE, which every
+    // SDL_GPU driver this project builds for (D3D12, Vulkan) supports.
+    capabilities.wireframe_fill = true;
     return Result::success(Device{device, device, capabilities});
 }
 
@@ -2290,11 +2293,15 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     const ShaderDesc& fragment,
     TextureFormat target_format,
     ColorBlend blend,
-    DepthState depth) noexcept {
+    DepthState depth,
+    RasterState raster) noexcept {
     using Result = core::Result<GraphicsPipeline, RhiError>;
 
     if (handle_ == nullptr) {
         return Result::failure(RhiError::Unavailable);
+    }
+    if (raster.fill != FillMode::Solid && !capabilities_.wireframe_fill) {
+        return Result::failure(RhiError::OperationUnsupported);
     }
     if (!valid_blend(blend) || vertex.stage != ShaderStage::Vertex
         || fragment.stage != ShaderStage::Fragment || vertex.bytecode.empty()
@@ -2309,7 +2316,8 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     }
     if (capabilities_.backend == BackendKind::D3d12) {
         auto created = detail::d3d12_create_pipeline(
-            handle_, vertex, fragment, std::span<const TextureFormat>{&target_format, 1U}, blend, depth);
+            handle_, vertex, fragment, std::span<const TextureFormat>{&target_format, 1U}, blend, depth,
+            raster);
         if (!created) {
             return Result::failure(created.error());
         }
@@ -2353,7 +2361,9 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.fill_mode = raster.fill == FillMode::Wireframe
+        ? SDL_GPU_FILLMODE_LINE
+        : SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -2386,10 +2396,12 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     const ShaderDesc& fragment,
     std::span<const TextureFormat> target_formats,
     ColorBlend blend,
-    DepthState depth) noexcept {
+    DepthState depth,
+    RasterState raster) noexcept {
     using Result = core::Result<GraphicsPipeline, RhiError>;
     if (target_formats.size() == 1U) {
-        return create_pipeline(vertex, fragment, target_formats.front(), blend, depth);
+        return create_pipeline(vertex, fragment, target_formats.front(), blend, depth,
+                               raster);
     }
     if (handle_ == nullptr) {
         return Result::failure(RhiError::Unavailable);
@@ -2409,8 +2421,11 @@ core::Result<GraphicsPipeline, RhiError> Device::create_pipeline(
     if (!supports(vertex.format) || !supports(fragment.format)) {
         return Result::failure(RhiError::ShaderFormatUnsupported);
     }
+    if (raster.fill != FillMode::Solid && !capabilities_.wireframe_fill) {
+        return Result::failure(RhiError::OperationUnsupported);
+    }
     auto created = detail::d3d12_create_pipeline(
-        handle_, vertex, fragment, target_formats, blend, depth);
+        handle_, vertex, fragment, target_formats, blend, depth, raster);
     if (!created) {
         return Result::failure(created.error());
     }

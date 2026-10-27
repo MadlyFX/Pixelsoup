@@ -115,6 +115,9 @@ cbuffer SceneConstants : register(b0, space3) {
     uint4 grain_context;
     // xy: authored slice extent. zw: render-target extent.
     uint4 grain_extent;
+    // x: how an editor view shades - 0 lit, 1 unlit, 2 lights only,
+    // 3 wireframe. A show always renders lit.
+    float4 view_mode;
     // Directional shadow cascades, deliberately independent of output slice:
     // near cascades are fit to sub-frusta of the authored full-canvas camera
     // and the last one is the full-scene fit, so two nodes select the same
@@ -638,8 +641,11 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         emissive_texture.SampleBias(emissive_sampler, input.uv, texture_sampling.x).rgb);
     const float sampled_occlusion =
         occlusion_texture.SampleBias(occlusion_sampler, input.uv, texture_sampling.x).r;
-    const float3 albedo = input.base_color_roughness.rgb *
+    // Lights only: a neutral grey surface, so only the light on it shows.
+    const bool lights_only = view_mode.x > 1.5 && view_mode.x < 2.5;
+    const float3 base_albedo = input.base_color_roughness.rgb *
         decode_srgb(sampled_base.rgb);
+    const float3 albedo = lights_only ? float3(0.5, 0.5, 0.5) : base_albedo;
     // glTF packs roughness in G and metallic in B. These are data channels,
     // sampled linearly rather than passed through the colour transfer curve.
     float roughness = saturate(
@@ -653,10 +659,10 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         dot(normal_dx, normal_dx) + dot(normal_dy, normal_dy));
     roughness = pow(saturate(pow(roughness, 4.0) + normal_variance), 0.25);
 #endif
-    const float metallic = saturate(
+    const float metallic = lights_only ? 0.0 : saturate(
         input.emissive_metallic.a * sampled_metallic_roughness.b);
-    const float3 emissive =
-        input.emissive_metallic.rgb * sampled_emissive;
+    const float3 emissive = lights_only ? float3(0.0, 0.0, 0.0)
+        : input.emissive_metallic.rgb * sampled_emissive;
 
     const float alpha_coverage = saturate(input.anisotropy.w * sampled_base.a);
     if (input.alpha.y > 0.5 && input.alpha.y < 1.5 && alpha_coverage < input.alpha.x) discard;
@@ -687,6 +693,15 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     m.tangent = normalize(rotated_tangent - normal * dot(normal, rotated_tangent));
     m.bitangent = cross(normal, m.tangent) * input.world_tangent.w;
     m.anisotropy = input.anisotropy.x * aniso_map.b;
+    if (lights_only) {
+        // A plain dielectric: no coat, sheen, transmission or anisotropy.
+        m.coat = 0.0;
+        m.sheen = float3(0.0, 0.0, 0.0);
+        m.transmission = 0.0;
+        m.anisotropy = 0.0;
+        m.specular_weight = 1.0;
+        m.dielectric_f0 = float3(0.04, 0.04, 0.04);
+    }
     const bool extended_lighting = m.coat > 0.0 || max_component(m.sheen) > 0.0
         || m.transmission > 0.0 || m.anisotropy > 0.0 || m.specular_weight != 1.0
         || input.anisotropy.z != 1.5 || any(input.specular.rgb != 1.0)
@@ -909,7 +924,17 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // setting decides only where that authored order runs: scene-linear before
     // tone mapping for Exposure, or display-referred after encoding for Gain.
     const bool display_gain = counts.y != 0u;
-    const float3 exposed = accumulated * ground_exposure.a;
+    // Unlit and wireframe replace the lit result with the surface's own
+    // colour, unexposed, so a base colour reads as itself.
+    const bool unlit = view_mode.x > 0.5 && view_mode.x < 1.5;
+    const bool wireframe = view_mode.x > 2.5;
+    if (unlit) {
+        accumulated = base_albedo + emissive;
+    } else if (wireframe) {
+        accumulated = 0.35 + 0.65 * base_albedo;
+    }
+    const float3 exposed =
+        accumulated * (unlit || wireframe ? 1.0 : ground_exposure.a);
 #if !defined(MEDIASERVER_SCENE_LINEAR)
     // Display-referred only. The Advanced path is scene-linear all the way to
     // the output stage, which owns the display transform - and this block used

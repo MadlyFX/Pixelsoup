@@ -185,6 +185,8 @@ struct ViewportFrame final {
     std::optional<StageProjection> projection_choice;
     // The Stage view's menu asked for four views (true) or one (false).
     std::optional<bool> layout_choice;
+    // The Stage view's shading menu chose how this view shades.
+    std::optional<render::ViewShading> shading_choice;
 };
 
 // One canvas-space corner of a drawable's normalized source plane. Source
@@ -442,6 +444,13 @@ class ViewportPanel final {
     // Whether the Stage is showing four views, so the menu offers the other
     // layout.
     void set_stage_four_views(bool four) noexcept { stage_four_views_ = four; }
+    // What the shading menu, left of the view menu, shows for this view.
+    [[nodiscard]] render::ViewShading stage_shading() const noexcept {
+        return stage_shading_;
+    }
+    void set_stage_shading(render::ViewShading shading) noexcept {
+        stage_shading_ = shading;
+    }
     // A Stage panel draws its toolbar across the top of `draw`'s bounds
     // unless this is off: in four views one toolbar serves them all, drawn by
     // `draw_toolbar`.
@@ -696,10 +705,13 @@ class ViewportPanel final {
     bool show_bounds_{};
     StageProjection stage_projection_{StageProjection::Perspective};
     bool stage_four_views_{};
+    render::ViewShading stage_shading_{render::ViewShading::Lit};
     bool toolbar_shown_{true};
     bool drawing_masks_{};
     void draw_stage_view_menu(gui::UiContext& ctx, const gui::Rect& menu,
                               ViewportFrame& frame);
+    void draw_stage_shading_menu(gui::UiContext& ctx, const gui::Rect& menu,
+                                 ViewportFrame& frame);
     doc::NodeId drag_node_{};
     scene::Mat4 drag_start_world_{};
     scene::ModelLocalBounds drag_start_bounds_{};

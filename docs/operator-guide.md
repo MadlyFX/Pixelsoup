@@ -1471,6 +1471,23 @@ in use, Stage shows the bottom-right view alone. Each view renders separately,
 so four views cost about as much GPU time as one Stage of the same total
 size plus the fixed per-frame work of three more renders.
 
+**Shading.** The menu left of the view menu names how the view shades and
+switches it, and with the pointer over a view the Unreal keys do the same:
+
+| Keys | Shading |
+| --- | --- |
+| Alt+4 | Lit: the picture the show renders |
+| Alt+3 | Unlit: each surface's own colour and glow, with no lighting |
+| Alt+6 | Lights only: every surface a neutral grey, so only the light on it shows; clips show as flat grey cards |
+| Alt+2 | Wireframe: every triangle edge, seen through the others; clips' edges in orange |
+
+Shading belongs to the view: in four views each can shade differently, and
+Program and the outputs always show the lit picture. Unlit and Wireframe draw
+no atmosphere (the renderer reports fog idle there), and nothing is mirrored
+in a planar reflection while they are on. Picking, the gizmo, Measure and
+snapping work the same in every shading. The existing `BOUNDS` toggle outlines
+bounding boxes in any of them.
+
 An orthographic view's eye stands 200 m behind what it shows, so atmosphere
 (fog) is not drawn in it - it would be the air of that whole distance - and
 the renderer reports fog as idle there with that reason. Lighting, shadows,

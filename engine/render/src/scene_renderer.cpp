@@ -199,6 +199,9 @@ struct SceneConstants final {
     core::u32 grain_context[4U]{};
     // slice width/height, render-target width/height
     core::u32 grain_extent[4U]{};
+    // x: the view's ViewShading. scene_media.frag.hlsl declares the block up
+    // to here, so this stays ahead of everything it does not read.
+    float view_mode[4U]{};
     // One light projection per cascade. Only counts[2] of them are valid; the
     // last valid one is the full-scene fit the RSM pass also used.
     float shadow_view_projection[scene::max_shadow_cascades][16U]{};
@@ -247,7 +250,7 @@ static_assert(sizeof(SkyConstants) == 240U);
 // The exact constant-buffer size, asserted so a field added here without one
 // added to the shader is a build error rather than a frame of misread
 // constants.
-static_assert(sizeof(SceneConstants) == 928U);
+static_assert(sizeof(SceneConstants) == 944U);
 
 // scene_rsm_flux.frag.hlsl: cbuffer RsmFluxConstants.
 struct RsmFluxConstants final {
@@ -2231,6 +2234,27 @@ Result SceneRenderer::create(
     renderer.rsm_normal_pipeline_ = std::move(rsm_normal_pipeline);
     renderer.auxiliary_pipeline_ = std::move(auxiliary_pipeline);
     renderer.media_auxiliary_pipeline_ = std::move(media_auxiliary_pipeline);
+    if (limits.view_shading && device.capabilities().wireframe_fill) {
+        // The lit and media colour passes, rasterizing edges. Depth still
+        // tests and writes, so an edge behind another is drawn after it in
+        // the same pass; the colour pass clears its own depth, so the edges
+        // are tested only against each other and every one shows.
+        const rhi::RasterState edges{rhi::FillMode::Wireframe};
+        auto wireframe = device.create_pipeline(
+            vertex, fragment, color_format, rhi::ColorBlend::Disabled,
+            depth_state, edges);
+        auto media_wireframe = device.create_pipeline(
+            vertex, media_fragment, color_format,
+            advanced ? rhi::ColorBlend::PremultipliedNormal
+                     : rhi::ColorBlend::Normal,
+            depth_state, edges);
+        if (!wireframe || !media_wireframe) {
+            return Result::failure(RenderError::BackendFailure);
+        }
+        renderer.wireframe_pipeline_ = std::move(wireframe).value();
+        renderer.media_wireframe_pipeline_ =
+            std::move(media_wireframe).value();
+    }
     renderer.rsm_flux_pipeline_ = std::move(rsm_flux_pipeline);
     renderer.environment_ = std::move(environment);
     renderer.offline_media_ = std::move(offline_media).value();
@@ -3209,10 +3233,23 @@ bool SceneRenderer::render(
     if (!resolve_render_view(scene, slice, options, render_view)) {
         return false;
     }
+    // An editor view's shading aid. Wireframe needs its own pipelines, which
+    // only a renderer built for an editor view has: refused, not drawn lit.
+    const ViewShading shading = render_view.shading;
+    const bool wireframe = shading == ViewShading::Wireframe;
+    if (wireframe && (!wireframe_pipeline_ || !media_wireframe_pipeline_)) {
+        static_cast<void>(core::report_idle_once(
+            "view shading",
+            "wireframe needs a renderer built for an editor view"));
+        return false;
+    }
 
     planar_active_ = false;
     planar_texture_ = nullptr;
-    if (!options.reflection_pass && scene.environment.planar.enabled) {
+    // Unlit and wireframe draw no light, so they need no mirror either.
+    if (!options.reflection_pass && scene.environment.planar.enabled
+        && (shading == ViewShading::Lit
+            || shading == ViewShading::LightsOnly)) {
         const auto& p = scene.environment.planar;
         const auto& full = options.residency_scene ? *options.residency_scene : scene;
         const bool receiver = p.receiver != doc::NodeId{} &&
@@ -4720,6 +4757,7 @@ bool SceneRenderer::render(
         scene_constants.eye_position[2U] = render_view.eye.z;
         scene_constants.eye_position[3U] = 1.0F;
     }
+    scene_constants.view_mode[0U] = static_cast<float>(shading);
     scene_constants.sky_ambient[0U] = scene.environment.sky_color.x;
     scene_constants.sky_ambient[1U] = scene.environment.sky_color.y;
     scene_constants.sky_ambient[2U] = scene.environment.sky_color.z;
@@ -5198,7 +5236,7 @@ bool SceneRenderer::render(
     if (options.reflection_pass) scene_constants.ground_exposure[3] = 1.0F;
 
     rhi::PulledDraw draw{};
-    draw.pipeline = &pipeline_;
+    draw.pipeline = wireframe ? &wireframe_pipeline_ : &pipeline_;
     draw.vertex_buffers = vertex_bindings;
     draw.fragment_buffers = lit_fragment_bindings;
     draw.vertex_uniform = bytes_of(view_constants);
@@ -5495,7 +5533,8 @@ bool SceneRenderer::render(
         const BatchConstants occluder_offsets{
             occluder.range.first_index, occluder.first_instance, 0U, 0U};
         rhi::PulledDraw occluder_draw{};
-        occluder_draw.pipeline = &media_depth_pipeline_;
+        occluder_draw.pipeline =
+            wireframe ? &media_wireframe_pipeline_ : &media_depth_pipeline_;
         occluder_draw.vertex_buffers = vertex_bindings;
         occluder_draw.vertex_uniform = bytes_of(view_constants);
         occluder_draw.raster_viewport = raster_viewport;
@@ -5543,7 +5582,10 @@ bool SceneRenderer::render(
             0U};
         rhi::PulledDraw composite_draw{};
         const auto pipeline_index = blend_index(composite.blend);
-        composite_draw.pipeline = composite.media
+        composite_draw.pipeline = wireframe
+            ? (composite.media ? &media_wireframe_pipeline_
+                               : &wireframe_pipeline_)
+            : composite.media
             ? &media_blended_pipelines_[pipeline_index]
             : &blended_pipelines_[pipeline_index];
         composite_draw.vertex_buffers = vertex_bindings;

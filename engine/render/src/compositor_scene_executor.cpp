@@ -920,6 +920,9 @@ constexpr const char* fog_refusal_depth =
 // between would be integrated as though the camera really were out there.
 constexpr const char* fog_idle_orthographic =
     "atmosphere is not drawn in an orthographic view";
+// Unlit and wireframe show surfaces as they are; air would only veil them.
+constexpr const char* fog_idle_unlit =
+    "atmosphere is drawn only in Lit and Lights only views";
 constexpr const char* fog_refusal_targets =
     "no atmosphere targets at this extent on this device";
 constexpr const char* bloom_refusal_unaligned =
@@ -2383,14 +2386,19 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             plan.adjusted_scene.environment.fog_density > 0.0F;
         const bool orthographic_view = render_view.has_value()
             && scene::orthographic(render_view->matrices.projection);
+        const bool unlit_view = render_view.has_value()
+            && (render_view->shading == ViewShading::Unlit
+                || render_view->shading == ViewShading::Wireframe);
+        const char* const fog_idle = orthographic_view ? fog_idle_orthographic
+            : unlit_view ? fog_idle_unlit : nullptr;
         // Reported idle with its reason rather than drawn through a viewpoint
-        // that is not where the picture is taken from.
-        const bool fog_authored = fog_present && !orthographic_view;
-        if (fog_present && orthographic_view) {
+        // that is not where the picture is taken from, or over a picture
+        // that shows no light.
+        const bool fog_authored = fog_present && fog_idle == nullptr;
+        if (fog_present && fog_idle != nullptr) {
             last_passes_.fog = PassState::Idle;
-            last_passes_.fog_refusal = fog_idle_orthographic;
-            static_cast<void>(
-                core::report_idle_once("atmosphere", fog_idle_orthographic));
+            last_passes_.fog_refusal = fog_idle;
+            static_cast<void>(core::report_idle_once("atmosphere", fog_idle));
         }
         const bool bloom_authored = authored.bloom_strength > 0.0F;
         const bool motion_authored = authored.motion_blur && authored.motion_blur_radius > 0U;

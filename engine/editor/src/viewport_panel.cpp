@@ -2898,6 +2898,30 @@ gui::Rect stage_view_menu_bounds(const gui::Rect& image) noexcept {
                      width, 22.0F};
 }
 
+// The shading menu, left of the view menu; empty with it.
+gui::Rect stage_shading_menu_bounds(const gui::Rect& view_menu) noexcept {
+    constexpr float width = 100.0F;
+    if (view_menu.width <= 0.0F) {
+        return gui::Rect{};
+    }
+    return gui::Rect{view_menu.x - width - 4.0F, view_menu.y, width,
+                     view_menu.height};
+}
+
+std::string_view stage_shading_name(render::ViewShading shading) noexcept {
+    switch (shading) {
+    case render::ViewShading::Unlit:
+        return "UNLIT";
+    case render::ViewShading::LightsOnly:
+        return "LIGHTS ONLY";
+    case render::ViewShading::Wireframe:
+        return "WIREFRAME";
+    case render::ViewShading::Lit:
+        break;
+    }
+    return "LIT";
+}
+
 std::string_view stage_projection_name(StageProjection projection) noexcept {
     switch (projection) {
     case StageProjection::Top:
@@ -3131,6 +3155,28 @@ void ViewportPanel::copy_tools_from(const ViewportPanel& other) noexcept {
     resolution_ = other.resolution_;
 }
 
+void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
+                                            const gui::Rect& menu,
+                                            ViewportFrame& frame) {
+    if (menu.width <= 0.0F) {
+        return;
+    }
+    const gui::UiId menu_id = mix(id_, 42U);
+    if (ctx.button(mix(id_, 43U), menu, stage_shading_name(stage_shading_))) {
+        ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
+    }
+    ctx.tooltip(menu,
+                "How this view shades. Only the Stage changes: Program and "
+                "the outputs always show the lit picture.");
+    // In ViewShading order.
+    constexpr std::array<std::string_view, 4U> options{
+        "Lit            Alt+4", "Unlit          Alt+3",
+        "Lights only    Alt+6", "Wireframe      Alt+2"};
+    if (const auto chosen = ctx.context_menu(menu_id, options)) {
+        frame.shading_choice = static_cast<render::ViewShading>(*chosen);
+    }
+}
+
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
                                   const scene::Scene& scene,
@@ -3185,6 +3231,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         role_ == ViewportRole::Stage && projection == nullptr && !drawing_masks_
             ? stage_view_menu_bounds(frame.image)
             : gui::Rect{};
+    const gui::Rect shading_menu = stage_shading_menu_bounds(view_menu);
 
     if (surface_preview_.has_value()) {
         const output::ProjectionSurface* const committed =
@@ -3321,7 +3368,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     const bool occluded =
         (interaction_occluder != nullptr &&
          interaction_occluder->contains(ctx.pointer_x(), ctx.pointer_y())) ||
-        view_menu.contains(ctx.pointer_x(), ctx.pointer_y());
+        view_menu.contains(ctx.pointer_x(), ctx.pointer_y()) ||
+        shading_menu.contains(ctx.pointer_x(), ctx.pointer_y());
     GizmoAxis hovered_scene_axis = GizmoAxis::None;
     if (!occluded && !measuring_) {
         switch (gizmo_tool) {
@@ -4308,6 +4356,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     ctx.pop_clip();
     draw_stage_view_menu(ctx, view_menu, frame);
+    draw_stage_shading_menu(ctx, shading_menu, frame);
 
     frame.deep_select_open = deep_select_open_;
     frame.deep_candidate_count = deep_candidates_.size();

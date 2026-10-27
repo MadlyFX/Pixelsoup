@@ -360,6 +360,14 @@ effect_target_name(const ElementInfo *target,
           length, 0, static_cast<int>(storage.size() - 1U)))};
 }
 
+// The Stage views' renderers: the show's own limits, plus the wireframe
+// pipelines their shading menu can ask for.
+[[nodiscard]] render::RendererLimits stage_view_limits() noexcept {
+  render::RendererLimits limits{};
+  limits.view_shading = true;
+  return limits;
+}
+
 [[nodiscard]] const rhi::Texture *
 record_editor_scene(render::CompositorSceneExecutor &executor,
                      rhi::CommandList &commands, const scene::Scene &frame,
@@ -1747,6 +1755,8 @@ struct EditorShell::Impl final {
       orbit.projection = projection;
     }
     StageOrbit orbit{};
+    // An authoring aid for this view alone; Program always renders lit.
+    render::ViewShading shading{render::ViewShading::Lit};
     ViewportPanel panel;
     // Every view past the first renders through its own executor and
     // display, made the first time four views are shown.
@@ -2430,7 +2440,7 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
   }
   auto stage = render::CompositorSceneExecutor::create(
       window.device(), restored_width, restored_height,
-      render::RendererLimits{}, render::MediaCacheConfig{}, working_format);
+      stage_view_limits(), render::MediaCacheConfig{}, working_format);
   if (!stage) {
     return Result::failure(EditorError::Unavailable);
   }
@@ -2894,8 +2904,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     for (std::size_t index = 1U; index < impl.stage_views.size(); ++index) {
       Impl::StageViewport &view = impl.stage_views[index];
       auto renderer = render::CompositorSceneExecutor::create(
-          device, 64U, 64U, render::RendererLimits{},
-          render::MediaCacheConfig{}, format);
+          device, 64U, 64U, stage_view_limits(), render::MediaCacheConfig{},
+          format);
       auto display = render::OutputTransform::create(device, 64U, 64U);
       if (!renderer || !display) {
         impl.stage_four_failed = true;
@@ -3193,6 +3203,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           static_cast<core::u64>(view.orbit.projection);
       stage_view.clip_planes = render::SceneClipPlanes{
           view_camera.near_plane, view_camera.far_plane};
+      stage_view.shading = view.shading;
       auto geometry_camera = authored_stage.camera;
       auto geometry_canvas = authored_stage.canvas;
       std::swap(stage_scene.camera, geometry_camera);
@@ -4078,6 +4089,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
+  // The current Stage view's shading. Wireframe needs a device that can
+  // rasterize edges; without one the view stays as it is and says why.
+  const auto choose_shading = [&](render::ViewShading shading) {
+    if (shading == render::ViewShading::Wireframe &&
+        !impl.window.device().capabilities().wireframe_fill) {
+      impl.stage_bookmark_note = "Wireframe is unavailable on this GPU";
+      impl.stage_bookmark_note_until = impl.window.time_seconds() + 3.0;
+      impl.stage_bookmark_view = impl.stage_current;
+      return;
+    }
+    impl.stage().shading = shading;
+  };
+
   // Stage camera navigation, as in the Unreal Editor's perspective viewport.
   // `pointer_free` says no floating panel covers the pointer; `left_available`
   // that a left press on bare canvas may walk (mask authoring owns it).
@@ -4140,6 +4164,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const auto &[key, projection] : views) {
           if (ui.key_pressed(key)) {
             impl.stage().orbit.projection = projection;
+          }
+        }
+        constexpr std::array<std::pair<gui::Key, render::ViewShading>, 4U>
+            shadings{{{gui::Key::ShadeLit, render::ViewShading::Lit},
+                      {gui::Key::ShadeUnlit, render::ViewShading::Unlit},
+                      {gui::Key::ShadeLightsOnly,
+                       render::ViewShading::LightsOnly},
+                      {gui::Key::ShadeWireframe,
+                       render::ViewShading::Wireframe}}};
+        for (const auto &[key, shading] : shadings) {
+          if (ui.key_pressed(key)) {
+            choose_shading(shading);
           }
         }
       }
@@ -4637,6 +4673,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                          ? &floating_occluder.value()
                          : nullptr);
           view.panel.set_stage_projection(view.orbit.projection);
+          view.panel.set_stage_shading(view.shading);
           view.panel.set_stage_four_views(impl.stage_four);
           view.panel.set_toolbar_shown(toolbar);
           view.frame = view.panel.draw(
@@ -4656,6 +4693,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         if (view.frame.layout_choice.has_value()) {
           set_four_views(*view.frame.layout_choice);
+        }
+        if (view.frame.shading_choice.has_value()) {
+          choose_shading(*view.frame.shading_choice);
         }
         if (!impl.stage_bookmark_note.empty() &&
             impl.stage_bookmark_view == impl.stage_current &&

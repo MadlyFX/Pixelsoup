@@ -19,6 +19,9 @@ constexpr const char* bloom_refusal_targets =
 // between would be integrated as though the camera really were out there.
 constexpr const char* fog_idle_orthographic =
     "atmosphere is not drawn in an orthographic view";
+// Unlit and wireframe show surfaces as they are; air would only veil them.
+constexpr const char* fog_idle_unlit =
+    "atmosphere is drawn only in Lit and Lights only views";
 constexpr const char* fog_refusal_targets =
     "no atmosphere targets at this extent on this device";
 
@@ -72,7 +75,11 @@ constexpr const char* fog_refusal_targets =
     if (!options.view.has_value()) {
         return 0U;
     }
-    return options.view->history_identity;
+    // A different shading aid is a different picture: its history resets.
+    // Lit adds nothing, so every output view keeps its identity.
+    return options.view->history_identity
+        ^ (static_cast<core::u64>(options.view->shading)
+           * 0x9E37'79B9'7F4A'7C15ULL);
 }
 
 [[nodiscard]] SceneHistoryAction scene_history_action(
@@ -669,10 +676,14 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     const bool defer = request.defer_scene_effects;
     const bool orthographic_view = request.options.view.has_value()
         && scene::orthographic(request.options.view->matrices.projection);
+    const bool unlit_view = request.options.view.has_value()
+        && (request.options.view->shading == ViewShading::Unlit
+            || request.options.view->shading == ViewShading::Wireframe);
+    const char* const fog_idle = orthographic_view ? fog_idle_orthographic
+        : unlit_view ? fog_idle_unlit : nullptr;
     if (!defer && readiness.selected == scene::RendererBackend::Advanced
-        && atmosphere.fog_density > 0.0F && orthographic_view) {
-        static_cast<void>(
-            core::report_idle_once("atmosphere", fog_idle_orthographic));
+        && atmosphere.fog_density > 0.0F && fog_idle != nullptr) {
+        static_cast<void>(core::report_idle_once("atmosphere", fog_idle));
     } else if (!defer && readiness.selected == scene::RendererBackend::Advanced
         && atmosphere.fog_density > 0.0F) {
         // The frustum this frame was actually rendered from and the raster it
@@ -940,9 +951,9 @@ RenderProductsResult HybridSceneRenderer::render_frame(
         passes.fog = defer ? PassState::NotAuthored
                            : state(atmosphere.fog_density > 0.0F, fog_ran);
         if (!defer && advanced && atmosphere.fog_density > 0.0F
-            && orthographic_view) {
+            && fog_idle != nullptr) {
             passes.fog = PassState::Idle;
-            passes.fog_refusal = fog_idle_orthographic;
+            passes.fog_refusal = fog_idle;
         }
         last_products_.passes = passes;
     }

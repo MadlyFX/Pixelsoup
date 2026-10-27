@@ -190,6 +190,9 @@ struct DeviceCapabilities final {
     // One pipeline may write several colour targets in a pass: see the
     // format-list create_pipeline and PulledDraw::additional_targets.
     bool multiple_render_targets{};
+    // A graphics pipeline may rasterize triangle edges only
+    // (RasterState::fill = FillMode::Wireframe).
+    bool wireframe_fill{};
     bool explicit_barriers{};
     bool async_compute{};
     bool indirect_draw{};
@@ -520,6 +523,21 @@ struct DepthState final {
     bool greater{true};
 
     bool operator==(const DepthState&) const = default;
+};
+
+// How a pipeline fills the triangles it rasterizes. Wireframe draws their
+// edges only, one pixel wide, and needs `capabilities().wireframe_fill`.
+enum class FillMode : core::u8 {
+    Solid,
+    Wireframe,
+};
+
+// Rasterizer behaviour of a pipeline beyond depth. Solid by default, which is
+// every pipeline that predates the field.
+struct RasterState final {
+    FillMode fill{FillMode::Solid};
+
+    bool operator==(const RasterState&) const = default;
 };
 
 class Device;
@@ -1461,7 +1479,8 @@ public:
         const ShaderDesc& fragment,
         TextureFormat target_format,
         ColorBlend blend,
-        DepthState depth = DepthState{}) noexcept;
+        DepthState depth = DepthState{},
+        RasterState raster = RasterState{}) noexcept;
 
     // Several colour targets, written at SV_Target0, SV_Target1, ... in this
     // order. More than one needs `capabilities().multiple_render_targets`
@@ -1471,7 +1490,8 @@ public:
         const ShaderDesc& fragment,
         std::span<const TextureFormat> target_formats,
         ColorBlend blend,
-        DepthState depth = DepthState{}) noexcept;
+        DepthState depth = DepthState{},
+        RasterState raster = RasterState{}) noexcept;
 
     // Compatibility for the UI/output paths while their only distinction is
     // still opaque versus ordinary straight-alpha composition.

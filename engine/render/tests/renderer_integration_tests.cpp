@@ -5341,6 +5341,211 @@ void an_orthographic_view_shades_along_the_view_and_idles_fog() {
                  render::RendererReadinessCode::OrthographicCamera);
 }
 
+// An editor view's shading aids, through the Advanced renderer: Unlit shows
+// a surface's base colour whatever the light; Lights only shows the light on
+// a neutral grey whatever the colour; Wireframe draws edges and leaves a
+// face's interior to the background, and is refused by a renderer not built
+// for an editor view. Unlit and Wireframe idle the fog with their reason.
+void view_shading_shows_colour_light_or_edges() {
+    if (!render::HybridSceneRenderer::shaders_available()
+        || !rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto opened = rhi::Device::create(config);
+    RENDER_CHECK(opened);
+    auto device = std::move(opened).value();
+    if (!device.capabilities().advanced_raster()
+        || !device.capabilities().wireframe_fill) {
+        return;
+    }
+
+    constexpr core::u32 width = 96U;
+    constexpr core::u32 height = 96U;
+    scene::Scene base{};
+    base.id = scene::SceneId{801U};
+    base.document_version = doc::Version{1U};
+    base.camera_source = doc::NodeId{800U};
+    base.canvas = scene::Canvas{width, height};
+    base.camera.eye = scene::Vec3{0.0F, 0.0F, 5.0F};
+    base.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    base.camera.field_of_view = 0.125F;
+    base.camera.near_plane = 0.1F;
+    base.camera.far_plane = 50.0F;
+    base.renderer_settings.backend = scene::RendererBackend::Advanced;
+    base.renderer_settings.required = true;
+    base.renderer_settings.shadow_cascades = 0U;
+    base.renderer_settings.gi_strength = 0.0F;
+    base.renderer_settings.occlusion_radius = 0.0F;
+    base.environment.ambient = 0.0F;
+    base.environment.sky_color = scene::Vec3{0.0F, 0.0F, 0.0F};
+
+    // A red wall facing the camera, filling the middle of the frame.
+    scene::MeshInstance wall{};
+    wall.source = doc::NodeId{810U};
+    wall.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+    wall.world = scene::scaling(scene::Vec3{2.0F, 2.0F, 0.2F});
+    wall.normal = scene::normal_basis(wall.world);
+    wall.material.base_color = scene::Vec3{0.8F, 0.1F, 0.1F};
+    wall.material.roughness = 1.0F;
+    base.instances.push_back(wall);
+    scene::DirectionalLight sun{};
+    sun.direction = scene::Vec3{0.0F, 0.0F, -1.0F};
+    sun.intensity = 2.0F;
+    base.directional_lights.push_back(sun);
+
+    struct Rendered final {
+        bool ok{};
+        std::vector<core::u8> frame;
+        render::RenderProducts products;
+    };
+    const auto render_once = [&](const scene::Scene& source,
+                                 render::ViewShading shading,
+                                 bool editor_view) {
+        scene::Scene framed = source;
+        framed.show_frame = 1U;
+        render::RendererLimits limits{};
+        limits.max_instances = 4U;
+        limits.max_vertices = 4096U;
+        limits.max_indices = 12288U;
+        limits.max_lights = 4U;
+        limits.max_history_slots = 2U;
+        limits.view_shading = editor_view;
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        check(created.has_value(), "renderer", __LINE__);
+        auto renderer = std::move(created).value();
+        auto readback = device.create_readback(width * height * 8U);
+        check(readback.has_value(), "readback", __LINE__);
+        render::SceneRenderView view{
+            scene::view_for_slice(framed.camera, framed.canvas,
+                                  scene::whole(framed.canvas)),
+            framed.camera.eye,
+            scene::normalize(framed.camera.target - framed.camera.eye)};
+        view.history_identity = 93U;
+        view.shading = shading;
+        render::RenderFrameRequest request{};
+        request.scene = &framed;
+        request.slice = scene::whole(framed.canvas);
+        request.output_width = width;
+        request.output_height = height;
+        request.options.view = view;
+        request.history.scene = framed.id;
+        request.history.document_version = framed.document_version;
+        request.history.surface = render::HistorySurface::Offscreen;
+        request.history.surface_id = 1U;
+        request.history.canvas = framed.canvas;
+        request.history.slice = request.slice;
+        request.history.width = width;
+        request.history.height = height;
+        request.history.camera_source = framed.camera_source;
+        request.history.camera_digest =
+            render::camera_history_digest(framed.camera);
+        request.history.view_digest =
+            93U ^ (static_cast<core::u64>(shading) * 0x9E37'79B9'7F4A'7C15ULL);
+        request.history.profile_digest =
+            render::renderer_profile_digest(framed.renderer_settings);
+        Rendered result{};
+        auto acquired = device.acquire_commands();
+        check(acquired.has_value(), "acquire", __LINE__);
+        auto commands = std::move(acquired).value();
+        auto rendered = renderer.render_frame(commands, request);
+        if (!rendered) {
+            return result;
+        }
+        result.ok = true;
+        result.products = rendered.value();
+        check(commands.download(*rendered.value().color, readback.value()),
+              "download", __LINE__);
+        auto submitted = device.submit(std::move(commands));
+        check(submitted.has_value(), "submit", __LINE__);
+        check(std::move(submitted).value().wait(), "wait", __LINE__);
+        const auto pixels = readback.value().map();
+        const std::size_t bytes =
+            static_cast<std::size_t>(width) * height * 8U;
+        check(pixels.size() >= bytes, "map", __LINE__);
+        result.frame.assign(pixels.begin(), pixels.begin() + bytes);
+        readback.value().unmap();
+        return result;
+    };
+    // The wall's middle, and a ring of pixels inside its face but clear of
+    // its edges.
+    const std::size_t centre = (height / 2U) * width + width / 2U;
+    const auto channel = [&](const Rendered& r, std::size_t pixel,
+                             std::size_t lane) {
+        return static_cast<double>(half_lane(r.frame, pixel, lane));
+    };
+
+    scene::Scene brighter = base;
+    brighter.directional_lights.front().intensity = 6.0F;
+    scene::Scene green = base;
+    green.instances.front().material.base_color =
+        scene::Vec3{0.1F, 0.8F, 0.1F};
+
+    // Lit follows the light.
+    const Rendered lit = render_once(base, render::ViewShading::Lit, false);
+    const Rendered lit_bright =
+        render_once(brighter, render::ViewShading::Lit, false);
+    RENDER_CHECK(lit.ok && lit_bright.ok);
+    RENDER_CHECK(channel(lit_bright, centre, 0U) >
+                 channel(lit, centre, 0U) * 2.0);
+
+    // Unlit: the base colour itself, whatever the light.
+    const Rendered unlit = render_once(base, render::ViewShading::Unlit, true);
+    const Rendered unlit_bright =
+        render_once(brighter, render::ViewShading::Unlit, true);
+    RENDER_CHECK(unlit.ok && unlit_bright.ok);
+    RENDER_CHECK(std::abs(channel(unlit, centre, 0U) - 0.8) <= 0.01);
+    RENDER_CHECK(std::abs(channel(unlit, centre, 1U) - 0.1) <= 0.01);
+    RENDER_CHECK(std::abs(channel(unlit_bright, centre, 0U) -
+                          channel(unlit, centre, 0U)) <= 1.0e-3);
+
+    // Lights only: grey whatever the colour, brighter with the light.
+    const Rendered lights =
+        render_once(base, render::ViewShading::LightsOnly, true);
+    const Rendered lights_green =
+        render_once(green, render::ViewShading::LightsOnly, true);
+    const Rendered lights_bright =
+        render_once(brighter, render::ViewShading::LightsOnly, true);
+    RENDER_CHECK(lights.ok && lights_green.ok && lights_bright.ok);
+    RENDER_CHECK(std::abs(channel(lights, centre, 0U) -
+                          channel(lights, centre, 1U)) <= 1.0e-3);
+    RENDER_CHECK(std::abs(channel(lights, centre, 0U) -
+                          channel(lights_green, centre, 0U)) <= 1.0e-3);
+    RENDER_CHECK(channel(lights, centre, 0U) > 0.05);
+    RENDER_CHECK(channel(lights_bright, centre, 0U) >
+                 channel(lights, centre, 0U) * 2.0);
+
+    // Wireframe: inside the face, clear of the diagonals that split its
+    // triangles, is the black background, while edges are drawn elsewhere.
+    const Rendered edges =
+        render_once(base, render::ViewShading::Wireframe, true);
+    RENDER_CHECK(edges.ok);
+    RENDER_CHECK(channel(edges, centre + 12U, 0U) <= 1.0e-3);
+    RENDER_CHECK(channel(lit, centre + 12U, 0U) > 0.01);
+    std::size_t drawn = 0U;
+    for (std::size_t pixel = 0U;
+         pixel < static_cast<std::size_t>(width) * height; ++pixel) {
+        drawn += channel(edges, pixel, 0U) > 0.1 ? 1U : 0U;
+    }
+    RENDER_CHECK(drawn > 40U);
+    RENDER_CHECK(drawn < static_cast<std::size_t>(width) * height / 4U);
+    // Not built for an editor view: refused rather than drawn lit.
+    RENDER_CHECK(!render_once(base, render::ViewShading::Wireframe, false).ok);
+
+    // Fog stays out of Unlit and Wireframe, with the reason.
+    scene::Scene foggy = base;
+    foggy.environment.fog_density = 0.4F;
+    const Rendered foggy_unlit =
+        render_once(foggy, render::ViewShading::Unlit, true);
+    RENDER_CHECK(foggy_unlit.ok);
+    RENDER_CHECK(foggy_unlit.products.passes.fog == render::PassState::Idle);
+    RENDER_CHECK(foggy_unlit.products.passes.fog_refusal ==
+                 std::string_view{
+                     "atmosphere is drawn only in Lit and Lights only views"});
+}
+
 // Fog settles below its height.
 //
 // With a falloff authored the air above the base height thins, so the rows of
@@ -5714,6 +5919,8 @@ constexpr std::array cases{
     Case{"fog settles below its height", &fog_settles_below_its_height},
     Case{"an orthographic view shades along the view and idles fog",
          &an_orthographic_view_shades_along_the_view_and_idles_fog},
+    Case{"view shading shows colour, light or edges",
+         &view_shading_shows_colour_light_or_edges},
     Case{"a spot does not shine through a wall",
          &a_spot_does_not_shine_through_a_wall},
     Case{"atlas assignment ignores the camera and a floor does not self shadow",

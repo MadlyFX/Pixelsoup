@@ -82,6 +82,9 @@ namespace mediaserver::render {
 struct RendererLimits final {
     // Internal construction bound: a reflection capture cannot recurse.
     bool planar_reflections{true};
+    // Builds the wireframe pipelines an editor view's ViewShading::Wireframe
+    // draws with. Off for every output node, which only ever renders Lit.
+    bool view_shading{};
     core::u32 max_instances{scene::max_scene_instances};
     // One tiny CPU history slot per independently mapped output/view. The
     // default covers the replicated feed-map ceiling without duplicating GPU
@@ -249,6 +252,21 @@ struct RenderStats final {
     bool operator==(const RenderStats&) const = default;
 };
 
+// How an editor view shades the scene. Lit is the picture the show renders
+// and the only shading an output ever uses; the others are authoring aids for
+// the operator's own Stage view and never enter a document or a digest.
+enum class ViewShading : core::u8 {
+    Lit,
+    // Base colour and emission as they are, with no lighting.
+    Unlit,
+    // Every surface a neutral grey dielectric under the scene's own lights
+    // and shadows; clips are flat grey cards.
+    LightsOnly,
+    // Triangle edges only, every edge visible through the others. Needs a
+    // renderer built with RendererLimits::view_shading.
+    Wireframe,
+};
+
 struct SceneClipPlanes final {
     float near_plane{};
     float far_plane{};
@@ -285,6 +303,8 @@ struct SceneRenderView final {
     std::optional<float> shutter_seconds;
     // Present only for an ICVFX plate, including when its lens data is missing.
     std::optional<PlateLens> plate_lens;
+    // An editor view's shading aid; every output view is Lit.
+    ViewShading shading{ViewShading::Lit};
 
     bool operator==(const SceneRenderView&) const = default;
 };
@@ -818,6 +838,10 @@ private:
     // texture. This pipeline writes depth, alpha-tests the clip, and composes
     // a zero-alpha colour, so it primes depth without touching the image.
     rhi::GraphicsPipeline media_depth_pipeline_;
+    // ViewShading::Wireframe's colour passes, built only for an editor view
+    // (RendererLimits::view_shading) on a device with wireframe_fill.
+    rhi::GraphicsPipeline wireframe_pipeline_;
+    rhi::GraphicsPipeline media_wireframe_pipeline_;
     rhi::Sampler media_sampler_;
     std::array<rhi::Sampler, material_sampler_count> material_samplers_;
     // One white RGBA texel is neutral for base colour, packed

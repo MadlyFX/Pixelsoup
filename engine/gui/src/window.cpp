@@ -118,8 +118,9 @@ namespace {
         }
     }
     // Alt+G / Alt+R / Alt+S clear location, rotation and scale, as in
-    // Blender, and Alt+P / J / H / K choose a Stage view's projection. Alt
-    // with a letter produces no text, so these arrive as keys.
+    // Blender, Alt+P / J / H / K choose a Stage view's projection and
+    // Alt+4 / 3 / 6 / 2 its shading. Alt with a letter or digit produces no
+    // text, so these arrive as keys and never reach a digit's view recall.
     // Ctrl excluded: AltGr arrives as Ctrl+Alt on Windows layouts.
     if ((modifiers & SDL_KMOD_ALT) != 0U &&
         (modifiers & SDL_KMOD_CTRL) == 0U) {
@@ -143,6 +144,18 @@ namespace {
         }
         if (code == SDLK_K) {
             return Key::ViewSide;
+        }
+        if (code == SDLK_4) {
+            return Key::ShadeLit;
+        }
+        if (code == SDLK_3) {
+            return Key::ShadeUnlit;
+        }
+        if (code == SDLK_6) {
+            return Key::ShadeLightsOnly;
+        }
+        if (code == SDLK_2) {
+            return Key::ShadeWireframe;
         }
     }
     switch (code) {

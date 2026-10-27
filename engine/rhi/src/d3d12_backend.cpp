@@ -1373,6 +1373,8 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     capabilities.indexed_geometry = true;
     // Callable: a format-list pipeline and PulledDraw::additional_targets.
     capabilities.multiple_render_targets = true;
+    // Callable: RasterState::fill selects D3D12_FILL_MODE_WIREFRAME.
+    capabilities.wireframe_fill = true;
     // Callable: create_compute_pipeline builds a compute root signature and
     // PSO, and CommandList::dispatch binds sampled textures, per-subresource
     // storage textures, storage buffers and uniform bytes, inserts the UAV
@@ -2118,7 +2120,8 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
     const ShaderDesc& fragment,
     std::span<const TextureFormat> target_formats,
     ColorBlend blend,
-    DepthState depth) noexcept {
+    DepthState depth,
+    RasterState raster) noexcept {
     using Result = core::Result<void*, RhiError>;
     auto* state = as_device(value);
     if (target_formats.empty() || target_formats.size() > max_color_targets
@@ -2254,7 +2257,9 @@ core::Result<void*, RhiError> d3d12_create_pipeline(
     desc.PS = {fragment.bytecode.data(), fragment.bytecode.size()};
     desc.BlendState = blend_desc(blend);
     desc.SampleMask = UINT_MAX;
-    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.FillMode = raster.fill == FillMode::Wireframe
+        ? D3D12_FILL_MODE_WIREFRAME
+        : D3D12_FILL_MODE_SOLID;
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.RasterizerState.FrontCounterClockwise = TRUE;
     desc.RasterizerState.DepthClipEnable = TRUE;
@@ -3765,7 +3770,7 @@ void d3d12_unmap_readback(void*) noexcept {}
 void d3d12_release_readback(void*, void*) noexcept {}
 core::Result<void*, RhiError> d3d12_create_pipeline(
     void*, const ShaderDesc&, const ShaderDesc&, std::span<const TextureFormat>, ColorBlend,
-    DepthState) noexcept {
+    DepthState, RasterState) noexcept {
     return core::Result<void*, RhiError>::failure(RhiError::Unavailable);
 }
 void d3d12_release_pipeline(void*, void*) noexcept {}

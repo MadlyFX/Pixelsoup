@@ -307,6 +307,23 @@ integrate the air between the far-off eye and the stage, so in an
 orthographic view it is reported `PassState::Idle` with "atmosphere is not
 drawn in an orthographic view" and not drawn.
 
+**Editor view shading.** `SceneRenderView::shading` lets an editor view
+draw `Unlit` (base colour plus emission, unexposed), `LightsOnly` (a neutral
+0.5 grey dielectric under the scene's own lights and shadows) or `Wireframe`.
+The choice reaches the fragment stages as `view_mode.x` in the scene
+constants, placed right after `grain_extent` so the media stage, which
+declares the block only that far, can read it too. Wireframe draws the
+colour passes through pipelines built with `rhi::RasterState{Wireframe}`
+(`D3D12_FILL_MODE_WIREFRAME`, `SDL_GPU_FILLMODE_LINE`, gated by
+`DeviceCapabilities::wireframe_fill`); a renderer makes them only when
+`RendererLimits::view_shading` asks, which the Stage's executors do and no
+output node does, and a wireframe request to one without them is refused.
+The colour pass clears its own depth, so every edge shows through the others.
+Shading folds into the view's history identity, so a change resets temporal
+history; Unlit and Wireframe skip the planar mirror and report fog
+`PassState::Idle` with "atmosphere is drawn only in Lit and Lights only
+views". An output view is always `Lit`, which changes nothing it draws.
+
 **Remaining unsupported paths:** a native Vulkan backend, GPU-driven
 indirect/meshlet submission, point/area-light and ray-traced shadows, ray tracing,
 DDGI, ReSTIR, denoising, and temporal upscaling. The integration contracts refuse those

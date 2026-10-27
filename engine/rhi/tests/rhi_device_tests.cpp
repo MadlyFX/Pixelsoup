@@ -23,6 +23,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -1612,10 +1613,100 @@ void a_viewport_larger_than_its_target_is_refused() {
     RHI_CHECK(std::move(submitted).value().wait());
 }
 
+
+// A wireframe pipeline rasterizes triangle edges and leaves their interiors
+// alone. The fullscreen triangle's edges lie on and outside the target's
+// border, so a wireframe draw of it covers the middle of the target with
+// nothing, where the same draw filled solid covers every pixel.
+void a_wireframe_pipeline_draws_edges_and_not_interiors() {
+    auto device = open_device();
+    if (!device.capabilities().wireframe_fill) {
+        return;
+    }
+    rhi::ShaderDesc vertex{};
+    vertex.stage = rhi::ShaderStage::Vertex;
+    vertex.format = rhi::ShaderFormat::Dxil;
+    vertex.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_solid_vert_dxil),
+        sizeof(mediaserver_solid_vert_dxil)};
+    rhi::ShaderDesc fragment{};
+    fragment.stage = rhi::ShaderStage::Fragment;
+    fragment.format = rhi::ShaderFormat::Dxil;
+    fragment.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_solid_frag_dxil),
+        sizeof(mediaserver_solid_frag_dxil)};
+    auto wireframe = device.create_pipeline(
+        vertex, fragment, rhi::TextureFormat::Rgba8Unorm,
+        rhi::ColorBlend::Disabled, rhi::DepthState{},
+        rhi::RasterState{rhi::FillMode::Wireframe});
+    if (!wireframe && wireframe.error() == rhi::RhiError::ShaderFormatUnsupported) {
+        return;
+    }
+    RHI_CHECK(wireframe);
+    auto solid = solid_pipeline(device, rhi::TextureFormat::Rgba8Unorm);
+    RHI_CHECK(solid);
+
+    constexpr core::u32 width = 16U;
+    constexpr core::u32 height = 16U;
+    constexpr core::u32 bytes = width * height * 4U;
+    auto color = device.create_texture(target_desc(width, height));
+    RHI_CHECK(color);
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = width;
+    depth_desc.height = height;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto depth = device.create_texture(depth_desc);
+    RHI_CHECK(depth);
+    const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{3U, 1U}};
+
+    const auto covered = [&](const rhi::GraphicsPipeline& pipeline) {
+        auto readback = device.create_readback(bytes);
+        RHI_CHECK(readback);
+        rhi::PulledDraw draw{};
+        draw.pipeline = &pipeline;
+        draw.batches = batches;
+        auto acquired = device.acquire_commands();
+        RHI_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        RHI_CHECK(commands.draw_pulled(
+            color.value(), rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}, depth.value(),
+            0.0F, draw));
+        RHI_CHECK(commands.download(color.value(), readback.value()));
+        auto submitted = device.submit(std::move(commands));
+        RHI_CHECK(submitted);
+        RHI_CHECK(std::move(submitted).value().wait());
+        const auto pixels = readback.value().map();
+        RHI_CHECK(pixels.size() >= bytes);
+        std::size_t lit = 0U;
+        bool middle = false;
+        for (core::u32 y = 1U; y + 1U < height; ++y) {
+            for (core::u32 x = 1U; x + 1U < width; ++x) {
+                const bool white =
+                    pixels[((static_cast<std::size_t>(y) * width) + x) * 4U] ==
+                    255U;
+                lit += white ? 1U : 0U;
+                middle = middle || (white && x == width / 2U &&
+                                    y == height / 2U);
+            }
+        }
+        readback.value().unmap();
+        return std::pair<std::size_t, bool>{lit, middle};
+    };
+    const auto filled = covered(solid.value());
+    RHI_CHECK(filled.first == (width - 2U) * (height - 2U) && filled.second);
+    // Inside the border the only edge is the diagonal reaching the far
+    // corner: at most a pixel or two, never the interior.
+    const auto edges = covered(wireframe.value());
+    RHI_CHECK(!edges.second);
+    RHI_CHECK(edges.first <= 2U);
+}
+
 #else
 
 void a_viewport_draw_covers_its_rectangle_and_nothing_else() {}
 void a_viewport_larger_than_its_target_is_refused() {}
+void a_wireframe_pipeline_draws_edges_and_not_interiors() {}
 
 #endif
 
@@ -1876,7 +1967,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 26U> cases{{
+constexpr std::array<Case, 27U> cases{{
     {"an explicit transition is journalled and rolls back",
      &native_d3d12_an_explicit_transition_is_journalled_and_rolls_back},
     {"a redundant transition is a no-op",
@@ -1885,6 +1976,8 @@ constexpr std::array<Case, 26U> cases{{
      &a_backend_without_explicit_barriers_refuses},
     {"a viewport draw covers its rectangle and nothing else",
      &a_viewport_draw_covers_its_rectangle_and_nothing_else},
+    {"a wireframe pipeline draws edges and not interiors",
+     &a_wireframe_pipeline_draws_edges_and_not_interiors},
     {"a viewport larger than its target is refused",
      &a_viewport_larger_than_its_target_is_refused},
     {"a region copy moves exact pixels and refuses the rest",

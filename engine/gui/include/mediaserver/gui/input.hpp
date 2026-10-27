@@ -102,6 +102,12 @@ enum class Key : core::u8 {
     ViewTop,
     ViewFront,
     ViewSide,
+    // Alt+4, Alt+3, Alt+6, Alt+2: the Stage view under the pointer shades
+    // Lit, Unlit, Lights only or Wireframe, as Unreal's view modes.
+    ShadeLit,
+    ShadeUnlit,
+    ShadeLightsOnly,
+    ShadeWireframe,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies
