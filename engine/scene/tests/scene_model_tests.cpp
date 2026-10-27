@@ -3198,6 +3198,59 @@ void timeline_cuts_keep_the_published_media_set() {
     MODEL_CHECK(scene::asset_set_digest(library_scene) != library_assets);
 }
 
+// The size a video clip is held at is authored on the clip, reaches the
+// evaluated clip and its prewarm request alike, and is part of the digest:
+// two nodes that disagree about it would draw different pixels.
+void a_clip_carries_the_size_it_is_held_at() {
+    const auto clip = [](std::optional<std::string_view> resolution) {
+        doc::Node built = node(
+            1U, schema::media_type,
+            {text(schema::source, "plate.mp4"),
+             whole(schema::sequence_start, 0),
+             whole(schema::sequence_count, 100),
+             whole(schema::clip_start, 10),
+             whole(schema::clip_duration, 50)});
+        if (resolution.has_value()) {
+            const Property authored = text(schema::media_resolution, *resolution);
+            built.properties.emplace(authored.first, authored.second);
+        }
+        return built;
+    };
+    scene::SceneModel full;
+    full.reset(doc::Root{}.set(clip(std::nullopt)));
+    scene::SceneModel half;
+    half.reset(doc::Root{}.set(clip(schema::media_resolution_half)));
+    scene::SceneModel named_full;
+    named_full.reset(doc::Root{}.set(clip(schema::media_resolution_full)));
+    MODEL_CHECK(full.counters().rejected == 0U);
+    MODEL_CHECK(half.counters().rejected == 0U);
+    MODEL_CHECK(named_full.counters().rejected == 0U);
+
+    const auto on_air = scene::SceneTime{20U, 60U, 1U};
+    const auto full_scene = full.evaluate(on_air);
+    const auto half_scene = half.evaluate(on_air);
+    MODEL_CHECK(full_scene.media.size() == 1U && half_scene.media.size() == 1U);
+    MODEL_CHECK(full_scene.media.front().resolution
+                == scene::MediaResolution::Full);
+    MODEL_CHECK(half_scene.media.front().resolution
+                == scene::MediaResolution::Half);
+    MODEL_CHECK(named_full.evaluate(on_air).media.front().resolution
+                == scene::MediaResolution::Full);
+    MODEL_CHECK(scene::digest(full_scene) != scene::digest(half_scene));
+    // Naming full is the same clip as saying nothing.
+    MODEL_CHECK(full_scene.media == named_full.evaluate(on_air).media);
+
+    // Before the cut, the clip is warmed at the size it will be shown at.
+    const auto approaching = half.evaluate(scene::SceneTime{5U, 60U, 1U});
+    MODEL_CHECK(approaching.media_prewarm.size() == 1U);
+    MODEL_CHECK(approaching.media_prewarm.front().resolution
+                == scene::MediaResolution::Half);
+
+    scene::SceneModel unknown;
+    unknown.reset(doc::Root{}.set(clip("quarter")));
+    MODEL_CHECK(unknown.counters().rejected == 1U);
+}
+
 void a_clip_reports_the_range_it_loops_over() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -5079,7 +5132,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 87U> cases{{
+constexpr std::array<Case, 88U> cases{{
+    {"a clip carries the size it is held at",
+     &a_clip_carries_the_size_it_is_held_at},
     {"negative native placements keep exact source mapping and safe bounds",
      &negative_native_placements_keep_exact_source_mapping_and_safe_bounds},
     {"published keyframes use the canonical cubic sampler",

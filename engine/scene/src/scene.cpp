@@ -1046,6 +1046,7 @@ core::u64 digest(const Scene& scene) noexcept {
         mix(state, clip.normal);
         mix(state, clip.source);
         mix(state, static_cast<core::u64>(clip.frame_index));
+        mix(state, static_cast<core::u64>(clip.resolution));
         mix(state, clip.asset.value());
         mix(state, clip.source_node.value());
         mix(state, clip.timeline_lane.value());

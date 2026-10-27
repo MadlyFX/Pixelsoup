@@ -306,6 +306,9 @@ namespace mediaserver::app {
         info.source = text(scene::schema::source);
         info.sequence_start = integer(scene::schema::sequence_start, 0U);
         info.sequence_count = integer(scene::schema::sequence_count, 1U);
+        info.media_resolution =
+            text(scene::schema::media_resolution) == scene::schema::media_resolution_half
+            ? scene::MediaResolution::Half : scene::MediaResolution::Full;
         info.display_name = text(scene::schema::group_name);
         if (info.display_name.empty() && !info.source.empty() &&
             (kind == editor::ElementKind::Media ||

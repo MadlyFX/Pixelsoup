@@ -1,6 +1,7 @@
 #include <mediaserver/render/media_source.hpp>
 
 #include "ffmpeg_source_test_support.hpp"
+#include "d3d12_video_halve.hpp"
 #include "nv12_conversion.hpp"
 
 // FFmpeg is a C library; its headers are included through extern "C" and with
@@ -92,7 +93,10 @@ namespace {
     return true;
 }
 
+// Whether a source names a video file. A half-resolution source is still the
+// file it names, so the variant suffix is read past rather than matched.
 [[nodiscard]] bool is_video_path(std::string_view source) {
+    source = media_source_variant(source).path;
     return ends_with(source, ".mp4") || ends_with(source, ".mov") ||
            ends_with(source, ".mkv") || ends_with(source, ".avi") ||
            ends_with(source, ".webm") || ends_with(source, ".m4v") ||
@@ -139,6 +143,9 @@ struct Decoder final {
     // Decoding onto the renderer's device, so a decoded frame is handed over
     // as a surface rather than as pixels in system memory.
     bool resident_on_renderer{};
+    // Every frame is held at half size: halved on the device before the
+    // decoder's surface is released, or in system memory before upload.
+    bool half_resolution{};
     int stream{-1};
     double fps{25.0};
     core::i64 start_pts{};
@@ -570,7 +577,10 @@ stream_frame_rate(const AVStream *stream) noexcept {
 
 [[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source) {
     auto decoder = std::make_unique<Decoder>();
-    if (avformat_open_input(&decoder->format, source.c_str(), nullptr,
+    const MediaSourceVariant variant = media_source_variant(source);
+    decoder->half_resolution = variant.half_resolution;
+    const std::string path{variant.path};
+    if (avformat_open_input(&decoder->format, path.c_str(), nullptr,
                             nullptr) != 0) {
         return nullptr;
     }
@@ -719,6 +729,44 @@ stream_frame_rate(const AVStream *stream) noexcept {
             return DecodedFrame{};
         }
         WaitForSingleObject(hardware->sync_ctx.event, INFINITE);
+    }
+
+    // A half-resolution clip keeps the halved copy and lets the decoder have
+    // its surface back now, so read-ahead holds quarter-size frames. If the
+    // copy cannot be made the clip keeps the full-size surface: the picture
+    // stays right and only the saving is lost.
+    if (decoder.half_resolution) {
+        auto halved = detail::halve_video_surface(
+            static_cast<ID3D12Device *>(device.value), hardware->texture,
+            static_cast<core::u32>(width), static_cast<core::u32>(height),
+            ten_bit);
+        if (halved.has_value()) {
+            DecodedFrame out{};
+            try {
+                DecodedGpuFrame gpu{};
+                gpu.retained = std::move(halved->owner);
+                gpu.device = device;
+                gpu.resource = rhi::NativeHandle{
+                    rhi::BackendKind::D3d12, rhi::NativeObjectKind::Texture,
+                    halved->resource};
+                gpu.bytes = static_cast<std::size_t>(halved->width) *
+                            static_cast<std::size_t>(halved->height) * 3U /
+                            2U * (ten_bit ? 2U : 1U);
+                out.width = halved->width;
+                out.height = halved->height;
+                out.chroma = ChromaExtent{halved->width / 2U,
+                                          halved->height / 2U};
+                out.layout = ten_bit
+                    ? (colour.limited ? DecodedPixelLayout::P010Rec709Limited
+                                      : DecodedPixelLayout::P010Rec709Full)
+                    : (colour.limited ? DecodedPixelLayout::Nv12Rec709Limited
+                                      : DecodedPixelLayout::Nv12Rec709Full);
+                out.gpu = std::move(gpu);
+            } catch (...) {
+                return DecodedFrame{};
+            }
+            return out;
+        }
     }
 
     AVFrame *retained = av_frame_alloc();
@@ -1221,7 +1269,14 @@ class FfmpegSource final : public MediaSource {
             avcodec_flush_buffers(decoder.codec);
             decoder.next_index = -1;
         }
-        return decode_until(decoder, target);
+        DecodedFrame frame = decode_until(decoder, target);
+        // A frame already on the device was halved there. One in system
+        // memory is halved before it is held or uploaded; a layout the CPU
+        // cannot halve stays full size rather than being shown wrong.
+        if (decoder.half_resolution && frame.valid() && !frame.gpu) {
+            static_cast<void>(detail::halve_decoded_frame(frame));
+        }
+        return frame;
     }
 
   private:
@@ -1233,15 +1288,20 @@ class FfmpegSource final : public MediaSource {
 // block the render thread. Absolute lexical normalization touches no source
 // file; on Windows, case folding also merges ordinary spelling differences.
 [[nodiscard]] std::string canonical_source_key(const std::string &source) {
+    const MediaSourceVariant variant = media_source_variant(source);
+    const std::string plain{variant.path};
     std::error_code error;
-    auto path = std::filesystem::absolute(std::filesystem::path{source}, error);
-    std::string key = error ? source : path.lexically_normal().string();
+    auto path = std::filesystem::absolute(std::filesystem::path{plain}, error);
+    std::string key = error ? plain : path.lexically_normal().string();
 #if defined(_WIN32)
     std::transform(key.begin(), key.end(), key.begin(), [](char value) {
         return static_cast<char>(
             value >= 'A' && value <= 'Z' ? value - 'A' + 'a' : value);
     });
 #endif
+    if (variant.half_resolution) {
+        key += half_resolution_suffix;
+    }
     return key;
 }
 
@@ -1992,8 +2052,9 @@ class DispatchMediaSource final : public MediaSource {
 
     [[nodiscard]] std::string key(const std::string &source,
                                   core::u32 frame_index) const override {
-        return is_video_path(source) ? video_.key(source, frame_index)
-                                     : image_.key(source, frame_index);
+        return is_video_path(source)
+            ? video_.key(source, frame_index)
+            : image_.key(still_path(source), frame_index);
     }
 
     [[nodiscard]] MediaDecodeScheduling scheduling(
@@ -2007,8 +2068,9 @@ class DispatchMediaSource final : public MediaSource {
                                       core::u32 frame_index) override {
         // image_ is stateless, so its cache-worker decode may safely overlap
         // render-thread video_ registry polling on this dispatcher.
-        return is_video_path(source) ? video_.decode(source, frame_index)
-                                     : image_.decode(source, frame_index);
+        return is_video_path(source)
+            ? video_.decode(source, frame_index)
+            : image_.decode(still_path(source), frame_index);
     }
 
     [[nodiscard]] std::shared_ptr<const DecodedFrame>
@@ -2020,7 +2082,7 @@ class DispatchMediaSource final : public MediaSource {
     try_decode(const std::string &source, core::u32 frame_index,
                core::u64 stream) override {
         if (!is_video_path(source)) {
-            return MediaSource::try_decode(source, frame_index);
+            return MediaSource::try_decode(still_path(source), frame_index);
         }
         return video_registry().try_frame(worker_for(source, stream),
                                           frame_index);
@@ -2059,6 +2121,10 @@ class DispatchMediaSource final : public MediaSource {
     }
 
   private:
+    [[nodiscard]] static std::string still_path(const std::string &source) {
+        return std::string{media_source_variant(source).path};
+    }
+
     struct WorkerEntry final {
         std::shared_ptr<AsyncVideoSourceState> worker;
         core::u64 stamp{};
@@ -2188,7 +2254,8 @@ core::u32 probe_frame_count(const std::string &source) {
 MediaProbe probe_media(const std::string &source) {
     MediaProbe result{};
     if (!is_video_path(source)) {
-        const auto path = ImageSequenceSource::resolve_path(source, 0U);
+        const auto path = ImageSequenceSource::resolve_path(
+            std::string{media_source_variant(source).path}, 0U);
         if (radiance_source(path)) {
             ImageSequenceSource images;
             const auto image = images.decode(path, 0U);

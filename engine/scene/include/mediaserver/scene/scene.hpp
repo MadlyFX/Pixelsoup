@@ -1766,6 +1766,14 @@ struct MeshInstance final {
 // style. Its placement identity names the same decoder continuity the live clip
 // will use, so warming one of two cuts from the same file cannot displace the
 // other cut's forward-walking decoder.
+// How large a clip's decoded picture is held. Half averages each 2x2 block of
+// the frame once, as it is decoded, so every frame held for the clip - the
+// read-ahead included - costs a quarter of the memory, and the full-size
+// frame is released as soon as the half-size one exists. It does not make the
+// decode itself any cheaper: a compressed video frame can only be decoded
+// whole. Video only; a still or image sequence is held at full size.
+enum class MediaResolution : core::u8 { Full, Half };
+
 struct MediaPrewarm final {
     std::string source;
     core::u32 frame_index{};
@@ -1774,6 +1782,7 @@ struct MediaPrewarm final {
     core::u32 loop_first{};
     core::u32 loop_count{};
     core::u64 frames_until_start{};
+    MediaResolution resolution{MediaResolution::Full};
 
     bool operator==(const MediaPrewarm&) const = default;
 };
@@ -1833,6 +1842,10 @@ struct MediaInstance final {
     // Machine-local source availability, applied after the authored scene
     // digest. Offline placements retain their geometry and draw a placeholder.
     bool offline{};
+
+    // Authored, and so in scene_hash: every node holds the clip at the same
+    // size and draws the same pixels from it.
+    MediaResolution resolution{MediaResolution::Full};
 
     bool operator==(const MediaInstance&) const = default;
 };

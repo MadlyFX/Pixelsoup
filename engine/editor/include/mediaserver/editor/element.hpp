@@ -137,6 +137,8 @@ struct ElementInfo final {
     std::string source;
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
+    // Clip-only: the size the decoded video is held at.
+    scene::MediaResolution media_resolution{scene::MediaResolution::Full};
     // Clip-only native source cadence. Timeline filmstrips use the same exact
     // rational show-to-source mapping as trim/slip authoring; an absent rate
     // retains the image-sequence one-source-frame-per-show-frame contract.

@@ -3,6 +3,7 @@
 #include <mediaserver/rhi/device.hpp>
 
 #include "../src/ffmpeg_source_test_support.hpp"
+#include "../src/nv12_conversion.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -713,6 +714,80 @@ void professional_intraframe_codec_decodes(AVCodecID id, int profile, bool ten_b
         const int actual = display_rgb(*frame, 128U, 64U).r;
         VIDEO_CHECK(std::abs(expected - actual) <= 4);
     }
+    // Held at half resolution, the same frame arrives at half size in both
+    // planes - 4:2:2 chroma stays full height relative to the smaller luma -
+    // and a flat picture keeps its level.
+    const auto half = await_frame(
+        *source, render::half_resolution_source(path), 1U);
+    VIDEO_CHECK(half->valid() && half->width == 640U && half->height == 360U);
+    VIDEO_CHECK(half->source_frame == 1U);
+    VIDEO_CHECK(half->chroma.width == 320U && half->chroma.height == 360U);
+    VIDEO_CHECK(half->pixels.size()
+                == (ten_bit ? 640U * 360U * 4U : 640U * 360U * 2U));
+    const int expected_half = static_cast<int>((16U + 96U) * 255U / 219U);
+    VIDEO_CHECK(std::abs(expected_half - display_rgb(*half, 64U, 32U).r) <= 4);
+}
+
+// The system-memory halving, against hand-worked means. Each output sample is
+// the 2x2 block's mean rounded half up; an odd extent averages its last row
+// or column with itself; chroma is halved at its own extent.
+void halving_averages_each_two_by_two_block() {
+    render::DecodedFrame nv12{};
+    nv12.width = 4U;
+    nv12.height = 3U;
+    nv12.layout = render::DecodedPixelLayout::Nv12Rec709Limited;
+    nv12.chroma = render::ChromaExtent{2U, 2U};
+    nv12.pixels = {
+        10U, 20U, 30U, 41U,
+        50U, 60U, 70U, 80U,
+        90U, 91U, 200U, 203U,
+        // Chroma: two rows of two U/V pairs.
+        100U, 200U, 103U, 201U,
+        110U, 10U, 111U, 12U};
+    VIDEO_CHECK(render::detail::halve_decoded_frame(nv12));
+    VIDEO_CHECK(nv12.width == 2U && nv12.height == 2U);
+    VIDEO_CHECK(nv12.chroma == (render::ChromaExtent{1U, 1U}));
+    // 10+20+50+60=140 -> 35; 30+41+70+80=221 -> 55 (55.25);
+    // 90+91+90+91=362 -> 91 (90.5 rounds up); 200+203+200+203=806 -> 202.
+    // U: 100+103+110+111=424 -> 106; V: 200+201+10+12=423 -> 106 (105.75).
+    const std::vector<core::u8> expected_nv12{35U, 55U, 91U, 202U, 106U, 106U};
+    VIDEO_CHECK(nv12.pixels == expected_nv12);
+
+    render::DecodedFrame p010{};
+    p010.width = 2U;
+    p010.height = 2U;
+    p010.layout = render::DecodedPixelLayout::P010Rec709Full;
+    p010.chroma = render::ChromaExtent{1U, 1U};
+    const std::array<core::u16, 6U> samples{
+        {0xffc0U, 0x0040U, 0x8000U, 0x8001U, 0x1234U, 0xfedcU}};
+    for (const core::u16 sample : samples) {
+        p010.pixels.push_back(static_cast<core::u8>(sample & 0xffU));
+        p010.pixels.push_back(static_cast<core::u8>(sample >> 8U));
+    }
+    VIDEO_CHECK(render::detail::halve_decoded_frame(p010));
+    VIDEO_CHECK(p010.width == 1U && p010.height == 1U);
+    // (0xffc0 + 0x0040 + 0x8000 + 0x8001 + 2) / 4 = 0x8000 (0x20003 / 4).
+    // A 1x1 chroma plane averages its one pair with itself.
+    const std::vector<core::u8> expected_p010{
+        0x00U, 0x80U, 0x34U, 0x12U, 0xdcU, 0xfeU};
+    VIDEO_CHECK(p010.pixels == expected_p010);
+
+    render::DecodedFrame rgba{};
+    rgba.width = 2U;
+    rgba.height = 1U;
+    rgba.pixels = {0U, 10U, 255U, 255U, 1U, 20U, 0U, 255U};
+    VIDEO_CHECK(render::detail::halve_decoded_frame(rgba));
+    VIDEO_CHECK(rgba.width == 1U && rgba.height == 1U);
+    const std::vector<core::u8> expected_rgba{1U, 15U, 128U, 255U};
+    VIDEO_CHECK(rgba.pixels == expected_rgba);
+
+    render::DecodedFrame linear{};
+    linear.width = 2U;
+    linear.height = 2U;
+    linear.layout = render::DecodedPixelLayout::Rgba16FloatLinear;
+    linear.pixels.assign(2U * 2U * 8U, 0U);
+    VIDEO_CHECK(!render::detail::halve_decoded_frame(linear));
+    VIDEO_CHECK(linear.width == 2U);
 }
 
 // A high-definition source that carries no colour description at all, which
@@ -921,11 +996,15 @@ void a_decoded_frame_stays_on_the_renderers_device() {
                                             : writer.frame->height / 2;
                 const int columns = plane == 0 ? writer.frame->width
                                                : writer.frame->width / 2;
-                const int level = plane == 0 ? 40 + index * 20 : 128;
                 for (int row = 0; row < rows; ++row) {
-                    std::fill_n(writer.frame->data[plane]
-                                    + row * writer.frame->linesize[plane],
-                                columns, static_cast<core::u8>(level));
+                    auto *const pixels = writer.frame->data[plane]
+                        + row * writer.frame->linesize[plane];
+                    for (int column = 0; column < columns; ++column) {
+                        pixels[column] = static_cast<core::u8>(
+                            plane == 0
+                                ? 40 + index * 20 + (column * 3 + row * 5) % 120
+                                : 96 + (column + row * plane) % 64);
+                    }
                 }
             }
             writer.frame->pts = index;
@@ -970,6 +1049,65 @@ void a_decoded_frame_stays_on_the_renderers_device() {
     VIDEO_CHECK(!device.import_video_planes(
         frame->gpu->resource, frame->width, frame->height,
         rhi::TextureFormat::R16Unorm, rhi::TextureFormat::Rg16Unorm));
+
+    // Held at half resolution, the frame is halved on the same device into a
+    // surface of its own - not the decoder's - and adopted the same way.
+    const auto half = await_frame(
+        *source, render::half_resolution_source(path), 0U);
+    VIDEO_CHECK(half->valid() && half->gpu.has_value());
+    VIDEO_CHECK(half->width == 640U && half->height == 360U);
+    VIDEO_CHECK(half->source_frame == 0U);
+    VIDEO_CHECK(half->gpu->device == device.native_handle());
+    VIDEO_CHECK(half->gpu->resource.value != frame->gpu->resource.value);
+    VIDEO_CHECK(half->gpu->bytes == 640U * 360U * 3U / 2U);
+    VIDEO_CHECK(half->layout == render::DecodedPixelLayout::Nv12Rec709Limited);
+    VIDEO_CHECK(half->chroma == (render::ChromaExtent{320U, 180U}));
+    auto half_planes = device.import_video_planes(
+        half->gpu->resource, half->width, half->height,
+        rhi::TextureFormat::R8Unorm, rhi::TextureFormat::Rg8Unorm);
+    VIDEO_CHECK(half_planes.has_value());
+    VIDEO_CHECK(half_planes.value().chroma.width() == 320U
+                && half_planes.value().chroma.height() == 180U);
+
+    // Its luma is exactly the 2x2 mean of the full frame's, rounded half up:
+    // the same bytes the system-memory path produces, so a node is not
+    // shown a different picture for decoding in a different place.
+    const auto read_luma = [&](const rhi::Texture &luma, core::u32 width,
+                               core::u32 height) {
+        auto readback = device.create_readback(width * height);
+        VIDEO_CHECK(readback.has_value());
+        auto acquired = device.acquire_commands();
+        VIDEO_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        VIDEO_CHECK(commands.download(luma, readback.value()));
+        auto submitted = device.submit(std::move(commands));
+        VIDEO_CHECK(submitted.has_value());
+        VIDEO_CHECK(std::move(submitted).value().wait());
+        const auto bytes = readback.value().map();
+        VIDEO_CHECK(bytes.size() >= static_cast<std::size_t>(width) * height);
+        std::vector<core::u8> result(bytes.begin(),
+                                     bytes.begin() + width * height);
+        readback.value().unmap();
+        return result;
+    };
+    const auto full_luma = read_luma(planes.value().luma, 1'280U, 720U);
+    const auto half_luma = read_luma(half_planes.value().luma, 640U, 360U);
+    std::size_t mismatched = 0U;
+    for (core::u32 y = 0U; y < 360U; ++y) {
+        for (core::u32 x = 0U; x < 640U; ++x) {
+            const auto at = [&](core::u32 column, core::u32 row) {
+                return static_cast<core::u32>(
+                    full_luma[static_cast<std::size_t>(row) * 1'280U + column]);
+            };
+            const core::u32 mean = (at(x * 2U, y * 2U) + at(x * 2U + 1U, y * 2U)
+                + at(x * 2U, y * 2U + 1U) + at(x * 2U + 1U, y * 2U + 1U) + 2U)
+                / 4U;
+            if (half_luma[static_cast<std::size_t>(y) * 640U + x] != mean) {
+                ++mismatched;
+            }
+        }
+    }
+    VIDEO_CHECK(mismatched == 0U);
 }
 
 // Ten-bit video keeps its depth all the way to the renderer: two sixteen-bit
@@ -1114,7 +1252,9 @@ void ten_bit_video_keeps_its_depth() {
                 == rhi::TextureFormat::Rg16Unorm);
 }
 
-constexpr std::array<Case, 16U> cases{{
+constexpr std::array<Case, 17U> cases{{
+    {"halving averages each two by two block",
+     &halving_averages_each_two_by_two_block},
     {"ready frames report what shared residency holds",
      &ready_frames_report_what_shared_residency_holds},
     {"speculative publication preserves current frames with a full cache",

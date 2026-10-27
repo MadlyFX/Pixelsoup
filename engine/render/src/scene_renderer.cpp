@@ -4244,7 +4244,13 @@ bool SceneRenderer::render(
         if (mesh_range == nullptr || mesh_range->index_count == 0U) {
             continue;
         }
-        const std::string& media_source = clip.source;
+        // A half-resolution clip decodes as a source of its own; a full one
+        // keeps its path and allocates nothing here.
+        const std::string half_source =
+            clip.resolution == scene::MediaResolution::Half
+            ? media_decode_source(clip) : std::string{};
+        const std::string& media_source =
+            half_source.empty() ? clip.source : half_source;
         ResolvedMediaFrame media_frame = clip.offline || media_source.empty()
             ? ResolvedMediaFrame{} : media_cache.resolve(
             *device_, commands, media_source, clip.frame_index,
@@ -4292,7 +4298,7 @@ bool SceneRenderer::render(
         }
         media_cache.prewarm(
             *device_, commands,
-            upcoming.source,
+            media_decode_source(upcoming.source, upcoming.resolution),
             upcoming.frame_index,
             MediaLoopWindow{upcoming.loop_first, upcoming.loop_count},
             upcoming.source_node.value());

@@ -422,8 +422,10 @@ struct MediaCache::AsyncDecodeState final
             if(authored_generation_ != generation) {
                 auto paths=std::make_shared<std::vector<std::string>>();
                 paths->reserve(media.size());
-                for(const auto& clip:media) if(!clip.source.empty() &&
-                    std::find(paths->begin(),paths->end(),clip.source)==paths->end()) paths->push_back(clip.source);
+                for(const auto& clip:media) if(!clip.source.empty()) {
+                    auto decoded=media_decode_source(clip);
+                    if(std::find(paths->begin(),paths->end(),decoded)==paths->end()) paths->push_back(std::move(decoded));
+                }
                 refresh_sources_=std::move(paths); authored_generation_=generation;
                 ++generation_; ready_.clear(); ready_bytes_=0; refreshed_=refresh_sources_->empty();
             }
@@ -674,6 +676,13 @@ void MediaCache::begin_frame() noexcept {
         last_frame_by_clip_.erase(held->first);
         last_request_by_clip_.erase(held->first);
         held = last_by_clip_.erase(held);
+    }
+    for (auto entry = resident_.begin(); entry != resident_.end();) {
+        const auto next = std::next(entry);
+        if (entry->orphaned && !resident_is_held(entry->key)) {
+            erase(entry);
+        }
+        entry = next;
     }
     read_ahead_requests_.clear();
     stats_ = MediaCacheStats{};
@@ -1172,7 +1181,7 @@ void MediaCache::release_unauthored(
         std::vector<std::string> authored;
         authored.reserve(media.size());
         for (const auto& clip : media) {
-            if (!clip.source.empty()) authored.push_back(clip.source);
+            if (!clip.source.empty()) authored.push_back(media_decode_source(clip));
         }
         std::sort(authored.begin(), authored.end());
         authored.erase(std::unique(authored.begin(), authored.end()),
@@ -1189,6 +1198,17 @@ void MediaCache::release_unauthored(
         const auto gone = [&departed](const std::string& source) {
             return std::binary_search(departed.begin(), departed.end(),
                                       source);
+        };
+        // A placement switched between resolutions of one file departs one
+        // decode source and arrives at another. Its held picture is kept
+        // until the new size has a frame of its own to show; see resolve().
+        const auto file_still_authored = [&authored](const std::string& source) {
+            const auto file = media_source_variant(source).path;
+            return std::any_of(
+                authored.begin(), authored.end(),
+                [file](const std::string& kept) {
+                    return media_source_variant(kept).path == file;
+                });
         };
         reconcile_recordings();
         for (auto entry = candidates_.begin(); entry != candidates_.end();) {
@@ -1214,7 +1234,12 @@ void MediaCache::release_unauthored(
         for (auto entry = resident_.begin(); entry != resident_.end();) {
             const auto next = std::next(entry);
             if (gone(entry->source)) {
-                erase(entry);
+                if (resident_is_held(entry->key)
+                    && file_still_authored(entry->source)) {
+                    entry->orphaned = true;
+                } else {
+                    erase(entry);
+                }
             }
             entry = next;
         }
@@ -1439,6 +1464,29 @@ ResolvedMediaFrame MediaCache::resolve(
         last_by_clip_.erase(clip_key);
         last_frame_by_clip_.erase(clip_key);
         last_request_by_clip_.erase(clip_key);
+        // Unless the placement was on air last pass as another resolution of
+        // the same file. That is not a cut: the show is where it was and the
+        // picture is the same one, so the placement keeps showing what it
+        // held until the new size publishes a frame, which replaces it as
+        // any newer frame would. Showing nothing instead puts the offline
+        // placeholder on the wall for as long as a cold decode takes.
+        const auto file = media_source_variant(source_template).path;
+        for (const ClipKey& previous : on_air_) {
+            if (previous.second != clip || previous.first == source_template
+                || media_source_variant(previous.first).path != file) {
+                continue;
+            }
+            const auto held = last_by_clip_.find(previous);
+            if (held == last_by_clip_.end()) {
+                continue;
+            }
+            last_by_clip_[clip_key] = held->second;
+            const auto frame = last_frame_by_clip_.find(previous);
+            if (frame != last_frame_by_clip_.end()) {
+                last_frame_by_clip_[clip_key] = frame->second;
+            }
+            break;
+        }
     }
     // How far the show moved this frame is how far it will move next frame, so
     // the stride is taken from what was actually asked for rather than assumed

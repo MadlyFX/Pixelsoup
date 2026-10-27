@@ -1009,13 +1009,31 @@ bool CommandList::upload_texture_rows(
     }
 
     auto* const device = as_device(device_->backend_handle());
+    // Rows are staged at a 256-byte pitch. SDL's D3D12 driver can only copy
+    // from a transfer buffer whose rows are aligned that way, and realigns any
+    // that are not into a temporary buffer of its own on every upload - a
+    // 1920-wide eight-bit video plane cost tens of milliseconds a frame that
+    // way. Every SDL backend accepts the padded pitch as it is.
+    constexpr std::size_t row_alignment = 256U;
+    const std::size_t texel_bytes =
+        compressed ? 16U : bytes_per_pixel(texture.desc_.format);
+    const std::size_t row_bytes = required / (compressed
+        ? static_cast<std::size_t>((row_count + 3U) / 4U)
+        : static_cast<std::size_t>(row_count));
+    const std::size_t pitch = compressed || row_alignment % texel_bytes != 0U
+        ? row_bytes
+        : (row_bytes + row_alignment - 1U) / row_alignment * row_alignment;
+    const std::size_t staged = pitch * (required / row_bytes);
+    if (staged > static_cast<std::size_t>(std::numeric_limits<Uint32>::max())) {
+        return false;
+    }
     auto* staging =
         static_cast<SDL_GPUTransferBuffer*>(texture.upload_staging_);
     const bool streaming = texture.desc_.streaming_upload;
     if (staging == nullptr) {
         SDL_GPUTransferBufferCreateInfo info{};
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        info.size = static_cast<Uint32>(required);
+        info.size = static_cast<Uint32>(staged);
         staging = SDL_CreateGPUTransferBuffer(device, &info);
         if (staging == nullptr) {
             return false;
@@ -1036,7 +1054,14 @@ bool CommandList::upload_texture_rows(
         }
         return false;
     }
-    std::copy(pixels.begin(), pixels.end(), static_cast<core::u8*>(mapped));
+    if (pitch == row_bytes) {
+        std::copy(pixels.begin(), pixels.end(), static_cast<core::u8*>(mapped));
+    } else {
+        for (std::size_t row = 0U; row < required / row_bytes; ++row) {
+            std::copy_n(pixels.data() + row * row_bytes, row_bytes,
+                        static_cast<core::u8*>(mapped) + row * pitch);
+        }
+    }
     SDL_UnmapGPUTransferBuffer(device, staging);
 
     auto* const pass =
@@ -1049,7 +1074,9 @@ bool CommandList::upload_texture_rows(
     }
     SDL_GPUTextureTransferInfo source{};
     source.transfer_buffer = staging;
-    source.pixels_per_row = compressed ? (width + 3U) / 4U * 4U : width;
+    source.pixels_per_row = compressed
+        ? (width + 3U) / 4U * 4U
+        : static_cast<Uint32>(pitch / texel_bytes);
     source.rows_per_layer = compressed ? (row_count + 3U) / 4U * 4U : row_count;
     SDL_GPUTextureRegion region{};
     region.texture = static_cast<SDL_GPUTexture*>(texture.handle_);

@@ -1625,6 +1625,38 @@ void model_animation_buttons_preserve_exact_start_frame() {
     }
 }
 
+// A video clip offers the size it is held at; choosing one authors that
+// size on the clip and nothing else. A still has no such choice to offer.
+void a_video_clip_chooses_the_size_it_is_held_at() {
+    Harness h;
+    h.element.kind = editor::ElementKind::Media;
+    h.element.source = "C:/plates/drive.mp4";
+    h.element.source_frame_rate = scene::MediaFrameRate{24U, 1U};
+    const float y = h.control_y("media resolution", subject.value(), well_x);
+    const auto halved = h.choose(y, 0U, 1U);
+    UI_CHECK(halved.text_edits.size() == 1U);
+    UI_CHECK(halved.text_edits[0].node == subject);
+    UI_CHECK(halved.text_edits[0].property == scene::schema::media_resolution);
+    UI_CHECK(halved.text_edits[0].value == scene::schema::media_resolution_half);
+
+    h.element.media_resolution = scene::MediaResolution::Half;
+    const auto restored = h.choose(y, 1U, 0U);
+    UI_CHECK(restored.text_edits.size() == 1U);
+    UI_CHECK(restored.text_edits[0].value == scene::schema::media_resolution_full);
+
+    Harness still;
+    still.element.kind = editor::ElementKind::Media;
+    still.element.source = "C:/plates/frame.png";
+    bool offered = true;
+    try {
+        static_cast<void>(
+            still.control_y("media resolution", subject.value(), well_x));
+    } catch (const std::runtime_error&) {
+        offered = false;
+    }
+    UI_CHECK(!offered);
+}
+
 void model_texture_buttons_target_selected_part_and_channel() {
     Harness h;
     h.element.kind = editor::ElementKind::Model;
@@ -1859,7 +1891,8 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 54U> cases{{
+constexpr std::array<Case, 55U> cases{{
+    {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
      &a_surface_diamond_keys_its_position_at_the_playhead},
     {"a filled surface diamond removes the yaw key there",

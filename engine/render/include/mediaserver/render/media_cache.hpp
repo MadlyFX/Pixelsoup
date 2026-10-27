@@ -189,6 +189,11 @@ class MediaCache final {
         // views of the decoder's own surface, and this reference is what stops
         // the decoder reusing it underneath them.
         std::shared_ptr<void> retained;
+        // Its source is no longer authored, but a placement switched to
+        // another resolution of the same file is still showing it while the
+        // new size's first frame decodes. Freed at the start of the first
+        // frame nothing holds it.
+        bool orphaned{};
     };
 
     enum class CandidateUploadState : core::u8 {
@@ -374,5 +379,21 @@ class MediaCache final {
     core::u64 candidate_stamp_{};
     MediaCacheStats stats_{};
 };
+
+// The source string a clip decodes from: its file, plus the resolution it is
+// held at. Every caller that resolves, prewarms or retires a clip names it
+// this way, so a half-resolution clip and a full one on the same file never
+// share a decoded frame.
+[[nodiscard]] inline std::string media_decode_source(
+    const std::string &source, scene::MediaResolution resolution) {
+    return resolution == scene::MediaResolution::Half && !source.empty()
+        ? half_resolution_source(source)
+        : source;
+}
+
+[[nodiscard]] inline std::string media_decode_source(
+    const scene::MediaInstance &clip) {
+    return media_decode_source(clip.source, clip.resolution);
+}
 
 } // namespace mediaserver::render

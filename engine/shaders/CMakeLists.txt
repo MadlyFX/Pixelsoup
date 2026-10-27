@@ -504,6 +504,11 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         depth_merge.comp.hlsl cs_6_2
         mediaserver_depth_merge_comp_dxil depth_merge_comp_dxil.h)
+    # Half-resolution video. One plane of a decoded frame into a surface of
+    # half the size, on the decode worker rather than in a render pass.
+    mediaserver_compile_dxil(
+        video_halve.comp.hlsl cs_6_2
+        mediaserver_video_halve_comp_dxil video_halve_comp_dxil.h)
     mediaserver_compile_dxil(
         compute_fill.comp.hlsl cs_6_2
         mediaserver_compute_fill_comp_dxil compute_fill_comp_dxil.h)

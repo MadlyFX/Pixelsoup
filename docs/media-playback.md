@@ -203,7 +203,72 @@ Advanced products uses the same filter as its colour.
   pixels. A scaled preview of the canvas filters at its own scale.
 
 It does not reduce decode cost or decoded-frame memory: the full-resolution
-frame is still decoded and held.
+frame is still decoded and held. Holding a clip at half resolution, below,
+does.
+
+## Holding a video clip at half resolution
+
+A video clip can be held at half resolution (**Inspector > Content >
+Resolution**, authored as `media_resolution = "half"` on the clip). Each decoded
+frame is reduced to half its width and height as soon as it is decoded, so
+every frame held for the clip - current, read-ahead and trail - costs a quarter
+of the memory, and the full-size frame is released at once.
+
+- On the native D3D12 path the decode worker averages each 2x2 block of the
+  decoder's surface into a half-size NV12/P010 surface of its own
+  (`engine/shaders/video_halve.comp.hlsl`, `d3d12_video_halve.cpp`), waits
+  for it, and gives the decoder its surface back. The renderer adopts the
+  half-size surface as plane views exactly as it would the decoder's, so
+  drawing stays zero-copy. Half-size surfaces are pooled per size.
+- A frame decoded into system memory - ProRes, DNxHR, NotchLC, or hardware
+  video on the SDL path - is averaged on the CPU before it is held or
+  uploaded (`halve_decoded_frame`), at its own depth and subsampling.
+- Both paths take the 2x2 mean on integer codes and round half up, so a frame
+  halved on the GPU and on the CPU are the same bytes, and every node holding
+  the clip draws the same picture. The setting is authored and is part of the
+  scene digest.
+- A full-size and a half-size placement of the same file are different
+  pictures, so each has its own decoder, read-ahead and cache entries.
+- Switching a placement's resolution is not a cut. It keeps showing the
+  picture it held at the old size until the new size has decoded a frame of
+  its own - a second or two for eight cold 4K streams - and the old frame is
+  freed as soon as nothing shows it. A placement newly cut in inherits
+  nothing.
+- Decoding costs exactly the same: a compressed video frame can only be
+  decoded whole. Half resolution saves memory, upload and sampling, not
+  decode throughput.
+- A clip shown larger than half its source size is visibly softer. Stills and
+  image sequences ignore the setting.
+- A picture whose half size would not be even (width or height not a multiple
+  of four) keeps its full-size frames on the device path.
+
+Measured 2026-10-26 on the RTX 3090 with four 3840x2160 H.264 plates at
+24 fps (`mediaserver_render_media_video_benchmark --buffered-output
+[--half-resolution]`, 240 warm-up frames then 480 measured, same binary):
+
+| D3D12 | Full | Half |
+| --- | --- | --- |
+| ready ratio | 0.998, 0.998 | 0.998, 0.996 |
+| peak process VRAM growth | 6069, 6188 MiB | 1980, 2018 MiB |
+| decoded frames held | 172 (2.14 GB, byte-bound) | 192 (0.60 GB, count-bound) |
+| submit wait, mean | 1.18-1.24 ms | 0.58-0.60 ms |
+
+On the SDL path the same four plates read back through system memory, which
+is the limit there; holding them at half resolution still relieves the
+upload and the render thread:
+
+| SDL | Full | Half |
+| --- | --- | --- |
+| ready ratio | 0.700 | 0.854 |
+| render call, mean | 3.28 ms | 1.22 ms |
+| submit wait, mean | 4.75 ms | 2.28 ms |
+| peak process VRAM growth | 3091 MiB | 2417 MiB |
+
+Halving costs about 0.3 ms of decode-worker time per frame once warm, most
+of it waiting for the GPU. A clip's first ~48 frames per plate each allocate
+a new half-size surface (about 2.4 ms apiece), so while read-ahead fills after
+a clip starts its ready ratio runs a few points below full resolution
+(0.92-0.95 against 0.98 over a cold 10 s run) before converging.
 
 ## Clips the scene has stopped authoring
 
