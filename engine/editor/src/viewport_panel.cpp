@@ -1420,7 +1420,7 @@ ViewportPanel::surface_at(const scene::Scene& scene, float canvas_x,
         if (observation.ready()) {
             const std::shared_ptr<const scene::MeshData> mesh{
                 observation.asset, &observation.asset->mesh};
-            if (const auto bvh = surface_cache_.observe(mesh)) {
+            if (const auto bvh = surface_cache_->observe(mesh)) {
                 return scene::raycast_mesh(*bvh, *mesh, local, limit);
             }
         }
@@ -1498,7 +1498,7 @@ ViewportPanel::measure_point_at(const scene::Scene& scene, float canvas_x,
     }
     }
     const std::shared_ptr<const scene::MeshBvh> bvh =
-        mesh != nullptr ? surface_cache_.observe(mesh) : nullptr;
+        mesh != nullptr ? surface_cache_->observe(mesh) : nullptr;
     if (bvh == nullptr) {
         return point;
     }
@@ -1523,10 +1523,24 @@ ViewportPanel::measure_point_at(const scene::Scene& scene, float canvas_x,
         local_reach, triangles, 512U));
 
     // Nearest on screen wins; a vertex anywhere in reach beats a midpoint.
+    // Points level on screen go to the one nearer the surface the pointer is
+    // on: in an orthographic view a corner and the corner straight behind it
+    // land on the same pixel, and only the front one can be seen.
     float vertex_reach = reach;
     float midpoint_reach = reach;
     std::optional<scene::Vec3> vertex;
     std::optional<scene::Vec3> midpoint;
+    constexpr float level = 0.25F;
+    const auto closer = [&](float distance, float best,
+                            const std::optional<scene::Vec3>& chosen,
+                            scene::Vec3 candidate) {
+        if (distance < best - level) {
+            return true;
+        }
+        return chosen.has_value() && distance < best + level &&
+               scene::length(candidate - hit->position) <
+                   scene::length(*chosen - hit->position);
+    };
     const auto screen_distance = [&](scene::Vec3 candidate) {
         const auto projected =
             scene::project_to_canvas(scene.camera, scene.canvas, candidate);
@@ -1546,15 +1560,19 @@ ViewportPanel::measure_point_at(const scene::Scene& scene, float canvas_x,
         }
         for (core::u32 corner = 0U; corner < 3U; ++corner) {
             const float distance = screen_distance(corners[corner]);
-            if (distance < vertex_reach) {
-                vertex_reach = distance;
+            if (distance < reach &&
+                (!vertex.has_value() ||
+                 closer(distance, vertex_reach, vertex, corners[corner]))) {
+                vertex_reach = std::min(vertex_reach, distance);
                 vertex = corners[corner];
             }
             const scene::Vec3 middle =
                 (corners[corner] + corners[(corner + 1U) % 3U]) * 0.5F;
             const float middle_distance = screen_distance(middle);
-            if (middle_distance < midpoint_reach) {
-                midpoint_reach = middle_distance;
+            if (middle_distance < reach &&
+                (!midpoint.has_value() ||
+                 closer(middle_distance, midpoint_reach, midpoint, middle))) {
+                midpoint_reach = std::min(midpoint_reach, middle_distance);
                 midpoint = middle;
             }
         }
@@ -1843,7 +1861,7 @@ void ViewportPanel::reset_project_state() noexcept {
     model_bounds_cache_.clear();
     projection_mesh_stamp_ = 0U;
     projection_mesh_cache_.clear();
-    surface_cache_.request_reset();
+    surface_cache_->request_reset();
     primitive_meshes_.clear();
     set_measuring(false);
     pivot_override_.reset();
@@ -1872,7 +1890,7 @@ bool detail::wait_for_viewport_projection_surface_for_test(
 
 bool detail::wait_for_viewport_surface_hierarchies_for_test(
     ViewportPanel& panel) noexcept {
-    return detail::wait_for_model_surface_cache_for_test(panel.surface_cache_);
+    return detail::wait_for_model_surface_cache_for_test(*panel.surface_cache_);
 }
 
 CanvasPoint to_canvas(const gui::Rect& image, scene::Canvas canvas,
@@ -2908,14 +2926,209 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
         ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
     }
     ctx.tooltip(menu,
-                "This view's projection. Top, Front and Side are "
-                "orthographic: drag to pan, wheel to zoom.");
-    constexpr std::array<std::string_view, 4U> options{
+                "This view's projection, and one or four views. Top, Front "
+                "and Side are orthographic: drag to pan, wheel to zoom.");
+    const std::array<std::string_view, 5U> options{
         "Perspective    Alt+P", "Top            Alt+J",
-        "Front          Alt+H", "Side           Alt+K"};
+        "Front          Alt+H", "Side           Alt+K",
+        stage_four_views_ ? "One view" : "Four views"};
     if (const auto chosen = ctx.context_menu(menu_id, options)) {
-        frame.projection_choice = static_cast<StageProjection>(*chosen);
+        if (*chosen < 4U) {
+            frame.projection_choice = static_cast<StageProjection>(*chosen);
+        } else {
+            frame.layout_choice = !stage_four_views_;
+        }
     }
+}
+
+void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
+                                 float frames_per_second) {
+    ctx.panel(toolbar, ctx.theme().background);
+    ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
+                        toolbar.width, 1.0F},
+              ctx.theme().divider);
+    // Keep preview resolution accessible even in a narrow dock: the
+    // transform tools go first, the display toggles only when there is
+    // room for them too.
+    float left = toolbar.x + 7.0F;
+    if (toolbar.width >= 520.0F) {
+        // A selected choice is drawn pressed; every one is a button, so a
+        // click on the current tool is harmless rather than dead.
+        const auto choice = [&](core::u64 salt, float width,
+                                std::string_view label, bool chosen,
+                                std::string_view hint) {
+            const gui::Rect rect{left, toolbar.y + 4.0F, width, 20.0F};
+            const bool clicked = ctx.button(mix(id_, salt), rect, label);
+            if (chosen) {
+                ctx.panel(rect, ctx.theme().widget_active);
+                ctx.label(gui::Rect{rect.x + 7.0F, rect.y,
+                                    std::max(rect.width - 7.0F, 0.0F),
+                                    rect.height},
+                          label, ctx.theme().text);
+            }
+            ctx.tooltip(rect, hint);
+            left += width + 4.0F;
+            return clicked;
+        };
+        if (choice(10U, 46.0F, "MOVE",
+                   !measuring_ && tool_ == TransformTool::Move,
+                   "Move tool. G moves the selection from the keyboard; "
+                   "X, Y or Z constrains it, Shift+X/Y/Z to a plane.")) {
+            tool_ = TransformTool::Move;
+            set_measuring(false);
+        }
+        if (choice(11U, 56.0F, "ROTATE",
+                   !measuring_ && tool_ == TransformTool::Rotate,
+                   "Rotate tool. R rotates the selection about the view, "
+                   "or about X, Y or Z once one is typed.")) {
+            tool_ = TransformTool::Rotate;
+            set_measuring(false);
+        }
+        if (choice(12U, 48.0F, "SCALE",
+                   !measuring_ && tool_ == TransformTool::Scale,
+                   "Scale tool. S scales the selection; X, Y or Z scales "
+                   "one axis, Shift+X/Y/Z the other two.")) {
+            tool_ = TransformTool::Scale;
+            set_measuring(false);
+        }
+        if (choice(15U, 64.0F, "MEASURE", measuring_,
+                   "Measure tool (M). Click two points for the distance "
+                   "between them in metres; points snap to vertices, then "
+                   "edge midpoints, then the surface. Shift+click adds "
+                   "to a path. Nothing measured is saved.")) {
+            set_measuring(!measuring_);
+        }
+        left += 6.0F;
+        if (choice(13U, 56.0F,
+                   orientation_ == TransformOrientation::Global ? "GLOBAL"
+                                                                : "LOCAL",
+                   false,
+                   "Gizmo and axis-key orientation: world axes, or the "
+                   "selected element's own. Pressing an axis key twice "
+                   "uses the other one for that transform.")) {
+            orientation_ = orientation_ == TransformOrientation::Global
+                               ? TransformOrientation::Local
+                               : TransformOrientation::Global;
+        }
+        if (choice(14U, 44.0F, "SNAP", snapping_,
+                   "Snap moves, turns and scales to the steps beside "
+                   "this (Shift: a tenth of the distance and scale step, "
+                   "a fifth of the angle). Shift+Tab toggles; hold Ctrl "
+                   "to invert while dragging.")) {
+            snapping_ = !snapping_;
+        }
+        draw_snap_controls(ctx, gui::Rect{left, toolbar.y + 4.0F, 124.0F,
+                                          20.0F});
+        left += 128.0F;
+        if (choice(18U, 64.0F, "SURFACE", surface_snapping_,
+                   "Surface snapping: an element dragged by its body "
+                   "rides over whatever is under the pointer and rests on "
+                   "it. Hold V while moving to put the dragged element's "
+                   "vertex nearest the pointer onto the vertex under it.")) {
+            surface_snapping_ = !surface_snapping_;
+        }
+        left += 6.0F;
+    }
+    // The display toggles, when they fit before the preview controls;
+    // otherwise one SHOW menu holds them, so they stay reachable.
+    const float preview_left =
+        toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F;
+    const gui::UiId show_menu = mix(id_, 20U);
+    float used_right = left;
+    if (left + 218.0F > preview_left && toolbar.width >= 520.0F) {
+        const gui::Rect show{left, toolbar.y + 4.0F, 52.0F, 20.0F};
+        used_right = show.x + show.width;
+        if (ctx.button(mix(id_, 21U), show, "SHOW")) {
+            ctx.open_context_menu(show_menu, show.x,
+                                  show.y + show.height);
+        }
+        ctx.tooltip(show, "Grid, guides, gizmo and bounds.");
+        const std::array<std::string, 4U> labels{
+            std::string{show_grid_ ? "[x] " : "[ ] "} + "Grid",
+            std::string{show_overlays_ ? "[x] " : "[ ] "} + "Guides",
+            std::string{show_gizmo_ ? "[x] " : "[ ] "} + "Gizmo",
+            std::string{show_bounds_ ? "[x] " : "[ ] "} + "Bounds"};
+        const std::array<std::string_view, 4U> options{
+            labels[0], labels[1], labels[2], labels[3]};
+        if (const auto chosen = ctx.context_menu(show_menu, options)) {
+            switch (*chosen) {
+            case 0U: show_grid_ = !show_grid_; break;
+            case 1U: show_overlays_ = !show_overlays_; break;
+            case 2U: show_gizmo_ = !show_gizmo_; break;
+            default: show_bounds_ = !show_bounds_; break;
+            }
+        }
+    }
+    if (left + 218.0F <= preview_left) {
+        float button_x = left;
+        if (ctx.button(mix(id_, 1U),
+                       gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
+                       show_grid_ ? "GRID" : "grid")) {
+            show_grid_ = !show_grid_;
+        }
+        button_x += 48.0F;
+        if (ctx.button(mix(id_, 2U),
+                       gui::Rect{button_x, toolbar.y + 4.0F, 52.0F, 20.0F},
+                       show_overlays_ ? "GUIDES" : "guides")) {
+            show_overlays_ = !show_overlays_;
+        }
+        button_x += 56.0F;
+        if (ctx.button(mix(id_, 3U),
+                       gui::Rect{button_x, toolbar.y + 4.0F, 50.0F, 20.0F},
+                       show_gizmo_ ? "GIZMO" : "gizmo")) {
+            show_gizmo_ = !show_gizmo_;
+        }
+        button_x += 54.0F;
+        const gui::Rect bounds_button{button_x, toolbar.y + 4.0F, 54.0F,
+                                      20.0F};
+        if (ctx.button(mix(id_, 19U), bounds_button,
+                       show_bounds_ ? "BOUNDS" : "bounds")) {
+            show_bounds_ = !show_bounds_;
+        }
+        ctx.tooltip(bounds_button,
+                    "Outline every element's bounding box, selected or "
+                    "not.");
+    }
+    const float quality_x = toolbar.x + std::max(64.0F, toolbar.width - 158.0F);
+    {
+        // The caption gives way to SHOW in a narrow dock; the list stays.
+        if (used_right + 4.0F <= quality_x - 58.0F) {
+            ctx.label(
+                gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
+                "PREVIEW", ctx.theme().text_muted);
+        }
+        draw_resolution_control(ctx,
+            gui::Rect{quality_x, toolbar.y + 4.0F, 90.0F, 20.0F});
+        ctx.panel(
+            gui::Rect{quality_x + 96.0F, toolbar.y + 4.0F, 54.0F, 20.0F},
+            ctx.theme().widget);
+        std::array<char, 24U> fps_text{};
+        const int fps_length = std::snprintf(
+            fps_text.data(), fps_text.size(), "%.3g FPS",
+            std::max(frames_per_second, 0.0F));
+        ctx.label(
+            gui::Rect{quality_x + 101.0F, toolbar.y + 4.0F, 49.0F, 20.0F},
+            std::string_view{
+                fps_text.data(), static_cast<std::size_t>(
+                                     std::max(fps_length, 0))},
+            ctx.theme().text);
+    }
+}
+
+void ViewportPanel::copy_tools_from(const ViewportPanel& other) noexcept {
+    tool_ = other.tool_;
+    orientation_ = other.orientation_;
+    snapping_ = other.snapping_;
+    snap_steps_ = other.snap_steps_;
+    surface_snapping_ = other.surface_snapping_;
+    if (measuring_ != other.measuring_) {
+        set_measuring(other.measuring_);
+    }
+    show_grid_ = other.show_grid_;
+    show_overlays_ = other.show_overlays_;
+    show_gizmo_ = other.show_gizmo_;
+    show_bounds_ = other.show_bounds_;
+    resolution_ = other.resolution_;
 }
 
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
@@ -2949,179 +3162,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         };
 
     gui::Rect image_bounds = bounds;
-    if (role_ == ViewportRole::Stage && bounds.height > stage_toolbar_height) {
-        const gui::Rect toolbar{bounds.x, bounds.y, bounds.width,
-                                stage_toolbar_height};
-        ctx.panel(toolbar, ctx.theme().background);
-        ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
-                            toolbar.width, 1.0F},
-                  ctx.theme().divider);
-        // Keep preview resolution accessible even in a narrow dock: the
-        // transform tools go first, the display toggles only when there is
-        // room for them too.
-        float left = toolbar.x + 7.0F;
-        if (toolbar.width >= 520.0F) {
-            // A selected choice is drawn pressed; every one is a button, so a
-            // click on the current tool is harmless rather than dead.
-            const auto choice = [&](core::u64 salt, float width,
-                                    std::string_view label, bool chosen,
-                                    std::string_view hint) {
-                const gui::Rect rect{left, toolbar.y + 4.0F, width, 20.0F};
-                const bool clicked = ctx.button(mix(id_, salt), rect, label);
-                if (chosen) {
-                    ctx.panel(rect, ctx.theme().widget_active);
-                    ctx.label(gui::Rect{rect.x + 7.0F, rect.y,
-                                        std::max(rect.width - 7.0F, 0.0F),
-                                        rect.height},
-                              label, ctx.theme().text);
-                }
-                ctx.tooltip(rect, hint);
-                left += width + 4.0F;
-                return clicked;
-            };
-            if (choice(10U, 46.0F, "MOVE",
-                       !measuring_ && tool_ == TransformTool::Move,
-                       "Move tool. G moves the selection from the keyboard; "
-                       "X, Y or Z constrains it, Shift+X/Y/Z to a plane.")) {
-                tool_ = TransformTool::Move;
-                set_measuring(false);
-            }
-            if (choice(11U, 56.0F, "ROTATE",
-                       !measuring_ && tool_ == TransformTool::Rotate,
-                       "Rotate tool. R rotates the selection about the view, "
-                       "or about X, Y or Z once one is typed.")) {
-                tool_ = TransformTool::Rotate;
-                set_measuring(false);
-            }
-            if (choice(12U, 48.0F, "SCALE",
-                       !measuring_ && tool_ == TransformTool::Scale,
-                       "Scale tool. S scales the selection; X, Y or Z scales "
-                       "one axis, Shift+X/Y/Z the other two.")) {
-                tool_ = TransformTool::Scale;
-                set_measuring(false);
-            }
-            if (choice(15U, 64.0F, "MEASURE", measuring_,
-                       "Measure tool (M). Click two points for the distance "
-                       "between them in metres; points snap to vertices, then "
-                       "edge midpoints, then the surface. Shift+click adds "
-                       "to a path. Nothing measured is saved.")) {
-                set_measuring(!measuring_);
-            }
-            left += 6.0F;
-            if (choice(13U, 56.0F,
-                       orientation_ == TransformOrientation::Global ? "GLOBAL"
-                                                                    : "LOCAL",
-                       false,
-                       "Gizmo and axis-key orientation: world axes, or the "
-                       "selected element's own. Pressing an axis key twice "
-                       "uses the other one for that transform.")) {
-                orientation_ = orientation_ == TransformOrientation::Global
-                                   ? TransformOrientation::Local
-                                   : TransformOrientation::Global;
-            }
-            if (choice(14U, 44.0F, "SNAP", snapping_,
-                       "Snap moves, turns and scales to the steps beside "
-                       "this (Shift: a tenth of the distance and scale step, "
-                       "a fifth of the angle). Shift+Tab toggles; hold Ctrl "
-                       "to invert while dragging.")) {
-                snapping_ = !snapping_;
-            }
-            draw_snap_controls(ctx, gui::Rect{left, toolbar.y + 4.0F, 124.0F,
-                                              20.0F});
-            left += 128.0F;
-            if (choice(18U, 64.0F, "SURFACE", surface_snapping_,
-                       "Surface snapping: an element dragged by its body "
-                       "rides over whatever is under the pointer and rests on "
-                       "it. Hold V while moving to put the dragged element's "
-                       "vertex nearest the pointer onto the vertex under it.")) {
-                surface_snapping_ = !surface_snapping_;
-            }
-            left += 6.0F;
-        }
-        // The display toggles, when they fit before the preview controls;
-        // otherwise one SHOW menu holds them, so they stay reachable.
-        const float preview_left =
-            toolbar.x + std::max(64.0F, toolbar.width - 158.0F) - 64.0F;
-        const gui::UiId show_menu = mix(id_, 20U);
-        float used_right = left;
-        if (left + 218.0F > preview_left && toolbar.width >= 520.0F) {
-            const gui::Rect show{left, toolbar.y + 4.0F, 52.0F, 20.0F};
-            used_right = show.x + show.width;
-            if (ctx.button(mix(id_, 21U), show, "SHOW")) {
-                ctx.open_context_menu(show_menu, show.x,
-                                      show.y + show.height);
-            }
-            ctx.tooltip(show, "Grid, guides, gizmo and bounds.");
-            const std::array<std::string, 4U> labels{
-                std::string{show_grid_ ? "[x] " : "[ ] "} + "Grid",
-                std::string{show_overlays_ ? "[x] " : "[ ] "} + "Guides",
-                std::string{show_gizmo_ ? "[x] " : "[ ] "} + "Gizmo",
-                std::string{show_bounds_ ? "[x] " : "[ ] "} + "Bounds"};
-            const std::array<std::string_view, 4U> options{
-                labels[0], labels[1], labels[2], labels[3]};
-            if (const auto chosen = ctx.context_menu(show_menu, options)) {
-                switch (*chosen) {
-                case 0U: show_grid_ = !show_grid_; break;
-                case 1U: show_overlays_ = !show_overlays_; break;
-                case 2U: show_gizmo_ = !show_gizmo_; break;
-                default: show_bounds_ = !show_bounds_; break;
-                }
-            }
-        }
-        if (left + 218.0F <= preview_left) {
-            float button_x = left;
-            if (ctx.button(mix(id_, 1U),
-                           gui::Rect{button_x, toolbar.y + 4.0F, 44.0F, 20.0F},
-                           show_grid_ ? "GRID" : "grid")) {
-                show_grid_ = !show_grid_;
-            }
-            button_x += 48.0F;
-            if (ctx.button(mix(id_, 2U),
-                           gui::Rect{button_x, toolbar.y + 4.0F, 52.0F, 20.0F},
-                           show_overlays_ ? "GUIDES" : "guides")) {
-                show_overlays_ = !show_overlays_;
-            }
-            button_x += 56.0F;
-            if (ctx.button(mix(id_, 3U),
-                           gui::Rect{button_x, toolbar.y + 4.0F, 50.0F, 20.0F},
-                           show_gizmo_ ? "GIZMO" : "gizmo")) {
-                show_gizmo_ = !show_gizmo_;
-            }
-            button_x += 54.0F;
-            const gui::Rect bounds_button{button_x, toolbar.y + 4.0F, 54.0F,
-                                          20.0F};
-            if (ctx.button(mix(id_, 19U), bounds_button,
-                           show_bounds_ ? "BOUNDS" : "bounds")) {
-                show_bounds_ = !show_bounds_;
-            }
-            ctx.tooltip(bounds_button,
-                        "Outline every element's bounding box, selected or "
-                        "not.");
-        }
-        const float quality_x = toolbar.x + std::max(64.0F, toolbar.width - 158.0F);
-        {
-            // The caption gives way to SHOW in a narrow dock; the list stays.
-            if (used_right + 4.0F <= quality_x - 58.0F) {
-                ctx.label(
-                    gui::Rect{quality_x - 58.0F, toolbar.y, 56.0F, toolbar.height},
-                    "PREVIEW", ctx.theme().text_muted);
-            }
-            draw_resolution_control(ctx,
-                gui::Rect{quality_x, toolbar.y + 4.0F, 90.0F, 20.0F});
-            ctx.panel(
-                gui::Rect{quality_x + 96.0F, toolbar.y + 4.0F, 54.0F, 20.0F},
-                ctx.theme().widget);
-            std::array<char, 24U> fps_text{};
-            const int fps_length = std::snprintf(
-                fps_text.data(), fps_text.size(), "%.3g FPS",
-                std::max(frames_per_second, 0.0F));
-            ctx.label(
-                gui::Rect{quality_x + 101.0F, toolbar.y + 4.0F, 49.0F, 20.0F},
-                std::string_view{
-                    fps_text.data(), static_cast<std::size_t>(
-                                         std::max(fps_length, 0))},
-                ctx.theme().text);
-        }
+    if (role_ == ViewportRole::Stage && toolbar_shown_ &&
+        bounds.height > stage_toolbar_height) {
+        draw_toolbar(ctx,
+                     gui::Rect{bounds.x, bounds.y, bounds.width,
+                               stage_toolbar_height},
+                     frames_per_second);
         image_bounds.y += stage_toolbar_height;
         image_bounds.height -= stage_toolbar_height;
     }

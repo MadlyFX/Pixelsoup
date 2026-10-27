@@ -1457,6 +1457,20 @@ work in them as they do in perspective. Front and Side show the upright grid
 through the origin, with the vertical Y axis in green. A kept view (Ctrl+1 to
 Ctrl+9) remembers its projection.
 
+**Four views.** Choose **Four views** in the same menu to split Stage into
+Top (top left), Front (top right), Side (bottom left) and the perspective
+view (bottom right); **One view** in any view's menu goes back to the single
+view, which is the bottom-right one. The first time, the three new views centre on what the
+perspective view looks at, at its zoom. Each view has its own camera, menu
+and gizmo: the camera keys, F, Ctrl+1 to Ctrl+9 and the Alt projection keys
+act on the view under the pointer, a camera drag stays with the view it began
+in, and a click picks what that view shows under the pointer. Selection,
+Measure, snapping and Library drops work in every view, and the one toolbar
+above them sets the tools for all four. While Masks or a colour eyedropper is
+in use, Stage shows the bottom-right view alone. Each view renders separately,
+so four views cost about as much GPU time as one Stage of the same total
+size plus the fixed per-frame work of three more renders.
+
 An orthographic view's eye stands 200 m behind what it shows, so atmosphere
 (fog) is not drawn in it - it would be the air of that whole distance - and
 the renderer reports fog as idle there with that reason. Lighting, shadows,

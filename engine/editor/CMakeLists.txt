@@ -135,6 +135,18 @@ if(BUILD_TESTING)
         TIMEOUT 60 RUN_SERIAL TRUE)
     set_target_properties(mediaserver_editor_shell_stage_drop_tests PROPERTIES FOLDER "tests")
 
+    # Stage views: orthographic keys and four views, picking in each.
+    add_executable(mediaserver_editor_shell_stage_views_tests
+        tests/editor_shell_stage_views_tests.cpp)
+    target_link_libraries(mediaserver_editor_shell_stage_views_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3)
+    mediaserver_set_project_options(mediaserver_editor_shell_stage_views_tests)
+    add_test(NAME mediaserver.editor_shell_stage_views
+        COMMAND mediaserver_editor_shell_stage_views_tests)
+    set_tests_properties(mediaserver.editor_shell_stage_views PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_stage_views_tests PROPERTIES FOLDER "tests")
+
     # The Stage's Blender transform keys through the real shell and window.
     add_executable(mediaserver_editor_shell_transform_tests
         tests/editor_shell_transform_tests.cpp

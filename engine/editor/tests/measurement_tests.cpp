@@ -1,4 +1,5 @@
 #include <mediaserver/editor/measurement.hpp>
+#include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/input.hpp>
@@ -518,6 +519,66 @@ void a_narrow_stage_keeps_its_display_toggles_in_a_show_menu() {
     MEASURE_CHECK(!h.panel.grid_visible());
 }
 
+// Each of the Stage's four views - Top, Front, Side and Perspective - finds
+// the surface under a pixel through its own camera, and its Measure point
+// snaps to the vertex there. The orthographic views' rays are parallel, so a
+// pixel near a corner must still reach that corner's face, not the eye.
+void every_stage_view_picks_and_snaps_through_its_own_camera() {
+    scene::Scene view = box_scene();
+    view.canvas = scene::Canvas{1200U, 800U};
+    editor::ViewportPanel panel{gui::ui_id("measure.views"),
+                                editor::ViewportRole::Stage};
+    // Build the box's hierarchy first; until then only bounds stand in.
+    static_cast<void>(panel.measure_point_at(view, 600.0F, 400.0F, 12.0F));
+    MEASURE_CHECK(editor::detail::wait_for_viewport_surface_hierarchies_for_test(
+        panel));
+
+    editor::StageOrbit orbit{{0.3F, 0.2F, -0.1F}, 0.1F, 0.06F, 7.0F};
+    struct Expected final {
+        editor::StageProjection projection;
+        // A face this view sees, a point on it away from every vertex and
+        // midpoint, and one of its corners.
+        scene::Vec3 normal;
+        scene::Vec3 face;
+        scene::Vec3 corner;
+    };
+    constexpr std::array<Expected, 4U> views{{
+        {editor::StageProjection::Top, {0.0F, 1.0F, 0.0F},
+         {0.4F, 1.0F, -0.3F}, {1.0F, 1.0F, 1.0F}},
+        {editor::StageProjection::Front, {0.0F, 0.0F, 1.0F},
+         {0.4F, -0.3F, 1.0F}, {-1.0F, 1.0F, 1.0F}},
+        {editor::StageProjection::Side, {1.0F, 0.0F, 0.0F},
+         {1.0F, -0.3F, 0.4F}, {1.0F, -1.0F, -1.0F}},
+        {editor::StageProjection::Perspective, {0.0F, 1.0F, 0.0F},
+         {0.4F, 1.0F, -0.3F}, {1.0F, 1.0F, 1.0F}},
+    }};
+    for (const Expected& expected : views) {
+        orbit.projection = expected.projection;
+        view.camera = editor::stage_camera_for(scene::Camera{}, orbit);
+        MEASURE_CHECK(scene::orthographic(view.camera) ==
+                      editor::stage_orthographic(expected.projection));
+
+        const auto face = pixel_of(view, expected.face);
+        const auto hit = panel.surface_at(view, face.x, face.y);
+        MEASURE_CHECK(hit.has_value() && hit->node == box_node);
+        MEASURE_CHECK(near(hit->position, expected.face, 0.01F));
+        MEASURE_CHECK(near(hit->normal, expected.normal, 0.01F));
+
+        // A pixel just inside the face near its corner: the vertex.
+        const scene::Vec3 centre = expected.normal;
+        const auto inside = pixel_of(
+            view, expected.corner + (centre - expected.corner) * 0.04F);
+        const auto point =
+            panel.measure_point_at(view, inside.x, inside.y, 12.0F);
+        MEASURE_CHECK(point.has_value());
+        MEASURE_CHECK(point->snap == editor::MeasureSnap::Vertex);
+        MEASURE_CHECK(point->element == box_node);
+        // In Top the bottom corner beneath it lands on the same pixel; the
+        // one on the face under the pointer is the one taken.
+        MEASURE_CHECK(near(point->position, expected.corner));
+    }
+}
+
 struct Case final {
     const char* name;
     void (*run)();
@@ -547,6 +608,8 @@ int main() {
              the_bounds_overlay_outlines_every_element_only_when_on},
         Case{"a narrow Stage keeps its display toggles in a SHOW menu",
              a_narrow_stage_keeps_its_display_toggles_in_a_show_menu},
+        Case{"every Stage view picks and snaps through its own camera",
+             every_stage_view_picks_and_snaps_through_its_own_camera},
     };
     int failures = 0;
     for (const Case& test : cases) {

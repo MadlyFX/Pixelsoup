@@ -1737,8 +1737,51 @@ struct EditorShell::Impl final {
   std::optional<InspectorColorSampleRequest> color_sample_request;
   ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
                               ViewportRole::Program};
-  ViewportPanel stage_panel{gui::ui_id("editor.viewport.stage"),
-                            ViewportRole::Stage};
+  // The Stage's views. The first fills the Stage alone; in four views it is
+  // the bottom-right one, beside Top, Front and Side. Each keeps its own
+  // camera, panel (its own picking, gizmo and measurement) and render
+  // target. The one toolbar sets the tools for all of them.
+  struct StageViewport final {
+    StageViewport(const char *id, StageProjection projection) noexcept
+        : panel{gui::ui_id(id), ViewportRole::Stage} {
+      orbit.projection = projection;
+    }
+    StageOrbit orbit{};
+    ViewportPanel panel;
+    // Every view past the first renders through its own executor and
+    // display, made the first time four views are shown.
+    std::optional<render::CompositorSceneExecutor> renderer;
+    std::optional<render::OutputTransform> display;
+    const rhi::Texture *texture{};
+    // The view follows its pane's actual content aspect, one frame behind a
+    // resize, so it fills its pane rather than letterboxing.
+    core::u32 surface_width{};
+    core::u32 surface_height{};
+    StageAssetStatus assets{true, "LOADING STAGE ASSETS...",
+                            "Preparing the first Stage image."};
+    ViewportFrame frame{};
+  };
+  std::array<StageViewport, 4U> stage_views{
+      {{"editor.viewport.stage", StageProjection::Perspective},
+       {"editor.viewport.stage.top", StageProjection::Top},
+       {"editor.viewport.stage.front", StageProjection::Front},
+       {"editor.viewport.stage.side", StageProjection::Side}}};
+  // The operator asked for four views. They are drawn once their renders
+  // exist, and the first view stands alone while masks are authored or a
+  // colour is being sampled.
+  bool stage_four{};
+  bool stage_four_failed{};
+  // The other three views have been set up to look where the first did.
+  bool stage_four_shown{};
+  bool stage_single_only{};
+  // The view the Stage code is acting for right now: each in turn while the
+  // views are drawn, then the one under the pointer or holding a gesture.
+  std::size_t stage_current{};
+  std::size_t navigation_view{};
+  std::size_t stage_bookmark_view{};
+  [[nodiscard]] StageViewport &stage() noexcept {
+    return stage_views[stage_current];
+  }
   InspectorPanel inspector_panel{gui::ui_id("editor.inspector")};
   TimelinePanel timeline_panel{gui::ui_id("editor.timeline")};
   CuesPanel cues_panel{gui::ui_id("editor.cues")};
@@ -1810,11 +1853,11 @@ struct EditorShell::Impl final {
   double hardware_warning_until{};
   double compositor_warning_until{};
 
-  // The Stage camera is editor-local and never enters the document. It is
-  // navigated as in the Unreal Editor (see stage_navigation_for): a button
-  // joins a camera gesture only when it was pressed on the Stage, and the
-  // gesture then follows whichever of those buttons are still held.
-  StageOrbit stage_view{};
+  // The Stage cameras (StageViewport::orbit) are editor-local and never enter
+  // the document. They are navigated as in the Unreal Editor (see
+  // stage_navigation_for): a button joins a camera gesture only when it was
+  // pressed on a Stage view, and the gesture then follows whichever of those
+  // buttons are still held, in that view.
   // Ctrl+1..9 camera bookmarks for the free view, and the note that
   // confirms one was kept or recalled.
   std::array<std::optional<StageOrbit>, 9U> stage_bookmarks{};
@@ -1828,12 +1871,9 @@ struct EditorShell::Impl final {
   float fly_speed{stage_default_fly_speed};
   double fly_speed_shown_until{};
   double navigation_time{};
+  // This frame's share of a held fly, measured once for all the views.
+  float navigation_seconds{};
 
-  // The Stage renderer follows the dock's actual content aspect (one frame
-  // behind a resize), so the authoring view fills its pane instead of looking
-  // like a letterboxed program feed. Program keeps the authored canvas.
-  core::u32 stage_surface_width{};
-  core::u32 stage_surface_height{};
 
   // A viewport drag captures every selected element's starting local position.
   // The panel reports one displayed-world delta; each node maps that through
@@ -1904,7 +1944,9 @@ struct EditorShell::Impl final {
         compositor_panel.show_minimap(decoded.value().compositor_minimap);
       }
       if (decoded && docks.restore(decoded.value().docks)) {
-        stage_panel.set_resolution(decoded.value().stage_resolution);
+        for (StageViewport &view : stage_views) {
+          view.panel.set_resolution(decoded.value().stage_resolution);
+        }
         program_panel.set_resolution(decoded.value().program_resolution);
         saved_workspace_layout.assign(workspace_layout.begin(),
                                       workspace_layout.end());
@@ -2543,7 +2585,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.pending_scene_delete.reset();
     impl.program_projection_cache.reset();
     impl.program_panel.reset_project_state();
-    impl.stage_panel.reset_project_state();
+    for (Impl::StageViewport &view : impl.stage_views) {
+      view.panel.reset_project_state();
+      view.assets = impl.stage_assets;
+    }
     impl.group_nodes.clear();
     impl.group_start.clear();
     impl.manipulating = false;
@@ -2668,7 +2713,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const scene::Scene &authored_stage =
       switcher.stage_scene != nullptr ? *switcher.stage_scene : scene;
   const scene::Camera stage_camera =
-      stage_camera_for(authored_stage.camera, impl.stage_view);
+      stage_camera_for(authored_stage.camera, impl.stage_views[0U].orbit);
   const auto request_clip_clipboard = [&](ClipClipboardAction action) {
     ClipClipboardRequest request{};
     request.action = action;
@@ -2796,11 +2841,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   scene::Scene stage_scene = authored_stage;
   bypass_sampled_chroma_key(stage_scene, impl.color_sample_request);
+  // A Stage view's camera and canvas: its own orbit over the authored camera,
+  // at its pane's size. The first view's set the scene up; the others swap
+  // in while they are rendered and drawn.
+  const auto stage_view_camera = [&](const Impl::StageViewport &view) {
+    return stage_camera_for(authored_stage.camera, view.orbit);
+  };
+  const auto stage_view_canvas = [&](const Impl::StageViewport &view) {
+    return view.surface_width > 0U && view.surface_height > 0U
+               ? scene::Canvas{view.surface_width, view.surface_height}
+               : authored_stage.canvas;
+  };
   stage_scene.camera = stage_camera;
-  if (impl.stage_surface_width > 0U && impl.stage_surface_height > 0U) {
-    stage_scene.canvas =
-        scene::Canvas{impl.stage_surface_width, impl.stage_surface_height};
-  }
+  stage_scene.canvas = stage_view_canvas(impl.stage_views[0U]);
   // Keep the authored environment and lighting. Grid and guides are UI
   // overlays; making them readable must not change the scene's illumination.
 
@@ -2830,13 +2883,68 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_panel.resolution());
   program_extent.preview_width = program_preview.width;
   program_extent.preview_height = program_preview.height;
-  const PreviewExtent stage_preview = preview_extent(
-      stage_scene.canvas.width, stage_scene.canvas.height,
-      impl.stage_panel.resolution());
+  // The other three views render once four are asked for: their executors
+  // are made at the first frame that wants them, and kept.
+  if (impl.stage_four && !impl.stage_four_failed &&
+      !impl.stage_views[1U].renderer.has_value()) {
+    const rhi::TextureFormat format =
+        device.capabilities().backend == rhi::BackendKind::D3d12
+            ? rhi::TextureFormat::Rgba16Float
+            : rhi::TextureFormat::Rgba8Unorm;
+    for (std::size_t index = 1U; index < impl.stage_views.size(); ++index) {
+      Impl::StageViewport &view = impl.stage_views[index];
+      auto renderer = render::CompositorSceneExecutor::create(
+          device, 64U, 64U, render::RendererLimits{},
+          render::MediaCacheConfig{}, format);
+      auto display = render::OutputTransform::create(device, 64U, 64U);
+      if (!renderer || !display) {
+        impl.stage_four_failed = true;
+        break;
+      }
+      view.renderer.emplace(std::move(renderer).value());
+      view.display.emplace(std::move(display).value());
+    }
+    if (impl.stage_four_failed) {
+      for (std::size_t index = 1U; index < impl.stage_views.size(); ++index) {
+        impl.stage_views[index].renderer.reset();
+        impl.stage_views[index].display.reset();
+      }
+      impl.stage_four = false;
+      impl.stage_bookmark_note = "Four views are unavailable on this GPU";
+      impl.stage_bookmark_note_until = impl.window.time_seconds() + 3.0;
+      impl.stage_bookmark_view = 0U;
+    }
+  }
+  const std::size_t stage_view_count =
+      impl.stage_four && !impl.stage_single_only &&
+              impl.stage_views[1U].renderer.has_value()
+          ? impl.stage_views.size()
+          : 1U;
+  const auto stage_renderer_of =
+      [&](std::size_t index) -> render::CompositorSceneExecutor & {
+    return index == 0U ? impl.stage_renderer
+                       : *impl.stage_views[index].renderer;
+  };
+  const auto stage_display_of =
+      [&](std::size_t index) -> render::OutputTransform & {
+    return index == 0U ? impl.stage_display : *impl.stage_views[index].display;
+  };
+  std::array<PreviewExtent, 4U> stage_previews{};
+  bool stage_resized = false;
+  for (std::size_t index = 0U; index < stage_view_count; ++index) {
+    const scene::Canvas canvas = stage_view_canvas(impl.stage_views[index]);
+    stage_previews[index] =
+        preview_extent(canvas.width, canvas.height,
+                       impl.stage_views[index].panel.resolution());
+    stage_resized = stage_resized ||
+                    stage_renderer_of(index).width() !=
+                        stage_previews[index].width ||
+                    stage_renderer_of(index).height() !=
+                        stage_previews[index].height;
+  }
   if (impl.program_preview_width != program_preview.width ||
       impl.program_preview_height != program_preview.height ||
-      impl.stage_renderer.width() != stage_preview.width ||
-      impl.stage_renderer.height() != stage_preview.height) {
+      stage_resized) {
     // An explicit preview resize replaces textures and descriptors referenced
     // by both scene and UI submissions. Drain once at this boundary only.
     device.wait_idle();
@@ -2860,13 +2968,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                 program_extent.preview_height) &&
       impl.program_display.resize(device, program_extent.preview_width,
                                   program_extent.preview_height);
-  const bool stage_targets_ready =
-      impl.stage_renderer.resize(device, stage_preview.width,
-                                 stage_preview.height) &&
-      impl.stage_display.resize(device, stage_preview.width,
-                                stage_preview.height);
+  std::array<bool, 4U> stage_targets_ready{};
+  for (std::size_t index = 0U; index < stage_view_count; ++index) {
+    stage_targets_ready[index] =
+        stage_renderer_of(index).resize(device, stage_previews[index].width,
+                                        stage_previews[index].height) &&
+        stage_display_of(index).resize(device, stage_previews[index].width,
+                                       stage_previews[index].height);
+    impl.stage_views[index].texture = &stage_display_of(index).target();
+  }
   const rhi::Texture *program_texture = impl.visible_program ? &*impl.visible_program : &impl.program_display.target();
-  const rhi::Texture *stage_texture = &impl.stage_display.target();
   bool program_preview_ok = false;
   bool program_preview_held = false;
   bool program_mapping_unavailable = false;
@@ -2908,6 +3019,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_renderer.observe_completed_timing(completed);
       impl.program_to_renderer.observe_completed_timing(completed);
       impl.stage_renderer.observe_completed_timing(completed);
+      for (Impl::StageViewport &view : impl.stage_views) {
+        if (view.renderer.has_value()) {
+          view.renderer->observe_completed_timing(completed);
+        }
+      }
     }
     pending = {};
   }
@@ -3052,64 +3168,72 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
     if (!program_preview_ok || program_preview_held) next_asset_gate = impl.asset_gate;
 
-    // The Stage camera is a render override, not the geometry policy camera.
-    // Keep the authored camera/canvas for LOD and shadow selection while the
-    // matrices below drive the viewport. Swap the small camera carriers only;
-    // copying the scene's thousands of drawable records again would undo the
-    // submission savings this boundary exists to provide.
-    render::SceneRenderView stage_view{};
-    stage_view.matrices = scene::view_for_slice(
-        stage_scene.camera, stage_scene.canvas, scene::whole(stage_scene.canvas));
-    stage_view.eye = stage_scene.camera.eye;
-    stage_view.forward = scene::normalize(
-        stage_scene.camera.target - stage_scene.camera.eye);
-    // A projection change is a cut, not camera motion: each one keeps its
-    // own temporal history.
-    stage_view.history_identity =
-        0x5354'4147'4556'4945ULL ^
-        static_cast<core::u64>(impl.stage_view.projection);
-    stage_view.clip_planes = render::SceneClipPlanes{
-        stage_camera.near_plane, stage_camera.far_plane};
-    auto geometry_camera = authored_stage.camera;
-    auto geometry_canvas = authored_stage.canvas;
-    std::swap(stage_scene.camera, geometry_camera);
-    std::swap(stage_scene.canvas, geometry_canvas);
-    const rhi::Texture *const rendered_stage =
-        stage_targets_ready
-            ? record_editor_scene(impl.stage_renderer, commands, stage_scene,
-                                  compositor_graph, &impl.frame_media_cache,
-                                  &stage_view)
-            : nullptr;
-    std::swap(stage_scene.camera, geometry_camera);
-    std::swap(stage_scene.canvas, geometry_canvas);
-    impl.stage_display.adopt_color(stage_scene.renderer_settings.color, scene::asset_generation_key(stage_scene));
-    const bool stage_ok =
-        rendered_stage != nullptr && impl.stage_display.render(
-            commands, *rendered_stage,
-            scene::CanvasRect{0U, 0U, stage_preview.width,
-                              stage_preview.height},
-            impl.stage_renderer.scene_linear_output());
-    auto stage_assets = stage_asset_status(
-        impl.stage_renderer.renderer_passes().geometry,
-        impl.stage_renderer.media_cache_stats().pending_requests,
-        rendered_stage != nullptr ? impl.stage_display.color_state()
-                                  : render::DisplayLutState::Ready);
-    if (!stage_targets_ready) {
-      stage_assets = {false, "STAGE TARGETS UNAVAILABLE",
-                      "The Stage render target could not be created."};
-    } else if (!impl.stage_renderer.renderer_readiness().satisfied) {
-      stage_assets = {false, "STAGE RENDER UNAVAILABLE",
-                      std::string{impl.stage_renderer.renderer_readiness().headline()}};
-    } else if (!stage_ok && stage_assets.headline.empty()) {
-      stage_assets = {false, "STAGE RENDER FAILED",
-                      "Check Renderer diagnostics."};
+    // The Stage cameras are a render override, not the geometry policy
+    // camera. Keep the authored camera/canvas for LOD and shadow selection
+    // while the matrices below drive each view. Swap the small camera
+    // carriers only; copying the scene's thousands of drawable records again
+    // would undo the submission savings this boundary exists to provide.
+    std::array<StageAssetStatus, 4U> stage_assets{};
+    for (std::size_t index = 0U; index < stage_view_count; ++index) {
+      Impl::StageViewport &view = impl.stage_views[index];
+      render::CompositorSceneExecutor &renderer = stage_renderer_of(index);
+      render::OutputTransform &display = stage_display_of(index);
+      const scene::Camera view_camera = stage_view_camera(view);
+      const scene::Canvas view_canvas = stage_view_canvas(view);
+      render::SceneRenderView stage_view{};
+      stage_view.matrices = scene::view_for_slice(view_camera, view_canvas,
+                                                  scene::whole(view_canvas));
+      stage_view.eye = view_camera.eye;
+      stage_view.forward =
+          scene::normalize(view_camera.target - view_camera.eye);
+      // A projection change is a cut, not camera motion: each one keeps its
+      // own temporal history.
+      stage_view.history_identity =
+          0x5354'4147'4556'4945ULL ^
+          static_cast<core::u64>(view.orbit.projection);
+      stage_view.clip_planes = render::SceneClipPlanes{
+          view_camera.near_plane, view_camera.far_plane};
+      auto geometry_camera = authored_stage.camera;
+      auto geometry_canvas = authored_stage.canvas;
+      std::swap(stage_scene.camera, geometry_camera);
+      std::swap(stage_scene.canvas, geometry_canvas);
+      const rhi::Texture *const rendered_stage =
+          stage_targets_ready[index]
+              ? record_editor_scene(renderer, commands, stage_scene,
+                                    compositor_graph, &impl.frame_media_cache,
+                                    &stage_view)
+              : nullptr;
+      std::swap(stage_scene.camera, geometry_camera);
+      std::swap(stage_scene.canvas, geometry_canvas);
+      display.adopt_color(stage_scene.renderer_settings.color,
+                          scene::asset_generation_key(stage_scene));
+      const bool stage_ok =
+          rendered_stage != nullptr &&
+          display.render(commands, *rendered_stage,
+                         scene::CanvasRect{0U, 0U, stage_previews[index].width,
+                                           stage_previews[index].height},
+                         renderer.scene_linear_output());
+      StageAssetStatus &status = stage_assets[index];
+      status = stage_asset_status(
+          renderer.renderer_passes().geometry,
+          renderer.media_cache_stats().pending_requests,
+          rendered_stage != nullptr ? display.color_state()
+                                    : render::DisplayLutState::Ready);
+      if (!stage_targets_ready[index]) {
+        status = {false, "STAGE TARGETS UNAVAILABLE",
+                  "The Stage render target could not be created."};
+      } else if (!renderer.renderer_readiness().satisfied) {
+        status = {false, "STAGE RENDER UNAVAILABLE",
+                  std::string{renderer.renderer_readiness().headline()}};
+      } else if (!stage_ok && status.headline.empty()) {
+        status = {false, "STAGE RENDER FAILED", "Check Renderer diagnostics."};
+      }
+      if (!stage_ok) {
+        static_cast<void>(commands.clear(display.target(),
+                                         rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
+      }
+      view.texture = &display.target();
     }
-    if (!stage_ok) {
-      static_cast<void>(commands.clear(
-          impl.stage_display.target(),
-          rhi::Color{0.0F, 0.0F, 0.0F, 1.0F}));
-    }
-    stage_texture = &impl.stage_display.target();
     const auto record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - cpu_record_begin).count());
     const auto profile_digest = scene::renderer_settings_digest(program_render_scene->renderer_settings);
@@ -3119,8 +3243,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       program_preview_fault = "PROGRAM SUBMIT FAILED";
       impl.stage_assets = {false, "STAGE SUBMIT FAILED",
                            "The Stage image could not be submitted to the GPU."};
+      for (std::size_t index = 0U; index < stage_view_count; ++index) {
+        impl.stage_views[index].assets = impl.stage_assets;
+      }
     } else {
-      impl.stage_assets = std::move(stage_assets);
+      // What the Stage reports is the first view's, or the first view that
+      // has something to say.
+      impl.stage_assets = stage_assets[0U];
+      for (std::size_t index = 0U; index < stage_view_count; ++index) {
+        impl.stage_views[index].assets = std::move(stage_assets[index]);
+        if (impl.stage_assets.headline.empty()) {
+          impl.stage_assets = impl.stage_views[index].assets;
+        }
+      }
       impl.asset_gate = next_asset_gate;
       impl.assets.visible_commit = impl.assets.digest == impl.asset_gate.visible_digest() ? impl.asset_gate.visible_commit() : 0;
       *recording_slot = {std::move(submitted).value(), prepared.ready ? prepared.digest : 0U,
@@ -3951,6 +4086,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                          bool left_available) {
     const bool already = impl.navigate_left || impl.navigate_middle ||
                          impl.navigate_right;
+    // A gesture belongs to the view it began in; the others leave it be.
+    if (already && impl.navigation_view != impl.stage_current) {
+      return;
+    }
     const bool over =
         pointer_free && viewport.image.contains(ui.pointer_x(), ui.pointer_y());
     const bool left_press = left_available && viewport.pressed &&
@@ -3964,30 +4103,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.navigate_right = impl.navigate_right || ui.secondary_pointer_pressed();
       impl.navigate_middle = impl.navigate_middle || ui.middle_pointer_pressed();
       impl.navigate_left = impl.navigate_left || left_press;
+      if (!already) {
+        impl.navigation_view = impl.stage_current;
+      }
     }
     impl.navigate_left = impl.navigate_left && ui.pointer_down();
     impl.navigate_middle = impl.navigate_middle && ui.middle_pointer_down();
     impl.navigate_right = impl.navigate_right && ui.secondary_pointer_down();
 
     const double now = impl.window.time_seconds();
-    const float seconds =
-        std::clamp(static_cast<float>(now - impl.navigation_time), 0.0F, 0.1F);
-    impl.navigation_time = now;
+    const float seconds = impl.navigation_seconds;
     const StageNavigation gesture = stage_navigation_for(StageNavigationButtons{
         impl.navigate_left, impl.navigate_middle, impl.navigate_right,
         ui.alt_held(), ui.shift_held()});
     if (gesture == StageNavigation::None) {
       impl.navigation_moved = false;
       if (over && ui.wheel() != 0.0F) {
-        impl.stage_view = stage_wheel_dolly(impl.stage_view, ui.wheel());
+        impl.stage().orbit = stage_wheel_dolly(impl.stage().orbit, ui.wheel());
       }
       // F frames the selection, as everywhere in Unreal.
       const std::string_view typed = ui.shortcut_text();
       if (over && !impl.scene_selection.empty() &&
           typed.find_first_of("fF") != std::string_view::npos) {
-        if (const auto bounds = impl.stage_panel.world_bounds(
+        if (const auto bounds = impl.stage().panel.world_bounds(
                 stage_interaction_scene, impl.scene_selection.members())) {
-          impl.stage_view = stage_focus(impl.stage_view, *bounds);
+          impl.stage().orbit = stage_focus(impl.stage().orbit, *bounds);
         }
       }
       // Alt+P, J, H and K choose the projection, as the view's menu does.
@@ -3999,21 +4139,22 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
              {gui::Key::ViewSide, StageProjection::Side}}};
         for (const auto &[key, projection] : views) {
           if (ui.key_pressed(key)) {
-            impl.stage_view.projection = projection;
+            impl.stage().orbit.projection = projection;
           }
         }
       }
       // Ctrl+1..9 keeps this view in a slot and the digit returns to it, as
       // Unreal's camera bookmarks. Editor-local: the show's cameras are
       // untouched.
-      if (over && !impl.stage_panel.transforming()) {
+      if (over && !impl.stage().panel.transforming()) {
         for (std::size_t slot = 0U; slot < impl.stage_bookmarks.size();
              ++slot) {
           if (ui.key_pressed(static_cast<gui::Key>(
                   static_cast<core::u8>(gui::Key::SaveView1) + slot))) {
-            impl.stage_bookmarks[slot] = impl.stage_view;
+            impl.stage_bookmarks[slot] = impl.stage().orbit;
             impl.stage_bookmark_note = "View " + std::to_string(slot + 1U) +
                                        " saved";
+            impl.stage_bookmark_view = impl.stage_current;
             impl.stage_bookmark_note_until = now + 1.5;
           }
         }
@@ -4023,7 +4164,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           }
           const auto slot = static_cast<std::size_t>(key - '1');
           if (impl.stage_bookmarks[slot].has_value()) {
-            impl.stage_view = *impl.stage_bookmarks[slot];
+            impl.stage().orbit = *impl.stage_bookmarks[slot];
             impl.stage_bookmark_note =
                 "View " + std::string(1U, key);
           } else {
@@ -4032,6 +4173,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                        " keeps one";
           }
           impl.stage_bookmark_note_until = now + 1.5;
+          impl.stage_bookmark_view = impl.stage_current;
         }
       }
     } else {
@@ -4041,7 +4183,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       step.dy = ui.pointer_motion_y();
       step.seconds = seconds;
       step.units_per_pixel =
-          stage_units_per_pixel(impl.stage_view, viewport.image.height);
+          stage_units_per_pixel(impl.stage().orbit, viewport.image.height);
       if (gesture == StageNavigation::Look) {
         const auto axis = [&](gui::MoveKey positive, gui::MoveKey negative) {
           return (ui.move_key_down(positive) ? 1.0F : 0.0F) -
@@ -4058,10 +4200,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       step.fly_speed = impl.fly_speed;
       impl.navigation_moved = impl.navigation_moved || step.dx != 0.0F ||
                               step.dy != 0.0F || step.move != scene::Vec3{};
-      impl.stage_view = navigate_stage(impl.stage_view, step);
+      impl.stage().orbit = navigate_stage(impl.stage().orbit, step);
     }
 
-    if (now < impl.fly_speed_shown_until) {
+    if (now < impl.fly_speed_shown_until &&
+        impl.navigation_view == impl.stage_current) {
       char text[48]{};
       std::snprintf(text, sizeof(text), "CAMERA SPEED %.2f", impl.fly_speed);
       const gui::Rect badge{viewport.image.x + 8.0F,
@@ -4422,189 +4565,321 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const bool compositor_locked = switcher.rehearsal_locked;
   const auto draw_panel = [&](gui::PanelId panel, const gui::Rect &bounds) {
     if (panel == panel_stage) {
-      // Rendered at the panel's physical size, so a dense display gets a
-      // sharp Stage rather than a magnified one.
-      const float pixels = impl.window.ui_scale();
-      impl.stage_surface_width =
-          static_cast<core::u32>(std::max(bounds.width * pixels, 1.0F));
-      impl.stage_surface_height = static_cast<core::u32>(
-          std::max((bounds.height - 29.0F) * pixels, 1.0F));
-
-      // Floating dock frames are painted after Stage. When one is under
-      // the pointer, keep Stage's picker and camera gestures from taking
-      // the same press before the floating panel gets to handle it.
-      std::optional<gui::Rect> floating_occluder;
-      for (const gui::DockLayout::Floating &floating : impl.docks.floating()) {
-        if (floating.node != impl.docks.leaf_of(panel_stage) &&
-            floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
-          floating_occluder = floating.frame;
-          break;
+      // Turns four views on or off. The first time, the other three look at
+      // what the first does, from as far away.
+      const auto set_four_views = [&](bool four) {
+        impl.stage_four = four;
+        impl.stage_four_failed = false;
+        if (!four) {
+          return;
         }
-      }
+        for (std::size_t index = 1U; index < impl.stage_views.size();
+             ++index) {
+          Impl::StageViewport &other = impl.stage_views[index];
+          if (!impl.stage_four_shown) {
+            other.orbit.target = impl.stage_views[0U].orbit.target;
+            other.orbit.distance = impl.stage_views[0U].orbit.distance;
+            other.panel.share_surfaces_with(impl.stage_views[0U].panel);
+          }
+          other.panel.copy_tools_from(impl.stage_views[0U].panel);
+        }
+        impl.stage_four_shown = true;
+      };
+      // The scenes the panels and gestures read act for one view at a time:
+      // its own camera, over its own canvas.
+      const auto act_for = [&](std::size_t index) {
+        impl.stage_current = index;
+        const Impl::StageViewport &view = impl.stage_views[index];
+        stage_scene.camera = stage_view_camera(view);
+        stage_scene.canvas = stage_view_canvas(view);
+        stage_interaction_scene.camera = stage_scene.camera;
+        stage_interaction_scene.canvas = stage_scene.canvas;
+      };
+      // One Stage view drawn into `area`, with the toolbar across its top
+      // when it stands alone.
+      const auto draw_stage_view = [&](const gui::Rect &area, bool toolbar) {
+        Impl::StageViewport &view = impl.stage();
+        // Rendered at the pane's physical size, so a dense display gets a
+        // sharp Stage rather than a magnified one.
+        const float pixels = impl.window.ui_scale();
+        view.surface_width =
+            static_cast<core::u32>(std::max(area.width * pixels, 1.0F));
+        view.surface_height = static_cast<core::u32>(std::max(
+            (area.height - (toolbar ? 29.0F : 0.0F)) * pixels, 1.0F));
 
-      if (mask_stage_active && !color_sample_active) {
-        const MaskViewportFrame mask_frame = impl.stage_panel.draw_masks(
-            ui, bounds, *stage_texture, stage_scene,
-            mask_viewport_input(stage_scene, nullptr), &scene.camera,
-            static_cast<float>(timeline.rate_numerator) /
-                static_cast<float>(
-                    std::max(timeline.rate_denominator, 1U)));
-        stage_viewport_frame.image = mask_frame.image;
-        apply_mask_viewport_frame(mask_frame);
-      } else {
-        const gui::Rect *const interaction_block =
-            color_sample_active
-                ? &bounds
-                : (floating_occluder.has_value()
-                       ? &floating_occluder.value()
-                       : nullptr);
-        impl.stage_panel.set_stage_projection(impl.stage_view.projection);
-        stage_viewport_frame = impl.stage_panel.draw(
-            ui, bounds, *stage_texture, stage_interaction_scene,
-            impl.scene_selection.members(), impl.anchor(), &scene.camera,
-            interaction_block,
-            static_cast<float>(timeline.rate_numerator) /
-                static_cast<float>(
-                    std::max(timeline.rate_denominator, 1U)),
-            &feed_map,
-            impl.stage_surface_selection.value_or(doc::NodeId{}), nullptr,
-            plate_overlay, elements);
-      }
-      stage_viewport_drawn = true;
-      if (stage_viewport_frame.projection_choice.has_value()) {
-        impl.stage_view.projection = *stage_viewport_frame.projection_choice;
-      }
-      if (!impl.stage_bookmark_note.empty() &&
-          impl.window.time_seconds() < impl.stage_bookmark_note_until) {
-        const gui::Rect &image = stage_viewport_frame.image;
-        const float width = ui.font_width(impl.stage_bookmark_note) + 20.0F;
-        const gui::Rect note{image.x + (image.width - width) * 0.5F,
-                             image.y + 10.0F, width, 24.0F};
-        ui.panel(note, with_alpha(ui.theme().background, 0.86F));
-        ui.label(gui::Rect{note.x + 10.0F, note.y, width - 10.0F, note.height},
-                 impl.stage_bookmark_note, ui.theme().text);
-      }
-      // A passive notice leaves picking, framing and navigation available.
-      // Retain the last submitted state when command acquisition is busy.
-      if (!impl.stage_assets.headline.empty()) {
-        const auto& image = stage_viewport_frame.image;
-        const gui::Rect banner{image.x + 8.0F, image.y + 8.0F,
-                               std::max(std::min(image.width - 16.0F, 520.0F), 0.0F),
-                               std::min(54.0F, std::max(image.height - 16.0F, 0.0F))};
-        ui.push_clip(image);
-        ui.panel(banner, ui.theme().header);
-        const auto color = impl.stage_assets.loading ? ui.theme().accent
-                                                    : ui.theme().warning;
-        ui.panel(gui::Rect{banner.x, banner.y, 3.0F, banner.height}, color);
-        ui.label(gui::Rect{banner.x + 12.0F, banner.y + 4.0F,
-                           std::max(banner.width - 24.0F, 0.0F), 21.0F},
-                 impl.stage_assets.headline, color);
-        ui.label(gui::Rect{banner.x + 12.0F, banner.y + 27.0F,
-                           std::max(banner.width - 24.0F, 0.0F), 20.0F},
-                 impl.stage_assets.detail, ui.theme().text);
-        ui.pop_clip();
-      }
-      if (color_sample_active) {
-        const bool pointer_available =
-            !floating_occluder.has_value() ||
-            !floating_occluder->contains(ui.pointer_x(), ui.pointer_y());
-        run_color_sampler(gui::ui_id("editor.eyedropper.stage"),
-                          stage_viewport_frame.image,
-                          *stage_texture, pointer_available);
-      }
-      if (!color_sample_active && !switcher.rehearsal_locked) {
-        if (stage_viewport_frame.surface_edit.has_value()) {
-          const output::ProjectionSurface &surface =
-              *stage_viewport_frame.surface_edit;
-          impl.stage_surface_selection = surface.node;
-          impl.feed_mapping_panel.select_surface(surface.node);
-          impl.feed_mapping_panel.preview_surface_geometry(surface.node,
-                                                           surface.geometry);
-          FeedSurfaceTransform changed = FeedSurfaceTransform::All;
-          switch (stage_viewport_frame.gizmo_axis) {
-          case GizmoAxis::Screen:
-            changed = FeedSurfaceTransform::PositionX |
-                      FeedSurfaceTransform::PositionY |
-                      FeedSurfaceTransform::PositionZ;
-            break;
-          case GizmoAxis::X:
-            changed = FeedSurfaceTransform::PositionX;
-            break;
-          case GizmoAxis::Y:
-            changed = FeedSurfaceTransform::PositionY;
-            break;
-          case GizmoAxis::Z:
-            changed = FeedSurfaceTransform::PositionZ;
-            break;
-          case GizmoAxis::Yaw:
-            changed = FeedSurfaceTransform::Yaw;
-            break;
-          case GizmoAxis::View:
-          case GizmoAxis::None:
+        // Floating dock frames are painted after Stage. When one is under
+        // the pointer, keep Stage's picker and camera gestures from taking
+        // the same press before the floating panel gets to handle it.
+        std::optional<gui::Rect> floating_occluder;
+        for (const gui::DockLayout::Floating &floating : impl.docks.floating()) {
+          if (floating.node != impl.docks.leaf_of(panel_stage) &&
+              floating.frame.contains(ui.pointer_x(), ui.pointer_y())) {
+            floating_occluder = floating.frame;
             break;
           }
-          route_surface_edit(FeedSurfaceEditRequest{
-              surface.node,
-              surface.name,
-              surface.geometry,
-              impl.begin_gesture(),
-              surface.shape,
-              surface.horizontal_arc_turns,
-              surface.mesh_columns,
-              surface.mesh_source,
-              surface.mesh_scale,
-              changed});
         }
-        if (!mask_stage_active) {
-          handle_viewport(stage_viewport_frame, stage_scene,
-                          stage_interaction_scene);
-          const bool over_stage =
-              !floating_occluder.has_value() &&
-              stage_viewport_frame.image.contains(ui.pointer_x(),
-                                                  ui.pointer_y());
-          if (over_stage && !ui.typing() &&
-              !impl.stage_panel.transforming() &&
-              !impl.scene_selection.empty()) {
-            if (ui.key_pressed(gui::Key::ClearLocation)) {
-              clear_transform(TransformTool::Move, stage_scene);
-            } else if (ui.key_pressed(gui::Key::ClearRotation)) {
-              clear_transform(TransformTool::Rotate, stage_scene);
-            } else if (ui.key_pressed(gui::Key::ClearScale)) {
-              clear_transform(TransformTool::Scale, stage_scene);
+
+        if (mask_stage_active && !color_sample_active) {
+          const MaskViewportFrame mask_frame = view.panel.draw_masks(
+              ui, area, *view.texture, stage_scene,
+              mask_viewport_input(stage_scene, nullptr), &scene.camera,
+              static_cast<float>(timeline.rate_numerator) /
+                  static_cast<float>(
+                      std::max(timeline.rate_denominator, 1U)));
+          view.frame = ViewportFrame{};
+          view.frame.image = mask_frame.image;
+          apply_mask_viewport_frame(mask_frame);
+        } else {
+          const gui::Rect *const interaction_block =
+              color_sample_active
+                  ? &area
+                  : (floating_occluder.has_value()
+                         ? &floating_occluder.value()
+                         : nullptr);
+          view.panel.set_stage_projection(view.orbit.projection);
+          view.panel.set_stage_four_views(impl.stage_four);
+          view.panel.set_toolbar_shown(toolbar);
+          view.frame = view.panel.draw(
+              ui, area, *view.texture, stage_interaction_scene,
+              impl.scene_selection.members(), impl.anchor(), &scene.camera,
+              interaction_block,
+              static_cast<float>(timeline.rate_numerator) /
+                  static_cast<float>(
+                      std::max(timeline.rate_denominator, 1U)),
+              &feed_map,
+              impl.stage_surface_selection.value_or(doc::NodeId{}), nullptr,
+              plate_overlay, elements);
+        }
+        stage_viewport_drawn = true;
+        if (view.frame.projection_choice.has_value()) {
+          view.orbit.projection = *view.frame.projection_choice;
+        }
+        if (view.frame.layout_choice.has_value()) {
+          set_four_views(*view.frame.layout_choice);
+        }
+        if (!impl.stage_bookmark_note.empty() &&
+            impl.stage_bookmark_view == impl.stage_current &&
+            impl.window.time_seconds() < impl.stage_bookmark_note_until) {
+          const gui::Rect &image = view.frame.image;
+          const float width = ui.font_width(impl.stage_bookmark_note) + 20.0F;
+          const gui::Rect note{image.x + (image.width - width) * 0.5F,
+                               image.y + 10.0F, width, 24.0F};
+          ui.panel(note, with_alpha(ui.theme().background, 0.86F));
+          ui.label(gui::Rect{note.x + 10.0F, note.y, width - 10.0F, note.height},
+                   impl.stage_bookmark_note, ui.theme().text);
+        }
+        // A passive notice leaves picking, framing and navigation available.
+        // Retain the last submitted state when command acquisition is busy.
+        if (!view.assets.headline.empty()) {
+          const auto& image = view.frame.image;
+          const gui::Rect banner{image.x + 8.0F, image.y + 8.0F,
+                                 std::max(std::min(image.width - 16.0F, 520.0F), 0.0F),
+                                 std::min(54.0F, std::max(image.height - 16.0F, 0.0F))};
+          ui.push_clip(image);
+          ui.panel(banner, ui.theme().header);
+          const auto color = view.assets.loading ? ui.theme().accent
+                                                      : ui.theme().warning;
+          ui.panel(gui::Rect{banner.x, banner.y, 3.0F, banner.height}, color);
+          ui.label(gui::Rect{banner.x + 12.0F, banner.y + 4.0F,
+                             std::max(banner.width - 24.0F, 0.0F), 21.0F},
+                   view.assets.headline, color);
+          ui.label(gui::Rect{banner.x + 12.0F, banner.y + 27.0F,
+                             std::max(banner.width - 24.0F, 0.0F), 20.0F},
+                   view.assets.detail, ui.theme().text);
+          ui.pop_clip();
+        }
+        if (color_sample_active) {
+          const bool pointer_available =
+              !floating_occluder.has_value() ||
+              !floating_occluder->contains(ui.pointer_x(), ui.pointer_y());
+          run_color_sampler(gui::ui_id("editor.eyedropper.stage"),
+                            view.frame.image,
+                            *view.texture, pointer_available);
+        }
+        if (!color_sample_active && !switcher.rehearsal_locked) {
+          if (view.frame.surface_edit.has_value()) {
+            const output::ProjectionSurface &surface =
+                *view.frame.surface_edit;
+            impl.stage_surface_selection = surface.node;
+            impl.feed_mapping_panel.select_surface(surface.node);
+            impl.feed_mapping_panel.preview_surface_geometry(surface.node,
+                                                             surface.geometry);
+            FeedSurfaceTransform changed = FeedSurfaceTransform::All;
+            switch (view.frame.gizmo_axis) {
+            case GizmoAxis::Screen:
+              changed = FeedSurfaceTransform::PositionX |
+                        FeedSurfaceTransform::PositionY |
+                        FeedSurfaceTransform::PositionZ;
+              break;
+            case GizmoAxis::X:
+              changed = FeedSurfaceTransform::PositionX;
+              break;
+            case GizmoAxis::Y:
+              changed = FeedSurfaceTransform::PositionY;
+              break;
+            case GizmoAxis::Z:
+              changed = FeedSurfaceTransform::PositionZ;
+              break;
+            case GizmoAxis::Yaw:
+              changed = FeedSurfaceTransform::Yaw;
+              break;
+            case GizmoAxis::View:
+            case GizmoAxis::None:
+              break;
+            }
+            route_surface_edit(FeedSurfaceEditRequest{
+                surface.node,
+                surface.name,
+                surface.geometry,
+                impl.begin_gesture(),
+                surface.shape,
+                surface.horizontal_arc_turns,
+                surface.mesh_columns,
+                surface.mesh_source,
+                surface.mesh_scale,
+                changed});
+          }
+          if (!mask_stage_active) {
+            handle_viewport(view.frame, stage_scene,
+                            stage_interaction_scene);
+            const bool over_stage =
+                !floating_occluder.has_value() &&
+                view.frame.image.contains(ui.pointer_x(),
+                                                    ui.pointer_y());
+            if (over_stage && !ui.typing() &&
+                !view.panel.transforming() &&
+                !impl.scene_selection.empty()) {
+              if (ui.key_pressed(gui::Key::ClearLocation)) {
+                clear_transform(TransformTool::Move, stage_scene);
+              } else if (ui.key_pressed(gui::Key::ClearRotation)) {
+                clear_transform(TransformTool::Rotate, stage_scene);
+              } else if (ui.key_pressed(gui::Key::ClearScale)) {
+                clear_transform(TransformTool::Scale, stage_scene);
+              }
             }
           }
+        } else if (!color_sample_active) {
+          const float notice_width =
+              std::min(std::max(area.width - 24.0F, 0.0F), 312.0F);
+          const gui::Rect notice{area.x + (area.width - notice_width) * 0.5F,
+                                 area.y + 38.0F, notice_width, 24.0F};
+          ui.panel(notice, ui.theme().background);
+          outline(ui, notice, ui.theme().warning);
+          ui.label(gui::Rect{notice.x + 8.0F, notice.y, notice.width - 16.0F,
+                             notice.height},
+                   "TRANSITION ACTIVE - REHEARSAL LOCKED", ui.theme().warning);
         }
-      } else if (!color_sample_active) {
-        const float notice_width =
-            std::min(std::max(bounds.width - 24.0F, 0.0F), 312.0F);
-        const gui::Rect notice{bounds.x + (bounds.width - notice_width) * 0.5F,
-                               bounds.y + 38.0F, notice_width, 24.0F};
-        ui.panel(notice, ui.theme().background);
-        outline(ui, notice, ui.theme().warning);
-        ui.label(gui::Rect{notice.x + 8.0F, notice.y, notice.width - 16.0F,
-                           notice.height},
-                 "TRANSITION ACTIVE - REHEARSAL LOCKED", ui.theme().warning);
-      }
-      // The camera is the operator's own view, so it navigates through a
-      // rehearsal lock and while masks are authored, though a mask tool keeps
-      // the left button.
-      if (color_sample_active || switcher.rehearsal_locked) {
-        // Nothing may author into the Stage now; a keyboard transform must
-        // not keep holding the keyboard waiting for a confirm.
-        impl.stage_panel.cancel_transform();
-      }
-      if (color_sample_active) {
-        impl.navigate_left = false;
-        impl.navigate_middle = false;
-        impl.navigate_right = false;
+        // The camera is the operator's own view, so it navigates through a
+        // rehearsal lock and while masks are authored, though a mask tool keeps
+        // the left button.
+        if (color_sample_active || switcher.rehearsal_locked) {
+          // Nothing may author into the Stage now; a keyboard transform must
+          // not keep holding the keyboard waiting for a confirm.
+          view.panel.cancel_transform();
+        }
+        if (color_sample_active) {
+          impl.navigate_left = false;
+          impl.navigate_middle = false;
+          impl.navigate_right = false;
+        } else {
+          // A keyboard transform owns the pointer, its right-click cancel and
+          // the wheel included.
+          navigate_stage_camera(view.frame,
+                                !floating_occluder.has_value() &&
+                                    !view.frame.keyboard_transform,
+                                !mask_stage_active);
+        }
+      };
+
+      // Measured once a frame, for whichever view a held fly belongs to.
+      const double now = impl.window.time_seconds();
+      impl.navigation_seconds = std::clamp(
+          static_cast<float>(now - impl.navigation_time), 0.0F, 0.1F);
+      impl.navigation_time = now;
+      const bool four = stage_view_count == impl.stage_views.size() &&
+                        !mask_stage_active && !color_sample_active;
+      impl.stage_single_only = mask_stage_active || color_sample_active;
+      if (!four) {
+        // A gesture under way in a view that is no longer shown carries on
+        // in the one that is.
+        impl.navigation_view = 0U;
+        act_for(0U);
+        draw_stage_view(bounds, true);
       } else {
-        // A keyboard transform owns the pointer, its right-click cancel and
-        // the wheel included.
-        navigate_stage_camera(stage_viewport_frame,
-                              !floating_occluder.has_value() &&
-                                  !stage_viewport_frame.keyboard_transform,
-                              !mask_stage_active);
+        // One toolbar over Top and Front (top row), Side and the first view
+        // (bottom row). The first view's panel draws it and owns its
+        // settings; each view takes them before it draws and hands back any
+        // it changed (a key, a click) after.
+        constexpr float toolbar_height = 29.0F;
+        constexpr float gap = 2.0F;
+        impl.stage_views[0U].panel.draw_toolbar(
+            ui, gui::Rect{bounds.x, bounds.y, bounds.width, toolbar_height},
+            static_cast<float>(timeline.rate_numerator) /
+                static_cast<float>(std::max(timeline.rate_denominator, 1U)));
+        const float top = bounds.y + toolbar_height;
+        const float half_width = std::max((bounds.width - gap) * 0.5F, 1.0F);
+        const float half_height =
+            std::max((bounds.height - toolbar_height - gap) * 0.5F, 1.0F);
+        const std::array<std::pair<std::size_t, gui::Rect>, 4U> quadrants{{
+            {1U, gui::Rect{bounds.x, top, half_width, half_height}},
+            {2U, gui::Rect{bounds.x + half_width + gap, top, half_width,
+                           half_height}},
+            {3U, gui::Rect{bounds.x, top + half_height + gap, half_width,
+                           half_height}},
+            {0U, gui::Rect{bounds.x + half_width + gap,
+                           top + half_height + gap, half_width,
+                           half_height}},
+        }};
+        ui.panel(gui::Rect{bounds.x, top, bounds.width,
+                           bounds.height - toolbar_height},
+                 ui.theme().divider);
+        for (const auto &[index, area] : quadrants) {
+          act_for(index);
+          ViewportPanel &panel_of_view = impl.stage_views[index].panel;
+          if (index != 0U) {
+            panel_of_view.copy_tools_from(impl.stage_views[0U].panel);
+          }
+          draw_stage_view(area, false);
+          if (index != 0U) {
+            impl.stage_views[0U].panel.copy_tools_from(panel_of_view);
+          }
+          if (!impl.stage_four) {
+            break; // One view chosen from this view's menu.
+          }
+        }
       }
+      // What follows the Stage this frame - a drop, its preview, a keyboard
+      // transform's hold on the keys - acts for the view with the gesture,
+      // else the one under the pointer.
+      std::size_t focus = impl.stage_current;
+      if (four) {
+        focus = 0U;
+        bool chosen = false;
+        if (impl.navigate_left || impl.navigate_middle ||
+            impl.navigate_right) {
+          focus = impl.navigation_view;
+          chosen = true;
+        }
+        for (std::size_t index = 0U; !chosen && index < impl.stage_views.size();
+             ++index) {
+          const Impl::StageViewport &view = impl.stage_views[index];
+          if (view.panel.transforming() || view.panel.dragging() ||
+              view.frame.held) {
+            focus = index;
+            chosen = true;
+          }
+        }
+        for (std::size_t index = 0U; !chosen && index < impl.stage_views.size();
+             ++index) {
+          if (impl.stage_views[index].frame.image.contains(ui.pointer_x(),
+                                                           ui.pointer_y())) {
+            focus = index;
+            chosen = true;
+          }
+        }
+      }
+      act_for(focus);
+      stage_viewport_frame = impl.stage().frame;
       return;
     }
     if (panel == panel_program) {
@@ -6483,7 +6758,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return placed;
     }
     const float step = static_cast<float>(canvas.width) * 0.06F;
-    const bool snap = impl.stage_panel.snapping() != ui.ctrl_held();
+    const bool snap = impl.stage().panel.snapping() != ui.ctrl_held();
     for (std::size_t index = 0U; index < ids.size(); ++index) {
       const assets::Asset *const asset = asset_registry.asset(ids[index]);
       if (asset == nullptr) {
@@ -6498,11 +6773,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       StagePlacementRequest request{};
       request.ray = *ray;
       request.hit =
-          impl.stage_panel.surface_at(stage_interaction_scene, x, dropped.y);
+          impl.stage().panel.surface_at(stage_interaction_scene, x, dropped.y);
       request.camera = stage_interaction_scene.camera;
       request.snap = snap;
-      request.snap_move = impl.stage_panel.snap_steps().move;
-      request.snap_turns = impl.stage_panel.snap_steps().rotate_turns;
+      request.snap_move = impl.stage().panel.snap_steps().move;
+      request.snap_turns = impl.stage().panel.snap_steps().rotate_turns;
       if (const auto *const media = std::get_if<assets::MediaAsset>(asset)) {
         request.media = true;
         float aspect = 16.0F / 9.0F;
@@ -6511,7 +6786,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    static_cast<float>(media->dimensions->height);
         }
         request.bounds = media_placement_bounds(aspect);
-      } else if (const auto bounds = impl.stage_panel.model_source_bounds(
+      } else if (const auto bounds = impl.stage().panel.model_source_bounds(
                      std::get<assets::ModelAsset>(*asset).source)) {
         request.bounds = *bounds;
       }
@@ -6612,7 +6887,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         caption = "In the air";
         break;
       }
-      impl.stage_panel.draw_placement_preview(ui, stage_viewport_frame.image,
+      impl.stage().panel.draw_placement_preview(ui, stage_viewport_frame.image,
                                               stage_interaction_scene,
                                               placements, caption);
     }
@@ -7224,7 +7499,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // A keyboard transform is one gesture from G to its confirm, though no
   // button is held through it.
   if (!ui.pointer_down() && !ui.typing() &&
-      !impl.stage_panel.transforming()) {
+      !impl.stage().panel.transforming()) {
     impl.manipulating = false;
   }
 
@@ -7311,7 +7586,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   if (!ui.pointer_down()) {
     auto encoded = encode_workspace_layout(WorkspaceLayoutState{
         impl.docks.snapshot(), impl.workspace_window_width,
-        impl.workspace_window_height, impl.stage_panel.resolution(),
+        impl.workspace_window_height,
+        impl.stage_views[0U].panel.resolution(),
         impl.program_panel.resolution(), impl.ui_zoom_percent,
         std::min(impl.compositor_panel.parameter_panel_width(),
                  max_compositor_parameter_width),
@@ -7332,7 +7608,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const bool navigating =
       impl.navigate_left || impl.navigate_middle || impl.navigate_right;
   ui.set_navigating(navigating ||
-                    (stage_viewport_drawn && impl.stage_panel.transforming()));
+                    (stage_viewport_drawn && impl.stage().panel.transforming()));
   impl.window.set_pointer_locked(navigating && impl.navigation_moved);
 
   // What is being dragged out of the Library rides above every panel.

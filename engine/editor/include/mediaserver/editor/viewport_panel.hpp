@@ -183,6 +183,8 @@ struct ViewportFrame final {
     bool pivot_editing{};
     // The Stage view's menu chose a projection this frame.
     std::optional<StageProjection> projection_choice;
+    // The Stage view's menu asked for four views (true) or one (false).
+    std::optional<bool> layout_choice;
 };
 
 // One canvas-space corner of a drawable's normalized source plane. Source
@@ -437,6 +439,23 @@ class ViewportPanel final {
     void set_stage_projection(StageProjection projection) noexcept {
         stage_projection_ = projection;
     }
+    // Whether the Stage is showing four views, so the menu offers the other
+    // layout.
+    void set_stage_four_views(bool four) noexcept { stage_four_views_ = four; }
+    // A Stage panel draws its toolbar across the top of `draw`'s bounds
+    // unless this is off: in four views one toolbar serves them all, drawn by
+    // `draw_toolbar`.
+    void set_toolbar_shown(bool shown) noexcept { toolbar_shown_ = shown; }
+    void draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
+                      float frames_per_second);
+    // Takes `other`'s tool, orientation, snapping, measuring and display
+    // toggles, so views that share one toolbar behave as one.
+    void copy_tools_from(const ViewportPanel& other) noexcept;
+    // Builds triangle hierarchies on `other`'s worker, so views of one scene
+    // build each model once.
+    void share_surfaces_with(const ViewportPanel& other) noexcept {
+        surface_cache_ = other.surface_cache_;
+    }
     // The gizmo's tool, its orientation, and increment snapping. G, R and S
     // choose the tool as they start a keyboard transform; the Stage toolbar
     // sets all three.
@@ -655,8 +674,10 @@ class ViewportPanel final {
     core::u64 projection_mesh_stamp_{};
     std::unordered_map<core::u64, CachedProjectionState>
         projection_mesh_cache_;
-    // Triangle hierarchies for `surface_at`, built on their own worker.
-    ModelSurfaceCache surface_cache_;
+    // Triangle hierarchies for `surface_at`, built on their own worker -
+    // shared by the Stage's views (see `share_surfaces_with`).
+    std::shared_ptr<ModelSurfaceCache> surface_cache_{
+        std::make_shared<ModelSurfaceCache>()};
     // Generated primitive meshes, so vertex snapping reaches a box's corners.
     std::map<scene::MeshKey, std::shared_ptr<const scene::MeshData>>
         primitive_meshes_;
@@ -674,6 +695,8 @@ class ViewportPanel final {
     bool surface_snapping_{};
     bool show_bounds_{};
     StageProjection stage_projection_{StageProjection::Perspective};
+    bool stage_four_views_{};
+    bool toolbar_shown_{true};
     bool drawing_masks_{};
     void draw_stage_view_menu(gui::UiContext& ctx, const gui::Rect& menu,
                               ViewportFrame& frame);
