@@ -17,6 +17,9 @@ inline constexpr float ruler_height = 22.0F;
 inline constexpr float strip_height = 20.0F;
 // The cache bar's thickness along the top of the marker strip.
 inline constexpr float playback_cache_bar_height = 3.0F;
+// The zoom/scroll bar along the panel's foot: the whole show in miniature,
+// with the part on screen as a thumb whose ends zoom and whose middle pans.
+inline constexpr float navigator_height = 16.0F;
 // Every row - layer, track, or property - is a full list row high, so a
 // toggle or a key diamond is as easy to hit as the name beside it.
 inline constexpr float row_height = list_metrics::row_height;
@@ -36,6 +39,9 @@ struct TimelineLayout final {
   gui::Rect graph;
   // The part of the graph that is the marker strip.
   gui::Rect strip_graph;
+  // The foot band, full width, and the part of it under the lanes.
+  gui::Rect navigator;
+  gui::Rect navigator_graph;
 };
 
 // `operator_list_width` is the width the operator last dragged the list to,
@@ -55,15 +61,21 @@ layout_timeline(const gui::Rect &bounds, float operator_list_width) noexcept {
                         ruler_height};
   out.strip = gui::Rect{bounds.x, out.ruler.y + out.ruler.height, bounds.width,
                         strip_height};
-  out.rows = gui::Rect{
-      bounds.x, out.strip.y + out.strip.height, bounds.width,
+  const float below_strip =
       std::max(bounds.height - toolbar_height - ruler_height - strip_height,
-               0.0F)};
+               0.0F);
+  const float navigator = std::min(navigator_height, below_strip);
+  out.rows = gui::Rect{bounds.x, out.strip.y + out.strip.height, bounds.width,
+                       below_strip - navigator};
+  out.navigator = gui::Rect{bounds.x, out.rows.y + out.rows.height,
+                            bounds.width, navigator};
   out.graph = gui::Rect{bounds.x + out.list_width, out.ruler.y,
                         std::max(bounds.width - out.list_width, 0.0F),
                         out.ruler.height + out.strip.height + out.rows.height};
   out.strip_graph =
       gui::Rect{out.graph.x, out.strip.y, out.graph.width, out.strip.height};
+  out.navigator_graph = gui::Rect{out.graph.x, out.navigator.y,
+                                  out.graph.width, out.navigator.height};
   return out;
 }
 

@@ -466,10 +466,31 @@ RowList build_rows(RowsState &state, const RowsInput &input,
       visible_order.push_back(row.node);
     }
   }
+  // A placed clip's row takes the height the operator gave clip rows - its
+  // own, or every clip row's - so a filmstrip and waveform can be read.
+  // Every other row is one list row high.
+  std::vector<doc::NodeId> placed_clips;
+  for (const ElementInfo &element : elements) {
+    if (element.kind == ElementKind::Media && element.timing.placed()) {
+      placed_clips.push_back(element.node);
+    }
+  }
+  std::sort(placed_clips.begin(), placed_clips.end());
   float top = 0.0F;
   for (Row &row : rows) {
     row.top = top;
     row.height = row_height;
+    if (row.kind == Row::Kind::Layer && !row.surface &&
+        row.element_kind == ElementKind::Media) {
+      if (std::binary_search(placed_clips.begin(), placed_clips.end(),
+                             row.node)) {
+        const auto own = state.clip_row_heights.find(row.node);
+        row.height = std::clamp(own != state.clip_row_heights.end()
+                                    ? own->second
+                                    : state.clip_row_height,
+                                row_height, clip_row_height_maximum);
+      }
+    }
     top += row.height;
   }
 

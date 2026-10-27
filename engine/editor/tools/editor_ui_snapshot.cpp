@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -29,7 +30,7 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|feed]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|feed]
 //   feed draws Feed Mapping for one 15360x2160 Mosaic window carrying four
 //   2880x1536 wall sections, two of them named, with the first selected;
 //   curves draws the editor with the Timeline switched to Curves mode;
@@ -138,6 +139,7 @@ struct Show final {
   auto content = element(31U, editor::ElementKind::Media, "Particle_Ribbons.mov");
   content.parent_group = doc::NodeId{30U};
   content.timing = scene::ClipTiming{20, 340, 0, 24, 30};
+  content.sequence_count = 360U;
   auto logo = element(32U, editor::ElementKind::Media, "Logo_Intro.png");
   logo.parent_group = doc::NodeId{30U};
   logo.timing = scene::ClipTiming{120, 260, 0, 0, 0};
@@ -475,7 +477,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|feed]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|feed]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -490,12 +492,15 @@ int main(int argc, char **argv) {
   const bool curves = view == "curves" || handles;
   const bool summaries = view == "summaries";
   const bool feed = view == "feed";
+  // Every clip row Large, by a click on the navigator's L, with a waveform
+  // under Particle_Ribbons.mov.
+  const bool tall = view == "timeline-tall";
   const bool graph_view = view.substr(0U, 10U) == "compositor";
   // The Library with a small sample project: `library` (List), then
   // `library-grid` and `library-drag` (an asset carried out past the panel).
   const bool library_view = view.substr(0U, 7U) == "library";
   const std::string_view properties =
-      curves || summaries || feed || graph_view || library_view
+      curves || summaries || feed || tall || graph_view || library_view
           ? std::string_view{}
           : view;
 
@@ -647,7 +652,56 @@ int main(int argc, char **argv) {
   // Timeline toolbar's Curves toggle, pressed and released over two frames.
   // The LED Wall closes the same way, by a click on its twirl, its row
   // being the Timeline's second.
-  const bool clicks = curves || summaries || feed;
+  const bool clicks = curves || summaries || feed || tall;
+  assets::WaveformEnvelope envelope{};
+  for (std::size_t bin = 0U; bin < envelope.size(); ++bin) {
+    const float phase = static_cast<float>(bin) * 0.021F;
+    const float swell = 0.55F + 0.4F * std::sin(phase * 0.13F);
+    envelope[bin].peak = std::clamp(swell * (0.7F + 0.3F * std::sin(phase * 7.0F)), 0.0F, 1.0F);
+    envelope[bin].rms = envelope[bin].peak * 0.55F;
+  }
+  // An eight-thumbnail atlas, one hue per thumbnail with a frame number
+  // bar, so the tiles a clip draws show which source frame each one is.
+  std::optional<rhi::Texture> filmstrip_texture;
+  std::vector<core::u8> filmstrip_pixels;
+  std::vector<editor::TimelineFilmstripObservation> filmstrips;
+  if (tall) {
+    constexpr core::u32 tile_w = 160U;
+    constexpr core::u32 tile_h = 90U;
+    rhi::TextureDesc strip{};
+    strip.width = tile_w * 8U;
+    strip.height = tile_h;
+    strip.format = rhi::TextureFormat::Rgba8Unorm;
+    strip.sampled = true;
+    if (auto made = device.create_texture(strip)) {
+      filmstrip_texture = std::move(made).value();
+      filmstrip_pixels.resize(std::size_t{strip.width} * strip.height * 4U);
+      for (core::u32 y = 0U; y < tile_h; ++y) {
+        for (core::u32 x = 0U; x < strip.width; ++x) {
+          const core::u32 tile = x / tile_w;
+          const float hue = static_cast<float>(tile) / 8.0F;
+          // A bar along the foot, longer for each later thumbnail.
+          const bool bar = y > tile_h - 18U && (x % tile_w) < 18U * (tile + 1U);
+          const float shade = 0.35F + 0.5F * static_cast<float>(y) / tile_h;
+          core::u8 *px = &filmstrip_pixels[(std::size_t{y} * strip.width + x) * 4U];
+          px[0] = bar ? 240U : static_cast<core::u8>(255.0F * shade * (0.5F + 0.5F * std::sin(6.283F * hue)));
+          px[1] = bar ? 240U : static_cast<core::u8>(255.0F * shade * (0.5F + 0.5F * std::sin(6.283F * hue + 2.094F)));
+          px[2] = bar ? 240U : static_cast<core::u8>(255.0F * shade * (0.5F + 0.5F * std::sin(6.283F * hue + 4.189F)));
+          px[3] = 255U;
+        }
+      }
+      filmstrips.push_back(editor::TimelineFilmstripObservation{
+          doc::NodeId{31U}, {}, assets::DerivativeState::Ready,
+          &*filmstrip_texture});
+    }
+  }
+  std::vector<editor::TimelineWaveformObservation> waveforms;
+  if (tall) {
+    waveforms.push_back(editor::TimelineWaveformObservation{
+        doc::NodeId{31U}, {}, assets::DerivativeState::Ready, envelope});
+  }
+  const float tall_list_width =
+      std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
   const int passes = clicks || graph_view || library_view ? 8 : 3;
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
@@ -779,9 +833,11 @@ int main(int argc, char **argv) {
     // Feed selects its first viewport row the same way.
     input.set_mouse_position(
         clicking ? (feed ? 60.0F
+                    : tall ? timeline_bounds.x + tall_list_width - 20.0F
                          : timeline_bounds.x + (curves ? 608.0F : 38.0F))
                  : hover_x,
         clicking ? (feed ? 101.0F
+                    : tall ? timeline_bounds.y + timeline_bounds.height - 9.0F
                          : timeline_bounds.y + (curves ? 17.0F : 112.0F))
                  : hover_y);
     input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);
@@ -803,7 +859,8 @@ int main(int argc, char **argv) {
           show.selection.empty() ? doc::NodeId{} : show.selection.front(), true));
       static_cast<void>(timeline_panel.draw(
           ctx, timeline_bounds, timeline, show.keyframes, show.elements,
-          show.selection, show.selection.front(), {}, {}, {}, show.lanes));
+          show.selection, show.selection.front(), {}, {}, {}, show.lanes,
+          std::nullopt, std::nullopt, filmstrips, waveforms));
       static_cast<void>(output_panel.draw(ctx, output_bounds, outputs));
     }
     ctx.draw_overlays(window);
@@ -824,6 +881,11 @@ int main(int argc, char **argv) {
     return 1;
   }
   auto commands = std::move(acquired).value();
+  if (filmstrip_texture.has_value() &&
+      !commands.upload(*filmstrip_texture, filmstrip_pixels)) {
+    std::puts("filmstrip upload failed");
+    return 1;
+  }
   if (!renderer.value().upload_atlas(device, commands, font->pixels(),
                                      font->width(), font->height()) ||
       !renderer.value().render(device, commands, target.value(),

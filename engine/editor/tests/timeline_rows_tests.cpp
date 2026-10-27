@@ -275,12 +275,65 @@ void a_search_keeps_ancestors_open_and_summarises_the_match() {
                  {90, 2U, scene::PropertyChannel::PositionX, true}}));
 }
 
+// A placed clip's row is as tall as the operator made it - alone, or with
+// every other clip row - and the rows still stack as a running sum.
+void clip_rows_take_their_own_height_or_every_clip_rows() {
+  Fixture f;
+  f.state.clip_row_height = 52.0F;
+  f.state.clip_row_heights[shot_two] = 96.0F;
+  const RowList list = f.build();
+  ROWS_CHECK(list.rows[find(list, Row::Kind::Layer, shot_one)].height ==
+             52.0F);
+  ROWS_CHECK(list.rows[find(list, Row::Kind::Layer, shot_two)].height ==
+             96.0F);
+  ROWS_CHECK(list.rows[find(list, Row::Kind::LaneHeader, deck)].height ==
+             timeline::row_height);
+  ROWS_CHECK(list.rows[find(list, Row::Kind::Layer, loner)].height ==
+             timeline::row_height);
+  for (std::size_t index = 1U; index < list.rows.size(); ++index) {
+    ROWS_CHECK(list.rows[index].top ==
+               list.rows[index - 1U].top + list.rows[index - 1U].height);
+  }
+
+  // A height outside the range a row's edge drags through is held to it.
+  f.state.clip_row_heights[shot_two] = 1'000.0F;
+  f.state.clip_row_height = 3.0F;
+  const RowList clamped = f.build();
+  ROWS_CHECK(clamped.rows[find(clamped, Row::Kind::Layer, shot_two)].height ==
+             timeline::clip_row_height_maximum);
+  ROWS_CHECK(clamped.rows[find(clamped, Row::Kind::Layer, shot_one)].height ==
+             timeline::row_height);
+}
+
+// Minor ticks are whole frames, as many as fit, and a label drops its hour
+// only while the view stays inside the first one.
+void ruler_ticks_divide_whole_frames_and_labels_drop_a_zero_hour() {
+  // A second of 30 frames at 3 px a frame: two-frame ticks would be 6 px
+  // apart, so it divides in tenths of three frames.
+  ROWS_CHECK(timeline::ruler_subdivision(30, 3.0F, 7.0F) == 3);
+  // 24 frames has no tenth; its sixths of four frames are the finest fit.
+  ROWS_CHECK(timeline::ruler_subdivision(24, 3.0F, 7.0F) == 4);
+  ROWS_CHECK(timeline::ruler_subdivision(1, 100.0F, 7.0F) == 0);
+  ROWS_CHECK(timeline::ruler_subdivision(2, 2.0F, 7.0F) == 0);
+
+  ROWS_CHECK(timeline::compact_timecode("00:04:20:13", true) == "04:20:13");
+  ROWS_CHECK(timeline::compact_timecode("01:04:20:13", true) ==
+             "01:04:20:13");
+  ROWS_CHECK(timeline::compact_timecode("00:04:20:13", false) ==
+             "00:04:20:13");
+  ROWS_CHECK(timeline::compact_timecode("1200", true) == "1200");
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"clip rows take their own height or every clip row's",
+     &clip_rows_take_their_own_height_or_every_clip_rows},
+    {"ruler ticks divide whole frames and labels drop a zero hour",
+     &ruler_ticks_divide_whole_frames_and_labels_drop_a_zero_hour},
     {"rows link to their parents through groups and tracks",
      &rows_link_to_their_parents_through_groups_and_tracks},
     {"a closed group spans and unions everything below it",

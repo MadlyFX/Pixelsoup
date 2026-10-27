@@ -189,6 +189,11 @@ void TimelinePanel::reset_project_state() noexcept {
   rows_state_.expanded_groups.clear();
   rows_state_.expanded_hierarchies.clear();
   rows_state_.hierarchy_selection = doc::NodeId{};
+  // Rows sized alone belong to that project's clips; every clip row's
+  // height is a view preference and stays.
+  rows_state_.clip_row_heights.clear();
+  row_resize_ = RowResize{};
+  navigator_ = NavigatorState{};
   reveal_node_ = doc::NodeId{};
   reveal_scroll_ = false;
   reveal_until_ = 0.0;
@@ -296,10 +301,12 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   draw_toolbar(p);
   draw_ruler(p);
   draw_marker_strip(p);
+  resize_clip_rows(p);
   track_key_drag(p);
   resolve_clip_gesture(p);
   resolve_reorder_targets(p);
   draw_rows(p);
+  draw_navigator(p);
   resolve_track_drop(p);
   finish_marquee(p);
   draw_time_overlays(p);
@@ -788,21 +795,27 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
                             ruler.height + strip.height + rows_bounds.height};
   const gui::Rect lanes_area{graph.x, strip.y, graph.width,
                              strip.height + rows_bounds.height};
-  ctx.push_clip(lanes_area);
+  // The dimming runs up through the ruler too, so the played range reads
+  // from the top of the panel as well as across the clips.
+  ctx.push_clip(time_area);
   {
     const float in_x = frame_to_x(static_cast<double>(shown_first));
     const float out_x = frame_to_x(static_cast<double>(shown_last) + 1.0);
     const gui::UiColor dim = alpha(ctx.theme().background, 0.45F);
     if (in_x > graph.x) {
-      ctx.panel(gui::Rect{graph.x, lanes_area.y, in_x - graph.x,
-                          lanes_area.height},
+      ctx.panel(gui::Rect{graph.x, time_area.y, in_x - graph.x,
+                          time_area.height},
                 dim);
     }
     if (out_x < graph.x + graph.width) {
-      ctx.panel(gui::Rect{out_x, lanes_area.y,
-                          graph.x + graph.width - out_x, lanes_area.height},
+      ctx.panel(gui::Rect{out_x, time_area.y,
+                          graph.x + graph.width - out_x, time_area.height},
                 dim);
     }
+  }
+  ctx.pop_clip();
+  ctx.push_clip(lanes_area);
+  {
     for (const scene::TimelineMarker &marker : markers) {
       const float marker_x =
           frame_to_x(static_cast<double>(shown_marker_frame(marker)));
@@ -839,18 +852,29 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     draw_playback_overlay(p);
   }
   if (playhead_x >= graph.x && playhead_x <= graph.x + graph.width) {
-    ctx.draw_list().add_line(playhead_x, ruler.y, playhead_x,
+    // A flag on the ruler carrying the time it stands on, as Sequencer's
+    // does: the eye finds the playhead and reads it in one place. It stays
+    // whole at either edge of the lanes, its point still on the frame.
+    const std::string label = timecode(p, timeline.show_frame);
+    const float flag_width = ctx.font_width(label) + 10.0F;
+    const float flag_height = std::max(ruler.height - 8.0F, 6.0F);
+    const float flag_x =
+        std::clamp(playhead_x - flag_width * 0.5F, graph.x,
+                   std::max(graph.x, graph.x + graph.width - flag_width));
+    const gui::Rect flag{flag_x, ruler.y + 1.0F, flag_width, flag_height};
+    ctx.draw_list().add_line(playhead_x, flag.y + flag.height, playhead_x,
                              rows_bounds.y + rows_bounds.height, 1.5F,
                              ctx.theme().playhead);
-    // A shield-shaped head on the ruler: a handle the eye finds first.
-    const std::array<gui::UiPoint, 5U> head{{
-        {playhead_x - 5.5F, ruler.y + 1.0F},
-        {playhead_x + 5.5F, ruler.y + 1.0F},
-        {playhead_x + 5.5F, ruler.y + 9.0F},
-        {playhead_x, ruler.y + 14.0F},
-        {playhead_x - 5.5F, ruler.y + 9.0F},
+    ctx.panel(flag, ctx.theme().playhead);
+    const std::array<gui::UiPoint, 3U> point{{
+        {playhead_x - 4.5F, flag.y + flag.height},
+        {playhead_x + 4.5F, flag.y + flag.height},
+        {playhead_x, flag.y + flag.height + 5.0F},
     }};
-    ctx.draw_list().add_convex_poly(head, ctx.theme().playhead);
+    ctx.draw_list().add_convex_poly(point, ctx.theme().playhead);
+    ctx.label(gui::Rect{flag.x + 5.0F, flag.y, flag.width - 6.0F,
+                        flag.height},
+              label, ctx.theme().background);
   }
   ctx.pop_clip();
 

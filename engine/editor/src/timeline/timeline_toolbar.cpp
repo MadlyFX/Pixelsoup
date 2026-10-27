@@ -55,7 +55,11 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   }
   // Everything left of the marker group, measured from the panel's edge.
   const float left_extent = show_key_tools ? 766.0F : 718.0F;
-  constexpr float range_field_width = 96.0F;
+  // Wide enough for its caption and the longest value it can show, so the
+  // range never reads as "IN 00:00:0...".
+  const float range_field_width =
+      std::max(96.0F, 8.0F + ctx.font_width("OUT") + 6.0F +
+                          ctx.font_width(timecode(p, last)) + 8.0F);
   const bool show_range =
       right_x - (toolbar.x + left_extent) >= range_field_width * 2.0F + 12.0F;
   gui::Rect in_field{};

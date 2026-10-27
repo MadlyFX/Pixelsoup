@@ -17,6 +17,7 @@
 
 #include <compare>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -48,7 +49,18 @@ struct RowsState final {
   // Tracks start open; a closed track lists only its header, which then
   // summarises its clips.
   std::set<doc::NodeId> collapsed_lanes;
+  // How tall a placed clip's row is, so its filmstrip and waveform can be
+  // read: every clip row's height, and the rows the operator sized alone.
+  float clip_row_height{24.0F};
+  std::map<doc::NodeId, float> clip_row_heights;
 };
+
+// The clip-row heights the operator picks between, and the range a row's
+// edge drags through. The smallest is an ordinary list row.
+inline constexpr float clip_row_height_small = 24.0F;
+inline constexpr float clip_row_height_medium = 52.0F;
+inline constexpr float clip_row_height_large = 96.0F;
+inline constexpr float clip_row_height_maximum = 200.0F;
 
 // One animatable property of one target: where a channel's keys live.
 struct ChannelId final {
@@ -777,6 +789,18 @@ public:
   // The layer list's width, as the operator last dragged it; zero until they
   // do, which lets it follow the panel's own width.
   [[nodiscard]] float list_width() const noexcept { return list_width_; }
+  // The time view: the frame at the lanes' left edge and the zoom.
+  [[nodiscard]] const TimelineTimeAxis &time_axis() const noexcept {
+    return time_axis_;
+  }
+  // How tall a placed clip's row is drawn: its own height when the operator
+  // sized it alone, otherwise every clip row's.
+  [[nodiscard]] float clip_row_height(doc::NodeId clip) const noexcept {
+    const auto found = rows_state_.clip_row_heights.find(clip);
+    return found != rows_state_.clip_row_heights.end()
+               ? found->second
+               : rows_state_.clip_row_height;
+  }
   [[nodiscard]] bool scale_open() const noexcept { return key_tools_.scale_open; }
   [[nodiscard]] bool curves_mode() const noexcept { return graph_mode_; }
   // The Curves view's value zoom and pan since its last fit: 1 and 0 right
@@ -821,10 +845,16 @@ private:
   void draw_toolbar(Pass &p);
   void draw_ruler(Pass &p);
   void draw_marker_strip(Pass &p);
+  // The lower edges of clip rows in the list, which size those rows. Taken
+  // before the rows draw so a press on an edge is never also a layer lift.
+  void resize_clip_rows(Pass &p);
   void track_key_drag(Pass &p);
   void resolve_clip_gesture(Pass &p);
   void resolve_reorder_targets(Pass &p);
   void draw_rows(Pass &p);
+  // The zoom/scroll bar along the panel's foot, and the clip-height choices
+  // under the layer list beside it.
+  void draw_navigator(Pass &p);
   void resolve_track_drop(Pass &p);
   void finish_marquee(Pass &p);
   void draw_time_overlays(Pass &p);
@@ -863,8 +893,11 @@ private:
   // already shows it, and its key ticks.
   void summary_lane_cell(RowContext &rc, bool span_bar);
   void clip_bar_cell(RowContext &rc);
-  bool draw_clip_filmstrip(RowContext &rc, bool live);
-  void draw_clip_waveform(RowContext &rc, bool drew_filmstrip);
+  // Each draws into its part of the bar: the whole bar on a short row, or
+  // on a tall one the pictures above and the waveform below.
+  bool draw_clip_filmstrip(RowContext &rc, bool live, const gui::Rect &area);
+  void draw_clip_waveform(RowContext &rc, bool drew_filmstrip,
+                          const gui::Rect &area);
   void draw_clip_edges(RowContext &rc);
   void draw_clip_ramps(RowContext &rc);
   void draw_clip_label(RowContext &rc);
@@ -972,6 +1005,31 @@ private:
   ClickTracker clicks_;
   // The operator's width for the layer list; zero follows the panel.
   float list_width_{};
+
+  // A drag on a clip row's lower edge in the list. Shift sizes every clip
+  // row together.
+  struct RowResize final {
+    doc::NodeId clip{};
+    bool all{};
+    float start_y{};
+    float start_height{};
+  };
+  RowResize row_resize_;
+
+  // A drag on the navigator: its thumb pans, either end zooms with the other
+  // end held, and the bare track jumps the view there.
+  enum class NavigatorDrag : core::u8 { None, Pan, Left, Right };
+  struct NavigatorState final {
+    NavigatorDrag drag{NavigatorDrag::None};
+    float start_x{};
+    double start_left{};
+    double start_right{};
+    // The span the bar stands for, held while a drag runs so the thumb
+    // does not slide under the pointer as the view it reports changes.
+    double begin{};
+    double end{};
+  };
+  NavigatorState navigator_;
 
   // Lifted layers and tracks.
   struct ReorderState final {

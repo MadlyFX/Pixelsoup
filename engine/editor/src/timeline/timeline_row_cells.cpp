@@ -1,5 +1,7 @@
 #include "timeline_internal.hpp"
 
+#include <mediaserver/editor/timeline_filmstrip_texture_cache.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1162,15 +1164,34 @@ void TimelinePanel::clip_bar_cell(RowContext &rc) {
   const bool live =
       clip_.drag != ClipDrag::None && clip_.node == row.node;
   ctx.panel(clip_bar, alpha(row.color, live ? 0.42F : 0.30F));
-  const bool drew_filmstrip = draw_clip_filmstrip(rc, live);
-  draw_clip_waveform(rc, drew_filmstrip);
+  // A row tall enough to read both gives the waveform a band of its own
+  // under the pictures, as an editor stacks a clip's video over its audio;
+  // a short one overlays the two.
+  const TimelineWaveformObservation *const waveform =
+      waveform_for_clip(p, row.node);
+  const bool has_waveform =
+      waveform != nullptr &&
+      waveform->state == assets::DerivativeState::Ready &&
+      waveform->bins.size() == assets::waveform_peak_rms_bins;
+  gui::Rect pictures = clip_bar;
+  gui::Rect sound = clip_bar;
+  if (has_waveform && clip_bar.height >= split_clip_height) {
+    const float band = std::max(std::floor(clip_bar.height * 0.36F), 14.0F);
+    pictures.height = clip_bar.height - band;
+    sound = gui::Rect{clip_bar.x, pictures.y + pictures.height, clip_bar.width,
+                      band};
+    ctx.panel(sound, alpha(ctx.theme().background, 0.45F));
+  }
+  const bool drew_filmstrip = draw_clip_filmstrip(rc, live, pictures);
+  draw_clip_waveform(rc, drew_filmstrip && sound.y == pictures.y, sound);
   draw_clip_edges(rc);
   draw_clip_ramps(rc);
   draw_clip_label(rc);
   draw_clip_hover(rc);
 }
 
-bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live) {
+bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live,
+                                        const gui::Rect &area) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
   const EditorTimeline &timeline = p.input.timeline;
@@ -1181,7 +1202,7 @@ bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live) {
   const Row &row = rc.row;
   auto &clip_element = rc.clip_element;
   auto &clip_timing = rc.clip_timing;
-  auto &clip_bar = rc.clip_bar;
+  const gui::Rect &clip_bar = area;
 
   bool drew_filmstrip = false;
   if (const TimelineFilmstripObservation *const observation =
@@ -1223,7 +1244,54 @@ bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live) {
       }
     }
     const gui::UiColor tint{1.0F, 1.0F, 1.0F, live ? 0.62F : 0.78F};
-    if (looped) {
+    if (clip_bar.height >= tiled_filmstrip_height && clip_timing.duration > 0) {
+      // Whole frames at the source's shape, anchored to the clip's start so
+      // they ride with it rather than swimming as the view pans. Each shows
+      // the nearest of the atlas's eight thumbnails to the frame at its
+      // left edge; the last is cropped where the clip ends.
+      const float tile_width =
+          clip_bar.height * static_cast<float>(timeline_filmstrip_tile_width) /
+          static_cast<float>(timeline_filmstrip_tile_height);
+      const float clip_right = clip_bar.x + clip_bar.width;
+      const float visible_right = std::min(clip_right, graph.x + graph.width);
+      const float first_tile = std::floor(
+          std::max(std::max(clip_bar.x, graph.x) - clip_bar.x, 0.0F) /
+          tile_width);
+      for (unsigned drawn = 0U; drawn < maximum_filmstrip_tiles; ++drawn) {
+        const float x =
+            clip_bar.x + (first_tile + static_cast<float>(drawn)) * tile_width;
+        if (x >= visible_right) {
+          break;
+        }
+        const float width = std::min(tile_width, clip_right - x);
+        const double offset = std::clamp(
+            std::floor(static_cast<double>(x - clip_bar.x) /
+                       static_cast<double>(time_axis_.pixels_per_frame)),
+            0.0, static_cast<double>(clip_timing.duration - 1));
+        unsigned thumbnail = 0U;
+        if (clip_element->sequence_count > 1U && clip_timing.source_in >= 0) {
+          const auto phase = scene::advance_source_phase(
+              clip_timing.source_in, static_cast<core::i64>(offset),
+              source_mapping_show_rate, clip_element->source_frame_rate,
+              clip_element->sequence_count, scene::SourcePhaseRounding::Floor);
+          if (!phase) {
+            continue;
+          }
+          thumbnail = static_cast<unsigned>(std::llround(
+              static_cast<double>(phase.value()) * 7.0 /
+              static_cast<double>(clip_element->sequence_count - 1U)));
+        }
+        const float left_uv = static_cast<float>(thumbnail) / 8.0F;
+        ctx.draw_list().add_image_region(
+            x, clip_bar.y, width, clip_bar.height, *observation->texture,
+            left_uv, 0.0F, left_uv + 0.125F * (width / tile_width), 1.0F,
+            tint);
+        // A hairline between frames, so a run of similar pictures still
+        // reads as frames.
+        ctx.panel(gui::Rect{x, clip_bar.y, 1.0F, clip_bar.height},
+                  alpha(ctx.theme().background, 0.6F));
+      }
+    } else if (looped) {
       // Long placements repeat the source. Sample the existing eight-thumb
       // atlas at visible timeline positions, with a fixed per-row budget.
       // Neither a very long placement nor many loops increases this work.
@@ -1270,7 +1338,8 @@ bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live) {
   return drew_filmstrip;
 }
 
-void TimelinePanel::draw_clip_waveform(RowContext &rc, bool drew_filmstrip) {
+void TimelinePanel::draw_clip_waveform(RowContext &rc, bool drew_filmstrip,
+                                       const gui::Rect &area) {
   Pass &p = rc.p;
   gui::UiContext &ctx = p.ctx;
   const EditorTimeline &timeline = p.input.timeline;
@@ -1279,10 +1348,10 @@ void TimelinePanel::draw_clip_waveform(RowContext &rc, bool drew_filmstrip) {
     return time_axis_.frame(x, graph.x);
   };
   const Row &row = rc.row;
-  auto &centre_y = rc.centre_y;
+  const float centre_y = area.y + area.height * 0.5F;
   auto &clip_element = rc.clip_element;
   auto &clip_timing = rc.clip_timing;
-  auto &clip_bar = rc.clip_bar;
+  const gui::Rect &clip_bar = area;
 
   if (const TimelineWaveformObservation *const waveform =
           waveform_for_clip(p, row.node);
@@ -1435,13 +1504,15 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
     if (!clip_element->on_air) {
       name += "  off air";
     }
+    // On a tall row the name keeps to a band along the top, as a source
+    // name sits over a clip's first frame, and leaves the pictures clear.
+    const float band = std::min(clip_bar.height, row_height - 6.0F);
     const float text_width =
         std::min(ctx.font_width(name) + 8.0F, name_right - name_left);
     ctx.panel(gui::Rect{name_left - 4.0F, clip_bar.y + 2.0F, text_width,
-                        clip_bar.height - 4.0F},
+                        band - 4.0F},
               alpha(ctx.theme().background, 0.55F));
-    ctx.label(gui::Rect{name_left, clip_bar.y, name_right - name_left,
-                        clip_bar.height},
+    ctx.label(gui::Rect{name_left, clip_bar.y, name_right - name_left, band},
               name,
               clip_element->on_air ? ctx.theme().text
                                    : ctx.theme().text_muted);

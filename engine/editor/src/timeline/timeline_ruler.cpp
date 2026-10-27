@@ -112,14 +112,30 @@ void TimelinePanel::draw_ruler(Pass &p) {
 
   ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
   {
-    const float minimum_spacing =
-        std::max(76.0F, ctx.font_width(timecode(p, last)) + 14.0F);
+    // Labels drop the hours while the whole view is inside the first one,
+    // which leaves room for a label every second at an ordinary zoom.
+    const double view_right = x_to_frame(graph.x + graph.width);
+    const bool first_hour =
+        time_axis_.left_frame > -static_cast<double>(fps) * 3'600.0 &&
+        view_right < static_cast<double>(fps) * 3'600.0;
+    const auto tick_label = [&](core::i64 frame) {
+      const std::string text = compact_timecode(
+          timecode(p, static_cast<core::u64>(frame < 0 ? -frame : frame)),
+          first_hour);
+      return frame < 0 ? "-" + text : text;
+    };
+    const float minimum_spacing = std::max(
+        56.0F,
+        ctx.font_width(tick_label(static_cast<core::i64>(std::max(
+            view_right, static_cast<double>(last))))) + 14.0F);
     const core::i64 step =
         ruler_.frames ? ruler_step(time_axis_.pixels_per_frame)
                       : timecode_step(time_axis_.pixels_per_frame, fps, minimum_spacing);
-    const core::i64 minor = step >= static_cast<core::i64>(fps) * 2
-                                ? step / 2
-                                : (step > 1 ? 1 : 0);
+    // Minor ticks divide each labelled step into whole frames, with the
+    // half-way tick taller where the division is even, as a tape measure
+    // marks its halves.
+    const core::i64 minor =
+        ruler_subdivision(step, time_axis_.pixels_per_frame, 7.0F);
     const core::i64 visible_begin =
         static_cast<core::i64>(std::floor(time_axis_.left_frame));
     core::i64 tick = (visible_begin / step) * step;
@@ -131,27 +147,27 @@ void TimelinePanel::draw_ruler(Pass &p) {
       if (tick_x > graph.x + graph.width) {
         break;
       }
-      if (minor > 0 && minor * 6 >= step &&
-          static_cast<float>(minor) * time_axis_.pixels_per_frame >= 6.0F) {
+      if (minor > 0) {
+        const bool halves = (step / minor) % 2 == 0;
         for (core::i64 sub = tick + minor; sub < tick + step; sub += minor) {
           const float sub_x = frame_to_x(static_cast<double>(sub));
           if (sub_x >= graph.x) {
-            ctx.draw_list().add_rect(sub_x, ruler.y + ruler.height - 3.0F,
-                                     1.0F, 3.0F,
-                                     alpha(theme.text_muted, 0.55F));
+            const bool half = halves && (sub - tick) * 2 == step;
+            const float tall = half ? 5.0F : 3.0F;
+            ctx.draw_list().add_rect(sub_x, ruler.y + ruler.height - tall,
+                                     1.0F, tall,
+                                     alpha(theme.text_muted, half ? 0.8F : 0.5F));
           }
         }
       }
       if (tick_x < graph.x) {
         continue;
       }
-      ctx.draw_list().add_rect(tick_x, ruler.y + ruler.height - 7.0F, 1.0F,
-                               7.0F, theme.text_muted);
+      ctx.draw_list().add_rect(tick_x, ruler.y + ruler.height - 8.0F, 1.0F,
+                               8.0F, theme.text_muted);
       ctx.label(gui::Rect{tick_x + 4.0F, ruler.y, minimum_spacing,
                           ruler.height - 5.0F},
-                tick < 0
-                    ? "-" + timecode(p, static_cast<core::u64>(-tick))
-                    : timecode(p, static_cast<core::u64>(tick)), theme.text_muted);
+                tick_label(tick), theme.text_muted);
     }
   }
   ctx.pop_clip();

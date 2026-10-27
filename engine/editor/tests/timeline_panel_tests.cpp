@@ -1235,14 +1235,14 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
   h.open_position_components();
   // Curves is the text toggle at x=582..634. Entering it fits the one
   // plottable channel, Position X with values 1..3, to [0.8, 3.2] over the
-  // full rows area, y=76..400: value v draws at y = 76 + 135 * (3.2 - v).
-  // Its keys at frames 10, 20 and 50 are at (334, 373), (408, 238) and
-  // (630, 103).
+  // full rows area above the navigator, y=76..384: value v draws at
+  // y = 76 + 128.33 * (3.2 - v). Its keys at frames 10, 20 and 50 are at
+  // (334, 358.33), (408, 230) and (630, 101.67).
   static_cast<void>(h.click(608.0F, 17.0F));
   UI_CHECK(h.panel.curves_mode());
-  static_cast<void>(h.click(334.0F, 373.0F));
+  static_cast<void>(h.click(334.0F, 358.33F));
   UI_CHECK(h.panel.selected_key_count() == 1U);
-  static_cast<void>(h.click(408.0F, 238.0F, gui::KeyMods::Shift));
+  static_cast<void>(h.click(408.0F, 230.0F, gui::KeyMods::Shift));
   UI_CHECK(h.panel.selected_key_count() == 2U);
   static_cast<void>(h.click(659.0F, 17.0F));
 
@@ -1285,8 +1285,8 @@ void curve_tools_fit_navigate_hide_and_author_the_active_channel() {
   // the playhead and an absolute typed commit authors that exact property at
   // the playhead; target/property are never inferred from another row.
   // FIT SEL showed frames 9..21 and values [0.9, 2.1]: the frame-10 key,
-  // value 1, sits at x=321.7, y=373.
-  static_cast<void>(h.click(322.0F, 373.0F));
+  // value 1, sits at x=321.7, y=358.33.
+  static_cast<void>(h.click(322.0F, 358.33F));
   static_cast<void>(h.click(659.0F, 17.0F));
   static_cast<void>(h.frame(918.0F, 77.09F, false));
   static_cast<void>(h.frame(918.0F, 77.09F, true));
@@ -3390,15 +3390,15 @@ void dragging_a_curves_handle_commits_one_tangent_edit() {
   h.open_position_components();
   static_cast<void>(h.click(608.0F, 17.0F));
   UI_CHECK(h.panel.curves_mode());
-  // Fitted to [0.8, 3.2] over y = 76..400 - 135 px a unit - with frames
+  // Fitted to [0.8, 3.2] over y = 76..384 - 128.33 px a unit - with frames
   // 7.4 px apart from frame 10 at x = 334. The frame-20 key, value 2, is
-  // at (408, 238); its outgoing handle, at frame 30 and value 2.5, at
-  // (482, 170.5).
+  // at (408, 230); its outgoing handle, at frame 30 and value 2.5, at
+  // (482, 165.83).
   const auto x_of = [](double frame) {
     return static_cast<float>(334.0 + (frame - 10.0) * 7.4);
   };
   const auto y_of = [](double value) {
-    return static_cast<float>(76.0 + (3.2 - value) * 135.0);
+    return static_cast<float>(76.0 + (3.2 - value) * (308.0 / 2.4));
   };
   static_cast<void>(h.click(x_of(20.0), y_of(2.0)));
   UI_CHECK(h.panel.selected_key_count() == 1U);
@@ -3468,9 +3468,9 @@ void key_selection_carries_across_the_curves_switch() {
   static_cast<void>(h.click(608.0F, 17.0F));
   UI_CHECK(h.panel.curves_mode());
   UI_CHECK(h.panel.selected_key_count() == 1U);
-  // On the graph, fitted to [0.8, 3.2] over y=76..400, add the frame-50 key,
-  // value 3, at (630, 103).
-  static_cast<void>(h.click(630.0F, 103.0F, gui::KeyMods::Shift));
+  // On the graph, fitted to [0.8, 3.2] over y=76..384, add the frame-50 key,
+  // value 3, at (630, 101.67).
+  static_cast<void>(h.click(630.0F, 101.67F, gui::KeyMods::Shift));
   UI_CHECK(h.panel.selected_key_count() == 2U);
   static_cast<void>(h.click(608.0F, 17.0F));
   UI_CHECK(!h.panel.curves_mode());
@@ -3846,12 +3846,117 @@ void a_node_playhead_off_the_view_and_an_empty_cache_draw_nothing() {
   }
 }
 
+// The navigator under the lanes stands for frames 0..101 - the show range
+// and everything authored, the frame-60 clip end and frame-51 key inside it -
+// across x=262..998, 7.287 px a frame. Its thumb is the view, frames 0..100
+// after the first fit, so x=262..990.7. Ends zoom with the other held, the
+// body pans, a press beside the thumb jumps there, and none of it seeks.
+void the_navigator_pans_and_its_ends_zoom() {
+  Harness h;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  const double scale = 736.0 / 101.0;
+  const auto view_right = [&] {
+    const editor::TimelineTimeAxis &axis = h.panel.time_axis();
+    return axis.left_frame + 740.0 / static_cast<double>(axis.pixels_per_frame);
+  };
+  UI_CHECK(std::fabs(view_right() - 100.0) < 1.0e-3);
+
+  // The right end, dragged left to x=626, brings the right edge in to
+  // frame 50.05 and keeps the left edge on frame 0.
+  static_cast<void>(h.frame(990.0F, 392.0F, false));
+  UI_CHECK(!h.frame(990.0F, 392.0F, true).seek_to_frame.has_value());
+  UI_CHECK(!h.frame(626.0F, 392.0F, true).seek_to_frame.has_value());
+  static_cast<void>(h.frame(626.0F, 392.0F, false));
+  const double zoomed_right = 100.0 + (626.0 - 990.0) / scale;
+  UI_CHECK(std::fabs(h.panel.time_axis().left_frame) < 1.0e-6);
+  UI_CHECK(std::fabs(view_right() - zoomed_right) < 0.05);
+
+  // The thumb's body, now x=262..626.7, carries the view 25 frames right
+  // without changing its width.
+  const float pan_from = 444.0F;
+  const float pan_to = pan_from + static_cast<float>(25.0 * scale);
+  static_cast<void>(h.frame(pan_from, 392.0F, false));
+  static_cast<void>(h.frame(pan_from, 392.0F, true));
+  UI_CHECK(!h.frame(pan_to, 392.0F, true).seek_to_frame.has_value());
+  static_cast<void>(h.frame(pan_to, 392.0F, false));
+  UI_CHECK(std::fabs(h.panel.time_axis().left_frame - 25.0) < 0.05);
+  UI_CHECK(std::fabs(view_right() - 25.0 - zoomed_right) < 0.05);
+
+  // A press beside the thumb centres the view there, held inside the
+  // bar's span, so the view cannot run past frame 101.
+  static_cast<void>(h.click(960.0F, 392.0F));
+  UI_CHECK(std::fabs(view_right() - 101.0) < 0.05);
+
+  // The left end, dragged right by 10 frames, narrows the view and keeps
+  // its right edge where it was.
+  const double held_right = view_right();
+  const float left_x = static_cast<float>(
+      262.0 + h.panel.time_axis().left_frame * scale);
+  static_cast<void>(h.frame(left_x, 392.0F, false));
+  static_cast<void>(h.frame(left_x, 392.0F, true));
+  static_cast<void>(
+      h.frame(left_x + static_cast<float>(10.0 * scale), 392.0F, true));
+  static_cast<void>(
+      h.frame(left_x + static_cast<float>(10.0 * scale), 392.0F, false));
+  UI_CHECK(std::fabs(view_right() - held_right) < 0.05);
+  UI_CHECK(std::fabs(view_right() - h.panel.time_axis().left_frame -
+                     (zoomed_right - 10.0)) < 0.05);
+}
+
+// The clip is the second row, y=100..124. Its lower edge in the list sizes
+// it alone; Shift sizes every clip row; the navigator's S/M/L choices at
+// x=186..250 set every clip row and drop sizes given one row alone.
+void a_clip_rows_edge_and_the_height_choices_size_clip_rows() {
+  Harness h;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 24.0F);
+
+  static_cast<void>(h.frame(100.0F, 124.0F, false));
+  static_cast<void>(h.frame(100.0F, 124.0F, true));
+  const editor::TimelinePanelFrame dragging = h.frame(100.0F, 170.0F, true);
+  UI_CHECK(dragging.editing);
+  UI_CHECK(!h.panel.dragging_layer());
+  UI_CHECK(!dragging.selection.has_value());
+  static_cast<void>(h.frame(100.0F, 170.0F, false));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 70.0F);
+  UI_CHECK(h.panel.clip_row_height(doc::NodeId{999U}) == 24.0F);
+
+  // Large: every clip row 96 tall, the clip's own size given up.
+  static_cast<void>(h.click(240.0F, 392.0F));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 96.0F);
+  UI_CHECK(h.panel.clip_row_height(doc::NodeId{999U}) == 96.0F);
+
+  // Shift on the edge, now at y=196, sizes them all together.
+  static_cast<void>(h.frame(100.0F, 196.0F, false, gui::KeyMods::Shift));
+  static_cast<void>(h.frame(100.0F, 196.0F, true, gui::KeyMods::Shift));
+  static_cast<void>(h.frame(100.0F, 156.0F, true, gui::KeyMods::Shift));
+  static_cast<void>(h.frame(100.0F, 156.0F, false, gui::KeyMods::Shift));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 56.0F);
+  UI_CHECK(h.panel.clip_row_height(doc::NodeId{999U}) == 56.0F);
+
+  // Small puts them back to list rows; a project load keeps the choice
+  // but forgets rows sized alone.
+  static_cast<void>(h.click(196.0F, 392.0F));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 24.0F);
+  static_cast<void>(h.frame(100.0F, 124.0F, false));
+  static_cast<void>(h.frame(100.0F, 124.0F, true));
+  static_cast<void>(h.frame(100.0F, 150.0F, true));
+  static_cast<void>(h.frame(100.0F, 150.0F, false));
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 50.0F);
+  h.panel.reset_project_state();
+  UI_CHECK(h.panel.clip_row_height(clip_node) == 24.0F);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 116U> cases{{
+constexpr std::array<Case, 118U> cases{{
+    {"the navigator pans and its ends zoom",
+     &the_navigator_pans_and_its_ends_zoom},
+    {"a clip row's edge and the height choices size clip rows",
+     &a_clip_rows_edge_and_the_height_choices_size_clip_rows},
     {"the cache bar and node playheads draw until toggled off",
      &the_cache_bar_and_node_playheads_draw_until_toggled_off},
     {"a node playhead off the view and an empty cache draw nothing",

@@ -418,7 +418,15 @@ The exact IN and OUT number fields remain available for typed or dragged range
 entry. The adjacent Set In and Set Out controls take the current playhead in
 one click and preserve Loop. If a local Preview playhead is outside the old
 range, the other endpoint moves only as far as needed to keep the new range
-valid.
+valid. Frames outside In and Out are dimmed from the ruler down through every
+track, so the part of the show that plays reads at a glance.
+
+The ruler labels whole seconds and minutes, and fills the space between with
+minor ticks on whole frames, the half-way tick taller. While the view stays
+inside the show's first hour the labels leave the hour off (`04:20:13` rather
+than `00:04:20:13`). Right-click the ruler and choose **Show Frames** to label
+it in frame counts instead. The playhead carries a flag on the ruler with the
+time it stands on; the flag stays whole at either edge of the lanes.
 
 ### Cache bar and render-node playheads
 
@@ -454,7 +462,21 @@ The playhead-over-bar button after the cue button in the Timeline toolbar
 turns both overlays on and off. The bar describes this machine only: it says
 nothing about what a render node has decoded.
 
-On a media layer row the Timeline draws that placement as a bar:
+On a media layer row the Timeline draws that placement as a bar.
+
+Clip rows can be made taller so their pictures and sound can be read.
+**CLIP ROWS** at the foot of the layer list sets every clip row to **S**
+(one list row), **M** or **L**. Drag a clip row's lower edge in the layer
+list to size that row on its own, or hold Shift while dragging to size every
+clip row together; choosing S, M or L again puts rows sized on their own back
+with the rest. On a tall row the filmstrip shows whole frames side by side at
+the source's shape, each the source frame nearest its left edge, and the
+waveform gets its own band under the pictures. The clip's name keeps to a
+band along the top. Row heights are a view setting, like the list width:
+they are not saved in the project, and rows sized on their own are forgotten
+when another project is opened.
+
+Editing the bar:
 
 - With **Selection (`V`)**, **drag the bar** to move the clip. **Drag either
   end** to trim it; each end also answers a few units outside the bar, so a
@@ -596,7 +618,14 @@ Ctrl+wheel pans them, and a middle drag pans time with rows or, held with Ctrl,
 values. Because all six of those are gestures, the `KEYS` panel carries no
 stepper buttons for them - only the two things a wheel cannot do, `FIT SEL` and
 `FIT ALL`, which put a selection or the whole animation back on screen, in
-time and on the Curves graph in value. Track
+time and on the Curves graph in value.
+
+The navigator along the Timeline's foot is the whole show in miniature: the
+In/Out range, every placed clip, the markers and the playhead, with the part
+on screen as a thumb. Drag the thumb to scroll, drag either end of it to zoom
+while the other end stays put, or click the bar beside the thumb to jump
+there. It covers the show range and anything authored outside it, and never
+seeks the playhead. Track
 mute and lock are the layer list's eye and padlock rather than a letter, so the
 state of a stack reads from across a stage. The stage's LED surfaces follow the
 scene's elements in both the Timeline and the Scene outliner, each with the same

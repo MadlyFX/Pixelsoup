@@ -78,6 +78,15 @@ inline constexpr float minimum_pixels_per_frame =
 inline constexpr std::size_t filmstrip_prefetch_rows = 4U;
 inline constexpr std::size_t maximum_filmstrip_requests = 32U;
 inline constexpr std::size_t waveform_prefetch_rows = 4U;
+// A clip bar at least this tall stacks its waveform under its pictures.
+inline constexpr float split_clip_height = 40.0F;
+// Pictures at least this tall are drawn as whole frames side by side at the
+// source's shape, each showing the frame at its left edge; shorter ones
+// stretch the atlas across the clip, where a frame would be too small to
+// read anyway.
+inline constexpr float tiled_filmstrip_height = 28.0F;
+// The most frames one clip draws across the lanes.
+inline constexpr unsigned maximum_filmstrip_tiles = 96U;
 inline constexpr std::size_t maximum_waveform_requests = 32U;
 
 [[nodiscard]] inline std::optional<core::i64>
@@ -969,6 +978,38 @@ nearest_snap(core::i64 value, std::span<const core::i64> candidates,
     }
   }
   return seconds.back() * rate;
+}
+
+// The ruler's minor tick spacing under labelled ticks `step` frames apart:
+// the finest whole division of the step whose ticks stay at least
+// `minimum_spacing` apart, or zero when even halves would crowd. Divisions
+// are whole frames, so a minor tick always lands on a frame.
+[[nodiscard]] inline core::i64 ruler_subdivision(core::i64 step,
+                                                 float pixels_per_frame,
+                                                 float minimum_spacing) noexcept {
+  constexpr std::array<core::i64, 14U> parts{
+      {60, 50, 30, 25, 24, 20, 15, 12, 10, 6, 5, 4, 3, 2}};
+  for (const core::i64 count : parts) {
+    if (step % count != 0) {
+      continue;
+    }
+    const core::i64 minor = step / count;
+    if (static_cast<float>(minor) * pixels_per_frame >= minimum_spacing) {
+      return minor;
+    }
+  }
+  return 0;
+}
+
+// A ruler label in the short form an operator reads at a glance: the hours
+// dropped while the whole view is inside the first hour, the way MM:SS:FF
+// reads on a cue sheet. Frame counts are left as they are.
+[[nodiscard]] inline std::string compact_timecode(std::string text,
+                                                  bool first_hour) {
+  if (first_hour && text.size() == 11U && text.compare(0U, 3U, "00:") == 0) {
+    text.erase(0U, 3U);
+  }
+  return text;
 }
 
 // The identity a row's widgets are keyed by: what the row shows, never where
