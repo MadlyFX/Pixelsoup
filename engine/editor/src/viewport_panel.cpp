@@ -1324,6 +1324,102 @@ ViewportPanel::model_bounds_for(const scene::ModelInstance& model) {
     return std::nullopt;
 }
 
+std::optional<scene::SurfaceHit>
+ViewportPanel::surface_at(const scene::Scene& scene, float canvas_x,
+                          float canvas_y) {
+    const auto ray =
+        scene::canvas_ray(scene.camera, scene.canvas, canvas_x, canvas_y);
+    if (!ray.has_value()) {
+        return std::nullopt;
+    }
+    const scene::ModelRaycaster models =
+        [this](const scene::ModelInstance& model, const scene::Ray& local,
+               float limit) -> std::optional<scene::RayHit> {
+        const std::optional<scene::ModelLocalBounds> bounds =
+            model_bounds_for(model);
+        const scene::ModelLocalBounds box =
+            bounds.value_or(scene::ModelLocalBounds{});
+        const auto outer =
+            scene::raycast_box(local, box.minimum, box.maximum, limit);
+        if (!outer.has_value() || !bounds.has_value()) {
+            return outer;
+        }
+        // Inside its bounds the model's own triangles decide, once their
+        // hierarchy is ready; until then the bounds stand in for them.
+        const render::ModelCacheObservation observation =
+            model_cache_.observe(model.source, model_publication_fence_);
+        if (observation.ready()) {
+            if (const auto bvh = surface_cache_.observe(observation.asset)) {
+                return scene::raycast_mesh(*bvh, observation.asset->mesh,
+                                           local, limit);
+            }
+        }
+        return outer;
+    };
+    return scene::raycast_scene(scene, *ray, models, scene.camera.far_plane);
+}
+
+std::optional<scene::ModelLocalBounds>
+ViewportPanel::model_source_bounds(const std::string& source) {
+    scene::ModelInstance probe{};
+    probe.source = source;
+    return model_bounds_for(probe);
+}
+
+void ViewportPanel::draw_placement_preview(
+    gui::UiContext& ctx, const gui::Rect& image, const scene::Scene& scene,
+    std::span<const StagePlacement> placements, std::string_view caption) {
+    if (placements.empty()) {
+        return;
+    }
+    const gui::UiColor accent = ctx.theme().accent;
+    gui::UiDrawList& list = ctx.draw_list();
+    ctx.push_clip(image);
+    for (const StagePlacement& placement : placements) {
+        const scene::ModelLocalBounds& box = placement.bounds;
+        if (!(box.minimum == box.maximum)) {
+            wire_box(list, image, scene, placement_world(placement), accent,
+                     box);
+        }
+        // A square on the surface where it rests, and the surface's normal.
+        const scene::Vec3 n = placement.normal;
+        const scene::Vec3 across = scene::normalize(
+            scene::cross(n, std::abs(n.y) < 0.9F ? scene::Vec3{0.0F, 1.0F, 0.0F}
+                                                 : scene::Vec3{1.0F, 0.0F, 0.0F}));
+        const scene::Vec3 along = scene::cross(n, across);
+        constexpr float half = 0.2F;
+        const std::array<scene::Vec3, 4U> corners{
+            placement.contact + across * half + along * half,
+            placement.contact - across * half + along * half,
+            placement.contact - across * half - along * half,
+            placement.contact + across * half - along * half};
+        for (std::size_t index = 0U; index < corners.size(); ++index) {
+            projected_line(list, image, scene, corners[index],
+                           corners[(index + 1U) % corners.size()], 4.0F,
+                           outline_shadow);
+            projected_line(list, image, scene, corners[index],
+                           corners[(index + 1U) % corners.size()], 1.8F,
+                           accent);
+        }
+        projected_line(list, image, scene, placement.contact,
+                       placement.contact + n * 0.35F, 1.8F, accent);
+    }
+    const auto anchor = scene::project_to_canvas(scene.camera, scene.canvas,
+                                                 placements.front().contact);
+    if (!caption.empty() && anchor.visible) {
+        // Left of the contact: the Library's drag thumbnail rides below and
+        // to the right of the pointer.
+        const gui::UiPoint at = to_ui(image, scene.canvas, anchor);
+        const float width = ctx.font_width(caption) + 16.0F;
+        const gui::Rect badge{at.x - 18.0F - width, at.y - 11.0F, width, 22.0F};
+        ctx.panel(badge, accent);
+        ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
+                            badge.height},
+                  caption, ctx.theme().background);
+    }
+    ctx.pop_clip();
+}
+
 core::u64 ViewportPanel::next_model_bounds_stamp() noexcept {
     ++model_bounds_stamp_;
     if (model_bounds_stamp_ != 0U) {
@@ -1404,6 +1500,7 @@ void ViewportPanel::reset_project_state() noexcept {
     model_bounds_cache_.clear();
     projection_mesh_stamp_ = 0U;
     projection_mesh_cache_.clear();
+    surface_cache_.request_reset();
     mask_gesture_active_ = false;
     mask_gesture_cancelled_ = false;
     mask_gesture_hit_ = MaskViewportHit::None;

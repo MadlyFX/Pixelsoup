@@ -271,6 +271,8 @@ struct LibraryFrame final {
   // Stage, the Compositor and the Timeline so a persistent asset can be
   // placed where it was dropped.
   std::optional<doc::NodeId> dragging_asset;
+  // Every asset in that drag, `dragging_asset` first.
+  std::vector<doc::NodeId> dragging_assets;
   std::optional<LibraryAssetDrop> asset_drop;
   std::optional<LibraryProxyPolicyIntent> proxy_policy;
   // Look at the sources on disk again, reading their bytes. Nothing does this

@@ -134,8 +134,9 @@ struct AddIntent final {
   // source string as a renderer/backward-compatible fallback.
   doc::NodeId asset{};
   scene::SceneId scene{};
-  // Dragging an asset into Stage resolves the pointer onto the camera-target
-  // plane. A click-to-add leaves this empty and uses the document defaults.
+  // Dragging an asset into Stage rests it on the surface under the pointer
+  // (see stage_placement.hpp). A click-to-add leaves this empty and uses the
+  // document defaults.
   std::optional<scene::Vec3> position;
   // Exact native cadence for video. Absence deliberately means legacy/image
   // sequence 1:1 mapping, so old aggregate initializers remain compatible.
@@ -144,6 +145,9 @@ struct AddIntent final {
   // create for the new element, with its wires, in the same undo step. Its
   // scene_node is filled in with the element once that exists.
   std::optional<CompositorAddIntent> graph_layer;
+  // Yaw, pitch and roll in turns, from the same Stage drop: a screen hung on
+  // a wall faces out of it. Empty keeps the document default.
+  std::optional<scene::Vec3> rotation;
 
   bool operator==(const AddIntent &) const = default;
 };

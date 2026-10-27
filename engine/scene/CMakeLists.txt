@@ -8,6 +8,7 @@ add_library(mediaserver_scene STATIC
     src/lighting.cpp
     src/linked_scene.cpp
     src/physical_sky.cpp
+    src/raycast.cpp
     src/scene.cpp
     src/scene_model.cpp
     src/scene_project.cpp
@@ -39,7 +40,7 @@ if(BUILD_TESTING)
     # built with the same floating-point settings as the library. Built any
     # other way they would be testing a different computation.
     foreach(_scene_suite IN ITEMS
-            math geometry slice icvfx lighting model mask manipulate timeline_edit
+            math geometry slice icvfx lighting model mask manipulate raycast timeline_edit
             key_edit selection_set spatial_effect keyer linked_scene)
         add_executable(mediaserver_scene_${_scene_suite}_tests
             tests/scene_${_scene_suite}_tests.cpp

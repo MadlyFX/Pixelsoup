@@ -2521,6 +2521,7 @@ LibraryFrame LibraryPanel::draw_impl(
     if (drag_moved_) {
       if (!dragged_assets.empty()) {
         frame.dragging_asset = dragged_assets.front();
+        frame.dragging_assets = dragged_assets;
       }
       // The thumbnail of the asset the drag was started on rides with it.
       const doc::NodeId lead =
@@ -2566,6 +2567,7 @@ LibraryFrame LibraryPanel::draw_impl(
               dragged_assets.front(), ctx.pointer_release_x(),
               ctx.pointer_release_y(), dragged_assets};
           frame.dragging_asset.reset();
+          frame.dragging_assets.clear();
         }
       }
     }

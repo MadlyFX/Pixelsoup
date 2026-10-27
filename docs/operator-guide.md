@@ -749,7 +749,18 @@ the Library already holds keeps it in its folder.
 the asset you pressed on, with a count when more than one asset is dragged.
 What happens on release depends on where it lands:
 
-- **Stage:** each asset is placed where it was dropped, side by side.
+- **Stage:** each asset lands on the surface under the pointer, side by side.
+  While you drag over Stage, an outline shows where each will land and a
+  label names the surface it will rest on. An asset rests on that surface
+  rather than sinking into it: a model's lowest point touches it, and a
+  screen stands on its bottom edge, turned to face the Stage camera. A
+  screen dropped on a wall hangs flat against it, facing out. Locked set
+  pieces still count as surfaces. With nothing under the pointer, the asset
+  rests on the stage floor where the grid is drawn. With **SNAP** on (or
+  **Ctrl** held while it is off), the landing point steps to the 1 m grid
+  across a level or upright surface, and a screen's turn steps by 5
+  degrees. An imported model is hit on its own triangles a moment after it
+  first appears. Until then, the Stage uses its bounding box.
 - **An empty part of the Timeline:** each asset becomes a new layer.
 - **A compatible Timeline row or Compositor Scene Layer:** the asset replaces
   that source, as described below.

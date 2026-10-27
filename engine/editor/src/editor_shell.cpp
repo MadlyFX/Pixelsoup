@@ -4124,7 +4124,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto instantiate_asset = [&](doc::NodeId id,
                                      std::optional<scene::Vec3> position,
                                      std::optional<CompositorAddIntent>
-                                         graph_layer = std::nullopt) {
+                                         graph_layer = std::nullopt,
+                                     std::optional<scene::Vec3> rotation =
+                                         std::nullopt) {
     const assets::Asset *const found = asset_registry.asset(id);
     if (found == nullptr) {
       return;
@@ -4140,6 +4142,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                       impl.next_edit_gesture++, aspect,
                                       media->id, authored_stage.id, position,
                                       media->frame_rate, graph_layer});
+      result.adds.back().rotation = rotation;
       return;
     }
     const auto &model = std::get<assets::ModelAsset>(*found);
@@ -4147,6 +4150,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                     impl.next_edit_gesture++, 16.0F / 9.0F,
                                     model.id, authored_stage.id, position,
                                     std::nullopt, graph_layer});
+    result.adds.back().rotation = rotation;
   };
 
   const auto draw_placeholder = [&](const gui::Rect &bounds,
@@ -4179,6 +4183,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
   std::optional<doc::NodeId> dragging_asset;
+  std::vector<doc::NodeId> dragging_assets;
   // Files dragged in from the desktop that the Library imported itself.
   bool library_took_files = false;
   std::optional<EffectApplyRequest> pending_effect_drop;
@@ -5336,6 +5341,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             impl.next_edit_gesture++});
       }
       dragging_asset = library.dragging_asset;
+      dragging_assets = library.dragging_assets;
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
@@ -6369,6 +6375,61 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   const auto effect_type = [](compositor::NodeKind kind) {
     return compositor::output_ports(kind).front().type;
   };
+  // Where dragged Library assets land on Stage: side by side a step apart,
+  // so none hides another, each resting on the surface under its own line of
+  // sight. Empty off the Stage image. The drop and its preview share this, so
+  // what the outline shows is what the release authors.
+  const auto stage_placements_at =
+      [&](std::span<const doc::NodeId> ids, float screen_x, float screen_y)
+      -> std::vector<std::pair<doc::NodeId, StagePlacement>> {
+    std::vector<std::pair<doc::NodeId, StagePlacement>> placed;
+    if (!stage_viewport_drawn || switcher.rehearsal_locked) {
+      return placed;
+    }
+    const scene::Canvas canvas = stage_interaction_scene.canvas;
+    const CanvasPoint dropped =
+        to_canvas(stage_viewport_frame.image, canvas, screen_x, screen_y);
+    if (!dropped.inside) {
+      return placed;
+    }
+    const float step = static_cast<float>(canvas.width) * 0.06F;
+    const bool snap = impl.stage_panel.snapping() != ui.ctrl_held();
+    for (std::size_t index = 0U; index < ids.size(); ++index) {
+      const assets::Asset *const asset = asset_registry.asset(ids[index]);
+      if (asset == nullptr) {
+        continue;
+      }
+      const float x = dropped.x + step * static_cast<float>(index);
+      const auto ray = scene::canvas_ray(stage_interaction_scene.camera,
+                                         canvas, x, dropped.y);
+      if (!ray.has_value()) {
+        continue;
+      }
+      StagePlacementRequest request{};
+      request.ray = *ray;
+      request.hit =
+          impl.stage_panel.surface_at(stage_interaction_scene, x, dropped.y);
+      request.camera = stage_interaction_scene.camera;
+      request.snap = snap;
+      if (const auto *const media = std::get_if<assets::MediaAsset>(asset)) {
+        request.media = true;
+        float aspect = 16.0F / 9.0F;
+        if (media->dimensions.has_value() && media->dimensions->height > 0U) {
+          aspect = static_cast<float>(media->dimensions->width) /
+                   static_cast<float>(media->dimensions->height);
+        }
+        request.bounds = media_placement_bounds(aspect);
+      } else if (const auto bounds = impl.stage_panel.model_source_bounds(
+                     std::get<assets::ModelAsset>(*asset).source)) {
+        request.bounds = *bounds;
+      }
+      if (const auto placement = place_on_stage(request)) {
+        placed.emplace_back(ids[index], *placement);
+      }
+    }
+    return placed;
+  };
+
   std::optional<CompositorPortDrop> port_hover;
   std::optional<CompositorWireDrop> wire_hover;
   std::string port_hover_what;
@@ -6429,6 +6490,40 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.panel(badge, ui.theme().accent);
     ui.label({badge.x + 8.0F, badge.y, badge.width - 8.0F, badge.height},
              label, ui.theme().background);
+  }
+  if (!dragging_assets.empty() && !port_hover.has_value() &&
+      !wire_hover.has_value() && !replacement_hover.has_value() &&
+      !ui.pointer_blocked() &&
+      !(timeline_panel_drawn &&
+        timeline_panel_bounds.contains(ui.pointer_x(), ui.pointer_y()))) {
+    const auto placed =
+        stage_placements_at(dragging_assets, ui.pointer_x(), ui.pointer_y());
+    if (!placed.empty()) {
+      std::vector<StagePlacement> placements;
+      placements.reserve(placed.size());
+      for (const auto &[unused, placement] : placed) {
+        static_cast<void>(unused);
+        placements.push_back(placement);
+      }
+      const StagePlacement &lead = placements.front();
+      std::string caption;
+      switch (lead.surface) {
+      case StagePlacementSurface::Element:
+        // The name Scene shows, or its kind and number when it has none.
+        caption = "On " + viewport_deep_select_label(stage_interaction_scene,
+                                                     lead.element, elements);
+        break;
+      case StagePlacementSurface::Floor:
+        caption = "On floor";
+        break;
+      case StagePlacementSurface::ViewPlane:
+        caption = "In the air";
+        break;
+      }
+      impl.stage_panel.draw_placement_preview(ui, stage_viewport_frame.image,
+                                              stage_interaction_scene,
+                                              placements, caption);
+    }
   }
   if (compositor_panel_drawn && !compositor_locked && !port_hover.has_value() &&
       !wire_hover.has_value()) {
@@ -6738,34 +6833,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     pending_asset_drop.reset();
   }
 
-  if (pending_asset_drop.has_value() && stage_viewport_drawn &&
-      !switcher.rehearsal_locked) {
-    const CanvasPoint dropped =
-        to_canvas(stage_viewport_frame.image, stage_scene.canvas,
-                  pending_asset_drop->screen_x, pending_asset_drop->screen_y);
-    if (dropped.inside) {
-      const scene::Vec3 offset = scene::screen_drag_to_translation(
-          stage_scene.camera, stage_scene.canvas, stage_scene.camera.target,
-          dropped.x - static_cast<float>(stage_scene.canvas.width) * 0.5F,
-          dropped.y - static_cast<float>(stage_scene.canvas.height) * 0.5F);
-      // Several assets land side by side, a step apart, so none hides
-      // another.
-      const scene::Vec3 step = scene::screen_drag_to_translation(
-          stage_scene.camera, stage_scene.canvas, stage_scene.camera.target,
-          static_cast<float>(stage_scene.canvas.width) * 0.06F, 0.0F);
-      const std::vector<doc::NodeId> &dropped_assets =
-          pending_asset_drop->assets.empty()
-              ? std::vector<doc::NodeId>{pending_asset_drop->asset}
-              : pending_asset_drop->assets;
-      for (std::size_t index = 0U; index < dropped_assets.size(); ++index) {
-        const float along = static_cast<float>(index);
-        instantiate_asset(
-            dropped_assets[index],
-            scene::Vec3{stage_scene.camera.target.x + offset.x + step.x * along,
-                        stage_scene.camera.target.y + offset.y + step.y * along,
-                        stage_scene.camera.target.z + offset.z +
-                            step.z * along});
-      }
+  if (pending_asset_drop.has_value()) {
+    const std::vector<doc::NodeId> &dropped_assets =
+        pending_asset_drop->assets.empty()
+            ? std::vector<doc::NodeId>{pending_asset_drop->asset}
+            : pending_asset_drop->assets;
+    for (const auto &[asset, placement] :
+         stage_placements_at(dropped_assets, pending_asset_drop->screen_x,
+                             pending_asset_drop->screen_y)) {
+      instantiate_asset(asset, placement.position, std::nullopt,
+                        placement.rotation == scene::Vec3{}
+                            ? std::nullopt
+                            : std::optional<scene::Vec3>{placement.rotation});
     }
   }
 

@@ -1015,6 +1015,17 @@ placed_clip_duration(const editor::AddIntent &add,
                 std::string{scene::schema::position_z},
                 real(static_cast<double>(add.position->z)));
         }
+        if (add.rotation.has_value()) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::rotation_yaw},
+                real(static_cast<double>(add.rotation->x)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::rotation_pitch},
+                real(static_cast<double>(add.rotation->y)));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::rotation_roll},
+                real(static_cast<double>(add.rotation->z)));
+        }
     };
     if (kind == editor::AddKind::Model) {
         node.type = std::string{scene::schema::model_type};

@@ -4,6 +4,8 @@
 
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
+#include <mediaserver/editor/model_surface_cache.hpp>
+#include <mediaserver/editor/stage_placement.hpp>
 #include <mediaserver/editor/stage_view.hpp>
 #include <mediaserver/editor/transform_tool.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -15,6 +17,7 @@
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
+#include <mediaserver/scene/raycast.hpp>
 #include <mediaserver/scene/scene.hpp>
 
 #include <array>
@@ -22,6 +25,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -426,6 +430,25 @@ class ViewportPanel final {
     [[nodiscard]] std::optional<WorldBounds>
     world_bounds(const scene::Scene& scene, std::span<const doc::NodeId> nodes);
 
+    // Where the line of sight through canvas pixel (x, y) first meets a
+    // surface of `scene`, locked elements included. Imported models are hit
+    // on their triangles once a background worker has built their hierarchy,
+    // and on their bounds until then; nothing here waits or builds.
+    [[nodiscard]] std::optional<scene::SurfaceHit>
+    surface_at(const scene::Scene& scene, float canvas_x, float canvas_y);
+
+    // Local bounds of the model at `source`, once the model cache has it.
+    // Asking starts the decode of a model nothing in the scene uses yet.
+    [[nodiscard]] std::optional<scene::ModelLocalBounds>
+    model_source_bounds(const std::string& source);
+
+    // Where dropped assets will land, drawn over this viewport's image: each
+    // one's bounds at its placement and a mark where it rests on the surface.
+    void draw_placement_preview(gui::UiContext& ctx, const gui::Rect& image,
+                                const scene::Scene& scene,
+                                std::span<const StagePlacement> placements,
+                                std::string_view caption);
+
     // Project-generation boundary. Background workers are process-owned, so
     // this drops only panel-local observations and never joins asset work.
     void reset_project_state() noexcept;
@@ -547,6 +570,8 @@ class ViewportPanel final {
     core::u64 projection_mesh_stamp_{};
     std::unordered_map<core::u64, CachedProjectionState>
         projection_mesh_cache_;
+    // Triangle hierarchies for `surface_at`, built on their own worker.
+    ModelSurfaceCache surface_cache_;
 
     bool mask_gesture_active_{};
     bool mask_gesture_cancelled_{};
