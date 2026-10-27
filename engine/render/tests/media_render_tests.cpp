@@ -344,6 +344,84 @@ void depth_orders_media_and_lane_order_breaks_ties() {
                 > swapped_lanes.rgba[swapped + 1U]);
 }
 
+void a_crossing_clip_and_card_each_hide_the_other() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    const auto red_path = write_solid_tga("crossing_red", 255U, 0U, 0U);
+    // A red clip and a green emitting card, both blended and both centred on
+    // the origin, turned opposite ways about Y so they cross down the middle
+    // of the frame: each is nearer the camera on one side.
+    struct Crossing final {
+        Image image;
+        bool clip_nearer_on_left{};
+    };
+    const auto render_crossing = [&](float clip_yaw, float card_alpha) {
+        auto scn = clip_scene(canvas, red_path);
+        scn.environment.sky_color = scene::Vec3{};
+        scn.environment.ground_color = scene::Vec3{};
+        scn.environment.ambient = 0.0F;
+        auto& clip = scn.media.front();
+        clip.world = scene::multiply(
+            scene::rotation(clip_yaw, 0.0F, 0.0F),
+            scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+        clip.normal = scene::normal_basis(clip.world);
+        scene::MeshInstance card{};
+        card.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+        card.source = mediaserver::doc::NodeId{2U};
+        card.world = scene::multiply(
+            scene::rotation(-clip_yaw, 0.0F, 0.0F),
+            scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+        card.normal = scene::normal_basis(card.world);
+        card.material.base_color = scene::Vec3{};
+        card.material.emissive = scene::Vec3{0.0F, 1.0F, 0.0F};
+        card.material.alpha_mode = scene::MaterialAlphaMode::Blend;
+        scene::Fill fill{};
+        fill.color_a = scene::FillColor{1.0F, 1.0F, 1.0F, card_alpha};
+        card.material.fill = fill;
+        scn.instances.push_back(card);
+        const scene::Vec3 left{-0.2F, 0.0F, 0.0F};
+        const bool clip_nearer =
+            scene::transform_point(clip.world, left).z
+            > scene::transform_point(card.world, left).z;
+        return Crossing{render_clip(device, scn), clip_nearer};
+    };
+    const auto red_wins = [](const Image& image, core::u32 x) {
+        const auto pixel = image.at(x, 32U);
+        return image.rgba[pixel + 0U] > 200U && image.rgba[pixel + 1U] < 40U;
+    };
+    const auto green_wins = [](const Image& image, core::u32 x) {
+        const auto pixel = image.at(x, 32U);
+        return image.rgba[pixel + 1U] > 200U && image.rgba[pixel + 0U] < 40U;
+    };
+
+    // Opaque, whichever way round they cross: the nearer one shows on each
+    // side. The two are drawn in the same order both times, so one of these
+    // needs the layer drawn first to hide the one drawn after it.
+    for (const float yaw : {0.05F, -0.05F}) {
+        const auto crossing = render_crossing(yaw, 1.0F);
+        const bool clip_left = crossing.clip_nearer_on_left;
+        MEDIA_CHECK(clip_left ? red_wins(crossing.image, 16U)
+                              : green_wins(crossing.image, 16U));
+        MEDIA_CHECK(clip_left ? green_wins(crossing.image, 48U)
+                              : red_wins(crossing.image, 48U));
+    }
+
+    // A translucent card writes no depth of its own, but the opaque clip
+    // still hides it wherever the clip is the nearer of the two.
+    for (const float yaw : {0.05F, -0.05F}) {
+        const auto crossing = render_crossing(yaw, 0.5F);
+        MEDIA_CHECK(red_wins(crossing.image,
+                             crossing.clip_nearer_on_left ? 16U : 48U));
+    }
+
+    // On one plane neither hides the other by depth: the composite order
+    // decides the whole surface, the same on both sides.
+    const auto coplanar = render_crossing(0.0F, 1.0F);
+    MEDIA_CHECK(red_wins(coplanar.image, 16U) == red_wins(coplanar.image, 48U));
+    MEDIA_CHECK(red_wins(coplanar.image, 16U)
+                != green_wins(coplanar.image, 16U));
+}
+
 [[nodiscard]] bool renderer_usable(rhi::Device& device) {
     auto probe = render::SceneRenderer::create(device, 16U, 16U, test_limits());
     if (probe) {
@@ -3045,7 +3123,7 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 47U> cases{{
+constexpr std::array<Case, 48U> cases{{
     {"a resolution switch holds the last picture until the new size is ready",
      &a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready},
     {"a deleted clip releases its residency and tells its decoder",
@@ -3078,6 +3156,8 @@ constexpr std::array<Case, 47U> cases{{
      &clip_opacity_and_brightness_are_composited},
     {"depth orders media and lane order breaks ties",
      &depth_orders_media_and_lane_order_breaks_ties},
+    {"a crossing clip and card each hide the other",
+     &a_crossing_clip_and_card_each_hide_the_other},
     {"clip saturation is identity-exact in both response domains",
      &clip_saturation_is_identity_exact_in_both_response_domains},
     {"clip Levels is identity-exact and authored order is visible",

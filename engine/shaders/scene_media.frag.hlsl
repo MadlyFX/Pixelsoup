@@ -298,7 +298,10 @@ float4 main(Input input) : SV_Target0 {
         // Drawn for depth alone, on behalf of another compositor layer. The
         // depth silhouette follows the complete authored coverage, including
         // layer opacity and edge feather, rather than the file alpha alone.
-        if (opacity < media_depth_only_coverage_cutoff) {
+        // The clip's own blended depth pass keeps only its opaque pixels.
+        if (opacity < (input.layer_style.w > 1.5
+                           ? blended_depth_coverage_cutoff
+                           : media_depth_only_coverage_cutoff)) {
             discard;
         }
         return float4(0.0, 0.0, 0.0, 0.0);

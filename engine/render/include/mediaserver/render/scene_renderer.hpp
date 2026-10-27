@@ -757,6 +757,7 @@ private:
         std::array<rhi::GraphicsPipeline, 4U> blended_pipelines,
         std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines,
         rhi::GraphicsPipeline media_depth_pipeline,
+        rhi::GraphicsPipeline blended_depth_pipeline,
         rhi::Sampler media_sampler,
         rhi::Texture material_fallback,
         rhi::Texture normal_fallback,
@@ -838,6 +839,13 @@ private:
     // texture. This pipeline writes depth, alpha-tests the clip, and composes
     // a zero-alpha colour, so it primes depth without touching the image.
     rhi::GraphicsPipeline media_depth_pipeline_;
+    // Blended layers write no depth, so two that cross would be ordered whole
+    // by their centres. Before compositing, each one except the last draws
+    // its fully opaque pixels into depth through these (lit, then media's
+    // depth pipeline above), so a later layer is hidden where it passes
+    // behind an earlier one. The pass is biased like a depth-only occluder,
+    // leaving each layer's own plane to the composite order.
+    rhi::GraphicsPipeline blended_depth_pipeline_;
     // ViewShading::Wireframe's colour passes, built only for an editor view
     // (RendererLimits::view_shading) on a device with wireframe_fill.
     rhi::GraphicsPipeline wireframe_pipeline_;

@@ -94,7 +94,8 @@ cbuffer ViewConstants : register(b0, space1) {
 cbuffer BatchConstants : register(b1, space1) {
     // x: first index, y: first instance, z: nonzero for an indexed draw, in
     // which the input assembler has already read the index and SV_VertexID
-    // is the vertex itself.
+    // is the vertex itself. w: nonzero for a blended layer's own depth pass,
+    // which draws the layer depth-only and keeps only its opaque pixels.
     uint4 batch_offsets;
 };
 
@@ -201,7 +202,11 @@ Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
     result.current_clip = mul(canvas_view_projection, world);
     result.previous_clip = mul(previous_view_projection, previous_world);
     result.position = mul(view_projection, world);
-    if (instance.layer_style.w > 0.5) {
+    // The blended depth pass takes the same bias, so a layer never hides
+    // itself or anything on its own plane when it is drawn for colour.
+    const float layer_mode =
+        batch_offsets.w != 0u ? 2.0 : instance.layer_style.w;
+    if (layer_mode > 0.5) {
         // Reversed depth: the near plane is one, so subtracting recedes.
         result.position.z -= depth_only_bias * result.position.w;
     }
@@ -221,7 +226,7 @@ Varyings evaluate_vertex(uint vertex_id, uint instance_id) {
     result.alpha = instance.alpha;
 
     result.uv = vertex.uv;
-    result.layer_style = instance.layer_style;
+    result.layer_style = float4(instance.layer_style.xyz, layer_mode);
     result.effect_range = instance.effect_range;
     result.object_id = instance.effect_range.w;
     return result;

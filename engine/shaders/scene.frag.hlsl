@@ -236,6 +236,18 @@ float3 environment_ambient(float3 normal, float3 view, float3 albedo,
 #endif
 
 #include "scene_varyings.hlsli"
+#include "scene_media_coverage.hlsli"
+
+// How much of what is behind this pixel the layer hides: its opacity, the
+// horizontal edge feather, and the material's coverage when it blends.
+float layer_opacity(Varyings input, float alpha_coverage) {
+    const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
+    const float horizontal_coverage = input.layer_style.y > 0.0
+        ? smoothstep(0.0, input.layer_style.y, edge_distance)
+        : 1.0;
+    return saturate(input.layer_style.x * horizontal_coverage
+        * (input.alpha.y > 1.5 ? alpha_coverage : 1.0));
+}
 
 // Multiply and Screen need different fixed-function factors from ordinary
 // straight-alpha source-over. Prepare exactly the source colour those factors
@@ -649,8 +661,9 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // drawn here only so that this layer is occluded by it. Depth is still
     // written - there is no discard - but nothing reaches the colour target,
     // and a fully transparent black is also inert under every blend equation
-    // the layer composite can apply afterwards.
-    if (input.layer_style.w > 0.5) {
+    // the layer composite can apply afterwards. A blended layer's own depth
+    // pass (2) goes on to find its coverage first.
+    if (input.layer_style.w > 0.5 && input.layer_style.w < 1.5) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -709,6 +722,14 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     const float alpha_coverage =
         saturate(input.anisotropy.w * sampled_base.a * fill.a);
     if (input.alpha.y > 0.5 && input.alpha.y < 1.5 && alpha_coverage < input.alpha.x) discard;
+    if (input.layer_style.w > 1.5) {
+        // Depth for the pixels that hide what is behind them completely, so
+        // a blended layer crossing another is hidden where it passes behind
+        // it. Translucent pixels write nothing and stay ordered by the sort.
+        if (layer_opacity(input, alpha_coverage)
+                < blended_depth_coverage_cutoff) discard;
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
     MaterialLobes m;
     m.coat = input.coat.x * clearcoat_texture.SampleBias(clearcoat_sampler, input.uv, texture_sampling.x).r;
     m.coat_roughness = input.coat.y * clearcoat_roughness_texture.SampleBias(clearcoat_roughness_sampler, input.uv, texture_sampling.x).g;
@@ -957,12 +978,7 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         accumulated = lerp(accumulated, coat_light, weight);
     }
 
-    const float edge_distance = min(input.uv.x, 1.0 - input.uv.x);
-    const float horizontal_coverage = input.layer_style.y > 0.0
-        ? smoothstep(0.0, input.layer_style.y, edge_distance)
-        : 1.0;
-    const float opacity = saturate(
-        input.layer_style.x * horizontal_coverage * (input.alpha.y > 1.5 ? alpha_coverage : 1.0));
+    const float opacity = layer_opacity(input, alpha_coverage);
     // The program is already canonicalised on the CPU. The project's response
     // setting decides only where that authored order runs: scene-linear before
     // tone mapping for Exposure, or display-referred after encoding for Gain.

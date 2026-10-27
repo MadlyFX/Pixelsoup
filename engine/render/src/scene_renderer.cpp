@@ -1640,6 +1640,7 @@ SceneRenderer::SceneRenderer(
     std::array<rhi::GraphicsPipeline, 4U> blended_pipelines,
     std::array<rhi::GraphicsPipeline, 4U> media_blended_pipelines,
     rhi::GraphicsPipeline media_depth_pipeline,
+    rhi::GraphicsPipeline blended_depth_pipeline,
     rhi::Sampler media_sampler,
     rhi::Texture material_fallback,
     rhi::Texture normal_fallback,
@@ -1670,6 +1671,7 @@ SceneRenderer::SceneRenderer(
       blended_pipelines_(std::move(blended_pipelines)),
       media_blended_pipelines_(std::move(media_blended_pipelines)),
       media_depth_pipeline_(std::move(media_depth_pipeline)),
+      blended_depth_pipeline_(std::move(blended_depth_pipeline)),
       media_sampler_(std::move(media_sampler)),
       material_fallback_(std::move(material_fallback)),
       normal_fallback_(std::move(normal_fallback)),
@@ -1855,6 +1857,22 @@ Result SceneRenderer::create(
     if (!media_depth_pipeline) {
         return Result::failure(
             media_depth_pipeline.error() ==
+                    rhi::RhiError::ShaderFormatUnsupported
+                ? RenderError::ShaderFormatUnsupported
+                : RenderError::BackendFailure);
+    }
+    // The lit counterpart, for the depth pass a blended surface makes of its
+    // own opaque pixels before the layers are composited.
+    auto blended_depth_pipeline = device.create_pipeline(
+        vertex,
+        fragment,
+        color_format,
+        advanced ? rhi::ColorBlend::PremultipliedNormal
+                 : rhi::ColorBlend::Normal,
+        depth_state);
+    if (!blended_depth_pipeline) {
+        return Result::failure(
+            blended_depth_pipeline.error() ==
                     rhi::RhiError::ShaderFormatUnsupported
                 ? RenderError::ShaderFormatUnsupported
                 : RenderError::BackendFailure);
@@ -2212,6 +2230,7 @@ Result SceneRenderer::create(
         std::move(blended_pipelines),
         std::move(media_blended_pipelines),
         std::move(media_depth_pipeline).value(),
+        std::move(blended_depth_pipeline).value(),
         std::move(media_sampler).value(),
         std::move(material_fallback).value(),
         std::move(normal_fallback).value(),
@@ -5668,18 +5687,23 @@ bool SceneRenderer::render(
     // Destination-reading layers are intentionally one batch per pass. That
     // preserves their sorted order while allowing every layer to choose its
     // own fixed-function blend equation and, for media, its own texture.
-    for (std::size_t index = 0U; index < composite_draws_.size(); ++index) {
-        const auto& composite = composite_draws_[index];
+    // `depth_pass` records the layer instead into depth alone, for its fully
+    // opaque pixels.
+    const auto record_composite = [&](const CompositeDraw& composite,
+                                      bool depth_pass, bool store_depth) {
         const rhi::DrawBatch composite_batch{
             composite.range.index_count, 1U};
         const BatchConstants composite_offsets{
             composite.range.first_index,
             composite.first_instance,
             0U,
-            0U};
+            depth_pass ? 1U : 0U};
         rhi::PulledDraw composite_draw{};
         const auto pipeline_index = blend_index(composite.blend);
-        composite_draw.pipeline = wireframe
+        composite_draw.pipeline = depth_pass
+            ? (composite.media ? &media_depth_pipeline_
+                               : &blended_depth_pipeline_)
+            : wireframe
             ? (composite.media ? &media_wireframe_pipeline_
                                : &wireframe_pipeline_)
             : composite.media
@@ -5729,9 +5753,28 @@ bool SceneRenderer::render(
         composite_draw.batches =
             std::span<const rhi::DrawBatch>{&composite_batch, 1U};
         composite_draw.load = true;
-        composite_draw.store_depth = index + 1U < composite_draws_.size();
-        if (!graph_.draw_pulled(commands, core::RenderPass::Media,
-                color_, clear, depth_, 0.0F, composite_draw)) {
+        composite_draw.store_depth = store_depth;
+        return graph_.draw_pulled(commands, core::RenderPass::Media,
+            color_, clear, depth_, 0.0F, composite_draw);
+    };
+    // Layers write no depth when composited, so two that cross would each be
+    // drawn whole over the other in sorted order. First, every layer that a
+    // later one could pass behind writes the depth of its fully opaque pixels,
+    // so the later one is hidden there. Only Normal layers hide what is
+    // behind them; the last layer has nothing after it to hide; a layer
+    // below full opacity has no opaque pixels; and wireframe draws edges.
+    for (std::size_t index = 0U;
+         !wireframe && index + 1U < composite_draws_.size(); ++index) {
+        const auto& composite = composite_draws_[index];
+        if (composite.blend != scene::BlendMode::Normal
+            || opacity(composite.instance.style) < 1.0F) {
+            continue;
+        }
+        if (!record_composite(composite, true, true)) return false;
+    }
+    for (std::size_t index = 0U; index < composite_draws_.size(); ++index) {
+        if (!record_composite(composite_draws_[index], false,
+                index + 1U < composite_draws_.size())) {
             return false;
         }
     }

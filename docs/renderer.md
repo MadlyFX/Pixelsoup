@@ -83,6 +83,17 @@ destination pixels (non-Normal blend modes, or any media clip, since a decoded
 frame may carry alpha even at full layer opacity) is queued instead, sorted
 back-to-front with document order and insertion order as tie-breakers, and
 drawn as its own depth-tested pass with its own fixed-function blend equation.
+These layers write no depth while they composite, so the sort alone would
+draw two that cross through each other one wholly over the other, swapping as
+the camera moves. Before compositing, every Normal-blend layer at full layer
+opacity except the last therefore draws its fully opaque pixels (alpha that
+an 8-bit target would still store as 255) into depth alone, using the same
+shader with `BatchConstants.w` set. The bias depth-only occluders use keeps
+that pass off each layer's own plane, so a layer never hides itself and
+clips stacked on one screen are still ordered by the composite. A crossing
+media screen and Background card then hide each other wherever either is
+opaque. Translucent pixels still rely on the sort, so where a translucent
+edge crosses in front of a layer drawn after it, the later layer covers it.
 Lighting is a small, deliberately bounded PBR core in `scene.frag.hlsl` -
 Trowbridge-Reitz distribution, height-correlated Smith visibility, Schlick
 Fresnel, Lambert diffuse, a two-colour hemisphere ambient term standing in for

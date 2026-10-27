@@ -1817,6 +1817,48 @@ void a_background_fill_colours_its_surface() {
                        centre_rgb(empty_image), 1));
 }
 
+void crossing_blended_cards_hide_each_other_like_opaque_ones() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    // Two cards turned opposite ways about Y cross down the middle of the
+    // frame. Drawn opaque, the depth buffer settles each side; blended, the
+    // fully opaque pixels have to settle it the same way.
+    const auto render_crossing = [&](scene::MaterialAlphaMode mode,
+                                     float yaw) {
+        auto scn = compositing_scene(canvas);
+        add_emissive_quad(scn, scene::Vec3{0.3F, 0.0F, 0.0F}, 0.0F,
+                          mediaserver::doc::NodeId{1U});
+        add_emissive_quad(scn, scene::Vec3{0.0F, 0.3F, 0.0F}, 0.0F,
+                          mediaserver::doc::NodeId{2U});
+        for (std::size_t index = 0U; index < 2U; ++index) {
+            auto& card = scn.instances[index];
+            card.world = scene::multiply(
+                scene::rotation(index == 0U ? yaw : -yaw, 0.0F, 0.0F),
+                scene::scaling(scene::Vec3{3.0F, 3.0F, 1.0F}));
+            card.normal = scene::normal_basis(card.world);
+            card.material.alpha_mode = mode;
+        }
+        return render_slice(device, scn, scene::whole(canvas), canvas.width,
+                            canvas.height);
+    };
+    for (const float yaw : {0.05F, -0.05F}) {
+        const auto opaque =
+            render_crossing(scene::MaterialAlphaMode::Opaque, yaw);
+        const auto blended =
+            render_crossing(scene::MaterialAlphaMode::Blend, yaw);
+        // The two sides really are different cards.
+        RENDER_CHECK(rgb_at(opaque, 16U, 32U) != rgb_at(opaque, 48U, 32U));
+        for (const core::u32 x : {16U, 48U}) {
+            const auto expected = rgb_at(opaque, x, 32U);
+            const auto actual = rgb_at(blended, x, 32U);
+            for (std::size_t channel = 0U; channel < 3U; ++channel) {
+                RENDER_CHECK(channel_difference(
+                                 actual[channel], expected[channel]) <= 1);
+            }
+        }
+    }
+}
+
 void every_layer_blend_mode_uses_its_real_equation() {
     auto device = open_device();
     constexpr scene::Canvas canvas{64U, 64U};
@@ -3307,7 +3349,7 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 40U> cases{{
+constexpr std::array<Case, 41U> cases{{
     {"renderers on one device share resident geometry",
      &renderers_on_one_device_share_resident_geometry},
     {"shadow maps are reused until what they draw changes",
@@ -3350,6 +3392,8 @@ constexpr std::array<Case, 40U> cases{{
      &imported_texture_roles_reach_pixels_with_their_correct_encoding},
     {"a Background fill colours its surface",
      &a_background_fill_colours_its_surface},
+    {"crossing blended cards hide each other like opaque ones",
+     &crossing_blended_cards_hide_each_other_like_opaque_ones},
     {"every layer blend mode uses its real equation",
      &every_layer_blend_mode_uses_its_real_equation},
     {"transparent order is back to front not vector order",
