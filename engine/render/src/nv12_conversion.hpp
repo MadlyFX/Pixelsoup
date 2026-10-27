@@ -3,8 +3,10 @@
 #include <mediaserver/render/image_decode.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <span>
+#include <vector>
 
 namespace mediaserver::render::detail {
 
@@ -158,6 +160,119 @@ struct SourcePlane final {
         return out;
     } catch (...) {
         return {};
+    }
+}
+
+// Halves a frame decoded into system memory, for a clip held at half
+// resolution: each output sample is the rounded mean of the 2x2 block it
+// covers, plane by plane, so the chroma keeps its own subsampling relative to
+// the smaller luma. An odd extent rounds up and the last row or column
+// averages with itself. Integer arithmetic throughout, so every node produces
+// the same bytes.
+//
+// Eight-bit RGBA and the two-plane NV12/P010 layouts are halved. Anything else
+// - a half-float still - is returned unchanged rather than averaged as the
+// wrong type; only video is held at half resolution.
+[[nodiscard]] inline bool halve_decoded_frame(DecodedFrame& frame) noexcept {
+    if (!frame.valid() || frame.gpu.has_value()) {
+        return false;
+    }
+    const bool planar = planar_video(frame.layout);
+    if (!planar && frame.layout != DecodedPixelLayout::Rgba8) {
+        return false;
+    }
+    // One plane: `channels` interleaved samples of `sample_bytes` each.
+    struct Plane final {
+        core::u32 width;
+        core::u32 height;
+        core::u32 channels;
+    };
+    const core::u32 sample_bytes =
+        planar ? video_sample_bytes(frame.layout) : 1U;
+    const auto plane_bytes = [sample_bytes](const Plane& plane) {
+        return static_cast<std::size_t>(plane.width) * plane.height *
+            plane.channels * sample_bytes;
+    };
+    const auto half = [](core::u32 extent) { return (extent + 1U) / 2U; };
+    std::array<Plane, 2U> planes{};
+    std::size_t count = 1U;
+    if (planar) {
+        planes[0] = Plane{frame.width, frame.height, 1U};
+        planes[1] = Plane{frame.chroma.width, frame.chroma.height, 2U};
+        count = 2U;
+    } else {
+        planes[0] = Plane{frame.width, frame.height, 4U};
+    }
+    std::size_t input_bytes = 0U;
+    std::size_t output_bytes = 0U;
+    for (std::size_t index = 0U; index < count; ++index) {
+        input_bytes += plane_bytes(planes[index]);
+        output_bytes += plane_bytes(Plane{half(planes[index].width),
+                                          half(planes[index].height),
+                                          planes[index].channels});
+    }
+    if (input_bytes != frame.pixels.size()) {
+        return false;
+    }
+    try {
+        std::vector<core::u8> output(output_bytes);
+        const auto read = [sample_bytes](const core::u8* at) -> core::u32 {
+            return sample_bytes == 1U
+                ? at[0]
+                : static_cast<core::u32>(at[0]) |
+                    (static_cast<core::u32>(at[1]) << 8U);
+        };
+        const auto write = [sample_bytes](core::u8* at, core::u32 value) {
+            at[0] = static_cast<core::u8>(value & 0xffU);
+            if (sample_bytes == 2U) {
+                at[1] = static_cast<core::u8>(value >> 8U);
+            }
+        };
+        const core::u8* source = frame.pixels.data();
+        core::u8* destination = output.data();
+        for (std::size_t index = 0U; index < count; ++index) {
+            const Plane& plane = planes[index];
+            const core::u32 out_width = half(plane.width);
+            const core::u32 out_height = half(plane.height);
+            const std::size_t texel = plane.channels * sample_bytes;
+            const std::size_t row = plane.width * texel;
+            for (core::u32 y = 0U; y < out_height; ++y) {
+                const core::u32 top = y * 2U;
+                const core::u32 bottom = std::min(top + 1U, plane.height - 1U);
+                for (core::u32 x = 0U; x < out_width; ++x) {
+                    const core::u32 left = x * 2U;
+                    const core::u32 right =
+                        std::min(left + 1U, plane.width - 1U);
+                    for (core::u32 channel = 0U; channel < plane.channels;
+                         ++channel) {
+                        const std::size_t offset = channel * sample_bytes;
+                        const core::u32 sum =
+                            read(source + top * row + left * texel + offset) +
+                            read(source + top * row + right * texel + offset) +
+                            read(source + bottom * row + left * texel + offset) +
+                            read(source + bottom * row + right * texel + offset);
+                        write(destination +
+                                  (static_cast<std::size_t>(y) * out_width + x) *
+                                      texel +
+                                  offset,
+                              (sum + 2U) / 4U);
+                    }
+                }
+            }
+            source += plane_bytes(plane);
+            destination +=
+                plane_bytes(Plane{out_width, out_height, plane.channels});
+        }
+        frame.pixels = std::move(output);
+        frame.width = half(frame.width);
+        frame.height = half(frame.height);
+        if (planar) {
+            frame.chroma = ChromaExtent{half(frame.chroma.width),
+                                        half(frame.chroma.height)};
+        }
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 

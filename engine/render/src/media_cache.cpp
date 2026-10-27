@@ -422,8 +422,10 @@ struct MediaCache::AsyncDecodeState final
             if(authored_generation_ != generation) {
                 auto paths=std::make_shared<std::vector<std::string>>();
                 paths->reserve(media.size());
-                for(const auto& clip:media) if(!clip.source.empty() &&
-                    std::find(paths->begin(),paths->end(),clip.source)==paths->end()) paths->push_back(clip.source);
+                for(const auto& clip:media) if(!clip.source.empty()) {
+                    auto decoded=media_decode_source(clip);
+                    if(std::find(paths->begin(),paths->end(),decoded)==paths->end()) paths->push_back(std::move(decoded));
+                }
                 refresh_sources_=std::move(paths); authored_generation_=generation;
                 ++generation_; ready_.clear(); ready_bytes_=0; refreshed_=refresh_sources_->empty();
             }
@@ -1172,7 +1174,7 @@ void MediaCache::release_unauthored(
         std::vector<std::string> authored;
         authored.reserve(media.size());
         for (const auto& clip : media) {
-            if (!clip.source.empty()) authored.push_back(clip.source);
+            if (!clip.source.empty()) authored.push_back(media_decode_source(clip));
         }
         std::sort(authored.begin(), authored.end());
         authored.erase(std::unique(authored.begin(), authored.end()),

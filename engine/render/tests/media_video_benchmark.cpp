@@ -1,3 +1,10 @@
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <dxgi1_4.h>
+#pragma comment(lib, "dxgi.lib")
+#endif
+
 #include <mediaserver/render/scene_renderer.hpp>
 
 #include <mediaserver/rhi/device.hpp>
@@ -46,6 +53,7 @@ struct Options final {
     bool radial_plates{};
     bool buffered_output{};
     bool d3d12{};
+    bool half_resolution{};
 };
 
 [[nodiscard]] std::size_t parse_count(std::string_view text) {
@@ -71,6 +79,7 @@ struct Options final {
             "[--video PATH]... [--warmup N] [--frames N] "
             "[--cadence-fps FPS] "
             "[--hold-frame] [--radial-plates] [--buffered-output] [--d3d12] "
+            "[--half-resolution] "
             "[--second-clip-offset N] [--min-ready-ratio 0..1] "
             "[--max-render-ms MS]"};
     }
@@ -92,6 +101,10 @@ struct Options final {
         }
         if (argument == "--d3d12") {
             options.d3d12 = true;
+            continue;
+        }
+        if (argument == "--half-resolution") {
+            options.half_resolution = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -123,6 +136,40 @@ struct Options final {
         }
     }
     return options;
+}
+
+// Device-local memory this process holds, summed over adapters, in MiB. The
+// decoder's own surfaces are allocated by the driver on FFmpeg's behalf, so
+// this is the only number that includes the read-ahead held on the device.
+[[nodiscard]] double process_vram_mib() {
+#if defined(_WIN32)
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(
+            __uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        return -1.0;
+    }
+    UINT64 usage = 0U;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT index = 0U;
+         factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND;
+         ++index) {
+        IDXGIAdapter3* queried = nullptr;
+        if (SUCCEEDED(adapter->QueryInterface(
+                __uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&queried)))) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+            if (SUCCEEDED(queried->QueryVideoMemoryInfo(
+                    0U, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+                usage += info.CurrentUsage;
+            }
+            queried->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return static_cast<double>(usage) / 1048576.0;
+#else
+    return -1.0;
+#endif
 }
 
 [[nodiscard]] rhi::Device open_device(bool d3d12) {
@@ -211,6 +258,7 @@ struct Measurements final {
     double submit_wait_ms_max{};
     std::size_t peak_gpu_resident_bytes{};
     std::size_t peak_cpu_ready_bytes{};
+    double peak_vram_mib{};
 };
 
 void record_cache_result(
@@ -260,6 +308,7 @@ void record_cache_result(
                     / static_cast<double>(native_rate->denominator)
                : 24.0);
     auto device = open_device(options.d3d12);
+    const double idle_vram_mib = process_vram_mib();
     auto program_created = render::SceneRenderer::create(
         device, 160U, 90U, benchmark_limits());
     auto stage_created = render::SceneRenderer::create(
@@ -271,6 +320,11 @@ void record_cache_result(
     auto stage = std::move(stage_created).value();
     auto frame = video_scene(
         options.paths, options.second_clip_offset, options.radial_plates);
+    if (options.half_resolution) {
+        for (auto& clip : frame.media) {
+            clip.resolution = scene::MediaResolution::Half;
+        }
+    }
     if (options.buffered_output) {
         render::configure_buffered_output_media_decode();
     }
@@ -357,6 +411,8 @@ void record_cache_result(
             measured.peak_cpu_ready_bytes = std::max(
                 measured.peak_cpu_ready_bytes,
                 render::media_decode_stats().ready_bytes);
+            measured.peak_vram_mib =
+                std::max(measured.peak_vram_mib, process_vram_mib());
         }
 
         next_tick += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -399,6 +455,7 @@ void record_cache_result(
               << " hold_frame=" << (options.hold_frame ? 1 : 0)
               << " radial_plates=" << (options.radial_plates ? 1 : 0)
               << " buffered_output=" << (options.buffered_output ? 1 : 0)
+              << " half_resolution=" << (options.half_resolution ? 1 : 0)
               << " warmup=" << options.warmup
               << " measured_frames=" << options.frames
               << " simultaneous_clips=" << frame.media.size() << '\n'
@@ -426,6 +483,10 @@ void record_cache_result(
               << " cpu_ready_frames=" << decode_after.ready_frames
               << " peak_cpu_ready_bytes=" << measured.peak_cpu_ready_bytes
               << " cpu_byte_budget=" << decode_after.byte_budget << '\n'
+              << "idle_vram_mib=" << idle_vram_mib
+              << " peak_vram_mib=" << measured.peak_vram_mib
+              << " peak_vram_growth_mib="
+              << measured.peak_vram_mib - idle_vram_mib << '\n'
               << "wall_seconds=" << elapsed_seconds << '\n';
 
     bool passed = true;

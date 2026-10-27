@@ -796,6 +796,12 @@ inline constexpr std::string_view source_in = "source_in";
 // fade to black.
 inline constexpr std::string_view fade_in = "fade_in";
 inline constexpr std::string_view fade_out = "fade_out";
+// The size a video clip is held at once decoded: "full", or "half" to average
+// each 2x2 block as the frame is decoded and hold a quarter of the memory. A
+// missing property is full. Stills ignore it.
+inline constexpr std::string_view media_resolution = "media_resolution";
+inline constexpr std::string_view media_resolution_full = "full";
+inline constexpr std::string_view media_resolution_half = "half";
 
 // ---------------------------------------------------------------------------
 // scene.channel

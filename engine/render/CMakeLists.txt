@@ -38,6 +38,7 @@ add_library(mediaserver_render STATIC
     src/media_source.cpp
     src/exr_decode.cpp
     src/ffmpeg_source.cpp
+    src/d3d12_video_halve.cpp
     src/model_mips.cpp
     src/model_compression.cpp
     src/model_package.cpp

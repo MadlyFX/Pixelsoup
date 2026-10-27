@@ -349,6 +349,7 @@ private:
         LayerStyle style{};
         bool locked{};
         bool visible{true};
+        MediaResolution resolution{MediaResolution::Full};
     };
 
     struct LaneEntry final {

@@ -375,4 +375,20 @@ class MediaCache final {
     MediaCacheStats stats_{};
 };
 
+// The source string a clip decodes from: its file, plus the resolution it is
+// held at. Every caller that resolves, prewarms or retires a clip names it
+// this way, so a half-resolution clip and a full one on the same file never
+// share a decoded frame.
+[[nodiscard]] inline std::string media_decode_source(
+    const std::string &source, scene::MediaResolution resolution) {
+    return resolution == scene::MediaResolution::Half && !source.empty()
+        ? half_resolution_source(source)
+        : source;
+}
+
+[[nodiscard]] inline std::string media_decode_source(
+    const scene::MediaInstance &clip) {
+    return media_decode_source(clip.source, clip.resolution);
+}
+
 } // namespace mediaserver::render

@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // The decode seam: a clip's (source, frame_index) turned into pixels.
@@ -134,7 +135,40 @@ class ImageSequenceSource final : public MediaSource {
 // The media source the MediaCache uses by default: routes each source to the
 // image-sequence decoder or the video decoder by file extension, so a clip can
 // be a plate sequence or an mp4 without the renderer knowing which.
+//
+// A source string may name a video held at half resolution, built by
+// half_resolution_source. It is a different picture from the same file at
+// full size, so it is a source of its own here: its own decoder, read-ahead
+// and cache keys. Carried inside the string so every layer that already keys
+// by source keeps that key distinct without learning about resolution. A
+// still or image sequence ignores the request and decodes at full size.
 [[nodiscard]] std::unique_ptr<MediaSource> make_media_source();
+
+struct MediaSourceVariant final {
+    std::string_view path;
+    bool half_resolution{};
+};
+
+// '|' cannot appear in a Windows path, and nothing here builds one with it.
+inline constexpr std::string_view half_resolution_suffix = "|half";
+
+[[nodiscard]] inline std::string half_resolution_source(std::string_view path) {
+    std::string result{path};
+    result += half_resolution_suffix;
+    return result;
+}
+
+[[nodiscard]] inline MediaSourceVariant media_source_variant(
+    std::string_view source) noexcept {
+    if (source.size() > half_resolution_suffix.size() &&
+        source.substr(source.size() - half_resolution_suffix.size()) ==
+            half_resolution_suffix) {
+        return MediaSourceVariant{
+            source.substr(0U, source.size() - half_resolution_suffix.size()),
+            true};
+    }
+    return MediaSourceVariant{source, false};
+}
 
 // Process-wide CPU decode residency. Video workers and their immutable ready
 // frames are shared by source path, so Program, Stage, and compositor layers do

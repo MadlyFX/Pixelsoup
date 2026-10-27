@@ -991,6 +991,14 @@ scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
 [Editing clips on the timeline](#editing-clips-on-the-timeline).
 
+A video clip's **Inspector > Content > Resolution** chooses the size its decoded
+frames are held at. **Half** holds a quarter of the video memory per frame -
+useful for a plate that is always shown small, or on a node short of memory -
+at the cost of a softer picture wherever the clip is shown larger than half its
+source size. It does not make decoding any cheaper. Every node honours the
+choice, so the wall stays consistent. See
+[Holding a video clip at half resolution](media-playback.md#holding-a-video-clip-at-half-resolution).
+
 Select a built-in generator such as a box or plane and open **Inspector > Material** to assign Base color, Metal / rough, Normal, Occlusion or Emission textures. Images are sampled using the generator's UVs, and **Clear** removes an assigned channel. Metal / rough uses roughness in green and metallic in blue; normal maps use tangent space. PNG, JPEG, TGA and BMP images are supported. Keep the referenced image available at the same path on every render node.
 
 Select one imported model and open **Inspector > Model Materials** to assign

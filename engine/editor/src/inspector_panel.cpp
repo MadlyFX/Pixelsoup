@@ -1546,6 +1546,58 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
                        static_cast<std::size_t>(std::max(length, 0))},
                    sequence_mixed);
     }
+    // How large a video clip is held once decoded. A clip with a native rate
+    // is a video file; stills and image sequences are always held whole.
+    if (element.kind == ElementKind::Media &&
+        element.source_frame_rate.has_value()) {
+        std::vector<const ElementInfo*> targets;
+        bool resolution_mixed = false;
+        for (const ElementInfo& selected : selected_) {
+            if (selected.locked || selected.kind != ElementKind::Media ||
+                !selected.source_frame_rate.has_value()) {
+                continue;
+            }
+            if (!targets.empty() &&
+                targets.front()->media_resolution != selected.media_resolution) {
+                resolution_mixed = true;
+            }
+            targets.push_back(&selected);
+        }
+        if (resolution_mixed) {
+            ++frame.mixed_fields;
+        }
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        const float label_width =
+            std::clamp(row.width * label_fraction, label_min, label_max);
+        ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
+                  "Resolution", ctx.theme().text_muted);
+        const gui::Rect well{row.x + label_width, row.y + 1.0F,
+                             std::max(row.width - label_width, 1.0F),
+                             row.height - 2.0F};
+        constexpr std::array<std::string_view, 2U> sizes{{"Full", "Half"}};
+        std::size_t next = resolution_mixed
+            ? sizes.size()
+            : (element.media_resolution == scene::MediaResolution::Half ? 1U
+                                                                        : 0U);
+        if (ctx.dropdown(mix(id_, "media resolution", element.node.value()),
+                         well, sizes, next) &&
+            next < sizes.size() && !element.locked) {
+            const std::string value{
+                next == 1U ? scene::schema::media_resolution_half
+                           : scene::schema::media_resolution_full};
+            for (const ElementInfo* const target : targets) {
+                frame.text_edits.push_back(
+                    {target->node,
+                     std::string{scene::schema::media_resolution}, value});
+            }
+        }
+        ctx.tooltip(well,
+                    "Half holds each decoded frame at half width and height: "
+                    "a quarter of the video memory, but softer wherever the "
+                    "clip is shown larger than half its source size. "
+                    "Decoding costs the same.");
+    }
 }
 
 void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,

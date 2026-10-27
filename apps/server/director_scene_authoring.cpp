@@ -322,6 +322,19 @@ map_transport(editor::TransportRequest request) noexcept {
     } else if (edit.property == scene::schema::source && edit.text.has_value()) {
         return schedule_model_source_edit(scheduler, edit.node, *edit.text,
             cmd::TransactionId{edit.gesture}, apply_at, coalescing);
+    } else if (edit.property == scene::schema::media_resolution && edit.text.has_value()) {
+        // Only a clip has a decoded size, and only the two named sizes are
+        // readable; anything else would make the clip node unreadable. Full
+        // is the absence of the property, so a project that never halves a
+        // clip carries nothing new.
+        if (existing->type != scene::schema::media_type) return true;
+        if (*edit.text == scene::schema::media_resolution_half) {
+            updated.properties.insert_or_assign(edit.property, doc::PropertyValue{*edit.text});
+        } else if (*edit.text == scene::schema::media_resolution_full) {
+            updated.properties.erase(edit.property);
+        } else {
+            return true;
+        }
     } else if (edit.property == scene::schema::ies_source && edit.text.has_value()) {
         if (existing->type != scene::schema::light_type || edit.text->size() > 1024U) return true;
         updated.properties.insert_or_assign(edit.property, doc::PropertyValue{*edit.text});

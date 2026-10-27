@@ -1690,6 +1690,13 @@ void SceneModel::put(const doc::Node& node) {
         media.style = read_style(reader);
         media.locked = reader.boolean(schema::locked, false);
         media.visible = reader.boolean(schema::visible, true);
+        const auto resolution = reader.text(
+            schema::media_resolution, schema::media_resolution_full);
+        if (resolution == schema::media_resolution_half) {
+            media.resolution = MediaResolution::Half;
+        } else if (resolution != schema::media_resolution_full) {
+            reader.fail();
+        }
         parsed = Entry{media};
     } else if (node.type == schema::model_type) {
         ModelEntry model{};
@@ -4754,7 +4761,7 @@ Scene SceneModel::evaluate(
                             time, at, clip->timing, clip->frame_rate,
                             clip->sequence_start, clip->sequence_count),
                         id, clip->asset, clip->sequence_start,
-                        clip->sequence_count, distance};
+                        clip->sequence_count, distance, clip->resolution};
                     const auto position = std::lower_bound(
                         scene.media_prewarm.begin(), scene.media_prewarm.end(), request,
                         [](const MediaPrewarm& a, const MediaPrewarm& b) {
@@ -4851,7 +4858,9 @@ Scene SceneModel::evaluate(
                 clip->locked || projection->second.lane_locked
                     || (parent != nullptr && parent->locked),
                 clip->parent_group,
-                clip->group_order});
+                clip->group_order,
+                false,
+                clip->resolution});
             continue;
         }
 
