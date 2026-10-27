@@ -78,6 +78,36 @@ void a_canvas_ray_passes_through_the_point_drawn_at_that_pixel() {
     RAY_CHECK(!scene::canvas_ray(camera, scene::Canvas{}, 1.0F, 1.0F));
 }
 
+void an_orthographic_ray_runs_along_the_view_from_under_its_pixel() {
+    // A Top view: looking straight down from forty metres, eight metres tall.
+    scene::Camera camera{};
+    camera.eye = scene::Vec3{2.0F, 40.0F, -1.0F};
+    camera.target = scene::Vec3{2.0F, 0.0F, -1.0F};
+    camera.up = scene::Vec3{0.0F, 0.0F, -1.0F};
+    camera.near_plane = 0.05F;
+    camera.far_plane = 80.0F;
+    camera.orthographic_height = 8.0F;
+    for (const scene::Vec3 point :
+         {scene::Vec3{2.0F, 0.0F, -1.0F}, scene::Vec3{4.5F, 1.5F, -3.0F},
+          scene::Vec3{-3.0F, -6.0F, 2.5F}}) {
+        const auto projected = scene::project_to_canvas(camera, canvas, point);
+        const auto ray =
+            scene::canvas_ray(camera, canvas, projected.x, projected.y);
+        RAY_CHECK(ray.has_value());
+        // Parallel to the view, wherever the pixel is.
+        RAY_CHECK(near(ray->direction, scene::Vec3{0.0F, -1.0F, 0.0F}));
+        // Starting on the eye plane, directly above the point.
+        RAY_CHECK(near(ray->origin.y, 40.0F, 1.0e-3F));
+        RAY_CHECK(near(ray->origin.x, point.x, 1.0e-3F));
+        RAY_CHECK(near(ray->origin.z, point.z, 1.0e-3F));
+    }
+    // A pixel's width apart on screen is the view's world scale apart.
+    const auto a = scene::canvas_ray(camera, canvas, 100.0F, 500.0F);
+    const auto b = scene::canvas_ray(camera, canvas, 101.0F, 500.0F);
+    RAY_CHECK(a.has_value() && b.has_value());
+    RAY_CHECK(near(b->origin.x - a->origin.x, 8.0F / 1080.0F, 1.0e-5F));
+}
+
 void a_box_is_hit_on_its_near_face_or_from_inside_on_its_far_wall() {
     const scene::Ray outside{scene::Vec3{0.25F, 3.0F, 0.0F},
                              scene::Vec3{0.0F, -1.0F, 0.0F}};
@@ -400,9 +430,11 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"a canvas ray passes through the point drawn at that pixel",
      &a_canvas_ray_passes_through_the_point_drawn_at_that_pixel},
+    {"an orthographic ray runs along the view from under its pixel",
+     &an_orthographic_ray_runs_along_the_view_from_under_its_pixel},
     {"a box is hit on its near face or from inside on its far wall",
      &a_box_is_hit_on_its_near_face_or_from_inside_on_its_far_wall},
     {"each primitive is hit where build_mesh puts its surface",

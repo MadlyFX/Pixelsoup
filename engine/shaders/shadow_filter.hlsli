@@ -283,7 +283,9 @@ float contact_shadow_visibility(float3 position, float3 normal, float3 to_light,
         const float depth = contact_depth_texture.Load(int3(pixel, 0));
         if (depth <= 0.0) continue;
         const float3 hit = contact_world((float2(pixel) + 0.5) * pitch + lighting_canvas.zw, depth);
-        const float separation = dot(ray - hit, normalize(hit - eye_position.xyz));
+        const float3 along_view = eye_position.w > 0.5
+            ? normalize(hit - eye_position.xyz) : -eye_position.xyz;
+        const float separation = dot(ray - hit, along_view);
         // A coplanar receiver cannot occlude itself, regardless of ray slope.
         if (dot(hit - position, normal) > 0.001 && separation > 0.001
             && separation < contact_shadow.y) {

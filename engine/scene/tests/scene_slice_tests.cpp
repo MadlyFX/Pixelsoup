@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -429,12 +430,163 @@ void no_lens_profile_preserves_the_legacy_tracked_camera_path_exactly() {
                 == scene::view_for_slice(lens_aware, wall, scene::whole(wall)));
 }
 
+// A plan view of a 1200 x 900 canvas, ten metres tall, looking down -Z from
+// ten metres back. Distinct from the default camera in every field it uses.
+[[nodiscard]] scene::Camera plan_camera() noexcept {
+    scene::Camera camera{};
+    camera.eye = scene::Vec3{1.0F, 2.0F, 10.0F};
+    camera.target = scene::Vec3{1.0F, 2.0F, 0.0F};
+    camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    camera.near_plane = 0.5F;
+    camera.far_plane = 40.5F;
+    camera.orthographic_height = 10.0F;
+    return camera;
+}
+
+constexpr scene::Canvas plan_canvas{1'200U, 900U};
+
+void an_orthographic_camera_maps_world_extent_without_perspective() {
+    const scene::Camera camera = plan_camera();
+    SLICE_CHECK(scene::valid(camera) && scene::orthographic(camera));
+    // Ten metres over 900 pixels, so 13.333 m across 1200: the top edge is
+    // five metres above the target and the right edge 6.667 m beside it.
+    const auto top_right = scene::project_to_canvas(
+        camera, plan_canvas, scene::Vec3{1.0F + 20.0F / 3.0F, 7.0F, 0.0F});
+    SLICE_CHECK(std::abs(top_right.x - 1200.0F) <= 1.0e-2F);
+    SLICE_CHECK(std::abs(top_right.y) <= 1.0e-2F);
+    // No foreshortening: the same offset lands on the same pixel at any depth.
+    for (const float z : {9.0F, 0.0F, -12.0F, -30.0F}) {
+        const auto sample = scene::project_to_canvas(
+            camera, plan_canvas, scene::Vec3{3.5F, 0.5F, z});
+        SLICE_CHECK(sample.visible);
+        SLICE_CHECK(std::abs(sample.x - (600.0F + 2.5F * 90.0F)) <= 1.0e-2F);
+        SLICE_CHECK(std::abs(sample.y - (450.0F + 1.5F * 90.0F)) <= 1.0e-2F);
+    }
+    // Reversed and linear: near is one, far is zero, and halfway is a half.
+    const auto depth_at = [&](float distance) {
+        return scene::project_to_canvas(camera, plan_canvas,
+                                        scene::Vec3{1.0F, 2.0F,
+                                                    10.0F - distance})
+            .depth;
+    };
+    SLICE_CHECK(std::abs(depth_at(0.5F) - 1.0F) <= 1.0e-6F);
+    SLICE_CHECK(std::abs(depth_at(40.5F)) <= 1.0e-6F);
+    SLICE_CHECK(std::abs(depth_at(20.5F) - 0.5F) <= 1.0e-6F);
+    // The perspective camera at the same pose foreshortens the far point.
+    scene::Camera perspective = camera;
+    perspective.orthographic_height = 0.0F;
+    const auto far_point = scene::project_to_canvas(
+        perspective, plan_canvas, scene::Vec3{3.5F, 0.5F, -30.0F});
+    SLICE_CHECK(far_point.x < 600.0F + 2.5F * 90.0F - 10.0F);
+    // Both matrices read as what they are.
+    SLICE_CHECK(scene::orthographic(
+        scene::view_for_slice(camera, plan_canvas, scene::whole(plan_canvas))
+            .projection));
+    SLICE_CHECK(!scene::orthographic(
+        scene::view_for_slice(perspective, plan_canvas,
+                              scene::whole(plan_canvas))
+            .projection));
+}
+
+void orthographic_slices_tile_and_share_their_edges() {
+    const scene::Camera camera = plan_camera();
+    const scene::CanvasRect left{0U, 0U, 700U, 900U};
+    const scene::CanvasRect right{700U, 0U, 500U, 900U};
+    const auto a = scene::window_for_slice(camera, plan_canvas, left);
+    const auto b = scene::window_for_slice(camera, plan_canvas, right);
+    SLICE_CHECK(a.right == b.left);
+    // Every slice puts a point where the whole canvas does.
+    for (const scene::Vec3 point :
+         {scene::Vec3{-4.0F, 5.5F, -3.0F}, scene::Vec3{2.2F, -1.0F, 4.0F},
+          scene::Vec3{6.0F, 0.0F, -20.0F}}) {
+        const auto whole =
+            scene::project_to_canvas(camera, plan_canvas, point);
+        const scene::CanvasRect owner = whole.x < 700.0F ? left : right;
+        const auto sliced =
+            scene::project_through_slice(camera, plan_canvas, owner, point);
+        SLICE_CHECK(std::abs(sliced.x - whole.x) <= 1.0e-3F);
+        SLICE_CHECK(std::abs(sliced.y - whole.y) <= 1.0e-3F);
+        SLICE_CHECK(std::abs(sliced.depth - whole.depth) <= 1.0e-6F);
+    }
+}
+
+void an_orthographic_jitter_slides_by_the_same_subpixel_either_way() {
+    const scene::Camera camera = plan_camera();
+    const scene::SubpixelJitter jitter{0.25F, -0.375F};
+    const scene::ViewMatrices from_window = scene::view_for_slice(
+        camera, plan_canvas, scene::whole(plan_canvas), jitter);
+    const scene::ViewMatrices from_matrix = scene::jittered(
+        scene::view_for_slice(camera, plan_canvas,
+                              scene::whole(plan_canvas)),
+        jitter, plan_canvas.width, plan_canvas.height);
+    for (core::u32 index = 0U; index < 16U; ++index) {
+        SLICE_CHECK(std::abs(from_matrix.projection.m[index] -
+                             from_window.projection.m[index]) <= 1.0e-6F);
+    }
+    const scene::Vec3 probe{2.0F, 3.0F, -5.0F};
+    const auto plain = scene::project_to_canvas(camera, plan_canvas, probe);
+    const auto shifted =
+        scene::project_to_canvas(from_matrix, plan_canvas, probe);
+    // The same directions the perspective form has: x against the window,
+    // y with it.
+    SLICE_CHECK(std::abs((shifted.x - plain.x) + jitter.x) <= 1.0e-3F);
+    SLICE_CHECK(std::abs((shifted.y - plain.y) - jitter.y) <= 1.0e-3F);
+}
+
+void an_orthographic_camera_is_checked_and_digested() {
+    scene::Camera camera = plan_camera();
+    SLICE_CHECK(std::abs(scene::units_per_canvas_pixel(camera, 1.0F, 900.0F) -
+                         10.0F / 900.0F) <= 1.0e-7F);
+    SLICE_CHECK(scene::units_per_canvas_pixel(camera, 1.0F, 900.0F) ==
+                scene::units_per_canvas_pixel(camera, 30.0F, 900.0F));
+    scene::Camera perspective = camera;
+    perspective.orthographic_height = 0.0F;
+    perspective.field_of_view = 0.125F;
+    SLICE_CHECK(std::abs(scene::units_per_canvas_pixel(perspective, 30.0F,
+                                                       900.0F) -
+                         30.0F * scene::units_per_canvas_pixel(
+                                     perspective, 1.0F, 900.0F)) <= 1.0e-5F);
+
+    // An orthographic box keeps one cross-section from near to far.
+    const auto corners = scene::frustum_corners(camera, 4.0F / 3.0F);
+    SLICE_CHECK(corners.valid);
+    SLICE_CHECK(std::abs(corners.points[0].x - corners.points[4].x) <=
+                1.0e-5F);
+    SLICE_CHECK(std::abs(corners.points[3].y - corners.points[7].y) <=
+                1.0e-5F);
+    SLICE_CHECK(std::abs(corners.points[3].y - 7.0F) <= 1.0e-5F);
+
+    // A negative or non-finite height, or a calibrated lens, is unusable.
+    scene::Camera negative = camera;
+    negative.orthographic_height = -1.0F;
+    SLICE_CHECK(!scene::valid(negative));
+    scene::Camera infinite = camera;
+    infinite.orthographic_height = std::numeric_limits<float>::infinity();
+    SLICE_CHECK(!scene::valid(infinite));
+    scene::Camera lensed = camera;
+    lensed.lens_profile = scene::LensProfile{};
+    SLICE_CHECK(scene::valid(*lensed.lens_profile));
+    SLICE_CHECK(!scene::valid(lensed));
+
+    // In the scene digest when set; absent, the digest is the historical one.
+    scene::Scene base{};
+    base.camera = perspective;
+    scene::Scene ortho = base;
+    ortho.camera.orthographic_height = 10.0F;
+    scene::Scene taller = ortho;
+    taller.camera.orthographic_height = 12.5F;
+    SLICE_CHECK(scene::digest(base) != scene::digest(ortho));
+    SLICE_CHECK(scene::digest(ortho) != scene::digest(taller));
+    scene::Scene again = base;
+    SLICE_CHECK(scene::digest(base) == scene::digest(again));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 18U> cases{{
     {"adjacent slices share a bit-identical frustum plane",
      &adjacent_slices_share_a_bit_identical_frustum_plane},
     {"a slice boundary is the same wherever it is cut",
@@ -462,6 +614,14 @@ constexpr std::array<Case, 14U> cases{{
      &distortion_expands_coverage_without_changing_the_rendered_projection},
     {"no lens profile preserves the legacy tracked camera path exactly",
      &no_lens_profile_preserves_the_legacy_tracked_camera_path_exactly},
+    {"an orthographic camera maps world extent without perspective",
+     &an_orthographic_camera_maps_world_extent_without_perspective},
+    {"orthographic slices tile and share their edges",
+     &orthographic_slices_tile_and_share_their_edges},
+    {"an orthographic jitter slides by the same subpixel either way",
+     &an_orthographic_jitter_slides_by_the_same_subpixel_either_way},
+    {"an orthographic camera is checked and digested",
+     &an_orthographic_camera_is_checked_and_digested},
 }};
 
 } // namespace

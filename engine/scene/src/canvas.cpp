@@ -31,7 +31,20 @@ constexpr core::u64 max_canvas_extent = 65'535U;
     if (!(camera.near_plane > 0.0F) || !(camera.far_plane > camera.near_plane)) {
         return false;
     }
+    if (!std::isfinite(camera.orthographic_height)
+        || camera.orthographic_height < 0.0F) {
+        return false;
+    }
     return length(camera.target - camera.eye) > 0.0F;
+}
+
+// Half the height the full canvas window spans: on the near plane for a
+// perspective camera, at every depth for an orthographic one.
+[[nodiscard]] float half_window_height(const Camera& camera) noexcept {
+    return orthographic(camera)
+        ? camera.orthographic_height * 0.5F
+        : camera.near_plane
+            * deterministic::tan_half_turns(camera.field_of_view);
 }
 
 [[nodiscard]] bool valid_window(const FrustumWindow& value) noexcept {
@@ -100,6 +113,22 @@ constexpr core::u64 max_canvas_extent = 65'535U;
         return identity_view();
     }
 
+    if (orthographic(camera)) {
+        // The window is in world units at every depth. View z is negative in
+        // front of the eye, so depth (far + z) / span is one at the near plane
+        // and zero at the far plane: the reversed contract, linear in depth.
+        Mat4 projection{};
+        projection.set(0U, 0U, 2.0F / width);
+        projection.set(0U, 3U, -(frustum.right + frustum.left) / width);
+        projection.set(1U, 1U, 2.0F / height);
+        projection.set(1U, 3U, -(frustum.top + frustum.bottom) / height);
+        projection.set(2U, 2U, 1.0F / depth_span);
+        projection.set(2U, 3U, frustum.far_plane / depth_span);
+        projection.set(3U, 3U, 1.0F);
+        const auto view = look_at(camera.eye, camera.target, camera.up);
+        return ViewMatrices{view, projection, multiply(projection, view)};
+    }
+
     const auto twice_near = frustum.near_plane + frustum.near_plane;
 
     Mat4 projection{};
@@ -136,6 +165,25 @@ constexpr core::u64 max_canvas_extent = 65'535U;
 }
 
 } // namespace
+
+bool orthographic(const Mat4& projection) noexcept {
+    return projection.at(3U, 2U) == 0.0F && projection.at(3U, 3U) == 1.0F
+        && projection.at(3U, 0U) == 0.0F && projection.at(3U, 1U) == 0.0F
+        && projection.at(0U, 0U) != 0.0F;
+}
+
+float units_per_canvas_pixel(const Camera& camera, float depth,
+                             float canvas_height) noexcept {
+    if (!valid(camera) || !(canvas_height > 0.0F) || !std::isfinite(depth)) {
+        return 0.0F;
+    }
+    const float result = orthographic(camera)
+        ? camera.orthographic_height / canvas_height
+        : 2.0F * std::max(depth, 0.0F)
+            * deterministic::tan_half_turns(camera.field_of_view)
+            / canvas_height;
+    return std::isfinite(result) ? result : 0.0F;
+}
 
 void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
                   Turns roll) noexcept {
@@ -215,7 +263,8 @@ bool valid(const Camera& camera) noexcept {
     if (!valid_camera_body(camera)) {
         return false;
     }
-    if (camera.lens_profile.has_value() && !valid(*camera.lens_profile)) {
+    if (camera.lens_profile.has_value()
+        && (orthographic(camera) || !valid(*camera.lens_profile))) {
         return false;
     }
     // Zero is what the deterministic tangent reports for a field of view at or
@@ -661,8 +710,7 @@ FrustumWindow window_for_slice(
     const auto canvas_height = static_cast<float>(canvas.height);
 
     // The full near-plane window the camera sees, before the slice narrows it.
-    const auto top = near_plane
-        * deterministic::tan_half_turns(camera.field_of_view);
+    const auto top = half_window_height(camera);
     const auto bottom = -top;
     const auto right = top * (canvas_width / canvas_height);
     const auto left = -right;
@@ -726,8 +774,7 @@ FrustumWindow window_for_slice(
     // node A's `x + width + jitter` is node B's `x + jitter`.
     const auto canvas_width = static_cast<float>(canvas.width);
     const auto canvas_height = static_cast<float>(canvas.height);
-    const auto top = camera.near_plane
-        * deterministic::tan_half_turns(camera.field_of_view);
+    const auto top = half_window_height(camera);
     const auto bottom = -top;
     const auto right = top * (canvas_width / canvas_height);
     const auto left = -right;
@@ -815,6 +862,16 @@ ViewMatrices jittered(
     ViewMatrices result = matrices;
     const auto offset_x = jitter.x * 2.0F / static_cast<float>(width);
     const auto offset_y = jitter.y * 2.0F / static_cast<float>(height);
+    if (orthographic(matrices.projection)) {
+        // The orthographic window's offset lives in the translation column,
+        // with the opposite sign: there `-(right + left) / span` carries it.
+        result.projection.set(0U, 3U,
+                              matrices.projection.at(0U, 3U) - offset_x);
+        result.projection.set(1U, 3U,
+                              matrices.projection.at(1U, 3U) - offset_y);
+        result.view_projection = multiply(result.projection, result.view);
+        return result;
+    }
     result.projection.set(0U, 2U, matrices.projection.at(0U, 2U) + offset_x);
     result.projection.set(1U, 2U, matrices.projection.at(1U, 2U) + offset_y);
     result.view_projection = multiply(result.projection, result.view);
@@ -908,8 +965,7 @@ FrustumWindow window_for_aspect(
         || !(aspect_ratio > 0.0F)) {
         return FrustumWindow{};
     }
-    const auto top =
-        camera.near_plane * deterministic::tan_half_turns(camera.field_of_view);
+    const auto top = half_window_height(camera);
     const auto right = top * aspect_ratio;
     return FrustumWindow{
         -right, right, -top, top, camera.near_plane, camera.far_plane};
@@ -994,10 +1050,12 @@ FrustumCorners frustum_corners(
                                  Vec3{1.0F, 0.0F, 0.0F});
     const auto up = cross(right, forward);
 
+    // An orthographic box has the same cross-section at both ends.
     const auto tangent = deterministic::tan_half_turns(camera.field_of_view);
-    const auto near_half_height = camera.near_plane * tangent;
+    const auto near_half_height = half_window_height(camera);
     const auto near_half_width = near_half_height * aspect_ratio;
-    const auto far_half_height = camera.far_plane * tangent;
+    const auto far_half_height =
+        orthographic(camera) ? near_half_height : camera.far_plane * tangent;
     const auto far_half_width = far_half_height * aspect_ratio;
 
     const auto corner = [&](float distance, float half_width,
@@ -1040,7 +1098,8 @@ FrustumCorners frustum_corners(const Camera& camera,
     const auto up = cross(right, forward);
     const auto corner = [&](float distance, float horizontal,
                             float vertical) noexcept {
-        const float scale = distance / window.near_plane;
+        const float scale =
+            orthographic(camera) ? 1.0F : distance / window.near_plane;
         const Vec3 centre = camera.eye + forward * distance;
         return centre + right * (horizontal * scale)
             + up * (vertical * scale);

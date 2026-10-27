@@ -10,14 +10,34 @@
 
 namespace mediaserver::editor {
 
+// How a Stage view projects. Top, Front and Side are orthographic and look
+// straight down -Y, along -Z and along -X; they keep the orbit's yaw and pitch
+// untouched, so returning to Perspective finds the view as it was left.
+enum class StageProjection : core::u8 {
+    Perspective,
+    Top,
+    Front,
+    Side,
+};
+
+[[nodiscard]] constexpr bool stage_orthographic(
+    StageProjection projection) noexcept {
+    return projection != StageProjection::Perspective;
+}
+
 // The Stage's free view: a pivot, the direction the eye sits in from it, and
-// how far away. Every navigation gesture is a change to these four values, so
-// orbiting after flying turns about a point straight ahead of the eye.
+// how far away. Every navigation gesture is a change to these values, so
+// orbiting after flying turns about a point straight ahead of the eye. In an
+// orthographic view `distance` is the zoom: the view shows the height a
+// perspective view would show at the pivot from that far away.
 struct StageOrbit final {
     scene::Vec3 target{};
     scene::Turns yaw{0.10F};
     scene::Turns pitch{0.06F};
     float distance{9.0F};
+    StageProjection projection{StageProjection::Perspective};
+
+    bool operator==(const StageOrbit&) const = default;
 };
 
 inline constexpr scene::Turns stage_field_of_view = 0.14F;
@@ -27,6 +47,10 @@ inline constexpr float stage_minimum_distance = 0.5F;
 inline constexpr float stage_maximum_distance = 500.0F;
 // Turning rate for every rotating gesture, in turns per pixel of travel.
 inline constexpr float stage_turn_per_pixel = 0.0015F;
+// How far behind the pivot an orthographic view's eye stands, so geometry on
+// either side of the pivot along the view stays between its near and far
+// planes. Half the Stage's far plane: nothing within 200 m is clipped.
+inline constexpr float stage_orthographic_standoff = 200.0F;
 // Fly speed in scene units per second, as the right-drag wheel sets it.
 inline constexpr float stage_default_fly_speed = 4.0F;
 inline constexpr float stage_minimum_fly_speed = 0.05F;
@@ -43,8 +67,47 @@ inline constexpr float stage_maximum_fly_speed = 200.0F;
                        orbit.distance * cp * cy};
 }
 
+// The direction a Stage view looks along, and its screen right and up.
+struct StageViewAxes final {
+    scene::Vec3 forward{};
+    scene::Vec3 right{};
+    scene::Vec3 up{};
+};
+
+[[nodiscard]] inline StageViewAxes stage_view_axes(
+    const StageOrbit& orbit) noexcept {
+    switch (orbit.projection) {
+    case StageProjection::Top:
+        // North (-Z) at the top of the screen, +X to the right.
+        return {{0.0F, -1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, -1.0F}};
+    case StageProjection::Front:
+        return {{0.0F, 0.0F, -1.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}};
+    case StageProjection::Side:
+        return {{-1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, -1.0F}, {0.0F, 1.0F, 0.0F}};
+    case StageProjection::Perspective:
+        break;
+    }
+    const scene::Vec3 forward =
+        -stage_eye_offset(orbit) * (1.0F / orbit.distance);
+    const scene::Vec3 right{scene::deterministic::cos_turns(orbit.yaw), 0.0F,
+                            -scene::deterministic::sin_turns(orbit.yaw)};
+    return {forward, right, scene::cross(right, forward)};
+}
+
 [[nodiscard]] inline scene::Vec3 stage_eye(const StageOrbit& orbit) noexcept {
+    if (stage_orthographic(orbit.projection)) {
+        return orbit.target -
+               stage_view_axes(orbit).forward * stage_orthographic_standoff;
+    }
     return orbit.target + stage_eye_offset(orbit);
+}
+
+// The world height an orthographic Stage view shows: what the perspective view
+// shows at its pivot, so switching between them keeps the scale on screen.
+[[nodiscard]] inline float stage_orthographic_height(
+    const StageOrbit& orbit) noexcept {
+    return 2.0F * orbit.distance *
+           scene::deterministic::tan_half_turns(stage_field_of_view);
 }
 
 // Orbit changes the viewpoint, not the scene's photographic exposure. Rebuild
@@ -55,12 +118,17 @@ inline constexpr float stage_maximum_fly_speed = 200.0F;
     scene::Camera camera = authored;
     camera.target = orbit.target;
     camera.eye = stage_eye(orbit);
-    camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    camera.up = stage_orthographic(orbit.projection)
+                    ? stage_view_axes(orbit).up
+                    : scene::Vec3{0.0F, 1.0F, 0.0F};
     camera.field_of_view = stage_field_of_view;
     camera.near_plane = 0.05F;
     camera.far_plane = 400.0F;
     // The free view uses its own field of view, not a tracked lens calibration.
     camera.lens_profile.reset();
+    camera.orthographic_height = stage_orthographic(orbit.projection)
+                                     ? stage_orthographic_height(orbit)
+                                     : 0.0F;
     return camera;
 }
 
@@ -130,7 +198,7 @@ struct StageNavigationStep final {
 };
 
 // World units per viewport pixel at the pivot, for an image `height` pixels
-// tall.
+// tall. The same expression is an orthographic view's scale everywhere.
 [[nodiscard]] inline float stage_units_per_pixel(const StageOrbit& orbit,
                                                  float height) noexcept {
     if (!(height > 0.0F)) {
@@ -142,8 +210,15 @@ struct StageNavigationStep final {
 
 // Moves the eye along the view by `amount` units, carrying the pivot ahead
 // once the eye reaches it, so the wheel can keep travelling forward.
+// An orthographic view zooms instead: it has nowhere to travel to.
 [[nodiscard]] inline StageOrbit stage_dolly(StageOrbit orbit,
                                             float amount) noexcept {
+    if (stage_orthographic(orbit.projection)) {
+        orbit.distance = std::clamp(orbit.distance - amount,
+                                    stage_minimum_distance,
+                                    stage_maximum_distance);
+        return orbit;
+    }
     const scene::Vec3 forward = -stage_eye_offset(orbit) * (1.0F / orbit.distance);
     const float distance = orbit.distance - amount;
     if (distance < stage_minimum_distance) {
@@ -195,15 +270,54 @@ struct WorldBounds final {
     const scene::Vec3 half = (bounds.maximum - bounds.minimum) * 0.5F;
     const float radius = std::max(scene::length(half), 0.25F);
     orbit.target = bounds.minimum + half;
-    orbit.distance = std::clamp(
-        radius * 1.1F /
-            scene::deterministic::sin_turns(stage_field_of_view * 0.5F),
-        stage_minimum_distance, stage_maximum_distance);
+    // An orthographic view only has to show the box across its height, not
+    // keep it inside a cone.
+    const float reach =
+        stage_orthographic(orbit.projection)
+            ? radius * 1.1F /
+                  scene::deterministic::tan_half_turns(stage_field_of_view)
+            : radius * 1.1F /
+                  scene::deterministic::sin_turns(stage_field_of_view * 0.5F);
+    orbit.distance =
+        std::clamp(reach, stage_minimum_distance, stage_maximum_distance);
+    return orbit;
+}
+
+// An orthographic view pans and zooms; it never turns. Every drag carries the
+// scene with the pointer, Alt+right drag and the wheel zoom, and the fly keys
+// pan (A D, Q E) and zoom (W S).
+[[nodiscard]] inline StageOrbit navigate_stage_orthographic(
+    StageOrbit orbit, const StageNavigationStep& step) noexcept {
+    const StageViewAxes axes = stage_view_axes(orbit);
+    switch (step.gesture) {
+    case StageNavigation::None:
+        return orbit;
+    case StageNavigation::Dolly:
+        return stage_dolly(orbit,
+                           (step.dx - step.dy) * orbit.distance * 0.005F);
+    case StageNavigation::Look:
+        orbit.target = orbit.target +
+                       (axes.right * step.move.x + axes.up * step.move.y) *
+                           (step.fly_speed * step.seconds);
+        orbit = stage_dolly(orbit, step.move.z * step.fly_speed * step.seconds);
+        [[fallthrough]];
+    case StageNavigation::Walk:
+    case StageNavigation::Orbit:
+    case StageNavigation::Pan:
+    case StageNavigation::Track:
+        orbit.target = orbit.target +
+                       axes.right * (-step.dx * step.units_per_pixel) +
+                       axes.up * (step.dy * step.units_per_pixel);
+        return orbit;
+    }
     return orbit;
 }
 
 [[nodiscard]] inline StageOrbit navigate_stage(
     StageOrbit orbit, const StageNavigationStep& step) noexcept {
+    if (stage_orthographic(orbit.projection)) {
+        return navigate_stage_orthographic(orbit, step);
+    }
     const float cy = scene::deterministic::cos_turns(orbit.yaw);
     const float sy = scene::deterministic::sin_turns(orbit.yaw);
     const scene::Vec3 forward =

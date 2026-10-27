@@ -118,7 +118,8 @@ namespace {
         }
     }
     // Alt+G / Alt+R / Alt+S clear location, rotation and scale, as in
-    // Blender. Alt with a letter produces no text, so these arrive as keys.
+    // Blender, and Alt+P / J / H / K choose a Stage view's projection. Alt
+    // with a letter produces no text, so these arrive as keys.
     // Ctrl excluded: AltGr arrives as Ctrl+Alt on Windows layouts.
     if ((modifiers & SDL_KMOD_ALT) != 0U &&
         (modifiers & SDL_KMOD_CTRL) == 0U) {
@@ -130,6 +131,18 @@ namespace {
         }
         if (code == SDLK_S) {
             return Key::ClearScale;
+        }
+        if (code == SDLK_P) {
+            return Key::ViewPerspective;
+        }
+        if (code == SDLK_J) {
+            return Key::ViewTop;
+        }
+        if (code == SDLK_H) {
+            return Key::ViewFront;
+        }
+        if (code == SDLK_K) {
+            return Key::ViewSide;
         }
     }
     switch (code) {

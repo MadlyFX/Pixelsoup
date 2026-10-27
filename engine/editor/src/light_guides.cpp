@@ -148,14 +148,17 @@ float directional_light_arrow_length(const scene::Camera& camera, Vec3 anchor,
     const Vec3 forward = scene::normalize(camera.target - camera.eye,
                                           {0, 0, -1});
     const float depth = scene::dot(anchor - camera.eye, forward);
-    const float tangent = scene::deterministic::tan_half_turns(camera.field_of_view);
-    if (!std::isfinite(depth) || !std::isfinite(tangent) ||
-        !(depth > 0.0F) || !(tangent > 0.0F) ||
-        !(viewport_height > 0.0F)) return 0.0F;
+    const float per_pixel =
+        scene::units_per_canvas_pixel(camera, depth, viewport_height);
+    if (!std::isfinite(depth) || !(depth > 0.0F) || !(per_pixel > 0.0F)) {
+        return 0.0F;
+    }
     // 60 viewport pixels at the anchor's depth. The depth cap keeps rays from
-    // reaching the eye when a wide lens or a small panel is used.
-    return std::min(depth * 2.0F * tangent * (60.0F / viewport_height),
-                    depth * 0.1F);
+    // reaching the eye when a wide lens or a small panel is used; it does not
+    // apply to an orthographic view, whose eye stands well back.
+    const float length = per_pixel * 60.0F;
+    return scene::orthographic(camera) ? length
+                                       : std::min(length, depth * 0.1F);
 }
 
 std::optional<std::array<scene::CanvasProjection, 2U>> project_light_guide_segment(

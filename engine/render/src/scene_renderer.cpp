@@ -4706,10 +4706,20 @@ bool SceneRenderer::render(
     scene_constants.contact_shadow[0] = renderer_settings.contact_shadow_length;
     scene_constants.contact_shadow[1] = renderer_settings.contact_shadow_thickness;
     scene_constants.contact_shadow[2] = 32.0F;
-    scene_constants.eye_position[0U] = render_view.eye.x;
-    scene_constants.eye_position[1U] = render_view.eye.y;
-    scene_constants.eye_position[2U] = render_view.eye.z;
-    scene_constants.eye_position[3U] = 1.0F;
+    // An orthographic view has no eye point to look from: every pixel sees
+    // along the view. w = 0 carries that direction, toward the viewer, in
+    // place of a position, and the shading reads it as the view vector.
+    if (scene::orthographic(render_view.matrices.projection)) {
+        scene_constants.eye_position[0U] = -render_view.forward.x;
+        scene_constants.eye_position[1U] = -render_view.forward.y;
+        scene_constants.eye_position[2U] = -render_view.forward.z;
+        scene_constants.eye_position[3U] = 0.0F;
+    } else {
+        scene_constants.eye_position[0U] = render_view.eye.x;
+        scene_constants.eye_position[1U] = render_view.eye.y;
+        scene_constants.eye_position[2U] = render_view.eye.z;
+        scene_constants.eye_position[3U] = 1.0F;
+    }
     scene_constants.sky_ambient[0U] = scene.environment.sky_color.x;
     scene_constants.sky_ambient[1U] = scene.environment.sky_color.y;
     scene_constants.sky_ambient[2U] = scene.environment.sky_color.z;
@@ -5421,7 +5431,12 @@ bool SceneRenderer::render(
                 const TemporalResolve::Sources sources{
                     &occlusion_->target(), &velocity_, &object_id_,
                     options.view ? color_.width() : scene.canvas.width,
-                    options.view ? color_.height() : scene.canvas.height};
+                    options.view ? color_.height() : scene.canvas.height,
+                    options.view
+                        ? orthographic_history_depth_tolerance(
+                              options.view->matrices.projection,
+                              color_.height())
+                        : 0.0F};
                 auto resolved = temporal_occlusion_->apply(*device_, commands,
                     options.history_slot, disposition, sources);
                 if (!resolved) return false;

@@ -648,6 +648,12 @@ void mix(core::u64& state, const Camera& value) noexcept {
     mix(state, value.shutter_seconds);
     mix(state, value.iso);
     mix(state, value.exposure_compensation_ev);
+    // Conditional, like the lens profile, so every perspective camera keeps
+    // its historical digest.
+    if (orthographic(value)) {
+        mix(state, 0x4F52'5448'4F47'5241ULL); // "ORTHOGRA"
+        mix(state, value.orthographic_height);
+    }
 }
 
 void mix(core::u64& state, const TrackedCamera& value) noexcept {

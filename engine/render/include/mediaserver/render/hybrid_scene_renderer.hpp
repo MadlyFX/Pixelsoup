@@ -32,6 +32,11 @@ enum class RendererReadinessCode : core::u8 {
     RequestedFeaturesUnavailable,
     AdvancedImplementationUnavailable,
     InvalidPolicy,
+    // The scene's own camera is orthographic. Level of detail, shadow cascade
+    // fitting and every node's projection assume a perspective camera, so an
+    // orthographic view is drawn only as an explicit view (the Stage's Top,
+    // Front and Side) over a perspective authored camera.
+    OrthographicCamera,
 };
 
 enum class RendererCapability : core::u64 {
@@ -65,6 +70,11 @@ struct RendererReadiness final {
     const scene::RendererSettings& settings,
     const rhi::DeviceCapabilities& capabilities,
     bool advanced_implementation_available = false) noexcept;
+
+// `readiness` for a frame drawn from `camera`: refused with
+// OrthographicCamera when that camera is orthographic, unchanged otherwise.
+[[nodiscard]] RendererReadiness readiness_for_camera(
+    RendererReadiness readiness, const scene::Camera& camera) noexcept;
 
 struct RenderFrameRequest final {
     const ConformanceCapture* conformance{};

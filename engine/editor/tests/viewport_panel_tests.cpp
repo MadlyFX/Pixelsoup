@@ -2643,15 +2643,121 @@ void stage_orbit_preserves_authored_exposure() {
     UI_CHECK(scene::camera_exposure_multiplier(moved) == scene::camera_exposure_multiplier(next));
 }
 
+void orthographic_views_look_along_their_axis_at_the_same_scale() {
+    scene::Camera authored{};
+    authored.exposure_compensation_ev = 1.5F;
+    editor::StageOrbit orbit{{1.0F, 2.0F, 3.0F}, 0.1F, 0.06F, 9.0F};
+    const scene::Camera perspective = editor::stage_camera_for(authored, orbit);
+    UI_CHECK(!scene::orthographic(perspective));
+    const scene::Canvas canvas{1600U, 900U};
+    const float height =
+        2.0F * 9.0F *
+        scene::deterministic::tan_half_turns(editor::stage_field_of_view);
+
+    struct Expected final {
+        editor::StageProjection projection;
+        scene::Vec3 forward;
+        // A world offset that moves right on screen, and one along the view
+        // that moves nothing.
+        scene::Vec3 rightward;
+        scene::Vec3 along;
+    };
+    constexpr std::array<Expected, 3U> views{{
+        {editor::StageProjection::Top, {0.0F, -1.0F, 0.0F},
+         {1.0F, 0.0F, 0.0F}, {0.0F, -7.0F, 0.0F}},
+        {editor::StageProjection::Front, {0.0F, 0.0F, -1.0F},
+         {1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, -7.0F}},
+        {editor::StageProjection::Side, {-1.0F, 0.0F, 0.0F},
+         {0.0F, 0.0F, -1.0F}, {-7.0F, 0.0F, 0.0F}},
+    }};
+    for (const Expected& view : views) {
+        orbit.projection = view.projection;
+        const scene::Camera camera = editor::stage_camera_for(authored, orbit);
+        UI_CHECK(scene::valid(camera) && scene::orthographic(camera));
+        UI_CHECK(near_vec(scene::normalize(camera.target - camera.eye),
+                          view.forward));
+        UI_CHECK(near(scene::length(camera.eye - camera.target),
+                      editor::stage_orthographic_standoff, 0.01F));
+        UI_CHECK(near(camera.orthographic_height, height, 1.0e-4F));
+        // The orthographic scale is the perspective view's scale at the pivot.
+        UI_CHECK(near(editor::stage_units_per_pixel(orbit, 900.0F) * 900.0F,
+                      camera.orthographic_height, 1.0e-4F));
+        UI_CHECK(camera.exposure_compensation_ev == 1.5F);
+
+        const auto centre =
+            scene::project_to_canvas(camera, canvas, orbit.target);
+        UI_CHECK(near(centre.x, 800.0F, 0.01F) && near(centre.y, 450.0F, 0.01F));
+        const auto right = scene::project_to_canvas(
+            camera, canvas, orbit.target + view.rightward);
+        UI_CHECK(near(right.x - 800.0F, 900.0F / height, 0.01F));
+        UI_CHECK(near(right.y, 450.0F, 0.01F));
+        const auto deeper = scene::project_to_canvas(
+            camera, canvas, orbit.target + view.along);
+        UI_CHECK(near(deeper.x, 800.0F, 0.01F) && near(deeper.y, 450.0F, 0.01F));
+        UI_CHECK(deeper.depth < centre.depth);
+    }
+    // Back to Perspective is the view as it was left.
+    orbit.projection = editor::StageProjection::Perspective;
+    UI_CHECK(editor::stage_camera_for(authored, orbit) == perspective);
+}
+
+void an_orthographic_view_pans_and_zooms_but_never_turns() {
+    const editor::StageOrbit start{{1.0F, 0.5F, -2.0F}, 0.1F, 0.05F, 8.0F,
+                                   editor::StageProjection::Top};
+    editor::StageNavigationStep step{};
+    step.dx = 100.0F;
+    step.dy = 50.0F;
+    step.units_per_pixel = 0.05F;
+    // Every drag carries the scene with the pointer: right on screen is +X in
+    // Top, and down on screen is +Z.
+    for (const editor::StageNavigation gesture :
+         {editor::StageNavigation::Walk, editor::StageNavigation::Orbit,
+          editor::StageNavigation::Look, editor::StageNavigation::Pan,
+          editor::StageNavigation::Track}) {
+        step.gesture = gesture;
+        const editor::StageOrbit moved = editor::navigate_stage(start, step);
+        UI_CHECK(moved.yaw == start.yaw && moved.pitch == start.pitch);
+        UI_CHECK(moved.distance == start.distance);
+        UI_CHECK(moved.projection == editor::StageProjection::Top);
+        UI_CHECK(near_vec(moved.target, scene::Vec3{-4.0F, 0.5F, -4.5F}));
+    }
+    // Alt+right zooms; the pivot stays.
+    step = {};
+    step.gesture = editor::StageNavigation::Dolly;
+    step.dx = 10.0F;
+    step.dy = -15.0F;
+    const editor::StageOrbit zoomed = editor::navigate_stage(start, step);
+    UI_CHECK(near(zoomed.distance, 7.0F) && zoomed.target == start.target);
+    // The wheel zooms without carrying the pivot, and stops at the limit.
+    UI_CHECK(near(editor::stage_wheel_dolly(start, 2.0F).distance, 6.4F));
+    editor::StageOrbit close = start;
+    close.distance = 0.6F;
+    const editor::StageOrbit limit = editor::stage_wheel_dolly(close, 3.0F);
+    UI_CHECK(limit.distance == editor::stage_minimum_distance);
+    UI_CHECK(limit.target == start.target);
+    // F frames the box across the view's height.
+    const editor::WorldBounds box{{-1.0F, 0.0F, 2.0F}, {3.0F, 4.0F, 6.0F}};
+    const editor::StageOrbit framed = editor::stage_focus(start, box);
+    UI_CHECK(near_vec(framed.target, scene::Vec3{1.0F, 2.0F, 4.0F}));
+    UI_CHECK(editor::stage_orthographic_height(framed) >=
+             2.0F * std::sqrt(12.0F));
+    UI_CHECK(editor::stage_orthographic_height(framed) <
+             3.0F * std::sqrt(12.0F));
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 66U> cases{{
+constexpr std::array<Case, 68U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
+    {"orthographic views look along their axis at the same scale",
+     &orthographic_views_look_along_their_axis_at_the_same_scale},
+    {"an orthographic view pans and zooms but never turns",
+     &an_orthographic_view_pans_and_zooms_but_never_turns},
     {"preview resolution controls preserve logical picking", &preview_resolution_controls_preserve_logical_picking},
     {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},
     {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},

@@ -189,6 +189,7 @@ boundary_wake_text(const show::BoundaryLateness::Window &window) {
         return net::RuntimeRendererReadinessState::
             AdvancedImplementationUnavailable;
     case render::RendererReadinessCode::InvalidPolicy:
+    case render::RendererReadinessCode::OrthographicCamera:
         return net::RuntimeRendererReadinessState::InvalidPolicy;
     }
     return net::RuntimeRendererReadinessState::Unknown;

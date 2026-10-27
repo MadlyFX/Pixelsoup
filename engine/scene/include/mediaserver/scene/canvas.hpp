@@ -92,9 +92,34 @@ struct Camera final {
     float shutter_seconds{1.0F / 48.0F};
     float iso{100.0F};
     float exposure_compensation_ev{};
+    // Zero for the ordinary perspective camera. Positive makes the projection
+    // orthographic: this is the world height the canvas spans, at every depth,
+    // and the field of view is not used for the image. No document property
+    // carries it - an authored camera is always perspective, so every node
+    // evaluates zero here - and only the editor's Stage views set it. It is in
+    // the scene digest all the same, and a renderer asked to draw a scene whose
+    // own camera is orthographic refuses rather than guess (an orthographic
+    // Stage view reaches the renderer as an explicit view instead).
+    float orthographic_height{};
 
     bool operator==(const Camera&) const = default;
 };
+
+// True when the camera projects orthographically (see `orthographic_height`).
+[[nodiscard]] constexpr bool orthographic(const Camera& camera) noexcept {
+    return camera.orthographic_height > 0.0F;
+}
+
+// True when a projection matrix is orthographic: a constant clip w of one.
+// What a renderer handed only matrices tests, because the passes that care
+// (atmosphere, view-dependent shading) must agree with what rasterised.
+[[nodiscard]] bool orthographic(const Mat4& projection) noexcept;
+
+// World units one canvas pixel spans, `depth` units in front of the eye along
+// the view: the same at every depth for an orthographic camera, growing with
+// depth for a perspective one. Zero for an unusable camera or canvas height.
+[[nodiscard]] float units_per_canvas_pixel(const Camera& camera, float depth,
+                                           float canvas_height) noexcept;
 
 // How far ahead of its eye a placed camera's target sits. A camera is aimed
 // by its rotation; the target only names the view direction (and gives the
@@ -130,10 +155,13 @@ void place_camera(Camera& camera, Vec3 position, Turns yaw, Turns pitch,
 
 // True when the camera describes a frustum that can actually be built: a
 // positive near plane strictly inside the far plane, a field of view inside
-// half a turn, and an eye that is not sitting on its own target.
+// half a turn, and an eye that is not sitting on its own target. An
+// orthographic height must be finite and not negative, and an orthographic
+// camera has no lens profile: a calibrated lens is a perspective device.
 [[nodiscard]] bool valid(const Camera& camera) noexcept;
 
 // The near-plane window a slice sees, in view space, plus the depth range.
+// For an orthographic camera the window is the same rectangle at every depth.
 //
 // Exposed rather than kept inside the projection because it is the quantity
 // two neighbouring slices have to agree on *exactly*, so it needs to be
@@ -248,6 +276,10 @@ struct ViewMatrices final {
 // everything downstream is that the depth clear is 0 and the depth test is
 // greater-than, not less-than.
 //
+// An orthographic camera gets the orthographic form of the same contract:
+// clip w is one, depth is linear in view distance, still near 1 and far 0,
+// and a slice is the same fraction of the canvas window as in perspective.
+//
 // Returns identity matrices for an invalid camera, canvas, or slice. Callers
 // validate first; this refuses to produce a matrix with an infinity in it.
 [[nodiscard]] ViewMatrices view_for_slice(
@@ -343,7 +375,8 @@ struct ViewMatrices final {
 // reversed-depth value that decides what occludes it.
 //
 // `visible` is false when the point is at or behind the eye plane, where the
-// perspective divide has no meaning. The pixel coordinates are then not
+// perspective divide has no meaning; an orthographic projection has no divide
+// and reports every point visible. The pixel coordinates are then not
 // usable; they are still returned so a caller can print them while debugging.
 struct CanvasProjection final {
     float x{};

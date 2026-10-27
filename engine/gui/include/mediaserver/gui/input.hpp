@@ -95,6 +95,13 @@ enum class Key : core::u8 {
     SaveView7,
     SaveView8,
     SaveView9,
+    // Alt+P, Alt+J, Alt+H, Alt+K: the Stage view under the pointer becomes
+    // Perspective, Top, Front or Side. Unreal's J, H and K; P rather than its
+    // G, which here clears location as in Blender.
+    ViewPerspective,
+    ViewTop,
+    ViewFront,
+    ViewSide,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies

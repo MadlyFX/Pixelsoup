@@ -273,25 +273,53 @@ void draw_light_icon(gui::UiDrawList& list, const gui::Rect& image,
 
 // The floor grid follows the view: centred under what the camera looks at,
 // spaced by `stage_grid_step` with a brighter line every ten, and the world
-// X (red) and Z (blue) axes wherever they cross it. Each line is drawn in
+// X (red) and Z (blue) axes wherever they cross it - or, in a Front or Side
+// view, the upright grid with Y (green). Each line is drawn in
 // pieces so the part in front of the camera still shows when the camera
 // stands on the grid. Returns the spacing, for the readout.
 float draw_grid(gui::UiDrawList& list, const gui::Rect& image,
                 const scene::Scene& view) {
+    // An orthographic view's reach is the height it shows; the eye stands
+    // well back from what it looks at.
     const float reach =
-        std::max(scene::length(view.camera.eye - view.camera.target),
-                 std::abs(view.camera.eye.y));
+        scene::orthographic(view.camera)
+            ? view.camera.orthographic_height
+            : std::max(scene::length(view.camera.eye - view.camera.target),
+                       std::abs(view.camera.eye.y));
     const float step = stage_grid_step(reach);
     const float major = step * 10.0F;
     constexpr int half_grid = 40;
     constexpr int pieces = 8;
-    const float centre_x = std::round(view.camera.target.x / major) * major;
-    const float centre_z = std::round(view.camera.target.z / major) * major;
+    // The floor, unless an orthographic view looks along it: a Front or Side
+    // view gets the upright grid through the origin facing it instead.
+    const scene::Vec3 forward = scene::normalize(
+        view.camera.target - view.camera.eye, scene::Vec3{0.0F, -1.0F, 0.0F});
+    std::size_t across = 0U; // x
+    std::size_t along = 2U;  // z
+    if (scene::orthographic(view.camera) && std::abs(forward.y) < 0.5F) {
+        along = 1U;
+        across = std::abs(forward.x) > std::abs(forward.z) ? 2U : 0U;
+    }
+    const auto component = [](scene::Vec3 v, std::size_t axis) {
+        return axis == 0U ? v.x : axis == 1U ? v.y : v.z;
+    };
+    const auto point = [&](float u, float v) {
+        scene::Vec3 result{};
+        (across == 0U ? result.x : result.z) = u;
+        (along == 1U ? result.y : result.z) = v;
+        return result;
+    };
+    const float centre_u =
+        std::round(component(view.camera.target, across) / major) * major;
+    const float centre_v =
+        std::round(component(view.camera.target, along) / major) * major;
     const float extent = static_cast<float>(half_grid) * step;
     const gui::UiColor minor_color{0.22F, 0.28F, 0.36F, 0.18F};
     const gui::UiColor major_color{0.30F, 0.38F, 0.48F, 0.34F};
-    const gui::UiColor x_axis{0.72F, 0.18F, 0.18F, 0.45F};
-    const gui::UiColor z_axis{0.16F, 0.34F, 0.82F, 0.50F};
+    const std::array<gui::UiColor, 3U> axis_color{
+        gui::UiColor{0.72F, 0.18F, 0.18F, 0.45F},
+        gui::UiColor{0.22F, 0.62F, 0.24F, 0.50F},
+        gui::UiColor{0.16F, 0.34F, 0.82F, 0.50F}};
     const auto pieced = [&](scene::Vec3 from, scene::Vec3 to, float thickness,
                             gui::UiColor color) {
         for (int piece = 0; piece < pieces; ++piece) {
@@ -304,16 +332,18 @@ float draw_grid(gui::UiDrawList& list, const gui::Rect& image,
     for (int line_index = -half_grid; line_index <= half_grid; ++line_index) {
         const float offset = static_cast<float>(line_index) * step;
         const bool is_major = line_index % 10 == 0;
-        const float z = centre_z + offset;
-        const float x = centre_x + offset;
+        const float v = centre_v + offset;
+        const float u = centre_u + offset;
         const float thickness = is_major ? 1.2F : 1.0F;
         const gui::UiColor grid = is_major ? major_color : minor_color;
-        pieced(scene::Vec3{centre_x - extent, 0.0F, z},
-               scene::Vec3{centre_x + extent, 0.0F, z}, thickness,
-               std::abs(z) < step * 0.5F ? x_axis : grid);
-        pieced(scene::Vec3{x, 0.0F, centre_z - extent},
-               scene::Vec3{x, 0.0F, centre_z + extent}, thickness,
-               std::abs(x) < step * 0.5F ? z_axis : grid);
+        // A line of constant v runs along the `across` axis, and is that
+        // axis itself where v is zero.
+        pieced(point(centre_u - extent, v), point(centre_u + extent, v),
+               thickness,
+               std::abs(v) < step * 0.5F ? axis_color[across] : grid);
+        pieced(point(u, centre_v - extent), point(u, centre_v + extent),
+               thickness,
+               std::abs(u) < step * 0.5F ? axis_color[along] : grid);
     }
     return step;
 }
@@ -694,10 +724,8 @@ constexpr std::array<scene::Vec3, 3U> world_basis{
     const float canvas_pixels = gizmo_length_pixels *
                                 static_cast<float>(view.canvas.height) /
                                 image.height;
-    const float units_per_pixel =
-        2.0F * depth *
-        scene::deterministic::tan_half_turns(view.camera.field_of_view) /
-        static_cast<float>(view.canvas.height);
+    const float units_per_pixel = scene::units_per_canvas_pixel(
+        view.camera, depth, static_cast<float>(view.canvas.height));
     result.world_length = units_per_pixel * canvas_pixels;
 
     const auto origin =
@@ -1477,10 +1505,8 @@ ViewportPanel::measure_point_at(const scene::Scene& scene, float canvas_x,
 
     // `reach` canvas pixels at the hit's depth, carried into the element's
     // local space. The inverse's longest axis bounds how far that can stretch.
-    const float pixel_world =
-        hit->distance * 2.0F *
-        scene::deterministic::tan_half_turns(scene.camera.field_of_view) /
-        static_cast<float>(scene.canvas.height);
+    const float pixel_world = scene::units_per_canvas_pixel(
+        scene.camera, hit->distance, static_cast<float>(scene.canvas.height));
     const scene::Mat4 inverse = scene::invert_affine(world);
     float inverse_scale = 0.0F;
     for (core::u32 column = 0U; column < 3U; ++column) {
@@ -2843,7 +2869,54 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
               hint, measure_color);
 }
 
+// The corner of a Stage image its view menu occupies; empty when the image is
+// too small to spare it.
+gui::Rect stage_view_menu_bounds(const gui::Rect& image) noexcept {
+    constexpr float width = 104.0F;
+    if (image.width < width + 16.0F || image.height < 40.0F) {
+        return gui::Rect{};
+    }
+    return gui::Rect{image.x + image.width - width - 6.0F, image.y + 6.0F,
+                     width, 22.0F};
+}
+
+std::string_view stage_projection_name(StageProjection projection) noexcept {
+    switch (projection) {
+    case StageProjection::Top:
+        return "TOP";
+    case StageProjection::Front:
+        return "FRONT";
+    case StageProjection::Side:
+        return "SIDE";
+    case StageProjection::Perspective:
+        break;
+    }
+    return "PERSPECTIVE";
+}
+
 } // namespace
+
+void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
+                                         const gui::Rect& menu,
+                                         ViewportFrame& frame) {
+    if (menu.width <= 0.0F) {
+        return;
+    }
+    const gui::UiId menu_id = mix(id_, 40U);
+    if (ctx.button(mix(id_, 41U), menu,
+                   stage_projection_name(stage_projection_))) {
+        ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
+    }
+    ctx.tooltip(menu,
+                "This view's projection. Top, Front and Side are "
+                "orthographic: drag to pan, wheel to zoom.");
+    constexpr std::array<std::string_view, 4U> options{
+        "Perspective    Alt+P", "Top            Alt+J",
+        "Front          Alt+H", "Side           Alt+K"};
+    if (const auto chosen = ctx.context_menu(menu_id, options)) {
+        frame.projection_choice = static_cast<StageProjection>(*chosen);
+    }
+}
 
 ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                                   const rhi::Texture& target,
@@ -3060,6 +3133,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     if (frame.image.width <= 0.0F || frame.image.height <= 0.0F) {
         return frame;
     }
+    // The view's own menu sits over the image's top-right corner, so the
+    // pointer over it picks nothing underneath.
+    const gui::Rect view_menu =
+        role_ == ViewportRole::Stage && projection == nullptr && !drawing_masks_
+            ? stage_view_menu_bounds(frame.image)
+            : gui::Rect{};
 
     if (surface_preview_.has_value()) {
         const output::ProjectionSurface* const committed =
@@ -3194,8 +3273,9 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                              selected_surface_value->geometry.center)
             : GizmoGeometry{};
     const bool occluded =
-        interaction_occluder != nullptr &&
-        interaction_occluder->contains(ctx.pointer_x(), ctx.pointer_y());
+        (interaction_occluder != nullptr &&
+         interaction_occluder->contains(ctx.pointer_x(), ctx.pointer_y())) ||
+        view_menu.contains(ctx.pointer_x(), ctx.pointer_y());
     GizmoAxis hovered_scene_axis = GizmoAxis::None;
     if (!occluded && !measuring_) {
         switch (gizmo_tool) {
@@ -4181,6 +4261,7 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                           drag_snap_target_, false);
     }
     ctx.pop_clip();
+    draw_stage_view_menu(ctx, view_menu, frame);
 
     frame.deep_select_open = deep_select_open_;
     frame.deep_candidate_count = deep_candidates_.size();
@@ -4206,10 +4287,13 @@ MaskViewportFrame ViewportPanel::draw_masks(
     deep_select_open_ = false;
     deep_candidates_.clear();
     const gui::Rect ordinary_interaction_block = bounds;
+    // The mask tools own the image's top-right corner (COVERAGE).
+    drawing_masks_ = true;
     const ViewportFrame ordinary = draw(
         ctx, bounds, render_target, scene, {}, {}, camera_overlay,
         &ordinary_interaction_block, frames_per_second, nullptr, {},
         projection);
+    drawing_masks_ = false;
     frame.image = ordinary.image;
     // Mask coordinates resolve against whatever canvas this panel is showing:
     // the authored camera canvas on Stage, the output raster on Program. The

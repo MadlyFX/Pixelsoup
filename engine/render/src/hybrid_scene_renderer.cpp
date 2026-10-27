@@ -15,6 +15,10 @@ constexpr const char* bloom_refusal_unaligned =
     "slice does not start on the canvas's 64-pixel bloom grid";
 constexpr const char* bloom_refusal_targets =
     "no bloom targets at this extent on this device";
+// An orthographic view's eye stands far behind what it shows, so the air
+// between would be integrated as though the camera really were out there.
+constexpr const char* fog_idle_orthographic =
+    "atmosphere is not drawn in an orthographic view";
 constexpr const char* fog_refusal_targets =
     "no atmosphere targets at this extent on this device";
 
@@ -127,8 +131,20 @@ std::string_view RendererReadiness::headline() const noexcept {
         return "ADVANCED RENDERER UNAVAILABLE";
     case RendererReadinessCode::InvalidPolicy:
         return "RENDERER POLICY INVALID";
+    case RendererReadinessCode::OrthographicCamera:
+        return "ORTHOGRAPHIC CAMERA NEEDS A STAGE VIEW";
     }
     return "RENDERER UNAVAILABLE";
+}
+
+RendererReadiness readiness_for_camera(RendererReadiness readiness,
+                                       const scene::Camera& camera) noexcept {
+    if (scene::orthographic(camera)) {
+        readiness.code = RendererReadinessCode::OrthographicCamera;
+        readiness.satisfied = false;
+        readiness.fallback = false;
+    }
+    return readiness;
 }
 
 RendererReadiness evaluate_renderer_readiness(
@@ -422,8 +438,9 @@ RenderProductsResult HybridSceneRenderer::render_frame(
             RenderError::InvalidConfiguration);
     }
 
-    const RendererReadiness readiness =
-        this->readiness(request.scene->renderer_settings);
+    const RendererReadiness readiness = readiness_for_camera(
+        this->readiness(request.scene->renderer_settings),
+        request.scene->camera);
     const bool wants_motion = request.scene->renderer_settings.motion_blur
         && request.scene->renderer_settings.motion_blur_radius > 0U;
     const float shutter = object_shutter_fraction(*request.scene,
@@ -650,7 +667,13 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     // Skipped entirely when the owner applies atmosphere and bloom to its
     // composite instead; see `RenderFrameRequest::defer_scene_effects`.
     const bool defer = request.defer_scene_effects;
+    const bool orthographic_view = request.options.view.has_value()
+        && scene::orthographic(request.options.view->matrices.projection);
     if (!defer && readiness.selected == scene::RendererBackend::Advanced
+        && atmosphere.fog_density > 0.0F && orthographic_view) {
+        static_cast<void>(
+            core::report_idle_once("atmosphere", fog_idle_orthographic));
+    } else if (!defer && readiness.selected == scene::RendererBackend::Advanced
         && atmosphere.fog_density > 0.0F) {
         // The frustum this frame was actually rendered from and the raster it
         // fills, decided by `fog_frame_for` - the one derivation the renderer
@@ -707,7 +730,12 @@ RenderProductsResult HybridSceneRenderer::render_frame(
             last_products_.color, &selected.velocity_target(),
             &selected.object_id_target(),
             request.options.view ? selected.width() : request.scene->canvas.width,
-            request.options.view ? selected.height() : request.scene->canvas.height};
+            request.options.view ? selected.height() : request.scene->canvas.height,
+            request.options.view
+                ? orthographic_history_depth_tolerance(
+                      request.options.view->matrices.projection,
+                      selected.height())
+                : 0.0F};
         auto resolved = temporal_->apply(
             *device_, commands, record_options.history_slot,
             history_decision.disposition, sources);
@@ -911,6 +939,11 @@ RenderProductsResult HybridSceneRenderer::render_frame(
                              : state(authored.bloom_strength > 0.0F, bloom_ran);
         passes.fog = defer ? PassState::NotAuthored
                            : state(atmosphere.fog_density > 0.0F, fog_ran);
+        if (!defer && advanced && atmosphere.fog_density > 0.0F
+            && orthographic_view) {
+            passes.fog = PassState::Idle;
+            passes.fog_refusal = fog_idle_orthographic;
+        }
         last_products_.passes = passes;
     }
 

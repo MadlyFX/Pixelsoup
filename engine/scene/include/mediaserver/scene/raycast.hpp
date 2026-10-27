@@ -36,6 +36,8 @@ struct Ray final {
 // The world-space ray from the camera's eye through canvas pixel (x, y), y
 // running down, through the same full-canvas projection `project_to_canvas`
 // uses. Its direction is unit length. Empty for a degenerate camera or canvas.
+// An orthographic camera's rays are parallel: each starts on the eye plane
+// under its pixel and runs along the view.
 [[nodiscard]] std::optional<Ray> canvas_ray(const Camera& camera, Canvas canvas,
                                             float canvas_x,
                                             float canvas_y) noexcept;

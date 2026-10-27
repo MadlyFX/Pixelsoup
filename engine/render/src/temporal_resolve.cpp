@@ -6,6 +6,7 @@
 #endif
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <span>
 #include <utility>
@@ -63,6 +64,20 @@ struct TaaConstants final {
 }
 
 } // namespace
+
+float orthographic_history_depth_tolerance(const scene::Mat4& projection,
+                                           core::u32 height) noexcept {
+    if (height == 0U || !scene::orthographic(projection)
+        || !(projection.at(1U, 1U) > 0.0F)) {
+        return 0.0F;
+    }
+    // y_ndc = P11 * y, so the view is 2 / P11 tall; depth = P22 * distance.
+    const float world_per_pixel =
+        2.0F / projection.at(1U, 1U) / static_cast<float>(height);
+    const float tolerance =
+        1.0e-5F + 2.0F * world_per_pixel * std::abs(projection.at(2U, 2U));
+    return std::isfinite(tolerance) ? tolerance : 0.0F;
+}
 
 bool TemporalResolve::shaders_available() noexcept {
     return shader_blobs().present;
@@ -305,6 +320,7 @@ ApplyResult TemporalResolve::apply(
     // for ordinary slices, or the padded image for an explicit tracked view.
     constants.canvas[0U] = static_cast<float>(sources.canvas_width);
     constants.canvas[1U] = static_cast<float>(sources.canvas_height);
+    constants.parameters[3U] = sources.depth_tolerance;
 
     const std::array<rhi::SampledTexture, 6U> inputs{{
         rhi::SampledTexture{sources.color, &sampler_},

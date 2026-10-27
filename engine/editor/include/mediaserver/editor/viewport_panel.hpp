@@ -181,6 +181,8 @@ struct ViewportFrame final {
     // A middle drag from the gizmo's centre is moving the pivot: the middle
     // button is not the camera's until it is let go.
     bool pivot_editing{};
+    // The Stage view's menu chose a projection this frame.
+    std::optional<StageProjection> projection_choice;
 };
 
 // One canvas-space corner of a drawable's normalized source plane. Source
@@ -426,6 +428,15 @@ class ViewportPanel final {
     // Every element's bounding box outlined, selected or not.
     [[nodiscard]] bool bounds_visible() const noexcept { return show_bounds_; }
     void set_bounds_visible(bool visible) noexcept { show_bounds_ = visible; }
+    // What the Stage view's menu, in the top-right corner of its image, shows
+    // as this view's projection. The shell owns the view and sets it before
+    // `draw`; a choice from the menu comes back in the frame.
+    [[nodiscard]] StageProjection stage_projection() const noexcept {
+        return stage_projection_;
+    }
+    void set_stage_projection(StageProjection projection) noexcept {
+        stage_projection_ = projection;
+    }
     // The gizmo's tool, its orientation, and increment snapping. G, R and S
     // choose the tool as they start a keyboard transform; the Stage toolbar
     // sets all three.
@@ -662,6 +673,10 @@ class ViewportPanel final {
     // first time V is held.
     bool surface_snapping_{};
     bool show_bounds_{};
+    StageProjection stage_projection_{StageProjection::Perspective};
+    bool drawing_masks_{};
+    void draw_stage_view_menu(gui::UiContext& ctx, const gui::Rect& menu,
+                              ViewportFrame& frame);
     doc::NodeId drag_node_{};
     scene::Mat4 drag_start_world_{};
     scene::ModelLocalBounds drag_start_bounds_{};

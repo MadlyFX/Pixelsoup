@@ -3063,7 +3063,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     stage_view.eye = stage_scene.camera.eye;
     stage_view.forward = scene::normalize(
         stage_scene.camera.target - stage_scene.camera.eye);
-    stage_view.history_identity = 0x5354'4147'4556'4945ULL;
+    // A projection change is a cut, not camera motion: each one keeps its
+    // own temporal history.
+    stage_view.history_identity =
+        0x5354'4147'4556'4945ULL ^
+        static_cast<core::u64>(impl.stage_view.projection);
     stage_view.clip_planes = render::SceneClipPlanes{
         stage_camera.near_plane, stage_camera.far_plane};
     auto geometry_camera = authored_stage.camera;
@@ -3986,6 +3990,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.stage_view = stage_focus(impl.stage_view, *bounds);
         }
       }
+      // Alt+P, J, H and K choose the projection, as the view's menu does.
+      if (over) {
+        constexpr std::array<std::pair<gui::Key, StageProjection>, 4U> views{
+            {{gui::Key::ViewPerspective, StageProjection::Perspective},
+             {gui::Key::ViewTop, StageProjection::Top},
+             {gui::Key::ViewFront, StageProjection::Front},
+             {gui::Key::ViewSide, StageProjection::Side}}};
+        for (const auto &[key, projection] : views) {
+          if (ui.key_pressed(key)) {
+            impl.stage_view.projection = projection;
+          }
+        }
+      }
       // Ctrl+1..9 keeps this view in a slot and the digit returns to it, as
       // Unreal's camera bookmarks. Editor-local: the show's cameras are
       // untouched.
@@ -4441,6 +4458,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 : (floating_occluder.has_value()
                        ? &floating_occluder.value()
                        : nullptr);
+        impl.stage_panel.set_stage_projection(impl.stage_view.projection);
         stage_viewport_frame = impl.stage_panel.draw(
             ui, bounds, *stage_texture, stage_interaction_scene,
             impl.scene_selection.members(), impl.anchor(), &scene.camera,
@@ -4453,6 +4471,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
             plate_overlay, elements);
       }
       stage_viewport_drawn = true;
+      if (stage_viewport_frame.projection_choice.has_value()) {
+        impl.stage_view.projection = *stage_viewport_frame.projection_choice;
+      }
       if (!impl.stage_bookmark_note.empty() &&
           impl.window.time_seconds() < impl.stage_bookmark_note_until) {
         const gui::Rect &image = stage_viewport_frame.image;

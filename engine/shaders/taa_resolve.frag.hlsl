@@ -25,7 +25,8 @@ SamplerState history_depth_sampler : register(s5, space2);
 
 cbuffer TaaConstants : register(b0, space3) {
     // xy: target extent in pixels. z: how much of the history survives a
-    // blend. w: unused.
+    // blend. w: an absolute depth tolerance for an orthographic view, whose
+    // depth is linear; zero keeps the relative perspective tolerance.
     float4 taa_parameters;
     // xy: canvas extent in pixels. The velocity product is canvas-relative, so
     // this is what converts it to pixels - and because the padded slice renders
@@ -66,7 +67,9 @@ float4 main(float4 position : SV_Position) : SV_Target {
     const float expected_depth = velocity.Load(int3(pixel, 0)).w;
     if (expected_depth < 0.0 || expected_depth > 1.0) return current;
     const uint id = object_id.Load(int3(pixel, 0));
-    const float tolerance = 1.0e-5 + abs(expected_depth) * 0.002;
+    const float tolerance = taa_parameters.w > 0.0
+        ? taa_parameters.w
+        : 1.0e-5 + abs(expected_depth) * 0.002;
     const float2 sample_position = history_point - 0.5;
     const float2 base = floor(sample_position);
     const float2 fraction = sample_position - base;

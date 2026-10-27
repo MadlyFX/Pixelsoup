@@ -1244,6 +1244,8 @@ SdlPresenter::renderer_readiness() const noexcept {
             AdvancedImplementationUnavailable;
         break;
     case render::RendererReadinessCode::InvalidPolicy:
+    // No authored camera is orthographic; one that arrives is a policy fault.
+    case render::RendererReadinessCode::OrthographicCamera:
         result.state = show::PresenterRendererReadinessState::InvalidPolicy;
         break;
     }

@@ -1436,6 +1436,35 @@ what the camera looks at and widens a decade at a time as you pull back, from
 1 cm close in to 1 km far out, with a brighter line every ten. The bottom
 right of Stage names the current spacing.
 
+**Top, Front and Side views.** The menu in the top-right corner of the Stage
+image names the view's projection (`PERSPECTIVE` at first) and switches it.
+With the pointer over Stage the keys do the same:
+
+| Keys | View |
+| --- | --- |
+| Alt+J | Top: looking straight down, north (-Z) up the screen |
+| Alt+H | Front: looking along -Z |
+| Alt+K | Side: looking along -X |
+| Alt+P | Perspective again, as you left it |
+
+Top, Front and Side are orthographic: nothing shrinks with distance, so sizes
+and alignments read true across the whole view. They show the same scale the
+perspective view shows at its pivot, and they never turn. Every drag pans
+with the scene following the pointer; the wheel and Alt+right drag zoom; and
+with the right button held, A/D and Q/E pan while W/S zoom. **F** frames the
+selection, and picking, the gizmo, Measure, snapping and Library drops all
+work in them as they do in perspective. Front and Side show the upright grid
+through the origin, with the vertical Y axis in green. A kept view (Ctrl+1 to
+Ctrl+9) remembers its projection.
+
+An orthographic view's eye stands 200 m behind what it shows, so atmosphere
+(fog) is not drawn in it - it would be the air of that whole distance - and
+the renderer reports fog as idle there with that reason. Lighting, shadows,
+reflections and temporal smoothing are drawn as in perspective, with every
+pixel seeing along the same direction. Only the Stage has these views; a
+show's own cameras are always perspective, and an output node refuses a scene
+whose camera is not.
+
 Directional lights have no scene position. Stage draws their pickable marker
 near the world origin, offset opposite the light direction. The marker stays
 there as the view turns or frames another object; its direction arrows keep a

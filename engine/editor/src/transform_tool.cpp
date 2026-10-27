@@ -1,4 +1,5 @@
 #include <mediaserver/editor/transform_tool.hpp>
+#include <mediaserver/scene/raycast.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -226,7 +227,18 @@ plane_drag_translation(const scene::Camera& camera, scene::Canvas canvas,
         return std::nullopt;
     }
     const auto hit = [&](float x, float y) -> std::optional<scene::Vec3> {
-        const scene::Vec3 ray = pointer_ray(camera, canvas, x, y);
+        // An orthographic view's rays are parallel and start on its eye
+        // plane, not at the eye.
+        scene::Vec3 start = camera.eye;
+        scene::Vec3 ray = pointer_ray(camera, canvas, x, y);
+        if (scene::orthographic(camera)) {
+            const auto parallel = scene::canvas_ray(camera, canvas, x, y);
+            if (!parallel.has_value()) {
+                return std::nullopt;
+            }
+            start = parallel->origin;
+            ray = parallel->direction;
+        }
         const float facing = scene::dot(ray, unit_normal);
         const float ray_length = scene::length(ray);
         // Within about three degrees of edge-on the plane is a line on
@@ -235,11 +247,11 @@ plane_drag_translation(const scene::Camera& camera, scene::Canvas canvas,
             return std::nullopt;
         }
         const float distance =
-            scene::dot(origin - camera.eye, unit_normal) / facing;
+            scene::dot(origin - start, unit_normal) / facing;
         if (!(distance > 0.0F) || !std::isfinite(distance)) {
             return std::nullopt;
         }
-        return camera.eye + ray * distance;
+        return start + ray * distance;
     };
     const auto from = hit(from_x, from_y);
     const auto to = hit(to_x, to_y);

@@ -295,9 +295,8 @@ Vec3 screen_drag_to_translation(const Camera& camera, Canvas canvas,
     // World height the canvas spans at this depth, divided by its pixels. The
     // field of view applies to height and pixels are square, so this scale is
     // the same horizontally.
-    const auto units_per_pixel =
-        2.0F * depth * deterministic::tan_half_turns(camera.field_of_view) /
-        static_cast<float>(canvas.height);
+    const auto units_per_pixel = units_per_canvas_pixel(
+        camera, depth, static_cast<float>(canvas.height));
 
     return right * (drag_x * units_per_pixel) +
            up * (-drag_y * units_per_pixel);

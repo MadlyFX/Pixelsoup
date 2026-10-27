@@ -916,6 +916,10 @@ struct DepthMergeConstants final {
 // by address. Kept short enough for one line of the settings card.
 constexpr const char* fog_refusal_depth =
     "no combined depth for the atmosphere on this device";
+// An orthographic view's eye stands far behind what it shows, so the air
+// between would be integrated as though the camera really were out there.
+constexpr const char* fog_idle_orthographic =
+    "atmosphere is not drawn in an orthographic view";
 constexpr const char* fog_refusal_targets =
     "no atmosphere targets at this extent on this device";
 constexpr const char* bloom_refusal_unaligned =
@@ -2183,8 +2187,10 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         // Advanced renderer whatever backend the show selected. Asking for
         // readiness would build only what the policy names.
         layer_renderers_.front().prepare(plan.adjusted_scene);
-        last_readiness_ = layer_renderers_.front().readiness(
-            plan.adjusted_scene.renderer_settings);
+        last_readiness_ = readiness_for_camera(
+            layer_renderers_.front().readiness(
+                plan.adjusted_scene.renderer_settings),
+            plan.adjusted_scene.camera);
         last_scene_linear_ =
             last_readiness_.selected == scene::RendererBackend::Advanced;
         if (!last_readiness_.satisfied) {
@@ -2373,8 +2379,19 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             // depth like any other, so the plate focuses it where it stands.
             // Refusing the whole plate for one layer's look blanked the wall.
         }
-        const bool fog_authored =
+        const bool fog_present =
             plan.adjusted_scene.environment.fog_density > 0.0F;
+        const bool orthographic_view = render_view.has_value()
+            && scene::orthographic(render_view->matrices.projection);
+        // Reported idle with its reason rather than drawn through a viewpoint
+        // that is not where the picture is taken from.
+        const bool fog_authored = fog_present && !orthographic_view;
+        if (fog_present && orthographic_view) {
+            last_passes_.fog = PassState::Idle;
+            last_passes_.fog_refusal = fog_idle_orthographic;
+            static_cast<void>(
+                core::report_idle_once("atmosphere", fog_idle_orthographic));
+        }
         const bool bloom_authored = authored.bloom_strength > 0.0F;
         const bool motion_authored = authored.motion_blur && authored.motion_blur_radius > 0U;
         const auto refuse_motion = [this](const char* reason) {

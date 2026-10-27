@@ -334,6 +334,15 @@ std::optional<Ray> canvas_ray(const Camera& camera, Canvas canvas,
         return std::nullopt;
     }
     const Vec3 on_near{near.x / near.w, near.y / near.w, near.z / near.w};
+    if (orthographic(camera)) {
+        // Every ray runs along the view, from the eye plane under the pixel.
+        const Vec3 forward = normalize(camera.target - camera.eye, Vec3{});
+        if (!(length(forward) > 0.0F) || !std::isfinite(on_near.x) ||
+            !std::isfinite(on_near.y) || !std::isfinite(on_near.z)) {
+            return std::nullopt;
+        }
+        return Ray{on_near - forward * camera.near_plane, forward};
+    }
     const Vec3 direction = on_near - camera.eye;
     if (!(length(direction) > 1.0e-12F) || !std::isfinite(direction.x) ||
         !std::isfinite(direction.y) || !std::isfinite(direction.z)) {

@@ -280,6 +280,33 @@ so two nodes round the pixel they share identically. Basic input remains a
 straight sample. Applied last, after warp and after the switcher's dissolve;
 per-panel calibration stays on the LED processor.
 
+**Orthographic views.** `scene::Camera::orthographic_height`, when positive,
+makes `view_for_slice` orthographic: the window is world-sized at every depth,
+clip w is one, and depth is linear but still reversed (near 1, far 0), so
+slices, jitter and the shared-edge guarantee keep their perspective forms.
+`scene::orthographic(Mat4)` tells a projection apart from the matrix alone.
+No document property sets the height, so every authored camera - and every
+node's camera - is perspective; it is in the scene digest all the same. The
+Stage's Top, Front and Side views reach the renderer as an explicit
+`SceneRenderView` over the perspective authored camera, which keeps driving
+level of detail and shadow-cascade fitting exactly as it does for the
+perspective Stage view. A frame whose *own* camera is orthographic is refused
+with `RendererReadinessCode::OrthographicCamera` ("ORTHOGRAPHIC CAMERA NEEDS
+A STAGE VIEW"), because those camera-derived fits assume a perspective cone.
+
+Each pass that reads the view was checked against an orthographic matrix:
+ambient occlusion, contact shadows, the sky and the planar mirror reconstruct
+through the inverse view-projection or the matrix itself and need nothing
+more; the lit shading and contact-shadow separation take their view vector
+from `eye_position`, whose w is 0 in an orthographic view to carry the one
+view direction instead of a point; temporal resolve validates history against
+an absolute depth tolerance (`orthographic_history_depth_tolerance`, two
+pixels of world height in linear depth) instead of the perspective relative
+one; and motion vectors are matrix differences. Volumetric fog would
+integrate the air between the far-off eye and the stage, so in an
+orthographic view it is reported `PassState::Idle` with "atmosphere is not
+drawn in an orthographic view" and not drawn.
+
 **Remaining unsupported paths:** a native Vulkan backend, GPU-driven
 indirect/meshlet submission, point/area-light and ray-traced shadows, ray tracing,
 DDGI, ReSTIR, denoising, and temporal upscaling. The integration contracts refuse those

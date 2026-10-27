@@ -138,6 +138,7 @@ core::u64 camera_history_digest(const scene::Camera& camera) noexcept {
     mix(state, camera.shutter_seconds);
     mix(state, camera.iso);
     mix(state, camera.exposure_compensation_ev);
+    mix(state, camera.orthographic_height);
     return state;
 }
 

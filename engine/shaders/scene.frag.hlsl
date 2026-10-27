@@ -100,6 +100,8 @@ StructuredBuffer<float4> ltc_tables : register(t19, space2);
 #endif
 
 cbuffer SceneConstants : register(b0, space3) {
+    // w = 1: xyz is the eye. w = 0: an orthographic view, and xyz is the unit
+    // direction toward the viewer, the same at every pixel.
     float4 eye_position;
     // rgb: the colour of the sky half of the ambient hemisphere.
     // a: overall ambient strength.
@@ -698,7 +700,10 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     const float2 ndc = canvas_pixel / lighting_canvas.xy * float2(2.0, -2.0) + float2(-1.0, 1.0);
     const float4 reconstructed = mul(lighting_inverse_view_projection, float4(ndc, input.position.z, 1.0));
     const float3 world_position = reconstructed.xyz / reconstructed.w;
-    const float3 view = normalize(eye_position.xyz - world_position);
+    // w = 0: an orthographic view, whose view vector is the same everywhere.
+    const float3 view = eye_position.w > 0.5
+        ? normalize(eye_position.xyz - world_position)
+        : eye_position.xyz;
     float3 coat_light = 0.0;
     float3 accumulated = float3(0.0, 0.0, 0.0);
     for (uint index = 0; index < counts.x; ++index) {

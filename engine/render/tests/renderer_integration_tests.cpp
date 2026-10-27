@@ -5107,6 +5107,240 @@ void fog_on_a_view_driven_frame_uses_the_views_own_matrix() {
     RENDER_CHECK(worst_against_reference <= 1.0 / 1024.0);
 }
 
+// An orthographic view is drawn only as an explicit view. Its view vector is
+// the same at every pixel, so a glossy floor under a sun shades uniformly where
+// the perspective view of it shows a highlight; its atmosphere is reported
+// idle with the reason rather than integrated from an eye that stands far
+// behind the picture; and a scene whose own camera is orthographic is refused.
+void an_orthographic_view_shades_along_the_view_and_idles_fog() {
+    const float tolerance = render::orthographic_history_depth_tolerance(
+        scene::view_for_slice(
+            [] {
+                scene::Camera camera{};
+                camera.eye = scene::Vec3{0.0F, 0.0F, 10.0F};
+                camera.near_plane = 0.5F;
+                camera.far_plane = 40.5F;
+                camera.orthographic_height = 10.0F;
+                return camera;
+            }(),
+            scene::Canvas{1200U, 900U}, scene::CanvasRect{0U, 0U, 1200U, 900U})
+            .projection,
+        900U);
+    RENDER_CHECK(std::abs(tolerance -
+                          (1.0e-5F + 2.0F * (10.0F / 900.0F) / 40.0F)) <=
+                 1.0e-7F);
+    RENDER_CHECK(render::orthographic_history_depth_tolerance(
+                     scene::view_for_slice(scene::Camera{},
+                                           scene::Canvas{1200U, 900U},
+                                           scene::CanvasRect{0U, 0U, 1200U, 900U})
+                         .projection,
+                     900U) == 0.0F);
+    {
+        scene::Camera orthographic{};
+        orthographic.orthographic_height = 4.0F;
+        const render::RendererReadiness refused = render::readiness_for_camera(
+            render::RendererReadiness{}, orthographic);
+        RENDER_CHECK(!refused.satisfied);
+        RENDER_CHECK(refused.code ==
+                     render::RendererReadinessCode::OrthographicCamera);
+        RENDER_CHECK(refused.headline() ==
+                     std::string_view{"ORTHOGRAPHIC CAMERA NEEDS A STAGE VIEW"});
+        RENDER_CHECK(render::readiness_for_camera(render::RendererReadiness{},
+                                                  scene::Camera{})
+                         .satisfied);
+    }
+
+    if (!render::HybridSceneRenderer::shaders_available()
+        || !render::VolumetricFog::shaders_available()
+        || !rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto opened = rhi::Device::create(config);
+    RENDER_CHECK(opened);
+    auto device = std::move(opened).value();
+    if (!device.capabilities().advanced_raster()
+        || !device.capabilities().compute
+        || !device.capabilities().storage_images) {
+        return;
+    }
+
+    constexpr core::u32 width = 96U;
+    constexpr core::u32 height = 96U;
+    scene::Scene base{};
+    base.id = scene::SceneId{701U};
+    base.document_version = doc::Version{1U};
+    base.camera_source = doc::NodeId{700U};
+    base.canvas = scene::Canvas{width, height};
+    base.camera.eye = scene::Vec3{0.0F, 3.0F, 6.0F};
+    base.camera.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    base.camera.field_of_view = 0.125F;
+    base.camera.near_plane = 0.1F;
+    base.camera.far_plane = 100.0F;
+    base.renderer_settings.backend = scene::RendererBackend::Advanced;
+    base.renderer_settings.required = true;
+    base.renderer_settings.shadow_cascades = 0U;
+    base.renderer_settings.gi_strength = 0.0F;
+    base.renderer_settings.occlusion_radius = 0.0F;
+    base.renderer_settings.contact_shadow_length = 0.0F;
+    base.environment.ambient = 0.2F;
+    base.environment.sky_color = scene::Vec3{0.1F, 0.12F, 0.2F};
+    base.environment.fog_density = 0.4F;
+    base.environment.fog_color = scene::Vec3{0.7F, 0.75F, 0.85F};
+
+    // A glossy floor far wider than either view.
+    scene::MeshInstance floor{};
+    floor.source = doc::NodeId{710U};
+    floor.mesh = scene::MeshKey{scene::Primitive::Box, 1U};
+    floor.world = scene::multiply(
+        scene::translation(scene::Vec3{0.0F, -0.05F, 0.0F}),
+        scene::scaling(scene::Vec3{60.0F, 0.1F, 60.0F}));
+    floor.normal = scene::normal_basis(floor.world);
+    floor.material.base_color = scene::Vec3{0.5F, 0.5F, 0.52F};
+    floor.material.roughness = 0.15F;
+    floor.material.metallic = 0.6F;
+    base.instances.push_back(floor);
+
+    scene::DirectionalLight sun{};
+    sun.direction = scene::Vec3{-0.3F, -0.9F, -0.2F};
+    sun.intensity = 3.0F;
+    base.directional_lights.push_back(sun);
+
+    render::RendererLimits limits{};
+    limits.max_instances = 4U;
+    limits.max_vertices = 4096U;
+    limits.max_indices = 12288U;
+    limits.max_lights = 4U;
+    limits.max_history_slots = 2U;
+
+    struct Rendered final {
+        bool ok{};
+        std::vector<core::u8> frame;
+        render::RenderProducts products;
+        render::RendererReadiness readiness;
+    };
+    const auto render_once = [&](const scene::Scene& framed_source,
+                                 const render::SceneRenderView* view) {
+        scene::Scene framed = framed_source;
+        framed.show_frame = 1U;
+        auto created =
+            render::HybridSceneRenderer::create(device, width, height, limits);
+        check(created.has_value(), "renderer", __LINE__);
+        auto renderer = std::move(created).value();
+        auto readback = device.create_readback(width * height * 8U);
+        check(readback.has_value(), "readback", __LINE__);
+        render::RenderFrameRequest request{};
+        request.scene = &framed;
+        request.slice = scene::whole(framed.canvas);
+        request.output_width = width;
+        request.output_height = height;
+        if (view != nullptr) {
+            request.options.view = *view;
+        }
+        request.history.scene = framed.id;
+        request.history.document_version = framed.document_version;
+        request.history.surface = render::HistorySurface::Offscreen;
+        request.history.surface_id = 1U;
+        request.history.canvas = framed.canvas;
+        request.history.slice = request.slice;
+        request.history.width = width;
+        request.history.height = height;
+        request.history.camera_source = framed.camera_source;
+        request.history.camera_digest =
+            render::camera_history_digest(framed.camera);
+        request.history.view_digest = view != nullptr ? 91U : 0U;
+        request.history.profile_digest =
+            render::renderer_profile_digest(framed.renderer_settings);
+        Rendered result{};
+        auto acquired = device.acquire_commands();
+        check(acquired.has_value(), "acquire", __LINE__);
+        auto commands = std::move(acquired).value();
+        auto rendered = renderer.render_frame(commands, request);
+        result.readiness = renderer.diagnostics().last_readiness;
+        if (!rendered) {
+            return result;
+        }
+        result.ok = true;
+        result.products = rendered.value();
+        check(commands.download(*rendered.value().color, readback.value()),
+              "download", __LINE__);
+        auto submitted = device.submit(std::move(commands));
+        check(submitted.has_value(), "submit", __LINE__);
+        check(std::move(submitted).value().wait(), "wait", __LINE__);
+        const auto pixels = readback.value().map();
+        const std::size_t bytes =
+            static_cast<std::size_t>(width) * height * 8U;
+        check(pixels.size() >= bytes, "map", __LINE__);
+        result.frame.assign(pixels.begin(), pixels.begin() + bytes);
+        readback.value().unmap();
+        return result;
+    };
+    const auto spread = [&](const std::vector<core::u8>& frame) {
+        double low = 1.0e9;
+        double high = -1.0e9;
+        for (std::size_t pixel = 0U;
+             pixel < static_cast<std::size_t>(width) * height; ++pixel) {
+            const double value = half_lane(frame, pixel, 1U);
+            low = std::min(low, value);
+            high = std::max(high, value);
+        }
+        return high - low;
+    };
+
+    // Looking straight down on the floor from twenty metres, twelve wide.
+    scene::Camera top = base.camera;
+    top.eye = scene::Vec3{0.0F, 20.0F, 0.0F};
+    top.target = scene::Vec3{0.0F, 0.0F, 0.0F};
+    top.up = scene::Vec3{0.0F, 0.0F, -1.0F};
+    top.near_plane = 0.05F;
+    top.far_plane = 40.0F;
+    top.orthographic_height = 12.0F;
+    const auto view_from = [&](const scene::Camera& camera) {
+        render::SceneRenderView view{
+            scene::view_for_slice(camera, base.canvas,
+                                  scene::whole(base.canvas)),
+            camera.eye, scene::normalize(camera.target - camera.eye)};
+        view.history_identity = 91U;
+        view.clip_planes =
+            render::SceneClipPlanes{camera.near_plane, camera.far_plane};
+        return view;
+    };
+    const render::SceneRenderView orthographic_view = view_from(top);
+    RENDER_CHECK(scene::orthographic(orthographic_view.matrices.projection));
+    const Rendered plan = render_once(base, &orthographic_view);
+    RENDER_CHECK(plan.ok);
+    RENDER_CHECK(plan.products.passes.fog == render::PassState::Idle);
+    RENDER_CHECK(plan.products.passes.fog_refusal ==
+                 std::string_view{
+                     "atmosphere is not drawn in an orthographic view"});
+    // One view vector: the whole floor is one shade.
+    RENDER_CHECK(spread(plan.frame) <= 1.0e-3);
+
+    // The same pose in perspective spreads the highlight across the floor,
+    // and draws its fog.
+    scene::Camera perspective = top;
+    perspective.orthographic_height = 0.0F;
+    perspective.field_of_view = 0.1F;
+    const render::SceneRenderView perspective_view = view_from(perspective);
+    const Rendered seen = render_once(base, &perspective_view);
+    RENDER_CHECK(seen.ok);
+    RENDER_CHECK(seen.products.passes.fog == render::PassState::Active);
+    scene::Scene clear = base;
+    clear.environment.fog_density = 0.0F;
+    const Rendered clear_seen = render_once(clear, &perspective_view);
+    RENDER_CHECK(clear_seen.ok);
+    RENDER_CHECK(spread(clear_seen.frame) > 0.02);
+
+    // The scene's own camera orthographic, with no view: refused by name.
+    scene::Scene authored = base;
+    authored.camera = top;
+    const Rendered refused = render_once(authored, nullptr);
+    RENDER_CHECK(!refused.ok);
+    RENDER_CHECK(refused.readiness.code ==
+                 render::RendererReadinessCode::OrthographicCamera);
+}
+
 // Fog settles below its height.
 //
 // With a falloff authored the air above the base height thins, so the rows of
@@ -5478,6 +5712,8 @@ constexpr std::array cases{
     Case{"fog on a view driven frame uses the views own matrix",
          &fog_on_a_view_driven_frame_uses_the_views_own_matrix},
     Case{"fog settles below its height", &fog_settles_below_its_height},
+    Case{"an orthographic view shades along the view and idles fog",
+         &an_orthographic_view_shades_along_the_view_and_idles_fog},
     Case{"a spot does not shine through a wall",
          &a_spot_does_not_shine_through_a_wall},
     Case{"atlas assignment ignores the camera and a floor does not self shadow",

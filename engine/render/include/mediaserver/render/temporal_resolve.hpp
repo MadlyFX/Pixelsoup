@@ -6,6 +6,7 @@
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/render/temporal_history.hpp>
 #include <mediaserver/rhi/device.hpp>
+#include <mediaserver/scene/canvas.hpp>
 
 #include <vector>
 
@@ -51,6 +52,12 @@ struct TemporalResolveStats final {
     bool operator==(const TemporalResolveStats&) const = default;
 };
 
+// Two pixels of an orthographic view's world height, in its linear depth
+// units: about what the perspective rule allows at an ordinary viewing
+// distance. Zero for a perspective projection or an empty target.
+[[nodiscard]] float orthographic_history_depth_tolerance(
+    const scene::Mat4& projection, core::u32 height) noexcept;
+
 class TemporalResolve final {
 public:
     [[nodiscard]] static bool shaders_available() noexcept;
@@ -88,6 +95,11 @@ public:
         // its own padded raster: its velocity is normalized to that viewpoint.
         core::u32 canvas_width{};
         core::u32 canvas_height{};
+        // How far a history tap's depth may sit from the expected previous
+        // depth. Zero is the perspective rule, relative to the depth itself;
+        // an orthographic view's depth is linear, and passes an absolute one
+        // from `orthographic_history_depth_tolerance`.
+        float depth_tolerance{};
     };
 
     // Applies the published disposition and returns the colour to publish.
