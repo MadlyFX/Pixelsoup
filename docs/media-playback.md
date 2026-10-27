@@ -229,6 +229,11 @@ of the memory, and the full-size frame is released at once.
   scene digest.
 - A full-size and a half-size placement of the same file are different
   pictures, so each has its own decoder, read-ahead and cache entries.
+- Switching a placement's resolution is not a cut. It keeps showing the
+  picture it held at the old size until the new size has decoded a frame of
+  its own - a second or two for eight cold 4K streams - and the old frame is
+  freed as soon as nothing shows it. A placement newly cut in inherits
+  nothing.
 - Decoding costs exactly the same: a compressed video frame can only be
   decoded whole. Half resolution saves memory, upload and sampling, not
   decode throughput.

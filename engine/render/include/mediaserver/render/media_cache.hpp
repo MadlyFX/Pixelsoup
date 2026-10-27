@@ -189,6 +189,11 @@ class MediaCache final {
         // views of the decoder's own surface, and this reference is what stops
         // the decoder reusing it underneath them.
         std::shared_ptr<void> retained;
+        // Its source is no longer authored, but a placement switched to
+        // another resolution of the same file is still showing it while the
+        // new size's first frame decodes. Freed at the start of the first
+        // frame nothing holds it.
+        bool orphaned{};
     };
 
     enum class CandidateUploadState : core::u8 {

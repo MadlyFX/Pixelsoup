@@ -2805,6 +2805,125 @@ void a_deleted_clip_releases_its_residency_and_tells_its_decoder() {
     MEDIA_CHECK(cache.stats().uploads == 0U);
 }
 
+// A placement switched to another resolution of its file keeps showing the
+// picture it held until the new size has a frame of its own, and the old
+// frame is given back once nothing shows it. A placement newly on air under
+// the new size inherits nothing: that is a cut, and holds nothing.
+void a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready() {
+    struct State final {
+        std::atomic_bool half_ready{};
+    };
+    class Source final : public render::MediaSource {
+    public:
+        explicit Source(std::shared_ptr<State> value)
+            : state(std::move(value)) {}
+        std::string key(const std::string& path,
+                        core::u32 frame) const override {
+            return path + "#" + std::to_string(frame);
+        }
+        render::MediaDecodeScheduling scheduling(
+            const std::string&) const noexcept override {
+            return render::MediaDecodeScheduling::SourceManaged;
+        }
+        render::DecodedFrame decode(const std::string& path,
+                                    core::u32) override {
+            const bool half = render::media_source_variant(path).half_resolution;
+            render::DecodedFrame frame;
+            frame.width = frame.height = half ? 4U : 8U;
+            frame.pixels.assign(
+                static_cast<std::size_t>(frame.width) * frame.height * 4U,
+                half ? 200U : 10U);
+            return frame;
+        }
+        std::shared_ptr<const render::DecodedFrame> try_decode(
+            const std::string& path, core::u32 frame) override {
+            if (render::media_source_variant(path).half_resolution
+                && !state->half_ready) {
+                return nullptr;
+            }
+            return std::make_shared<const render::DecodedFrame>(
+                decode(path, frame));
+        }
+        std::shared_ptr<const render::DecodedFrame> try_prefetched(
+            const std::string&, core::u32, core::u64) override {
+            return nullptr;
+        }
+        std::shared_ptr<State> state;
+    };
+    auto device = open_device();
+    const auto state = std::make_shared<State>();
+    render::MediaCache cache{std::make_unique<Source>(state)};
+
+    constexpr core::u64 placement = 7U;
+    constexpr core::u64 cut_in = 8U;
+    scene::MediaInstance full;
+    full.source = "plate.mp4";
+    scene::MediaInstance half = full;
+    half.resolution = scene::MediaResolution::Half;
+    const std::string half_source = render::media_decode_source(half);
+    const std::array full_scene{full};
+    const std::array half_scene{half};
+
+    // One command frame: each named placement resolved once, in order.
+    const auto frame = [&](const std::string& source, core::u32 index,
+                           std::span<const core::u64> placements) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        std::vector<render::ResolvedMediaFrame> resolved;
+        for (const core::u64 clip : placements) {
+            resolved.push_back(cache.resolve(device, commands, source, index,
+                                             {0U, 100U}, clip));
+        }
+        const auto stats = cache.stats();
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+        return std::pair{resolved, stats};
+    };
+    const std::array only{placement};
+    const std::array both{placement, cut_in};
+
+    static_cast<void>(cache.adopt_generation(0U, full_scene));
+    // The two sizes are told apart by extent: a texture object moves when
+    // its upload is published, so its address is no identity.
+    const auto extent = [](const render::ResolvedMediaFrame& resolved) {
+        return resolved ? resolved.primary->width() : 0U;
+    };
+    bool shown = false;
+    for (core::u32 index = 0U; !shown && index < 8U; ++index) {
+        shown = extent(frame(full.source, index, only).first.front()) == 8U;
+    }
+    MEDIA_CHECK(shown);
+
+    // The switch. The full source is no longer authored, the half one is
+    // still decoding: the placement holds its full-size picture for as many
+    // frames as that takes, while the clip cutting in under the new size
+    // shows nothing rather than another placement's picture.
+    static_cast<void>(cache.adopt_generation(0U, half_scene));
+    for (core::u32 index = 8U; index < 11U; ++index) {
+        const auto [resolved, stats] = frame(half_source, index, both);
+        MEDIA_CHECK(extent(resolved[0]) == 8U);
+        MEDIA_CHECK(!resolved[1]);
+        MEDIA_CHECK(stats.held_frames == 1U);
+        MEDIA_CHECK(stats.resident_frames == 1U);
+    }
+
+    // The new size lands and replaces the held picture.
+    state->half_ready = true;
+    bool replaced = false;
+    for (core::u32 attempt = 0U; !replaced && attempt < 8U; ++attempt) {
+        replaced = extent(frame(half_source, 11U, only).first.front()) == 4U;
+    }
+    MEDIA_CHECK(replaced);
+
+    // And the full-size frame nothing shows any more is given back.
+    const auto [resolved, stats] = frame(half_source, 11U, only);
+    MEDIA_CHECK(extent(resolved.front()) == 4U);
+    MEDIA_CHECK(stats.resident_frames == 1U);
+}
+
 class LargeReadySource final : public render::MediaSource {
 public:
     LargeReadySource(core::u32 width, core::u32 height) {
@@ -2926,7 +3045,9 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 46U> cases{{
+constexpr std::array<Case, 47U> cases{{
+    {"a resolution switch holds the last picture until the new size is ready",
+     &a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready},
     {"a deleted clip releases its residency and tells its decoder",
      &a_deleted_clip_releases_its_residency_and_tells_its_decoder},
     {"native NV12 colors match Rec709 reference pixels",
