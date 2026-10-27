@@ -1820,7 +1820,11 @@ void auto_key_is_an_explicit_toggle_and_camera_lens_rows_are_keyable() {
   UI_CHECK(h.panel.auto_key_enabled());
   static_cast<void>(h.click(190.0F, 45.0F));
   UI_CHECK(!h.panel.auto_key_enabled());
-  static_cast<void>(h.type("k"));
+  // Shift+K, now that bare K stops the show.
+  static_cast<void>(h.type("K"));
+  UI_CHECK(h.panel.auto_key_enabled());
+  // Bare K is the shuttle's stop and leaves Auto Key alone.
+  UI_CHECK(h.type("k").transport == editor::TransportRequest::Pause);
   UI_CHECK(h.panel.auto_key_enabled());
 
   Harness camera;
@@ -3658,7 +3662,7 @@ void typing_a_value_keys_it_at_the_playhead() {
 
   // With Auto Key off, an animated channel's value is only shown too.
   h.focus();
-  static_cast<void>(h.type("k"));
+  static_cast<void>(h.type("K"));
   UI_CHECK(!h.panel.auto_key_enabled());
   UI_CHECK(h.click(158.0F, 136.0F).keys.empty());
   UI_CHECK(!h.ctx.typing());
@@ -3947,12 +3951,138 @@ void a_clip_rows_edge_and_the_height_choices_size_clip_rows() {
   UI_CHECK(h.panel.clip_row_height(clip_node) == 24.0F);
 }
 
+void j_k_and_l_shuttle_the_playhead() {
+  Harness h;
+  h.focus();
+  UI_CHECK(h.type("j").transport == editor::TransportRequest::PlayReverse);
+  UI_CHECK(h.type("k").transport == editor::TransportRequest::Pause);
+  UI_CHECK(h.type("l").transport == editor::TransportRequest::PlayForward);
+  UI_CHECK(h.panel.auto_key_enabled());
+}
+
+// The clip, frames 20..59, is selected; at 50 fps Shift makes a nudge a
+// second. A second clip butts it at 60 for the Roll tool's cut.
+void alt_arrows_nudge_the_selection_with_the_active_tool() {
+  Harness h;
+  editor::ElementInfo next = make_clip();
+  next.node = doc::NodeId{8U};
+  next.timing = scene::ClipTiming{60, 20, 0, 0, 0};
+  h.elements.push_back(next);
+  h.selection = {clip_node};
+  h.primary = clip_node;
+  h.focus();
+
+  // Selection moves the clip; the playhead stays put.
+  const editor::TimelinePanelFrame right =
+      h.key(gui::Key::Right, gui::KeyMods::Alt);
+  UI_CHECK(right.transport == editor::TransportRequest::None);
+  UI_CHECK(right.clip_edits.size() == 1U);
+  UI_CHECK(right.clip_edits.front().clip == clip_node);
+  UI_CHECK(right.clip_edits.front().timing.start == 21);
+  UI_CHECK(right.clip_edits.front().timing.duration == 40);
+  const editor::TimelinePanelFrame back = h.key(
+      gui::Key::Left, gui::KeyMods::Alt | gui::KeyMods::Shift);
+  UI_CHECK(back.clip_edits.front().timing.start == -30);
+  // Without Alt the arrows still step the playhead.
+  UI_CHECK(h.key(gui::Key::Right).transport ==
+           editor::TransportRequest::StepForward);
+
+  // Ripple trims the clip's tail, pulling what follows.
+  static_cast<void>(h.type("b"));
+  const editor::TimelinePanelFrame rippled =
+      h.key(gui::Key::Right, gui::KeyMods::Alt);
+  UI_CHECK(rippled.timeline_edits.size() == 1U);
+  UI_CHECK(std::get<editor::TimelineRippleTrimRequest>(
+               rippled.timeline_edits.front()) ==
+           (editor::TimelineRippleTrimRequest{
+               clip_node, scene::TimelineTrimEdge::Tail, 1}));
+
+  // Roll moves the cut after it, shared with the clip that starts there.
+  static_cast<void>(h.type("n"));
+  const editor::TimelinePanelFrame rolled =
+      h.key(gui::Key::Left, gui::KeyMods::Alt);
+  UI_CHECK(rolled.timeline_edits.size() == 1U);
+  UI_CHECK(std::get<editor::TimelineRollRequest>(
+               rolled.timeline_edits.front()) ==
+           (editor::TimelineRollRequest{clip_node, doc::NodeId{8U}, -1}));
+
+  // A key selection is nudged in place of the clips.
+  const std::array<editor::TimelineKeyAddress, 1U> chosen{
+      {{object_node, scene::PropertyChannel::PositionX, 20}}};
+  h.panel.replace_key_selection(chosen);
+  const editor::TimelinePanelFrame keyed =
+      h.key(gui::Key::Right, gui::KeyMods::Alt);
+  UI_CHECK(keyed.timeline_edits.empty());
+  UI_CHECK(keyed.key_batch.has_value());
+  UI_CHECK(keyed.key_batch->action == editor::TimelineKeyBatchAction::Move);
+  UI_CHECK(keyed.key_batch->delta == 1);
+  UI_CHECK(keyed.key_batch->keys ==
+           (std::vector<editor::TimelineKeyAddress>{chosen.begin(),
+                                                    chosen.end()}));
+}
+
+// The playhead is on frame 50, inside the selected clip 20..59.
+void alt_q_and_alt_w_trim_the_selected_clip_to_the_playhead() {
+  Harness h;
+  h.selection = {clip_node};
+  h.primary = clip_node;
+  h.focus();
+  const editor::TimelinePanelFrame head =
+      h.key(gui::Key::TrimHeadToPlayhead, gui::KeyMods::Alt);
+  UI_CHECK(head.timeline_edits.size() == 1U);
+  UI_CHECK(std::get<editor::TimelineRippleTrimRequest>(
+               head.timeline_edits.front()) ==
+           (editor::TimelineRippleTrimRequest{
+               clip_node, scene::TimelineTrimEdge::Head, 30}));
+  const editor::TimelinePanelFrame tail =
+      h.key(gui::Key::TrimTailToPlayhead, gui::KeyMods::Alt);
+  UI_CHECK(std::get<editor::TimelineRippleTrimRequest>(
+               tail.timeline_edits.front()) ==
+           (editor::TimelineRippleTrimRequest{
+               clip_node, scene::TimelineTrimEdge::Tail, -10}));
+
+  // Off the clip there is nothing to trim, and the panel says why.
+  h.timeline.show_frame = 70U;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.key(gui::Key::TrimHeadToPlayhead, gui::KeyMods::Alt)
+               .timeline_edits.empty());
+  const editor::TimelinePanelFrame told = h.frame(0.0F, 0.0F, false);
+  UI_CHECK(told.clip_status_error);
+  UI_CHECK(!told.clip_status.empty());
+}
+
+// ? opens the sheet, which takes the pointer: a press closes it without
+// reaching the play button under it. Its button sits at the foot of the
+// layer list, x=6..26.
+void the_shortcut_sheet_opens_from_its_key_and_button_and_any_press_closes_it() {
+  Harness h;
+  h.focus();
+  static_cast<void>(h.type("?"));
+  UI_CHECK(h.panel.shortcut_sheet_open());
+  UI_CHECK(h.click(73.0F, 17.0F).transport == editor::TransportRequest::None);
+  UI_CHECK(!h.panel.shortcut_sheet_open());
+
+  static_cast<void>(h.click(16.0F, 392.0F));
+  UI_CHECK(h.panel.shortcut_sheet_open());
+  static_cast<void>(h.key(gui::Key::Escape));
+  UI_CHECK(!h.panel.shortcut_sheet_open());
+  UI_CHECK(h.click(73.0F, 17.0F).transport ==
+           editor::TransportRequest::TogglePlay);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 118U> cases{{
+constexpr std::array<Case, 122U> cases{{
+    {"J, K and L shuttle the playhead", &j_k_and_l_shuttle_the_playhead},
+    {"Alt+arrows nudge the selection with the active tool",
+     &alt_arrows_nudge_the_selection_with_the_active_tool},
+    {"Alt+Q and Alt+W trim the selected clip to the playhead",
+     &alt_q_and_alt_w_trim_the_selected_clip_to_the_playhead},
+    {"the shortcut sheet opens from its key and button and any press closes it",
+     &the_shortcut_sheet_opens_from_its_key_and_button_and_any_press_closes_it},
     {"the navigator pans and its ends zoom",
      &the_navigator_pans_and_its_ends_zoom},
     {"a clip row's edge and the height choices size clip rows",

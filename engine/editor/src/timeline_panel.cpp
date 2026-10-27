@@ -295,6 +295,10 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   if (!open_pass(p)) {
     return std::move(p.frame);
   }
+  // The shortcut sheet is modal: nothing under it answers the pointer.
+  if (shortcut_sheet_open_) {
+    ctx.push_pointer_block();
+  }
   prune_key_selection(p);
   navigate(p);
   request_derivatives(p);
@@ -315,6 +319,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   draw_rate_menu(p);
   draw_drag_feedback(p);
   handle_actions(p);
+  draw_shortcut_sheet(p);
   close_pass(p);
   return std::move(p.frame);
 }

@@ -88,6 +88,10 @@ enum class TransportRequest : core::u8 {
   // from a stop to the next cue. A show already running through its cues
   // ignores it, because GO never skips content.
   Go,
+  // J, K and L: play backwards, stop, play forwards, from where it stands.
+  PlayReverse,
+  Pause,
+  PlayForward,
 };
 
 // An inclusive run of show frames, `first` <= `last`.
@@ -801,6 +805,9 @@ public:
                ? found->second
                : rows_state_.clip_row_height;
   }
+  [[nodiscard]] bool shortcut_sheet_open() const noexcept {
+    return shortcut_sheet_open_;
+  }
   [[nodiscard]] bool scale_open() const noexcept { return key_tools_.scale_open; }
   [[nodiscard]] bool curves_mode() const noexcept { return graph_mode_; }
   // The Curves view's value zoom and pan since its last fit: 1 and 0 right
@@ -855,6 +862,14 @@ private:
   // The zoom/scroll bar along the panel's foot, and the clip-height choices
   // under the layer list beside it.
   void draw_navigator(Pass &p);
+  // Alt+Left/Right: the selected keys, or else the selected clips with the
+  // active tool, `delta` frames along.
+  void nudge_selection(Pass &p, core::i64 delta);
+  // Alt+Q / Alt+W: each selected clip under the playhead loses the frames
+  // before it or from it on, and what follows on its track closes up.
+  void trim_to_playhead(Pass &p, scene::TimelineTrimEdge edge);
+  // The keyboard reference, opened with ? or its button, over the panel.
+  void draw_shortcut_sheet(Pass &p);
   void resolve_track_drop(Pass &p);
   void finish_marquee(Pass &p);
   void draw_time_overlays(Pass &p);
@@ -1030,6 +1045,9 @@ private:
     double end{};
   };
   NavigatorState navigator_;
+  // The keyboard reference sheet. While it is open it takes the pointer;
+  // any press, Escape or ? closes it.
+  bool shortcut_sheet_open_{};
 
   // Lifted layers and tracks.
   struct ReorderState final {

@@ -6,6 +6,7 @@
 #include "edit_coalescing_policy.hpp"
 #include "output_window_config.hpp"
 #include "playback.hpp"
+#include "transport_commands.hpp"
 
 #include <mediaserver/cmd/command.hpp>
 #include <mediaserver/net/session_protocol.hpp>
@@ -104,9 +105,5 @@ make_presenter(const PlaybackOptions &options, const std::string &title,
 [[nodiscard]] std::vector<show::CuePoint>
 scene_cue_sheet(const scene::SceneModel &model, scene::SceneId scene_id,
                 show::FrameRate rate);
-
-void apply_command(show::TransportAuthority &transport,
-                   show::PresenterCommand command,
-                   cmd::FrameNumber at) noexcept;
 
 } // namespace mediaserver::app

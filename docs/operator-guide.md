@@ -510,8 +510,8 @@ Editing the bar:
   continues from the signed placement start when playback reaches zero.
 
 **Auto Key**, beside Timeline search, controls whether editing an animated
-property writes a key at the current playhead. `K` toggles it while Timeline
-has keyboard focus. With Auto Key off, edits change the underlying base value;
+property writes a key at the current playhead. `Shift+K` toggles it while
+Timeline has keyboard focus; bare `K` stops the playhead. With Auto Key off, edits change the underlying base value;
 existing animation continues to override that value during playback. The
 property diamonds still explicitly add or remove keys in either mode. This
 setting covers the Inspector, Stage transforms, physical surface transforms,
@@ -579,6 +579,37 @@ The cached filmstrip previews the offset while dragging, and the final preview
 and readout remain after release as the edit reaches the Director. The Stage
 updates when the edit is committed. **Slide (`U`)** is a separate operation
 that adjusts the neighboring cuts; use Selection to freely move a clip.
+
+### Timeline keys
+
+Press `?` while Timeline has keyboard focus, or the **?** button at the foot
+of the layer list, for a sheet of every key the Timeline answers; any press or
+`Esc` closes it. The editing keys follow the conventions of other editors:
+
+- **`J`, `K`, `L`** play backwards, stop and play forwards from wherever the
+  playhead stands, at the show rate; pressing `J` while playing forwards turns
+  the show round in place, and `L` turns it back. `Space` and the play button
+  always play forwards. There is no faster shuttle: one control frame always
+  advances one show frame. In Preview the keys drive the Preview playhead;
+  otherwise they drive the live show, as `Space` does.
+- **`Alt+Q`** and **`Alt+W`** ripple trim each selected clip the playhead is
+  inside to the playhead: `Alt+Q` removes the frames before it, keeping the
+  clip's start so what was under the playhead now starts there, and `Alt+W`
+  removes the frames from the playhead on. Later clips on the track close up.
+  Bare `Q` stays the hold cue key. With no selected clip under the playhead
+  the panel says so and nothing changes.
+- **`Alt+Left`** and **`Alt+Right`** nudge the selection a frame, or a second
+  with Shift. Selected keys move first; otherwise the selected clips are
+  nudged with the active tool: Selection moves them, Ripple Trim moves their
+  out point and what follows, Roll moves the cut after each clip with the
+  clip that starts on it, Slip changes the source frames they show, and Slide
+  moves them between their neighbours. Ripple, Roll and Slide act on the
+  earliest selected clip of each track. Without Alt the arrows step the
+  playhead as before.
+
+`Ctrl+K` cuts the selected clips at the playhead, `Shift+Delete` ripple
+deletes them, `I` and `O` set the range, `Up` and `Down` jump between cuts and
+markers, and `=`, `-` and `\` zoom.
 
 **Curves** turns the lanes into one graph the full height of the layer
 list. Every channel listed on screen below an open layer - and every

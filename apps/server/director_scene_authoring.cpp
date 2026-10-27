@@ -241,6 +241,12 @@ map_transport(editor::TransportRequest request) noexcept {
         return show::PresenterCommand::GoToEnd;
     case editor::TransportRequest::Go:
         return show::PresenterCommand::Go;
+    case editor::TransportRequest::PlayReverse:
+        return show::PresenterCommand::PlayReverse;
+    case editor::TransportRequest::Pause:
+        return show::PresenterCommand::Pause;
+    case editor::TransportRequest::PlayForward:
+        return show::PresenterCommand::PlayForward;
     case editor::TransportRequest::None:
         break;
     }

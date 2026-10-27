@@ -38,6 +38,7 @@ add_executable(media-server
     playback.cpp
     playback_media.cpp
     playback_runtime.cpp
+    transport_commands.cpp
     proxy_generation_service.cpp
     proxy_playback.cpp
     renderer_lockstep.cpp
@@ -129,6 +130,25 @@ mediaserver_set_project_options(media-server)
 set_target_properties(media-server PROPERTIES FOLDER "apps")
 
 if(BUILD_TESTING)
+    add_executable(mediaserver_transport_command_tests
+        transport_commands.cpp
+        tests/transport_command_tests.cpp
+    )
+    target_include_directories(mediaserver_transport_command_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_transport_command_tests
+        PRIVATE MediaServer::Show
+    )
+    mediaserver_set_project_options(mediaserver_transport_command_tests)
+    add_test(
+        NAME mediaserver.server_transport_commands
+        COMMAND mediaserver_transport_command_tests
+    )
+    set_target_properties(mediaserver_transport_command_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_output_playback_buffer_tests
         tests/output_playback_buffer_tests.cpp
     )

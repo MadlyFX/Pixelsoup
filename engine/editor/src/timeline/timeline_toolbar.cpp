@@ -164,7 +164,8 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                  "Back one frame (Left), one second (Shift+Left)");
   transport_icon("play", 30.0F,
                  timeline.playing ? gui::Icon::Pause : gui::Icon::Play,
-                 TransportRequest::TogglePlay, "Play / Pause (Space)",
+                 TransportRequest::TogglePlay,
+                 "Play forwards / Pause (Space); J, K and L shuttle",
                  timeline.playing);
   transport_icon("step forward", icon_button_width, gui::Icon::StepForward,
                  TransportRequest::StepForward,

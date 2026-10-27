@@ -566,7 +566,15 @@ void TimelinePanel::handle_actions(Pass &p) {
                          !typing_at_start && !ctx.typing() &&
                          !ctx.pointer_down();
   if (shortcuts) {
-    if (ctx.key_pressed(gui::Key::Left)) {
+    // Alt moves what is selected rather than the playhead: a frame, or a
+    // second with Shift, as the arrows step the playhead.
+    const core::i64 nudge =
+        ctx.shift_held() ? static_cast<core::i64>(p.fps) : 1;
+    if (ctx.alt_held() && ctx.key_pressed(gui::Key::Left)) {
+      nudge_selection(p, -nudge);
+    } else if (ctx.alt_held() && ctx.key_pressed(gui::Key::Right)) {
+      nudge_selection(p, nudge);
+    } else if (ctx.key_pressed(gui::Key::Left)) {
       frame.transport = ctx.shift_held() ? TransportRequest::JumpBack
                                          : TransportRequest::StepBack;
     } else if (ctx.key_pressed(gui::Key::Right)) {
@@ -596,6 +604,11 @@ void TimelinePanel::handle_actions(Pass &p) {
             static_cast<core::u64>(std::max<core::i64>(*target, 0)), first,
             last);
       }
+    }
+    if (ctx.key_pressed(gui::Key::TrimHeadToPlayhead)) {
+      trim_to_playhead(p, scene::TimelineTrimEdge::Head);
+    } else if (ctx.key_pressed(gui::Key::TrimTailToPlayhead)) {
+      trim_to_playhead(p, scene::TimelineTrimEdge::Tail);
     }
     if (ctx.key_pressed(gui::Key::Split)) {
       for (const ElementInfo *clip : selected_clips) {
@@ -673,9 +686,23 @@ void TimelinePanel::handle_actions(Pass &p) {
       case 'S':
         snapping_ = !snapping_;
         break;
+      // J, K and L shuttle as in every editor: backwards, stop, forwards.
+      case 'j':
+      case 'J':
+        frame.transport = TransportRequest::PlayReverse;
+        break;
       case 'k':
+        frame.transport = TransportRequest::Pause;
+        break;
+      case 'l':
+      case 'L':
+        frame.transport = TransportRequest::PlayForward;
+        break;
       case 'K':
         auto_key_ = !auto_key_;
+        break;
+      case '?':
+        shortcut_sheet_open_ = !shortcut_sheet_open_;
         break;
       case 'v':
       case 'V':

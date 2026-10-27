@@ -115,6 +115,16 @@ void TimelinePanel::draw_navigator(Pass &p) {
   ctx.panel(gui::Rect{navigator.x, navigator.y, navigator.width, 1.0F},
             theme.divider);
 
+  // The keyboard reference, where the hand finds it without a menu.
+  if (list_width >= 40.0F &&
+      text_toggle(ctx, mix(id_, "shortcut sheet"),
+                  gui::Rect{navigator.x + 6.0F, navigator.y + 2.0F, 20.0F,
+                            navigator.height - 3.0F},
+                  "?", shortcut_sheet_open_,
+                  "Timeline keyboard shortcuts (?)")) {
+    shortcut_sheet_open_ = true;
+  }
+
   // The layer list's end: every clip row's height, chosen at once. A row
   // sized alone by its edge rejoins the others when one is chosen.
   constexpr float choice_width = 22.0F;

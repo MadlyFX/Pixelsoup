@@ -64,6 +64,12 @@ enum class PresenterCommand : core::u8 {
     GoToEnd,
     // The cue GO: run from a hold, release a loop, or play to the next cue.
     Go,
+    // An editor's J, K and L: play backwards, stop, play forwards, each from
+    // wherever the show is. Playing either way while already playing the
+    // other turns it round without moving it.
+    PlayReverse,
+    Pause,
+    PlayForward,
 };
 
 // A caller-owned 32-bit surface allocated once. Both the headless and windowed

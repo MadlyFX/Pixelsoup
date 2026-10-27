@@ -30,7 +30,7 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|feed]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|feed]
 //   feed draws Feed Mapping for one 15360x2160 Mosaic window carrying four
 //   2880x1536 wall sections, two of them named, with the first selected;
 //   curves draws the editor with the Timeline switched to Curves mode;
@@ -477,7 +477,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|feed]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|feed]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -495,12 +495,15 @@ int main(int argc, char **argv) {
   // Every clip row Large, by a click on the navigator's L, with a waveform
   // under Particle_Ribbons.mov.
   const bool tall = view == "timeline-tall";
+  // The keyboard reference sheet, opened by its button at the list's foot.
+  const bool keys_sheet = view == "timeline-keys";
   const bool graph_view = view.substr(0U, 10U) == "compositor";
   // The Library with a small sample project: `library` (List), then
   // `library-grid` and `library-drag` (an asset carried out past the panel).
   const bool library_view = view.substr(0U, 7U) == "library";
   const std::string_view properties =
-      curves || summaries || feed || tall || graph_view || library_view
+      curves || summaries || feed || tall || keys_sheet || graph_view ||
+              library_view
           ? std::string_view{}
           : view;
 
@@ -652,7 +655,7 @@ int main(int argc, char **argv) {
   // Timeline toolbar's Curves toggle, pressed and released over two frames.
   // The LED Wall closes the same way, by a click on its twirl, its row
   // being the Timeline's second.
-  const bool clicks = curves || summaries || feed || tall;
+  const bool clicks = curves || summaries || feed || tall || keys_sheet;
   assets::WaveformEnvelope envelope{};
   for (std::size_t bin = 0U; bin < envelope.size(); ++bin) {
     const float phase = static_cast<float>(bin) * 0.021F;
@@ -834,10 +837,12 @@ int main(int argc, char **argv) {
     input.set_mouse_position(
         clicking ? (feed ? 60.0F
                     : tall ? timeline_bounds.x + tall_list_width - 20.0F
+                    : keys_sheet ? timeline_bounds.x + 16.0F
                          : timeline_bounds.x + (curves ? 608.0F : 38.0F))
                  : hover_x,
         clicking ? (feed ? 101.0F
-                    : tall ? timeline_bounds.y + timeline_bounds.height - 9.0F
+                    : tall || keys_sheet
+                        ? timeline_bounds.y + timeline_bounds.height - 9.0F
                          : timeline_bounds.y + (curves ? 17.0F : 112.0F))
                  : hover_y);
     input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);

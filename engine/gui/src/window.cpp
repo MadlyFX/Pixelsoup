@@ -157,6 +157,12 @@ namespace {
         if (code == SDLK_2) {
             return Key::ShadeWireframe;
         }
+        if (code == SDLK_Q) {
+            return Key::TrimHeadToPlayhead;
+        }
+        if (code == SDLK_W) {
+            return Key::TrimTailToPlayhead;
+        }
     }
     switch (code) {
     case SDLK_BACKSPACE:

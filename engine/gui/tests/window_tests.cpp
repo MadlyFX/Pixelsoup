@@ -313,6 +313,22 @@ void standard_clipboard_chords_are_semantic_keys() {
     UI_CHECK(has_mod(input.mods(), gui::KeyMods::Ctrl));
 }
 
+// Alt+Q and Alt+W trim to the playhead; Alt with a letter produces no text,
+// so they have to arrive as keys or not at all.
+void alt_q_and_alt_w_are_the_trim_to_playhead_keys() {
+    gui::InputState input;
+    input.new_frame();
+    const SDL_Event head = key_event(SDLK_Q, true, SDL_KMOD_LALT);
+    const SDL_Event tail = key_event(SDLK_W, true, SDL_KMOD_LALT);
+    UI_CHECK(gui::translate_event(&head, input));
+    UI_CHECK(gui::translate_event(&tail, input));
+
+    const auto keys = input.keys();
+    UI_CHECK(keys.size() == 2U);
+    UI_CHECK(keys[0] == gui::Key::TrimHeadToPlayhead);
+    UI_CHECK(keys[1] == gui::Key::TrimTailToPlayhead);
+}
+
 void a_printable_key_is_left_to_text_input() {
     gui::InputState input;
     input.new_frame();
@@ -543,7 +559,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 20U> cases{{
+constexpr std::array<Case, 21U> cases{{
+    {"Alt+Q and Alt+W are the trim-to-playhead keys",
+     &alt_q_and_alt_w_are_the_trim_to_playhead_keys},
     {"dropped files arrive with their drop point for one frame",
      &dropped_files_arrive_with_their_drop_point_for_one_frame},
     {"one native batch keeps scaled press and release endpoints",

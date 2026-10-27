@@ -67,7 +67,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
                             ruler.y + 2.0F, auto_key_width - 3.0F,
                             std::max(ruler.height - 4.0F, 0.0F)},
                   "Auto Key", auto_key_,
-                  "Auto Key (K): edits to animated properties create keys. "
+                  "Auto Key (Shift+K): edits to animated properties create keys. "
                   "Off edits base values; existing animation still plays. "
                   "Use a property diamond to add or remove a key explicitly.")) {
     auto_key_ = !auto_key_;
