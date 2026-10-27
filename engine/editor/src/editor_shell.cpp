@@ -4275,6 +4275,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     case LibraryAddAction::Sphere:
       add_simple(AddKind::Sphere);
       return;
+    case LibraryAddAction::Background:
+      add_simple(AddKind::Background);
+      return;
     case LibraryAddAction::DirectionalLight:
       add_simple(AddKind::DirectionalLight);
       return;
@@ -4439,6 +4442,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   std::optional<LibraryAssetDrop> pending_asset_drop;
   std::optional<doc::NodeId> dragging_asset;
   std::vector<doc::NodeId> dragging_assets;
+  std::optional<LibraryAddAction> dragging_generator;
+  std::optional<LibraryGeneratorDrop> pending_generator_drop;
   // Files dragged in from the desktop that the Library imported itself.
   bool library_took_files = false;
   std::optional<EffectApplyRequest> pending_effect_drop;
@@ -5751,6 +5756,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
+      dragging_generator = library.dragging_generator;
+      if (library.generator_drop.has_value()) {
+        pending_generator_drop = library.generator_drop;
+      }
       result.thumbnail_requests.insert(result.thumbnail_requests.end(),
                                        library.thumbnail_requests.begin(),
                                        library.thumbnail_requests.end());
@@ -6838,6 +6847,61 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     return placed;
   };
 
+  // Where a dragged surface generator lands on Stage, by the same rule as a
+  // dragged asset: a Background hangs like a screen, the shapes rest on what
+  // is under the pointer at their default size.
+  const auto generator_placement_at =
+      [&](LibraryAddAction action, float screen_x,
+          float screen_y) -> std::optional<StagePlacement> {
+    if (!stage_viewport_drawn || switcher.rehearsal_locked ||
+        !library_generator_placeable(action)) {
+      return std::nullopt;
+    }
+    const scene::Canvas canvas = stage_interaction_scene.canvas;
+    const CanvasPoint dropped =
+        to_canvas(stage_viewport_frame.image, canvas, screen_x, screen_y);
+    if (!dropped.inside) {
+      return std::nullopt;
+    }
+    const auto ray = scene::canvas_ray(stage_interaction_scene.camera, canvas,
+                                       dropped.x, dropped.y);
+    if (!ray.has_value()) {
+      return std::nullopt;
+    }
+    StagePlacementRequest request{};
+    request.ray = *ray;
+    request.hit = impl.stage().panel.surface_at(stage_interaction_scene,
+                                                dropped.x, dropped.y);
+    request.camera = stage_interaction_scene.camera;
+    request.snap = impl.stage().panel.snapping() != ui.ctrl_held();
+    request.snap_move = impl.stage().panel.snap_steps().move;
+    request.snap_turns = impl.stage().panel.snap_steps().rotate_turns;
+    if (action == LibraryAddAction::Background) {
+      request.media = true;
+      request.bounds = media_placement_bounds(16.0F / 9.0F);
+    } else if (action == LibraryAddAction::Plane) {
+      request.bounds = scene::ModelLocalBounds{
+          scene::Vec3{-0.5F, 0.0F, -0.5F}, scene::Vec3{0.5F, 0.0F, 0.5F}};
+    } else {
+      request.bounds = scene::ModelLocalBounds{
+          scene::Vec3{-0.5F, -0.5F, -0.5F}, scene::Vec3{0.5F, 0.5F, 0.5F}};
+    }
+    return place_on_stage(request);
+  };
+  const auto placement_caption = [&](const StagePlacement &lead) {
+    switch (lead.surface) {
+    case StagePlacementSurface::Element:
+      // The name Scene shows, or its kind and number when it has none.
+      return "On " + viewport_deep_select_label(stage_interaction_scene,
+                                                lead.element, elements);
+    case StagePlacementSurface::Floor:
+      return std::string{"On floor"};
+    case StagePlacementSurface::ViewPlane:
+      return std::string{"In the air"};
+    }
+    return std::string{};
+  };
+
   std::optional<CompositorPortDrop> port_hover;
   std::optional<CompositorWireDrop> wire_hover;
   std::string port_hover_what;
@@ -6913,24 +6977,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         static_cast<void>(unused);
         placements.push_back(placement);
       }
-      const StagePlacement &lead = placements.front();
-      std::string caption;
-      switch (lead.surface) {
-      case StagePlacementSurface::Element:
-        // The name Scene shows, or its kind and number when it has none.
-        caption = "On " + viewport_deep_select_label(stage_interaction_scene,
-                                                     lead.element, elements);
-        break;
-      case StagePlacementSurface::Floor:
-        caption = "On floor";
-        break;
-      case StagePlacementSurface::ViewPlane:
-        caption = "In the air";
-        break;
-      }
-      impl.stage().panel.draw_placement_preview(ui, stage_viewport_frame.image,
-                                              stage_interaction_scene,
-                                              placements, caption);
+      impl.stage().panel.draw_placement_preview(
+          ui, stage_viewport_frame.image, stage_interaction_scene, placements,
+          placement_caption(placements.front()));
+    }
+  }
+  if (dragging_generator.has_value() && !ui.pointer_blocked() &&
+      !(timeline_panel_drawn &&
+        timeline_panel_bounds.contains(ui.pointer_x(), ui.pointer_y()))) {
+    if (const auto placement = generator_placement_at(
+            *dragging_generator, ui.pointer_x(), ui.pointer_y())) {
+      const std::array<StagePlacement, 1U> placements{*placement};
+      impl.stage().panel.draw_placement_preview(
+          ui, stage_viewport_frame.image, stage_interaction_scene, placements,
+          placement_caption(*placement));
     }
   }
   if (compositor_panel_drawn && !compositor_locked && !port_hover.has_value() &&
@@ -7253,6 +7313,45 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                         placement.rotation == scene::Vec3{}
                             ? std::nullopt
                             : std::optional<scene::Vec3>{placement.rotation});
+    }
+  }
+
+  if (pending_generator_drop.has_value() &&
+      !(timeline_panel_drawn &&
+        timeline_panel_bounds.contains(pending_generator_drop->screen_x,
+                                       pending_generator_drop->screen_y))) {
+    const auto placement = generator_placement_at(
+        pending_generator_drop->action, pending_generator_drop->screen_x,
+        pending_generator_drop->screen_y);
+    if (placement.has_value()) {
+      AddKind kind = AddKind::Box;
+      switch (pending_generator_drop->action) {
+      case LibraryAddAction::Plane:
+        kind = AddKind::Plane;
+        break;
+      case LibraryAddAction::Sphere:
+        kind = AddKind::Sphere;
+        break;
+      case LibraryAddAction::Background:
+        kind = AddKind::Background;
+        break;
+      default:
+        break;
+      }
+      AddIntent add{kind,
+                    std::string{},
+                    1U,
+                    impl.next_edit_gesture++,
+                    16.0F / 9.0F,
+                    {},
+                    authored_stage.id};
+      add.position = placement->position;
+      if (placement->rotation != scene::Vec3{}) {
+        add.rotation = placement->rotation;
+      }
+      result.adds.push_back(std::move(add));
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
     }
   }
 

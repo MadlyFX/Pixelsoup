@@ -154,6 +154,58 @@ struct SceneInfo final {
     bool operator==(const SceneInfo&) const = default;
 };
 
+// A generated colour: one colour, or a gradient from colour A to colour B.
+// The compositor's Background node fills the canvas with it; a Background
+// surface on Stage fills its own face. Positions and sizes are fractions of
+// whatever is filled, measured in its real proportions, so a radial fill on a
+// wide plane is a circle rather than the ellipse its UVs would make.
+enum class FillMode : core::u8 {
+    Solid = 0U,
+    Linear = 1U,
+    Radial = 2U,
+};
+
+// Straight (unpremultiplied) colour as the operator picks it: display
+// referred, each channel [0, 1].
+struct FillColor final {
+    float r{};
+    float g{};
+    float b{};
+    float a{1.0F};
+
+    bool operator==(const FillColor&) const = default;
+};
+
+struct Fill final {
+    FillMode mode{FillMode::Solid};
+    // Solid uses A alone; a gradient runs from A at its start (Linear) or
+    // centre (Radial) to B.
+    FillColor color_a{0.0F, 0.0F, 0.0F, 1.0F};
+    FillColor color_b{1.0F, 1.0F, 1.0F, 1.0F};
+    // Linear direction from A to B, clockwise as seen: 0 runs left to right,
+    // a quarter turn top to bottom.
+    Turns angle{};
+    // The gradient's midpoint (Linear) or centre (Radial), as fractions of
+    // the filled width and height.
+    float center_x{0.5F};
+    float center_y{0.5F};
+    // Linear: the ramp's length as a fraction of the filled extent measured
+    // along its direction. Radial: the radius as a fraction of half the
+    // diagonal, so 1 reaches the corners. (0, max_fill_size].
+    float size{1.0F};
+
+    bool operator==(const Fill&) const = default;
+};
+
+inline constexpr float max_fill_size = 64.0F;
+inline constexpr float max_fill_center = 64.0F;
+
+// Whether any part of `fill` is less than opaque.
+[[nodiscard]] constexpr bool translucent(const Fill& fill) noexcept {
+    return fill.color_a.a < 1.0F ||
+           (fill.mode != FillMode::Solid && fill.color_b.a < 1.0F);
+}
+
 enum class MaterialAlphaMode : core::u8 {
     Opaque,
     Mask,
@@ -203,6 +255,10 @@ struct Material final {
     std::string specular_texture;
     std::string specular_color_texture;
     std::string anisotropy_texture;
+
+    // A Background surface: the fill multiplies the base and emissive colours
+    // and its alpha the coverage. Absent on every other drawable.
+    std::optional<Fill> fill;
 
     bool operator==(const Material&) const = default;
 };

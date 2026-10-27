@@ -821,6 +821,67 @@ void atmosphere_is_clamped_on_the_way_in() {
                 == -scene::max_fog_anisotropy);
 }
 
+void a_background_fill_is_read_clamped_and_blends_when_translucent() {
+    doc::Root root;
+    // Distinct non-default values in every key, and two out of range.
+    root = root.set(node(
+        1U, schema::object_type,
+        {text(schema::primitive, "quad"),
+         text(schema::fill_mode, schema::radial_fill),
+         real(schema::fill_a_r, 0.125), real(schema::fill_a_g, 0.25),
+         real(schema::fill_a_b, 0.375), real(schema::fill_a_a, 0.5),
+         real(schema::fill_b_r, 0.625), real(schema::fill_b_g, 0.75),
+         real(schema::fill_b_b, 1.5), real(schema::fill_b_a, 0.875),
+         real(schema::fill_angle_turns, 1.25),
+         real(schema::fill_center_x, 0.3), real(schema::fill_center_y, -0.2),
+         real(schema::fill_size, 200.0)}));
+    // An ordinary surface carries no fill.
+    root = root.set(node(2U, schema::object_type,
+                         {text(schema::primitive, "quad")}));
+    // An opaque solid fill leaves the alpha mode as authored.
+    root = root.set(node(
+        3U, schema::object_type,
+        {text(schema::primitive, "quad"),
+         text(schema::fill_mode, schema::solid_fill),
+         real(schema::fill_b_a, 0.0)}));
+
+    scene::SceneModel model;
+    model.reset(root);
+    MODEL_CHECK(model.counters().rejected == 0U);
+    const scene::Scene built = model.evaluate(at_start);
+    MODEL_CHECK(built.instances.size() == 3U);
+    const auto fill = built.instances[0U].material.fill;
+    MODEL_CHECK(fill.has_value());
+    MODEL_CHECK(fill->mode == scene::FillMode::Radial);
+    MODEL_CHECK((fill->color_a == scene::FillColor{0.125F, 0.25F, 0.375F, 0.5F}));
+    MODEL_CHECK((fill->color_b == scene::FillColor{0.625F, 0.75F, 1.0F, 0.875F}));
+    MODEL_CHECK(fill->angle == 0.25F);
+    MODEL_CHECK(fill->center_x == 0.3F);
+    MODEL_CHECK(fill->center_y == -0.2F);
+    MODEL_CHECK(fill->size == scene::max_fill_size);
+    MODEL_CHECK(built.instances[0U].material.alpha_mode
+                == scene::MaterialAlphaMode::Blend);
+    MODEL_CHECK(!built.instances[1U].material.fill.has_value());
+    MODEL_CHECK(built.instances[2U].material.fill.has_value());
+    MODEL_CHECK(built.instances[2U].material.alpha_mode
+                == scene::MaterialAlphaMode::Opaque);
+    // The authored view reads the same fill.
+    MODEL_CHECK(scene::read_surface_fill(root.get(doc::NodeId{1U})->properties)
+                == fill);
+    MODEL_CHECK(!scene::read_surface_fill(root.get(doc::NodeId{2U})->properties)
+                     .has_value());
+
+    // A mode that is not one of the three words is a damaged node.
+    root = root.set(node(
+        4U, schema::object_type,
+        {text(schema::primitive, "quad"), text(schema::fill_mode, "conic")}));
+    scene::SceneModel damaged;
+    damaged.reset(root);
+    MODEL_CHECK(damaged.counters().rejected == 1U);
+    MODEL_CHECK(!scene::read_surface_fill(root.get(doc::NodeId{4U})->properties)
+                     .has_value());
+}
+
 void physical_renderer_inputs_are_replicated_without_resolving_assets() {
     doc::Root root;
     root = root.set(node(
@@ -5132,7 +5193,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 88U> cases{{
+constexpr std::array<Case, 89U> cases{{
     {"a clip carries the size it is held at",
      &a_clip_carries_the_size_it_is_held_at},
     {"negative native placements keep exact source mapping and safe bounds",
@@ -5173,6 +5234,8 @@ constexpr std::array<Case, 88U> cases{{
      &a_point_light_is_carried_through_as_one},
     {"physical renderer inputs are replicated without resolving assets",
      &physical_renderer_inputs_are_replicated_without_resolving_assets},
+    {"a Background fill is read clamped and blends when translucent",
+     &a_background_fill_is_read_clamped_and_blends_when_translucent},
     {"atmosphere is clamped on the way in",
      &atmosphere_is_clamped_on_the_way_in},
     {"camera lens calibration is authored clamped and part of scene identity",

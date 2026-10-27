@@ -36,14 +36,14 @@ void check(bool condition, const char *expression, int line) {
 // (search from x=6, then New Folder, IMPORT and RESCAN at the right), the
 // 20-unit column header or folder path at y=50, the content from y=70, and
 // a 22-unit footer. In the List view the Generators section's heading is
-// 70..92 and, open, its seven rows follow at 22 units each (92..246);
+// 70..92 and, open, its eight rows follow at 22 units each (92..268);
 // folders and then assets come after. Asset rows are 33 units tall at the
 // default thumbnail size. The empty test font measures every string as 0.
 constexpr float content_top = 70.0F;
 constexpr float generator_row(int index) {
   return 92.0F + 22.0F * static_cast<float>(index) + 11.0F;
 }
-constexpr float after_generators = 246.0F;
+constexpr float after_generators = 268.0F;
 // Generators, folders and assets are separate groups with 10 units between
 // them at the top level (6 inside a folder).
 constexpr float first_group = after_generators + 10.0F;
@@ -198,13 +198,47 @@ void a_generator_click_reports_its_add_action() {
   harness.bounds = gui::Rect{0.0F, 0.0F, 260.0F, 320.0F};
   UI_CHECK(harness.click(80.0F, generator_row(0)).add ==
            editor::LibraryAddAction::Box);
-  // Box, Plane, Sphere, Camera, then the lights.
+  // Box, Plane, Sphere, Background, Camera, then the lights.
   UI_CHECK(harness.click(80.0F, generator_row(3)).add ==
+           editor::LibraryAddAction::Background);
+  UI_CHECK(harness.click(80.0F, generator_row(4)).add ==
            editor::LibraryAddAction::Camera);
-  UI_CHECK(harness.click(80.0F, generator_row(6)).add ==
+  UI_CHECK(harness.click(80.0F, generator_row(7)).add ==
            editor::LibraryAddAction::SpotLight);
   // Below the last generator there is nothing to add.
   UI_CHECK(!harness.click(80.0F, after_generators + 10.0F).add.has_value());
+}
+
+void a_surface_generator_drags_out_to_stage() {
+  Harness harness;
+  harness.bounds = gui::Rect{0.0F, 0.0F, 260.0F, 320.0F};
+  // Carried past the threshold, the Background is reported as dragging,
+  // and let go outside the Library it is dropped where it was let go - not
+  // also added as a click.
+  const auto [held, released] =
+      harness.drag(80.0F, generator_row(3), 420.0F, 150.0F);
+  UI_CHECK(held.dragging_generator == editor::LibraryAddAction::Background);
+  UI_CHECK(!held.generator_drop.has_value());
+  UI_CHECK(released.generator_drop.has_value());
+  UI_CHECK(released.generator_drop->action ==
+           editor::LibraryAddAction::Background);
+  UI_CHECK(released.generator_drop->screen_x == 420.0F);
+  UI_CHECK(released.generator_drop->screen_y == 150.0F);
+  UI_CHECK(!released.add.has_value());
+  UI_CHECK(!released.dragging_generator.has_value());
+
+  // Let go back over the Library it is nothing at all.
+  const auto [unused, back] =
+      harness.drag(80.0F, generator_row(0), 120.0F, generator_row(5));
+  static_cast<void>(unused);
+  UI_CHECK(!back.generator_drop.has_value());
+  UI_CHECK(!back.add.has_value());
+
+  // A light is placed where it is added, so it never starts a drag.
+  const auto [light, light_released] =
+      harness.drag(80.0F, generator_row(5), 420.0F, 150.0F);
+  UI_CHECK(!light.dragging_generator.has_value());
+  UI_CHECK(!light_released.generator_drop.has_value());
 }
 
 void the_generators_section_collapses() {
@@ -979,13 +1013,15 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 35U> cases{{
+constexpr std::array<Case, 36U> cases{{
     {"changed sources are offered for acceptance",
      &changed_sources_are_offered_for_acceptance},
     {"the horizontal scrollbar drags without touching rows",
      &the_horizontal_scrollbar_drags_without_touching_rows},
     {"a generator click reports its add action",
      &a_generator_click_reports_its_add_action},
+    {"a surface generator drags out to Stage",
+     &a_surface_generator_drags_out_to_stage},
     {"the generators section collapses", &the_generators_section_collapses},
     {"a click selects and a double-click places",
      &a_click_selects_and_a_double_click_places},

@@ -1663,6 +1663,160 @@ void imported_texture_roles_reach_pixels_with_their_correct_encoding() {
     RENDER_CHECK(occlusion_disabled > occlusion_enabled + 40);
 }
 
+[[nodiscard]] std::array<int, 3U> rgb_at(
+    const RenderedImage& image, core::u32 x, core::u32 y) noexcept {
+    const auto offset =
+        (static_cast<std::size_t>(y) * image.width + x) * 4U;
+    return std::array<int, 3U>{
+        image.rgba[offset], image.rgba[offset + 1U], image.rgba[offset + 2U]};
+}
+
+[[nodiscard]] float encoded_to_linear(float encoded) noexcept {
+    return encoded <= 0.04045F
+        ? encoded / 12.92F
+        : std::pow((encoded + 0.055F) / 1.055F, 2.4F);
+}
+
+void a_background_fill_colours_its_surface() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    // A white-emitting card over black: the fill is then the whole result.
+    const auto render_card = [&](std::optional<scene::Fill> fill,
+                                 scene::Vec3 emissive,
+                                 scene::Vec3 scale = {3.0F, 3.0F, 1.0F}) {
+        auto scn = compositing_scene(canvas);
+        add_emissive_quad(scn, emissive, 0.0F, mediaserver::doc::NodeId{1U});
+        auto& card = scn.instances.back();
+        card.world = scene::scaling(scale);
+        card.normal = scene::normal_basis(card.world);
+        card.material.fill = fill;
+        if (fill.has_value() && scene::translucent(*fill)) {
+            card.material.alpha_mode = scene::MaterialAlphaMode::Blend;
+        }
+        return render_slice(device, scn, scene::whole(canvas), canvas.width,
+                            canvas.height);
+    };
+    const auto close = [](const std::array<int, 3U>& lhs,
+                          const std::array<int, 3U>& rhs, int tolerance) {
+        for (std::size_t channel = 0U; channel < 3U; ++channel) {
+            if (channel_difference(lhs[channel], rhs[channel]) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const scene::Vec3 white{1.0F, 1.0F, 1.0F};
+
+    // Solid: the fill is a display colour, so white emission times the fill
+    // matches emission of that colour decoded to linear light.
+    scene::Fill solid{};
+    solid.color_a = scene::FillColor{0.5F, 0.25F, 0.75F, 1.0F};
+    const auto solid_image = render_card(solid, white);
+    const auto decoded = render_card(
+        std::nullopt,
+        scene::Vec3{encoded_to_linear(0.5F), encoded_to_linear(0.25F),
+                    encoded_to_linear(0.75F)});
+    RENDER_CHECK(close(centre_rgb(solid_image), centre_rgb(decoded), 1));
+    // Colour B is unused by a solid fill.
+    solid.color_b = scene::FillColor{0.0F, 1.0F, 0.0F, 1.0F};
+    RENDER_CHECK(render_card(solid, white).rgba == solid_image.rgba);
+
+    // Linear at a quarter turn runs A at the top to B at the bottom, through
+    // the premultiplied midpoint at the centre.
+    scene::Fill vertical{};
+    vertical.mode = scene::FillMode::Linear;
+    vertical.color_a = scene::FillColor{1.0F, 0.0F, 0.0F, 1.0F};
+    vertical.color_b = scene::FillColor{0.0F, 0.0F, 1.0F, 1.0F};
+    vertical.angle = 0.25F;
+    const auto vertical_image = render_card(vertical, white);
+    const auto top = rgb_at(vertical_image, 32U, 2U);
+    const auto bottom = rgb_at(vertical_image, 32U, 61U);
+    RENDER_CHECK(top[0U] > top[2U] + 60);
+    RENDER_CHECK(bottom[2U] > bottom[0U] + 60);
+    const auto middle = rgb_at(vertical_image, 32U, 32U);
+    RENDER_CHECK(channel_difference(middle[0U], middle[2U]) <= 6);
+    // The same ramp unrotated runs left to right instead.
+    scene::Fill horizontal = vertical;
+    horizontal.angle = 0.0F;
+    const auto horizontal_image = render_card(horizontal, white);
+    const auto left = rgb_at(horizontal_image, 2U, 32U);
+    const auto right = rgb_at(horizontal_image, 61U, 32U);
+    RENDER_CHECK(left[0U] > left[2U] + 60);
+    RENDER_CHECK(right[2U] > right[0U] + 60);
+
+    // Radial distance is measured in the card's world size, so on a card
+    // twice as wide as it is tall, equal world offsets across and up read
+    // the same colour - not equal UV offsets.
+    scene::Fill radial{};
+    radial.mode = scene::FillMode::Radial;
+    radial.color_a = scene::FillColor{1.0F, 1.0F, 1.0F, 1.0F};
+    radial.color_b = scene::FillColor{0.0F, 0.0F, 0.0F, 1.0F};
+    radial.size = 0.5F;
+    const auto radial_image =
+        render_card(radial, white, scene::Vec3{3.0F, 1.5F, 1.0F});
+    const auto centre = rgb_at(radial_image, 32U, 32U);
+    // Pixel centres 13.5 px right of and above the canvas centre at 32.
+    const auto across = rgb_at(radial_image, 45U, 31U);
+    const auto up = rgb_at(radial_image, 31U, 18U);
+    RENDER_CHECK(centre[0U] > across[0U] + 20);
+    RENDER_CHECK(close(across, up, 3));
+
+    // The Advanced path carries the same fill in scene-linear light: the
+    // solid card is the decoded colour itself, and the ramp still runs from
+    // the top to the bottom.
+    std::optional<rhi::Device> advanced_device;
+    if (rhi::Device::available(rhi::BackendKind::D3d12)) {
+        rhi::DeviceConfig config{};
+        config.backend = rhi::BackendKind::D3d12;
+        auto opened = rhi::Device::create(config);
+        RENDER_CHECK(opened);
+        if (opened.value().capabilities().advanced_raster()
+            && opened.value().capabilities().compute) {
+            advanced_device.emplace(std::move(opened).value());
+        }
+    }
+    const auto render_advanced = [&](const scene::Fill& fill) {
+        auto scn = compositing_scene(canvas);
+        add_emissive_quad(scn, white, 0.0F, mediaserver::doc::NodeId{1U});
+        scn.instances.back().material.fill = fill;
+        return render_slice(*advanced_device, scn, scene::whole(canvas),
+                            canvas.width, canvas.height, std::nullopt,
+                            render::SceneRendererMode::AdvancedLinear);
+    };
+    const auto linear_at = [](const RenderedImage& image, core::u32 x,
+                              core::u32 y, std::size_t channel) {
+        core::u16 bits{};
+        std::memcpy(&bits,
+                    image.rgba.data()
+                        + (static_cast<std::size_t>(y) * image.width + x) * 8U
+                        + channel * 2U,
+                    sizeof(bits));
+        return half_to_float(bits);
+    };
+    solid.color_b = scene::FillColor{0.0F, 0.0F, 0.0F, 1.0F};
+    if (advanced_device.has_value()) {
+        const auto advanced_solid = render_advanced(solid);
+        RENDER_CHECK(std::abs(linear_at(advanced_solid, 32U, 32U, 0U)
+                              - encoded_to_linear(0.5F)) < 0.002F);
+        RENDER_CHECK(std::abs(linear_at(advanced_solid, 32U, 32U, 1U)
+                              - encoded_to_linear(0.25F)) < 0.002F);
+        const auto advanced_vertical = render_advanced(vertical);
+        RENDER_CHECK(linear_at(advanced_vertical, 32U, 2U, 0U)
+                     > linear_at(advanced_vertical, 32U, 2U, 2U) * 4.0F);
+        RENDER_CHECK(linear_at(advanced_vertical, 32U, 61U, 2U)
+                     > linear_at(advanced_vertical, 32U, 61U, 0U) * 4.0F);
+    }
+
+    // A transparent fill is the operator seeing through the card.
+    scene::Fill clear{};
+    clear.color_a = scene::FillColor{1.0F, 1.0F, 1.0F, 0.0F};
+    auto empty = compositing_scene(canvas);
+    const auto empty_image = render_slice(
+        device, empty, scene::whole(canvas), canvas.width, canvas.height);
+    RENDER_CHECK(close(centre_rgb(render_card(clear, white)),
+                       centre_rgb(empty_image), 1));
+}
+
 void every_layer_blend_mode_uses_its_real_equation() {
     auto device = open_device();
     constexpr scene::Canvas canvas{64U, 64U};
@@ -3153,7 +3307,7 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 39U> cases{{
+constexpr std::array<Case, 40U> cases{{
     {"renderers on one device share resident geometry",
      &renderers_on_one_device_share_resident_geometry},
     {"shadow maps are reused until what they draw changes",
@@ -3194,6 +3348,8 @@ constexpr std::array<Case, 39U> cases{{
      &canceled_recordings_reuse_and_eventually_commit_one_model_candidate},
     {"imported texture roles reach pixels with their correct encoding",
      &imported_texture_roles_reach_pixels_with_their_correct_encoding},
+    {"a Background fill colours its surface",
+     &a_background_fill_colours_its_surface},
     {"every layer blend mode uses its real equation",
      &every_layer_blend_mode_uses_its_real_equation},
     {"transparent order is back to front not vector order",

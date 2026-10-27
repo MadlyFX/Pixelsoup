@@ -301,48 +301,16 @@ merge_constant_is_identity(const MergeParameters& parameters) noexcept {
     return false;
 }
 
-enum class BackgroundMode : core::u8 {
-    Solid = 0U,
-    Linear = 1U,
-    Radial = 2U,
-};
+// A Background is the scene's colour fill, so the node and a Background
+// surface on Stage are one vocabulary edited with the same controls. Here its
+// positions are fractions of the authored canvas, so every node of a wall
+// computes the same colour for the same canvas pixel.
+using BackgroundMode = scene::FillMode;
+using BackgroundColor = scene::FillColor;
+using BackgroundParameters = scene::Fill;
 
-// Straight (unpremultiplied) colour as the operator picks it: display
-// referred, each channel [0, 1].
-struct BackgroundColor final {
-    float r{};
-    float g{};
-    float b{};
-    float a{1.0F};
-
-    bool operator==(const BackgroundColor&) const = default;
-};
-
-// Positions are in the authored canvas, so every node of a wall computes the
-// same colour for the same canvas pixel.
-struct BackgroundParameters final {
-    BackgroundMode mode{BackgroundMode::Solid};
-    // Solid uses A alone; a gradient runs from A at its start (Linear) or
-    // centre (Radial) to B.
-    BackgroundColor color_a{0.0F, 0.0F, 0.0F, 1.0F};
-    BackgroundColor color_b{1.0F, 1.0F, 1.0F, 1.0F};
-    // Linear direction from A to B, clockwise on the canvas: 0 runs left to
-    // right, a quarter turn top to bottom.
-    scene::Turns angle{};
-    // The gradient's midpoint (Linear) or centre (Radial), as fractions of
-    // the canvas width and height.
-    float center_x{0.5F};
-    float center_y{0.5F};
-    // Linear: the ramp's length as a fraction of the canvas measured along
-    // its direction. Radial: the radius as a fraction of half the canvas
-    // diagonal, so 1 reaches the corners. (0, max_background_gradient_size].
-    float size{1.0F};
-
-    bool operator==(const BackgroundParameters&) const = default;
-};
-
-inline constexpr float max_background_gradient_size = 64.0F;
-inline constexpr float max_background_center = 64.0F;
+inline constexpr float max_background_gradient_size = scene::max_fill_size;
+inline constexpr float max_background_center = scene::max_fill_center;
 
 struct OutputParameters final {
     // False is the non-destructive editor default: unconnected scene drawables

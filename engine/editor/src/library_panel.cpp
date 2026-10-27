@@ -155,10 +155,13 @@ struct LibraryItem final {
   LibraryAddAction action;
 };
 
-constexpr std::array<LibraryItem, 7U> library_items{{
+constexpr std::array<LibraryItem, 8U> library_items{{
     {"Box", "3D primitive", LibraryAddAction::Box},
     {"Plane", "2D surface", LibraryAddAction::Plane},
     {"Sphere", "3D primitive", LibraryAddAction::Sphere},
+    // The compositor's Background node as a card on Stage: a colour or a
+    // gradient, edited with the same controls.
+    {"Background", "Colour or gradient", LibraryAddAction::Background},
     {"Camera", "Tracked stage camera", LibraryAddAction::Camera},
     {"Directional Light", "Global sun", LibraryAddAction::DirectionalLight},
     {"Point Light", "Local emitter", LibraryAddAction::PointLight},
@@ -666,6 +669,14 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
   } else if (action == LibraryAddAction::Plane) {
     draw.add_line(cube.x, cube.y + cube.height, cube.x + cube.width, cube.y,
                   1.0F, color);
+  } else if (action == LibraryAddAction::Background) {
+    // A ramp: bands growing brighter down the card.
+    for (int band = 0; band < 3; ++band) {
+      const float height = cube.height / 3.0F;
+      draw.add_rect(cube.x + 1.0F, cube.y + height * static_cast<float>(band),
+                    cube.width - 2.0F, height,
+                    with_alpha(color, 0.2F + 0.25F * static_cast<float>(band)));
+    }
   }
 }
 
@@ -976,6 +987,8 @@ void LibraryPanel::reset_project_state() noexcept {
   drag_items_.clear();
   drag_primary_ = {};
   drag_moved_ = false;
+  generator_drag_.reset();
+  generator_drag_moved_ = false;
   pending_folder_name_.reset();
   known_folders_.clear();
   menu_open_ = false;
@@ -1050,7 +1063,10 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
   } else {
     const float icon = 26.0F;
     draw_library_icon(
-        ctx, ghost_model_ ? LibraryAddAction::Model : LibraryAddAction::Media,
+        ctx, ghost_generator_.has_value()
+                 ? *ghost_generator_
+                 : (ghost_model_ ? LibraryAddAction::Model
+                                 : LibraryAddAction::Media),
         gui::Rect{image.x + (image.width - icon) * 0.5F,
                   image.y + (image.height - icon) * 0.5F, icon, icon});
   }
@@ -1081,6 +1097,7 @@ LibraryFrame LibraryPanel::draw_impl(
   LibraryFrame frame;
   ghost_live_ = false;
   ghost_texture_ = nullptr;
+  ghost_generator_.reset();
   if (thumbnail_window != nullptr) {
     frame.thumbnail_retain.emplace();
   }
@@ -1894,7 +1911,15 @@ LibraryFrame LibraryPanel::draw_impl(
                           const gui::Rect &twirl, const gui::Rect &inert) {
     const bool hovered_here = over(hit, pointer_x, pointer_y);
     if (entry.kind == Entry::Kind::Generator) {
-      if (interaction.clicked) {
+      if (interaction.pressed &&
+          library_generator_placeable(entry.item->action)) {
+        generator_drag_ = entry.item->action;
+        generator_drag_moved_ = false;
+        drag_start_x_ = ctx.pointer_press_x();
+        drag_start_y_ = ctx.pointer_press_y();
+      }
+      // A press that became a drag is not also a click.
+      if (interaction.clicked && !generator_drag_moved_) {
         frame.add = entry.item->action;
       }
       return;
@@ -2575,6 +2600,44 @@ LibraryFrame LibraryPanel::draw_impl(
       drag_items_.clear();
       drag_primary_ = {};
       drag_moved_ = false;
+    }
+  }
+
+  // A generator carried out to Stage. Let go back inside the Library it is
+  // nothing; outside, the shell places it where it landed.
+  if (generator_drag_.has_value()) {
+    if (ctx.pointer_down()) {
+      const float dx = pointer_x - drag_start_x_;
+      const float dy = pointer_y - drag_start_y_;
+      generator_drag_moved_ = generator_drag_moved_ ||
+                              dx * dx + dy * dy >= drag_threshold_squared;
+    }
+    const bool released = !ctx.pointer_down();
+    if (generator_drag_moved_) {
+      frame.dragging_generator = generator_drag_;
+      const auto item = std::find_if(
+          library_items.begin(), library_items.end(),
+          [this](const LibraryItem &candidate) {
+            return candidate.action == *generator_drag_;
+          });
+      ghost_live_ = !released;
+      ghost_count_ = 1U;
+      ghost_model_ = false;
+      ghost_generator_ = generator_drag_;
+      ghost_label_ = item != library_items.end() ? std::string{item->name}
+                                                 : std::string{};
+      if (released) {
+        frame.dragging_generator.reset();
+        if (!pointer_inside) {
+          frame.generator_drop = LibraryGeneratorDrop{
+              *generator_drag_, ctx.pointer_release_x(),
+              ctx.pointer_release_y()};
+        }
+      }
+    }
+    if (released) {
+      generator_drag_.reset();
+      generator_drag_moved_ = false;
     }
   }
 

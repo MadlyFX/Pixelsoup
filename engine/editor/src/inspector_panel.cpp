@@ -518,6 +518,27 @@ InspectorPanel::editable_value(const ElementInfo& element,
         if (binding.property == scene::schema::specular_color_r) return EditableValue{element.node, element.node, element.material.specular_color.x};
         if (binding.property == scene::schema::specular_color_g) return EditableValue{element.node, element.node, element.material.specular_color.y};
         if (binding.property == scene::schema::specular_color_b) return EditableValue{element.node, element.node, element.material.specular_color.z};
+        if (element.material.fill.has_value()) {
+            const scene::Fill& fill = *element.material.fill;
+            const std::pair<std::string_view, float> fills[]{
+                {scene::schema::fill_a_r, fill.color_a.r},
+                {scene::schema::fill_a_g, fill.color_a.g},
+                {scene::schema::fill_a_b, fill.color_a.b},
+                {scene::schema::fill_a_a, fill.color_a.a},
+                {scene::schema::fill_b_r, fill.color_b.r},
+                {scene::schema::fill_b_g, fill.color_b.g},
+                {scene::schema::fill_b_b, fill.color_b.b},
+                {scene::schema::fill_b_a, fill.color_b.a},
+                {scene::schema::fill_angle_turns, fill.angle},
+                {scene::schema::fill_center_x, fill.center_x},
+                {scene::schema::fill_center_y, fill.center_y},
+                {scene::schema::fill_size, fill.size}};
+            for (const auto& [property, value] : fills) {
+                if (binding.property == property) {
+                    return EditableValue{element.node, element.node, value};
+                }
+            }
+        }
         return std::nullopt;
     case FieldDomain::Effect: {
         if (is_light(element.kind)) {
@@ -843,6 +864,23 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
             binding.property == scene::schema::color_b ||
             binding.property == scene::schema::roughness ||
             binding.property == scene::schema::metallic) {
+          return std::clamp(value, 0.0, 1.0);
+        }
+        // The fill's ranges, as the compositor's Background states them.
+        if (binding.property == scene::schema::fill_angle_turns) {
+          const double wrapped = value - std::floor(value);
+          return wrapped < 0.0 ? wrapped + 1.0 : wrapped;
+        }
+        if (binding.property == scene::schema::fill_center_x ||
+            binding.property == scene::schema::fill_center_y) {
+          return std::clamp(value, -static_cast<double>(scene::max_fill_center),
+                            static_cast<double>(scene::max_fill_center));
+        }
+        if (binding.property == scene::schema::fill_size) {
+          return std::clamp(value, 0.01,
+                            static_cast<double>(scene::max_fill_size));
+        }
+        if (binding.property.starts_with("fill_")) {
           return std::clamp(value, 0.0, 1.0);
         }
         return std::max(value, 0.0);
@@ -1643,6 +1681,104 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
                       std::string{scene::schema::lane_aspect_locked},
                       element.aspect_locked ? 0.0 : 1.0});
     }
+}
+
+void InspectorPanel::draw_fill(gui::UiContext& ctx, Cursor& cursor,
+                               const ElementInfo& element,
+                               InspectorFrame& frame) {
+    if (element.kind != ElementKind::Object ||
+        !element.material.fill.has_value() ||
+        !section(ctx, cursor, "FILL", fill_open_)) {
+        return;
+    }
+    const scene::Fill& fill = *element.material.fill;
+
+    // The compositor Background's TYPE, in scene::FillMode order.
+    {
+        constexpr std::array<std::string_view, 3U> modes{
+            "Solid", "Linear gradient", "Radial gradient"};
+        const gui::Rect row = take_row(cursor, row_height);
+        cursor.y += row_gap;
+        const float label_width =
+            std::clamp(row.width * label_fraction, label_min, label_max);
+        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "Type",
+                  ctx.theme().text_muted);
+        const gui::Rect well{row.x + label_width, row.y,
+                             std::max(row.width - label_width, 1.0F),
+                             row.height};
+        std::size_t selected = static_cast<std::size_t>(fill.mode);
+        if (ctx.dropdown(mix(id_, "fill mode", element.node.value()), well,
+                         modes, selected)) {
+            for (const ElementInfo& item : selected_) {
+                if (!item.locked && item.material.fill.has_value()) {
+                    frame.named_edits.push_back(NamedEdit{
+                        item.node, std::string{scene::schema::fill_mode},
+                        static_cast<double>(selected)});
+                }
+            }
+        }
+    }
+
+    // A colour as a swatch above its four channels.
+    constexpr std::array<std::string_view, 4U> rgba{{"R", "G", "B", "A"}};
+    const auto colour_rows = [&](std::string_view label,
+                                 const scene::FillColor& colour,
+                                 const std::array<std::string_view, 4U>& keys,
+                                 std::size_t salt) {
+        const gui::Rect swatch = take_row(cursor, 14.0F);
+        cursor.y += row_gap;
+        const float label_width =
+            std::clamp(swatch.width * label_fraction, label_min, label_max);
+        ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
+                  label, ctx.theme().text_muted);
+        const gui::Rect well{swatch.x + label_width, swatch.y + 2.0F,
+                             std::max(swatch.width - label_width, 1.0F),
+                             swatch.height - 4.0F};
+        ctx.panel(well, gui::UiColor{colour.r, colour.g, colour.b, 1.0F});
+        std::array<FieldBinding, 4U> bindings{};
+        for (std::size_t i = 0U; i < bindings.size(); ++i) {
+            bindings[i] = FieldBinding{FieldDomain::Material, {}, keys[i]};
+        }
+        const std::array<float, 4U> values{colour.r, colour.g, colour.b,
+                                           colour.a};
+        vector_row(ctx, cursor, "RGBA", rgba, values, 0.005F, bindings, frame,
+                   nullptr, false, false, salt);
+    };
+    colour_rows(fill.mode == scene::FillMode::Solid ? "Colour" : "Colour A",
+                fill.color_a,
+                {scene::schema::fill_a_r, scene::schema::fill_a_g,
+                 scene::schema::fill_a_b, scene::schema::fill_a_a},
+                0U);
+    if (fill.mode == scene::FillMode::Solid) {
+        return;
+    }
+    colour_rows("Colour B", fill.color_b,
+                {scene::schema::fill_b_r, scene::schema::fill_b_g,
+                 scene::schema::fill_b_b, scene::schema::fill_b_a},
+                10U);
+
+    constexpr std::array<std::string_view, 1U> scalar_axis{{""}};
+    const auto scalar = [&](std::string_view label, std::string_view property,
+                            float value, float speed) {
+        const std::array<float, 1U> values{value};
+        const std::array<FieldBinding, 1U> bindings{
+            {{FieldDomain::Material, {}, property}}};
+        vector_row(ctx, cursor, label, scalar_axis, values, speed, bindings,
+                   frame);
+    };
+    if (fill.mode == scene::FillMode::Linear) {
+        scalar("Angle Turns", scene::schema::fill_angle_turns, fill.angle,
+               0.001F);
+    }
+    {
+        constexpr std::array<std::string_view, 2U> xy{{"X", "Y"}};
+        const std::array<float, 2U> values{fill.center_x, fill.center_y};
+        const std::array<FieldBinding, 2U> bindings{
+            {{FieldDomain::Material, {}, scene::schema::fill_center_x},
+             {FieldDomain::Material, {}, scene::schema::fill_center_y}}};
+        vector_row(ctx, cursor, "Center", xy, values, 0.005F, bindings, frame);
+    }
+    scalar("Size", scene::schema::fill_size, fill.size, 0.01F);
 }
 
 void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
@@ -2884,6 +3020,7 @@ InspectorFrame InspectorPanel::draw_selection(
         cursor.y += row_gap;
         if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
+        draw_fill(ctx, cursor, *displayed, frame);
         draw_material(ctx, cursor, *displayed, frame);
         draw_compositing(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_effects(ctx, cursor, *displayed, frame, keyframes, show_frame,

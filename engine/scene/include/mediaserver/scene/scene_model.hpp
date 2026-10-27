@@ -613,6 +613,12 @@ private:
 // failing test rather than a control that silently does nothing.
 void write_renderer_settings(doc::Node& node, const RendererSettings& value);
 
+// A scene.object's Background fill as the scene model reads it, or nothing
+// for an ordinary surface or a damaged fill. For views that show authored
+// values without evaluating the scene.
+[[nodiscard]] std::optional<Fill> read_surface_fill(
+    const doc::PropertyMap& properties) noexcept;
+
 // Asset activation belongs to a running cohort. A saved project's frame
 // ordinals cannot authorize publication in a new session.
 [[nodiscard]] doc::Root without_asset_commits(const doc::Root& project);

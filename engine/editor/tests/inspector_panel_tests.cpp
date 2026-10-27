@@ -590,6 +590,55 @@ void an_animated_property_displays_and_keys_its_evaluated_value() {
     UI_CHECK(near(keyed.key_edits[2].value, 3.0));
 }
 
+void a_background_edits_its_fill_with_the_background_controls() {
+    // An ordinary object has no FILL section at all.
+    Harness plain;
+    bool reachable = true;
+    try {
+        static_cast<void>(plain.control_y("fill mode", subject.value()));
+    } catch (const std::runtime_error&) {
+        reachable = false;
+    }
+    UI_CHECK(!reachable);
+
+    Harness h;
+    h.element.material.fill = scene::Fill{};
+    h.element.material.fill->mode = scene::FillMode::Linear;
+    h.element.material.fill->color_a = scene::FillColor{0.25F, 0.5F, 0.75F, 1.0F};
+    const float mode_y = h.control_y("fill mode", subject.value(), 200.0F);
+    const float colour_a_y = h.control_y("RGBA", 0U, field_x0);
+    const float colour_b_y = h.control_y("RGBA", 10U, field_x0);
+    const float angle_y = h.control_y("Angle Turns", 0U, 200.0F);
+    const float size_y = h.control_y("Size", 0U, 200.0F);
+    // In the compositor Background's order: type, A, B, angle, then size.
+    UI_CHECK(mode_y < colour_a_y && colour_a_y < colour_b_y &&
+             colour_b_y < angle_y && angle_y < size_y);
+
+    // Scrubbing colour A's red edits that one fill key on the element.
+    static_cast<void>(h.frame(field_x0, colour_a_y, false));
+    static_cast<void>(h.frame(field_x0, colour_a_y, true));
+    const editor::InspectorFrame red =
+        h.frame(field_x0 + 20.0F, colour_a_y, true);
+    static_cast<void>(h.frame(field_x0 + 20.0F, colour_a_y, false));
+    UI_CHECK(red.named_edits.size() == 1U);
+    UI_CHECK(red.named_edits.front().node == subject);
+    UI_CHECK(red.named_edits.front().property == scene::schema::fill_a_r);
+    UI_CHECK(red.named_edits.front().value > 0.25);
+    UI_CHECK(red.named_edits.front().value <= 1.0);
+
+    // A solid fill has one colour and no direction.
+    Harness solid;
+    solid.element.material.fill = scene::Fill{};
+    static_cast<void>(solid.control_y("RGBA", 0U, field_x0));
+    reachable = true;
+    try {
+        static_cast<void>(solid.control_y("RGBA", 10U, field_x0));
+    } catch (const std::runtime_error&) {
+        reachable = false;
+    }
+    UI_CHECK(!reachable);
+}
+
 void a_light_edits_its_own_named_properties() {
     Harness h;
     h.element = make_point_light();
@@ -1891,7 +1940,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 55U> cases{{
+constexpr std::array<Case, 56U> cases{{
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
      &a_surface_diamond_keys_its_position_at_the_playhead},
@@ -1955,6 +2004,8 @@ constexpr std::array<Case, 55U> cases{{
      &an_animated_property_displays_and_keys_its_evaluated_value},
     {"a light edits its own named properties",
      &a_light_edits_its_own_named_properties},
+    {"a Background edits its fill with the Background controls",
+     &a_background_edits_its_fill_with_the_background_controls},
     {"a spot is authorable from the inspector",
      &a_spot_is_authorable_from_the_inspector},
     {"a collapsed section takes its fields with it",

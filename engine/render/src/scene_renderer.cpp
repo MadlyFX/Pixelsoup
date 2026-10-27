@@ -558,6 +558,82 @@ struct CompiledInlineRange final {
     core::u32 count{};
 };
 
+// scene.frag.hlsl: surface_fill. A Background surface's fill rides its inline
+// program as an operation of its own kind, outside scene::EffectKind, which
+// every colour-effect evaluator skips. Its four parameter vectors are the
+// mode and reciprocal ramp extent with the direction, the centre and the
+// surface's world width and height, then colours A and B.
+inline constexpr core::u32 surface_fill_inline_kind = 32U;
+static_assert(surface_fill_inline_kind
+    > static_cast<core::u32>(scene::EffectKind::FilmGrain));
+
+struct SurfaceFillProgram final {
+    std::array<GpuInlineEffectParameter, 4U> parameters{};
+};
+
+// The fill measured in the surface's own world size, with the same
+// deterministic trigonometry and extents as the compositor's Background, so
+// the shader only places the pixel and interpolates. UV u runs along local X;
+// v along local Z on a plane and down local Y on a quad (scene.cpp
+// mask_source_plane). Any other mesh is filled in its UV square.
+[[nodiscard]] std::optional<SurfaceFillProgram> surface_fill_program(
+    const scene::MeshInstance& instance) noexcept {
+    if (!instance.material.fill.has_value()) {
+        return std::nullopt;
+    }
+    const scene::Fill& fill = *instance.material.fill;
+    const auto column_length = [&](std::size_t column) noexcept {
+        const float x = instance.world.m[column * 4U];
+        const float y = instance.world.m[column * 4U + 1U];
+        const float z = instance.world.m[column * 4U + 2U];
+        const float length = std::sqrt(x * x + y * y + z * z);
+        return std::isfinite(length) ? length : 0.0F;
+    };
+    float width = 1.0F;
+    float height = 1.0F;
+    if (instance.mesh.primitive == scene::Primitive::Plane) {
+        width = column_length(0U);
+        height = column_length(2U);
+    } else if (instance.mesh.primitive == scene::Primitive::Quad) {
+        width = column_length(0U);
+        height = column_length(1U);
+    }
+    SurfaceFillProgram program{};
+    auto& ramp = program.parameters[0U].values;
+    auto& placement = program.parameters[1U].values;
+    ramp[0U] = static_cast<float>(static_cast<core::u8>(fill.mode));
+    placement[0U] = fill.center_x * width;
+    placement[1U] = fill.center_y * height;
+    placement[2U] = width;
+    placement[3U] = height;
+    if (fill.mode == scene::FillMode::Linear) {
+        const float x = scene::deterministic::cos_turns(fill.angle);
+        const float y = scene::deterministic::sin_turns(fill.angle);
+        // The surface's extent along the ramp, so a size of 1 runs exactly
+        // from one edge to the opposite one.
+        const float length =
+            (std::abs(x) * width + std::abs(y) * height) * fill.size;
+        ramp[1U] = length > 0.0F ? 1.0F / length : 0.0F;
+        ramp[2U] = x;
+        ramp[3U] = y;
+    } else if (fill.mode == scene::FillMode::Radial) {
+        const float radius =
+            fill.size * 0.5F * std::sqrt(width * width + height * height);
+        ramp[1U] = radius > 0.0F ? 1.0F / radius : 0.0F;
+    }
+    const auto color = [](const scene::FillColor& value,
+                          GpuInlineEffectParameter& into) noexcept {
+        into.values[0U] = value.r;
+        into.values[1U] = value.g;
+        into.values[2U] = value.b;
+        into.values[3U] = value.a;
+    };
+    color(fill.color_a, program.parameters[2U]);
+    color(fill.mode == scene::FillMode::Solid ? fill.color_a : fill.color_b,
+          program.parameters[3U]);
+    return program;
+}
+
 [[nodiscard]] bool compile_inline_program(
     const scene::EffectStack& effects,
     const scene::EffectSettings& settings,
@@ -567,7 +643,8 @@ struct CompiledInlineRange final {
     core::u32& curve_luts_used,
     std::vector<core::u8>& operation_bytes,
     std::vector<core::u8>& parameter_bytes,
-    CompiledInlineRange& range) {
+    CompiledInlineRange& range,
+    const std::optional<SurfaceFillProgram>& fill = std::nullopt) {
     const std::size_t operation_start = operation_bytes.size();
     const std::size_t parameter_start = parameter_bytes.size();
     const core::u32 curve_lut_start = curve_luts_used;
@@ -772,6 +849,22 @@ struct CompiledInlineRange final {
             ++range.count;
             return true;
         };
+
+    if (fill.has_value()) {
+        if (!room_for(4U)) {
+            rollback();
+            return false;
+        }
+        const core::u32 parameter_offset = static_cast<core::u32>(
+            parameter_bytes.size() / sizeof(GpuInlineEffectParameter));
+        for (const GpuInlineEffectParameter& parameter : fill->parameters) {
+            append(parameter_bytes, parameter);
+        }
+        append(operation_bytes,
+               GpuInlineEffectOp{surface_fill_inline_kind, parameter_offset,
+                                 4U, 0U});
+        ++range.count;
+    }
 
     if (effects.inline_operations.empty()) {
         // Hand-built/legacy Scene values already carry response-shaped scalar
@@ -3817,7 +3910,8 @@ bool SceneRenderer::render(
     const auto inline_range_for =
         [&](doc::NodeId source,
             const scene::EffectStack& effects,
-            InlineProgramRange& range) {
+            InlineProgramRange& range,
+            const std::optional<SurfaceFillProgram>& fill = std::nullopt) {
             if (source.value() != 0U) {
                 const auto found = std::find_if(
                     inline_program_cache_.begin(),
@@ -3841,7 +3935,8 @@ bool SceneRenderer::render(
                     curve_luts_used,
                     inline_effect_op_scratch_,
                     inline_effect_parameter_scratch_,
-                    compiled)) {
+                    compiled,
+                    fill)) {
                 return false;
             }
             range = InlineProgramRange{compiled.first, compiled.count};
@@ -3968,7 +4063,8 @@ bool SceneRenderer::render(
         InlineProgramRange effect_range{};
         if (!instance_depth_only
             && !inline_range_for(
-                instance.source, instance.style.effects, effect_range)) {
+                instance.source, instance.style.effects, effect_range,
+                surface_fill_program(instance))) {
             return false;
         }
         append(
@@ -4384,7 +4480,8 @@ bool SceneRenderer::render(
         if (!inline_range_for(
                 draw.instance.source,
                 draw.instance.style.effects,
-                effect_range)) {
+                effect_range,
+                surface_fill_program(draw.instance))) {
             return false;
         }
         draw.first_effect = effect_range.first;

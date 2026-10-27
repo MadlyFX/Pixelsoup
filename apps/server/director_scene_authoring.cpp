@@ -410,6 +410,44 @@ map_transport(editor::TransportRequest request) noexcept {
             : unit == scene::LightUnit::Candela ? scene::schema::candela_unit
             : unit == scene::LightUnit::Lux ? scene::schema::lux_unit
             : unit == scene::LightUnit::Nits ? scene::schema::nits_unit : scene::schema::unitless_unit}});
+    } else if (edit.property == scene::schema::fill_mode) {
+        // The Inspector sends the mode as FillMode's value; the document
+        // spells it as a word, like the compositor's Background.
+        if (existing->type != scene::schema::object_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        constexpr std::array<std::string_view, 3U> modes{
+            scene::schema::solid_fill, scene::schema::linear_fill,
+            scene::schema::radial_fill};
+        const auto index = static_cast<std::size_t>(
+            std::llround(std::clamp(edit.value, 0.0, 2.0)));
+        updated.properties.insert_or_assign(
+            edit.property, doc::PropertyValue{std::string{modes[index]}});
+    } else if (edit.property.starts_with("fill_")) {
+        // Every other fill key is a number. Clamped here to the range the
+        // scene model reads, so a scrub past an end stops there rather than
+        // writing a value the next read silently clamps anyway.
+        if (existing->type != scene::schema::object_type ||
+            !std::isfinite(edit.value)) {
+            return true;
+        }
+        double value = edit.value;
+        if (edit.property == scene::schema::fill_angle_turns) {
+            value -= std::floor(value);
+        } else if (edit.property == scene::schema::fill_center_x ||
+                   edit.property == scene::schema::fill_center_y) {
+            value = std::clamp(value,
+                               -static_cast<double>(scene::max_fill_center),
+                               static_cast<double>(scene::max_fill_center));
+        } else if (edit.property == scene::schema::fill_size) {
+            value = std::clamp(value, 0.01,
+                               static_cast<double>(scene::max_fill_size));
+        } else {
+            value = std::clamp(value, 0.0, 1.0);
+        }
+        updated.properties.insert_or_assign(edit.property,
+                                            doc::PropertyValue{value});
     } else if (edit.property == scene::schema::shadow_tier) {
         const int tier = static_cast<int>(std::llround(edit.value));
         updated.properties.insert_or_assign(
@@ -1184,6 +1222,54 @@ placed_clip_duration(const editor::AddIntent &add,
     }
 
     node.type = std::string{scene::schema::object_type};
+    if (kind == editor::AddKind::Background) {
+        // A 16:9 card two metres tall standing on the floor, facing the
+        // camera like a screen. Its colour is all emission over a black,
+        // non-reflective base, so the fill reads as itself rather than as a
+        // painted board picking up the lights; a gradient from a dark top to
+        // a lighter horizon so a new one is visibly a gradient.
+        node.properties.emplace(std::string{scene::schema::primitive},
+                                text("quad"));
+        node.properties.emplace(std::string{scene::schema::group_name},
+                                text("Background"));
+        node.properties.emplace(std::string{scene::schema::position_y},
+                                real(1.0));
+        node.properties.emplace(std::string{scene::schema::scale_x},
+                                real(2.0 * 16.0 / 9.0));
+        node.properties.emplace(std::string{scene::schema::scale_y}, real(2.0));
+        for (const std::string_view channel :
+             {scene::schema::color_r, scene::schema::color_g,
+              scene::schema::color_b}) {
+            node.properties.emplace(std::string{channel}, real(0.0));
+        }
+        for (const std::string_view channel :
+             {scene::schema::emissive_r, scene::schema::emissive_g,
+              scene::schema::emissive_b}) {
+            node.properties.emplace(std::string{channel}, real(1.0));
+        }
+        node.properties.emplace(std::string{scene::schema::roughness},
+                                real(1.0));
+        node.properties.emplace(std::string{scene::schema::specular},
+                                real(0.0));
+        node.properties.emplace(std::string{scene::schema::double_sided},
+                                doc::PropertyValue{true});
+        node.properties.emplace(std::string{scene::schema::fill_mode},
+                                text(scene::schema::linear_fill));
+        const std::pair<std::string_view, double> fill[]{
+            {scene::schema::fill_a_r, 0.10}, {scene::schema::fill_a_g, 0.12},
+            {scene::schema::fill_a_b, 0.18}, {scene::schema::fill_a_a, 1.0},
+            {scene::schema::fill_b_r, 0.46}, {scene::schema::fill_b_g, 0.50},
+            {scene::schema::fill_b_b, 0.56}, {scene::schema::fill_b_a, 1.0},
+            {scene::schema::fill_angle_turns, 0.25},
+            {scene::schema::fill_center_x, 0.5},
+            {scene::schema::fill_center_y, 0.5},
+            {scene::schema::fill_size, 1.0}};
+        for (const auto& [property, value] : fill) {
+            node.properties.emplace(std::string{property}, real(value));
+        }
+        add_links();
+        return node;
+    }
     const std::string_view primitive =
         kind == editor::AddKind::Plane
             ? "plane"

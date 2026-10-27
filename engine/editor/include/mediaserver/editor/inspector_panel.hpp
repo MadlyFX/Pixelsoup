@@ -270,6 +270,10 @@ class InspectorPanel final {
     // the plane's height is tied to it.
     void draw_screen(gui::UiContext& ctx, Cursor& cursor,
                      const ElementInfo& element, InspectorFrame& frame);
+    // A Background's colour or gradient: the controls of the compositor's
+    // Background node, on the surface it fills.
+    void draw_fill(gui::UiContext& ctx, Cursor& cursor,
+                   const ElementInfo& element, InspectorFrame& frame);
     void draw_material(gui::UiContext& ctx, Cursor& cursor,
                        const ElementInfo& element, InspectorFrame& frame);
     void draw_compositing(
@@ -361,6 +365,7 @@ class InspectorPanel final {
     bool transform_open_{true};
     bool camera_open_{true};
     bool light_open_{true};
+    bool fill_open_{true};
     bool material_open_{true};
     std::size_t material_part_{};
     doc::NodeId material_part_node_{};

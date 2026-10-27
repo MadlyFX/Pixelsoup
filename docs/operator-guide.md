@@ -727,8 +727,11 @@ content. Each view keeps its own size.
 
 Click an asset to select it. Ctrl toggles assets in and out of the selection,
 and Shift extends it. Double-click an asset, or press Enter, to place it in
-the scene. The Generators section lists the built-in primitives, lights and
-camera, and a single click adds one. Right-click an asset, folder or empty
+the scene. The Generators section lists the built-in primitives, a
+Background card, lights and camera, and a single click adds one. Drag a Box,
+Plane, Sphere or Background onto Stage instead to place it where it lands, the
+way a dropped asset is: an outline previews where it will rest. Lights and
+the camera are added where their defaults put them. Right-click an asset, folder or empty
 space for **Add to Scene**, **Rename** (F2), **New Folder**, **Move to Top
 Level**, **Remove from Library** (Delete), **Import Media...**, **Import
 Model...** and **Rescan Sources**.
@@ -1101,6 +1104,24 @@ choice, so the wall stays consistent. See
 
 Select a built-in generator such as a box or plane and open **Inspector > Material** to assign Base color, Metal / rough, Normal, Occlusion or Emission textures. Images are sampled using the generator's UVs, and **Clear** removes an assigned channel. Metal / rough uses roughness in green and metallic in blue; normal maps use tangent space. PNG, JPEG, TGA and BMP images are supported. Keep the referenced image available at the same path on every render node.
 
+**Background cards.** **Background** in the Library's Generators is the
+compositor's Background node as a card on Stage: a 16:9 card two metres tall
+that stands facing the camera like a screen. It is named Background in Scene. Select it and
+**Inspector > Fill** has the same controls as the node: **Type** (Solid,
+Linear gradient or Radial gradient), **Colour A** and **Colour B** with their
+alphas, **Angle Turns** for a linear ramp, and **Center** and **Size**. They
+mean what they do on the node, measured on the card instead of the canvas:
+Center and Size are fractions of the card's own width and height in its real
+proportions, so a radial gradient on a wide card is a circle, and resizing the
+card scales the gradient with it. A colour with alpha below 1 blends the card
+over what is behind it.
+
+The fill multiplies the card's base and emissive colours. A new card has a
+black, non-reflective base and white emission, so it shows the fill as its own
+light: exposed and tone-mapped like the rest of the scene, and exact in the
+Stage's **Unlit** view. Raise its Base Color and lower Emissive under
+**Material** to make it a lit, painted board instead.
+
 Select one imported model and open **Inspector > Model Materials** to assign
 texture images. Choose the numbered **Material part**, then use **Browse...** for
 Base color, Normal, Metal / rough, Occlusion or Emission. **Clear** removes that
@@ -1339,7 +1360,9 @@ in its LAYERS with Multiply to tint or vignette them, or as a Matte's Matte
 Image to fade a layer out across the frame: a gradient from opaque to
 transparent in Alpha mode, or from white to black in Luma mode. Like any image on
 Output's path, an opaque Background covers the scene drawables the graph does
-not reference; give those Scene Layers of their own to place them over it.
+not reference; give those Scene Layers of their own to place them over it. For
+the same fill on a surface in the scene instead of the whole canvas, place a
+[Background card](#authoring-and-project-files) from the Library.
 
 The Spatial / 3D category also contains **LED Car Process**, a purpose-built
 nine-socket virtual-production rig. Any subset of its optional Front, four

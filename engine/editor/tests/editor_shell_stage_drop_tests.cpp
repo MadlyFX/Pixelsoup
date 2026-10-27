@@ -14,7 +14,8 @@
 // A Library asset dragged onto the Stage through the shipping docked shell,
 // with real SDL input: it rests on the surface under the pointer, a screen
 // stands on its bottom edge and turns to face the Stage camera, and nothing is
-// authored until the release.
+// authored until the release. A Background generator dragged out the same way
+// is placed like a screen.
 namespace {
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
@@ -132,19 +133,6 @@ void stage_drop() {
     check(SDL_PushEvent(&event), "pointer button");
     return frame();
   };
-  // Filter the Library to the two assets. The List view sorts them by name:
-  // the model's row is 70..103, the video's 103..136.
-  static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, true));
-  static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, false));
-  SDL_Event text{};
-  text.type = SDL_EVENT_TEXT_INPUT;
-  text.text.windowID = window_id;
-  text.text.text = "Dropped";
-  check(SDL_PushEvent(&text), "filter Library");
-  static_cast<void>(frame());
-  const float asset_x = library.x + 80.0F;
-  const float media_y = library.y + 120.0F;
-  const float model_y = library.y + 86.0F;
   // Just below the middle of the image, under the Stage toolbar: the
   // default free view looks down at the origin, so this is on the platform.
   const float drop_x = stage.x + stage.width * 0.5F;
@@ -158,6 +146,39 @@ void stage_drop() {
     return released;
   };
   const scene::Vec3 eye = editor::stage_eye(editor::StageOrbit{});
+
+  // The Background generator, the fourth Generators row (92 + 3 x 22 ..),
+  // is placed like a screen: it stands on the platform facing the camera.
+  const auto background = drag(library.x + 80.0F, library.y + 169.0F);
+  check(background.adds.size() == 1U, "the Background is added");
+  const editor::AddIntent &card = background.adds.front();
+  check(card.kind == editor::AddKind::Background,
+        "the dropped generator is a Background");
+  check(card.position.has_value() && card.rotation.has_value(),
+        "a Stage drop places and turns the Background");
+  check(near(card.position->y, 1.5F), "the Background stands on the platform");
+  {
+    const scene::Mat4 turned = scene::rotation(card.rotation->x, 0.0F, 0.0F);
+    const scene::Vec3 face{turned.at(0U, 2U), 0.0F, turned.at(2U, 2U)};
+    const scene::Vec3 toward = scene::normalize(scene::Vec3{
+        eye.x - card.position->x, 0.0F, eye.z - card.position->z});
+    check(scene::dot(face, toward) > 0.999F,
+          "the Background faces the camera");
+  }
+
+  // Filter the Library to the two assets. The List view sorts them by name:
+  // the model's row is 70..103, the video's 103..136.
+  static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, true));
+  static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, false));
+  SDL_Event text{};
+  text.type = SDL_EVENT_TEXT_INPUT;
+  text.text.windowID = window_id;
+  text.text.text = "Dropped";
+  check(SDL_PushEvent(&text), "filter Library");
+  static_cast<void>(frame());
+  const float asset_x = library.x + 80.0F;
+  const float media_y = library.y + 120.0F;
+  const float model_y = library.y + 86.0F;
 
   const auto video = drag(asset_x, media_y);
   check(video.adds.size() == 1U, "the video is added");

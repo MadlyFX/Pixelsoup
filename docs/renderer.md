@@ -159,6 +159,19 @@ canvas-pixel coordinate, and channel; independently rendered adjacent wall
 slices therefore produce byte-identical noise at their shared coordinates.
 Amount `0` is identity and adds no shader operation.
 
+A Background card's fill (`scene::Fill`, the same type as the compositor's
+Background node) rides the front of the drawable's inline program as an
+operation of its own kind, which every colour-effect evaluator skips. The CPU
+measures the ramp in the card's world width and height (UV u along local X, v
+down local Y on a quad or along local Z on a plane) with the deterministic
+trigonometry the compositor uses, so the shader only places the pixel and
+interpolates, premultiplied, between the two display colours. The decoded
+colour multiplies the base and emissive colours before lighting and its alpha
+the coverage; a translucent fill makes an opaque surface blend. The fill is
+part of the material digest. It costs four parameter vectors of the bounded
+inline budget, and exceeding that budget refuses the recording like any other
+inline operation.
+
 **The compositor graph runs as isolated render passes, not shader tricks.**
 `CompositorSceneExecutor` evaluates the typed graph (`engine/compositor`) into
 an ordered stack of layers, renders each into its own transparent offscreen

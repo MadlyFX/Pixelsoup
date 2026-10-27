@@ -34,6 +34,7 @@ enum class LibraryAddAction : core::u8 {
   Box,
   Plane,
   Sphere,
+  Background,
   Media,
   Model,
   DirectionalLight,
@@ -167,6 +168,27 @@ inline constexpr core::u32 maximum_library_thumbnail_request_intents = 64U;
 // Library assets let go outside the Library. `asset` is the one the drag
 // was started on; `assets` is everything dragged, `asset` first, so a drop
 // on Stage can place each.
+// A surface generator - Box, Plane, Sphere or Background - dragged out of
+// the Library and let go at a screen point, for the shell to place on Stage
+// where it landed.
+struct LibraryGeneratorDrop final {
+  LibraryAddAction action{LibraryAddAction::Box};
+  float screen_x{};
+  float screen_y{};
+
+  bool operator==(const LibraryGeneratorDrop &) const = default;
+};
+
+// Whether a generator can be dragged out and rested on a Stage surface: the
+// ones that are a shape. Lights and cameras are placed where they are added.
+[[nodiscard]] constexpr bool library_generator_placeable(
+    LibraryAddAction action) noexcept {
+  return action == LibraryAddAction::Box ||
+         action == LibraryAddAction::Plane ||
+         action == LibraryAddAction::Sphere ||
+         action == LibraryAddAction::Background;
+}
+
 struct LibraryAssetDrop final {
   doc::NodeId asset{};
   float screen_x{};
@@ -274,6 +296,11 @@ struct LibraryFrame final {
   // Every asset in that drag, `dragging_asset` first.
   std::vector<doc::NodeId> dragging_assets;
   std::optional<LibraryAssetDrop> asset_drop;
+  // A placeable generator carried beyond the click threshold, and where it
+  // was let go outside the Library. A generator released without moving is
+  // a click and reports `add` instead.
+  std::optional<LibraryAddAction> dragging_generator;
+  std::optional<LibraryGeneratorDrop> generator_drop;
   std::optional<LibraryProxyPolicyIntent> proxy_policy;
   // Look at the sources on disk again, reading their bytes. Nothing does this
   // on a timer, so a file that arrived after the project opened is noticed
@@ -412,6 +439,9 @@ private:
   float drag_start_y_{};
   bool drag_moved_{};
   bool drag_pressed_selected_{};
+  // A press on a placeable generator, which becomes a drag once it moves.
+  std::optional<LibraryAddAction> generator_drag_;
+  bool generator_drag_moved_{};
   // What draw_drag_ghost() shows. The texture is borrowed for this frame
   // only, like every thumbnail; the ghost is drawn only on a frame whose
   // draw() set `ghost_live_`.
@@ -419,6 +449,8 @@ private:
   std::string ghost_label_;
   const rhi::Texture *ghost_texture_{};
   bool ghost_model_{};
+  // The generator a ghost stands for, drawn as its icon.
+  std::optional<LibraryAddAction> ghost_generator_;
   std::size_t ghost_count_{};
   // A folder this panel asked for, opened for naming once it appears.
   std::optional<std::string> pending_folder_name_;

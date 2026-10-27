@@ -239,6 +239,9 @@ namespace mediaserver::app {
         info.material.specular_color.x = std::clamp(number(scene::schema::specular_color_r, 1.0), 0.0F, 1.0F);
         info.material.specular_color.y = std::clamp(number(scene::schema::specular_color_g, 1.0), 0.0F, 1.0F);
         info.material.specular_color.z = std::clamp(number(scene::schema::specular_color_b, 1.0), 0.0F, 1.0F);
+        if (doc_node->type == scene::schema::object_type) {
+            info.material.fill = scene::read_surface_fill(doc_node->properties);
+        }
         info.style.opacity =
             std::clamp(number(scene::schema::opacity, 1.0), 0.0F, 1.0F);
         const int blend =

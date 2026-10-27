@@ -948,6 +948,27 @@ void scene_bridge_is_stable_bounded_and_keeps_previous_transform() {
     RENDER_CHECK(bridge.records().front().world ==
                  value.instances.front().world);
 
+    // A Background fill is render-affecting: adding one, and then changing
+    // any one of its values, each changes the visual digest.
+    const auto unfilled = bridge.update(value);
+    RENDER_CHECK(unfilled);
+    value.instances.front().material.fill = scene::Fill{};
+    const auto filled = bridge.update(value);
+    RENDER_CHECK(filled);
+    RENDER_CHECK(filled.value().visual_digest !=
+                 unfilled.value().visual_digest);
+    value.instances.front().material.fill->color_b.a = 0.25F;
+    const auto retinted = bridge.update(value);
+    RENDER_CHECK(retinted);
+    RENDER_CHECK(retinted.value().visual_digest !=
+                 filled.value().visual_digest);
+    value.instances.front().material.fill->size = 2.0F;
+    const auto resized = bridge.update(value);
+    RENDER_CHECK(resized);
+    RENDER_CHECK(resized.value().visual_digest !=
+                 retinted.value().visual_digest);
+    value.instances.front().material.fill.reset();
+
     scene::Scene too_large{};
     for (core::u64 index = 1U; index <= 5U; ++index) {
         scene::MeshInstance item{};

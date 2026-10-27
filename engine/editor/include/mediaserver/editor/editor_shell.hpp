@@ -98,6 +98,9 @@ enum class AddKind : core::u8 {
   Box,
   Plane,
   Sphere,
+  // A standing card filled with a colour or gradient: the Stage's form of the
+  // compositor's Background node, edited with the same controls.
+  Background,
   DirectionalLight,
   PointLight,
   // A spot is a point light with a cone. Its own entry rather than a point the

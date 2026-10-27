@@ -726,6 +726,50 @@ read_luma_key(Reader& reader) noexcept {
     return material;
 }
 
+// A Background surface's fill, or nothing for an ordinary surface. Numbers
+// out of range clamp, as every material factor does; an unknown mode word is
+// a damaged node.
+[[nodiscard]] std::optional<Fill> read_fill(
+    Reader& reader, const doc::PropertyMap& properties) noexcept {
+    if (find(properties, schema::fill_mode) == nullptr) {
+        return std::nullopt;
+    }
+    Fill fill{};
+    const auto mode = reader.text(schema::fill_mode, schema::solid_fill);
+    if (mode == schema::solid_fill) {
+        fill.mode = FillMode::Solid;
+    } else if (mode == schema::linear_fill) {
+        fill.mode = FillMode::Linear;
+    } else if (mode == schema::radial_fill) {
+        fill.mode = FillMode::Radial;
+    } else {
+        reader.fail();
+    }
+    const auto read_color = [&reader](FillColor& color, std::string_view r,
+                                      std::string_view g, std::string_view b,
+                                      std::string_view a) noexcept {
+        color.r = std::clamp(reader.number(r, color.r), 0.0F, 1.0F);
+        color.g = std::clamp(reader.number(g, color.g), 0.0F, 1.0F);
+        color.b = std::clamp(reader.number(b, color.b), 0.0F, 1.0F);
+        color.a = std::clamp(reader.number(a, color.a), 0.0F, 1.0F);
+    };
+    read_color(fill.color_a, schema::fill_a_r, schema::fill_a_g,
+               schema::fill_a_b, schema::fill_a_a);
+    read_color(fill.color_b, schema::fill_b_r, schema::fill_b_g,
+               schema::fill_b_b, schema::fill_b_a);
+    const float angle = reader.number(schema::fill_angle_turns, fill.angle);
+    fill.angle = angle - std::floor(angle);
+    fill.center_x = std::clamp(reader.number(schema::fill_center_x,
+                                             fill.center_x),
+                               -max_fill_center, max_fill_center);
+    fill.center_y = std::clamp(reader.number(schema::fill_center_y,
+                                             fill.center_y),
+                               -max_fill_center, max_fill_center);
+    fill.size = std::clamp(reader.number(schema::fill_size, fill.size),
+                           0.01F, max_fill_size);
+    return fill;
+}
+
 [[nodiscard]] LightUnit read_light_unit(Reader& reader) noexcept {
     const auto unit = reader.text(schema::light_unit, schema::unitless_unit);
     if (unit == schema::unitless_unit) {
@@ -773,6 +817,13 @@ read_luma_key(Reader& reader) noexcept {
 }
 
 } // namespace
+
+std::optional<Fill> read_surface_fill(
+    const doc::PropertyMap& properties) noexcept {
+    Reader reader{properties};
+    const std::optional<Fill> fill = read_fill(reader, properties);
+    return reader.ok() ? fill : std::nullopt;
+}
 
 core::u32 SceneCounters::duplicate_singletons() const noexcept {
     return duplicate_cameras;
@@ -1172,6 +1223,15 @@ void SceneModel::put(const doc::Node& node) {
             schema::scale_z,
             Vec3{1.0F, 1.0F, 1.0F});
         object.material = read_material(reader, Material{});
+        object.material.fill = read_fill(reader, node.properties);
+        // Transparency in the fill is the operator's intent to see through
+        // it, so an opaque surface carrying one is blended rather than drawn
+        // as a solid card with the alpha ignored.
+        if (object.material.fill.has_value() &&
+            translucent(*object.material.fill) &&
+            object.material.alpha_mode == MaterialAlphaMode::Opaque) {
+            object.material.alpha_mode = MaterialAlphaMode::Blend;
+        }
         object.style = read_style(reader);
         object.spin_turns_per_second =
             reader.number(schema::spin_turns_per_second, 0.0F);

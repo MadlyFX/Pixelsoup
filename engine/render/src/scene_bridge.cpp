@@ -83,6 +83,21 @@ void mix(core::u64& state, const scene::Mat4& value) noexcept {
     mix(state, hash(material.specular_texture));
     mix(state, hash(material.specular_color_texture));
     mix(state, hash(material.anisotropy_texture));
+    mix(state, static_cast<core::u64>(material.fill.has_value()));
+    if (material.fill.has_value()) {
+        const scene::Fill& fill = *material.fill;
+        mix(state, static_cast<core::u64>(fill.mode));
+        for (const scene::FillColor& color : {fill.color_a, fill.color_b}) {
+            mix(state, color.r);
+            mix(state, color.g);
+            mix(state, color.b);
+            mix(state, color.a);
+        }
+        mix(state, fill.angle);
+        mix(state, fill.center_x);
+        mix(state, fill.center_y);
+        mix(state, fill.size);
+    }
 
     return state;
 }

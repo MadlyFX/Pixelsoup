@@ -601,6 +601,47 @@ float3 apply_inline_effects(
     return colour;
 }
 
+// A Background surface's fill (scene_renderer.cpp: SurfaceFillOp), carried as
+// an inline operation that apply_inline_effects ignores. The ramp is measured
+// on the CPU in the surface's world size, so this only places the pixel and
+// interpolates - the same arithmetic as compositor_merge.frag.hlsl generate().
+// Returns linear colour and straight alpha; white and opaque without a fill.
+static const uint surface_fill_kind = 32u;
+
+float4 surface_fill(uint4 range, float2 uv) {
+    for (uint index = 0u; index < range.y; ++index) {
+        const InlineEffectOp operation = inline_effects[range.x + index];
+        if (operation.kind != surface_fill_kind
+            || operation.parameter_count != 4u) {
+            continue;
+        }
+        const float4 ramp = inline_effect_parameters[operation.parameter_offset];
+        const float4 placement =
+            inline_effect_parameters[operation.parameter_offset + 1u];
+        const float4 color_a =
+            inline_effect_parameters[operation.parameter_offset + 2u];
+        const float4 color_b =
+            inline_effect_parameters[operation.parameter_offset + 3u];
+        const float2 position = uv * placement.zw;
+        float t = 0.0;
+        if (ramp.x > 0.5 && ramp.x < 1.5) { // FillMode::Linear
+            t = dot(position - placement.xy, ramp.zw) * ramp.y + 0.5;
+        } else if (ramp.x > 1.5) { // FillMode::Radial
+            t = length(position - placement.xy) * ramp.y;
+        }
+        t = saturate(t);
+        // Premultiplied interpolation, so a transparent end contributes no
+        // colour of its own to the ramp.
+        const float4 mixed = lerp(float4(color_a.rgb * color_a.a, color_a.a),
+                                  float4(color_b.rgb * color_b.a, color_b.a), t);
+        const float alpha = saturate(mixed.a);
+        const float3 straight = alpha > 1e-6 ? saturate(mixed.rgb / alpha)
+                                             : float3(0.0, 0.0, 0.0);
+        return float4(decode_srgb(straight), alpha);
+    }
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+
 #include "area_lighting.hlsli"
 
 float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
@@ -643,8 +684,9 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         occlusion_texture.SampleBias(occlusion_sampler, input.uv, texture_sampling.x).r;
     // Lights only: a neutral grey surface, so only the light on it shows.
     const bool lights_only = view_mode.x > 1.5 && view_mode.x < 2.5;
+    const float4 fill = surface_fill(input.effect_range, input.uv);
     const float3 base_albedo = input.base_color_roughness.rgb *
-        decode_srgb(sampled_base.rgb);
+        decode_srgb(sampled_base.rgb) * fill.rgb;
     const float3 albedo = lights_only ? float3(0.5, 0.5, 0.5) : base_albedo;
     // glTF packs roughness in G and metallic in B. These are data channels,
     // sampled linearly rather than passed through the colour transfer curve.
@@ -662,9 +704,10 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     const float metallic = lights_only ? 0.0 : saturate(
         input.emissive_metallic.a * sampled_metallic_roughness.b);
     const float3 emissive = lights_only ? float3(0.0, 0.0, 0.0)
-        : input.emissive_metallic.rgb * sampled_emissive;
+        : input.emissive_metallic.rgb * sampled_emissive * fill.rgb;
 
-    const float alpha_coverage = saturate(input.anisotropy.w * sampled_base.a);
+    const float alpha_coverage =
+        saturate(input.anisotropy.w * sampled_base.a * fill.a);
     if (input.alpha.y > 0.5 && input.alpha.y < 1.5 && alpha_coverage < input.alpha.x) discard;
     MaterialLobes m;
     m.coat = input.coat.x * clearcoat_texture.SampleBias(clearcoat_sampler, input.uv, texture_sampling.x).r;

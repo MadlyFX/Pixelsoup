@@ -370,6 +370,27 @@ inline constexpr std::string_view transmission_texture = "transmission_texture";
 inline constexpr std::string_view specular_texture = "specular_texture";
 inline constexpr std::string_view specular_color_texture = "specular_color_texture";
 inline constexpr std::string_view anisotropy_texture = "anisotropy_texture";
+// A Background surface's fill (scene::Fill), on a scene.object. Absent
+// fill_mode is an ordinary surface; present, it is one of the three words
+// below and the other keys default to scene::Fill's values. Centre and size
+// are fractions of the surface's own width (local X) and height (local Z for
+// a plane, Y for a quad), measured in its world size.
+inline constexpr std::string_view fill_mode = "fill_mode";
+inline constexpr std::string_view solid_fill = "solid";
+inline constexpr std::string_view linear_fill = "linear";
+inline constexpr std::string_view radial_fill = "radial";
+inline constexpr std::string_view fill_a_r = "fill_a_r";
+inline constexpr std::string_view fill_a_g = "fill_a_g";
+inline constexpr std::string_view fill_a_b = "fill_a_b";
+inline constexpr std::string_view fill_a_a = "fill_a_a";
+inline constexpr std::string_view fill_b_r = "fill_b_r";
+inline constexpr std::string_view fill_b_g = "fill_b_g";
+inline constexpr std::string_view fill_b_b = "fill_b_b";
+inline constexpr std::string_view fill_b_a = "fill_b_a";
+inline constexpr std::string_view fill_angle_turns = "fill_angle_turns";
+inline constexpr std::string_view fill_center_x = "fill_center_x";
+inline constexpr std::string_view fill_center_y = "fill_center_y";
+inline constexpr std::string_view fill_size = "fill_size";
 
 // Shared layer/compositing properties for objects, media, and imported models.
 // Blend mode is stored as 0=normal, 1=add, 2=multiply, 3=screen.
