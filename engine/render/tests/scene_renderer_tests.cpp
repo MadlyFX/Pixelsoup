@@ -1290,6 +1290,89 @@ void model_geometry_streams_over_several_recordings_before_it_draws() {
     on_each_backend(model_geometry_streams_on);
 }
 
+// A square map whose texels all differ, so a row uploaded to the wrong place,
+// or never uploaded, changes the picture.
+void write_fixture_pattern_tga(const std::filesystem::path& path, core::u32 size) {
+    std::vector<core::u8> bytes(18U + static_cast<std::size_t>(size) * size * 4U);
+    bytes[2U] = 2U;
+    bytes[12U] = static_cast<core::u8>(size & 0xffU);
+    bytes[13U] = static_cast<core::u8>(size >> 8U);
+    bytes[14U] = bytes[12U];
+    bytes[15U] = bytes[13U];
+    bytes[16U] = 32U;
+    bytes[17U] = 0x28U;
+    for (core::u32 y = 0U; y < size; ++y) {
+        for (core::u32 x = 0U; x < size; ++x) {
+            const std::size_t texel = 18U + (static_cast<std::size_t>(y) * size + x) * 4U;
+            bytes[texel] = 128U;
+            bytes[texel + 1U] = static_cast<core::u8>(y * 255U / (size - 1U));
+            bytes[texel + 2U] = static_cast<core::u8>(x * 255U / (size - 1U));
+            bytes[texel + 3U] = 255U;
+        }
+    }
+    std::ofstream out{path, std::ios::binary | std::ios::trunc};
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    out.close();
+    check(static_cast<bool>(out), "write pattern texture", __LINE__);
+}
+
+void model_textures_stream_on(rhi::Device& device) {
+    constexpr scene::Canvas canvas{32U, 32U};
+    const std::string stem = "streamed_model_textures";
+    const std::string source = emissive_model(stem);
+    // A 16x16 emissive map, magnified across the frame so every row of its
+    // top level reaches pixels.
+    write_fixture_pattern_tga(
+        std::filesystem::path{source}.parent_path() / (stem + "_emissive.tga"), 16U);
+    const scene::Scene scn = textured_model_scene(canvas, source, scene::Vec3{}, 0.0F, 0.0F);
+    auto limits = test_limits();
+    // One row of the map per recording: its textures take more than twenty.
+    limits.texture_upload_bytes = 64U;
+    auto created = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, limits, render::SceneRendererMode::BasicDisplay);
+    auto whole = render::SceneRenderer::create(
+        device, canvas.width, canvas.height, test_limits(), render::SceneRendererMode::BasicDisplay);
+    RENDER_CHECK(created.has_value() && whole.has_value());
+    auto renderer = std::move(created).value();
+    static_cast<void>(record_frame(device, renderer, scn, canvas));
+    RENDER_CHECK(render::detail::wait_for_shared_model_cache_for_test());
+    std::size_t streaming{};
+    CentreFrame frame{};
+    for (;;) {
+        frame = record_frame(device, renderer, scn, canvas);
+        // Upload capacity defers rows to later recordings; it never refuses
+        // the generation.
+        RENDER_CHECK(frame.stats.model_integration_refusals == 0U);
+        if (frame.stats.models_pending == 0U) {
+            break;
+        }
+        // Nothing is drawn from partly uploaded textures.
+        RENDER_CHECK(frame.centre[0] < 16U && frame.centre[1] < 16U && frame.centre[2] < 16U);
+        RENDER_CHECK(++streaming < 256U);
+        if (streaming == 3U) {
+            // A canceled recording's rows are uploaded again.
+            auto acquired = device.acquire_commands();
+            RENDER_CHECK(acquired.has_value());
+            auto canceled = std::move(acquired).value();
+            RENDER_CHECK(renderer.render(canceled, scn, scene::whole(canvas)));
+        }
+    }
+    RENDER_CHECK(streaming >= 16U);
+    RENDER_CHECK(frame.stats.model_integrations == 1U);
+    RENDER_CHECK(frame.centre[2] > 64U);
+    // The same image a renderer that uploads the textures at once draws.
+    const auto expected = settle(device, whole.value(), scn, canvas);
+    RENDER_CHECK(frame.pixels == expected.pixels);
+    const auto landed = record_frame(device, renderer, scn, canvas);
+    RENDER_CHECK(landed.stats.model_integration_attempts == 0U);
+    RENDER_CHECK(landed.pixels == expected.pixels);
+}
+
+void model_textures_stream_over_several_recordings_before_they_draw() {
+    on_each_backend(model_textures_stream_on);
+}
+
 void the_arena_grows_on(rhi::Device& device) {
     constexpr scene::Canvas canvas{48U, 32U};
     scene::Scene one = textured_model_scene(
@@ -3349,7 +3432,7 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 41U> cases{{
+constexpr std::array<Case, 42U> cases{{
     {"renderers on one device share resident geometry",
      &renderers_on_one_device_share_resident_geometry},
     {"shadow maps are reused until what they draw changes",
@@ -3359,6 +3442,8 @@ constexpr std::array<Case, 41U> cases{{
     {"the range allocator reuses, coalesces and grows", &the_range_allocator_reuses_coalesces_and_grows},
     {"model geometry streams over several recordings before it draws",
      &model_geometry_streams_over_several_recordings_before_it_draws},
+    {"model textures stream over several recordings before they draw",
+     &model_textures_stream_over_several_recordings_before_they_draw},
     {"the geometry arena grows without disturbing resident meshes",
      &the_geometry_arena_grows_without_disturbing_resident_meshes},
     {"refreshed model generations are reclaimed", &refreshed_model_generations_are_reclaimed},

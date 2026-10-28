@@ -1922,6 +1922,7 @@ Result SceneRenderer::create(
         || limits.max_model_texture_bytes == 0U
         || limits.max_vertices == 0U || limits.max_indices == 0U
         || limits.max_skin_vertices == 0U || limits.geometry_upload_bytes == 0U
+        || limits.texture_upload_bytes == 0U
         || limits.max_lights == 0U || limits.max_inline_effect_ops == 0U
         || limits.directional_shadow_resolution == 0U
         || limits.directional_shadow_resolution > 4'096U
@@ -2783,35 +2784,120 @@ bool SceneRenderer::resize(
     return true;
 }
 
-core::u64 SceneRenderer::geometry_budget(rhi::CommandList& commands) {
+core::u64 SceneRenderer::RecordingBudget::remaining(
+    rhi::CommandList& commands, core::u64 limit) {
     const auto current = commands.recording_token();
     if (!current) {
         return 0U;
     }
-    if (!geometry_budget_recording_
-        || !geometry_budget_recording_.same_recording(current)) {
-        geometry_budget_recording_ = current;
-        geometry_budget_used_ = 0U;
+    if (!recording || !recording.same_recording(current)) {
+        recording = current;
+        used = 0U;
     }
-    return geometry_budget_used_ >= limits_.geometry_upload_bytes
-        ? 0U : limits_.geometry_upload_bytes - geometry_budget_used_;
+    return used >= limit ? 0U : limit - used;
 }
 
 bool SceneRenderer::stream_geometry(
     GeometryResidency::Entry& entry,
     rhi::CommandList& commands,
     bool complete_now) {
-    const auto budget = complete_now ? std::numeric_limits<core::u64>::max()
-                                     : geometry_budget(commands);
+    const auto budget = complete_now
+        ? std::numeric_limits<core::u64>::max()
+        : geometry_budget_.remaining(commands, limits_.geometry_upload_bytes);
     const auto streamed = geometry_->stream(entry, commands, complete_now, budget);
     if (streamed.written != 0U) {
         stats_.geometry_uploaded = true;
         stats_.upload_bytes += streamed.written;
         if (!complete_now) {
-            geometry_budget_used_ += streamed.written;
+            geometry_budget_.used += streamed.written;
         }
     }
     return streamed.drawable;
+}
+
+SceneRenderer::TextureUpload SceneRenderer::stream_model_textures(
+    PendingModelIntegration& integration, rhi::CommandList& commands) {
+    using rhi::CommandRecordingOutcome;
+    // Upload space left for the draw data recorded after these rows.
+    constexpr core::u64 upload_reserve = 16ULL << 20U;
+    const auto position = [](core::u64 texture, core::u64 mip, core::u64 row) noexcept {
+        return texture << 40U | mip << 32U | row;
+    };
+    const auto current = commands.recording_token();
+    auto& writes = integration.texture_writes;
+    auto& next = integration.texture_next;
+    // A canceled recording never ran: upload again from its first row.
+    for (auto write = writes.begin(); write != writes.end(); ++write) {
+        const auto outcome = write->recording.outcome();
+        if (outcome == CommandRecordingOutcome::Canceled
+            || outcome == CommandRecordingOutcome::Unavailable) {
+            next = std::min(next, write->begin);
+            writes.erase(write, writes.end());
+            break;
+        }
+    }
+    while (!writes.empty()
+           && writes.front().recording.outcome() == CommandRecordingOutcome::Submitted) {
+        writes.erase(writes.begin());
+    }
+
+    auto& targets = integration.candidate.textures;
+    const auto& sources = integration.decoded_asset->textures;
+    const core::u64 end = position(targets.size(), 0U, 0U);
+    core::u64 budget = current ? texture_budget_.remaining(commands, limits_.texture_upload_bytes) : 0U;
+    while (next < end) {
+        const auto index = static_cast<std::size_t>(next >> 40U);
+        const auto mip = static_cast<core::u32>((next >> 32U) & 0xFFU);
+        const auto row = static_cast<core::u32>(next & 0xFFFF'FFFFULL);
+        if (index >= sources.size() || !sources[index].valid() || !targets[index]) {
+            next = position(index + 1U, 0U, 0U);
+            continue;
+        }
+        const ModelTexture& source = sources[index];
+        const auto width = mip == 0U ? source.width : source.lower_mips[mip - 1U].width;
+        const auto height = mip == 0U ? source.height : source.lower_mips[mip - 1U].height;
+        const std::span<const core::u8> pixels =
+            mip == 0U ? source.rgba : source.lower_mips[mip - 1U].rgba;
+        const core::u32 block = source.encoding == ModelTextureEncoding::Rgba8 ? 1U : 4U;
+        const core::u64 row_bytes = block == 1U ? static_cast<core::u64>(width) * 4U
+            : static_cast<core::u64>((width + 3U) / 4U) * 16U;
+        // The list's capacity is measured in rows of the widest level, so
+        // it holds at least as many rows of a narrower one.
+        const core::u32 capacity =
+            commands.texture_upload_row_capacity(targets[index], upload_reserve);
+        // A row wider than the whole limit still goes, alone, so any limit
+        // makes progress.
+        const core::u64 budget_rows = texture_budget_.used == 0U
+            ? std::max<core::u64>(budget / row_bytes, 1U) : budget / row_bytes;
+        const auto block_rows = static_cast<core::u32>(std::min<core::u64>({
+            (height - row + block - 1U) / block,
+            (static_cast<core::u64>(capacity) + block - 1U) / block,
+            budget_rows}));
+        if (!current || block_rows == 0U) {
+            break;
+        }
+        const auto rows = std::min(height - row, block_rows * block);
+        const auto bytes = pixels.subspan(
+            static_cast<std::size_t>((row / block) * row_bytes),
+            static_cast<std::size_t>(block_rows * row_bytes));
+        if (!commands.upload_texture_rows(targets[index], mip, 0U, row, rows, bytes)) {
+            return TextureUpload::Failed;
+        }
+        budget -= std::min<core::u64>(budget, bytes.size());
+        texture_budget_.used += bytes.size();
+        stats_.upload_bytes += bytes.size();
+        if (writes.empty() || !writes.back().recording.same_recording(current)) {
+            writes.push_back({current, next});
+        }
+        next = row + rows < height ? position(index, mip, row + rows)
+            : mip < source.lower_mips.size() ? position(index, mip + 1U, 0U)
+            : position(index + 1U, 0U, 0U);
+    }
+    const bool landed = next >= end && std::all_of(writes.begin(), writes.end(),
+        [&](const PendingModelIntegration::TextureWrite& write) noexcept {
+            return current && current.same_recording(write.recording);
+        });
+    return landed ? TextureUpload::Drawable : TextureUpload::Pending;
 }
 
 bool SceneRenderer::streaming_geometry(const std::string& source) const noexcept {
@@ -3042,6 +3128,21 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         ++stats_.models_stale;
     }
 
+    // A candidate leaving its transaction may still have writes in flight
+    // into its slots and textures: it is retired, and they are reused only
+    // after those recordings.
+    const auto retire_candidate = [&](PendingModelIntegration& integration) {
+        if (integration.candidate.geometry) {
+            for (const auto& write : integration.candidate.geometry->writes) {
+                integration.candidate.uses.push_back(write.recording);
+            }
+        }
+        for (const auto& write : integration.texture_writes) {
+            integration.candidate.uses.push_back(write.recording);
+        }
+        retired_models_.push_back(std::move(integration.candidate));
+    };
+
     // A canceled-generation retry is superseded only after the command's
     // publication fence can see a different complete asset. A newer live
     // request may still be Pending or Failed while `observed` intentionally
@@ -3055,12 +3156,7 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         // Explicit refresh supersedes the canceled candidate. Keep its driver
         // resources in the already-reserved retirement slot rather than
         // destroying them on the frame thread.
-        if (pending->candidate.geometry) {
-            for (const auto& write : pending->candidate.geometry->writes) {
-                pending->candidate.uses.push_back(write.recording);
-            }
-        }
-        retired_models_.push_back(std::move(pending->candidate));
+        retire_candidate(*pending);
         pending = pending_model_integrations_.erase(pending);
     }
 
@@ -3142,40 +3238,26 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
         return retry_later();
     }
 
-    const auto upload_texture = [&](rhi::Texture& target, const ModelTexture& source) {
-        if (!commands.upload_texture_rows(target, 0U, 0U, 0U, source.height, source.rgba)) return false;
-        for (std::size_t level = 0U; level < source.lower_mips.size(); ++level)
-            if (!commands.upload_texture_rows(target, static_cast<core::u32>(level + 1U),
-                    0U, 0U, source.lower_mips[level].height, source.lower_mips[level].rgba)) return false;
-        stats_.upload_bytes += texture_mip_bytes(source, 0U);
-        return true;
-    };
     const ModelAsset& decoded = *decoded_asset;
     const auto model_textures = texture_streamer_ ? std::span<const ModelTexture>{} :
         std::span<const ModelTexture>{decoded.textures};
-    // Streams the candidate's geometry. Once all of it has landed, or was
-    // written earlier in this recording, its textures are uploaded and it is
-    // drawable here; until then the wall keeps its current answer.
+    // Streams the candidate's geometry and (Basic) textures. Once all of it
+    // has landed, or was written earlier in this recording, it is drawable
+    // here; until then the wall keeps its current answer.
     const auto advance = [&](PendingModelIntegration& integration)
         -> const ResidentModel* {
-        if (!integration.candidate.geometry
-            || !stream_geometry(*integration.candidate.geometry, commands, false)) {
-            ++stats_.models_pending;
+        const bool geometry_drawable = integration.candidate.geometry
+            && stream_geometry(*integration.candidate.geometry, commands, false);
+        const TextureUpload textures = stream_model_textures(integration, commands);
+        if (textures == TextureUpload::Failed) {
+            integration.blocked = true;
+            found->second.blocked_generation = decoded_generation;
+            ++stats_.model_integration_refusals;
             return replacing ? &found->second : nullptr;
         }
-        for (std::size_t index = 0U;
-             index < model_textures.size(); ++index) {
-            const ModelTexture& source_texture = model_textures[index];
-            if (!source_texture.valid()) {
-                continue;
-            }
-            if (index >= integration.candidate.textures.size()
-                || !upload_texture(integration.candidate.textures[index], source_texture)) {
-                integration.blocked = true;
-                found->second.blocked_generation = decoded_generation;
-                ++stats_.model_integration_refusals;
-                return replacing ? &found->second : nullptr;
-            }
+        if (!geometry_drawable || textures != TextureUpload::Drawable) {
+            ++stats_.models_pending;
+            return replacing ? &found->second : nullptr;
         }
         integration.recording = recording;
         integration.blocked = false;
@@ -3296,20 +3378,14 @@ const SceneRenderer::ResidentModel* SceneRenderer::integrate_model(
             source_part.samplers});
     }
     if (retry) {
-        // The replaced candidate may still have writes in flight into its
-        // slots and textures: retire it so they are reused only after those
-        // recordings.
         if (pending->candidate.geometry || !pending->candidate.textures.empty()) {
-            if (pending->candidate.geometry) {
-                for (const auto& write : pending->candidate.geometry->writes) {
-                    pending->candidate.uses.push_back(write.recording);
-                }
-            }
-            retired_models_.push_back(std::move(pending->candidate));
+            retire_candidate(*pending);
         }
         pending->candidate = std::move(resident);
         pending->recording = {};
         pending->blocked = false;
+        pending->texture_next = 0U;
+        pending->texture_writes.clear();
     } else {
         pending_model_integrations_.push_back(PendingModelIntegration{
             &found->second,

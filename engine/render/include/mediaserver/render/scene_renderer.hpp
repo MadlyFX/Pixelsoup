@@ -125,6 +125,11 @@ struct RendererLimits final {
     // larger model integrates over several frames and reports pending until
     // all of it has landed.
     core::u64 geometry_upload_bytes{48ULL << 20U};
+    // Model texture bytes Basic uploads per recording, within what the
+    // command list's upload pages still hold. A model with more integrates
+    // over several frames and reports pending until all of it has landed.
+    // Advanced streams its textures through TextureResidency instead.
+    core::u64 texture_upload_bytes{16ULL << 20U};
     core::u32 max_lights{
         scene::max_scene_directional_lights + scene::max_scene_point_lights};
     // Per-cascade resolution of the directional shadow products shared by
@@ -698,11 +703,32 @@ private:
         ResidentModel candidate;
         std::shared_ptr<const ModelAsset> decoded_asset;
         // The recording the candidate is drawable in; empty while its
-        // geometry is still streaming or after a canceled recording.
+        // geometry or textures are still streaming or after a canceled
+        // recording.
         rhi::CommandRecordingToken recording;
         core::u64 generation{};
         bool blocked{};
+        // Basic texture upload progress over (texture, mip, row), and the
+        // recordings that carried each run of it. Rows land once their
+        // recording is submitted; a canceled run is uploaded again.
+        struct TextureWrite final {
+            rhi::CommandRecordingToken recording;
+            core::u64 begin{};
+        };
+        core::u64 texture_next{};
+        std::vector<TextureWrite> texture_writes;
     };
+
+    // What remains of a per-recording upload limit. Use restarts at zero
+    // with each recording.
+    struct RecordingBudget final {
+        rhi::CommandRecordingToken recording;
+        core::u64 used{};
+
+        [[nodiscard]] core::u64 remaining(rhi::CommandList& commands, core::u64 limit);
+    };
+
+    enum class TextureUpload : core::u8 { Drawable, Pending, Failed };
 
     // A drawable that needs destination colour: translucent Normal, Add,
     // Multiply, Screen, and every media texture (whose pixels may carry alpha).
@@ -840,10 +866,16 @@ private:
     // this recording.
     [[nodiscard]] bool stream_geometry(
         GeometryResidency::Entry& entry, rhi::CommandList& commands, bool complete_now);
-    [[nodiscard]] core::u64 geometry_budget(rhi::CommandList& commands);
+    // Uploads the rows of a Basic candidate's textures this recording can
+    // carry: up to `texture_upload_bytes`, and only what fits the command
+    // list's remaining upload pages. Drawable once every row has landed or
+    // was written earlier in this recording; Failed only when an upload the
+    // list had room for was refused.
+    [[nodiscard]] TextureUpload stream_model_textures(
+        PendingModelIntegration& integration, rhi::CommandList& commands);
     void note_use(const ResidentModel& model, rhi::CommandList& commands);
-    // True while a model's candidate is still streaming its geometry: the
-    // model is loading, not refused.
+    // True while a model's candidate is still streaming its geometry or
+    // textures: the model is loading, not refused.
     [[nodiscard]] bool streaming_geometry(const std::string& source) const noexcept;
     // Releases retired models no outstanding recording uses: their arena
     // slots, textures and retirement slots.
@@ -1082,8 +1114,8 @@ private:
     std::vector<ResidentModel> retired_models_;
     std::vector<PendingModelIntegration> pending_model_integrations_;
     core::u64 model_texture_bytes_{};
-    rhi::CommandRecordingToken geometry_budget_recording_;
-    core::u64 geometry_budget_used_{};
+    RecordingBudget geometry_budget_;
+    RecordingBudget texture_budget_;
     std::vector<core::u8> instance_scratch_;
     std::vector<core::u8> light_scratch_;
     std::vector<core::u8> inline_effect_op_scratch_;

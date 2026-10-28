@@ -255,6 +255,14 @@ same pane reports residency and loading/refusal reasons. The default 512 MiB
 envelope includes replacement headroom. New model imports prepare BC7 colour/data and
 BC5 normal mip chains on a worker and reference immutable `.msmodel` packages.
 
+**Basic model textures.** Basic keeps every imported texture's full mip chain
+resident and uploads it in rows: at most 16 MiB a recording
+(`RendererLimits::texture_upload_bytes`), and only what the command list's
+80 MiB of native upload pages still holds. A model with more texture data than
+that draws a few frames after it loads. Until every row has landed it reports
+loading, and nothing is drawn from partly uploaded textures. Rows from a
+canceled recording are uploaded again.
+
 **Extended materials and model ingest.** The renderer supports glTF clearcoat,
 sheen, thin transmission, IOR, specular and anisotropy. Select an object and open
 **Properties > Surface Layers** to edit its numeric factors, or use **Library >
