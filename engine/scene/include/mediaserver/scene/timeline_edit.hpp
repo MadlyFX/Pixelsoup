@@ -99,6 +99,16 @@ enum class SourcePhaseRounding : core::u8 { Nearest, Floor };
     core::u32 sequence_count,
     SourcePhaseRounding rounding = SourcePhaseRounding::Nearest) noexcept;
 
+// Sync lock. Each ripple edit below also takes the tracks that keep time with
+// it: on each of those lanes (the edited lane itself is skipped), every
+// unlocked clip that starts at or after the edit's boundary moves by the same
+// amount as the edited lane's. A clip straddling the boundary, and a locked
+// clip, stay where they are. An edit that would push a moving clip into one
+// that stays is clamped where the edit clamps (ripple trim) and refused with
+// OverlappingClips where it cannot (ripple delete, insert). Overlaps a synced
+// lane already had are not counted against the edit. Every moved clip is an
+// update in the plan.
+
 // Tail: duration += d, then later unlocked clips move by d.
 // Head: source-in += rate(d), duration -= d, then later unlocked clips move
 // by -d while the selected start remains fixed.
@@ -107,13 +117,15 @@ enum class SourcePhaseRounding : core::u8 { Nearest, Floor };
     doc::NodeId selected,
     TimelineTrimEdge edge,
     core::i64 requested_delta,
-    MediaFrameRate show_rate);
+    MediaFrameRate show_rate,
+    std::span<const doc::NodeId> synced_lanes = {});
 
 // Selected whole clips must form one contiguous union on one lane. Clips at
 // or after the old union end move left by its exact duration.
 [[nodiscard]] TimelineEditResult plan_ripple_delete(
     std::span<const ClipPlacement> clips,
-    std::span<const doc::NodeId> selected);
+    std::span<const doc::NodeId> selected,
+    std::span<const doc::NodeId> synced_lanes = {});
 
 // The two supplied clips may be in either input order; their timeline order
 // determines left and right. They must touch at exactly one unambiguous cut.
@@ -145,7 +157,8 @@ enum class SourcePhaseRounding : core::u8 { Nearest, Floor };
     std::span<const ClipPlacement> clips,
     TimelineLaneRef target,
     core::i64 start,
-    core::i64 duration);
+    core::i64 duration,
+    std::span<const doc::NodeId> synced_lanes = {});
 
 // Plans the effect of a pasted span on existing clips. A clip strictly
 // containing the span is updated to its left remainder and copied to a newly

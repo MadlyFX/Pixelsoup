@@ -447,13 +447,15 @@ struct EditorSwitcherState final {
   scene::SceneId program_scene{};
   scene::SceneId rehearsal_scene{};
   const scene::Scene *stage_scene{};
-  // The Stage scene evaluated at a Timeline edit's edit point with the edit
-  // applied, while a trim, roll, slip or slide is being dragged. The Stage
-  // views draw it in place of `stage_scene`; picking, gizmos and every panel
-  // keep reading `stage_scene`, so only the picture follows the edit.
-  const scene::Scene *stage_edit_preview{};
-  // What that picture is, captioned over the Stage: "OUT  LAST FRAME  ...".
-  std::string_view stage_edit_caption{};
+  // What the Stage views draw in place of `stage_scene` while it differs
+  // from it: the Stage scene at a dragged Timeline edit's edit point with the
+  // edit applied, and with only the soloed tracks' clips while any are
+  // soloed. Picking, gizmos and every panel keep reading `stage_scene`, so
+  // only the picture changes. Null when the Stage draws `stage_scene`.
+  const scene::Scene *stage_view_override{};
+  // What that picture is, captioned over the Stage: "OUT  LAST FRAME  ...",
+  // or that tracks are soloed.
+  std::string_view stage_view_caption{};
   const scene::Scene *transition_from{};
   const scene::Scene *transition_to{};
   // Compositor graphs are scene-scoped, so Program and the scene on the Stage
@@ -799,6 +801,9 @@ struct EditorFrame final {
   // at its edit point. Reported every frame the drag runs; absent returns
   // the Stage to the playhead. Authors nothing.
   std::optional<TimelineEditPreview> stage_edit_preview;
+  // The Timeline's solo, resolved to what the Stage draws. Reported every
+  // frame; absent draws everything. Authors nothing.
+  std::optional<scene::SoloFilter> stage_solo;
   std::vector<TimelineLaneEditIntent> lane_edits;
   std::vector<TimelineLayerOrderIntent> layer_orders;
   std::vector<ElementFlagIntent> element_flags;

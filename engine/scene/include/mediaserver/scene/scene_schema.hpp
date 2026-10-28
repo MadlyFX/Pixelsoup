@@ -190,6 +190,9 @@ inline constexpr std::string_view lane_name = "lane_name";
 inline constexpr std::string_view lane_order = "lane_order";
 inline constexpr std::string_view lane_muted = "lane_muted";
 inline constexpr std::string_view lane_locked = "lane_locked";
+// A sync-locked track keeps time with ripple edits made on other tracks: its
+// clips at or after the edit point move by the same amount. Not drawn.
+inline constexpr std::string_view lane_sync_locked = "lane_sync_locked";
 inline constexpr std::string_view lane_compositing_mode =
     "lane_compositing_mode";
 inline constexpr std::string_view lane_normal_mode = "normal";

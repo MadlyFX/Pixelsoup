@@ -17,6 +17,7 @@ enum class LaneAuthorAction : core::u8 {
     MoveTo,
     ToggleMute,
     ToggleLock,
+    ToggleSyncLock,
     DeleteEmpty,
     DeleteClips,
     DeleteMoveClips,

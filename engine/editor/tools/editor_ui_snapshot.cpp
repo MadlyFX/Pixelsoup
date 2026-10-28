@@ -30,7 +30,7 @@
 // running editor shows only whatever its scene happens to hold.
 //
 //   mediaserver_editor_ui_snapshot <out.bmp> [scale] [width] [height]
-//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|feed]
+//       [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|timeline-tracks|feed]
 //   feed draws Feed Mapping for one 15360x2160 Mosaic window carrying four
 //   2880x1536 wall sections, two of them named, with the first selected;
 //   curves draws the editor with the Timeline switched to Curves mode;
@@ -477,7 +477,7 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
-              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|feed]");
+              "[width] [height] [hover_x hover_y] [view: media|model|light|renderer|environment|curves|handles|summaries|timeline-tall|timeline-keys|timeline-tracks|feed]");
     return 2;
   }
   const std::string out_path = argv[1];
@@ -497,12 +497,16 @@ int main(int argc, char **argv) {
   const bool tall = view == "timeline-tall";
   // The keyboard reference sheet, opened by its button at the list's foot.
   const bool keys_sheet = view == "timeline-keys";
+  // The two clips on tracks of their own, one sync locked, and the logo at
+  // Half: the track switches and the Full/Half switch.
+  const bool tracks = view == "timeline-tracks";
   const bool graph_view = view.substr(0U, 10U) == "compositor";
   // The Library with a small sample project: `library` (List), then
   // `library-grid` and `library-drag` (an asset carried out past the panel).
   const bool library_view = view.substr(0U, 7U) == "library";
   const std::string_view properties =
-      curves || summaries || feed || tall || keys_sheet || graph_view ||
+      curves || summaries || feed || tall || keys_sheet || tracks ||
+              graph_view ||
               library_view
           ? std::string_view{}
           : view;
@@ -531,6 +535,24 @@ int main(int argc, char **argv) {
   gui::UiContext ctx{input, list, *font, editor_like_theme()};
 
   Show show = sample_show();
+  if (tracks) {
+    for (editor::ElementInfo &held : show.elements) {
+      if (held.node == doc::NodeId{31U}) {
+        held.timeline_lane = doc::NodeId{50U};
+      } else if (held.node == doc::NodeId{32U}) {
+        held.timeline_lane = doc::NodeId{51U};
+        held.media_resolution = scene::MediaResolution::Half;
+      }
+    }
+    scene::TimelineLane plates{doc::NodeId{50U}, scene::SceneId{1U}, 10,
+                               "Plates", false, false,
+                               scene::BlendMode::Normal, false};
+    scene::TimelineLane titles{doc::NodeId{51U}, scene::SceneId{1U}, 20,
+                               "Titles", false, false,
+                               scene::BlendMode::Normal, false};
+    titles.sync_locked = true;
+    show.lanes = {plates, titles};
+  }
   if (handles) {
     scene::ChannelKeyframes &opacity = show.keyframes[1];
     opacity.tangents[1] =

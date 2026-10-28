@@ -702,6 +702,9 @@ PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
         case editor::TimelineLaneAction::ToggleLock:
             action = LaneAuthorAction::ToggleLock;
             break;
+        case editor::TimelineLaneAction::ToggleSyncLock:
+            action = LaneAuthorAction::ToggleSyncLock;
+            break;
         case editor::TimelineLaneAction::DeleteEmpty:
             action = LaneAuthorAction::DeleteEmpty;
             break;

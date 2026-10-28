@@ -2867,12 +2867,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // While a Timeline edit is dragged the Stage views draw its edit point
   // instead, set up exactly as the Stage scene is. Copied only then: the
   // drag lasts a gesture, not a show.
-  std::optional<scene::Scene> stage_edit_scene;
-  if (switcher.stage_edit_preview != nullptr) {
-    stage_edit_scene = *switcher.stage_edit_preview;
-    bypass_sampled_chroma_key(*stage_edit_scene, impl.color_sample_request);
-    stage_edit_scene->camera = stage_scene.camera;
-    stage_edit_scene->canvas = stage_scene.canvas;
+  std::optional<scene::Scene> stage_view_scene;
+  if (switcher.stage_view_override != nullptr) {
+    stage_view_scene = *switcher.stage_view_override;
+    bypass_sampled_chroma_key(*stage_view_scene, impl.color_sample_request);
+    stage_view_scene->camera = stage_scene.camera;
+    stage_view_scene->canvas = stage_scene.canvas;
   }
   // Keep the authored environment and lighting. Grid and guides are UI
   // overlays; making them readable must not change the scene's illumination.
@@ -3215,7 +3215,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           view_camera.near_plane, view_camera.far_plane};
       stage_view.shading = view.shading;
       scene::Scene &drawn_stage =
-          stage_edit_scene.has_value() ? *stage_edit_scene : stage_scene;
+          stage_view_scene.has_value() ? *stage_view_scene : stage_scene;
       auto geometry_camera = authored_stage.camera;
       auto geometry_canvas = authored_stage.canvas;
       std::swap(drawn_stage.camera, geometry_camera);
@@ -4728,11 +4728,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         // While a Timeline edit is dragged the picture is its edit point, not
         // the playhead's frame; the caption says which, in the playhead's
         // colour, along the foot where the bookmark note never sits.
-        if (stage_edit_scene.has_value() &&
-            !switcher.stage_edit_caption.empty()) {
+        if (stage_view_scene.has_value() &&
+            !switcher.stage_view_caption.empty()) {
           const gui::Rect &image = view.frame.image;
           const float width =
-              std::min(ui.font_width(switcher.stage_edit_caption) + 24.0F,
+              std::min(ui.font_width(switcher.stage_view_caption) + 24.0F,
                        std::max(image.width - 16.0F, 0.0F));
           const gui::Rect note{image.x + (image.width - width) * 0.5F,
                                image.y + image.height - 34.0F, width, 24.0F};
@@ -4742,7 +4742,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    ui.theme().playhead);
           ui.label(gui::Rect{note.x + 12.0F, note.y,
                              std::max(width - 14.0F, 0.0F), note.height},
-                   switcher.stage_edit_caption, ui.theme().playhead);
+                   switcher.stage_view_caption, ui.theme().playhead);
           ui.pop_clip();
         }
         // A passive notice leaves picking, framing and navigation available.
@@ -6261,6 +6261,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.range = timeline_frame.range;
       result.show_rate = timeline_frame.show_rate;
       result.stage_edit_preview = timeline_frame.edit_preview;
+      result.stage_solo = timeline_frame.solo;
+      // A clip row's Full/Half switch is the Inspector's Resolution
+      // setting, authored the same way, one undo step per switch.
+      for (const TimelineMediaResolutionEdit &edit :
+           timeline_frame.media_resolutions) {
+        result.generic_edits.push_back(GenericEdit{
+            edit.clip, std::string{scene::schema::media_resolution}, 0.0,
+            impl.begin_gesture(),
+            std::string{edit.resolution == scene::MediaResolution::Half
+                            ? scene::schema::media_resolution_half
+                            : scene::schema::media_resolution_full}});
+      }
       pending_timeline_layer_drop = timeline_frame.layer_drop;
       editor_control_editing = editor_control_editing || timeline_frame.editing;
       delete_consumed = delete_consumed || timeline_frame.consume_delete;

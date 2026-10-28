@@ -3097,6 +3097,84 @@ void a_placed_clip_is_on_air_only_inside_its_own_span() {
 
 // An editor's trim preview: the same model evaluated as if a placement's
 // timing were the proposed one, leaving the authored evaluation alone.
+// An editor's solo draws only what it shows: other clips leave the lane
+// stack, lights keep lighting unless a light is soloed, and a track's sync
+// lock is read back from the document.
+void a_solo_draws_only_what_it_shows() {
+    doc::Root root;
+    root = root.set(node(100U, schema::stage_type, {}));
+    root = root.set(node(
+        20U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Front"),
+         whole(schema::lane_order, 10)}));
+    root = root.set(node(
+        30U, schema::timeline_lane_type,
+        {whole(schema::scene_id, 100), text(schema::lane_name, "Back"),
+         whole(schema::lane_order, 20), flag(schema::lane_sync_locked, true)}));
+    // Clip 1 is on no track, 2 on Front, 3 on Back; 4 and 5 are lights.
+    root = root.set(node(
+        1U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::clip_start, 0), whole(schema::clip_duration, 20)}));
+    root = root.set(node(
+        2U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::lane_id, 20), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+    root = root.set(node(
+        3U, schema::media_type,
+        {whole(schema::scene_id, 100), text(schema::source, "plate.png"),
+         whole(schema::lane_id, 30), whole(schema::clip_start, 0),
+         whole(schema::clip_duration, 20)}));
+    root = root.set(node(
+        4U, schema::light_type,
+        {whole(schema::scene_id, 100), text(schema::light_kind, "point"),
+         real(schema::range, 25.0), real(schema::intensity, 12.0)}));
+    root = root.set(node(
+        5U, schema::light_type,
+        {whole(schema::scene_id, 100), text(schema::light_kind, "point"),
+         real(schema::range, 25.0), real(schema::intensity, 12.0)}));
+    scene::SceneModel model;
+    model.reset(root);
+    const auto evaluate = [&](const scene::SoloFilter* solo) {
+        return model.evaluate(scene::SceneId{100U}, at_start, {}, {}, solo);
+    };
+    const auto sources = [](const scene::Scene& drawn) {
+        std::vector<doc::NodeId> ids;
+        for (const auto& media : drawn.media) {
+            ids.push_back(media.source_node);
+        }
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    MODEL_CHECK(sources(evaluate(nullptr)).size() == 3U);
+
+    // Front's clip soloed: the others go, and both lights still light.
+    const scene::SoloFilter front{{doc::NodeId{2U}}, false};
+    const scene::Scene fronted = evaluate(&front);
+    MODEL_CHECK(sources(fronted) == (std::vector<doc::NodeId>{doc::NodeId{2U}}));
+    MODEL_CHECK(fronted.point_lights.size() == 2U);
+
+    // A light soloed with it: only that light lights.
+    const scene::SoloFilter lit{{doc::NodeId{2U}, doc::NodeId{4U}}, true};
+    const scene::Scene lit_scene = evaluate(&lit);
+    MODEL_CHECK(sources(lit_scene) == (std::vector<doc::NodeId>{doc::NodeId{2U}}));
+    MODEL_CHECK(lit_scene.point_lights.size() == 1U);
+    MODEL_CHECK(lit_scene.point_lights.front().source == doc::NodeId{4U});
+
+    const auto lanes = model.lanes(scene::SceneId{100U});
+    const auto back = std::find_if(lanes.begin(), lanes.end(),
+                                   [](const scene::TimelineLane& lane) {
+                                       return lane.id == doc::NodeId{30U};
+                                   });
+    MODEL_CHECK(back != lanes.end() && back->sync_locked);
+    MODEL_CHECK(std::none_of(lanes.begin(), lanes.end(),
+                             [](const scene::TimelineLane& lane) {
+                                 return lane.id != doc::NodeId{30U} &&
+                                        lane.sync_locked;
+                             }));
+}
+
 void a_timing_override_evaluates_a_placement_as_proposed() {
     scene::SceneModel model;
     model.reset(doc::Root{}.set(node(
@@ -5232,7 +5310,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 90U> cases{{
+constexpr std::array<Case, 91U> cases{{
+    {"a solo draws only what it shows",
+     &a_solo_draws_only_what_it_shows},
     {"a timing override evaluates a placement as proposed",
      &a_timing_override_evaluates_a_placement_as_proposed},
     {"a clip carries the size it is held at",

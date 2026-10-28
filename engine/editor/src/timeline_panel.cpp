@@ -194,6 +194,8 @@ void TimelinePanel::reset_project_state() noexcept {
   rows_state_.clip_row_heights.clear();
   row_resize_ = RowResize{};
   navigator_ = NavigatorState{};
+  soloed_.clear();
+  targeted_lane_.reset();
   reveal_node_ = doc::NodeId{};
   reveal_scroll_ = false;
   reveal_until_ = 0.0;
@@ -347,6 +349,55 @@ bool TimelinePanel::open_pass(Pass &p) {
   p.typing_at_start = ctx.typing();
   frame.filmstrip_retain = TimelineFilmstripRetainIntent{};
   frame.waveform_retain = TimelineWaveformRetainIntent{};
+  // Solo names rows and target a track; a row that went away takes them
+  // with it. The solo is reported before anything can return early, so the
+  // Stage keeps it while the panel is too small to draw.
+  const auto lane_exists = [&](doc::NodeId id) {
+    return std::any_of(lanes.begin(), lanes.end(),
+                       [&](const scene::TimelineLane &lane) {
+                         return !lane.implicit && lane.id == id;
+                       });
+  };
+  std::erase_if(soloed_, [&](doc::NodeId id) {
+    return !lane_exists(id) && find_element(elements, id) == nullptr;
+  });
+  if (targeted_lane_.has_value() && !lane_exists(*targeted_lane_)) {
+    targeted_lane_.reset();
+  }
+  if (!soloed_.empty()) {
+    // Resolved here, against the hierarchy the rows show - groups, Blender
+    // collections and tracks - because that is the hierarchy the operator
+    // soloed in, and the one only the editor holds whole.
+    std::map<doc::NodeId, const ElementInfo *> by_node;
+    for (const ElementInfo &element : elements) {
+      by_node.emplace(element.node, &element);
+    }
+    scene::SoloFilter filter{};
+    for (const ElementInfo &element : elements) {
+      bool shown = false;
+      const ElementInfo *at = &element;
+      for (std::size_t depth = 0U; at != nullptr && depth <= elements.size();
+           ++depth) {
+        if (soloed_.contains(at->node) ||
+            (at->kind == ElementKind::Media &&
+             at->timeline_lane != doc::NodeId{} &&
+             soloed_.contains(at->timeline_lane))) {
+          shown = true;
+          break;
+        }
+        const doc::NodeId parent = layer_parent(*at);
+        const auto found = parent == doc::NodeId{} ? by_node.end()
+                                                    : by_node.find(parent);
+        at = found == by_node.end() ? nullptr : found->second;
+      }
+      if (shown) {
+        filter.shown.push_back(element.node);
+        filter.lights = filter.lights || is_light(element.kind);
+      }
+    }
+    std::sort(filter.shown.begin(), filter.shown.end());
+    frame.solo = std::move(filter);
+  }
   ctx.panel(bounds, ctx.theme().panel);
   if (ctx.pointer_pressed()) {
     timeline_focused_ =
@@ -409,11 +460,20 @@ bool TimelinePanel::open_pass(Pass &p) {
                   });
 
   auto &target_lane = p.target_lane;
+  // The track the operator targeted leads; then the selected track; then the
+  // track every selected clip is on.
+  const auto targeted = std::find_if(
+      lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
+        return targeted_lane_.has_value() && !lane.implicit &&
+               lane.id == *targeted_lane_;
+      });
   const auto explicit_lane = std::find_if(
       lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
         return !lane.implicit && lane.id == selected_lane_;
       });
-  if (explicit_lane != lanes.end() && !explicit_lane->locked) {
+  if (targeted != lanes.end() && !targeted->locked) {
+    target_lane = targeted->id;
+  } else if (explicit_lane != lanes.end() && !explicit_lane->locked) {
     target_lane = explicit_lane->id;
   } else if (same_selected_lane) {
     target_lane = selected_clips.front()->timeline_lane;
@@ -534,7 +594,8 @@ void TimelinePanel::navigate(Pass &p) {
     return time_axis_.frame(x, graph.x);
   };
 
-  p.content_height = rows_extent(rows);
+  // One row more than the rows themselves: the New track button after them.
+  p.content_height = rows_extent(rows) + row_height;
   auto &content_height = p.content_height;
   p.maximum_row_scroll =
       std::max(content_height - rows_bounds.height, 0.0F);

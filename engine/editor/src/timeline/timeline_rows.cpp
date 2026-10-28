@@ -247,6 +247,7 @@ RowList build_rows(RowsState &state, const RowsInput &input,
                true};
     header.locked = lane.locked;
     header.muted = lane.muted;
+    header.sync_locked = lane.sync_locked;
     header.lane_member = true;
     header.lane_owner = lane.id;
     rows.push_back(std::move(header));

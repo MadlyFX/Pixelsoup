@@ -191,8 +191,9 @@ frame-identical fractional-rate cuts.
   every later unlocked clip by `-d`. Thus removing source frames shortens the
   show and adding available handles lengthens it. Source-handle, positive-
   duration, and representable-frame limits clamp the whole gesture before any command is
-  authored. An “all selected lanes” modifier applies the same boundary/delta
-  to each selected unlocked lane.
+  authored. Sync-locked, unlocked lanes take the same boundary and delta (see
+  the operator guide's track switches); straddling and locked clips stay, and
+  a collision with one clamps the trim.
 - **Ripple delete:** the selection must contain whole clips whose union is one
   contiguous span, with no unselected clip intersecting that span on a targeted
   lane. Delete those clips, then shift clips starting at or after the old span

@@ -182,6 +182,26 @@ void rename_toggle_and_move_are_deterministic_and_scene_scoped() {
     LANE_CHECK(boolean(*locked.value().document.get(doc::NodeId{10U}),
                        scene::schema::lane_locked));
 
+    // Sync lock is its own switch: on, then off again, the lock untouched.
+    auto synced = app::plan_lane_authoring(
+        locked.value().document,
+        app::LaneAuthorRequest{app::LaneAuthorAction::ToggleSyncLock,
+                               scene::SceneId{1U}, doc::NodeId{10U}},
+        100U);
+    LANE_CHECK(synced);
+    LANE_CHECK(boolean(*synced.value().document.get(doc::NodeId{10U}),
+                       scene::schema::lane_sync_locked));
+    LANE_CHECK(boolean(*synced.value().document.get(doc::NodeId{10U}),
+                       scene::schema::lane_locked));
+    auto unsynced = app::plan_lane_authoring(
+        synced.value().document,
+        app::LaneAuthorRequest{app::LaneAuthorAction::ToggleSyncLock,
+                               scene::SceneId{1U}, doc::NodeId{10U}},
+        100U);
+    LANE_CHECK(unsynced);
+    LANE_CHECK(!boolean(*unsynced.value().document.get(doc::NodeId{10U}),
+                        scene::schema::lane_sync_locked));
+
     auto moved = app::plan_lane_authoring(
         locked.value().document,
         app::LaneAuthorRequest{app::LaneAuthorAction::MoveEarlier,

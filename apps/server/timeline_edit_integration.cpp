@@ -2,6 +2,7 @@
 
 #include "timeline_edit_authoring.hpp"
 
+#include <mediaserver/doc/document.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace mediaserver::app {
 namespace {
@@ -57,8 +59,37 @@ using Result = core::Result<
         static_cast<core::u64>(*owner) == scene.value();
 }
 
+// The scene's tracks that keep time with ripple edits: sync-locked, and not
+// locked, since a locked track's clips stay where they are whatever else
+// moves.
+[[nodiscard]] std::vector<doc::NodeId> synced_lanes(
+    const doc::Root& document, scene::SceneId scene) {
+    std::vector<doc::NodeId> lanes;
+    for (const doc::NodeChange& change :
+         doc::diff(doc::Root{}, document).changes) {
+        if (!change.after) {
+            continue;
+        }
+        const doc::Node& node = *change.after;
+        const doc::NodeId id = change.id;
+        if (node.type != scene::schema::timeline_lane_type ||
+            !boolean(node, scene::schema::lane_sync_locked) ||
+            boolean(node, scene::schema::lane_locked)) {
+            continue;
+        }
+        const std::int64_t* const owner =
+            integer(node, scene::schema::scene_id);
+        if (owner != nullptr && *owner >= 0 &&
+            static_cast<core::u64>(*owner) == scene.value()) {
+            lanes.push_back(id);
+        }
+    }
+    return lanes;
+}
+
 struct RequestPlanner final {
     std::span<const scene::ClipPlacement> clips;
+    std::span<const doc::NodeId> synced;
     const editor::TimelineEditIntent& intent;
     const ClipClipboard& clipboard;
     core::u64 next_node{};
@@ -67,12 +98,12 @@ struct RequestPlanner final {
         const editor::TimelineRippleTrimRequest& request) const {
         return scene::plan_ripple_trim(
             clips, request.clip, request.edge, request.delta,
-            intent.show_rate);
+            intent.show_rate, synced);
     }
 
     [[nodiscard]] scene::TimelineEditResult operator()(
         const editor::TimelineRippleDeleteRequest& request) const {
-        return scene::plan_ripple_delete(clips, request.clips);
+        return scene::plan_ripple_delete(clips, request.clips, synced);
     }
 
     [[nodiscard]] scene::TimelineEditResult operator()(
@@ -105,7 +136,7 @@ struct RequestPlanner final {
         }
         return scene::plan_insert(
             clips, scene::TimelineLaneRef{intent.scene, request.lane},
-            static_cast<core::i64>(intent.playhead), *span);
+            static_cast<core::i64>(intent.playhead), *span, synced);
     }
 
     [[nodiscard]] scene::TimelineEditResult operator()(
@@ -157,8 +188,10 @@ Result plan_timeline_edit_integration(
                 TimelineEditIntegrationError::TargetLaneUnavailable);
         }
 
+        const std::vector<doc::NodeId> synced =
+            synced_lanes(document, request.scene);
         scene::TimelineEditResult planned = std::visit(
-            RequestPlanner{clips, request, clipboard, next_node},
+            RequestPlanner{clips, synced, request, clipboard, next_node},
             request.request);
         if (!planned) {
             return Result::failure(

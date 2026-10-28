@@ -177,6 +177,52 @@ void fractional_slip_routes_through_the_pure_planner() {
   EDIT_CHECK(integer(*slipped, scene::schema::clip_duration) == 20);
 }
 
+// A second track keeps time with a ripple on the first while it is sync
+// locked, and is left alone again once it is also locked: lock wins.
+void a_sync_locked_track_keeps_time_with_a_ripple_unless_it_is_locked() {
+  doc::Node second = lane();
+  second.id = doc::NodeId{21U};
+  second.properties.insert_or_assign(std::string{scene::schema::lane_order},
+                                     whole(10));
+  second.properties.insert_or_assign(
+      std::string{scene::schema::lane_sync_locked}, true);
+  doc::Node follower = media(12U, 20, 10);
+  follower.properties.insert_or_assign(std::string{scene::schema::lane_id},
+                                       whole(21));
+  doc::Root root;
+  root = root.set(stage());
+  root = root.set(lane());
+  root = root.set(second);
+  root = root.set(media(10U, 0, 20));
+  root = root.set(media(11U, 20, 10));
+  root = root.set(follower);
+
+  app::ClipClipboard clipboard;
+  const editor::TimelineEditIntent request{
+      scene_id,
+      editor::TimelineRippleTrimRequest{
+          doc::NodeId{10U}, scene::TimelineTrimEdge::Tail, 5},
+      show_60, 0U, 7U};
+  const auto synced = app::plan_timeline_edit_integration(
+      root, placements(root), request, clipboard, 100U);
+  EDIT_CHECK(synced.has_value());
+  EDIT_CHECK(integer(*synced.value().document.get(doc::NodeId{11U}),
+                     scene::schema::clip_start) == 25);
+  EDIT_CHECK(integer(*synced.value().document.get(doc::NodeId{12U}),
+                     scene::schema::clip_start) == 25);
+
+  second.properties.insert_or_assign(std::string{scene::schema::lane_locked},
+                                     true);
+  root = root.set(second);
+  const auto held = app::plan_timeline_edit_integration(
+      root, placements(root), request, clipboard, 100U);
+  EDIT_CHECK(held.has_value());
+  EDIT_CHECK(integer(*held.value().document.get(doc::NodeId{11U}),
+                     scene::schema::clip_start) == 25);
+  EDIT_CHECK(integer(*held.value().document.get(doc::NodeId{12U}),
+                     scene::schema::clip_start) == 20);
+}
+
 void negative_placement_and_loop_slip_commit_with_undo_and_redo() {
   auto root = doc::Root{}.set(stage()).set(lane()).set(media(10U, 10, 800, 190));
   const auto normalized = app::normalise_clip_timing(
@@ -480,7 +526,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"a sync-locked track keeps time with a ripple unless it is locked",
+     &a_sync_locked_track_keeps_time_with_a_ripple_unless_it_is_locked},
     {"negative placement and loop Slip commit with undo and redo",
      &negative_placement_and_loop_slip_commit_with_undo_and_redo},
     {"Razor uses playback rounding and wraps looping sources",

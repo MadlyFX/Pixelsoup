@@ -321,6 +321,9 @@ struct TimelineLane final {
     // projection reports what renders, not what the document happens to hold,
     // so an Inspector showing these values is not showing a stale number.
     bool aspect_locked{true};
+    // Whether ripple edits on other tracks move this one's later clips too.
+    // Editing behaviour only: it changes nothing that is drawn.
+    bool sync_locked{};
 
     bool operator==(const TimelineLane&) const = default;
 };

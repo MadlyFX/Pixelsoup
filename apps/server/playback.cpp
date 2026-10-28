@@ -1933,6 +1933,9 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     // The Timeline edit being dragged, which the Stage shows at its edit
     // point. Replaced by every editor frame; evaluated for the Stage alone.
     std::optional<editor::TimelineEditPreview> stage_edit_request;
+    // The Timeline's solo, resolved to what the Stage draws. Editor-local,
+    // like the edit preview.
+    std::optional<scene::SoloFilter> stage_solo_request;
     // A pending show range/loop change from the timeline.
     std::optional<editor::RangeRequest> pending_range;
     // A pending exact project cadence. The transport anchor and the Director
@@ -2406,6 +2409,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_preview_seek = pending_preview_seek,
         .preview_commands = preview_commands,
         .stage_edit_request = stage_edit_request,
+        .stage_solo_request = stage_solo_request,
         .pending_range = pending_range,
         .pending_show_rate = pending_show_rate,
         .pending_keys = pending_keys,

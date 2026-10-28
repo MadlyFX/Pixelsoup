@@ -5,6 +5,7 @@
 #include <mediaserver/scene/scene.hpp>
 #include <mediaserver/scene/linked_scene.hpp>
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <span>
@@ -138,6 +139,24 @@ struct ClipTimingOverride final {
     bool operator==(const ClipTimingOverride&) const = default;
 };
 
+// An editor's solo, already resolved against the hierarchy the editor shows:
+// the objects, models, clips and lights to draw - everything soloed and
+// everything inside a soloed group, collection or track - sorted. Drawables
+// not listed are not drawn. Lights are filtered the same way only when
+// `lights` is set, which is when a light is among those soloed; otherwise
+// every light keeps lighting the scene. Editor-local: nothing evaluated with
+// one is replicated, digested or drawn on an output.
+struct SoloFilter final {
+    std::vector<doc::NodeId> shown;
+    bool lights{};
+
+    [[nodiscard]] bool shows(doc::NodeId node) const noexcept {
+        return std::binary_search(shown.begin(), shown.end(), node);
+    }
+
+    bool operator==(const SoloFilter&) const = default;
+};
+
 // Which source frame `clip` shows at `show_frame`, by the same mapping the
 // drawing and warm-up paths use. `time` supplies the show rate; its frame is
 // not read.
@@ -172,10 +191,13 @@ public:
     // `timing_overrides`, sorted by clip id, stand in for those placements'
     // authored timing - where each starts and ends, which source frame it
     // shows, its ramps - and change nothing else about the evaluation.
+    //
+    // `solo`, when given, is an editor's solo (see SoloFilter).
     [[nodiscard]] Scene evaluate(SceneTime time, ShowLoop loop = {}) const;
     [[nodiscard]] Scene evaluate(
         SceneId scene, SceneTime time, ShowLoop loop = {},
-        std::span<const ClipTimingOverride> timing_overrides = {}) const;
+        std::span<const ClipTimingOverride> timing_overrides = {},
+        const SoloFilter* solo = nullptr) const;
 
     // Valid authored scenes, in stage-node-id order. Documents with no stages
     // retain an implicit legacy evaluation scene but report no authored scene
@@ -385,6 +407,7 @@ private:
         core::u32 raster_width{default_raster_width};
         core::u32 raster_height{default_raster_height};
         bool aspect_locked{true};
+        bool sync_locked{};
     };
 
     struct MarkerEntry final {

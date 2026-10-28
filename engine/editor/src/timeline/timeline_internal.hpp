@@ -419,6 +419,36 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
   return interaction.clicked;
 }
 
+// A compact labelled switch on a row, for state worth reading from across a
+// stage: lit in `color` while engaged, an outline otherwise. A disabled chip
+// still shows its state and answers no press.
+[[nodiscard]] inline bool chip_toggle(gui::UiContext &ctx, gui::UiId id,
+                                      const gui::Rect &bounds,
+                                      std::string_view label, bool engaged,
+                                      gui::UiColor color,
+                                      std::string_view tooltip,
+                                      bool enabled = true) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  const gui::Theme &theme = ctx.theme();
+  const bool hot = enabled && interaction.hovered;
+  if (engaged) {
+    ctx.panel(bounds, alpha(color, hot ? 1.0F : (enabled ? 0.85F : 0.5F)));
+  } else {
+    ctx.panel(bounds, hot ? theme.widget_hover : alpha(theme.widget, 0.6F));
+    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 1.0F,
+                        bounds.width, 1.0F},
+              alpha(theme.border, 0.9F));
+  }
+  const float width = ctx.font_width(label);
+  ctx.label(gui::Rect{bounds.x + std::max((bounds.width - width) * 0.5F, 1.0F),
+                      bounds.y, bounds.width, bounds.height},
+            label,
+            engaged ? theme.background
+                    : alpha(theme.text_muted, enabled ? 1.0F : 0.5F));
+  ctx.tooltip(bounds, tooltip);
+  return enabled && interaction.clicked;
+}
+
 inline void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolbar) {
   ctx.panel(gui::Rect{x, toolbar.y + 8.0F, 1.0F, toolbar.height - 16.0F},
             ctx.theme().divider);
@@ -780,6 +810,8 @@ struct Row final {
   core::u8 component_count{3U};
   bool locked{};
   bool muted{};
+  // A track header's: whether it keeps time with ripples on other tracks.
+  bool sync_locked{};
   // The element's own authored visibility, before any group above it. The
   // toggle reports what this row owns, so a row hidden by its group still
   // shows its own state rather than its parent's.

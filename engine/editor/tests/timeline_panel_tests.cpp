@@ -4148,12 +4148,133 @@ void a_dragged_edit_point_asks_the_stage_to_show_it() {
   static_cast<void>(move.frame(574.0F, 113.0F, false));
 }
 
+// At 1400 wide the list is 340 and a row's padlock is x=312..336. A track
+// header's switches sit just inside it - target x=218..248, sync x=250..288,
+// solo x=290..308 - and a clip row's solo at x=290..308 with its Full/Half
+// switch inside it at x=246..286. The
+// Background track is row zero, Foreground (holding the clip) row one at
+// y=100..124, its clip row two at y=124..148; the object is row three.
+void track_switches_and_a_clip_rows_resolution_switch() {
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  h.elements[1U].timeline_lane = lane_node;
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{
+      destination_lane_node, scene::SceneId{100U}, 20, "Background", false,
+      false, scene::BlendMode::Normal, false});
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  // Solo is the operator's alone: no lane edit, and reported every frame,
+  // resolved to what the Stage draws - the track's clip, not the object.
+  const editor::TimelinePanelFrame soloing = h.click(299.0F, 112.0F);
+  UI_CHECK(soloing.lane_edits.empty());
+  UI_CHECK(h.panel.soloed().contains(lane_node));
+  const editor::TimelinePanelFrame soloed = h.frame(0.0F, 0.0F, false);
+  UI_CHECK(soloed.solo.has_value());
+  UI_CHECK(soloed.solo->shown == (std::vector<doc::NodeId>{clip_node}));
+  UI_CHECK(!soloed.solo->lights);
+  static_cast<void>(h.click(299.0F, 112.0F));
+  UI_CHECK(!h.frame(0.0F, 0.0F, false).solo.has_value());
+
+  // Any row solos itself the same way: the clip's own S, at y=124..148.
+  static_cast<void>(h.click(299.0F, 136.0F));
+  UI_CHECK(h.panel.soloed().contains(clip_node));
+  UI_CHECK(h.frame(0.0F, 0.0F, false).solo->shown ==
+           (std::vector<doc::NodeId>{clip_node}));
+  static_cast<void>(h.click(299.0F, 136.0F));
+  UI_CHECK(h.panel.soloed().empty());
+
+  // Sync lock is authored on the track.
+  const editor::TimelinePanelFrame synced = h.click(271.0F, 112.0F);
+  UI_CHECK(synced.lane_edits.size() == 1U);
+  UI_CHECK(synced.lane_edits.front().action ==
+           editor::TimelineLaneAction::ToggleSyncLock);
+  UI_CHECK(synced.lane_edits.front().lane == lane_node);
+
+  // A targeted track is where Insert lands with nothing selected.
+  static_cast<void>(h.click(238.0F, 112.0F));
+  UI_CHECK(h.panel.targeted_lane() == std::optional<doc::NodeId>{lane_node});
+  h.clipboard_span = 10;
+  h.focus();
+  const editor::TimelinePanelFrame inserted = h.type(",");
+  UI_CHECK(inserted.timeline_edits.size() == 1U);
+  UI_CHECK(std::get<editor::TimelineInsertRequest>(
+               inserted.timeline_edits.front())
+               .lane == lane_node);
+  static_cast<void>(h.click(238.0F, 112.0F));
+  UI_CHECK(!h.panel.targeted_lane().has_value());
+
+  // The clip row switches Full to Half and back; a locked clip refuses.
+  const editor::TimelinePanelFrame halved = h.click(266.0F, 136.0F);
+  UI_CHECK(halved.media_resolutions ==
+           (std::vector<editor::TimelineMediaResolutionEdit>{
+               {clip_node, scene::MediaResolution::Half}}));
+  h.elements[1U].media_resolution = scene::MediaResolution::Half;
+  UI_CHECK(h.click(266.0F, 136.0F).media_resolutions ==
+           (std::vector<editor::TimelineMediaResolutionEdit>{
+               {clip_node, scene::MediaResolution::Full}}));
+  h.elements[1U].locked = true;
+  UI_CHECK(h.click(266.0F, 136.0F).media_resolutions.empty());
+  h.elements[1U].locked = false;
+
+  // After the last row, New track.
+  const editor::TimelinePanelFrame created = h.click(60.0F, 184.0F);
+  UI_CHECK(created.lane_edits.size() == 1U);
+  UI_CHECK(created.lane_edits.front().action ==
+           editor::TimelineLaneAction::Create);
+
+  // A track that goes away takes its solo and target with it.
+  static_cast<void>(h.click(299.0F, 112.0F));
+  static_cast<void>(h.click(238.0F, 112.0F));
+  h.lanes.erase(h.lanes.begin());
+  h.elements[1U].timeline_lane = doc::NodeId{};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.panel.soloed().empty());
+  UI_CHECK(!h.panel.targeted_lane().has_value());
+}
+
+// A group, alone on the list at y=76..100 with its solo at x=290..308 (the
+// list is 340 wide at 1400), holding the object and a light. Soloing it
+// shows everything inside it and, holding a light, filters the lights too.
+void soloing_a_group_shows_what_is_inside_it() {
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  const doc::NodeId group{60U};
+  const doc::NodeId lamp{61U};
+  editor::ElementInfo folder{};
+  folder.node = group;
+  folder.kind = editor::ElementKind::Group;
+  editor::ElementInfo child = make_object();
+  child.parent_group = group;
+  editor::ElementInfo light{};
+  light.node = lamp;
+  light.kind = editor::ElementKind::PointLight;
+  light.parent_group = group;
+  h.elements = {folder, child, light};
+  h.keys.clear();
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  static_cast<void>(h.click(299.0F, 88.0F));
+  UI_CHECK(h.panel.soloed().contains(group));
+  const editor::TimelinePanelFrame soloed = h.frame(0.0F, 0.0F, false);
+  UI_CHECK(soloed.solo.has_value());
+  UI_CHECK(soloed.solo->shown ==
+           (std::vector<doc::NodeId>{object_node, group, lamp}));
+  UI_CHECK(soloed.solo->lights);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 124U> cases{{
+constexpr std::array<Case, 126U> cases{{
+    {"soloing a group shows what is inside it",
+     &soloing_a_group_shows_what_is_inside_it},
+    {"track switches and a clip row's resolution switch",
+     &track_switches_and_a_clip_rows_resolution_switch},
     {"a dragged edit point asks the Stage to show it",
      &a_dragged_edit_point_asks_the_stage_to_show_it},
     {"a clip drag reads out its change, landing and snap",

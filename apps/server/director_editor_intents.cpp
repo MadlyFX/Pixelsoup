@@ -454,6 +454,7 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
     // The Stage follows a dragged edit for as long as the editor reports
     // one, and returns to its playhead the frame it stops.
     stage_edit_request = std::move(editor_frame.stage_edit_preview);
+    stage_solo_request = std::move(editor_frame.stage_solo);
     try {
         pending_hardware_places.insert(
             pending_hardware_places.end(),

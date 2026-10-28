@@ -1582,6 +1582,7 @@ void SceneModel::put(const doc::Node& node) {
         }
         lane.muted = reader.boolean(schema::lane_muted, false);
         lane.locked = reader.boolean(schema::lane_locked, false);
+        lane.sync_locked = reader.boolean(schema::lane_sync_locked, false);
         const auto mode = reader.text(
             schema::lane_compositing_mode, schema::lane_normal_mode);
         if (mode == schema::lane_normal_mode) {
@@ -3738,6 +3739,7 @@ std::vector<TimelineLane> SceneModel::lanes(SceneId scene_id) const {
                 projected.raster_width = lane->raster_width;
                 projected.raster_height = lane->raster_height;
                 projected.aspect_locked = lane->aspect_locked;
+                projected.sync_locked = lane->sync_locked;
                 result.push_back(std::move(projected));
             }
         } else if (const auto* const clip = std::get_if<MediaEntry>(&entry)) {
@@ -3828,7 +3830,8 @@ Scene SceneModel::evaluate(SceneTime time, ShowLoop loop) const {
 
 Scene SceneModel::evaluate(
     SceneId scene_id, SceneTime time, ShowLoop loop,
-    std::span<const ClipTimingOverride> timing_overrides) const {
+    std::span<const ClipTimingOverride> timing_overrides,
+    const SoloFilter* solo) const {
     // A placement's timing as this evaluation reads it: an override's for a
     // clip one names, the authored one for every other.
     const auto timing_of = [timing_overrides](doc::NodeId node,
@@ -4633,6 +4636,11 @@ Scene SceneModel::evaluate(
         if (!clip->visible) {
             continue;
         }
+        // A solo leaves a clip out of the lane stack altogether, so the
+        // clips it shows composite exactly as they would among the rest.
+        if (solo != nullptr && !solo->shows(id)) {
+            continue;
+        }
         if (clip->parent_group.has_value()) {
             const auto parent =
                 group_projection.resolved.find(*clip->parent_group);
@@ -4727,7 +4735,8 @@ Scene SceneModel::evaluate(
 
     for (const auto& [id, entry] : entries_) {
         if (const auto* const object = std::get_if<ObjectEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id) {
+            if (scope_of(id, default_scene) != scene_id ||
+                (solo != nullptr && !solo->shows(id))) {
                 continue;
             }
             const GroupResolution* parent = nullptr;
@@ -4948,7 +4957,8 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const model = std::get_if<ModelEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id) {
+            if (scope_of(id, default_scene) != scene_id ||
+                (solo != nullptr && !solo->shows(id))) {
                 continue;
             }
             const GroupResolution* parent = nullptr;
@@ -4999,7 +5009,8 @@ Scene SceneModel::evaluate(
         }
 
         if (const auto* const authored = std::get_if<LightEntry>(&entry)) {
-            if (scope_of(id, default_scene) != scene_id || !authored->visible) {
+            if (scope_of(id, default_scene) != scene_id || !authored->visible ||
+                (solo != nullptr && solo->lights && !solo->shows(id))) {
                 continue;
             }
             // Keyframe channels animate a light's position (a local light's

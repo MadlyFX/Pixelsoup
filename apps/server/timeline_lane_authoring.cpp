@@ -216,11 +216,14 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
             return Result::success(std::move(plan));
         }
         if (request.action == LaneAuthorAction::ToggleMute
-            || request.action == LaneAuthorAction::ToggleLock) {
+            || request.action == LaneAuthorAction::ToggleLock
+            || request.action == LaneAuthorAction::ToggleSyncLock) {
             const std::string_view property =
                 request.action == LaneAuthorAction::ToggleMute
                 ? scene::schema::lane_muted
-                : scene::schema::lane_locked;
+                : (request.action == LaneAuthorAction::ToggleLock
+                       ? scene::schema::lane_locked
+                       : scene::schema::lane_sync_locked);
             put_bool(lane, property, !read_bool(lane, property));
             plan.document = plan.document.set(lane);
             plan.changed.push_back(lane.id);

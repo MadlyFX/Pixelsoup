@@ -367,6 +367,8 @@ enum class TimelineLaneAction : core::u8 {
   MoveTo,
   ToggleMute,
   ToggleLock,
+  // Whether the track keeps time with ripple edits on other tracks.
+  ToggleSyncLock,
   DeleteEmpty,
   DeleteClips,
   DeleteMoveClips,
@@ -520,6 +522,16 @@ struct TimelineOverwriteRequest final {
   doc::NodeId lane{};
 
   bool operator==(const TimelineOverwriteRequest &) const = default;
+};
+
+// A clip's decode resolution, switched from its Timeline row. Half holds each
+// decoded frame at half width and height, as the Inspector's Resolution
+// setting does; this is the same authored property.
+struct TimelineMediaResolutionEdit final {
+  doc::NodeId clip{};
+  scene::MediaResolution resolution{scene::MediaResolution::Full};
+
+  bool operator==(const TimelineMediaResolutionEdit &) const = default;
 };
 
 // The Stage's view of an edit under way, Premiere's trim monitor folded into
@@ -683,6 +695,15 @@ struct TimelinePanelFrame final {
   // beside the pointer reads it: "+00:00:12  >  00:01:04:07   SNAP cue".
   // Empty while nothing is being dragged.
   std::string drag_readout;
+  // The Timeline's solo, resolved against the rows' hierarchy into what the
+  // Stage draws: everything soloed and everything inside a soloed group,
+  // collection or track, with lights filtered only once one is among them.
+  // Absent while nothing is soloed. Operator-local view state, reported
+  // every frame and never authored; Program and the outputs draw everything.
+  std::optional<scene::SoloFilter> solo;
+  // Full or Half chosen from a clip row's resolution switch: each is one
+  // authored media_resolution edit.
+  std::vector<TimelineMediaResolutionEdit> media_resolutions;
   // While a trim, roll, slip or slide runs, what the Stage shows in place
   // of the playhead's frame: the edit point, with the placements as the
   // edit would leave them. Absent otherwise, which returns the Stage to the
@@ -831,6 +852,15 @@ public:
   [[nodiscard]] bool shortcut_sheet_open() const noexcept {
     return shortcut_sheet_open_;
   }
+  // The rows soloed on the Stage: layers, groups, lights and tracks.
+  [[nodiscard]] const std::set<doc::NodeId> &soloed() const noexcept {
+    return soloed_;
+  }
+  // The track Insert and Overwrite are aimed at by its target switch, if
+  // the operator set one.
+  [[nodiscard]] std::optional<doc::NodeId> targeted_lane() const noexcept {
+    return targeted_lane_;
+  }
   [[nodiscard]] bool scale_open() const noexcept { return key_tools_.scale_open; }
   [[nodiscard]] bool curves_mode() const noexcept { return graph_mode_; }
   // The Curves view's value zoom and pan since its last fit: 1 and 0 right
@@ -927,6 +957,8 @@ private:
   void begin_row(RowContext &rc);
   void track_header_list_cell(RowContext &rc);
   void layer_list_cell(RowContext &rc);
+  // The S switch a row solos itself on the Stage with.
+  void solo_toggle(RowContext &rc, const gui::Rect &bounds);
   void properties_header_list_cell(RowContext &rc);
   void property_group_list_cell(RowContext &rc);
   void channel_list_cell(RowContext &rc);
@@ -1082,6 +1114,12 @@ private:
   // The keyboard reference sheet. While it is open it takes the pointer;
   // any press, Escape or ? closes it.
   bool shortcut_sheet_open_{};
+  // Operator-local state. Soloed rows - any layer, group, light or track -
+  // are the only things the Stage draws; the targeted track is where Insert
+  // and Overwrite land, ahead of the selected track or clips. Neither is
+  // authored.
+  std::set<doc::NodeId> soloed_;
+  std::optional<doc::NodeId> targeted_lane_;
 
   // Lifted layers and tracks.
   struct ReorderState final {

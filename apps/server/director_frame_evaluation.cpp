@@ -297,19 +297,40 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             candidate->asset_cohort_required = true;
         }
 
-        // A Timeline edit being dragged: the Stage scene once more, at the
-        // edit point and with the edit applied, for the Stage views to draw.
-        // Program, the nodes and every panel keep the frames above.
-        tick.stage_edit_frame.reset();
+        // What the Stage views draw while it differs from the Stage scene: a
+        // Timeline edit being dragged, at its edit point with the edit
+        // applied, and the soloed tracks alone. Program, the nodes and every
+        // panel keep the frames above.
+        tick.stage_view_frame.reset();
+        tick.stage_view_caption.clear();
 #if defined(MEDIASERVER_HAS_GUI)
-        if (options.edit && stage_edit_request.has_value()) {
-            tick.stage_edit_frame = scene_model.evaluate(
+        if (options.edit &&
+            (stage_edit_request.has_value() || stage_solo_request.has_value())) {
+            const core::u64 shown = stage_edit_request.has_value()
+                                        ? stage_edit_request->frame
+                                        : stage_show_frame.value();
+            tick.stage_view_frame = scene_model.evaluate(
                 stage_scene,
-                scene::SceneTime{stage_edit_request->frame,
-                                 input.rate.numerator,
+                scene::SceneTime{shown, input.rate.numerator,
                                  input.rate.denominator},
-                {}, stage_edit_request->timings);
-            scene::Scene &edited = *tick.stage_edit_frame;
+                {},
+                stage_edit_request.has_value()
+                    ? std::span<const scene::ClipTimingOverride>{
+                          stage_edit_request->timings}
+                    : std::span<const scene::ClipTimingOverride>{},
+                stage_solo_request.has_value() ? &*stage_solo_request : nullptr);
+            if (stage_edit_request.has_value()) {
+                tick.stage_view_caption = stage_edit_request->caption;
+            }
+            if (stage_solo_request.has_value()) {
+                // The Stage is no longer what Program shows, so it says so
+                // for as long as anything is soloed.
+                if (!tick.stage_view_caption.empty()) {
+                    tick.stage_view_caption += "   ";
+                }
+                tick.stage_view_caption += "SOLO  STAGE ONLY";
+            }
+            scene::Scene &edited = *tick.stage_view_frame;
             edited.asset_commit = stage_scene_frame.asset_commit;
             edited.asset_manifest_digest =
                 stage_scene_frame.asset_manifest_digest;
@@ -467,6 +488,21 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                     director_playback_asset_registry,
                     director_asset_availability, observations) &&
                 proxies_ready;
+        }
+        // The Stage-view scene - an edit preview or a solo - is the Stage
+        // scene evaluated once more, so it is finished the same way: the
+        // physical cameras Program shows, and its media resolved to the
+        // files this machine actually decodes. Left raw, every clip on it
+        // names a source the editor never loaded and waits forever. Its
+        // observations repeat the Stage's own and are not reported again.
+        if (tick.stage_view_frame.has_value()) {
+            tick.stage_view_frame->tracked_cameras =
+                scene_frame.tracked_cameras;
+            std::vector<ProxyPlacementObservation> repeated;
+            static_cast<void>(resolve_scene_proxies(
+                director_proxy_playback, *tick.stage_view_frame,
+                director_playback_asset_registry, director_asset_availability,
+                repeated));
         }
         report_proxy_status_changes("Director", observations,
                                     director_proxy_observations);

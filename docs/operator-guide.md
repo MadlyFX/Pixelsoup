@@ -345,7 +345,37 @@ is, by construction; it does not reorder clips across surfaces at different
 depths, which composite back-to-front from the camera like everything else in
 the scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
 track never disappears on a bare delete: choose `DELETE+CLIPS`, or choose a
-named destination and `MOVE+DELETE` its placements first.
+named destination and `MOVE+DELETE` its placements first. **New track**,
+after the last row of the list, adds a track at the bottom; the + at the head
+of the list does the same.
+
+Beside its padlock a track header carries three switches, each lit while it
+is on:
+
+- **TGT** aims Insert and Overwrite (`,` and `.`, or the menu) at this track,
+  whatever is selected. Without a target they go to the selected track, or to
+  the track every selected clip is on. One track at a time is the target; the
+  target is the operator's own and is not saved in the project.
+- **SYNC** sync-locks the track, and is saved with it. A ripple trim, ripple
+  delete or insert made on another track moves this track's clips at or after
+  the edit point by the same amount, so what plays on it stays in time with
+  the track being cut. A clip that straddles the edit point stays where it is,
+  as does a locked clip; and a locked track never moves, sync locked or not.
+  Where a moving clip would run into one that stays, a ripple trim stops
+  short of it and a ripple delete or insert is refused with nothing changed.
+  The Stage preview of a ripple drag shows the synced tracks moving too.
+- **S** solos the track on the Stage; see **Solo** below.
+
+**Solo.** Every row the Stage draws - an object, a model, a clip, a light, a
+group, a Blender collection and a track - carries an **S** just inside its
+padlock. While anything is soloed, the Stage draws only what is soloed and
+what is inside it: a soloed group or collection brings its children, and a
+soloed track its clips. Lights keep lighting the Stage as they are, unless a
+light is among what is soloed - soloed itself or inside a soloed group - in
+which case only those lights light it. Solo several rows to see them together;
+a caption along the Stage's foot says the Stage is soloed. Solo is the
+operator's alone: Program, the render nodes and the outputs keep drawing
+everything, nothing is authored, and it is not saved with the project.
 
 A placement carrying no track belongs to none. It stands on its own transform
 like any other scene element, and is drawn as an ordinary top-level row rather
@@ -464,6 +494,14 @@ nothing about what a render node has decoded.
 
 On a media layer row the Timeline draws that placement as a bar.
 
+Each placed clip row carries its decode resolution inside its padlock:
+**FULL**, or **HALF** lit in the warning colour, with `HALF` also written on
+the clip's bar. Click it to switch; it is the Inspector's Resolution setting,
+authored the same way and undone the same way. Half holds each decoded frame
+at half width and height: a quarter of the video memory, softer wherever the
+clip is shown larger than half its source size. A locked clip shows its state
+and refuses the switch.
+
 Clip rows can be made taller so their pictures and sound can be read.
 **CLIP ROWS** at the foot of the layer list sets every clip row to **S**
 (one list row), **M** or **L**. Drag a clip row's lower edge in the layer
@@ -573,8 +611,10 @@ step, and locked layers are left as they are.
 
 The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
-requires one valid contiguous selected span. Insert Clipboard and Overwrite
-Clipboard target the active unlocked track at the playhead, preview their exact
+requires one valid contiguous selected span. Ripple Trim, Ripple Delete and
+Insert also move sync-locked tracks (see **SYNC** above). Insert Clipboard and
+Overwrite Clipboard target the active unlocked track - the targeted one first -
+at the playhead, preview their exact
 affected span, and run only after `GO`; Overwrite retains both uncovered split
 remainders and their retargeted effects/key channels. Handle limits, adjacency,
 locks, rational source rates, and stale selections are validated by the

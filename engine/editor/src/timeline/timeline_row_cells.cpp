@@ -127,6 +127,33 @@ void TimelinePanel::draw_rows(Pass &p) {
   if (graph_mode_) {
     draw_graph(p);
   }
+  // A new track is made where the track list ends, as in every editor;
+  // the + on the ruler is the same action for when the list is long.
+  {
+    const float button_y = rows_bounds.y + rows_extent(rows) - row_scroll_;
+    if (button_y < rows_bounds.y + rows_bounds.height &&
+        button_y + row_height > rows_bounds.y) {
+      const gui::Rect button{rows_bounds.x + 8.0F, button_y + 3.0F,
+                             std::min(120.0F, p.layout.list_width - 16.0F),
+                             row_height - 6.0F};
+      const gui::Interaction made =
+          ctx.grab(mix(id_, "new track row"), button);
+      ctx.panel(button, made.hovered ? ctx.theme().widget_hover
+                                     : alpha(ctx.theme().widget, 0.6F));
+      gui::draw_icon(ctx.draw_list(), gui::Icon::Plus, button.x + 10.0F,
+                     button.y + button.height * 0.5F,
+                     made.hovered ? ctx.theme().text : ctx.theme().text_muted);
+      ctx.label(gui::Rect{button.x + 20.0F, button.y,
+                          std::max(button.width - 22.0F, 0.0F), button.height},
+                "New track",
+                made.hovered ? ctx.theme().text : ctx.theme().text_muted);
+      ctx.tooltip(button, "Add a track at the bottom of the list");
+      if (made.clicked) {
+        p.frame.lane_edits.push_back(
+            TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
+      }
+    }
+  }
   // A row another panel pointed at is outlined, fading.
   if (ctx.time_seconds() < reveal_until_) {
     for (const RowContext &rc : visible) {
@@ -523,8 +550,48 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
                       badge.y, badge.width, badge.height},
             number, row_theme.background);
   name_x = badge.x + badge.width + 8.0F;
-  name_bounds = gui::Rect{name_x, y, std::max(lock_x - name_x - 4.0F, 0.0F),
+  // The track's working switches, just inside its padlock: where Insert
+  // and Overwrite land, whether it keeps time with ripples elsewhere, and
+  // whether the Stage shows it alone. Each reads its state from across a
+  // stage when lit.
+  constexpr float chip_height = 16.0F;
+  const gui::Rect solo_chip{lock_x - 4.0F - 18.0F, centre_y - 8.0F, 18.0F,
+                            chip_height};
+  const gui::Rect sync_chip{solo_chip.x - 2.0F - 38.0F, solo_chip.y, 38.0F,
+                            chip_height};
+  const gui::Rect target_chip{sync_chip.x - 2.0F - 30.0F, solo_chip.y, 30.0F,
+                              chip_height};
+  name_bounds = gui::Rect{name_x, y,
+                          std::max(target_chip.x - name_x - 4.0F, 0.0F),
                           row.height};
+  const bool targeted =
+      targeted_lane_.has_value() && *targeted_lane_ == row.node;
+  if (chip_toggle(ctx, mix(id_, "track target", row.node.value()),
+                  target_chip, "TGT", targeted, row_theme.accent,
+                  targeted ? "Insert and Overwrite land on this track. Click "
+                             "to stop aiming them here."
+                           : "Aim Insert and Overwrite at this track, "
+                             "whatever is selected.",
+                  !row.locked || targeted)) {
+    if (targeted) {
+      targeted_lane_.reset();
+    } else {
+      targeted_lane_ = row.node;
+    }
+  }
+  if (chip_toggle(ctx, mix(id_, "track sync lock", row.node.value()),
+                  sync_chip, "SYNC", row.sync_locked, row_theme.good,
+                  row.sync_locked
+                      ? "Sync locked: a ripple on another track moves this "
+                        "track's later clips by the same amount. Click to "
+                        "let it stay put."
+                      : "Sync lock: keep this track in time with ripple "
+                        "edits made on other tracks.",
+                  !row.locked)) {
+    frame.lane_edits.push_back(TimelineLaneEdit{
+        TimelineLaneAction::ToggleSyncLock, row.node, {}});
+  }
+  solo_toggle(rc, solo_chip);
   if (rename_.editing(row.node.value())) {
     // While a track's name is open the shell holds one lane gesture and
     // keeps the keyboard's shortcuts away from the field.
@@ -552,6 +619,29 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
                       row_hovered)) {
     frame.lane_edits.push_back(TimelineLaneEdit{
         TimelineLaneAction::ToggleLock, row.node, {}});
+  }
+}
+
+// A row's Stage solo: lit while the row is soloed. Soloing anything draws, on
+// the Stage alone, only what is soloed and what is inside it.
+void TimelinePanel::solo_toggle(RowContext &rc, const gui::Rect &bounds) {
+  gui::UiContext &ctx = rc.p.ctx;
+  const doc::NodeId node = rc.row.node;
+  const bool soloed = soloed_.contains(node);
+  if (chip_toggle(ctx, mix(id_, "solo", node.value()), bounds, "S", soloed,
+                  ctx.theme().warning,
+                  soloed ? "Soloed: the Stage draws only what is soloed and "
+                           "what is inside it. Program and the outputs draw "
+                           "everything."
+                         : "Solo on the Stage: draw only this and what is "
+                           "inside it while you work. Lights keep lighting "
+                           "unless a light is soloed. Program is "
+                           "unaffected.")) {
+    if (soloed) {
+      soloed_.erase(node);
+    } else {
+      soloed_.insert(node);
+    }
   }
 }
 
@@ -596,10 +686,25 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
   const bool has_toggles =
       row.surface || row_element == nullptr ||
       row_element->kind != ElementKind::Environment;
+  // Anything the Stage draws - a layer, a model, a light, a group or a
+  // collection - can be soloed there, from just inside its padlock.
+  constexpr float solo_width = 18.0F;
+  const bool solo_chip =
+      has_toggles && !row.surface && row_element != nullptr &&
+      orderable_layer(*row_element);
+  // A placed video clip carries its decode resolution inside that, where
+  // the state is read and switched without the Inspector.
+  constexpr float resolution_width = 40.0F;
+  const bool resolution_chip =
+      has_toggles && !row.surface && row_element != nullptr &&
+      row_element->kind == ElementKind::Media &&
+      row_element->timing.placed();
   // A surface keeps its badge, just inside the padlock.
   const float name_right =
       (has_toggles ? lock_x : graph.x) - (row.surface ? 60.0F : 0.0F) -
-      (has_toggles ? 0.0F : 64.0F);
+      (has_toggles ? 0.0F : 64.0F) -
+      (solo_chip ? solo_width + 4.0F : 0.0F) -
+      (resolution_chip ? resolution_width + 4.0F : 0.0F);
   name_bounds = gui::Rect{name_x, y,
                           std::max(name_right - name_x - 6.0F, 0.0F),
                           row.height};
@@ -639,6 +744,35 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
                         row_hovered)) {
       frame.element_flags.push_back(TimelineElementFlagEdit{
           row.node, TimelineElementFlag::Locked, !row.locked});
+    }
+  }
+  if (solo_chip) {
+    solo_toggle(rc, gui::Rect{lock_x - 4.0F - solo_width, centre_y - 8.0F,
+                              solo_width, 16.0F});
+  }
+  if (resolution_chip) {
+    // Half is the one to notice - a softer picture wherever the clip is
+    // shown larger than half its source - so it is the one lit, in the
+    // warning colour.
+    const bool half =
+        row_element->media_resolution == scene::MediaResolution::Half;
+    const float right = lock_x - 4.0F - (solo_chip ? solo_width + 4.0F : 0.0F);
+    const gui::Rect chip{right - resolution_width, centre_y - 8.0F,
+                         resolution_width, 16.0F};
+    if (chip_toggle(
+            ctx, mix(id_, "clip resolution", row.node.value()), chip,
+            half ? "HALF" : "FULL", half, row_theme.warning,
+            half ? "Half resolution: each decoded frame is held at half "
+                   "width and height - a quarter of the video memory, softer "
+                   "wherever it is shown larger than half its source. Click "
+                   "for Full."
+                 : "Full resolution. Click for Half: a quarter of the video "
+                   "memory, softer wherever the clip is shown larger than "
+                   "half its source size. Decoding costs the same.",
+            !row.locked)) {
+      frame.media_resolutions.push_back(TimelineMediaResolutionEdit{
+          row.node, half ? scene::MediaResolution::Full
+                         : scene::MediaResolution::Half});
     }
   }
 }
@@ -1500,6 +1634,9 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
     std::string name = row.label;
     if (clip_.drag == ClipDrag::Slip && clip_.node == row.node) {
       name += "  Source " + std::to_string(clip_timing.source_in);
+    }
+    if (clip_element->media_resolution == scene::MediaResolution::Half) {
+      name += "  HALF";
     }
     if (!clip_element->on_air) {
       name += "  off air";

@@ -337,6 +337,73 @@ void append_changed_updates(
     return EditResult::failure(TimelineEditError::AllocationFailed);
 }
 
+// Moves the synced lanes with an edit on edited (see the header): on each,
+// every unlocked clip starting at or after oundary moves by delta and is
+// appended to moved. False when a moving clip would come to overlap one
+// that stays - a straddler or a locked clip - where it did not before, or
+// when a move is not representable.
+[[nodiscard]] bool shift_synced_lanes(
+    std::span<const ClipPlacement> clips, TimelineLaneRef edited,
+    std::span<const doc::NodeId> synced, core::i64 boundary,
+    core::i64 delta, std::vector<ClipPlacement>& moved) {
+    if (delta == 0) {
+        return true;
+    }
+    std::vector<doc::NodeId> lanes(synced.begin(), synced.end());
+    std::sort(lanes.begin(), lanes.end());
+    lanes.erase(std::unique(lanes.begin(), lanes.end()), lanes.end());
+    for (const doc::NodeId lane : lanes) {
+        if (lane == edited.lane) {
+            continue;
+        }
+        const auto scoped =
+            lane_clips(clips, TimelineLaneRef{edited.scene, lane});
+        std::vector<const ClipPlacement*> staying;
+        std::vector<const ClipPlacement*> moving;
+        for (const ClipPlacement* clip : scoped) {
+            if (clip->locked || clip->timing.start < boundary) {
+                staying.push_back(clip);
+            } else {
+                moving.push_back(clip);
+            }
+        }
+        for (const ClipPlacement* clip : moving) {
+            ClipPlacement shifted = *clip;
+            core::i64 before_end{};
+            core::i64 after_end{};
+            if (!checked_add(shifted.timing.start, delta,
+                             shifted.timing.start) ||
+                !timeline_valid(shifted) || !clip_end(*clip, before_end) ||
+                !clip_end(shifted, after_end)) {
+                return false;
+            }
+            for (const ClipPlacement* stay : staying) {
+                core::i64 stay_end{};
+                if (!clip_end(*stay, stay_end)) {
+                    return false;
+                }
+                const bool now = shifted.timing.start < stay_end &&
+                                 after_end > stay->timing.start;
+                const bool was = clip->timing.start < stay_end &&
+                                 before_end > stay->timing.start;
+                if (now && !was) {
+                    return false;
+                }
+            }
+            moved.push_back(std::move(shifted));
+        }
+    }
+    return true;
+}
+
+void sort_updates(TimelineEditPlan& plan) {
+    std::sort(plan.updates.begin(), plan.updates.end(),
+              [](const ClipPlacement& left,
+                 const ClipPlacement& right) noexcept {
+                  return left.node < right.node;
+              });
+}
+
 } // namespace
 
 SourceOrdinalResult source_ordinal_delta(
@@ -423,7 +490,7 @@ SourceOrdinalResult advance_source_phase(
 TimelineEditResult plan_ripple_trim(
     std::span<const ClipPlacement> clips, doc::NodeId selected,
     TimelineTrimEdge edge, core::i64 requested_delta,
-    MediaFrameRate show_rate) {
+    MediaFrameRate show_rate, std::span<const doc::NodeId> synced_lanes) {
     try {
         if (!valid_rate(show_rate)) {
             return EditResult::failure(TimelineEditError::InvalidRate);
@@ -456,8 +523,17 @@ TimelineEditResult plan_ripple_trim(
                 TimelineEditError::IncompatibleClip);
         }
 
+        // The synced lanes' clips as the delta under trial moves them.
+        std::vector<ClipPlacement> synced;
         const auto build = [&](core::i64 delta,
                                std::vector<ClipPlacement>& candidate) {
+            synced.clear();
+            if (!shift_synced_lanes(
+                    clips, lane, synced_lanes, old_tail,
+                    edge == TimelineTrimEdge::Tail ? delta : -delta,
+                    synced)) {
+                return false;
+            }
             candidate = copy_lane(scoped);
             for (ClipPlacement& clip : candidate) {
                 if (clip.node == selected) {
@@ -518,6 +594,8 @@ TimelineEditResult plan_ripple_trim(
         plan.span_start = chosen->timing.start;
         plan.span_duration = chosen->timing.duration;
         append_changed_updates(scoped, candidate, plan);
+        plan.updates.insert(plan.updates.end(), synced.begin(), synced.end());
+        sort_updates(plan);
         return EditResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return allocation_failure();
@@ -526,7 +604,8 @@ TimelineEditResult plan_ripple_trim(
 
 TimelineEditResult plan_ripple_delete(
     std::span<const ClipPlacement> clips,
-    std::span<const doc::NodeId> selected) {
+    std::span<const doc::NodeId> selected,
+    std::span<const doc::NodeId> synced_lanes) {
     try {
         if (selected.empty()) {
             return EditResult::failure(
@@ -639,11 +718,13 @@ TimelineEditResult plan_ripple_delete(
             }
             plan.updates.push_back(std::move(shifted));
         }
-        std::sort(plan.updates.begin(), plan.updates.end(),
-                  [](const ClipPlacement& left,
-                     const ClipPlacement& right) noexcept {
-                      return left.node < right.node;
-                  });
+        // Synced lanes close up by the same span; one with something left in
+        // the way refuses the delete rather than covering it.
+        if (!shift_synced_lanes(clips, lane, synced_lanes, span_end,
+                                -span_duration, plan.updates)) {
+            return EditResult::failure(TimelineEditError::OverlappingClips);
+        }
+        sort_updates(plan);
         return EditResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return allocation_failure();
@@ -942,7 +1023,8 @@ TimelineEditResult plan_slide(
 
 TimelineEditResult plan_insert(
     std::span<const ClipPlacement> clips, TimelineLaneRef target,
-    core::i64 start, core::i64 duration) {
+    core::i64 start, core::i64 duration,
+    std::span<const doc::NodeId> synced_lanes) {
     try {
         core::i64 paste_end{};
         if (duration <= 0 ||
@@ -987,11 +1069,12 @@ TimelineEditResult plan_insert(
             }
             plan.updates.push_back(std::move(shifted));
         }
-        std::sort(plan.updates.begin(), plan.updates.end(),
-                  [](const ClipPlacement& left,
-                     const ClipPlacement& right) noexcept {
-                      return left.node < right.node;
-                  });
+        // Synced lanes open the same gap at the paste point.
+        if (!shift_synced_lanes(clips, target, synced_lanes, start, duration,
+                                plan.updates)) {
+            return EditResult::failure(TimelineEditError::OverlappingClips);
+        }
+        sort_updates(plan);
         return EditResult::success(std::move(plan));
     } catch (const std::bad_alloc&) {
         return allocation_failure();

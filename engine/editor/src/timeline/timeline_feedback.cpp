@@ -147,6 +147,14 @@ std::optional<TimelineEditPreview> TimelinePanel::edit_preview(Pass &p) {
           std::nullopt, 0});
     }
   }
+  // The tracks that keep time with a ripple, as the Director reads them:
+  // sync locked and not locked.
+  std::vector<doc::NodeId> synced;
+  for (const scene::TimelineLane &lane : p.input.lanes) {
+    if (!lane.implicit && lane.sync_locked && !lane.locked) {
+      synced.push_back(lane.id);
+    }
+  }
   // The edits that move what follows on a track, or a neighbour, are planned
   // exactly as the Director will plan them, so the Stage shows the cut the
   // release will author. The others change the dragged clip alone.
@@ -163,13 +171,13 @@ std::optional<TimelineEditPreview> TimelinePanel::edit_preview(Pass &p) {
     kind = "RIPPLE IN";
     planned = scene::plan_ripple_trim(placements, clip_.node,
                                       scene::TimelineTrimEdge::Head,
-                                      clip_.delta, rate);
+                                      clip_.delta, rate, synced);
     break;
   case ClipDrag::RippleTrimTail:
     kind = "RIPPLE OUT";
     planned = scene::plan_ripple_trim(placements, clip_.node,
                                       scene::TimelineTrimEdge::Tail,
-                                      clip_.delta, rate);
+                                      clip_.delta, rate, synced);
     break;
   case ClipDrag::Roll:
     kind = "ROLL";

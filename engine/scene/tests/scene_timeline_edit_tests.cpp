@@ -675,12 +675,109 @@ void every_plan_is_independent_of_input_and_selection_order() {
     EDIT_CHECK(overwrite_a.value() == overwrite_b.value());
 }
 
+constexpr doc::NodeId synced_lane{21U};
+constexpr doc::NodeId free_lane{22U};
+
+// On the edited lane A is 0..100 and B 100..150. On the synced lane S1
+// (50..110) straddles A's tail, S2 is 130..140 and S3 a locked 200..220; an
+// unsynced lane holds U at 130..140.
+[[nodiscard]] std::vector<scene::ClipPlacement> synced_fixture() {
+    return {clip(1U, 0, 100), clip(2U, 100, 50),
+            clip(11U, 50, 60, 0, 1'000U, std::nullopt, synced_lane),
+            clip(12U, 130, 10, 0, 1'000U, std::nullopt, synced_lane),
+            clip(13U, 200, 20, 0, 1'000U, std::nullopt, synced_lane, true),
+            clip(21U, 130, 10, 0, 1'000U, std::nullopt, free_lane)};
+}
+
+void a_ripple_trim_moves_sync_locked_lanes_and_clamps_where_they_collide() {
+    const std::vector<scene::ClipPlacement> clips = synced_fixture();
+    const std::array<doc::NodeId, 1U> synced{synced_lane};
+
+    // Ten frames longer: B and S2 move on, the straddler, the locked clip and
+    // the unsynced lane stay.
+    const auto grown = scene::plan_ripple_trim(
+        clips, doc::NodeId{1U}, scene::TimelineTrimEdge::Tail, 10, show_60,
+        synced);
+    EDIT_CHECK(grown.has_value());
+    EDIT_CHECK(grown.value().applied_delta == 10);
+    EDIT_CHECK(update_for(grown.value(), doc::NodeId{2U})->timing.start == 110);
+    EDIT_CHECK(update_for(grown.value(), doc::NodeId{12U})->timing.start ==
+               140);
+    EDIT_CHECK(update_for(grown.value(), doc::NodeId{11U}) == nullptr);
+    EDIT_CHECK(update_for(grown.value(), doc::NodeId{13U}) == nullptr);
+    EDIT_CHECK(update_for(grown.value(), doc::NodeId{21U}) == nullptr);
+    EDIT_CHECK(std::is_sorted(
+        grown.value().updates.begin(), grown.value().updates.end(),
+        [](const scene::ClipPlacement& left,
+           const scene::ClipPlacement& right) {
+            return left.node < right.node;
+        }));
+
+    // Without the lane synced, nothing on it moves.
+    const auto alone = scene::plan_ripple_trim(
+        clips, doc::NodeId{1U}, scene::TimelineTrimEdge::Tail, 10, show_60);
+    EDIT_CHECK(alone.has_value());
+    EDIT_CHECK(update_for(alone.value(), doc::NodeId{12U}) == nullptr);
+
+    // Thirty shorter would put S2 inside the straddler; it stops at twenty,
+    // where S2 butts S1's end.
+    const auto shrunk = scene::plan_ripple_trim(
+        clips, doc::NodeId{1U}, scene::TimelineTrimEdge::Tail, -30, show_60,
+        synced);
+    EDIT_CHECK(shrunk.has_value());
+    EDIT_CHECK(shrunk.value().applied_delta == -20);
+    EDIT_CHECK(update_for(shrunk.value(), doc::NodeId{12U})->timing.start ==
+               110);
+    EDIT_CHECK(update_for(shrunk.value(), doc::NodeId{2U})->timing.start == 80);
+}
+
+void a_synced_lane_closes_up_or_refuses_a_ripple_delete_and_insert() {
+    const std::array<doc::NodeId, 1U> synced{synced_lane};
+    // Deleting B (100..150) closes the synced lane up by fifty as well.
+    std::vector<scene::ClipPlacement> clips{
+        clip(1U, 0, 100), clip(2U, 100, 50), clip(3U, 150, 20),
+        clip(12U, 160, 20, 0, 1'000U, std::nullopt, synced_lane)};
+    const std::array<doc::NodeId, 1U> doomed{doc::NodeId{2U}};
+    const auto closed = scene::plan_ripple_delete(clips, doomed, synced);
+    EDIT_CHECK(closed.has_value());
+    EDIT_CHECK(update_for(closed.value(), doc::NodeId{3U})->timing.start == 100);
+    EDIT_CHECK(update_for(closed.value(), doc::NodeId{12U})->timing.start ==
+               110);
+
+    // Something on the synced lane inside the deleted span would be covered:
+    // refused rather than overlapped.
+    clips.push_back(clip(11U, 120, 10, 0, 1'000U, std::nullopt, synced_lane));
+    const auto blocked = scene::plan_ripple_delete(clips, doomed, synced);
+    EDIT_CHECK(!blocked.has_value());
+    EDIT_CHECK(blocked.error() == scene::TimelineEditError::OverlappingClips);
+
+    // An insert opens the same gap on the synced lane: the straddler stays,
+    // S2 moves thirty on.
+    const scene::TimelineLaneRef lane{default_scene, default_lane};
+    std::vector<scene::ClipPlacement> pasted = synced_fixture();
+    const auto opened = scene::plan_insert(pasted, lane, 100, 30, synced);
+    EDIT_CHECK(opened.has_value());
+    EDIT_CHECK(update_for(opened.value(), doc::NodeId{2U})->timing.start == 130);
+    EDIT_CHECK(update_for(opened.value(), doc::NodeId{12U})->timing.start ==
+               160);
+    EDIT_CHECK(update_for(opened.value(), doc::NodeId{11U}) == nullptr);
+    // A locked clip where S2 would land refuses it.
+    pasted[4].timing.start = 165;
+    const auto walled = scene::plan_insert(pasted, lane, 100, 30, synced);
+    EDIT_CHECK(!walled.has_value());
+    EDIT_CHECK(walled.error() == scene::TimelineEditError::OverlappingClips);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 21U> cases{{
+constexpr std::array<Case, 23U> cases{{
+    {"a ripple trim moves sync-locked lanes and clamps where they collide",
+     &a_ripple_trim_moves_sync_locked_lanes_and_clamps_where_they_collide},
+    {"a synced lane closes up or refuses a ripple delete and insert",
+     &a_synced_lane_closes_up_or_refuses_a_ripple_delete_and_insert},
     {"looping phase mapping is exact at signed and wide boundaries",
      &looping_phase_mapping_is_exact_at_signed_and_wide_boundaries},
     {"all edit planners accept negative placement starts",
