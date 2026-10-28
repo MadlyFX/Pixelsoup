@@ -86,6 +86,20 @@ using SourceOrdinalResult =
     MediaFrameRate show_rate,
     const std::optional<MediaFrameRate>& source_rate) noexcept;
 
+// How many show frames `source_frames` consecutive source frames occupy: the
+// fewest show frames whose playback (the Floor mapping a cut uses) reaches
+// the last of them,
+//
+//   ceil(source_frames * show_rate / source_rate)
+//
+// so a source range cut into the timeline plays every frame it marked and no
+// frame after it. An absent source rate is the image-sequence 1:1 mapping.
+// Zero frames is an InvalidSpan; a result past i64 is an IntegerOverflow.
+[[nodiscard]] SourceOrdinalResult source_span_show_frames(
+    core::u64 source_frames,
+    MediaFrameRate show_rate,
+    const std::optional<MediaFrameRate>& source_rate) noexcept;
+
 enum class SourcePhaseRounding : core::u8 { Nearest, Floor };
 
 // Advances a looping source phase by the same exact rational, nearest-frame

@@ -346,6 +346,10 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         scene_mix.frag.hlsl ps_6_2
         mediaserver_scene_mix_frag_dxil scene_mix_frag_dxil.h)
+    # The Asset Viewer's channel and exposure view over a display image.
+    mediaserver_compile_dxil(
+        inspection_view.frag.hlsl ps_6_2
+        mediaserver_inspection_view_frag_dxil inspection_view_frag_dxil.h)
     # Inner frustum over outer frustum. Both are complete renders of the same
     # scene from two viewpoints; this puts the tracked one over the authored
     # one with a feather evaluated in absolute canvas pixels.

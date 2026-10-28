@@ -185,6 +185,7 @@ struct EditorViewInputs final {
     editor::ProjectSettingsState project_settings_view{};
     std::vector<editor::LibraryThumbnailObservation> thumbnail_observations;
     std::vector<editor::TimelineFilmstripObservation> filmstrip_observations;
+    editor::AssetViewerInput asset_viewer{};
 };
 #endif
 
@@ -459,6 +460,14 @@ struct DirectorShowLoop final {
     // The newest decode-residency snapshot, held while the scheduler is busy.
     std::vector<std::string> timeline_ready_sources{};
     std::vector<render::MediaReadyFrames> timeline_ready_frames{};
+    // The Asset Viewer: what it last asked to see, the scene that shows it
+    // and which file that is, and the ranges it cut into tracks that wait
+    // for the next sealed frame. Director-local; nothing here is replicated.
+    std::optional<editor::AssetViewerRequest> asset_viewer_request{};
+    std::optional<scene::Scene> asset_viewer_frame{};
+    editor::AssetViewerRendition asset_viewer_rendition{
+        editor::AssetViewerRendition::None};
+    std::vector<editor::SourceRangeEditIntent> pending_source_edits{};
 #endif
 
     // Runs until stopped, closed or out of run frames; returns the exit code.
@@ -542,6 +551,7 @@ struct DirectorShowLoop final {
     [[nodiscard]] PhaseExit observe_library_thumbnails(EditorViewInputs &inputs);
     [[nodiscard]] PhaseExit
     observe_timeline_filmstrips(EditorViewInputs &inputs);
+    void project_asset_viewer(EditorViewInputs &inputs);
     void observe_timeline_playback(DirectorTick &tick, EditorViewInputs &inputs);
     [[nodiscard]] PhaseExit project_output_media(DirectorTick &tick);
     [[nodiscard]] PhaseExit

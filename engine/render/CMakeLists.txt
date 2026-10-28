@@ -24,6 +24,7 @@ add_library(mediaserver_render STATIC
     src/geometry_visibility.cpp
     src/output_transform.cpp
     src/scene_mixer.cpp
+    src/inspection_view.cpp
     src/projection_mesh_warp.cpp
     src/mapped_scene.cpp
     src/gaussian_blur.cpp
@@ -416,6 +417,24 @@ if(BUILD_TESTING)
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
     )
     set_target_properties(mediaserver_render_projection_mesh_warp_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_render_inspection_view_tests
+        tests/inspection_view_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_inspection_view_tests
+        PRIVATE MediaServer::Render MediaServer::Rhi SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_render_inspection_view_tests)
+    add_test(
+        NAME mediaserver.render_inspection_view
+        COMMAND mediaserver_render_inspection_view_tests
+    )
+    set_tests_properties(mediaserver.render_inspection_view PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_render_inspection_view_tests
         PROPERTIES FOLDER "tests"
     )
 

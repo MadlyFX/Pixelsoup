@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -68,6 +69,60 @@ constexpr doc::NodeId default_lane{20U};
            doc::NodeId id) noexcept { return placement.node < id; });
     return found == plan.creates.end() || found->node != node ? nullptr
                                                               : &*found;
+}
+
+// A source range's show-frame length is the fewest show frames whose floor
+// playback reaches the range's last frame, so a cut plays all of it.
+void a_source_span_covers_every_marked_frame() {
+    // 24 source frames into a 25 show: 24 * 25 / 24 = 25, exactly.
+    const auto exact = scene::source_span_show_frames(
+        24U, scene::MediaFrameRate{25U, 1U}, scene::MediaFrameRate{24U, 1U});
+    EDIT_CHECK(exact.has_value() && exact.value() == 25);
+    // 100 frames of 23.976 into 25: 100 * 25 * 1001 / 24000 = 104.27.
+    const auto rational = scene::source_span_show_frames(
+        100U, scene::MediaFrameRate{25U, 1U},
+        scene::MediaFrameRate{24'000U, 1'001U});
+    EDIT_CHECK(rational.has_value() && rational.value() == 105);
+    // 30 into 24 drops frames: 7 source frames need 6 show frames.
+    const auto faster = scene::source_span_show_frames(
+        7U, scene::MediaFrameRate{24U, 1U}, scene::MediaFrameRate{30U, 1U});
+    EDIT_CHECK(faster.has_value() && faster.value() == 6);
+    // Each answer reaches its last frame under playback's floor mapping and
+    // one show frame fewer does not.
+    for (const auto& [frames, show, source] :
+         std::array<std::tuple<core::u64, scene::MediaFrameRate,
+                               scene::MediaFrameRate>, 3U>{{
+             {24U, {25U, 1U}, {24U, 1U}},
+             {100U, {25U, 1U}, {24'000U, 1'001U}},
+             {7U, {24U, 1U}, {30U, 1U}}}}) {
+        const auto span = scene::source_span_show_frames(frames, show, source);
+        EDIT_CHECK(span.has_value());
+        const auto reached = scene::advance_source_phase(
+            0, span.value() - 1, show, source,
+            std::numeric_limits<core::u32>::max(),
+            scene::SourcePhaseRounding::Floor);
+        const auto short_of = scene::advance_source_phase(
+            0, span.value() - 2, show, source,
+            std::numeric_limits<core::u32>::max(),
+            scene::SourcePhaseRounding::Floor);
+        EDIT_CHECK(reached.has_value() &&
+                   static_cast<core::u64>(reached.value()) <= frames - 1U);
+        EDIT_CHECK((short_of.has_value() &&
+                    static_cast<core::u64>(short_of.value()) < frames - 1U) ||
+                   span.value() == 1);
+    }
+    // An image sequence without a rate is one show frame per source frame.
+    const auto sequence =
+        scene::source_span_show_frames(37U, show_60, std::nullopt);
+    EDIT_CHECK(sequence.has_value() && sequence.value() == 37);
+    EDIT_CHECK(!scene::source_span_show_frames(0U, show_60, std::nullopt));
+    EDIT_CHECK(!scene::source_span_show_frames(
+        5U, scene::MediaFrameRate{0U, 1U}, std::nullopt));
+    EDIT_CHECK(!scene::source_span_show_frames(
+        5U, show_60, scene::MediaFrameRate{24U, 0U}));
+    EDIT_CHECK(!scene::source_span_show_frames(
+        std::numeric_limits<core::u64>::max(), show_60,
+        scene::MediaFrameRate{1U, 1U}));
 }
 
 void exact_rate_mapping_is_signed_rounded_and_overflow_safe() {
@@ -773,7 +828,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 23U> cases{{
+constexpr std::array<Case, 24U> cases{{
+    {"a source span covers every marked frame",
+     &a_source_span_covers_every_marked_frame},
     {"a ripple trim moves sync-locked lanes and clamps where they collide",
      &a_ripple_trim_moves_sync_locked_lanes_and_clamps_where_they_collide},
     {"a synced lane closes up or refuses a ripple delete and insert",

@@ -102,6 +102,8 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_renames.clear();
     pending_highlights.clear();
     pending_timeline_edits.clear();
+    pending_source_edits.clear();
+    asset_viewer_request.reset();
     pending_group_edit.reset();
     pending_selection_set_edit.reset();
     pending_mask_edit.reset();

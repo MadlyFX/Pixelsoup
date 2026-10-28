@@ -26,9 +26,11 @@ Other Windows demonstrations are:
 
 The initial workspace puts Scene and Library on the left, Stage in the center,
 Properties on the right, and Timeline below Stage. Compositor shares the bottom
-area as a tab alongside Output Monitor; Program Output shares Stage's dock. Select an object on Stage or
-in Scene to edit it in Properties. Import content in Library, then drag it onto
-Stage or a Timeline track. Additional panels are available in the Window menu.
+area as a tab alongside Output Monitor; Program Output and the Asset Viewer
+share Stage's dock. Select an object on Stage or in Scene to edit it in
+Properties. Import content in Library, then drag it onto Stage or a Timeline
+track; double-click it to look at it in the Asset Viewer first. Additional
+panels are available in the Window menu.
 Saved workspaces retain their dock arrangement. **View > Reset Workspace**
 restores this starting layout when you want to adopt it or undo dock rearrangements.
 Panel dragging and other editor input target 60 Hz independently of the show's
@@ -639,12 +641,17 @@ The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
 requires one valid contiguous selected span. Ripple Trim, Ripple Delete and
 Insert also move sync-locked tracks (see **SYNC** above). Insert Clipboard and
-Overwrite Clipboard target the active unlocked track - the targeted one first -
-at the playhead, preview their exact
-affected span, and run only after `GO`; Overwrite retains both uncovered split
-remainders and their retargeted effects/key channels. Handle limits, adjacency,
-locks, rational source rates, and stale selections are validated by the
-Director, and every accepted operation is one undo step.
+Overwrite Clipboard (`,` and `.`) target the active unlocked track - the
+targeted one first - at the playhead and commit at once, as an editor's do;
+Overwrite retains both uncovered split remainders and their retargeted
+effects/key channels. While the Asset Viewer has the keyboard, the same keys
+cut its marked range instead (Insert Source and Overwrite Source). Handle
+limits, adjacency, locks, rational source rates, and stale selections are
+validated by the Director, and every accepted operation is one undo step.
+**F** (match frame) opens the selected clip under the playhead in the Asset
+Viewer at the source frame it is showing, with In and Out around the frames
+the clip plays; a clip's right-click menu offers the same as **Open in Asset
+Viewer**.
 The six editing tool buttons use enlarged icons. Over the timeline editing
 surface, the pointer matches the active Ripple Trim, Roll, Slip, Slide or Razor
 tool. Selection (`V`) shows move, trim and fade cursors at the corresponding
@@ -868,13 +875,14 @@ The footer slider sets the thumbnail size, and so does Ctrl+wheel over the
 content. Each view keeps its own size.
 
 Click an asset to select it. Ctrl toggles assets in and out of the selection,
-and Shift extends it. Double-click an asset, or press Enter, to place it in
-the scene. The Generators section lists the built-in primitives, a
+and Shift extends it. Double-click an asset, or press Enter, to open it in
+the [Asset Viewer](#the-asset-viewer); dragging it out is how it reaches a
+scene. The Generators section lists the built-in primitives, a
 Background card, lights and camera, and a single click adds one. Drag a Box,
 Plane, Sphere or Background onto Stage instead to place it where it lands, the
 way a dropped asset is: an outline previews where it will rest. Lights and
 the camera are added where their defaults put them. Right-click an asset, folder or empty
-space for **Add to Scene**, **Rename** (F2), **New Folder**, **Move to Top
+space for **Open in Asset Viewer** (Enter), **Rename** (F2), **New Folder**, **Move to Top
 Level**, **Remove from Library** (Delete), **Import Media...**, **Import
 Model...** and **Rescan Sources**.
 
@@ -1022,6 +1030,78 @@ Their textures remain alive until earlier UI frames finish using them on the
 GPU. Both preview caches have a bounded retirement reserve; when it is full,
 new preview uploads retry after completion instead of waiting on the control
 thread. Editor shutdown finishes GPU work before releasing scene and UI images.
+
+### The Asset Viewer
+
+The Asset Viewer is a source monitor for one Library media asset at a time.
+Double-click an asset in the Library (or select it and press Enter), drop one
+onto the viewer, or choose **Open in Asset Viewer** from a Library or Timeline
+menu. It is a tab beside Stage and Program Output, and **Window > Asset
+Viewer** shows it. The arrows at the top right step back and forward through
+the assets opened.
+
+Nothing the viewer holds is part of the project: its frame, marks, zoom and
+channel view are this editor's own, are never sent to a render node, and reset
+when another project opens. The only thing that leaves it as an edit is a range
+cut into a track, which is one ordinary undo step.
+
+**Playing.** With the viewer focused (click in it), Space plays and pauses,
+J, K and L play backwards, stop and play forwards at the source's own rate,
+Left and Right step a frame (a second with Shift), and Home and End go to In
+and Out, or to the first and last frame. The scrub bar under the picture
+carries the asset's filmstrip; drag along it to scrub. **Loop** repeats
+playback and **In > Out** plays the marked range. The readout gives the
+source's own timecode - its start timecode plus the frame, drop-frame when the
+file's is - and the frame number. No sound plays: the program has no audio
+path.
+
+**What the header says.** **SOURCE** is the asset's own file, required by the
+project and found on this machine. **SOURCE - NOT CHECKED** is the asset's own
+file when nothing in the project uses it: presence is only asked of required
+content, so a missing file shows the grey placeholder rather than a warning.
+**PROXY** follows the asset's Prefer or Require Proxy policy, **PROXY REQUIRED
+- NOT READY** draws nothing, as the wall would, and **OFFLINE** is a missing
+file. **DECODING** means frames are still arriving; the last complete one is
+held. The viewer decodes through its own cache, so scrubbing it never counts
+against Program's asset readiness.
+
+**Marking and cutting.** I and O (or the **In** and **Out** buttons) mark the
+range; **Clear** removes both. `,` inserts the range at the Stage playhead on
+the target track and `.` overwrites; the **Insert**, **Overwrite** and
+**Append** buttons do the same, Append landing after the track's last clip.
+The target track is the one Insert and Overwrite Clipboard use - the targeted
+track, then the selected track, then the track every selected clip is on - and
+the edit row names it ("untracked layers" when it is the scene's clips filed
+under no track). An Insert that lands inside a clip cuts that clip there, as
+the Razor does, and its second half moves along after the new clip; clipboard
+Insert still refuses a point inside a clip. With no marks the whole source is
+used. The range plays
+for the fewest show frames that reach its last frame at the show rate, so
+every marked frame plays; a still keeps its five-second default. The cut
+commits at once, as one undo step, and the new clip is selected. The Stage
+playhead does not move: on Program it is the live show's clock. Without a
+target track, during a transition, or before the file has been probed, the
+viewer says why and nothing changes.
+
+**Dragging out.** Drag the picture out of the viewer to place the marked range.
+Let go on a track's band in the Timeline and it overwrites that track from the
+frame under the pointer; anywhere else on the Timeline it becomes a new layer
+starting there; on the Stage it becomes a new placement starting at the
+playhead, resting where a Library drop would.
+
+**Looking closely.** The wheel zooms about the pointer, a middle drag pans,
+**Fit** (or F) fits the picture and **1:1** shows one source pixel to one
+screen pixel. The channel menu shows red, green, blue or luma alone as grey,
+and the EV buttons add a display-only exposure offset (click the value to
+reset it). Under the picture, the readout gives the source pixel under the
+pointer and its display values after the project's colour transform. **Used**
+lists this asset's placements in the scene on the Stage; choosing one selects
+it.
+
+The viewer renders through its own renderer on the editor's GPU, made when it
+first shows a media asset and released a few seconds after it is hidden.
+It shows media only; a model opened in it says so, and is placed by dragging
+it from the Library.
 
 ## Render-node lifecycle control
 

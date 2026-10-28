@@ -1110,6 +1110,20 @@ placed_clip_duration(const editor::AddIntent &add,
                                 whole(0));
         node.properties.emplace(std::string{scene::schema::clip_duration},
                                 whole(placed_clip_duration(add, show_rate)));
+        // The Asset Viewer's marked range, dragged out: where it starts, how
+        // long it plays and which source frame it opens on.
+        if (add.timing.has_value() && add.timing->duration > 0 &&
+            add.timing->source_in >= 0) {
+            node.properties.insert_or_assign(
+                std::string{scene::schema::clip_start},
+                whole(add.timing->start));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::clip_duration},
+                whole(add.timing->duration));
+            node.properties.insert_or_assign(
+                std::string{scene::schema::source_in},
+                whole(add.timing->source_in));
+        }
         add_links();
         return node;
     }

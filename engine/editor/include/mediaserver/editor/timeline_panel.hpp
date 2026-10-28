@@ -669,8 +669,27 @@ struct TimelineDrawInput final {
   std::span<const scene::TimelineMarker> markers;
 };
 
+// A clip to open in the Asset Viewer: from its menu, at its first source
+// frame, or by match frame (F), at the source frame under the playhead.
+struct TimelineViewClipRequest final {
+  doc::NodeId clip{};
+  bool at_playhead{};
+
+  bool operator==(const TimelineViewClipRequest &) const = default;
+};
+
+// A point on a track's band in the time area: the track and the frame under
+// it, for a drop that lands on that track at that frame.
+struct TimelineLanePoint final {
+  doc::NodeId lane{};
+  core::i64 frame{};
+
+  bool operator==(const TimelineLanePoint &) const = default;
+};
+
 struct TimelinePanelFrame final {
   std::optional<core::u64> seek_to_frame;
+  std::optional<TimelineViewClipRequest> view_clip;
   std::vector<TimelineKeyEdit> keys;
   std::vector<TimelineKeyMoveEdit> key_moves;
   std::optional<TimelineKeyDuplicateEdit> key_duplicate;
@@ -769,6 +788,8 @@ public:
   struct ReplacementTarget final {
     doc::NodeId node{};
     gui::Rect bounds{};
+    // A track header's row rather than a layer's.
+    bool track{};
   };
   [[nodiscard]] std::span<const ReplacementTarget> replacement_targets() const noexcept {
     return replacement_targets_;
@@ -859,6 +880,19 @@ public:
   }
   // The track Insert and Overwrite are aimed at by its target switch, if
   // the operator set one.
+  // Where Insert and Overwrite land by the targeting rule - the targeted
+  // track, then the selected track, then the track every selected clip is
+  // on - as of the last draw. Empty when that names no unlocked track.
+  [[nodiscard]] std::optional<doc::NodeId> insert_target_lane() const noexcept {
+    return insert_target_lane_;
+  }
+  // The track and frame under (x, y) when it is over an unlocked track's
+  // band in the time area, as of the last draw.
+  [[nodiscard]] std::optional<TimelineLanePoint>
+  lane_point_at(float x, float y) const noexcept;
+  // The frame under (x, y) when it is over the time area, as of the last draw.
+  [[nodiscard]] std::optional<core::i64> frame_at(float x,
+                                                  float y) const noexcept;
   [[nodiscard]] std::optional<doc::NodeId> targeted_lane() const noexcept {
     return targeted_lane_;
   }
@@ -1225,6 +1259,8 @@ private:
   // two zoom, pan and select together.
   std::unique_ptr<timeline::TimelineGraphView> graph_;
   TimelineEditTool edit_tool_{TimelineEditTool::Standard};
+  std::optional<doc::NodeId> insert_target_lane_;
+  gui::Rect graph_bounds_{};
   bool timeline_focused_{};
   bool panning_{};
 

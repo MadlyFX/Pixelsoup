@@ -14,6 +14,9 @@
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative_profile_id.hpp>
+#if defined(MEDIASERVER_HAS_GUI)
+#include <mediaserver/editor/asset_viewer.hpp>
+#endif
 #include <mediaserver/core/asset_publication.hpp>
 #include <mediaserver/doc/document.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -504,6 +507,74 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 director_playback_asset_registry, director_asset_availability,
                 repeated));
         }
+#if defined(MEDIASERVER_HAS_GUI)
+        // The Asset Viewer's one clip, finished the way the Stage is: its
+        // media resolved to the file this machine decodes, by the asset's
+        // own proxy policy. An asset nothing in the project uses has no
+        // presence answer - presence is asked only of required content - so
+        // it resolves as its own file, unchecked, and a missing file shows
+        // the decoder's placeholder rather than a stat on this thread.
+        asset_viewer_frame.reset();
+        asset_viewer_rendition = editor::AssetViewerRendition::None;
+        if (asset_viewer_request.has_value()) {
+            const assets::Asset *const found =
+                director_playback_asset_registry.asset(
+                    asset_viewer_request->asset);
+            const auto *const media =
+                found != nullptr ? std::get_if<assets::MediaAsset>(found)
+                                 : nullptr;
+            if (media != nullptr) {
+                scene::Scene viewer = editor::asset_viewer_media_scene(
+                    *media, asset_viewer_request->source_frame,
+                    stage_scene_frame.renderer_settings);
+                const bool required = std::any_of(
+                    director_asset_availability.assets.begin(),
+                    director_asset_availability.assets.end(),
+                    [&](const ProjectAssetPresence &presence) {
+                        return presence.asset == media->id &&
+                               presence.source == media->source;
+                    });
+                ProjectAssetAvailability unchecked{};
+                if (!required) {
+                    ProjectAssetPresence presence{};
+                    presence.asset = media->id;
+                    presence.source = media->source;
+                    presence.present = true;
+                    presence.state = ProjectAssetPresence::State::Ready;
+                    presence.expected_fingerprint = media->fingerprint;
+                    presence.observed_fingerprint = media->fingerprint;
+                    presence.kind = assets::AssetKind::Media;
+                    unchecked.assets.push_back(std::move(presence));
+                }
+                std::vector<ProxyPlacementObservation> viewed;
+                static_cast<void>(resolve_scene_proxies(
+                    director_proxy_playback, viewer,
+                    director_playback_asset_registry,
+                    required ? director_asset_availability : unchecked,
+                    viewed));
+                if (!viewed.empty()) {
+                    const ProxyPlacementObservation &shown = viewed.front();
+                    if (shown.offline) {
+                        asset_viewer_rendition =
+                            editor::AssetViewerRendition::Offline;
+                    } else if (shown.resolution.selection ==
+                               assets::ProxyPlaybackSelection::Proxy) {
+                        asset_viewer_rendition =
+                            editor::AssetViewerRendition::Proxy;
+                    } else if (shown.resolution.selection ==
+                               assets::ProxyPlaybackSelection::Unready) {
+                        asset_viewer_rendition =
+                            editor::AssetViewerRendition::ProxyUnready;
+                    } else {
+                        asset_viewer_rendition =
+                            required ? editor::AssetViewerRendition::Source
+                                     : editor::AssetViewerRendition::Unchecked;
+                    }
+                }
+                asset_viewer_frame = std::move(viewer);
+            }
+        }
+#endif
         report_proxy_status_changes("Director", observations,
                                     director_proxy_observations);
         director_proxy_observations = std::move(observations);

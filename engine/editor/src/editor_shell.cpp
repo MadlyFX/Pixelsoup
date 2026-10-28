@@ -1,5 +1,6 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
+#include <mediaserver/editor/asset_viewer_panel.hpp>
 #include <mediaserver/editor/live_data_panel.hpp>
 
 #include <mediaserver/editor/library_thumbnail_texture_cache.hpp>
@@ -23,6 +24,7 @@
 #include <mediaserver/gui/ui_renderer.hpp>
 #include <mediaserver/gui/window.hpp>
 #include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/inspection_view.hpp>
 #include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/model_loader.hpp>
@@ -36,6 +38,7 @@
 #include <mediaserver/scene/manipulate.hpp>
 #include <mediaserver/scene/math.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
+#include <mediaserver/scene/timeline_edit.hpp>
 
 #include <algorithm>
 #include <array>
@@ -43,6 +46,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <future>
@@ -50,6 +54,7 @@
 #include <mediaserver/render/model_cache.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -179,6 +184,8 @@ const gui::PanelId panel_hardware_mapping =
     gui::ui_id("editor.panel.hardware-mapping");
 const gui::PanelId panel_feed_mapping = gui::ui_id("editor.panel.feed-mapping");
 const gui::PanelId panel_live_data = gui::ui_id("editor.panel.live-data");
+const gui::PanelId panel_asset_viewer =
+    gui::ui_id("editor.panel.asset-viewer");
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name) noexcept {
   core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
@@ -656,10 +663,11 @@ struct WindowPanelEntry final {
   std::string_view title;
 };
 
-[[nodiscard]] const std::array<WindowPanelEntry, 21U> &window_panel_entries() {
-  static const std::array<WindowPanelEntry, 21U> entries{{
+[[nodiscard]] const std::array<WindowPanelEntry, 22U> &window_panel_entries() {
+  static const std::array<WindowPanelEntry, 22U> entries{{
       {panel_stage, "View"},
       {panel_program, "Program Output"},
+      {panel_asset_viewer, "Asset Viewer"},
       {panel_scene, "Scene"},
       {panel_selection_sets, "Selection Sets"},
       {panel_masks, "Masks"},
@@ -1815,6 +1823,53 @@ struct EditorShell::Impl final {
   HardwareMappingPanel hardware_mapping_panel{
       gui::ui_id("editor.hardware-mapping")};
   FeedMappingPanel feed_mapping_panel{gui::ui_id("editor.feed-mapping")};
+  AssetViewerPanel asset_viewer_panel{gui::ui_id("editor.asset-viewer")};
+  // The Asset Viewer's picture. Its executor keeps its own media cache, so a
+  // scrub's pending decodes never count against Program's asset readiness,
+  // and it shares the window's device so device decoding stays available.
+  // Everything here is made the first time the panel shows a media asset and
+  // released after the panel has been hidden for a few seconds.
+  struct AssetViewerRender final {
+    std::optional<render::CompositorSceneExecutor> renderer;
+    std::optional<render::OutputTransform> display;
+    std::optional<render::InspectionView> inspection;
+    bool failed{};
+    // The picture the panel draws, or null.
+    const rhi::Texture *texture{};
+    // The image area the panel last asked for, in screen pixels.
+    core::u32 width{};
+    core::u32 height{};
+    bool drawn{};
+    core::u32 hidden_frames{};
+    bool decoding{};
+    std::string fault;
+    // What the current picture shows, so an unchanged one is not redrawn.
+    struct Shown final {
+      AssetViewerRequest request{};
+      std::string source;
+      AssetViewerRendition rendition{AssetViewerRendition::None};
+      AssetViewerFraming framing{};
+      AssetViewerChannel channel{AssetViewerChannel::Rgb};
+      float exposure{};
+      core::u32 width{};
+      core::u32 height{};
+      scene::ColorSettings color{};
+
+      bool operator==(const Shown &) const = default;
+    };
+    std::optional<Shown> shown;
+    // The pixel probe: one download of the display image in flight at a
+    // time, read when the GPU has finished it, never waited for.
+    std::optional<rhi::Readback> readback;
+    rhi::SubmittedWork probe_work;
+    bool probe_pending{};
+    core::u32 probe_x{};
+    core::u32 probe_y{};
+    core::u32 probe_width{};
+    core::u32 probe_height{};
+    double probe_time{};
+    std::optional<std::pair<core::u32, core::u32>> probe_at;
+  } viewer;
 
   // Scene-node selection is editor-local and canonical. Compositor, physical
   // surface, and mapping selections remain in their distinct carriers below.
@@ -2010,9 +2065,12 @@ struct EditorShell::Impl final {
     docks.set_active(inspector_dock, panel_inspector);
 
     // Program is a dock tab alongside Stage; it does not obscure the canvas
-    // until the operator chooses to detach it.
+    // until the operator chooses to detach it. The Asset Viewer is the third
+    // tab there: a source monitor beside the picture it feeds.
     static_cast<void>(docks.dock(panel_program, "Program Output", stage_dock,
                                  gui::DockSide::Center));
+    static_cast<void>(docks.dock(panel_asset_viewer, "Asset Viewer",
+                                 stage_dock, gui::DockSide::Center));
     docks.set_active(stage_dock, panel_stage);
 
     // Register less frequently used panels so Window can open them on demand.
@@ -2105,6 +2163,19 @@ struct EditorShell::Impl final {
       return;
     }
 
+    // A viewer opened from a workspace saved without one joins the Stage's
+    // tabs, where the starting layout keeps it, rather than splitting the
+    // window.
+    if (panel == panel_asset_viewer && !docks.has_saved_placement(panel) &&
+        docks.leaf_of(panel_stage) != gui::no_dock) {
+      const gui::DockId tabbed = docks.dock(panel, panel_title(panel),
+                                            docks.leaf_of(panel_stage),
+                                            gui::DockSide::Center);
+      if (tabbed != gui::no_dock) {
+        docks.set_active(tabbed, panel);
+        return;
+      }
+    }
     gui::DockId leaf = docks.add(panel, panel_title(panel));
     if (panel == panel_program && leaf != gui::no_dock) {
       const float monitor_width = std::clamp(
@@ -2505,7 +2576,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    std::span<const scene::TrackingSource>
                        tracking_sources,
                    std::span<const scene::TimelineMarker>
-                       timeline_markers) noexcept {
+                       timeline_markers,
+                   const AssetViewerInput &asset_viewer) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
   // The plates the Director derived this frame, drawn over both viewports so
@@ -2618,6 +2690,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
     impl.library_panel.reset_project_state();
+    impl.asset_viewer_panel.reset_project_state();
+    impl.viewer.shown.reset();
+    impl.viewer.texture = nullptr;
   }
 
   // Media stream discovery can take seconds for multi-gigabyte MOV files.
@@ -2997,6 +3072,98 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                        stage_previews[index].height);
     impl.stage_views[index].texture = &stage_display_of(index).target();
   }
+  // The Asset Viewer renders only while it is on screen with a media asset
+  // to show. Hidden for a few seconds, it gives its targets back; the drain
+  // is the same once-per-boundary wait a preview resize takes.
+  Impl::AssetViewerRender &viewer = impl.viewer;
+  const assets::MediaAsset *viewer_media = nullptr;
+  if (viewer.drawn && asset_viewer.scene != nullptr &&
+      asset_viewer.shown.asset == impl.asset_viewer_panel.asset()) {
+    if (const assets::Asset *const found =
+            asset_registry.asset(asset_viewer.shown.asset)) {
+      viewer_media = std::get_if<assets::MediaAsset>(found);
+    }
+  }
+  viewer.hidden_frames = viewer.drawn
+                             ? 0U
+                             : std::min(viewer.hidden_frames + 1U, 1000U);
+  if (viewer.hidden_frames > 180U &&
+      (viewer.renderer.has_value() || viewer.readback.has_value())) {
+    device.wait_idle();
+    viewer.renderer.reset();
+    viewer.display.reset();
+    viewer.inspection.reset();
+    viewer.readback.reset();
+    viewer.probe_work = rhi::SubmittedWork{};
+    viewer.probe_pending = false;
+    viewer.shown.reset();
+    viewer.texture = nullptr;
+    viewer.failed = false;
+  }
+  bool viewer_ready = false;
+  if (viewer_media != nullptr && viewer.width != 0U && viewer.height != 0U &&
+      !viewer.failed) {
+    if (!viewer.renderer.has_value()) {
+      auto renderer = render::CompositorSceneExecutor::create(
+          device, viewer.width, viewer.height, stage_view_limits(),
+          render::MediaCacheConfig{},
+          device.capabilities().backend == rhi::BackendKind::D3d12
+              ? rhi::TextureFormat::Rgba16Float
+              : rhi::TextureFormat::Rgba8Unorm);
+      auto display =
+          render::OutputTransform::create(device, viewer.width, viewer.height);
+      auto inspection =
+          render::InspectionView::create(device, viewer.width, viewer.height);
+      if (renderer && display && inspection) {
+        viewer.renderer.emplace(std::move(renderer).value());
+        viewer.display.emplace(std::move(display).value());
+        viewer.inspection.emplace(std::move(inspection).value());
+      } else {
+        viewer.failed = true;
+        viewer.fault = "ASSET VIEWER UNAVAILABLE ON THIS GPU";
+      }
+    } else if (viewer.renderer->width() != viewer.width ||
+               viewer.renderer->height() != viewer.height) {
+      device.wait_idle();
+      viewer.shown.reset();
+      viewer.texture = nullptr;
+      if (!viewer.renderer->resize(device, viewer.width, viewer.height) ||
+          !viewer.display->resize(device, viewer.width, viewer.height) ||
+          !viewer.inspection->resize(device, viewer.width, viewer.height)) {
+        viewer.failed = true;
+        viewer.fault = "ASSET VIEWER TARGETS UNAVAILABLE";
+      }
+    }
+    viewer_ready = viewer.renderer.has_value() && !viewer.failed;
+  }
+  // A finished probe download is read here, a frame or more after it was
+  // asked for, so the probe never waits on the GPU.
+  if (viewer.probe_pending && viewer.probe_work &&
+      viewer.probe_work.complete()) {
+    viewer.probe_pending = false;
+    std::optional<gui::UiColor> probed;
+    if (viewer.readback.has_value()) {
+      const auto pixels = viewer.readback->map();
+      const std::size_t offset =
+          (static_cast<std::size_t>(viewer.probe_y) * viewer.probe_width +
+           viewer.probe_x) *
+          4U;
+      if (viewer.probe_x < viewer.probe_width &&
+          viewer.probe_y < viewer.probe_height &&
+          offset + 3U < pixels.size()) {
+        constexpr float to_unit = 1.0F / 255.0F;
+        probed = gui::UiColor{static_cast<float>(pixels[offset]) * to_unit,
+                              static_cast<float>(pixels[offset + 1U]) * to_unit,
+                              static_cast<float>(pixels[offset + 2U]) * to_unit,
+                              1.0F};
+      }
+      viewer.readback->unmap();
+    }
+    impl.asset_viewer_panel.set_probe_value(probed);
+  }
+  if (!viewer.probe_at.has_value()) {
+    impl.asset_viewer_panel.set_probe_value(std::nullopt);
+  }
   const rhi::Texture *program_texture = impl.visible_program ? &*impl.visible_program : &impl.program_display.target();
   bool program_preview_ok = false;
   bool program_preview_held = false;
@@ -3257,6 +3424,76 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       view.texture = &display.target();
     }
+    // The Asset Viewer's one-clip scene, through the orthographic view its
+    // zoom and pan describe. Redrawn only when what it shows changes, or
+    // while its frames or colour table are still arriving.
+    if (viewer_ready) {
+      const AssetViewerFraming framing = impl.asset_viewer_panel.framing();
+      Impl::AssetViewerRender::Shown wanted{};
+      wanted.request = asset_viewer.shown;
+      wanted.source = asset_viewer.scene->media.empty()
+                          ? std::string{}
+                          : asset_viewer.scene->media.front().source;
+      wanted.rendition = asset_viewer.rendition;
+      wanted.framing = framing;
+      wanted.channel = impl.asset_viewer_panel.channel();
+      wanted.exposure = impl.asset_viewer_panel.exposure_stops();
+      wanted.width = viewer.width;
+      wanted.height = viewer.height;
+      wanted.color = asset_viewer.scene->renderer_settings.color;
+      if (!viewer.shown.has_value() || *viewer.shown != wanted ||
+          viewer.decoding ||
+          viewer.display->color_state() != render::DisplayLutState::Ready) {
+        scene::Scene viewer_scene = *asset_viewer.scene;
+        viewer_scene.canvas = scene::Canvas{viewer.width, viewer.height};
+        const scene::Camera camera = asset_viewer_camera(
+            framing, asset_viewer_pixels(*viewer_media),
+            static_cast<float>(viewer.width),
+            static_cast<float>(viewer.height));
+        render::SceneRenderView viewer_view{};
+        viewer_view.matrices = scene::view_for_slice(
+            camera, viewer_scene.canvas, scene::whole(viewer_scene.canvas));
+        viewer_view.eye = camera.eye;
+        viewer_view.forward = scene::Vec3{0.0F, 0.0F, -1.0F};
+        viewer_view.history_identity = 0x4153'5345'5456'4945ULL;
+        viewer_view.clip_planes =
+            render::SceneClipPlanes{camera.near_plane, camera.far_plane};
+        const rhi::Texture *const rendered = record_editor_scene(
+            *viewer.renderer, commands, viewer_scene,
+            compositor::CompositorGraph{}, nullptr, &viewer_view);
+        viewer.display->adopt_color(viewer_scene.renderer_settings.color,
+                                    scene::asset_generation_key(viewer_scene));
+        static constexpr std::array<render::InspectionChannel, 5U> channels{
+            render::InspectionChannel::Rgb, render::InspectionChannel::Red,
+            render::InspectionChannel::Green, render::InspectionChannel::Blue,
+            render::InspectionChannel::Luma};
+        const bool viewer_ok =
+            rendered != nullptr &&
+            viewer.display->render(
+                commands, *rendered,
+                scene::CanvasRect{0U, 0U, viewer.width, viewer.height},
+                viewer.renderer->scene_linear_output()) &&
+            viewer.inspection->render(
+                commands, viewer.display->target(),
+                channels[static_cast<std::size_t>(wanted.channel)],
+                wanted.exposure);
+        viewer.decoding =
+            viewer.renderer->media_cache_stats().pending_requests != 0U;
+        if (viewer_ok) {
+          viewer.shown = std::move(wanted);
+          viewer.texture = &viewer.inspection->target();
+          viewer.fault.clear();
+        } else {
+          viewer.shown.reset();
+          viewer.texture = nullptr;
+          viewer.fault =
+              viewer.renderer->renderer_readiness().satisfied
+                  ? std::string{"ASSET VIEWER RENDER FAILED"}
+                  : std::string{
+                        viewer.renderer->renderer_readiness().headline()};
+        }
+      }
+    }
     const auto record_ns = static_cast<core::u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - cpu_record_begin).count());
     const auto profile_digest = scene::renderer_settings_digest(program_render_scene->renderer_settings);
@@ -3285,6 +3522,43 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           record_ns, profile_digest, impl.next_recording_sequence++};
     }
     impl.program_preview_valid = program_preview_ok;
+    // The probe reads the display image the panel shows (before the channel
+    // view), in its own small submission, at most ten times a second.
+    if (viewer_ready && viewer.shown.has_value() &&
+        viewer.probe_at.has_value() && !viewer.probe_pending &&
+        impl.window.time_seconds() - viewer.probe_time >= 0.1 &&
+        viewer.display->target().desc().format ==
+            rhi::TextureFormat::Rgba8Unorm) {
+      const rhi::Texture &image = viewer.display->target();
+      const std::uint64_t bytes =
+          static_cast<std::uint64_t>(image.width()) * image.height() * 4U;
+      if (bytes != 0U && bytes <= std::numeric_limits<core::u32>::max()) {
+        if (!viewer.readback.has_value() ||
+            viewer.readback->capacity_bytes() < bytes) {
+          viewer.readback.reset();
+          if (auto created =
+                  device.create_readback(static_cast<core::u32>(bytes))) {
+            viewer.readback.emplace(std::move(created).value());
+          }
+        }
+        if (viewer.readback.has_value()) {
+          if (auto probe_commands = device.acquire_commands()) {
+            auto list = std::move(probe_commands).value();
+            if (list.download(image, *viewer.readback)) {
+              if (auto work = device.submit(std::move(list))) {
+                viewer.probe_work = std::move(work).value();
+                viewer.probe_pending = true;
+                viewer.probe_x = viewer.probe_at->first;
+                viewer.probe_y = viewer.probe_at->second;
+                viewer.probe_width = image.width();
+                viewer.probe_height = image.height();
+                viewer.probe_time = impl.window.time_seconds();
+              }
+            }
+          }
+        }
+      }
+    }
   } else if (program_targets_ready && impl.program_preview_valid) {
     // Command acquisition is deliberately non-blocking. Keep the completed
     // prior image while all contexts are in flight; this is pressure, not a
@@ -4396,6 +4670,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                      std::optional<CompositorAddIntent>
                                          graph_layer = std::nullopt,
                                      std::optional<scene::Vec3> rotation =
+                                         std::nullopt,
+                                     std::optional<scene::ClipTiming> timing =
                                          std::nullopt) {
     const assets::Asset *const found = asset_registry.asset(id);
     if (found == nullptr) {
@@ -4413,6 +4689,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                       media->id, authored_stage.id, position,
                                       media->frame_rate, graph_layer});
       result.adds.back().rotation = rotation;
+      result.adds.back().timing = timing;
       return;
     }
     const auto &model = std::get<assets::ModelAsset>(*found);
@@ -4452,6 +4729,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   ViewportFrame stage_viewport_frame{};
   bool stage_viewport_drawn = false;
   std::optional<LibraryAssetDrop> pending_asset_drop;
+  std::optional<AssetViewerDrop> pending_viewer_drop;
+  bool viewer_drawn_now = false;
   std::optional<doc::NodeId> dragging_asset;
   std::vector<doc::NodeId> dragging_assets;
   std::optional<LibraryAddAction> dragging_generator;
@@ -4616,6 +4895,62 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // that still has to hold is a running dissolve: both of its inputs are
   // already committed pictures, so no graph edit may land mid-transition.
   const bool compositor_locked = switcher.rehearsal_locked;
+  // A Timeline clip's source in the Asset Viewer: at the source frame under
+  // the playhead for match frame, else at the clip's first source frame,
+  // with In and Out around the source frames its first pass plays.
+  const auto open_clip_in_viewer = [&](const TimelineViewClipRequest &request) {
+    const ElementInfo *const clip = find_element(elements, request.clip);
+    if (clip == nullptr || clip->kind != ElementKind::Media) {
+      return;
+    }
+    impl.show_panel(panel_asset_viewer);
+    const assets::Asset *const asset =
+        asset_registry.asset_for_source(clip->source, assets::AssetKind::Media);
+    const auto *const media =
+        asset != nullptr ? std::get_if<assets::MediaAsset>(asset) : nullptr;
+    if (media == nullptr) {
+      impl.asset_viewer_panel.show_message(
+          "The clip's source is not in the Library", ui.time_seconds());
+      return;
+    }
+    const core::u32 count = asset_viewer_frame_count(*media);
+    const scene::MediaFrameRate show_rate{timeline.rate_numerator,
+                                          timeline.rate_denominator};
+    scene::ClipPlacement placement{};
+    placement.node = clip->node;
+    placement.source = clip->source;
+    placement.sequence_start = clip->sequence_start;
+    placement.sequence_count = std::max(clip->sequence_count, 1U);
+    placement.timing = clip->timing;
+    placement.frame_rate = clip->source_frame_rate;
+    const scene::SceneTime time{0U, show_rate.numerator,
+                                show_rate.denominator};
+    const core::u64 at =
+        request.at_playhead
+            ? timeline.show_frame
+            : static_cast<core::u64>(std::max<core::i64>(clip->timing.start, 0));
+    const core::u32 shown =
+        scene::clip_source_frame(placement, time, at) - placement.sequence_start;
+    const core::u32 first = static_cast<core::u32>(
+        static_cast<core::u64>(std::max<core::i64>(clip->timing.source_in, 0)) %
+        count);
+    core::u32 last = count - 1U;
+    if (clip->timing.duration > 0) {
+      // The last frame the clip's floor mapping reaches, unwrapped.
+      if (const auto reached = scene::advance_source_phase(
+              0, clip->timing.duration - 1, show_rate,
+              clip->source_frame_rate, std::numeric_limits<core::u32>::max(),
+              scene::SourcePhaseRounding::Floor);
+          reached && reached.value() >= 0) {
+        last = static_cast<core::u32>(std::min<core::i64>(
+            static_cast<core::i64>(first) + reached.value(),
+            static_cast<core::i64>(count) - 1));
+      }
+    }
+    impl.asset_viewer_panel.open(media->id, std::min(shown, count - 1U),
+                                 std::pair{first, last});
+  };
+
   const auto draw_panel = [&](gui::PanelId panel, const gui::Rect &bounds) {
     if (panel == panel_stage) {
       // Turns four views on or off. The first time, the other three look at
@@ -5716,6 +6051,71 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       return;
     }
+    if (panel == panel_asset_viewer) {
+      viewer_drawn_now = true;
+      const std::optional<doc::NodeId> target =
+          impl.timeline_panel.insert_target_lane();
+      std::string target_name;
+      if (target.has_value()) {
+        // The scene's implicit lane holds the clips filed under no track.
+        target_name = "untracked layers";
+        for (const scene::TimelineLane &lane : timeline_lanes) {
+          if (lane.id == *target && !lane.implicit && !lane.name.empty()) {
+            target_name = lane.name;
+            break;
+          }
+        }
+      }
+      const bool picture_current =
+          impl.viewer.shown.has_value() &&
+          impl.viewer.shown->request.asset == impl.asset_viewer_panel.asset();
+      AssetViewerDrawInput viewer_input{};
+      viewer_input.assets = &asset_registry;
+      viewer_input.director = &asset_viewer;
+      viewer_input.image = picture_current ? impl.viewer.texture : nullptr;
+      viewer_input.decoding = picture_current && impl.viewer.decoding;
+      viewer_input.image_fault = impl.viewer.fault;
+      viewer_input.show_rate =
+          scene::MediaFrameRate{timeline.rate_numerator,
+                                timeline.rate_denominator};
+      viewer_input.target_lane = target;
+      viewer_input.target_name = target_name;
+      viewer_input.edits_locked = switcher.rehearsal_locked;
+      viewer_input.elements = elements;
+      viewer_input.lanes = timeline_lanes;
+      viewer_input.pixels_per_unit = impl.window.ui_scale();
+      const AssetViewerFrame viewed =
+          impl.asset_viewer_panel.draw(ui, bounds, viewer_input);
+      result.asset_viewer = viewed.request;
+      impl.viewer.width = viewed.surface_width;
+      impl.viewer.height = viewed.surface_height;
+      impl.viewer.probe_at = viewed.probe;
+      if (viewed.source_edit.has_value() && target.has_value()) {
+        result.source_edits.push_back(SourceRangeEditIntent{
+            authored_stage.id, impl.asset_viewer_panel.asset(),
+            viewed.source_edit->source_in, viewed.source_edit->source_frames,
+            viewed.source_edit->mode, *target, timeline.show_frame,
+            scene::MediaFrameRate{timeline.rate_numerator,
+                                  timeline.rate_denominator},
+            impl.next_edit_gesture++});
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+      }
+      if (viewed.select_clip.has_value()) {
+        if (const ElementInfo *const clip =
+                find_element(elements, *viewed.select_clip);
+            clip != nullptr && !clip->locked) {
+          impl.stage_surface_selection.reset();
+          impl.select_only(*viewed.select_clip);
+          impl.history_context = HistoryContext::Scene;
+          impl.semantic_boundary = true;
+        }
+      }
+      if (viewed.drop.has_value()) {
+        pending_viewer_drop = viewed.drop;
+      }
+      return;
+    }
     if (panel == panel_library) {
       impl.library_panel.set_changed_sources(project.changed_assets);
       const LibraryFrame library =
@@ -5760,8 +6160,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         import_files(library.import_files, library.import_folder);
         library_took_files = true;
       }
-      if (library.instantiate_asset.has_value()) {
-        instantiate_asset(library.instantiate_asset.value(), std::nullopt);
+      if (library.view_asset.has_value()) {
+        impl.asset_viewer_panel.open(*library.view_asset);
+        impl.show_panel(panel_asset_viewer);
       }
       // One gesture for everything a single Delete or menu choice removed,
       // so it undoes as one.
@@ -6252,6 +6653,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         result.cues_armed = timeline_frame.cues_armed;
       }
       result.filmstrip_retain = timeline_frame.filmstrip_retain;
+      if (timeline_frame.view_clip.has_value()) {
+        open_clip_in_viewer(*timeline_frame.view_clip);
+      }
       if (timeline_frame.seek_to_frame.has_value()) {
         result.seek_to_frame = timeline_frame.seek_to_frame;
       }
@@ -7307,6 +7711,69 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
+  // The Asset Viewer's picture let go. On a track's band it overwrites that
+  // track from the frame under the pointer; elsewhere on the Timeline it is a
+  // new layer starting there, and on the Stage a new placement starting at
+  // the playhead. Either way it carries the marked range.
+  if (pending_viewer_drop.has_value() && !switcher.rehearsal_locked) {
+    const AssetViewerDrop drop = *pending_viewer_drop;
+    const assets::Asset *const found = asset_registry.asset(drop.asset);
+    const auto *const media =
+        found != nullptr ? std::get_if<assets::MediaAsset>(found) : nullptr;
+    const scene::MediaFrameRate show_rate{timeline.rate_numerator,
+                                          timeline.rate_denominator};
+    std::optional<scene::ClipTiming> timing;
+    if (media != nullptr && asset_viewer_frame_count(*media) > 1U) {
+      std::optional<scene::MediaFrameRate> source_rate;
+      if (media->frame_rate.has_value()) {
+        source_rate = scene::MediaFrameRate{media->frame_rate->numerator,
+                                            media->frame_rate->denominator};
+      }
+      if (const auto span = scene::source_span_show_frames(
+              drop.source_frames, show_rate, source_rate)) {
+        scene::ClipTiming placed{};
+        placed.start = static_cast<core::i64>(timeline.show_frame);
+        placed.duration = span.value();
+        placed.source_in = static_cast<core::i64>(drop.source_in);
+        timing = placed;
+      }
+    }
+    if (media != nullptr && timeline_panel_drawn &&
+        timeline_panel_bounds.contains(drop.screen_x, drop.screen_y)) {
+      if (const auto point =
+              impl.timeline_panel.lane_point_at(drop.screen_x, drop.screen_y)) {
+        result.source_edits.push_back(SourceRangeEditIntent{
+            authored_stage.id, drop.asset, drop.source_in, drop.source_frames,
+            SourceEditMode::Overwrite, point->lane,
+            static_cast<core::u64>(std::max<core::i64>(point->frame, 0)),
+            show_rate, impl.next_edit_gesture++});
+      } else {
+        if (timing.has_value()) {
+          if (const auto frame =
+                  impl.timeline_panel.frame_at(drop.screen_x, drop.screen_y)) {
+            timing->start = *frame;
+          }
+        }
+        instantiate_asset(drop.asset, std::nullopt, std::nullopt, std::nullopt,
+                          timing);
+      }
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+    } else if (media != nullptr) {
+      const std::array<doc::NodeId, 1U> dropped{drop.asset};
+      for (const auto &[asset, placement] :
+           stage_placements_at(dropped, drop.screen_x, drop.screen_y)) {
+        instantiate_asset(asset, placement.position, std::nullopt,
+                          placement.rotation == scene::Vec3{}
+                              ? std::nullopt
+                              : std::optional<scene::Vec3>{placement.rotation},
+                          timing);
+        impl.history_context = HistoryContext::Scene;
+        impl.semantic_boundary = true;
+      }
+    }
+  }
+
   if (pending_asset_drop.has_value()) {
     const auto &drop = *pending_asset_drop;
     if (const auto port = port_drop_at(drop.screen_x, drop.screen_y,
@@ -7804,8 +8271,37 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                     (stage_viewport_drawn && impl.stage().panel.transforming()));
   impl.window.set_pointer_locked(navigating && impl.navigation_moved);
 
-  // What is being dragged out of the Library rides above every panel.
+  // What is being dragged out of the Library or the Asset Viewer rides above
+  // every panel.
   impl.library_panel.draw_drag_ghost(ui);
+  impl.asset_viewer_panel.draw_drag_ghost(ui, impl.viewer.texture);
+  impl.viewer.drawn = viewer_drawn_now;
+  if (viewer_drawn_now && impl.asset_viewer_panel.asset() != doc::NodeId{}) {
+    const assets::Asset *const viewed =
+        asset_registry.asset(impl.asset_viewer_panel.asset());
+    const auto *const media =
+        viewed != nullptr ? std::get_if<assets::MediaAsset>(viewed) : nullptr;
+    const assets::DerivativeProfile *const profile = assets::derivative_profile(
+        assets::DerivativeProfileId::Filmstrip8x160x90Srgb);
+    if (media != nullptr && media->fingerprint.has_value() &&
+        profile != nullptr) {
+      const assets::DerivativeKey key =
+          assets::make_derivative_key(media->id, *media->fingerprint, *profile);
+      if (!asset_viewer.filmstrip.has_value() ||
+          asset_viewer.filmstrip->key != key ||
+          asset_viewer.filmstrip->state != assets::DerivativeState::Ready) {
+        result.filmstrip_requests.push_back(TimelineFilmstripRequestIntent{
+            key, TimelineFilmstripRequestPriority::Visible});
+      }
+      if (!result.filmstrip_retain.has_value()) {
+        result.filmstrip_retain = TimelineFilmstripRetainIntent{};
+      }
+      auto &keys = result.filmstrip_retain->keys;
+      if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+        keys.push_back(key);
+      }
+    }
+  }
   ui.draw_overlays(gui::Rect{0.0F, 0.0F, width, height});
   impl.window.set_cursor(ui.cursor());
   static_cast<void>(impl.window.present(

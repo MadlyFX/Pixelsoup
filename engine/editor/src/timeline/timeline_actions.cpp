@@ -414,6 +414,8 @@ void TimelinePanel::handle_actions(Pass &p) {
             add_entry("Set In/Out to Clip", MenuCommand::RangeToClip,
                       element->node, element->timing.start,
                       {}, element->timing.last_frame());
+            add_entry("Open in Asset Viewer", MenuCommand::OpenInAssetViewer,
+                      element->node);
           }
           if (!element->linked &&
               element->kind != ElementKind::Environment) {
@@ -479,6 +481,9 @@ void TimelinePanel::handle_actions(Pass &p) {
         break;
       case MenuCommand::InsertClipboard:
         frame.timeline_edits.emplace_back(TimelineInsertRequest{entry.node});
+        break;
+      case MenuCommand::OpenInAssetViewer:
+        frame.view_clip = TimelineViewClipRequest{entry.node, false};
         break;
       case MenuCommand::OverwriteClipboard:
         frame.timeline_edits.emplace_back(TimelineOverwriteRequest{entry.node});
@@ -724,6 +729,18 @@ void TimelinePanel::handle_actions(Pass &p) {
       case 's':
       case 'S':
         snapping_ = !snapping_;
+        break;
+      // Match frame: the selected clip under the playhead opens in the Asset
+      // Viewer at the source frame it is showing.
+      case 'f':
+      case 'F':
+        for (const ElementInfo *clip : selected_clips) {
+          if (playhead >= clip->timing.start &&
+              playhead <= clip->timing.last_frame()) {
+            frame.view_clip = TimelineViewClipRequest{clip->node, true};
+            break;
+          }
+        }
         break;
       // J, K and L shuttle as in every editor: backwards, stop, forwards.
       case 'j':

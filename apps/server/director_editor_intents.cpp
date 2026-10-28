@@ -281,6 +281,14 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
             return 1;
         }
     }
+    for (const auto &edit : editor_frame.source_edits) {
+        try {
+            pending_source_edits.push_back(edit);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue an Asset Viewer edit\n";
+            return 1;
+        }
+    }
     if (editor_frame.group_edit.has_value()) {
         try {
             pending_group_edit = editor_frame.group_edit;

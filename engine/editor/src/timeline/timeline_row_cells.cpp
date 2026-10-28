@@ -434,7 +434,8 @@ void TimelinePanel::begin_row(RowContext &rc) {
     const float top = std::max(y, rows_bounds.y);
     const float bottom = std::min(y + row.height, rows_bounds.y + rows_bounds.height);
     replacement_targets_.push_back({row.node,
-        {rows_bounds.x, top, rows_bounds.width, bottom - top}});
+        {rows_bounds.x, top, rows_bounds.width, bottom - top},
+        row.kind == Row::Kind::LaneHeader});
   }
   rc.is_selected =
       row.kind == Row::Kind::LaneHeader

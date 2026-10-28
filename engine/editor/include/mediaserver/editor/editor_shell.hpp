@@ -4,6 +4,7 @@
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/library_edit.hpp>
+#include <mediaserver/editor/asset_viewer.hpp>
 #include <mediaserver/compositor/compositor_graph.hpp>
 #include <mediaserver/core/result.hpp>
 #include <mediaserver/core/types.hpp>
@@ -151,6 +152,10 @@ struct AddIntent final {
   // Yaw, pitch and roll in turns, from the same Stage drop: a screen hung on
   // a wall faces out of it. Empty keeps the document default.
   std::optional<scene::Vec3> rotation;
+  // For a Media clip dragged out of the Asset Viewer: the marked range's
+  // placement - its start, its show-frame duration and its first source
+  // frame. Empty places the whole source from frame zero.
+  std::optional<scene::ClipTiming> timing;
 
   bool operator==(const AddIntent &) const = default;
 };
@@ -307,6 +312,26 @@ struct TimelineMarkerEditIntent final {
   core::u64 gesture{};
 
   bool operator==(const TimelineMarkerEditIntent &) const = default;
+};
+
+// The Asset Viewer's marked range cut into a track: source frames
+// [source_in, source_in + source_frames) of one Library media asset. Insert
+// and Overwrite land at `start` on `lane`; Append lands after the lane's last
+// clip and ignores `start`. The Director plans it against the document it
+// holds, exactly as it plans a clipboard Insert or Overwrite, so a locked or
+// stale track changes nothing and the whole edit is one undo step.
+struct SourceRangeEditIntent final {
+  scene::SceneId scene{};
+  doc::NodeId asset{};
+  core::u64 source_in{};
+  core::u64 source_frames{};
+  SourceEditMode mode{SourceEditMode::Insert};
+  doc::NodeId lane{};
+  core::u64 start{};
+  scene::MediaFrameRate show_rate{};
+  core::u64 transaction{};
+
+  bool operator==(const SourceRangeEditIntent &) const = default;
 };
 
 // One semantic advanced timeline operation. The panel supplies stable
@@ -814,6 +839,11 @@ struct EditorFrame final {
   // The operator asked the Library to look at the sources again.
   bool rescan_assets{};
   std::vector<TimelineEditIntent> timeline_edits;
+  // Ranges the Asset Viewer cut into a track this frame.
+  std::vector<SourceRangeEditIntent> source_edits;
+  // What the Asset Viewer wants to show on the next frame, while it is on
+  // screen with a media asset open. Authors nothing.
+  std::optional<AssetViewerRequest> asset_viewer;
   // Markers and cues created, moved, renamed, or deleted this frame, from the
   // Timeline or the Cue Stack.
   std::vector<TimelineMarkerEditIntent> marker_edits;
@@ -998,7 +1028,8 @@ public:
         std::span<const TimelineFilmstripObservation> filmstrips = {},
         const LiveDataState &live_data = {},
         std::span<const scene::TrackingSource> tracking_sources = {},
-        std::span<const scene::TimelineMarker> timeline_markers = {}) noexcept;
+        std::span<const scene::TimelineMarker> timeline_markers = {},
+        const AssetViewerInput &asset_viewer = {}) noexcept;
 
   // Applies a Director-validated recall without authoring a command or
   // touching any non-Scene selection domain. Returns false if the scene is no

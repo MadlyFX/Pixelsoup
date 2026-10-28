@@ -836,6 +836,7 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         if (const PhaseExit exit = observe_timeline_filmstrips(inputs)) {
             return exit;
         }
+        project_asset_viewer(inputs);
         if (const PhaseExit exit = project_output_media(tick)) {
             return exit;
         }
@@ -873,8 +874,10 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
             stage_lanes, clip_clipboard.span_duration(),
             selection_set_summaries, key_scale_preview,
             filmstrip_observations, live_data_view,
-            authored_tracking_sources, stage_markers);
+            authored_tracking_sources, stage_markers, inputs.asset_viewer);
         ++editor_frame_calls;
+        // Shown again next frame only while the panel keeps asking.
+        asset_viewer_request = editor_frame.asset_viewer;
         if (const PhaseExit exit =
                 apply_editor_services(inputs, editor_frame)) {
             return exit;
@@ -1834,6 +1837,53 @@ PhaseExit DirectorShowLoop::observe_timeline_filmstrips(
         }
     }
     return std::nullopt;
+}
+
+void DirectorShowLoop::project_asset_viewer(EditorViewInputs &inputs) {
+    editor::AssetViewerInput &viewer = inputs.asset_viewer;
+    if (!asset_viewer_request.has_value() ||
+        !asset_viewer_frame.has_value()) {
+        return;
+    }
+    viewer.scene = &*asset_viewer_frame;
+    viewer.shown = *asset_viewer_request;
+    viewer.rendition = asset_viewer_rendition;
+    // The asset's filmstrip, loaded onto the editor's device once it is
+    // ready and the editor is retaining it, as a Timeline clip's is.
+    const assets::Asset *const asset =
+        director_asset_registry.asset(asset_viewer_request->asset);
+    const auto *const media =
+        asset != nullptr ? std::get_if<assets::MediaAsset>(asset) : nullptr;
+    const assets::DerivativeProfile *const profile =
+        assets::derivative_profile(
+            assets::DerivativeProfileId::Filmstrip8x160x90Srgb);
+    if (!thumbnail_service || media == nullptr ||
+        !media->fingerprint.has_value() || profile == nullptr) {
+        return;
+    }
+    editor::AssetViewerFilmstrip filmstrip{};
+    filmstrip.key =
+        assets::make_derivative_key(media->id, *media->fingerprint, *profile);
+    filmstrip.texture = editor->timeline_filmstrip_texture(filmstrip.key);
+    if (const auto snapshot = thumbnail_service->snapshot(filmstrip.key);
+        snapshot.has_value()) {
+        filmstrip.state = snapshot->state;
+        if (filmstrip.state == assets::DerivativeState::Ready &&
+            filmstrip.texture == nullptr &&
+            std::find(retained_filmstrip_keys.begin(),
+                      retained_filmstrip_keys.end(),
+                      filmstrip.key) != retained_filmstrip_keys.end()) {
+            auto loaded = thumbnail_service->load(filmstrip.key);
+            if (loaded && editor->upload_timeline_filmstrip(
+                              filmstrip.key, loaded.value().payload)) {
+                filmstrip.texture =
+                    editor->timeline_filmstrip_texture(filmstrip.key);
+            } else {
+                filmstrip.state = assets::DerivativeState::Failed;
+            }
+        }
+    }
+    viewer.filmstrip = filmstrip;
 }
 
 PhaseExit DirectorShowLoop::project_output_media(DirectorTick &tick) {

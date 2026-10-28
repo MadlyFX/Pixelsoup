@@ -181,6 +181,32 @@ void TimelinePanel::select_marker(doc::NodeId marker) {
   markers_.selected.assign(1U, marker);
 }
 
+std::optional<TimelineLanePoint>
+TimelinePanel::lane_point_at(float x, float y) const noexcept {
+  const std::optional<core::i64> frame = frame_at(x, y);
+  if (!frame.has_value()) {
+    return std::nullopt;
+  }
+  for (const ReplacementTarget &target : replacement_targets_) {
+    if (target.track && target.bounds.contains(x, y)) {
+      return TimelineLanePoint{target.node, *frame};
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<core::i64> TimelinePanel::frame_at(float x,
+                                                 float y) const noexcept {
+  if (!graph_bounds_.contains(x, y)) {
+    return std::nullopt;
+  }
+  const double frame = std::floor(time_axis_.frame(x, graph_bounds_.x));
+  if (!std::isfinite(frame)) {
+    return std::nullopt;
+  }
+  return static_cast<core::i64>(std::clamp(frame, -1.0e15, 1.0e15));
+}
+
 void TimelinePanel::reset_project_state() noexcept {
   replacement_targets_.clear();
   time_axis_ = TimelineTimeAxis{};
@@ -484,9 +510,11 @@ bool TimelinePanel::open_pass(Pass &p) {
   }
   p.paste_ready = clipboard_span.has_value() && *clipboard_span > 0 &&
                            target_lane.has_value();
+  insert_target_lane_ = target_lane;
 
   p.layout =
       timeline::layout_timeline(bounds, list_width_);
+  graph_bounds_ = p.layout.graph;
   // The part of the graph that is time rather than the ruler's own band.
   p.fps =
       nominal_rate(timeline.rate_numerator, timeline.rate_denominator);

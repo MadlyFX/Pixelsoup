@@ -12,6 +12,7 @@
 #include "director_scene_authoring.hpp"
 #include "key_clipboard.hpp"
 #include "scene_duplicate.hpp"
+#include "source_range_edit.hpp"
 #include "mask_edit_integration.hpp"
 #include "project_asset_import.hpp"
 #include "source_replacement_authoring.hpp"
@@ -73,6 +74,7 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         pending_renames.clear();
         pending_highlights.clear();
         pending_timeline_edits.clear();
+        pending_source_edits.clear();
         pending_group_edit.reset();
         pending_selection_set_edit.reset();
         pending_mask_edit.reset();
@@ -1068,6 +1070,99 @@ PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
         project_message = "TIMELINE EDIT APPLIED";
     }
     pending_timeline_edits.clear();
+    // The Asset Viewer's ranges: each a whole-source Library add of its asset,
+    // trimmed to the range and pasted the way a clipboard Insert or
+    // Overwrite is, then selected so the next keystroke acts on it.
+    for (const editor::SourceRangeEditIntent &request : pending_source_edits) {
+        const assets::Asset *const found =
+            director_asset_registry.asset(request.asset);
+        const auto *const media =
+            found != nullptr ? std::get_if<assets::MediaAsset>(found) : nullptr;
+        if (media == nullptr) {
+            project_message =
+                "ASSET VIEWER EDIT REJECTED - ASSET IS NOT IN THE LIBRARY";
+            continue;
+        }
+        editor::AddIntent add{};
+        add.kind = editor::AddKind::Media;
+        add.source = media->source;
+        add.count = std::max(media->frame_count.value_or(1U), 1U);
+        add.gesture = request.transaction;
+        add.aspect =
+            media->dimensions.has_value() && media->dimensions->height != 0U
+                ? static_cast<float>(media->dimensions->width) /
+                      static_cast<float>(media->dimensions->height)
+                : 16.0F / 9.0F;
+        add.asset = media->id;
+        add.scene = request.scene;
+        add.frame_rate = media->frame_rate;
+        const show::FrameRate show_rate{request.show_rate.numerator,
+                                        request.show_rate.denominator};
+        doc::Node placement = make_added_node(
+            doc::NodeId{1U}, add, show_rate, scene::IcvfxCameraSettings{});
+        scene::SceneModel current_model;
+        current_model.reset(scheduler.projected_document());
+        const std::vector<scene::ClipPlacement> current_clips =
+            current_model.clips(request.scene);
+        auto planned = plan_source_range_edit(
+            scheduler.projected_document(), current_clips, *media, request,
+            std::move(placement), next_new_node);
+        if (!planned) {
+            switch (planned.error()) {
+            case SourceRangeEditError::NotProbed:
+                project_message =
+                    "ASSET VIEWER EDIT REJECTED - SOURCE NOT PROBED";
+                break;
+            case SourceRangeEditError::RangeOutsideSource:
+                project_message =
+                    "ASSET VIEWER EDIT REJECTED - RANGE OUTSIDE THE SOURCE";
+                break;
+            case SourceRangeEditError::TargetLaneUnavailable:
+                project_message = "ASSET VIEWER EDIT REJECTED - TARGET "
+                                  "TRACK IS LOCKED OR STALE";
+                break;
+            case SourceRangeEditError::TimelineRejected:
+                project_message = "ASSET VIEWER EDIT REJECTED - CLIPS "
+                                  "OR HANDLES CHANGED";
+                break;
+            case SourceRangeEditError::AllocationFailed:
+                std::cerr << "could not allocate an Asset Viewer edit plan\n";
+                return 1;
+            }
+            continue;
+        }
+        const doc::Delta delta =
+            doc::diff(scheduler.projected_document(), planned.value().document);
+        if (!delta.changes.empty()) {
+            auto scheduled = scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{request.transaction}, frame);
+            if (!scheduled) {
+                std::cerr << "could not author an Asset Viewer edit for "
+                             "frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+        }
+        next_new_node = planned.value().next_node;
+        std::vector<doc::NodeId> placed;
+        for (const doc::Node &created : planned.value().created) {
+            if (created.type == scene::schema::media_type) {
+                placed.push_back(created.id);
+            }
+        }
+        static_cast<void>(editor->apply_selection_set_recall(
+            request.scene, placed,
+            placed.empty() ? std::nullopt
+                           : std::optional<doc::NodeId>{placed.front()}));
+        project_message =
+            request.mode == editor::SourceEditMode::Insert
+                ? "ASSET VIEWER RANGE INSERTED"
+            : request.mode == editor::SourceEditMode::Overwrite
+                ? "ASSET VIEWER RANGE OVERWRITTEN"
+                : "ASSET VIEWER RANGE APPENDED";
+    }
+    pending_source_edits.clear();
     if (pending_clip_paste.has_value()) {
         auto planned = pending_clip_paste->snapshot.paste(
             scheduler.projected_document(),

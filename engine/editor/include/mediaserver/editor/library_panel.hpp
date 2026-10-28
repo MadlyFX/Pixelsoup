@@ -269,9 +269,10 @@ timecode_frames(std::string_view timecode, assets::MediaFrameRate rate);
                                         bool drop_frame);
 
 // One library interaction. Importing adds a persistent project asset,
-// instantiating places an already-imported asset in the scene, and the
-// organisation edits only change where an asset is listed. Generator and
-// light actions continue to author scene elements directly.
+// viewing opens one in the Asset Viewer, and the organisation edits only
+// change where an asset is listed. An asset reaches a scene only by being
+// dragged out (`asset_drop`). Generator and light actions continue to author
+// scene elements directly.
 struct LibraryFrame final {
   std::optional<LibraryAddAction> add;
   std::optional<LibraryImportAction> import_asset;
@@ -279,7 +280,8 @@ struct LibraryFrame final {
   std::vector<std::string> import_files;
   // The folder an import - from the dialog or dropped files - lands in.
   doc::NodeId import_folder{};
-  std::optional<doc::NodeId> instantiate_asset;
+  // A double-click, Enter or Open in Asset Viewer on an asset.
+  std::optional<doc::NodeId> view_asset;
   // Removes only the persistent Library records. Existing scene placements
   // keep their authored source fallback and therefore continue to render.
   std::vector<doc::NodeId> remove_assets;
@@ -321,8 +323,8 @@ struct LibraryFrame final {
 // whose columns carry timecode, resolution, length, codec, geometry and
 // texture size and sort on a header click; a Grid view of thumbnails one
 // folder at a time; and a footer slider that sizes the thumbnails in
-// either. Click selects (Ctrl toggles, Shift extends), double-click places
-// an asset in the scene or opens a folder, and a drag files the selection
+// either. Click selects (Ctrl toggles, Shift extends), double-click opens
+// an asset in the Asset Viewer or opens a folder, and a drag files the selection
 // into a folder or carries it out to Stage, the Compositor or the Timeline
 // under a thumbnail that follows the pointer. Files dragged in from the
 // desktop import into the folder they are let go over.

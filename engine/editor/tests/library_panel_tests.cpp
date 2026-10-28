@@ -250,19 +250,28 @@ void the_generators_section_collapses() {
 
 // ---------------------------------------------------------------- selection
 
-void a_click_selects_and_a_double_click_places() {
+void a_click_selects_and_a_double_click_opens_the_viewer() {
   Harness harness;
   harness.registry = project_assets();
 
   const editor::LibraryFrame first = harness.click(120.0F, opening_plate_y);
-  UI_CHECK(!first.instantiate_asset.has_value());
+  UI_CHECK(!first.view_asset.has_value());
   UI_CHECK(harness.panel.selection().size() == 1U);
   UI_CHECK(harness.panel.selection()[0] == doc::NodeId{20U});
 
   // The test clock stands still, so the next click is a double-click.
+  // It opens the asset in the Asset Viewer. Nothing is placed: an asset
+  // reaches a scene only by being dragged there.
   const editor::LibraryFrame second = harness.click(120.0F, opening_plate_y);
-  UI_CHECK(second.instantiate_asset == doc::NodeId{20U});
+  UI_CHECK(second.view_asset == doc::NodeId{20U});
   UI_CHECK(!second.add.has_value() && !second.import_asset.has_value());
+  UI_CHECK(!second.asset_drop.has_value());
+
+  // Enter opens the selection's asset the same way.
+  const editor::LibraryFrame entered =
+      harness.frame(-1.0F, -1.0F, false, gui::KeyMods::None, {}, 0.0F,
+                    gui::Key::Enter);
+  UI_CHECK(entered.view_asset == doc::NodeId{20U});
 }
 
 void shift_extends_and_ctrl_toggles_the_selection() {
@@ -290,7 +299,7 @@ void search_filters_assets_by_name_and_metadata() {
   static_cast<void>(harness.click(120.0F, content_top + 16.0F));
   const editor::LibraryFrame placed =
       harness.click(120.0F, content_top + 16.0F);
-  UI_CHECK(placed.instantiate_asset == doc::NodeId{30U});
+  UI_CHECK(placed.view_asset == doc::NodeId{30U});
 
   // A resolution is something to search for too.
   Harness resolution;
@@ -299,7 +308,7 @@ void search_filters_assets_by_name_and_metadata() {
   static_cast<void>(
       resolution.frame(70.0F, 37.0F, false, gui::KeyMods::None, "3840"));
   static_cast<void>(resolution.click(120.0F, content_top + 16.0F));
-  UI_CHECK(resolution.click(120.0F, content_top + 16.0F).instantiate_asset ==
+  UI_CHECK(resolution.click(120.0F, content_top + 16.0F).view_asset ==
            doc::NodeId{20U});
 }
 
@@ -496,7 +505,7 @@ void the_proxy_chip_cycles_its_policy_without_placing() {
       assets::DerivativeProfileId::Proxy720pCfrH264;
   // A second click at once is no double-click: the chip is its own control.
   result = harness.click(1164.0F, opening_plate_y);
-  UI_CHECK(!result.instantiate_asset.has_value());
+  UI_CHECK(!result.view_asset.has_value());
   UI_CHECK(result.proxy_policy->policy ==
            assets::ProxyPlaybackPolicy::RequireProxy);
 
@@ -587,13 +596,14 @@ void changed_sources_are_offered_for_acceptance() {
   static_cast<void>(harness.right_click(60.0F, opening_plate_y));
   const editor::LibraryFrame one = harness.choose(60.0F, opening_plate_y, 0U);
   UI_CHECK(one.accept_sources == std::vector<doc::NodeId>{doc::NodeId{20U}});
-  UI_CHECK(!one.instantiate_asset.has_value());
+  UI_CHECK(!one.view_asset.has_value());
 
-  // An unchanged asset's menu has no such entry: its first is Add to Scene.
+  // An unchanged asset's menu has no such entry: its first is Open in Asset
+  // Viewer. There is no Add to Scene; dragging out places an asset.
   static_cast<void>(harness.right_click(60.0F, hero_car_y));
-  const editor::LibraryFrame placed = harness.choose(60.0F, hero_car_y, 0U);
-  UI_CHECK(placed.accept_sources.empty());
-  UI_CHECK(placed.instantiate_asset == doc::NodeId{30U});
+  const editor::LibraryFrame viewed = harness.choose(60.0F, hero_car_y, 0U);
+  UI_CHECK(viewed.accept_sources.empty());
+  UI_CHECK(viewed.view_asset == doc::NodeId{30U});
 
   // Nothing changed, nothing offered: the title row is inert.
   harness.panel.set_changed_sources({});
@@ -613,7 +623,7 @@ void a_drag_out_carries_the_whole_selection_under_a_thumbnail() {
   static_cast<void>(harness.frame(120.0F, opening_plate_y, true));
   const editor::LibraryFrame held = harness.frame(900.0F, 250.0F, true);
   UI_CHECK(held.dragging_asset == doc::NodeId{20U});
-  UI_CHECK(!held.instantiate_asset.has_value());
+  UI_CHECK(!held.view_asset.has_value());
   // The ghost is drawn behind the pointer, above everything else.
   const std::size_t before = harness.list.vertices().size();
   harness.panel.draw_drag_ghost(harness.ctx);
@@ -1023,8 +1033,8 @@ constexpr std::array<Case, 36U> cases{{
     {"a surface generator drags out to Stage",
      &a_surface_generator_drags_out_to_stage},
     {"the generators section collapses", &the_generators_section_collapses},
-    {"a click selects and a double-click places",
-     &a_click_selects_and_a_double_click_places},
+    {"a click selects and a double-click opens the viewer",
+     &a_click_selects_and_a_double_click_opens_the_viewer},
     {"Shift extends and Ctrl toggles the selection",
      &shift_extends_and_ctrl_toggles_the_selection},
     {"search filters assets by name and metadata",

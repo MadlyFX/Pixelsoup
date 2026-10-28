@@ -1,3 +1,4 @@
+#include <mediaserver/editor/asset_viewer_panel.hpp>
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
@@ -54,7 +55,10 @@
 //   at the hover point;
 //   compositor-merge screens a plate over a gradient Background with one
 //   Merge, selected, and darkens the result with a second whose LAYERS
-//   are unwired; compositor-background selects the Background instead.
+//   are unwired; compositor-background selects the Background instead;
+//   asset-viewer draws the Asset Viewer on a 24 fps plate with a marked
+//   range and its filmstrip (the picture is the filmstrip atlas, standing
+//   in for a render), and asset-viewer-empty draws it with nothing open.
 namespace {
 
 namespace assets = mediaserver::assets;
@@ -504,10 +508,11 @@ int main(int argc, char **argv) {
   // The Library with a small sample project: `library` (List), then
   // `library-grid` and `library-drag` (an asset carried out past the panel).
   const bool library_view = view.substr(0U, 7U) == "library";
+  const bool viewer_view = view.substr(0U, 12U) == "asset-viewer";
   const std::string_view properties =
       curves || summaries || feed || tall || keys_sheet || tracks ||
               graph_view ||
-              library_view
+              library_view || viewer_view
           ? std::string_view{}
           : view;
 
@@ -690,7 +695,7 @@ int main(int argc, char **argv) {
   std::optional<rhi::Texture> filmstrip_texture;
   std::vector<core::u8> filmstrip_pixels;
   std::vector<editor::TimelineFilmstripObservation> filmstrips;
-  if (tall) {
+  if (tall || viewer_view) {
     constexpr core::u32 tile_w = 160U;
     constexpr core::u32 tile_h = 90U;
     rhi::TextureDesc strip{};
@@ -728,6 +733,23 @@ int main(int argc, char **argv) {
   const float tall_list_width =
       std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
   const int passes = clicks || graph_view || library_view ? 8 : 3;
+  editor::AssetViewerPanel viewer_panel{gui::ui_id("snapshot.viewer")};
+  assets::AssetRegistry viewer_assets{};
+  {
+    assets::MediaAsset plate{};
+    plate.id = doc::NodeId{40U};
+    plate.display_name = "Driving_Plate_Front.mov";
+    plate.source = "D:/media/Driving_Plate_Front.mov";
+    plate.dimensions = assets::PixelDimensions{3840U, 2160U};
+    plate.frame_count = 1440U;
+    plate.frame_rate = assets::MediaFrameRate{24U, 1U};
+    plate.codec = "prores";
+    plate.start_timecode = "01:00:00:00";
+    viewer_assets.assets.push_back(assets::Asset{plate});
+  }
+  if (view == "asset-viewer") {
+    viewer_panel.open(doc::NodeId{40U}, 312U, std::pair{240U, 455U});
+  }
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
     if (graph_view) {
@@ -803,6 +825,47 @@ int main(int argc, char **argv) {
           compositor_panel.draw_wire_drop(ctx, *drop, "LUMA KEY");
         }
       }
+      ctx.draw_overlays(window);
+      continue;
+    }
+    if (viewer_view) {
+      input.set_mouse_position(hover_x, hover_y);
+      input.set_mouse_button(gui::MouseButton::Left, false);
+      ctx.new_frame(1.0);
+      ctx.panel(window, ctx.theme().background);
+      editor::AssetViewerInput director{};
+      director.shown = editor::AssetViewerRequest{doc::NodeId{40U}, 312U};
+      director.rendition = editor::AssetViewerRendition::Source;
+      if (filmstrip_texture.has_value()) {
+        director.filmstrip = editor::AssetViewerFilmstrip{
+            {}, assets::DerivativeState::Ready, &*filmstrip_texture};
+      }
+      std::vector<editor::ElementInfo> uses;
+      editor::ElementInfo use{};
+      use.node = doc::NodeId{31U};
+      use.kind = editor::ElementKind::Media;
+      use.display_name = "Driving_Plate_Front.mov";
+      use.source = "D:/media/Driving_Plate_Front.mov";
+      use.timing = scene::ClipTiming{120, 240, 0, 0, 0};
+      use.timeline_lane = doc::NodeId{50U};
+      uses.push_back(use);
+      const std::array<scene::TimelineLane, 1U> lanes{
+          scene::TimelineLane{doc::NodeId{50U}, scene::SceneId{1U}, 10,
+                              "Plates", false, false,
+                              scene::BlendMode::Normal, false}};
+      editor::AssetViewerDrawInput in{};
+      in.assets = &viewer_assets;
+      in.director = &director;
+      in.image = view == "asset-viewer" && filmstrip_texture.has_value()
+                     ? &*filmstrip_texture
+                     : nullptr;
+      in.show_rate = scene::MediaFrameRate{25U, 1U};
+      in.target_lane = doc::NodeId{50U};
+      in.target_name = "Plates";
+      in.elements = uses;
+      in.lanes = lanes;
+      in.pixels_per_unit = scale;
+      static_cast<void>(viewer_panel.draw(ctx, window, in));
       ctx.draw_overlays(window);
       continue;
     }

@@ -1,6 +1,7 @@
 #include "timeline_edit_integration.hpp"
 #include "timeline_edit_authoring.hpp"
 #include "clip_timing_authoring.hpp"
+#include "source_range_edit.hpp"
 
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/scene/key_edit.hpp>
@@ -21,6 +22,7 @@
 namespace {
 
 namespace app = mediaserver::app;
+namespace assets = mediaserver::assets;
 namespace cmd = mediaserver::cmd;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
@@ -521,12 +523,285 @@ void key_scale_replacement_is_one_scene_undo_transaction() {
   EDIT_CHECK(doc::diff(scheduler.projected_document(), root).changes.empty());
 }
 
+// ----------------------------------------------------------- Asset Viewer
+
+// A 200-frame 24 fps source, cut into a 25 fps show.
+constexpr scene::MediaFrameRate show_25{25U, 1U};
+
+[[nodiscard]] assets::MediaAsset viewer_source() {
+  assets::MediaAsset asset{};
+  asset.id = doc::NodeId{501U};
+  asset.display_name = "Plate";
+  asset.source = "clip.mov";
+  asset.frame_count = 200U;
+  asset.frame_rate = assets::MediaFrameRate{24U, 1U};
+  asset.dimensions = assets::PixelDimensions{1920U, 1080U};
+  return asset;
+}
+
+// What a Library add of `asset` authors: the whole source from frame zero.
+[[nodiscard]] doc::Node whole_source(const assets::MediaAsset &asset,
+                                     core::i64 duration = 209) {
+  doc::Node node{};
+  node.id = doc::NodeId{1U};
+  node.type = std::string{scene::schema::media_type};
+  node.properties.emplace(std::string{scene::schema::source}, asset.source);
+  node.properties.emplace(std::string{scene::schema::sequence_start}, whole(0));
+  node.properties.emplace(
+      std::string{scene::schema::sequence_count},
+      whole(static_cast<std::int64_t>(asset.frame_count.value_or(1U))));
+  if (asset.frame_rate.has_value()) {
+    node.properties.emplace(
+        std::string{scene::schema::source_rate_numerator},
+        whole(static_cast<std::int64_t>(asset.frame_rate->numerator)));
+    node.properties.emplace(
+        std::string{scene::schema::source_rate_denominator},
+        whole(static_cast<std::int64_t>(asset.frame_rate->denominator)));
+  }
+  node.properties.emplace(std::string{scene::schema::clip_start}, whole(0));
+  node.properties.emplace(std::string{scene::schema::clip_duration},
+                          whole(duration));
+  node.properties.emplace(std::string{scene::schema::scene_id}, whole(1));
+  node.properties.emplace(
+      std::string{scene::schema::asset_id},
+      whole(static_cast<std::int64_t>(asset.id.value())));
+  return node;
+}
+
+[[nodiscard]] editor::SourceRangeEditIntent
+viewer_range(editor::SourceEditMode mode, core::u64 source_in,
+             core::u64 frames, core::u64 start) {
+  editor::SourceRangeEditIntent request{};
+  request.scene = scene_id;
+  request.asset = doc::NodeId{501U};
+  request.source_in = source_in;
+  request.source_frames = frames;
+  request.mode = mode;
+  request.lane = lane_id;
+  request.start = start;
+  request.show_rate = show_25;
+  request.transaction = 77U;
+  return request;
+}
+
+void a_viewer_insert_places_the_exact_range_and_moves_later_clips() {
+  const auto root = doc::Root{}
+                        .set(stage())
+                        .set(lane())
+                        .set(media(10U, 0, 20))
+                        .set(media(11U, 20, 10));
+  const assets::MediaAsset asset = viewer_source();
+  // Source frames 48..71: one second of 24 fps, which plays for exactly 25
+  // frames of a 25 fps show.
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Insert, 48U, 24U, 20U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(plan.has_value());
+  const doc::Node *const cut = created_media_at(plan.value(), 20);
+  EDIT_CHECK(cut != nullptr);
+  EDIT_CHECK(cut->id.value() >= 300U);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 25);
+  EDIT_CHECK(integer(*cut, scene::schema::source_in) == 48);
+  EDIT_CHECK(integer(*cut, scene::schema::lane_id) == 20);
+  EDIT_CHECK(integer(*cut, scene::schema::asset_id) == 501);
+  EDIT_CHECK(integer(*cut, scene::schema::scene_id) == 1);
+  // The clip already at the edit point moves along by the cut's length; the
+  // one before it stays.
+  EDIT_CHECK(integer(*plan.value().document.get(doc::NodeId{11U}),
+                     scene::schema::clip_start) == 45);
+  EDIT_CHECK(integer(*plan.value().document.get(doc::NodeId{10U}),
+                     scene::schema::clip_start) == 0);
+  // The first and last show frames play the first and last marked frames.
+  scene::SceneModel model;
+  model.reset(plan.value().document);
+  const auto clips = model.clips(scene_id);
+  const auto placed = std::find_if(
+      clips.begin(), clips.end(),
+      [&](const scene::ClipPlacement &clip) { return clip.node == cut->id; });
+  EDIT_CHECK(placed != clips.end());
+  const scene::SceneTime time{0U, 25U, 1U};
+  EDIT_CHECK(scene::clip_source_frame(*placed, time, 20U) == 48U);
+  EDIT_CHECK(scene::clip_source_frame(*placed, time, 44U) == 71U);
+  EDIT_CHECK(placed->timing.last_frame() == 44);
+}
+
+void a_viewer_insert_inside_a_clip_cuts_it_and_moves_its_second_half() {
+  const auto root =
+      doc::Root{}.set(stage()).set(lane()).set(media(10U, 0, 100, 7));
+  const assets::MediaAsset asset = viewer_source();
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Insert, 0U, 24U, 40U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(plan.has_value());
+  // The first half keeps its place and its id, cut at the edit point.
+  const doc::Node *const head = plan.value().document.get(doc::NodeId{10U});
+  EDIT_CHECK(head != nullptr);
+  EDIT_CHECK(integer(*head, scene::schema::clip_start) == 0);
+  EDIT_CHECK(integer(*head, scene::schema::clip_duration) == 40);
+  // The new clip plays from the edit point for 25 frames...
+  const doc::Node *const cut = created_media_at(plan.value(), 40);
+  EDIT_CHECK(cut != nullptr);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 25);
+  // ...and the second half follows it, still showing the source frames it
+  // showed before: 7 + 40 onwards, at the image sequence's one-to-one rate.
+  scene::SceneModel model;
+  model.reset(plan.value().document);
+  const auto clips = model.clips(scene_id);
+  const auto tail = std::find_if(
+      clips.begin(), clips.end(), [](const scene::ClipPlacement &clip) {
+        return clip.timing.start == 65;
+      });
+  EDIT_CHECK(tail != clips.end());
+  EDIT_CHECK(tail->node != doc::NodeId{10U} && tail->node != cut->id);
+  EDIT_CHECK(tail->timing.duration == 60);
+  EDIT_CHECK(tail->timing.source_in == 47);
+  // The whole edit is one document replacement.
+  EDIT_CHECK(clips.size() == 3U);
+}
+
+void a_viewer_overwrite_keeps_both_remainders_of_the_clip_it_lands_in() {
+  const auto root =
+      doc::Root{}.set(stage()).set(lane()).set(media(10U, 0, 100, 0));
+  const assets::MediaAsset asset = viewer_source();
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Overwrite, 0U, 24U, 10U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(plan.has_value());
+  EDIT_CHECK(integer(*plan.value().document.get(doc::NodeId{10U}),
+                     scene::schema::clip_duration) == 10);
+  const doc::Node *const cut = created_media_at(plan.value(), 10);
+  EDIT_CHECK(cut != nullptr);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 25);
+  const doc::Node *const remainder = created_media_at(plan.value(), 35);
+  EDIT_CHECK(remainder != nullptr);
+  EDIT_CHECK(integer(*remainder, scene::schema::clip_duration) == 65);
+}
+
+void a_viewer_append_lands_after_the_last_clip_and_moves_nothing() {
+  const auto root = doc::Root{}
+                        .set(stage())
+                        .set(lane())
+                        .set(media(10U, 0, 20))
+                        .set(media(11U, 20, 10));
+  EDIT_CHECK(app::source_append_frame(placements(root), scene_id, lane_id) ==
+             30U);
+  const assets::MediaAsset asset = viewer_source();
+  // The request's start is ignored: Append goes after the track's last clip.
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Append, 12U, 48U, 3U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(plan.has_value());
+  const doc::Node *const cut = created_media_at(plan.value(), 30);
+  EDIT_CHECK(cut != nullptr);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 50);
+  EDIT_CHECK(integer(*cut, scene::schema::source_in) == 12);
+  EDIT_CHECK(*plan.value().document.get(doc::NodeId{10U}) ==
+             *root.get(doc::NodeId{10U}));
+  EDIT_CHECK(*plan.value().document.get(doc::NodeId{11U}) ==
+             *root.get(doc::NodeId{11U}));
+}
+
+void a_viewer_still_keeps_its_placed_duration() {
+  const auto root = doc::Root{}.set(stage()).set(lane());
+  assets::MediaAsset still = viewer_source();
+  still.frame_count = 1U;
+  still.frame_rate.reset();
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), still,
+      viewer_range(editor::SourceEditMode::Insert, 0U, 1U, 7U),
+      whole_source(still, 125), 300U);
+  EDIT_CHECK(plan.has_value());
+  const doc::Node *const cut = created_media_at(plan.value(), 7);
+  EDIT_CHECK(cut != nullptr);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 125);
+}
+
+void a_viewer_range_is_refused_with_its_reason_and_nothing_changes() {
+  const auto root =
+      doc::Root{}.set(stage()).set(lane()).set(media(10U, 0, 20));
+  assets::MediaAsset unprobed = viewer_source();
+  unprobed.frame_count.reset();
+  const auto not_probed = app::plan_source_range_edit(
+      root, placements(root), unprobed,
+      viewer_range(editor::SourceEditMode::Insert, 0U, 10U, 0U),
+      whole_source(unprobed), 300U);
+  EDIT_CHECK(!not_probed);
+  EDIT_CHECK(not_probed.error() == app::SourceRangeEditError::NotProbed);
+
+  const assets::MediaAsset asset = viewer_source();
+  const auto past_end = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Insert, 190U, 11U, 0U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(!past_end);
+  EDIT_CHECK(past_end.error() ==
+             app::SourceRangeEditError::RangeOutsideSource);
+  const auto empty = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Insert, 4U, 0U, 0U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(!empty);
+  EDIT_CHECK(empty.error() == app::SourceRangeEditError::RangeOutsideSource);
+
+  const auto locked_root =
+      doc::Root{}.set(stage()).set(lane(true)).set(media(10U, 0, 20));
+  const auto locked = app::plan_source_range_edit(
+      locked_root, placements(locked_root), asset,
+      viewer_range(editor::SourceEditMode::Overwrite, 0U, 10U, 0U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(!locked);
+  EDIT_CHECK(locked.error() ==
+             app::SourceRangeEditError::TargetLaneUnavailable);
+}
+
+void a_viewer_cut_is_one_undo_step() {
+  const auto root = doc::Root{}
+                        .set(stage())
+                        .set(lane())
+                        .set(media(10U, 0, 20))
+                        .set(media(11U, 20, 10));
+  const assets::MediaAsset asset = viewer_source();
+  const auto plan = app::plan_source_range_edit(
+      root, placements(root), asset,
+      viewer_range(editor::SourceEditMode::Insert, 48U, 24U, 20U),
+      whole_source(asset), 300U);
+  EDIT_CHECK(plan.has_value());
+  cmd::DirectorScheduler scheduler{root};
+  constexpr cmd::UndoContextId history{2U};
+  EDIT_CHECK(scheduler.schedule_document_replace(
+      plan.value().document, history, cmd::TransactionId{77U},
+      cmd::FrameNumber{1U}));
+  EDIT_CHECK(scheduler.seal_frame(cmd::FrameNumber{1U}));
+  EDIT_CHECK(scheduler.undo_depth(history) == 1U);
+  EDIT_CHECK(scheduler.schedule_undo(history, cmd::TransactionId{78U},
+                                     cmd::FrameNumber{2U}));
+  EDIT_CHECK(scheduler.seal_frame(cmd::FrameNumber{2U}));
+  EDIT_CHECK(doc::diff(root, scheduler.sealed_document()).changes.empty());
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 8U> cases{{
+constexpr std::array<Case, 15U> cases{{
+    {"a viewer insert inside a clip cuts it and moves its second half",
+     &a_viewer_insert_inside_a_clip_cuts_it_and_moves_its_second_half},
+    {"a viewer insert places the exact range and moves later clips",
+     &a_viewer_insert_places_the_exact_range_and_moves_later_clips},
+    {"a viewer overwrite keeps both remainders of the clip it lands in",
+     &a_viewer_overwrite_keeps_both_remainders_of_the_clip_it_lands_in},
+    {"a viewer append lands after the last clip and moves nothing",
+     &a_viewer_append_lands_after_the_last_clip_and_moves_nothing},
+    {"a viewer still keeps its placed duration",
+     &a_viewer_still_keeps_its_placed_duration},
+    {"a viewer range is refused with its reason and nothing changes",
+     &a_viewer_range_is_refused_with_its_reason_and_nothing_changes},
+    {"a viewer cut is one undo step", &a_viewer_cut_is_one_undo_step},
     {"a sync-locked track keeps time with a ripple unless it is locked",
      &a_sync_locked_track_keeps_time_with_a_ripple_unless_it_is_locked},
     {"negative placement and loop Slip commit with undo and redo",

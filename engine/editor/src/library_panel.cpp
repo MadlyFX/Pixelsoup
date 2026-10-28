@@ -440,7 +440,7 @@ void draw_view_icon(gui::UiContext &ctx, const gui::Rect &bounds,
 }
 
 enum class MenuCommand : core::u8 {
-  Place,
+  View,
   Rename,
   NewFolder,
   NewFolderInside,
@@ -1885,7 +1885,7 @@ LibraryFrame LibraryPanel::draw_impl(
   bool menu_on_header = false;
   const auto open_entry = [&](const Entry &entry) {
     if (entry.kind == Entry::Kind::Asset) {
-      frame.instantiate_asset = entry.id;
+      frame.view_asset = entry.id;
     } else if (entry.kind == Entry::Kind::Folder) {
       if (list) {
         if (!expanded_.erase(entry.id)) {
@@ -2767,7 +2767,7 @@ LibraryFrame LibraryPanel::draw_impl(
     if (ctx.key_pressed(gui::Key::Enter)) {
       for (const doc::NodeId id : selection_) {
         if (registry.asset(id) != nullptr) {
-          frame.instantiate_asset = id;
+          frame.view_asset = id;
           break;
         }
       }
@@ -2806,7 +2806,7 @@ LibraryFrame LibraryPanel::draw_impl(
                            : std::string{"Accept Changed Source"},
             MenuCommand::AcceptChanged);
       }
-      add("Add to Scene     Enter", MenuCommand::Place);
+      add("Open in Asset Viewer   Enter", MenuCommand::View);
       add("Rename           F2", MenuCommand::Rename);
       add("New Folder", MenuCommand::NewFolder);
       if (registry.folder_of(*registry.asset(*menu_on)) != doc::NodeId{}) {
@@ -2906,9 +2906,9 @@ LibraryFrame LibraryPanel::draw_impl(
       } else {
         const doc::NodeId target = menu_target_;
         switch (static_cast<MenuCommand>(raw)) {
-        case MenuCommand::Place:
+        case MenuCommand::View:
           if (registry.asset(target) != nullptr) {
-            frame.instantiate_asset = target;
+            frame.view_asset = target;
           }
           break;
         case MenuCommand::Rename:

@@ -543,6 +543,7 @@ enum class MenuCommand : core::u8 {
   DeleteMarker,
   // The entry's frame holds the scene::KeyEase it applies.
   EaseKeys,
+  OpenInAssetViewer,
 };
 
 // A cue's tag: the number in a filled chip. Held cues burn in the transport

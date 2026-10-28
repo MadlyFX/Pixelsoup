@@ -451,6 +451,41 @@ SourceOrdinalResult source_ordinal_delta(
     return Result::success(signed_result);
 }
 
+SourceOrdinalResult source_span_show_frames(
+    core::u64 source_frames, MediaFrameRate show_rate,
+    const std::optional<MediaFrameRate>& source_rate) noexcept {
+    using Result = SourceOrdinalResult;
+    if (!valid_rate(show_rate) ||
+        (source_rate.has_value() && !valid_rate(*source_rate))) {
+        return Result::failure(TimelineEditError::InvalidRate);
+    }
+    if (source_frames == 0U) {
+        return Result::failure(TimelineEditError::InvalidSpan);
+    }
+    core::u64 frames = source_frames;
+    if (source_rate.has_value()) {
+        const core::u64 numerator_factor =
+            static_cast<core::u64>(show_rate.numerator) *
+            static_cast<core::u64>(source_rate->denominator);
+        const core::u64 denominator =
+            static_cast<core::u64>(show_rate.denominator) *
+            static_cast<core::u64>(source_rate->numerator);
+        const WideDivision division = divide_wide(
+            multiply_wide(source_frames, numerator_factor), denominator);
+        if (division.quotient_overflow ||
+            (division.remainder != 0U &&
+             division.quotient == std::numeric_limits<core::u64>::max())) {
+            return Result::failure(TimelineEditError::IntegerOverflow);
+        }
+        frames = division.quotient + (division.remainder != 0U ? 1U : 0U);
+    }
+    core::i64 signed_result{};
+    if (!signed_magnitude(frames, false, signed_result)) {
+        return Result::failure(TimelineEditError::IntegerOverflow);
+    }
+    return Result::success(signed_result);
+}
+
 SourceOrdinalResult advance_source_phase(
     core::i64 source_in, core::i64 show_delta, MediaFrameRate show_rate,
     const std::optional<MediaFrameRate>& source_rate,

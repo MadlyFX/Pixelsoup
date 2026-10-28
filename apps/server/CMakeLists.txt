@@ -107,6 +107,7 @@ if(MEDIASERVER_ENABLE_GUI)
         scene_duplicate.cpp
         render_machine_window.cpp
         mask_edit_integration.cpp
+        source_range_edit.cpp
         timeline_edit_integration.cpp
         thumbnail_service.cpp
     )
@@ -657,6 +658,7 @@ if(BUILD_TESTING)
     if(MEDIASERVER_ENABLE_GUI)
         add_executable(mediaserver_timeline_edit_integration_tests
             clip_clipboard.cpp
+            source_range_edit.cpp
             timeline_edit_authoring.cpp
             timeline_edit_integration.cpp
             tests/timeline_edit_integration_tests.cpp

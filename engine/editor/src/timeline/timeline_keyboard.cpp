@@ -23,7 +23,7 @@ struct ShortcutGroup final {
   std::span<const Shortcut> entries;
 };
 
-constexpr std::array<Shortcut, 10U> playback_keys{{
+constexpr std::array<Shortcut, 11U> playback_keys{{
     {"Space", "Play forwards / pause"},
     {"J  K  L", "Play backwards, stop, play forwards"},
     {"Left  Right", "Step a frame (Shift: a second)"},
@@ -34,6 +34,7 @@ constexpr std::array<Shortcut, 10U> playback_keys{{
     {"I  O", "Set In / Out at the playhead"},
     {"X", "Set In/Out around the selected clips"},
     {"M", "Add a marker, or name the one here"},
+    {"F", "Match frame in the Asset Viewer"},
 }};
 
 constexpr std::array<Shortcut, 11U> editing_keys{{

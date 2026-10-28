@@ -39,6 +39,7 @@ contracts; check current code before treating an individual item as missing.
   or sustainable stage throughput.
 - Preserve source material names in imported model packages so the current
   numbered material-part texture selector can show meaningful slot names.
+  The [Asset Viewer plan](asset-viewer-plan.md) phase 3b depends on this.
 
 ## Editorial and compositor depth
 
@@ -46,6 +47,10 @@ contracts; check current code before treating an individual item as missing.
 The following packages are specified enough to estimate and implement. They
 are ordered by dependency: establish the data model and deterministic CPU
 projection before exposing editor controls or adding a GPU processor.
+
+The Asset Viewer - a source monitor for media, a look-dev inspector for
+models, and asset-level material and interpretation settings - is planned in
+three phases in the [Asset Viewer plan](asset-viewer-plan.md).
 
 #### Effects, masks, mattes, and graph diagnostics
 

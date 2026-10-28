@@ -2,6 +2,8 @@ find_package(tinyfiledialogs CONFIG REQUIRED)
 
 add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
+    src/asset_viewer.cpp
+    src/asset_viewer_panel.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
     src/model_surface_cache.cpp
@@ -125,6 +127,18 @@ if(BUILD_TESTING)
     set_tests_properties(mediaserver.editor_shell_source_replacement PROPERTIES
         TIMEOUT 60 RUN_SERIAL TRUE)
     set_target_properties(mediaserver_editor_shell_source_replacement_tests PROPERTIES FOLDER "tests")
+
+    # A Library double-click opens the Asset Viewer, which cuts into a track.
+    add_executable(mediaserver_editor_shell_asset_viewer_tests
+        tests/editor_shell_asset_viewer_tests.cpp)
+    target_link_libraries(mediaserver_editor_shell_asset_viewer_tests
+        PRIVATE MediaServer::Editor SDL3::SDL3)
+    mediaserver_set_project_options(mediaserver_editor_shell_asset_viewer_tests)
+    add_test(NAME mediaserver.editor_shell_asset_viewer
+        COMMAND mediaserver_editor_shell_asset_viewer_tests)
+    set_tests_properties(mediaserver.editor_shell_asset_viewer PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE)
+    set_target_properties(mediaserver_editor_shell_asset_viewer_tests PROPERTIES FOLDER "tests")
 
     # Library assets dropped on Stage rest on the surface under the pointer.
     add_executable(mediaserver_editor_shell_stage_drop_tests
@@ -350,6 +364,21 @@ if(BUILD_TESTING)
     )
     set_target_properties(
         mediaserver_editor_color_correction_tests PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_editor_asset_viewer_tests
+        tests/asset_viewer_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_asset_viewer_tests
+        PRIVATE MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_asset_viewer_tests)
+    add_test(
+        NAME mediaserver.editor_asset_viewer
+        COMMAND mediaserver_editor_asset_viewer_tests
+    )
+    set_target_properties(
+        mediaserver_editor_asset_viewer_tests PROPERTIES FOLDER "tests"
     )
 
     add_executable(mediaserver_editor_texture_tests
