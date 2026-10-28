@@ -1184,26 +1184,41 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
         accepted.push_back(AcceptedEdge{&edge, output->type});
     }
 
-    for (const GraphNode& node : result.nodes) {
-        for (const PortDescriptor& port : input_ports(node.kind)) {
-            if (!port.required) {
+    // A node waits for its required inputs. Until each is fed by a node that
+    // is itself enabled, it is disabled: not an error, just out of the
+    // picture. Its wires carry nothing, so anything that needed it waits in
+    // turn, and an Output left waiting is no compositor at all - Program
+    // shows the scene as authored. Starting from every node enabled and
+    // removing the waiting ones until none change keeps a cycle enabled, so
+    // it is still reported as the cycle it is.
+    std::set<doc::NodeId> disabled;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const GraphNode& node : result.nodes) {
+            if (disabled.contains(node.node)) {
                 continue;
             }
-            const bool connected =
-                std::any_of(accepted.begin(), accepted.end(),
-                            [&node, &port](const AcceptedEdge& value) noexcept {
+            const auto ports = input_ports(node.kind);
+            const bool waiting = std::any_of(
+                ports.begin(), ports.end(), [&](const PortDescriptor& port) {
+                    return port.required &&
+                        std::none_of(
+                            accepted.begin(), accepted.end(),
+                            [&](const AcceptedEdge& value) {
                                 return value.edge->to.node == node.node &&
-                                       value.edge->to.port == port.index;
+                                    value.edge->to.port == port.index &&
+                                    !disabled.contains(value.edge->from.node);
                             });
-            if (!connected) {
-                result.diagnostics.push_back(
-                    {DiagnosticCode::MissingRequiredInput,
-                     node.node,
-                     {},
-                     port.index});
+                });
+            if (waiting) {
+                disabled.insert(node.node);
+                changed = true;
             }
         }
     }
+    std::erase_if(accepted, [&disabled](const AcceptedEdge& value) {
+        return disabled.contains(value.edge->from.node);
+    });
 
     const auto first_output =
         std::find_if(result.nodes.begin(), result.nodes.end(),
@@ -1431,6 +1446,7 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
     for (const GraphNode& node : result.nodes) {
         GraphNodeMetadata metadata{};
         metadata.node = node.node;
+        metadata.disabled = disabled.contains(node.node);
         metadata.execution_domain = execution_domain(node.kind);
         metadata.identity = !is_effect_node(node.kind)
             ? EffectIdentityState::NotEffect
@@ -1821,6 +1837,12 @@ CompositorGraph CompositorModel::build(const doc::NodeId* const scoped_scene,
         std::unique(result.diagnostics.begin(), result.diagnostics.end()),
         result.diagnostics.end());
     if (!result.valid()) {
+        return result;
+    }
+    // An Output still waiting for its image composites nothing: no plan, so
+    // every consumer renders the scene as authored.
+    if (first_output != result.nodes.end() &&
+        disabled.contains(first_output->node)) {
         return result;
     }
 

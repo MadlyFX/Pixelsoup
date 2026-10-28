@@ -1082,13 +1082,76 @@ parameter_panel_height(const compositor::GraphNode &node) noexcept {
   return header + footer + row;
 }
 
+// Something for the operator to fix. A parked branch - a node kept in the
+// graph that reaches no Output - is not: it is drawn faded and otherwise left
+// alone, never counted or outlined as a problem.
+[[nodiscard]] bool is_problem(
+    const compositor::GraphDiagnostic &diagnostic) noexcept {
+  return diagnostic.code != compositor::DiagnosticCode::DeadBranch;
+}
+
 [[nodiscard]] bool node_has_diagnostic(const compositor::CompositorGraph &graph,
                                        doc::NodeId node) noexcept {
   return std::any_of(
       graph.diagnostics.begin(), graph.diagnostics.end(),
       [node](const compositor::GraphDiagnostic &diagnostic) noexcept {
-        return diagnostic.subject == node || diagnostic.related == node;
+        return is_problem(diagnostic) &&
+               (diagnostic.subject == node || diagnostic.related == node);
       });
+}
+
+// Kept in the graph but reaching no Output.
+[[nodiscard]] bool node_parked(const compositor::CompositorGraph &graph,
+                               doc::NodeId node) noexcept {
+  return std::any_of(
+      graph.diagnostics.begin(), graph.diagnostics.end(),
+      [node](const compositor::GraphDiagnostic &diagnostic) noexcept {
+        return !is_problem(diagnostic) && diagnostic.subject == node;
+      });
+}
+
+// Waiting for a required input, and so taking no part in the picture.
+[[nodiscard]] bool node_disabled(const compositor::CompositorGraph &graph,
+                                 doc::NodeId node) noexcept {
+  const compositor::GraphNodeMetadata *const metadata = graph.metadata(node);
+  return metadata != nullptr && metadata->disabled;
+}
+
+// What a disabled node is waiting for, in the operator's words: each required
+// input with no wire, or whose wires come only from nodes that are waiting
+// themselves.
+[[nodiscard]] std::string disabled_reason(
+    const compositor::CompositorGraph &graph,
+    const compositor::GraphNode &node) {
+  std::string waits;
+  for (const compositor::PortDescriptor &port :
+       compositor::input_ports(node.kind)) {
+    if (!port.required) {
+      continue;
+    }
+    bool wired = false;
+    bool fed = false;
+    for (const compositor::GraphEdge &edge : graph.edges) {
+      if (edge.to.node == node.node && edge.to.port == port.index) {
+        wired = true;
+        fed = fed || !node_disabled(graph, edge.from.node);
+      }
+    }
+    if (fed) {
+      continue;
+    }
+    if (!waits.empty()) {
+      waits += " and ";
+    }
+    waits += wired ? "what feeds " : "";
+    waits += port.name;
+    waits += wired ? " is complete" : " is connected";
+  }
+  std::string reason = "Disabled until " + waits;
+  if (node.kind == compositor::NodeKind::Output) {
+    reason += "; until then Program shows the scene as authored";
+  }
+  return reason;
 }
 
 [[nodiscard]] const CompositorPortVisual *
@@ -1468,8 +1531,6 @@ std::string_view compositor_diagnostic_message(
     return "A wire joins different kinds of port; filters go into FILTERS";
   case compositor::DiagnosticCode::DuplicateInput:
     return "An input already has a connection";
-  case compositor::DiagnosticCode::MissingRequiredInput:
-    return "A required input is not connected";
   case compositor::DiagnosticCode::MissingOutput:
     return "Add and connect one Output node";
   case compositor::DiagnosticCode::DuplicateOutput:
@@ -3246,15 +3307,6 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           map_toggle.width, 2.0F},
                 ctx.theme().accent);
     }
-    // The navigation hint only where it cannot run into the graph status
-    // and selection actions at the toolbar's other end.
-    constexpr std::string_view hint = "WHEEL ZOOM  /  MIDDLE-DRAG PAN";
-    if (toolbar.width >= 760.0F) {
-      ctx.label(gui::Rect{map_toggle.right() + 10.0F, toolbar.y,
-                          std::ceil(ctx.font_width(hint)) + 2.0F,
-                          toolbar.height},
-                hint, ctx.theme().text_muted);
-    }
   }
 
   const auto palette_matches = [&](const CompositorPaletteItem &item) {
@@ -3316,14 +3368,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       [](const compositor::GraphDiagnostic &diagnostic) noexcept {
         return diagnostic.severity == compositor::DiagnosticSeverity::Error;
       }));
-  const std::size_t warning_count =
-      compositor_graph.diagnostics.size() - error_count;
+  const std::size_t warning_count = static_cast<std::size_t>(std::count_if(
+      compositor_graph.diagnostics.begin(), compositor_graph.diagnostics.end(),
+      [](const compositor::GraphDiagnostic &diagnostic) noexcept {
+        return is_problem(diagnostic) &&
+               diagnostic.severity == compositor::DiagnosticSeverity::Warning;
+      }));
+  const bool graph_problems = error_count + warning_count != 0U;
   int graph_status_length{};
   if (invalid_output_count) {
     graph_status_length =
         std::snprintf(graph_status.data(), graph_status.size(), "%llu OUTPUTS",
                       static_cast<unsigned long long>(output_count));
-  } else if (compositor_graph.diagnostics.empty()) {
+  } else if (!graph_problems) {
     graph_status_length = std::snprintf(
         graph_status.data(), graph_status.size(), "%llu NODES",
         static_cast<unsigned long long>(compositor_graph.nodes.size()));
@@ -3369,9 +3426,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           trailing_control_width,
                       toolbar.y, status_width, toolbar.height},
             graph_status_text,
-            !invalid_output_count && compositor_graph.diagnostics.empty()
-                ? ctx.theme().text_muted
-                : ctx.theme().warning);
+            !invalid_output_count && !graph_problems ? ctx.theme().text_muted
+                                                     : ctx.theme().warning);
   if (has_selection) {
     const gui::Rect remove_bounds{
         toolbar.right() - remove_width - 8.0F, toolbar.y + 3.0F,
@@ -5213,8 +5269,22 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // Guidance sits behind graph content: it remains available in empty/error
   // states, while nodes and wires always paint over it and therefore never
   // become obscured by instructional chrome.
-  if (compositor_graph.nodes.empty() || !compositor_graph.diagnostics.empty()) {
-    const bool diagnostic = !compositor_graph.diagnostics.empty();
+  const auto first_problem =
+      std::find_if(compositor_graph.diagnostics.begin(),
+                   compositor_graph.diagnostics.end(), is_problem);
+  const bool graph_problem = first_problem != compositor_graph.diagnostics.end();
+  // The Output is waiting for its image, so the graph composites nothing and
+  // Program shows the scene as authored.
+  const auto output_node = std::find_if(
+      compositor_graph.nodes.begin(), compositor_graph.nodes.end(),
+      [](const compositor::GraphNode &node) noexcept {
+        return node.kind == compositor::NodeKind::Output;
+      });
+  const bool composites_nothing =
+      output_node != compositor_graph.nodes.end() &&
+      node_disabled(compositor_graph, output_node->node);
+  if (compositor_graph.nodes.empty() || graph_problem || composites_nothing) {
+    const bool diagnostic = graph_problem;
     gui::Rect top = gui::inset(canvas, 8.0F);
     gui::Rect guide = gui::cut_top(top, 28.0F);
     guide.width = std::min(guide.width, 660.0F);
@@ -5224,16 +5294,17 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       : with_alpha(ctx.theme().accent, 0.42F));
     std::string title;
     if (diagnostic) {
-      title = compositor_graph.diagnostics.front().severity ==
-                      compositor::DiagnosticSeverity::Error
+      title = first_problem->severity == compositor::DiagnosticSeverity::Error
                   ? "GRAPH ERROR: "
                   : "GRAPH WARNING: ";
     } else {
       title = "START: ";
     }
-    title += diagnostic ? compositor_diagnostic_message(
-                              compositor_graph.diagnostics.front())
-                        : std::string_view{"Add a Layer for each scene object"};
+    title += diagnostic ? compositor_diagnostic_message(*first_problem)
+             : compositor_graph.nodes.empty()
+                 ? std::string_view{"Add a Layer for each scene object"}
+                 : std::string_view{"Wire Layers into Output; until then "
+                                    "Program shows the scene as authored"};
     ctx.label(gui::inset(guide, 8.0F, 3.0F), title,
               diagnostic ? ctx.theme().warning : ctx.theme().text_muted);
     ctx.tooltip(guide, title + " · Connect the output on the right of a node to an input on the left. Layers feed Composite, then Output.");
@@ -5360,11 +5431,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool hovered = std::addressof(visual) == hovered_edge;
     const bool splice = std::addressof(visual) == insert_edge;
     const gui::UiColor color = port_color(ctx, visual.from->descriptor->type);
-    // A bypassed node's wire carries nothing, and says so by fading.
+    // A bypassed or disabled node's wire carries nothing, and says so by
+    // fading.
     const compositor::GraphNode *const wire_source =
         compositor_graph.node(visual.edge->from.node);
     const bool carries_nothing =
-        wire_source != nullptr && bypassed(*wire_source);
+        wire_source != nullptr &&
+        (bypassed(*wire_source) ||
+         node_disabled(compositor_graph, wire_source->node));
     gui::UiColor stroke = with_alpha(color, 0.78F);
     float width = wire_width;
     if (selected || splice) {
@@ -5523,6 +5597,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         selected_nodes_.begin(), selected_nodes_.end(), visual.node->node);
     const bool diagnostic =
         node_has_diagnostic(compositor_graph, visual.node->node);
+    const bool parked = node_parked(compositor_graph, visual.node->node);
+    const bool waiting = node_disabled(compositor_graph, visual.node->node);
     const gui::UiColor kind = compositor_node_color(ctx, visual.node->kind);
     const gui::UiColor body = scale(ctx.theme().panel, 1.18F);
 
@@ -5567,14 +5643,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          compositor_title_text, view_.zoom)) {
       const std::string detail =
           passed_through ? std::string{"BYPASSED"}
+          : waiting      ? std::string{"DISABLED"}
                          : compositor_node_detail(*visual.node, elements);
+      const gui::Rect detail_line{text_area.x, title_line.bottom(),
+                                  text_area.width, node_detail_height};
       static_cast<void>(compositor_label(
-          ctx,
-          gui::Rect{text_area.x, title_line.bottom(), text_area.width,
-                    node_detail_height},
-          detail,
+          ctx, detail_line, detail,
           passed_through ? compositor_bypass_color : ctx.theme().text_muted,
           compositor_detail_text, view_.zoom));
+      if (waiting) {
+        ctx.tooltip(detail_line,
+                    disabled_reason(compositor_graph, *visual.node));
+      }
     }
 
     // Names share a row: an input on the left, an output on the right. Each
@@ -5769,9 +5849,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
 
-    // Dots over names: a filled shape is connected, a ring is open, and an
-    // open required input is drawn as the problem it is. While a wire is
-    // being drawn, ports it cannot reach fade back.
+    // Dots over names: a filled shape is connected and a ring is open; a node
+    // waiting on an open input says DISABLED rather than drawing it as a
+    // problem. While a wire is being drawn, ports it cannot reach fade back.
     for (const CompositorPortVisual &port : inputs) {
       if (port.endpoint.node != visual.node->node) {
         continue;
@@ -5782,9 +5862,6 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           can_connect(compositor_graph, *connecting_source, port, lifted);
       const bool target = snapped == std::addressof(port);
       gui::UiColor color = port_color(ctx, port.descriptor->type);
-      if (!connected && port.descriptor->required) {
-        color = ctx.theme().warning;
-      }
       if (connecting_source != nullptr && !compatible) {
         color = with_alpha(color, 0.3F);
       }
@@ -5819,15 +5896,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     : color,
                 output_connected(port.endpoint) || active, body);
     }
-    // A node whose output never reaches Output is drawn faded: it costs
-    // nothing on screen until it is connected.
-    const bool dead = std::any_of(
-        compositor_graph.diagnostics.begin(), compositor_graph.diagnostics.end(),
-        [&visual](const compositor::GraphDiagnostic &diagnostic) noexcept {
-          return diagnostic.code == compositor::DiagnosticCode::DeadBranch &&
-                 diagnostic.subject == visual.node->node;
-        });
-    if (dead && !selected) {
+    // A node whose output never reaches Output, or that is waiting for an
+    // input, is drawn faded: it costs nothing on screen until it is wired.
+    if ((parked || waiting) && !selected) {
       ctx.panel(visual.bounds, with_alpha(ctx.theme().background, 0.45F));
     }
     // A bypassed node's body is dimmed below its title, which stays

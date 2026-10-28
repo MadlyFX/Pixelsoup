@@ -5115,13 +5115,13 @@ MaskViewportFrame ViewportPanel::draw_masks(
     // A Masks tab changes what clicking the picture means. Keep that mode
     // visible in both Stage and Program Output instead of making a failed
     // object-selection click feel like a broken picker.
-    constexpr std::string_view selection_notice =
-        "OBJECT SELECTION LOCKED WHILE MASKS IS OPEN";
-    // Centred along the image's foot, 6 above it.
+    constexpr std::string_view selection_notice = "Can't select while masking";
+    // Centred along the image's foot, 6 above it, sized to its words.
     gui::Rect foot = gui::inset(frame.image, gui::Padding{8.0F, 0.0F, 8.0F, 6.0F});
     foot = gui::cut_bottom(foot, 23.0F);
-    const gui::Rect selection_notice_bounds =
-        gui::centered(foot, std::min(foot.width, 326.0F), foot.height);
+    const gui::Rect selection_notice_bounds = gui::centered(
+        foot, std::min(foot.width, std::ceil(ctx.font_width(selection_notice)) + 16.0F),
+        foot.height);
     ctx.panel(selection_notice_bounds,
               gui::UiColor{0.03F, 0.04F, 0.05F, 0.90F});
     ctx.label(gui::inset(selection_notice_bounds, 8.0F, 0.0F),

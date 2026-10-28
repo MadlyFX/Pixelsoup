@@ -666,6 +666,7 @@ core::u64 digest(const CompositorGraph& graph) noexcept {
         }
         hash_float(hash, metadata.bounds_expansion.x);
         hash_float(hash, metadata.bounds_expansion.y);
+        hash_byte(hash, metadata.disabled ? 1U : 0U);
     }
 
     hash_byte(hash, graph.resources.available ? 1U : 0U);

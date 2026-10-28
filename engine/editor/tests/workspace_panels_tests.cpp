@@ -1127,7 +1127,7 @@ void incompatible_ports_are_rejected_and_persisted_edges_draw_wires() {
 }
 
 void compositor_diagnostics_are_explained_in_plain_language() {
-  constexpr std::array<compositor::DiagnosticCode, 16U> codes{{
+  constexpr std::array<compositor::DiagnosticCode, 15U> codes{{
       compositor::DiagnosticCode::NodesOverCapacity,
       compositor::DiagnosticCode::EdgesOverCapacity,
       compositor::DiagnosticCode::DanglingNode,
@@ -1135,7 +1135,6 @@ void compositor_diagnostics_are_explained_in_plain_language() {
       compositor::DiagnosticCode::UnknownPort,
       compositor::DiagnosticCode::IncompatiblePorts,
       compositor::DiagnosticCode::DuplicateInput,
-      compositor::DiagnosticCode::MissingRequiredInput,
       compositor::DiagnosticCode::MissingOutput,
       compositor::DiagnosticCode::DuplicateOutput,
       compositor::DiagnosticCode::DuplicateSceneLayerReference,
@@ -1151,9 +1150,6 @@ void compositor_diagnostics_are_explained_in_plain_language() {
     UI_CHECK(!message.empty());
     UI_CHECK(message.find("Graph is not ready") == std::string_view::npos);
   }
-  UI_CHECK(editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
-               compositor::DiagnosticCode::MissingRequiredInput, {}, {}, 0U}) ==
-           "A required input is not connected");
   UI_CHECK(editor::compositor_diagnostic_message(compositor::GraphDiagnostic{
                compositor::DiagnosticCode::IncompatiblePorts, {}, {}, 0U}) ==
            "A wire joins different kinds of port; filters go into FILTERS");
@@ -1200,16 +1196,43 @@ void compositor_diagnostics_are_explained_in_plain_language() {
   static_cast<void>(invalid_harness.frame(invalid, 0.0F, 0.0F, false));
   UI_CHECK(invalid_harness.list.vertices().size() > without_guide);
 
-  compositor::CompositorGraph warning = ready;
-  warning.diagnostics.push_back(
+  // A parked node - kept, reaching no Output - is not a problem: it is
+  // faded, one quad over it, and raises no guide and no outline.
+  compositor::CompositorGraph parked = ready;
+  parked.diagnostics.push_back(
       compositor::GraphDiagnostic{compositor::DiagnosticCode::DeadBranch,
                                   doc::NodeId{10U},
                                   {},
                                   0U,
                                   compositor::DiagnosticSeverity::Warning});
+  CompositorHarness parked_harness;
+  static_cast<void>(parked_harness.frame(parked, 0.0F, 0.0F, false));
+  UI_CHECK(parked_harness.list.vertices().size() == without_guide + 6U);
+
+  // A real warning still raises the guide.
+  compositor::CompositorGraph warning = ready;
+  warning.diagnostics.push_back(compositor::GraphDiagnostic{
+      compositor::DiagnosticCode::PassBudgetExceeded, {}, {}, 0U,
+      compositor::DiagnosticSeverity::Warning});
   CompositorHarness warning_harness;
   static_cast<void>(warning_harness.frame(warning, 0.0F, 0.0F, false));
   UI_CHECK(warning_harness.list.vertices().size() > without_guide);
+
+  // An Output waiting for its image is not an error either: it is disabled
+  // and faded, and the start guide says Program shows the scene meanwhile.
+  compositor::CompositorGraph wired;
+  wired.nodes.push_back(
+      graph_node(20U, compositor::NodeKind::Output, 180.0F, 90.0F));
+  compositor::CompositorGraph waiting = wired;
+  waiting.node_metadata.push_back(compositor::GraphNodeMetadata{
+      .node = doc::NodeId{20U}, .disabled = true});
+  CompositorHarness wired_harness;
+  static_cast<void>(wired_harness.frame(wired, 0.0F, 0.0F, false));
+  CompositorHarness waiting_harness;
+  static_cast<void>(waiting_harness.frame(waiting, 0.0F, 0.0F, false));
+  // The guide's panel and outline, and the fade's quad.
+  UI_CHECK(waiting_harness.list.vertices().size() >=
+           wired_harness.list.vertices().size() + 36U);
 }
 
 // The values an operator reaches for most are on the node itself: pressing

@@ -664,14 +664,25 @@ void a_document_reference_must_resolve_to_a_drawable() {
 }
 
 void invalid_graphs_never_form_partial_render_plans() {
+    // Two Outputs are an error, and the planner refuses the graph whole.
     const auto graph = graph_of({node(100U, "scene.object"), layer(10U, 100U),
-                                 node(13U, schema::output_type)});
+                                 node(13U, schema::output_type),
+                                 node(14U, schema::output_type)});
     PLAN_CHECK(!graph.valid());
     scene::Scene source{};
     source.instances.push_back(instance(100U, scene::BlendMode::Normal));
     const auto built = render::plan_compositor_scene(graph, source);
     PLAN_CHECK(!built.has_value());
     PLAN_CHECK(built.error() == render::CompositorScenePlanError::InvalidGraph);
+
+    // An Output with nothing wired is no error but is disabled: the graph
+    // composites nothing, so it has no plan and the planner forms none -
+    // every caller renders the scene as authored instead.
+    const auto waiting = graph_of({node(100U, "scene.object"), layer(10U, 100U),
+                                   node(13U, schema::output_type)});
+    PLAN_CHECK(waiting.valid());
+    PLAN_CHECK(waiting.plan.steps.empty());
+    PLAN_CHECK(!render::plan_compositor_scene(waiting, source).has_value());
 }
 
 void scene_effects_isolate_only_layers_that_need_it() {

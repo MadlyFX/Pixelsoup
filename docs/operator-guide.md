@@ -209,9 +209,9 @@ gesture as the Stage, drawn over the connector image. Its overlay resolves
 through the output's own projection, so a mask over a canvas slice registers
 with the crop and one over a physical surface registers with the warp, and the
 panel says `PROGRAM OUTPUT  /  MASKS` while it is doing so.
-Both mask-authoring viewports display `OBJECT SELECTION LOCKED WHILE MASKS IS
-OPEN`, making the temporary interaction domain explicit instead of leaving an
-ordinary selection click to appear broken.
+Both mask-authoring viewports display `Can't select while masking`, making
+the temporary interaction domain explicit instead of leaving an ordinary
+selection click to appear broken.
 
 Primitive masks are transformed on the picture itself. Selecting a rectangle
 or ellipse exposes four resize handles and a rotation handle; dragging the body
@@ -1518,8 +1518,7 @@ grows and shrinks with the zoom. Zoomed far out, the smaller lines (the
 detail under the title, then port names) are left out rather than squeezed.
 Ports are coloured and shaped by what they carry: blue circles for images,
 violet diamonds for effects, and green squares for array instances. A filled
-port is connected; a ring is open, and an open required input is drawn in the
-warning colour. A node's header carries the colour of its Add Node category.
+port is connected and a ring is open. A node's header carries the colour of its Add Node category.
 
 Wires are curves. To connect, drag from an output port - its dot or its name -
 and release over an input. The whole input row is the target, and the wire
@@ -1542,7 +1541,14 @@ wires of its own onto a wire it can carry - Composite onto an image wire, say -
 and it is spliced in. Double-click a wire to add a reroute point where you
 clicked, drag a point to route the wire, and double-click a point to remove it.
 Reroute points are layout only and never change the picture. A node whose
-output reaches nothing is drawn faded. A node with a problem carries a mark
+output reaches nothing is parked: it is drawn faded, and parking a node to keep
+it for later is not an error. A node that needs an input it does not have yet -
+a Composite with nothing on LAYERS, a Merge with no BASE, a Matte without both
+its images - is disabled until it is wired: its detail line says `DISABLED`
+(hover it to see what it is waiting for), it is drawn faded, and its wires
+carry nothing, so whatever it feeds waits with it. An Output with nothing wired
+is disabled the same way, and Program then shows the scene as authored. A node
+with a problem carries a mark
 beside its title - filled for an error, a ring for a warning - and hovering
 the mark names every problem; a problem with a wire is marked halfway along
 it.

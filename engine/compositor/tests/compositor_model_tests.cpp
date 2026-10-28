@@ -1925,19 +1925,90 @@ void warnings_keep_the_plan_and_expose_canonical_node_paths() {
                               {real(schema::radius, 8.0)}),
                          node(2U, schema::output_type)}));
     const compositor::CompositorGraph mixed_graph = mixed.evaluate();
-    COMPOSITOR_CHECK(!mixed_graph.valid());
-    COMPOSITOR_CHECK(mixed_graph.diagnostics.size() == 2U);
+    // An Output with nothing wired is not an error: it is disabled, and the
+    // graph composites nothing - no plan - so Program shows the scene.
+    COMPOSITOR_CHECK(mixed_graph.valid());
+    COMPOSITOR_CHECK(mixed_graph.diagnostics.size() == 1U);
     COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].severity ==
-                     compositor::DiagnosticSeverity::Error);
-    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].code ==
-                     compositor::DiagnosticCode::MissingRequiredInput);
-    COMPOSITOR_CHECK(mixed_graph.diagnostics[1U].severity ==
                      compositor::DiagnosticSeverity::Warning);
-    COMPOSITOR_CHECK(mixed_graph.diagnostics[1U].code ==
+    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].code ==
                      compositor::DiagnosticCode::DeadBranch);
-    COMPOSITOR_CHECK(mixed_graph.diagnostics[0U].sort_key() <
-                     mixed_graph.diagnostics[1U].sort_key());
     COMPOSITOR_CHECK(mixed_graph.plan.steps.empty());
+    COMPOSITOR_CHECK(mixed_graph.metadata(doc::NodeId{2U}) != nullptr);
+    COMPOSITOR_CHECK(mixed_graph.metadata(doc::NodeId{2U})->disabled);
+    COMPOSITOR_CHECK(!mixed_graph.metadata(doc::NodeId{1U})->disabled);
+
+    // A node waiting for a required input is disabled, never an error, and
+    // what it feeds waits with it. Parked, a Composite with nothing on LAYERS
+    // and a Merge with no BASE leave the live layer planning. Wired between
+    // a layer and Output, the Merge with no BASE disables the Output too, so
+    // nothing is composited; given a BASE, it all comes back.
+    enum class MergeWiring { Parked, NoBase, Complete };
+    const auto parked_root = [](MergeWiring wiring) {
+        std::vector<doc::Node> nodes{
+            node(100U, "scene.object"),
+            node(101U, "scene.object"),
+            scene_layer(2U, 100U),
+            scene_layer(3U, 101U),
+            node(4U, schema::output_type),
+            node(6U, schema::composite_type),
+            node(7U, schema::merge_type),
+            node(8U, schema::composite_type),
+        };
+        if (wiring == MergeWiring::Parked) {
+            nodes.push_back(edge(12U, 2U, 0U, 4U, 0U));
+        } else {
+            nodes.push_back(edge(12U, 2U, 0U, 8U, 0U));
+            nodes.push_back(edge(13U, 8U, 0U, 7U, 1U));
+            nodes.push_back(edge(14U, 7U, 0U, 4U, 0U));
+        }
+        if (wiring == MergeWiring::Complete) {
+            nodes.push_back(edge(15U, 3U, 0U, 7U, 0U));
+        }
+        return root_of(nodes);
+    };
+    const auto disabled = [](const compositor::CompositorGraph& graph,
+                             core::u64 id) {
+        const compositor::GraphNodeMetadata* const metadata =
+            graph.metadata(doc::NodeId{id});
+        return metadata != nullptr && metadata->disabled;
+    };
+
+    compositor::CompositorModel parked;
+    parked.reset(parked_root(MergeWiring::Parked));
+    const compositor::CompositorGraph parked_graph = parked.evaluate();
+    COMPOSITOR_CHECK(parked_graph.valid());
+    COMPOSITOR_CHECK(!parked_graph.plan.steps.empty());
+    COMPOSITOR_CHECK(!disabled(parked_graph, 4U));
+    for (const core::u64 id : {6U, 7U, 8U}) {
+        COMPOSITOR_CHECK(disabled(parked_graph, id));
+        COMPOSITOR_CHECK(has_diagnostic(
+            parked_graph, compositor::DiagnosticCode::DeadBranch, doc::NodeId{id}));
+    }
+
+    compositor::CompositorModel waiting;
+    waiting.reset(parked_root(MergeWiring::NoBase));
+    const compositor::CompositorGraph waiting_graph = waiting.evaluate();
+    COMPOSITOR_CHECK(waiting_graph.valid());
+    COMPOSITOR_CHECK(!waiting_graph.has_errors());
+    COMPOSITOR_CHECK(waiting_graph.plan.steps.empty());
+    COMPOSITOR_CHECK(disabled(waiting_graph, 7U));
+    COMPOSITOR_CHECK(disabled(waiting_graph, 4U));
+    // The Composite has its layer and is enabled, but what it feeds is not,
+    // so it reaches no Output.
+    COMPOSITOR_CHECK(!disabled(waiting_graph, 8U));
+    COMPOSITOR_CHECK(has_diagnostic(
+        waiting_graph, compositor::DiagnosticCode::DeadBranch, doc::NodeId{8U}));
+
+    compositor::CompositorModel complete;
+    complete.reset(parked_root(MergeWiring::Complete));
+    const compositor::CompositorGraph complete_graph = complete.evaluate();
+    COMPOSITOR_CHECK(complete_graph.valid());
+    COMPOSITOR_CHECK(!complete_graph.plan.steps.empty());
+    for (const core::u64 id : {4U, 7U, 8U}) {
+        COMPOSITOR_CHECK(!disabled(complete_graph, id));
+    }
+    COMPOSITOR_CHECK(disabled(complete_graph, 6U));
 
     // Two equally short live routes choose the lower next node id, independent
     // of edge insertion order.
@@ -2421,9 +2492,9 @@ void merge_is_typed_bounded_and_digested() {
                                    return one.id == doc::NodeId{10U};
                                }));
     const auto missing = evaluate_nodes(unbased);
-    COMPOSITOR_CHECK(has_diagnostic(
-        missing, compositor::DiagnosticCode::MissingRequiredInput,
-        doc::NodeId{4U}));
+    COMPOSITOR_CHECK(!missing.has_errors());
+    COMPOSITOR_CHECK(missing.metadata(doc::NodeId{4U}) != nullptr);
+    COMPOSITOR_CHECK(missing.metadata(doc::NodeId{4U})->disabled);
 
     // The constant changes nothing under Normal, at zero opacity, or when it
     // is the blend's own identity.

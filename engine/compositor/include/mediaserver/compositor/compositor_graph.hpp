@@ -428,7 +428,8 @@ enum class DiagnosticCode : core::u8 {
     UnknownPort = 4U,
     IncompatiblePorts = 5U,
     DuplicateInput = 6U,
-    MissingRequiredInput = 7U,
+    // 7 was MissingRequiredInput, before a node waiting for a required input
+    // was disabled rather than an error (see GraphNodeMetadata::disabled).
     MissingOutput = 8U,
     DuplicateOutput = 9U,
     // The current executor adjusts by referenced scene-node identity, so two
@@ -521,6 +522,10 @@ struct GraphNodeMetadata final {
     // structural nodes are zero. Sequential layer support is the sum of these
     // values in authored effect-edge order.
     scene::EffectBoundsExpansion bounds_expansion{};
+    // A required input is open, or fed only by disabled nodes: the node takes
+    // no part in the picture, and its wires carry nothing, until it is wired.
+    // A disabled Output means the graph composites nothing.
+    bool disabled{};
 
     bool operator==(const GraphNodeMetadata&) const = default;
 };
