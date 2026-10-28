@@ -32,3 +32,5 @@ compile_commands.json
 # Python caches are disposable regardless of which working directory runs them.
 __pycache__/
 *.py[cod]
+# Local driving footage: too large for Git without LFS.
+/Models/media/driving/
