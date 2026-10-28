@@ -55,13 +55,31 @@ build inputs and notices and must not be treated as disposable cache.
 
 ## Build and validation
 
-Implementation changes require `windows-msvc-debug-gui` and
-`windows-msvc-release-gui` builds from an MSVC developer shell with
-`VCPKG_ROOT` set. `scripts/run-editor-demo.ps1` launches the current editor
-workflow; `-Exe` selects a particular build. Run relevant CTest entries using
-`ctest --preset <preset> -R <pattern> --output-on-failure`; use the full suite
-when a shared contract changes. Headless changes can also use the headless
-presets. Blender checks are listed in `integrations/blender/README.md`.
+Build from an MSVC developer shell with `VCPKG_ROOT` set.
+`scripts/run-editor-demo.ps1` launches the current editor workflow; `-Exe`
+selects a particular build.
+
+Testing is tiered so a change builds and runs only what it affects:
+
+- **Area**: each code-map area has a build preset and a test preset of the
+  same name: `area-spine`, `area-session`, `area-persist`, `area-scene`,
+  `area-compositor`, `area-output`, `area-render`, `area-editor`,
+  `area-server` and `area-blender`. `cmake --build --preset area-render`
+  links only that area's tests (on Debug GUI); `ctest --preset area-render`
+  runs them. Run every area the change touches. `-R <pattern>` narrows further.
+- **Quick**: `ctest --preset quick` runs everything except tests labelled
+  `slow`, after a full `windows-msvc-debug-gui` build. Use it when a change
+  crosses areas or alters a shared contract.
+- **Full**: the `windows-msvc-debug-gui` and `windows-msvc-release-gui` test
+  presets run every entry. `scripts/package-windows-release.ps1` builds both
+  configurations and runs both full suites before it packages. Run them
+  yourself before merging to main.
+
+Areas and the `slow`/`blender` labels are assigned in
+`cmake/TestGroups.cmake`; a new test directory needs an area there. Only
+`area-server` and the full builds relink `media-server.exe`. Headless changes
+can also use the headless presets. Blender checks are listed in
+`integrations/blender/README.md`.
 
 Documentation and generated-file cleanup need link/reference validation and
 checks of affected launch, package and fixture paths; they do not need new

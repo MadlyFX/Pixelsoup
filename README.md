@@ -30,7 +30,12 @@ ctest --preset windows-msvc-release-gui
 The demo opens the editor and a supervised local output node. Close the editor
 or press Enter in its console to stop it. Use `-Exe` to select a specific
 executable. Reconfigure with `--fresh` when intentionally resetting a build.
-Implementation changes require both Debug and Release builds.
+
+For day-to-day work, build and test one area at a time
+(`cmake --build --preset area-editor`, then `ctest --preset area-editor`), or
+run `ctest --preset quick` to skip the slow tests. The full Debug and Release
+suites run before packaging. [AGENTS.md](AGENTS.md#build-and-validation)
+lists the areas.
 
 Other presets: `windows-msvc-debug` and `linux-clang-debug` are headless;
 `macos-clang-debug-gui` builds the SDL shell. GUI builds enable the `gui`
@@ -84,8 +89,9 @@ plans and one-off validation captures remain available in Git history.
 python scripts/package-blender-livelink.py
 ```
 
-Windows packaging consumes the Release GUI build and includes app-local
-dependencies, launchers and notices. See
+Windows packaging first builds both GUI presets and runs their full test
+suites, then packages the Release GUI build with app-local dependencies,
+launchers and notices. `-SkipTests` packages the existing build untested. See
 [package instructions](packaging/windows/README.txt).
 
 SDI, NDI, ST 2110, a native Vulkan backend and external render/plugin

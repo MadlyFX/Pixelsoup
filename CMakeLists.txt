@@ -116,4 +116,18 @@ endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests/unit)
+
+    # Area labels and tests-<area> build targets; see cmake/TestGroups.cmake.
+    # The areas follow the code map in AGENTS.md.
+    include(TestGroups)
+    mediaserver_test_area(spine engine/core engine/doc engine/cmd tests/unit)
+    mediaserver_test_area(session engine/wire engine/net engine/show)
+    mediaserver_test_area(persist engine/persist)
+    mediaserver_test_area(scene engine/scene engine/track engine/assets)
+    mediaserver_test_area(compositor engine/compositor)
+    mediaserver_test_area(output engine/output engine/topology engine/sync)
+    mediaserver_test_area(render engine/shaders engine/rhi engine/render)
+    mediaserver_test_area(editor engine/ui engine/gui engine/editor)
+    mediaserver_test_area(server apps/server)
+    mediaserver_test_blender_group()
 endif()

@@ -5,16 +5,50 @@
 .DESCRIPTION
   Copies the optimized executable, app-local dependency DLLs, VC++ runtime,
   demo launchers, and operator notes into a versioned folder, then emits a ZIP
-  and SHA-256 checksum. Run after building windows-msvc-release-gui.
+  and SHA-256 checksum.
+
+  Before packaging it builds windows-msvc-debug-gui and
+  windows-msvc-release-gui and runs the full CTest suite for both, and stops
+  on any failure. Run from an MSVC developer shell with VCPKG_ROOT set, with
+  both presets already configured. -SkipTests packages whatever is in
+  -BuildDir without building or testing it.
 #>
 param(
     [string]$BuildDir = "$PSScriptRoot/../out/build/windows-msvc-release-gui",
     [string]$Destination = "$PSScriptRoot/../out/release",
-    [string]$Version = "0.1.0"
+    [string]$Version = "0.1.0",
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
 $repository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).ProviderPath
+
+if ($SkipTests) {
+    Write-Warning 'Packaging without building or running the full test suite.'
+} else {
+    foreach ($tool in 'cmake', 'ctest') {
+        if ($null -eq (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            throw "$tool is not on PATH. Run from an MSVC developer shell, or pass -SkipTests."
+        }
+    }
+    Push-Location -LiteralPath $repository
+    try {
+        foreach ($preset in 'windows-msvc-debug-gui', 'windows-msvc-release-gui') {
+            if (-not (Test-Path -LiteralPath (Join-Path $repository "out/build/$preset/CMakeCache.txt"))) {
+                throw "Configure the $preset preset before packaging: cmake --preset $preset"
+            }
+            Write-Host "Building $preset"
+            & cmake --build --preset $preset
+            if ($LASTEXITCODE -ne 0) { throw "Build of $preset failed; nothing was packaged." }
+            Write-Host "Running the full test suite on $preset"
+            & ctest --preset $preset
+            if ($LASTEXITCODE -ne 0) { throw "Tests failed on $preset; nothing was packaged." }
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 $BuildDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildDir)
 $Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
 $executable = Join-Path $BuildDir 'apps/server/media-server.exe'

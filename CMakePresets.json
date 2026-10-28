@@ -116,6 +116,86 @@
     {
       "name": "macos-clang-debug-gui",
       "configurePreset": "macos-clang-debug-gui"
+    },
+    {
+      "name": "area-spine",
+      "displayName": "Debug GUI: spine tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-spine"
+      ]
+    },
+    {
+      "name": "area-session",
+      "displayName": "Debug GUI: session tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-session"
+      ]
+    },
+    {
+      "name": "area-persist",
+      "displayName": "Debug GUI: persist tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-persist"
+      ]
+    },
+    {
+      "name": "area-scene",
+      "displayName": "Debug GUI: scene tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-scene"
+      ]
+    },
+    {
+      "name": "area-compositor",
+      "displayName": "Debug GUI: compositor tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-compositor"
+      ]
+    },
+    {
+      "name": "area-output",
+      "displayName": "Debug GUI: output tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-output"
+      ]
+    },
+    {
+      "name": "area-render",
+      "displayName": "Debug GUI: render tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-render"
+      ]
+    },
+    {
+      "name": "area-editor",
+      "displayName": "Debug GUI: editor tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-editor"
+      ]
+    },
+    {
+      "name": "area-server",
+      "displayName": "Debug GUI: server tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-server"
+      ]
+    },
+    {
+      "name": "area-blender",
+      "displayName": "Debug GUI: blender tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-blender"
+      ]
     }
   ],
   "testPresets": [
@@ -124,6 +204,9 @@
       "configurePreset": "windows-msvc-debug",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
       }
     },
     {
@@ -131,6 +214,9 @@
       "configurePreset": "linux-clang-debug",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
       }
     },
     {
@@ -138,6 +224,9 @@
       "configurePreset": "windows-msvc-debug-gui",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
       }
     },
     {
@@ -145,6 +234,9 @@
       "configurePreset": "windows-msvc-release-gui",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
       }
     },
     {
@@ -152,6 +244,196 @@
       "configurePreset": "macos-clang-debug-gui",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "quick",
+      "displayName": "Debug GUI: everything except slow tests",
+      "description": "Day-to-day pass after a full Debug GUI build. Skips entries labelled slow (and the opt-in soak).",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "exclude": {
+          "label": "^(slow|soak)$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-spine",
+      "displayName": "Debug GUI: spine tests",
+      "description": "Run after cmake --build --preset area-spine.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^spine$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-session",
+      "displayName": "Debug GUI: session tests",
+      "description": "Run after cmake --build --preset area-session.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^session$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-persist",
+      "displayName": "Debug GUI: persist tests",
+      "description": "Run after cmake --build --preset area-persist.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^persist$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-scene",
+      "displayName": "Debug GUI: scene tests",
+      "description": "Run after cmake --build --preset area-scene.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^scene$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-compositor",
+      "displayName": "Debug GUI: compositor tests",
+      "description": "Run after cmake --build --preset area-compositor.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^compositor$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-output",
+      "displayName": "Debug GUI: output tests",
+      "description": "Run after cmake --build --preset area-output.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^output$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-render",
+      "displayName": "Debug GUI: render tests",
+      "description": "Run after cmake --build --preset area-render.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^render$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-editor",
+      "displayName": "Debug GUI: editor tests",
+      "description": "Run after cmake --build --preset area-editor.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^editor$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-server",
+      "displayName": "Debug GUI: server tests",
+      "description": "Run after cmake --build --preset area-server.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^server$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-blender",
+      "displayName": "Debug GUI: blender tests",
+      "description": "Run after cmake --build --preset area-blender.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^blender$"
+        }
+      },
+      "execution": {
+        "jobs": 8
       }
     }
   ]
