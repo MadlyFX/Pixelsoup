@@ -518,6 +518,16 @@ void the_look_dev_scene_places_lights_floor_and_figure() {
   VIEWER_CHECK(editor::asset_viewer_model_scene(model, view, bounds, project,
                                                 nullptr)
                    .instances.empty());
+  // A thumbnail's floor without its grid is the plane alone.
+  view.look.floor = true;
+  view.look.grid = false;
+  const scene::Scene plain =
+      editor::asset_viewer_model_scene(model, view, bounds, project, nullptr);
+  VIEWER_CHECK(plain.instances.size() == 1U &&
+               plain.instances.front().mesh.primitive ==
+                   scene::Primitive::Plane);
+  VIEWER_CHECK(studio.instances.size() > plain.instances.size() + 3U);
+  view.look.grid = true;
 
   // Turning the rig turns every light; the turntable turns the model.
   view.look.rig_yaw = 0.25F;

@@ -397,21 +397,23 @@ scene::Scene asset_viewer_model_scene(const assets::ModelAsset &asset,
     const float width = step * 0.02F;
     const float lift = step * 0.002F;
     core::u64 index = 1U;
-    for (int line = -lines; line <= lines; ++line) {
-      const float at = static_cast<float>(line) * step;
-      const bool axis = line == 0;
-      add_prop(viewer, scene::Primitive::Box,
-               box_world(scene::Vec3{0.0F, ground + lift * 0.5F, at},
-                         scene::Vec3{reach * 2.0F, lift, width}),
-               axis ? scene::Vec3{0.50F, 0.10F, 0.10F}
-                    : scene::Vec3{0.12F, 0.12F, 0.12F},
-               0.9F, index++);
-      add_prop(viewer, scene::Primitive::Box,
-               box_world(scene::Vec3{at, ground + lift * 0.5F, 0.0F},
-                         scene::Vec3{width, lift, reach * 2.0F}),
-               axis ? scene::Vec3{0.10F, 0.18F, 0.50F}
-                    : scene::Vec3{0.12F, 0.12F, 0.12F},
-               0.9F, index++);
+    if (view.look.grid) {
+      for (int line = -lines; line <= lines; ++line) {
+        const float at = static_cast<float>(line) * step;
+        const bool axis = line == 0;
+        add_prop(viewer, scene::Primitive::Box,
+                 box_world(scene::Vec3{0.0F, ground + lift * 0.5F, at},
+                           scene::Vec3{reach * 2.0F, lift, width}),
+                 axis ? scene::Vec3{0.50F, 0.10F, 0.10F}
+                      : scene::Vec3{0.12F, 0.12F, 0.12F},
+                 0.9F, index++);
+        add_prop(viewer, scene::Primitive::Box,
+                 box_world(scene::Vec3{at, ground + lift * 0.5F, 0.0F},
+                           scene::Vec3{width, lift, reach * 2.0F}),
+                 axis ? scene::Vec3{0.10F, 0.18F, 0.50F}
+                      : scene::Vec3{0.12F, 0.12F, 0.12F},
+                 0.9F, index++);
+      }
     }
   }
   if (view.look.figure) {

@@ -486,12 +486,14 @@ Phase 2 shipped with these differences from the plan above:
   baked static is checked against the Stage scene's placements only.
 - **Thumbnails** are drawn in a command list of their own after the editor's
   frame, with fixed Advanced settings so a thumbnail depends on the model
-  alone, floor on and figure off. A thumbnail is downloaded once two draws in
-  a row report geometry, textures and colour table ready. The Director's
-  thumbnail service holds the job (Queued until the editor takes it,
-  Generating until its picture returns), and encodes and caches it on its
+  alone, the floor on without its grid (at 320 x 180 its 2 cm lines break
+  into scattered dots) and the figure off. A thumbnail is downloaded once two
+  draws in a row report geometry, textures and colour table ready. The
+  Director's thumbnail service holds the job (Queued until the editor takes
+  it, Generating until its picture returns), and encodes and caches it on its
   workers after re-checking the file's fingerprint. Requests follow the
-  Library's visible rows plus prefetch, like media thumbnails.
+  Library's visible rows plus prefetch, like media thumbnails, and the
+  Library's texture cache takes both picture profiles.
 - **The UV checker, world normals and part isolation are on the Stage too**:
   the two shadings are in the Stage's shading menu, without shortcuts.
 - **The UV and tangent checks ignore 1x1 textures**: an importer's
@@ -525,11 +527,36 @@ as well as in the viewer. That is a renderer limit outside this phase.
 
 The editor's half of thumbnails is tested through the real shell (a red cube
 drawn in the middle of a 320 x 180 picture, a missing file answered with no
-picture) and the service's half by its unit test. Not yet seen live: a model
-thumbnail in the Library (the end-to-end project's model has no
-fingerprint, and media thumbnails failed in the scratch profile), Program
-record time and VRAM with the viewer orbiting a large model, and a Release
-build.
+picture), the service's half by its unit test, and the Library's upload of a
+model picture by the texture cache's test.
+
+Checked live in Release (an isolated Director with a copy of
+`Models/endtoendtest.mstage`): `DamagedHelmet.glb` and `Lantern.glb` dropped
+from the desktop became Library models, and their thumbnails appeared, as did
+`adamHead`'s. The live check found two faults, both fixed: the Library's
+thumbnail texture cache accepted only the media profile, so every model
+picture was drawn, encoded and cached and then shown as THUMBNAIL FAILED; and
+the grid broke into dots at thumbnail size. The release-gui build passes its
+full suite.
+
+Measured on the same Release build (RTX 3090, the project on Advanced at
+Balanced, a viewer image of about 845 x 275, Program paused and recorded every
+frame), as the editor's whole frame, interleaved:
+
+| Viewer | CPU record | GPU | Frame interval | Process VRAM |
+| --- | --- | --- | --- | --- |
+| Closed, Stage showing | 0.42 ms | 1.7-2.0 ms | 20.5 ms | 2,106 MiB |
+| `adamHead` open, idle | 0.43 ms | 2.0 ms | 20.6 ms | 2,549 MiB |
+| `adamHead` turning every frame | 1.19 ms | 4.0 ms | 20.5 ms | 2,549 MiB |
+| Hidden again | 0.42 ms | 1.9-2.0 ms | 20.5 ms | 2,311 MiB |
+
+An idle viewer draws nothing and costs Program nothing measurable. The
+turntable, which redraws the model and its shadows every frame, is the upper
+bound for orbiting. Hiding the viewer returns its renderer's 238 MiB; about
+205 MiB (the size of `adamHead`'s textures) stays held after the first open,
+and further opens and closes return to the same two figures, so it does not
+grow. Not measured: Program playing media while the viewer works (this copy's
+plates had no proxies, so Program held a paused frame).
 
 ### Done when
 

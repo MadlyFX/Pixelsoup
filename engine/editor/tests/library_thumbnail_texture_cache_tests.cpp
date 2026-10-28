@@ -133,6 +133,34 @@ void an_exact_key_uploads_one_sampled_texture() {
   CACHE_CHECK(cache.find(key) == nullptr);
 }
 
+// A model's Library tile is its own profile: the same asset and revision
+// under the model view is a different picture from a media thumbnail.
+void a_models_view_uploads_beside_media_thumbnails() {
+  rhi::Device device = open_device();
+  editor::LibraryThumbnailTextureCache cache{device, 2U};
+  const assets::DerivativeKey media = thumbnail_key(61U, 4U);
+  const assets::DerivativeProfile *const model_profile =
+      assets::derivative_profile(
+          assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+  CACHE_CHECK(model_profile != nullptr);
+  assets::ContentFingerprint fingerprint{};
+  fingerprint.byte_length = 10'004U;
+  fingerprint.sha256.bytes[0U] = 4U;
+  const assets::DerivativeKey model =
+      assets::make_derivative_key(doc::NodeId{61U}, fingerprint,
+                                  *model_profile);
+  CACHE_CHECK(model != media);
+
+  const rhi::Texture *const model_texture =
+      upload_and_wait(cache, device, model, solid_frame(200U, 40U, 30U));
+  const rhi::Texture *const media_texture =
+      upload_and_wait(cache, device, media, solid_frame(10U, 20U, 30U));
+  CACHE_CHECK(model_texture != media_texture);
+  CACHE_CHECK(cache.size() == 2U);
+  CACHE_CHECK(cache.find(model) == model_texture);
+  CACHE_CHECK(cache.find(media) == media_texture);
+}
+
 void full_derivative_keys_drive_lru_and_exact_retain() {
   rhi::Device device = open_device();
   editor::LibraryThumbnailTextureCache cache{device, 2U};
@@ -249,11 +277,13 @@ void native_pending_draws_survive_retain_reset_and_budget_pressure() {
   CACHE_CHECK(retried && retried.value().wait());
 }
 
-constexpr std::array<Case, 4U> cases{{
+constexpr std::array<Case, 5U> cases{{
     {"native pending draws survive retain reset and budget pressure",
      &native_pending_draws_survive_retain_reset_and_budget_pressure},
     {"an exact key uploads one sampled texture",
      &an_exact_key_uploads_one_sampled_texture},
+    {"a model's view uploads beside media thumbnails",
+     &a_models_view_uploads_beside_media_thumbnails},
     {"full derivative keys drive LRU and exact retain",
      &full_derivative_keys_drive_lru_and_exact_retain},
     {"invalid profiles frames and capacities create nothing",

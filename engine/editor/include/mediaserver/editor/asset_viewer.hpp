@@ -203,8 +203,11 @@ struct AssetViewerLookDev final {
   std::string hdri_source;
   // Turns the light rig, or the image, about the vertical.
   scene::Turns rig_yaw{};
-  // The grey floor and its grid.
+  // The grey floor, and the grid ruled on it. A thumbnail keeps the floor for
+  // the model's shadow but not the grid, whose lines break into dots at
+  // thumbnail size.
   bool floor{true};
+  bool grid{true};
   // The 1.8 m figure standing beside the model, for scale.
   bool figure{true};
 

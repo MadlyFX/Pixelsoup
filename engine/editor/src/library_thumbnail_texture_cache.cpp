@@ -51,8 +51,13 @@ const rhi::Texture *LibraryThumbnailTextureCache::upload(
   constexpr std::size_t expected_bytes =
       static_cast<std::size_t>(library_thumbnail_texture_width) *
       library_thumbnail_texture_height * 4U;
+  // A Library tile shows a media thumbnail or a model's three-quarter view;
+  // both are 320 x 180 sRGB pictures.
+  const bool library_picture =
+      key.profile == assets::DerivativeProfileId::Thumbnail320x180Srgb ||
+      key.profile == assets::DerivativeProfileId::ModelTurntable320x180Srgb;
   if (capacity_ == 0U || !assets::valid_derivative_key(key) ||
-      key.profile != assets::DerivativeProfileId::Thumbnail320x180Srgb ||
+      !library_picture ||
       !frame.valid() || frame.width != library_thumbnail_texture_width ||
       frame.height != library_thumbnail_texture_height ||
       frame.format != rhi::TextureFormat::Rgba8Unorm ||

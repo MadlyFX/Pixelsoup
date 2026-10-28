@@ -3804,6 +3804,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                    observed.asset->bounds.maximum};
           AssetViewerModelView look{};
           look.orbit = asset_viewer_model_home(bounds);
+          look.look.grid = false;
           look.look.figure = false;
           // Fixed settings, so a thumbnail depends on the model alone.
           scene::RendererSettings settings{};

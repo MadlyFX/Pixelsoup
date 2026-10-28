@@ -40,7 +40,8 @@ public:
   find(const assets::DerivativeKey &key) noexcept;
 
   // Creates one immutable sampled texture and records its upload on the
-  // caller's command list. Only a valid Thumbnail320x180Srgb key and an exact
+  // caller's command list. Only a valid Library picture key (a media
+  // Thumbnail320x180Srgb or a model's ModelTurntable320x180Srgb) and an exact
   // 320x180 RGBA8 frame are accepted. A resident exact-key hit records no
   // upload and returns the existing texture.
   [[nodiscard]] const rhi::Texture *
