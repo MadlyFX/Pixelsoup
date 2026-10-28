@@ -1033,7 +1033,9 @@ thread. Editor shutdown finishes GPU work before releasing scene and UI images.
 
 ### The Asset Viewer
 
-The Asset Viewer is a source monitor for one Library media asset at a time.
+The Asset Viewer shows one Library asset at a time on its own: media as a
+source monitor, and a model or projection mesh in a neutral look-dev scene
+(see [Models in the Asset Viewer](#models-in-the-asset-viewer) below).
 Double-click an asset in the Library (or select it and press Enter), drop one
 onto the viewer, or choose **Open in Asset Viewer** from a Library or Timeline
 menu. It is a tab beside Stage and Program Output, and **Window > Asset
@@ -1099,9 +1101,73 @@ lists this asset's placements in the scene on the Stage; choosing one selects
 it.
 
 The viewer renders through its own renderer on the editor's GPU, made when it
-first shows a media asset and released a few seconds after it is hidden.
-It shows media only; a model opened in it says so, and is placed by dragging
-it from the Library.
+first shows an asset and released a few seconds after it is hidden.
+
+#### Models in the Asset Viewer
+
+A model or projection mesh opens at the origin of a look-dev scene: a grey
+floor meeting its base (where a drop on the Stage would rest it), ruled every
+metre, with the lines through its pivot red along X and blue along Z; a
+1.8 m figure beside it for scale; and a studio rig of three lights - key,
+fill and rim - with the key casting shadows in the Advanced renderer. It
+opens in a three-quarter view from the front right. Nothing about the scene
+or the view is authored: like everything in the viewer, it is this editor's
+own and resets with the project. A model is placed by dragging it from the
+Library, as before.
+
+**Looking around.** A left drag orbits about the pivot, a middle drag pans,
+and a right drag or the wheel moves in and out. **Frame** (F) fits the whole
+model and **Home** returns to the opening view. **Turntable** (T) turns the
+model about its pivot, one turn in 10, 20 or 40 seconds; a Shift+drag turns
+the lights instead. **Floor** and **Figure** hide them.
+
+**Lighting.** The environment menu chooses the **Studio** rig; the **Stage
+scene**'s own sky, image, physical sky and directional lights, at its
+camera's exposure; or an **HDRI image...**, an equirectangular HDR or EXR
+file chosen from disk, turned by Shift+drag. An image lights a scene only in
+the Advanced renderer, as on the wall, and the header says so when the
+project renders Basic. The viewer draws with the project's renderer, quality,
+colour and texture budget, so materials resolve as they do on the wall.
+
+**Shading.** The shading menu has the Stage's Lit, Unlit, Lights only and
+Wireframe, and two more for checking an asset: **UV checker** shows its
+texture mapping and **World normals** its facing. A projection mesh opens in
+UV checker, since its UVs are the mapping the wall is calibrated with.
+
+**Under the picture** the readout gives the width (x), depth (z) and height
+(y) in metres, and where the pivot sits from the middle of the base. Three
+tabs below:
+
+- **Details**: the counts - vertices, triangles, parts, materials, textures
+  and the memory they need at full resolution, levels of detail and
+  animation clips - and the checks, warnings first: textures over the
+  project's texture budget (Project Settings > Geometry), a normal map on
+  vertices without a tangent frame, a textured part without UVs, textures
+  larger than 4096 px, a size suggesting the wrong units (over 100 m or under
+  1 cm across), a pivot far outside the geometry, an animated model whose
+  placements on the Stage are still set to Bake Geometry: Static, and
+  vertices without UV0 on a projection mesh. They are worked out away from
+  the editor's frame, so a large model shows "Checking the package" for a
+  moment.
+- **Parts**: one row per material run at full detail, with its colour,
+  roughness and metal and each texture's size and format. Click a row to
+  show that part alone, and click it again (or **Show all**) to show every
+  part.
+- **Animation**: the package's clips by name and length. Click one to play
+  it on the viewer's own clock; Space plays and pauses, Left and Right step a
+  frame (a second with Shift), **Loop** repeats it, and the bar scrubs it.
+  **Bind pose** stops.
+
+While a model's geometry or textures are arriving the header says
+**LOADING**, and Details says what it is waiting for, as the Stage does. A
+model the importer refused says **DID NOT LOAD**; one the renderer could not
+put on the GPU says **LOAD FAILED** with its reason.
+
+**Library thumbnails.** A model's Library thumbnail is the same three-quarter
+view under the studio rig, drawn on the editor's GPU when the Library first
+shows it and kept in this machine's derivative cache like a media thumbnail
+(the `model-turntable-320x180-srgb` profile). It is drawn again when the file
+changes.
 
 ## Render-node lifecycle control
 
@@ -1731,11 +1797,13 @@ switches it, and with the pointer over a view the Unreal keys do the same:
 | Alt+3 | Unlit: each surface's own colour and glow, with no lighting |
 | Alt+6 | Lights only: every surface a neutral grey, so only the light on it shows; clips show as flat grey cards |
 | Alt+2 | Wireframe: every triangle edge, seen through the others; clips' edges in orange |
+| (menu) | UV checker: each surface's texture mapping as a coloured checker, red rising along U and green along V |
+| (menu) | World normals: which way each surface faces, as a colour |
 
 Shading belongs to the view: in four views each can shade differently, and
-Program and the outputs always show the lit picture. Unlit and Wireframe draw
-no atmosphere (the renderer reports fog idle there), and nothing is mirrored
-in a planar reflection while they are on. Picking, the gizmo, Measure and
+Program and the outputs always show the lit picture. Every shading but Lit
+and Lights only draws no atmosphere (the renderer reports fog idle there), and
+nothing is mirrored in a planar reflection while it is on. Picking, the gizmo, Measure and
 snapping work the same in every shading. The Bounds toggle outlines
 bounding boxes in any of them.
 

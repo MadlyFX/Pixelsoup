@@ -1498,21 +1498,27 @@ PhaseExit DirectorShowLoop::observe_library_thumbnails(EditorViewInputs &inputs)
         const assets::DerivativeProfile *const profile =
             assets::derivative_profile(
                 assets::DerivativeProfileId::Thumbnail320x180Srgb);
-        if (profile != nullptr) {
+        // A model's thumbnail is its own profile, drawn by the editor.
+        const assets::DerivativeProfile *const model_profile =
+            assets::derivative_profile(
+                assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+        if (profile != nullptr && model_profile != nullptr) {
             try {
                 thumbnail_observations.reserve(
                     asset_registry.assets.size());
                 for (const assets::Asset &asset :
                      asset_registry.assets) {
-                    const auto *const media =
-                        std::get_if<assets::MediaAsset>(&asset);
-                    if (media == nullptr ||
-                        !media->fingerprint.has_value()) {
+                    const bool media =
+                        std::holds_alternative<assets::MediaAsset>(asset);
+                    const auto &fingerprint =
+                        assets::asset_fingerprint(asset);
+                    if (!fingerprint.has_value()) {
                         continue;
                     }
                     const assets::DerivativeKey key =
                         assets::make_derivative_key(
-                            media->id, *media->fingerprint, *profile);
+                            assets::asset_id(asset), *fingerprint,
+                            media ? *profile : *model_profile);
                     editor::LibraryThumbnailState state =
                         editor::LibraryThumbnailState::Placeholder;
                     const rhi::Texture *texture =
@@ -2030,6 +2036,57 @@ PhaseExit DirectorShowLoop::request_library_thumbnails(
                     << static_cast<unsigned>(scheduled.error().code)
                     << ")\n";
             }
+        }
+        // Models are drawn by the editor, which has the GPU: the service
+        // hands out what is waiting, as much as the editor has room for,
+        // and takes the pictures back to encode and cache.
+        for (const editor::LibraryThumbnailRequestIntent &request :
+             editor_frame.thumbnail_requests) {
+            const assets::Asset *const asset =
+                asset_registry.asset(request.key.asset);
+            const auto *const model =
+                asset != nullptr
+                    ? std::get_if<assets::ModelAsset>(asset)
+                    : nullptr;
+            if (model == nullptr || !model->fingerprint.has_value()) {
+                continue;
+            }
+            const assets::DerivativeProfile *const profile =
+                assets::derivative_profile(
+                    assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+            if (profile == nullptr ||
+                assets::make_derivative_key(model->id,
+                                            *model->fingerprint,
+                                            *profile) != request.key) {
+                continue;
+            }
+            const auto scheduled = thumbnail_service->request_model(
+                *model,
+                request.priority ==
+                        editor::LibraryThumbnailRequestPriority::Visible
+                    ? server::ThumbnailRequestPriority::Visible
+                    : server::ThumbnailRequestPriority::Prefetch);
+            if (!scheduled) {
+                std::cerr << "could not request a model thumbnail for "
+                          << model->id.value() << " (code "
+                          << static_cast<unsigned>(scheduled.error().code)
+                          << ")\n";
+            }
+        }
+        if (const core::u32 room = editor->model_thumbnail_room();
+            room != 0U) {
+            for (server::ModelThumbnailRender &render :
+                 thumbnail_service->take_model_renders(room)) {
+                if (!editor->queue_model_thumbnail(render.key,
+                                                   std::move(render.source))) {
+                    thumbnail_service->complete_model_render(render.key, {});
+                }
+            }
+        }
+        for (editor::RenderedModelThumbnail &drawn :
+             editor->take_model_thumbnails()) {
+            thumbnail_service->complete_model_render(drawn.key,
+                                                     std::move(drawn.rgba));
         }
         for (const editor::TimelineFilmstripRequestIntent &request :
              editor_frame.filmstrip_requests) {

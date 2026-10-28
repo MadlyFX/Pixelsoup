@@ -53,6 +53,7 @@ add_library(mediaserver_render STATIC
     src/texture_streaming.cpp
     src/model_cache.cpp
     src/model_loader.cpp
+    src/model_report.cpp
     src/model_animation.cpp
     src/projection_mesh_loader.cpp
     src/hybrid_scene_renderer.cpp
@@ -834,6 +835,20 @@ if(BUILD_TESTING)
         COMMAND mediaserver_render_model_loader_tests
     )
     set_target_properties(mediaserver_render_model_loader_tests PROPERTIES
+        FOLDER "tests")
+
+    add_executable(mediaserver_render_model_report_tests
+        tests/model_report_tests.cpp
+    )
+    target_link_libraries(mediaserver_render_model_report_tests
+        PRIVATE MediaServer::Render
+    )
+    mediaserver_set_project_options(mediaserver_render_model_report_tests)
+    add_test(
+        NAME mediaserver.render_model_report
+        COMMAND mediaserver_render_model_report_tests
+    )
+    set_target_properties(mediaserver_render_model_report_tests PROPERTIES
         FOLDER "tests")
 
     add_executable(mediaserver_render_model_cache_tests

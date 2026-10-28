@@ -110,6 +110,13 @@ using ThumbnailDecoderFactory =
 // One synchronous, frame-exact renderer MediaSource per service worker.
 [[nodiscard]] ThumbnailDecoderFactory default_thumbnail_decoder_factory();
 
+// A model's thumbnail waiting to be drawn. Only the editor has a GPU, so the
+// service hands these out and takes the pictures back.
+struct ModelThumbnailRender final {
+    assets::DerivativeKey key;
+    std::string source;
+};
+
 enum class ThumbnailServiceErrorCode : core::u8 {
     InvalidAsset,
     MissingFingerprint,
@@ -155,6 +162,24 @@ public:
         const assets::MediaAsset& asset,
         ThumbnailRequestPriority priority =
             ThumbnailRequestPriority::Visible);
+
+    // A model's three-quarter view (ModelTurntable320x180Srgb). Ready work
+    // is returned at once; otherwise it is Queued until the editor takes it
+    // from take_model_renders, then Generating until complete_model_render
+    // brings its picture back to be encoded and cached on a worker.
+    [[nodiscard]] ThumbnailRequestResult request_model(
+        const assets::ModelAsset& asset,
+        ThumbnailRequestPriority priority =
+            ThumbnailRequestPriority::Visible);
+    // Up to `limit` waiting model renders, visible ones first, each marked
+    // Generating as it is handed out.
+    [[nodiscard]] std::vector<ModelThumbnailRender>
+    take_model_renders(core::u32 limit);
+    // The editor's render of `key`: rows top to bottom of profile-sized
+    // RGBA8, or empty when it could not draw the model. A picture for work
+    // no longer generating - cancelled by retain(), say - is dropped.
+    void complete_model_render(const assets::DerivativeKey& key,
+                               std::vector<core::u8> rgba);
 
     [[nodiscard]] std::optional<ThumbnailSnapshot>
     snapshot(const assets::DerivativeKey& key);

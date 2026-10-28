@@ -2872,6 +2872,10 @@ std::string_view stage_shading_name(render::ViewShading shading) noexcept {
         return "Lights only";
     case render::ViewShading::Wireframe:
         return "Wireframe";
+    case render::ViewShading::UvChecker:
+        return "UV checker";
+    case render::ViewShading::WorldNormals:
+        return "World normals";
     case render::ViewShading::Lit:
         break;
     }
@@ -3296,10 +3300,11 @@ void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
                 "How this view shades. Only the Stage changes: Program and "
                 "the outputs always show the lit picture.");
     // In ViewShading order.
-    constexpr std::array<std::string_view, 4U> options{
+    constexpr std::array<std::string_view, 6U> options{
         "Lit            Alt+4", "Unlit          Alt+3",
-        "Lights only    Alt+6", "Wireframe      Alt+2"};
-    std::array<bool, 4U> checked{};
+        "Lights only    Alt+6", "Wireframe      Alt+2",
+        "UV checker",           "World normals"};
+    std::array<bool, 6U> checked{};
     checked[static_cast<std::size_t>(stage_shading_)] = true;
     if (const auto chosen = ctx.context_menu(menu_id, options, checked)) {
         frame.shading_choice = static_cast<render::ViewShading>(*chosen);

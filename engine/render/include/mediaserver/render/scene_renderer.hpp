@@ -269,7 +269,22 @@ enum class ViewShading : core::u8 {
     // Triangle edges only, every edge visible through the others. Needs a
     // renderer built with RendererLimits::view_shading.
     Wireframe,
+    // Each surface's first texture coordinates as an eight-by-eight checker,
+    // red rising with U and green with V, so a stretched, flipped or missing
+    // mapping shows. Unlit. Needs RendererLimits::view_shading.
+    UvChecker,
+    // The shaded world-space normal, normal map included, as a colour: x, y
+    // and z from -1..1 to 0..1 on screen. Unlit. Needs
+    // RendererLimits::view_shading.
+    WorldNormals,
 };
+
+// Whether a view shading draws the scene's light: Lit and Lights only do;
+// the others show a property of the surface instead, so atmosphere and
+// mirrors have nothing to add to them.
+[[nodiscard]] constexpr bool view_shading_lit(ViewShading shading) noexcept {
+    return shading == ViewShading::Lit || shading == ViewShading::LightsOnly;
+}
 
 struct SceneClipPlanes final {
     float near_plane{};
@@ -309,6 +324,10 @@ struct SceneRenderView final {
     std::optional<PlateLens> plate_lens;
     // An editor view's shading aid; every output view is Lit.
     ViewShading shading{ViewShading::Lit};
+    // An editor view's isolation aid: draw only this part of every model, by
+    // its index among the package's full-detail parts, at full detail. Empty
+    // draws every part; every output view leaves it empty.
+    std::optional<core::u32> model_part;
 
     bool operator==(const SceneRenderView&) const = default;
 };

@@ -7,9 +7,10 @@ look-dev scene, as in a game-engine asset viewer, and its asset-level
 settings - materials, textures, pivot, interpretation - are set up there once
 for every placement in the project.
 
-Phase 1 is built; [As built](#as-built) records where it differs from what
-follows. Phases 2 and 3 are not built. The plan has three phases that can
-ship separately.
+Phases 1 and 2 are built; their As built sections
+([phase 1](#as-built), [phase 2](#as-built-1)) record where they differ from
+what follows. Phase 3 is not built. The plan has three phases that can ship
+separately.
 Each one lists what the operator sees, where the code goes, what it must not
 break, its tests, and when it is done. The [decisions](#decisions) section
 at the end records what has been settled and what is still open.
@@ -448,6 +449,87 @@ Nothing in this phase changes the document. It shows and checks.
   and the `asset-viewer-model` snapshot view.
 - Live: VRAM and Program record time with the viewer orbiting a large
   imported model.
+
+### As built
+
+Phase 2 shipped with these differences from the plan above:
+
+- **The studio rig is three unitless lights**, key, fill and rim, over a
+  grey surround, with the key first so the Advanced renderer's cascaded
+  shadows come from it. The physical sky is not part of it: under a Basic
+  project it would need exposure and units the rig does not have. A Stage
+  scene that uses the physical sky still lights the model with it through
+  **Stage scene**.
+- **The floor meets the model's base**, where a Stage drop rests it, rather
+  than standing at the origin. The readout and the pivot check say where the
+  origin is. The turntable turns about the vertical through the pivot, so
+  the base stays on the floor.
+- **The grid is geometry**: thin strips on the floor, so the model hides the
+  lines behind it, which a UI overlay like the Stage's would draw over it.
+- **Navigation is the viewer's own**: left drag orbits, middle drag pans,
+  right drag and the wheel dolly, Shift+left drag turns the lights (and an
+  HDRI). The Stage's Unreal walk and fly keys are not used.
+- **Lighting follows the project's renderer** (backend, quality, colour,
+  texture budget). A Basic project draws no shadows and no HDRI, as on the
+  wall; the header says so for an HDRI.
+- **No missing-texture check.** A glTF texture the importer cannot read
+  refuses the whole model, so the viewer reports the model as not loaded.
+  The model cache gives no reason text, so the viewer says the importer
+  refused the file.
+- **The checks' facts are worked out on an editor worker** (one thread,
+  newest request first), kept by (source, model cache generation), not on
+  the model cache's worker. The checks themselves are cheap and run where
+  they are shown.
+- **A projection mesh opens in UV checker** shading, which shows its UV0
+  layout on the mesh; there is no separate UV-layout view.
+- **The viewer's own animation clock runs at 60 fps.** Animated content
+  baked static is checked against the Stage scene's placements only.
+- **Thumbnails** are drawn in a command list of their own after the editor's
+  frame, with fixed Advanced settings so a thumbnail depends on the model
+  alone, floor on and figure off. A thumbnail is downloaded once two draws in
+  a row report geometry, textures and colour table ready. The Director's
+  thumbnail service holds the job (Queued until the editor takes it,
+  Generating until its picture returns), and encodes and caches it on its
+  workers after re-checking the file's fingerprint. Requests follow the
+  Library's visible rows plus prefetch, like media thumbnails.
+- **The UV checker, world normals and part isolation are on the Stage too**:
+  the two shadings are in the Stage's shading menu, without shortcuts.
+- **The UV and tangent checks ignore 1x1 textures**: an importer's
+  one-texel stand-in for a material factor (the spec-gloss conversion makes
+  them) reads the same at every UV, so a part sampling only those needs
+  neither.
+- **The viewer says why a model is not drawn yet**, with the Stage's own
+  asset status: the LOADING chip's tooltip and the Details tab carry the
+  reason, and a GPU refusal shows as LOAD FAILED.
+- **Not built:** dragging a model out of the viewer to place it (the Library
+  drag places it), and a digest-mode test that the look-dev scene renders
+  identically across runs. The two shadings and isolation have pixel tests
+  instead.
+
+Checked offline with `mediaserver_editor_ui_snapshot asset-viewer-model`
+(D3D12, Advanced): DamagedHelmet rests on the floor beside the figure, lit by
+the rig with floor shadows from the key; UV checker maps its textures; the
+Parts tab lists its part with five 2048 px textures. `adamHead` (an 84-part
+package with 25 textures up to 4096 px) draws with only a texture-budget
+note.
+
+Checked live (Debug, an isolated Director with a copy of
+`Models/endtoendtest.mstage`): a Library double-click opened `adamHead` in
+model mode, the facts and checks arrived from the worker, and with the
+project on Advanced the model drew with floor shadows. On the project's own
+Basic backend the viewer showed LOAD FAILED, "Model GPU resources are
+unavailable": the Basic renderer uploads a model's whole texture set in one
+recording, and the D3D12 backend allows 80 MiB of uploads per command list,
+so a model with more texture data than that is refused there - on the Stage
+as well as in the viewer. That is a renderer limit outside this phase.
+
+The editor's half of thumbnails is tested through the real shell (a red cube
+drawn in the middle of a 320 x 180 picture, a missing file answered with no
+picture) and the service's half by its unit test. Not yet seen live: a model
+thumbnail in the Library (the end-to-end project's model has no
+fingerprint, and media thumbnails failed in the scratch profile), Program
+record time and VRAM with the viewer orbiting a large model, and a Release
+build.
 
 ### Done when
 

@@ -1,6 +1,7 @@
 #include <mediaserver/editor/editor_shell.hpp>
 
 #include <mediaserver/editor/asset_viewer_panel.hpp>
+#include <mediaserver/editor/model_facts_worker.hpp>
 #include <mediaserver/editor/live_data_panel.hpp>
 
 #include <mediaserver/editor/library_thumbnail_texture_cache.hpp>
@@ -48,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <future>
 #include <mediaserver/render/model_ingest_queue.hpp>
@@ -369,6 +371,15 @@ effect_target_name(const ElementInfo *target,
 
 // The Stage views' renderers: the show's own limits, plus the wireframe
 // pipelines their shading menu can ask for.
+// A model thumbnail is the derivative profile's size. A model that has not
+// loaded within about a minute, or whose textures have not settled within
+// five seconds of drawing, is answered with no picture.
+constexpr core::u32 model_thumbnail_width = 320U;
+constexpr core::u32 model_thumbnail_height = 180U;
+constexpr std::size_t model_thumbnail_queue = 8U;
+constexpr core::u32 model_thumbnail_wait_frames = 3'600U;
+constexpr core::u32 model_thumbnail_draw_frames = 300U;
+
 [[nodiscard]] render::RendererLimits stage_view_limits() noexcept {
   render::RendererLimits limits{};
   limits.view_shading = true;
@@ -1827,7 +1838,7 @@ struct EditorShell::Impl final {
   // The Asset Viewer's picture. Its executor keeps its own media cache, so a
   // scrub's pending decodes never count against Program's asset readiness,
   // and it shares the window's device so device decoding stays available.
-  // Everything here is made the first time the panel shows a media asset and
+  // Everything here is made the first time the panel shows an asset and
   // released after the panel has been hidden for a few seconds.
   struct AssetViewerRender final {
     std::optional<render::CompositorSceneExecutor> renderer;
@@ -1842,6 +1853,8 @@ struct EditorShell::Impl final {
     bool drawn{};
     core::u32 hidden_frames{};
     bool decoding{};
+    // Why a model's picture is not complete yet, as the Stage says it.
+    StageAssetStatus model_status;
     std::string fault;
     // What the current picture shows, so an unchanged one is not redrawn.
     struct Shown final {
@@ -1854,10 +1867,25 @@ struct EditorShell::Impl final {
       core::u32 width{};
       core::u32 height{};
       scene::ColorSettings color{};
+      // Model mode: the view, the box it framed, and the Stage lighting it
+      // borrowed, which can change under an unchanged view.
+      std::optional<AssetViewerModelView> model;
+      std::optional<WorldBounds> model_bounds;
+      std::optional<scene::Environment> stage_environment;
+      std::vector<scene::DirectionalLight> stage_lights;
 
       bool operator==(const Shown &) const = default;
     };
     std::optional<Shown> shown;
+    // The model view the panel last asked for, drawn one frame behind like
+    // the pane size, and the loaded package's box.
+    std::optional<AssetViewerModelView> model_request;
+    std::optional<WorldBounds> model_bounds;
+    // Model packages come from the process-wide model cache the renderer
+    // reads, observed without waiting; their facts are worked out on a
+    // worker made the first time a model is shown.
+    render::ModelCache model_cache;
+    std::unique_ptr<ModelFactsWorker> facts_worker;
     // The pixel probe: one download of the display image in flight at a
     // time, read when the GPU has finished it, never waited for.
     std::optional<rhi::Readback> readback;
@@ -1870,6 +1898,28 @@ struct EditorShell::Impl final {
     double probe_time{};
     std::optional<std::pair<core::u32, core::u32>> probe_at;
   } viewer;
+
+  // Library thumbnails of models, drawn one at a time at the profile's
+  // 320 x 180 in the viewer's studio look-dev scene, in a command list of
+  // their own after the frame's. The targets are made for the first and
+  // released once nothing has been queued for a while.
+  struct ModelThumbnailWork final {
+    struct Job final {
+      assets::DerivativeKey key;
+      std::string source;
+      core::u32 waited{};
+      core::u32 drawn{};
+      bool settled{};
+    };
+    std::deque<Job> queue;
+    std::optional<render::CompositorSceneExecutor> renderer;
+    std::optional<render::OutputTransform> display;
+    std::optional<rhi::Readback> readback;
+    rhi::SubmittedWork download;
+    bool downloading{};
+    core::u32 idle_frames{};
+    std::vector<RenderedModelThumbnail> finished;
+  } model_thumbnails;
 
   // Scene-node selection is editor-local and canonical. Compositor, physical
   // surface, and mapping selections remain in their distinct carriers below.
@@ -2275,6 +2325,29 @@ EditorShell::~EditorShell() {
   // are destroyed first. Finish their submissions before any owner releases
   // resources; the device's own destructor would be too late.
   if (impl_) impl_->window.device().wait_idle();
+}
+
+core::u32 EditorShell::model_thumbnail_room() const noexcept {
+  const std::size_t queued = impl_->model_thumbnails.queue.size();
+  return queued >= model_thumbnail_queue
+             ? 0U
+             : static_cast<core::u32>(model_thumbnail_queue - queued);
+}
+
+bool EditorShell::queue_model_thumbnail(const assets::DerivativeKey &key,
+                                        std::string source) {
+  if (model_thumbnail_room() == 0U || source.empty()) {
+    return false;
+  }
+  impl_->model_thumbnails.queue.push_back(
+      Impl::ModelThumbnailWork::Job{key, std::move(source)});
+  return true;
+}
+
+std::vector<RenderedModelThumbnail> EditorShell::take_model_thumbnails() {
+  std::vector<RenderedModelThumbnail> taken;
+  taken.swap(impl_->model_thumbnails.finished);
+  return taken;
 }
 
 void EditorShell::reset_library_thumbnail_textures(
@@ -2693,6 +2766,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.asset_viewer_panel.reset_project_state();
     impl.viewer.shown.reset();
     impl.viewer.texture = nullptr;
+    impl.viewer.model_request.reset();
+    impl.viewer.model_bounds.reset();
+    // Every queued thumbnail is answered, drawn or not.
+    for (const Impl::ModelThumbnailWork::Job &job :
+         impl.model_thumbnails.queue) {
+      if (!impl.model_thumbnails.downloading ||
+          &job != &impl.model_thumbnails.queue.front()) {
+        impl.model_thumbnails.finished.push_back(
+            RenderedModelThumbnail{job.key, {}});
+      }
+    }
+    if (impl.model_thumbnails.downloading &&
+        !impl.model_thumbnails.queue.empty()) {
+      Impl::ModelThumbnailWork::Job front =
+          std::move(impl.model_thumbnails.queue.front());
+      impl.model_thumbnails.queue.clear();
+      impl.model_thumbnails.queue.push_back(std::move(front));
+    } else {
+      impl.model_thumbnails.queue.clear();
+    }
   }
 
   // Media stream discovery can take seconds for multi-gigabyte MOV files.
@@ -3077,11 +3170,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   // is the same once-per-boundary wait a preview resize takes.
   Impl::AssetViewerRender &viewer = impl.viewer;
   const assets::MediaAsset *viewer_media = nullptr;
+  const assets::ModelAsset *viewer_model = nullptr;
   if (viewer.drawn && asset_viewer.scene != nullptr &&
       asset_viewer.shown.asset == impl.asset_viewer_panel.asset()) {
     if (const assets::Asset *const found =
             asset_registry.asset(asset_viewer.shown.asset)) {
       viewer_media = std::get_if<assets::MediaAsset>(found);
+    }
+  }
+  if (viewer.drawn && viewer.model_request.has_value() &&
+      viewer.model_request->asset == impl.asset_viewer_panel.asset()) {
+    if (const assets::Asset *const found =
+            asset_registry.asset(viewer.model_request->asset)) {
+      viewer_model = std::get_if<assets::ModelAsset>(found);
     }
   }
   viewer.hidden_frames = viewer.drawn
@@ -3101,8 +3202,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     viewer.failed = false;
   }
   bool viewer_ready = false;
-  if (viewer_media != nullptr && viewer.width != 0U && viewer.height != 0U &&
-      !viewer.failed) {
+  if ((viewer_media != nullptr || viewer_model != nullptr) &&
+      viewer.width != 0U && viewer.height != 0U && !viewer.failed) {
     if (!viewer.renderer.has_value()) {
       auto renderer = render::CompositorSceneExecutor::create(
           device, viewer.width, viewer.height, stage_view_limits(),
@@ -3135,6 +3236,37 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
     }
     viewer_ready = viewer.renderer.has_value() && !viewer.failed;
+  }
+  // A model thumbnail's download is read the same way, once it is done.
+  Impl::ModelThumbnailWork &thumbs = impl.model_thumbnails;
+  if (thumbs.downloading && thumbs.download && thumbs.download.complete()) {
+    thumbs.downloading = false;
+    std::vector<core::u8> pixels;
+    if (thumbs.readback.has_value() && !thumbs.queue.empty()) {
+      const auto mapped = thumbs.readback->map();
+      const std::size_t bytes = std::size_t{model_thumbnail_width} *
+                                model_thumbnail_height * 4U;
+      if (mapped.size() >= bytes) {
+        pixels.assign(mapped.begin(), mapped.begin() + bytes);
+      }
+      thumbs.readback->unmap();
+    }
+    if (!thumbs.queue.empty()) {
+      thumbs.finished.push_back(RenderedModelThumbnail{
+          thumbs.queue.front().key, std::move(pixels)});
+      thumbs.queue.pop_front();
+    }
+  }
+  thumbs.idle_frames = thumbs.queue.empty() && !thumbs.downloading
+                           ? std::min(thumbs.idle_frames + 1U, 1000U)
+                           : 0U;
+  if (thumbs.idle_frames > 600U &&
+      (thumbs.renderer.has_value() || thumbs.readback.has_value())) {
+    device.wait_idle();
+    thumbs.renderer.reset();
+    thumbs.display.reset();
+    thumbs.readback.reset();
+    thumbs.download = rhi::SubmittedWork{};
   }
   // A finished probe download is read here, a frame or more after it was
   // asked for, so the probe never waits on the GPU.
@@ -3424,10 +3556,81 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       view.texture = &display.target();
     }
+    // A model in the Asset Viewer's look-dev scene, through its orbit.
+    // Redrawn only when what it shows changes - a turn of the turntable or a
+    // frame of its clip is a change - or while its geometry, textures or
+    // colour table are still arriving.
+    if (viewer_ready && viewer_model != nullptr) {
+      const AssetViewerModelView &request = *viewer.model_request;
+      const bool stage_lit =
+          request.look.environment == AssetViewerEnvironment::Stage;
+      Impl::AssetViewerRender::Shown wanted{};
+      wanted.width = viewer.width;
+      wanted.height = viewer.height;
+      wanted.color = authored_stage.renderer_settings.color;
+      wanted.source = viewer_model->source;
+      wanted.model = request;
+      wanted.model_bounds = viewer.model_bounds;
+      if (stage_lit) {
+        wanted.stage_environment = authored_stage.environment;
+        wanted.stage_lights = authored_stage.directional_lights;
+      }
+      if (!viewer.shown.has_value() || *viewer.shown != wanted ||
+          viewer.decoding ||
+          viewer.display->color_state() != render::DisplayLutState::Ready) {
+        const WorldBounds box =
+            asset_viewer_model_bounds(*viewer_model, viewer.model_bounds);
+        scene::Scene viewer_scene = asset_viewer_model_scene(
+            *viewer_model, request, box, authored_stage.renderer_settings,
+            &authored_stage);
+        viewer_scene.canvas = scene::Canvas{viewer.width, viewer.height};
+        const scene::Camera &camera = viewer_scene.camera;
+        render::SceneRenderView viewer_view{};
+        viewer_view.matrices = scene::view_for_slice(
+            camera, viewer_scene.canvas, scene::whole(viewer_scene.canvas));
+        viewer_view.eye = camera.eye;
+        viewer_view.forward = scene::normalize(camera.target - camera.eye);
+        viewer_view.history_identity = 0x4153'5345'544D'4F44ULL;
+        viewer_view.clip_planes =
+            render::SceneClipPlanes{camera.near_plane, camera.far_plane};
+        viewer_view.shading = request.shading;
+        viewer_view.model_part = request.part;
+        const rhi::Texture *const rendered = record_editor_scene(
+            *viewer.renderer, commands, viewer_scene,
+            compositor::CompositorGraph{}, nullptr, &viewer_view);
+        viewer.display->adopt_color(viewer_scene.renderer_settings.color,
+                                    scene::asset_generation_key(viewer_scene));
+        const bool viewer_ok =
+            rendered != nullptr &&
+            viewer.display->render(
+                commands, *rendered,
+                scene::CanvasRect{0U, 0U, viewer.width, viewer.height},
+                viewer.renderer->scene_linear_output());
+        viewer.model_status = stage_asset_status(
+            viewer.renderer->renderer_passes().geometry,
+            viewer.renderer->media_cache_stats().pending_requests,
+            viewer.display->color_state());
+        viewer.decoding =
+            !viewer.renderer->renderer_passes().geometry.assets.ready;
+        if (viewer_ok) {
+          viewer.shown = std::move(wanted);
+          viewer.texture = &viewer.display->target();
+          viewer.fault.clear();
+        } else {
+          viewer.shown.reset();
+          viewer.texture = nullptr;
+          viewer.fault =
+              viewer.renderer->renderer_readiness().satisfied
+                  ? std::string{"ASSET VIEWER RENDER FAILED"}
+                  : std::string{
+                        viewer.renderer->renderer_readiness().headline()};
+        }
+      }
+    }
     // The Asset Viewer's one-clip scene, through the orthographic view its
     // zoom and pan describe. Redrawn only when what it shows changes, or
     // while its frames or colour table are still arriving.
-    if (viewer_ready) {
+    if (viewer_ready && viewer_media != nullptr) {
       const AssetViewerFraming framing = impl.asset_viewer_panel.framing();
       Impl::AssetViewerRender::Shown wanted{};
       wanted.request = asset_viewer.shown;
@@ -3524,7 +3727,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.program_preview_valid = program_preview_ok;
     // The probe reads the display image the panel shows (before the channel
     // view), in its own small submission, at most ten times a second.
-    if (viewer_ready && viewer.shown.has_value() &&
+    if (viewer_ready && viewer_media != nullptr && viewer.shown.has_value() &&
         viewer.probe_at.has_value() && !viewer.probe_pending &&
         impl.window.time_seconds() - viewer.probe_time >= 0.1 &&
         viewer.display->target().desc().format ==
@@ -3555,6 +3758,99 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 viewer.probe_time = impl.window.time_seconds();
               }
             }
+          }
+        }
+      }
+    }
+    // The next queued model thumbnail. A model still loading is asked again
+    // next frame; once it, its textures and the colour table have arrived
+    // and a second draw agrees, the picture is downloaded.
+    if (!thumbs.queue.empty() && !thumbs.downloading) {
+      Impl::ModelThumbnailWork::Job &job = thumbs.queue.front();
+      const render::ModelCacheObservation observed =
+          impl.viewer.model_cache.observe(
+              job.source, impl.viewer.model_cache.publication_epoch());
+      const bool refused =
+          (!observed.ready() &&
+           observed.state == render::ModelCacheState::Failed) ||
+          ++job.waited > model_thumbnail_wait_frames ||
+          job.drawn > model_thumbnail_draw_frames;
+      if (!refused && observed.ready() && !thumbs.renderer.has_value()) {
+        render::RendererLimits limits{};
+        limits.view_shading = true;
+        auto made = render::CompositorSceneExecutor::create(
+            device, model_thumbnail_width, model_thumbnail_height, limits,
+            render::MediaCacheConfig{},
+            device.capabilities().backend == rhi::BackendKind::D3d12
+                ? rhi::TextureFormat::Rgba16Float
+                : rhi::TextureFormat::Rgba8Unorm);
+        auto display = render::OutputTransform::create(
+            device, model_thumbnail_width, model_thumbnail_height);
+        if (made && display) {
+          thumbs.renderer.emplace(std::move(made).value());
+          thumbs.display.emplace(std::move(display).value());
+        }
+      }
+      if (refused || (observed.ready() && !thumbs.renderer.has_value())) {
+        thumbs.finished.push_back(RenderedModelThumbnail{job.key, {}});
+        thumbs.queue.pop_front();
+      } else if (observed.ready()) {
+        auto thumb_commands = device.acquire_commands();
+        if (thumb_commands) {
+          rhi::CommandList list = std::move(thumb_commands).value();
+          assets::ModelAsset model{};
+          model.source = job.source;
+          const WorldBounds bounds{observed.asset->bounds.minimum,
+                                   observed.asset->bounds.maximum};
+          AssetViewerModelView look{};
+          look.orbit = asset_viewer_model_home(bounds);
+          look.look.figure = false;
+          // Fixed settings, so a thumbnail depends on the model alone.
+          scene::RendererSettings settings{};
+          settings.backend = scene::RendererBackend::Advanced;
+          scene::Scene picture =
+              asset_viewer_model_scene(model, look, bounds, settings, nullptr);
+          picture.canvas =
+              scene::Canvas{model_thumbnail_width, model_thumbnail_height};
+          render::SceneRenderView thumb_view{};
+          thumb_view.matrices = scene::view_for_slice(
+              picture.camera, picture.canvas, scene::whole(picture.canvas));
+          thumb_view.eye = picture.camera.eye;
+          thumb_view.forward =
+              scene::normalize(picture.camera.target - picture.camera.eye);
+          thumb_view.history_identity = 0x4153'5345'5448'554DULL;
+          thumb_view.clip_planes = render::SceneClipPlanes{
+              picture.camera.near_plane, picture.camera.far_plane};
+          const rhi::Texture *const drawn = record_editor_scene(
+              *thumbs.renderer, list, picture, compositor::CompositorGraph{},
+              nullptr, &thumb_view);
+          thumbs.display->adopt_color(picture.renderer_settings.color);
+          const bool shown =
+              drawn != nullptr &&
+              thumbs.display->render(
+                  list, *drawn,
+                  scene::CanvasRect{0U, 0U, model_thumbnail_width,
+                                    model_thumbnail_height},
+                  thumbs.renderer->scene_linear_output());
+          ++job.drawn;
+          const bool ready =
+              shown && thumbs.renderer->renderer_passes().geometry.assets.ready &&
+              thumbs.display->color_state() == render::DisplayLutState::Ready &&
+              thumbs.display->target().desc().format ==
+                  rhi::TextureFormat::Rgba8Unorm;
+          bool fetch = ready && job.settled;
+          job.settled = ready;
+          if (fetch && !thumbs.readback.has_value()) {
+            if (auto created = device.create_readback(
+                    model_thumbnail_width * model_thumbnail_height * 4U)) {
+              thumbs.readback.emplace(std::move(created).value());
+            }
+          }
+          fetch = fetch && thumbs.readback.has_value() &&
+                  list.download(thumbs.display->target(), *thumbs.readback);
+          if (auto work = device.submit(std::move(list)); work && fetch) {
+            thumbs.download = std::move(work).value();
+            thumbs.downloading = true;
           }
         }
       }
@@ -6066,14 +6362,69 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           }
         }
       }
+      // A model is observed in the model cache the renderer shares, never
+      // waited for, and its facts are worked out on the viewer's worker.
+      const assets::Asset *const viewed_asset =
+          asset_registry.asset(impl.asset_viewer_panel.asset());
+      const auto *const viewed_model =
+          viewed_asset != nullptr ? std::get_if<assets::ModelAsset>(viewed_asset)
+                                  : nullptr;
+      AssetViewerModelInput model_input{};
+      if (viewed_model != nullptr) {
+        const render::ModelCacheObservation observed =
+            impl.viewer.model_cache.observe(
+                viewed_model->source,
+                impl.viewer.model_cache.publication_epoch());
+        if (observed.ready()) {
+          model_input.state = AssetViewerModelState::Ready;
+          model_input.bounds = WorldBounds{observed.asset->bounds.minimum,
+                                           observed.asset->bounds.maximum};
+          if (impl.viewer.facts_worker == nullptr) {
+            impl.viewer.facts_worker = std::make_unique<ModelFactsWorker>();
+          }
+          model_input.facts = impl.viewer.facts_worker->facts(
+              viewed_model->source, observed.generation, observed.asset);
+        } else if (observed.state == render::ModelCacheState::Failed) {
+          model_input.state = AssetViewerModelState::Failed;
+          model_input.diagnostic =
+              "The importer refused the file. Open it in the application "
+              "that made it, then Rescan the Library.";
+        }
+        model_input.checks.texture_budget_bytes =
+            static_cast<core::u64>(
+                authored_stage.renderer_settings.texture_budget_mib) *
+            1024ULL * 1024ULL;
+        model_input.checks.projection_mesh = viewed_model->projection_mesh;
+        model_input.checks.static_placements = static_cast<core::u32>(
+            std::count_if(authored_stage.models.begin(),
+                          authored_stage.models.end(),
+                          [&](const scene::ModelInstance &placed) {
+                            return placed.source == viewed_model->source &&
+                                   placed.bake_static;
+                          }));
+        model_input.advanced = authored_stage.renderer_settings.backend ==
+                               scene::RendererBackend::Advanced;
+        impl.viewer.model_bounds = model_input.bounds;
+      }
       const bool picture_current =
           impl.viewer.shown.has_value() &&
-          impl.viewer.shown->request.asset == impl.asset_viewer_panel.asset();
+          (viewed_model != nullptr
+               ? impl.viewer.shown->model.has_value() &&
+                     impl.viewer.shown->model->asset ==
+                         impl.asset_viewer_panel.asset()
+               : !impl.viewer.shown->model.has_value() &&
+                     impl.viewer.shown->request.asset ==
+                         impl.asset_viewer_panel.asset());
       AssetViewerDrawInput viewer_input{};
       viewer_input.assets = &asset_registry;
       viewer_input.director = &asset_viewer;
       viewer_input.image = picture_current ? impl.viewer.texture : nullptr;
       viewer_input.decoding = picture_current && impl.viewer.decoding;
+      if (viewed_model != nullptr && picture_current) {
+        viewer_input.loading_detail = impl.viewer.model_status.detail;
+        viewer_input.load_failed = !impl.viewer.model_status.loading &&
+                                   !impl.viewer.model_status.headline.empty();
+      }
       viewer_input.image_fault = impl.viewer.fault;
       viewer_input.show_rate =
           scene::MediaFrameRate{timeline.rate_numerator,
@@ -6084,9 +6435,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       viewer_input.elements = elements;
       viewer_input.lanes = timeline_lanes;
       viewer_input.pixels_per_unit = impl.window.ui_scale();
+      viewer_input.model = viewed_model != nullptr ? &model_input : nullptr;
       const AssetViewerFrame viewed =
           impl.asset_viewer_panel.draw(ui, bounds, viewer_input);
       result.asset_viewer = viewed.request;
+      impl.viewer.model_request = viewed.model_view;
+      if (viewed.choose_hdri) {
+        FilePickerRequest request{};
+        request.kind = FilePickerKind::EnvironmentMap;
+        request.current = impl.asset_viewer_panel.look().hdri_source;
+        if (auto path = choose_property_file(request)) {
+          impl.asset_viewer_panel.set_hdri(std::move(*path));
+        }
+      }
       impl.viewer.width = viewed.surface_width;
       impl.viewer.height = viewed.surface_height;
       impl.viewer.probe_at = viewed.probe;

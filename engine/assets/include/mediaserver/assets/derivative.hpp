@@ -40,6 +40,8 @@ enum class DerivativeSampling : core::u8 {
     UniformTimeline,
     WholeAsset,
     ConstantFrameRate,
+    // A model rendered once from a camera derived from its bounds alone.
+    BoundsFramedView,
 };
 
 enum class DerivativePixelFormat : core::u8 {

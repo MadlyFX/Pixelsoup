@@ -428,6 +428,11 @@ struct ThumbnailService::Impl final {
     struct Job final {
         assets::DerivativeKey key;
         assets::MediaAsset asset;
+        // A model job is drawn by the editor rather than decoded here: it
+        // waits for take_model_renders, then for its picture.
+        std::optional<assets::ModelAsset> model;
+        bool waiting{};
+        std::vector<core::u8> rendered;
         assets::DerivativeState state{assets::DerivativeState::Missing};
         ThumbnailRequestPriority priority{ThumbnailRequestPriority::Visible};
         ThumbnailFailureCode failure{ThumbnailFailureCode::None};
@@ -529,6 +534,10 @@ struct ThumbnailService::Impl final {
                            ThumbnailFailureCode::None) noexcept {
         job.cancellation.request_stop();
         release_queue_slot_locked(job);
+        if (job.waiting) {
+            job.waiting = false;
+            --waiting_count;
+        }
         if (job.state == assets::DerivativeState::Queued ||
             job.state == assets::DerivativeState::Generating ||
             (job.state == assets::DerivativeState::Stale && job.in_flight)) {
@@ -637,7 +646,80 @@ struct ThumbnailService::Impl final {
         prune_locked();
     }
 
+    // A model's picture came back from the editor: encode it, check the
+    // file is still the revision it was drawn from, and publish.
+    void process_model(const std::shared_ptr<Job>& job) {
+        const std::stop_token stop = job->cancellation.get_token();
+        const assets::DerivativeProfile* profile =
+            assets::derivative_profile(job->key.profile);
+        std::vector<core::u8> pixels = std::move(job->rendered);
+        job->rendered.clear();
+        std::size_t expected = 0U;
+        if (profile == nullptr ||
+            !expected_rgba_bytes(profile->width, profile->height, expected) ||
+            pixels.size() != expected) {
+            finish(job, assets::DerivativeState::Failed,
+                   ThumbnailFailureCode::NoValidFrame);
+            return;
+        }
+        std::optional<std::vector<core::u8>> encoded;
+        try {
+            encoded = encode_png(profile->width, profile->height, pixels, stop);
+        } catch (...) {
+            encoded.reset();
+        }
+        if (stop.stop_requested()) {
+            finish(job, assets::DerivativeState::Cancelled);
+            return;
+        }
+        if (!encoded.has_value()) {
+            finish(job, assets::DerivativeState::Failed,
+                   ThumbnailFailureCode::EncodeFailed);
+            return;
+        }
+        const auto fingerprint =
+            assets::source_fingerprint(job->model->source, stop);
+        if (!fingerprint) {
+            if (fingerprint.error().code ==
+                assets::ContentFingerprintErrorCode::Cancelled) {
+                finish(job, assets::DerivativeState::Cancelled);
+            } else {
+                finish(job, assets::DerivativeState::Failed,
+                       ThumbnailFailureCode::SourceUnavailable);
+            }
+            return;
+        }
+        if (!job->model->fingerprint.has_value() ||
+            fingerprint.value() != *job->model->fingerprint) {
+            finish(job, assets::DerivativeState::Stale,
+                   ThumbnailFailureCode::FingerprintMismatch);
+            return;
+        }
+        const auto published = cache.publish(job->key, *encoded, false, stop);
+        if (!published) {
+            finish(job, assets::DerivativeState::Failed,
+                   ThumbnailFailureCode::CacheFailure,
+                   published.error().code);
+            return;
+        }
+        if (published.value().state == assets::DerivativeState::Cancelled) {
+            finish(job, assets::DerivativeState::Cancelled);
+            return;
+        }
+        finish(job,
+               published.value().state == assets::DerivativeState::Ready
+                   ? assets::DerivativeState::Ready
+                   : assets::DerivativeState::Failed,
+               published.value().state == assets::DerivativeState::Ready
+                   ? ThumbnailFailureCode::None
+                   : ThumbnailFailureCode::CacheFailure);
+    }
+
     void process(const std::shared_ptr<Job>& job, ThumbnailDecoder* decoder) {
+        if (job->model.has_value()) {
+            process_model(job);
+            return;
+        }
         const std::stop_token stop = job->cancellation.get_token();
         if (decoder == nullptr) {
             finish(job, assets::DerivativeState::Failed,
@@ -881,6 +963,10 @@ struct ThumbnailService::Impl final {
     std::vector<std::thread> workers;
     std::deque<std::shared_ptr<Job>> visible;
     std::deque<std::shared_ptr<Job>> prefetch;
+    // Model jobs waiting for the editor to draw them, visible first.
+    std::deque<std::shared_ptr<Job>> visible_renders;
+    std::deque<std::shared_ptr<Job>> prefetch_renders;
+    core::u32 waiting_count{};
     std::unordered_map<std::string, std::shared_ptr<Job>> jobs;
     core::u32 queued_count{};
     core::u32 prefetch_count{};
@@ -1024,6 +1110,139 @@ ThumbnailRequestResult ThumbnailService::request_for_profile(
     }
 }
 
+ThumbnailRequestResult ThumbnailService::request_model(
+    const assets::ModelAsset& asset, ThumbnailRequestPriority priority) {
+    try {
+        if (!asset.id || !assets::valid_asset_source(asset.source)) {
+            return ThumbnailRequestResult::failure(
+                service_error(ThumbnailServiceErrorCode::InvalidAsset));
+        }
+        if (!asset.fingerprint.has_value()) {
+            return ThumbnailRequestResult::failure(
+                service_error(ThumbnailServiceErrorCode::MissingFingerprint));
+        }
+        const assets::DerivativeProfile* profile = assets::derivative_profile(
+            assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+        if (profile == nullptr) {
+            return ThumbnailRequestResult::failure(
+                service_error(ThumbnailServiceErrorCode::InvalidAsset));
+        }
+        const assets::DerivativeKey derivative_key =
+            assets::make_derivative_key(asset.id, *asset.fingerprint, *profile);
+        const std::string encoded_key =
+            assets::derivative_key_string(derivative_key);
+        {
+            std::lock_guard lock{implementation_->mutex};
+            const auto found = implementation_->jobs.find(encoded_key);
+            if (found != implementation_->jobs.end() &&
+                (found->second->waiting || found->second->enqueued ||
+                 found->second->in_flight)) {
+                return ThumbnailRequestResult::success(
+                    implementation_->snapshot_locked(*found->second));
+            }
+        }
+        const auto cached = implementation_->cache.inspect(derivative_key);
+        auto job = std::make_shared<Impl::Job>();
+        job->key = derivative_key;
+        job->model = asset;
+        job->priority = priority;
+        std::lock_guard lock{implementation_->mutex};
+        const auto raced = implementation_->jobs.find(encoded_key);
+        if (raced != implementation_->jobs.end() &&
+            (raced->second->waiting || raced->second->enqueued ||
+             raced->second->in_flight)) {
+            return ThumbnailRequestResult::success(
+                implementation_->snapshot_locked(*raced->second));
+        }
+        job->stamp = ++implementation_->clock;
+        if (!cached) {
+            implementation_->set_state_locked(
+                *job, assets::DerivativeState::Failed,
+                ThumbnailFailureCode::CacheFailure);
+            job->cache_error = cached.error().code;
+        } else if (cached.value().state == assets::DerivativeState::Ready) {
+            implementation_->set_state_locked(*job,
+                                              assets::DerivativeState::Ready);
+        } else if (implementation_->waiting_count >=
+                   implementation_->config.maximum_pending_requests) {
+            implementation_->set_state_locked(
+                *job, assets::DerivativeState::Cancelled,
+                ThumbnailFailureCode::QueueCapacity);
+        } else {
+            implementation_->set_state_locked(*job,
+                                              assets::DerivativeState::Queued);
+            job->waiting = true;
+            ++implementation_->waiting_count;
+            (priority == ThumbnailRequestPriority::Visible
+                 ? implementation_->visible_renders
+                 : implementation_->prefetch_renders)
+                .push_back(job);
+        }
+        implementation_->jobs.insert_or_assign(encoded_key, job);
+        implementation_->prune_locked();
+        return ThumbnailRequestResult::success(
+            implementation_->snapshot_locked(*job));
+    } catch (const std::bad_alloc&) {
+        return ThumbnailRequestResult::failure(
+            service_error(ThumbnailServiceErrorCode::AllocationFailed));
+    }
+}
+
+std::vector<ModelThumbnailRender>
+ThumbnailService::take_model_renders(core::u32 limit) {
+    std::vector<ModelThumbnailRender> taken;
+    try {
+        std::lock_guard lock{implementation_->mutex};
+        for (auto* queue : {&implementation_->visible_renders,
+                            &implementation_->prefetch_renders}) {
+            while (taken.size() < limit && !queue->empty()) {
+                std::shared_ptr<Impl::Job> job = std::move(queue->front());
+                queue->pop_front();
+                if (!job->waiting || job->cancellation.stop_requested()) {
+                    continue;
+                }
+                job->waiting = false;
+                --implementation_->waiting_count;
+                job->in_flight = true;
+                implementation_->set_state_locked(
+                    *job, assets::DerivativeState::Generating);
+                taken.push_back(ModelThumbnailRender{job->key, job->model->source});
+            }
+        }
+    } catch (const std::bad_alloc&) {
+    }
+    return taken;
+}
+
+void ThumbnailService::complete_model_render(const assets::DerivativeKey& key,
+                                             std::vector<core::u8> rgba) {
+    try {
+        const std::string encoded = assets::derivative_key_string(key);
+        std::lock_guard lock{implementation_->mutex};
+        const auto found = implementation_->jobs.find(encoded);
+        if (found == implementation_->jobs.end() || found->second->key != key) {
+            return;
+        }
+        const std::shared_ptr<Impl::Job>& job = found->second;
+        if (!job->model.has_value() || !job->in_flight || job->enqueued) {
+            return;
+        }
+        job->in_flight = false;
+        if (job->cancellation.stop_requested() ||
+            job->state != assets::DerivativeState::Generating) {
+            if (job->state != assets::DerivativeState::Cancelled) {
+                implementation_->set_state_locked(
+                    *job, assets::DerivativeState::Cancelled);
+            }
+            return;
+        }
+        job->rendered = std::move(rgba);
+        job->priority = ThumbnailRequestPriority::Visible;
+        static_cast<void>(implementation_->enqueue_locked(job));
+    } catch (...) {
+    }
+}
+
 std::optional<ThumbnailSnapshot> ThumbnailService::snapshot(
     const assets::DerivativeKey& key) {
     try {
@@ -1072,7 +1291,7 @@ void ThumbnailService::retain(
     std::lock_guard lock{implementation_->mutex};
     for (auto& pair : implementation_->jobs) {
         Impl::Job& job = *pair.second;
-        if ((job.enqueued || job.in_flight) &&
+        if ((job.enqueued || job.in_flight || job.waiting) &&
             retained.find(pair.first) == retained.end()) {
             implementation_->cancel_locked(job);
         }

@@ -3572,13 +3572,22 @@ bool SceneRenderer::render(
             "wireframe needs a renderer built for an editor view"));
         return false;
     }
+    if ((shading == ViewShading::UvChecker
+         || shading == ViewShading::WorldNormals
+         || render_view.model_part.has_value())
+        && !limits_.view_shading) {
+        static_cast<void>(core::report_idle_once(
+            "view shading",
+            "UV checker, world normals and part isolation need a renderer "
+            "built for an editor view"));
+        return false;
+    }
 
     planar_active_ = false;
     planar_texture_ = nullptr;
-    // Unlit and wireframe draw no light, so they need no mirror either.
+    // Views that draw no light need no mirror either.
     if (!options.reflection_pass && scene.environment.planar.enabled
-        && (shading == ViewShading::Lit
-            || shading == ViewShading::LightsOnly)) {
+        && view_shading_lit(shading)) {
         const auto& p = scene.environment.planar;
         const auto& full = options.residency_scene ? *options.residency_scene : scene;
         const bool receiver = p.receiver != doc::NodeId{} &&
@@ -4399,7 +4408,10 @@ bool SceneRenderer::render(
         }
         const bool visible = camera_visible(model.world, animated_bounds);
         const auto& levels = resident->decoded_asset->lods;
-        const core::u32 lod = deforming ? 0U : select_model_lod(scene, model.world, resident->bounds, levels);
+        // An isolated part is named among the full-detail parts, so an
+        // isolating view stays at full detail.
+        const core::u32 lod = deforming || render_view.model_part.has_value()
+            ? 0U : select_model_lod(scene, model.world, resident->bounds, levels);
         selected(model.source_node, true, visible, lod);
         if (levels.size() > 1U) ++stats_.lod_models;
         if (lod > 0U) ++stats_.lod_reductions;
@@ -4439,6 +4451,10 @@ bool SceneRenderer::render(
         }
         for (core::u32 part_index = level.first_part;
              part_index < level.first_part + level.part_count; ++part_index) {
+            if (render_view.model_part.has_value()
+                && part_index - level.first_part != *render_view.model_part) {
+                continue;
+            }
             const auto& part = resident->parts[part_index];
             if (held_instances() >= limits_.max_instances) {
                 ++stats_.dropped_instances;

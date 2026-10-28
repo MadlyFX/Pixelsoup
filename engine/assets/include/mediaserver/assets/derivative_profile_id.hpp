@@ -13,6 +13,9 @@ enum class DerivativeProfileId : core::u16 {
     Waveform2048PeakRms = 3U,
     Proxy720pCfrH264 = 4U,
     ProxySourceCfrHevcMain10 = 5U,
+    // A model's three-quarter view under the Asset Viewer's studio rig, its
+    // camera a fixed function of the package's bounds.
+    ModelTurntable320x180Srgb = 6U,
 };
 
 } // namespace mediaserver::assets

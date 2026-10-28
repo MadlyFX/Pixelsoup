@@ -50,7 +50,8 @@ projection before exposing editor controls or adding a GPU processor.
 
 The Asset Viewer - a source monitor for media, a look-dev inspector for
 models, and asset-level material and interpretation settings - is planned in
-three phases in the [Asset Viewer plan](asset-viewer-plan.md).
+three phases in the [Asset Viewer plan](asset-viewer-plan.md). The first two
+are built; phase 3, asset-level settings, remains.
 
 #### Effects, masks, mattes, and graph diagnostics
 

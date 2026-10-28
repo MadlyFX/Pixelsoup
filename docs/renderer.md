@@ -352,10 +352,29 @@ colour passes through pipelines built with `rhi::RasterState{Wireframe}`
 `RendererLimits::view_shading` asks, which the Stage's executors do and no
 output node does, and a wireframe request to one without them is refused.
 The colour pass clears its own depth, so every edge shows through the others.
-Shading folds into the view's history identity, so a change resets temporal
-history; Unlit and Wireframe skip the planar mirror and report fog
-`PassState::Idle` with "atmosphere is drawn only in Lit and Lights only
-views". An output view is always `Lit`, which changes nothing it draws.
+Two surface aids show a property of the surface instead of its light, unlit
+and unexposed: `UvChecker` draws each surface's first UVs as an eight-by-eight
+checker, red rising with U and green with V, the dark squares at 0.35 of the
+light ones' level, so a stretched, flipped or missing mapping shows; and
+`WorldNormals` draws the shaded world normal, normal map included, as
+`n * 0.5 + 0.5`. Both colours are display values (`engine/shaders/view_aid.hlsli`):
+the scene-linear path linearises them so the display transform's sRGB encode
+gives them back, and the display-referred path writes them past the tone curve
+and inline effects. Clips show the same aids on their quads. Like Wireframe,
+both need a renderer built with `RendererLimits::view_shading` and are refused
+by one without it.
+
+`SceneRenderView::model_part` is an isolation aid: it draws only that part of
+every model, by its index among the package's full-detail parts, and keeps
+the model at its full-detail level of detail so the index means the same
+part. It also needs `RendererLimits::view_shading`. The Asset Viewer's Parts
+list sets it; no output view does.
+
+Shading and the isolated part fold into the view's history identity, so a
+change resets temporal history; every shading but Lit and Lights only skips
+the planar mirror and reports fog `PassState::Idle` with "atmosphere is
+drawn only in Lit and Lights only views" (`view_shading_lit`). An output view
+is always `Lit` with every part, which changes nothing it draws.
 
 **Remaining unsupported paths:** a native Vulkan backend, GPU-driven
 indirect/meshlet submission, point/area-light and ray-traced shadows, ray tracing,

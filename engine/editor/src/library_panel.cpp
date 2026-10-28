@@ -1637,6 +1637,12 @@ LibraryFrame LibraryPanel::draw_impl(
           ? assets::derivative_profile(
                 assets::DerivativeProfileId::Thumbnail320x180Srgb)
           : nullptr;
+  // A model's thumbnail is a rendered three-quarter view of its own profile.
+  const assets::DerivativeProfile *const model_thumbnail_profile =
+      thumbnails_enabled
+          ? assets::derivative_profile(
+                assets::DerivativeProfileId::ModelTurntable320x180Srgb)
+          : nullptr;
   struct Thumbnail final {
     const LibraryThumbnailObservation *observation{};
     LibraryThumbnailState state{LibraryThumbnailState::Placeholder};
@@ -1644,8 +1650,14 @@ LibraryFrame LibraryPanel::draw_impl(
   const auto thumbnail_for = [&](const assets::Asset &asset,
                                  const gui::Rect &where) -> Thumbnail {
     Thumbnail result;
-    if (thumbnail_profile == nullptr ||
-        assets::asset_kind(asset) != assets::AssetKind::Media) {
+    const assets::AssetKind kind = assets::asset_kind(asset);
+    const assets::DerivativeProfile *const profile =
+        kind == assets::AssetKind::Media ? thumbnail_profile
+        : kind == assets::AssetKind::Model ||
+                kind == assets::AssetKind::ProjectionMesh
+            ? model_thumbnail_profile
+            : nullptr;
+    if (profile == nullptr) {
       return result;
     }
     const std::optional<assets::ContentFingerprint> &fingerprint =
@@ -1654,7 +1666,7 @@ LibraryFrame LibraryPanel::draw_impl(
       return result;
     }
     const assets::DerivativeKey key = assets::make_derivative_key(
-        assets::asset_id(asset), *fingerprint, *thumbnail_profile);
+        assets::asset_id(asset), *fingerprint, *profile);
     if (!assets::valid_derivative_key(key)) {
       return result;
     }
@@ -1798,7 +1810,7 @@ LibraryFrame LibraryPanel::draw_impl(
                     preview.y + (preview.height - icon) * 0.5F, icon, icon});
     }
     border(ctx, preview,
-           with_alpha(thumbnails_enabled && media
+           with_alpha(thumbnails_enabled
                           ? library_thumbnail_color(ctx, thumbnail.state)
                           : theme.border,
                       0.78F));

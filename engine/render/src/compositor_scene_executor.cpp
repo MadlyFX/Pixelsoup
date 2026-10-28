@@ -2387,8 +2387,7 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
         const bool orthographic_view = render_view.has_value()
             && scene::orthographic(render_view->matrices.projection);
         const bool unlit_view = render_view.has_value()
-            && (render_view->shading == ViewShading::Unlit
-                || render_view->shading == ViewShading::Wireframe);
+            && !view_shading_lit(render_view->shading);
         const char* const fog_idle = orthographic_view ? fog_idle_orthographic
             : unlit_view ? fog_idle_unlit : nullptr;
         // Reported idle with its reason rather than drawn through a viewpoint

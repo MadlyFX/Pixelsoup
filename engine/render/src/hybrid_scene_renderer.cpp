@@ -75,11 +75,16 @@ constexpr const char* fog_refusal_targets =
     if (!options.view.has_value()) {
         return 0U;
     }
-    // A different shading aid is a different picture: its history resets.
-    // Lit adds nothing, so every output view keeps its identity.
+    // A different shading aid or isolated part is a different picture: its
+    // history resets. Lit with every part adds nothing, so every output view
+    // keeps its identity.
+    const core::u64 part = options.view->model_part.has_value()
+        ? static_cast<core::u64>(*options.view->model_part) + 1U
+        : 0U;
     return options.view->history_identity
         ^ (static_cast<core::u64>(options.view->shading)
-           * 0x9E37'79B9'7F4A'7C15ULL);
+           * 0x9E37'79B9'7F4A'7C15ULL)
+        ^ (part * 0xC2B2'AE3D'27D4'EB4FULL);
 }
 
 [[nodiscard]] SceneHistoryAction scene_history_action(
@@ -677,8 +682,7 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     const bool orthographic_view = request.options.view.has_value()
         && scene::orthographic(request.options.view->matrices.projection);
     const bool unlit_view = request.options.view.has_value()
-        && (request.options.view->shading == ViewShading::Unlit
-            || request.options.view->shading == ViewShading::Wireframe);
+        && !view_shading_lit(request.options.view->shading);
     const char* const fog_idle = orthographic_view ? fog_idle_orthographic
         : unlit_view ? fog_idle_unlit : nullptr;
     if (!defer && readiness.selected == scene::RendererBackend::Advanced

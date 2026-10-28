@@ -983,6 +983,13 @@ struct EditorConfig final {
 // and a GPU to run it on. Checked once so the Director can refuse cleanly.
 [[nodiscard]] bool editor_available() noexcept;
 
+// A model's Library thumbnail as the editor drew it: rows top to bottom of
+// 320 x 180 RGBA8, or empty when the model could not be drawn.
+struct RenderedModelThumbnail final {
+  assets::DerivativeKey key;
+  std::vector<core::u8> rgba;
+};
+
 class EditorShell final {
 public:
   [[nodiscard]] static core::Result<std::unique_ptr<EditorShell>, EditorError>
@@ -1053,6 +1060,15 @@ public:
       std::span<const core::u8> encoded_png) noexcept;
   void retain_library_thumbnail_textures(
       std::span<const assets::DerivativeKey> keys) noexcept;
+
+  // Model thumbnails are drawn on the window's device, which only the editor
+  // has: the Director queues the models it was asked for, up to the room
+  // there is, and collects the pictures. Every queued key comes back once,
+  // drawn or empty, a few frames later; nothing here waits on the GPU.
+  [[nodiscard]] core::u32 model_thumbnail_room() const noexcept;
+  [[nodiscard]] bool queue_model_thumbnail(const assets::DerivativeKey &key,
+                                           std::string source);
+  [[nodiscard]] std::vector<RenderedModelThumbnail> take_model_thumbnails();
 
   // Runtime-only Timeline filmstrip atlas residency. This cache shares the UI
   // device but not the Library thumbnail capacity or derivative identity.

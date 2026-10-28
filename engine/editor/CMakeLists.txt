@@ -4,6 +4,7 @@ add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/asset_viewer.cpp
     src/asset_viewer_panel.cpp
+    src/model_facts_worker.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
     src/model_surface_cache.cpp

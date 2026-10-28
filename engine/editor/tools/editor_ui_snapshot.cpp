@@ -8,6 +8,9 @@
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
+#include <mediaserver/render/compositor_scene_executor.hpp>
+#include <mediaserver/render/model_cache.hpp>
+#include <mediaserver/render/output_transform.hpp>
 #include <mediaserver/rhi/device.hpp>
 
 #include <algorithm>
@@ -15,7 +18,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -58,7 +63,14 @@
 //   are unwired; compositor-background selects the Background instead;
 //   asset-viewer draws the Asset Viewer on a 24 fps plate with a marked
 //   range and its filmstrip (the picture is the filmstrip atlas, standing
-//   in for a render), and asset-viewer-empty draws it with nothing open.
+//   in for a render), and asset-viewer-empty draws it with nothing open;
+//   asset-viewer-model renders a real model (MEDIASERVER_SNAPSHOT_MODEL, or
+//   Models/DamagedHelmet) in the viewer's look-dev scene through the
+//   renderer, Advanced unless MEDIASERVER_SNAPSHOT_BACKEND=basic, with its
+//   facts worked out from the package the model cache loaded;
+//   asset-viewer-model-parts clicks its Parts tab and isolates the second
+//   part, and asset-viewer-model-uv and asset-viewer-model-lights draw it
+//   in UV checker and Lights only shading.
 namespace {
 
 namespace assets = mediaserver::assets;
@@ -67,9 +79,27 @@ namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
 namespace rhi = mediaserver::rhi;
+namespace render = mediaserver::render;
 namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
 namespace topology = mediaserver::topology;
+
+// An environment variable's text, empty when it is not set.
+[[nodiscard]] std::string environment_text(const char *name) {
+#ifdef _WIN32
+  char *value = nullptr;
+  std::size_t length = 0U;
+  if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
+    return {};
+  }
+  std::string text{value};
+  std::free(value);
+  return text;
+#else
+  const char *const value = std::getenv(name);
+  return value != nullptr ? std::string{value} : std::string{};
+#endif
+}
 
 [[nodiscard]] std::optional<gui::FontAtlas> load_font(float scale) {
   constexpr std::array<const char *, 2U> candidates{
@@ -517,6 +547,12 @@ int main(int argc, char **argv) {
           : view;
 
   rhi::DeviceConfig config{};
+  // A model is rendered as the editor window renders it: on D3D12 where the
+  // machine has it, which is what the Advanced renderer needs.
+  if (view.substr(0U, 18U) == "asset-viewer-model" &&
+      rhi::Device::available(rhi::BackendKind::D3d12)) {
+    config.backend = rhi::BackendKind::D3d12;
+  }
   auto created = rhi::Device::create(config);
   if (!created) {
     std::puts("no device");
@@ -732,7 +768,10 @@ int main(int argc, char **argv) {
   }
   const float tall_list_width =
       std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
-  const int passes = clicks || graph_view || library_view ? 8 : 3;
+  const int passes =
+      clicks || graph_view || library_view || view.substr(0U, 18U) == "asset-viewer-model"
+          ? 8
+          : 3;
   editor::AssetViewerPanel viewer_panel{gui::ui_id("snapshot.viewer")};
   assets::AssetRegistry viewer_assets{};
   {
@@ -750,6 +789,123 @@ int main(int argc, char **argv) {
   if (view == "asset-viewer") {
     viewer_panel.open(doc::NodeId{40U}, 312U, std::pair{240U, 455U});
   }
+  // A real model, loaded by the model cache the renderer reads and drawn by
+  // the renderer in the viewer's own look-dev scene.
+  const bool model_snapshot = view.substr(0U, 18U) == "asset-viewer-model";
+  editor::AssetViewerModelInput model_input{};
+  assets::ModelAsset snapshot_model{};
+  std::optional<render::CompositorSceneExecutor> model_renderer;
+  std::optional<render::OutputTransform> model_display;
+  bool model_drawn = false;
+  scene::RendererSettings model_settings{};
+  if (model_snapshot) {
+    const std::string chosen = environment_text("MEDIASERVER_SNAPSHOT_MODEL");
+    const std::filesystem::path path = std::filesystem::absolute(
+        !chosen.empty() ? chosen
+                        : "Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb");
+    snapshot_model.id = doc::NodeId{44U};
+    snapshot_model.display_name = path.filename().string();
+    snapshot_model.source = path.generic_string();
+    viewer_assets.assets.push_back(assets::Asset{snapshot_model});
+    viewer_panel.open(snapshot_model.id);
+    model_settings.backend =
+        environment_text("MEDIASERVER_SNAPSHOT_BACKEND") == "basic"
+            ? scene::RendererBackend::Basic
+            : scene::RendererBackend::Advanced;
+    render::ModelCache cache;
+    static_cast<void>(cache.observe(snapshot_model.source, cache.publication_epoch()));
+    static_cast<void>(render::detail::wait_for_shared_model_cache_for_test());
+    const render::ModelCacheObservation observed =
+        cache.observe(snapshot_model.source, cache.publication_epoch());
+    if (observed.ready()) {
+      model_input.state = editor::AssetViewerModelState::Ready;
+      model_input.bounds = editor::WorldBounds{observed.asset->bounds.minimum,
+                                               observed.asset->bounds.maximum};
+      model_input.facts = std::make_shared<const render::ModelPackageFacts>(
+          render::model_package_facts(*observed.asset));
+    } else {
+      model_input.state = editor::AssetViewerModelState::Failed;
+      model_input.diagnostic = "The importer refused the file.";
+    }
+    model_input.advanced =
+        model_settings.backend == scene::RendererBackend::Advanced;
+  }
+  // Renders the panel's model view at its image area's size, frame after
+  // frame until the geometry, textures and colour table have all arrived.
+  const auto render_model = [&](const editor::AssetViewerModelView &request,
+                                core::u32 width, core::u32 height) {
+    if (!model_renderer.has_value()) {
+      render::RendererLimits limits{};
+      limits.view_shading = true;
+      auto made = render::CompositorSceneExecutor::create(
+          device, width, height, limits, render::MediaCacheConfig{},
+          device.capabilities().backend == rhi::BackendKind::D3d12
+              ? rhi::TextureFormat::Rgba16Float
+              : rhi::TextureFormat::Rgba8Unorm);
+      auto display = render::OutputTransform::create(device, width, height);
+      if (!made || !display) {
+        std::puts("no model renderer");
+        return;
+      }
+      model_renderer.emplace(std::move(made).value());
+      model_display.emplace(std::move(display).value());
+    } else if (model_renderer->width() != width ||
+               model_renderer->height() != height) {
+      static_cast<void>(device.wait_idle());
+      static_cast<void>(model_renderer->resize(device, width, height));
+      static_cast<void>(model_display->resize(device, width, height));
+    }
+    bool settled = false;
+    for (int attempt = 0; attempt < 240; ++attempt) {
+      const editor::WorldBounds bounds =
+          editor::asset_viewer_model_bounds(snapshot_model, model_input.bounds);
+      scene::Scene look = editor::asset_viewer_model_scene(
+          snapshot_model, request, bounds, model_settings, nullptr);
+      look.canvas = scene::Canvas{width, height};
+      render::SceneRenderView look_view{};
+      look_view.matrices = scene::view_for_slice(look.camera, look.canvas,
+                                                 scene::whole(look.canvas));
+      look_view.eye = look.camera.eye;
+      look_view.forward = scene::normalize(look.camera.target - look.camera.eye);
+      look_view.history_identity = 0x4153'5345'544D'4F44ULL;
+      look_view.clip_planes = render::SceneClipPlanes{look.camera.near_plane,
+                                                      look.camera.far_plane};
+      look_view.shading = request.shading;
+      look_view.model_part = request.part;
+      auto acquired = device.acquire_commands();
+      if (!acquired) {
+        break;
+      }
+      auto commands = std::move(acquired).value();
+      const auto rendered = model_renderer->execute(commands, look, look_view);
+      model_display->adopt_color(look.renderer_settings.color);
+      const bool shown =
+          rendered &&
+          model_display->render(commands, *rendered.value(),
+                                scene::CanvasRect{0U, 0U, width, height},
+                                model_renderer->scene_linear_output());
+      auto submitted = device.submit(std::move(commands));
+      if (submitted) {
+        static_cast<void>(std::move(submitted).value().wait());
+      }
+      static_cast<void>(render::detail::wait_for_shared_model_cache_for_test());
+      const bool ready =
+          shown && model_renderer->renderer_passes().geometry.assets.ready &&
+          model_display->color_state() == render::DisplayLutState::Ready;
+      if (ready && settled) {
+        model_drawn = true;
+        return;
+      }
+      settled = ready;
+      if (!rendered && attempt > 30) {
+        std::printf("model render refused: %s\n",
+                    std::string{model_renderer->renderer_readiness().headline()}
+                        .c_str());
+        return;
+      }
+    }
+    model_drawn = model_display.has_value();
+  };
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
     if (graph_view) {
@@ -826,6 +982,47 @@ int main(int argc, char **argv) {
         }
       }
       ctx.draw_overlays(window);
+      continue;
+    }
+    if (model_snapshot) {
+      // The Parts view clicks its tab, then its second row.
+      float x = hover_x;
+      float y = hover_y;
+      bool down = false;
+      const float info_height =
+          std::clamp(window.height * 0.32F, 120.0F, 220.0F);
+      const float info_y = window.y + window.height - info_height;
+      if (view == "asset-viewer-model-parts" && pass >= 1 && pass <= 4) {
+        const bool tab = pass <= 2;
+        x = tab ? window.x + 6.0F + ctx.font_width("Details") + 24.0F + 10.0F
+                : window.x + window.width * 0.5F;
+        y = tab ? info_y + 13.0F : info_y + 26.0F + 4.0F + 23.0F + 11.0F;
+        down = pass == 1 || pass == 3;
+      }
+      input.set_mouse_position(x, y);
+      input.set_mouse_button(gui::MouseButton::Left, down);
+      ctx.new_frame(1.0 + 0.016 * pass);
+      ctx.panel(window, ctx.theme().background);
+      editor::AssetViewerDrawInput in{};
+      in.assets = &viewer_assets;
+      in.model = &model_input;
+      in.image = model_drawn && model_display.has_value()
+                     ? &model_display->target()
+                     : nullptr;
+      in.pixels_per_unit = scale;
+      if (view == "asset-viewer-model-uv" && pass == 1) {
+        viewer_panel.set_shading(render::ViewShading::UvChecker);
+      }
+      if (view == "asset-viewer-model-lights" && pass == 1) {
+        viewer_panel.set_shading(render::ViewShading::LightsOnly);
+      }
+      const editor::AssetViewerFrame viewed = viewer_panel.draw(ctx, window, in);
+      ctx.draw_overlays(window);
+      if (viewed.model_view.has_value() && viewed.surface_width != 0U &&
+          pass + 2 >= passes) {
+        render_model(*viewed.model_view, viewed.surface_width,
+                     viewed.surface_height);
+      }
       continue;
     }
     if (viewer_view) {

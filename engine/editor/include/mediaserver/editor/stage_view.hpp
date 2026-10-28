@@ -261,6 +261,8 @@ struct StageNavigationStep final {
 struct WorldBounds final {
     scene::Vec3 minimum{};
     scene::Vec3 maximum{};
+
+    bool operator==(const WorldBounds&) const = default;
 };
 
 // F: the pivot moves to the middle of `bounds` and the eye backs off along the

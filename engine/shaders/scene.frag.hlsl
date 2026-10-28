@@ -14,6 +14,7 @@ static const float pi = 3.14159265358979323846;
 
 #include "light.hlsli"
 #include "ies.hlsli"
+#include "view_aid.hlsli"
 
 // One shadow-casting light's map. Only lights that got a tile appear here, so
 // a light's `params.w` is an index into this table rather than a flag.
@@ -116,7 +117,7 @@ cbuffer SceneConstants : register(b0, space3) {
     // xy: authored slice extent. zw: render-target extent.
     uint4 grain_extent;
     // x: how an editor view shades - 0 lit, 1 unlit, 2 lights only,
-    // 3 wireframe. A show always renders lit.
+    // 3 wireframe, 4 UV checker, 5 world normals. A show always renders lit.
     float4 view_mode;
     // Directional shadow cascades, deliberately independent of output slice:
     // near cascades are fit to sub-frusta of the authored full-canvas camera
@@ -986,14 +987,18 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
     // Unlit and wireframe replace the lit result with the surface's own
     // colour, unexposed, so a base colour reads as itself.
     const bool unlit = view_mode.x > 0.5 && view_mode.x < 1.5;
-    const bool wireframe = view_mode.x > 2.5;
+    const bool wireframe = view_mode.x > 2.5 && view_mode.x < 3.5;
+    // A surface aid shows a property of the surface, unexposed and unlit.
+    const bool aid = view_aid_active(view_mode.x);
     if (unlit) {
         accumulated = base_albedo + emissive;
     } else if (wireframe) {
         accumulated = 0.35 + 0.65 * base_albedo;
+    } else if (aid) {
+        accumulated = decode_srgb(view_aid_colour(view_mode.x, input.uv, normal));
     }
     const float3 exposed =
-        accumulated * (unlit || wireframe ? 1.0 : ground_exposure.a);
+        accumulated * (unlit || wireframe || aid ? 1.0 : ground_exposure.a);
 #if !defined(MEDIASERVER_SCENE_LINEAR)
     // Display-referred only. The Advanced path is scene-linear all the way to
     // the output stage, which owns the display transform - and this block used
@@ -1009,6 +1014,10 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
             apply_inline_effects(
                 display, input.effect_range, input.position.xy));
     }
+    // A surface aid is shown as it is, with no tone curve or grade.
+    if (aid) {
+        display = view_aid_colour(view_mode.x, input.uv, normal);
+    }
 #endif
 #if defined(MEDIASERVER_SCENE_LINEAR)
     // The advanced working target is premultiplied scene-linear RGBA16F.
@@ -1020,6 +1029,9 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
               input.position.xy)))
         : max(apply_inline_effects(
               exposed, input.effect_range, input.position.xy), 0.0);
+    if (aid) {
+        linear_output = exposed;
+    }
     float3 linear_source =
         blend_source(linear_output, opacity, input.layer_style.z);
     if (input.layer_style.z < 1.5) { // Normal and Add use premultiplied factors.

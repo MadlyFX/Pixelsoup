@@ -448,9 +448,10 @@ struct RenderedImage final {
     core::u32 out_width,
     core::u32 out_height,
     std::optional<render::SceneRenderView> explicit_view = std::nullopt,
-    render::SceneRendererMode mode = render::SceneRendererMode::BasicDisplay) {
+    render::SceneRendererMode mode = render::SceneRendererMode::BasicDisplay,
+    const render::RendererLimits& limits = test_limits()) {
     auto created =
-        render::SceneRenderer::create(device, out_width, out_height, test_limits(), mode);
+        render::SceneRenderer::create(device, out_width, out_height, limits, mode);
     check(created.has_value(), "renderer creation", __LINE__);
     auto renderer = std::move(created).value();
 
@@ -1123,6 +1124,194 @@ void imported_material_parts_draw_as_separate_pbr_batches() {
     RENDER_CHECK(red_pixels > 100U);
     RENDER_CHECK(green_pixels > 100U);
     RENDER_CHECK(blue_pixels > 100U);
+}
+
+// The surface aids show a property of the surface rather than its light.
+// A unit quad fills an orthographic view one unit tall, so pixel (x, y) shows
+// UV ((x + 0.5) / 64, (y + 0.5) / 64), and the expected checker colour at each
+// cell's centre is computed here from that alone. The quad faces +Z, so world
+// normals are (0.5, 0.5, 1) on screen. Only an editor-view renderer draws
+// either; an output renderer refuses rather than drawing them lit.
+void uv_checker_and_world_normals_show_the_surface() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{64U, 64U};
+    const scene::CanvasRect whole = scene::whole(canvas);
+    scene::Scene scn = empty_scene(canvas);
+    scene::MeshInstance quad{};
+    quad.mesh = scene::MeshKey{scene::Primitive::Quad, 1U};
+    quad.world = scene::identity();
+    quad.normal = scene::normal_basis(quad.world);
+    quad.material.base_color = scene::Vec3{0.2F, 0.6F, 0.1F};
+    scn.instances.push_back(quad);
+    scene::Camera camera = scn.camera;
+    camera.orthographic_height = 1.0F;
+    render::SceneRenderView view{
+        scene::view_for_slice(camera, canvas, whole), camera.eye,
+        scene::normalize(camera.target - camera.eye)};
+    view.clip_planes =
+        render::SceneClipPlanes{camera.near_plane, camera.far_plane};
+    render::RendererLimits editor = test_limits();
+    editor.view_shading = true;
+
+    const auto expected_checker = [](core::u32 x, core::u32 y) {
+        const float u = (static_cast<float>(x) + 0.5F) / 64.0F;
+        const float v = (static_cast<float>(y) + 0.5F) / 64.0F;
+        const bool odd =
+            ((static_cast<int>(u * 8.0F) + static_cast<int>(v * 8.0F)) % 2) != 0;
+        const float scale = odd ? 0.35F : 1.0F;
+        return std::array<int, 3U>{
+            static_cast<int>(std::lround((0.25F + 0.75F * u) * scale * 255.0F)),
+            static_cast<int>(std::lround((0.25F + 0.75F * v) * scale * 255.0F)),
+            static_cast<int>(std::lround(0.85F * scale * 255.0F))};
+    };
+    const auto rgb_at = [](const RenderedImage& image, core::u32 x,
+                           core::u32 y) {
+        const std::size_t offset =
+            (static_cast<std::size_t>(y) * image.width + x) * 4U;
+        return std::array<int, 3U>{image.rgba[offset], image.rgba[offset + 1U],
+                                   image.rgba[offset + 2U]};
+    };
+
+    view.shading = render::ViewShading::UvChecker;
+    const RenderedImage checker =
+        render_slice(device, scn, whole, canvas.width, canvas.height, view,
+                     render::SceneRendererMode::BasicDisplay, editor);
+    for (core::u32 cell_y = 0U; cell_y < 8U; ++cell_y) {
+        for (core::u32 cell_x = 0U; cell_x < 8U; ++cell_x) {
+            const core::u32 x = cell_x * 8U + 4U;
+            const core::u32 y = cell_y * 8U + 4U;
+            const auto drawn = rgb_at(checker, x, y);
+            const auto wanted = expected_checker(x, y);
+            for (std::size_t lane = 0U; lane < 3U; ++lane) {
+                RENDER_CHECK(channel_difference(drawn[lane], wanted[lane]) <= 3);
+            }
+        }
+    }
+    // Red rises with U and green with V: the mapping is not mirrored.
+    RENDER_CHECK(rgb_at(checker, 60U, 4U)[0U] > rgb_at(checker, 4U, 4U)[0U]);
+    RENDER_CHECK(rgb_at(checker, 4U, 60U)[1U] > rgb_at(checker, 4U, 4U)[1U]);
+
+    view.shading = render::ViewShading::WorldNormals;
+    const RenderedImage normals =
+        render_slice(device, scn, whole, canvas.width, canvas.height, view,
+                     render::SceneRendererMode::BasicDisplay, editor);
+    const auto facing = rgb_at(normals, 32U, 32U);
+    RENDER_CHECK(channel_difference(facing[0U], 128) <= 2);
+    RENDER_CHECK(channel_difference(facing[1U], 128) <= 2);
+    RENDER_CHECK(channel_difference(facing[2U], 255) <= 2);
+
+    // The scene-linear path carries the same colour, linearised for the
+    // display transform to encode, where this machine has one.
+    std::optional<rhi::Device> advanced_device;
+    if (rhi::Device::available(rhi::BackendKind::D3d12)) {
+        rhi::DeviceConfig config{};
+        config.backend = rhi::BackendKind::D3d12;
+        auto opened = rhi::Device::create(config);
+        RENDER_CHECK(opened);
+        if (opened.value().capabilities().advanced_raster()
+            && opened.value().capabilities().compute) {
+            advanced_device.emplace(std::move(opened).value());
+        }
+    }
+    if (advanced_device.has_value()) {
+        const RenderedImage linear = render_slice(
+            *advanced_device, scn, whole, canvas.width, canvas.height, view,
+            render::SceneRendererMode::AdvancedLinear, editor);
+        const auto linear_at = [&](std::size_t lane) {
+            core::u16 bits{};
+            std::memcpy(&bits,
+                        linear.rgba.data() + (32U * 64U + 32U) * 8U + lane * 2U,
+                        sizeof(bits));
+            return half_to_float(bits);
+        };
+        RENDER_CHECK(std::abs(linear_at(0U) - decode_srgb_code(128U)) < 0.01F);
+        RENDER_CHECK(std::abs(linear_at(1U) - decode_srgb_code(128U)) < 0.01F);
+        RENDER_CHECK(std::abs(linear_at(2U) - 1.0F) < 0.01F);
+    }
+
+    // An output renderer refuses either aid.
+    for (const render::ViewShading shading :
+         {render::ViewShading::UvChecker, render::ViewShading::WorldNormals}) {
+        auto created = render::SceneRenderer::create(
+            device, canvas.width, canvas.height, test_limits());
+        check(created.has_value(), "renderer creation", __LINE__);
+        auto renderer = std::move(created).value();
+        auto acquired = device.acquire_commands();
+        check(acquired.has_value(), "acquire commands", __LINE__);
+        auto commands = std::move(acquired).value();
+        render::SceneRenderOptions options{};
+        options.view = view;
+        options.view->shading = shading;
+        RENDER_CHECK(!renderer.render(commands, scn, whole, options));
+    }
+}
+
+// An isolating view draws one part of the model and nothing else. Each of
+// the fixture's three parts has its own colour, so each isolation must show
+// exactly one colour, and the three together must show all three. An output
+// renderer refuses isolation rather than drawing every part.
+void an_isolated_part_draws_alone() {
+    auto device = open_device();
+    constexpr scene::Canvas canvas{128U, 80U};
+    const scene::CanvasRect whole = scene::whole(canvas);
+    const scene::Scene scn = multipart_model_scene(canvas);
+    render::SceneRenderView view{
+        scene::view_for_slice(scn.camera, canvas, whole), scn.camera.eye,
+        scene::normalize(scn.camera.target - scn.camera.eye)};
+    render::RendererLimits editor = test_limits();
+    editor.view_shading = true;
+
+    const auto colours = [](const RenderedImage& image) {
+        std::array<std::size_t, 3U> counts{};
+        for (std::size_t pixel = 0U; pixel < image.rgba.size(); pixel += 4U) {
+            const int red = image.rgba[pixel];
+            const int green = image.rgba[pixel + 1U];
+            const int blue = image.rgba[pixel + 2U];
+            counts[0U] += red > green + 40 && red > blue + 40 ? 1U : 0U;
+            counts[1U] += green > red + 40 && green > blue + 40 ? 1U : 0U;
+            counts[2U] += blue > red + 40 && blue > green + 40 ? 1U : 0U;
+        }
+        return counts;
+    };
+    std::array<bool, 3U> seen{};
+    for (core::u32 part = 0U; part < 3U; ++part) {
+        view.model_part = part;
+        const RenderedImage image =
+            render_slice(device, scn, whole, canvas.width, canvas.height, view,
+                         render::SceneRendererMode::BasicDisplay, editor);
+        RENDER_CHECK(image.stats.instances == 1U);
+        const auto counts = colours(image);
+        std::size_t shown = 0U;
+        for (std::size_t colour = 0U; colour < counts.size(); ++colour) {
+            if (counts[colour] > 100U) {
+                ++shown;
+                seen[colour] = true;
+            } else {
+                RENDER_CHECK(counts[colour] == 0U);
+            }
+        }
+        RENDER_CHECK(shown == 1U);
+    }
+    RENDER_CHECK(seen[0U] && seen[1U] && seen[2U]);
+
+    // A part past the last draws nothing.
+    view.model_part = 3U;
+    const RenderedImage none =
+        render_slice(device, scn, whole, canvas.width, canvas.height, view,
+                     render::SceneRendererMode::BasicDisplay, editor);
+    RENDER_CHECK(none.stats.instances == 0U);
+
+    auto created = render::SceneRenderer::create(device, canvas.width,
+                                                 canvas.height, test_limits());
+    check(created.has_value(), "renderer creation", __LINE__);
+    auto renderer = std::move(created).value();
+    auto acquired = device.acquire_commands();
+    check(acquired.has_value(), "acquire commands", __LINE__);
+    auto commands = std::move(acquired).value();
+    render::SceneRenderOptions options{};
+    options.view = view;
+    options.view->model_part = 0U;
+    RENDER_CHECK(!renderer.render(commands, scn, whole, options));
 }
 
 void a_gpu_model_integration_refusal_is_sticky_for_its_generation() {
@@ -3349,7 +3538,7 @@ void baked_environment_matches_live_lighting() {
     RENDER_CHECK(maximum < 0.025F);
 }
 
-constexpr std::array<Case, 41U> cases{{
+constexpr std::array<Case, 43U> cases{{
     {"renderers on one device share resident geometry",
      &renderers_on_one_device_share_resident_geometry},
     {"shadow maps are reused until what they draw changes",
@@ -3384,6 +3573,9 @@ constexpr std::array<Case, 41U> cases{{
     {"the halves reconstruct the whole", &the_halves_reconstruct_the_whole},
     {"imported material parts draw as separate pbr batches",
      &imported_material_parts_draw_as_separate_pbr_batches},
+    {"UV checker and world normals show the surface",
+     &uv_checker_and_world_normals_show_the_surface},
+    {"an isolated part draws alone", &an_isolated_part_draws_alone},
     {"a GPU model integration refusal is sticky for its generation",
      &a_gpu_model_integration_refusal_is_sticky_for_its_generation},
     {"canceled recordings reuse and eventually commit one model candidate",

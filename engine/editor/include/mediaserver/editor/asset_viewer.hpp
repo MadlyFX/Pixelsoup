@@ -4,6 +4,8 @@
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/editor/stage_view.hpp>
+#include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/rhi/device.hpp>
 #include <mediaserver/scene/scene.hpp>
 
@@ -176,5 +178,94 @@ asset_viewer_pan(const AssetViewerFraming &framing,
 [[nodiscard]] std::string asset_viewer_timecode(const assets::MediaAsset &asset,
                                                 scene::MediaFrameRate show_rate,
                                                 core::u64 frame);
+
+// ---------------------------------------------------------------------------
+// Model mode: a model or projection mesh alone in a neutral look-dev scene.
+// Like the media scene above, everything here is editor-local and drawn by
+// the ordinary renderer, so the model's materials resolve as they do on the
+// wall; nothing is authored, replicated or digested.
+
+// What lights the model.
+enum class AssetViewerEnvironment : core::u8 {
+  // A grey surround and a three-light rig - key, fill and rim - with the key
+  // first, so it is the light the Advanced renderer casts shadows from.
+  Studio,
+  // The Stage scene's own sky, image, physical sky and directional lights,
+  // and its camera's exposure.
+  Stage,
+  // An equirectangular HDR or EXR image the operator chose. Advanced only,
+  // as an environment image is on the wall.
+  Hdri,
+};
+
+struct AssetViewerLookDev final {
+  AssetViewerEnvironment environment{AssetViewerEnvironment::Studio};
+  std::string hdri_source;
+  // Turns the light rig, or the image, about the vertical.
+  scene::Turns rig_yaw{};
+  // The grey floor and its grid.
+  bool floor{true};
+  // The 1.8 m figure standing beside the model, for scale.
+  bool figure{true};
+
+  bool operator==(const AssetViewerLookDev &) const = default;
+};
+
+// The rate the viewer plays a model's animation at.
+inline constexpr core::u32 asset_viewer_animation_rate = 60U;
+
+// What the viewer asks to see of a model on the next frame.
+struct AssetViewerModelView final {
+  doc::NodeId asset{};
+  StageOrbit orbit{};
+  render::ViewShading shading{render::ViewShading::Lit};
+  AssetViewerLookDev look{};
+  // The model's turn about the vertical, the turntable's angle.
+  scene::Turns turntable{};
+  // Only this full-detail part, by index; every part when empty.
+  std::optional<core::u32> part;
+  // The animation clip played, by index; the bind pose when empty.
+  std::optional<core::u32> clip;
+  bool loop{true};
+  // The viewer's own animation frame, at asset_viewer_animation_rate.
+  core::u64 animation_frame{};
+
+  bool operator==(const AssetViewerModelView &) const = default;
+};
+
+// The model's box in its own space: the loaded package's when it has loaded,
+// else the Library's imported bounds, else a 1 m cube standing on the origin.
+[[nodiscard]] WorldBounds
+asset_viewer_model_bounds(const assets::ModelAsset &asset,
+                          const std::optional<WorldBounds> &loaded) noexcept;
+
+// The model's size and where its pivot (the origin it is placed by) sits
+// relative to the middle of its base, all in metres.
+struct AssetViewerDimensions final {
+  float width{};  // along x
+  float depth{};  // along z
+  float height{}; // along y
+  scene::Vec3 pivot_offset{};
+
+  bool operator==(const AssetViewerDimensions &) const = default;
+};
+[[nodiscard]] AssetViewerDimensions
+asset_viewer_dimensions(const WorldBounds &bounds) noexcept;
+
+// A three-quarter view from the front right, a little above, framing the
+// whole box: where a model opens, and where Home returns.
+[[nodiscard]] StageOrbit asset_viewer_model_home(const WorldBounds &bounds) noexcept;
+
+// The look-dev scene: the model at the origin turned by the turntable, the
+// floor meeting its base as a Stage drop rests it on a surface, the figure
+// when shown, and the chosen lighting. The camera is the
+// view's orbit, so shadows and detail are fitted to what is shown. Only the
+// project's backend, quality, colour and texture budget carry over.
+[[nodiscard]] scene::Scene
+asset_viewer_model_scene(const assets::ModelAsset &asset,
+                         const AssetViewerModelView &view,
+                         const WorldBounds &bounds,
+                         const scene::RendererSettings &project,
+                         const scene::Scene *stage);
 
 } // namespace mediaserver::editor

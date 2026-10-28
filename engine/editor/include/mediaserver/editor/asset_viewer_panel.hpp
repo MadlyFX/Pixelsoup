@@ -3,10 +3,13 @@
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/editor/asset_viewer.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/render/model_report.hpp>
 #include <mediaserver/scene/scene_model.hpp>
 
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -36,14 +39,38 @@ struct AssetViewerDrop final {
   bool operator==(const AssetViewerDrop &) const = default;
 };
 
+// The model the viewer shows, as the editor's model cache has it.
+enum class AssetViewerModelState : core::u8 {
+  Loading,
+  Ready,
+  Failed,
+};
+
+struct AssetViewerModelInput final {
+  AssetViewerModelState state{AssetViewerModelState::Loading};
+  // Why it did not load, from the importer.
+  std::string_view diagnostic;
+  // The package's facts, once the worker has them.
+  std::shared_ptr<const render::ModelPackageFacts> facts;
+  render::ModelCheckContext checks;
+  // The loaded package's own box, once it has loaded.
+  std::optional<WorldBounds> bounds;
+  // The project renders Advanced, which an HDRI and shadows need.
+  bool advanced{};
+};
+
 struct AssetViewerDrawInput final {
   const assets::AssetRegistry *assets{};
   // The Director's answer for the last request. Null before the first.
   const AssetViewerInput *director{};
   // The rendered picture, sized to the image area the last draw reported.
   const rhi::Texture *image{};
-  // The picture is still waiting on decoded frames.
+  // The picture is still waiting on decoded frames, or a model's geometry
+  // and textures; `loading_detail` says which, as the Stage does.
   bool decoding{};
+  std::string_view loading_detail;
+  // A model's assets failed on the GPU, with the reason in loading_detail.
+  bool load_failed{};
   // Why there is no picture; empty when there is one.
   std::string_view image_fault;
   scene::MediaFrameRate show_rate{50U, 1U};
@@ -58,11 +85,17 @@ struct AssetViewerDrawInput final {
   std::span<const scene::TimelineLane> lanes;
   // Screen pixels per interface unit, so 100% is one source pixel per pixel.
   float pixels_per_unit{1.0F};
+  // Set while the open asset is a model or projection mesh.
+  const AssetViewerModelInput *model{};
 };
 
 struct AssetViewerFrame final {
   // What to show next frame. Empty while no media asset is open.
   std::optional<AssetViewerRequest> request;
+  // What to draw of the open model next frame; empty unless one is open.
+  std::optional<AssetViewerModelView> model_view;
+  // The operator asked to light the model with an image of their choosing.
+  bool choose_hdri{};
   std::optional<AssetViewerSourceEdit> source_edit;
   // The picture is being dragged out; and where it was let go.
   bool dragging{};
@@ -112,6 +145,8 @@ public:
   }
   // A short note in the edit row, such as why a cut was refused.
   void show_message(std::string message, double now);
+  // Lights the model with the equirectangular image at `path`.
+  void set_hdri(std::string path);
 
   // A new project's ids mean nothing here: forget the asset and history.
   void reset_project_state() noexcept;
@@ -134,6 +169,28 @@ public:
   [[nodiscard]] const AssetViewerFraming &framing() const noexcept {
     return framing_;
   }
+  [[nodiscard]] const StageOrbit &orbit() const noexcept { return orbit_; }
+  [[nodiscard]] render::ViewShading shading() const noexcept {
+    return shading_;
+  }
+  void set_shading(render::ViewShading shading) noexcept { shading_ = shading; }
+  [[nodiscard]] const AssetViewerLookDev &look() const noexcept {
+    return look_;
+  }
+  [[nodiscard]] std::optional<core::u32> isolated_part() const noexcept {
+    return part_;
+  }
+  [[nodiscard]] std::optional<core::u32> clip() const noexcept {
+    return clip_;
+  }
+  [[nodiscard]] bool turntable() const noexcept { return turntable_; }
+
+  // The model view's three tabs below the picture.
+  enum class ModelTab : core::u8 {
+    Details,
+    Parts,
+    Animation,
+  };
 
 private:
   struct Pass;
@@ -148,6 +205,17 @@ private:
   void draw_transport(Pass &p);
   void draw_edit_row(Pass &p);
   void handle_keys(Pass &p);
+  void draw_model(Pass &p);
+  void draw_model_header(Pass &p);
+  void draw_model_image(Pass &p);
+  void draw_model_tools(Pass &p);
+  void draw_model_info(Pass &p);
+  void draw_model_details(Pass &p, gui::FormLayout &rows);
+  void draw_model_parts(Pass &p, gui::FormLayout &rows);
+  void draw_model_animation(Pass &p, gui::FormLayout &rows);
+  void handle_model_keys(Pass &p);
+  void advance_model(Pass &p);
+  void play_clip(double now) noexcept;
   void request_edit(Pass &p, SourceEditMode mode);
   [[nodiscard]] std::pair<core::u32, core::u32> marked_range(
       core::u32 count) const noexcept;
@@ -180,6 +248,36 @@ private:
   double message_until_{};
   std::vector<std::string> use_labels_;
   std::vector<doc::NodeId> use_clips_;
+
+  // Model mode. Like everything above, editor-local and reset with the
+  // project.
+  bool model_fresh_{true};
+  bool navigated_{};
+  bool framed_from_package_{};
+  StageOrbit orbit_{};
+  render::ViewShading shading_{render::ViewShading::Lit};
+  AssetViewerLookDev look_{};
+  bool turntable_{};
+  // Seconds a turntable turn takes.
+  float turntable_period_{20.0F};
+  scene::Turns turntable_angle_{};
+  // When the model view last advanced; empty before its first frame.
+  std::optional<double> last_time_;
+  std::optional<core::u32> part_;
+  std::optional<core::u32> clip_;
+  bool clip_playing_{};
+  bool clip_loop_{true};
+  double clip_origin_time_{};
+  core::u64 clip_origin_frame_{};
+  core::u64 clip_frame_{};
+  // The pointer button steering the model view, while one is held.
+  enum class ModelDrag : core::u8 { None, Orbit, Rig, Track, Dolly };
+  ModelDrag model_drag_{ModelDrag::None};
+  ModelTab tab_{ModelTab::Details};
+  gui::ScrollRegion info_scroll_;
+  std::shared_ptr<const render::ModelPackageFacts> checked_facts_;
+  render::ModelCheckContext checked_context_{};
+  std::vector<render::ModelCheck> checks_;
 };
 
 } // namespace mediaserver::editor

@@ -101,11 +101,16 @@ rendition_tooltip(AssetViewerRendition rendition) noexcept {
 
 struct AssetViewerPanel::Pass final {
   gui::UiContext &ctx;
-  const gui::Rect &bounds;
+  const gui::Rect &bounds_rect;
   const AssetViewerDrawInput &input;
   AssetViewerFrame frame{};
   const assets::Asset *asset{};
   const assets::MediaAsset *media{};
+  const assets::ModelAsset *model{};
+  // The model's box, in model mode.
+  WorldBounds bounds{};
+  gui::Rect tools{};
+  gui::Rect info{};
   core::u32 count{1U};
   assets::MediaFrameRate rate{};
   gui::Rect header{};
@@ -133,6 +138,7 @@ void AssetViewerPanel::open(
     asset_ = asset;
     framing_ = {};
     probe_value_.reset();
+    model_fresh_ = true;
   }
   stop();
   frame_ = frame;
@@ -162,6 +168,15 @@ void AssetViewerPanel::reset_project_state() noexcept {
   dragging_ = false;
   drag_armed_ = false;
   message_.clear();
+  model_fresh_ = true;
+  look_ = AssetViewerLookDev{};
+  turntable_ = false;
+  part_.reset();
+  clip_.reset();
+  clip_playing_ = false;
+  model_drag_ = ModelDrag::None;
+  checked_facts_.reset();
+  checks_.clear();
 }
 
 void AssetViewerPanel::play(int direction, double now) noexcept {
@@ -410,8 +425,7 @@ void AssetViewerPanel::draw_image(Pass &p) {
     return;
   }
   if (p.media == nullptr) {
-    centred("The Asset Viewer shows media. Drag a model from the Library to "
-            "place it.",
+    centred("The Asset Viewer cannot show this kind of asset",
             theme.text_muted);
     return;
   }
@@ -473,8 +487,8 @@ void AssetViewerPanel::draw_image(Pass &p) {
   // The capture is still held on the frame it is let go, so the release is
   // what ends the drag.
   if (grab.released || (!grab.held && (drag_armed_ || dragging_))) {
-    if (dragging_ && !p.bounds.contains(ctx.pointer_release_x(),
-                                        ctx.pointer_release_y())) {
+    if (dragging_ && !p.bounds_rect.contains(ctx.pointer_release_x(),
+                                             ctx.pointer_release_y())) {
       const auto [in, out] = marked_range(p.count);
       p.frame.drop = AssetViewerDrop{asset_, in, out - in + 1U,
                                      ctx.pointer_release_x(),
@@ -913,6 +927,8 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
     p.asset = input.assets->asset(asset_);
     p.media = p.asset != nullptr ? std::get_if<assets::MediaAsset>(p.asset)
                                  : nullptr;
+    p.model = p.asset != nullptr ? std::get_if<assets::ModelAsset>(p.asset)
+                                 : nullptr;
   }
   if (p.media != nullptr) {
     p.count = asset_viewer_frame_count(*p.media);
@@ -924,6 +940,11 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
 
   ctx.panel(bounds, ctx.theme().panel);
   ctx.push_clip(bounds);
+  if (p.model != nullptr && input.model != nullptr) {
+    draw_model(p);
+    ctx.pop_clip();
+    return p.frame;
+  }
   const float bottom = scrub_height + transport_height + edit_height;
   p.header = gui::Rect{bounds.x, bounds.y, bounds.width, header_height};
   p.image = gui::Rect{bounds.x, bounds.y + header_height, bounds.width,
@@ -949,6 +970,870 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
     p.frame.request = AssetViewerRequest{asset_, frame_};
   }
   return p.frame;
+}
+
+namespace {
+
+constexpr float tools_height = 30.0F;
+constexpr float tab_height = 26.0F;
+constexpr float list_row_height = 22.0F;
+
+[[nodiscard]] std::string_view shading_text(render::ViewShading shading) noexcept {
+  switch (shading) {
+  case render::ViewShading::Lit:
+    return "Lit";
+  case render::ViewShading::Unlit:
+    return "Unlit";
+  case render::ViewShading::LightsOnly:
+    return "Lights only";
+  case render::ViewShading::Wireframe:
+    return "Wireframe";
+  case render::ViewShading::UvChecker:
+    return "UV checker";
+  case render::ViewShading::WorldNormals:
+    return "World normals";
+  }
+  return "Lit";
+}
+
+[[nodiscard]] std::string length_text(float metres) {
+  std::array<char, 32U> text{};
+  // Below a tenth of a millimetre is nothing, and never "-0.0 mm".
+  if (std::abs(metres) < 0.0001F) {
+    metres = 0.0F;
+  }
+  const float size = std::abs(metres);
+  if (size >= 1.0F || size == 0.0F) {
+    std::snprintf(text.data(), text.size(), "%.2f m", static_cast<double>(metres));
+  } else if (size >= 0.01F) {
+    std::snprintf(text.data(), text.size(), "%.1f cm",
+                  static_cast<double>(metres) * 100.0);
+  } else {
+    std::snprintf(text.data(), text.size(), "%.1f mm",
+                  static_cast<double>(metres) * 1000.0);
+  }
+  return text.data();
+}
+
+// 1234567 as "1,234,567".
+[[nodiscard]] std::string grouped(core::u64 value) {
+  std::string digits = std::to_string(value);
+  for (std::size_t at = digits.size(); at > 3U; at -= 3U) {
+    digits.insert(at - 3U, ",");
+  }
+  return digits;
+}
+
+[[nodiscard]] std::string counted(core::u64 count, std::string_view one,
+                                  std::string_view many) {
+  return grouped(count) + " " + std::string{count == 1U ? one : many};
+}
+
+[[nodiscard]] std::string_view encoding_text(render::ModelTextureEncoding encoding) noexcept {
+  switch (encoding) {
+  case render::ModelTextureEncoding::Bc7:
+    return "BC7";
+  case render::ModelTextureEncoding::Bc5:
+    return "BC5";
+  case render::ModelTextureEncoding::Rgba8:
+    break;
+  }
+  return "RGBA8";
+}
+
+// A scene-linear colour roughly as the screen shows it, for a swatch.
+[[nodiscard]] gui::UiColor swatch(scene::Vec3 linear) noexcept {
+  const auto encode = [](float value) {
+    return std::pow(std::clamp(value, 0.0F, 1.0F), 1.0F / 2.2F);
+  };
+  return gui::UiColor{encode(linear.x), encode(linear.y), encode(linear.z), 1.0F};
+}
+
+[[nodiscard]] std::string seconds_text(double seconds) {
+  std::array<char, 24U> text{};
+  std::snprintf(text.data(), text.size(), "%.2f s", seconds);
+  return text.data();
+}
+
+} // namespace
+
+void AssetViewerPanel::set_hdri(std::string path) {
+  if (path.empty()) {
+    return;
+  }
+  look_.hdri_source = std::move(path);
+  look_.environment = AssetViewerEnvironment::Hdri;
+}
+
+void AssetViewerPanel::play_clip(double now) noexcept {
+  clip_playing_ = true;
+  clip_origin_time_ = now;
+  clip_origin_frame_ = clip_frame_;
+}
+
+void AssetViewerPanel::advance_model(Pass &p) {
+  const double now = p.ctx.time_seconds();
+  const double elapsed =
+      last_time_.has_value() ? std::clamp(now - *last_time_, 0.0, 0.25) : 0.0;
+  last_time_ = now;
+  if (turntable_ && turntable_period_ > 0.0F) {
+    const float turned =
+        turntable_angle_ + static_cast<float>(elapsed / turntable_period_);
+    turntable_angle_ = turned - std::floor(turned);
+  }
+  const render::ModelPackageFacts *const facts = p.input.model->facts.get();
+  if (!clip_playing_ || !clip_.has_value() || facts == nullptr ||
+      *clip_ >= facts->clips.size()) {
+    return;
+  }
+  const double rate = static_cast<double>(asset_viewer_animation_rate);
+  core::u64 frame = clip_origin_frame_ +
+                    static_cast<core::u64>(std::floor(
+                        std::max(now - clip_origin_time_, 0.0) * rate));
+  const auto last = static_cast<core::u64>(std::ceil(
+      static_cast<double>(std::max(facts->clips[*clip_].duration, 0.0F)) * rate));
+  if (!clip_loop_ && frame >= last) {
+    frame = last;
+    clip_playing_ = false;
+  }
+  clip_frame_ = frame;
+}
+
+void AssetViewerPanel::handle_model_keys(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  if (!focused_ || ctx.typing()) {
+    return;
+  }
+  bool used = false;
+  const render::ModelPackageFacts *const facts = p.input.model->facts.get();
+  const bool animating = clip_.has_value() && facts != nullptr &&
+                         *clip_ < facts->clips.size();
+  if (ctx.key_pressed(gui::Key::Home)) {
+    orbit_ = asset_viewer_model_home(p.bounds);
+    used = true;
+  } else if (animating && (ctx.key_pressed(gui::Key::Left) ||
+                           ctx.key_pressed(gui::Key::Right))) {
+    clip_playing_ = false;
+    const core::u64 step =
+        ctx.shift_held() ? asset_viewer_animation_rate : 1U;
+    if (ctx.key_pressed(gui::Key::Left)) {
+      clip_frame_ = clip_frame_ > step ? clip_frame_ - step : 0U;
+    } else {
+      clip_frame_ += step;
+    }
+    used = true;
+  }
+  for (const char key : ctx.shortcut_text()) {
+    switch (key) {
+    case 'f':
+    case 'F':
+      orbit_ = stage_focus(orbit_, p.bounds);
+      navigated_ = true;
+      used = true;
+      break;
+    case 't':
+    case 'T':
+      turntable_ = !turntable_;
+      used = true;
+      break;
+    case ' ':
+      if (animating) {
+        if (clip_playing_) {
+          clip_playing_ = false;
+        } else {
+          play_clip(ctx.time_seconds());
+        }
+        used = true;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+  p.frame.consumed_keys = used;
+}
+
+void AssetViewerPanel::draw_model_header(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const AssetViewerModelInput &model = *p.input.model;
+  const gui::Rect &bar = p.header;
+  ctx.panel(bar, theme.header);
+  ctx.panel(gui::Rect{bar.x, bar.y + bar.height - 1.0F, bar.width, 1.0F},
+            theme.divider);
+  float right = bar.x + bar.width - 4.0F;
+  const float y = bar.y + 3.0F;
+  const float h = bar.height - 6.0F;
+  const auto room = [&](float width) {
+    return right - width > bar.x + 160.0F;
+  };
+  const auto place = [&](float width) {
+    right -= width;
+    const gui::Rect at{right, y, width, h};
+    right -= 4.0F;
+    return at;
+  };
+  if (room(112.0F)) {
+    static constexpr std::array<std::string_view, 6U> shadings{
+        "Lit", "Unlit", "Lights only", "Wireframe", "UV checker",
+        "World normals"};
+    std::size_t selected = static_cast<std::size_t>(shading_);
+    const gui::Rect at = place(112.0F);
+    if (ctx.dropdown(mix(id_, "shading"), at, shadings, selected)) {
+      shading_ = static_cast<render::ViewShading>(
+          std::min<std::size_t>(selected, shadings.size() - 1U));
+    }
+    ctx.tooltip(at, "How the model is shaded here. UV checker shows its "
+                    "texture mapping; World normals its facing.");
+  }
+  if (room(120.0F)) {
+    static constexpr std::array<std::string_view, 3U> environments{
+        "Studio", "Stage scene", "HDRI image..."};
+    std::size_t selected = static_cast<std::size_t>(look_.environment);
+    const gui::Rect at = place(120.0F);
+    if (ctx.dropdown(mix(id_, "environment"), at, environments, selected)) {
+      if (selected == 2U) {
+        p.frame.choose_hdri = true;
+      } else {
+        look_.environment = static_cast<AssetViewerEnvironment>(selected);
+      }
+    }
+    ctx.tooltip(at, look_.environment == AssetViewerEnvironment::Hdri
+                        ? std::string_view{look_.hdri_source}
+                        : std::string_view{
+                              "What lights the model. Only the viewer changes; "
+                              "nothing is authored."});
+  }
+  if (room(52.0F)) {
+    const gui::Rect forward = place(24.0F);
+    right += 4.0F;
+    const gui::Rect back = place(24.0F);
+    if (ctx.button(mix(id_, "back"), back, "<") && history_index_ > 0U &&
+        !history_.empty()) {
+      --history_index_;
+      const doc::NodeId wanted = history_[history_index_];
+      asset_ = doc::NodeId{};
+      open(wanted);
+    }
+    if (ctx.button(mix(id_, "forward"), forward, ">") &&
+        history_index_ + 1U < history_.size()) {
+      ++history_index_;
+      const doc::NodeId wanted = history_[history_index_];
+      asset_ = doc::NodeId{};
+      open(wanted);
+    }
+    ctx.tooltip(back, "Previous asset");
+    ctx.tooltip(forward, "Next asset");
+  }
+
+  const std::string title{assets::asset_display_name(*p.asset)};
+  const float title_width = std::min(ctx.font_width(title) + 4.0F,
+                                     std::max(right - bar.x - 12.0F, 0.0F));
+  const gui::Rect title_rect{bar.x + 8.0F, bar.y, title_width, bar.height};
+  ctx.label(title_rect, title, theme.text);
+  ctx.tooltip(title_rect, assets::asset_source(*p.asset));
+  float chip_x = title_rect.x + title_rect.width + 8.0F;
+  const auto chip = [&](std::string_view text, gui::UiColor color,
+                        std::string_view tip) {
+    const float width = ctx.font_width(text) + 12.0F;
+    if (chip_x + width > right) {
+      return;
+    }
+    const gui::Rect rect{chip_x, bar.y + 6.0F, width, bar.height - 12.0F};
+    ctx.panel(rect, alpha(color, 0.18F));
+    ctx.label(gui::Rect{rect.x + 6.0F, rect.y, rect.width - 6.0F, rect.height},
+              text, color);
+    ctx.tooltip(rect, tip);
+    chip_x += width + 6.0F;
+  };
+  if (p.model->projection_mesh) {
+    chip("PROJECTION MESH", theme.text_muted,
+         "A projection mesh: its UV0 is the mapping the wall is calibrated "
+         "with, so it opens in UV checker shading");
+  }
+  if (model.state == AssetViewerModelState::Failed) {
+    chip("DID NOT LOAD", theme.warning, model.diagnostic);
+  } else if (p.input.load_failed) {
+    chip("LOAD FAILED", theme.warning, p.input.loading_detail);
+  } else if (model.state == AssetViewerModelState::Loading ||
+             p.input.decoding) {
+    chip("LOADING", theme.playhead,
+         p.input.loading_detail.empty()
+             ? std::string_view{"Waiting for the model's geometry or textures"}
+             : p.input.loading_detail);
+  }
+  if (look_.environment == AssetViewerEnvironment::Hdri && !model.advanced) {
+    chip("HDRI NEEDS ADVANCED", theme.warning,
+         "An environment image lights a scene only in the Advanced renderer "
+         "(Project Settings > Renderer)");
+  }
+}
+
+void AssetViewerPanel::draw_model_image(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const AssetViewerModelInput &model = *p.input.model;
+  const gui::Rect area = p.image;
+  ctx.panel(area, theme.background);
+  if (area.width < 8.0F || area.height < readout_height + 8.0F) {
+    return;
+  }
+  const gui::Rect picture_area{area.x, area.y, area.width,
+                               area.height - readout_height};
+  const gui::Rect readout{area.x, picture_area.y + picture_area.height,
+                          area.width, readout_height};
+  ctx.panel(readout, theme.panel);
+  p.frame.surface_width = static_cast<core::u32>(
+      std::max(std::lround(picture_area.width * p.ppu), 1L));
+  p.frame.surface_height = static_cast<core::u32>(
+      std::max(std::lround(picture_area.height * p.ppu), 1L));
+
+  const auto centred = [&](std::string_view text, gui::UiColor color) {
+    const float width =
+        std::min(ctx.font_width(text), picture_area.width - 16.0F);
+    ctx.label(gui::Rect{picture_area.x + (picture_area.width - width) * 0.5F,
+                        picture_area.y + picture_area.height * 0.5F - 12.0F,
+                        std::max(width, 0.0F), 24.0F},
+              text, color);
+  };
+  if (p.input.image != nullptr && p.input.image->width() != 0U) {
+    ctx.image(picture_area, *p.input.image);
+  } else if (model.state == AssetViewerModelState::Failed) {
+    centred("This model did not load", theme.warning);
+  } else if (!p.input.image_fault.empty()) {
+    centred(p.input.image_fault, theme.warning);
+  } else {
+    centred("Loading the model", theme.text_muted);
+  }
+
+  // Left drag orbits about the pivot, Shift+left turns the lights, middle
+  // drag pans, right drag and the wheel dolly.
+  const bool hovered =
+      picture_area.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+      !ctx.pointer_blocked();
+  if (hovered && ctx.wheel() != 0.0F) {
+    orbit_ = stage_wheel_dolly(orbit_, ctx.wheel());
+    navigated_ = true;
+  }
+  const gui::Interaction grab = ctx.grab(mix(id_, "model-view"), picture_area);
+  if (grab.pressed) {
+    model_drag_ = ctx.shift_held() ? ModelDrag::Rig : ModelDrag::Orbit;
+  } else if (hovered && ctx.middle_pointer_pressed()) {
+    model_drag_ = ModelDrag::Track;
+  } else if (hovered && ctx.secondary_pointer_pressed()) {
+    model_drag_ = ModelDrag::Dolly;
+  }
+  const bool held = (model_drag_ == ModelDrag::Orbit ||
+                     model_drag_ == ModelDrag::Rig)
+                        ? grab.held && !grab.released
+                    : model_drag_ == ModelDrag::Track ? ctx.middle_pointer_down()
+                    : model_drag_ == ModelDrag::Dolly
+                        ? ctx.secondary_pointer_down()
+                        : false;
+  if (!held) {
+    model_drag_ = ModelDrag::None;
+  }
+  const float dx = ctx.pointer_dx();
+  const float dy = ctx.pointer_dy();
+  if (model_drag_ != ModelDrag::None && (dx != 0.0F || dy != 0.0F)) {
+    StageNavigationStep step{};
+    step.dx = dx;
+    step.dy = dy;
+    step.units_per_pixel = stage_units_per_pixel(orbit_, picture_area.height);
+    switch (model_drag_) {
+    case ModelDrag::Orbit:
+      step.gesture = StageNavigation::Orbit;
+      break;
+    case ModelDrag::Track:
+      step.gesture = StageNavigation::Track;
+      break;
+    case ModelDrag::Dolly:
+      step.gesture = StageNavigation::Dolly;
+      break;
+    case ModelDrag::Rig: {
+      const float turned = look_.rig_yaw + dx * stage_turn_per_pixel;
+      look_.rig_yaw = turned - std::floor(turned);
+      break;
+    }
+    case ModelDrag::None:
+      break;
+    }
+    if (step.gesture != StageNavigation::None) {
+      orbit_ = navigate_stage(orbit_, step);
+      navigated_ = true;
+    }
+  }
+  if (model_drag_ != ModelDrag::None) {
+    ctx.set_cursor(gui::Cursor::Move);
+  }
+
+  // The model's size and where its pivot sits.
+  const AssetViewerDimensions size = asset_viewer_dimensions(p.bounds);
+  std::array<char, 160U> text{};
+  std::snprintf(text.data(), text.size(),
+                "W %s   D %s   H %s     Pivot %s, %s, %s from the base centre",
+                length_text(size.width).c_str(), length_text(size.depth).c_str(),
+                length_text(size.height).c_str(),
+                length_text(size.pivot_offset.x).c_str(),
+                length_text(size.pivot_offset.y).c_str(),
+                length_text(size.pivot_offset.z).c_str());
+  ctx.label(gui::Rect{readout.x + 8.0F, readout.y, readout.width - 16.0F,
+                      readout.height},
+            text.data(), theme.text_muted);
+  ctx.tooltip(readout,
+              model.bounds.has_value()
+                  ? "Width (x), depth (z) and height (y) of the package, in "
+                    "metres, and its origin relative to the middle of its base"
+                  : "From the Library's import; the loaded package refines it");
+}
+
+void AssetViewerPanel::draw_model_tools(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const gui::Rect &row = p.tools;
+  ctx.panel(row, theme.panel);
+  ctx.panel(gui::Rect{row.x, row.y, row.width, 1.0F}, theme.divider);
+  float x = row.x + 8.0F;
+  const float y = row.y + 3.0F;
+  const float h = row.height - 6.0F;
+  const auto next = [&](float width) {
+    const gui::Rect at{x, y, width, h};
+    x += width + 4.0F;
+    return at;
+  };
+  const auto lit = [&](const gui::Rect &at, bool on) {
+    if (on) {
+      ctx.panel(gui::Rect{at.x, at.y + at.height - 2.0F, at.width, 2.0F},
+                theme.accent);
+    }
+  };
+  const gui::Rect frame = next(50.0F);
+  const gui::Rect home = next(50.0F);
+  x += 8.0F;
+  const gui::Rect turntable = next(74.0F);
+  const gui::Rect period = next(62.0F);
+  x += 8.0F;
+  const gui::Rect floor = next(48.0F);
+  const gui::Rect figure = next(54.0F);
+  if (ctx.button(mix(id_, "frame"), frame, "Frame")) {
+    orbit_ = stage_focus(orbit_, p.bounds);
+    navigated_ = true;
+  }
+  if (ctx.button(mix(id_, "home"), home, "Home")) {
+    orbit_ = asset_viewer_model_home(p.bounds);
+  }
+  if (ctx.button(mix(id_, "turntable"), turntable, "Turntable")) {
+    turntable_ = !turntable_;
+  }
+  lit(turntable, turntable_);
+  static constexpr std::array<std::string_view, 3U> periods{"10 s", "20 s",
+                                                            "40 s"};
+  static constexpr std::array<float, 3U> period_seconds{10.0F, 20.0F, 40.0F};
+  std::size_t chosen = 1U;
+  for (std::size_t index = 0U; index < period_seconds.size(); ++index) {
+    if (turntable_period_ == period_seconds[index]) {
+      chosen = index;
+    }
+  }
+  if (ctx.dropdown(mix(id_, "period"), period, periods, chosen)) {
+    turntable_period_ =
+        period_seconds[std::min(chosen, period_seconds.size() - 1U)];
+  }
+  if (ctx.button(mix(id_, "floor"), floor, "Floor")) {
+    look_.floor = !look_.floor;
+  }
+  lit(floor, look_.floor);
+  if (ctx.button(mix(id_, "figure"), figure, "Figure")) {
+    look_.figure = !look_.figure;
+  }
+  lit(figure, look_.figure);
+  ctx.tooltip(frame, "Frame the whole model (F)");
+  ctx.tooltip(home, "Back to the three-quarter view it opened in (Home)");
+  ctx.tooltip(turntable, "Turn the model about its pivot (T)");
+  ctx.tooltip(period, "How long one turn takes");
+  ctx.tooltip(floor, "The floor and its grid, ruled in metres");
+  ctx.tooltip(figure, "A 1.8 m figure beside the model, for scale");
+
+  if (part_.has_value()) {
+    const gui::Rect all{row.x + row.width - 78.0F, y, 70.0F, h};
+    if (all.x > x + 90.0F) {
+      if (ctx.button(mix(id_, "all-parts"), all, "Show all")) {
+        part_.reset();
+      }
+      ctx.label(gui::Rect{all.x - 90.0F, row.y, 86.0F, row.height},
+                "Part " + std::to_string(*part_ + 1U) + " only",
+                theme.playhead);
+    }
+  }
+}
+
+void AssetViewerPanel::draw_model_details(Pass &p, gui::FormLayout &rows) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const AssetViewerModelInput &model = *p.input.model;
+  const auto line = [&](std::string_view text, gui::UiColor color) {
+    ctx.label(rows.caption(), text, color);
+  };
+  const AssetViewerDimensions size = asset_viewer_dimensions(p.bounds);
+  line(length_text(size.width) + " wide, " + length_text(size.depth) +
+           " deep, " + length_text(size.height) + " tall",
+       theme.text);
+  if ((p.input.decoding || p.input.load_failed) &&
+      !p.input.loading_detail.empty()) {
+    line(p.input.loading_detail,
+         p.input.load_failed ? theme.warning : theme.playhead);
+  }
+  if (model.state == AssetViewerModelState::Failed) {
+    line("It did not load: " + std::string{model.diagnostic}, theme.warning);
+    return;
+  }
+  const render::ModelPackageFacts *const facts = model.facts.get();
+  if (facts == nullptr) {
+    line(model.state == AssetViewerModelState::Loading
+             ? "Loading the package"
+             : "Checking the package",
+         theme.text_muted);
+    return;
+  }
+  // Materials as the Library counted them at import; the package keeps
+  // one part per material run, not the source's material list.
+  std::string counts = counted(facts->vertices, "vertex", "vertices") + ", " +
+                       counted(facts->triangles, "triangle", "triangles") +
+                       ", " + counted(facts->parts.size(), "part", "parts");
+  if (p.model->material_count.has_value()) {
+    counts += ", " + counted(*p.model->material_count, "material", "materials");
+  }
+  line(counts, theme.text_muted);
+  std::array<char, 48U> memory{};
+  std::snprintf(memory.data(), memory.size(), "%.0f MiB",
+                static_cast<double>(facts->texture_bytes) / (1024.0 * 1024.0));
+  line(counted(facts->textures, "texture", "textures") + " (" + memory.data() +
+           " at full resolution), " +
+           counted(facts->lods, "level of detail", "levels of detail") + ", " +
+           counted(facts->clips.size(), "animation clip", "animation clips"),
+       theme.text_muted);
+  rows.space(4.0F);
+  if (checks_.empty()) {
+    line("No problems found", theme.good);
+  }
+  for (const render::ModelCheck &check : checks_) {
+    const bool warning = check.level == render::ModelCheckLevel::Warning;
+    const gui::Rect at = rows.caption();
+    ctx.label(gui::Rect{at.x, at.y, 14.0F, at.height}, warning ? "!" : "i",
+              warning ? theme.warning : theme.text_muted);
+    ctx.label(gui::Rect{at.x + 16.0F, at.y, at.width - 16.0F, at.height},
+              check.text, warning ? theme.text : theme.text_muted);
+    ctx.tooltip(at, check.text);
+  }
+}
+
+void AssetViewerPanel::draw_model_parts(Pass &p, gui::FormLayout &rows) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const render::ModelPackageFacts *const facts = p.input.model->facts.get();
+  if (facts == nullptr) {
+    ctx.label(rows.caption(), "Waiting for the package", theme.text_muted);
+    return;
+  }
+  for (std::size_t index = 0U; index < facts->parts.size(); ++index) {
+    const render::ModelPartFacts &part = facts->parts[index];
+    const gui::Rect at = rows.next(list_row_height, 1.0F);
+    const bool chosen = part_.has_value() && *part_ == index;
+    const bool visible = at.y + at.height > p.info.y && at.y < p.info.y + p.info.height;
+    if (chosen) {
+      ctx.panel(at, theme.selection);
+    } else if (index % 2U == 1U) {
+      ctx.panel(at, theme.row);
+    }
+    const gui::UiColor colour = part.has_material
+                                    ? swatch(part.material.base_color)
+                                    : theme.text_muted;
+    ctx.panel(gui::Rect{at.x + 4.0F, at.y + 4.0F, 14.0F, at.height - 8.0F},
+              colour);
+    std::array<char, 96U> factors{};
+    std::snprintf(factors.data(), factors.size(), "rough %.2f  metal %.2f",
+                  static_cast<double>(part.material.roughness),
+                  static_cast<double>(part.material.metallic));
+    std::string text = "Part " + std::to_string(index + 1U) + "   " +
+                       counted(part.triangles, "tri", "tris") + "   " +
+                       (part.has_material ? std::string{factors.data()}
+                                          : std::string{"no material"});
+    std::string textures;
+    for (const render::ModelPartTexture &texture : part.textures) {
+      textures += textures.empty() ? "" : ",  ";
+      textures += std::string{render::model_texture_role_name(texture.role)} +
+                  " " + std::to_string(texture.width) + "x" +
+                  std::to_string(texture.height) + " " +
+                  std::string{encoding_text(texture.encoding)};
+    }
+    if (!textures.empty()) {
+      text += "   " + textures;
+    }
+    ctx.label(gui::Rect{at.x + 24.0F, at.y, at.width - 28.0F, at.height}, text,
+              part.missing_uv || part.missing_tangent ? theme.warning
+                                                      : theme.text);
+    if (visible) {
+      const gui::Interaction row = ctx.grab(
+          mix(mix(id_, "part"), std::to_string(index)), at);
+      if (row.pressed) {
+        if (chosen) {
+          part_.reset();
+        } else {
+          part_ = static_cast<core::u32>(index);
+        }
+      }
+      ctx.tooltip(at, textures.empty()
+                          ? std::string_view{"Click to show this part alone"}
+                          : std::string_view{textures});
+    }
+  }
+}
+
+void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const render::ModelPackageFacts *const facts = p.input.model->facts.get();
+  if (facts == nullptr) {
+    ctx.label(rows.caption(), "Waiting for the package", theme.text_muted);
+    return;
+  }
+  if (facts->clips.empty()) {
+    ctx.label(rows.caption(), "This model has no animation clips",
+              theme.text_muted);
+    return;
+  }
+  const double now = ctx.time_seconds();
+  const double rate = static_cast<double>(asset_viewer_animation_rate);
+  // The transport for the chosen clip.
+  {
+    const gui::Rect at = rows.next(p.ctx.theme().metrics.control, 6.0F);
+    const gui::Rect play{at.x, at.y, 56.0F, at.height};
+    const gui::Rect loop{play.x + play.width + 4.0F, at.y, 48.0F, at.height};
+    const bool chosen = clip_.has_value() && *clip_ < facts->clips.size();
+    if (ctx.button(mix(id_, "clip-play"), play,
+                   clip_playing_ ? "Pause" : "Play")) {
+      if (!chosen) {
+        clip_ = 0U;
+        clip_frame_ = 0U;
+      }
+      if (clip_playing_) {
+        clip_playing_ = false;
+      } else {
+        play_clip(now);
+      }
+    }
+    if (ctx.button(mix(id_, "clip-loop"), loop, "Loop")) {
+      clip_loop_ = !clip_loop_;
+      clip_origin_time_ = now;
+      clip_origin_frame_ = clip_frame_;
+    }
+    if (clip_loop_) {
+      ctx.panel(gui::Rect{loop.x, loop.y + loop.height - 2.0F, loop.width, 2.0F},
+                theme.accent);
+    }
+    ctx.tooltip(play, "Play or pause the clip (Space)");
+    ctx.tooltip(loop, "Loop the clip");
+    if (chosen) {
+      const double duration =
+          std::max(static_cast<double>(facts->clips[*clip_].duration), 0.0);
+      double shown = static_cast<double>(clip_frame_) / rate;
+      if (clip_loop_ && duration > 0.0) {
+        shown = std::fmod(shown, duration);
+      }
+      shown = std::min(shown, duration);
+      const std::string time = seconds_text(shown) + " / " + seconds_text(duration);
+      const float time_width = ctx.font_width(time) + 12.0F;
+      const gui::Rect bar{loop.x + loop.width + 10.0F, at.y + 6.0F,
+                          std::max(at.x + at.width - time_width -
+                                       (loop.x + loop.width + 10.0F),
+                                   10.0F),
+                          at.height - 12.0F};
+      ctx.panel(bar, theme.track);
+      if (duration > 0.0) {
+        const float head = bar.x + bar.width * static_cast<float>(shown / duration);
+        ctx.panel(gui::Rect{head - 1.0F, bar.y - 3.0F, 2.0F, bar.height + 6.0F},
+                  theme.playhead);
+        const gui::Interaction scrub = ctx.grab(mix(id_, "clip-scrub"), bar);
+        if (scrub.held) {
+          clip_playing_ = false;
+          const double t = std::clamp(
+              static_cast<double>((ctx.pointer_x() - bar.x) / bar.width), 0.0, 1.0);
+          clip_frame_ = static_cast<core::u64>(std::llround(t * duration * rate));
+        }
+      }
+      ctx.label(gui::Rect{bar.x + bar.width + 8.0F, at.y, time_width, at.height},
+                time, theme.text_muted);
+    }
+  }
+  const auto row = [&](std::size_t index, std::string_view name,
+                       std::string_view detail, bool chosen) {
+    const gui::Rect at = rows.next(list_row_height, 1.0F);
+    if (chosen) {
+      ctx.panel(at, theme.selection);
+    } else if (index % 2U == 1U) {
+      ctx.panel(at, theme.row);
+    }
+    ctx.label(gui::Rect{at.x + 8.0F, at.y, at.width * 0.7F, at.height}, name,
+              theme.text);
+    const float detail_width = ctx.font_width(detail) + 8.0F;
+    ctx.label(gui::Rect{at.x + at.width - detail_width, at.y, detail_width,
+                        at.height},
+              detail, theme.text_muted);
+    const bool visible =
+        at.y + at.height > p.info.y && at.y < p.info.y + p.info.height;
+    return visible &&
+           ctx.grab(mix(mix(id_, "clip"), std::to_string(index)), at).pressed;
+  };
+  if (row(0U, "Bind pose", "", !clip_.has_value())) {
+    clip_.reset();
+    clip_playing_ = false;
+    clip_frame_ = 0U;
+  }
+  for (std::size_t index = 0U; index < facts->clips.size(); ++index) {
+    const render::ModelClipFacts &clip = facts->clips[index];
+    const std::string name =
+        clip.name.empty() ? "Clip " + std::to_string(index + 1U) : clip.name;
+    if (row(index + 1U, name, seconds_text(clip.duration),
+            clip_.has_value() && *clip_ == index)) {
+      clip_ = static_cast<core::u32>(index);
+      clip_frame_ = 0U;
+      play_clip(now);
+    }
+  }
+}
+
+void AssetViewerPanel::draw_model_info(Pass &p) {
+  gui::UiContext &ctx = p.ctx;
+  const gui::Theme &theme = ctx.theme();
+  const render::ModelPackageFacts *const facts = p.input.model->facts.get();
+  const gui::Rect tabs{p.info.x, p.info.y, p.info.width, tab_height};
+  ctx.panel(p.info, theme.panel);
+  ctx.panel(tabs, theme.header);
+  ctx.panel(gui::Rect{tabs.x, tabs.y + tabs.height - 1.0F, tabs.width, 1.0F},
+            theme.divider);
+  const std::array<std::string, 3U> names{
+      "Details",
+      facts != nullptr ? "Parts  " + std::to_string(facts->parts.size())
+                       : std::string{"Parts"},
+      facts != nullptr ? "Animation  " + std::to_string(facts->clips.size())
+                       : std::string{"Animation"}};
+  float x = tabs.x + 6.0F;
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    const float width = ctx.font_width(names[index]) + 20.0F;
+    const gui::Rect at{x, tabs.y + 2.0F, width, tabs.height - 4.0F};
+    if (ctx.button(mix(mix(id_, "tab"), names[index].substr(0U, 4U)), at,
+                   names[index])) {
+      if (tab_ != static_cast<ModelTab>(index)) {
+        tab_ = static_cast<ModelTab>(index);
+        info_scroll_.reset();
+      }
+    }
+    if (tab_ == static_cast<ModelTab>(index)) {
+      ctx.panel(gui::Rect{at.x, at.y + at.height - 2.0F, at.width, 2.0F},
+                theme.accent);
+    }
+    x += width + 4.0F;
+  }
+  if (!checks_.empty()) {
+    const auto warnings = static_cast<std::size_t>(std::count_if(
+        checks_.begin(), checks_.end(), [](const render::ModelCheck &check) {
+          return check.level == render::ModelCheckLevel::Warning;
+        }));
+    if (warnings != 0U) {
+      const std::string text = counted(warnings, "warning", "warnings");
+      const float width = ctx.font_width(text) + 12.0F;
+      ctx.label(gui::Rect{tabs.x + tabs.width - width, tabs.y, width,
+                          tabs.height},
+                text, theme.warning);
+    }
+  }
+
+  const gui::Rect content{p.info.x, tabs.y + tabs.height, p.info.width,
+                          std::max(p.info.height - tabs.height, 0.0F)};
+  gui::Metrics metrics = theme.metrics;
+  metrics.inset = 8.0F;
+  metrics.gap = 4.0F;
+  const float offset = info_scroll_.begin(ctx, content);
+  gui::FormLayout rows{content, metrics, offset};
+  switch (tab_) {
+  case ModelTab::Details:
+    draw_model_details(p, rows);
+    break;
+  case ModelTab::Parts:
+    draw_model_parts(p, rows);
+    break;
+  case ModelTab::Animation:
+    draw_model_animation(p, rows);
+    break;
+  }
+  info_scroll_.end(ctx, rows.extent());
+}
+
+void AssetViewerPanel::draw_model(Pass &p) {
+  const AssetViewerModelInput &model = *p.input.model;
+  p.bounds = asset_viewer_model_bounds(*p.model, model.bounds);
+  if (model_fresh_) {
+    model_fresh_ = false;
+    navigated_ = false;
+    framed_from_package_ = model.bounds.has_value();
+    orbit_ = asset_viewer_model_home(p.bounds);
+    shading_ = p.model->projection_mesh ? render::ViewShading::UvChecker
+                                        : render::ViewShading::Lit;
+    part_.reset();
+    clip_.reset();
+    clip_playing_ = false;
+    clip_frame_ = 0U;
+    turntable_angle_ = 0.0F;
+    tab_ = ModelTab::Details;
+    info_scroll_.reset();
+  } else if (!framed_from_package_ && model.bounds.has_value()) {
+    // The package's own box replaces the imported one once it loads.
+    framed_from_package_ = true;
+    if (!navigated_) {
+      orbit_ = asset_viewer_model_home(p.bounds);
+    }
+  }
+  if (model.facts != checked_facts_ || !(model.checks == checked_context_)) {
+    checked_facts_ = model.facts;
+    checked_context_ = model.checks;
+    checks_ = model.facts != nullptr
+                  ? render::model_asset_checks(*model.facts, model.checks)
+                  : std::vector<render::ModelCheck>{};
+  }
+  if (const render::ModelPackageFacts *const facts = model.facts.get()) {
+    if (part_.has_value() && *part_ >= facts->parts.size()) {
+      part_.reset();
+    }
+    if (clip_.has_value() && *clip_ >= facts->clips.size()) {
+      clip_.reset();
+      clip_playing_ = false;
+    }
+  }
+
+  const gui::Rect &bounds = p.bounds_rect;
+  const float info_height =
+      bounds.height >= 360.0F
+          ? std::clamp(bounds.height * 0.32F, 120.0F, 220.0F)
+          : 0.0F;
+  p.header = gui::Rect{bounds.x, bounds.y, bounds.width, header_height};
+  p.info = gui::Rect{bounds.x, bounds.y + bounds.height - info_height,
+                     bounds.width, info_height};
+  p.tools = gui::Rect{bounds.x, p.info.y - tools_height, bounds.width,
+                      tools_height};
+  p.image = gui::Rect{bounds.x, bounds.y + header_height, bounds.width,
+                      std::max(p.tools.y - bounds.y - header_height, 0.0F)};
+
+  handle_model_keys(p);
+  advance_model(p);
+  draw_model_image(p);
+  draw_model_tools(p);
+  if (info_height > 0.0F) {
+    draw_model_info(p);
+  }
+  draw_model_header(p);
+  p.frame.model_view = AssetViewerModelView{
+      asset_, orbit_, shading_, look_, turntable_angle_, part_,
+      clip_,  clip_loop_, clip_frame_};
 }
 
 void AssetViewerPanel::draw_drag_ghost(gui::UiContext &ctx,

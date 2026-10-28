@@ -31,6 +31,7 @@ StructuredBuffer<float4> inline_effect_parameters : register(t3, space2);
 
 #include "scene_media_coverage.hlsli"
 #include "scene_media_sampling.hlsli"
+#include "view_aid.hlsli"
 
 // The same block the lit stage receives, so both agree about the project's
 // brightness curve. Only the curve selector is read here: a clip carries no
@@ -44,7 +45,8 @@ cbuffer SceneConstants : register(b0, space3) {
     uint4 grain_context;
     uint4 grain_extent;
     // x: how an editor view shades - 0 lit, 1 unlit, 2 lights only,
-    // 3 wireframe. A clip is unlit already; see main.
+    // 3 wireframe, 4 UV checker, 5 world normals. A clip is unlit already;
+    // see main.
     float4 view_mode;
 };
 
@@ -307,10 +309,14 @@ float4 main(Input input) : SV_Target0 {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
     // Lights only shows a clip as a flat grey card - it is a picture, not a
-    // lit surface - and wireframe draws its edges in one clip colour.
+    // lit surface - wireframe draws its edges in one clip colour, and the
+    // surface aids show its mapping or facing as they do any surface's.
     if (view_mode.x > 1.5) {
-        const float3 aid = view_mode.x > 2.5 ? float3(0.95, 0.7, 0.3)
-                                             : float3(0.18, 0.18, 0.18);
+        const float3 aid = view_aid_active(view_mode.x)
+            ? media_decode_srgb(view_aid_colour(
+                  view_mode.x, input.uv, input.world_normal))
+            : view_mode.x > 2.5 ? float3(0.95, 0.7, 0.3)
+                                : float3(0.18, 0.18, 0.18);
 #if defined(MEDIASERVER_SCENE_LINEAR)
         float3 aid_source = blend_source(aid, opacity, input.layer_style.z);
         if (input.layer_style.z < 1.5) {

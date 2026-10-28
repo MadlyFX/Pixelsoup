@@ -5,12 +5,15 @@
 
 #include <array>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 namespace assets = mediaserver::assets;
+namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
@@ -196,6 +199,105 @@ void library_to_viewer_to_track() {
   switcher.rehearsal_locked = true;
   check(type(".").source_edits.empty(), "a transition refuses the cut");
 }
+// A red cube, as the importer reads one: a model the thumbnail can be told
+// apart from the floor and sky by colour alone.
+[[nodiscard]] std::string write_red_cube() {
+  const auto directory =
+      std::filesystem::temp_directory_path() / "mediaserver_viewer_thumbnail";
+  std::filesystem::create_directories(directory);
+  {
+    std::ofstream material{directory / "red.mtl", std::ios::trunc};
+    material << "newmtl Red\nKd 0.85 0.05 0.05\nPr 0.6\nPm 0.0\n";
+  }
+  const auto path = directory / "cube.obj";
+  std::ofstream model{path, std::ios::trunc};
+  model << "mtllib red.mtl\n"
+           "v -0.5 0 -0.5\nv 0.5 0 -0.5\nv 0.5 1 -0.5\nv -0.5 1 -0.5\n"
+           "v -0.5 0 0.5\nv 0.5 0 0.5\nv 0.5 1 0.5\nv -0.5 1 0.5\n"
+           "usemtl Red\n"
+           "f 1 3 2\nf 1 4 3\nf 5 6 7\nf 5 7 8\nf 1 5 8\nf 1 8 4\n"
+           "f 2 3 7\nf 2 7 6\nf 4 8 7\nf 4 7 3\nf 1 2 6\nf 1 6 5\n";
+  model.close();
+  check(static_cast<bool>(model), "write the cube");
+  return path.generic_string();
+}
+
+// A model's Library thumbnail is drawn on the editor's own device: queued by
+// key, it comes back a few frames later as 320 x 180 pixels with the model
+// in the middle, and a file that cannot load comes back with no picture.
+void model_thumbnails_draw_on_the_editors_device() {
+  if (!editor::editor_available()) {
+    std::puts("[skip] editor GPU backend unavailable");
+    return;
+  }
+  editor::EditorConfig config;
+  config.title = "Model thumbnail";
+  auto created = editor::EditorShell::create(config);
+  check(created.has_value(), "create editor");
+  auto shell = std::move(created).value();
+  scene::Scene show;
+  show.id = scene::SceneId{100U};
+  editor::EditorTimeline timeline;
+  timeline.last_frame = 600U;
+  const std::vector<scene::ChannelKeyframes> keys;
+  const std::vector<editor::ElementInfo> elements;
+  const assets::AssetRegistry registry;
+  editor::EditorSwitcherState switcher;
+  const auto frame = [&] {
+    auto result = shell->frame(show, timeline, keys, elements, {}, {}, {},
+                               switcher, registry, {}, {}, {}, {}, {}, {},
+                               {}, {}, {});
+    check(result.status == editor::EditorStatus::Running, "editor running");
+  };
+
+  const assets::DerivativeProfile *const profile = assets::derivative_profile(
+      assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+  check(profile != nullptr, "the model thumbnail profile exists");
+  const auto key_for = [&](core::u64 id) {
+    assets::ContentFingerprint fingerprint{};
+    fingerprint.byte_length = id;
+    fingerprint.sha256.bytes[0U] = static_cast<core::u8>(id);
+    return assets::make_derivative_key(doc::NodeId{id}, fingerprint, *profile);
+  };
+  const assets::DerivativeKey cube = key_for(88U);
+  const assets::DerivativeKey missing = key_for(89U);
+  const core::u32 room = shell->model_thumbnail_room();
+  check(room != 0U, "there is room for a thumbnail");
+  check(shell->queue_model_thumbnail(cube, write_red_cube()), "queue the cube");
+  check(shell->queue_model_thumbnail(
+            missing, "T:/mediaserver-no-such-folder/missing.obj"),
+        "queue the missing model");
+  check(shell->model_thumbnail_room() == room - 2U, "both take room");
+
+  std::vector<editor::RenderedModelThumbnail> drawn;
+  for (int attempt = 0; attempt < 1200 && drawn.size() < 2U; ++attempt) {
+    frame();
+    for (editor::RenderedModelThumbnail &done : shell->take_model_thumbnails()) {
+      drawn.push_back(std::move(done));
+    }
+  }
+  check(drawn.size() == 2U, "both thumbnails are answered");
+  const auto answer = [&](const assets::DerivativeKey &key)
+      -> const editor::RenderedModelThumbnail & {
+    for (const editor::RenderedModelThumbnail &done : drawn) {
+      if (done.key == key) {
+        return done;
+      }
+    }
+    throw std::runtime_error{"a queued key was not answered"};
+  };
+  check(answer(missing).rgba.empty(), "a missing model has no picture");
+  const std::vector<core::u8> &pixels = answer(cube).rgba;
+  check(pixels.size() == 320U * 180U * 4U, "the picture is 320 x 180 RGBA");
+  const std::size_t centre = (90U * 320U + 160U) * 4U;
+  check(pixels[centre] > pixels[centre + 1U] + 40 &&
+            pixels[centre] > pixels[centre + 2U] + 40,
+        "the red cube is in the middle of the picture");
+  const std::size_t corner = (4U * 320U + 4U) * 4U;
+  check(pixels[corner] < pixels[corner + 1U] + 40,
+        "the corner is sky, not the model");
+  check(shell->model_thumbnail_room() == room, "the room comes back");
+}
 } // namespace
 
 int main() {
@@ -203,6 +305,8 @@ int main() {
     library_to_viewer_to_track();
     std::puts("[pass] Library double-click opens the Asset Viewer, which cuts "
               "into the target track");
+    model_thumbnails_draw_on_the_editors_device();
+    std::puts("[pass] a model's thumbnail is drawn on the editor's device");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "[fail] %s\n", error.what());

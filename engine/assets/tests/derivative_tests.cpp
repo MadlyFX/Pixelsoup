@@ -37,7 +37,19 @@ void check(bool condition, const char* expression, int line) {
 
 void profile_catalog_freezes_output_semantics() {
     const auto profiles = assets::derivative_profiles();
-    DERIVATIVE_CHECK(profiles.size() == 5U);
+    DERIVATIVE_CHECK(profiles.size() == 6U);
+    // A model's thumbnail is its own frozen profile, never the media one.
+    const auto* model = assets::derivative_profile(
+        assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+    DERIVATIVE_CHECK(model != nullptr);
+    DERIVATIVE_CHECK(static_cast<core::u16>(model->id) == 6U);
+    DERIVATIVE_CHECK(model->name == "model-turntable-320x180-srgb");
+    DERIVATIVE_CHECK(model->width == 320U && model->height == 180U);
+    DERIVATIVE_CHECK(model->sampling ==
+                     assets::DerivativeSampling::BoundsFramedView);
+    DERIVATIVE_CHECK(model->container == assets::DerivativeContainer::Png);
+    DERIVATIVE_CHECK(assets::derivative_profile(
+                         "model-turntable-320x180-srgb") == model);
     const auto* thumbnail = assets::derivative_profile(
         assets::DerivativeProfileId::Thumbnail320x180Srgb);
     DERIVATIVE_CHECK(thumbnail != nullptr);

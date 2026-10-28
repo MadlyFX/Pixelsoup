@@ -9,7 +9,7 @@
 namespace mediaserver::assets {
 namespace {
 
-constexpr std::array<DerivativeProfile, 5U> profiles{{
+constexpr std::array<DerivativeProfile, 6U> profiles{{
     {
         DerivativeProfileId::Thumbnail320x180Srgb,
         "thumb-320x180-srgb",
@@ -159,6 +159,36 @@ constexpr std::array<DerivativeProfile, 5U> profiles{{
         DerivativeFitPolicy::PreserveWithinBounds,
         18U,
         30U,
+    },
+    {
+        DerivativeProfileId::ModelTurntable320x180Srgb,
+        "model-turntable-320x180-srgb",
+        1U,
+        1U,
+        DerivativeKind::Thumbnail,
+        DerivativeContainer::Png,
+        DerivativeCodec::Png,
+        DerivativeSampling::BoundsFramedView,
+        320U,
+        180U,
+        1U,
+        DerivativeFrameRatePolicy::NotApplicable,
+        {},
+        DerivativePixelFormat::Rgba8,
+        DerivativeColorPrimaries::Rec709,
+        DerivativeTransfer::Srgb,
+        DerivativeMatrix::Rgb,
+        DerivativeColorRange::Full,
+        DerivativeAlphaPolicy::Straight,
+        DerivativeAudioLayout::None,
+        DerivativeAudioCodec::None,
+        0U,
+        0U,
+        DerivativeOrientationPolicy::NotApplicable,
+        DerivativePixelAspectPolicy::NotApplicable,
+        DerivativeFitPolicy::NotApplicable,
+        0U,
+        0U,
     },
 }};
 

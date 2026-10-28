@@ -523,6 +523,123 @@ void no_valid_frame_reports_failed_after_exact_fallback_order() {
                     std::vector<core::u32>{1U, 2U, 0U});
 }
 
+[[nodiscard]] assets::ModelAsset make_model(doc::NodeId id,
+                                            const fs::path& path) {
+    const std::string source = assets::asset_source_from_path(path);
+    const auto fingerprint = assets::source_fingerprint(source);
+    if (!fingerprint) {
+        throw std::runtime_error{"could not fingerprint model fixture"};
+    }
+    assets::ModelAsset model{};
+    model.id = id;
+    model.display_name = "Test model";
+    model.source = source;
+    model.fingerprint = fingerprint.value();
+    return model;
+}
+
+// A model's thumbnail is drawn by the editor: the request waits, untouched by
+// the decode workers, until the editor takes it; the picture it brings back
+// is encoded and cached under the model profile's key. An empty picture
+// fails it, and work cancelled while the editor draws drops its picture.
+void model_thumbnails_wait_for_the_editors_picture() {
+    TemporaryDirectory temporary;
+    const fs::path drawn_path = temporary.path() / "drawn.glb";
+    const fs::path broken_path = temporary.path() / "broken.glb";
+    const fs::path dropped_path = temporary.path() / "dropped.glb";
+    write(drawn_path, "a model revision");
+    write(broken_path, "a model that does not draw");
+    write(dropped_path, "a model nobody looks at any more");
+    const assets::ModelAsset drawn = make_model(doc::NodeId{61U}, drawn_path);
+    const assets::ModelAsset broken = make_model(doc::NodeId{62U}, broken_path);
+    const assets::ModelAsset dropped = make_model(doc::NodeId{63U}, dropped_path);
+    auto decoder = std::make_shared<DecoderState>();
+    server::ThumbnailService service{
+        open_cache(temporary.path() / "cache"),
+        server::ThumbnailServiceConfig{1U, 8U, 4U, 32U},
+        factory(decoder)};
+
+    const auto requested = service.request_model(drawn);
+    THUMBNAIL_CHECK(requested);
+    THUMBNAIL_CHECK(requested.value().state == assets::DerivativeState::Queued);
+    THUMBNAIL_CHECK(requested.value().key.profile ==
+                    assets::DerivativeProfileId::ModelTurntable320x180Srgb);
+    THUMBNAIL_CHECK(requested.value().key.asset == drawn.id);
+    // Asking again while it waits is the same work.
+    THUMBNAIL_CHECK(service.request_model(drawn).value().revision ==
+                    requested.value().revision);
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    THUMBNAIL_CHECK(service.snapshot(requested.value().key)->state ==
+                    assets::DerivativeState::Queued);
+    THUMBNAIL_CHECK(decoded_ordinals(decoder).empty());
+
+    const std::vector<server::ModelThumbnailRender> taken =
+        service.take_model_renders(4U);
+    THUMBNAIL_CHECK(taken.size() == 1U);
+    THUMBNAIL_CHECK(taken.front().key == requested.value().key);
+    THUMBNAIL_CHECK(taken.front().source == drawn.source);
+    THUMBNAIL_CHECK(service.snapshot(requested.value().key)->state ==
+                    assets::DerivativeState::Generating);
+    THUMBNAIL_CHECK(service.take_model_renders(4U).empty());
+
+    // A red first pixel on blue.
+    std::vector<core::u8> picture(320U * 180U * 4U, 0U);
+    for (std::size_t at = 0U; at < picture.size(); at += 4U) {
+        picture[at + 2U] = 200U;
+        picture[at + 3U] = 255U;
+    }
+    picture[0U] = 255U;
+    picture[2U] = 0U;
+    service.complete_model_render(requested.value().key, picture);
+    const server::ThumbnailSnapshot ready = wait_for_state(
+        service, requested.value().key, assets::DerivativeState::Ready);
+    const auto loaded = service.load(ready.key);
+    THUMBNAIL_CHECK(loaded);
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* const decoded = stbi_load_from_memory(
+        loaded.value().payload.data(),
+        static_cast<int>(loaded.value().payload.size()), &width, &height,
+        &channels, 4);
+    THUMBNAIL_CHECK(decoded != nullptr);
+    THUMBNAIL_CHECK(width == 320 && height == 180);
+    THUMBNAIL_CHECK(decoded[0U] == 255U && decoded[2U] == 0U);
+    THUMBNAIL_CHECK(decoded[4U] == 0U && decoded[6U] == 200U);
+    stbi_image_free(decoded);
+    // Cached, it is Ready at once and needs no second picture.
+    THUMBNAIL_CHECK(service.request_model(drawn).value().state ==
+                    assets::DerivativeState::Ready);
+    THUMBNAIL_CHECK(service.take_model_renders(4U).empty());
+
+    // No picture: Failed.
+    const auto broken_request = service.request_model(broken);
+    THUMBNAIL_CHECK(service.take_model_renders(4U).size() == 1U);
+    service.complete_model_render(broken_request.value().key, {});
+    const server::ThumbnailSnapshot failed = wait_for_state(
+        service, broken_request.value().key, assets::DerivativeState::Failed);
+    THUMBNAIL_CHECK(failed.failure == server::ThumbnailFailureCode::NoValidFrame);
+
+    // Cancelled while drawn: the picture is dropped and nothing is cached.
+    const auto dropped_request = service.request_model(dropped);
+    THUMBNAIL_CHECK(service.take_model_renders(4U).size() == 1U);
+    service.retain({});
+    THUMBNAIL_CHECK(service.snapshot(dropped_request.value().key)->state ==
+                    assets::DerivativeState::Cancelled);
+    service.complete_model_render(dropped_request.value().key, picture);
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    THUMBNAIL_CHECK(service.snapshot(dropped_request.value().key)->state ==
+                    assets::DerivativeState::Cancelled);
+    const auto never = service.load(dropped_request.value().key);
+    THUMBNAIL_CHECK(never);
+    THUMBNAIL_CHECK(never.value().entry.state ==
+                    assets::DerivativeState::Missing);
+    // A model without a fingerprint is refused outright.
+    assets::ModelAsset unfingerprinted = drawn;
+    unfingerprinted.fingerprint.reset();
+    THUMBNAIL_CHECK(!service.request_model(unfingerprinted));
+}
+
 void invalid_assets_never_enter_the_queue() {
     TemporaryDirectory temporary;
     auto decoder = std::make_shared<DecoderState>();
@@ -545,7 +662,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
     {"deterministic probe PNG and asset identity",
      &deterministic_probe_png_and_asset_identity},
     {"production decoder generates a still thumbnail",
@@ -563,6 +680,8 @@ constexpr std::array<Case, 9U> cases{{
      &no_valid_frame_reports_failed_after_exact_fallback_order},
     {"invalid assets never enter the queue",
      &invalid_assets_never_enter_the_queue},
+    {"model thumbnails wait for the editor's picture",
+     &model_thumbnails_wait_for_the_editors_picture},
 }};
 
 } // namespace

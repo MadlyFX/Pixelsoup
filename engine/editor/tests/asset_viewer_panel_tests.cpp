@@ -2,11 +2,13 @@
 #include <mediaserver/editor/asset_viewer_panel.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/text.hpp>
+#include <mediaserver/scene/manipulate.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
+#include <memory>
 #include <optional>
 #include <iostream>
 #include <stdexcept>
@@ -21,6 +23,7 @@ namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
 namespace editor = mediaserver::editor;
 namespace gui = mediaserver::gui;
+namespace render = mediaserver::render;
 namespace scene = mediaserver::scene;
 
 void check(bool condition, const char *expression, int line) {
@@ -242,7 +245,7 @@ void an_opened_asset_is_requested_and_nothing_else() {
   const editor::AssetViewerFrame shown = harness.type({});
   VIEWER_CHECK(shown.request == editor::AssetViewerRequest{plate_id, 0U});
   VIEWER_CHECK(shown.surface_width > 0U && shown.surface_height > 0U);
-  // A model opens in the panel but is not something it renders.
+  // A model asks for nothing the Director renders.
   harness.panel.open(model_id);
   VIEWER_CHECK(!harness.type({}).request.has_value());
 }
@@ -373,6 +376,418 @@ void the_wheel_zooms_about_the_pointer_and_fit_resets() {
   VIEWER_CHECK(harness.panel.framing().scale == 0.0F);
 }
 
+// ---------------------------------------------------------------- models
+
+[[nodiscard]] editor::WorldBounds box(scene::Vec3 minimum, scene::Vec3 maximum) {
+  return editor::WorldBounds{minimum, maximum};
+}
+
+[[nodiscard]] bool near3(scene::Vec3 a, scene::Vec3 b,
+                         float tolerance = 1.0e-3F) noexcept {
+  return near(a.x, b.x, tolerance) && near(a.y, b.y, tolerance) &&
+         near(a.z, b.z, tolerance);
+}
+
+[[nodiscard]] assets::ModelAsset car() {
+  assets::ModelAsset model{};
+  model.id = model_id;
+  model.display_name = "Car";
+  model.source = "D:/models/car.glb";
+  return model;
+}
+
+// Three parts, the second with two textures, and two clips.
+[[nodiscard]] std::shared_ptr<const render::ModelPackageFacts> car_facts() {
+  render::ModelPackageFacts facts{};
+  facts.vertices = 900U;
+  facts.triangles = 600U;
+  for (int index = 0; index < 3; ++index) {
+    render::ModelPartFacts part{};
+    part.triangles = 200U;
+    part.has_material = true;
+    facts.parts.push_back(part);
+  }
+  facts.parts[1U].textures.push_back(render::ModelPartTexture{
+      0U, 2048U, 2048U, render::ModelTextureEncoding::Bc7});
+  facts.materials = 3U;
+  facts.clips.push_back(render::ModelClipFacts{"Idle", 2.0F});
+  facts.clips.push_back(render::ModelClipFacts{"Drive", 1.5F});
+  facts.bounds = render::ModelBounds{scene::Vec3{-1.0F, 0.0F, -2.0F},
+                                     scene::Vec3{1.0F, 1.5F, 2.0F}};
+  return std::make_shared<const render::ModelPackageFacts>(std::move(facts));
+}
+
+void model_bounds_prefer_the_package_and_measure_from_the_base() {
+  assets::ModelAsset model = car();
+  // Nothing known: a 1 m cube standing on the origin.
+  const editor::WorldBounds unknown =
+      editor::asset_viewer_model_bounds(model, std::nullopt);
+  VIEWER_CHECK(near3(unknown.minimum, scene::Vec3{-0.5F, 0.0F, -0.5F}));
+  VIEWER_CHECK(near3(unknown.maximum, scene::Vec3{0.5F, 1.0F, 0.5F}));
+  // The Library's import, then the loaded package over it.
+  model.bounds = assets::ModelBounds{-2.0, -1.0, -3.0, 2.0, 1.0, 3.0};
+  const editor::WorldBounds imported =
+      editor::asset_viewer_model_bounds(model, std::nullopt);
+  VIEWER_CHECK(near3(imported.maximum, scene::Vec3{2.0F, 1.0F, 3.0F}));
+  const editor::WorldBounds loaded = editor::asset_viewer_model_bounds(
+      model, box(scene::Vec3{0.0F, 0.0F, 0.0F}, scene::Vec3{4.0F, 3.0F, 2.0F}));
+  VIEWER_CHECK(near3(loaded.maximum, scene::Vec3{4.0F, 3.0F, 2.0F}));
+
+  // 4 m wide, 2 m deep, 3 m tall, with its origin at a corner of the base:
+  // the pivot sits 2 m left and 1 m behind the base's middle.
+  const editor::AssetViewerDimensions size =
+      editor::asset_viewer_dimensions(loaded);
+  VIEWER_CHECK(near(size.width, 4.0F) && near(size.depth, 2.0F) &&
+               near(size.height, 3.0F));
+  VIEWER_CHECK(near3(size.pivot_offset, scene::Vec3{-2.0F, 0.0F, -1.0F}));
+  // Standing on its centre, the pivot is at the base's middle.
+  VIEWER_CHECK(near3(editor::asset_viewer_dimensions(unknown).pivot_offset,
+                     scene::Vec3{}));
+
+  // Home looks at the middle of the box from the front right, a little
+  // above, far enough back to see all of it.
+  const editor::StageOrbit home = editor::asset_viewer_model_home(loaded);
+  VIEWER_CHECK(near3(home.target, scene::Vec3{2.0F, 1.5F, 1.0F}));
+  VIEWER_CHECK(home.yaw > 0.0F && home.pitch > 0.0F);
+  const float radius = scene::length(scene::Vec3{2.0F, 1.5F, 1.0F});
+  VIEWER_CHECK(home.distance > radius);
+  VIEWER_CHECK(home.projection == editor::StageProjection::Perspective);
+}
+
+void the_look_dev_scene_places_lights_floor_and_figure() {
+  const assets::ModelAsset model = car();
+  const editor::WorldBounds bounds =
+      box(scene::Vec3{-1.0F, -0.5F, -2.0F}, scene::Vec3{1.0F, 1.0F, 2.0F});
+  scene::RendererSettings project{};
+  project.backend = scene::RendererBackend::Advanced;
+  project.texture_budget_mib = 1536U;
+  project.bloom_strength = 0.7F;
+  editor::AssetViewerModelView view{};
+  view.asset = model_id;
+  view.orbit = editor::asset_viewer_model_home(bounds);
+
+  const scene::Scene studio =
+      editor::asset_viewer_model_scene(model, view, bounds, project, nullptr);
+  // The project's backend and budget carry over; its look does not.
+  VIEWER_CHECK(studio.renderer_settings.backend ==
+               scene::RendererBackend::Advanced);
+  VIEWER_CHECK(studio.renderer_settings.texture_budget_mib == 1536U);
+  VIEWER_CHECK(studio.renderer_settings.bloom_strength == 0.0F);
+  // One model at the origin, drawn from its own file, never baked static.
+  VIEWER_CHECK(studio.models.size() == 1U);
+  VIEWER_CHECK(studio.models.front().source == "D:/models/car.glb");
+  VIEWER_CHECK(studio.models.front().source_node == model_id);
+  VIEWER_CHECK(!studio.models.front().bake_static);
+  VIEWER_CHECK(!studio.models.front().animation.enabled);
+  VIEWER_CHECK(near3(scene::transform_point(studio.models.front().world,
+                                            scene::Vec3{1.0F, 0.0F, 0.0F}),
+                     scene::Vec3{1.0F, 0.0F, 0.0F}));
+  // Three lights, key first and brightest, all shining downwards.
+  VIEWER_CHECK(studio.directional_lights.size() == 3U);
+  for (const scene::DirectionalLight &light : studio.directional_lights) {
+    VIEWER_CHECK(light.direction.y < 0.0F);
+    VIEWER_CHECK(light.intensity <= studio.directional_lights.front().intensity);
+  }
+  VIEWER_CHECK(!studio.environment.baked.enabled &&
+               studio.environment.fog_density == 0.0F);
+  // The camera is the orbit.
+  VIEWER_CHECK(near3(studio.camera.target, view.orbit.target));
+  // The floor faces up at the model's base; the figure stands 1.8 m tall on
+  // it beside the model, clear of it.
+  const auto floor = std::find_if(
+      studio.instances.begin(), studio.instances.end(), [](const auto &prop) {
+        return prop.mesh.primitive == scene::Primitive::Plane;
+      });
+  VIEWER_CHECK(floor != studio.instances.end());
+  VIEWER_CHECK(near(scene::translation_of(floor->world).y, -0.5F));
+  float figure_top = 0.0F;
+  float figure_x = 0.0F;
+  for (const scene::MeshInstance &prop : studio.instances) {
+    if (prop.mesh.primitive == scene::Primitive::Sphere) {
+      const scene::Vec3 centre = scene::translation_of(prop.world);
+      figure_top = std::max(figure_top, centre.y + 0.2F);
+      figure_x = centre.x;
+    }
+  }
+  VIEWER_CHECK(near(figure_top, 1.3F));
+  VIEWER_CHECK(figure_x - 0.2F > bounds.maximum.x);
+
+  // Without floor or figure, the model is all there is.
+  view.look.floor = false;
+  view.look.figure = false;
+  VIEWER_CHECK(editor::asset_viewer_model_scene(model, view, bounds, project,
+                                                nullptr)
+                   .instances.empty());
+
+  // Turning the rig turns every light; the turntable turns the model.
+  view.look.rig_yaw = 0.25F;
+  view.turntable = 0.25F;
+  const scene::Scene turned =
+      editor::asset_viewer_model_scene(model, view, bounds, project, nullptr);
+  VIEWER_CHECK(!near3(turned.directional_lights.front().direction,
+                      studio.directional_lights.front().direction));
+  VIEWER_CHECK(near(turned.directional_lights.front().direction.y,
+                    studio.directional_lights.front().direction.y));
+  const scene::Vec3 side = scene::transform_point(turned.models.front().world,
+                                                  scene::Vec3{1.0F, 0.0F, 0.0F});
+  VIEWER_CHECK(near(side.x, 0.0F) && near(std::abs(side.z), 1.0F));
+
+  // A clip plays on the viewer's own clock.
+  view.clip = 1U;
+  view.loop = false;
+  view.animation_frame = 90U;
+  const scene::Scene animated =
+      editor::asset_viewer_model_scene(model, view, bounds, project, nullptr);
+  VIEWER_CHECK(animated.models.front().animation.enabled);
+  VIEWER_CHECK(animated.models.front().animation.clip == 1U);
+  VIEWER_CHECK(!animated.models.front().animation.loop);
+  VIEWER_CHECK(animated.show_frame == 90U);
+  VIEWER_CHECK(animated.show_rate ==
+               (scene::MediaFrameRate{editor::asset_viewer_animation_rate, 1U}));
+}
+
+void the_stage_or_an_image_can_light_the_model() {
+  const assets::ModelAsset model = car();
+  const editor::WorldBounds bounds =
+      box(scene::Vec3{-1.0F, 0.0F, -1.0F}, scene::Vec3{1.0F, 1.0F, 1.0F});
+  scene::Scene stage{};
+  stage.environment.sky_color = scene::Vec3{0.3F, 0.1F, 0.05F};
+  stage.environment.fog_density = 0.4F;
+  stage.environment.baked.enabled = true;
+  scene::DirectionalLight sun{};
+  sun.intensity = 7.5F;
+  stage.directional_lights.push_back(sun);
+  stage.camera.aperture_f_number = 11.0F;
+  stage.camera.iso = 400.0F;
+  editor::AssetViewerModelView view{};
+  view.asset = model_id;
+  view.orbit = editor::asset_viewer_model_home(bounds);
+  view.look.environment = editor::AssetViewerEnvironment::Stage;
+  const scene::Scene staged =
+      editor::asset_viewer_model_scene(model, view, bounds, {}, &stage);
+  VIEWER_CHECK(staged.environment.sky_color == stage.environment.sky_color);
+  VIEWER_CHECK(staged.directional_lights.size() == 1U);
+  VIEWER_CHECK(staged.directional_lights.front().intensity == 7.5F);
+  VIEWER_CHECK(staged.camera.aperture_f_number == 11.0F);
+  VIEWER_CHECK(staged.camera.iso == 400.0F);
+  // The room's air and baked light stay in the room.
+  VIEWER_CHECK(staged.environment.fog_density == 0.0F);
+  VIEWER_CHECK(!staged.environment.baked.enabled);
+  // With no Stage scene, the studio lights it.
+  VIEWER_CHECK(editor::asset_viewer_model_scene(model, view, bounds, {}, nullptr)
+                   .directional_lights.size() == 3U);
+
+  view.look.environment = editor::AssetViewerEnvironment::Hdri;
+  view.look.hdri_source = "D:/hdri/hall.exr";
+  view.look.rig_yaw = 0.125F;
+  const scene::Scene image =
+      editor::asset_viewer_model_scene(model, view, bounds, {}, &stage);
+  VIEWER_CHECK(image.environment.map_source == "D:/hdri/hall.exr");
+  VIEWER_CHECK(image.environment.map_rotation == 0.125F);
+  VIEWER_CHECK(image.directional_lights.empty());
+}
+
+struct ModelHarness final {
+  Harness base;
+  editor::AssetViewerModelInput model{};
+
+  ModelHarness() {
+    base.assets.assets.clear();
+    base.assets.assets.push_back(assets::Asset{plate()});
+    base.assets.assets.push_back(assets::Asset{car()});
+  }
+
+  editor::AssetViewerFrame frame(float x, float y, bool down,
+                                 std::string_view text = {},
+                                 std::optional<gui::Key> key = std::nullopt,
+                                 gui::KeyMods mods = gui::KeyMods::None,
+                                 gui::MouseButton button = gui::MouseButton::Left) {
+    gui::InputState &input = base.input;
+    input.new_frame();
+    input.set_mods(mods);
+    input.set_mouse_position(x, y);
+    input.set_mouse_button(button, down);
+    input.add_text(text);
+    if (key.has_value()) {
+      input.add_key(*key);
+    }
+    base.ctx.new_frame(base.time);
+    editor::AssetViewerDrawInput in{};
+    in.assets = &base.assets;
+    in.model = &model;
+    return base.panel.draw(base.ctx, Harness::bounds, in);
+  }
+
+  void click(float x, float y) {
+    static_cast<void>(frame(x, y, false));
+    static_cast<void>(frame(x, y, true));
+    static_cast<void>(frame(x, y, false));
+  }
+
+  editor::AssetViewerFrame type(std::string_view text) {
+    return frame(-1.0F, -1.0F, false, text);
+  }
+
+  // The info area's tab buttons, as the panel lays them out.
+  [[nodiscard]] float tab_x(std::size_t index) const {
+    const std::array<std::string, 3U> names{
+        "Details", "Parts  3", "Animation  2"};
+    float x = 6.0F;
+    for (std::size_t at = 0U; at < index; ++at) {
+      x += base.ctx.font_width(names[at]) + 20.0F + 4.0F;
+    }
+    return x + 4.0F;
+  }
+};
+
+// The 800 x 500 panel keeps 160 units below its picture for the info area,
+// whose tabs take its top 26 and whose rows start 4 below them.
+constexpr float info_tab_y = 340.0F + 13.0F;
+constexpr float first_row_y = 370.0F;
+
+void a_model_opens_framed_and_asks_for_its_view() {
+  ModelHarness harness;
+  harness.base.panel.open(model_id);
+  const editor::AssetViewerFrame loading = harness.type({});
+  VIEWER_CHECK(!loading.request.has_value());
+  VIEWER_CHECK(loading.model_view.has_value());
+  VIEWER_CHECK(loading.model_view->asset == model_id);
+  VIEWER_CHECK(loading.model_view->shading == mediaserver::render::ViewShading::Lit);
+  VIEWER_CHECK(loading.surface_width > 0U && loading.surface_height > 0U);
+  const editor::WorldBounds cube =
+      editor::asset_viewer_model_bounds(car(), std::nullopt);
+  VIEWER_CHECK(loading.model_view->orbit == editor::asset_viewer_model_home(cube));
+  // The package's own box arrives and, untouched, the view re-frames to it.
+  const editor::WorldBounds loaded =
+      box(scene::Vec3{-3.0F, 0.0F, -3.0F}, scene::Vec3{3.0F, 4.0F, 3.0F});
+  harness.model.state = editor::AssetViewerModelState::Ready;
+  harness.model.bounds = loaded;
+  VIEWER_CHECK(harness.type({}).model_view->orbit ==
+               editor::asset_viewer_model_home(loaded));
+  // Media still opens as media.
+  harness.base.panel.open(plate_id);
+  const editor::AssetViewerFrame media = harness.type({});
+  VIEWER_CHECK(media.request.has_value() && !media.model_view.has_value());
+
+  // A projection mesh opens showing its UV mapping.
+  assets::ModelAsset mesh = car();
+  mesh.id = doc::NodeId{43U};
+  mesh.projection_mesh = true;
+  harness.base.assets.assets.push_back(assets::Asset{mesh});
+  harness.base.panel.open(mesh.id);
+  VIEWER_CHECK(harness.type({}).model_view->shading ==
+               mediaserver::render::ViewShading::UvChecker);
+}
+
+void the_model_view_orbits_frames_and_turns() {
+  ModelHarness harness;
+  harness.model.state = editor::AssetViewerModelState::Ready;
+  harness.model.bounds =
+      box(scene::Vec3{-1.0F, 0.0F, -1.0F}, scene::Vec3{1.0F, 2.0F, 1.0F});
+  harness.base.panel.open(model_id);
+  const editor::StageOrbit home = harness.type({}).model_view->orbit;
+  // A left drag orbits about the pivot.
+  static_cast<void>(harness.frame(400.0F, 200.0F, false));
+  static_cast<void>(harness.frame(400.0F, 200.0F, true));
+  const editor::AssetViewerFrame orbited = harness.frame(460.0F, 180.0F, true);
+  static_cast<void>(harness.frame(460.0F, 180.0F, false));
+  VIEWER_CHECK(orbited.model_view->orbit.yaw != home.yaw);
+  VIEWER_CHECK(orbited.model_view->orbit.pitch != home.pitch);
+  VIEWER_CHECK(near3(orbited.model_view->orbit.target, home.target));
+  VIEWER_CHECK(harness.base.panel.focused());
+  // Navigated, a new box no longer re-frames it; Home does.
+  harness.model.bounds =
+      box(scene::Vec3{-5.0F, 0.0F, -5.0F}, scene::Vec3{5.0F, 5.0F, 5.0F});
+  VIEWER_CHECK(harness.type({}).model_view->orbit == orbited.model_view->orbit);
+  const editor::AssetViewerFrame homed =
+      harness.frame(-1.0F, -1.0F, false, {}, gui::Key::Home);
+  VIEWER_CHECK(homed.model_view->orbit ==
+               editor::asset_viewer_model_home(*harness.model.bounds));
+  VIEWER_CHECK(homed.consumed_keys);
+  // The wheel dollies in.
+  harness.base.input.new_frame();
+  harness.base.input.set_mouse_position(400.0F, 200.0F);
+  harness.base.input.add_wheel(1.0F);
+  harness.base.ctx.new_frame(harness.base.time);
+  editor::AssetViewerDrawInput in{};
+  in.assets = &harness.base.assets;
+  in.model = &harness.model;
+  const editor::AssetViewerFrame dollied =
+      harness.base.panel.draw(harness.base.ctx, Harness::bounds, in);
+  VIEWER_CHECK(dollied.model_view->orbit.distance <
+               homed.model_view->orbit.distance);
+  // Shift+drag turns the lights, not the view.
+  static_cast<void>(harness.frame(400.0F, 200.0F, false, {}, std::nullopt,
+                                  gui::KeyMods::Shift));
+  static_cast<void>(harness.frame(400.0F, 200.0F, true, {}, std::nullopt,
+                                  gui::KeyMods::Shift));
+  const editor::AssetViewerFrame lit = harness.frame(
+      480.0F, 200.0F, true, {}, std::nullopt, gui::KeyMods::Shift);
+  static_cast<void>(harness.frame(480.0F, 200.0F, false));
+  VIEWER_CHECK(lit.model_view->look.rig_yaw != 0.0F);
+  VIEWER_CHECK(lit.model_view->orbit == dollied.model_view->orbit);
+  // T starts the turntable: one turn in twenty seconds.
+  static_cast<void>(harness.type("t"));
+  VIEWER_CHECK(harness.base.panel.turntable());
+  harness.base.time += 0.2;
+  static_cast<void>(harness.type({}));
+  harness.base.time += 0.2;
+  const editor::AssetViewerFrame turning = harness.type({});
+  VIEWER_CHECK(near(turning.model_view->turntable, 0.02F, 1.0e-4F));
+  // F frames the model again.
+  VIEWER_CHECK(harness.type("f").model_view->orbit.target ==
+               editor::stage_focus(lit.model_view->orbit, *harness.model.bounds)
+                   .target);
+}
+
+void a_part_row_isolates_and_a_clip_row_plays() {
+  ModelHarness harness;
+  harness.model.state = editor::AssetViewerModelState::Ready;
+  harness.model.facts = car_facts();
+  harness.base.panel.open(model_id);
+  static_cast<void>(harness.type({}));
+  // The Parts tab, then its second row.
+  harness.click(harness.tab_x(1U), info_tab_y);
+  harness.click(400.0F, first_row_y + 23.0F + 11.0F);
+  VIEWER_CHECK(harness.base.panel.isolated_part() == 1U);
+  VIEWER_CHECK(harness.type({}).model_view->part == 1U);
+  // Clicked again, every part shows.
+  harness.click(400.0F, first_row_y + 23.0F + 11.0F);
+  VIEWER_CHECK(!harness.base.panel.isolated_part().has_value());
+
+  // The Animation tab: below its transport, the bind pose, then each clip.
+  harness.click(harness.tab_x(2U), info_tab_y);
+  const float drive_y = first_row_y + 30.0F + 23.0F * 2.0F + 11.0F;
+  harness.click(400.0F, drive_y);
+  VIEWER_CHECK(harness.base.panel.clip() == 1U);
+  harness.base.time += 1.0;
+  const editor::AssetViewerFrame playing = harness.type({});
+  VIEWER_CHECK(playing.model_view->clip == 1U);
+  VIEWER_CHECK(playing.model_view->animation_frame ==
+               editor::asset_viewer_animation_rate);
+  // The bind pose row clears it.
+  harness.click(400.0F, first_row_y + 30.0F + 11.0F);
+  VIEWER_CHECK(!harness.base.panel.clip().has_value());
+  VIEWER_CHECK(harness.type({}).model_view->animation_frame == 0U);
+}
+
+void an_hdri_lights_the_model_once_chosen() {
+  ModelHarness harness;
+  harness.base.panel.open(model_id);
+  harness.base.panel.set_hdri({});
+  VIEWER_CHECK(harness.base.panel.look().environment ==
+               editor::AssetViewerEnvironment::Studio);
+  harness.base.panel.set_hdri("D:/hdri/hall.exr");
+  const editor::AssetViewerFrame lit = harness.type({});
+  VIEWER_CHECK(lit.model_view->look.environment ==
+               editor::AssetViewerEnvironment::Hdri);
+  VIEWER_CHECK(lit.model_view->look.hdri_source == "D:/hdri/hall.exr");
+  // A new project forgets it.
+  harness.base.panel.reset_project_state();
+  VIEWER_CHECK(harness.base.panel.look().environment ==
+               editor::AssetViewerEnvironment::Studio);
+}
+
 void a_project_change_forgets_the_asset() {
   Harness harness;
   harness.panel.open(plate_id);
@@ -388,7 +803,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 20U> cases{{
     {"a fit shows the whole picture centred",
      &a_fit_shows_the_whole_picture_centred},
     {"1:1 is one source pixel per screen pixel",
@@ -415,6 +830,20 @@ constexpr std::array<Case, 13U> cases{{
      &the_wheel_zooms_about_the_pointer_and_fit_resets},
     {"a project change forgets the asset",
      &a_project_change_forgets_the_asset},
+    {"model bounds prefer the package and measure from the base",
+     &model_bounds_prefer_the_package_and_measure_from_the_base},
+    {"the look-dev scene places lights, floor and figure",
+     &the_look_dev_scene_places_lights_floor_and_figure},
+    {"the Stage or an image can light the model",
+     &the_stage_or_an_image_can_light_the_model},
+    {"a model opens framed and asks for its view",
+     &a_model_opens_framed_and_asks_for_its_view},
+    {"the model view orbits, frames and turns",
+     &the_model_view_orbits_frames_and_turns},
+    {"a part row isolates and a clip row plays",
+     &a_part_row_isolates_and_a_clip_row_plays},
+    {"an HDRI lights the model once chosen",
+     &an_hdri_lights_the_model_once_chosen},
 }};
 
 } // namespace
