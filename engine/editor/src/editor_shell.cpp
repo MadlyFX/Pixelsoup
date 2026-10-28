@@ -6354,11 +6354,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.timeline_panel.insert_target_lane();
       std::string target_name;
       if (target.has_value()) {
-        // The scene's implicit lane holds the clips filed under no track.
-        target_name = "untracked layers";
         for (const scene::TimelineLane &lane : timeline_lanes) {
-          if (lane.id == *target && !lane.implicit && !lane.name.empty()) {
-            target_name = lane.name;
+          if (lane.id == *target && !lane.implicit) {
+            target_name = lane.name.empty() ? "an unnamed track" : lane.name;
             break;
           }
         }
@@ -8073,7 +8071,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
-  // The Asset Viewer's picture let go. On a track's band it overwrites that
+  // The Asset Viewer's picture let go. On a track's band it is laid over that
   // track from the frame under the pointer; elsewhere on the Timeline it is a
   // new layer starting there, and on the Stage a new placement starting at
   // the playhead. Either way it carries the marked range.

@@ -878,11 +878,10 @@ public:
   [[nodiscard]] const std::set<doc::NodeId> &soloed() const noexcept {
     return soloed_;
   }
-  // The track Insert and Overwrite are aimed at by its target switch, if
-  // the operator set one.
   // Where Insert and Overwrite land by the targeting rule - the targeted
-  // track, then the selected track, then the track every selected clip is
-  // on - as of the last draw. Empty when that names no unlocked track.
+  // track, then the selected track, then the selected clip's track, and
+  // otherwise outside every track (doc::NodeId{}) - as of the last draw.
+  // Empty when that names a locked track.
   [[nodiscard]] std::optional<doc::NodeId> insert_target_lane() const noexcept {
     return insert_target_lane_;
   }
@@ -893,6 +892,8 @@ public:
   // The frame under (x, y) when it is over the time area, as of the last draw.
   [[nodiscard]] std::optional<core::i64> frame_at(float x,
                                                   float y) const noexcept;
+  // The track Insert and Overwrite are aimed at by its target switch, if
+  // the operator set one.
   [[nodiscard]] std::optional<doc::NodeId> targeted_lane() const noexcept {
     return targeted_lane_;
   }

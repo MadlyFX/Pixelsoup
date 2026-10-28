@@ -32,10 +32,10 @@ suggests. They also explain several of the constraints below.
   machine-local cache that never enters a project
   (`engine/assets/include/mediaserver/assets/derivative_profile_id.hpp`,
   profiles 1-5). The editor uploads them through bounded texture caches.
-- **Timeline editing.** `plan_insert` and `plan_overwrite`
-  (`engine/scene/include/mediaserver/scene/timeline_edit.hpp`) already plan
-  displacement, sync-locked tracks and overwrite split remainders. Clipboard
-  Insert and Overwrite (`,` and `.`) use them through
+- **Timeline editing.** `plan_insert`
+  (`engine/scene/include/mediaserver/scene/timeline_edit.hpp`) already plans
+  displacement and sync-locked tracks. Clipboard Insert and Overwrite (`,` and
+  `.`) go through
   `apps/server/timeline_edit_integration.cpp`, aim at the targeted track (else
   the selected one) and commit at once. (The operator guide said they waited
   for `GO`; that was wrong, and is corrected.) Timeline
@@ -163,8 +163,20 @@ note).
 **Putting the range on the timeline.**
 
 - Insert, Overwrite and Append target the same track the clipboard does: the
-  targeted track, else the selected track, else the track every selected
-  clip is on. With none, the viewer says **Choose a target track**.
+  targeted track, else the selected track (only while the selection holds
+  it), else the selected clip's track, the primary clip's when the clips are
+  on several. With none of those - no tracks, or none chosen - the range
+  lands outside every track. Only a locked target refuses, and the viewer
+  says **The target track is locked**. (It used to refuse whenever no track
+  was chosen, and a track once clicked stayed the target after another clip
+  was selected. Changed after the first live use.)
+- Insert cuts a clip it lands inside and moves everything after the edit
+  point along. Overwrite lays the range over the track, in front of every
+  clip already on it: those stay whole underneath, nothing moves, and the
+  edit keeps its length. Clipboard Overwrite works the same way. (Both first
+  cut the covered clips into split remainders with `plan_overwrite`; in a
+  track that lists each clip on its own row, that looked the same as Insert.
+  Changed after the first live use.)
 - The edit lands at the Stage scene's playhead, which in Preview is the
   Director-local Preview playhead.
 - **It commits immediately, as one undo step.** There is no span preview and
@@ -177,7 +189,8 @@ note).
   gets when dropped on the timeline today.
 - Model assets cannot go onto a track, and the viewer says so.
 - **Dragging the picture** carries the asset and the range. Released on a
-  track's lane it overwrites at the snapped drop frame. On empty timeline it
+  track's lane it is laid over the track at the snapped drop frame, as
+  Overwrite is. On empty timeline it
   makes a new track holding the trimmed clip. On Stage it makes a new
   placement there with that timing. Releasing on a track header still means
   **Replace source** and keeps the placement's timing.
@@ -263,7 +276,7 @@ placements always win.
   lane, start, gesture}`.
 - `timeline_edit_integration.cpp` converts the source range to show frames
   with the rational mapping and rounding playback already uses. It plans
-  displacement with `plan_insert`/`plan_overwrite` and authors the new
+  displacement with `plan_insert` (Overwrite displaces nothing) and authors the new
   `scene.media` placement (asset_id, source, sequence fields, rate, lane,
   timing) the way `instantiate_asset` does. Everything is one transaction,
   scheduled on the next sealed frame with no confirmation step. The result
@@ -293,7 +306,8 @@ placements always win.
 - `apps/server/tests/timeline_edit_integration_tests.cpp`, source range cases:
   - exact `source_in` and duration at 24000/1001 into 25 and at 30 into 24
   - sync-locked tracks moving, a locked track refusing
-  - Overwrite keeping both split remainders
+  - Overwrite laying the range in front of the track's clips, cutting and
+    moving nothing
   - Append after the last clip
   - the edit applying on the first sealed frame with no confirmation, and
     reporting the new clip

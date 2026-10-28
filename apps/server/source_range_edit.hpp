@@ -31,10 +31,11 @@ enum class SourceRangeEditError : core::u8 {
 // the range - every frame marked, at the show rate, by playback's own floor
 // mapping. A still keeps the placement's duration. The trimmed clip then
 // goes through exactly the planning a clipboard Insert or Overwrite takes,
-// so sync-locked tracks, locked tracks and split remainders behave the same.
-// Insert at a point inside a clip first cuts that clip there, as the Razor
-// does, so its second half moves along with the rest of the track. Append
-// overwrites from the lane's last clip end, which moves nothing.
+// so sync-locked and locked tracks behave the same, and Overwrite lays it over
+// the track in front of every clip already there, cutting and moving
+// nothing. Insert at a point inside a clip first cuts that clip there, as the
+// Razor does, so its second half moves along with the rest of the track.
+// Append overwrites from the lane's last clip end, which moves nothing.
 [[nodiscard]] core::Result<TimelineEditIntegrationPlan, SourceRangeEditError>
 plan_source_range_edit(const doc::Root& document,
                        std::span<const scene::ClipPlacement> clips,

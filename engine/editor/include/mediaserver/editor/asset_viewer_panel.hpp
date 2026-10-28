@@ -75,7 +75,8 @@ struct AssetViewerDrawInput final {
   std::string_view image_fault;
   scene::MediaFrameRate show_rate{50U, 1U};
   // Where Insert, Overwrite and Append land, by the Timeline's targeting
-  // rule; empty when it names none.
+  // rule: a track, or doc::NodeId{} for outside every track. Empty when the
+  // rule names a locked track.
   std::optional<doc::NodeId> target_lane;
   std::string_view target_name;
   // Scene edits are refused while a transition runs.

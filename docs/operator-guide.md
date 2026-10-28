@@ -357,8 +357,11 @@ it is on (hover one for its name):
 
 - **Target** (a ring with sights) aims Insert and Overwrite (`,` and `.`, or the menu) at this track,
   whatever is selected. Without a target they go to the selected track, or to
-  the track every selected clip is on. One track at a time is the target; the
-  target is the operator's own and is not saved in the project.
+  the selected clip's track (the clip you chose last when the clips are on
+  several), and with no track selected - or no tracks at all - outside every
+  track, among the clips filed under none. A locked target refuses them. One
+  track at a time is the target; the target is the operator's own and is not
+  saved in the project.
 - **Sync lock** (a chain link) sync-locks the track, and is saved with it. A ripple trim, ripple
   delete or insert made on another track moves this track's clips at or after
   the edit point by the same amount, so what plays on it stays in time with
@@ -641,10 +644,15 @@ The `EDIT` picker selects context-sensitive advanced tools. Ripple Trim, Roll,
 Slip, and Slide commit one signed-frame edit when the drag ends. Ripple Delete
 requires one valid contiguous selected span. Ripple Trim, Ripple Delete and
 Insert also move sync-locked tracks (see **SYNC** above). Insert Clipboard and
-Overwrite Clipboard (`,` and `.`) target the active unlocked track - the
-targeted one first - at the playhead and commit at once, as an editor's do;
-Overwrite retains both uncovered split remainders and their retargeted
-effects/key channels. While the Asset Viewer has the keyboard, the same keys
+Overwrite Clipboard (`,` and `.`) land where the selection is (see **Target**
+above), outside every track when no track is chosen, at the playhead, and
+commit at once, as an editor's do. Outside every track, Insert moves only the
+later clips filed under no track, and Overwrite stacks the paste in front of
+them.
+Overwrite lays the clipboard over the track, in front of every clip already
+on it, keeping the pasted clips' own stacking: the clips it covers stay whole
+underneath, nothing moves, and the track keeps its length. While the Asset
+Viewer has the keyboard, the same keys
 cut its marked range instead (Insert Source and Overwrite Source). Handle
 limits, adjacency, locks, rational source rates, and stale selections are
 validated by the Director, and every accepted operation is one undo step.
@@ -1071,23 +1079,27 @@ against Program's asset readiness.
 range; **Clear** removes both. `,` inserts the range at the Stage playhead on
 the target track and `.` overwrites; the **Insert**, **Overwrite** and
 **Append** buttons do the same, Append landing after the track's last clip.
-The target track is the one Insert and Overwrite Clipboard use - the targeted
-track, then the selected track, then the track every selected clip is on - and
-the edit row names it ("untracked layers" when it is the scene's clips filed
-under no track). An Insert that lands inside a clip cuts that clip there, as
+Overwrite lays the range over the track in front of every clip already on
+it, as Overwrite Clipboard does: those clips stay whole underneath, nothing
+moves, and the edit keeps its length.
+The range lands where Insert and Overwrite Clipboard do - the targeted track,
+then the selected track, then the selected clip's track, and otherwise outside
+every track - and the edit row names it ("outside every track" when no track
+is chosen). An Insert that lands inside a clip cuts that clip there, as
 the Razor does, and its second half moves along after the new clip; clipboard
 Insert still refuses a point inside a clip. With no marks the whole source is
 used. The range plays
 for the fewest show frames that reach its last frame at the show rate, so
 every marked frame plays; a still keeps its five-second default. The cut
 commits at once, as one undo step, and the new clip is selected. The Stage
-playhead does not move: on Program it is the live show's clock. Without a
-target track, during a transition, or before the file has been probed, the
+playhead does not move: on Program it is the live show's clock. Aimed at a
+locked track, during a transition, or before the file has been probed, the
 viewer says why and nothing changes.
 
 **Dragging out.** Drag the picture out of the viewer to place the marked range.
-Let go on a track's band in the Timeline and it overwrites that track from the
-frame under the pointer; anywhere else on the Timeline it becomes a new layer
+Let go on a track's band in the Timeline and it is laid over that track from
+the frame under the pointer, as Overwrite does; anywhere else on the Timeline
+it becomes a new layer
 starting there; on the Stage it becomes a new placement starting at the
 playhead, resting where a Library drop would.
 
@@ -1164,7 +1176,8 @@ model the importer refused says **DID NOT LOAD**; one the renderer could not
 put on the GPU says **LOAD FAILED** with its reason.
 
 **Library thumbnails.** A model's Library thumbnail is the same three-quarter
-view under the studio rig, drawn on the editor's GPU when the Library first
+view under the studio rig, on a plain floor without the grid or the figure,
+drawn on the editor's GPU when the Library first
 shows it and kept in this machine's derivative cache like a media thumbnail
 (the `model-turntable-320x180-srgb` profile). It is drawn again when the file
 changes.

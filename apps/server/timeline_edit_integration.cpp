@@ -10,7 +10,9 @@
 #include <limits>
 #include <new>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -92,7 +94,6 @@ struct RequestPlanner final {
     std::span<const doc::NodeId> synced;
     const editor::TimelineEditIntent& intent;
     const ClipClipboard& clipboard;
-    core::u64 next_node{};
 
     [[nodiscard]] scene::TimelineEditResult operator()(
         const editor::TimelineRippleTrimRequest& request) const {
@@ -139,21 +140,78 @@ struct RequestPlanner final {
             static_cast<core::i64>(intent.playhead), *span, synced);
     }
 
+    // Overwrite lays the clipboard over the track: no clip already there is
+    // cut or moved, so the plan only names the span the paste covers.
     [[nodiscard]] scene::TimelineEditResult operator()(
-        const editor::TimelineOverwriteRequest& request) const {
+        const editor::TimelineOverwriteRequest&) const {
         const std::optional<core::i64> span = clipboard.span_duration();
+        constexpr core::i64 last = std::numeric_limits<core::i64>::max();
         if (!span.has_value() || *span <= 0 ||
-            intent.playhead > static_cast<core::u64>(
-                                  std::numeric_limits<core::i64>::max())) {
+            intent.playhead > static_cast<core::u64>(last - *span)) {
             return scene::TimelineEditResult::failure(
                 scene::TimelineEditError::InvalidSpan);
         }
-        return scene::plan_overwrite(
-            clips, scene::TimelineLaneRef{intent.scene, request.lane},
-            static_cast<core::i64>(intent.playhead), *span,
-            intent.show_rate, doc::NodeId{next_node});
+        scene::TimelineEditPlan plan{};
+        plan.span_start = static_cast<core::i64>(intent.playhead);
+        plan.span_duration = *span;
+        return scene::TimelineEditResult::success(std::move(plan));
     }
 };
+
+// Stacks the pasted clips in front of every clip already on `lane`, keeping
+// their own order among themselves. A track stacks its clips by clip_order;
+// clips filed under no track stack by group_order. False when the orders
+// would run past i64.
+[[nodiscard]] bool stack_in_front(
+    doc::Root& document,
+    std::vector<doc::Node>& created,
+    std::span<const scene::ClipPlacement> clips,
+    scene::SceneId scene,
+    doc::NodeId lane) {
+    constexpr core::i64 last = std::numeric_limits<core::i64>::max();
+    const bool untracked = lane == doc::NodeId{};
+    core::i64 front = 0;
+    for (const scene::ClipPlacement& clip : clips) {
+        if (clip.scene != scene || clip.lane != lane) {
+            continue;
+        }
+        const core::i64 order = untracked ? clip.group_order : clip.order;
+        if (order == last) {
+            return false;
+        }
+        front = std::max(front, order + 1);
+    }
+
+    // The pasted clips in their own compositing order: order, start, id.
+    const std::string_view property =
+        untracked ? scene::schema::group_order : scene::schema::clip_order;
+    const auto stacking = [property](const doc::Node& node) noexcept {
+        const std::int64_t* const order = integer(node, property);
+        const std::int64_t* const start =
+            integer(node, scene::schema::clip_start);
+        return std::tuple{order != nullptr ? *order : 0,
+                          start != nullptr ? *start : 0, node.id.value()};
+    };
+    std::vector<doc::Node*> pasted;
+    for (doc::Node& node : created) {
+        if (node.type == scene::schema::media_type) {
+            pasted.push_back(&node);
+        }
+    }
+    std::sort(pasted.begin(), pasted.end(),
+              [&](const doc::Node* left, const doc::Node* right) noexcept {
+                  return stacking(*left) < stacking(*right);
+              });
+    if (static_cast<core::u64>(last - front) < pasted.size()) {
+        return false;
+    }
+    for (doc::Node* const node : pasted) {
+        node->properties.insert_or_assign(std::string{property},
+                                          doc::PropertyValue{front++});
+        document = document.set(*node);
+    }
+    return true;
+}
 
 [[nodiscard]] std::optional<doc::NodeId> paste_lane(
     const editor::TimelineEditRequest& request) noexcept {
@@ -191,7 +249,7 @@ Result plan_timeline_edit_integration(
         const std::vector<doc::NodeId> synced =
             synced_lanes(document, request.scene);
         scene::TimelineEditResult planned = std::visit(
-            RequestPlanner{clips, synced, request, clipboard, next_node},
+            RequestPlanner{clips, synced, request, clipboard},
             request.request);
         if (!planned) {
             return Result::failure(
@@ -223,6 +281,13 @@ Result plan_timeline_edit_integration(
             }
             result.document = pasted.value().document;
             result.next_node = pasted.value().next_node;
+            if (std::holds_alternative<editor::TimelineOverwriteRequest>(
+                    request.request) &&
+                !stack_in_front(result.document, pasted.value().created,
+                                clips, request.scene, *target)) {
+                return Result::failure(
+                    TimelineEditIntegrationError::PasteRejected);
+            }
             result.created.insert(
                 result.created.end(),
                 pasted.value().created.begin(), pasted.value().created.end());

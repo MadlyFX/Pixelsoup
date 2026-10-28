@@ -394,6 +394,11 @@ bool TimelinePanel::open_pass(Pass &p) {
   if (targeted_lane_.has_value() && !lane_exists(*targeted_lane_)) {
     targeted_lane_.reset();
   }
+  // The selected track is the one the selection holds: choosing a clip, or
+  // nothing, leaves no track selected.
+  if (selected_lane_ != doc::NodeId{} && !selected(selected_lane_, selection)) {
+    selected_lane_ = doc::NodeId{};
+  }
   if (!soloed_.empty()) {
     // Resolved here, against the hierarchy the rows show - groups, Blender
     // collections and tracks - because that is the hierarchy the operator
@@ -481,32 +486,34 @@ bool TimelinePanel::open_pass(Pass &p) {
               }
               return left->node < right->node;
             });
-  const bool same_selected_lane =
-      clip_selection_valid &&
-      std::all_of(selected_clips.begin(), selected_clips.end(),
-                  [&](const ElementInfo *clip) noexcept {
-                    return clip->timeline_lane ==
-                           selected_clips.front()->timeline_lane;
-                  });
-
   auto &target_lane = p.target_lane;
-  // The track the operator targeted leads; then the selected track; then the
-  // track every selected clip is on.
-  const auto targeted = std::find_if(
+  // The targeted track leads; then the selected track; then the selected
+  // clip's track, the primary clip's when the clips are on several. With none
+  // of those - no tracks, or none chosen - the edit lands outside every track.
+  // A locked track refuses it rather than sending it somewhere else.
+  const auto primary_clip =
+      std::find_if(selected_clips.begin(), selected_clips.end(),
+                   [&](const ElementInfo *clip) noexcept {
+                     return clip->node == anchor;
+                   });
+  doc::NodeId aimed{};
+  if (targeted_lane_.has_value()) {
+    aimed = *targeted_lane_;
+  } else if (selected_lane_ != doc::NodeId{}) {
+    aimed = selected_lane_;
+  } else if (primary_clip != selected_clips.end()) {
+    aimed = (*primary_clip)->timeline_lane;
+  } else if (!selected_clips.empty()) {
+    aimed = selected_clips.front()->timeline_lane;
+  }
+  const auto aimed_lane = std::find_if(
       lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
-        return targeted_lane_.has_value() && !lane.implicit &&
-               lane.id == *targeted_lane_;
+        return !lane.implicit && lane.id == aimed;
       });
-  const auto explicit_lane = std::find_if(
-      lanes.begin(), lanes.end(), [&](const scene::TimelineLane &lane) {
-        return !lane.implicit && lane.id == selected_lane_;
-      });
-  if (targeted != lanes.end() && !targeted->locked) {
-    target_lane = targeted->id;
-  } else if (explicit_lane != lanes.end() && !explicit_lane->locked) {
-    target_lane = explicit_lane->id;
-  } else if (same_selected_lane) {
-    target_lane = selected_clips.front()->timeline_lane;
+  if (aimed == doc::NodeId{}) {
+    target_lane = doc::NodeId{};
+  } else if (aimed_lane != lanes.end() && !aimed_lane->locked) {
+    target_lane = aimed;
   }
   p.paste_ready = clipboard_span.has_value() && *clipboard_span > 0 &&
                            target_lane.has_value();

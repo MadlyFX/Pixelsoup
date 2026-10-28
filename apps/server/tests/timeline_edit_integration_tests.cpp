@@ -391,7 +391,7 @@ void insert_is_one_replacement_with_lane_mapped_clipboard_subgraph() {
       doc::diff(scheduler.projected_document(), plan.document).changes.empty());
 }
 
-void overwrite_preserves_both_old_remainders_and_adds_the_paste_atomically() {
+void overwrite_lays_the_paste_over_the_track_and_cuts_nothing() {
   doc::Root root;
   root = root.set(stage());
   root = root.set(lane());
@@ -414,20 +414,25 @@ void overwrite_preserves_both_old_remainders_and_adds_the_paste_atomically() {
   }
   const auto &plan = planned.value();
   EDIT_CHECK(plan.timeline.applied_delta == 0);
-  EDIT_CHECK(integer(*plan.document.get(doc::NodeId{11U}),
-                     scene::schema::clip_start) == 4);
-  EDIT_CHECK(integer(*plan.document.get(doc::NodeId{11U}),
-                     scene::schema::clip_duration) == 1);
-
+  EDIT_CHECK(plan.timeline.span_start == 5);
+  EDIT_CHECK(plan.timeline.span_duration == 5);
+  // Clip 11 runs under the paste and keeps all of itself, its effect and its
+  // key channel; the track still ends at 16.
+  for (const core::u64 kept : {10U, 11U, 30U, 40U}) {
+    EDIT_CHECK(*plan.document.get(doc::NodeId{kept}) ==
+               *root.get(doc::NodeId{kept}));
+  }
+  EDIT_CHECK(plan.changed.empty() && plan.erased.empty());
+  EDIT_CHECK(app::source_append_frame(placements(plan.document), scene_id,
+                                      lane_id) == 16U);
+  // The paste is the only new clip, on the track and in front of clips 10
+  // and 11 (orders 10 and 11).
+  EDIT_CHECK(plan.created.size() == 1U);
   const doc::Node *const pasted = created_media_at(plan, 5);
-  const doc::Node *const right = created_media_at(plan, 10);
   EDIT_CHECK(pasted != nullptr);
-  EDIT_CHECK(right != nullptr);
   EDIT_CHECK(integer(*pasted, scene::schema::asset_id) == 501);
-  EDIT_CHECK(integer(*right, scene::schema::asset_id) == 777);
-  EDIT_CHECK(integer(*right, scene::schema::clip_duration) == 6);
-  // Native-rate split: six show frames advance three source ordinals.
-  EDIT_CHECK(integer(*right, scene::schema::source_in) == 23);
+  EDIT_CHECK(integer(*pasted, scene::schema::lane_id) == 20);
+  EDIT_CHECK(integer(*pasted, scene::schema::clip_order) == 12);
 
   cmd::DirectorScheduler scheduler{root};
   auto scheduled = scheduler.schedule_document_replace(
@@ -435,6 +440,102 @@ void overwrite_preserves_both_old_remainders_and_adds_the_paste_atomically() {
       cmd::TransactionId{request.transaction}, cmd::FrameNumber{1U});
   EDIT_CHECK(scheduled.has_value());
   EDIT_CHECK(scheduler.undo_depth(cmd::UndoContextId{2U}) == 1U);
+
+  // Several pasted clips keep their own stacking - here clip 10 in front of
+  // clip 11, against their id order - above everything on the track.
+  doc::Node front = media(10U, 0, 5, 0, 501U);
+  front.properties.insert_or_assign(std::string{scene::schema::clip_order},
+                                    whole(30));
+  const auto stacked = root.set(front);
+  app::ClipClipboard both;
+  constexpr std::array pair{doc::NodeId{10U}, doc::NodeId{11U}};
+  EDIT_CHECK(both.copy(stacked, pair));
+  const editor::TimelineEditIntent twice{
+      scene_id, editor::TimelineOverwriteRequest{lane_id}, show_60, 2U, 22U};
+  const auto layered = app::plan_timeline_edit_integration(
+      stacked, placements(stacked), twice, both, 100U);
+  EDIT_CHECK(layered.has_value());
+  const doc::Node *const first = created_media_at(layered.value(), 2);
+  const doc::Node *const second = created_media_at(layered.value(), 6);
+  EDIT_CHECK(first != nullptr && second != nullptr);
+  EDIT_CHECK(integer(*first, scene::schema::asset_id) == 501);
+  EDIT_CHECK(integer(*second, scene::schema::asset_id) == 777);
+  EDIT_CHECK(integer(*second, scene::schema::clip_order) == 31);
+  EDIT_CHECK(integer(*first, scene::schema::clip_order) == 32);
+  // The pasted effect follows the pasted clip 11.
+  EDIT_CHECK(std::any_of(
+      layered.value().created.begin(), layered.value().created.end(),
+      [&](const doc::Node &node) {
+        return node.type == scene::schema::effect_type &&
+               integer(node, scene::schema::effect_target) ==
+                   static_cast<std::int64_t>(second->id.value());
+      }));
+  for (const core::u64 kept : {10U, 11U, 30U, 40U}) {
+    EDIT_CHECK(*layered.value().document.get(doc::NodeId{kept}) ==
+               *stacked.get(doc::NodeId{kept}));
+  }
+}
+
+// With no track chosen the editor aims a paste outside every track: the
+// pasted clip leaves its track, and only the clips filed under no track make
+// room for it or stack under it.
+void a_paste_outside_every_track_leaves_the_tracks_alone() {
+  const auto filed_under_no_track = [](core::u64 id, core::i64 start,
+                                       core::i64 duration, std::int64_t order) {
+    doc::Node node = media(id, start, duration, 0, 900U + id);
+    node.properties.erase(std::string{scene::schema::lane_id});
+    node.properties.erase(std::string{scene::schema::clip_order});
+    node.properties.emplace(std::string{scene::schema::group_order},
+                            whole(order));
+    return node;
+  };
+  doc::Root root;
+  root = root.set(stage());
+  root = root.set(lane());
+  root = root.set(media(10U, 0, 5, 0, 501U));
+  root = root.set(media(11U, 6, 9, 0, 777U));
+  root = root.set(filed_under_no_track(12U, 8, 12, 4));
+  root = root.set(filed_under_no_track(13U, 0, 3, 9));
+
+  app::ClipClipboard clipboard;
+  constexpr std::array copied{doc::NodeId{10U}};
+  EDIT_CHECK(clipboard.copy(root, copied));
+
+  // Insert moves the later untracked clip, 12, along by the paste and leaves
+  // clip 11 on the track where it is, though it too starts after the playhead.
+  const editor::TimelineEditIntent insert{
+      scene_id, editor::TimelineInsertRequest{doc::NodeId{}}, show_60, 6U, 51U};
+  const auto inserted = app::plan_timeline_edit_integration(
+      root, placements(root), insert, clipboard, 100U);
+  EDIT_CHECK(inserted.has_value());
+  EDIT_CHECK(integer(*inserted.value().document.get(doc::NodeId{12U}),
+                     scene::schema::clip_start) == 13);
+  for (const core::u64 kept : {10U, 11U, 13U}) {
+    EDIT_CHECK(*inserted.value().document.get(doc::NodeId{kept}) ==
+               *root.get(doc::NodeId{kept}));
+  }
+  const doc::Node *const put = created_media_at(inserted.value(), 6);
+  EDIT_CHECK(put != nullptr);
+  EDIT_CHECK(integer(*put, scene::schema::asset_id) == 501);
+  EDIT_CHECK(!put->properties.contains(scene::schema::lane_id));
+
+  // Overwrite moves nothing and stacks the paste in front of the untracked
+  // clips (group orders 4 and 9), whatever the track's clips are.
+  const editor::TimelineEditIntent overwrite{
+      scene_id, editor::TimelineOverwriteRequest{doc::NodeId{}}, show_60, 6U,
+      52U};
+  const auto laid = app::plan_timeline_edit_integration(
+      root, placements(root), overwrite, clipboard, 100U);
+  EDIT_CHECK(laid.has_value());
+  EDIT_CHECK(laid.value().changed.empty() && laid.value().erased.empty());
+  for (const core::u64 kept : {10U, 11U, 12U, 13U}) {
+    EDIT_CHECK(*laid.value().document.get(doc::NodeId{kept}) ==
+               *root.get(doc::NodeId{kept}));
+  }
+  const doc::Node *const over = created_media_at(laid.value(), 6);
+  EDIT_CHECK(over != nullptr);
+  EDIT_CHECK(!over->properties.contains(scene::schema::lane_id));
+  EDIT_CHECK(integer(*over, scene::schema::group_order) == 10);
 }
 
 void locked_or_ambiguous_clipboard_targets_fail_without_a_document() {
@@ -661,23 +762,55 @@ void a_viewer_insert_inside_a_clip_cuts_it_and_moves_its_second_half() {
   EDIT_CHECK(clips.size() == 3U);
 }
 
-void a_viewer_overwrite_keeps_both_remainders_of_the_clip_it_lands_in() {
-  const auto root =
-      doc::Root{}.set(stage()).set(lane()).set(media(10U, 0, 100, 0));
+void a_viewer_overwrite_lays_the_range_over_the_track_and_keeps_its_length() {
+  const auto root = doc::Root{}
+                        .set(stage())
+                        .set(lane())
+                        .set(media(10U, 0, 100, 3))
+                        .set(media(11U, 100, 40));
   const assets::MediaAsset asset = viewer_source();
   const auto plan = app::plan_source_range_edit(
       root, placements(root), asset,
-      viewer_range(editor::SourceEditMode::Overwrite, 0U, 24U, 10U),
+      viewer_range(editor::SourceEditMode::Overwrite, 36U, 24U, 10U),
       whole_source(asset), 300U);
   EDIT_CHECK(plan.has_value());
-  EDIT_CHECK(integer(*plan.value().document.get(doc::NodeId{10U}),
-                     scene::schema::clip_duration) == 10);
+  // The clips already on the track are neither cut nor moved: the track
+  // still ends at 140.
+  EDIT_CHECK(*plan.value().document.get(doc::NodeId{10U}) ==
+             *root.get(doc::NodeId{10U}));
+  EDIT_CHECK(*plan.value().document.get(doc::NodeId{11U}) ==
+             *root.get(doc::NodeId{11U}));
+  EDIT_CHECK(app::source_append_frame(placements(plan.value().document),
+                                      scene_id, lane_id) == 140U);
+  // The range is the one new clip, on the track at the playhead and in
+  // front of both clips there (their orders are 10 and 11).
+  EDIT_CHECK(plan.value().created.size() == 1U);
   const doc::Node *const cut = created_media_at(plan.value(), 10);
   EDIT_CHECK(cut != nullptr);
   EDIT_CHECK(integer(*cut, scene::schema::clip_duration) == 25);
-  const doc::Node *const remainder = created_media_at(plan.value(), 35);
-  EDIT_CHECK(remainder != nullptr);
-  EDIT_CHECK(integer(*remainder, scene::schema::clip_duration) == 65);
+  EDIT_CHECK(integer(*cut, scene::schema::source_in) == 36);
+  EDIT_CHECK(integer(*cut, scene::schema::lane_id) == 20);
+  EDIT_CHECK(integer(*cut, scene::schema::clip_order) == 12);
+  EDIT_CHECK(placements(plan.value().document).size() == 3U);
+
+  // Clips filed under no track stack by group order instead.
+  doc::Node loose = media(12U, 0, 50);
+  loose.properties.erase(std::string{scene::schema::lane_id});
+  loose.properties.erase(std::string{scene::schema::clip_order});
+  loose.properties.emplace(std::string{scene::schema::group_order}, whole(6));
+  const auto untracked_root = doc::Root{}.set(stage()).set(loose);
+  editor::SourceRangeEditIntent untracked =
+      viewer_range(editor::SourceEditMode::Overwrite, 0U, 24U, 5U);
+  untracked.lane = doc::NodeId{};
+  const auto over_loose = app::plan_source_range_edit(
+      untracked_root, placements(untracked_root), asset, untracked,
+      whole_source(asset), 300U);
+  EDIT_CHECK(over_loose.has_value());
+  EDIT_CHECK(*over_loose.value().document.get(doc::NodeId{12U}) == loose);
+  const doc::Node *const laid = created_media_at(over_loose.value(), 5);
+  EDIT_CHECK(laid != nullptr);
+  EDIT_CHECK(!laid->properties.contains(scene::schema::lane_id));
+  EDIT_CHECK(integer(*laid, scene::schema::group_order) == 7);
 }
 
 void a_viewer_append_lands_after_the_last_clip_and_moves_nothing() {
@@ -788,13 +921,13 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 16U> cases{{
     {"a viewer insert inside a clip cuts it and moves its second half",
      &a_viewer_insert_inside_a_clip_cuts_it_and_moves_its_second_half},
     {"a viewer insert places the exact range and moves later clips",
      &a_viewer_insert_places_the_exact_range_and_moves_later_clips},
-    {"a viewer overwrite keeps both remainders of the clip it lands in",
-     &a_viewer_overwrite_keeps_both_remainders_of_the_clip_it_lands_in},
+    {"a viewer overwrite lays the range over the track and keeps its length",
+     &a_viewer_overwrite_lays_the_range_over_the_track_and_keeps_its_length},
     {"a viewer append lands after the last clip and moves nothing",
      &a_viewer_append_lands_after_the_last_clip_and_moves_nothing},
     {"a viewer still keeps its placed duration",
@@ -812,8 +945,10 @@ constexpr std::array<Case, 15U> cases{{
      &fractional_slip_routes_through_the_pure_planner},
     {"insert is one replacement with lane mapped clipboard subgraph",
      &insert_is_one_replacement_with_lane_mapped_clipboard_subgraph},
-    {"overwrite preserves both old remainders and adds paste atomically",
-     &overwrite_preserves_both_old_remainders_and_adds_the_paste_atomically},
+    {"overwrite lays the paste over the track and cuts nothing",
+     &overwrite_lays_the_paste_over_the_track_and_cuts_nothing},
+    {"a paste outside every track leaves the tracks alone",
+     &a_paste_outside_every_track_leaves_the_tracks_alone},
     {"locked or ambiguous clipboard targets fail without a document",
      &locked_or_ambiguous_clipboard_targets_fail_without_a_document},
     {"key scale replacement is one scene undo transaction",

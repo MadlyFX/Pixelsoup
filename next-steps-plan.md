@@ -228,10 +228,11 @@ frame-identical fractional-rate cuts.
   action. Clipboard data is Director-local snapshot data and clears when the
   project generation changes.
 - **Insert/overwrite:** Insert shifts later clips on targeted unlocked lanes by
-  the pasted duration. Overwrite leaves later clips fixed and trims/splits any
-  overlapped clips at the paste boundaries; it never silently deletes a
-  partially covered remainder. Each mode previews its affected span before
-  commit.
+  the pasted duration. Overwrite lays the paste over the target lane in front
+  of its clips, which stay whole underneath; nothing is trimmed, split or
+  moved, so the lane keeps its length. Both land where the selection is, and
+  outside every lane when no lane is chosen. Each mode previews its affected
+  span before commit.
 
 The Timeline adds lane headers, vertical reorder, per-lane lock/mute, adjustable
 height, horizontal/vertical scrolling, track filters, and snap targets for

@@ -252,7 +252,7 @@ void AssetViewerPanel::request_edit(Pass &p, SourceEditMode mode) {
     return;
   }
   if (!p.input.target_lane.has_value()) {
-    show_message("Choose a target track with its target switch", now);
+    show_message("The target track is locked", now);
     return;
   }
   const auto [in, out] = marked_range(p.count);
@@ -743,8 +743,8 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   }
   ctx.tooltip(insert, "Insert the range at the playhead on the target track "
                       "(,); later clips move along");
-  ctx.tooltip(overwrite, "Overwrite the target track at the playhead with "
-                         "the range (.)");
+  ctx.tooltip(overwrite, "Lay the range over the target track at the "
+                         "playhead, in front of its clips (.); nothing moves");
   ctx.tooltip(append, "Add the range after the target track's last clip");
 
   // Where the cut lands, and the placements of this asset already in the
@@ -818,9 +818,13 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
              asset_viewer_timecode(*p.media, p.input.show_rate, out) + "  " +
              duration_text(frames, p.rate);
     }
-    text += p.input.target_lane.has_value()
-                ? "   to " + std::string{p.input.target_name}
-                : std::string{"   no target track"};
+    if (!p.input.target_lane.has_value()) {
+      text += "   target track locked";
+    } else if (*p.input.target_lane == doc::NodeId{}) {
+      text += "   outside every track";
+    } else {
+      text += "   to " + std::string{p.input.target_name};
+    }
   }
   ctx.label(gui::Rect{x + 6.0F, row.y, std::max(right - x - 6.0F, 0.0F),
                       row.height},

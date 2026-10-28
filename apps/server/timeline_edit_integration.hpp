@@ -21,9 +21,11 @@ enum class TimelineEditIntegrationError : core::u8 {
     AllocationFailed,
 };
 
-// Complete document replacement for one advanced Timeline intent. Insert and
-// Overwrite contain both the displaced/trimmed existing graph and the pasted
-// clipboard subgraph, so the caller schedules exactly this Root once.
+// Complete document replacement for one advanced Timeline intent. Insert
+// contains both the displaced existing graph and the pasted clipboard
+// subgraph, so the caller schedules exactly this Root once. Overwrite lays the
+// pasted clips over the target track, in front of every clip already on it,
+// and changes nothing else: the track keeps its length.
 struct TimelineEditIntegrationPlan final {
     doc::Root document;
     scene::TimelineEditPlan timeline;

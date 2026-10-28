@@ -2150,6 +2150,87 @@ void the_split_chord_and_comma_and_period_edit_at_the_playhead() {
   UI_CHECK(outside.type(",").timeline_edits.empty());
 }
 
+[[nodiscard]] std::optional<doc::NodeId>
+inserted_lane(const editor::TimelinePanelFrame &frame) {
+  if (frame.timeline_edits.size() != 1U) {
+    return std::nullopt;
+  }
+  const auto *const insert =
+      std::get_if<editor::TimelineInsertRequest>(&frame.timeline_edits.front());
+  return insert != nullptr ? std::optional<doc::NodeId>{insert->lane}
+                           : std::nullopt;
+}
+
+// Insert and Overwrite land where the selection is: the selected track, else
+// the selected clip's track, else outside every track. At 1400 wide the
+// Background track's header is row zero, y=76..100, with its name at x=150.
+void insert_and_overwrite_land_where_the_selection_is() {
+  // With no tracks and nothing selected they land outside every track.
+  Harness bare;
+  bare.clipboard_span = 12;
+  bare.focus();
+  UI_CHECK(inserted_lane(bare.type(",")) == doc::NodeId{});
+  const editor::TimelinePanelFrame laid = bare.type(".");
+  UI_CHECK(laid.timeline_edits.size() == 1U);
+  const auto *const overwrite =
+      std::get_if<editor::TimelineOverwriteRequest>(&laid.timeline_edits.front());
+  UI_CHECK(overwrite != nullptr && overwrite->lane == doc::NodeId{});
+  UI_CHECK(bare.panel.insert_target_lane() == doc::NodeId{});
+
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  editor::ElementInfo other = make_clip();
+  other.node = doc::NodeId{8U};
+  other.timing = scene::ClipTiming{70, 20, 0, 0, 0};
+  other.timeline_lane = destination_lane_node;
+  h.elements[1U].timeline_lane = lane_node;
+  h.elements.push_back(other);
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "Foreground", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{
+      destination_lane_node, scene::SceneId{100U}, 20, "Background", false,
+      false, scene::BlendMode::Normal, false});
+  h.clipboard_span = 12;
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  // A selected track, held by the selection as the shell holds it.
+  const editor::TimelinePanelFrame chosen = h.click(150.0F, 88.0F);
+  UI_CHECK(chosen.selection.has_value() &&
+           chosen.selection->node == destination_lane_node);
+  h.selection = {destination_lane_node};
+  h.primary = destination_lane_node;
+  h.focus();
+  UI_CHECK(inserted_lane(h.type(",")) == destination_lane_node);
+
+  // Choosing a clip leaves no track selected: its own track leads.
+  h.selection = {clip_node};
+  h.primary = clip_node;
+  UI_CHECK(inserted_lane(h.type(",")) == lane_node);
+
+  // Clips on two tracks: the primary clip's track.
+  h.selection = {clip_node, other.node};
+  h.primary = other.node;
+  UI_CHECK(inserted_lane(h.type(",")) == destination_lane_node);
+  h.primary = clip_node;
+  UI_CHECK(inserted_lane(h.type(",")) == lane_node);
+
+  // Nothing on a track selected: outside every track.
+  h.selection = {object_node};
+  h.primary = object_node;
+  UI_CHECK(inserted_lane(h.type(",")) == doc::NodeId{});
+  h.selection.clear();
+  h.primary = doc::NodeId{};
+  UI_CHECK(inserted_lane(h.type(",")) == doc::NodeId{});
+
+  // A locked track refuses rather than sending the edit elsewhere.
+  h.lanes[0U].locked = true;
+  h.selection = {clip_node};
+  h.primary = clip_node;
+  UI_CHECK(h.type(",").timeline_edits.empty());
+  UI_CHECK(!h.panel.insert_target_lane().has_value());
+}
+
 // Another panel can point at a row: it is scrolled into view and outlined
 // for a moment, and the Timeline's selection is left alone.
 void a_revealed_row_scrolls_into_view_without_selecting() {
@@ -4479,7 +4560,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 130U> cases{{
+constexpr std::array<Case, 131U> cases{{
     {"soloing a group shows what is inside it",
      &soloing_a_group_shows_what_is_inside_it},
     {"a track is listed once, by its header",
@@ -4585,6 +4666,8 @@ constexpr std::array<Case, 130U> cases{{
      &clip_menus_offer_only_what_applies_to_the_clip},
     {"the split chord and comma and period edit at the playhead",
      &the_split_chord_and_comma_and_period_edit_at_the_playhead},
+    {"insert and overwrite land where the selection is",
+     &insert_and_overwrite_land_where_the_selection_is},
     {"markers and cues are added at the playhead and where double-clicked",
      &markers_and_cues_are_added_at_the_playhead_and_where_double_clicked},
     {"a marker is chosen, moved, renamed, and deleted on the strip",

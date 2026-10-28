@@ -322,10 +322,16 @@ void without_marks_the_whole_source_is_cut() {
                                              0U, 240U});
 }
 
-void a_cut_without_a_target_or_during_a_transition_is_refused() {
+// With no track to aim at a cut lands outside every track; the Timeline names
+// no target only when it aims at a locked one.
+void a_cut_at_a_locked_track_or_during_a_transition_is_refused() {
   Harness harness;
   harness.panel.open(plate_id);
   harness.click(Harness::picture_x, Harness::picture_y);
+  harness.target = doc::NodeId{};
+  VIEWER_CHECK(harness.type(",").source_edit ==
+               editor::AssetViewerSourceEdit{editor::SourceEditMode::Insert,
+                                             0U, 240U});
   harness.target.reset();
   VIEWER_CHECK(!harness.type(",").source_edit.has_value());
   harness.target = track_id;
@@ -832,8 +838,8 @@ constexpr std::array<Case, 20U> cases{{
      &marks_and_comma_cut_the_range_into_the_target_track},
     {"without marks the whole source is cut",
      &without_marks_the_whole_source_is_cut},
-    {"a cut without a target or during a transition is refused",
-     &a_cut_without_a_target_or_during_a_transition_is_refused},
+    {"a cut at a locked track or during a transition is refused",
+     &a_cut_at_a_locked_track_or_during_a_transition_is_refused},
     {"the picture drags out carrying its range",
      &the_picture_drags_out_carrying_its_range},
     {"the wheel zooms about the pointer and Fit resets",
