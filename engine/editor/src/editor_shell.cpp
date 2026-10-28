@@ -6382,6 +6382,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               edit.clip, edit.timing, impl.clip_edit_gesture, edit.lane});
         }
       }
+      // A clip or track bar dragged to a new time and a new place in the
+      // stack is one undo step: the reorder joins the retime's transaction.
+      if (!timeline_frame.clip_edits.empty() &&
+          (!timeline_frame.layer_reorders.empty() ||
+           !timeline_frame.lane_edits.empty()) &&
+          impl.lane_edit_gesture == 0U) {
+        impl.lane_edit_gesture = impl.clip_edit_gesture;
+      }
       if (!impl.timeline_panel.dragging_clip()) {
         // The gesture ends with the pointer, so the next drag is its own
         // transaction even when it moves the same clip again.

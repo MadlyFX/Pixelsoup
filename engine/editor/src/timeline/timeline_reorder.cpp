@@ -89,41 +89,6 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     }
   }
 
-  // A layer target owns its complete expanded row band. Pointer placement in
-  // the upper/lower half chooses a before/after insertion; peers are filtered
-  // below so an ordering drag can never imply reparenting or track nesting.
-  struct LayerDropTarget final {
-    const ElementInfo *element{};
-    gui::Rect bounds{};
-    std::string_view label;
-  };
-  std::vector<LayerDropTarget> layer_drop_targets;
-  layer_drop_targets.reserve(elements.size());
-  for (std::size_t index = 0U; index < rows.size(); ++index) {
-    if (rows[index].kind != Row::Kind::Layer || rows[index].surface) {
-      continue;
-    }
-    const ElementInfo *const element = find_element(elements, rows[index].node);
-    if (element == nullptr || !orderable_layer(*element)) {
-      continue;
-    }
-    std::size_t end = index + 1U;
-    while (end < rows.size() && rows[end].kind != Row::Kind::LaneHeader &&
-           (rows[end].kind != Row::Kind::Layer ||
-            rows[end].indent > rows[index].indent)) {
-      ++end;
-    }
-    const float raw_top = rows_bounds.y + row_top(rows, index) - row_scroll_;
-    const float raw_bottom = rows_bounds.y + row_top(rows, end) - row_scroll_;
-    const float top = std::max(raw_top, rows_bounds.y);
-    const float bottom = std::min(raw_bottom, rows_bounds.y + rows_bounds.height);
-    if (bottom > top) {
-      layer_drop_targets.push_back(LayerDropTarget{
-          element,
-          gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
-          rows[index].label});
-    }
-  }
   if (reorder_.lane_node != doc::NodeId{} && ctx.pointer_down()) {
     const float dx = ctx.pointer_x() - reorder_.lane_start_x;
     const float dy = ctx.pointer_y() - reorder_.lane_start_y;
@@ -166,20 +131,6 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     scratch.clip_drag_label = dragged != nullptr ? layer_name(*dragged) : "CLIP";
   }
 
-  const auto layer_peers = [](const ElementInfo &source,
-                              const ElementInfo &destination) noexcept {
-    const bool source_tracked = source.kind == ElementKind::Media &&
-                                source.timeline_lane != doc::NodeId{};
-    const bool destination_tracked = destination.kind == ElementKind::Media &&
-                                     destination.timeline_lane != doc::NodeId{};
-    if (source_tracked || destination_tracked) {
-      return source_tracked && destination_tracked &&
-             source.timeline_lane == destination.timeline_lane;
-    }
-    return layer_parent(source) == layer_parent(destination);
-  };
-
-  const LayerDropTarget *layer_drop_hovered = nullptr;
   p.layer_lane_hovered = nullptr;
   auto &layer_lane_hovered = p.layer_lane_hovered;
   bool layer_drop_committed{};
@@ -222,26 +173,14 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
           }
         }
         if (!scratch.layer_assignment_feedback) {
-          for (const LayerDropTarget &target : layer_drop_targets) {
-            if (target.element->node != source->node &&
-                !target.element->locked && layer_peers(*source, *target.element) &&
-                target.bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-              layer_drop_hovered = &target;
-            }
-          }
-          if (layer_drop_hovered != nullptr) {
-            const bool before =
-                ctx.pointer_y() < layer_drop_hovered->bounds.y +
-                                      layer_drop_hovered->bounds.height * 0.5F;
-            scratch.layer_drop_landing_y =
-                before ? layer_drop_hovered->bounds.y
-                       : layer_drop_hovered->bounds.y +
-                             layer_drop_hovered->bounds.height;
+          // A layer target owns its complete expanded row band; the upper or
+          // lower half chooses before or after it.
+          if (const std::optional<LayerLanding> landing = layer_landing(
+                  p, *source, ctx.pointer_x(), ctx.pointer_y())) {
+            scratch.layer_drop_landing_y = landing->y;
             if (!ctx.pointer_down()) {
               frame.layer_reorders.push_back(TimelineLayerReorder{
-                  source->node, layer_drop_hovered->element->node,
-                  before ? TimelineLayerPlacement::Before
-                         : TimelineLayerPlacement::After});
+                  source->node, landing->destination, landing->placement});
               layer_drop_committed = true;
             }
           }
@@ -362,20 +301,23 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   frame.drag_readout = drag_readout(p);
   frame.edit_preview = edit_preview(p);
 
+  // An insertion cursor across the rows: where a reorder lands.
+  const auto landing_line = [&](float y) {
+    ctx.panel(gui::Rect{rows_bounds.x, y - 1.5F, rows_bounds.width, 3.0F},
+              ctx.theme().accent);
+    ctx.panel(gui::Rect{rows_bounds.x, y - 5.0F, 3.0F, 10.0F},
+              ctx.theme().accent);
+    ctx.panel(gui::Rect{rows_bounds.x + rows_bounds.width - 3.0F, y - 5.0F,
+                        3.0F, 10.0F},
+              ctx.theme().accent);
+  };
+
   // Drag feedback is the panel's final visual layer, just as it is in Feed
   // Mapping. The playhead, filmstrips, scroll thumb, and popups therefore
   // cannot cut through a lifted item or obscure its destination.
   if (scratch.layer_drag_active) {
     if (scratch.layer_drop_landing_y.has_value()) {
-      ctx.panel(gui::Rect{rows_bounds.x, *scratch.layer_drop_landing_y - 1.5F,
-                          rows_bounds.width, 3.0F},
-                ctx.theme().accent);
-      ctx.panel(gui::Rect{rows_bounds.x, *scratch.layer_drop_landing_y - 5.0F, 3.0F,
-                          10.0F},
-                ctx.theme().accent);
-      ctx.panel(gui::Rect{rows_bounds.x + rows_bounds.width - 3.0F,
-                          *scratch.layer_drop_landing_y - 5.0F, 3.0F, 10.0F},
-                ctx.theme().accent);
+      landing_line(*scratch.layer_drop_landing_y);
     }
     if (scratch.layer_assignment_feedback) {
       for (const LaneDropTarget &target : lane_drop_targets) {
@@ -412,15 +354,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
 
   if (scratch.lane_drag_feedback) {
     if (scratch.lane_drop_landing_y.has_value()) {
-      ctx.panel(gui::Rect{rows_bounds.x, *scratch.lane_drop_landing_y - 1.5F,
-                          rows_bounds.width, 3.0F},
-                ctx.theme().accent);
-      ctx.panel(gui::Rect{rows_bounds.x, *scratch.lane_drop_landing_y - 5.0F, 3.0F,
-                          10.0F},
-                ctx.theme().accent);
-      ctx.panel(gui::Rect{rows_bounds.x + rows_bounds.width - 3.0F,
-                          *scratch.lane_drop_landing_y - 5.0F, 3.0F, 10.0F},
-                ctx.theme().accent);
+      landing_line(*scratch.lane_drop_landing_y);
     }
     std::string ghost_label{"REORDER  "};
     ghost_label += scratch.lane_drag_label;
@@ -436,7 +370,36 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
               ghost_label, ctx.theme().text);
   }
 
+  // A track bar carried onto another track's band reorders the track, as a
+  // header drag does, and lands on the same edge.
+  if (track_.drag == ClipDrag::Move && track_.moved &&
+      track_.destination != doc::NodeId{}) {
+    std::vector<doc::NodeId> stack;
+    for (const scene::TimelineLane &lane : p.input.lanes) {
+      if (!lane.implicit) {
+        stack.push_back(lane.id);
+      }
+    }
+    const auto dragged = std::find(stack.begin(), stack.end(), track_.lane);
+    const auto destination =
+        std::find(stack.begin(), stack.end(), track_.destination);
+    const auto band = std::find_if(
+        lane_drop_targets.begin(), lane_drop_targets.end(),
+        [&](const LaneDropTarget &target) {
+          return target.lane == track_.destination;
+        });
+    if (dragged != stack.end() && destination != stack.end() &&
+        band != lane_drop_targets.end()) {
+      landing_line(destination > dragged
+                       ? band->bounds.y
+                       : band->bounds.y + band->bounds.height);
+    }
+  }
+
   if (scratch.clip_move_feedback) {
+    if (clip_landing_.has_value()) {
+      landing_line(clip_landing_->y);
+    }
     // Track outlines mean exactly one thing here: dropping the clip into that
     // track. This is the nesting operation the same outline would falsely
     // suggest during a track reorder.
@@ -472,7 +435,14 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
 
     std::string ghost_label{"MOVE  "};
     ghost_label += scratch.clip_drag_label;
-    if (clip_drop_hovered != nullptr) {
+    if (clip_landing_.has_value()) {
+      const ElementInfo *const peer =
+          find_element(elements, clip_landing_->destination);
+      ghost_label += clip_landing_->placement == TimelineLayerPlacement::Before
+                         ? "  >  above "
+                         : "  >  below ";
+      ghost_label += peer != nullptr ? layer_name(*peer) : "layer";
+    } else if (clip_drop_hovered != nullptr) {
       ghost_label += "  >  ";
       ghost_label += clip_drop_hovered->label;
     } else if (clip_.drop_lane.has_value() &&

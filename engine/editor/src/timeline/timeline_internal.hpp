@@ -419,34 +419,87 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
   return interaction.clicked;
 }
 
-// A compact labelled switch on a row, for state worth reading from across a
-// stage: lit in `color` while engaged, an outline otherwise. A disabled chip
-// still shows its state and answers no press.
-[[nodiscard]] inline bool chip_toggle(gui::UiContext &ctx, gui::UiId id,
-                                      const gui::Rect &bounds,
-                                      std::string_view label, bool engaged,
-                                      gui::UiColor color,
+// The width of a row's icon switch.
+inline constexpr float row_switch_width = 18.0F;
+
+// A row switch drawn as its icon alone, beside the eye and padlock: faint
+// while off, lit in `color` on a wash of it while on, and given a body only
+// under the pointer, so a column of them reads as state rather than as a
+// wall of buttons. A disabled switch still shows its state and answers no
+// press.
+[[nodiscard]] inline bool icon_toggle(gui::UiContext &ctx, gui::UiId id,
+                                      const gui::Rect &bounds, gui::Icon icon,
+                                      bool engaged, gui::UiColor color,
                                       std::string_view tooltip,
                                       bool enabled = true) {
   const gui::Interaction interaction = ctx.grab(id, bounds);
   const gui::Theme &theme = ctx.theme();
   const bool hot = enabled && interaction.hovered;
   if (engaged) {
-    ctx.panel(bounds, alpha(color, hot ? 1.0F : (enabled ? 0.85F : 0.5F)));
-  } else {
-    ctx.panel(bounds, hot ? theme.widget_hover : alpha(theme.widget, 0.6F));
-    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 1.0F,
-                        bounds.width, 1.0F},
-              alpha(theme.border, 0.9F));
+    ctx.panel(bounds, alpha(color, hot ? 0.34F : 0.22F));
+  } else if (hot) {
+    ctx.panel(bounds, theme.widget_hover);
   }
-  const float width = ctx.font_width(label);
-  ctx.label(gui::Rect{bounds.x + std::max((bounds.width - width) * 0.5F, 1.0F),
-                      bounds.y, bounds.width, bounds.height},
-            label,
-            engaged ? theme.background
-                    : alpha(theme.text_muted, enabled ? 1.0F : 0.5F));
+  const gui::UiColor mark =
+      engaged ? alpha(color, enabled ? 1.0F : 0.55F)
+              : alpha(hot ? theme.text : theme.text_muted,
+                      enabled ? (hot ? 1.0F : 0.6F) : 0.3F);
+  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
+                 bounds.y + bounds.height * 0.5F, mark, 0.85F);
   ctx.tooltip(bounds, tooltip);
   return enabled && interaction.clicked;
+}
+
+// `text` cut to `width` by its middle rather than its end, so names that
+// share a long beginning - take_01_left.mov, take_01_right.mov - still read
+// apart. Unchanged when it fits.
+[[nodiscard]] inline std::string elide_middle(const gui::UiContext &ctx,
+                                              std::string_view text,
+                                              float width) {
+  if (ctx.font_width(text) <= width) {
+    return std::string{text};
+  }
+  constexpr std::string_view ellipsis{"..."};
+  const float room = width - ctx.font_width(ellipsis);
+  if (room <= 0.0F) {
+    return std::string{};
+  }
+  const auto continuation = [](char c) noexcept {
+    return (static_cast<unsigned char>(c) & 0xC0U) == 0x80U;
+  };
+  // The end usually carries what tells two takes apart, so it keeps the
+  // larger share.
+  const float head_room = room * 0.45F;
+  std::size_t head = 0U;
+  float used = 0.0F;
+  while (head < text.size()) {
+    std::size_t next = head + 1U;
+    while (next < text.size() && continuation(text[next])) {
+      ++next;
+    }
+    const float advance = ctx.font_width(text.substr(head, next - head));
+    if (used + advance > head_room) {
+      break;
+    }
+    used += advance;
+    head = next;
+  }
+  std::size_t tail = text.size();
+  while (tail > head) {
+    std::size_t previous = tail - 1U;
+    while (previous > head && continuation(text[previous])) {
+      --previous;
+    }
+    const float advance =
+        ctx.font_width(text.substr(previous, tail - previous));
+    if (used + advance > room) {
+      break;
+    }
+    used += advance;
+    tail = previous;
+  }
+  return std::string{text.substr(0U, head)} + std::string{ellipsis} +
+         std::string{text.substr(tail)};
 }
 
 inline void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolbar) {
@@ -458,6 +511,8 @@ inline void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolba
 // the menu means what it said when it opened.
 enum class MenuCommand : core::u8 {
   SplitAtPlayhead,
+  // Every clip on a track under the playhead.
+  SplitTrackAtPlayhead,
   RippleDeleteSelection,
   RippleDeleteClip,
   InsertClipboard,
@@ -1263,6 +1318,8 @@ struct TimelinePanel::Pass final {
   std::vector<std::size_t> cue_numbers;
   bool any_cue{};
   timeline::RowList built;
+  // The most any visible name overran its row this frame.
+  float name_overflow{};
   float content_height{};
   float maximum_row_scroll{};
 
@@ -1343,6 +1400,12 @@ struct TimelinePanel::RowContext final {
   std::array<const scene::ChannelKeyframes *, 3U> keys{};
   const ElementInfo *clip_element{};
   scene::ClipTiming clip_timing{};
+  // A track header whose track holds placed clips draws `clip_bar` as the
+  // track's own bar, over `track_first` .. `track_end` as they are shown.
+  bool track_bar{};
+  core::i64 track_first{};
+  core::i64 track_end{};
+  std::size_t track_clips{};
   gui::Rect clip_bar{};
   float clip_fade_in_x{};
   float clip_fade_out_x{};

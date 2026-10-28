@@ -107,6 +107,29 @@ std::string TimelinePanel::drag_readout(Pass &p) {
       break;
     }
     guide = clip_.snap_guide;
+  } else if (track_.drag != ClipDrag::None && track_.moved) {
+    switch (track_.drag) {
+    case ClipDrag::TrimIn:
+      text = "TRACK IN " + signed_duration(p, track_.delta) + "  >  " +
+             at(track_.first + track_.delta);
+      break;
+    case ClipDrag::TrimOut:
+      text = "TRACK OUT " + signed_duration(p, track_.delta) + "  >  " +
+             at(track_.end + track_.delta - 1);
+      break;
+    default:
+      text = "TRACK " + signed_duration(p, track_.delta) + "  >  " +
+             at(track_.first + track_.delta);
+      break;
+    }
+    if (track_.destination != doc::NodeId{}) {
+      for (const scene::TimelineLane &lane : p.input.lanes) {
+        if (lane.id == track_.destination && !lane.implicit) {
+          text += "   REORDER  >  " + lane.name;
+        }
+      }
+    }
+    guide = track_.snap_guide;
   } else if (keys_.dragging) {
     const std::size_t count = keys_.drag_keys.size();
     text = std::string{keys_.duplicate ? "COPY " : ""} +

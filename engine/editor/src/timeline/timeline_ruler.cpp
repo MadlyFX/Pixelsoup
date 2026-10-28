@@ -82,24 +82,41 @@ void TimelinePanel::draw_ruler(Pass &p) {
         TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
   }
   // The edge between the layer list and the lanes is a seam the operator
-  // drags: long names want a wide list, long shows want wide lanes.
+  // drags: long names want a wide list, long shows want wide lanes. A
+  // double-click widens the list until every name on screen reads whole.
   {
     // Over the rows only: on the ruler and the marker strip the same edge is
     // where the In handle and a cue at frame zero are grabbed.
-    const gui::Rect seam{graph.x - 3.0F, rows_bounds.y, 6.0F,
+    const gui::Rect seam{graph.x - 5.0F, rows_bounds.y, 8.0F,
                          rows_bounds.height};
     const gui::Interaction drag = ctx.grab(mix(id_, "list seam"), seam);
     ctx.cursor_for(drag, gui::Cursor::ResizeHorizontal);
+    const float widest =
+        std::max(bounds.width - minimum_graph_width, minimum_list_width);
     if (drag.held) {
       list_width_ = std::clamp(ctx.pointer_x() - bounds.x, minimum_list_width,
-                               std::max(bounds.width - minimum_graph_width,
-                                        minimum_list_width));
+                               widest);
     }
-    ctx.panel(gui::Rect{graph.x - (drag.held || drag.hovered ? 1.0F : 0.0F),
-                        ruler.y, drag.held || drag.hovered ? 2.0F : 1.0F,
+    if (drag.clicked &&
+        clicks_.double_click(mix(id_, "list seam"), ctx.time_seconds())) {
+      list_width_ = std::clamp(std::max(list_fit_width_, list_width),
+                               minimum_list_width, widest);
+    }
+    const bool lit = drag.held || drag.hovered;
+    ctx.panel(gui::Rect{graph.x - (lit ? 1.0F : 0.0F), ruler.y,
+                        lit ? 2.0F : 1.0F,
                         ruler.height + strip.height + rows_bounds.height},
               drag.held ? theme.accent
                         : (drag.hovered ? theme.text_muted : theme.border));
+    // A grip at the top of the seam says it moves.
+    for (int dot = 0; dot < 3; ++dot) {
+      ctx.panel(gui::Rect{graph.x - 1.0F,
+                          rows_bounds.y + 6.0F + 4.0F * static_cast<float>(dot),
+                          2.0F, 2.0F},
+                lit ? theme.text : theme.text_muted);
+    }
+    ctx.tooltip(seam, "Drag to widen the track list. Double-click to fit "
+                      "the names.");
   }
 
   // Edit points: where a cut, a range end, or a marker sits. Snapping and

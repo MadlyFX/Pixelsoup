@@ -249,6 +249,9 @@ void TimelinePanel::reset_project_state() noexcept {
   clip_.moved = false;
   clip_.drop_lane.reset();
   clip_.snap_guide.reset();
+  clip_landing_.reset();
+  track_ = TrackGesture{};
+  list_fit_width_ = 0.0F;
 }
 
 void TimelineTimeAxis::fit(double begin, double span, float width) noexcept {
@@ -310,6 +313,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
   resize_clip_rows(p);
   track_key_drag(p);
   resolve_clip_gesture(p);
+  resolve_track_gesture(p);
   resolve_reorder_targets(p);
   draw_rows(p);
   draw_navigator(p);
@@ -594,8 +598,7 @@ void TimelinePanel::navigate(Pass &p) {
     return time_axis_.frame(x, graph.x);
   };
 
-  // One row more than the rows themselves: the New track button after them.
-  p.content_height = rows_extent(rows) + row_height;
+  p.content_height = rows_extent(rows);
   auto &content_height = p.content_height;
   p.maximum_row_scroll =
       std::max(content_height - rows_bounds.height, 0.0F);
@@ -655,7 +658,9 @@ void TimelinePanel::navigate(Pass &p) {
   const double draw_delta = std::clamp(
       ctx.time_seconds() - previous_draw_time_, 0.0, 0.05);
   previous_draw_time_ = ctx.time_seconds();
-  if (clip_.drag != ClipDrag::None && clip_.moved && ctx.pointer_down()) {
+  if (((clip_.drag != ClipDrag::None && clip_.moved) ||
+       (track_.drag != ClipDrag::None && track_.moved)) &&
+      ctx.pointer_down()) {
     constexpr float edge_zone = 24.0F;
     float velocity = 0.0F;
     if (ctx.pointer_x() < graph.x + edge_zone) {
@@ -904,8 +909,11 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
           ? keys_.snap_guide
           : (clip_.drag != ClipDrag::None
                  ? clip_.snap_guide
-                 : (markers_.drag_moved ? markers_.snap_guide
-                                       : std::optional<core::i64>{}));
+                 : (track_.drag != ClipDrag::None
+                        ? track_.snap_guide
+                        : (markers_.drag_moved
+                               ? markers_.snap_guide
+                               : std::optional<core::i64>{})));
   if (guide.has_value()) {
     const float guide_x = frame_to_x(static_cast<double>(*guide));
     if (guide_x >= graph.x && guide_x <= graph.x + graph.width) {
@@ -1054,14 +1062,18 @@ void TimelinePanel::close_pass(Pass &p) {
   // keeps the more specific move, trim and fade feedback drawn above.
   if (!ctx.pointer_blocked() && !scratch.popup_pointer_blocked &&
       !scratch.key_popup_pointer_blocked &&
-      (clip_.drag != ClipDrag::None ||
+      (clip_.drag != ClipDrag::None || track_.drag != ClipDrag::None ||
        (graph.contains(ctx.pointer_x(), ctx.pointer_y()) &&
         ctx.pointer_y() >= rows_bounds.y))) {
-    if (edit_tool_ != TimelineEditTool::Standard) {
+    const ClipDrag drag =
+        clip_.drag != ClipDrag::None ? clip_.drag : track_.drag;
+    if (track_.drag != ClipDrag::None ||
+        (edit_tool_ == TimelineEditTool::Standard && drag != ClipDrag::None)) {
+      // A track bar answers every tool but the razor as Selection does.
+      ctx.set_cursor(drag == ClipDrag::Move ? gui::Cursor::Move
+                                            : gui::Cursor::ResizeHorizontal);
+    } else if (edit_tool_ != TimelineEditTool::Standard) {
       ctx.set_cursor(tool_cursor(edit_tool_));
-    } else if (clip_.drag != ClipDrag::None) {
-      ctx.set_cursor(clip_.drag == ClipDrag::Move ? gui::Cursor::Move
-                                               : gui::Cursor::ResizeHorizontal);
     }
   }
 }

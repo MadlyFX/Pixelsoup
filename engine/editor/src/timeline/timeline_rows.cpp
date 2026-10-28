@@ -287,8 +287,11 @@ RowList build_rows(RowsState &state, const RowsInput &input,
   std::vector<const ElementInfo *> ordinary_layers;
   std::vector<const ElementInfo *> unordered_layers;
   for (const ElementInfo &element : elements) {
-    if (element.kind == ElementKind::Media &&
-        emitted_media.contains(element.node)) {
+    // A track is listed once, by its header above; the element the Director
+    // also publishes for it is what the Inspector edits, not another row.
+    if ((element.kind == ElementKind::Media &&
+         emitted_media.contains(element.node)) ||
+        element.kind == ElementKind::Track) {
       continue;
     }
     (orderable_layer(element) ? ordinary_layers : unordered_layers)

@@ -794,8 +794,9 @@ public:
   [[nodiscard]] std::size_t selected_key_count() const noexcept {
     return keys_.selected.size();
   }
+  // A clip, or a whole track's clips by its bar, being moved or trimmed.
   [[nodiscard]] bool dragging_clip() const noexcept {
-    return clip_.drag != ClipDrag::None;
+    return clip_.drag != ClipDrag::None || track_.drag != ClipDrag::None;
   }
   [[nodiscard]] bool dragging_layer() const noexcept {
     return reorder_.layer_node != doc::NodeId{};
@@ -910,6 +911,9 @@ private:
   void resize_clip_rows(Pass &p);
   void track_key_drag(Pass &p);
   void resolve_clip_gesture(Pass &p);
+  // A drag on a track's bar: every clip on it moved or its ends trimmed as
+  // one clip, and the track reordered when dropped on another's band.
+  void resolve_track_gesture(Pass &p);
   void resolve_reorder_targets(Pass &p);
   void draw_rows(Pass &p);
   // The zoom/scroll bar along the panel's foot, and the clip-height choices
@@ -957,6 +961,8 @@ private:
   void begin_row(RowContext &rc);
   void track_header_list_cell(RowContext &rc);
   void layer_list_cell(RowContext &rc);
+  // A layer's or track's name in its name bounds.
+  void row_name_label(RowContext &rc, gui::UiColor color);
   // The S switch a row solos itself on the Stage with.
   void solo_toggle(RowContext &rc, const gui::Rect &bounds);
   void properties_header_list_cell(RowContext &rc);
@@ -974,6 +980,9 @@ private:
   // already shows it, and its key ticks.
   void summary_lane_cell(RowContext &rc, bool span_bar);
   void clip_bar_cell(RowContext &rc);
+  // A track's own bar, from its first clip's head to its last clip's tail,
+  // which edits the track as though it were one clip.
+  void track_bar_cell(RowContext &rc);
   // Each draws into its part of the bar: the whole bar on a short row, or
   // on a tall one the pictures above and the waveform below.
   bool draw_clip_filmstrip(RowContext &rc, bool live, const gui::Rect &area);
@@ -1086,6 +1095,9 @@ private:
   ClickTracker clicks_;
   // The operator's width for the layer list; zero follows the panel.
   float list_width_{};
+  // The list width at which every name on screen last frame read whole:
+  // where a double-click on its seam takes the list.
+  float list_fit_width_{};
 
   // A drag on a clip row's lower edge in the list. Shift sizes every clip
   // row together.
@@ -1252,6 +1264,58 @@ private:
     bool press_consumed{};
   };
   ClipGesture clip_;
+
+  // Where a lifted layer lands among its peers: the row it goes before or
+  // after. Only ids are kept, because the rows are rebuilt every frame.
+  struct LayerLanding final {
+    doc::NodeId destination{};
+    TimelineLayerPlacement placement{TimelineLayerPlacement::Before};
+    float y{};
+  };
+  // The peer of `source` whose band holds (x, y), if any: an ordering drag
+  // never implies reparenting or moving between tracks.
+  [[nodiscard]] std::optional<LayerLanding>
+  layer_landing(Pass &p, const ElementInfo &source, float x, float y);
+  // A clip bar dragged up or down within its own track or stack reorders
+  // it there, alongside whatever the drag did to its time.
+  std::optional<LayerLanding> clip_landing_;
+
+  // A drag on a track's bar. Move slides every clip on the track by one
+  // delta and, over another track's band, also reorders the track; TrimIn
+  // and TrimOut trim the clips at the track's head and tail. Like a clip
+  // drag it previews here and authors once, on release.
+  struct TrackClip final {
+    doc::NodeId node{};
+    scene::ClipTiming origin{};
+    scene::ClipTiming proposed{};
+  };
+  struct TrackGesture final {
+    ClipDrag drag{ClipDrag::None};
+    doc::NodeId lane{};
+    std::vector<TrackClip> clips;
+    // The track's span when the drag began: its first clip's head and its
+    // last clip's exclusive tail.
+    core::i64 first{};
+    core::i64 end{};
+    core::i64 anchor{};
+    core::i64 delta{};
+    float start_x{};
+    float start_y{};
+    std::optional<gui::UiPoint> release;
+    bool moved{};
+    std::optional<core::i64> snap_guide;
+    // Another track whose band a Move is over; zero over its own.
+    doc::NodeId destination{};
+    // Released changes, drawn until the Director adopts them.
+    std::vector<TrackClip> pending;
+    core::u32 pending_frames{};
+  };
+  TrackGesture track_;
+  void press_track_bar(RowContext &rc, ClipDrag part);
+  // How a placed clip is drawn: as a clip or track drag proposes it, as a
+  // released edit left it until the Director adopts it, or as authored.
+  [[nodiscard]] scene::ClipTiming
+  shown_timing(const ElementInfo &element) const noexcept;
   double previous_draw_time_{};
   bool auto_key_{true};
   // A row another panel pointed at: still to be scrolled to, and outlined

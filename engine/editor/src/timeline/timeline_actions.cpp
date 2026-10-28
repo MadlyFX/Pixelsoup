@@ -323,6 +323,34 @@ void TimelinePanel::handle_actions(Pass &p) {
                     MenuCommand::ToggleTrackMute, lane->id);
           add_entry(lane->locked ? "Unlock Track" : "Lock Track",
                     MenuCommand::ToggleTrackLock, lane->id);
+          // The track's own bar edits it as one clip; so does its menu.
+          bool spanned = false;
+          bool under_playhead = false;
+          core::i64 track_first = 0;
+          core::i64 track_last = 0;
+          for (const ElementInfo &held : elements) {
+            if (held.kind != ElementKind::Media ||
+                held.timeline_lane != lane->id || !held.timing.placed()) {
+              continue;
+            }
+            track_first = spanned ? std::min(track_first, held.timing.start)
+                                  : held.timing.start;
+            track_last = spanned ? std::max(track_last, held.timing.last_frame())
+                                 : held.timing.last_frame();
+            spanned = true;
+            under_playhead = under_playhead ||
+                             (editable_clip(held) &&
+                              playhead > held.timing.start &&
+                              playhead <= held.timing.last_frame());
+          }
+          if (under_playhead && !lane->locked) {
+            add_entry("Split Track at Playhead",
+                      MenuCommand::SplitTrackAtPlayhead, lane->id);
+          }
+          if (spanned) {
+            add_entry("Set In/Out to Track", MenuCommand::RangeToClip,
+                      lane->id, track_first, {}, track_last);
+          }
           if (clipboard_span.has_value() && *clipboard_span > 0 &&
               !lane->locked) {
             add_entry("Insert Clipboard at Playhead",
@@ -429,6 +457,17 @@ void TimelinePanel::handle_actions(Pass &p) {
         frame.clip_splits.push_back(
             TimelineClipSplit{entry.node, signed_frame(acting_frame)});
         break;
+      case MenuCommand::SplitTrackAtPlayhead: {
+        const core::i64 cut = signed_frame(acting_frame);
+        for (const ElementInfo &element : elements) {
+          if (editable_clip(element) && element.timeline_lane == entry.node &&
+              cut > element.timing.start &&
+              cut <= element.timing.last_frame()) {
+            frame.clip_splits.push_back(TimelineClipSplit{element.node, cut});
+          }
+        }
+        break;
+      }
       case MenuCommand::RippleDeleteSelection:
         ripple_delete(selected_clips);
         break;

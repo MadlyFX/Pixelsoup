@@ -213,6 +213,16 @@ enum class Icon : core::u8 {
     Projection,
     // A half-lit ball: how a Stage view shades.
     Shading,
+    // A ring round a dot with four sights: where an edit is aimed.
+    Target,
+    // Two linked chain links: kept in step with something else.
+    SyncLock,
+    // Headphones: heard - here, shown - alone.
+    Solo,
+    // A picture's resolution: the whole square at Full, a quarter of it at
+    // Half, which is the share of the pixels Half keeps.
+    FullResolution,
+    HalfResolution,
 };
 void draw_icon(
     UiDrawList& list,

@@ -753,6 +753,53 @@ void draw_icon(
         list.add_convex_poly(lit, color);
         return;
     }
+    case Icon::Target:
+        arc(4.5F, 0.0F, 6.2832F, 1.3F);
+        list.add_rect(x - 7.0F, y - 0.6F, 3.0F, 1.2F, color);
+        list.add_rect(x + 4.0F, y - 0.6F, 3.0F, 1.2F, color);
+        list.add_rect(x - 0.6F, y - 7.0F, 1.2F, 3.0F, color);
+        list.add_rect(x - 0.6F, y + 4.0F, 1.2F, 3.0F, color);
+        list.add_rect(x - 1.25F, y - 1.25F, 2.5F, 2.5F, color);
+        return;
+    case Icon::SyncLock: {
+        // Two capsule outlines on the diagonal, each through the other.
+        const auto link = [&](float cx, float cy) {
+            // Up and to the right; each end a half circle facing away.
+            constexpr float half = 2.6F;
+            constexpr float radius = 2.4F;
+            constexpr float axis = -0.7854F;
+            constexpr float pi = 3.14159265F;
+            const float dx = std::cos(axis) * half;
+            const float dy = std::sin(axis) * half;
+            std::array<UiPoint, 19U> points{};
+            for (std::size_t index = 0U; index < 18U; ++index) {
+                const bool far_end = index >= 9U;
+                const float t = static_cast<float>(far_end ? index - 9U : index) / 8.0F;
+                const float angle = axis + (far_end ? -0.5F : 0.5F) * pi + pi * t;
+                points[index] = UiPoint{
+                    cx + (far_end ? dx : -dx) + std::cos(angle) * radius,
+                    cy + (far_end ? dy : -dy) + std::sin(angle) * radius};
+            }
+            points.back() = points.front();
+            list.add_polyline(points, 1.3F, color);
+        };
+        link(x - 2.0F, y + 2.0F);
+        link(x + 2.0F, y - 2.0F);
+        return;
+    }
+    case Icon::Solo:
+        arc(5.0F, 3.1416F, 3.1416F, 1.4F);
+        list.add_rect(x - 6.2F, y, 3.0F, 5.5F, color);
+        list.add_rect(x + 3.2F, y, 3.0F, 5.5F, color);
+        return;
+    case Icon::FullResolution:
+        outline(x - 6.0F, y - 6.0F, 12.0F, 12.0F, 1.2F);
+        list.add_rect(x - 4.0F, y - 4.0F, 8.0F, 8.0F, color);
+        return;
+    case Icon::HalfResolution:
+        outline(x - 6.0F, y - 6.0F, 12.0F, 12.0F, 1.2F);
+        list.add_rect(x - 4.0F, y - 4.0F, 4.0F, 4.0F, color);
+        return;
     }
 }
 

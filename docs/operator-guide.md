@@ -345,18 +345,19 @@ is, by construction; it does not reorder clips across surfaces at different
 depths, which composite back-to-front from the camera like everything else in
 the scene. Creating or deleting a track is an ordinary Scene edit. A non-empty
 track never disappears on a bare delete: choose `DELETE+CLIPS`, or choose a
-named destination and `MOVE+DELETE` its placements first. **New track**,
-after the last row of the list, adds a track at the bottom; the + at the head
-of the list does the same.
+named destination and `MOVE+DELETE` its placements first. The + at the head
+of the list adds a track, as does **New Track** on a track's menu. A track is
+listed once, by its header; selecting the header is how the Inspector reaches
+the screen.
 
-Beside its padlock a track header carries three switches, each lit while it
-is on:
+Beside its padlock a track header carries three icon switches, each lit while
+it is on (hover one for its name):
 
-- **TGT** aims Insert and Overwrite (`,` and `.`, or the menu) at this track,
+- **Target** (a ring with sights) aims Insert and Overwrite (`,` and `.`, or the menu) at this track,
   whatever is selected. Without a target they go to the selected track, or to
   the track every selected clip is on. One track at a time is the target; the
   target is the operator's own and is not saved in the project.
-- **SYNC** sync-locks the track, and is saved with it. A ripple trim, ripple
+- **Sync lock** (a chain link) sync-locks the track, and is saved with it. A ripple trim, ripple
   delete or insert made on another track moves this track's clips at or after
   the edit point by the same amount, so what plays on it stays in time with
   the track being cut. A clip that straddles the edit point stays where it is,
@@ -364,11 +365,25 @@ is on:
   Where a moving clip would run into one that stays, a ripple trim stops
   short of it and a ripple delete or insert is refused with nothing changed.
   The Stage preview of a ripple drag shows the synced tracks moving too.
-- **S** solos the track on the Stage; see **Solo** below.
+- **Solo** (headphones) solos the track on the Stage; see **Solo** below.
+
+**Track bar.** A track holding placed clips draws a bar in its header's lane
+from its first clip's head to its last clip's tail, ticked at every cut and
+labelled with its clip count. The bar edits the track as though it were one
+clip: drag it to move every clip on the track by the same amount, snapping
+either end to cuts on other tracks, the playhead and markers; drag its left or
+right end to trim the clip that opens or closes the track; with the
+**Razor (`C`)** click it to cut every clip on the track there (Shift: every
+track). Ripple, Roll, Slip and Slide have no single cut to act on, so the bar
+answers them as Selection does. Carry the bar onto another track's band and
+the track takes that place in the stack, the same reorder a header drag makes;
+moved in time as well, both are one undo step. A track with a locked clip
+refuses the drag rather than leave that clip behind. The track's menu also
+offers **Split Track at Playhead** and **Set In/Out to Track**.
 
 **Solo.** Every row the Stage draws - an object, a model, a clip, a light, a
-group, a Blender collection and a track - carries an **S** just inside its
-padlock. While anything is soloed, the Stage draws only what is soloed and
+group, a Blender collection and a track - carries a **Solo** switch just
+inside its padlock. While anything is soloed, the Stage draws only what is soloed and
 what is inside it: a soloed group or collection brings its children, and a
 soloed track its clips. Lights keep lighting the Stage as they are, unless a
 light is among what is soloed - soloed itself or inside a soloed group - in
@@ -390,8 +405,11 @@ offscreen or only a few pixels wide does not require hunting for its bar.
 Dropping on any row outside every band takes the clip out of its track again,
 and back onto its own transform. A locked track refuses an arriving clip.
 
-Every orderable layer row has the same full-width lift gesture. Dragging a clip
-within its current track reorders that track's clips; dragging an object, model,
+Every orderable layer row has the same full-width lift gesture, and so does a
+clip's bar: drag the bar up or down within its own track - or among the loose
+layers, for a clip on no track - and it lands above or below the clip it is
+dropped on, alongside whatever the drag did to its time, in one undo step.
+Dragging a clip within its current track reorders that track's clips; dragging an object, model,
 light, group, or trackless clip inserts it before or after another sibling. The target
 is one insertion line, not a highlighted row: highlighting a peer would imply
 nesting, while reparenting is a separate hierarchy operation. Release authors
@@ -409,7 +427,8 @@ timeline's open folders.
 
 A track's header has a twirl too: closed, it lists only the header, and a
 search still looks inside it. Anything closed summarises what it hides, the
-way a collapsed layer or compound clip does elsewhere. A closed track, group,
+way a collapsed layer or compound clip does elsewhere. A track always draws
+its track bar (see **Track bar** above), open or closed. A closed group,
 collection or hierarchy parent draws a thin bar over the frames its clips and
 keys span, from the earliest clip start or key to the latest clip end or key,
 and a small tick on every frame anything below it is keyed. A layer whose
@@ -418,11 +437,18 @@ keys the same way; a clip's ticks ride on its bar. A tick takes the channel's
 colour when every key on that frame belongs to one channel, is neutral where
 channels meet, and is larger where several keys share the frame. Opening a
 parent moves its summary down to whatever below it is still closed. A layer
-with nothing placed or keyed draws nothing in its lane. Summaries are for
-reading only: they are not dragged, and pressing one acts on the lane
-beneath.
+with nothing placed or keyed draws nothing in its lane. Summaries other than
+the track bar are for reading only: they are not dragged, and pressing one
+acts on the lane beneath.
 
-Track order is changed by dragging a header up or down the stack. The target is
+The edge between the track list and the lanes is a seam, marked by a grip at
+its top: drag it to widen the list, or double-click it to widen the list until
+every name on screen reads whole. A name too long for its row is shortened in
+the middle, so names that share a long beginning still read apart, and shows
+whole on hover.
+
+Track order is changed by dragging a header - or its bar - up or down the
+stack. The target is
 shown as a single insertion cursor between tracks, never as a highlighted
 track: the operation is ordering, not nesting. Crossing several tracks previews
 locally and reports one absolute reorder on release, so the whole drag is one
@@ -494,9 +520,9 @@ nothing about what a render node has decoded.
 
 On a media layer row the Timeline draws that placement as a bar.
 
-Each placed clip row carries its decode resolution inside its padlock:
-**FULL**, or **HALF** lit in the warning colour, with `HALF` also written on
-the clip's bar. Click it to switch; it is the Inspector's Resolution setting,
+Each placed clip row carries its decode resolution inside its padlock as an
+icon: a filled square for **Full**, or a quarter-filled square lit in the
+warning colour for **Half**, with `HALF` also written on the clip's bar. Click it to switch; it is the Inspector's Resolution setting,
 authored the same way and undone the same way. Half holds each decoded frame
 at half width and height: a quarter of the video memory, softer wherever the
 clip is shown larger than half its source size. A locked clip shows its state

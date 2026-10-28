@@ -117,6 +117,8 @@ void TimelinePanel::draw_rows(Pass &p) {
       channel_lane_cell(rc);
       break;
     case Row::Kind::LaneHeader:
+      track_bar_cell(rc);
+      break;
     case Row::Kind::PropertiesHeader:
       summary_lane_cell(rc, true);
       break;
@@ -127,33 +129,9 @@ void TimelinePanel::draw_rows(Pass &p) {
   if (graph_mode_) {
     draw_graph(p);
   }
-  // A new track is made where the track list ends, as in every editor;
-  // the + on the ruler is the same action for when the list is long.
-  {
-    const float button_y = rows_bounds.y + rows_extent(rows) - row_scroll_;
-    if (button_y < rows_bounds.y + rows_bounds.height &&
-        button_y + row_height > rows_bounds.y) {
-      const gui::Rect button{rows_bounds.x + 8.0F, button_y + 3.0F,
-                             std::min(120.0F, p.layout.list_width - 16.0F),
-                             row_height - 6.0F};
-      const gui::Interaction made =
-          ctx.grab(mix(id_, "new track row"), button);
-      ctx.panel(button, made.hovered ? ctx.theme().widget_hover
-                                     : alpha(ctx.theme().widget, 0.6F));
-      gui::draw_icon(ctx.draw_list(), gui::Icon::Plus, button.x + 10.0F,
-                     button.y + button.height * 0.5F,
-                     made.hovered ? ctx.theme().text : ctx.theme().text_muted);
-      ctx.label(gui::Rect{button.x + 20.0F, button.y,
-                          std::max(button.width - 22.0F, 0.0F), button.height},
-                "New track",
-                made.hovered ? ctx.theme().text : ctx.theme().text_muted);
-      ctx.tooltip(button, "Add a track at the bottom of the list");
-      if (made.clicked) {
-        p.frame.lane_edits.push_back(
-            TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
-      }
-    }
-  }
+  // How wide the list would have to be for every name on screen to read
+  // whole, for the seam's double-click.
+  list_fit_width_ = p.layout.list_width + p.name_overflow;
   // A row another panel pointed at is outlined, fading.
   if (ctx.time_seconds() < reveal_until_) {
     for (const RowContext &rc : visible) {
@@ -267,13 +245,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
     if (element != nullptr && element->kind == ElementKind::Media &&
         element->timing.placed()) {
       rc.clip_element = element;
-      rc.clip_timing =
-          clip_.drag != ClipDrag::None && clip_.node == row.node
-              ? clip_.proposed
-              : (clip_.pending_edit.has_value() &&
-                         clip_.pending_edit->clip == row.node
-                     ? clip_.pending_edit->timing
-                     : element->timing);
+      rc.clip_timing = shown_timing(*element);
       const scene::ClipTiming &timing = rc.clip_timing;
       const float x0 = frame_to_x(static_cast<double>(timing.start));
       const float x1 =
@@ -284,6 +256,27 @@ void TimelinePanel::layout_row(RowContext &rc) {
           frame_to_x(static_cast<double>(timing.start + timing.fade_in));
       rc.clip_fade_out_x = frame_to_x(static_cast<double>(
           timing.start + timing.duration - timing.fade_out));
+    }
+  }
+  if (row.kind == Row::Kind::LaneHeader) {
+    for (const ElementInfo &element : elements) {
+      if (element.kind != ElementKind::Media ||
+          element.timeline_lane != row.node || !element.timing.placed()) {
+        continue;
+      }
+      const scene::ClipTiming timing = shown_timing(element);
+      const core::i64 end = timing.start + timing.duration;
+      rc.track_first =
+          rc.track_bar ? std::min(rc.track_first, timing.start) : timing.start;
+      rc.track_end = rc.track_bar ? std::max(rc.track_end, end) : end;
+      rc.track_bar = true;
+      ++rc.track_clips;
+    }
+    if (rc.track_bar) {
+      const float x0 = frame_to_x(static_cast<double>(rc.track_first));
+      const float x1 = frame_to_x(static_cast<double>(rc.track_end));
+      rc.clip_bar =
+          gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row.height - 6.0F};
     }
   }
 
@@ -344,14 +337,19 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
     p.hits.add(target);
   }
 
-  if (row.locked || rc.clip_element == nullptr) {
+  if (row.locked || (rc.clip_element == nullptr && !rc.track_bar)) {
     return;
   }
   const gui::Rect &bar = rc.clip_bar;
   p.hits.add(HitTarget{mix(id_, "clip body", identity), bar,
                        HitPriority::ClipBody, bar,
                        row_part_tag(rc.index, RowPart::ClipBody)});
-  if (edit_tool_ != TimelineEditTool::Standard) {
+  // A track has no single cut to ripple, roll, slip or slide, so its bar
+  // answers those tools as Selection does; the razor needs only the body.
+  const bool selection_parts =
+      rc.track_bar ? edit_tool_ != TimelineEditTool::Razor
+                   : edit_tool_ == TimelineEditTool::Standard;
+  if (!selection_parts) {
     return;
   }
   const float grab = edge_grab_width(bar.width);
@@ -367,6 +365,9 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
                        HitPriority::TrimEdge,
                        gui::Rect{bar.x + bar.width, bar.y, 0.0F, bar.height},
                        row_part_tag(rc.index, RowPart::TrimOut)});
+  if (rc.track_bar) {
+    return;
+  }
   // The knobs ride the bar's top edge; each answers within a disc around
   // its centre, but no deeper into the bar than fade_knob_depth: a knob sits
   // on its trim edge whenever the clip has no fade, and the rest of that
@@ -428,7 +429,8 @@ void TimelinePanel::begin_row(RowContext &rc) {
   auto &content_x = rc.content_x;
   auto &lock_x = rc.lock_x;
 
-  if (row.kind == Row::Kind::Layer && !row.surface) {
+  if ((row.kind == Row::Kind::Layer && !row.surface) ||
+      row.kind == Row::Kind::LaneHeader) {
     const float top = std::max(y, rows_bounds.y);
     const float bottom = std::min(y + row.height, rows_bounds.y + rows_bounds.height);
     replacement_targets_.push_back({row.node,
@@ -555,23 +557,23 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
   // whether the Stage shows it alone. Each reads its state from across a
   // stage when lit.
   constexpr float chip_height = 16.0F;
-  const gui::Rect solo_chip{lock_x - 4.0F - 18.0F, centre_y - 8.0F, 18.0F,
-                            chip_height};
-  const gui::Rect sync_chip{solo_chip.x - 2.0F - 38.0F, solo_chip.y, 38.0F,
-                            chip_height};
-  const gui::Rect target_chip{sync_chip.x - 2.0F - 30.0F, solo_chip.y, 30.0F,
-                              chip_height};
+  const gui::Rect solo_chip{lock_x - 4.0F - row_switch_width, centre_y - 8.0F,
+                            row_switch_width, chip_height};
+  const gui::Rect sync_chip{solo_chip.x - 2.0F - row_switch_width,
+                            solo_chip.y, row_switch_width, chip_height};
+  const gui::Rect target_chip{sync_chip.x - 2.0F - row_switch_width,
+                              solo_chip.y, row_switch_width, chip_height};
   name_bounds = gui::Rect{name_x, y,
                           std::max(target_chip.x - name_x - 4.0F, 0.0F),
                           row.height};
   const bool targeted =
       targeted_lane_.has_value() && *targeted_lane_ == row.node;
-  if (chip_toggle(ctx, mix(id_, "track target", row.node.value()),
-                  target_chip, "TGT", targeted, row_theme.accent,
-                  targeted ? "Insert and Overwrite land on this track. Click "
-                             "to stop aiming them here."
-                           : "Aim Insert and Overwrite at this track, "
-                             "whatever is selected.",
+  if (icon_toggle(ctx, mix(id_, "track target", row.node.value()),
+                  target_chip, gui::Icon::Target, targeted, row_theme.accent,
+                  targeted ? "Targeted: Insert and Overwrite land on this "
+                             "track. Click to stop aiming them here."
+                           : "Target: aim Insert and Overwrite at this "
+                             "track, whatever is selected.",
                   !row.locked || targeted)) {
     if (targeted) {
       targeted_lane_.reset();
@@ -579,8 +581,9 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
       targeted_lane_ = row.node;
     }
   }
-  if (chip_toggle(ctx, mix(id_, "track sync lock", row.node.value()),
-                  sync_chip, "SYNC", row.sync_locked, row_theme.good,
+  if (icon_toggle(ctx, mix(id_, "track sync lock", row.node.value()),
+                  sync_chip, gui::Icon::SyncLock, row.sync_locked,
+                  row_theme.good,
                   row.sync_locked
                       ? "Sync locked: a ripple on another track moves this "
                         "track's later clips by the same amount. Click to "
@@ -603,8 +606,7 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
           TimelineLaneAction::Rename, row.node, std::move(*renamed)});
     }
   } else {
-    ctx.label(name_bounds, row.label,
-              row.muted ? row_theme.text_muted : row_theme.text);
+    row_name_label(rc, row.muted ? row_theme.text_muted : row_theme.text);
   }
   // Muting a track hides it, so its switch is the eye every layer has;
   // the toggles double as the state readout, so no badge repeats them.
@@ -622,14 +624,29 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
   }
 }
 
+// A layer's or track's name: cut by its middle when the list is too narrow
+// for it, read whole on hover, and how far it overruns noted for the seam.
+void TimelinePanel::row_name_label(RowContext &rc, gui::UiColor color) {
+  gui::UiContext &ctx = rc.p.ctx;
+  const gui::Rect &bounds = rc.name_bounds;
+  const float overrun = ctx.font_width(rc.row.label) + 2.0F - bounds.width;
+  rc.p.name_overflow = std::max(rc.p.name_overflow, overrun);
+  if (overrun <= 0.0F) {
+    ctx.label(bounds, rc.row.label, color);
+    return;
+  }
+  ctx.label(bounds, elide_middle(ctx, rc.row.label, bounds.width), color);
+  ctx.tooltip(bounds, rc.row.label);
+}
+
 // A row's Stage solo: lit while the row is soloed. Soloing anything draws, on
 // the Stage alone, only what is soloed and what is inside it.
 void TimelinePanel::solo_toggle(RowContext &rc, const gui::Rect &bounds) {
   gui::UiContext &ctx = rc.p.ctx;
   const doc::NodeId node = rc.row.node;
   const bool soloed = soloed_.contains(node);
-  if (chip_toggle(ctx, mix(id_, "solo", node.value()), bounds, "S", soloed,
-                  ctx.theme().warning,
+  if (icon_toggle(ctx, mix(id_, "solo", node.value()), bounds, gui::Icon::Solo,
+                  soloed, ctx.theme().warning,
                   soloed ? "Soloed: the Stage draws only what is soloed and "
                            "what is inside it. Program and the outputs draw "
                            "everything."
@@ -688,13 +705,13 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
       row_element->kind != ElementKind::Environment;
   // Anything the Stage draws - a layer, a model, a light, a group or a
   // collection - can be soloed there, from just inside its padlock.
-  constexpr float solo_width = 18.0F;
+  constexpr float solo_width = row_switch_width;
   const bool solo_chip =
       has_toggles && !row.surface && row_element != nullptr &&
       orderable_layer(*row_element);
   // A placed video clip carries its decode resolution inside that, where
   // the state is read and switched without the Inspector.
-  constexpr float resolution_width = 40.0F;
+  constexpr float resolution_width = row_switch_width;
   const bool resolution_chip =
       has_toggles && !row.surface && row_element != nullptr &&
       row_element->kind == ElementKind::Media &&
@@ -717,10 +734,9 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
   } else {
     const bool shown =
         row_element == nullptr || row_element->effective_visible;
-    ctx.label(name_bounds, row.label,
-              row.locked ? row_theme.text_muted
-                         : (shown ? row_theme.text
-                                  : alpha(row_theme.text, 0.45F)));
+    row_name_label(rc, row.locked ? row_theme.text_muted
+                                  : (shown ? row_theme.text
+                                           : alpha(row_theme.text, 0.45F)));
   }
   if (row.surface) {
     ctx.label(gui::Rect{lock_x - 60.0F, y, 56.0F, row.height}, "SURFACE",
@@ -759,9 +775,10 @@ void TimelinePanel::layer_list_cell(RowContext &rc) {
     const float right = lock_x - 4.0F - (solo_chip ? solo_width + 4.0F : 0.0F);
     const gui::Rect chip{right - resolution_width, centre_y - 8.0F,
                          resolution_width, 16.0F};
-    if (chip_toggle(
+    if (icon_toggle(
             ctx, mix(id_, "clip resolution", row.node.value()), chip,
-            half ? "HALF" : "FULL", half, row_theme.warning,
+            half ? gui::Icon::HalfResolution : gui::Icon::FullResolution,
+            half, row_theme.warning,
             half ? "Half resolution: each decoded frame is held at half "
                    "width and height - a quarter of the video memory, softer "
                    "wherever it is shown larger than half its source. Click "
@@ -1287,6 +1304,141 @@ void TimelinePanel::layer_lane_cell(RowContext &rc) {
 
 }
 
+// A track's bar: a wash over its clips' whole span with a tick at every cut,
+// so it reads as the clips it moves together, its trim edges, how many clips
+// it holds, and what a press would do. A track with nothing placed keeps the
+// summary of what it keys.
+void TimelinePanel::track_bar_cell(RowContext &rc) {
+  if (!rc.track_bar) {
+    summary_lane_cell(rc, true);
+    return;
+  }
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const gui::Rect &graph = p.layout.graph;
+  const Row &row = rc.row;
+  const gui::Rect &bar = rc.clip_bar;
+  const bool live = track_.drag != ClipDrag::None && track_.lane == row.node;
+  const float strength = row.locked ? 0.5F : 1.0F;
+  ctx.panel(bar, alpha(row.color, (live ? 0.34F : 0.20F) * strength));
+  for (const ElementInfo &element : p.input.elements) {
+    if (element.kind != ElementKind::Media ||
+        element.timeline_lane != row.node || !element.timing.placed()) {
+      continue;
+    }
+    const scene::ClipTiming timing = shown_timing(element);
+    for (const core::i64 cut : {timing.start, timing.start + timing.duration}) {
+      const float x = time_axis_.x(static_cast<double>(cut), graph.x);
+      if (x > bar.x + 1.0F && x < bar.x + bar.width - 1.0F) {
+        ctx.panel(gui::Rect{x - 0.5F, bar.y + 3.0F, 1.0F, bar.height - 6.0F},
+                  alpha(row.color, 0.6F * strength));
+      }
+    }
+  }
+  draw_clip_edges(rc);
+  summary_lane_cell(rc, false);
+  const float label_left = std::max(bar.x, graph.x) + 6.0F +
+                           edge_grab_width(bar.width);
+  const float label_right = bar.x + bar.width - 6.0F;
+  const std::string count = std::to_string(rc.track_clips) +
+                            (rc.track_clips == 1U ? " clip" : " clips");
+  if (label_right - label_left >= ctx.font_width(count)) {
+    ctx.label(gui::Rect{label_left, bar.y, label_right - label_left,
+                        bar.height},
+              count, alpha(ctx.theme().text_muted, strength));
+  }
+  if (row.node == selected_lane_) {
+    draw_border(ctx, bar, ctx.theme().text, 1.5F);
+  }
+  if (!row.locked) {
+    draw_clip_hover(rc);
+    if (p.hover_owner.has_value() && tag_row(p.hover_owner->tag) == rc.index &&
+        tag_part(p.hover_owner->tag) == RowPart::ClipBody) {
+      ctx.tooltip(bar, "The whole track as one clip: drag to move every "
+                       "clip on it, or onto another track to reorder; drag "
+                       "an end to trim; the razor cuts the track.");
+    }
+  }
+}
+
+// A press on a track's bar. The razor cuts every clip on the track where it
+// lands (Shift: on every track); anything else lifts every clip on it, which
+// a locked clip forbids, since moving the rest would tear the track apart.
+void TimelinePanel::press_track_bar(RowContext &rc, ClipDrag part) {
+  Pass &p = rc.p;
+  gui::UiContext &ctx = p.ctx;
+  const std::span<const ElementInfo> elements = p.input.elements;
+  TimelinePanelFrame &frame = p.frame;
+  const Row &row = rc.row;
+  clip_.press_consumed = true;
+  keys_.selected.clear();
+  keys_.drag_keys.clear();
+  keys_.dragging = false;
+  keys_.duplicate = false;
+  keys_.marquee_tracking = false;
+  keys_.marquee_active = false;
+  keys_.lasso_points.clear();
+  markers_.selected.clear();
+  selected_lane_ = row.node;
+  TimelineSelectionRequest next{};
+  next.node = row.node;
+  next.action = selection_action(ctx.ctrl_held(), ctx.shift_held(), true);
+  if (next.action == SelectionAction::Range) {
+    next.visible_order = p.built.visible_order;
+  }
+  frame.selection = std::move(next);
+  if (edit_tool_ == TimelineEditTool::Razor) {
+    const core::i64 cut = razor_frame(p, ctx.pointer_press_x());
+    for (const ElementInfo &element : elements) {
+      if (editable_clip(element) &&
+          (element.timeline_lane == row.node || ctx.shift_held()) &&
+          cut > element.timing.start && cut <= element.timing.last_frame()) {
+        frame.clip_splits.push_back(TimelineClipSplit{element.node, cut});
+      }
+    }
+    return;
+  }
+  track_ = TrackGesture{.pending = std::move(track_.pending),
+                        .pending_frames = track_.pending_frames};
+  bool any_locked = false;
+  for (const ElementInfo &element : elements) {
+    if (element.kind != ElementKind::Media ||
+        element.timeline_lane != row.node || !element.timing.placed()) {
+      continue;
+    }
+    if (element.locked) {
+      any_locked = true;
+      continue;
+    }
+    const core::i64 end = element.timing.start + element.timing.duration;
+    track_.first = track_.clips.empty()
+                       ? element.timing.start
+                       : std::min(track_.first, element.timing.start);
+    track_.end = track_.clips.empty() ? end : std::max(track_.end, end);
+    track_.clips.push_back(
+        TrackClip{element.node, element.timing, element.timing});
+  }
+  if (any_locked || track_.clips.empty()) {
+    track_.clips.clear();
+    clip_.status = "TRACK EDIT UNAVAILABLE  /  Unlock the track's locked "
+                   "clips to move them together";
+    clip_.status_error = true;
+    clip_.status_until = ctx.time_seconds() + 3.0;
+    return;
+  }
+  track_.drag = part;
+  track_.lane = row.node;
+  track_.anchor = static_cast<core::i64>(std::llround(
+      time_axis_.frame(ctx.pointer_press_x(), p.layout.graph.x)));
+  track_.start_x = ctx.pointer_press_x();
+  track_.start_y = ctx.pointer_press_y();
+  track_.release =
+      ctx.pointer_released()
+          ? std::optional{gui::UiPoint{ctx.pointer_release_x(),
+                                       ctx.pointer_release_y()}}
+          : std::nullopt;
+}
+
 // A placed clip: body, filmstrip and waveform, trim edges, ramps and fade
 // knobs, its name, and what a press would do.
 void TimelinePanel::clip_bar_cell(RowContext &rc) {
@@ -1677,7 +1829,7 @@ void TimelinePanel::draw_clip_hover(RowContext &rc) {
           ? tag_part(p.hover_owner->tag)
           : RowPart::Lane;
   if (hovered != RowPart::Lane && clip_.drag == ClipDrag::None &&
-      !ctx.pointer_blocked()) {
+      track_.drag == ClipDrag::None && !ctx.pointer_blocked()) {
     const float px = ctx.pointer_x();
     if (edit_tool_ == TimelineEditTool::Razor) {
       const float cut_x =
@@ -1837,7 +1989,11 @@ void TimelinePanel::lane_press(RowContext &rc) {
                        owned == RowPart::FadeIn || owned == RowPart::FadeOut;
   const bool razor_press = owned_here && on_clip &&
                            edit_tool_ == TimelineEditTool::Razor;
-  if (razor_press) {
+  if (owned_here && on_clip && rc.track_bar) {
+    press_track_bar(rc, owned == RowPart::TrimIn    ? ClipDrag::TrimIn
+                        : owned == RowPart::TrimOut ? ClipDrag::TrimOut
+                                                    : ClipDrag::Move);
+  } else if (razor_press) {
     clip_.press_consumed = true;
     const core::i64 cut = razor_frame(p, press_x);
     for (const ElementInfo &element : elements) {
