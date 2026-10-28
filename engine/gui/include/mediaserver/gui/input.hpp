@@ -112,6 +112,9 @@ enum class Key : core::u8 {
     // playhead, Premiere's Q and W. Bare Q is the Timeline's cue key.
     TrimHeadToPlayhead,
     TrimTailToPlayhead,
+    // Ctrl+Enter: Take - Preview to the wall. Its own key, so nothing that
+    // answers a plain Enter (a field, the Cue Stack's GO) fires with it.
+    Take,
 };
 
 // Physical keys read as held state rather than as presses: a 3D viewport flies

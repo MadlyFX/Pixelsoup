@@ -101,10 +101,11 @@ namespace scene = mediaserver::scene;
 
 using Result = core::Result<std::unique_ptr<EditorShell>, EditorError>;
 
-constexpr float top_bar_height = 34.0F;
-constexpr float status_bar_height = 28.0F;
-// Where the menu bar starts, after the brand mark and name.
-constexpr float menu_bar_left = 158.0F;
+// The show bar is tall enough for the Program and Preview cards, Take and GO
+// to be hit without aiming; see editor_dock_area().
+constexpr float top_bar_height = editor_top_bar_height;
+constexpr float status_bar_height = editor_status_bar_height;
+constexpr float menu_bar_left = editor_menu_bar_left;
 
 // Docked panels sit on the window background with a six-unit gutter between
 // them; every seam answers the pointer four units either side of that gap.
@@ -203,31 +204,10 @@ const gui::PanelId panel_asset_viewer =
   return hash;
 }
 
-// The editor's palette. Surfaces step up in value from the window ground to
-// panels to their headers, every panel is framed in `border`, and text sits
-// well clear of all of them, so regions read apart in a dark room without any
-// of them competing with the picture.
+// The editor's palette is gui::Theme's own (see ui_context.hpp for what each
+// colour means); the editor only packs its forms a little tighter.
 [[nodiscard]] constexpr gui::Theme editor_theme() noexcept {
   gui::Theme theme{};
-  theme.background = gui::UiColor{0.031F, 0.039F, 0.051F, 1.0F};
-  theme.panel = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
-  theme.header = gui::UiColor{0.086F, 0.102F, 0.125F, 1.0F};
-  theme.row = gui::UiColor{0.075F, 0.088F, 0.108F, 1.0F};
-  theme.row_alt = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
-  theme.widget = gui::UiColor{0.102F, 0.122F, 0.149F, 1.0F};
-  theme.widget_hover = gui::UiColor{0.141F, 0.169F, 0.204F, 1.0F};
-  theme.widget_active = gui::UiColor{0.000F, 0.345F, 0.565F, 1.0F};
-  theme.accent = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
-  theme.selection = gui::UiColor{0.039F, 0.255F, 0.420F, 1.0F};
-  theme.track = gui::UiColor{0.039F, 0.047F, 0.059F, 1.0F};
-  theme.text = gui::UiColor{0.850F, 0.880F, 0.910F, 1.0F};
-  theme.text_muted = gui::UiColor{0.520F, 0.570F, 0.620F, 1.0F};
-  theme.divider = gui::UiColor{0.118F, 0.137F, 0.165F, 1.0F};
-  theme.border = gui::UiColor{0.165F, 0.192F, 0.231F, 1.0F};
-  theme.playhead = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
-  theme.keyframe = gui::UiColor{0.880F, 0.930F, 1.000F, 1.0F};
-  theme.good = gui::UiColor{0.250F, 0.840F, 0.420F, 1.0F};
-  theme.warning = gui::UiColor{0.960F, 0.400F, 0.320F, 1.0F};
   theme.padding = 5.0F;
   return theme;
 }
@@ -578,15 +558,22 @@ void draw_inline_remove(gui::UiContext &ui, const gui::Rect &bounds,
                           color);
 }
 
+// One pixel of a wall, magnified: a soft square holding its red, green and
+// blue emitters.
 void draw_brand_mark(gui::UiContext &ui, float x, float y) {
-  auto &draw = ui.draw_list();
-  constexpr gui::UiColor cyan{0.000F, 0.760F, 0.980F, 1.0F};
-  constexpr gui::UiColor magenta{0.930F, 0.160F, 0.760F, 1.0F};
-  draw.add_triangle(x, y + 2.0F, x + 15.0F, y + 8.0F, x, y + 16.0F, cyan);
-  draw.add_triangle(x + 6.0F, y, x + 18.0F, y + 8.0F, x + 6.0F, y + 18.0F,
-                    magenta);
-  draw.add_triangle(x + 5.0F, y + 4.0F, x + 12.0F, y + 8.0F, x + 5.0F,
-                    y + 13.0F, ui.theme().background);
+  const gui::Rect tile{x, y, 32.0F, 32.0F};
+  ui.rounded(tile, ui.theme().header, 10.0F);
+  constexpr std::array<gui::UiColor, 3U> emitters{{
+      {1.000F, 0.420F, 0.420F, 1.0F},
+      {0.357F, 0.890F, 0.561F, 1.0F},
+      {0.353F, 0.659F, 1.000F, 1.0F},
+  }};
+  for (std::size_t index = 0U; index < emitters.size(); ++index) {
+    const gui::Rect emitter{x + 7.5F + 6.5F * static_cast<float>(index),
+                            y + 8.0F, 4.0F, 16.0F};
+    ui.glow(emitter, emitters[index], 2.0F, 5.0F);
+    ui.rounded(emitter, emitters[index], 2.0F);
+  }
 }
 
 struct HeaderActions final {
@@ -594,7 +581,36 @@ struct HeaderActions final {
   bool preview{};
   bool swap{};
   bool open_setup{};
+  // The show bar's own controls: run the cue stack, bring the Output Monitor
+  // forward, and dim the editor for a long night.
+  bool go{};
+  bool show_outputs{};
+  bool toggle_night{};
 };
+
+// The editor dimmed for the small hours: surfaces, text and every glow pulled
+// down together, so the room stays dark and the wall stays the brightest
+// thing in it. The picture itself is never touched.
+[[nodiscard]] gui::Theme night_theme(gui::Theme theme) noexcept {
+  const auto dim = [](gui::UiColor color, float amount) noexcept {
+    return gui::UiColor{color.r * amount, color.g * amount, color.b * amount,
+                        color.a};
+  };
+  theme.background = dim(theme.background, 0.7F);
+  theme.panel = dim(theme.panel, 0.72F);
+  theme.header = dim(theme.header, 0.74F);
+  theme.row = dim(theme.row, 0.72F);
+  theme.row_alt = dim(theme.row_alt, 0.72F);
+  theme.widget = dim(theme.widget, 0.76F);
+  theme.widget_hover = dim(theme.widget_hover, 0.8F);
+  theme.track = dim(theme.track, 0.7F);
+  theme.divider = dim(theme.divider, 0.75F);
+  theme.border = dim(theme.border, 0.75F);
+  theme.text = dim(theme.text, 0.82F);
+  theme.text_muted = dim(theme.text_muted, 0.85F);
+  theme.glow *= 0.45F;
+  return theme;
+}
 
 enum class ApplicationMenu : core::u8 {
   None,
@@ -985,44 +1001,114 @@ enum class DeleteDomain : core::u8 {
   Neutral,
 };
 
+// What the show bar knows about the show beyond the switcher: where the cue
+// stack stands and how the render servers are doing.
+struct ShowBarState final {
+  const EditorTimeline *timeline{};
+  std::span<const scene::TimelineMarker> markers{};
+  const OutputMonitorState *outputs{};
+  bool night{};
+  // The Program picture as the editor last composited it, shown in the
+  // Program card; null shows the card's lit tile instead. Borrowed for the
+  // frame, like any viewport image.
+  const rhi::Texture *program_picture{};
+  float program_aspect{16.0F / 9.0F};
+};
+
+[[nodiscard]] std::string_view scene_name(const EditorSwitcherState &switcher,
+                                          scene::SceneId id) noexcept {
+  for (const scene::SceneInfo &info : switcher.scenes) {
+    if (info.id == id) {
+      return info.name;
+    }
+  }
+  return {};
+}
+
+// "Q2  Logo sting" for a cue, the way the Cue Stack names it.
+[[nodiscard]] std::string cue_caption(
+    std::span<const scene::TimelineMarker> markers, doc::NodeId id) {
+  std::size_t number = 0U;
+  for (const scene::TimelineMarker &marker : markers) {
+    if (marker.is_cue()) {
+      ++number;
+    }
+    if (marker.id == id) {
+      std::string text = marker.is_cue() ? "Q" + std::to_string(number)
+                                         : std::string{"M"};
+      if (!marker.name.empty()) {
+        text += "  ";
+        text += marker.name;
+      }
+      return text;
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] HeaderActions
 draw_application_header(gui::UiContext &ui, float width,
                         const EditorSwitcherState &switcher,
                         ApplicationMenu &open_menu,
-                        const EditorProjectState &project) {
+                        const EditorProjectState &project,
+                        const ShowBarState &show = {}) {
   HeaderActions actions{};
+  const gui::Theme &theme = ui.theme();
   const gui::Rect top{0.0F, 0.0F, width, top_bar_height};
-  ui.panel(top, ui.theme().background);
+  ui.panel(top, theme.background);
+  const float middle = top_bar_height * 0.5F;
+  // Two lines in a card: a small capitalised state over the thing it names.
+  const auto two_lines = [&](const gui::Rect &cell, std::string_view caption,
+                             gui::UiColor caption_color,
+                             std::string_view value, gui::UiColor value_color) {
+    const float line = ui.line_height();
+    const float block = line * 2.0F - 2.0F;
+    const float y = cell.y + (cell.height - block) * 0.5F;
+    ui.label(gui::Rect{cell.x, y, cell.width, line}, caption, caption_color);
+    ui.label(gui::Rect{cell.x, y + line - 2.0F, cell.width, line}, value,
+             value_color);
+  };
+
+  // --- The project: a wall pixel for a mark, its name, whether it is saved.
+  draw_brand_mark(ui, 14.0F, middle - 16.0F);
   {
-    gui::Rect rule = top;
-    ui.panel(gui::cut_bottom(rule, 1.0F), ui.theme().divider);
+    std::string name =
+        project.path.empty()
+            ? std::string{"Untitled"}
+            : native_path_to_utf8(native_path_from_utf8(project.path).stem());
+    const gui::Rect cell{56.0F, 0.0F, menu_bar_left - 64.0F, top_bar_height};
+    const float line = ui.line_height();
+    const float y = middle - line + 1.0F;
+    ui.label(gui::Rect{cell.x, y, cell.width, line}, name, theme.text);
+    const gui::UiColor state = project.dirty ? theme.caution : theme.good;
+    draw_status_dot(ui, cell.x + 4.0F, y + line + line * 0.5F - 2.0F, state,
+                    3.0F);
+    ui.label(gui::Rect{cell.x + 13.0F, y + line - 2.0F, cell.width - 13.0F,
+                       line},
+             project.dirty ? "Unsaved changes" : "Saved", theme.text_muted);
+    if (!project.path.empty()) {
+      ui.tooltip(cell, project.path);
+    }
   }
 
-  draw_brand_mark(ui, 12.0F, 8.0F);
-  {
-    gui::Rect brand = top;
-    static_cast<void>(gui::cut_left(brand, 38.0F));
-    ui.label(gui::cut_left(brand, 116.0F), "MEDIA STAGE", ui.theme().text);
-  }
-
+  // --- The menus: quiet words that light up as pills under the pointer.
   const auto menus = menu_bar_layout(ui);
   for (std::size_t index = 0U; index < menus.size(); ++index) {
     const MenuBarEntry &entry = menu_bar_entries[index];
     const gui::Rect menu = menus[index];
-    const gui::Interaction it =
-        ui.grab(mix(gui::ui_id("editor.menu"), entry.label), menu);
+    const gui::UiId menu_id = mix(gui::ui_id("editor.menu"), entry.label);
+    const gui::Interaction it = ui.grab(menu_id, menu);
+    ui.cursor_for(it, gui::Cursor::Hand);
     const bool active =
         entry.menu != ApplicationMenu::None && open_menu == entry.menu;
-    if (it.hovered || active) {
-      ui.panel(menu, ui.theme().header);
+    const float hover =
+        ui.ease(menu_id ^ gui::ui_id("hover"), it.hovered || active ? 1.0F : 0.0F);
+    const gui::Rect pill = gui::centered(menu, menu.width, 32.0F);
+    if (hover > 0.0F) {
+      ui.rounded(pill, gui::fade(theme.widget, hover), 16.0F);
     }
-    ui.label(gui::inset(menu, gui::Padding{9.0F, 0.0F, 0.0F, 0.0F}),
-             entry.label,
-             it.hovered || active ? ui.theme().text : ui.theme().text_muted);
-    if (active) {
-      gui::Rect underline = menu;
-      ui.panel(gui::cut_bottom(underline, 2.0F), ui.theme().accent);
-    }
+    ui.label_centered(pill, entry.label,
+                      gui::blend(theme.text_muted, theme.text, hover));
     if (it.clicked) {
       if (entry.setup) {
         actions.open_setup = true;
@@ -1037,70 +1123,291 @@ draw_application_header(gui::UiContext &ui, float width,
   }
   const float menus_right = menus.back().right();
 
-  // Program/Preview are mode selectors, not show-state jargon. Keep the whole
-  // group an exact width so its labels stay stable when the window is resized.
-  constexpr float modes_width = 246.0F;
-  constexpr float modes_right_margin = 16.0F;
-  gui::Rect modes{
-      std::max(width - modes_width - modes_right_margin, menus_right + 16.0F),
-      5.0F, modes_width, 24.0F};
-  // The open project, named in the middle of the bar the way every document
-  // editor names its document, with a dot while it has unsaved changes.
-  const gui::Rect workspace = gui::inset(
-      gui::Rect{menus_right, 0.0F, std::max(modes.x - menus_right, 0.0F),
-                top_bar_height},
-      12.0F, 0.0F);
-  if (workspace.width > 90.0F) {
-    std::string name =
-        project.path.empty()
-            ? std::string{"Untitled"}
-            : native_path_to_utf8(
-                  native_path_from_utf8(project.path).stem());
-    const float chip_width =
-        std::min(ui.font_width(name) + (project.dirty ? 34.0F : 22.0F),
-                 workspace.width);
-    const gui::Rect chip =
-        gui::centered(workspace, chip_width, top_bar_height - 10.0F);
-    ui.panel(chip, ui.theme().header);
-    ui.outline(chip, ui.theme().border);
-    // The name, and room for the unsaved dot after it.
-    ui.label(gui::inset(chip, gui::Padding{11.0F, 0.0F,
-                                           project.dirty ? 19.0F : 7.0F, 0.0F}),
-             name, ui.theme().text);
-    if (project.dirty) {
-      draw_status_dot(ui, chip.right() - 12.0F,
-                      chip.y + chip.height * 0.5F, ui.theme().playhead, 3.0F);
-      ui.tooltip(chip, "Unsaved changes");
-    } else if (!project.path.empty()) {
-      ui.tooltip(chip, project.path);
-    }
+  // --- The right-hand cluster, laid out from the window's right edge: the
+  // night dim, render-server health, then the cue stack with its GO.
+  gui::Rect right{menus_right, 0.0F, std::max(width - menus_right - 10.0F, 0.0F),
+                  top_bar_height};
+  {
+    const gui::Rect night = gui::centered(gui::cut_right(right, 40.0F), 40.0F, 40.0F);
+    actions.toggle_night = icon_button(
+        ui, gui::ui_id("editor.show-bar.night"), night, gui::Icon::Night,
+        show.night ? "Night dim is on: back to full brightness"
+                   : "Night dim: calm the editor for a long night",
+        show.night);
+    static_cast<void>(gui::cut_right(right, 8.0F));
   }
 
-  constexpr float mode_gap = 4.0F;
-  actions.program = chrome_button(
-      ui, gui::ui_id("editor.mode.program"), gui::cut_left(modes, 80.0F),
-      "Program", !switcher.rehearsal_mode, !switcher.rehearsal_locked);
-  static_cast<void>(gui::cut_left(modes, mode_gap));
+  const bool roomy = width >= 1500.0F;
+  if (show.outputs != nullptr && width >= 1100.0F) {
+    const OutputMonitorState &outputs = *show.outputs;
+    std::size_t live = 0U;
+    for (const OutputMonitorState::Node &node : outputs.nodes) {
+      live += node.connection == OutputMonitorState::Node::Connection::Live ? 1U : 0U;
+    }
+    const std::size_t total = outputs.nodes.size();
+    std::string_view caption = "No outputs";
+    gui::UiColor caption_color = theme.text_muted;
+    if (total != 0U) {
+      switch (outputs.cluster.health) {
+      case OutputMonitorState::Cluster::Health::Healthy:
+        caption = "All live";
+        caption_color = theme.good;
+        break;
+      case OutputMonitorState::Cluster::Health::Degraded:
+        caption = "Degraded";
+        caption_color = theme.caution;
+        break;
+      case OutputMonitorState::Cluster::Health::Faulted:
+        caption = "Faulted";
+        caption_color = theme.warning;
+        break;
+      case OutputMonitorState::Cluster::Health::Unmonitored:
+        caption = live == total ? "Live" : "Offline";
+        caption_color = live == total ? theme.good : theme.text_muted;
+        break;
+      }
+    }
+    const std::string count =
+        std::to_string(live) + " / " + std::to_string(total) + " live";
+    const float text_width = roomy ? std::max(ui.font_width(caption), ui.font_width(count)) : 0.0F;
+    const std::size_t columns = std::max<std::size_t>((std::min<std::size_t>(total, 8U) + 1U) / 2U, 1U);
+    const float leds = 9.0F * static_cast<float>(columns) + 4.0F * static_cast<float>(columns - 1U);
+    const gui::Rect card = gui::centered(
+        gui::cut_right(right, leds + text_width + (roomy ? 38.0F : 26.0F)),
+        leds + text_width + (roomy ? 38.0F : 26.0F), 46.0F);
+    static_cast<void>(gui::cut_right(right, 8.0F));
+    const gui::UiId id = gui::ui_id("editor.show-bar.health");
+    const gui::Interaction it = ui.grab(id, card);
+    ui.cursor_for(it, gui::Cursor::Hand);
+    const float hover = ui.ease(id ^ gui::ui_id("hover"), it.hovered ? 1.0F : 0.0F);
+    ui.rounded(card, gui::blend(theme.header, theme.widget, hover), 14.0F);
+    // One light per render server, two rows deep.
+    const float led_x = card.x + 13.0F;
+    for (std::size_t index = 0U; index < std::min<std::size_t>(total, 8U); ++index) {
+      const OutputMonitorState::Node &node = outputs.nodes[index];
+      using Status = OutputMonitorState::Node::Status;
+      gui::UiColor color = theme.text_muted;
+      if (node.connection == OutputMonitorState::Node::Connection::Live) {
+        color = node.content_ready() ? theme.good : theme.caution;
+      } else if (node.connection == OutputMonitorState::Node::Connection::CatchingUp ||
+                 node.status == Status::Starting || node.status == Status::Probing) {
+        color = theme.caution;
+      } else if (node.status == Status::Faulted || node.status == Status::Unreachable ||
+                 node.status == Status::ProtocolError || node.output_failed()) {
+        color = theme.warning;
+      }
+      const float cx = led_x + 4.5F + 13.0F * static_cast<float>(index / 2U);
+      const float cy = card.center_y() + (index % 2U == 0U ? -6.5F : 6.5F);
+      draw_status_dot(ui, cx, cy, color, 4.0F);
+    }
+    if (total == 0U) {
+      draw_status_dot(ui, led_x + 4.5F, card.center_y(), theme.text_muted, 4.0F);
+    }
+    if (roomy) {
+      two_lines(gui::Rect{led_x + leds + 12.0F, card.y, text_width + 4.0F, card.height},
+                caption, caption_color, count, theme.text);
+    }
+    ui.tooltip(card, std::string{caption} + ": " + count +
+                         ". Click for the Output Monitor");
+    actions.show_outputs = it.clicked;
+  }
+
+  if (show.timeline != nullptr && width >= 1000.0F) {
+    const EditorTimeline &timeline = *show.timeline;
+    bool any_cue = false;
+    for (const scene::TimelineMarker &marker : show.markers) {
+      any_cue = any_cue || marker.is_cue();
+    }
+    std::string_view caption = "Next cue";
+    gui::UiColor caption_color = theme.cue;
+    std::string what;
+    if (!any_cue) {
+      caption = "No cues";
+      caption_color = theme.text_muted;
+      what = "Q adds one";
+    } else if (!timeline.cues_armed) {
+      caption = "Cues off";
+      caption_color = theme.text_muted;
+      what = "Playing through";
+    } else if (timeline.held_cue != doc::NodeId{}) {
+      caption = "Holding";
+      caption_color = theme.caution;
+      what = cue_caption(show.markers, timeline.held_cue);
+    } else if (timeline.looping_cue != doc::NodeId{}) {
+      caption = "Looping";
+      caption_color = theme.accent;
+      what = cue_caption(show.markers, timeline.looping_cue);
+    } else if (timeline.next_cue != doc::NodeId{}) {
+      what = cue_caption(show.markers, timeline.next_cue);
+    } else {
+      caption = "End of stack";
+      caption_color = theme.text_muted;
+    }
+    const float text_width = roomy ? 150.0F : 96.0F;
+    const gui::Rect card = gui::centered(
+        gui::cut_right(right, text_width + 70.0F), text_width + 70.0F, 50.0F);
+    static_cast<void>(gui::cut_right(right, 8.0F));
+    ui.rounded(card, theme.header, 25.0F);
+    two_lines(gui::Rect{card.x + 18.0F, card.y, text_width, card.height},
+              caption, caption_color, what, theme.text);
+    // GO: the stack's one big key, lit magenta whenever there is a cue to
+    // run and the show is not already running to it.
+    const bool running = timeline.playing && timeline.looping_cue == doc::NodeId{} &&
+                         timeline.held_cue == doc::NodeId{};
+    const bool live = any_cue && !running;
+    const gui::Rect go{card.right() - 46.0F, card.center_y() - 20.0F, 40.0F, 40.0F};
+    const gui::UiId go_id = gui::ui_id("editor.show-bar.go");
+    const gui::Interaction it = any_cue ? ui.grab(go_id, go) : gui::Interaction{};
+    if (any_cue) {
+      ui.cursor_for(it, gui::Cursor::Hand);
+    }
+    const bool pressed = it.held && !it.released;
+    const gui::Rect key = pressed ? go.inflated(-1.5F, -1.5F) : go;
+    if (live) {
+      ui.glow(key, theme.cue, 20.0F, it.hovered ? 14.0F : 10.0F);
+      ui.rounded(key, it.hovered ? gui::blend(theme.cue, theme.text, 0.15F) : theme.cue, key.height * 0.5F);
+    } else {
+      ui.rounded(key, theme.widget, key.height * 0.5F);
+    }
+    ui.label_centered(key, "GO",
+                      live ? gui::UiColor{0.16F, 0.03F, 0.13F, 1.0F} : theme.text_muted);
+    ui.tooltip(go, "GO: run from a hold, release a loop, or play to the next cue");
+    actions.go = any_cue && it.clicked;
+  }
+
+  // --- Program, Take and Preview, centred in what is left. Program glows
+  // green because it is on the wall; the one being edited is ringed.
+  const float left_edge = menus_right + 16.0F;
+  const float right_edge = right.right() - 8.0F;
+  const float room = std::max(right_edge - left_edge, 0.0F);
+  const float card_width = std::clamp((room - 120.0F) * 0.5F, 140.0F, 220.0F);
+  constexpr float take_width = 104.0F;
+  constexpr float group_gap = 10.0F;
+  const float group_width = card_width * 2.0F + take_width + group_gap * 2.0F;
+  const float group_x = std::clamp(width * 0.5F - group_width * 0.5F, left_edge,
+                                   std::max(left_edge, right_edge - group_width));
+  const gui::Rect program_card{group_x, middle - 23.0F, card_width, 46.0F};
+  const gui::Rect take{program_card.right() + group_gap, middle - 22.0F,
+                       take_width, 44.0F};
+  const gui::Rect preview_card{take.right() + group_gap, middle - 23.0F,
+                               card_width, 46.0F};
+  const bool modes_enabled = !switcher.rehearsal_locked;
+  const auto monitor = [&](const gui::Rect &card, gui::UiId id,
+                           std::string_view caption, gui::UiColor color,
+                           std::string_view name, bool editing, bool lit,
+                           std::string_view tip,
+                           const rhi::Texture *picture = nullptr) {
+    const gui::Interaction it =
+        modes_enabled ? ui.grab(id, card) : gui::Interaction{};
+    if (modes_enabled) {
+      ui.cursor_for(it, gui::Cursor::Hand);
+    }
+    const float hover = ui.ease(id ^ gui::ui_id("hover"), it.hovered ? 1.0F : 0.0F);
+    if (lit) {
+      ui.glow(card, color, 14.0F, 12.0F);
+    }
+    ui.rounded(card, gui::blend(theme.header, theme.widget, hover * 0.8F), 14.0F);
+    if (editing) {
+      ui.rounded_outline(card, gui::fade(color, 0.85F), 14.0F, 1.5F);
+    }
+    // The wall itself: the picture on it when there is one, otherwise a
+    // tile of six lit emitters in the card's colour.
+    const gui::Rect tile{card.x + 7.0F, card.y + 7.0F, 52.0F, 32.0F};
+    if (picture != nullptr) {
+      ui.rounded(tile, gui::UiColor{0.0F, 0.0F, 0.0F, 1.0F}, 8.0F);
+      static_cast<void>(ui.image_fit(tile, *picture, show.program_aspect));
+      ui.draw_list().add_corner_mask(tile.x, tile.y, tile.width, tile.height,
+                                     8.0F, theme.header);
+      ui.rounded_outline(tile, gui::fade(color, 0.5F), 8.0F);
+    } else {
+      ui.rounded(tile, gui::fade(color, 0.16F), 8.0F);
+      for (std::size_t index = 0U; index < 6U; ++index) {
+        const float cx = tile.x + 16.0F + 10.0F * static_cast<float>(index % 3U);
+        const float cy = tile.y + 11.0F + 10.0F * static_cast<float>(index / 3U);
+        draw_filled_circle(ui, cx, cy, 2.0F,
+                           gui::fade(color, lit ? 0.95F : 0.6F));
+      }
+    }
+    two_lines(gui::Rect{tile.right() + 10.0F, card.y,
+                        card.right() - tile.right() - 18.0F, card.height},
+              caption, color, name.empty() ? std::string_view{"No scene"} : name,
+              theme.text);
+    ui.tooltip(card, tip);
+    return modes_enabled && it.clicked;
+  };
+  actions.program = monitor(
+      program_card, gui::ui_id("editor.mode.program"),
+      switcher.program_held ? "On air - held" : "On air", theme.good,
+      scene_name(switcher, switcher.program_scene), !switcher.rehearsal_mode,
+      true, "Program is on the wall. Click to edit it directly",
+      show.program_picture);
   const bool has_rehearsal = switcher.rehearsal_scene != scene::SceneId{};
-  const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
-  // Swap is held by the switcher's own preconditions - a Preview scene to
+  actions.preview = monitor(
+      preview_card, gui::ui_id("editor.mode.preview"), "Preview",
+      theme.preview,
+      has_rehearsal ? scene_name(switcher, switcher.rehearsal_scene)
+                    : std::string_view{"Rehearse here"},
+      switcher.rehearsal_mode, switcher.rehearsal_mode,
+      "Preview: rehearse a scene off air, then Take it to the wall");
+
+  // Take: held by the switcher's own preconditions - a Preview scene to
   // promote and no transition already running - and by nothing else except a
   // STRICT synchronization policy whose timing is unproven. A dissolve also
-  // needs a matching canvas; the button says CUT rather than failing silently.
+  // needs a matching canvas; the key says Cut rather than failing silently.
+  const bool canvas_mismatch = has_rehearsal && !switcher.dissolve_compatible;
   const bool swap_enabled = !switcher.transition_active &&
                             !switcher.rehearsal_locked && has_rehearsal &&
                             !switcher.program_held && !switcher.publication_pending;
-  actions.swap = chrome_button(
-      ui, gui::ui_id("editor.mode.swap"), gui::cut_left(modes, 74.0F),
+  const std::string_view take_label =
       switcher.transition_active
-          ? "FADING"
-          : (switcher.program_held ? "HELD" : switcher.publication_pending ? "STAGING"
-              : switcher.linked_publication ? "PUBLISH" : (canvas_mismatch ? "CUT" : "SWAP")),
-      false, swap_enabled);
-  static_cast<void>(gui::cut_left(modes, mode_gap));
-  actions.preview = chrome_button(
-      ui, gui::ui_id("editor.mode.preview"), gui::cut_left(modes, 80.0F),
-      "Preview", switcher.rehearsal_mode, !switcher.rehearsal_locked);
+          ? "Fading"
+          : (switcher.program_held ? "Held"
+             : switcher.publication_pending ? "Staging"
+             : switcher.linked_publication ? "Publish"
+             : (canvas_mismatch ? "Cut" : "Take"));
+  {
+    const gui::UiId id = gui::ui_id("editor.mode.swap");
+    const gui::Interaction it = swap_enabled ? ui.grab(id, take) : gui::Interaction{};
+    if (swap_enabled) {
+      ui.cursor_for(it, gui::Cursor::Hand);
+    }
+    const bool pressed = it.held && !it.released;
+    const float hover = ui.ease(id ^ gui::ui_id("hover"), it.hovered ? 1.0F : 0.0F);
+    const gui::Rect key = pressed ? take.inflated(-1.5F, -1.5F) : take;
+    const float radius = key.height * 0.5F;
+    if (switcher.transition_active) {
+      // The dissolve fills the key from the left as it runs.
+      ui.glow(key, theme.good, radius, 12.0F);
+      ui.rounded(key, theme.widget, radius);
+      const float mix = std::clamp(switcher.transition_mix, 0.0F, 1.0F);
+      if (mix > 0.0F) {
+        ui.rounded(gui::Rect{key.x, key.y, std::max(key.width * mix, key.height), key.height},
+                   gui::fade(theme.good, 0.45F), radius);
+      }
+    } else if (swap_enabled) {
+      ui.rounded(key, pressed ? theme.widget_active
+                              : gui::blend(theme.widget, theme.widget_hover, hover),
+                 radius);
+      ui.rounded_outline(key, gui::fade(theme.good, 0.35F + 0.4F * hover), radius, 1.5F);
+    } else {
+      ui.rounded(key, theme.track, radius);
+    }
+    const gui::UiColor ink = swap_enabled || switcher.transition_active
+                                 ? theme.text : theme.text_muted;
+    const float label_width = ui.font_width(take_label);
+    const float content = 18.0F + 8.0F + label_width;
+    const float x = key.center_x() - content * 0.5F;
+    gui::draw_icon(ui.draw_list(), gui::Icon::Take, x + 9.0F, key.center_y(), ink, 1.15F);
+    ui.label(gui::Rect{x + 26.0F, key.y, label_width + 2.0F, key.height}, take_label, ink);
+    ui.tooltip(take, canvas_mismatch
+                         ? "Cut Preview to the wall (Ctrl+Enter). The canvases "
+                           "differ, so it cannot dissolve"
+                         : "Take: dissolve Preview to the wall (Ctrl+Enter)");
+    // Ctrl+Enter is the keyboard's Take, held by everything that holds the
+    // key - and by any field or menu that has the keyboard.
+    const bool take_key = !ui.typing() && ui.key_pressed(gui::Key::Take);
+    actions.swap = swap_enabled && (it.clicked || take_key);
+  }
   return actions;
 }
 
@@ -1359,17 +1666,12 @@ void draw_application_menu_overlay(gui::UiContext &ui,
                                    core::u16 zoom_percent) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
                          width, status_bar_height};
-  ui.panel(status, ui.theme().header);
-  {
-    gui::Rect rule = status;
-    ui.panel(gui::cut_top(rule, 1.0F), ui.theme().border);
-  }
+  ui.panel(status, ui.theme().background);
 
-  // Each reading is a quiet label and a value, with a dot where the value is
-  // a state - the way a broadcast status line reads, rather than a run of
-  // capitals the operator has to parse. Readings run in from the left, each
-  // closed by a rule.
-  gui::Rect readings = gui::inset(status, gui::Padding{6.0F, 0.0F, 0.0F, 0.0F});
+  // Each reading is a soft chip: a quiet label and a value, with a dot where
+  // the value is a state - the way a broadcast status line reads, rather than
+  // a run of capitals the operator has to parse. Chips run in from the left.
+  gui::Rect readings = gui::inset(status, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F});
   const auto reading = [&](std::string_view label, std::string_view value,
                            std::optional<gui::UiColor> dot,
                            gui::UiColor value_color) {
@@ -1378,10 +1680,10 @@ void draw_application_menu_overlay(gui::UiContext &ui,
     const float value_width = ui.font_width(value);
     gui::Rect cell = gui::cut_left(
         readings, label_width + dot_width + value_width + 22.0F);
-    gui::Rect rule = cell;
-    ui.panel(gui::inset(gui::cut_right(rule, 1.0F), 0.0F, 7.0F),
-             ui.theme().divider);
-    static_cast<void>(gui::cut_left(cell, 8.0F));
+    static_cast<void>(gui::cut_left(readings, 6.0F));
+    const gui::Rect chip = gui::inset(cell, 0.0F, 3.0F);
+    ui.rounded(chip, ui.theme().panel, chip.height * 0.5F);
+    static_cast<void>(gui::cut_left(cell, 10.0F));
     const gui::Rect label_cell = gui::cut_left(cell, label_width);
     if (!label.empty()) {
       ui.label(label_cell, label, ui.theme().text_muted);
@@ -1416,9 +1718,10 @@ void draw_application_menu_overlay(gui::UiContext &ui,
       gui::cut_right(trailing, ui.font_width(zoom_text) + 20.0F);
   const gui::Interaction zoom_it =
       ui.grab(gui::ui_id("editor.status.zoom"), zoom);
-  if (zoom_it.hovered || zoom_it.held) {
-    ui.panel(zoom, ui.theme().widget_hover);
-  }
+  ui.cursor_for(zoom_it, gui::Cursor::Hand);
+  ui.rounded(zoom, zoom_it.hovered || zoom_it.held ? ui.theme().widget_hover
+                                                  : ui.theme().panel,
+             zoom.height * 0.5F);
   ui.label(gui::inset(zoom, gui::Padding{10.0F, 0.0F, 0.0F, 0.0F}), zoom_text,
            zoom_percent == 100U ? ui.theme().text_muted : ui.theme().text);
   ui.tooltip(zoom, "Interface size - Ctrl+= larger, Ctrl+- smaller, Ctrl+0 "
@@ -1444,7 +1747,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   } else if (pending_media_probes > 0U) {
     std::array<char, 48U> probing_text{};
     const int probing_length = std::snprintf(
-        probing_text.data(), probing_text.size(), "READING MEDIA  %zu",
+        probing_text.data(), probing_text.size(), "Reading media  %zu",
         pending_media_probes);
     ui.label(message_box(190.0F),
              std::string_view{
@@ -1838,6 +2141,8 @@ struct EditorShell::Impl final {
   core::u32 workspace_window_height{};
   // Operator interface zoom, in percent of the display's own scale.
   core::u16 ui_zoom_percent{100U};
+  // The show bar's night dim: a calmer palette for the small hours.
+  bool night{};
   std::optional<InspectorColorSampleRequest> color_sample_request;
   ViewportPanel program_panel{gui::ui_id("editor.viewport.program"),
                               ViewportRole::Program};
@@ -2134,6 +2439,7 @@ struct EditorShell::Impl final {
         compositor_panel.set_parameter_panel_width(
             decoded.value().compositor_parameter_width);
         compositor_panel.show_minimap(decoded.value().compositor_minimap);
+        night = decoded.value().night_dim;
       }
       if (decoded && docks.restore(decoded.value().docks)) {
         for (StageViewport &view : stage_views) {
@@ -4084,6 +4390,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
 
   gui::UiContext &ui = impl.ui;
+  ui.set_theme(impl.night ? night_theme(editor_theme()) : editor_theme());
   ui.new_frame(impl.window.time_seconds());
   if (impl.color_sample_request.has_value() &&
       ui.key_pressed(gui::Key::Escape)) {
@@ -4157,7 +4464,20 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   };
 
   const HeaderActions header =
-      draw_application_header(ui, width, switcher, impl.open_menu, project);
+      draw_application_header(ui, width, switcher, impl.open_menu, project,
+                              [&] {
+                                ShowBarState show{&timeline, timeline_markers,
+                                                  &output_monitor, impl.night};
+                                if (impl.visible_program.has_value() &&
+                                    impl.program_preview_valid &&
+                                    impl.visible_program->height() != 0U) {
+                                  show.program_picture = &*impl.visible_program;
+                                  show.program_aspect =
+                                      static_cast<float>(impl.visible_program->width()) /
+                                      static_cast<float>(impl.visible_program->height());
+                                }
+                                return show;
+                              }());
   const ApplicationMenuResult menu_result =
       run_application_menu_input(ui, width, height, impl.open_menu,
                                  impl.recent_projects_submenu_open, impl.docks,
@@ -4280,6 +4600,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   if (header.open_setup) {
     impl.show_setup();
+  }
+  if (header.toggle_night) {
+    impl.night = !impl.night;
+  }
+  if (header.go) {
+    result.transport = TransportRequest::Go;
+  }
+  if (header.show_outputs &&
+      impl.docks.show(panel_output) == gui::no_dock) {
+    impl.show_panel(panel_output);
   }
   if (header.program && switcher.rehearsal_mode &&
       !switcher.rehearsal_locked) {
@@ -5891,11 +6221,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                  theme.panel);
         const gui::Rect header{bounds.x, bounds.y, bounds.width,
                                scene_header_height};
-        ui.panel(header, theme.header);
         ui.label(gui::Rect{header.x + 10.0F, header.y, 120.0F, header.height},
-                 "SCENES", theme.text_muted);
+                 "Scenes", theme.text_muted);
         const std::string count = std::to_string(switcher.scenes.size());
-        ui.label(gui::Rect{header.x + 10.0F + ui.font_width("SCENES") + 8.0F,
+        ui.label(gui::Rect{header.x + 10.0F + ui.font_width("Scenes") + 8.0F,
                            header.y, 40.0F, header.height},
                  count, with_alpha(theme.text_muted, 0.7F));
         const gui::Rect add_scene{header.right() - 56.0F,
@@ -5965,7 +6294,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const gui::Rect remove{row.right() - remove_width, row.y,
                                  remove_width, row.height};
           const std::string_view tag =
-              is_program ? "PGM" : (is_rehearsal ? "PVW" : (!compatible ? "SIZE" : ""));
+              is_program ? "ON AIR"
+                         : (is_rehearsal ? "PREVIEW" : (!compatible ? "Size" : ""));
           const float tag_width = tag.empty() ? 0.0F : pill_width(ui, tag) + 6.0F;
           // The small Blender-orange B before a scene's name is its Blender
           // button - well away from the PGM/PVW pill, so the link never reads
@@ -6005,10 +6335,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           } else if (interaction.hovered || row_pointed) {
             background = theme.widget_hover;
           }
-          ui.panel(row, background);
-          ui.panel(gui::Rect{row.x, row.y + 3.0F, 3.0F, row.height - 6.0F},
-                   is_program ? theme.good
-                              : (is_rehearsal ? theme.accent : theme.border));
+          // A soft capsule per scene, with its state as a lit stripe at the
+          // left: green on air, cyan in Preview.
+          ui.rounded(row, background, theme.radius);
+          ui.rounded(gui::Rect{row.x + 3.0F, row.y + 6.0F, 3.0F, row.height - 12.0F},
+                     is_program ? theme.good
+                                : (is_rehearsal ? theme.preview : theme.border),
+                     1.5F);
 
           const gui::Interaction blender_interaction =
               ui.grab(gui::ui_id("editor.scene-blender") ^ info.id.value(),
@@ -6076,8 +6409,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           if (!tag.empty()) {
             const gui::Rect pill = draw_pill(
                 ui, remove.x - tag_width, row.y + row.height * 0.5F, tag,
-                !compatible ? theme.warning
-                            : (is_program ? theme.good : theme.accent),
+                !compatible ? theme.caution
+                            : (is_program ? theme.good : theme.preview),
                 is_program);
             ui.tooltip(pill, is_program ? "On Program - the live output"
                              : is_rehearsal
@@ -7549,9 +7882,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
-  const float dock_height =
-      std::max(height - top_bar_height - status_bar_height, 0.0F);
-  impl.dock_host.update(ui, gui::Rect{0.0F, top_bar_height, width, dock_height},
+  impl.dock_host.update(ui, editor_dock_area(width, height),
                         draw_panel, editor_dock_metrics);
   impl.dock_host.overlay(ui);
 
@@ -8650,7 +8981,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.program_panel.resolution(), impl.ui_zoom_percent,
         std::min(impl.compositor_panel.parameter_panel_width(),
                  max_compositor_parameter_width),
-        impl.compositor_panel.minimap_shown()});
+        impl.compositor_panel.minimap_shown(), impl.night});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;

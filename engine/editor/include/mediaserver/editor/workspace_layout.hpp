@@ -48,6 +48,9 @@ struct WorkspaceLayoutState final {
   // Whether the Compositor shows its minimap. Records older than the field
   // read as hidden, the panel's default.
   bool compositor_minimap{};
+  // Whether the show bar's night dim is on. Machine-local: it suits the room
+  // the desk is in, not the show.
+  bool night_dim{};
 };
 
 // The zoom range the editor offers, in percent.

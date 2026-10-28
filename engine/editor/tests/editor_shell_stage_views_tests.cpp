@@ -126,8 +126,8 @@ void stage_views() {
   int width = 0;
   int height = 0;
   check(SDL_GetWindowSizeInPixels(window, &width, &height), "window extent");
-  layout.solve({0, 34, static_cast<float>(width) / scale,
-                static_cast<float>(height) / scale - 62},
+  layout.solve(editor::editor_dock_area(static_cast<float>(width) / scale,
+                                          static_cast<float>(height) / scale),
                {.divider = 6, .seam_reach = 4, .tab_bar = 32,
                 .title_bar = 30, .edge = 0.25F});
   const gui::Rect stage = layout.content_of(layout.leaf_of(stage_panel));
@@ -222,7 +222,7 @@ void stage_views() {
   const float menu_y = whole.y + 6.0F;
   click(menu_x, menu_y + 11.0F);
   // The fifth entry, below the four projections.
-  click(menu_x, menu_y + 22.0F + 2.0F + 24.0F * 4.0F + 12.0F);
+  click(menu_x, menu_y + 22.0F + 6.0F + gui::menu_row_height * 4.5F);
   frame();
 
   constexpr float gap = 2.0F;

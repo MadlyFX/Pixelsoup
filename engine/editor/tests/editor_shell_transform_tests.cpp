@@ -81,7 +81,8 @@ void transforms() {
                       static_cast<float>(starting.value().ui_zoom_percent) / 100.0F;
   int width = 0, height = 0;
   check(SDL_GetWindowSizeInPixels(window, &width, &height), "window extent");
-  layout.solve({0, 34, static_cast<float>(width) / scale, static_cast<float>(height) / scale - 62},
+  layout.solve(editor::editor_dock_area(static_cast<float>(width) / scale,
+                                          static_cast<float>(height) / scale),
                {.divider = 6, .seam_reach = 4, .tab_bar = 32, .title_bar = 30, .edge = 0.25F});
   const gui::Rect stage = layout.content_of(layout.leaf_of(gui::ui_id("editor.panel.stage")));
   check(stage.width > 100.0F && stage.height > 100.0F, "Stage is in the starting workspace");

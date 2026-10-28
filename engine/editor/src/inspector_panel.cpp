@@ -173,6 +173,52 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
         : std::string_view{"FreeD"};
 }
 
+// The element as a new one of its kind starts: what it is - its identity,
+// its kind, its place in the show and its links - kept, and every value an
+// operator authors put back to ElementInfo's own defaults, which mirror the
+// scene's. Reset to default reads a field's default off this.
+[[nodiscard]] ElementInfo pristine_like(const ElementInfo& element) {
+    const ElementInfo fresh{};
+    ElementInfo pristine = element;
+    pristine.position = fresh.position;
+    pristine.rotation = fresh.rotation;
+    pristine.scale = fresh.scale;
+    pristine.color = fresh.color;
+    pristine.intensity = fresh.intensity;
+    pristine.direction = fresh.direction;
+    pristine.range = fresh.range;
+    pristine.color_temperature_kelvin = fresh.color_temperature_kelvin;
+    pristine.angular_radius = fresh.angular_radius;
+    pristine.ies_rotation = fresh.ies_rotation;
+    pristine.light_width = fresh.light_width;
+    pristine.light_height = fresh.light_height;
+    pristine.light_radius = fresh.light_radius;
+    pristine.area_rotation = fresh.area_rotation;
+    pristine.inner_cone = fresh.inner_cone;
+    pristine.outer_cone = fresh.outer_cone;
+    pristine.animation = fresh.animation;
+    // A fill keeps its kind - Solid, Linear, Radial is a choice, not a value -
+    // and starts its colours and placement over.
+    std::optional<scene::Fill> fill;
+    if (element.material.fill.has_value()) {
+        fill = scene::Fill{};
+        fill->mode = element.material.fill->mode;
+    }
+    pristine.material = fresh.material;
+    pristine.material.fill = fill;
+    pristine.style.opacity = fresh.style.opacity;
+    pristine.style.horizontal_blend = fresh.style.horizontal_blend;
+    pristine.raster_width = fresh.raster_width;
+    pristine.raster_height = fresh.raster_height;
+    pristine.field_of_view = fresh.field_of_view;
+    pristine.shutter_seconds = fresh.shutter_seconds;
+    pristine.aperture_f_number = fresh.aperture_f_number;
+    pristine.focus_distance_m = fresh.focus_distance_m;
+    pristine.icvfx = fresh.icvfx;
+    pristine.environment = fresh.environment;
+    return pristine;
+}
+
 } // namespace
 
 ElementInfo evaluated_element(
@@ -184,6 +230,42 @@ ElementInfo evaluated_element(
 
 gui::Rect InspectorPanel::take_row(Cursor& cursor, float height) noexcept {
     return cursor.next(height, 0.0F);
+}
+
+std::optional<double> InspectorPanel::default_value(
+    const FieldBinding& binding) {
+    for (const ElementInfo& element : selected_) {
+        if (element.locked || !editable_value(element, binding).has_value()) {
+            continue;
+        }
+        // Read the field off a pristine copy of the element, with its
+        // effects as they are first added and nothing animated.
+        std::vector<scene::EffectInstance> fresh_effects;
+        for (const scene::EffectInstance& effect : effects_) {
+            if (effect.target != element.node) {
+                continue;
+            }
+            scene::EffectInstance fresh = scene::initial_effect(effect.kind);
+            fresh.source = effect.source;
+            fresh.target = effect.target;
+            fresh.order = effect.order;
+            fresh.enabled = effect.enabled;
+            fresh_effects.push_back(fresh);
+        }
+        const std::span<const scene::EffectInstance> effects = effects_;
+        const std::span<const scene::ChannelKeyframes> keyframes = keyframes_;
+        effects_ = fresh_effects;
+        keyframes_ = {};
+        const std::optional<EditableValue> fresh =
+            editable_value(pristine_like(element), binding);
+        effects_ = effects;
+        keyframes_ = keyframes;
+        if (fresh.has_value()) {
+            return fresh->value;
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
 }
 
 void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
@@ -210,14 +292,66 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
         // than clipping a label and a number in the same row.
         label_width = row.width;
     }
+    std::array<std::optional<double>, 4U> defaults{};
+    bool differs = false;
+    for (std::size_t i = 0U; i < std::min(count, defaults.size()); ++i) {
+        defaults[i] = default_value(bindings[i]);
+        if (defaults[i].has_value() &&
+            std::abs(static_cast<double>(values[i]) - *defaults[i]) >
+                1.0e-5 * std::max(1.0, std::abs(*defaults[i]))) {
+            differs = true;
+        }
+    }
+    const float reset_width = differs ? reset_button_width : 0.0F;
     ctx.label(gui::Rect{row.x, row.y,
-                        std::max(label_width - key_width, 0.0F), row.height}, label,
-              ctx.theme().text_muted);
+                        std::max(label_width - key_width - reset_width, 0.0F),
+                        row.height},
+              label, ctx.theme().text_muted);
     if (key_requested != nullptr) {
         const gui::Rect key_bounds{row.x + label_width - key_width, row.y,
                                    key_width, row.height};
         *key_requested = key_button(ctx, mix(id_, label, 9'000U + id_salt), key_bounds,
                                     animated, keyed_here, ctx.theme().panel);
+    }
+    // Any component away from its default carries the reset arrow, at the
+    // end of the label and left of the key: a click puts back every
+    // component that differs, in one edit.
+    {
+        if (differs) {
+            const gui::Rect reset_bounds{
+                row.x + label_width - key_width - reset_button_width, row.y,
+                reset_button_width, row.height};
+            std::string tip{"Reset to default ("};
+            for (std::size_t i = 0U; i < std::min(count, defaults.size()); ++i) {
+                if (!defaults[i].has_value()) {
+                    continue;
+                }
+                std::array<char, 32U> text{};
+                const int length = std::snprintf(text.data(), text.size(),
+                                                 i == 0U ? "%.*f" : ", %.*f",
+                                                 std::max(precision, 0),
+                                                 *defaults[i]);
+                tip.append(text.data(),
+                           static_cast<std::size_t>(std::max(length, 0)));
+            }
+            tip += ")";
+            if (reset_button(ctx, mix(id_, label, 10'000U + id_salt),
+                             reset_bounds, tip)) {
+                for (std::size_t i = 0U; i < std::min(count, defaults.size());
+                     ++i) {
+                    if (!defaults[i].has_value() ||
+                        std::abs(static_cast<double>(values[i]) - *defaults[i]) <=
+                            1.0e-5 * std::max(1.0, std::abs(*defaults[i]))) {
+                        continue;
+                    }
+                    NumberFieldEdit edit{};
+                    edit.kind = NumberFieldEditKind::Absolute;
+                    edit.value = *defaults[i];
+                    emit_numeric(bindings[i], mix(id_, label, i + id_salt), edit,
+                                 summarize(bindings[i], frame), frame);
+                }
+            }
+        }
     }
 
     if (stacked) {
@@ -243,6 +377,41 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
                          summary.mixed)) {
             emit_numeric(bindings[i], field, edit, std::move(summary), frame);
         }
+    }
+}
+
+void InspectorPanel::colour_well(gui::UiContext& ctx, const gui::Rect& well,
+                                 std::string_view name,
+                                 std::array<float, 3U> channels,
+                                 std::span<const FieldBinding> bindings,
+                                 InspectorFrame& frame, bool mixed,
+                                 std::size_t salt) {
+    const gui::UiId id = mix(id_, name, 11'000U + salt);
+    gui::UiColor color{channels[0], channels[1], channels[2], 1.0F};
+    const bool changed = ctx.color_well(id, well, color);
+    if (mixed && !ctx.color_open(id)) {
+        ctx.rounded(well, ctx.theme().track, ctx.theme().radius_small);
+        ctx.label(gui::Rect{well.x + 8.0F, well.y, std::max(well.width - 8.0F, 0.0F),
+                            well.height},
+                  "Mixed", ctx.theme().text_muted);
+    }
+    // The whole visit to the picker is one gesture, so one undo step.
+    if (ctx.color_open(id)) {
+        colour_editing_ = true;
+    }
+    if (!changed) {
+        return;
+    }
+    const std::array<float, 3U> next{color.r, color.g, color.b};
+    for (std::size_t i = 0U; i < std::min<std::size_t>(3U, bindings.size()); ++i) {
+        if (std::abs(next[i] - channels[i]) <= 1.0e-6F) {
+            continue;
+        }
+        NumberFieldEdit edit{};
+        edit.kind = NumberFieldEditKind::Absolute;
+        edit.value = static_cast<double>(next[i]);
+        emit_numeric(bindings[i], id + i + 1U, edit, summarize(bindings[i], frame),
+                     frame);
     }
 }
 
@@ -980,16 +1149,16 @@ bool InspectorPanel::section(gui::UiContext& ctx, Cursor& cursor,
     if (it.clicked) {
         open = !open;
     }
-    ctx.panel(row, it.hovered ? ctx.theme().widget : ctx.theme().header);
-    draw_twirl(ctx, row.x + 8.0F, row.y + row.height * 0.5F, open,
-               ctx.theme().text_muted);
-    ctx.label(gui::Rect{row.x + 20.0F, row.y, row.width - 20.0F, row.height},
-              [&] {
-                  std::string label{title};
-                  for (std::size_t i = 1U; i < label.size(); ++i)
-                      if (label[i] >= 'A' && label[i] <= 'Z') label[i] += 'a' - 'A';
-                  return label;
-              }(), ctx.theme().text);
+    // A soft band, eased lighter under the pointer, that twirls its group.
+    ctx.cursor_for(it, gui::Cursor::Hand);
+    const float hover =
+        ctx.ease(mix(id_, title, 1001U), it.hovered ? 1.0F : 0.0F);
+    ctx.rounded(row, gui::blend(ctx.theme().header, ctx.theme().widget, hover),
+                ctx.theme().radius);
+    draw_twirl(ctx, row.x + 10.0F, row.y + row.height * 0.5F, open,
+               hover > 0.5F ? ctx.theme().accent : ctx.theme().text_muted);
+    ctx.label(gui::Rect{row.x + 22.0F, row.y, row.width - 22.0F, row.height},
+              gui::sentence_case(title), ctx.theme().text);
     return open;
 }
 
@@ -1296,16 +1465,11 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
     ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
               "Color", ctx.theme().text_muted);
     const gui::Rect color_well{
-        swatch.x + label_width, swatch.y + 2.0F,
-        std::max(swatch.width - label_width, 1.0F), swatch.height - 4.0F};
-    if (color_mixed) {
-        ctx.panel(color_well, ctx.theme().track);
-        ctx.label(color_well, "Mixed", ctx.theme().text_muted);
-    } else {
-        ctx.panel(color_well,
-                  gui::UiColor{element.color.x, element.color.y,
-                               element.color.z, 1.0F});
-    }
+        swatch.x + label_width, swatch.y,
+        std::max(swatch.width - label_width, 1.0F), swatch.height};
+    colour_well(ctx, color_well, "Color",
+                {element.color.x, element.color.y, element.color.z},
+                color_bindings, frame, color_mixed, 0U);
 
     {
         const std::array<float, 3U> values{element.color.x, element.color.y,
@@ -1708,14 +1872,15 @@ void InspectorPanel::draw_fill(gui::UiContext& ctx, Cursor& cursor,
             std::clamp(swatch.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
                   label, ctx.theme().text_muted);
-        const gui::Rect well{swatch.x + label_width, swatch.y + 2.0F,
+        const gui::Rect well{swatch.x + label_width, swatch.y,
                              std::max(swatch.width - label_width, 1.0F),
-                             swatch.height - 4.0F};
-        ctx.panel(well, gui::UiColor{colour.r, colour.g, colour.b, 1.0F});
+                             swatch.height};
         std::array<FieldBinding, 4U> bindings{};
         for (std::size_t i = 0U; i < bindings.size(); ++i) {
             bindings[i] = FieldBinding{FieldDomain::Material, {}, keys[i]};
         }
+        colour_well(ctx, well, label, {colour.r, colour.g, colour.b},
+                    bindings, frame, false, 20U + salt);
         const std::array<float, 4U> values{colour.r, colour.g, colour.b,
                                            colour.a};
         vector_row(ctx, cursor, "RGBA", rgba, values, 0.005F, bindings, frame,
@@ -1883,17 +2048,12 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
               "Base Color", ctx.theme().text_muted);
     const gui::Rect color_well{
-        swatch.x + label_width, swatch.y + 2.0F,
-        std::max(swatch.width - label_width, 1.0F), swatch.height - 4.0F};
-    if (color_mixed) {
-        ctx.panel(color_well, ctx.theme().track);
-        ctx.label(color_well, "Mixed", ctx.theme().text_muted);
-    } else {
-        ctx.panel(color_well,
-                  gui::UiColor{element.material.base_color.x,
-                               element.material.base_color.y,
-                               element.material.base_color.z, 1.0F});
-    }
+        swatch.x + label_width, swatch.y,
+        std::max(swatch.width - label_width, 1.0F), swatch.height};
+    colour_well(ctx, color_well, "Base Color",
+                {element.material.base_color.x, element.material.base_color.y,
+                 element.material.base_color.z},
+                color_bindings, frame, color_mixed, 40U);
 
     {
         const std::array<float, 3U> values{
@@ -2228,7 +2388,7 @@ void InspectorPanel::draw_effects(
     // picture without an effect was to delete it and lose its keys with it.
     // It is the layer list's eye, because switching a thing off is one idea.
     constexpr float enable_width = 22.0F;
-    constexpr float remove_width = 64.0F;
+    constexpr float remove_width = 84.0F;
     const gui::Rect enable{title_row.x + 3.0F, title_row.y + 1.0F,
                            enable_width, std::max(title_row.height - 2.0F,
                                                   0.0F)};
@@ -2261,17 +2421,9 @@ void InspectorPanel::draw_effects(
               effect.enabled ? ctx.theme().text : ctx.theme().text_muted);
     const gui::Rect remove{title_row.right() - remove_width,
                            title_row.y, remove_width, title_row.height};
-    const gui::Interaction remove_it =
-        ctx.grab(mix(id_, title, 8'000U + id_salt), remove);
-    ctx.panel(remove, remove_it.hovered ? ctx.theme().widget_hover
-                                        : ctx.theme().widget);
-    ctx.panel(gui::Rect{remove.x, remove.y, 2.0F, remove.height},
-              ctx.theme().warning);
-    ctx.label(gui::Rect{remove.x + 8.0F, remove.y,
-                        std::max(remove.width - 8.0F, 0.0F), remove.height},
-              "REMOVE",
-              remove_it.hovered ? ctx.theme().warning : ctx.theme().text);
-    if (remove_it.clicked) {
+    if (pill_button(ctx, mix(id_, title, 8'000U + id_salt), remove,
+                    gui::Icon::Trash, "Remove", "Remove this effect",
+                    ButtonTone::Danger)) {
       frame.effect_deletes.push_back(effect.source);
     }
 
@@ -2409,18 +2561,13 @@ void InspectorPanel::draw_effects(
                           swatch.height},
                 "Key Color", ctx.theme().text_muted);
       const gui::Rect color_well{
-          swatch.x + swatch_label_width, swatch.y + 2.0F,
+          swatch.x + swatch_label_width, swatch.y,
           std::max(swatch.width - swatch_label_width - 28.0F, 1.0F),
-          std::max(swatch.height - 4.0F, 1.0F)};
-      if (color_mixed) {
-        ctx.panel(color_well, ctx.theme().track);
-        ctx.label(color_well, "Mixed", ctx.theme().text_muted);
-      } else {
-        ctx.panel(color_well,
-                  gui::UiColor{effect.chroma_key.key_color.x,
-                               effect.chroma_key.key_color.y,
-                               effect.chroma_key.key_color.z, 1.0F});
-      }
+          swatch.height};
+      colour_well(ctx, color_well, "Key Color",
+                  {effect.chroma_key.key_color.x, effect.chroma_key.key_color.y,
+                   effect.chroma_key.key_color.z},
+                  key_color_bindings, frame, color_mixed, 60U + id_salt);
       const gui::Rect sample_button{
           color_well.right() + 6.0F, swatch.y,
           22.0F,
@@ -3039,8 +3186,11 @@ InspectorFrame InspectorPanel::draw_selection(
     // Destructive actions follow the editing groups instead of interrupting them.
     cursor.space(row_gap * 2.0F);
     const auto actions = take_row(cursor, row_height);
-    if (!displayed->linked_collection && ctx.button(mix(id_, "delete", 0U),
-            {actions.x, actions.y, std::min(actions.width, 96.0F), actions.height}, "Delete"))
+    if (!displayed->linked_collection &&
+        pill_button(ctx, mix(id_, "delete", 0U),
+                    {actions.x, actions.y, std::min(actions.width, 96.0F), actions.height},
+                    gui::Icon::Trash, "Delete", "Delete the selection (Del)",
+                    ButtonTone::Danger))
         frame.delete_requested = true;
     scroll_.end(ctx, cursor.extent());
     // The bar runs 2px in from the panel's right edge.
@@ -3050,7 +3200,8 @@ InspectorFrame InspectorPanel::draw_selection(
         ctx.panel(thumb, ctx.theme().text_muted);
     }
 
-    frame.editing = frame.editing || fields_.live();
+    frame.editing = frame.editing || fields_.live() || colour_editing_;
+    colour_editing_ = false;
     if (!frame.editing) {
         drag_capture_ = {};
     }

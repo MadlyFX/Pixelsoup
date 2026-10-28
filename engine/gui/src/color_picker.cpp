@@ -1,5 +1,7 @@
 #include <mediaserver/gui/color_picker.hpp>
 
+#include <mediaserver/gui/shapes.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -7,13 +9,21 @@
 namespace mediaserver::gui {
 namespace {
 
-struct Hsv final {
-    float hue{};
-    float saturation{};
-    float value{};
-};
+[[nodiscard]] bool different(UiColor left, UiColor right) noexcept {
+    return std::abs(left.r - right.r) > 1.0e-6F ||
+           std::abs(left.g - right.g) > 1.0e-6F ||
+           std::abs(left.b - right.b) > 1.0e-6F;
+}
 
-[[nodiscard]] Hsv rgb_to_hsv(UiColor color) noexcept {
+// A marker that reads on any colour under it: a white ring inside a dark one.
+void draw_marker(UiDrawList& list, UiPoint centre, float radius) {
+    add_ring(list, centre, radius + 1.5F, 1.5F, UiColor{0.0F, 0.0F, 0.0F, 0.55F});
+    add_ring(list, centre, radius, 2.0F, UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+}
+
+} // namespace
+
+Hsv rgb_to_hsv(UiColor color) noexcept {
     const float red = std::clamp(color.r, 0.0F, 1.0F);
     const float green = std::clamp(color.g, 0.0F, 1.0F);
     const float blue = std::clamp(color.b, 0.0F, 1.0F);
@@ -38,7 +48,7 @@ struct Hsv final {
     return result;
 }
 
-[[nodiscard]] UiColor hsv_to_rgb(Hsv value, float alpha) noexcept {
+UiColor hsv_to_rgb(Hsv value, float alpha) noexcept {
     const float hue = value.hue - std::floor(value.hue);
     const float saturation = std::clamp(value.saturation, 0.0F, 1.0F);
     const float brightness = std::clamp(value.value, 0.0F, 1.0F);
@@ -65,13 +75,77 @@ struct Hsv final {
     }
 }
 
-[[nodiscard]] bool different(UiColor left, UiColor right) noexcept {
-    return std::abs(left.r - right.r) > 1.0e-6F ||
-           std::abs(left.g - right.g) > 1.0e-6F ||
-           std::abs(left.b - right.b) > 1.0e-6F;
-}
+bool hsv_fields(UiContext& ctx, UiId id, const Rect& bounds, Hsv& hsv,
+                UiColor ground) {
+    if (bounds.width <= 1.0F || bounds.height <= 22.0F) {
+        return false;
+    }
+    constexpr float hue_height = 14.0F;
+    constexpr float gap = 6.0F;
+    const Rect field{bounds.x, bounds.y, bounds.width,
+                     std::max(bounds.height - hue_height - gap, 1.0F)};
+    const Rect rail{bounds.x, field.bottom() + gap, bounds.width, hue_height};
 
-} // namespace
+    const Interaction field_it =
+        ctx.grab(id ^ ui_id("color-picker.saturation-value"), field);
+    const Interaction rail_it = ctx.grab(id ^ ui_id("color-picker.hue"), rail);
+    ctx.cursor_for(field_it, Cursor::Hand);
+    ctx.cursor_for(rail_it, Cursor::Hand);
+    if (rail_it.held) {
+        hsv.hue = std::clamp(
+            (ctx.pointer_x() - rail.x) / std::max(rail.width, 1.0F), 0.0F, 1.0F);
+    }
+    if (field_it.held) {
+        hsv.saturation = std::clamp(
+            (ctx.pointer_x() - field.x) / std::max(field.width, 1.0F), 0.0F, 1.0F);
+        hsv.value = 1.0F - std::clamp(
+            (ctx.pointer_y() - field.y) / std::max(field.height, 1.0F), 0.0F, 1.0F);
+    }
+
+    // The field: white to the pure hue across, then a fade to black down -
+    // two smooth gradients rather than a grid of cells.
+    UiDrawList& list = ctx.draw_list();
+    const UiColor white{1.0F, 1.0F, 1.0F, 1.0F};
+    const UiColor pure = hsv_to_rgb(Hsv{hsv.hue, 1.0F, 1.0F}, 1.0F);
+    list.add_gradient_rect(field.x, field.y, field.width, field.height, white,
+                           pure, pure, white);
+    const UiColor clear{0.0F, 0.0F, 0.0F, 0.0F};
+    const UiColor black{0.0F, 0.0F, 0.0F, 1.0F};
+    list.add_gradient_rect(field.x, field.y, field.width, field.height, clear,
+                           clear, black, black);
+    const float radius = ctx.theme().radius;
+    list.add_corner_mask(field.x, field.y, field.width, field.height, radius,
+                         ground);
+
+    // The rail: the hue circle unrolled, in six even blends.
+    for (std::size_t step = 0U; step < 6U; ++step) {
+        const float from = static_cast<float>(step) / 6.0F;
+        const float to = static_cast<float>(step + 1U) / 6.0F;
+        const UiColor left = hsv_to_rgb(Hsv{from, 1.0F, 1.0F}, 1.0F);
+        const UiColor right = hsv_to_rgb(Hsv{to, 1.0F, 1.0F}, 1.0F);
+        // Each blend overlaps the next by half a unit so no seam shows; the
+        // last stops exactly at the rail's end.
+        const float x = rail.x + rail.width * from;
+        const float end = step == 5U ? rail.right()
+                                     : rail.x + rail.width * to + 0.5F;
+        list.add_gradient_rect(x, rail.y, end - x, rail.height, left, right,
+                               right, left);
+    }
+    list.add_corner_mask(rail.x, rail.y, rail.width, rail.height,
+                         rail.height * 0.5F, ground);
+
+    // Markers sit where the value returned this frame is.
+    draw_marker(list,
+                UiPoint{field.x + hsv.saturation * field.width,
+                        field.y + (1.0F - hsv.value) * field.height},
+                field_it.held ? 7.0F : 6.0F);
+    const float knob_x = rail.x + std::clamp(hsv.hue, 0.0F, 1.0F) * rail.width;
+    add_disc(list, UiPoint{knob_x, rail.center_y()}, rail.height * 0.5F + 1.0F,
+             pure, 16U);
+    draw_marker(list, UiPoint{knob_x, rail.center_y()},
+                rail.height * 0.5F + (rail_it.held ? 1.0F : 0.0F));
+    return field_it.held || rail_it.held;
+}
 
 ColorPickerFrame ColorPicker::draw(UiContext& ctx, UiId id,
                                    const Rect& bounds, UiColor color) {
@@ -79,15 +153,6 @@ ColorPickerFrame ColorPicker::draw(UiContext& ctx, UiId id,
     if (bounds.width <= 1.0F || bounds.height <= 22.0F) {
         return frame;
     }
-
-    constexpr float hue_height = 14.0F;
-    constexpr float gap = 6.0F;
-    const Rect saturation_value{
-        bounds.x, bounds.y, bounds.width,
-        std::max(bounds.height - hue_height - gap, 1.0F)};
-    const Rect hue{bounds.x, saturation_value.bottom() + gap,
-                   bounds.width, hue_height};
-
     Hsv hsv = rgb_to_hsv(color);
     const auto remembered = remembered_hues_.try_emplace(id, hsv.hue).first;
     if (hsv.saturation > 1.0e-6F) {
@@ -95,95 +160,12 @@ ColorPickerFrame ColorPicker::draw(UiContext& ctx, UiId id,
     } else {
         hsv.hue = remembered->second;
     }
-    constexpr std::size_t saturation_steps = 20U;
-    constexpr std::size_t value_steps = 12U;
-    const float cell_width =
-        saturation_value.width / static_cast<float>(saturation_steps);
-    const float cell_height =
-        saturation_value.height / static_cast<float>(value_steps);
-    for (std::size_t row = 0U; row < value_steps; ++row) {
-        const float value = 1.0F -
-            (static_cast<float>(row) + 0.5F) /
-                static_cast<float>(value_steps);
-        for (std::size_t column = 0U; column < saturation_steps; ++column) {
-            const float saturation =
-                (static_cast<float>(column) + 0.5F) /
-                static_cast<float>(saturation_steps);
-            ctx.panel(Rect{saturation_value.x +
-                               static_cast<float>(column) * cell_width,
-                           saturation_value.y +
-                               static_cast<float>(row) * cell_height,
-                           cell_width + 0.5F, cell_height + 0.5F},
-                      hsv_to_rgb(Hsv{hsv.hue, saturation, value}, 1.0F));
-        }
-    }
-
-    constexpr std::size_t hue_steps = 48U;
-    const float hue_width = hue.width / static_cast<float>(hue_steps);
-    for (std::size_t step = 0U; step < hue_steps; ++step) {
-        const float value = (static_cast<float>(step) + 0.5F) /
-                            static_cast<float>(hue_steps);
-        ctx.panel(Rect{hue.x + static_cast<float>(step) * hue_width, hue.y,
-                       hue_width + 0.5F, hue.height},
-                  hsv_to_rgb(Hsv{value, 1.0F, 1.0F}, 1.0F));
-    }
-
-    const Interaction saturation_value_interaction =
-        ctx.grab(id ^ ui_id("color-picker.saturation-value"),
-                 saturation_value);
-    const Interaction hue_interaction =
-        ctx.grab(id ^ ui_id("color-picker.hue"), hue);
-    if (hue_interaction.held) {
-        hsv.hue = std::clamp((ctx.pointer_x() - hue.x) /
-                                 std::max(hue.width, 1.0F),
-                             0.0F, 1.0F);
-        remembered->second = hsv.hue;
-    }
-    if (saturation_value_interaction.held) {
-        hsv.saturation = std::clamp(
-            (ctx.pointer_x() - saturation_value.x) /
-                std::max(saturation_value.width, 1.0F),
-            0.0F, 1.0F);
-        hsv.value = 1.0F - std::clamp(
-            (ctx.pointer_y() - saturation_value.y) /
-                std::max(saturation_value.height, 1.0F),
-            0.0F, 1.0F);
-    }
-
-    frame.editing = saturation_value_interaction.held || hue_interaction.held;
+    frame.editing = hsv_fields(ctx, id, bounds, hsv, ctx.theme().panel);
+    remembered->second = hsv.hue;
     if (frame.editing) {
         frame.color = hsv_to_rgb(hsv, color.a);
         frame.changed = different(frame.color, color);
     }
-
-    // The markers are deliberately high contrast against both black and the
-    // fully saturated corners. Their positions always reflect the value the
-    // widget returned on this frame, including direct manipulation.
-    const float marker_x =
-        saturation_value.x + hsv.saturation * saturation_value.width;
-    const float marker_y =
-        saturation_value.y + (1.0F - hsv.value) * saturation_value.height;
-    constexpr float marker_radius = 5.0F;
-    ctx.draw_list().add_line(marker_x - marker_radius, marker_y,
-                             marker_x + marker_radius, marker_y, 2.0F,
-                             ctx.theme().track);
-    ctx.draw_list().add_line(marker_x, marker_y - marker_radius, marker_x,
-                             marker_y + marker_radius, 2.0F,
-                             ctx.theme().track);
-    ctx.draw_list().add_line(marker_x - marker_radius + 1.0F, marker_y,
-                             marker_x + marker_radius - 1.0F, marker_y, 1.0F,
-                             ctx.theme().text);
-    ctx.draw_list().add_line(marker_x, marker_y - marker_radius + 1.0F,
-                             marker_x, marker_y + marker_radius - 1.0F, 1.0F,
-                             ctx.theme().text);
-
-    const float hue_x = hue.x + hsv.hue * hue.width;
-    ctx.draw_list().add_line(hue_x, hue.y - 2.0F, hue_x,
-                             hue.bottom() + 2.0F, 3.0F,
-                             ctx.theme().track);
-    ctx.draw_list().add_line(hue_x, hue.y - 1.0F, hue_x,
-                             hue.bottom() + 1.0F, 1.0F,
-                             ctx.theme().text);
     return frame;
 }
 

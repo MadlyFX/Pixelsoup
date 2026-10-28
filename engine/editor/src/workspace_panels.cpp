@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <functional>
 #include <map>
@@ -2060,22 +2062,29 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // zebra; the hierarchy is the structure the eye follows, and alternating
     // fills fight the guides. The highlight keeps a bar at the right edge so
     // it still reads on a selected row.
+    // Each is a soft capsule inset from the panel's edges, the primary
+    // selection ringed in the accent.
+    const gui::Rect capsule = gui::inset(row, 3.0F, 1.0F);
     if (element.highlight.has_value()) {
       const gui::UiColor highlight = timeline_marker_color(*element.highlight);
       if (!is_selected) {
-        ctx.panel(row, with_alpha(highlight, 0.2F));
+        ctx.rounded(capsule, with_alpha(highlight, 0.2F), theme.radius);
       }
-      gui::Rect bar = row;
-      ctx.panel(gui::cut_right(bar, 3.0F), highlight);
+      ctx.rounded(gui::Rect{capsule.right() - 5.0F, capsule.y + 5.0F, 3.0F,
+                            std::max(capsule.height - 10.0F, 0.0F)},
+                  highlight, 1.5F);
     }
     if (is_selected) {
-      ctx.panel(row, element.node == primary ? scale(theme.selection, 1.2F)
-                                              : theme.selection);
+      ctx.rounded(capsule,
+                  element.node == primary ? scale(theme.selection, 1.2F)
+                                          : theme.selection,
+                  theme.radius);
       if (element.node == primary) {
-        ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, theme.accent);
+        ctx.rounded_outline(capsule, with_alpha(theme.accent, 0.45F),
+                            theme.radius);
       }
     } else if (row_hovered && !dragging_) {
-      ctx.panel(row, with_alpha(theme.widget_hover, 0.7F));
+      ctx.rounded(capsule, with_alpha(theme.widget_hover, 0.7F), theme.radius);
     }
     draw_indent_guides(ctx, tree_x, row.y, row.height, entry.depth,
                        guide_color);
@@ -2570,6 +2579,43 @@ CompositorPanel::pending_position(doc::NodeId node) const noexcept {
   return found == pending_moves_.end()
              ? std::nullopt
              : std::optional<gui::UiPoint>{gui::UiPoint{found->x, found->y}};
+}
+
+void CompositorPanel::colour_well_field(
+    gui::UiContext &ctx, const gui::Rect &well, doc::NodeId node,
+    core::u64 slot, gui::UiColor current,
+    const std::array<CompositorProperty, 3U> &channels,
+    CompositorFrame &frame) {
+  const gui::UiId id = mix(id_, "compositor.colour", node.value() * 8U + slot);
+  gui::UiColor picked = current;
+  if (ctx.color_well(id, well, picked)) {
+    colour_target_ = ColourTarget{id, node, channels, picked};
+  }
+  if (ctx.color_open(id)) {
+    colour_editing_ = true;
+  }
+  if (!colour_target_.has_value() || colour_target_->well != id ||
+      colour_target_->node != node) {
+    return;
+  }
+  // A frame carries one property, so the picked colour lands a channel a
+  // frame, inside the one gesture the open picker holds.
+  const std::array<float, 3U> now{current.r, current.g, current.b};
+  const std::array<float, 3U> want{colour_target_->color.r,
+                                   colour_target_->color.g,
+                                   colour_target_->color.b};
+  for (std::size_t index = 0U; index < 3U; ++index) {
+    if (std::abs(now[index] - want[index]) <= 1.0e-6F) {
+      continue;
+    }
+    if (!frame.property_edit.has_value()) {
+      frame.property_edit = CompositorPropertyEditIntent{
+          node, colour_target_->channels[index],
+          CompositorPropertyValue{want[index]}};
+    }
+    return;
+  }
+  colour_target_.reset();
 }
 
 void CompositorPanel::select_only(doc::NodeId node) {
@@ -3224,18 +3270,12 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       add_menu_open_ ? "ADD NODE  -" : "ADD NODE  +";
   const gui::Rect add_button{toolbar.x + 8.0F, toolbar.y + 3.0F,
                              button_width("ADD NODE  +", 94.0F), button_height};
-  const gui::Interaction add_interaction =
-      clipped_grab(ctx, mix(id_, "compositor.add_menu"), add_button, toolbar);
-  ctx.panel(add_button, add_interaction.held ? ctx.theme().widget_active
-                                             : (add_interaction.hovered
-                                                    ? ctx.theme().widget_hover
-                                                    : ctx.theme().widget));
-  ctx.label(gui::Rect{add_button.x + 7.0F, add_button.y,
-                      std::max(add_button.width - 7.0F, 0.0F),
-                      add_button.height},
-            add_label,
-            add_interaction.hovered ? ctx.theme().text : ctx.theme().accent);
-  if (add_interaction.clicked) {
+  static_cast<void>(add_label);
+  // The graph's one coloured button: a node is what this panel makes.
+  if (pill_button(ctx, mix(id_, "compositor.add_menu"), add_button,
+                  gui::Icon::Plus, "Add node",
+                  "Add a node (or right-click the canvas)",
+                  ButtonTone::Primary, true, add_menu_open_)) {
     add_menu_open_ = !add_menu_open_;
     if (!add_menu_open_) {
       add_category_.reset();
@@ -3258,26 +3298,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                button_height};
     const float anchor_x = canvas.x + canvas.width * 0.5F;
     const float anchor_y = canvas.y + canvas.height * 0.5F;
-    const auto navigation_button = [&](std::string_view salt,
-                                       const gui::Rect &button,
-                                       std::string_view label) {
-      const gui::Interaction interaction =
-          clipped_grab(ctx, mix(id_, salt), button, toolbar);
-      ctx.panel(button, interaction.held
-                            ? ctx.theme().widget_active
-                            : (interaction.hovered ? ctx.theme().widget_hover
-                                                   : ctx.theme().widget));
-      const float label_inset =
-          std::max((button.width - ctx.font_width(label)) * 0.5F, 0.0F);
-      ctx.label(gui::Rect{button.x + label_inset, button.y,
-                          std::max(button.width - label_inset, 0.0F),
-                          button.height},
-                label,
-                interaction.hovered ? ctx.theme().text
-                                    : ctx.theme().text_muted);
-      return interaction.clicked;
-    };
-    if (navigation_button("compositor.zoom_out", zoom_out, "-")) {
+    // View controls: marks, named on hover, with the zoom itself as the
+    // one word.
+    const auto navigation_button =
+        [&](std::string_view salt, const gui::Rect &button,
+            std::string_view label, std::optional<gui::Icon> icon = std::nullopt,
+            std::string_view tip = {}, bool engaged = false) {
+          return pill_button(ctx, mix(id_, salt), button, icon,
+                             icon.has_value() ? std::string_view{} : label,
+                             tip, ButtonTone::Quiet, true, engaged);
+        };
+    if (navigation_button("compositor.zoom_out", zoom_out, "-",
+                          gui::Icon::Minus, "Zoom out")) {
       set_zoom(view_.zoom / compositor_zoom_step, anchor_x, anchor_y);
     }
     std::array<char, 16U> zoom_text{};
@@ -3287,25 +3319,24 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (navigation_button("compositor.zoom_reset", zoom_value,
                           std::string_view{zoom_text.data(),
                                            static_cast<std::size_t>(
-                                               std::max(zoom_length, 0))})) {
+                                               std::max(zoom_length, 0))},
+                          std::nullopt, "Back to 100%")) {
       set_zoom(1.0F, anchor_x, anchor_y);
     }
-    if (navigation_button("compositor.zoom_in", zoom_in, "+")) {
+    if (navigation_button("compositor.zoom_in", zoom_in, "+",
+                          gui::Icon::Plus, "Zoom in")) {
       set_zoom(view_.zoom * compositor_zoom_step, anchor_x, anchor_y);
     }
-    if (navigation_button("compositor.view_reset", reset_view, "RESET")) {
+    if (navigation_button("compositor.view_reset", reset_view, "RESET",
+                          gui::Icon::Fit, "Reset the view")) {
       view_ = gui::CanvasView{};
     }
     const gui::Rect map_toggle{reset_view.right() + 4.0F,
                                toolbar.y + 3.0F, button_width("MAP", 44.0F),
                                button_height};
-    if (navigation_button("compositor.minimap_toggle", map_toggle, "MAP")) {
+    if (navigation_button("compositor.minimap_toggle", map_toggle, "MAP",
+                          gui::Icon::Map, "Overview map", minimap_)) {
       minimap_ = !minimap_;
-    }
-    if (minimap_) {
-      ctx.panel(gui::Rect{map_toggle.x, map_toggle.bottom() - 2.0F,
-                          map_toggle.width, 2.0F},
-                ctx.theme().accent);
     }
   }
 
@@ -3378,24 +3409,24 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   int graph_status_length{};
   if (invalid_output_count) {
     graph_status_length =
-        std::snprintf(graph_status.data(), graph_status.size(), "%llu OUTPUTS",
+        std::snprintf(graph_status.data(), graph_status.size(), "%llu outputs",
                       static_cast<unsigned long long>(output_count));
   } else if (!graph_problems) {
     graph_status_length = std::snprintf(
-        graph_status.data(), graph_status.size(), "%llu NODES",
+        graph_status.data(), graph_status.size(), "%llu nodes",
         static_cast<unsigned long long>(compositor_graph.nodes.size()));
   } else if (error_count != 0U && warning_count != 0U) {
     graph_status_length = std::snprintf(
-        graph_status.data(), graph_status.size(), "%llu ERRORS / %llu WARNINGS",
+        graph_status.data(), graph_status.size(), "%llu errors, %llu warnings",
         static_cast<unsigned long long>(error_count),
         static_cast<unsigned long long>(warning_count));
   } else if (error_count != 0U) {
     graph_status_length =
-        std::snprintf(graph_status.data(), graph_status.size(), "%llu ERRORS",
+        std::snprintf(graph_status.data(), graph_status.size(), "%llu errors",
                       static_cast<unsigned long long>(error_count));
   } else {
     graph_status_length =
-        std::snprintf(graph_status.data(), graph_status.size(), "%llu WARNINGS",
+        std::snprintf(graph_status.data(), graph_status.size(), "%llu warnings",
                       static_cast<unsigned long long>(warning_count));
   }
   const std::string_view graph_status_text{
@@ -3408,18 +3439,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const bool selected_required_output = has_selection && !removable.has_value();
   std::string remove_label;
   if (selection_.kind == CompositorSelectionKind::Edge) {
-    remove_label = "DISCONNECT";
+    remove_label = "Disconnect";
   } else if (selection_.kind == CompositorSelectionKind::Comment) {
-    remove_label = "DELETE COMMENT";
+    remove_label = "Delete comment";
   } else if (selected_required_output) {
-    remove_label = "OUTPUT REQUIRED";
+    remove_label = "Output required";
   } else if (removable.has_value() && removable->targets.size() > 1U) {
-    remove_label = "DELETE " + std::to_string(removable->targets.size()) +
-                   " NODES";
+    remove_label = "Delete " + std::to_string(removable->targets.size()) +
+                   " nodes";
   } else {
-    remove_label = "DELETE NODE";
+    remove_label = "Delete node";
   }
-  const float remove_width = button_width(remove_label, 86.0F);
+  const float remove_width = button_width(remove_label, 86.0F) + 22.0F;
   const float trailing_control_width =
       has_selection ? remove_width + 12.0F : 0.0F;
   ctx.label(gui::Rect{toolbar.right() - status_width - 8.0F -
@@ -3432,23 +3463,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::Rect remove_bounds{
         toolbar.right() - remove_width - 8.0F, toolbar.y + 3.0F,
         remove_width, button_height};
-    gui::Interaction interaction{};
-    if (!selected_required_output) {
-      interaction = clipped_grab(ctx, mix(id_, "compositor.remove"),
-                                 remove_bounds, toolbar);
-    }
-    ctx.panel(remove_bounds,
-              interaction.held ? ctx.theme().widget_active
-                               : (interaction.hovered ? ctx.theme().widget_hover
-                                                      : ctx.theme().widget));
-    ctx.outline(remove_bounds,
-                interaction.hovered ? ctx.theme().warning : ctx.theme().divider);
-    ctx.label(gui::Rect{remove_bounds.x + 7.0F, remove_bounds.y,
-                        std::max(remove_bounds.width - 7.0F, 0.0F),
-                        remove_bounds.height},
-              remove_label,
-              interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
-    if (interaction.clicked && removable.has_value()) {
+    // Destructive, so red-ringed, and set apart at the toolbar's far end.
+    if (pill_button(ctx, mix(id_, "compositor.remove"), remove_bounds,
+                    selection_.kind == CompositorSelectionKind::Edge
+                        ? gui::Icon::Close
+                        : gui::Icon::Trash,
+                    remove_label, "Delete (Del)", ButtonTone::Danger,
+                    !selected_required_output) &&
+        removable.has_value()) {
       frame.remove = removable;
     }
   }
@@ -4457,6 +4479,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         drag_released = true;
         released_node = pressed_node;
+        if (drag_moved_) {
+          // Set down: each moved node starts a little small and springs
+          // back to size, so it feels planted where it was let go.
+          for (const GroupMember &member : drag_group_) {
+            ctx.settle(mix(id_, "compositor.plant", member.node.value()),
+                       0.94F);
+          }
+        }
       }
     }
   }
@@ -5601,26 +5631,40 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const bool waiting = node_disabled(compositor_graph, visual.node->node);
     const gui::UiColor kind = compositor_node_color(ctx, visual.node->kind);
     const gui::UiColor body = scale(ctx.theme().panel, 1.18F);
+    // Everything this node draws from here is one mark, scaled as one when
+    // it is lifted by a drag or settles after a drop.
+    const std::size_t first_vertex = ctx.draw_list().vertices().size();
+    const bool carried =
+        dragging_node_ != doc::NodeId{} && drag_moved_ && ctx.pointer_down() &&
+        std::any_of(drag_group_.begin(), drag_group_.end(),
+                    [&visual](const GroupMember &member) noexcept {
+                      return member.node == visual.node->node;
+                    });
+    const float card_radius = std::max(3.0F, 10.0F * view_.zoom);
 
-    // A soft drop shadow lifts the node off the grid.
-    const float shadow = std::max(2.0F, 3.0F * view_.zoom);
-    ctx.panel(gui::Rect{visual.bounds.x + shadow * 0.5F,
-                        visual.bounds.y + shadow, visual.bounds.width,
-                        visual.bounds.height},
-              with_alpha(ctx.theme().background, 0.55F));
-    ctx.panel(visual.bounds, body);
+    // A soft shadow lifts the card off the grid, further while it is carried.
+    ctx.shadow(visual.bounds, card_radius,
+               std::max(4.0F, (carried ? 22.0F : 12.0F) * view_.zoom));
+    if (selected) {
+      ctx.glow(visual.bounds, ctx.theme().accent, card_radius,
+               std::max(4.0F, 10.0F * view_.zoom));
+    }
+    ctx.rounded(visual.bounds, body, card_radius);
 
     gui::Rect below_header = visual.bounds;
     gui::Rect node_header =
         gui::cut_top(below_header, metrics_.header_height * view_.zoom);
-    ctx.panel(node_header, blend_color(ctx.theme().header, kind, 0.16F));
-    ctx.panel(gui::cut_bottom(node_header, std::max(1.0F, 2.0F * view_.zoom)),
-              with_alpha(kind, 0.85F));
-    ctx.outline(visual.bounds,
-                diagnostic ? ctx.theme().warning
-                      : (selected ? ctx.theme().accent : ctx.theme().border),
-                selected || diagnostic ? std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom))
-                                  : 1.0F);
+    // The title band carries the node's kind as a tint, with a fine line of
+    // it where the band meets the ports.
+    ctx.rounded(node_header, blend_color(ctx.theme().header, kind, 0.2F),
+                card_radius, gui::UiDrawList::corner_top);
+    ctx.panel(gui::cut_bottom(node_header, std::max(1.0F, 1.5F * view_.zoom)),
+              with_alpha(kind, 0.7F));
+    if (diagnostic || selected) {
+      ctx.rounded_outline(
+          visual.bounds, diagnostic ? ctx.theme().warning : ctx.theme().accent,
+          card_radius, std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom)));
+    }
 
     const std::string_view title =
         visual.node->label.empty()
@@ -5899,29 +5943,40 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // A node whose output never reaches Output, or that is waiting for an
     // input, is drawn faded: it costs nothing on screen until it is wired.
     if ((parked || waiting) && !selected) {
-      ctx.panel(visual.bounds, with_alpha(ctx.theme().background, 0.45F));
+      ctx.rounded(visual.bounds, with_alpha(ctx.theme().background, 0.45F),
+                  card_radius);
     }
     // A bypassed node's body is dimmed below its title, which stays
     // readable, and edged in the transport's amber.
     if (passed_through) {
       const float below = std::min(metrics_.header_height * view_.zoom,
                                    visual.bounds.height);
-      ctx.panel(gui::Rect{visual.bounds.x, visual.bounds.y + below,
-                          visual.bounds.width, visual.bounds.height - below},
-                with_alpha(ctx.theme().background, 0.5F));
-      ctx.outline(visual.bounds, with_alpha(compositor_bypass_color, 0.8F),
-                  std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom)));
+      ctx.rounded(gui::Rect{visual.bounds.x, visual.bounds.y + below,
+                            visual.bounds.width, visual.bounds.height - below},
+                  with_alpha(ctx.theme().background, 0.5F), card_radius,
+                  gui::UiDrawList::corner_bottom);
+      ctx.rounded_outline(visual.bounds,
+                          with_alpha(compositor_bypass_color, 0.8F), card_radius,
+                          std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom)));
     }
     // Brought here from another panel: outlined, fading, for a moment.
     if (visual.node->node == reveal_node_ && ctx.time_seconds() < reveal_until_) {
       const float left = static_cast<float>(reveal_until_ - ctx.time_seconds());
       const float grow = 3.0F;
-      ctx.outline(gui::Rect{visual.bounds.x - grow, visual.bounds.y - grow,
-                       visual.bounds.width + grow * 2.0F,
-                       visual.bounds.height + grow * 2.0F},
-                  with_alpha(ctx.theme().accent, std::clamp(left / 1.5F, 0.0F, 1.0F)),
-                  2.0F);
+      ctx.rounded_outline(
+          gui::Rect{visual.bounds.x - grow, visual.bounds.y - grow,
+                    visual.bounds.width + grow * 2.0F,
+                    visual.bounds.height + grow * 2.0F},
+          with_alpha(ctx.theme().accent, std::clamp(left / 1.5F, 0.0F, 1.0F)),
+          card_radius + grow, 2.0F);
     }
+    // Carried nodes rise a touch; a node just set down springs back from a
+    // little small. At rest the factor is exactly one and nothing moves.
+    const float plant = ctx.spring(
+        mix(id_, "compositor.plant", visual.node->node.value()),
+        carried ? 1.025F : 1.0F);
+    ctx.draw_list().scale_since(first_vertex, visual.bounds.center_x(),
+                                visual.bounds.center_y(), plant);
   }
   // An order number being dragged rides on the pointer, over the nodes.
   if (dragged_number.has_value()) {
@@ -6002,12 +6057,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       parameter_bounds.height > 0.0F) {
     ctx.push_clip(parameter_bounds);
     ctx.panel(parameter_bounds, scale(ctx.theme().panel, 0.98F));
-    ctx.outline(parameter_bounds, ctx.theme().divider);
-    {
-      gui::Rect stripe = parameter_bounds;
-      ctx.panel(gui::cut_top(stripe, 3.0F),
-                compositor_node_color(ctx, parameter_node->kind));
-    }
+    // The node's kind as a soft lit bar along the top.
+    ctx.rounded(gui::Rect{parameter_bounds.x + 8.0F, parameter_bounds.y + 2.0F,
+                          std::max(parameter_bounds.width - 16.0F, 0.0F), 3.0F},
+                compositor_node_color(ctx, parameter_node->kind), 1.5F);
     // The heading's lines are as tall as the font says, never clipped.
     const float heading_height = ctx.line_height();
     const float subheading_height =
@@ -6016,7 +6069,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         std::max(32.0F, std::ceil(3.0F + heading_height + subheading_height));
     gui::Rect heading =
         gui::inset(parameter_bounds, gui::Padding{8.0F, 2.0F, 8.0F, 0.0F});
-    ctx.label(gui::cut_top(heading, heading_height), "PARAMETERS",
+    ctx.label(gui::cut_top(heading, heading_height), "Parameters",
               ctx.theme().text);
     static_cast<void>(compositor_label(
         ctx, gui::cut_top(heading, subheading_height),
@@ -6025,7 +6078,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // Bypass is a node's own switch, beside its name.
     if (compositor::node_kind_bypassable(parameter_node->kind)) {
       const bool off = bypassed(*parameter_node);
-      const std::string_view caption = off ? "BYPASSED" : "BYPASS";
+      const std::string_view caption = off ? "Bypassed" : "Bypass";
       gui::Rect corner =
           gui::inset(parameter_bounds, gui::Padding{0.0F, 5.0F, 8.0F, 0.0F});
       gui::Rect button =
@@ -6039,9 +6092,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         toggle_bypass();
       }
-      ctx.panel(button, off ? with_alpha(compositor_bypass_color, 0.85F)
-                            : (pressed.hovered ? ctx.theme().widget_hover
-                                               : ctx.theme().widget));
+      ctx.cursor_for(pressed, gui::Cursor::Hand);
+      ctx.rounded(button, off ? with_alpha(compositor_bypass_color, 0.85F)
+                              : (pressed.hovered ? ctx.theme().widget_hover
+                                                 : ctx.theme().widget),
+                  button.height * 0.5F);
       ctx.label(gui::inset(button, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F}),
                 caption, off ? ctx.theme().background : ctx.theme().text);
       ctx.tooltip(button, "Pass this node through as if it did nothing (D)");
@@ -6082,7 +6137,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     float widest_label{};
     for (const std::string_view label :
          compositor_parameter_labels(parameter_node->kind)) {
-      widest_label = std::max(widest_label, ctx.font_width(label));
+      widest_label =
+          std::max(widest_label, ctx.font_width(gui::sentence_case(label)));
     }
     constexpr float minimum_field_width = 84.0F;
     const float inline_label_width = std::max(60.0F, widest_label + 12.0F);
@@ -6093,14 +6149,15 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.push_clip(parameter_body);
     // One labelled field row; returns where the field goes.
     const auto next_field = [&](std::string_view label) {
+      const std::string shown = gui::sentence_case(label);
       if (stacked_labels) {
-        ctx.label(rows.next(stacked_label_height, 0.0F), label,
+        ctx.label(rows.next(stacked_label_height, 0.0F), shown,
                   ctx.theme().text_muted);
       }
       gui::Rect field = rows.control();
       const gui::Rect label_cell = gui::cut_left(field, label_width);
       if (!stacked_labels) {
-        ctx.label(label_cell, label, ctx.theme().text_muted);
+        ctx.label(label_cell, shown, ctx.theme().text_muted);
       }
       return field;
     };
@@ -6116,14 +6173,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         collapsed_sections_ ^= mask;
       }
       const bool open = (collapsed_sections_ & mask) == 0U;
-      ctx.panel(row, interaction.hovered ? ctx.theme().widget_hover
-                                         : ctx.theme().header);
-      draw_twirl(ctx, row.x + 9.0F, row.y + row.height * 0.5F, open,
+      ctx.cursor_for(interaction, gui::Cursor::Hand);
+      ctx.rounded(row, interaction.hovered ? ctx.theme().widget_hover
+                                           : ctx.theme().header,
+                  ctx.theme().radius);
+      draw_twirl(ctx, row.x + 10.0F, row.y + row.height * 0.5F, open,
                  interaction.hovered ? ctx.theme().accent
                                      : ctx.theme().text_muted);
-      ctx.label(gui::Rect{row.x + 19.0F, row.y,
-                          std::max(row.width - 23.0F, 0.0F), row.height},
-                title,
+      ctx.label(gui::Rect{row.x + 21.0F, row.y,
+                          std::max(row.width - 25.0F, 0.0F), row.height},
+                gui::sentence_case(title),
                 interaction.hovered ? ctx.theme().text : ctx.theme().text_muted);
       return open;
     };
@@ -6155,9 +6214,53 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          edit.direction, edit.modifiers};
       }
     };
+    // Every field below reads its value straight out of the node's
+    // parameter block, so its default is the same member of a fresh block
+    // of the node's kind: found by where the value sits in the block. A
+    // value that is not a member (a computed one) has no default here.
+    const compositor::NodeParameters fresh_parameters = std::visit(
+        [](const auto &current) {
+          return compositor::NodeParameters{std::decay_t<decltype(current)>{}};
+        },
+        parameter_node->parameters);
+    const auto default_of = [&]<typename Value>(const Value &value)
+        -> std::optional<Value> {
+      return std::visit(
+          [&](const auto &current) -> std::optional<Value> {
+            using Block = std::decay_t<decltype(current)>;
+            const auto begin = reinterpret_cast<std::uintptr_t>(&current);
+            const auto at = reinterpret_cast<std::uintptr_t>(&value);
+            if (at < begin || at + sizeof(Value) > begin + sizeof(Block)) {
+              return std::nullopt;
+            }
+            Value fresh{};
+            std::memcpy(&fresh,
+                        reinterpret_cast<const unsigned char *>(
+                            &std::get<Block>(fresh_parameters)) +
+                            (at - begin),
+                        sizeof(Value));
+            return fresh;
+          },
+          parameter_node->parameters);
+    };
+    // The reset arrow at the end of a field's label while its value differs
+    // from the default; true on the frame it is pressed.
+    const auto reset_field = [&](CompositorProperty property,
+                                 const gui::Rect &field, bool differs,
+                                 std::string_view tip) {
+      if (!differs || stacked_labels) {
+        return false;
+      }
+      return reset_button(
+          ctx, field_id(property) ^ gui::ui_id("reset"),
+          gui::Rect{field.x - reset_button_width - 2.0F, field.y,
+                    reset_button_width, field.height},
+          tip);
+    };
     const auto scalar_field =
-        [&](std::string_view label, CompositorProperty property, float value,
-            double speed, float minimum, float maximum, int decimals) {
+        [&](std::string_view label, CompositorProperty property,
+            const float &value, double speed, float minimum, float maximum,
+            int decimals) {
           const gui::Rect field = next_field(label);
           double authored = 0.0;
           NumberFieldEdit edit{};
@@ -6167,6 +6270,20 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                      authored, decimals, &edit)) {
             emit_float(property, authored, value, minimum, maximum);
             record_nudge(property, numeric_id, edit);
+          }
+          if (const std::optional<float> fresh = default_of(value)) {
+            std::array<char, 48U> tip{};
+            std::snprintf(tip.data(), tip.size(), "Reset to default (%.*f)",
+                          decimals, static_cast<double>(*fresh));
+            if (reset_field(property, field,
+                            std::abs(value - *fresh) >
+                                1.0e-5F * std::max(1.0F, std::abs(*fresh)),
+                            tip.data()) &&
+                !frame.property_edit.has_value()) {
+              frame.property_edit = CompositorPropertyEditIntent{
+                  parameter_node->node, property,
+                  CompositorPropertyValue{*fresh}};
+            }
           }
         };
     // A two-state value shown as a button naming its state; a click flips it.
@@ -6204,9 +6321,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     };
     const auto unsigned_field = [&](std::string_view label,
                                     CompositorProperty property,
-                                    core::u32 value, double speed,
+                                    const core::u32 &value, double speed,
                                     core::u32 minimum, core::u32 maximum) {
       const gui::Rect field = next_field(label);
+      if (const std::optional<core::u32> fresh = default_of(value)) {
+        const std::string tip =
+            "Reset to default (" + std::to_string(*fresh) + ")";
+        if (reset_field(property, field, value != *fresh, tip) &&
+            !frame.property_edit.has_value()) {
+          frame.property_edit = CompositorPropertyEditIntent{
+              parameter_node->node, property, CompositorPropertyValue{*fresh}};
+        }
+      }
       double authored{};
       NumberFieldEdit edit{};
       const gui::UiId numeric_id = field_id(property);
@@ -6592,12 +6718,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (parameters == nullptr) {
         break;
       }
-      // The colour being keyed out, as a swatch above its three channels.
-      const gui::Rect swatch = next_field("KEY COLOUR");
-      ctx.panel(swatch, gui::UiColor{parameters->key_color.x,
-                                     parameters->key_color.y,
-                                     parameters->key_color.z, 1.0F});
-      ctx.outline(swatch, ctx.theme().border);
+      // The colour being keyed out, as a well above its three channels.
+      colour_well_field(
+          ctx, next_field("KEY COLOUR"), parameter_node->node, 0U,
+          gui::UiColor{parameters->key_color.x, parameters->key_color.y,
+                       parameters->key_color.z, 1.0F},
+          {CompositorProperty::ChromaKeyRed, CompositorProperty::ChromaKeyGreen,
+           CompositorProperty::ChromaKeyBlue},
+          frame);
       scalar_field("KEY RED", CompositorProperty::ChromaKeyRed,
                    parameters->key_color.x, 0.005, 0.0F, 1.0F, 3);
       scalar_field("KEY GREEN", CompositorProperty::ChromaKeyGreen,
@@ -6894,10 +7022,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const auto colour_fields =
           [&](std::string_view title, const compositor::BackgroundColor &colour,
               const std::array<Property, 4U> &properties) {
-            const gui::Rect swatch = next_field(title);
-            ctx.panel(swatch,
-                      gui::UiColor{colour.r, colour.g, colour.b, 1.0F});
-            ctx.outline(swatch, ctx.theme().border);
+            colour_well_field(ctx, next_field(title), parameter_node->node,
+                              properties[0U] == Property::BackgroundColorAR ? 1U : 2U,
+                              gui::UiColor{colour.r, colour.g, colour.b, 1.0F},
+                              {properties[0U], properties[1U], properties[2U]},
+                              frame);
             scalar_field("RED", properties[0U], colour.r, 0.005, 0.0F, 1.0F,
                          3);
             scalar_field("GREEN", properties[1U], colour.g, 0.005, 0.0F, 1.0F,
@@ -7453,7 +7582,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     pending_wires_ = std::move(held);
   }
 
-  frame.editing = parameter_fields_.live() || inline_fields_.live();
+  frame.editing =
+      parameter_fields_.live() || inline_fields_.live() || colour_editing_;
+  colour_editing_ = false;
   ctx.pop_clip();
   if (drag_released) {
     dragging_node_ = {};
@@ -8415,6 +8546,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   return result;
 }
 
+
 OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                             const gui::Rect &bounds,
                                             const OutputMonitorState &state) {
@@ -8472,7 +8604,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case NodeStatus::Stopping:
     case NodeStatus::Probing:
     case NodeStatus::Busy:
-      return theme.keyframe;
+      return theme.caution;
     case NodeStatus::Faulted:
     case NodeStatus::AuthenticationFailed:
     case NodeStatus::ProtocolError:
@@ -8542,7 +8674,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     case ContentStatus::Ready:
       return theme.good;
     case ContentStatus::Checking:
-      return theme.keyframe;
+      return theme.caution;
     case ContentStatus::Missing:
     case ContentStatus::Error:
       return theme.warning;
@@ -8603,11 +8735,6 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   // lines of capitals is now something the eye reads in one pass.
   gui::Rect area = bounds;
   const gui::Rect summary = gui::cut_top(area, summary_height);
-  ctx.panel(summary, theme.header);
-  {
-    gui::Rect rule = summary;
-    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
-  }
   // The frame number at the right; chips laid in from the left until the
   // next would run into it.
   gui::Rect chips = summary;
@@ -8623,8 +8750,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
     const gui::Rect body = gui::cut_left(chips, width);
     static_cast<void>(gui::cut_left(chips, 6.0F));
-    ctx.panel(body, with_alpha(color, 0.10F));
-    ctx.outline(body, with_alpha(color, 0.40F));
+    ctx.rounded(body, with_alpha(color, 0.14F), body.height * 0.5F);
     draw_status_dot(ctx, body.x + 10.0F, body.center_y(), color, 3.0F);
     ctx.label(gui::inset(body, gui::Padding{19.0F, 0.0F, 1.0F, 0.0F}), text,
               theme.text);
@@ -8643,7 +8769,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
             : (state.cluster.health == ClusterHealth::Faulted
                    ? theme.warning
                    : (state.cluster.health == ClusterHealth::Degraded
-                          ? theme.keyframe
+                          ? theme.caution
                           : theme.text_muted));
     const std::string_view health =
         state.cluster.health == ClusterHealth::Healthy    ? "Healthy"
@@ -8919,7 +9045,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   const auto status_pill = [&](float x, float centre_y, std::string_view text,
                                gui::UiColor color, bool filled,
                                std::string_view tip) {
-    const gui::Rect pill = draw_pill(ctx, x, centre_y, text, color, filled);
+    const gui::Rect pill =
+        draw_pill(ctx, x, centre_y, gui::sentence_case(text), color, filled);
     ctx.tooltip(pill, tip);
   };
   const auto row_cells = [&](const gui::Rect &row, std::string_view name,
@@ -8933,7 +9060,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
               theme.text);
     if (!tag.empty() && name_width > tag_width + 40.0F) {
       static_cast<void>(draw_pill(ctx, name_x + name_text + 8.0F, centre_y,
-                                  tag, theme.text_muted, false));
+                                  gui::sentence_case(tag), theme.text_muted,
+                                  false));
     }
     if (show_resolution) {
       ctx.label(gui::cell(resolution_column, row), resolution,
@@ -8975,11 +9103,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     const gui::Rect row{bounds.x, y, bounds.width, program_height};
     gui::Rect line = row;
     line = gui::cut_top(line, row_height);
-    ctx.panel(row, theme.row);
-    {
-      gui::Rect rule = row;
-      ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
-    }
+    ctx.rounded(gui::inset(row, 4.0F, 2.0F), theme.row, theme.radius);
     const float centre_y = line.center_y();
     if (state.cluster.conformance_active) {
       draw_twirl(ctx, bounds.x + 12.0F, centre_y, program_expanded_,
@@ -9143,14 +9267,11 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     const bool hovered = !ctx.pointer_blocked() &&
                          line.contains(ctx.pointer_x(), ctx.pointer_y()) &&
                          list_bounds.contains(ctx.pointer_x(), ctx.pointer_y());
-    ctx.panel(row, index % 2U == 0U ? theme.row_alt : theme.row);
-    if (hovered) {
-      ctx.panel(line, with_alpha(theme.widget_hover, 0.5F));
-    }
-    {
-      gui::Rect rule = row;
-      ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
-    }
+    const gui::Rect card = gui::inset(row, 4.0F, 2.0F);
+    ctx.rounded(card,
+                hovered ? gui::blend(theme.row, theme.widget_hover, 0.5F)
+                        : theme.row,
+                theme.radius);
     const float centre_y = line.center_y();
     draw_twirl(ctx, bounds.x + 12.0F, centre_y, expanded,
                hovered ? theme.text : theme.text_muted);
@@ -9166,7 +9287,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     // put the reason in the tooltip rather than only in the expanded detail.
     const bool output_failed = node.output_failed();
     const gui::UiColor node_color = output_failed ? theme.warning
-        : awaiting_connection ? theme.warning
+        : awaiting_connection ? theme.caution
                               : status_color(node.status);
     std::string status_tip{status_label(node.status)};
     if (!node.detail.empty()) {
@@ -9355,31 +9476,67 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   gui::Rect batch = gui::inset(footer, gui::Padding{0.0F, 4.0F, 6.0F, 4.0F});
   const auto batch_button = [&](std::string_view suffix, std::string_view label,
                                 OutputLifecycleAction action, bool caution) {
-    const gui::Rect button =
-        gui::cut_right(batch, ctx.font_width(label) + 24.0F);
+    // Stopping every output takes the wall dark, so it asks twice: the
+    // first press arms it for a few seconds and says so, the second stops.
+    const bool confirmable = action == OutputLifecycleAction::Stop;
+    const bool armed =
+        confirmable && ctx.time_seconds() < stop_all_armed_until_;
+    constexpr std::string_view confirm_label = "Confirm stop";
+    const float label_width =
+        confirmable ? std::max(ctx.font_width(label), ctx.font_width(confirm_label))
+                    : ctx.font_width(label);
+    const gui::Rect button = gui::cut_right(batch, label_width + 44.0F);
     static_cast<void>(gui::cut_right(batch, 6.0F));
     const bool enabled = actionable(action) > 0U;
     const gui::Interaction interaction =
         enabled ? ctx.grab(mix(id_, suffix), button) : gui::Interaction{};
-    const gui::UiColor base =
-        caution ? with_alpha(theme.warning, 0.16F) : theme.widget;
-    ctx.panel(button, !enabled ? with_alpha(theme.widget, 0.5F)
-                               : (interaction.held && !interaction.released
-                                      ? theme.widget_active
-                                      : (interaction.hovered
-                                             ? (caution ? with_alpha(
-                                                              theme.warning,
-                                                              0.30F)
-                                                        : theme.widget_hover)
-                                             : base)));
-    ctx.outline(button,
-                !enabled ? theme.divider
-                    : (caution ? with_alpha(theme.warning, 0.7F) : theme.border));
-    ctx.label_centered(button, label,
-                       !enabled ? with_alpha(theme.text_muted, 0.6F)
-                                : (caution ? theme.warning : theme.text));
+    if (enabled) {
+      ctx.cursor_for(interaction, gui::Cursor::Hand);
+    }
+    const float radius = button.height * 0.5F;
+    const bool pressed = interaction.held && !interaction.released;
+    if (armed && enabled) {
+      ctx.glow(button, theme.warning, radius, 10.0F);
+    }
+    ctx.rounded(button,
+                !enabled ? with_alpha(theme.widget, 0.5F)
+                         : (pressed ? theme.widget_active
+                            : armed ? theme.warning
+                                    : (caution ? with_alpha(theme.warning,
+                                                            interaction.hovered
+                                                                ? 0.22F
+                                                                : 0.0F)
+                                               : (interaction.hovered
+                                                      ? theme.widget_hover
+                                                      : theme.widget))),
+                radius);
+    if (caution && enabled && !armed) {
+      ctx.rounded_outline(button, with_alpha(theme.warning, 0.6F), radius, 1.5F);
+    }
+    const gui::UiColor ink = !enabled ? with_alpha(theme.text_muted, 0.6F)
+                             : armed  ? theme.background
+                                      : (caution ? theme.warning : theme.text);
+    const gui::Icon icon = action == OutputLifecycleAction::Stop
+                               ? gui::Icon::Stop
+                               : (action == OutputLifecycleAction::Restart
+                                      ? gui::Icon::Restart
+                                      : gui::Icon::Power);
+    gui::draw_icon(ctx.draw_list(), icon, button.x + 17.0F, button.center_y(),
+                   ink, 0.9F);
+    ctx.label(gui::Rect{button.x + 30.0F, button.y,
+                        std::max(button.width - 34.0F, 0.0F), button.height},
+              armed ? confirm_label : label, ink);
+    if (confirmable) {
+      ctx.tooltip(button, armed ? "Press again to stop every output"
+                                : "Stop every output (asks first)");
+    }
     if (enabled && interaction.clicked && !frame.lifecycle.has_value()) {
-      frame.lifecycle = OutputLifecycleRequest{{}, 0U, {}, action, true};
+      if (confirmable && !armed) {
+        stop_all_armed_until_ = ctx.time_seconds() + 4.0;
+      } else {
+        frame.lifecycle = OutputLifecycleRequest{{}, 0U, {}, action, true};
+        stop_all_armed_until_ = -1.0;
+      }
     }
   };
   if (!state.nodes.empty()) {

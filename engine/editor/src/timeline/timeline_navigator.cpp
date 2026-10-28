@@ -135,7 +135,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
   constexpr float choice_width = 22.0F;
   const float choices_width =
       choice_width * static_cast<float>(height_choices.size()) + 4.0F;
-  const float caption_width = ctx.font_width("CLIP ROWS") + 12.0F;
+  const float caption_width = ctx.font_width("Clip rows") + 12.0F;
   if (list_width >= choices_width + caption_width + 8.0F) {
     // At the list's right end, the caption then the choices, each choice
     // 2 narrower than its step.
@@ -143,7 +143,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
     const gui::Rect caption = gui::cut_right(list_foot, caption_width);
     ctx.label(gui::Rect{caption.x, navigator.y + 1.0F, caption.width,
                         navigator.height - 1.0F},
-              "CLIP ROWS", theme.text_muted);
+              "Clip rows", theme.text_muted);
     for (const HeightChoice &choice : height_choices) {
       const bool engaged =
           rows_state_.clip_row_heights.empty() &&

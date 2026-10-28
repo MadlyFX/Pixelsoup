@@ -5,6 +5,7 @@
 #include <mediaserver/render/render_error.hpp>
 #include <mediaserver/rhi/device.hpp>
 
+#include <array>
 #include <span>
 #include <vector>
 
@@ -149,6 +150,78 @@ public:
     void add_polyline(
         std::span<const UiPoint> points, float thickness, UiColor color);
 
+    // A rectangle with rounded corners, filled. The edges land on whole
+    // pixels as add_rect's do; the corners are arcs with a one-pixel
+    // anti-aliased fringe, so a pill or a card reads as soft without blurring
+    // its straight sides. `radius` is clamped to half the shorter side, and
+    // `corners` picks which corners round (the others stay square). A radius
+    // under a pixel draws an ordinary rectangle.
+    void add_rounded_rect(
+        float x,
+        float y,
+        float width,
+        float height,
+        float radius,
+        UiColor color,
+        core::u8 corners = corner_all);
+    // The same outline as a stroke `thickness` units wide, inside the edge.
+    void add_rounded_outline(
+        float x,
+        float y,
+        float width,
+        float height,
+        float radius,
+        float thickness,
+        UiColor color,
+        core::u8 corners = corner_all);
+    // A soft halo `spread` units deep outside the same outline, fading from
+    // `color` at the edge to nothing: how a live control lights up.
+    void add_rounded_glow(
+        float x,
+        float y,
+        float width,
+        float height,
+        float radius,
+        float spread,
+        UiColor color);
+    // Paints the outside of each rounded corner - the sliver between the
+    // box's square corner and its arc - in `color`. Drawn over square content
+    // in the colour behind the box, it rounds that content's corners without
+    // a rounded clip: how a docked panel keeps soft corners whatever its
+    // contents paint edge to edge.
+    void add_corner_mask(
+        float x,
+        float y,
+        float width,
+        float height,
+        float radius,
+        UiColor color,
+        core::u8 corners = corner_all);
+    // A rectangle whose four corners carry their own colours, blended across
+    // it: a colour picker's fields and rails, a fade.
+    void add_gradient_rect(
+        float x,
+        float y,
+        float width,
+        float height,
+        UiColor top_left,
+        UiColor top_right,
+        UiColor bottom_right,
+        UiColor bottom_left);
+
+    // Which corners of a rounded rectangle round.
+    static constexpr core::u8 corner_top_left = 1U;
+    static constexpr core::u8 corner_top_right = 2U;
+    static constexpr core::u8 corner_bottom_right = 4U;
+    static constexpr core::u8 corner_bottom_left = 8U;
+    static constexpr core::u8 corner_top = corner_top_left | corner_top_right;
+    static constexpr core::u8 corner_bottom =
+        corner_bottom_left | corner_bottom_right;
+    static constexpr core::u8 corner_left = corner_top_left | corner_bottom_left;
+    static constexpr core::u8 corner_right =
+        corner_top_right | corner_bottom_right;
+    static constexpr core::u8 corner_all = 15U;
+
     // A rectangle sampling an arbitrary texture rather than the atlas - an
     // engine render target dropped into a panel. `tint` multiplies it, so white
     // shows it untouched. The texture is borrowed and must outlive the frame
@@ -175,6 +248,13 @@ public:
         float u1,
         float v1,
         UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+
+    // Scales everything drawn since vertex `first` about (centre_x,
+    // centre_y) - logical units - by `factor`. A whole compound mark grows
+    // or shrinks as one, text included, without redrawing it: how a dragged
+    // node lifts and settles. Clip rectangles stay where they were.
+    void scale_since(std::size_t first, float centre_x, float centre_y,
+                     float factor) noexcept;
 
     [[nodiscard]] const std::vector<UiVertex>& vertices() const noexcept {
         return vertices_;
@@ -208,6 +288,35 @@ private:
     // One vertex sampling the white texel, counted into the open batch. Only
     // valid straight after a begin_run() that returned true.
     void push_solid(float x, float y, UiColor color);
+    // The same, already in physical pixels.
+    void push_pixel(float x, float y, UiColor color);
+    // Four edges `thickness` deep inside the box: the square outline a
+    // rounded one falls back to below a pixel of radius.
+    void add_outline_box(float x, float y, float width, float height,
+                         float thickness, UiColor color);
+    // The outline of a rounded rectangle in physical pixels: the snapped box,
+    // each corner's arc centre and radius, and how finely each arc is cut.
+    struct RoundedOutline final {
+        float x0{};
+        float y0{};
+        float x1{};
+        float y1{};
+        std::array<float, 4U> radius{};
+        core::u32 segments{};
+    };
+    [[nodiscard]] bool rounded_outline(
+        float x,
+        float y,
+        float width,
+        float height,
+        float radius,
+        core::u8 corners,
+        RoundedOutline& out) const noexcept;
+    // Walks the outline clockwise from the top-left corner, calling `visit`
+    // with each point offset `offset` pixels outward along its normal.
+    template <typename Visit>
+    void walk_outline(const RoundedOutline& outline, float offset,
+                      Visit&& visit) const;
     [[nodiscard]] Clip current_clip() const noexcept;
     // One logical span [start, start + extent) onto the pixel grid.
     void snap_span(float start, float extent, float& from, float& to) const noexcept;

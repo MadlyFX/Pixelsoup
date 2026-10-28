@@ -9,8 +9,11 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 // The Inspector's proof, with no GPU and no window.
@@ -721,13 +724,54 @@ void the_delete_button_asks_the_shell_to_remove_the_selection() {
     UI_CHECK(released.delete_requested);
 }
 
+// A value away from its default carries a reset arrow at the end of its
+// label, as in Unreal's details panel; a click puts back each component that
+// differs - here Position's X and Z - and leaves the rest alone. At its
+// default the arrow is gone.
+void a_changed_value_resets_to_its_default() {
+    Harness h;
+    h.element.position = scene::Vec3{1.5F, 0.0F, -2.25F};
+    core::u64 reset_id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
+    for (const char c : std::string_view{"Position"}) {
+        reset_id ^= static_cast<core::u8>(c);
+        reset_id *= 1099511628211ULL;
+    }
+    reset_id ^= static_cast<core::u64>(10'000U) + 0x9E3779B9ULL;
+    reset_id *= 1099511628211ULL;
+    std::optional<std::pair<float, float>> found;
+    for (float y = 10.0F; y < 400.0F && !found; y += 4.0F) {
+        for (float x = 2.0F; x < 200.0F && !found; x += 3.0F) {
+            static_cast<void>(h.frame(x, y, false));
+            if (h.ctx.hot() == reset_id) {
+                found = std::pair{x, y};
+            }
+        }
+    }
+    UI_CHECK(found.has_value());
+    if (!found) {
+        return;
+    }
+    static_cast<void>(h.frame(found->first, found->second, true));
+    const editor::InspectorFrame reset =
+        h.frame(found->first, found->second, false);
+    UI_CHECK(reset.component_edits.size() == 2U);
+    for (const editor::ComponentEdit& edit : reset.component_edits) {
+        UI_CHECK(edit.node == subject);
+        UI_CHECK(near(edit.value, 0.0));
+    }
+
+    h.element.position = scene::Vec3{};
+    static_cast<void>(h.frame(found->first, found->second, false));
+    UI_CHECK(h.ctx.hot() != reset_id);
+}
+
 void an_effect_remove_button_requests_true_node_deletion() {
     Harness h;
     const doc::NodeId effect_node{80U};
     h.effects.push_back(scene::EffectInstance{
         effect_node, subject, scene::EffectKind::Saturation, 0, true, 2.0F});
 
-    // The unmistakable REMOVE control is at the right of the effect's title
+    // The red-ringed Remove control is at the right of the effect's title
     // row. It reports the first-class effect identity, not an enabled=false
     // property edit, so the authoring boundary can erase it and its channels.
     constexpr float remove_x = 250.0F;
@@ -1940,7 +1984,8 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 56U> cases{{
+constexpr std::array<Case, 57U> cases{{
+    {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
      &a_surface_diamond_keys_its_position_at_the_playhead},

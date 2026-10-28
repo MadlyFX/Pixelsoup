@@ -930,6 +930,21 @@ private:
   std::optional<core::u8> add_category_;
   std::string node_search_;
   NumberField parameter_fields_;
+  // A colour parameter's swatch as a colour well. What the picker chose
+  // reaches the graph one channel a frame, since a frame carries one edit.
+  void colour_well_field(gui::UiContext &ctx, const gui::Rect &well,
+                         doc::NodeId node, core::u64 slot,
+                         gui::UiColor current,
+                         const std::array<CompositorProperty, 3U> &channels,
+                         CompositorFrame &frame);
+  struct ColourTarget final {
+    gui::UiId well{};
+    doc::NodeId node{};
+    std::array<CompositorProperty, 3U> channels{};
+    gui::UiColor color{};
+  };
+  std::optional<ColourTarget> colour_target_;
+  bool colour_editing_{};
   float parameter_width_{};
   float parameter_height_{};
   float parameter_scroll_{};
@@ -1238,6 +1253,9 @@ private:
   bool conformance_expanded_{};
   bool timing_expanded_{};
   bool program_expanded_{};
+  // Until when Stop all is armed by its first press; a second press before
+  // then stops every output.
+  double stop_all_armed_until_{-1.0};
   std::set<doc::NodeId> expanded_;
   gui::UiId id_{};
   gui::ScrollRegion scroll_;

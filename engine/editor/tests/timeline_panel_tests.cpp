@@ -198,12 +198,14 @@ struct Harness final {
     return pressed;
   }
 
-  // Right-clicks at (x, y) and picks menu entry `entry`. Menus open 2px
-  // under the pointer with 24px rows.
+  // Right-clicks at (x, y) and picks menu entry `entry`. Menus open 6px
+  // under the pointer with menu_row_height rows.
   editor::TimelinePanelFrame choose(float x, float y, std::size_t entry) {
     static_cast<void>(right_click(x, y));
     UI_CHECK(ctx.typing());
-    return click(x + 10.0F, y + 14.0F + 24.0F * static_cast<float>(entry));
+    return click(x + 10.0F,
+                 y + 6.0F + gui::menu_row_height *
+                                (static_cast<float>(entry) + 0.5F));
   }
 
   // Printable keys while the timeline has the operator's attention.

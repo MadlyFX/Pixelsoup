@@ -304,6 +304,17 @@ class InspectorPanel final {
     // A labelled row of numeric fields, one per axis letter in `axes`. Each
     // binding resolves the corresponding field across the current selection,
     // renders Mixed when needed, and emits the complete fan-out directly.
+    // What `binding` holds on a new element of the selection's kind, or
+    // nothing when no selected element has the field. Not const: it reads
+    // the field through editable_value() with the panel's effects and keys
+    // swapped for pristine ones for the length of the call.
+    [[nodiscard]] std::optional<double> default_value(const FieldBinding& binding);
+    // A colour's swatch as a well: a click opens the colour picker, and
+    // what is picked is written to the three channel bindings.
+    void colour_well(gui::UiContext& ctx, const gui::Rect& well,
+                     std::string_view name, std::array<float, 3U> rgb,
+                     std::span<const FieldBinding> bindings,
+                     InspectorFrame& frame, bool mixed, std::size_t salt);
     void vector_row(gui::UiContext& ctx, Cursor& cursor,
                     std::string_view label,
                     std::span<const std::string_view> axes,
@@ -340,6 +351,8 @@ class InspectorPanel final {
     // overflowed, which is only known after a frame has been laid out.
     gui::ScrollRegion scroll_;
 
+    // A colour picker opened from this panel is open this frame.
+    bool colour_editing_{};
     NumberField fields_;
     // Evaluated snapshots and model spans are valid only during draw(). They
     // let every row retain the compact single-selection layout while resolving

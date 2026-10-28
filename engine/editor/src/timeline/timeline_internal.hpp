@@ -363,8 +363,7 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
 
 [[nodiscard]] inline gui::UiColor mix_colors(gui::UiColor a, gui::UiColor b,
                                       float t) noexcept {
-  return gui::UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
-                      a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+  return gui::blend(a, b, t);
 }
 
 // A square tool button carrying a drawn mark. `engaged` is a mode that is on
@@ -376,25 +375,8 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
                                bool engaged, std::string_view tooltip,
                                gui::UiColor engaged_color,
                                float icon_scale = 1.0F) {
-  const gui::Interaction interaction = ctx.grab(id, bounds);
-  const gui::Theme &theme = ctx.theme();
-  ctx.panel(bounds, (interaction.held && !interaction.released)
-                        ? theme.widget_active
-                        : (engaged ? alpha(engaged_color, 0.22F)
-                                   : (interaction.hovered ? theme.widget_hover
-                                                          : theme.widget)));
-  if (engaged) {
-    ctx.panel(gui::Rect{bounds.x, bounds.bottom() - 2.0F,
-                        bounds.width, 2.0F},
-              engaged_color);
-  }
-  gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(),
-                 bounds.center_y(),
-                 engaged ? engaged_color
-                         : (interaction.hovered ? theme.text
-                                                : theme.text_muted), icon_scale);
-  ctx.tooltip(bounds, tooltip);
-  return interaction.clicked;
+  return tool_key(ctx, id, bounds, icon, engaged, tooltip, engaged_color,
+                  icon_scale);
 }
 
 // A text toggle in the same family, for the few modes with no honest icon.
@@ -402,22 +384,24 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
                                const gui::Rect &bounds, std::string_view label,
                                bool engaged, std::string_view tooltip) {
   const gui::Interaction interaction = ctx.grab(id, bounds);
+  ctx.cursor_for(interaction, gui::Cursor::Hand);
   const gui::Theme &theme = ctx.theme();
-  ctx.panel(bounds, (interaction.held && !interaction.released)
-                        ? theme.widget_active
-                        : (engaged ? alpha(theme.accent, 0.22F)
-                                   : (interaction.hovered ? theme.widget_hover
-                                                          : theme.widget)));
-  if (engaged) {
-    ctx.panel(gui::Rect{bounds.x, bounds.bottom() - 2.0F,
-                        bounds.width, 2.0F},
-              theme.accent);
-  }
+  const float hover = ctx.ease(id ^ gui::ui_id("timeline.toggle.hover"),
+                               interaction.hovered ? 1.0F : 0.0F);
+  // A soft key like the icon buttons beside it: lit in the accent while on.
+  ctx.rounded(bounds,
+              (interaction.held && !interaction.released)
+                  ? theme.widget_active
+                  : (engaged ? alpha(theme.accent, 0.22F + 0.08F * hover)
+                             : mix_colors(theme.widget, theme.widget_hover,
+                                          hover)),
+              std::min(bounds.height * 0.5F, theme.radius));
   const float width = ctx.font_width(label);
   ctx.label(gui::Rect{bounds.x + std::max((bounds.width - width) * 0.5F, 2.0F),
                       bounds.y, std::max(bounds.width - 4.0F, 0.0F),
                       bounds.height},
-            label, engaged ? theme.text : theme.text_muted);
+            label, engaged ? theme.accent
+                           : mix_colors(theme.text_muted, theme.text, hover));
   ctx.tooltip(bounds, tooltip);
   return interaction.clicked;
 }
@@ -859,6 +843,12 @@ struct Row final {
   // A closed parent's entry in RowList::summaries, or no_row.
   std::size_t summary{no_row};
 };
+
+// How round a clip's corners are: soft at any height, but never so round a
+// short or narrow clip turns into a lozenge.
+[[nodiscard]] inline float clip_radius(const gui::Rect &bar) noexcept {
+  return std::min({6.0F, bar.height * 0.3F, bar.width * 0.3F});
+}
 
 [[nodiscard]] inline doc::NodeId layer_parent(const ElementInfo &element) noexcept {
   return element.linked ? element.linked_parent

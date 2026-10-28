@@ -78,64 +78,75 @@ namespace mediaserver::app {
                             doc::PropertyValue{std::int64_t{0}});
     node.properties.emplace(std::string{scene::schema::effect_enabled},
                             doc::PropertyValue{true});
+    // The values a new effect starts with are scene::initial_effect()'s, the
+    // same ones the Inspector's Reset to default returns a field to.
+    const scene::EffectInstance initial = scene::initial_effect(effect.kind);
+    const auto real = [](float value) {
+        return doc::PropertyValue{static_cast<double>(value)};
+    };
+    const auto whole = [](auto value) {
+        return doc::PropertyValue{static_cast<std::int64_t>(value)};
+    };
     if (effect.kind == scene::EffectKind::Brightness) {
         node.properties.emplace(std::string{scene::schema::brightness},
-                                doc::PropertyValue{1.0});
+                                real(initial.value));
     } else if (effect.kind == scene::EffectKind::Saturation) {
         node.properties.emplace(std::string{scene::schema::saturation},
-                                doc::PropertyValue{1.0});
+                                real(initial.value));
     } else if (effect.kind == scene::EffectKind::Blur) {
         node.properties.emplace(std::string{scene::schema::blur_radius},
-                                doc::PropertyValue{8.0});
+                                real(initial.value));
     } else if (effect.kind == scene::EffectKind::BoxBlur) {
         node.properties.emplace(std::string{scene::schema::box_blur_radius},
-                                doc::PropertyValue{std::int64_t{8}});
+                                whole(initial.box_blur.radius_px));
         node.properties.emplace(std::string{scene::schema::box_blur_passes},
-                                doc::PropertyValue{std::int64_t{1}});
+                                whole(initial.box_blur.passes));
     } else if (effect.kind == scene::EffectKind::DirectionalBlur) {
         node.properties.emplace(
             std::string{scene::schema::directional_blur_length},
-            doc::PropertyValue{16.0});
+            real(initial.directional_blur.length_px));
         node.properties.emplace(
             std::string{scene::schema::directional_blur_angle_turns},
-            doc::PropertyValue{0.0});
+            real(initial.directional_blur.angle_turns));
     } else if (effect.kind == scene::EffectKind::ChromaKey) {
+        const scene::ChromaKeyParameters &key = initial.chroma_key;
         node.properties.emplace(std::string{scene::schema::chroma_key_color_r},
-                                doc::PropertyValue{0.0});
+                                real(key.key_color.x));
         node.properties.emplace(std::string{scene::schema::chroma_key_color_g},
-                                doc::PropertyValue{1.0});
+                                real(key.key_color.y));
         node.properties.emplace(std::string{scene::schema::chroma_key_color_b},
-                                doc::PropertyValue{0.0});
+                                real(key.key_color.z));
         node.properties.emplace(
             std::string{scene::schema::chroma_key_tolerance},
-            doc::PropertyValue{0.1});
+            real(key.tolerance));
         node.properties.emplace(std::string{scene::schema::chroma_key_softness},
-                                doc::PropertyValue{0.1});
+                                real(key.softness));
         node.properties.emplace(
             std::string{scene::schema::chroma_key_morphology_px},
-            doc::PropertyValue{std::int64_t{0}});
+            whole(key.morphology_px));
         node.properties.emplace(
             std::string{scene::schema::chroma_key_spill_suppression},
-            doc::PropertyValue{0.0});
+            real(key.spill_suppression));
         node.properties.emplace(std::string{scene::schema::chroma_key_mix},
-                                doc::PropertyValue{1.0});
+                                real(key.mix));
     } else if (effect.kind == scene::EffectKind::LumaKey) {
+        const scene::LumaKeyParameters &key = initial.luma_key;
         node.properties.emplace(
             std::string{scene::schema::luma_key_low_threshold},
-            doc::PropertyValue{0.0});
+            real(key.low_threshold));
         node.properties.emplace(
             std::string{scene::schema::luma_key_high_threshold},
-            doc::PropertyValue{1.0});
+            real(key.high_threshold));
         node.properties.emplace(
             std::string{scene::schema::luma_key_low_softness},
-            doc::PropertyValue{0.0});
+            real(key.low_softness));
         node.properties.emplace(
             std::string{scene::schema::luma_key_high_softness},
-            doc::PropertyValue{0.0});
+            real(key.high_softness));
         node.properties.emplace(std::string{scene::schema::luma_key_invert},
-                                doc::PropertyValue{false});
+                                doc::PropertyValue{key.invert});
         node.properties.emplace(std::string{scene::schema::luma_key_mix},
-                                doc::PropertyValue{1.0});
+                                real(key.mix));
     } else if (effect.kind == scene::EffectKind::Levels) {
         const auto add_channel =
             [&](std::string_view input_black, std::string_view input_white,

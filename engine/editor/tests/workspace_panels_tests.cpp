@@ -49,11 +49,12 @@ void check(bool condition, const char *expression, int line) {
   return {object, media, light};
 }
 
-// The outliner's geometry: a 32-unit search bar, then 24-unit rows (the first
-// row's centre is y=44), the eye at x=2..26 and the padlock at the right edge,
-// a 30-unit footer naming the selection.
+// The outliner's geometry: a 32-unit search bar, then list-height rows (the
+// first row's centre is y=46), the eye at x=2..26 and the padlock at the
+// right edge, a 30-unit footer naming the selection.
 constexpr float scene_row(int index) {
-  return 44.0F + 24.0F * static_cast<float>(index);
+  return 32.0F + editor::list_metrics::row_height *
+                     (static_cast<float>(index) + 0.5F);
 }
 
 struct SceneHarness final {
@@ -113,17 +114,19 @@ struct SceneHarness final {
   }
 
   // Chooses entry `index` of a menu of `count` entries opened at `anchor_y`:
-  // menus open 2 units below the pointer in 24-unit rows, or flip above it
-  // when they would leave the 300-unit window, never closer than 4 to its top.
+  // menus open 6 units below the pointer in menu_row_height rows, or flip
+  // above it when they would leave the 300-unit window, never closer than 8
+  // to its top.
   std::optional<editor::SceneSelectionRequest>
   choose(float anchor_y, std::size_t count, std::size_t index) {
-    const float height = 24.0F * static_cast<float>(count);
-    float top = anchor_y + 2.0F;
-    if (top + height > bounds.height - 4.0F) {
-      top = anchor_y - height - 2.0F;
+    const float height = gui::menu_row_height * static_cast<float>(count);
+    float top = anchor_y + 6.0F;
+    if (top + height > bounds.height - 8.0F) {
+      top = anchor_y - height - 6.0F;
     }
-    top = std::max(top, 4.0F);
-    const float y = top + 24.0F * static_cast<float>(index) + 12.0F;
+    top = std::max(top, 8.0F);
+    const float y =
+        top + gui::menu_row_height * (static_cast<float>(index) + 0.5F);
     static_cast<void>(frame(90.0F, y, false));
     static_cast<void>(frame(90.0F, y, true));
     return frame(90.0F, y, false);
@@ -361,7 +364,8 @@ void a_scene_row_menu_picks_a_highlight_color() {
     const auto opened = harness.choose(scene_row(0), 6U, 3U);
     UI_CHECK(!opened.has_value() || !opened->highlight_changed);
     // The palette opens at the pointer that chose Highlight Color...
-    const float palette_anchor = scene_row(0) + 2.0F + 24.0F * 3.0F + 12.0F;
+    const float palette_anchor =
+        scene_row(0) + 6.0F + gui::menu_row_height * 3.5F;
     const auto picked = harness.choose(palette_anchor, 9U, entry);
     UI_CHECK(picked.has_value());
     UI_CHECK(picked->highlight_changed);
@@ -1197,7 +1201,8 @@ void compositor_diagnostics_are_explained_in_plain_language() {
   UI_CHECK(invalid_harness.list.vertices().size() > without_guide);
 
   // A parked node - kept, reaching no Output - is not a problem: it is
-  // faded, one quad over it, and raises no guide and no outline.
+  // faded, one soft veil in the ground colour over its card, and raises no
+  // guide and no outline. Everything it adds over a ready node is that veil.
   compositor::CompositorGraph parked = ready;
   parked.diagnostics.push_back(
       compositor::GraphDiagnostic{compositor::DiagnosticCode::DeadBranch,
@@ -1207,7 +1212,20 @@ void compositor_diagnostics_are_explained_in_plain_language() {
                                   compositor::DiagnosticSeverity::Warning});
   CompositorHarness parked_harness;
   static_cast<void>(parked_harness.frame(parked, 0.0F, 0.0F, false));
-  UI_CHECK(parked_harness.list.vertices().size() == without_guide + 6U);
+  const gui::UiColor ground = parked_harness.ctx.theme().background;
+  const auto veil_vertices = [&ground](const gui::UiDrawList &list) {
+    return static_cast<std::size_t>(std::count_if(
+        list.vertices().begin(), list.vertices().end(),
+        [&ground](const gui::UiVertex &vertex) {
+          return vertex.r == ground.r && vertex.g == ground.g &&
+                 vertex.b == ground.b &&
+                 (std::abs(vertex.a - 0.45F) < 1.0e-4F || vertex.a == 0.0F);
+        }));
+  };
+  const std::size_t veil =
+      veil_vertices(parked_harness.list) - veil_vertices(ready_harness.list);
+  UI_CHECK(veil > 0U);
+  UI_CHECK(parked_harness.list.vertices().size() == without_guide + veil);
 
   // A real warning still raises the guide.
   compositor::CompositorGraph warning = ready;
@@ -3470,16 +3488,49 @@ void output_monitor_emits_explicit_cluster_relaunch() {
   editor::OutputMonitorState state{240U,  3840U, 1080U,
                                    60.0F, true,  std::span{&node, 1U}};
   // Footer buttons run right to left: Stop all, Restart all, Start all.
-  // With the glyphless test font each is 24 wide: Restart all is x=370..394.
-  static_cast<void>(harness.frame(382.0F, 134.0F, false, state));
-  static_cast<void>(harness.frame(382.0F, 134.0F, true, state));
-  const auto released = harness.frame(382.0F, 134.0F, false, state);
+  // With the glyphless test font each is its icon and padding, 44 wide:
+  // Restart all is x=330..374.
+  static_cast<void>(harness.frame(352.0F, 134.0F, false, state));
+  static_cast<void>(harness.frame(352.0F, 134.0F, true, state));
+  const auto released = harness.frame(352.0F, 134.0F, false, state);
   UI_CHECK(released.lifecycle.has_value());
   UI_CHECK(released.lifecycle->all);
   UI_CHECK(released.lifecycle->device == doc::NodeId{});
   UI_CHECK(released.lifecycle->endpoint.empty());
   UI_CHECK(released.lifecycle->action ==
            editor::OutputLifecycleAction::Restart);
+}
+
+// Stopping every output takes the wall dark, so Stop all asks twice: the
+// first press only arms it, the second stops.
+void output_monitor_stop_all_asks_before_stopping() {
+  OutputMonitorHarness harness;
+  const editor::OutputMonitorState::Node node{
+      doc::NodeId{50U},
+      "Render A",
+      "127.0.0.1:47840",
+      3U,
+      1920U,
+      1080U,
+      editor::OutputMonitorState::Node::Status::Running,
+      4U,
+      {}};
+  editor::OutputMonitorState state{240U,  3840U, 1080U,
+                                   60.0F, true,  std::span{&node, 1U}};
+  // Stop all is the rightmost footer button, x=380..424.
+  const auto press = [&] {
+    static_cast<void>(harness.frame(402.0F, 134.0F, false, state));
+    static_cast<void>(harness.frame(402.0F, 134.0F, true, state));
+    return harness.frame(402.0F, 134.0F, false, state);
+  };
+  const auto armed = press();
+  UI_CHECK(!armed.lifecycle.has_value());
+  const auto stopped = press();
+  UI_CHECK(stopped.lifecycle.has_value());
+  UI_CHECK(stopped.lifecycle->all);
+  UI_CHECK(stopped.lifecycle->action == editor::OutputLifecycleAction::Stop);
+  // And it disarms: the next press arms again rather than stopping.
+  UI_CHECK(!press().lifecycle.has_value());
 }
 
 void output_monitor_cluster_health_keeps_node_controls_reachable() {
@@ -4359,7 +4410,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 134U> cases{{
+constexpr std::array<Case, 135U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4562,6 +4613,8 @@ constexpr std::array<Case, 134U> cases{{
      &output_monitor_scroll_reaches_later_cluster_nodes},
     {"output monitor emits explicit cluster relaunch",
      &output_monitor_emits_explicit_cluster_relaunch},
+    {"output monitor stop all asks before stopping",
+     &output_monitor_stop_all_asks_before_stopping},
     {"output monitor cluster health keeps node controls reachable",
      &output_monitor_cluster_health_keeps_node_controls_reachable},
     {"project settings apply reports the edited values",

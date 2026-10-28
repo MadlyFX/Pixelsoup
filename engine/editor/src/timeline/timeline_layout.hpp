@@ -21,9 +21,11 @@ inline constexpr float playback_cache_bar_height = 3.0F;
 // The zoom/scroll bar along the panel's foot: the whole show in miniature,
 // with the part on screen as a thumb whose ends zoom and whose middle pans.
 inline constexpr float navigator_height = 16.0F;
-// Every row - layer, track, or property - is a full list row high, so a
-// toggle or a key diamond is as easy to hit as the name beside it.
-inline constexpr float row_height = list_metrics::row_height;
+// Every row - layer, track, or property - is one height, so a toggle or a
+// key diamond is as easy to hit as the name beside it. Denser than the other
+// lists, since a show's layers and their keys must fit on one screen; clip
+// rows have their own S/M/L sizes for a larger target.
+inline constexpr float row_height = 24.0F;
 // The layer list's limits while the operator drags its edge.
 inline constexpr float minimum_list_width = 200.0F;
 inline constexpr float minimum_graph_width = 160.0F;

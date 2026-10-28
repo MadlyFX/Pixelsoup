@@ -52,8 +52,7 @@ constexpr float floating_edge_reach = 5.0F;
 
 // One-unit outline, drawn as four rules so it never covers what it frames.
 [[nodiscard]] UiColor mixed(UiColor a, UiColor b, float t) noexcept {
-    return UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
-                   a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+    return blend(a, b, t);
 }
 
 [[nodiscard]] Rect floating_title_bounds(
@@ -1025,8 +1024,9 @@ void DockHost::draw_seam(UiContext& ctx, DockId split) const {
         : Rect{panes.divider.x,
                panes.divider.y + (panes.divider.height - rule) * 0.5F,
                panes.divider.width, rule};
-    ctx.panel(line, held ? ctx.theme().accent
-                         : mixed(ctx.theme().border, ctx.theme().accent, 0.5F));
+    ctx.rounded(line, held ? ctx.theme().accent
+                           : mixed(ctx.theme().border, ctx.theme().accent, 0.5F),
+                rule * 0.5F);
 }
 
 void DockHost::draw_tree(
@@ -1053,28 +1053,24 @@ void DockHost::draw_leaf(
     }
 
     const Theme& theme = ctx.theme();
-    ctx.panel(bounds, theme.panel);
+    // Every leaf is a soft card on the window ground; the gutter between two
+    // is what tells them apart, so no frame is drawn.
+    ctx.rounded(bounds, theme.panel, theme.radius_large);
 
-    // The strip is a shade darker than the panel it heads, so a row of tabs
-    // reads as the panel's title bar; the showing tab is cut from the panel's
-    // own colour and joins it.
+    // The tabs are pills along the card's top. The showing one is raised
+    // and lit; the rest are quiet text until the pointer reaches them.
     Rect body = bounds;
     const Rect strip = cut_top(body, metrics_.tab_bar);
-    const UiColor strip_color = mixed(theme.background, theme.panel, 0.55F);
-    ctx.panel(strip, strip_color);
-    {
-        Rect rule = strip;
-        ctx.panel(cut_bottom(rule, 1.0F), theme.border);
-    }
 
     const PanelId active = layout_->active_of(leaf);
     ctx.push_clip(strip);
-    float pen = bounds.x;
+    // Clear of the card's rounded corner.
+    float pen = bounds.x + 4.0F;
     for (const PanelId panel : tabs) {
         const std::string_view title = layout_->title_of(panel);
         // Room for the label, breathing space, and a close affordance that does
         // not overlap the tab's drag target.
-        const float width = ctx.font_width(title) + theme.padding * 3.0F +
+        const float width = ctx.font_width(title) + theme.padding * 3.0F + 8.0F +
                             tab_close_extent;
         const Rect tab{pen, strip.y, width, strip.height};
         if (tab.x >= strip.right()) {
@@ -1124,34 +1120,27 @@ void DockHost::draw_leaf(
             drop_pending_ = true;
         }
 
-        const UiColor body_color = is_active
-            ? theme.panel
-            : (it.hovered ? mixed(strip_color, theme.widget_hover, 0.6F)
-                          : strip_color);
-        // An inactive tab stops a pixel short, leaving the strip's rule.
-        ctx.panel(is_active ? tab : inset(tab, Padding{0.0F, 0.0F, 0.0F, 1.0F}),
-                  body_color);
+        const float hover = ctx.ease(tab_id(panel) ^ ui_id("dock.tab.hover"),
+                                     it.hovered ? 1.0F : 0.0F);
+        const Rect pill = inset(tab, Padding{3.0F, 5.0F, 1.0F, 3.0F});
         if (is_active) {
-            // An accent rule along the top marks the showing tab - readable at
-            // a glance in a dark room - and the tab opens into the panel
-            // below it rather than sitting on a line.
-            Rect edges = tab;
-            Rect top = tab;
-            ctx.panel(cut_top(top, 2.0F), theme.accent);
-            ctx.panel(cut_right(edges, 1.0F), theme.border);
-            if (tab.x > bounds.x) {
-                ctx.panel(cut_left(edges, 1.0F), theme.border);
-            }
+            ctx.rounded(pill, theme.widget, pill.height * 0.5F);
+        } else if (hover > 0.0F) {
+            ctx.rounded(pill, fade(theme.widget, 0.7F * hover),
+                        pill.height * 0.5F);
         }
         // The title, a pixel low to sit on the tab's centre line.
         Rect title_cell = inset(
-            tab, Padding{theme.padding * 1.5F, 0.0F, tab_close_extent, 0.0F});
+            tab, Padding{theme.padding * 1.5F + 4.0F, 0.0F, tab_close_extent, 0.0F});
         title_cell.y += 1.0F;
         ctx.label(title_cell, title, is_active ? theme.text : theme.text_muted);
         if (closable) {
             if (close.hovered || close.held) {
-                ctx.panel(close_bounds.inflated(-2.0F, -2.0F),
-                          close.held ? theme.widget_active : theme.widget_hover);
+                const float side = std::min(close_bounds.width, close_bounds.height) - 4.0F;
+                ctx.rounded(Rect{close_bounds.center_x() - side * 0.5F,
+                                 close_bounds.center_y() - side * 0.5F, side, side},
+                            close.held ? theme.widget_active : theme.widget_hover,
+                            side * 0.5F);
             }
             const UiColor close_color =
                 close.held ? theme.warning
@@ -1177,9 +1166,11 @@ void DockHost::draw_leaf(
         draw_panel(active, content);
         ctx.pop_clip();
     }
-    // Last, over the panel's own edge pixels: every leaf is framed, so two
-    // dark panels side by side always read as two.
-    ctx.outline(bounds, theme.border);
+    // Last, over whatever the panel painted edge to edge: its square corners
+    // are rounded off in the ground colour behind the card.
+    ctx.draw_list().add_corner_mask(bounds.x, bounds.y, bounds.width,
+                                    bounds.height, theme.radius_large,
+                                    theme.background);
 }
 
 void DockHost::run_floating_chrome(UiContext& ctx) {
@@ -1254,15 +1245,11 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         const Rect title = floating_title_bounds(frame, metrics_);
         // A soft drop shadow and a lit frame, so a floating panel reads as
         // sitting above the docked ones rather than punched into them.
-        for (int ring = 3; ring >= 1; --ring) {
-            // Each ring spreads 2px further, the shadow falling down-right.
-            Rect shadow = inset(frame.frame, -static_cast<float>(ring) * 2.0F);
-            shadow.x += 2.0F;
-            shadow.y += 4.0F;
-            ctx.panel(shadow, UiColor{0.0F, 0.0F, 0.0F, 0.14F});
-        }
-        ctx.panel(frame.frame, ctx.theme().background);
-        ctx.panel(title, mixed(ctx.theme().header, ctx.theme().widget_hover, 0.4F));
+        ctx.shadow(frame.frame, ctx.theme().radius_large, 22.0F);
+        ctx.rounded(frame.frame, ctx.theme().background, ctx.theme().radius_large);
+        ctx.rounded(title, mixed(ctx.theme().header, ctx.theme().widget_hover, 0.4F),
+                    ctx.theme().radius_large, UiDrawList::corner_top);
+        ctx.rounded_outline(frame.frame, ctx.theme().border, ctx.theme().radius_large);
         const Rect close_bounds = floating_close_bounds(frame, metrics_);
         // Named after the panel showing in it - unless a lone tab right below
         // already says so, when the bar is simply the handle (the pointer

@@ -2231,7 +2231,9 @@ void the_tracked_camera_and_plate_overlays_appear_only_when_live() {
     const auto brightest_green = [](const gui::UiDrawList& list) {
         float alpha = 0.0F;
         for (const gui::UiVertex& vertex : list.vertices()) {
-            if (vertex.g > 0.75F && vertex.r < 0.45F) {
+            // Blue held low as well: the cyan accent is not the tracking
+            // green.
+            if (vertex.g > 0.75F && vertex.r < 0.45F && vertex.b < 0.70F) {
                 alpha = std::max(alpha, vertex.a);
             }
         }
@@ -2787,8 +2789,9 @@ void the_stage_view_menus_choose_projection_layout_and_shading() {
         const float y = menu.y + menu.height * 0.5F;
         take(frame(x, y, true));
         take(frame(x, y, false));
-        const float row_y = menu.y + menu.height + 2.0F +
-                            24.0F * static_cast<float>(row) + 12.0F;
+        const float row_y = menu.y + menu.height + 6.0F +
+                            gui::menu_row_height *
+                                (static_cast<float>(row) + 0.5F);
         take(frame(menu.x + 20.0F, row_y, false));
         take(frame(menu.x + 20.0F, row_y, true));
         take(frame(menu.x + 20.0F, row_y, false));

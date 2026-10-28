@@ -139,8 +139,8 @@ void workflow(const char* project_path, const char* workspace_path) {
     scale = SDL_GetWindowDisplayScale(window) * static_cast<float>(decoded.value().ui_zoom_percent) / 100.0F;
     int width = 0, height = 0;
     check(SDL_GetWindowSizeInPixels(window, &width, &height), "window extent");
-    layout.solve({0, 34, static_cast<float>(width) / scale,
-                  static_cast<float>(height) / scale - 62},
+    layout.solve(editor::editor_dock_area(static_cast<float>(width) / scale,
+                                          static_cast<float>(height) / scale),
                  {.divider=6, .seam_reach=4, .tab_bar=32, .title_bar=30, .edge=0.25F});
   };
   int count = 0;
@@ -195,18 +195,23 @@ void workflow(const char* project_path, const char* workspace_path) {
     check(SDL_PushEvent(&event), "push release"); frame(step);
     frame("settled");
   };
-  click(170.0F, 12.0F, "File menu");
+  // The File menu is the first entry of the menu bar; its popup opens at
+  // the top of the dock area under it, Recent Projects its third row, and
+  // the submenu beside it.
+  const float popup_x = editor::editor_menu_bar_left;
+  const float popup_y = editor::editor_top_bar_height;
+  click(popup_x + 12.0F, editor::editor_top_bar_height * 0.5F, "File menu");
   SDL_Event hover_recent{};
   hover_recent.type = SDL_EVENT_MOUSE_MOTION;
   hover_recent.motion.windowID = window_id;
   const float input_scale = scale / SDL_GetWindowPixelDensity(window);
-  hover_recent.motion.x = 180.0F * input_scale;
-  hover_recent.motion.y = 93.0F * input_scale;
+  hover_recent.motion.x = (popup_x + 22.0F) * input_scale;
+  hover_recent.motion.y = (popup_y + 59.0F) * input_scale;
   check(SDL_PushEvent(&hover_recent), "hover Recent Projects");
   frame("Recent Projects submenu hover");
   check(!requested_project.has_value(),
         "opening Recent Projects does not load a project");
-  click(400.0F, 97.0F, "Recent project");
+  click(popup_x + 242.0F, popup_y + 63.0F, "Recent project");
   check(requested_project == recent_projects.front(),
         "recent project uses the editor's project-open request");
   const auto properties = gui::ui_id("editor.panel.inspector");

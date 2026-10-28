@@ -43,6 +43,15 @@ public:
     void outline(float left, float top, float width, float height, float thickness) const {
         add_outline(list_, Rect{x_ + left, y_ + top, width, height}, thickness, color_);
     }
+    // Soft boxes: a rounded fill, and a rounded stroke inside the box.
+    void rounded(float left, float top, float width, float height, float radius) const {
+        list_.add_rounded_rect(x_ + left, y_ + top, width, height, radius, color_);
+    }
+    void rounded_outline(float left, float top, float width, float height,
+                         float radius, float thickness) const {
+        list_.add_rounded_outline(x_ + left, y_ + top, width, height, radius,
+                                  thickness, color_);
+    }
 
     void line(float x0, float y0, float x1, float y1, float thickness) const {
         list_.add_line(x_ + x0, y_ + y0, x_ + x1, y_ + y1, thickness, color_);
@@ -90,6 +99,20 @@ public:
 
     void polyline(std::initializer_list<UiPoint> points, float thickness) const {
         list_.add_polyline(placed(points), thickness, color_);
+    }
+    // A soft stroke: an anti-aliased polyline with round ends, the hand the
+    // newer glyphs are drawn in.
+    void stroke(std::initializer_list<UiPoint> points, float thickness = 1.6F) const {
+        stroke(std::span<const UiPoint>{points.begin(), points.size()}, thickness);
+    }
+    void stroke(std::span<const UiPoint> points, float thickness = 1.6F) const {
+        if (points.empty()) {
+            return;
+        }
+        list_.add_polyline(placed(points), thickness, color_);
+        const float cap = thickness * 0.5F;
+        add_disc(list_, at(points.front()), cap, color_, 8U);
+        add_disc(list_, at(points.back()), cap, color_, 8U);
     }
     void polyline(std::span<const UiPoint> points, float thickness) const {
         list_.add_polyline(placed(points), thickness, color_);
@@ -268,75 +291,84 @@ void draw_icon(
         pen.rect(4.0F, -4.5F, 2.0F, 9.0F);
         return;
     case Icon::Loop: {
-        // Three quarters of a ring with its arrowhead: the round trip.
+        // Most of a ring running into its arrowhead: the round trip.
         constexpr float radius = 5.0F;
         constexpr float start = 0.6F;
-        constexpr float sweep = 4.8F;
-        pen.stroked_arc(radius, start, sweep, 1.5F, 9U);
-        pen.shifted(on_circle({}, radius, start + sweep))
-            .triangle(-3.0F, -3.0F, 3.0F, -1.0F, -1.0F, 3.0F);
+        constexpr float sweep = 4.6F;
+        pen.arc(radius, start, sweep, 1.6F, 16U);
+        const float end = start + sweep;
+        const UiPoint at = on_circle({}, radius, end);
+        const UiPoint along{-std::sin(end), std::cos(end)};
+        pen.arrowhead(UiPoint{at.x + along.x * 2.5F, at.y + along.y * 2.5F},
+                      along, 4.0F, 3.2F);
         return;
     }
     case Icon::Snap:
-        // A horseshoe magnet, legs up.
-        pen.rect(-5.0F, -5.0F, 3.0F, 6.0F);
-        pen.rect(2.0F, -5.0F, 3.0F, 6.0F);
-        pen.line(-3.5F, 1.0F, -2.0F, 4.0F, 3.0F);
-        pen.line(-2.0F, 4.0F, 2.0F, 4.0F, 3.0F);
-        pen.line(2.0F, 4.0F, 3.5F, 1.0F, 3.0F);
+        // A horseshoe magnet, legs up, in one soft stroke.
+        pen.stroke({{-4.5F, -5.5F}, {-4.5F, 0.5F}}, 2.4F);
+        pen.stroke({{4.5F, -5.5F}, {4.5F, 0.5F}}, 2.4F);
+        pen.shifted(0.0F, 0.5F).arc(4.5F, 0.0F, pi, 2.4F, 12U);
         return;
     case Icon::Marker:
-        pen.rect(-4.0F, -6.0F, 1.5F, 12.0F);
-        pen.triangle(-3.0F, -6.0F, 5.0F, -3.0F, -3.0F, 0.0F);
+        // A pennant on its staff.
+        pen.stroke({{-4.0F, -6.0F}, {-4.0F, 6.5F}});
+        pen.fill({{-4.0F, -6.0F}, {5.0F, -3.5F}, {-4.0F, -1.0F}});
         return;
     case Icon::Hold:
         // An octagon with flat sides top and bottom, as a stop sign stands.
         pen.fill(arc_points<8U>(6.0F, 6.0F, pi / 8.0F, pi * 7.0F / 4.0F));
         return;
     case Icon::Select:
-        pen.triangle(-4.0F, -6.0F, -4.0F, 4.0F, 4.0F, 1.0F);
-        pen.line(-1.0F, 1.0F, 2.0F, 6.0F, 2.0F);
+        // A pointer: the arrow filled, its edge one soft stroke round it.
+        // Sharp tips mitre long, so the arrow keeps clear of the square's
+        // edge.
+        pen.fill({{-4.0F, -5.5F}, {4.5F, 1.0F}, {0.6F, 1.8F}});
+        pen.fill({{-4.0F, -5.5F}, {0.6F, 1.8F}, {-1.2F, 5.5F}});
+        pen.stroke({{-4.0F, -5.5F}, {4.5F, 1.0F}, {0.6F, 1.8F}, {-1.2F, 5.5F},
+                    {-4.0F, -5.5F}},
+                   1.3F);
         return;
     case Icon::Ripple:
-        // An edit point that pushes everything after it along.
-        pen.rect(-4.0F, -6.0F, 1.5F, 12.0F);
-        pen.rect(-7.0F, -6.0F, 3.0F, 1.5F);
-        pen.rect(-7.0F, 4.5F, 3.0F, 1.5F);
-        pen.rect(-1.0F, -0.75F, 5.0F, 1.5F);
-        pen.points_right(7.0F, 3.0F);
+        // A clip's closing edge pushing everything after it along.
+        pen.stroke({{-5.5F, -6.0F}, {-2.0F, -6.0F}, {-2.0F, 6.0F}, {-5.5F, 6.0F}});
+        pen.stroke({{0.5F, 0.0F}, {4.5F, 0.0F}});
+        pen.arrowhead(UiPoint{6.5F, 0.0F}, UiPoint{1.0F, 0.0F}, 3.5F, 3.0F);
+        pen.stroke({{6.5F, -6.0F}, {6.5F, -3.5F}}, 1.4F);
+        pen.stroke({{6.5F, 3.5F}, {6.5F, 6.0F}}, 1.4F);
         return;
     case Icon::Roll:
-        // The shared edit point between two clips, moved either way.
-        pen.rect(-2.0F, -6.0F, 1.5F, 12.0F);
-        pen.rect(0.5F, -6.0F, 1.5F, 12.0F);
-        pen.points_left(-7.0F, 3.0F);
-        pen.points_right(7.0F, 3.0F);
+        // The edit point two clips share, moved either way.
+        pen.stroke({{-3.5F, -6.0F}, {-1.0F, -6.0F}, {-1.0F, 6.0F}, {-3.5F, 6.0F}});
+        pen.stroke({{3.5F, -6.0F}, {1.0F, -6.0F}, {1.0F, 6.0F}, {3.5F, 6.0F}});
+        pen.arrowhead(UiPoint{-7.0F, 0.0F}, UiPoint{-1.0F, 0.0F}, 3.0F, 2.6F);
+        pen.arrowhead(UiPoint{7.0F, 0.0F}, UiPoint{1.0F, 0.0F}, 3.0F, 2.6F);
         return;
     case Icon::Slip:
         // The source moves inside a clip that stays put.
-        pen.outline(-7.0F, -5.0F, 14.0F, 10.0F, 1.0F);
-        pen.rect(-2.0F, -0.5F, 4.0F, 1.0F);
-        pen.points_left(-5.0F, 2.5F);
-        pen.points_right(5.0F, 2.5F);
+        pen.rounded_outline(-7.0F, -5.0F, 14.0F, 10.0F, 2.5F, 1.4F);
+        pen.stroke({{-2.0F, 0.0F}, {2.0F, 0.0F}}, 1.4F);
+        pen.arrowhead(UiPoint{-4.5F, 0.0F}, UiPoint{-1.0F, 0.0F}, 2.6F, 2.3F);
+        pen.arrowhead(UiPoint{4.5F, 0.0F}, UiPoint{1.0F, 0.0F}, 2.6F, 2.3F);
         return;
     case Icon::Slide:
         // The clip moves between neighbours that stay put.
-        pen.rect(-3.0F, -4.0F, 6.0F, 8.0F);
-        pen.points_left(-7.5F, 3.0F);
-        pen.points_right(7.5F, 3.0F);
+        pen.rounded(-2.75F, -4.5F, 5.5F, 9.0F, 1.8F);
+        pen.arrowhead(UiPoint{-7.0F, 0.0F}, UiPoint{-1.0F, 0.0F}, 3.0F, 2.6F);
+        pen.arrowhead(UiPoint{7.0F, 0.0F}, UiPoint{1.0F, 0.0F}, 3.0F, 2.6F);
         return;
     case Icon::Razor:
-        // A blade crossing a clip.
-        pen.line(-5.0F, 6.0F, 4.0F, -6.0F, 2.0F);
-        pen.line(-1.0F, 6.0F, 7.0F, -4.0F, 1.0F);
-        pen.line(-7.0F, -1.0F, 7.0F, -1.0F, 1.0F);
+        // Scissors: two finger rings and their crossing blades.
+        pen.shifted(-4.5F, -3.5F).ring(1.9F, 1.4F);
+        pen.shifted(-4.5F, 3.5F).ring(1.9F, 1.4F);
+        pen.stroke({{-3.0F, -2.2F}, {6.5F, 4.5F}}, 1.6F);
+        pen.stroke({{-3.0F, 2.2F}, {6.5F, -4.5F}}, 1.6F);
         return;
     case Icon::Fit:
-        pen.rect(-7.0F, -5.0F, 1.5F, 10.0F);
-        pen.rect(5.5F, -5.0F, 1.5F, 10.0F);
-        pen.rect(-3.0F, -0.75F, 6.0F, 1.5F);
-        pen.points_left(-5.0F, 2.5F);
-        pen.points_right(5.0F, 2.5F);
+        // Four soft corners closing in on what fits between them.
+        pen.stroke({{-6.0F, -2.0F}, {-6.0F, -5.0F}, {-3.0F, -5.0F}});
+        pen.stroke({{3.0F, -5.0F}, {6.0F, -5.0F}, {6.0F, -2.0F}});
+        pen.stroke({{6.0F, 2.0F}, {6.0F, 5.0F}, {3.0F, 5.0F}});
+        pen.stroke({{-3.0F, 5.0F}, {-6.0F, 5.0F}, {-6.0F, 2.0F}});
         return;
     case Icon::Plus:
         pen.rect(-5.0F, -1.0F, 10.0F, 2.0F);
@@ -346,26 +378,27 @@ void draw_icon(
         pen.dot(9.0F);
         return;
     case Icon::Restart: {
-        // Most of a ring, with the arrowhead at its start: go round again.
+        // Most of a ring running into its arrowhead: go round again.
         constexpr float radius = 5.0F;
-        constexpr float start = -1.2F;
-        pen.stroked_arc(radius, start, 5.0F, 1.6F, 10U);
-        pen.shifted(on_circle({}, radius, start))
-            .triangle(-3.5F, -1.5F, 2.0F, -3.5F, 0.5F, 2.5F);
+        constexpr float start = -1.0F;
+        constexpr float sweep = 4.6F;
+        pen.arc(radius, start, sweep, 1.6F, 16U);
+        const float end = start + sweep;
+        const UiPoint at = on_circle({}, radius, end);
+        const UiPoint along{-std::sin(end), std::cos(end)};
+        pen.arrowhead(UiPoint{at.x + along.x * 2.5F, at.y + along.y * 2.5F},
+                      along, 4.0F, 3.2F);
         return;
     }
     case Icon::Details:
-        pen.rect(-5.0F, -4.0F, 10.0F, 1.5F);
-        pen.rect(-5.0F, -0.75F, 10.0F, 1.5F);
-        pen.rect(-5.0F, 2.5F, 10.0F, 1.5F);
+        pen.stroke({{-5.0F, -4.0F}, {5.0F, -4.0F}});
+        pen.stroke({{-5.0F, 0.0F}, {5.0F, 0.0F}});
+        pen.stroke({{-5.0F, 4.0F}, {5.0F, 4.0F}});
         return;
     case Icon::Duplicate:
-        // The back frame as an outline, the front one solid over it.
-        pen.rect(-6.0F, -6.0F, 8.0F, 1.2F);
-        pen.rect(-6.0F, -6.0F, 1.2F, 8.0F);
-        pen.rect(0.8F, -6.0F, 1.2F, 3.0F);
-        pen.rect(-6.0F, 0.8F, 3.0F, 1.2F);
-        pen.rect(-2.0F, -2.0F, 8.0F, 8.0F);
+        // The back frame as a soft outline, the front one solid over it.
+        pen.rounded_outline(-6.5F, -6.5F, 9.0F, 9.0F, 2.5F, 1.4F);
+        pen.rounded(-2.5F, -2.5F, 9.0F, 9.0F, 2.5F);
         return;
     case Icon::Cache:
         pen.rect(-7.0F, 2.0F, 8.0F, 3.0F);
@@ -430,10 +463,12 @@ void draw_icon(
         pen.rect(-0.6F, 0.0F, 1.2F, 6.5F);
         return;
     case Icon::Grid:
-        for (int line = 0; line < 4; ++line) {
-            const float at = -6.0F + 4.0F * static_cast<float>(line);
-            pen.rect(at - 0.5F, -6.0F, 1.0F, 12.0F);
-            pen.rect(-6.0F, at - 0.5F, 12.0F, 1.0F);
+        // A soft square cut into nine.
+        pen.rounded_outline(-6.5F, -6.5F, 13.0F, 13.0F, 3.0F, 1.4F);
+        for (int line = 1; line < 3; ++line) {
+            const float at = -6.5F + 13.0F * static_cast<float>(line) / 3.0F;
+            pen.rect(at - 0.6F, -6.0F, 1.2F, 12.0F);
+            pen.rect(-6.0F, at - 0.6F, 12.0F, 1.2F);
         }
         return;
     case Icon::Angle: {
@@ -469,9 +504,9 @@ void draw_icon(
         pen.dot(4.0F);
         return;
     case Icon::Screen:
-        pen.outline(-7.0F, -5.5F, 14.0F, 9.0F, 1.3F);
-        pen.rect(-0.75F, 3.5F, 1.5F, 2.0F);
-        pen.rect(-3.5F, 5.5F, 7.0F, 1.2F);
+        pen.rounded_outline(-7.0F, -6.0F, 14.0F, 9.5F, 2.5F, 1.4F);
+        pen.stroke({{0.0F, 3.5F}, {0.0F, 5.5F}}, 1.4F);
+        pen.stroke({{-3.0F, 6.0F}, {3.0F, 6.0F}}, 1.4F);
         return;
     case Icon::Projection:
         // A frustum opening away from its eye, with the eye as a dot.
@@ -529,6 +564,147 @@ void draw_icon(
         // A lens up and to the left, its handle running down to the right.
         pen.shifted(-1.5F, -1.5F).stroked_arc(2.35F, 0.0F, tau, 1.3F, 16U);
         pen.line(0.5F, 0.5F, 3.5F, 3.5F, 1.0F);
+        return;
+    case Icon::Take:
+        // Preview goes up to the wall as Program comes down.
+        pen.stroke({{-6.0F, -3.0F}, {5.5F, -3.0F}});
+        pen.stroke({{2.5F, -6.0F}, {5.5F, -3.0F}, {2.5F, 0.0F}});
+        pen.stroke({{6.0F, 3.5F}, {-5.5F, 3.5F}});
+        pen.stroke({{-2.5F, 0.5F}, {-5.5F, 3.5F}, {-2.5F, 6.5F}});
+        return;
+    case Icon::Night: {
+        // The lit edge of the moon (most of a circle) and its shadowed edge
+        // (an arc of a second circle up and to the right), meeting at the
+        // horns.
+        const auto lit = arc_points<13U>(6.0F, 6.0F, 0.2817F, 4.330F);
+        const auto shade = arc_points<9U>(5.0F, 5.0F, 3.909F, -2.924F);
+        std::array<UiPoint, 13U + 9U> outline{};
+        for (std::size_t index = 0U; index < lit.size(); ++index) {
+            outline[index] = lit[index];
+        }
+        for (std::size_t index = 0U; index < shade.size(); ++index) {
+            outline[lit.size() + index] =
+                UiPoint{shade[index].x + 3.0F, shade[index].y - 2.5F};
+        }
+        pen.shifted(-0.5F, 0.5F).stroke(outline, 1.5F);
+        return;
+    }
+    case Icon::Import:
+        pen.stroke({{-6.0F, 2.0F}, {-6.0F, 6.0F}, {6.0F, 6.0F}, {6.0F, 2.0F}});
+        pen.stroke({{0.0F, -6.5F}, {0.0F, 2.5F}});
+        pen.stroke({{-3.25F, -0.75F}, {0.0F, 2.5F}, {3.25F, -0.75F}});
+        return;
+    case Icon::Publish:
+        pen.stroke({{-6.0F, 2.0F}, {-6.0F, 6.0F}, {6.0F, 6.0F}, {6.0F, 2.0F}});
+        pen.stroke({{0.0F, 3.0F}, {0.0F, -6.0F}});
+        pen.stroke({{-3.25F, -2.75F}, {0.0F, -6.0F}, {3.25F, -2.75F}});
+        return;
+    case Icon::Rescan: {
+        // Two arcs chasing each other round.
+        constexpr float radius = 5.5F;
+        for (const float start : {-2.75F, 0.39F}) {
+            constexpr float sweep = 2.2F;
+            pen.arc(radius, start, sweep, 1.6F, 12U);
+            const float end = start + sweep;
+            const UiPoint at = on_circle({}, radius, end);
+            const UiPoint along{-std::sin(end), std::cos(end)};
+            pen.arrowhead(UiPoint{at.x + along.x * 2.5F, at.y + along.y * 2.5F},
+                          along, 4.0F, 3.0F);
+        }
+        return;
+    }
+    case Icon::Trash:
+        pen.stroke({{-6.0F, -3.75F}, {6.0F, -3.75F}});
+        pen.stroke({{-2.0F, -3.75F}, {-2.0F, -6.0F}, {2.0F, -6.0F}, {2.0F, -3.75F}}, 1.4F);
+        pen.stroke({{-4.5F, -3.75F}, {-3.5F, 6.25F}, {3.5F, 6.25F}, {4.5F, -3.75F}});
+        pen.stroke({{-1.2F, -0.75F}, {-1.0F, 3.25F}}, 1.3F);
+        pen.stroke({{1.2F, -0.75F}, {1.0F, 3.25F}}, 1.3F);
+        return;
+    case Icon::Power:
+        pen.arc(5.5F, -pi * 0.5F + 0.62F, tau - 1.24F, 1.7F, 20U);
+        pen.stroke({{0.0F, -6.75F}, {0.0F, -0.5F}}, 1.7F);
+        return;
+    case Icon::MarkIn:
+        pen.stroke({{-1.5F, -6.0F}, {-4.5F, -6.0F}, {-4.5F, 6.0F}, {-1.5F, 6.0F}});
+        pen.stroke({{0.5F, 0.0F}, {6.0F, 0.0F}});
+        pen.stroke({{3.5F, -2.5F}, {6.0F, 0.0F}, {3.5F, 2.5F}});
+        return;
+    case Icon::MarkOut:
+        pen.stroke({{1.5F, -6.0F}, {4.5F, -6.0F}, {4.5F, 6.0F}, {1.5F, 6.0F}});
+        pen.stroke({{-0.5F, 0.0F}, {-6.0F, 0.0F}});
+        pen.stroke({{-3.5F, -2.5F}, {-6.0F, 0.0F}, {-3.5F, 2.5F}});
+        return;
+    case Icon::Insert:
+    case Icon::Overwrite:
+    case Icon::Append: {
+        // A track along the bottom, and the edit coming down into it.
+        const float drop_x = icon == Icon::Append ? 4.25F : 0.0F;
+        const float track_right = icon == Icon::Append ? 1.5F : 6.5F;
+        pen.stroke({{-6.5F, 1.0F}, {track_right, 1.0F}, {track_right, 6.5F},
+                    {-6.5F, 6.5F}, {-6.5F, 1.0F}},
+                   1.4F);
+        if (icon == Icon::Insert) {
+            pen.stroke({{0.0F, 1.0F}, {0.0F, 6.5F}}, 1.4F);
+        } else if (icon == Icon::Overwrite) {
+            pen.rect(-2.5F, 1.0F, 5.0F, 5.5F);
+        } else {
+            pen.outline(3.0F, 1.0F, 3.5F, 5.5F, 1.0F);
+        }
+        pen.stroke({{drop_x, -6.5F}, {drop_x, -1.5F}});
+        pen.stroke({{drop_x - 2.5F, -3.75F}, {drop_x, -1.25F}, {drop_x + 2.5F, -3.75F}});
+        return;
+    }
+    case Icon::Close:
+        pen.stroke({{-4.5F, -4.5F}, {4.5F, 4.5F}});
+        pen.stroke({{4.5F, -4.5F}, {-4.5F, 4.5F}});
+        return;
+    case Icon::Droplet: {
+        // A round foot tapering to a point: two tangents from the tip and
+        // the arc between them.
+        const auto foot = arc_points<13U>(4.2F, 4.2F, -0.531F, 4.203F);
+        std::array<UiPoint, 13U + 2U> outline{};
+        outline.front() = UiPoint{0.0F, -6.5F};
+        for (std::size_t index = 0U; index < foot.size(); ++index) {
+            outline[index + 1U] = UiPoint{foot[index].x, foot[index].y + 1.8F};
+        }
+        outline.back() = outline.front();
+        pen.stroke(outline, 1.5F);
+        return;
+    }
+    case Icon::Check:
+        pen.stroke({{-5.0F, 0.5F}, {-1.5F, 4.0F}, {5.5F, -3.5F}}, 1.8F);
+        return;
+    case Icon::Link:
+        draw_icon(list, Icon::SyncLock, center_x, center_y, color);
+        return;
+    case Icon::Minus:
+        pen.stroke({{-5.0F, 0.0F}, {5.0F, 0.0F}}, 1.8F);
+        return;
+    case Icon::PlayRange:
+        // Play between two marks: a triangle inside a pair of brackets.
+        pen.stroke({{-3.5F, -5.5F}, {-6.0F, -5.5F}, {-6.0F, 5.5F}, {-3.5F, 5.5F}}, 1.5F);
+        pen.stroke({{3.5F, -5.5F}, {6.0F, -5.5F}, {6.0F, 5.5F}, {3.5F, 5.5F}}, 1.5F);
+        pen.fill({{-2.0F, -3.5F}, {3.5F, 0.0F}, {-2.0F, 3.5F}});
+        return;
+    case Icon::Reset: {
+        // Most of a ring turning back anticlockwise into its arrowhead, the
+        // way Unreal marks a value that differs from its default.
+        constexpr float radius = 4.75F;
+        constexpr float start = -0.6F;
+        constexpr float sweep = -4.3F;
+        pen.arc(radius, start, sweep, 1.6F, 14U);
+        const float end = start + sweep;
+        const UiPoint at = on_circle({}, radius, end);
+        const UiPoint along{std::sin(end), -std::cos(end)};
+        pen.arrowhead(UiPoint{at.x + along.x * 3.0F, at.y + along.y * 3.0F},
+                      along, 4.0F, 3.2F);
+        return;
+    }
+    case Icon::Map:
+        pen.stroke({{-6.5F, -5.0F}, {6.5F, -5.0F}, {6.5F, 5.0F}, {-6.5F, 5.0F},
+                    {-6.5F, -5.0F}},
+                   1.4F);
+        pen.rect(0.5F, 0.0F, 4.5F, 3.5F);
         return;
     }
 }

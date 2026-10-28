@@ -565,21 +565,26 @@ struct Harness final {
 };
 
 // The x of the nth tab's middle in a leaf whose strip starts at `left`.
+// Tabs start 4 in, clear of the card's rounded corner, and each is its
+// label, three paddings and 8 of pill margin wide, then a 20-unit close.
+[[nodiscard]] float tab_width(const gui::UiContext& ctx) {
+    constexpr float close_extent = 20.0F;
+    return ctx.font_width(std::string_view{}) + ctx.theme().padding * 3.0F +
+           8.0F + close_extent;
+}
+
 [[nodiscard]] float tab_centre(
     const gui::UiContext& ctx, float left, std::size_t index) {
-    constexpr float close_extent = 18.0F;
-    const float width = ctx.font_width(std::string_view{}) +
-                        ctx.theme().padding * 3.0F + close_extent;
-    return left + width * static_cast<float>(index) +
+    constexpr float close_extent = 20.0F;
+    const float width = tab_width(ctx);
+    return left + 4.0F + width * static_cast<float>(index) +
            (width - close_extent) * 0.5F;
 }
 
 [[nodiscard]] float tab_close_centre(
     const gui::UiContext& ctx, float left, std::size_t index) {
-    constexpr float close_extent = 18.0F;
-    const float width = ctx.font_width(std::string_view{}) +
-                        ctx.theme().padding * 3.0F + close_extent;
-    return left + width * static_cast<float>(index) + width - 9.5F;
+    const float width = tab_width(ctx);
+    return left + 4.0F + width * static_cast<float>(index) + width - 10.0F;
 }
 
 void clicking_a_tab_brings_it_forward() {

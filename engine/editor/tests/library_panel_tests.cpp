@@ -115,11 +115,12 @@ struct Harness final {
     return opened;
   }
 
-  // Entry `index` of a menu opened at (x, anchor_y): menus open 2 below the
-  // pointer in 24-unit rows, showing ten at a time, and with the empty test
-  // font they are 36 units wide.
+  // Entry `index` of a menu opened at (x, anchor_y): menus open 6 below the
+  // pointer in menu_row_height rows, showing ten at a time, and with the
+  // empty test font they are 40 units wide.
   editor::LibraryFrame choose(float x, float anchor_y, std::size_t index) {
-    const float y = anchor_y + 2.0F + 24.0F * static_cast<float>(index) + 12.0F;
+    const float y = anchor_y + 6.0F +
+                    gui::menu_row_height * (static_cast<float>(index) + 0.5F);
     return click(x + 10.0F, y);
   }
 

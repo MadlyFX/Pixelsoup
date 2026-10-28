@@ -7,6 +7,7 @@
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -44,55 +45,112 @@ using UiId = core::u64;
     return hash;
 }
 
-// The colours and paddings the widgets paint with: an After Effects-style dark
-// theme by default. A caller can swap it wholesale.
+// The colours, corner radii and motion the widgets paint with. A caller can
+// swap it wholesale.
 //
-// The hues run cool and desaturated so that what is actually on the wall - the
-// rendered viewport, and a clip's own colour on a timeline bar - is the only
-// saturated thing on screen. Everything else is a value, not a colour, which is
-// what keeps a dark room legible at a glance.
+// Surfaces are warm, slightly lifted greys that step up in value from the
+// window ground to panels to raised controls, so regions read apart without
+// lines and the eye rests late in a long shift. Colour is reserved for state,
+// and each hue has one meaning borrowed from the red, green and blue of a wall
+// pixel: green is on air, cyan is preview and selection, magenta is the cue
+// stack, amber asks for a look and red is broken or destructive. Everything
+// else stays grey, so the picture is always the most colourful thing on
+// screen.
 struct Theme final {
     // The ground behind the panels, and the panels themselves.
-    UiColor background{0.043F, 0.047F, 0.059F, 1.0F};
-    UiColor panel{0.071F, 0.078F, 0.098F, 1.0F};
+    UiColor background{0.051F, 0.055F, 0.071F, 1.0F};
+    UiColor panel{0.090F, 0.094F, 0.118F, 1.0F};
     // A section header inside a panel, and the two tints a long list alternates
     // between so similar rows stay countable.
-    UiColor header{0.106F, 0.118F, 0.145F, 1.0F};
-    UiColor row{0.086F, 0.094F, 0.118F, 1.0F};
-    UiColor row_alt{0.071F, 0.078F, 0.098F, 1.0F};
+    UiColor header{0.118F, 0.125F, 0.153F, 1.0F};
+    UiColor row{0.102F, 0.106F, 0.133F, 1.0F};
+    UiColor row_alt{0.090F, 0.094F, 0.118F, 1.0F};
 
-    UiColor widget{0.145F, 0.157F, 0.192F, 1.0F};
+    // A raised control at rest, under the pointer, and held.
+    UiColor widget{0.153F, 0.165F, 0.200F, 1.0F};
     UiColor widget_hover{0.196F, 0.212F, 0.255F, 1.0F};
-    UiColor widget_active{0.153F, 0.353F, 0.588F, 1.0F};
-    UiColor accent{0.231F, 0.510F, 0.965F, 1.0F};
+    UiColor widget_active{0.106F, 0.302F, 0.384F, 1.0F};
+    // Focus, the engaged tool, what is being edited: preview cyan.
+    UiColor accent{0.278F, 0.788F, 1.0F, 1.0F};
     // A selected row: the accent held well back, so a whole list of them does
     // not glow.
-    UiColor selection{0.114F, 0.208F, 0.361F, 1.0F};
-    UiColor track{0.043F, 0.047F, 0.059F, 1.0F};
-    UiColor text{0.878F, 0.894F, 0.925F, 1.0F};
-    UiColor text_muted{0.443F, 0.475F, 0.545F, 1.0F};
+    UiColor selection{0.118F, 0.231F, 0.290F, 1.0F};
+    // A well: the inside of a field, a slider's groove, a sunken strip.
+    UiColor track{0.063F, 0.067F, 0.086F, 1.0F};
+    // Text sits a little below white, which is easier on the eye in a dark
+    // room than pure white on near-black.
+    UiColor text{0.902F, 0.890F, 0.863F, 1.0F};
+    UiColor text_muted{0.506F, 0.506F, 0.545F, 1.0F};
     // A rule inside a panel: between a toolbar and a list, a header and its
     // rows. Visible against both, but quieter than anything with content.
-    UiColor divider{0.027F, 0.031F, 0.039F, 1.0F};
+    UiColor divider{0.133F, 0.141F, 0.173F, 1.0F};
     // The edge of a panel, a field, or a floating frame - the line that says
     // where one surface stops. Lighter than the surfaces, so two dark panels
     // side by side never merge into one.
-    UiColor border{0.165F, 0.184F, 0.224F, 1.0F};
+    UiColor border{0.169F, 0.180F, 0.220F, 1.0F};
 
-    // The transport's own colour. Amber because it is the one thing on the
-    // timeline that must be found without looking for it, and nothing else in
-    // the palette is warm.
-    UiColor playhead{0.973F, 0.706F, 0.235F, 1.0F};
+    // The playhead: a warm white, the brightest line on the timeline, so it is
+    // found without looking for it and never mistaken for a state colour.
+    UiColor playhead{0.965F, 0.949F, 0.910F, 1.0F};
     UiColor keyframe{0.471F, 0.784F, 1.0F, 1.0F};
-    // A live output, and something that needs an answer.
-    UiColor good{0.298F, 0.831F, 0.514F, 1.0F};
-    UiColor warning{0.937F, 0.427F, 0.353F, 1.0F};
+    // State. `good` is on air, healthy and playing; `warning` is faulted,
+    // missing and destructive.
+    UiColor good{0.247F, 0.890F, 0.604F, 1.0F};
+    UiColor warning{1.0F, 0.365F, 0.388F, 1.0F};
+    // Degraded, changed on disk, behind: worth a look, not yet broken.
+    UiColor caution{1.0F, 0.714F, 0.290F, 1.0F};
+    // Preview: what is rehearsed off air.
+    UiColor preview{0.278F, 0.788F, 1.0F, 1.0F};
+    // The cue stack and the next thing to press.
+    UiColor cue{1.0F, 0.388F, 0.812F, 1.0F};
 
     float padding{6.0F};
+
+    // Corner radii. Small for fields and chips, the default for rows, cards
+    // and buttons, large for panels and floating frames. Anything pressed
+    // with a height under twice the default comes out as a pill.
+    float radius_small{5.0F};
+    float radius{8.0F};
+    float radius_large{12.0F};
+    // How strongly a live or waiting control glows, from 0 (none) to 1. The
+    // night dim lowers it.
+    float glow{0.34F};
+    // Scales every eased transition's speed. 0 turns motion off: each value
+    // lands on its target the frame it changes.
+    float motion{1.0F};
 
     // The sizes panels are laid out with; see metrics.hpp.
     Metrics metrics{};
 };
+
+// A label as an operator reads it: "BARRIER LOST" becomes "Barrier lost",
+// "ROTATION (TURNS)" becomes "Rotation (turns)". State and structure are
+// carried by colour and shape, so words do not need to shout as well. A word
+// of two capitals or fewer after the first ("UV", "X") is an abbreviation and
+// keeps its case.
+[[nodiscard]] std::string sentence_case(std::string_view text);
+
+// One entry of a dropdown or context menu: tall enough to hit without aiming.
+inline constexpr float menu_row_height = 28.0F;
+
+// `color` with its alpha replaced, and two colours blended `t` of the way from
+// `from` to `to`. Named apart from the panels' own local helpers so a call
+// with a gui::UiColor never finds two candidates.
+[[nodiscard]] constexpr UiColor fade(UiColor color, float alpha) noexcept {
+    color.a = alpha;
+    return color;
+}
+[[nodiscard]] constexpr UiColor blend(UiColor from, UiColor to, float t) noexcept {
+    // The ends are exact, so a fully eased tint is the theme's colour itself.
+    if (t <= 0.0F) {
+        return from;
+    }
+    if (t >= 1.0F) {
+        return to;
+    }
+    return UiColor{from.r + (to.r - from.r) * t, from.g + (to.g - from.g) * t,
+                   from.b + (to.b - from.b) * t, from.a + (to.a - from.a) * t};
+}
 
 // The pointer's shape. A widget asks for one while the pointer is over it, or
 // while it holds the pointer, and the window shows the frame's last request. A
@@ -229,6 +287,45 @@ enum class Icon : core::u8 {
     HalfResolution,
     // A magnifier: a search field's mark.
     Search,
+    // The show bar and the actions that used to be words. Drawn as soft
+    // strokes with round ends, in the same 14px square.
+    //
+    // Two opposed arrows: Take, Preview to the wall.
+    Take,
+    // A crescent moon: the night dim.
+    Night,
+    // An arrow into a tray: bring files in. Out of one: publish.
+    Import,
+    Publish,
+    // Two chasing arrows: look again.
+    Rescan,
+    // A bin with its lid: delete.
+    Trash,
+    // A power mark: start.
+    Power,
+    // An opening and a closing bracket with an arrow: mark in and out.
+    MarkIn,
+    MarkOut,
+    // Edits into a track: pushed in, laid over, added at the end.
+    Insert,
+    Overwrite,
+    Append,
+    // A cross: close or dismiss.
+    Close,
+    // A drop: colour.
+    Droplet,
+    // A tick: done, confirmed.
+    Check,
+    // Two links: connect.
+    Link,
+    // A bar: less, zoom out.
+    Minus,
+    // A small frame inside a larger one: the overview map.
+    Map,
+    // An arrow curling back on itself: put a value back to its default.
+    Reset,
+    // A play mark between two brackets: play the marked range.
+    PlayRange,
 };
 void draw_icon(
     UiDrawList& list,
@@ -258,6 +355,8 @@ public:
     void new_frame(double time_seconds = 0.0);
 
     [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
+    // Swaps the palette between frames - the night dim, or a test's own.
+    void set_theme(const Theme& theme) noexcept { theme_ = theme; }
     [[nodiscard]] UiDrawList& draw_list() noexcept { return list_; }
     // Monotonic frame time supplied to new_frame(). Compound interactions such
     // as a long-press use the same clock as caret animation, which keeps them
@@ -298,6 +397,43 @@ public:
     // Empty bounds draw nothing.
     void outline(const Rect& bounds, UiColor color, float thickness = 1.0F);
 
+    // The soft forms the operator surfaces are built from: a filled rounded
+    // box, its stroke, and a glow around it. `radius` defaults to the theme's;
+    // pass bounds.height * 0.5 for a pill. The glow's strength follows the
+    // theme's, so the night dim calms every lit control at once.
+    void rounded(const Rect& bounds, UiColor color);
+    void rounded(const Rect& bounds, UiColor color, float radius,
+                 core::u8 corners = UiDrawList::corner_all);
+    void rounded_outline(const Rect& bounds, UiColor color, float radius,
+                         float thickness = 1.0F);
+    void glow(const Rect& bounds, UiColor color, float radius,
+              float spread = 12.0F);
+    // A floating surface's shadow: a dark halo under menus and popovers so
+    // they sit above the panels rather than in them.
+    void shadow(const Rect& bounds, float radius, float spread = 16.0F);
+
+    // --- Motion ---
+    //
+    // Small eased transitions keyed by id: a hover tint fading in, a row
+    // sliding to where a reorder put it, a node settling when it is dropped.
+    // Each call steps the value toward `target` by this frame's elapsed time
+    // and returns where it is now. A value first seen this frame - or not
+    // seen last frame - starts at its target, so nothing animates in from a
+    // stale position. With no clock (a test's frames all at time zero) or
+    // the theme's motion at zero, every value is simply its target, which
+    // keeps a draw list independent of timing.
+    //
+    // ease() approaches without overshoot; `speed` scales how quickly (1 is
+    // about a tenth of a second to settle). spring() overshoots a little and
+    // settles, which reads as something physical coming to rest.
+    [[nodiscard]] float ease(UiId id, float target, float speed = 1.0F);
+    [[nodiscard]] float spring(UiId id, float target);
+    // Puts a value somewhere other than its target, so the next ease() or
+    // spring() moves it back: a drop's "plant" starts slightly small.
+    void settle(UiId id, float value);
+    // Whether any eased value was still moving at the end of last frame.
+    [[nodiscard]] bool in_motion() const noexcept { return motion_last_frame_; }
+
     // Left-aligned, vertically centred text inside `bounds`.
     void label(const Rect& bounds, std::string_view text);
     void label(const Rect& bounds, std::string_view text, UiColor color);
@@ -336,7 +472,8 @@ public:
     void push_pointer_block() noexcept;
     void pop_pointer_block() noexcept;
     [[nodiscard]] bool pointer_blocked() const noexcept {
-        return pointer_block_depth_ != 0U || dropdown_id_ != 0U || dropdown_dismissed_;
+        return pointer_block_depth_ != 0U || dropdown_id_ != 0U || dropdown_dismissed_ ||
+               (color_.id != 0U && !in_color_popover_);
     }
 
     // A push button. Returns true on the frame the press is released over it.
@@ -387,6 +524,25 @@ public:
         std::span<const bool> checked);
     [[nodiscard]] bool menu_open(UiId id) const noexcept {
         return dropdown_id_ == id;
+    }
+
+    // A colour well: the colour as a soft swatch, which a click opens into
+    // the colour picker in a popover beneath it - a saturation/value field
+    // and hue rail, hex and R, G, B entry, the colour as it was before the
+    // edit (click it to go back), and recently picked colours. Like a menu
+    // the popover owns the pointer and keyboard while open; Escape restores
+    // the colour it opened with, Enter or a click outside keeps the new one.
+    //
+    // Returns true on every frame `value` changed, live while a drag runs.
+    // Alpha passes through untouched. Only one colour is edited at a time.
+    [[nodiscard]] bool color_well(UiId id, const Rect& bounds, UiColor& value);
+    // `id`'s popover is open, and whether a drag inside it holds the
+    // pointer - so a caller can fold a whole drag into one undo step.
+    [[nodiscard]] bool color_open(UiId id) const noexcept {
+        return color_.id != UiId{} && color_.id == id;
+    }
+    [[nodiscard]] bool color_dragging(UiId id) const noexcept {
+        return color_open(id) && color_.dragging;
     }
     void draw_overlays(const Rect& window_bounds);
 
@@ -533,7 +689,7 @@ public:
     // camera is being flown, whose W, A, S, D, Q and E are movement.
     [[nodiscard]] bool typing() const noexcept {
         return focus_ != UiId{} || dropdown_id_ != 0U || dropdown_dismissed_ ||
-               navigating_;
+               navigating_ || color_.id != 0U;
     }
     // A viewport has the keyboard - camera movement keys, or a keyboard
     // transform's axis letters and typed value - until this is cleared.
@@ -593,10 +749,29 @@ private:
     bool edit_field(UiId id, const Rect& bounds, std::string& value,
                     bool masked);
 
+    // One eased value. `frame` is the last frame it was asked for; one older
+    // than the previous frame is stale and its slot free for another id.
+    struct Motion final {
+        UiId id{};
+        float value{};
+        float velocity{};
+        core::u64 frame{};
+    };
+    // The motion slot for `id`, claimed if it has none. Null when the table
+    // has no room nearby, in which case the caller simply shows the target.
+    // `fresh_out` says the slot was claimed this call.
+    [[nodiscard]] Motion* motion(UiId id, bool& fresh_out) noexcept;
+
     InputState& input_;
     UiDrawList& list_;
     const FontAtlas& font_;
     Theme theme_;
+    // A fixed table sized once: motion never allocates on the frame path.
+    std::vector<Motion> motions_;
+    core::u64 frame_{};
+    float frame_dt_{};
+    bool motion_this_frame_{};
+    bool motion_last_frame_{};
     UiId hot_{};
     UiId active_{};
     // The capturing widget ran this frame; see new_frame().
@@ -633,6 +808,29 @@ private:
     std::string tooltip_previous_;
     double tooltip_since_{};
     Cursor cursor_{Cursor::Arrow};
+
+    // The open colour popover, if any. The popover runs at the end of the
+    // frame, over everything; what it picks reaches the well's owner the
+    // next frame through `pending`.
+    struct ColorEdit final {
+        UiId id{};
+        Rect anchor{};
+        Rect bounds{};
+        UiColor original{};
+        UiColor value{};
+        float hue{};
+        bool seen{};
+        bool pending{};
+        bool closing{};
+        bool dragging{};
+        std::string hex;
+        std::array<std::string, 3U> channels;
+    };
+    void draw_color_popover(const Rect& window_bounds);
+    ColorEdit color_{};
+    bool in_color_popover_{};
+    std::array<UiColor, 10U> recent_colors_{};
+    std::size_t recent_count_{};
 };
 
 } // namespace mediaserver::gui

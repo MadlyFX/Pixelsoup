@@ -56,8 +56,52 @@ sets the export destination, and **Bake lighting** starts the bake. Content's
 Source row shows the file name with its full path on hover.
 
 Object and effect icons use a neutral palette; shape and labels identify their
-types. Blue marks selection and active tools, while health colors report actual
-output states. User-assigned marker colors remain available.
+types. Colour is kept for state, one meaning per hue: green is on air,
+healthy and playing; cyan marks Preview, selection, focus and the active tool;
+magenta is the cue stack and its GO; amber asks for a look (degraded,
+connecting, changed on disk, hidden or locked); red is faulted, missing or
+destructive. Everything else is grey, so the picture on the wall stays the
+most colourful thing on screen. User-assigned marker colors remain available.
+
+**The show bar** along the top of the window keeps the show's state in one
+place, never behind a tab. From the left: the project's name and whether it is
+saved, the menus, then the **Program** and **Preview** cards with **Take**
+between them, the next cue with its **GO** key, the render-server lights and
+the night dim. Program glows green because it is on the wall and shows the
+picture it is sending; the card for the scene the editor is working on is
+ringed. Ctrl+Enter is Take from the keyboard, whenever no field or menu has
+it. The render-server lights are one per
+server - green live, amber starting or catching up, red faulted - with the
+cluster's health beside them; click them to bring the Output Monitor forward.
+GO does what the Cue Stack's GO does. The moon turns on the **night dim**,
+which lowers the brightness of every panel and glow for a long night without
+touching the picture; the editor remembers it, with the workspace, on this
+machine. **Stop all** in Output Monitor asks twice: the first press arms it
+and turns it red, and a second press within a few seconds stops every output.
+
+Small motions show where things went: a reordered or newly twirled layer
+glides to its new place in the Timeline, a compositor node lifts while it is
+dragged and settles where it is let go, and controls ease into their hover
+colours. They take a fraction of a second and never delay a click.
+
+**Colours** are picked in a colour well: click any colour swatch - a light's
+colour, a material's base colour, a fill, a chroma key, a Background node's
+colours - to open the colour picker under it. Drag in the large field for
+saturation and brightness and along the rail for hue, or type a hex code or
+R, G and B from 0 to 255. The left half of the comparison swatch is the colour
+as it was; click it to go back. Recently picked colours and the LED primaries
+sit along the bottom. Escape restores the colour the picker opened with; Enter
+or a click outside keeps the new one. Everything done in one visit to the
+picker is one undo step.
+
+**Reset to default.** A value that differs from where it starts carries a
+small amber arrow at the end of its label, as in Unreal's details panel:
+Properties, the Compositor's Parameters, Scene Settings and the Color panel
+all show it. Hover it to see the default; click it to put the value back.
+Every component of a row that differs is put back at once, as one undo step.
+Defaults are those of a newly made element, node or effect of the same kind -
+an object's position is the origin, a new Blur starts at 8 pixels - and an
+animated value is reset at the playhead the way typing it would be.
 
 ## Run across two machines
 
@@ -181,14 +225,15 @@ The point of the pair is that an operator can do real work - scrub, play, move
 elements, key them, rebuild the compositor graph - on a scene that is not on
 air, and put it on air only when they decide it is ready.
 
-The `PROGRAM` / `SWAP` / `PREVIEW` group at the top right is the whole control
-surface. `PROGRAM` puts the editor back on the live scene; `PREVIEW` returns to
-the scene being rehearsed; `SWAP` promotes Preview to Program. `PROJECT
-SCENES`, at the top of the left-hand SCENE panel, is where a scene is chosen:
-`PGM` marks the live one, `RHS` the rehearsed one, and clicking any other row
-takes it into Preview. `+ NEW` creates an empty scene and `CREATE COPY`
-duplicates the scene currently on the Stage, both straight into Preview. On a
-project that has never used the switcher, the first `PREVIEW` press copies
+The **Program**, **Take** and **Preview** cards in the middle of the show bar
+are the whole control surface. **Program** puts the editor back on the live
+scene; **Preview** returns to the scene being rehearsed; **Take** promotes
+Preview to Program. **Scenes**, at the top of the left-hand Scene panel, is
+where a scene is chosen: `ON AIR` marks the live one, `PREVIEW` the rehearsed
+one, and clicking any other row takes it into Preview. The **+** button
+creates an empty scene and the copy button duplicates the scene currently on
+the Stage, both straight into Preview. On a
+project that has never used the switcher, the first **Preview** press copies
 Program into a new `<name> Rehearsal` scene and opens it, so there is always
 something to work on.
 
@@ -252,19 +297,20 @@ Map and the Feed Map - the physical wall does not change because a different
 scene is being rehearsed - and surface edits made while in Preview key against
 the Program playhead, which is the frame the mapping panels draw.
 
-**Promoting.** `SWAP` exchanges the two slots at an exact control frame, so
+**Promoting.** **Take** exchanges the two slots at an exact control frame, so
 every node performs the same transition on the same frame. The default is a
 30-control-frame dissolve. A dissolve renders both scenes and mixes two
 finished pictures, which is only defined when the two scenes share a canvas;
-when they do not, the button reads `CUT` and promotes on a single frame
-instead. `FADING` means a transition is already running, during which scene,
-graph, and switcher edits are all refused - both inputs of a dissolve are
+when they do not, the key reads **Cut** and promotes on a single frame
+instead, and **Fading** fills the key while a transition runs, during which
+scene, graph, and switcher edits are all refused - both inputs of a dissolve are
 committed pictures. After a swap, Preview holds the scene that just came off
 air and its playhead re-seeds to the live frame.
 
-`SWAP` is held by exactly one thing beyond the switcher's own preconditions: a
-project that asks for physical output synchronization under a STRICT failure
-policy, whose timing the cluster cannot prove. The button then reads `HELD`,
+**Take** is held by exactly one thing beyond the switcher's own
+preconditions: a project that asks for physical output synchronization under a
+STRICT failure policy, whose timing the cluster cannot prove. The key then
+reads **Held**,
 and Output Monitor's timing line names the unmet condition. Nothing else blocks
 a promotion. In particular, whether render nodes hold the media a scene needs
 is reported on the Output Monitor and never gates the switcher - distributing
@@ -1626,8 +1672,8 @@ than fit. LED Car Process groups its fields into Position, Rotation, Plates,
 and Ceiling Reflection, and Levels has one section per channel. Click a
 section's heading to collapse or expand it.
 
-**Chroma Key** shows the key colour as a swatch above its Key Red, Green and
-Blue values, then Tolerance, Softness, Edge px (whole pixels: positive grows
+**Chroma Key** shows the key colour as a colour well above its Key Red, Green
+and Blue values, then Tolerance, Softness, Edge px (whole pixels: positive grows
 the kept area, negative shrinks it), Spill and Mix. **Luma Key** has Low and
 High thresholds, which stop at each other, Low and High Softness, a Matte
 switch between Normal and Inverted, and Mix. A Mix of zero passes a key

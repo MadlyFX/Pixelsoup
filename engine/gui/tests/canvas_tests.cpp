@@ -152,7 +152,7 @@ void an_arrowhead_points_along_its_direction() {
 // Every icon draws something, about the point it is given: inside a square
 // a little larger than the 14px it is designed for, and not lopsided.
 void every_icon_draws_about_its_centre() {
-    for (int value = 0; value <= static_cast<int>(gui::Icon::Search); ++value) {
+    for (int value = 0; value <= static_cast<int>(gui::Icon::PlayRange); ++value) {
         gui::UiDrawList list = fresh_list();
         gui::draw_icon(list, static_cast<gui::Icon>(value), 300.0F, 200.0F,
                        gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F});
@@ -162,7 +162,10 @@ void every_icon_draws_about_its_centre() {
         check(drawn.x >= 291.0F && drawn.right() <= 309.0F && drawn.y >= 191.0F
                   && drawn.bottom() <= 209.0F,
               which.c_str(), __LINE__);
-        check(drawn.width >= 5.0F && drawn.height >= 5.0F, which.c_str(), __LINE__);
+        // Minus is a bar: wide and, by design, flat.
+        const bool flat = static_cast<gui::Icon>(value) == gui::Icon::Minus;
+        check(drawn.width >= 5.0F && (flat || drawn.height >= 5.0F),
+              which.c_str(), __LINE__);
     }
     // Drawn at twice the size, the same glyph covers twice the extent about
     // the same centre. The plus is whole units, so pixel snapping leaves it.

@@ -1,5 +1,6 @@
 #include <mediaserver/editor/asset_viewer_panel.hpp>
 
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/scene/timeline_edit.hpp>
@@ -652,56 +653,57 @@ void AssetViewerPanel::draw_transport(Pass &p) {
   };
   const auto [in, out] = marked_range(p.count);
   const bool marked = mark_in_.has_value() || mark_out_.has_value();
-  const gui::Rect start = next(30.0F);
+  // The Timeline's transport, key for key: the same marks, the same lit
+  // Play while it runs, the same Loop.
+  const gui::Rect start = next(26.0F);
   const gui::Rect back = next(26.0F);
-  const gui::Rect play_button = next(52.0F);
+  const gui::Rect play_button = next(32.0F);
   const gui::Rect forward = next(26.0F);
-  const gui::Rect end = next(30.0F);
-  const gui::Rect loop = next(44.0F);
-  const gui::Rect in_out = next(66.0F);
-  if (ctx.button(mix(id_, "start"), start, "|<")) {
+  const gui::Rect end = next(26.0F);
+  x += 4.0F;
+  const gui::Rect loop = next(26.0F);
+  const gui::Rect in_out = next(26.0F);
+  if (tool_key(ctx, mix(id_, "start"), start, gui::Icon::ToStart, false,
+               "Go to In, or the first frame (Home)", theme.playhead)) {
     stop();
     seek(marked ? in : 0U, p.count);
   }
-  if (ctx.button(mix(id_, "step-back"), back, "<")) {
+  if (tool_key(ctx, mix(id_, "step-back"), back, gui::Icon::StepBack, false,
+               "Step back a frame (Left)", theme.playhead)) {
     stop();
     seek(frame_ == 0U ? 0U : frame_ - 1U, p.count);
   }
-  if (ctx.button(mix(id_, "play"), play_button,
-                 direction_ != 0 ? "Pause" : "Play")) {
+  if (tool_key(ctx, mix(id_, "play"), play_button,
+               direction_ != 0 ? gui::Icon::Pause : gui::Icon::Play,
+               direction_ != 0, "Play or pause (Space; J K L shuttle)",
+               theme.good)) {
     if (direction_ != 0) {
       stop();
     } else {
       play(1, now);
     }
   }
-  if (ctx.button(mix(id_, "step-forward"), forward, ">")) {
+  if (tool_key(ctx, mix(id_, "step-forward"), forward, gui::Icon::StepForward,
+               false, "Step forward a frame (Right)", theme.playhead)) {
     stop();
     seek(frame_ + 1U, p.count);
   }
-  if (ctx.button(mix(id_, "end"), end, ">|")) {
+  if (tool_key(ctx, mix(id_, "end"), end, gui::Icon::ToEnd, false,
+               "Go to Out, or the last frame (End)", theme.playhead)) {
     stop();
     seek(marked ? out : p.count - 1U, p.count);
   }
-  if (ctx.button(mix(id_, "loop"), loop, "Loop")) {
+  if (tool_key(ctx, mix(id_, "loop"), loop, gui::Icon::Loop, loop_,
+               "Loop playback", theme.accent)) {
     loop_ = !loop_;
   }
-  if (loop_) {
-    ctx.panel(gui::Rect{loop.x, loop.bottom() - 2.0F, loop.width, 2.0F},
-              theme.accent);
-  }
-  if (ctx.button(mix(id_, "in-to-out"), in_out, "In > Out")) {
+  if (tool_key(ctx, mix(id_, "in-to-out"), in_out, gui::Icon::PlayRange,
+               in_to_out_ && direction_ != 0, "Play the marked range",
+               theme.accent)) {
     seek(in, p.count);
     play(1, now);
     in_to_out_ = true;
   }
-  ctx.tooltip(start, "Go to In, or the first frame (Home)");
-  ctx.tooltip(back, "Step back a frame (Left)");
-  ctx.tooltip(play_button, "Play or pause (Space; J K L shuttle)");
-  ctx.tooltip(forward, "Step forward a frame (Right)");
-  ctx.tooltip(end, "Go to Out, or the last frame (End)");
-  ctx.tooltip(loop, "Loop playback");
-  ctx.tooltip(in_out, "Play the marked range");
 
   std::array<char, 32U> numbers{};
   std::snprintf(numbers.data(), numbers.size(), "  %u / %u", frame_ + 1U,
@@ -731,22 +733,25 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
     x += width + 4.0F;
     return at;
   };
-  const gui::Rect in_button = next(34.0F);
-  const gui::Rect out_button = next(40.0F);
-  const gui::Rect clear = next(46.0F);
-  if (ctx.button(mix(id_, "mark-in"), in_button, "In")) {
+  // The marks as keys, lit while they are set.
+  const gui::Rect in_button = next(26.0F);
+  const gui::Rect out_button = next(26.0F);
+  const gui::Rect clear = next(26.0F);
+  if (tool_key(ctx, mix(id_, "mark-in"), in_button, gui::Icon::MarkIn,
+               mark_in_.has_value(), "Mark In at this frame (I)",
+               theme.accent)) {
     mark_in_ = frame_;
   }
-  if (ctx.button(mix(id_, "mark-out"), out_button, "Out")) {
+  if (tool_key(ctx, mix(id_, "mark-out"), out_button, gui::Icon::MarkOut,
+               mark_out_.has_value(), "Mark Out at this frame (O)",
+               theme.accent)) {
     mark_out_ = frame_;
   }
-  if (ctx.button(mix(id_, "clear"), clear, "Clear")) {
+  if (tool_key(ctx, mix(id_, "clear"), clear, gui::Icon::Close, false,
+               "Clear In and Out", theme.accent)) {
     mark_in_.reset();
     mark_out_.reset();
   }
-  ctx.tooltip(in_button, "Mark In at this frame (I)");
-  ctx.tooltip(out_button, "Mark Out at this frame (O)");
-  ctx.tooltip(clear, "Clear In and Out");
 
   // From the right: the cuts and where they go.
   float right = row.right() - 8.0F;
@@ -756,23 +761,29 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
     right -= 4.0F;
     return at;
   };
-  const gui::Rect append = from_right(62.0F);
-  const gui::Rect overwrite = from_right(76.0F);
-  const gui::Rect insert = from_right(56.0F);
-  if (ctx.button(mix(id_, "insert"), insert, "Insert")) {
+  // The cuts put the picture on the wall's timeline, so each keeps its word
+  // beside its mark.
+  const auto cut_width = [&](std::string_view label) {
+    return ctx.font_width(label) + 44.0F;
+  };
+  const gui::Rect append = from_right(cut_width("Append"));
+  const gui::Rect overwrite = from_right(cut_width("Overwrite"));
+  const gui::Rect insert = from_right(cut_width("Insert"));
+  if (pill_button(ctx, mix(id_, "insert"), insert, gui::Icon::Insert, "Insert",
+                  "Insert the range at the playhead on the target track "
+                  "(,); later clips move along")) {
     request_edit(p, SourceEditMode::Insert);
   }
-  if (ctx.button(mix(id_, "overwrite"), overwrite, "Overwrite")) {
+  if (pill_button(ctx, mix(id_, "overwrite"), overwrite, gui::Icon::Overwrite,
+                  "Overwrite",
+                  "Lay the range over the target track at the playhead, in "
+                  "front of its clips (.); nothing moves")) {
     request_edit(p, SourceEditMode::Overwrite);
   }
-  if (ctx.button(mix(id_, "append"), append, "Append")) {
+  if (pill_button(ctx, mix(id_, "append"), append, gui::Icon::Append, "Append",
+                  "Add the range after the target track's last clip")) {
     request_edit(p, SourceEditMode::Append);
   }
-  ctx.tooltip(insert, "Insert the range at the playhead on the target track "
-                      "(,); later clips move along");
-  ctx.tooltip(overwrite, "Lay the range over the target track at the "
-                         "playhead, in front of its clips (.); nothing moves");
-  ctx.tooltip(append, "Add the range after the target track's last clip");
 
   // Where the cut lands, and the placements of this asset already in the
   // scene on the Stage.
@@ -1590,11 +1601,12 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
   // The transport for the chosen clip.
   {
     const gui::Rect at = rows.next(p.ctx.theme().metrics.control, 6.0F);
-    const gui::Rect play{at.x, at.y, 56.0F, at.height};
-    const gui::Rect loop{play.right() + 4.0F, at.y, 48.0F, at.height};
+    const gui::Rect play{at.x, at.y, 32.0F, at.height};
+    const gui::Rect loop{play.right() + 4.0F, at.y, 26.0F, at.height};
     const bool chosen = clip_.has_value() && *clip_ < facts->clips.size();
-    if (ctx.button(mix(id_, "clip-play"), play,
-                   clip_playing_ ? "Pause" : "Play")) {
+    if (tool_key(ctx, mix(id_, "clip-play"), play,
+                 clip_playing_ ? gui::Icon::Pause : gui::Icon::Play,
+                 clip_playing_, "Play or pause the clip (Space)", theme.good)) {
       if (!chosen) {
         clip_ = 0U;
         clip_frame_ = 0U;
@@ -1605,17 +1617,12 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
         play_clip(now);
       }
     }
-    if (ctx.button(mix(id_, "clip-loop"), loop, "Loop")) {
+    if (tool_key(ctx, mix(id_, "clip-loop"), loop, gui::Icon::Loop, clip_loop_,
+                 "Loop the clip", theme.accent)) {
       clip_loop_ = !clip_loop_;
       clip_origin_time_ = now;
       clip_origin_frame_ = clip_frame_;
     }
-    if (clip_loop_) {
-      ctx.panel(gui::Rect{loop.x, loop.bottom() - 2.0F, loop.width, 2.0F},
-                theme.accent);
-    }
-    ctx.tooltip(play, "Play or pause the clip (Space)");
-    ctx.tooltip(loop, "Loop the clip");
     if (chosen) {
       const double duration =
           std::max(static_cast<double>(facts->clips[*clip_].duration), 0.0);

@@ -41,13 +41,29 @@ void TimelinePanel::draw_rows(Pass &p) {
   p.hits.clear();
   std::vector<RowContext> visible;
   visible.reserve(64U);
+  // Each row glides to where the list now puts it - a reorder, a twirl
+  // opening above it - rather than jumping there. The glide is in the
+  // list's own coordinates, so scrolling stays immediate; its pointer
+  // targets travel with what is drawn, so a press lands on what it is over.
+  const auto row_motion = [this](const Row &row) noexcept {
+    core::u64 key = id_ ^ (static_cast<core::u64>(row.kind) << 58U);
+    key ^= row.node.value() * 0x9E3779B97F4A7C15ULL;
+    key ^= (static_cast<core::u64>(row.group) << 8U) ^
+           (static_cast<core::u64>(row.component) << 16U) ^
+           (static_cast<core::u64>(row.property) << 24U);
+    key ^= row.property_target.value() * 0xC2B2AE3D27D4EB4FULL;
+    key ^= row.lane_owner.value() * 0x165667B19E3779F9ULL;
+    return key;
+  };
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     const Row &row = rows[index];
-    const float y = rows_bounds.y + row.top - row_scroll_;
-    if (y + row.height <= rows_bounds.y ||
-        y >= rows_bounds.bottom()) {
+    const float target = rows_bounds.y + row.top - row_scroll_;
+    if (target + row.height <= rows_bounds.y ||
+        target >= rows_bounds.bottom()) {
       continue;
     }
+    const float y = rows_bounds.y +
+                    ctx.ease(row_motion(row), row.top, 0.75F) - row_scroll_;
     RowContext &rc = visible.emplace_back(p, row, index);
     rc.y = y;
     rc.track_number = track_numbers[index];
@@ -468,8 +484,9 @@ void TimelinePanel::begin_row(RowContext &rc) {
   const gui::Rect band{rows_bounds.x, y, rows_bounds.width, row.height};
   ctx.panel(band, background);
   if (!is_selected && row_hovered && layer_like) {
-    ctx.panel(gui::span_x(band, band.x, band.x + list_width),
-              alpha(row_theme.widget_hover, 0.6F));
+    ctx.rounded(gui::inset(gui::span_x(band, band.x, band.x + list_width),
+                           3.0F, 2.0F),
+                alpha(row_theme.widget_hover, 0.6F), row_theme.radius);
   }
   // Every layer is ruled off across the whole panel; property rows only
   // across the lanes, so a twirled-open layer still reads as one block.
@@ -480,10 +497,11 @@ void TimelinePanel::begin_row(RowContext &rc) {
   if (layer_like && !row.surface) {
     // The row's own colour down its left edge, above the rule: the kind for
     // a layer, the track's for a track. Selection takes the accent.
-    gui::Rect edge = gui::inset(band, gui::Padding{0.0F, 0.0F, 0.0F, 1.0F});
-    ctx.panel(gui::cut_left(edge, 3.0F),
-              is_selected ? row_theme.accent
-                          : alpha(row.color, row.locked ? 0.35F : 0.85F));
+    gui::Rect edge = gui::inset(band, gui::Padding{2.0F, 5.0F, 0.0F, 6.0F});
+    ctx.rounded(gui::cut_left(edge, 3.0F),
+                is_selected ? row_theme.accent
+                            : alpha(row.color, row.locked ? 0.35F : 0.85F),
+                1.5F);
   }
 
   const float tree_x = rows_bounds.x + list_metrics::toggle + 6.0F;
@@ -1325,7 +1343,8 @@ void TimelinePanel::track_bar_cell(RowContext &rc) {
   const gui::Rect &bar = rc.clip_bar;
   const bool live = track_.drag != ClipDrag::None && track_.lane == row.node;
   const float strength = row.locked ? 0.5F : 1.0F;
-  ctx.panel(bar, alpha(row.color, (live ? 0.34F : 0.20F) * strength));
+  ctx.rounded(bar, alpha(row.color, (live ? 0.34F : 0.20F) * strength),
+              clip_radius(bar));
   for (const ElementInfo &element : p.input.elements) {
     if (element.kind != ElementKind::Media ||
         element.timeline_lane != row.node || !element.timing.placed()) {
@@ -1352,7 +1371,7 @@ void TimelinePanel::track_bar_cell(RowContext &rc) {
               alpha(ctx.theme().text_muted, strength));
   }
   if (row.node == selected_lane_) {
-    ctx.outline(bar, ctx.theme().text, 1.5F);
+    ctx.rounded_outline(bar, ctx.theme().text, clip_radius(bar), 1.5F);
   }
   if (!row.locked) {
     draw_clip_hover(rc);
@@ -1453,7 +1472,8 @@ void TimelinePanel::clip_bar_cell(RowContext &rc) {
 
   const bool live =
       clip_.drag != ClipDrag::None && clip_.node == row.node;
-  ctx.panel(clip_bar, alpha(row.color, live ? 0.42F : 0.30F));
+  ctx.rounded(clip_bar, alpha(row.color, live ? 0.42F : 0.30F),
+              clip_radius(clip_bar));
   // A row tall enough to read both gives the waveform a band of its own
   // under the pictures, as an editor stacks a clip's video over its audio;
   // a short one overlays the two.
@@ -1472,6 +1492,11 @@ void TimelinePanel::clip_bar_cell(RowContext &rc) {
   }
   const bool drew_filmstrip = draw_clip_filmstrip(rc, live, pictures);
   draw_clip_waveform(rc, drew_filmstrip && sound.y == pictures.y, sound);
+  // The pictures run edge to edge; round them off in the row's own colour
+  // so the clip keeps its soft corners.
+  ctx.draw_list().add_corner_mask(clip_bar.x, clip_bar.y, clip_bar.width,
+                                  clip_bar.height, clip_radius(clip_bar),
+                                  rc.background);
   draw_clip_edges(rc);
   draw_clip_ramps(rc);
   draw_clip_label(rc);
@@ -1703,13 +1728,20 @@ void TimelinePanel::draw_clip_edges(RowContext &rc) {
   const Row &row = rc.row;
   auto &clip_bar = rc.clip_bar;
 
-  gui::Rect rules = clip_bar;
-  ctx.panel(gui::cut_top(rules, 1.0F), alpha(row.color, 0.85F));
-  ctx.panel(gui::cut_bottom(rules, 1.0F), alpha(row.color, 0.85F));
+  // A fine ring in the clip's colour, and its trim handles as soft
+  // capsules just inside each end.
+  const float radius = clip_radius(clip_bar);
+  ctx.rounded_outline(clip_bar, alpha(row.color, 0.85F), radius);
   const float grab = edge_grab_width(clip_bar.width);
-  gui::Rect ends = clip_bar;
-  ctx.panel(gui::cut_left(ends, grab), alpha(row.color, 0.68F));
-  ctx.panel(gui::cut_right(ends, grab), alpha(row.color, 0.68F));
+  if (grab >= 3.0F && clip_bar.height >= 8.0F) {
+    const float handle = std::min(grab - 1.0F, 4.0F);
+    const float inset = std::min(clip_bar.height * 0.25F, 5.0F);
+    for (const float x : {clip_bar.x + 2.0F, clip_bar.right() - 2.0F - handle}) {
+      ctx.rounded(gui::Rect{x, clip_bar.y + inset, handle,
+                            clip_bar.height - inset * 2.0F},
+                  alpha(row.color, 0.75F), handle * 0.5F);
+    }
+  }
 
 }
 
@@ -1808,7 +1840,9 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
                                    : ctx.theme().text_muted);
   }
   if (selected(row.node, selection)) {
-    ctx.outline(clip_bar, ctx.theme().text, 1.5F);
+    ctx.glow(clip_bar, ctx.theme().accent, clip_radius(clip_bar), 8.0F);
+    ctx.rounded_outline(clip_bar, ctx.theme().text, clip_radius(clip_bar),
+                        1.5F);
   }
 }
 

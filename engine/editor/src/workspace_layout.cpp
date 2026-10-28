@@ -22,7 +22,8 @@ constexpr std::uint16_t resolution_version = 3U;
 constexpr std::uint16_t zoom_version = 4U;
 // Version 5 appends the Compositor's Parameters width to the header.
 constexpr std::uint16_t parameter_width_version = 5U;
-// Version 6 appends a word of Compositor view flags; bit 0 is the minimap.
+// Version 6 appends a word of view flags: bit 0 is the Compositor minimap,
+// bit 1 the night dim.
 constexpr std::uint16_t current_version = 6U;
 constexpr std::uint16_t legacy_header_size = 28U;
 constexpr std::uint16_t window_size_header_size = 36U;
@@ -30,6 +31,7 @@ constexpr std::uint16_t resolution_header_size = 40U;
 constexpr std::uint16_t parameter_width_header_size = 44U;
 constexpr std::uint16_t header_size = 48U;
 constexpr std::uint32_t minimap_flag = 1U;
+constexpr std::uint32_t night_flag = 2U;
 constexpr std::size_t fixed_node_size = 28U;
 constexpr std::size_t floating_size = 20U;
 constexpr std::size_t closed_size = 40U;
@@ -188,7 +190,8 @@ encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
     append_u8(bytes, static_cast<core::u8>(workspace.program_resolution));
     append_u16(bytes, workspace.ui_zoom_percent);
     append_float(bytes, workspace.compositor_parameter_width);
-    append_u32(bytes, workspace.compositor_minimap ? minimap_flag : 0U);
+    append_u32(bytes, (workspace.compositor_minimap ? minimap_flag : 0U) |
+                          (workspace.night_dim ? night_flag : 0U));
 
     for (const gui::DockLayout::State::Node &node : state.nodes) {
       append_u8(bytes, node.split ? 1U : 0U);
@@ -319,10 +322,11 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
     if (version >= current_version) {
       std::uint32_t flags{};
       // Unknown flags are refused rather than silently dropped on resave.
-      if (!reader.u32(flags) || (flags & ~minimap_flag) != 0U) {
+      if (!reader.u32(flags) || (flags & ~(minimap_flag | night_flag)) != 0U) {
         return decode_failure(WorkspaceLayoutError::InvalidFormat);
       }
       workspace.compositor_minimap = (flags & minimap_flag) != 0U;
+      workspace.night_dim = (flags & night_flag) != 0U;
     }
     workspace.window_width = window_width;
     workspace.window_height = window_height;

@@ -292,6 +292,330 @@ void UiDrawList::add_polyline(
     }
 }
 
+bool UiDrawList::rounded_outline(
+    float x,
+    float y,
+    float width,
+    float height,
+    float radius,
+    core::u8 corners,
+    RoundedOutline& out) const noexcept {
+    snap_span(x, width, out.x0, out.x1);
+    snap_span(y, height, out.y0, out.y1);
+    if (out.x1 <= out.x0 || out.y1 <= out.y0) {
+        return false;
+    }
+    const float limit = std::min(out.x1 - out.x0, out.y1 - out.y0) * 0.5F;
+    const float pixels =
+        std::clamp(std::isfinite(radius) ? radius * scale_ : 0.0F, 0.0F, limit);
+    for (std::size_t corner = 0U; corner < 4U; ++corner) {
+        out.radius[corner] =
+            (corners & (1U << corner)) != 0U ? pixels : 0.0F;
+    }
+    // Cut finely enough that no chord strays a quarter pixel from the arc:
+    // two pieces for a small chip's corner, up to ten for a large pill.
+    out.segments = static_cast<core::u32>(
+        std::clamp(std::ceil(std::sqrt(pixels) * 1.3F), 2.0F, 10.0F));
+    return pixels >= 0.75F;
+}
+
+template <typename Visit>
+void UiDrawList::walk_outline(
+    const RoundedOutline& outline, float offset, Visit&& visit) const {
+    constexpr float quarter = 1.57079632679F;
+    // Top-left, top-right, bottom-right, bottom-left: each corner's arc
+    // starts where the previous edge arrives, turning clockwise on screen.
+    const std::array<float, 4U> start{
+        2.0F * quarter, 3.0F * quarter, 0.0F, quarter};
+    const std::array<UiPoint, 4U> centre{
+        UiPoint{outline.x0 + outline.radius[0], outline.y0 + outline.radius[0]},
+        UiPoint{outline.x1 - outline.radius[1], outline.y0 + outline.radius[1]},
+        UiPoint{outline.x1 - outline.radius[2], outline.y1 - outline.radius[2]},
+        UiPoint{outline.x0 + outline.radius[3], outline.y1 - outline.radius[3]}};
+    for (std::size_t corner = 0U; corner < 4U; ++corner) {
+        const float reach = std::max(outline.radius[corner] + offset, 0.0F);
+        // A square corner keeps its two end points: a zero-length arc whose
+        // normals still fan the fringe around the point.
+        const core::u32 steps =
+            outline.radius[corner] > 0.0F ? outline.segments : 1U;
+        for (core::u32 step = 0U; step <= steps; ++step) {
+            const float angle = start[corner] +
+                quarter * static_cast<float>(step) / static_cast<float>(steps);
+            const float nx = std::cos(angle);
+            const float ny = std::sin(angle);
+            if (outline.radius[corner] > 0.0F) {
+                visit(centre[corner].x + nx * reach,
+                      centre[corner].y + ny * reach);
+            } else {
+                // Push a square corner out along the diagonal so the offset
+                // outline stays a rectangle `offset` from this one.
+                const float sx = corner == 0U || corner == 3U ? -1.0F : 1.0F;
+                const float sy = corner < 2U ? -1.0F : 1.0F;
+                visit(centre[corner].x + sx * offset,
+                      centre[corner].y + sy * offset);
+            }
+        }
+    }
+}
+
+void UiDrawList::add_rounded_rect(
+    float x,
+    float y,
+    float width,
+    float height,
+    float radius,
+    UiColor color,
+    core::u8 corners) {
+    RoundedOutline outline{};
+    if (!rounded_outline(x, y, width, height, radius, corners, outline)) {
+        add_rect(x, y, width, height, color);
+        return;
+    }
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    // The fill stops half a pixel inside the edge and a one-pixel fringe
+    // fades across it, so a straight edge on the pixel grid stays crisp while
+    // the arcs come out smooth.
+    constexpr std::size_t max_points = 4U * 11U;
+    std::array<UiPoint, max_points> inner{};
+    std::array<UiPoint, max_points> outer{};
+    std::size_t count = 0U;
+    walk_outline(outline, -0.5F, [&](float px, float py) {
+        inner[count++] = UiPoint{px, py};
+    });
+    count = 0U;
+    walk_outline(outline, 0.5F, [&](float px, float py) {
+        outer[count++] = UiPoint{px, py};
+    });
+    const UiColor clear{color.r, color.g, color.b, 0.0F};
+    for (std::size_t i = 1U; i + 1U < count; ++i) {
+        push_pixel(inner[0U].x, inner[0U].y, color);
+        push_pixel(inner[i].x, inner[i].y, color);
+        push_pixel(inner[i + 1U].x, inner[i + 1U].y, color);
+    }
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t next = (i + 1U) % count;
+        push_pixel(inner[i].x, inner[i].y, color);
+        push_pixel(inner[next].x, inner[next].y, color);
+        push_pixel(outer[next].x, outer[next].y, clear);
+        push_pixel(inner[i].x, inner[i].y, color);
+        push_pixel(outer[next].x, outer[next].y, clear);
+        push_pixel(outer[i].x, outer[i].y, clear);
+    }
+}
+
+void UiDrawList::add_rounded_outline(
+    float x,
+    float y,
+    float width,
+    float height,
+    float radius,
+    float thickness,
+    UiColor color,
+    core::u8 corners) {
+    if (thickness <= 0.0F) {
+        return;
+    }
+    RoundedOutline outline{};
+    const bool rounded =
+        rounded_outline(x, y, width, height, radius, corners, outline);
+    if (outline.x1 <= outline.x0 || outline.y1 <= outline.y0) {
+        return;
+    }
+    if (!rounded) {
+        add_outline_box(x, y, width, height, thickness, color);
+        return;
+    }
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    const float stroke = std::max(thickness * scale_, 1.0F);
+    // Four rings of points: the outer fringe, the stroke's two edges, and the
+    // inner fringe, each a band of quads between neighbouring rings.
+    constexpr std::size_t max_points = 4U * 11U;
+    std::array<std::array<UiPoint, max_points>, 4U> rings{};
+    const std::array<float, 4U> offsets{
+        0.5F, -0.5F, std::min(-stroke + 0.5F, -0.5F), -stroke - 0.5F};
+    std::size_t count = 0U;
+    for (std::size_t ring = 0U; ring < rings.size(); ++ring) {
+        count = 0U;
+        walk_outline(outline, offsets[ring], [&](float px, float py) {
+            rings[ring][count++] = UiPoint{px, py};
+        });
+    }
+    const UiColor clear{color.r, color.g, color.b, 0.0F};
+    const std::array<UiColor, 4U> shade{clear, color, color, clear};
+    for (std::size_t band = 0U; band + 1U < rings.size(); ++band) {
+        const auto& a = rings[band];
+        const auto& b = rings[band + 1U];
+        for (std::size_t i = 0U; i < count; ++i) {
+            const std::size_t next = (i + 1U) % count;
+            push_pixel(a[i].x, a[i].y, shade[band]);
+            push_pixel(a[next].x, a[next].y, shade[band]);
+            push_pixel(b[next].x, b[next].y, shade[band + 1U]);
+            push_pixel(a[i].x, a[i].y, shade[band]);
+            push_pixel(b[next].x, b[next].y, shade[band + 1U]);
+            push_pixel(b[i].x, b[i].y, shade[band + 1U]);
+        }
+    }
+}
+
+void UiDrawList::add_rounded_glow(
+    float x,
+    float y,
+    float width,
+    float height,
+    float radius,
+    float spread,
+    UiColor color) {
+    if (spread <= 0.0F || color.a <= 0.0F) {
+        return;
+    }
+    RoundedOutline outline{};
+    static_cast<void>(rounded_outline(
+        x, y, width, height, radius, corner_all, outline));
+    if (outline.x1 <= outline.x0 || outline.y1 <= outline.y0) {
+        return;
+    }
+    // A glow wants round corners even on a square box, or its corners read
+    // as spikes; give each at least a few pixels of arc.
+    for (float& corner : outline.radius) {
+        corner = std::max(corner, std::min(3.0F * scale_,
+            std::min(outline.x1 - outline.x0, outline.y1 - outline.y0) * 0.5F));
+    }
+    outline.segments = std::max(outline.segments, 4U);
+    if (!begin_run(nullptr)) {
+        return;
+    }
+    const float pixels = spread * scale_;
+    // Three rings fall off roughly like a blur: bright at the edge, most of
+    // the light gone a third of the way out, nothing at the rim.
+    constexpr std::size_t max_points = 4U * 11U;
+    std::array<std::array<UiPoint, max_points>, 3U> rings{};
+    const std::array<float, 3U> offsets{0.0F, pixels * 0.35F, pixels};
+    const std::array<UiColor, 3U> shade{
+        color, UiColor{color.r, color.g, color.b, color.a * 0.4F},
+        UiColor{color.r, color.g, color.b, 0.0F}};
+    std::size_t count = 0U;
+    for (std::size_t ring = 0U; ring < rings.size(); ++ring) {
+        count = 0U;
+        walk_outline(outline, offsets[ring], [&](float px, float py) {
+            rings[ring][count++] = UiPoint{px, py};
+        });
+    }
+    for (std::size_t band = 0U; band + 1U < rings.size(); ++band) {
+        const auto& a = rings[band];
+        const auto& b = rings[band + 1U];
+        for (std::size_t i = 0U; i < count; ++i) {
+            const std::size_t next = (i + 1U) % count;
+            push_pixel(a[i].x, a[i].y, shade[band]);
+            push_pixel(a[next].x, a[next].y, shade[band]);
+            push_pixel(b[next].x, b[next].y, shade[band + 1U]);
+            push_pixel(a[i].x, a[i].y, shade[band]);
+            push_pixel(b[next].x, b[next].y, shade[band + 1U]);
+            push_pixel(b[i].x, b[i].y, shade[band + 1U]);
+        }
+    }
+}
+
+void UiDrawList::add_corner_mask(
+    float x,
+    float y,
+    float width,
+    float height,
+    float radius,
+    UiColor color,
+    core::u8 corners) {
+    RoundedOutline outline{};
+    if (!rounded_outline(x, y, width, height, radius, corners, outline) ||
+        !begin_run(nullptr)) {
+        return;
+    }
+    constexpr float quarter = 1.57079632679F;
+    const std::array<float, 4U> start{
+        2.0F * quarter, 3.0F * quarter, 0.0F, quarter};
+    const std::array<UiPoint, 4U> square{
+        UiPoint{outline.x0, outline.y0}, UiPoint{outline.x1, outline.y0},
+        UiPoint{outline.x1, outline.y1}, UiPoint{outline.x0, outline.y1}};
+    const UiColor clear{color.r, color.g, color.b, 0.0F};
+    for (std::size_t corner = 0U; corner < 4U; ++corner) {
+        const float r = outline.radius[corner];
+        if (r <= 0.0F) {
+            continue;
+        }
+        const float sx = corner == 0U || corner == 3U ? 1.0F : -1.0F;
+        const float sy = corner < 2U ? 1.0F : -1.0F;
+        const UiPoint centre{square[corner].x + sx * r, square[corner].y + sy * r};
+        // A fan from the square corner to the arc pushed half a pixel out,
+        // then a fringe fading inward across the arc: the mask is solid
+        // outside the curve and gone half a pixel inside it.
+        UiPoint previous_outer{};
+        UiPoint previous_inner{};
+        for (core::u32 step = 0U; step <= outline.segments; ++step) {
+            const float angle = start[corner] + quarter *
+                static_cast<float>(step) / static_cast<float>(outline.segments);
+            const float nx = std::cos(angle);
+            const float ny = std::sin(angle);
+            const UiPoint outer{centre.x + nx * (r + 0.5F), centre.y + ny * (r + 0.5F)};
+            const UiPoint inner{centre.x + nx * std::max(r - 0.5F, 0.0F),
+                                centre.y + ny * std::max(r - 0.5F, 0.0F)};
+            if (step > 0U) {
+                push_pixel(square[corner].x, square[corner].y, color);
+                push_pixel(previous_outer.x, previous_outer.y, color);
+                push_pixel(outer.x, outer.y, color);
+                push_pixel(previous_outer.x, previous_outer.y, color);
+                push_pixel(outer.x, outer.y, color);
+                push_pixel(inner.x, inner.y, clear);
+                push_pixel(previous_outer.x, previous_outer.y, color);
+                push_pixel(inner.x, inner.y, clear);
+                push_pixel(previous_inner.x, previous_inner.y, clear);
+            }
+            previous_outer = outer;
+            previous_inner = inner;
+        }
+    }
+}
+
+void UiDrawList::add_gradient_rect(
+    float x,
+    float y,
+    float width,
+    float height,
+    UiColor top_left,
+    UiColor top_right,
+    UiColor bottom_right,
+    UiColor bottom_left) {
+    float x0{};
+    float x1{};
+    float y0{};
+    float y1{};
+    snap_span(x, width, x0, x1);
+    snap_span(y, height, y0, y1);
+    if (x1 <= x0 || y1 <= y0 || !begin_run(nullptr)) {
+        return;
+    }
+    push_pixel(x0, y0, top_left);
+    push_pixel(x1, y0, top_right);
+    push_pixel(x1, y1, bottom_right);
+    push_pixel(x0, y0, top_left);
+    push_pixel(x1, y1, bottom_right);
+    push_pixel(x0, y1, bottom_left);
+}
+
+void UiDrawList::add_outline_box(
+    float x, float y, float width, float height, float thickness,
+    UiColor color) {
+    if (width <= 0.0F || height <= 0.0F) {
+        return;
+    }
+    const float t = std::min({thickness, width * 0.5F, height * 0.5F});
+    add_rect(x, y, width, t, color);
+    add_rect(x, y + height - t, width, t, color);
+    add_rect(x, y + t, t, height - 2.0F * t, color);
+    add_rect(x + width - t, y + t, t, height - 2.0F * t, color);
+}
+
 bool UiDrawList::begin_run(const rhi::Texture* texture) {
     const Clip clip = current_clip();
     // Fully-clipped geometry contributes nothing; skip it so an offscreen
@@ -325,6 +649,26 @@ void UiDrawList::push_solid(float x, float y, UiColor color) {
     vertices_.push_back(UiVertex{
         x * scale_, y * scale_, white_u_, white_v_, color.r, color.g, color.b,
         color.a});
+    ++batches_.back().vertex_count;
+}
+
+void UiDrawList::scale_since(std::size_t first, float centre_x, float centre_y,
+                             float factor) noexcept {
+    if (factor == 1.0F || !std::isfinite(factor)) {
+        return;
+    }
+    const float cx = centre_x * scale_;
+    const float cy = centre_y * scale_;
+    for (std::size_t index = first; index < vertices_.size(); ++index) {
+        UiVertex& vertex = vertices_[index];
+        vertex.x = cx + (vertex.x - cx) * factor;
+        vertex.y = cy + (vertex.y - cy) * factor;
+    }
+}
+
+void UiDrawList::push_pixel(float x, float y, UiColor color) {
+    vertices_.push_back(UiVertex{
+        x, y, white_u_, white_v_, color.r, color.g, color.b, color.a});
     ++batches_.back().vertex_count;
 }
 

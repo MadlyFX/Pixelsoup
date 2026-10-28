@@ -36,7 +36,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   // hand running a live show finds them without reading; exact In/Out entry
   // takes the space between when there is room for it.
   const gui::Theme &theme = ctx.theme();
-  ctx.panel(toolbar, theme.header);
+  ctx.panel(toolbar, theme.panel);
   {
     gui::Rect rule = toolbar;
     ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
@@ -121,11 +121,12 @@ void TimelinePanel::draw_toolbar(Pass &p) {
         toolbar_.time_drag_moved = false;
       }
     }
-    ctx.panel(field, interaction.hovered ? theme.widget_hover : theme.track);
-    gui::Rect edge = field;
-    ctx.panel(gui::cut_left(edge, 2.0F), color);
+    // A soft well with a lit dot in the time's own colour.
+    ctx.rounded(field, interaction.hovered ? theme.widget_hover : theme.track,
+                field.height * 0.5F);
+    draw_status_dot(ctx, field.x + 6.0F, field.center_y(), color, 2.5F);
     // The caption, then the time.
-    gui::Rect text = gui::inset(field, gui::Padding{8.0F, 0.0F, 2.0F, 0.0F});
+    gui::Rect text = gui::inset(field, gui::Padding{14.0F, 0.0F, 2.0F, 0.0F});
     if (!caption.empty()) {
       gui::Rect caption_cell = text;
       ctx.label(gui::cut_left(caption_cell, 28.0F), caption, theme.text_muted);
@@ -141,8 +142,9 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                                   std::string_view tip, bool engaged = false) {
     const bool fitted = fits(width);
     const gui::Rect at = place(width, 2.0F);
+    // Play lights green while the show runs, like the show bar's Program.
     if (fitted && icon_button(ctx, mix(id_, name), at, icon, engaged, tip,
-                              theme.playhead)) {
+                              name == "play" ? theme.good : theme.playhead)) {
       frame.transport = request;
     }
   };
@@ -426,15 +428,20 @@ void TimelinePanel::draw_toolbar(Pass &p) {
       frame.transport = TransportRequest::Go;
     }
     const gui::UiColor go_color =
-        timeline.held_cue != doc::NodeId{} ? theme.playhead : theme.good;
-    ctx.panel(go_button,
-              running ? (go.hovered ? theme.widget_hover : theme.widget)
-                      : alpha(go_color,
-                              (go.held && !go.released)
-                                  ? 0.55F
-                                  : (go.hovered ? 0.40F : 0.28F)));
+        timeline.held_cue != doc::NodeId{} ? theme.caution : theme.cue;
+    const float go_radius = go_button.height * 0.5F;
     if (!running) {
-      ctx.outline(go_button, go_color);
+      ctx.glow(go_button, go_color, go_radius, go.hovered ? 10.0F : 7.0F);
+    }
+    ctx.rounded(go_button,
+                running ? (go.hovered ? theme.widget_hover : theme.widget)
+                        : alpha(go_color,
+                                (go.held && !go.released)
+                                    ? 0.55F
+                                    : (go.hovered ? 0.40F : 0.28F)),
+                go_radius);
+    if (!running) {
+      ctx.rounded_outline(go_button, go_color, go_radius);
     }
     std::string go_text;
     if (running) {

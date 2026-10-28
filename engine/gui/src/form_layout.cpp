@@ -68,7 +68,7 @@ FormSection draw_form_section(UiContext& ctx, FormLayout& form, std::string_view
                               UiColor heading) {
     const FormSection section = form.section();
     ctx.panel(section.rule, ctx.theme().divider);
-    ctx.label(section.heading, title, heading);
+    ctx.label(section.heading, sentence_case(title), heading);
     return section;
 }
 

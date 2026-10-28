@@ -859,6 +859,101 @@ void the_color_picker_maps_hue_and_saturation_value_directly() {
     UI_CHECK(near(saturated.color.b, 0.5F));
 }
 
+// A colour well opens the picker in a popover under itself. The popover owns
+// the pointer, a drag in its field changes the colour live, and Escape puts
+// back the colour it opened with.
+void a_color_well_picks_live_and_escape_restores() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    constexpr gui::Rect window{0.0F, 0.0F, 600.0F, 600.0F};
+    constexpr gui::Rect well{20.0F, 20.0F, 40.0F, 20.0F};
+    constexpr gui::UiId id = 7U;
+    gui::UiColor color{1.0F, 0.0F, 0.0F, 0.5F};
+    const auto draw = [&] {
+        const bool changed = ctx.color_well(id, well, color);
+        ctx.draw_overlays(window);
+        return changed;
+    };
+    begin_frame(input, ctx, 30.0F, 30.0F, true);
+    UI_CHECK(!draw());
+    begin_frame(input, ctx, 30.0F, 30.0F, false);
+    UI_CHECK(!draw());
+    UI_CHECK(ctx.color_open(id));
+    UI_CHECK(ctx.typing());
+    UI_CHECK(ctx.pointer_blocked());
+
+    // The popover hangs 8 below the well with its field 14 in; the field's
+    // bottom-left corner is black.
+    const float field_x = well.x + 14.0F;
+    const float field_bottom = well.bottom() + 8.0F + 14.0F + 156.0F;
+    begin_frame(input, ctx, field_x + 1.0F, field_bottom - 1.0F, true);
+    static_cast<void>(draw());
+    UI_CHECK(ctx.color_dragging(id));
+    begin_frame(input, ctx, field_x + 1.0F, field_bottom - 1.0F, true);
+    UI_CHECK(draw());
+    UI_CHECK(color.r < 0.02F && color.g < 0.02F && color.b < 0.02F);
+    UI_CHECK(near(color.a, 0.5F));
+    begin_frame(input, ctx, field_x + 1.0F, field_bottom - 1.0F, false);
+    static_cast<void>(draw());
+    UI_CHECK(ctx.color_open(id));
+
+    input.new_frame();
+    input.add_key(gui::Key::Escape);
+    ctx.new_frame();
+    UI_CHECK(draw());
+    UI_CHECK(near(color.r, 1.0F) && near(color.g, 0.0F) && near(color.b, 0.0F));
+    UI_CHECK(!ctx.color_open(id));
+    UI_CHECK(!ctx.typing());
+}
+
+// Eased values: with no clock every value is its target, so draw lists never
+// depend on timing; with one, a changed target is approached over a few
+// frames and then held exactly, and a settled value springs back.
+void eased_values_snap_without_a_clock_and_glide_with_one() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    constexpr gui::UiId id = 41U;
+    ctx.new_frame(0.0);
+    UI_CHECK(ctx.ease(id, 10.0F) == 10.0F);
+    ctx.new_frame(0.0);
+    UI_CHECK(ctx.ease(id, 50.0F) == 50.0F);
+
+    double now = 1.0;
+    ctx.new_frame(now);
+    UI_CHECK(ctx.ease(id, 50.0F) == 50.0F);
+    now += 1.0 / 60.0;
+    ctx.new_frame(now);
+    const float first = ctx.ease(id, 100.0F);
+    UI_CHECK(first > 50.0F && first < 100.0F);
+    float last = first;
+    for (int frame = 0; frame < 120; ++frame) {
+        now += 1.0 / 60.0;
+        ctx.new_frame(now);
+        last = ctx.ease(id, 100.0F);
+    }
+    UI_CHECK(last == 100.0F);
+    UI_CHECK(!ctx.in_motion());
+
+    constexpr gui::UiId plant = 42U;
+    now += 1.0 / 60.0;
+    ctx.new_frame(now);
+    UI_CHECK(ctx.spring(plant, 1.0F) == 1.0F);
+    ctx.settle(plant, 0.9F);
+    const float pressed = ctx.spring(plant, 1.0F);
+    UI_CHECK(pressed >= 0.9F && pressed < 1.0F);
+    float settled = pressed;
+    for (int frame = 0; frame < 120; ++frame) {
+        now += 1.0 / 60.0;
+        ctx.new_frame(now);
+        settled = ctx.spring(plant, 1.0F);
+    }
+    UI_CHECK(settled == 1.0F);
+}
+
 void dropdown_selection_is_direct_and_blocks_the_workspace() {
     gui::InputState input; gui::UiDrawList list; const auto font=gui::FontAtlas::empty();gui::UiContext ctx{input,list,font};
     std::size_t selected=0;
@@ -868,8 +963,9 @@ void dropdown_selection_is_direct_and_blocks_the_workspace() {
     begin_frame(input,ctx,30,20,true);UI_CHECK(!draw());
     begin_frame(input,ctx,30,20,false);UI_CHECK(!draw());UI_CHECK(ctx.typing());
     // The menu overlaps another control; its click must never leak through.
-    begin_frame(input,ctx,30,118,true);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(!draw());
-    begin_frame(input,ctx,30,118,false);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(draw());UI_CHECK(selected==3);
+    const float sphere_y=field.bottom()+6.0F+gui::menu_row_height*3.5F; // the fourth entry, under a menu hung 6 below
+    begin_frame(input,ctx,30,sphere_y,true);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(!draw());
+    begin_frame(input,ctx,30,sphere_y,false);UI_CHECK(!ctx.button(51,{0,30,200,150},"Underlying"));UI_CHECK(draw());UI_CHECK(selected==3);
     // Outside dismissal consumes its press and release.
     begin_frame(input,ctx,30,20,true);static_cast<void>(draw());
     begin_frame(input,ctx,30,20,false);static_cast<void>(draw());
@@ -1059,7 +1155,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 37U> cases{{
+constexpr std::array<Case, 39U> cases{{
     {"motion after release does not change the click endpoint", &motion_after_release_does_not_change_the_click_endpoint},
     {"a prior release does not end a new capture", &a_prior_release_does_not_end_a_new_capture},
     {"input keeps each button's first press position", &input_keeps_each_buttons_first_press_position},
@@ -1119,6 +1215,10 @@ constexpr std::array<Case, 37U> cases{{
      &a_clipped_control_keeps_an_existing_drag_capture},
     {"the color picker maps hue and saturation value directly",
      &the_color_picker_maps_hue_and_saturation_value_directly},
+     {"a colour well picks live and Escape restores",
+      &a_color_well_picks_live_and_escape_restores},
+     {"eased values snap without a clock and glide with one",
+      &eased_values_snap_without_a_clock_and_glide_with_one},
 }};
 
 } // namespace

@@ -1,11 +1,16 @@
 #include <mediaserver/editor/color_correction_panel.hpp>
 
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -197,13 +202,45 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
     const auto heading_button = [&](const gui::Rect& heading, gui::UiId id,
                                     std::string_view label,
                                     gui::UiColor hover, float width = 58.0F) {
+        static_cast<void>(hover);
         gui::Rect strip = heading;
-        const gui::Rect button = gui::cut_right(strip, width);
-        const gui::Interaction it = ctx.grab(id, button);
-        ctx.panel(button, it.hovered ? ctx.theme().widget_hover
-                                     : ctx.theme().widget);
-        ctx.label(button, label, it.hovered ? hover : ctx.theme().text_muted);
-        return it.clicked;
+        const gui::Rect button =
+            gui::inset(gui::cut_right(strip, width + 14.0F),
+                       gui::Padding{0.0F, 2.0F, 0.0F, 2.0F});
+        const bool resets = label == "RESET";
+        return pill_button(ctx, id, button,
+                           resets ? std::optional{gui::Icon::Reset}
+                                  : std::nullopt,
+                           resets ? std::string_view{"Reset"}
+                                  : std::string_view{"Enable"},
+                           resets ? "Reset this section to its defaults"
+                                  : std::string_view{});
+    };
+    // A row's value is a member of one of the effects above; its default is
+    // the same member of that effect as it is first added, found by where
+    // the value sits in it.
+    const auto default_of = [&](const float& value) -> std::optional<float> {
+        const auto at = reinterpret_cast<std::uintptr_t>(&value);
+        for (const scene::EffectInstance* effect :
+             {levels, lift_gamma_gain, contrast_pivot, color_matrix,
+              white_balance}) {
+            if (effect == nullptr) {
+                continue;
+            }
+            const auto begin = reinterpret_cast<std::uintptr_t>(effect);
+            if (at < begin || at + sizeof(float) > begin + sizeof(*effect)) {
+                continue;
+            }
+            const scene::EffectInstance fresh =
+                scene::initial_effect(effect->kind);
+            float out{};
+            std::memcpy(&out,
+                        reinterpret_cast<const unsigned char*>(&fresh) +
+                            (at - begin),
+                        sizeof(float));
+            return out;
+        }
+        return std::nullopt;
     };
     // A label and a number field on one row. An entry, clamped into
     // [minimum, maximum], that changes the value is an edit of `property` on
@@ -211,10 +248,29 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
     const auto number_row = [&](std::string_view label,
                                 gui::UiColor label_color, gui::UiId numeric_id,
                                 doc::NodeId source, std::string_view property,
-                                float value, double speed, int decimals,
-                                float minimum, float maximum) {
+                                const float& value, double speed,
+                                int decimals, float minimum, float maximum) {
         const gui::FormRow row = form.row();
-        ctx.label(row.label, label, label_color);
+        const std::optional<float> fallback = default_of(value);
+        const bool differs =
+            fallback.has_value() &&
+            std::abs(value - *fallback) >
+                1.0e-5F * std::max(1.0F, std::abs(*fallback));
+        gui::Rect label_cell = row.label;
+        if (differs) {
+            const gui::Rect reset_bounds =
+                gui::cut_right(label_cell, reset_button_width);
+            std::array<char, 48U> tip{};
+            std::snprintf(tip.data(), tip.size(), "Reset to default (%.*f)",
+                          decimals, static_cast<double>(*fallback));
+            if (reset_button(ctx, numeric_id ^ gui::ui_id("reset"),
+                             reset_bounds, tip.data())) {
+                frame.edits.push_back(ColorCorrectionEdit{
+                    source, std::string{property},
+                    static_cast<double>(*fallback)});
+            }
+        }
+        ctx.label(label_cell, label, label_color);
         double authored{};
         NumberFieldEdit numeric_edit{};
         const std::size_t edits_before = frame.edits.size();

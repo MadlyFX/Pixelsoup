@@ -120,25 +120,6 @@ namespace topology = mediaserver::topology;
   // Mirrors editor_shell.cpp's editor_theme(); kept here so the tool needs
   // nothing from the shell.
   gui::Theme theme{};
-  theme.background = gui::UiColor{0.031F, 0.039F, 0.051F, 1.0F};
-  theme.panel = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
-  theme.header = gui::UiColor{0.086F, 0.102F, 0.125F, 1.0F};
-  theme.row = gui::UiColor{0.075F, 0.088F, 0.108F, 1.0F};
-  theme.row_alt = gui::UiColor{0.067F, 0.080F, 0.098F, 1.0F};
-  theme.widget = gui::UiColor{0.102F, 0.122F, 0.149F, 1.0F};
-  theme.widget_hover = gui::UiColor{0.141F, 0.169F, 0.204F, 1.0F};
-  theme.widget_active = gui::UiColor{0.000F, 0.345F, 0.565F, 1.0F};
-  theme.accent = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
-  theme.selection = gui::UiColor{0.039F, 0.255F, 0.420F, 1.0F};
-  theme.track = gui::UiColor{0.039F, 0.047F, 0.059F, 1.0F};
-  theme.text = gui::UiColor{0.850F, 0.880F, 0.910F, 1.0F};
-  theme.text_muted = gui::UiColor{0.520F, 0.570F, 0.620F, 1.0F};
-  theme.divider = gui::UiColor{0.118F, 0.137F, 0.165F, 1.0F};
-  theme.border = gui::UiColor{0.165F, 0.192F, 0.231F, 1.0F};
-  theme.playhead = gui::UiColor{0.090F, 0.650F, 0.930F, 1.0F};
-  theme.keyframe = gui::UiColor{0.880F, 0.930F, 1.000F, 1.0F};
-  theme.good = gui::UiColor{0.250F, 0.840F, 0.420F, 1.0F};
-  theme.warning = gui::UiColor{0.960F, 0.400F, 0.320F, 1.0F};
   theme.padding = 5.0F;
   return theme;
 }
@@ -684,7 +665,15 @@ int main(int argc, char **argv) {
   feed_hardware.output_bindings.push_back(mosaic);
   auto inspected = show.elements[4];
   if (properties == "model") inspected = show.elements[2];
-  if (properties == "light") inspected = show.elements[7];
+  // `light-color` presses the light's colour well at the hover point, so the
+  // colour picker shows open under it.
+  if (properties == "light" || properties == "light-color") {
+    inspected = show.elements[7];
+    // A warm, brighter-than-default spot, so its colour well shows a colour
+    // and its changed values carry reset arrows.
+    inspected.color = scene::Vec3{1.0F, 0.62F, 0.32F};
+    inspected.intensity = 2.5F;
+  }
   inspected.source = properties == "model"
       ? "T:/Production/Shows/Autumn/Models/Truss_Structure.glb"
       : "T:/Production/Shows/Autumn/Media/Particle_Ribbons.mov";
@@ -1127,7 +1116,8 @@ int main(int argc, char **argv) {
                         ? timeline_bounds.bottom() - 9.0F
                          : timeline_bounds.y + (curves ? 17.0F : 112.0F))
                  : hover_y);
-    input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);
+    input.set_mouse_button(gui::MouseButton::Left,
+                           (clicks || view == "light-color") && pass == 0);
     ctx.new_frame(1.0);
     ctx.panel(window, ctx.theme().background);
     if (feed) {

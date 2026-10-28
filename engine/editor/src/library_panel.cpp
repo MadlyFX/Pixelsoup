@@ -1378,8 +1378,9 @@ LibraryFrame LibraryPanel::draw_impl(
   // The toolbar: search, a new folder, import and rescan.
   const gui::Rect toolbar = gui::cut_top(regions, toolbar_height);
   constexpr float folder_button_width = 26.0F;
-  constexpr float import_width = 62.0F;
-  constexpr float rescan_width = 64.0F;
+  // Import is a word and its mark; Rescan a mark alone, named on hover.
+  constexpr float import_width = 92.0F;
+  constexpr float rescan_width = 34.0F;
   const bool room_for_import = bounds.width > 220.0F;
   const bool room_for_rescan = bounds.width > 300.0F;
   // The buttons after the search field, each a slot with its gap on the
@@ -1412,7 +1413,7 @@ LibraryFrame LibraryPanel::draw_impl(
     const gui::Interaction interaction =
         ctx.grab(mix(id_, "library.new_folder"), button);
     if (interaction.hovered) {
-      ctx.panel(button, theme.widget_hover);
+      ctx.rounded(button, theme.widget_hover, theme.radius);
     }
     draw_folder_icon(ctx, button.inflated(-5.0F, -5.0F),
                      interaction.hovered ? theme.text : theme.text_muted,
@@ -1423,14 +1424,18 @@ LibraryFrame LibraryPanel::draw_impl(
     create_folder = interaction.clicked;
   }
   if (room_for_import) {
-    if (ctx.button(mix(id_, "library.import"), slot_button(import_slot, 4.0F),
-                   "IMPORT")) {
+    // The panel's one coloured button: what it most wants pressed.
+    if (pill_button(ctx, mix(id_, "library.import"),
+                    slot_button(import_slot, 4.0F), gui::Icon::Import,
+                    "Import", "Import media, models or a folder (Ctrl+I)",
+                    ButtonTone::Primary)) {
       open_import_menu = true;
     }
   }
   if (room_for_rescan) {
-    if (ctx.button(mix(id_, "library.rescan"), slot_button(rescan_slot, 4.0F),
-                   "RESCAN")) {
+    if (pill_button(ctx, mix(id_, "library.rescan"),
+                    slot_button(rescan_slot, 4.0F), gui::Icon::Rescan, {},
+                    "Rescan: look for changed and missing source files")) {
       frame.rescan_assets = true;
     }
   }

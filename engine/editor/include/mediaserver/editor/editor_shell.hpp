@@ -47,6 +47,30 @@
 // every other edit. The editor never mutates scene or document state directly.
 namespace mediaserver::editor {
 
+// The window's chrome around the docked panels, in logical units: the show
+// bar above, the status bar below, and the gutter that lets every panel's
+// rounded corners show against the window. Public so a harness can solve the
+// same dock layout the editor does.
+inline constexpr float editor_top_bar_height = 60.0F;
+inline constexpr float editor_status_bar_height = 30.0F;
+inline constexpr float editor_dock_gutter = 6.0F;
+// Where the menu bar starts, after the brand mark and the project's name;
+// each menu opens from the top of the dock area under its entry.
+inline constexpr float editor_menu_bar_left = 214.0F;
+
+// The area the docked panels share in a window `width` by `height` units.
+[[nodiscard]] constexpr gui::Rect editor_dock_area(float width,
+                                                   float height) noexcept {
+  return gui::Rect{editor_dock_gutter, editor_top_bar_height,
+                   width > 2.0F * editor_dock_gutter
+                       ? width - 2.0F * editor_dock_gutter
+                       : 0.0F,
+                   height > editor_top_bar_height + editor_status_bar_height
+                       ? height - editor_top_bar_height -
+                             editor_status_bar_height
+                       : 0.0F};
+}
+
 enum class EditorError : core::u8 {
   // No GPU, or a device/window that could not be created.
   Unavailable,

@@ -1754,6 +1754,22 @@ struct EffectInstance final {
     bool operator==(const EffectInstance&) const = default;
 };
 
+// An effect of `kind` as it is first added: the colour effects at identity,
+// and the blurs at an amount that shows what they do. New effects are
+// authored from this, and Reset to default returns a field to it.
+[[nodiscard]] constexpr EffectInstance initial_effect(EffectKind kind) noexcept {
+    EffectInstance effect{};
+    effect.kind = kind;
+    if (kind == EffectKind::Blur) {
+        effect.value = 8.0F;
+    } else if (kind == EffectKind::BoxBlur) {
+        effect.box_blur.radius_px = 8U;
+    } else if (kind == EffectKind::DirectionalBlur) {
+        effect.directional_blur.length_px = 16.0F;
+    }
+    return effect;
+}
+
 struct LayerStyle final {
     float opacity{1.0F};
     BlendMode blend{BlendMode::Normal};

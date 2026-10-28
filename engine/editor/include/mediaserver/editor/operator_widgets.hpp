@@ -21,9 +21,9 @@
 namespace mediaserver::editor {
 
 // Shared list geometry, in logical units. Rows are tall enough to hit with a
-// pointer from arm's length; toggles are square targets the full row high.
+// pointer from arm's length without aiming; toggles are square targets.
 namespace list_metrics {
-inline constexpr float row_height = 24.0F;
+inline constexpr float row_height = 28.0F;
 inline constexpr float indent = 16.0F;
 inline constexpr float toggle = 24.0F;
 inline constexpr float icon = 16.0F;
@@ -95,6 +95,46 @@ bool search_box(gui::UiContext &ctx, gui::UiId id, const gui::Rect &field,
                                const gui::Rect &bounds, gui::Icon icon,
                                std::string_view tooltip, bool engaged = false,
                                bool enabled = true);
+
+// A transport or tool key: a soft rounded key with a body at rest, eased
+// lighter under the pointer, and lit in `engaged_color` while its mode is on
+// - Play while playing, Loop, the current edit tool. The Timeline's and the
+// Asset Viewer's transports are both built of these, so they read the same.
+[[nodiscard]] bool tool_key(gui::UiContext &ctx, gui::UiId id,
+                            const gui::Rect &bounds, gui::Icon icon,
+                            bool engaged, std::string_view tooltip,
+                            gui::UiColor engaged_color,
+                            float icon_scale = 1.0F);
+
+// How a pill button reads. Quiet for everyday actions, Primary for the one
+// thing a panel most wants pressed (Import), Danger for what cannot be taken
+// back lightly - ringed and inked in red, never filled.
+enum class ButtonTone : core::u8 {
+  Quiet,
+  Primary,
+  Danger,
+};
+
+// A pill carrying a drawn icon, a word, or both, centred: the operator's
+// everyday button. An icon alone needs `tooltip` to name it. `engaged` lights
+// a toggle that is on. Returns true on the frame it is clicked.
+[[nodiscard]] bool pill_button(gui::UiContext &ctx, gui::UiId id,
+                               const gui::Rect &bounds,
+                               std::optional<gui::Icon> icon,
+                               std::string_view label,
+                               std::string_view tooltip,
+                               ButtonTone tone = ButtonTone::Quiet,
+                               bool enabled = true, bool engaged = false);
+
+// The mark a value carries while it differs from its default: a small amber
+// arrow curling back, as in Unreal's details panel. Shown only when there is
+// something to put back; a click asks for the default. `tooltip` names the
+// default, so the operator knows what they are about to get.
+[[nodiscard]] bool reset_button(gui::UiContext &ctx, gui::UiId id,
+                                const gui::Rect &bounds,
+                                std::string_view tooltip);
+// The square a reset arrow takes at the end of a label.
+inline constexpr float reset_button_width = 18.0F;
 
 // A bordered text button for panel strips and list rows: dimmed and inert
 // while disabled, and filled with the selection colour while `selected` - a

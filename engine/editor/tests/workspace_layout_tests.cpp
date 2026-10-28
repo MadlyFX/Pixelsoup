@@ -195,9 +195,9 @@ void compositor_parameter_width_round_trips() {
   LAYOUT_CHECK(!editor::encode_workspace_layout(state));
 }
 
-// Whether the Compositor shows its minimap survives a restart; a record from
-// before the field leaves it hidden, and a flag the editor does not know is
-// refused rather than dropped.
+// Whether the Compositor shows its minimap, and whether the night dim is on,
+// survive a restart; a record from before the field leaves both off, and a
+// flag the editor does not know is refused rather than dropped.
 void compositor_minimap_round_trips() {
   editor::WorkspaceLayoutState state{sample_layout().snapshot(), 1400U, 900U};
   state.compositor_parameter_width = 300.0F;
@@ -222,8 +222,17 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(!older.value().compositor_minimap);
   LAYOUT_CHECK(older.value().compositor_parameter_width == 300.0F);
 
+  // Bit 1 is the night dim, which shares the word.
+  state.night_dim = true;
+  const auto night = editor::decode_workspace_layout(
+      editor::encode_workspace_layout(state).value());
+  LAYOUT_CHECK(night);
+  LAYOUT_CHECK(night.value().night_dim);
+  LAYOUT_CHECK(!night.value().compositor_minimap);
+  LAYOUT_CHECK(!older.value().night_dim);
+
   auto unknown = encoded;
-  unknown[44U] = std::byte{0x03U};
+  unknown[44U] = std::byte{0x05U};
   LAYOUT_CHECK(!editor::decode_workspace_layout(unknown));
 }
 

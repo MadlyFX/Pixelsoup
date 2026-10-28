@@ -85,6 +85,9 @@ namespace {
 [[nodiscard]] std::optional<Key> key_of(
     SDL_Keycode code, SDL_Keymod modifiers) noexcept {
     if ((modifiers & SDL_KMOD_CTRL) != 0U) {
+        if (code == SDLK_RETURN || code == SDLK_KP_ENTER) {
+            return Key::Take;
+        }
         if (code == SDLK_Z) {
             return (modifiers & SDL_KMOD_SHIFT) != 0U ? Key::Redo : Key::Undo;
         }

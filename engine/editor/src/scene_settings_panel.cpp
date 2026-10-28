@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -117,16 +120,63 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       changed = true;
     }
   };
+  // Every number below edits a member of the renderer or environment
+  // settings in place, so its default is the same member of fresh settings:
+  // found by where the value sits. Anything else has no default here.
+  const ProjectSettingsValues fresh{};
+  const auto default_of = [&]<typename Value>(const Value &value)
+      -> std::optional<Value> {
+    const auto at = reinterpret_cast<std::uintptr_t>(&value);
+    const auto look = [&](const auto &block,
+                          const auto &fresh_block) -> std::optional<Value> {
+      const auto begin = reinterpret_cast<std::uintptr_t>(&block);
+      if (at < begin || at + sizeof(Value) > begin + sizeof(block)) {
+        return std::nullopt;
+      }
+      Value out{};
+      std::memcpy(&out,
+                  reinterpret_cast<const unsigned char *>(&fresh_block) +
+                      (at - begin),
+                  sizeof(Value));
+      return out;
+    };
+    if (auto found = look(renderer, fresh.renderer)) return found;
+    return look(environment, fresh.environment);
+  };
+  // The reset arrow at the end of a label while its value is not the
+  // default; true on the frame it is pressed.
+  const auto reset = [&](std::string_view label, const gui::Rect &field,
+                         double value, double fallback, int precision) {
+    if (std::abs(value - fallback) <= 1.0e-6 * std::max(1.0, std::abs(fallback)) ||
+        field.x - label_width < bounds.x) {
+      return false;
+    }
+    std::array<char, 48U> tip{};
+    std::snprintf(tip.data(), tip.size(), "Reset to default (%.*f)",
+                  std::max(precision, 0), fallback);
+    return reset_button(ctx, id(label) ^ 0x5E5E7ULL,
+                        gui::Rect{field.x - reset_button_width - 2.0F, field.y,
+                                  reset_button_width, field.height},
+                        tip.data());
+  };
   const auto number = [&](std::string_view label, auto &value, double minimum,
                           double max_value, double speed = 0.01,
                           std::string_view unit = "", int precision = 3) {
     double edited{};
-    if (fields_.draw(ctx, id(label), well(label), unit,
+    const gui::Rect field = well(label);
+    if (fields_.draw(ctx, id(label), field, unit,
                      static_cast<double>(value), speed, edited, precision) &&
         std::isfinite(edited)) {
       value = static_cast<std::remove_reference_t<decltype(value)>>(
           std::clamp(edited, minimum, max_value));
       changed = true;
+    }
+    if (const auto fallback = default_of(value)) {
+      if (reset(label, field, static_cast<double>(value),
+                static_cast<double>(*fallback), precision)) {
+        value = *fallback;
+        changed = true;
+      }
     }
   };
   const auto file = [&](std::string_view label, std::string &value, FilePickerKind kind) {
@@ -206,6 +256,19 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       else {
         scene::set_environment_channel(environment, property,
                                        static_cast<float>(value));
+        changed = true;
+      }
+    }
+    const double fallback = std::clamp(
+        static_cast<double>(
+            scene::environment_channel_value(fresh.environment, property)),
+        minimum, max_value);
+    if (reset(label, field, value, fallback, 3)) {
+      if (animated && auto_key)
+        result.keys.push_back({property, fallback, false});
+      else {
+        scene::set_environment_channel(environment, property,
+                                       static_cast<float>(fallback));
         changed = true;
       }
     }

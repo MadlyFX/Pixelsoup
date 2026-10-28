@@ -22,8 +22,7 @@ constexpr float tau = 6.28318530718F;
 
 [[nodiscard]] gui::UiColor mixed(gui::UiColor a, gui::UiColor b,
                                  float t) noexcept {
-  return gui::UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
-                      a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+  return gui::blend(a, b, t);
 }
 
 void circle_outline(gui::UiContext &ctx, float cx, float cy, float radius,
@@ -238,19 +237,23 @@ bool row_flag_toggle(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
   const gui::Interaction interaction = ctx.grab(id, bounds);
   ctx.cursor_for(interaction, gui::Cursor::Hand);
   const gui::Theme &theme = ctx.theme();
+  // A round target under the pointer, centred on the mark.
+  const float target = std::min(bounds.width, bounds.height) - 4.0F;
+  const gui::Rect disc{bounds.center_x() - target * 0.5F,
+                       bounds.center_y() - target * 0.5F, target, target};
   if (interaction.held && !interaction.released) {
-    ctx.panel(bounds.inflated(-2.0F, -2.0F), theme.widget_active);
+    ctx.rounded(disc, theme.widget_active, target * 0.5F);
   } else if (interaction.hovered) {
-    ctx.panel(bounds.inflated(-2.0F, -2.0F), theme.widget_hover);
+    ctx.rounded(disc, theme.widget_hover, target * 0.5F);
   }
   // Hidden and locked are the states worth seeing from across a stage, so
-  // they are the ones drawn bright. The resting states stay in the column,
-  // faint, so the toggle is always where the eye expects it.
+  // they are the ones drawn bright, in the amber that asks for a look. The
+  // resting states stay in the column, faint, so the toggle is always where
+  // the eye expects it.
   const bool noteworthy = flag == RowFlag::Visible ? !state : state;
-  constexpr gui::UiColor lock_amber{0.96F, 0.72F, 0.28F, 1.0F};
   gui::UiColor color{};
   if (noteworthy) {
-    color = flag == RowFlag::Visible ? theme.warning : lock_amber;
+    color = theme.caution;
   } else if (interaction.hovered) {
     color = theme.text;
   } else {
@@ -293,24 +296,26 @@ void draw_indent_guides(gui::UiContext &ctx, float x, float y, float height,
 }
 
 float pill_width(const gui::UiContext &ctx, std::string_view text) {
-  return ctx.font_width(text) + 12.0F;
+  return ctx.font_width(text) + 16.0F;
 }
 
 gui::Rect draw_pill(gui::UiContext &ctx, float x, float centre_y,
                     std::string_view text, gui::UiColor color, bool filled) {
-  const float height = std::min(ctx.line_height() + 4.0F, 18.0F);
+  const float height = std::min(ctx.line_height() + 4.0F, 20.0F);
   const gui::Rect bounds{x, centre_y - height * 0.5F, pill_width(ctx, text),
                          height};
   if (filled) {
-    ctx.panel(bounds, color);
-    // Dark ink on a lit pill, so it reads like an indicator lamp.
-    ctx.label(gui::Rect{bounds.x + 6.0F, bounds.y, bounds.width - 6.0F,
+    // A lit lozenge with a soft halo and dark ink, so it reads like an
+    // indicator lamp.
+    ctx.glow(bounds, color, height * 0.5F, 8.0F);
+    ctx.rounded(bounds, color, height * 0.5F);
+    ctx.label(gui::Rect{bounds.x + 8.0F, bounds.y, bounds.width - 8.0F,
                         bounds.height},
               text, gui::UiColor{0.04F, 0.05F, 0.06F, 1.0F});
   } else {
-    ctx.panel(bounds, with_alpha(color, 0.16F));
-    ctx.outline(bounds, with_alpha(color, 0.65F));
-    ctx.label(gui::Rect{bounds.x + 6.0F, bounds.y, bounds.width - 6.0F,
+    // Unlit: a tinted capsule carrying its colour in the text.
+    ctx.rounded(bounds, with_alpha(color, 0.16F), height * 0.5F);
+    ctx.label(gui::Rect{bounds.x + 8.0F, bounds.y, bounds.width - 8.0F,
                         bounds.height},
               text, color);
   }
@@ -352,42 +357,175 @@ bool icon_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
   if (enabled) {
     ctx.cursor_for(interaction, gui::Cursor::Hand);
   }
+  // A soft rounded body that eases in under the pointer, sinks a pixel
+  // while pressed, and stays tinted with the accent while the tool is on.
+  const float half = std::min(bounds.width, bounds.height) * 0.5F;
+  const float radius = half > 14.0F ? theme.radius : half;
+  const float hover = ctx.ease(
+      id ^ gui::ui_id("icon-button.hover"),
+      enabled && (interaction.hovered || interaction.held) ? 1.0F : 0.0F);
   if (interaction.held && !interaction.released) {
-    ctx.panel(bounds, theme.widget_active);
+    ctx.rounded(bounds.inflated(-1.0F, -1.0F), theme.widget_active, radius);
   } else if (engaged) {
-    ctx.panel(bounds, with_alpha(theme.accent, 0.20F));
-    gui::Rect underline = bounds;
-    ctx.panel(gui::cut_bottom(underline, 2.0F), theme.accent);
-  } else if (interaction.hovered) {
-    ctx.panel(bounds, theme.widget_hover);
+    ctx.rounded(bounds,
+                mixed(with_alpha(theme.accent, 0.18F),
+                      with_alpha(theme.accent, 0.28F), hover),
+                radius);
+  } else if (hover > 0.0F) {
+    ctx.rounded(bounds, with_alpha(theme.widget_hover, hover), radius);
   }
   const gui::UiColor color =
       !enabled ? with_alpha(theme.text_muted, 0.4F)
                : (engaged ? theme.accent
-                          : (interaction.hovered ? theme.text
-                                                 : mixed(theme.text_muted,
-                                                         theme.text, 0.35F)));
+                          : mixed(mixed(theme.text_muted, theme.text, 0.45F),
+                                  theme.text, hover));
   gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(), bounds.center_y(),
                  color);
   ctx.tooltip(bounds, tooltip);
   return enabled && interaction.clicked;
 }
 
+bool tool_key(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
+              gui::Icon icon, bool engaged, std::string_view tooltip,
+              gui::UiColor engaged_color, float icon_scale) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  ctx.cursor_for(interaction, gui::Cursor::Hand);
+  const gui::Theme &theme = ctx.theme();
+  const float hover = ctx.ease(id ^ gui::ui_id("timeline.icon.hover"),
+                               interaction.hovered ? 1.0F : 0.0F);
+  const float radius = std::min(bounds.height * 0.5F, theme.radius);
+  const bool pressed = interaction.held && !interaction.released;
+  ctx.rounded(pressed ? bounds.inflated(-1.0F, -1.0F) : bounds,
+              pressed ? theme.widget_active
+                      : (engaged ? with_alpha(engaged_color, 0.22F + 0.08F * hover)
+                                 : mixed(theme.widget, theme.widget_hover, hover)),
+              radius);
+  gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(), bounds.center_y(),
+                 engaged ? engaged_color
+                         : mixed(theme.text_muted, theme.text, hover),
+                 icon_scale);
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
+bool pill_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
+                 std::optional<gui::Icon> icon, std::string_view label,
+                 std::string_view tooltip, ButtonTone tone, bool enabled,
+                 bool engaged) {
+  const gui::Theme &theme = ctx.theme();
+  const gui::Interaction interaction =
+      enabled ? ctx.grab(id, bounds) : gui::Interaction{};
+  if (enabled) {
+    ctx.cursor_for(interaction, gui::Cursor::Hand);
+  }
+  const float hover = ctx.ease(
+      id ^ gui::ui_id("pill-button.hover"),
+      enabled && (interaction.hovered || interaction.held) ? 1.0F : 0.0F);
+  const bool pressed = interaction.held && !interaction.released;
+  const gui::Rect shape = pressed ? bounds.inflated(-1.0F, -1.0F) : bounds;
+  const float radius = shape.height * 0.5F;
+  gui::UiColor fill{};
+  gui::UiColor ink = theme.text;
+  switch (tone) {
+  case ButtonTone::Quiet:
+    fill = engaged ? with_alpha(theme.accent, 0.2F + 0.08F * hover)
+                   : mixed(theme.widget, theme.widget_hover, hover);
+    ink = engaged ? theme.accent : theme.text;
+    break;
+  case ButtonTone::Primary:
+    fill = with_alpha(theme.accent, 0.22F + 0.12F * hover);
+    break;
+  case ButtonTone::Danger:
+    fill = with_alpha(theme.warning, 0.18F * hover);
+    ink = theme.warning;
+    break;
+  }
+  if (!enabled) {
+    fill = with_alpha(theme.widget, 0.5F);
+    ink = with_alpha(theme.text_muted, 0.6F);
+  } else if (pressed) {
+    fill = theme.widget_active;
+  }
+  ctx.rounded(shape, fill, radius);
+  if (tone == ButtonTone::Danger && enabled) {
+    ctx.rounded_outline(shape, with_alpha(theme.warning, 0.6F), radius, 1.5F);
+  }
+  // The icon and the word as one centred group.
+  constexpr float icon_width = 16.0F;
+  constexpr float gap = 6.0F;
+  const float text_width = label.empty() ? 0.0F : ctx.font_width(label);
+  const float content = (icon.has_value() ? icon_width : 0.0F) +
+                        (icon.has_value() && !label.empty() ? gap : 0.0F) +
+                        text_width;
+  float x = bounds.center_x() - content * 0.5F;
+  if (icon.has_value()) {
+    gui::draw_icon(ctx.draw_list(), *icon, x + icon_width * 0.5F,
+                   bounds.center_y(), ink);
+    x += icon_width + gap;
+  }
+  if (!label.empty()) {
+    ctx.label(gui::Rect{x, bounds.y,
+                        std::max(bounds.right() - x - 4.0F, 0.0F),
+                        bounds.height},
+              label, ink);
+  }
+  if (!tooltip.empty()) {
+    ctx.tooltip(bounds, tooltip);
+  }
+  return enabled && interaction.clicked;
+}
+
+bool reset_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
+                  std::string_view tooltip) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  ctx.cursor_for(interaction, gui::Cursor::Hand);
+  const gui::Theme &theme = ctx.theme();
+  const float side = std::min({bounds.width, bounds.height, 18.0F});
+  const gui::Rect disc{bounds.center_x() - side * 0.5F,
+                       bounds.center_y() - side * 0.5F, side, side};
+  if (interaction.hovered || interaction.held) {
+    ctx.rounded(disc, with_alpha(theme.caution, interaction.held ? 0.32F : 0.18F),
+                side * 0.5F);
+  }
+  gui::draw_icon(ctx.draw_list(), gui::Icon::Reset, bounds.center_x(),
+                 bounds.center_y(),
+                 interaction.hovered ? theme.caution
+                                     : with_alpha(theme.caution, 0.8F),
+                 0.85F);
+  ctx.tooltip(bounds, tooltip);
+  return interaction.clicked;
+}
+
 bool action_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
                    std::string_view label, bool enabled, bool selected) {
   const gui::Interaction interaction =
       enabled ? ctx.grab(id, bounds) : gui::Interaction{};
-  const gui::UiColor fill = !enabled
-      ? ctx.theme().track
-      : (interaction.held
-             ? ctx.theme().widget_active
-             : (selected ? ctx.theme().selection
-                         : (interaction.hovered ? ctx.theme().widget_hover
-                                                : ctx.theme().widget)));
-  ctx.panel(bounds, fill);
-  ctx.outline(bounds, enabled ? ctx.theme().header : ctx.theme().divider);
-  ctx.label(bounds, label, enabled ? ctx.theme().text
-                                  : ctx.theme().text_muted);
+  if (enabled) {
+    ctx.cursor_for(interaction, gui::Cursor::Hand);
+  }
+  const gui::Theme &theme = ctx.theme();
+  const float hover = ctx.ease(
+      id ^ gui::ui_id("action-button.hover"),
+      enabled && (interaction.hovered || interaction.held) ? 1.0F : 0.0F);
+  const bool pressed = interaction.held && !interaction.released;
+  const gui::UiColor fill =
+      !enabled ? theme.track
+               : (pressed ? theme.widget_active
+                          : (selected ? mixed(theme.selection,
+                                              with_alpha(theme.accent, 0.4F),
+                                              hover * 0.3F)
+                                      : mixed(theme.widget, theme.widget_hover,
+                                              hover)));
+  // A pill, so it reads as something to press; a selected toggle is ringed
+  // in the accent as well as tinted.
+  const gui::Rect shape = pressed ? bounds.inflated(-1.0F, -1.0F) : bounds;
+  const float radius = std::min(shape.height * 0.5F, theme.radius * 1.5F);
+  ctx.rounded(shape, fill, radius);
+  if (selected && enabled) {
+    ctx.rounded_outline(shape, with_alpha(theme.accent, 0.55F), radius);
+  }
+  ctx.label_centered(gui::inset(bounds, gui::Padding{6.0F, 0.0F, 6.0F, 0.0F}),
+                     label, enabled ? theme.text : theme.text_muted);
   return enabled && interaction.clicked;
 }
 
@@ -400,8 +538,10 @@ void draw_drop_target(gui::UiContext &ctx, const gui::Rect &area,
   const gui::UiColor color =
       with_alpha(ctx.theme().accent, hovered ? 1.0F : 0.35F);
   const float stroke = hovered ? 2.0F : 1.0F;
-  ctx.panel(area, with_alpha(ctx.theme().accent, hovered ? 0.12F : 0.025F));
-  ctx.outline(area, color, stroke);
+  const float radius = ctx.theme().radius_large;
+  ctx.rounded(area, with_alpha(ctx.theme().accent, hovered ? 0.12F : 0.025F),
+              radius);
+  ctx.rounded_outline(area, color, radius, stroke);
 
   constexpr float margin = 9.0F;
   constexpr float callout_height = 30.0F;
@@ -411,11 +551,11 @@ void draw_drop_target(gui::UiContext &ctx, const gui::Rect &area,
   if (callout.width <= 0.0F || callout.height <= 0.0F) {
     return;
   }
-  ctx.panel(callout, hovered ? ctx.theme().widget_active : ctx.theme().header);
-  ctx.outline(callout, color, stroke);
+  ctx.rounded(callout, hovered ? ctx.theme().widget_active : ctx.theme().header,
+              callout.height * 0.5F);
+  ctx.rounded_outline(callout, color, callout.height * 0.5F, stroke);
   gui::Rect text = callout;
-  ctx.panel(gui::cut_left(text, 3.0F), color);
-  ctx.label(gui::inset(text, gui::Padding{7.0F, 0.0F, 4.0F, 0.0F}),
+  ctx.label(gui::inset(text, gui::Padding{12.0F, 0.0F, 8.0F, 0.0F}),
             instruction, hovered ? ctx.theme().text : ctx.theme().text_muted);
 }
 
