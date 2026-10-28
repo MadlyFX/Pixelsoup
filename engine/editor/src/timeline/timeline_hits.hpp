@@ -50,9 +50,9 @@ struct HitTarget final {
 [[nodiscard]] inline float mark_distance(const gui::Rect &mark, float x,
                                          float y) noexcept {
   const float dx =
-      std::max({mark.x - x, 0.0F, x - (mark.x + mark.width)});
+      std::max({mark.x - x, 0.0F, x - (mark.right())});
   const float dy =
-      std::max({mark.y - y, 0.0F, y - (mark.y + mark.height)});
+      std::max({mark.y - y, 0.0F, y - (mark.bottom())});
   return std::sqrt(dx * dx + dy * dy);
 }
 

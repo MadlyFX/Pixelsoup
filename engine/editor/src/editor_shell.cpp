@@ -872,7 +872,7 @@ struct MenuRow final {
                                               float viewport_width,
                                               std::size_t project_count) {
   constexpr float preferred_width = 420.0F;
-  const float right_x = file_popup.x + file_popup.width;
+  const float right_x = file_popup.right();
   const float right_space = std::max(viewport_width - right_x, 0.0F);
   const bool opens_right = right_space >= file_popup.x;
   const float width = std::min(preferred_width,
@@ -1068,7 +1068,7 @@ draw_application_header(gui::UiContext &ui, float width,
                                            project.dirty ? 19.0F : 7.0F, 0.0F}),
              name, ui.theme().text);
     if (project.dirty) {
-      draw_status_dot(ui, chip.x + chip.width - 12.0F,
+      draw_status_dot(ui, chip.right() - 12.0F,
                       chip.y + chip.height * 0.5F, ui.theme().playhead, 3.0F);
       ui.tooltip(chip, "Unsaved changes");
     } else if (!project.path.empty()) {
@@ -4904,7 +4904,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       char text[48]{};
       std::snprintf(text, sizeof(text), "CAMERA SPEED %.2f", impl.fly_speed);
       const gui::Rect badge{viewport.image.x + 8.0F,
-                            viewport.image.y + viewport.image.height - 32.0F,
+                            viewport.image.bottom() - 32.0F,
                             156.0F, 24.0F};
       ui.panel(badge, ui.theme().background);
       ui.outline(badge, ui.theme().divider);
@@ -5661,7 +5661,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
       const gui::Rect output_bar{bounds.x, bounds.y, bounds.width, 26.0F};
       ui.panel(output_bar, ui.theme().header);
-      ui.panel(gui::Rect{output_bar.x, output_bar.y + output_bar.height - 1.0F,
+      ui.panel(gui::Rect{output_bar.x, output_bar.bottom() - 1.0F,
                          output_bar.width, 1.0F},
                ui.theme().divider);
       // The tab already says Program Output; the bar names the mode only when
@@ -5861,7 +5861,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                             static_cast<std::size_t>(std::max(preview_length, 0)))},
                ui.theme().text_muted);
       static_cast<void>(draw_pill(
-          ui, footer.x + footer.width - state_width - corner,
+          ui, footer.right() - state_width - corner,
           footer.y + footer.height * 0.5F, state_text, state_color,
           program_preview_ok && !program_preview_held &&
               !program_assets.waiting && timeline.playing));
@@ -5898,9 +5898,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         ui.label(gui::Rect{header.x + 10.0F + ui.font_width("SCENES") + 8.0F,
                            header.y, 40.0F, header.height},
                  count, with_alpha(theme.text_muted, 0.7F));
-        const gui::Rect add_scene{header.x + header.width - 56.0F,
+        const gui::Rect add_scene{header.right() - 56.0F,
                                   header.y + 2.0F, 26.0F, 24.0F};
-        const gui::Rect copy_scene{header.x + header.width - 29.0F,
+        const gui::Rect copy_scene{header.right() - 29.0F,
                                    header.y + 2.0F, 26.0F, 24.0F};
         if (icon_button(ui, gui::ui_id("editor.scene.create"), add_scene,
                         gui::Icon::Plus, "New scene", false,
@@ -5917,7 +5917,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.scene_list_offset = max_offset + 1U;
         }
 
-        float row_y = header.y + header.height + 2.0F;
+        float row_y = header.bottom() + 2.0F;
         const gui::Rect scene_rows{bounds.x, row_y, bounds.width,
                                    static_cast<float>(visible) *
                                        scene_row_height};
@@ -5962,7 +5962,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
 
           // Right to left: the hover cross, the on-air pill, then the name.
           constexpr float remove_width = 24.0F;
-          const gui::Rect remove{row.x + row.width - remove_width, row.y,
+          const gui::Rect remove{row.right() - remove_width, row.y,
                                  remove_width, row.height};
           const std::string_view tag =
               is_program ? "PGM" : (is_rehearsal ? "PVW" : (!compatible ? "SIZE" : ""));
@@ -5977,7 +5977,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           const BlenderSceneState *const blender =
               blender_link == project.blender_scenes.end() ? nullptr : &*blender_link;
           const gui::Rect blender_hit{row.x + 4.0F, row.y, 22.0F, row.height};
-          const float name_x = blender_hit.x + blender_hit.width + 4.0F;
+          const float name_x = blender_hit.right() + 4.0F;
           const gui::Rect name_bounds{
               name_x, row.y,
               std::max(remove.x - tag_width - name_x - 4.0F, 0.0F),
@@ -6132,7 +6132,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                   static_cast<float>(switcher.scenes.size()),
               10.0F);
           const float travel = track_height - thumb;
-          ui.panel(gui::Rect{bounds.x + bounds.width - 3.0F,
+          ui.panel(gui::Rect{bounds.right() - 3.0F,
                              scene_rows.y + travel *
                                                 static_cast<float>(impl.scene_list_offset) /
                                                 static_cast<float>(max_offset),
@@ -7813,7 +7813,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     ui.outline(bounds, ui.theme().accent);
     const std::string_view label = dragging_asset.has_value() ? "Replace source" : "Replace layer";
     const float label_width = ui.font_width(label) + 16.0F;
-    const gui::Rect badge{bounds.x + bounds.width - label_width, bounds.y,
+    const gui::Rect badge{bounds.right() - label_width, bounds.y,
                            label_width, std::min(bounds.height, 24.0F)};
     ui.panel(badge, ui.theme().accent);
     ui.label({badge.x + 8.0F, badge.y, badge.width - 8.0F, badge.height},

@@ -2,6 +2,7 @@
 
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/layout.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 
 #include <algorithm>
 
@@ -56,26 +57,19 @@ layout_timeline(const gui::Rect &bounds, float operator_list_width) noexcept {
   out.list_width = std::min(
       std::max(preferred_list, std::min(minimum_list_width, bounds.width)),
       std::max(bounds.width - minimum_graph_width, 0.0F));
-  out.toolbar = gui::Rect{bounds.x, bounds.y, bounds.width, toolbar_height};
-  out.ruler = gui::Rect{bounds.x, bounds.y + toolbar_height, bounds.width,
-                        ruler_height};
-  out.strip = gui::Rect{bounds.x, out.ruler.y + out.ruler.height, bounds.width,
-                        strip_height};
-  const float below_strip =
-      std::max(bounds.height - toolbar_height - ruler_height - strip_height,
-               0.0F);
-  const float navigator = std::min(navigator_height, below_strip);
-  out.rows = gui::Rect{bounds.x, out.strip.y + out.strip.height, bounds.width,
-                       below_strip - navigator};
-  out.navigator = gui::Rect{bounds.x, out.rows.y + out.rows.height,
-                            bounds.width, navigator};
-  out.graph = gui::Rect{bounds.x + out.list_width, out.ruler.y,
-                        std::max(bounds.width - out.list_width, 0.0F),
-                        out.ruler.height + out.strip.height + out.rows.height};
-  out.strip_graph =
-      gui::Rect{out.graph.x, out.strip.y, out.graph.width, out.strip.height};
-  out.navigator_graph = gui::Rect{out.graph.x, out.navigator.y,
-                                  out.graph.width, out.navigator.height};
+  gui::Rect rest = bounds;
+  out.toolbar = gui::cut_top(rest, toolbar_height);
+  out.ruler = gui::cut_top(rest, ruler_height);
+  out.strip = gui::cut_top(rest, strip_height);
+  out.navigator = gui::cut_bottom(rest, navigator_height);
+  out.rows = rest;
+  // Time runs right of the list, from the ruler down to the rows' foot; the
+  // strip and the navigator each have their part of it.
+  gui::Rect time = gui::span_y(bounds, out.ruler.y, out.rows.bottom());
+  static_cast<void>(gui::cut_left(time, out.list_width));
+  out.graph = time;
+  out.strip_graph = gui::cell(out.graph, out.strip);
+  out.navigator_graph = gui::cell(out.graph, out.navigator);
   return out;
 }
 

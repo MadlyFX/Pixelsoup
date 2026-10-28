@@ -48,15 +48,16 @@ void TimelinePanel::resize_clip_rows(Pass &p) {
   if (row_resize_.clip != doc::NodeId{} && !ctx.pointer_down()) {
     row_resize_ = RowResize{};
   }
-  ctx.push_clip(gui::Rect{rows_bounds.x, rows_bounds.y, list_width,
-                          rows_bounds.height});
+  const gui::Rect list = gui::span_x(rows_bounds, rows_bounds.x,
+                                     rows_bounds.x + list_width);
+  ctx.push_clip(list);
   for (const Row &row : rows) {
     if (row.kind != Row::Kind::Layer || row.surface ||
         row.element_kind != ElementKind::Media) {
       continue;
     }
     const float bottom = rows_bounds.y + row.top - row_scroll_ + row.height;
-    if (bottom < rows_bounds.y || bottom > rows_bounds.y + rows_bounds.height) {
+    if (bottom < rows_bounds.y || bottom > rows_bounds.bottom()) {
       continue;
     }
     const ElementInfo *const element = find_element(elements, row.node);
@@ -65,9 +66,9 @@ void TimelinePanel::resize_clip_rows(Pass &p) {
     }
     // The edge answers just either side of the rule between the rows, so
     // it never takes the row's own name or toggles from it.
+    const gui::Rect edge_bounds = gui::rule_y(list, bottom, 6.0F);
     const gui::Interaction edge =
-        ctx.grab(mix(id_, "clip row edge", row.node.value()),
-                 gui::Rect{rows_bounds.x, bottom - 3.0F, list_width, 6.0F});
+        ctx.grab(mix(id_, "clip row edge", row.node.value()), edge_bounds);
     ctx.cursor_for(edge, gui::Cursor::ResizeVertical);
     if (edge.pressed) {
       row_resize_ = RowResize{row.node, ctx.shift_held(),
@@ -94,7 +95,7 @@ void TimelinePanel::resize_clip_rows(Pass &p) {
       ctx.panel(gui::Rect{rows_bounds.x, bottom - 1.5F, list_width, 2.0F},
                 sizing ? ctx.theme().accent : ctx.theme().text_muted);
     }
-    ctx.tooltip(gui::Rect{rows_bounds.x, bottom - 3.0F, list_width, 6.0F},
+    ctx.tooltip(edge_bounds,
                 "Drag to size this clip row; Shift sizes every clip row");
   }
   ctx.pop_clip();
@@ -112,15 +113,19 @@ void TimelinePanel::draw_navigator(Pass &p) {
   }
 
   ctx.panel(navigator, theme.header);
-  ctx.panel(gui::Rect{navigator.x, navigator.y, navigator.width, 1.0F},
-            theme.divider);
+  {
+    gui::Rect rule = navigator;
+    ctx.panel(gui::cut_top(rule, 1.0F), theme.divider);
+  }
+  // Under the layer list, the foot's buttons sit 2 below its rule and 1
+  // above its bottom.
+  gui::Rect list_foot = gui::inset(navigator, gui::Padding{6.0F, 2.0F, 0.0F, 1.0F});
+  list_foot.width = std::max(list_width - 10.0F, 0.0F);
 
   // The keyboard reference, where the hand finds it without a menu.
   if (list_width >= 40.0F &&
       text_toggle(ctx, mix(id_, "shortcut sheet"),
-                  gui::Rect{navigator.x + 6.0F, navigator.y + 2.0F, 20.0F,
-                            navigator.height - 3.0F},
-                  "?", shortcut_sheet_open_,
+                  gui::cut_left(list_foot, 20.0F), "?", shortcut_sheet_open_,
                   "Timeline keyboard shortcuts (?)")) {
     shortcut_sheet_open_ = true;
   }
@@ -132,8 +137,11 @@ void TimelinePanel::draw_navigator(Pass &p) {
       choice_width * static_cast<float>(height_choices.size()) + 4.0F;
   const float caption_width = ctx.font_width("CLIP ROWS") + 12.0F;
   if (list_width >= choices_width + caption_width + 8.0F) {
-    float x = navigator.x + list_width - choices_width - 4.0F;
-    ctx.label(gui::Rect{x - caption_width, navigator.y + 1.0F, caption_width,
+    // At the list's right end, the caption then the choices, each choice
+    // 2 narrower than its step.
+    gui::Rect choices = gui::cut_right(list_foot, choices_width);
+    const gui::Rect caption = gui::cut_right(list_foot, caption_width);
+    ctx.label(gui::Rect{caption.x, navigator.y + 1.0F, caption.width,
                         navigator.height - 1.0F},
               "CLIP ROWS", theme.text_muted);
     for (const HeightChoice &choice : height_choices) {
@@ -141,13 +149,12 @@ void TimelinePanel::draw_navigator(Pass &p) {
           rows_state_.clip_row_heights.empty() &&
           std::fabs(rows_state_.clip_row_height - choice.height) < 0.5F;
       if (text_toggle(ctx, mix(id_, "clip row height", choice.label.front()),
-                      gui::Rect{x, navigator.y + 2.0F, choice_width - 2.0F,
-                                navigator.height - 3.0F},
+                      gui::inset(gui::cut_left(choices, choice_width),
+                                 gui::Padding{0.0F, 0.0F, 2.0F, 0.0F}),
                       choice.label, engaged, choice.tip)) {
         rows_state_.clip_row_height = choice.height;
         rows_state_.clip_row_heights.clear();
       }
-      x += choice_width;
     }
   }
   if (bar.width <= 2.0F * navigator_minimum_thumb) {
@@ -158,8 +165,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
   // it, and the view itself, so the thumb always lies on the bar. A drag
   // holds the span it began with, so the thumb tracks the pointer.
   const double view_left = time_axis_.left_frame;
-  const double view_right =
-      time_axis_.frame(graph.x + graph.width, graph.x);
+  const double view_right = time_axis_.frame(graph.right(), graph.x);
   if (navigator_.drag == NavigatorDrag::None) {
     double begin = static_cast<double>(p.first);
     double end = static_cast<double>(p.last) + 1.0;
@@ -184,9 +190,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
   }
   const double begin = std::min(navigator_.begin, view_left);
   const double end = std::max(navigator_.end, view_right);
-  const gui::Rect track{bar.x + 2.0F, bar.y + 3.0F,
-                        std::max(bar.width - 4.0F, 1.0F),
-                        std::max(bar.height - 5.0F, 1.0F)};
+  const gui::Rect track = gui::inset(bar, gui::Padding{2.0F, 3.0F, 2.0F, 2.0F});
   const double scale =
       static_cast<double>(track.width) / std::max(end - begin, 1.0);
   const auto to_x = [&](double frame) noexcept {
@@ -198,23 +202,21 @@ void TimelinePanel::draw_navigator(Pass &p) {
   if (thumb_right - thumb_left < navigator_minimum_thumb) {
     const float centre = (thumb_left + thumb_right) * 0.5F;
     thumb_left = std::clamp(centre - navigator_minimum_thumb * 0.5F, track.x,
-                            track.x + track.width - navigator_minimum_thumb);
+                            track.right() - navigator_minimum_thumb);
     thumb_right = thumb_left + navigator_minimum_thumb;
   }
 
   // Grips first, so an end wins over the body it overlaps; the bare track
   // last, so a press beside the thumb jumps the view there.
-  const gui::Interaction left_it = ctx.grab(
-      mix(id_, "navigator left"),
-      gui::Rect{thumb_left - navigator_grip_reach, bar.y,
-                navigator_grip_reach * 2.0F, bar.height});
-  const gui::Interaction right_it = ctx.grab(
-      mix(id_, "navigator right"),
-      gui::Rect{thumb_right - navigator_grip_reach, bar.y,
-                navigator_grip_reach * 2.0F, bar.height});
-  const gui::Interaction thumb_it = ctx.grab(
-      mix(id_, "navigator thumb"),
-      gui::Rect{thumb_left, bar.y, thumb_right - thumb_left, bar.height});
+  const gui::Interaction left_it =
+      ctx.grab(mix(id_, "navigator left"),
+               gui::rule_x(bar, thumb_left, navigator_grip_reach * 2.0F));
+  const gui::Interaction right_it =
+      ctx.grab(mix(id_, "navigator right"),
+               gui::rule_x(bar, thumb_right, navigator_grip_reach * 2.0F));
+  const gui::Interaction thumb_it =
+      ctx.grab(mix(id_, "navigator thumb"),
+               gui::span_x(bar, thumb_left, thumb_right));
   const gui::Interaction track_it =
       ctx.grab(mix(id_, "navigator track"), bar);
   ctx.cursor_for(left_it, gui::Cursor::ResizeHorizontal);
@@ -309,20 +311,19 @@ void TimelinePanel::draw_navigator(Pass &p) {
   {
     const float in_x = to_x(static_cast<double>(p.first));
     const float out_x = to_x(static_cast<double>(p.last) + 1.0);
-    ctx.panel(gui::Rect{in_x, track.y, std::max(out_x - in_x, 1.0F),
-                        track.height},
+    ctx.panel(gui::span_x(track, in_x, std::max(out_x, in_x + 1.0F)),
               alpha(theme.accent, 0.16F));
   }
   const bool thumb_hot = navigator_.drag != NavigatorDrag::None ||
                          thumb_it.hovered || left_it.hovered ||
                          right_it.hovered;
-  const gui::Rect thumb{thumb_left, bar.y + 2.0F, thumb_right - thumb_left,
-                        bar.height - 3.0F};
+  const gui::Rect thumb = gui::span_x(
+      gui::inset(bar, gui::Padding{0.0F, 2.0F, 0.0F, 1.0F}), thumb_left,
+      thumb_right);
   ctx.panel(thumb, thumb_hot ? theme.widget_hover : theme.widget);
   ctx.outline(thumb, thumb_hot ? theme.accent : theme.text_muted);
   const auto grip = [&](float x, bool hot) {
-    ctx.panel(gui::Rect{x - 1.0F, thumb.y + 3.0F, 2.0F,
-                        std::max(thumb.height - 6.0F, 1.0F)},
+    ctx.panel(gui::rule_x(gui::inset(thumb, 0.0F, 3.0F), x, 2.0F),
               hot ? theme.accent : theme.text);
   };
   grip(thumb_left + 4.0F,
@@ -336,7 +337,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
     const float x0 = to_x(static_cast<double>(element.timing.start));
     const float x1 = to_x(static_cast<double>(element.timing.start) +
                           static_cast<double>(element.timing.duration));
-    ctx.panel(gui::Rect{x0, track.y + track.height * 0.5F - 1.0F,
+    ctx.panel(gui::Rect{x0, track.center_y() - 1.0F,
                         std::max(x1 - x0, 1.0F), 3.0F},
               alpha(theme.text_muted, 0.7F));
   }

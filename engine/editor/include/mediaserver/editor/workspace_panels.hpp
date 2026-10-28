@@ -14,6 +14,7 @@
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/selection.hpp>
+#include <mediaserver/gui/canvas_view.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -582,12 +583,11 @@ public:
   [[nodiscard]] std::optional<gui::UiPoint>
   node_drop_position(float screen_x, float screen_y, float node_width,
                      float node_height) const noexcept {
-    if (!last_canvas_.contains(screen_x, screen_y) || zoom_ <= 0.0F) {
+    if (!last_canvas_.contains(screen_x, screen_y) || view_.zoom <= 0.0F) {
       return std::nullopt;
     }
-    return gui::UiPoint{
-        (screen_x - last_canvas_.x - pan_x_) / zoom_ - node_width * 0.5F,
-        (screen_y - last_canvas_.y - pan_y_) / zoom_ - node_height * 0.5F};
+    const gui::UiPoint at = view_.to_graph(last_canvas_, screen_x, screen_y);
+    return gui::UiPoint{at.x - node_width * 0.5F, at.y - node_height * 0.5F};
   }
 
   // Uses the same pan, zoom, dimensions and stacking order as the drawn nodes.
@@ -661,9 +661,9 @@ public:
   [[nodiscard]] bool minimap_shown() const noexcept { return minimap_; }
   void show_minimap(bool shown) noexcept { minimap_ = shown; }
 
-  [[nodiscard]] float graph_zoom() const noexcept { return zoom_; }
+  [[nodiscard]] float graph_zoom() const noexcept { return view_.zoom; }
   [[nodiscard]] gui::UiPoint graph_pan() const noexcept {
-    return gui::UiPoint{pan_x_, pan_y_};
+    return gui::UiPoint{view_.pan_x, view_.pan_y};
   }
 
   void reset_project_state() noexcept {
@@ -676,9 +676,7 @@ public:
     add_category_.reset();
     node_search_.clear();
     parameter_fields_ = NumberField{};
-    pan_x_ = 0.0F;
-    pan_y_ = 0.0F;
-    zoom_ = 1.0F;
+    view_ = gui::CanvasView{};
     panning_ = false;
     last_canvas_ = {};
     pending_moves_.clear();
@@ -939,9 +937,8 @@ private:
   float parameter_thumb_grab_{};
   // One bit per collapsible Parameters section; set means collapsed.
   core::u32 collapsed_sections_{};
-  float pan_x_{};
-  float pan_y_{};
-  float zoom_{1.0F};
+  // The graph's pan and zoom over the canvas.
+  gui::CanvasView view_{};
   bool panning_{};
   gui::Rect last_canvas_{};
 };

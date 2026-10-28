@@ -89,7 +89,7 @@ constexpr float floating_edge_reach = 5.0F;
 
 [[nodiscard]] Rect floating_right_edge(
     const DockLayout::Floating& frame) noexcept {
-    return Rect{frame.frame.x + frame.frame.width - floating_edge_reach,
+    return Rect{frame.frame.right() - floating_edge_reach,
                 frame.frame.y,
                 floating_edge_reach * 2.0F,
                 std::max(frame.frame.height - floating_grip_size, 0.0F)};
@@ -98,7 +98,7 @@ constexpr float floating_edge_reach = 5.0F;
 [[nodiscard]] Rect floating_bottom_edge(
     const DockLayout::Floating& frame) noexcept {
     return Rect{frame.frame.x,
-                frame.frame.y + frame.frame.height - floating_edge_reach,
+                frame.frame.bottom() - floating_edge_reach,
                 std::max(frame.frame.width - floating_grip_size, 0.0F),
                 floating_edge_reach * 2.0F};
 }
@@ -116,9 +116,9 @@ DockSide drop_side(const Rect& node, float x, float y, float edge) noexcept {
     // proportional terms wins a corner rather than the widest one.
     const float scores[] = {
         (x - node.x) / band_x,
-        (node.x + node.width - x) / band_x,
+        (node.right() - x) / band_x,
         (y - node.y) / band_y,
-        (node.y + node.height - y) / band_y,
+        (node.bottom() - y) / band_y,
     };
     constexpr DockSide sides[] = {
         DockSide::Left, DockSide::Right, DockSide::Top, DockSide::Bottom};
@@ -806,9 +806,9 @@ void DockLayout::solve(const Rect& area, const DockMetrics& metrics) {
             placed.width = std::min(placed.width, area.width);
             placed.height = std::min(placed.height, area.height);
             placed.x = std::clamp(placed.x, area.x,
-                                  area.x + area.width - placed.width);
+                                  area.right() - placed.width);
             placed.y = std::clamp(placed.y, area.y,
-                                  area.y + area.height - placed.height);
+                                  area.bottom() - placed.height);
         }
     }
     // Floating frames after the docked tree, in stacking order, so the leaf
@@ -1077,7 +1077,7 @@ void DockHost::draw_leaf(
         const float width = ctx.font_width(title) + theme.padding * 3.0F +
                             tab_close_extent;
         const Rect tab{pen, strip.y, width, strip.height};
-        if (tab.x >= strip.x + strip.width) {
+        if (tab.x >= strip.right()) {
             // Run off the end of the strip: clipped away, so it must not be
             // clickable either. Scrolling the strip is a later refinement.
             pen += width;
@@ -1311,14 +1311,14 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         const UiColor grip_color = resize_held
             ? ctx.theme().accent
             : (resize_hovered ? ctx.theme().text : ctx.theme().text_muted);
-        ctx.draw_list().add_line(grip.x + 6.0F, grip.y + grip.height - 3.0F,
-                                 grip.x + grip.width - 3.0F,
+        ctx.draw_list().add_line(grip.x + 6.0F, grip.bottom() - 3.0F,
+                                 grip.right() - 3.0F,
                                  grip.y + 6.0F, 1.0F, grip_color);
-        ctx.draw_list().add_line(grip.x + 10.0F, grip.y + grip.height - 3.0F,
-                                 grip.x + grip.width - 3.0F,
+        ctx.draw_list().add_line(grip.x + 10.0F, grip.bottom() - 3.0F,
+                                 grip.right() - 3.0F,
                                  grip.y + 10.0F, 1.0F, grip_color);
-        ctx.draw_list().add_line(grip.x + 14.0F, grip.y + grip.height - 3.0F,
-                                 grip.x + grip.width - 3.0F,
+        ctx.draw_list().add_line(grip.x + 14.0F, grip.bottom() - 3.0F,
+                                 grip.right() - 3.0F,
                                  grip.y + 14.0F, 1.0F, grip_color);
         const bool edge_held =
             ctx.active() == resize_edge_id(frame.node, true) ||

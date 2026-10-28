@@ -54,17 +54,8 @@ void TimelinePanel::draw_ruler(Pass &p) {
   const gui::Rect auto_key =
       gui::inset(gui::cut_right(search_bounds, auto_key_width),
                  gui::Padding{0.0F, 0.0F, 3.0F, 0.0F});
-  static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
-  if (search_.empty() && ctx.focus() != search_id) {
-    ctx.label(gui::inset(search_bounds, gui::Padding{19.0F, 0.0F, 4.0F, 0.0F}),
-              "Search Timeline...", theme.text_muted);
-  }
-  const float search_cy = search_bounds.y + search_bounds.height * 0.46F;
-  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 3.0F, theme.text_muted);
-  draw_circle(ctx, search_bounds.x + 9.0F, search_cy, 1.7F, theme.widget);
-  ctx.draw_list().add_line(search_bounds.x + 11.0F, search_cy + 2.0F,
-                           search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
-                           theme.text_muted);
+  static_cast<void>(search_box(ctx, search_id, search_bounds, search_,
+                               "Search Timeline..."));
   if (auto_key_width > 0.0F &&
       text_toggle(ctx, mix(id_, "auto key"), auto_key, "Auto Key", auto_key_,
                   "Auto Key (Shift+K): edits to animated properties create keys. "
@@ -128,7 +119,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
   {
     // Labels drop the hours while the whole view is inside the first one,
     // which leaves room for a label every second at an ordinary zoom.
-    const double view_right = x_to_frame(graph.x + graph.width);
+    const double view_right = x_to_frame(graph.right());
     const bool first_hour =
         time_axis_.left_frame > -static_cast<double>(fps) * 3'600.0 &&
         view_right < static_cast<double>(fps) * 3'600.0;
@@ -158,7 +149,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
     }
     for (std::size_t count = 0U; count < 512U; ++count, tick += step) {
       const float tick_x = frame_to_x(static_cast<double>(tick));
-      if (tick_x > graph.x + graph.width) {
+      if (tick_x > graph.right()) {
         break;
       }
       if (minor > 0) {
@@ -168,7 +159,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
           if (sub_x >= graph.x) {
             const bool half = halves && (sub - tick) * 2 == step;
             const float tall = half ? 5.0F : 3.0F;
-            ctx.draw_list().add_rect(sub_x, ruler.y + ruler.height - tall,
+            ctx.draw_list().add_rect(sub_x, ruler.bottom() - tall,
                                      1.0F, tall,
                                      alpha(theme.text_muted, half ? 0.8F : 0.5F));
           }
@@ -177,7 +168,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
       if (tick_x < graph.x) {
         continue;
       }
-      ctx.draw_list().add_rect(tick_x, ruler.y + ruler.height - 8.0F, 1.0F,
+      ctx.draw_list().add_rect(tick_x, ruler.bottom() - 8.0F, 1.0F,
                                8.0F, theme.text_muted);
       ctx.label(gui::Rect{tick_x + 4.0F, ruler.y, minimum_spacing,
                           ruler.height - 5.0F},
@@ -251,16 +242,16 @@ void TimelinePanel::draw_ruler(Pass &p) {
     ctx.push_clip(gui::cell(graph, ruler));
     const float bar_left = frame_to_x(static_cast<double>(shown_first));
     const float bar_right = frame_to_x(static_cast<double>(shown_last));
-    ctx.panel(gui::Rect{bar_left, ruler.y + ruler.height - 3.0F,
+    ctx.panel(gui::Rect{bar_left, ruler.bottom() - 3.0F,
                         std::max(bar_right - bar_left, 1.0F), 3.0F},
               alpha(theme.accent, timeline.loop ? 0.85F : 0.5F));
     const auto handle = [&](float handle_x, bool in, bool hot) {
       const gui::UiColor color = hot ? theme.text : theme.accent;
       ctx.panel(gui::Rect{handle_x - (in ? 0.0F : 2.0F),
-                          ruler.y + ruler.height - 9.0F, 2.0F, 9.0F},
+                          ruler.bottom() - 9.0F, 2.0F, 9.0F},
                 color);
       ctx.panel(gui::Rect{in ? handle_x : handle_x - 5.0F,
-                          ruler.y + ruler.height - 9.0F, 5.0F, 2.0F},
+                          ruler.bottom() - 9.0F, 5.0F, 2.0F},
                 color);
     };
     handle(bar_left, true, in_it.hovered || ruler_.range_drag == RangeHandle::In);
@@ -361,7 +352,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
   ctx.panel(gui::Rect{strip.x, strip.y, list_width, strip.height},
             theme.row_alt);
   ctx.panel(strip_graph, theme.background);
-  ctx.panel(gui::Rect{strip.x, strip.y + strip.height - 1.0F, strip.width,
+  ctx.panel(gui::Rect{strip.x, strip.bottom() - 1.0F, strip.width,
                       1.0F},
             theme.divider);
   if (any_cue) {
@@ -571,7 +562,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
     const bool looping = timeline.looping_cue == marker.id;
     const gui::UiColor color = alpha(timeline_marker_color(marker.color),
                                      looping ? 0.95F : 0.45F);
-    const float y = strip.y + strip.height - 4.0F;
+    const float y = strip.bottom() - 4.0F;
     ctx.panel(gui::Rect{from, y, std::max(to - from, 1.0F), 1.0F}, color);
     ctx.panel(gui::Rect{from, y - 4.0F, 1.0F, 5.0F}, color);
     ctx.draw_list().add_triangle(from + 1.0F, y - 3.0F, from + 6.0F, y - 0.5F,
@@ -684,7 +675,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
           mix(id_, "marker name", markers_.name_node.value());
       const float field_x = std::clamp(
           frame_to_x(static_cast<double>(markers[*index].frame)), graph.x,
-          std::max(graph.x, graph.x + graph.width - 160.0F));
+          std::max(graph.x, graph.right() - 160.0F));
       static_cast<void>(ctx.text_field(
           name_id,
           gui::Rect{field_x, strip.y + 1.0F, 160.0F, strip.height - 3.0F},

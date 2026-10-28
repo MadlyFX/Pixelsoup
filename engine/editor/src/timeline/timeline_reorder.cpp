@@ -81,7 +81,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     const float raw_top = rows_bounds.y + row_top(rows, index) - row_scroll_;
     const float raw_bottom = rows_bounds.y + row_top(rows, end) - row_scroll_;
     const float top = std::max(raw_top, rows_bounds.y);
-    const float bottom = std::min(raw_bottom, rows_bounds.y + rows_bounds.height);
+    const float bottom = std::min(raw_bottom, rows_bounds.bottom());
     if (bottom > top) {
       lane_drop_targets.push_back(LaneDropTarget{
           lane, gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
@@ -301,15 +301,36 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   frame.drag_readout = drag_readout(p);
   frame.edit_preview = edit_preview(p);
 
-  // An insertion cursor across the rows: where a reorder lands.
+  // An insertion cursor across the rows, with a cap at each end: where a
+  // reorder lands.
   const auto landing_line = [&](float y) {
-    ctx.panel(gui::Rect{rows_bounds.x, y - 1.5F, rows_bounds.width, 3.0F},
-              ctx.theme().accent);
-    ctx.panel(gui::Rect{rows_bounds.x, y - 5.0F, 3.0F, 10.0F},
-              ctx.theme().accent);
-    ctx.panel(gui::Rect{rows_bounds.x + rows_bounds.width - 3.0F, y - 5.0F,
-                        3.0F, 10.0F},
-              ctx.theme().accent);
+    ctx.panel(gui::rule_y(rows_bounds, y, 3.0F), ctx.theme().accent);
+    gui::Rect caps = gui::span_y(rows_bounds, y - 5.0F, y + 5.0F);
+    ctx.panel(gui::cut_left(caps, 3.0F), ctx.theme().accent);
+    ctx.panel(gui::cut_right(caps, 3.0F), ctx.theme().accent);
+  };
+  // The tracks a drag can drop into, outlined; the one under the pointer
+  // strongly.
+  const auto outline_targets = [&](const LaneDropTarget *hovered) {
+    for (const LaneDropTarget &target : lane_drop_targets) {
+      if (target.locked) {
+        continue;
+      }
+      const bool under = &target == hovered;
+      ctx.outline(target.bounds,
+                  under ? ctx.theme().accent : alpha(ctx.theme().accent, 0.28F),
+                  under ? 2.0F : 1.0F);
+    }
+  };
+  // What a drag carries, in a chip beside the pointer at most `widest`
+  // wide.
+  const auto ghost_at_pointer = [&](std::string_view text, float widest) {
+    const float width =
+        std::clamp(ctx.font_width(text) + 26.0F, 128.0F, widest);
+    drag_chip(ctx,
+              gui::Rect{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F, width,
+                        row_height},
+              text);
   };
 
   // Drag feedback is the panel's final visual layer, just as it is in Feed
@@ -320,16 +341,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
       landing_line(*scratch.layer_drop_landing_y);
     }
     if (scratch.layer_assignment_feedback) {
-      for (const LaneDropTarget &target : lane_drop_targets) {
-        if (target.locked) {
-          continue;
-        }
-        const bool hovered = &target == layer_lane_hovered;
-        ctx.outline(target.bounds,
-                    hovered ? ctx.theme().accent
-                            : alpha(ctx.theme().accent, 0.28F),
-                    hovered ? 2.0F : 1.0F);
-      }
+      outline_targets(layer_lane_hovered);
     }
     std::string ghost_label{
         scratch.layer_assignment_feedback ? "MOVE  " : "REORDER  "};
@@ -340,16 +352,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     } else if (scratch.layer_assignment_feedback) {
       ghost_label += "  >  OWN TRANSFORM";
     }
-    const float ghost_width =
-        std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 300.0F);
-    const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
-                          ghost_width, row_height};
-    ctx.panel(ghost, ctx.theme().widget_active);
-    ctx.panel(gui::Rect{ghost.x, ghost.y, 3.0F, ghost.height},
-              ctx.theme().accent);
-    ctx.label(gui::Rect{ghost.x + 10.0F, ghost.y,
-                        std::max(ghost.width - 14.0F, 0.0F), ghost.height},
-              ghost_label, ctx.theme().text);
+    ghost_at_pointer(ghost_label, 300.0F);
   }
 
   if (scratch.lane_drag_feedback) {
@@ -358,16 +361,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     }
     std::string ghost_label{"REORDER  "};
     ghost_label += scratch.lane_drag_label;
-    const float ghost_width =
-        std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 240.0F);
-    const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
-                          ghost_width, row_height};
-    ctx.panel(ghost, ctx.theme().widget_active);
-    ctx.panel(gui::Rect{ghost.x, ghost.y, 3.0F, ghost.height},
-              ctx.theme().accent);
-    ctx.label(gui::Rect{ghost.x + 10.0F, ghost.y,
-                        std::max(ghost.width - 14.0F, 0.0F), ghost.height},
-              ghost_label, ctx.theme().text);
+    ghost_at_pointer(ghost_label, 240.0F);
   }
 
   // A track bar carried onto another track's band reorders the track, as a
@@ -390,9 +384,8 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
         });
     if (dragged != stack.end() && destination != stack.end() &&
         band != lane_drop_targets.end()) {
-      landing_line(destination > dragged
-                       ? band->bounds.y
-                       : band->bounds.y + band->bounds.height);
+      landing_line(destination > dragged ? band->bounds.y
+                                         : band->bounds.bottom());
     }
   }
 
@@ -403,32 +396,25 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     // Track outlines mean exactly one thing here: dropping the clip into that
     // track. This is the nesting operation the same outline would falsely
     // suggest during a track reorder.
-    for (const LaneDropTarget &target : lane_drop_targets) {
-      if (target.locked) {
-        continue;
-      }
-      const bool hovered = &target == clip_drop_hovered;
-      ctx.outline(target.bounds,
-                  hovered ? ctx.theme().accent
-                          : alpha(ctx.theme().accent, 0.28F),
-                  hovered ? 2.0F : 1.0F);
-    }
+    outline_targets(clip_drop_hovered);
 
     if (clip_.drop_lane.has_value()) {
-      const float preview_x = frame_to_x(
-          static_cast<double>(clip_.proposed.start));
-      const float preview_right = frame_to_x(static_cast<double>(
-          clip_.proposed.start + clip_.proposed.duration));
+      // The clip's new span, a bar's height, following the pointer down the
+      // rows and cut to the visible part of the graph - never thinner than
+      // a pixel, so a clip off the edge still shows where it is going.
+      const float bar_height = row_height - 6.0F;
       const float preview_y = std::clamp(
-          ctx.pointer_y() - (row_height - 6.0F) * 0.5F,
-          rows_bounds.y + 3.0F,
-          rows_bounds.y + rows_bounds.height - row_height + 3.0F);
-      const gui::Rect preview_bar{
-          std::max(preview_x, graph.x), preview_y,
-          std::max(std::min(preview_right, graph.x + graph.width) -
-                       std::max(preview_x, graph.x),
-                   1.0F),
-          row_height - 6.0F};
+          ctx.pointer_y() - bar_height * 0.5F, rows_bounds.y + 3.0F,
+          rows_bounds.bottom() - row_height + 3.0F);
+      const float left = std::max(
+          frame_to_x(static_cast<double>(clip_.proposed.start)), graph.x);
+      const float right = std::min(
+          frame_to_x(static_cast<double>(clip_.proposed.start +
+                                         clip_.proposed.duration)),
+          graph.right());
+      const gui::Rect preview_bar = gui::span_x(
+          gui::Rect{graph.x, preview_y, graph.width, bar_height}, left,
+          std::max(right, left + 1.0F));
       ctx.panel(preview_bar, alpha(ctx.theme().accent, 0.24F));
       ctx.outline(preview_bar, alpha(ctx.theme().accent, 0.90F), 1.0F);
     }
@@ -455,16 +441,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     }
     // Where it is going in time, after where it is going in the stack.
     ghost_label += "   " + frame.drag_readout;
-    const float ghost_width =
-        std::clamp(ctx.font_width(ghost_label) + 26.0F, 128.0F, 520.0F);
-    const gui::Rect ghost{ctx.pointer_x() + 12.0F, ctx.pointer_y() + 8.0F,
-                          ghost_width, row_height};
-    ctx.panel(ghost, ctx.theme().widget_active);
-    ctx.panel(gui::Rect{ghost.x, ghost.y, 3.0F, ghost.height},
-              ctx.theme().accent);
-    ctx.label(gui::Rect{ghost.x + 10.0F, ghost.y,
-                        std::max(ghost.width - 14.0F, 0.0F), ghost.height},
-              ghost_label, ctx.theme().text);
+    ghost_at_pointer(ghost_label, 520.0F);
   }
 
   // Every other clip, key or marker drag carries the same chip beside the
@@ -475,19 +452,14 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
         ctx.font_width(frame.drag_readout) + 22.0F, 96.0F, 520.0F);
     float chip_x = ctx.pointer_x() + 14.0F;
     float chip_y = ctx.pointer_y() + 10.0F;
-    if (chip_x + chip_width > bounds.x + bounds.width) {
+    if (chip_x + chip_width > bounds.right()) {
       chip_x = std::max(bounds.x, ctx.pointer_x() - 14.0F - chip_width);
     }
-    if (chip_y + row_height > bounds.y + bounds.height) {
+    if (chip_y + row_height > bounds.bottom()) {
       chip_y = ctx.pointer_y() - 10.0F - row_height;
     }
-    const gui::Rect chip{chip_x, chip_y, chip_width, row_height};
-    ctx.panel(chip, ctx.theme().widget_active);
-    ctx.panel(gui::Rect{chip.x, chip.y, 3.0F, chip.height},
-              ctx.theme().accent);
-    ctx.label(gui::Rect{chip.x + 10.0F, chip.y,
-                        std::max(chip.width - 14.0F, 0.0F), chip.height},
-              frame.drag_readout, ctx.theme().text);
+    drag_chip(ctx, gui::Rect{chip_x, chip_y, chip_width, row_height},
+              frame.drag_readout);
   }
 
   // Keep source feedback readable even for very short or partly hidden clips.
@@ -495,16 +467,15 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   if (!clip_.status.empty() && ctx.time_seconds() <= clip_.status_until) {
     frame.clip_status = clip_.status;
     frame.clip_status_error = clip_.status_error;
-    const gui::Rect status{bounds.x + 8.0F, bounds.y + bounds.height - 30.0F,
-                           std::max(bounds.width - 16.0F, 0.0F), 24.0F};
+    // A banner along the panel's foot, 8 in from either side.
+    gui::Rect foot = gui::inset(bounds, gui::Padding{8.0F, 0.0F, 8.0F, 6.0F});
+    const gui::Rect status = gui::cut_bottom(foot, 24.0F);
     ctx.panel(status, ctx.theme().background);
     ctx.outline(status,
                 clip_.status_error ? ctx.theme().warning : ctx.theme().accent,
                 1.0F);
-    ctx.label(gui::Rect{status.x + 8.0F, status.y,
-                        std::max(status.width - 16.0F, 0.0F), status.height},
-              clip_.status, clip_.status_error ? ctx.theme().warning
-                                               : ctx.theme().text);
+    ctx.label(gui::inset(status, 8.0F, 0.0F), clip_.status,
+              clip_.status_error ? ctx.theme().warning : ctx.theme().text);
   }
 
 }

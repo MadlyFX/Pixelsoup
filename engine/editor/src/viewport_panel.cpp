@@ -2,6 +2,7 @@
 #include <mediaserver/editor/light_guides.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
+#include <mediaserver/gui/shapes.hpp>
 
 #include <mediaserver/scene/manipulate.hpp>
 
@@ -53,6 +54,9 @@ constexpr gui::UiColor screen_muted{0.549F, 0.529F, 0.510F, 0.45F};
 constexpr gui::UiColor surface_yaw{1.0F, 0.74F, 0.22F, 1.0F};
 constexpr gui::UiColor gizmo_hot{1.0F, 0.94F, 0.56F, 1.0F};
 constexpr gui::UiColor gizmo_view_color{0.90F, 0.92F, 0.96F, 0.85F};
+// The square every gizmo draws at its pivot.
+constexpr gui::UiColor gizmo_hub{0.90F, 0.92F, 0.96F, 1.0F};
+constexpr float gizmo_hub_size = 6.0F;
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
     core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
@@ -61,13 +65,20 @@ constexpr gui::UiColor gizmo_view_color{0.90F, 0.92F, 0.96F, 0.85F};
     return hash;
 }
 
+// Where a point in the authored canvas's pixels is drawn in `image`, the
+// rectangle the canvas is shown in.
+[[nodiscard]] gui::UiPoint canvas_to_image(const gui::Rect& image,
+                                           scene::Canvas canvas, float x,
+                                           float y) noexcept {
+    return gui::UiPoint{
+        image.x + x * image.width / static_cast<float>(canvas.width),
+        image.y + y * image.height / static_cast<float>(canvas.height)};
+}
+
 [[nodiscard]] gui::UiPoint
 to_ui(const gui::Rect& image, scene::Canvas canvas,
       const scene::CanvasProjection& point) noexcept {
-    const float canvas_width = static_cast<float>(canvas.width);
-    const float canvas_height = static_cast<float>(canvas.height);
-    return gui::UiPoint{image.x + point.x * image.width / canvas_width,
-                        image.y + point.y * image.height / canvas_height};
+    return canvas_to_image(image, canvas, point.x, point.y);
 }
 
 [[nodiscard]] bool selected(std::span<const doc::NodeId> selection,
@@ -145,6 +156,44 @@ void line(gui::UiDrawList& list, gui::UiPoint a, gui::UiPoint b,
     list.add_line(a.x, a.y, b.x, b.y, thickness, color);
 }
 
+// A stroke over a wider dark halo, so it reads over any picture.
+void haloed_line(gui::UiDrawList& list, gui::UiPoint a, gui::UiPoint b,
+                 float halo, float thickness, gui::UiColor color) {
+    line(list, a, b, halo, outline_shadow);
+    line(list, a, b, thickness, color);
+}
+
+// A `size` square centred on a point: a handle, a pivot, a measured point.
+void square(gui::UiDrawList& list, gui::UiPoint centre, float size,
+            gui::UiColor color) {
+    const gui::Rect box = gui::around(centre.x, centre.y, size, size);
+    list.add_rect(box.x, box.y, box.width, box.height, color);
+}
+
+// The same over a dark square `border` wider on every side.
+void haloed_square(gui::UiDrawList& list, gui::UiPoint centre, float size,
+                   float border, gui::UiColor color) {
+    square(list, centre, size + border * 2.0F, outline_shadow);
+    square(list, centre, size, color);
+}
+
+// A circle of `segments` straight strokes round `centre`, each over its
+// halo. Fixed in pixels, so a gizmo's rings stay one size at any distance.
+void haloed_ring(gui::UiDrawList& list, gui::UiPoint centre, float radius,
+                 std::size_t segments, float halo, float thickness,
+                 gui::UiColor color) {
+    gui::UiPoint previous{centre.x + radius, centre.y};
+    for (std::size_t index = 1U; index <= segments; ++index) {
+        const float turns =
+            static_cast<float>(index) / static_cast<float>(segments);
+        const gui::UiPoint next{
+            centre.x + scene::deterministic::cos_turns(turns) * radius,
+            centre.y + scene::deterministic::sin_turns(turns) * radius};
+        haloed_line(list, previous, next, halo, thickness, color);
+        previous = next;
+    }
+}
+
 void projected_line(gui::UiDrawList& list, const gui::Rect& image,
                     const scene::Scene& view, scene::Vec3 a, scene::Vec3 b,
                     float thickness, gui::UiColor color) {
@@ -157,6 +206,14 @@ void projected_line(gui::UiDrawList& list, const gui::Rect& image,
     }
     line(list, to_ui(image, view.canvas, projected_a),
          to_ui(image, view.canvas, projected_b), thickness, color);
+}
+
+void haloed_projected_line(gui::UiDrawList& list, const gui::Rect& image,
+                           const scene::Scene& view, scene::Vec3 a,
+                           scene::Vec3 b, float halo, float thickness,
+                           gui::UiColor color) {
+    projected_line(list, image, view, a, b, halo, outline_shadow);
+    projected_line(list, image, view, a, b, thickness, color);
 }
 
 template <std::size_t PointCount, std::size_t EdgeCount>
@@ -460,32 +517,18 @@ void draw_inner_frustum_overlay(gui::UiDrawList& list, const gui::Rect& image,
         plate.width == 0U || plate.height == 0U) {
         return;
     }
-    const auto to_image_x = [&](float canvas_x) {
-        return image.x + canvas_x / static_cast<float>(view.canvas.width) *
-                             image.width;
-    };
-    const auto to_image_y = [&](float canvas_y) {
-        return image.y + canvas_y / static_cast<float>(view.canvas.height) *
-                             image.height;
-    };
-    const auto outline = [&](float left, float top, float right, float bottom,
-                             float thickness, gui::UiColor color) {
-        const float width = std::max(right - left, 0.0F);
-        const float height = std::max(bottom - top, 0.0F);
-        list.add_rect(left, top, width, thickness, color);
-        list.add_rect(left, bottom - thickness, width, thickness, color);
-        list.add_rect(left, top, thickness, height, color);
-        list.add_rect(right - thickness, top, thickness, height, color);
-    };
-
-    const float left = to_image_x(static_cast<float>(plate.x));
-    const float top = to_image_y(static_cast<float>(plate.y));
-    const float right = to_image_x(static_cast<float>(plate.x + plate.width));
-    const float bottom = to_image_y(static_cast<float>(plate.y + plate.height));
+    const gui::UiPoint top_left = canvas_to_image(
+        image, view.canvas, static_cast<float>(plate.x),
+        static_cast<float>(plate.y));
+    const gui::UiPoint bottom_right = canvas_to_image(
+        image, view.canvas, static_cast<float>(plate.x + plate.width),
+        static_cast<float>(plate.y + plate.height));
+    const gui::Rect drawn = gui::spanning(top_left.x, top_left.y, bottom_right.x,
+                                            bottom_right.y);
 
     const gui::UiColor plate_color{0.29F, 0.85F, 0.55F, 0.90F};
     const gui::UiColor feather_color{0.29F, 0.85F, 0.55F, 0.35F};
-    outline(left, top, right, bottom, 2.0F, plate_color);
+    gui::add_outline(list, drawn, 2.0F, plate_color);
 
     // The feather sits inside the rectangle, so its inset is the authored
     // width scaled into image pixels the same way the edges were. The width is
@@ -501,11 +544,11 @@ void draw_inner_frustum_overlay(gui::UiDrawList& list, const gui::Rect& image,
     const float inset_y =
         static_cast<float>(feather_px) /
         static_cast<float>(view.canvas.height) * image.height;
-    if (right - left <= inset_x * 2.0F || bottom - top <= inset_y * 2.0F) {
+    if (drawn.width <= inset_x * 2.0F || drawn.height <= inset_y * 2.0F) {
         return;
     }
-    outline(left + inset_x, top + inset_y, right - inset_x, bottom - inset_y,
-            1.0F, feather_color);
+    gui::add_outline(list, gui::inset(drawn, inset_x, inset_y), 1.0F,
+                     feather_color);
 }
 
 void draw_light_guide(gui::UiDrawList& list, const gui::Rect& image,
@@ -536,13 +579,15 @@ void draw_light_guide(gui::UiDrawList& list, const gui::Rect& image,
 void light_guide_caption(gui::UiContext& ctx, const gui::Rect& image,
                          std::string_view shape, std::string_view extent) {
     if (image.width < 160.0F || image.height < 65.0F) return;
-    const gui::Rect caption{image.x + 8.0F, image.y + image.height - 50.0F,
-                            std::min(image.width - 16.0F, 395.0F), 42.0F};
+    gui::Rect foot = gui::inset(image, 8.0F);
+    gui::Rect caption = gui::cut_bottom(foot, 42.0F);
+    caption.width = std::min(caption.width, 395.0F);
     ctx.panel(caption, gui::UiColor{0.015F, 0.025F, 0.04F, 0.88F});
-    ctx.label({caption.x + 7, caption.y + 2, caption.width - 14, 18},
-              shape, outline_primary);
-    ctx.label({caption.x + 7, caption.y + 21, caption.width - 14, 18},
-              extent, ctx.theme().text);
+    // Two lines, a pixel apart.
+    gui::Rect lines = gui::inset(caption, gui::Padding{7.0F, 2.0F, 7.0F, 0.0F});
+    ctx.label(gui::cut_top(lines, 18.0F), shape, outline_primary);
+    static_cast<void>(gui::cut_top(lines, 1.0F));
+    ctx.label(gui::cut_top(lines, 18.0F), extent, ctx.theme().text);
 }
 
 void draw_light_overlays(gui::UiContext& ctx, gui::UiDrawList& list, const gui::Rect& image,
@@ -958,10 +1003,9 @@ void draw_surface(gui::UiDrawList& list, const ProjectedSurface& surface,
             !surface.visible[edge[0U]] || !surface.visible[edge[1U]]) {
             continue;
         }
-        line(list, surface.points[edge[0U]], surface.points[edge[1U]],
-             selected_surface ? 4.5F : 3.5F, outline_shadow);
-        line(list, surface.points[edge[0U]], surface.points[edge[1U]],
-             selected_surface ? 2.2F : 1.25F, color);
+        haloed_line(list, surface.points[edge[0U]], surface.points[edge[1U]],
+                    selected_surface ? 4.5F : 3.5F,
+                    selected_surface ? 2.2F : 1.25F, color);
     }
 }
 
@@ -1001,10 +1045,9 @@ void draw_screen(gui::UiDrawList& list, const gui::Rect& image,
         if (!visible[index] || !visible[next]) {
             continue;
         }
-        line(list, points[index], points[next],
-             selected_screen ? 4.0F : 3.0F, outline_shadow);
-        line(list, points[index], points[next],
-             selected_screen ? 2.0F : 1.0F, color);
+        haloed_line(list, points[index], points[next],
+                    selected_screen ? 4.0F : 3.0F,
+                    selected_screen ? 2.0F : 1.0F, color);
     }
 }
 
@@ -1025,29 +1068,15 @@ void draw_yaw_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
     if (!gizmo.visible) {
         return;
     }
-    constexpr std::size_t segments = 48U;
-    const gui::UiColor color = hovered || active
-                                   ? gui::UiColor{1.0F, 0.94F, 0.56F, 1.0F}
-                                   : surface_yaw;
-    gui::UiPoint previous{gizmo.origin.x + surface_yaw_radius_pixels,
-                          gizmo.origin.y};
-    for (std::size_t index = 1U; index <= segments; ++index) {
-        const float turns =
-            static_cast<float>(index) / static_cast<float>(segments);
-        const gui::UiPoint next{
-            gizmo.origin.x + scene::deterministic::cos_turns(turns) *
-                                   surface_yaw_radius_pixels,
-            gizmo.origin.y + scene::deterministic::sin_turns(turns) *
-                                   surface_yaw_radius_pixels};
-        line(list, previous, next, 4.5F, outline_shadow);
-        line(list, previous, next, active ? 2.8F : 1.8F, color);
-        previous = next;
-    }
-    const gui::UiPoint marker{gizmo.origin.x + surface_yaw_radius_pixels,
-                              gizmo.origin.y};
-    list.add_triangle(marker.x + 6.0F, marker.y, marker.x - 3.0F,
-                      marker.y - 4.5F, marker.x - 3.0F, marker.y + 4.5F,
-                      color);
+    const gui::UiColor color = hovered || active ? gizmo_hot : surface_yaw;
+    haloed_ring(list, gizmo.origin, surface_yaw_radius_pixels, 48U, 4.5F,
+                active ? 2.8F : 1.8F, color);
+    // An arrowhead astride the ring at its right, pointing out.
+    gui::add_arrowhead(list,
+                       gui::UiPoint{gizmo.origin.x + surface_yaw_radius_pixels +
+                                        6.0F,
+                                    gizmo.origin.y},
+                       gui::UiPoint{1.0F, 0.0F}, 9.0F, 4.5F, color);
 }
 
 [[nodiscard]] GizmoAxis hit_gizmo(const GizmoGeometry& gizmo, float pointer_x,
@@ -1089,33 +1118,18 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
     for (std::size_t index = 0U; index < gizmo.ends.size(); ++index) {
         const GizmoAxis axis = static_cast<GizmoAxis>(
             static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
-        gui::UiColor color = colors[index];
         const bool emphasized = hovered == axis || active == axis;
-        if (emphasized) {
-            color = gui::UiColor{1.0F, 0.94F, 0.56F, 1.0F};
-        }
-        line(list, gizmo.origin, gizmo.ends[index], 5.0F, outline_shadow);
-        line(list, gizmo.origin, gizmo.ends[index], emphasized ? 3.2F : 2.2F,
-             color);
-
-        const float dx = gizmo.ends[index].x - gizmo.origin.x;
-        const float dy = gizmo.ends[index].y - gizmo.origin.y;
-        const float magnitude = std::sqrt(dx * dx + dy * dy);
-        if (magnitude > 1.0F) {
-            const float nx = dx / magnitude;
-            const float ny = dy / magnitude;
-            const float px = -ny;
-            const float py = nx;
-            list.add_triangle(gizmo.ends[index].x, gizmo.ends[index].y,
-                              gizmo.ends[index].x - nx * 10.0F + px * 4.5F,
-                              gizmo.ends[index].y - ny * 10.0F + py * 4.5F,
-                              gizmo.ends[index].x - nx * 10.0F - px * 4.5F,
-                              gizmo.ends[index].y - ny * 10.0F - py * 4.5F,
-                              color);
+        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
+        const gui::UiPoint end = gizmo.ends[index];
+        haloed_line(list, gizmo.origin, end, 5.0F, emphasized ? 3.2F : 2.2F,
+                    color);
+        // An axis seen end-on has no direction to point along.
+        const gui::UiPoint along{end.x - gizmo.origin.x, end.y - gizmo.origin.y};
+        if (std::hypot(along.x, along.y) > 1.0F) {
+            gui::add_arrowhead(list, end, along, 10.0F, 4.5F, color);
         }
     }
-    list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
-                  gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
 }
 
 // The outer white ring Blender's rotate and scale gizmos share: rotation about
@@ -1175,21 +1189,9 @@ void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
 
 void draw_view_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
                     bool emphasized) {
-    const gui::UiColor color = emphasized ? gizmo_hot : gizmo_view_color;
-    gui::UiPoint previous{gizmo.origin.x + view_ring_radius_pixels,
-                          gizmo.origin.y};
-    for (std::size_t step = 1U; step <= gizmo_ring_segments; ++step) {
-        const float turns = static_cast<float>(step) /
-                            static_cast<float>(gizmo_ring_segments);
-        const gui::UiPoint next{
-            gizmo.origin.x + scene::deterministic::cos_turns(turns) *
-                                 view_ring_radius_pixels,
-            gizmo.origin.y + scene::deterministic::sin_turns(turns) *
-                                 view_ring_radius_pixels};
-        line(list, previous, next, 4.0F, outline_shadow);
-        line(list, previous, next, emphasized ? 2.6F : 1.6F, color);
-        previous = next;
-    }
+    haloed_ring(list, gizmo.origin, view_ring_radius_pixels,
+                gizmo_ring_segments, 4.0F, emphasized ? 2.6F : 1.6F,
+                emphasized ? gizmo_hot : gizmo_view_color);
 }
 
 void draw_rotate_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
@@ -1214,8 +1216,7 @@ void draw_rotate_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
             const gui::UiPoint b = gizmo.ring_points[index][step + 1U];
             if (gizmo.ring_front[index][step] &&
                 gizmo.ring_front[index][step + 1U]) {
-                line(list, a, b, 4.6F, outline_shadow);
-                line(list, a, b, emphasized ? 3.0F : 2.1F, color);
+                haloed_line(list, a, b, 4.6F, emphasized ? 3.0F : 2.1F, color);
             } else if (active == GizmoAxis::None) {
                 line(list, a, b, 1.2F, faded);
             }
@@ -1225,8 +1226,7 @@ void draw_rotate_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
         draw_view_ring(list, gizmo,
                        hovered == GizmoAxis::View || active == GizmoAxis::View);
     }
-    list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
-                  gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
 }
 
 void draw_scale_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
@@ -1241,18 +1241,14 @@ void draw_scale_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
             static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
         const bool emphasized = hovered == axis || active == axis;
         const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
-        line(list, gizmo.origin, gizmo.ends[index], 5.0F, outline_shadow);
-        line(list, gizmo.origin, gizmo.ends[index], emphasized ? 3.2F : 2.2F,
-             color);
-        const gui::UiPoint end = gizmo.ends[index];
-        list.add_rect(end.x - 5.5F, end.y - 5.5F, 11.0F, 11.0F,
-                      outline_shadow);
-        list.add_rect(end.x - 4.0F, end.y - 4.0F, 8.0F, 8.0F, color);
+        haloed_line(list, gizmo.origin, gizmo.ends[index], 5.0F,
+                    emphasized ? 3.2F : 2.2F, color);
+        // A box at the end, as every scale gizmo marks its axes.
+        haloed_square(list, gizmo.ends[index], 8.0F, 1.5F, color);
     }
     draw_view_ring(list, gizmo,
                    hovered == GizmoAxis::View || active == GizmoAxis::View);
-    list.add_rect(gizmo.origin.x - 3.0F, gizmo.origin.y - 3.0F, 6.0F, 6.0F,
-                  gui::UiColor{0.90F, 0.92F, 0.96F, 1.0F});
+    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
 }
 
 [[nodiscard]] bool is_xyz(GizmoAxis axis) noexcept {
@@ -1684,8 +1680,8 @@ ViewportPanel::elements_in_marquee(const scene::Scene& scene,
             bottom = std::max(bottom, at.y);
             any = true;
         }
-        return any && right >= box.x && left <= box.x + box.width &&
-               bottom >= box.y && top <= box.y + box.height;
+        return any && right >= box.x && left <= box.right() &&
+               bottom >= box.y && top <= box.bottom();
     };
     const auto add = [&inside](doc::NodeId node) {
         if (std::find(inside.begin(), inside.end(), node) == inside.end()) {
@@ -1756,12 +1752,9 @@ void ViewportPanel::draw_placement_preview(
             placement.contact - across * half - along * half,
             placement.contact + across * half - along * half};
         for (std::size_t index = 0U; index < corners.size(); ++index) {
-            projected_line(list, image, scene, corners[index],
-                           corners[(index + 1U) % corners.size()], 4.0F,
-                           outline_shadow);
-            projected_line(list, image, scene, corners[index],
-                           corners[(index + 1U) % corners.size()], 1.8F,
-                           accent);
+            haloed_projected_line(list, image, scene, corners[index],
+                                  corners[(index + 1U) % corners.size()], 4.0F,
+                                  1.8F, accent);
         }
         projected_line(list, image, scene, placement.contact,
                        placement.contact + n * 0.35F, 1.8F, accent);
@@ -1775,8 +1768,7 @@ void ViewportPanel::draw_placement_preview(
         const float width = ctx.font_width(caption) + 16.0F;
         const gui::Rect badge{at.x - 18.0F - width, at.y - 11.0F, width, 22.0F};
         ctx.panel(badge, accent);
-        ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
-                            badge.height},
+        ctx.label(gui::inset(badge, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F}),
                   caption, ctx.theme().background);
     }
     ctx.pop_clip();
@@ -2057,10 +2049,7 @@ std::optional<gui::UiPoint> mask_normalized_to_viewport(
             return std::nullopt;
         }
     }
-    return gui::UiPoint{
-        image.x + canvas_x * image.width / static_cast<float>(canvas.width),
-        image.y + canvas_y * image.height /
-                      static_cast<float>(canvas.height)};
+    return canvas_to_image(image, canvas, canvas_x, canvas_y);
 }
 
 std::optional<MaskViewportNormalizedPoint> mask_viewport_to_normalized(
@@ -2533,8 +2522,7 @@ void translate_mask(scene::MaskInstance& mask, float dx, float dy,
 
 void draw_mask_point(gui::UiDrawList& list, gui::UiPoint point,
                      gui::UiColor color, float size = 7.0F) {
-    list.add_rect(point.x - size * 0.5F, point.y - size * 0.5F, size, size,
-                  color);
+    square(list, point, size, color);
 }
 
 } // namespace
@@ -2669,8 +2657,7 @@ void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
     if (keyboard_.tool != TransformTool::Move) {
         line(list, centre, gui::UiPoint{keyboard_.pointer_x, keyboard_.pointer_y},
              1.0F, gizmo_view_color);
-        list.add_rect(centre.x - 3.0F, centre.y - 3.0F, 6.0F, 6.0F,
-                      gizmo_view_color);
+        square(list, centre, gizmo_hub_size, gizmo_view_color);
     }
 
     const char* tool = keyboard_.tool == TransformTool::Move
@@ -2766,8 +2753,8 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
     for (std::size_t index = 1U; index < points.size(); ++index) {
         const scene::Vec3 from = points[index - 1U].position;
         const scene::Vec3 to = points[index].position;
-        projected_line(list, image, view, from, to, 5.0F, outline_shadow);
-        projected_line(list, image, view, from, to, 2.0F, measure_color);
+        haloed_projected_line(list, image, view, from, to, 5.0F, 2.0F,
+                              measure_color);
         const auto middle = ui_of((from + to) * 0.5F);
         if (!middle.has_value()) {
             continue;
@@ -2784,10 +2771,7 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
     }
     for (const MeasurePoint& point : chain.points) {
         if (const auto at = ui_of(point.position)) {
-            list.add_rect(at->x - 4.0F, at->y - 4.0F, 8.0F, 8.0F,
-                          outline_shadow);
-            list.add_rect(at->x - 3.0F, at->y - 3.0F, 6.0F, 6.0F,
-                          measure_color);
+            haloed_square(list, *at, 6.0F, 1.0F, measure_color);
         }
     }
     if (points.size() > 2U) {
@@ -2800,10 +2784,7 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
         if (const auto at = ui_of(hover->position)) {
             switch (hover->snap) {
             case MeasureSnap::Vertex:
-                list.add_rect(at->x - 6.0F, at->y - 6.0F, 12.0F, 12.0F,
-                              outline_shadow);
-                list.add_rect(at->x - 4.5F, at->y - 4.5F, 9.0F, 9.0F,
-                              measure_color);
+                haloed_square(list, *at, 9.0F, 1.5F, measure_color);
                 break;
             case MeasureSnap::EdgeMidpoint:
                 list.add_triangle(at->x, at->y - 7.0F, at->x + 7.0F,
@@ -2848,8 +2829,9 @@ gui::Rect stage_view_menu_bounds(const gui::Rect& image, float width) noexcept {
     if (image.width < width + 16.0F || image.height < 40.0F) {
         return gui::Rect{};
     }
-    return gui::Rect{image.x + image.width - width - 6.0F, image.y + 6.0F,
-                     width, 22.0F};
+    gui::Rect corner = gui::inset(image, 6.0F);
+    corner = gui::cut_top(corner, 22.0F);
+    return gui::cut_right(corner, width);
 }
 
 // The shading menu, `width` wide, left of the view menu; empty with it.
@@ -2954,7 +2936,7 @@ bool toolbar_menu(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds,
         list.add_rect(ring_x, ring_y, 1.0F, 3.0F, ink);
         list.add_rect(ring_x + 2.0F, ring_y, 1.0F, 3.0F, ink);
     }
-    draw_chevron(list, bounds.x + bounds.width - 9.0F, middle + 1.0F,
+    draw_chevron(list, bounds.right() - 9.0F, middle + 1.0F,
                  lit ? theme.text : theme.text_muted);
     return it.clicked;
 }
@@ -2984,7 +2966,7 @@ void ViewportPanel::draw_stage_view_menu(gui::UiContext& ctx,
     if (toolbar_menu(ctx, mix(id_, 41U), menu, gui::Icon::Projection,
                      stage_projection_name(stage_projection_),
                      ctx.menu_open(menu_id), false, false, true)) {
-        ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
+        ctx.open_context_menu(menu_id, menu.x, menu.bottom());
     }
     ctx.tooltip(menu,
                 "This view's projection, and one or four views. Top, Front "
@@ -3130,7 +3112,7 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                          distances[move_step], ctx.menu_open(distance_menu),
                          false, !snapping_)) {
             ctx.open_context_menu(distance_menu, distance.x,
-                                  distance.y + distance.height);
+                                  distance.bottom());
         }
         ctx.tooltip(distance, "Move snap step.");
         {
@@ -3148,7 +3130,7 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                          degrees[turn_step], ctx.menu_open(angle_menu), true,
                          !snapping_)) {
             ctx.open_context_menu(angle_menu, angle.x,
-                                  angle.y + angle.height);
+                                  angle.bottom());
         }
         ctx.tooltip(angle, "Rotate snap step.");
         {
@@ -3209,10 +3191,10 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
         const float middle = show.y + show.height * 0.5F;
         gui::draw_eye_glyph(ctx.draw_list(), show.x + 13.0F, middle, true,
                             toolbar_ink(theme, lit ? 1.0F : 0.75F));
-        draw_chevron(ctx.draw_list(), show.x + show.width - 8.0F, middle,
+        draw_chevron(ctx.draw_list(), show.right() - 8.0F, middle,
                      lit ? theme.text : theme.text_muted);
         if (it.clicked) {
-            ctx.open_context_menu(show_menu, show.x, show.y + show.height);
+            ctx.open_context_menu(show_menu, show.x, show.bottom());
         }
         ctx.tooltip(show, "Show: grid, guides, gizmo and bounds.");
         constexpr std::array<std::string_view, 4U> options{
@@ -3249,7 +3231,7 @@ void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
     const gui::UiId menu = mix(id_, 24U);
     if (toolbar_menu(ctx, mix(id_, 4U), bounds, gui::Icon::Screen,
                      resolution_names[current_index], ctx.menu_open(menu))) {
-        ctx.open_context_menu(menu, bounds.x, bounds.y + bounds.height);
+        ctx.open_context_menu(menu, bounds.x, bounds.bottom());
     }
     ctx.tooltip(bounds,
                 "Preview resolution: lower renders this view faster. What "
@@ -3287,7 +3269,7 @@ void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,
     if (toolbar_menu(ctx, mix(id_, 43U), menu, gui::Icon::Shading,
                      stage_shading_name(stage_shading_),
                      ctx.menu_open(menu_id), false, false, true)) {
-        ctx.open_context_menu(menu_id, menu.x, menu.y + menu.height);
+        ctx.open_context_menu(menu_id, menu.x, menu.bottom());
     }
     ctx.tooltip(menu,
                 "How this view shades. Only the Stage changes: Program and "
@@ -4589,10 +4571,10 @@ MaskViewportFrame ViewportPanel::draw_masks(
                               input.target.coordinate_space,
                               source_mapping(input), 0.5F, 0.5F)
                               .has_value();
-    const gui::Rect coverage_button{
-        frame.image.x + std::max(frame.image.width - 106.0F, 0.0F),
-        frame.image.y + 5.0F,
-        std::min(101.0F, frame.image.width), 21.0F};
+    // The image's top-right corner, 5 in.
+    gui::Rect corner = gui::inset(frame.image, gui::Padding{0.0F, 5.0F, 5.0F, 0.0F});
+    corner = gui::cut_top(corner, 21.0F);
+    const gui::Rect coverage_button = gui::cut_right(corner, 101.0F);
     const gui::Interaction coverage_interaction =
         ctx.grab(mix(id_, 0x4D41534BU), coverage_button);
     const gui::Rect mask_interaction_bounds =
@@ -5084,13 +5066,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
                         top_screen->x + dx / length * 24.0F,
                         top_screen->y + dy / length * 24.0F};
                     line(list, *top_screen, rotate_screen, 1.2F, mask_handle);
-                    constexpr float diamond = 5.0F;
-                    const std::array<gui::UiPoint, 4U> points{{
-                        {rotate_screen.x, rotate_screen.y - diamond},
-                        {rotate_screen.x + diamond, rotate_screen.y},
-                        {rotate_screen.x, rotate_screen.y + diamond},
-                        {rotate_screen.x - diamond, rotate_screen.y}}};
-                    list.add_convex_poly(points, mask_handle);
+                    gui::add_diamond(list, rotate_screen, 5.0F, mask_handle);
                 }
             }
         }
@@ -5130,11 +5106,10 @@ MaskViewportFrame ViewportPanel::draw_masks(
     }
 
     if (!frame.mapping_valid) {
-        ctx.panel(gui::Rect{frame.image.x + 8.0F, frame.image.y + 8.0F,
-                            244.0F, 23.0F},
-                  gui::UiColor{0.12F, 0.04F, 0.04F, 0.90F});
-        ctx.label(gui::Rect{frame.image.x + 14.0F, frame.image.y + 8.0F,
-                            232.0F, 23.0F},
+        const gui::Rect notice{frame.image.x + 8.0F, frame.image.y + 8.0F,
+                               244.0F, 23.0F};
+        ctx.panel(notice, gui::UiColor{0.12F, 0.04F, 0.04F, 0.90F});
+        ctx.label(gui::inset(notice, 6.0F, 0.0F),
                   "SOURCE MASK MAPPING UNAVAILABLE", ctx.theme().warning);
     }
     // A Masks tab changes what clicking the picture means. Keep that mode
@@ -5142,18 +5117,14 @@ MaskViewportFrame ViewportPanel::draw_masks(
     // object-selection click feel like a broken picker.
     constexpr std::string_view selection_notice =
         "OBJECT SELECTION LOCKED WHILE MASKS IS OPEN";
-    const float selection_notice_width = std::min(
-        std::max(frame.image.width - 16.0F, 0.0F), 326.0F);
-    const gui::Rect selection_notice_bounds{
-        frame.image.x + (frame.image.width - selection_notice_width) * 0.5F,
-        frame.image.y + std::max(frame.image.height - 29.0F, 0.0F),
-        selection_notice_width, 23.0F};
+    // Centred along the image's foot, 6 above it.
+    gui::Rect foot = gui::inset(frame.image, gui::Padding{8.0F, 0.0F, 8.0F, 6.0F});
+    foot = gui::cut_bottom(foot, 23.0F);
+    const gui::Rect selection_notice_bounds =
+        gui::centered(foot, std::min(foot.width, 326.0F), foot.height);
     ctx.panel(selection_notice_bounds,
               gui::UiColor{0.03F, 0.04F, 0.05F, 0.90F});
-    ctx.label(gui::Rect{selection_notice_bounds.x + 8.0F,
-                        selection_notice_bounds.y,
-                        std::max(selection_notice_bounds.width - 16.0F, 0.0F),
-                        selection_notice_bounds.height},
+    ctx.label(gui::inset(selection_notice_bounds, 8.0F, 0.0F),
               selection_notice, ctx.theme().text_muted);
     const gui::UiColor coverage_body =
         coverage_interaction.held

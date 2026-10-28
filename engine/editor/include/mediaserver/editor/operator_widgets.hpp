@@ -82,6 +82,12 @@ void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
 void draw_filled_circle(gui::UiContext &ctx, float cx, float cy, float radius,
                         gui::UiColor color);
 
+// A search box in `field`: the text, its placeholder while it is empty and
+// not being typed in, and a magnifier at its left in the room the placeholder
+// leaves. Returns true on the frame the text changes.
+bool search_box(gui::UiContext &ctx, gui::UiId id, const gui::Rect &field,
+                std::string &value, std::string_view placeholder);
+
 // A square tool button carrying a drawn icon. Body only on hover, press, or
 // when engaged, so a toolbar of them reads as marks rather than a wall of
 // boxes. The tooltip names the action.

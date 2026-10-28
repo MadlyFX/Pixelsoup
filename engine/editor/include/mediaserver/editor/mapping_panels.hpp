@@ -5,6 +5,7 @@
 #include <mediaserver/doc/node.hpp>
 #include <mediaserver/editor/number_field.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/canvas_view.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
@@ -355,7 +356,7 @@ public:
   // the reset/default view for existing callers and authored tests.
   [[nodiscard]] IsometricProjection
   view_projection(const gui::Rect &bounds) const noexcept;
-  [[nodiscard]] float view_zoom() const noexcept { return view_zoom_; }
+  [[nodiscard]] float view_zoom() const noexcept { return view_.zoom; }
 
   // Drops document-owned interaction state after replacing the project.
   // View pan/zoom is editor-local and intentionally survives.
@@ -412,9 +413,8 @@ private:
   float link_drag_start_y_{};
   HardwareLinkFeedback link_notice_{HardwareLinkFeedback::None};
 
-  float view_zoom_{1.0F};
-  float view_pan_x_{};
-  float view_pan_y_{};
+  // The map's pan and zoom, about the default projection's origin.
+  gui::CanvasView view_{};
   bool panning_{};
 
   // A copy, so a machine that stops answering mid-drag can still be dropped.

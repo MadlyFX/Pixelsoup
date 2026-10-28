@@ -85,7 +85,7 @@ ColorPickerFrame ColorPicker::draw(UiContext& ctx, UiId id,
     const Rect saturation_value{
         bounds.x, bounds.y, bounds.width,
         std::max(bounds.height - hue_height - gap, 1.0F)};
-    const Rect hue{bounds.x, saturation_value.y + saturation_value.height + gap,
+    const Rect hue{bounds.x, saturation_value.bottom() + gap,
                    bounds.width, hue_height};
 
     Hsv hsv = rgb_to_hsv(color);
@@ -179,10 +179,10 @@ ColorPickerFrame ColorPicker::draw(UiContext& ctx, UiId id,
 
     const float hue_x = hue.x + hsv.hue * hue.width;
     ctx.draw_list().add_line(hue_x, hue.y - 2.0F, hue_x,
-                             hue.y + hue.height + 2.0F, 3.0F,
+                             hue.bottom() + 2.0F, 3.0F,
                              ctx.theme().track);
     ctx.draw_list().add_line(hue_x, hue.y - 1.0F, hue_x,
-                             hue.y + hue.height + 1.0F, 1.0F,
+                             hue.bottom() + 1.0F, 1.0F,
                              ctx.theme().text);
     return frame;
 }

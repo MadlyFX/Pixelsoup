@@ -141,9 +141,9 @@ void TimelinePanel::track_key_drag(Pass &p) {
     keys_.marquee_active = keys_.marquee_active || travel > marquee_threshold;
     if (keys_.lasso_mode) {
       const gui::UiPoint point{
-          std::clamp(ctx.pointer_x(), graph.x, graph.x + graph.width),
+          std::clamp(ctx.pointer_x(), graph.x, graph.right()),
           std::clamp(ctx.pointer_y(), rows_bounds.y,
-                     rows_bounds.y + rows_bounds.height)};
+                     rows_bounds.bottom())};
       if (keys_.lasso_points.empty()) {
         keys_.lasso_points.push_back(
             gui::UiPoint{keys_.marquee_start_x, keys_.marquee_start_y});
@@ -259,25 +259,25 @@ void TimelinePanel::finish_marquee(Pass &p) {
       const float left =
           std::max(std::min(keys_.marquee_start_x, ctx.pointer_x()), graph.x);
       const float right = std::min(std::max(keys_.marquee_start_x, ctx.pointer_x()),
-                                   graph.x + graph.width);
+                                   graph.right());
       const float top =
           std::max(std::min(keys_.marquee_start_y, ctx.pointer_y()), rows_bounds.y);
       const float bottom = std::min(std::max(keys_.marquee_start_y, ctx.pointer_y()),
-                                    rows_bounds.y + rows_bounds.height);
+                                    rows_bounds.bottom());
       const gui::Rect marquee{left, top, std::max(right - left, 0.0F),
                               std::max(bottom - top, 0.0F)};
       ctx.panel(marquee, alpha(ctx.theme().accent, 0.15F));
-      ctx.draw_list().add_line(marquee.x, marquee.y, marquee.x + marquee.width,
+      ctx.draw_list().add_line(marquee.x, marquee.y, marquee.right(),
                                marquee.y, 1.0F, ctx.theme().accent);
       ctx.draw_list().add_line(
-          marquee.x, marquee.y + marquee.height, marquee.x + marquee.width,
-          marquee.y + marquee.height, 1.0F, ctx.theme().accent);
+          marquee.x, marquee.bottom(), marquee.right(),
+          marquee.bottom(), 1.0F, ctx.theme().accent);
       ctx.draw_list().add_line(marquee.x, marquee.y, marquee.x,
-                               marquee.y + marquee.height, 1.0F,
+                               marquee.bottom(), 1.0F,
                                ctx.theme().accent);
       ctx.draw_list().add_line(
-          marquee.x + marquee.width, marquee.y, marquee.x + marquee.width,
-          marquee.y + marquee.height, 1.0F, ctx.theme().accent);
+          marquee.right(), marquee.y, marquee.right(),
+          marquee.bottom(), 1.0F, ctx.theme().accent);
     }
     ctx.pop_clip();
   }

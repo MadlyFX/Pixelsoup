@@ -477,16 +477,16 @@ TimelinePanel::layer_landing(Pass &p, const ElementInfo &source, float x,
     const float raw_bottom = rows_bounds.y + row_top(rows, end) - row_scroll_;
     const float top = std::max(raw_top, rows_bounds.y);
     const float bottom =
-        std::min(raw_bottom, rows_bounds.y + rows_bounds.height);
+        std::min(raw_bottom, rows_bounds.bottom());
     const gui::Rect band{rows_bounds.x, top, rows_bounds.width, bottom - top};
     if (bottom <= top || !band.contains(x, y)) {
       continue;
     }
-    const bool before = y < band.y + band.height * 0.5F;
+    const bool before = y < band.center_y();
     landing = LayerLanding{element->node,
                            before ? TimelineLayerPlacement::Before
                                   : TimelineLayerPlacement::After,
-                           before ? band.y : band.y + band.height};
+                           before ? band.y : band.bottom()};
   }
   return landing;
 }
@@ -690,7 +690,7 @@ TimelinePanel::clip_lane_under_pointer(Pass &p, float pointer_y) {
   std::vector<Row> &rows = p.built.rows;
 
   if (pointer_y < rows_bounds.y ||
-      pointer_y >= rows_bounds.y + rows_bounds.height) {
+      pointer_y >= rows_bounds.bottom()) {
     return std::nullopt;
   }
   const float local = pointer_y - rows_bounds.y + row_scroll_;

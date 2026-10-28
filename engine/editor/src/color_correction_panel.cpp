@@ -320,7 +320,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     px - 5.0F, rail.y - 4.0F, px + 5.0F, rail.y - 4.0F,
                     px, rail.y + 3.0F, handle_color);
                 ctx.draw_list().add_line(
-                    px, rail.y + 2.0F, px, rail.y + rail.height + 4.0F,
+                    px, rail.y + 2.0F, px, rail.bottom() + 4.0F,
                     interaction.held ? 2.0F : 1.0F, handle_color);
                 if (!interaction.held) {
                     return;
@@ -779,11 +779,11 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 const float fraction = static_cast<float>(division) / 4.0F;
                 ctx.draw_list().add_line(
                     plot.x + plot.width * fraction, plot.y,
-                    plot.x + plot.width * fraction, plot.y + plot.height,
+                    plot.x + plot.width * fraction, plot.bottom(),
                     1.0F, ctx.theme().divider);
                 ctx.draw_list().add_line(
                     plot.x, plot.y + plot.height * fraction,
-                    plot.x + plot.width, plot.y + plot.height * fraction,
+                    plot.right(), plot.y + plot.height * fraction,
                     1.0F, ctx.theme().divider);
             }
             const auto sample_value = [&](const scene::Vec4& value) noexcept {
@@ -796,7 +796,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             };
             if (parameters.lut.size() == scene::curve_lut_entries) {
                 float last_x = plot.x;
-                float last_y = plot.y + plot.height -
+                float last_y = plot.bottom() -
                     std::clamp(sample_value(parameters.lut.front()), 0.0F, 1.0F) *
                         plot.height;
                 for (std::size_t sample = 1U; sample < parameters.lut.size();
@@ -806,7 +806,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                         static_cast<float>(parameters.lut.size() - 1U);
                     const float value = std::clamp(
                         sample_value(parameters.lut[sample]), 0.0F, 1.0F);
-                    const float sample_y = plot.y + plot.height -
+                    const float sample_y = plot.bottom() -
                         value * plot.height;
                     ctx.draw_list().add_line(last_x, last_y, x, sample_y,
                                              1.5F, section.color);
@@ -819,7 +819,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 std::size_t nearest_point = points.size();
                 for (std::size_t point = 0U; point < points.size(); ++point) {
                     const float px = plot.x + points[point].x * plot.width;
-                    const float py = plot.y + plot.height -
+                    const float py = plot.bottom() -
                         points[point].y * plot.height;
                     const float dx = ctx.pointer_x() - px;
                     const float dy = ctx.pointer_y() - py;
@@ -919,7 +919,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                  point_index < points.size(); ++point_index) {
                 const scene::CurveControlPoint point = points[point_index];
                 const float px = plot.x + point.x * plot.width;
-                const float py = plot.y + plot.height - point.y * plot.height;
+                const float py = plot.bottom() - point.y * plot.height;
                 const bool active = curve_drag_effect_ == curves->source &&
                     curve_drag_section_ == section_index &&
                     curve_drag_point_ == point_index;

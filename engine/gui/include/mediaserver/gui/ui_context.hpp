@@ -227,6 +227,8 @@ enum class Icon : core::u8 {
     // Half, which is the share of the pixels Half keeps.
     FullResolution,
     HalfResolution,
+    // A magnifier: a search field's mark.
+    Search,
 };
 void draw_icon(
     UiDrawList& list,

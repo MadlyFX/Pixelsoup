@@ -152,8 +152,8 @@ void draw_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds,
   }
   case scene::EffectKind::DirectionalBlur: {
     const float left = bounds.x + 5.0F;
-    const float right = bounds.x + bounds.width - 5.0F;
-    const float bottom = bounds.y + bounds.height - 7.0F;
+    const float right = bounds.right() - 5.0F;
+    const float bottom = bounds.bottom() - 7.0F;
     const float top = bounds.y + 7.0F;
     for (std::size_t index = 0U; index < 3U; ++index) {
       const float offset = static_cast<float>(index) * 4.0F;
@@ -188,7 +188,7 @@ void draw_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds,
       const float height = heights[index];
       ctx.draw_list().add_rect(
           bounds.x + 4.0F + static_cast<float>(index) * 4.5F,
-          bounds.y + bounds.height - 5.0F - height, 3.0F, height, effect.color);
+          bounds.bottom() - 5.0F - height, 3.0F, height, effect.color);
     }
     return;
   }
@@ -205,10 +205,10 @@ void draw_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds,
   case scene::EffectKind::ContrastPivot: {
     const float middle = bounds.x + bounds.width * 0.5F;
     const float top = bounds.y + 6.0F;
-    const float bottom = bounds.y + bounds.height - 6.0F;
+    const float bottom = bounds.bottom() - 6.0F;
     ctx.draw_list().add_line(bounds.x + 5.0F, bottom, middle, top, 2.0F,
                              effect.color);
-    ctx.draw_list().add_line(middle, top, bounds.x + bounds.width - 5.0F,
+    ctx.draw_list().add_line(middle, top, bounds.right() - 5.0F,
                              bottom, 2.0F, effect.color);
     ctx.draw_list().add_rect(middle - 2.0F,
                              bounds.y + bounds.height * 0.5F - 2.0F, 4.0F, 4.0F,
@@ -230,25 +230,25 @@ void draw_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds,
   case scene::EffectKind::WhiteBalance: {
     const float middle = bounds.x + bounds.width * 0.5F;
     ctx.draw_list().add_line(middle, bounds.y + 5.0F, middle,
-                             bounds.y + bounds.height - 5.0F, 2.0F,
+                             bounds.bottom() - 5.0F, 2.0F,
                              effect.color);
     ctx.draw_list().add_rect(bounds.x + 5.0F, bounds.y + 8.0F,
                              middle - bounds.x - 7.0F, 12.0F,
                              gui::UiColor{0.35F, 0.62F, 1.0F, 1.0F});
     ctx.draw_list().add_rect(middle + 2.0F, bounds.y + 8.0F,
-                             bounds.x + bounds.width - middle - 7.0F, 12.0F,
+                             bounds.right() - middle - 7.0F, 12.0F,
                              gui::UiColor{1.0F, 0.58F, 0.25F, 1.0F});
     return;
   }
   case scene::EffectKind::Curves: {
     constexpr std::array<float, 5U> values{{0.78F, 0.45F, 0.56F, 0.82F, 0.94F}};
     float previous_x = bounds.x + 4.0F;
-    float previous_y = bounds.y + bounds.height - 5.0F;
+    float previous_y = bounds.bottom() - 5.0F;
     for (std::size_t index = 0U; index < values.size(); ++index) {
       const float x = bounds.x + 4.0F +
                       static_cast<float>(index + 1U) * (bounds.width - 8.0F) /
                           static_cast<float>(values.size());
-      const float y = bounds.y + bounds.height - 5.0F -
+      const float y = bounds.bottom() - 5.0F -
                       values[index] * (bounds.height - 10.0F);
       ctx.draw_list().add_line(previous_x, previous_y, x, y, 1.5F,
                                effect.color);
@@ -472,7 +472,7 @@ std::string_view EffectsPanel::dragging_name() const noexcept {
 std::optional<scene::EffectKind> draw_effect_picker(
     gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds) {
   if (ctx.button(id, bounds, "Add effect..."))
-    ctx.open_context_menu(id, bounds.x, bounds.y + bounds.height);
+    ctx.open_context_menu(id, bounds.x, bounds.bottom());
   static constexpr auto names = [] {
     std::array<std::string_view, effects.size()> result{};
     for (std::size_t index = 0; index < effects.size(); ++index)

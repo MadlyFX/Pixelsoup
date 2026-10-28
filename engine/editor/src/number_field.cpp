@@ -215,7 +215,7 @@ bool NumberField::draw(
     // The well's own floor line, in the accent when the field is live: an
     // operator scrubbing three fields in a row needs to see which one moved.
     ctx.panel(
-        gui::Rect{bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F},
+        gui::Rect{bounds.x, bounds.bottom() - 1.0F, bounds.width, 1.0F},
         active ? theme.accent : theme.divider);
 
     ctx.push_clip(bounds);

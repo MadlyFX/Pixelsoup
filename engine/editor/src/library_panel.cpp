@@ -1,6 +1,7 @@
 #include <mediaserver/editor/library_panel.hpp>
 
 #include <mediaserver/gui/rect_cut.hpp>
+#include <mediaserver/gui/shapes.hpp>
 
 #include <algorithm>
 #include <array>
@@ -66,20 +67,6 @@ constexpr gui::UiColor changed_color{0.93F, 0.66F, 0.24F, 1.0F};
   return color;
 }
 
-void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
-                 float radius, gui::UiColor color) {
-  constexpr std::size_t point_count = 12U;
-  constexpr float tau = 6.28318530718F;
-  std::array<gui::UiPoint, point_count> points{};
-  for (std::size_t index = 0U; index < point_count; ++index) {
-    const float angle =
-        tau * static_cast<float>(index) / static_cast<float>(point_count);
-    points[index] = gui::UiPoint{centre_x + std::cos(angle) * radius,
-                                 centre_y + std::sin(angle) * radius};
-  }
-  ctx.draw_list().add_convex_poly(points, color);
-}
-
 void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
   ctx.draw_list().add_line(x - 3.0F, y, x + 3.0F, y, 1.0F, color);
   ctx.draw_list().add_line(x, y - 3.0F, x, y + 3.0F, 1.0F, color);
@@ -100,16 +87,6 @@ void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
          lowercase(name).find(lowercase(query)) != std::string::npos;
 }
 
-[[nodiscard]] gui::Rect intersect(const gui::Rect &a,
-                                  const gui::Rect &b) noexcept {
-  const float left = std::max(a.x, b.x);
-  const float top = std::max(a.y, b.y);
-  const float right = std::min(a.x + a.width, b.x + b.width);
-  const float bottom = std::min(a.y + a.height, b.y + b.height);
-  return gui::Rect{left, top, std::max(right - left, 0.0F),
-                   std::max(bottom - top, 0.0F)};
-}
-
 [[nodiscard]] bool visible(const gui::Rect &bounds) noexcept {
   return bounds.width > 0.0F && bounds.height > 0.0F;
 }
@@ -117,7 +94,7 @@ void draw_plus(gui::UiContext &ctx, float x, float y, gui::UiColor color) {
 [[nodiscard]] gui::Interaction clipped_grab(gui::UiContext &ctx, gui::UiId id,
                                             const gui::Rect &bounds,
                                             const gui::Rect &clip) noexcept {
-  const gui::Rect hit = intersect(bounds, clip);
+  const gui::Rect hit = gui::intersection(bounds, clip);
   return visible(hit) ? ctx.grab(id, hit) : gui::Interaction{};
 }
 
@@ -620,7 +597,8 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
   if (action == LibraryAddAction::DirectionalLight ||
       action == LibraryAddAction::PointLight ||
       action == LibraryAddAction::SpotLight) {
-    draw_circle(ctx, centre_x, centre_y, 4.0F, color);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{centre_x, centre_y},
+                  4.0F, color);
     draw.add_line(centre_x - 7.0F, centre_y, centre_x - 5.0F, centre_y, 1.0F,
                   color);
     draw.add_line(centre_x + 5.0F, centre_y, centre_x + 7.0F, centre_y, 1.0F,
@@ -638,13 +616,13 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
     return;
   }
   if (action == LibraryAddAction::Model) {
-    draw.add_line(bounds.x + 2.0F, bounds.y + bounds.height - 3.0F, centre_x,
+    draw.add_line(bounds.x + 2.0F, bounds.bottom() - 3.0F, centre_x,
                   bounds.y + 2.0F, 1.0F, color);
-    draw.add_line(centre_x, bounds.y + 2.0F, bounds.x + bounds.width - 2.0F,
-                  bounds.y + bounds.height - 3.0F, 1.0F, color);
-    draw.add_line(bounds.x + 2.0F, bounds.y + bounds.height - 3.0F,
-                  bounds.x + bounds.width - 2.0F,
-                  bounds.y + bounds.height - 3.0F, 1.0F, color);
+    draw.add_line(centre_x, bounds.y + 2.0F, bounds.right() - 2.0F,
+                  bounds.bottom() - 3.0F, 1.0F, color);
+    draw.add_line(bounds.x + 2.0F, bounds.bottom() - 3.0F,
+                  bounds.right() - 2.0F,
+                  bounds.bottom() - 3.0F, 1.0F, color);
     return;
   }
   const gui::Rect cube{bounds.x + 3.0F, bounds.y + 3.0F, bounds.width - 6.0F,
@@ -653,11 +631,12 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
                 with_alpha(color, 0.18F));
   ctx.outline(cube, color);
   if (action == LibraryAddAction::Sphere) {
-    draw_circle(ctx, centre_x, centre_y, cube.width * 0.46F, color);
-    draw_circle(ctx, centre_x, centre_y, cube.width * 0.33F,
-                ctx.theme().widget);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{centre_x, centre_y},
+                  cube.width * 0.46F, color);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{centre_x, centre_y},
+                  cube.width * 0.33F, ctx.theme().widget);
   } else if (action == LibraryAddAction::Plane) {
-    draw.add_line(cube.x, cube.y + cube.height, cube.x + cube.width, cube.y,
+    draw.add_line(cube.x, cube.bottom(), cube.right(), cube.y,
                   1.0F, color);
   } else if (action == LibraryAddAction::Background) {
     // A ramp: bands growing brighter down the card.
@@ -675,12 +654,12 @@ void draw_cpu_decode_warning(gui::UiContext &ctx, const gui::Rect &bounds) {
   const gui::UiColor red = ctx.theme().warning;
   const gui::UiColor cutout = scale(ctx.theme().row, 0.72F);
   const float centre_x = bounds.x + bounds.width * 0.5F;
-  draw.add_triangle(centre_x, bounds.y, bounds.x + bounds.width,
-                    bounds.y + bounds.height, bounds.x,
-                    bounds.y + bounds.height, red);
+  draw.add_triangle(centre_x, bounds.y, bounds.right(),
+                    bounds.bottom(), bounds.x,
+                    bounds.bottom(), red);
   draw.add_line(centre_x, bounds.y + 4.0F, centre_x,
-                bounds.y + bounds.height - 4.5F, 1.5F, cutout);
-  draw.add_rect(centre_x - 0.8F, bounds.y + bounds.height - 3.0F, 1.6F, 1.6F,
+                bounds.bottom() - 4.5F, 1.5F, cutout);
+  draw.add_rect(centre_x - 0.8F, bounds.bottom() - 3.0F, 1.6F, 1.6F,
                 cutout);
 }
 
@@ -1061,7 +1040,7 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
                   image.y + (image.height - icon) * 0.5F, icon, icon});
   }
   ctx.outline(image, theme.accent);
-  const gui::Rect caption{image.x, image.y + image.height, image.width, 18.0F};
+  const gui::Rect caption{image.x, image.bottom(), image.width, 18.0F};
   ctx.panel(caption, with_alpha(theme.background, 0.92F));
   ctx.label(gui::Rect{caption.x + 5.0F, caption.y, caption.width - 10.0F,
                       caption.height},
@@ -1069,7 +1048,7 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
   if (ghost_count_ > 1U) {
     const std::string count = std::to_string(ghost_count_);
     const float width = std::max(ctx.font_width(count) + 10.0F, 18.0F);
-    const gui::Rect badge{image.x + image.width - width + 6.0F, image.y - 8.0F,
+    const gui::Rect badge{image.right() - width + 6.0F, image.y - 8.0F,
                           width, 16.0F};
     ctx.panel(badge, theme.accent);
     ctx.label(gui::Rect{badge.x + 5.0F, badge.y, badge.width - 5.0F,
@@ -1420,22 +1399,10 @@ LibraryFrame LibraryPanel::draw_impl(
   {
     const gui::Rect field = gui::inset(search_bounds, 6.0F, 3.0F);
     const gui::UiId search_id = mix(id_, "library.search");
-    if (ctx.text_field(search_id, field, search_)) {
+    if (search_box(ctx, search_id, field, search_,
+                   "Search Assets and Generators...")) {
       scroll_ = 0.0F;
     }
-    if (search_.empty() && ctx.focus() != search_id) {
-      ctx.label(gui::inset(field, gui::Padding{19.0F, 0.0F, 4.0F, 0.0F}),
-                "Search Assets and Generators...", theme.text_muted);
-    }
-    draw_circle(ctx, field.x + 9.0F, field.y + field.height * 0.46F, 3.0F,
-                theme.text_muted);
-    draw_circle(ctx, field.x + 9.0F, field.y + field.height * 0.46F, 1.7F,
-                theme.widget);
-    ctx.draw_list().add_line(field.x + 11.0F,
-                             field.y + field.height * 0.46F + 2.0F,
-                             field.x + 14.0F,
-                             field.y + field.height * 0.46F + 5.0F, 1.0F,
-                             theme.text_muted);
   }
   const gui::UiId menu_id = mix(id_, "library.menu");
   bool open_import_menu = false;
@@ -1450,7 +1417,7 @@ LibraryFrame LibraryPanel::draw_impl(
     draw_folder_icon(ctx, button.inflated(-5.0F, -5.0F),
                      interaction.hovered ? theme.text : theme.text_muted,
                      false);
-    draw_plus(ctx, button.x + button.width - 6.0F, button.y + 6.0F,
+    draw_plus(ctx, button.right() - 6.0F, button.y + 6.0F,
               theme.accent);
     ctx.tooltip(button, "New Folder");
     create_folder = interaction.clicked;
@@ -1556,9 +1523,9 @@ LibraryFrame LibraryPanel::draw_impl(
   const auto scrollbar = [&](std::string_view name, bool vertical,
                              float &offset, float maximum) {
     const gui::Rect track =
-        vertical ? gui::Rect{content.x + content.width, content.y,
+        vertical ? gui::Rect{content.right(), content.y,
                              scrollbar_size, content.height}
-                 : gui::Rect{content.x, content.y + content.height,
+                 : gui::Rect{content.x, content.bottom(),
                              content.width, scrollbar_size};
     const float length = vertical ? track.height : track.width;
     const float total = length + maximum;
@@ -1660,12 +1627,12 @@ LibraryFrame LibraryPanel::draw_impl(
       result.observation = std::addressof(*found);
       result.state = found->state;
     }
-    const bool in_view = visible(intersect(where, content));
+    const bool in_view = visible(gui::intersection(where, content));
     float distance = 0.0F;
-    if (!in_view && where.y + where.height <= content.y) {
+    if (!in_view && where.bottom() <= content.y) {
       distance = content.y - where.y - where.height;
     } else if (!in_view) {
-      distance = where.y - (content.y + content.height);
+      distance = where.y - (content.bottom());
     }
     thumbnail_candidates.push_back(
         ThumbnailCandidate{key, result.state, in_view, distance});
@@ -1799,8 +1766,8 @@ LibraryFrame LibraryPanel::draw_impl(
       // An amber corner: this file is not the revision the Library holds.
       const float size = std::clamp(preview.height * 0.35F, 6.0F, 18.0F);
       ctx.draw_list().add_triangle(
-          preview.x + preview.width - size, preview.y,
-          preview.x + preview.width, preview.y, preview.x + preview.width,
+          preview.right() - size, preview.y,
+          preview.right(), preview.y, preview.right(),
           preview.y + size, changed_color);
     }
   };
@@ -2004,7 +1971,7 @@ LibraryFrame LibraryPanel::draw_impl(
       const gui::Rect row{content.x, y, content.width, row_height};
       y += row_height;
       over_row = over_row || over(row, pointer_x, pointer_y);
-      const bool shown = visible(intersect(row, visible_content));
+      const bool shown = visible(gui::intersection(row, visible_content));
       const gui::UiId row_id =
           entry.kind == Entry::Kind::Generator
               ? mix(id_, "library.generator",
@@ -2142,7 +2109,7 @@ LibraryFrame LibraryPanel::draw_impl(
                             row.height},
                   entry.item->detail, theme.text_muted);
         draw_plus(ctx, std::min(origin_x + columns_width,
-                                content.x + content.width) -
+                                content.right()) -
                            12.0F,
                   row.y + row.height * 0.5F,
                   interaction.hovered ? theme.accent : theme.text_muted);
@@ -2162,8 +2129,8 @@ LibraryFrame LibraryPanel::draw_impl(
         const gui::Rect cell{x + 6.0F, row.y, std::max(width - 12.0F, 0.0F),
                              row.height};
         x += width;
-        if (cell.x > content.x + content.width ||
-            cell.x + cell.width < content.x) {
+        if (cell.x > content.right() ||
+            cell.right() < content.x) {
           continue;
         }
         if (column == LibraryColumn::Status) {
@@ -2177,9 +2144,9 @@ LibraryFrame LibraryPanel::draw_impl(
           const std::string status =
               status_text(*entry.asset, thumbnail, runtime);
           ctx.label(gui::Rect{status_x, row.y,
-                              std::max(cell.x + cell.width - status_x, 0.0F),
+                              std::max(cell.right() - status_x, 0.0F),
                               row.height},
-                    fit(ctx, status, cell.x + cell.width - status_x),
+                    fit(ctx, status, cell.right() - status_x),
                     status_color(*entry.asset, thumbnail, runtime));
           if (!status.empty()) {
             ctx.tooltip(cell, status);
@@ -2195,7 +2162,7 @@ LibraryFrame LibraryPanel::draw_impl(
                           static_cast<float>(progress.completed_frames) /
                               static_cast<float>(progress.total_frames),
                           0.0F, 1.0F);
-            const gui::Rect track{cell.x, row.y + row.height - 4.0F,
+            const gui::Rect track{cell.x, row.bottom() - 4.0F,
                                   cell.width, 3.0F};
             ctx.panel(track, scale(theme.track, 0.78F));
             if (fraction > 0.0F) {
@@ -2261,7 +2228,7 @@ LibraryFrame LibraryPanel::draw_impl(
       if (entry.kind == Entry::Kind::Asset) {
         thumbnail = thumbnail_for(*entry.asset, tile);
       }
-      const bool shown = visible(intersect(tile, visible_content));
+      const bool shown = visible(gui::intersection(tile, visible_content));
       const gui::UiId tile_id =
           entry.kind == Entry::Kind::Generator
               ? mix(id_, "library.generator",
@@ -2309,7 +2276,7 @@ LibraryFrame LibraryPanel::draw_impl(
         const Runtime runtime = runtime_for(*entry.asset);
         if (runtime.cpu_decode_only) {
           draw_cpu_decode_warning(
-              ctx, gui::Rect{image.x + image.width - 16.0F, image.y + 4.0F,
+              ctx, gui::Rect{image.right() - 16.0F, image.y + 4.0F,
                              12.0F, 11.0F});
         }
         const auto *const media = std::get_if<assets::MediaAsset>(entry.asset);
@@ -2350,7 +2317,7 @@ LibraryFrame LibraryPanel::draw_impl(
         ctx.panel(tile, with_alpha(theme.accent, 0.2F));
         ctx.outline(tile, theme.accent);
       }
-      const gui::Rect name_bounds{tile.x + 4.0F, image.y + image.height + 3.0F,
+      const gui::Rect name_bounds{tile.x + 4.0F, image.bottom() + 3.0F,
                                   tile.width - 8.0F, 16.0F};
       if (entry.id != doc::NodeId{} && rename_.editing(entry.id.value())) {
         if (auto renamed = rename_.draw(ctx, name_bounds)) {
@@ -2390,7 +2357,7 @@ LibraryFrame LibraryPanel::draw_impl(
   // ------------------------------------------------------------ header
   if (list) {
     ctx.panel(subheader, theme.header);
-    ctx.panel(gui::Rect{subheader.x, subheader.y + subheader.height - 1.0F,
+    ctx.panel(gui::Rect{subheader.x, subheader.bottom() - 1.0F,
                         subheader.width, 1.0F},
               theme.divider);
     ctx.push_clip(subheader);
@@ -2467,7 +2434,7 @@ LibraryFrame LibraryPanel::draw_impl(
   } else {
     // The folder path. Every step is a place to go, and a place to drop.
     ctx.panel(subheader, theme.header);
-    ctx.panel(gui::Rect{subheader.x, subheader.y + subheader.height - 1.0F,
+    ctx.panel(gui::Rect{subheader.x, subheader.bottom() - 1.0F,
                         subheader.width, 1.0F},
               theme.divider);
     ctx.push_clip(subheader);
@@ -2700,7 +2667,7 @@ LibraryFrame LibraryPanel::draw_impl(
       ctx.tooltip(slider, "Thumbnail size (Ctrl+Wheel)");
       draw_library_icon(
           ctx, LibraryAddAction::Media,
-          gui::Rect{slider.x + slider.width + 3.0F, footer.y + 4.0F, 14.0F,
+          gui::Rect{slider.right() + 3.0F, footer.y + 4.0F, 14.0F,
                     14.0F});
     }
     std::string summary;

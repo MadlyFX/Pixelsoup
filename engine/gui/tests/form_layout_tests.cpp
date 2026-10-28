@@ -153,6 +153,36 @@ void a_cell_is_where_a_column_crosses_a_row() {
     UI_CHECK(same_rect(gui::cell(column, row), 40.0F, 130.0F, 60.0F, 26.0F));
 }
 
+// The rectangles placed by a point or between two coordinates rather than
+// cut from a parent: a handle, a span of time, a playhead, a rubber band.
+void point_placed_boxes_sit_where_they_are_asked() {
+    UI_CHECK(same_rect(gui::around(50.0F, 40.0F, 10.0F, 6.0F), 45.0F, 37.0F, 10.0F, 6.0F));
+
+    constexpr gui::Rect lane{20.0F, 130.0F, 500.0F, 24.0F};
+    UI_CHECK(same_rect(gui::span_x(lane, 60.0F, 95.0F), 60.0F, 130.0F, 35.0F, 24.0F));
+    // A span that runs backwards is empty, not negative.
+    UI_CHECK(same_rect(gui::span_x(lane, 95.0F, 60.0F), 95.0F, 130.0F, 0.0F, 24.0F));
+    UI_CHECK(same_rect(gui::span_y(lane, 140.0F, 150.0F), 20.0F, 140.0F, 500.0F, 10.0F));
+
+    UI_CHECK(same_rect(gui::rule_x(lane, 70.0F), 69.5F, 130.0F, 1.0F, 24.0F));
+    UI_CHECK(same_rect(gui::rule_x(lane, 70.0F, 3.0F), 68.5F, 130.0F, 3.0F, 24.0F));
+    UI_CHECK(same_rect(gui::rule_y(lane, 140.0F, 2.0F), 20.0F, 139.0F, 500.0F, 2.0F));
+
+    UI_CHECK(same_rect(gui::spanning(90.0F, 20.0F, 30.0F, 70.0F), 30.0F, 20.0F, 60.0F, 50.0F));
+    UI_CHECK(same_rect(gui::spanning(30.0F, 70.0F, 90.0F, 20.0F), 30.0F, 20.0F, 60.0F, 50.0F));
+}
+
+void boxes_overlap_where_both_are_and_enclose_both() {
+    constexpr gui::Rect a{10.0F, 20.0F, 50.0F, 40.0F};
+    constexpr gui::Rect b{40.0F, 50.0F, 60.0F, 30.0F};
+    UI_CHECK(same_rect(gui::intersection(a, b), 40.0F, 50.0F, 20.0F, 10.0F));
+    UI_CHECK(same_rect(gui::intersection(b, a), 40.0F, 50.0F, 20.0F, 10.0F));
+    // Apart, they share nothing.
+    UI_CHECK(same_rect(gui::intersection(a, gui::Rect{200.0F, 0.0F, 5.0F, 5.0F}),
+                       200.0F, 20.0F, 0.0F, 0.0F));
+    UI_CHECK(same_rect(gui::enclosing(a, b), 10.0F, 20.0F, 90.0F, 60.0F));
+}
+
 void form_rows_follow_the_metrics_rhythm() {
     const gui::Metrics metrics = odd_metrics();
     gui::FormLayout form{gui::Rect{50.0F, 100.0F, 400.0F, 300.0F}, metrics};
@@ -368,6 +398,10 @@ int main() {
         {"list_rows_step_down_from_the_scrolled_top_unclamped",
          list_rows_step_down_from_the_scrolled_top_unclamped},
         {"a_cell_is_where_a_column_crosses_a_row", a_cell_is_where_a_column_crosses_a_row},
+        {"point_placed_boxes_sit_where_they_are_asked",
+         point_placed_boxes_sit_where_they_are_asked},
+        {"boxes_overlap_where_both_are_and_enclose_both",
+         boxes_overlap_where_both_are_and_enclose_both},
         {"form_rows_follow_the_metrics_rhythm", form_rows_follow_the_metrics_rhythm},
         {"a_section_after_a_caption_sits_as_far_from_it_as_after_a_row",
          a_section_after_a_caption_sits_as_far_from_it_as_after_a_row},

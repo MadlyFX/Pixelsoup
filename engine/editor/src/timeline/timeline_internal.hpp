@@ -8,6 +8,7 @@
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
+#include <mediaserver/gui/shapes.hpp>
 
 #include "timeline_graph_view.hpp"
 #include "timeline_hits.hpp"
@@ -383,12 +384,12 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
                                    : (interaction.hovered ? theme.widget_hover
                                                           : theme.widget)));
   if (engaged) {
-    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+    ctx.panel(gui::Rect{bounds.x, bounds.bottom() - 2.0F,
                         bounds.width, 2.0F},
               engaged_color);
   }
-  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
-                 bounds.y + bounds.height * 0.5F,
+  gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(),
+                 bounds.center_y(),
                  engaged ? engaged_color
                          : (interaction.hovered ? theme.text
                                                 : theme.text_muted), icon_scale);
@@ -408,7 +409,7 @@ inline constexpr std::array<RateChoice, 8U> common_rates{{
                                    : (interaction.hovered ? theme.widget_hover
                                                           : theme.widget)));
   if (engaged) {
-    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
+    ctx.panel(gui::Rect{bounds.x, bounds.bottom() - 2.0F,
                         bounds.width, 2.0F},
               theme.accent);
   }
@@ -446,8 +447,8 @@ inline constexpr float row_switch_width = 18.0F;
       engaged ? alpha(color, enabled ? 1.0F : 0.55F)
               : alpha(hot ? theme.text : theme.text_muted,
                       enabled ? (hot ? 1.0F : 0.6F) : 0.3F);
-  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
-                 bounds.y + bounds.height * 0.5F, mark, 0.85F);
+  gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(),
+                 bounds.center_y(), mark, 0.85F);
   ctx.tooltip(bounds, tooltip);
   return enabled && interaction.clicked;
 }
@@ -566,18 +567,15 @@ enum class MenuCommand : core::u8 {
   return "Q" + std::to_string(number);
 }
 
-inline void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
-                 gui::UiColor color) {
-  constexpr std::size_t point_count = 12U;
-  constexpr float tau = 6.28318530718F;
-  std::array<gui::UiPoint, point_count> points{};
-  for (std::size_t index = 0U; index < point_count; ++index) {
-    const float angle =
-        tau * static_cast<float>(index) / static_cast<float>(point_count);
-    points[index] = gui::UiPoint{cx + std::cos(angle) * radius,
-                                 cy + std::sin(angle) * radius};
-  }
-  ctx.draw_list().add_convex_poly(points, color);
+// A chip beside the pointer saying what a drag carries and where it is
+// going: a raised body with an accent edge down its left.
+inline void drag_chip(gui::UiContext &ctx, const gui::Rect &chip,
+                      std::string_view text) {
+  ctx.panel(chip, ctx.theme().widget_active);
+  gui::Rect edge = chip;
+  ctx.panel(gui::cut_left(edge, 3.0F), ctx.theme().accent);
+  ctx.label(gui::inset(chip, gui::Padding{10.0F, 0.0F, 4.0F, 0.0F}), text,
+            ctx.theme().text);
 }
 
 // A key's glyph says how it leaves for the next key, as in every motion

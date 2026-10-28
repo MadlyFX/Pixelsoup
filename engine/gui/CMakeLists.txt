@@ -8,6 +8,8 @@ add_library(mediaserver_gui STATIC
     src/layout.cpp
     src/form_layout.cpp
     src/ui_context.cpp
+    src/icons.cpp
+    src/shapes.cpp
     src/color_picker.cpp
     src/dock.cpp
     src/window.cpp
@@ -128,6 +130,23 @@ if(BUILD_TESTING)
         COMMAND mediaserver_gui_form_layout_tests
     )
     set_target_properties(mediaserver_gui_form_layout_tests PROPERTIES FOLDER "tests")
+
+    # What a canvas draws by points rather than boxes: the pan/zoom view, the
+    # shared shapes, and the icon glyphs. Arithmetic and vertex extents.
+    add_executable(mediaserver_gui_canvas_tests
+        tests/canvas_tests.cpp
+    )
+    target_link_libraries(mediaserver_gui_canvas_tests
+        PRIVATE
+            MediaServer::Gui
+    )
+    mediaserver_set_project_options(mediaserver_gui_canvas_tests)
+
+    add_test(
+        NAME mediaserver.gui_canvas
+        COMMAND mediaserver_gui_canvas_tests
+    )
+    set_target_properties(mediaserver_gui_canvas_tests PROPERTIES FOLDER "tests")
 
     # The dock tree is where rearranging goes wrong quietly - a collapse that
     # orphans a node, a drop that loses a panel - so its suite drives the tree

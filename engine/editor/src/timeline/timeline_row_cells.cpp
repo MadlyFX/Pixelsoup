@@ -45,7 +45,7 @@ void TimelinePanel::draw_rows(Pass &p) {
     const Row &row = rows[index];
     const float y = rows_bounds.y + row.top - row_scroll_;
     if (y + row.height <= rows_bounds.y ||
-        y >= rows_bounds.y + rows_bounds.height) {
+        y >= rows_bounds.bottom()) {
       continue;
     }
     RowContext &rc = visible.emplace_back(p, row, index);
@@ -142,7 +142,7 @@ void TimelinePanel::draw_rows(Pass &p) {
         gui::UiColor color = ctx.theme().accent;
         color.a = std::clamp(left / 1.5F, 0.0F, 1.0F);
         ctx.outline(gui::Rect{rows_bounds.x, rc.y,
-                              graph.x + graph.width - rows_bounds.x,
+                              graph.right() - rows_bounds.x,
                               rc.row.height},
                     color, 2.0F);
       }
@@ -194,7 +194,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
   rc.centre_y = y + row.height * 0.5F;
   rc.interaction_y = std::max(y, rows_bounds.y);
   const float interaction_bottom =
-      std::min(y + row.height, rows_bounds.y + rows_bounds.height);
+      std::min(y + row.height, rows_bounds.bottom());
   rc.interaction_height =
       std::max(interaction_bottom - rc.interaction_y, 0.0F);
   rc.controls =
@@ -239,6 +239,16 @@ void TimelinePanel::layout_row(RowContext &rc) {
             : group_channel(row.group, row.component)};
   }
 
+  // A bar over the frames from `first` to `end`, 3 in from the row's top and
+  // bottom, and never thinner than 2 so a one-frame clip zoomed far out
+  // still shows.
+  const auto bar_between = [&](core::i64 first, core::i64 end) {
+    const float x0 = frame_to_x(static_cast<double>(first));
+    const float x1 = frame_to_x(static_cast<double>(end));
+    return gui::span_x(
+        gui::inset(gui::Rect{graph.x, y, graph.width, row.height}, 0.0F, 3.0F),
+        x0, std::max(x1, x0 + 2.0F));
+  };
   if (row.kind == Row::Kind::Layer && !row.surface) {
     const ElementInfo *const element = find_element(elements, row.node);
     if (element != nullptr && element->kind == ElementKind::Media &&
@@ -246,11 +256,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
       rc.clip_element = element;
       rc.clip_timing = shown_timing(*element);
       const scene::ClipTiming &timing = rc.clip_timing;
-      const float x0 = frame_to_x(static_cast<double>(timing.start));
-      const float x1 =
-          frame_to_x(static_cast<double>(timing.start + timing.duration));
-      rc.clip_bar =
-          gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row.height - 6.0F};
+      rc.clip_bar = bar_between(timing.start, timing.start + timing.duration);
       rc.clip_fade_in_x =
           frame_to_x(static_cast<double>(timing.start + timing.fade_in));
       rc.clip_fade_out_x = frame_to_x(static_cast<double>(
@@ -272,10 +278,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
       ++rc.track_clips;
     }
     if (rc.track_bar) {
-      const float x0 = frame_to_x(static_cast<double>(rc.track_first));
-      const float x1 = frame_to_x(static_cast<double>(rc.track_end));
-      rc.clip_bar =
-          gui::Rect{x0, y + 3.0F, std::max(x1 - x0, 2.0F), row.height - 6.0F};
+      rc.clip_bar = bar_between(rc.track_first, rc.track_end);
     }
   }
 
@@ -328,8 +331,7 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
     HitTarget target{
         mix(mix(id_, "key", identity), "frame",
             static_cast<core::u64>((*rc.component_frames)[key])),
-        gui::Rect{x - key_hit_radius, y - key_hit_radius,
-                  key_hit_radius * 2.0F, key_hit_radius * 2.0F},
+        gui::around(x, y, key_hit_radius * 2.0F, key_hit_radius * 2.0F),
         HitPriority::Key, gui::Rect{x, y, 0.0F, 0.0F},
         row_part_tag(rc.index, RowPart::Key, key)};
     target.reach = key_hit_radius;
@@ -352,17 +354,16 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
     return;
   }
   const float grab = edge_grab_width(bar.width);
+  // Each end answers from just outside the bar to the grab width inside it,
+  // and measures from the edge itself.
   p.hits.add(HitTarget{mix(id_, "trim in", identity),
-                       gui::Rect{bar.x - trim_outer_reach, bar.y,
-                                 grab + trim_outer_reach, bar.height},
-                       HitPriority::TrimEdge,
-                       gui::Rect{bar.x, bar.y, 0.0F, bar.height},
+                       gui::span_x(bar, bar.x - trim_outer_reach, bar.x + grab),
+                       HitPriority::TrimEdge, gui::rule_x(bar, bar.x, 0.0F),
                        row_part_tag(rc.index, RowPart::TrimIn)});
   p.hits.add(HitTarget{mix(id_, "trim out", identity),
-                       gui::Rect{bar.x + bar.width - grab, bar.y,
-                                 grab + trim_outer_reach, bar.height},
-                       HitPriority::TrimEdge,
-                       gui::Rect{bar.x + bar.width, bar.y, 0.0F, bar.height},
+                       gui::span_x(bar, bar.right() - grab,
+                                   bar.right() + trim_outer_reach),
+                       HitPriority::TrimEdge, gui::rule_x(bar, bar.right(), 0.0F),
                        row_part_tag(rc.index, RowPart::TrimOut)});
   if (rc.track_bar) {
     return;
@@ -373,11 +374,10 @@ void TimelinePanel::collect_row_hits(RowContext &rc) {
   // end is the edge's to trim.
   const auto knob = [&](float x, std::string_view name, RowPart part) {
     const float centre_y = bar.y + 1.0F;
-    const float top = centre_y - fade_handle_reach;
     HitTarget target{mix(id_, name, identity),
-                     gui::Rect{x - fade_handle_reach, top,
-                               fade_handle_reach * 2.0F,
-                               bar.y + fade_knob_depth - top},
+                     gui::span_y(gui::rule_x(bar, x, fade_handle_reach * 2.0F),
+                                 centre_y - fade_handle_reach,
+                                 bar.y + fade_knob_depth),
                      HitPriority::FadeKnob,
                      gui::Rect{x, centre_y, 0.0F, 0.0F},
                      row_part_tag(rc.index, part)};
@@ -400,7 +400,7 @@ void TimelinePanel::collect_list_hits(RowContext &rc) {
                        RowPart part) {
     rc.p.hits.add(HitTarget{
         mix(id_, name, identity), bounds, HitPriority::Key,
-        gui::Rect{bounds.x + bounds.width * 0.5F, rc.centre_y, 0.0F, 0.0F},
+        gui::Rect{bounds.center_x(), rc.centre_y, 0.0F, 0.0F},
         row_part_tag(rc.index, part)});
   };
   add(rc.controls.previous, "previous key", RowPart::PreviousKey);
@@ -431,7 +431,7 @@ void TimelinePanel::begin_row(RowContext &rc) {
   if ((row.kind == Row::Kind::Layer && !row.surface) ||
       row.kind == Row::Kind::LaneHeader) {
     const float top = std::max(y, rows_bounds.y);
-    const float bottom = std::min(y + row.height, rows_bounds.y + rows_bounds.height);
+    const float bottom = std::min(y + row.height, rows_bounds.bottom());
     replacement_targets_.push_back({row.node,
         {rows_bounds.x, top, rows_bounds.width, bottom - top},
         row.kind == Row::Kind::LaneHeader});
@@ -463,22 +463,25 @@ void TimelinePanel::begin_row(RowContext &rc) {
     // reads them as that layer's contents rather than as more layers.
     background = row_theme.track;
   }
-  ctx.panel(gui::Rect{rows_bounds.x, y, rows_bounds.width, row.height},
-            background);
+  // The row across the whole panel; its list part is the band left of the
+  // lanes.
+  const gui::Rect band{rows_bounds.x, y, rows_bounds.width, row.height};
+  ctx.panel(band, background);
   if (!is_selected && row_hovered && layer_like) {
-    ctx.panel(gui::Rect{rows_bounds.x, y, list_width, row.height},
+    ctx.panel(gui::span_x(band, band.x, band.x + list_width),
               alpha(row_theme.widget_hover, 0.6F));
   }
   // Every layer is ruled off across the whole panel; property rows only
   // across the lanes, so a twirled-open layer still reads as one block.
-  ctx.panel(gui::Rect{layer_like ? rows_bounds.x : graph.x,
-                      y + row.height - 1.0F,
-                      layer_like ? rows_bounds.width : graph.width, 1.0F},
-            row_theme.divider);
+  {
+    gui::Rect ruled = layer_like ? band : gui::cell(graph, band);
+    ctx.panel(gui::cut_bottom(ruled, 1.0F), row_theme.divider);
+  }
   if (layer_like && !row.surface) {
-    // The row's own colour down its left edge: the kind for a layer, the
-    // track's for a track. Selection takes the accent.
-    ctx.panel(gui::Rect{rows_bounds.x, y, 3.0F, row.height - 1.0F},
+    // The row's own colour down its left edge, above the rule: the kind for
+    // a layer, the track's for a track. Selection takes the accent.
+    gui::Rect edge = gui::inset(band, gui::Padding{0.0F, 0.0F, 0.0F, 1.0F});
+    ctx.panel(gui::cut_left(edge, 3.0F),
               is_selected ? row_theme.accent
                           : alpha(row.color, row.locked ? 0.35F : 0.85F));
   }
@@ -509,9 +512,7 @@ void TimelinePanel::begin_row(RowContext &rc) {
   // the row itself.
   rc.content_x = twirl_x + list_metrics::twirl_width + 2.0F;
   rc.name_x = content_x;
-  rc.name_bounds = gui::Rect{content_x, y,
-                        std::max(graph.x - content_x - 48.0F, 0.0F),
-                        row.height};
+  rc.name_bounds = gui::span_x(band, content_x, graph.x - 48.0F);
   rc.lock_x = graph.x - list_metrics::toggle - 4.0F;
   rc.eye_bounds = gui::Rect{rows_bounds.x + 4.0F, y, list_metrics::toggle,
                              row.height};
@@ -551,7 +552,7 @@ void TimelinePanel::track_header_list_cell(RowContext &rc) {
                                          0.0F),
                       badge.y, badge.width, badge.height},
             number, row_theme.background);
-  name_x = badge.x + badge.width + 8.0F;
+  name_x = badge.right() + 8.0F;
   // The track's working switches, just inside its padlock: where Insert
   // and Overwrite land, whether it keeps time with ripples elsewhere, and
   // whether the Stage shows it alone. Each reads its state from across a
@@ -884,7 +885,7 @@ void TimelinePanel::channel_value_cell(RowContext &rc) {
       text.data(), static_cast<std::size_t>(std::max(length, 0))};
   const float text_width =
       std::min(ctx.font_width(shown) + 1.0F, bounds.width);
-  ctx.label(gui::Rect{bounds.x + bounds.width - text_width, rc.y, text_width,
+  ctx.label(gui::Rect{bounds.right() - text_width, rc.y, text_width,
                       row.height},
             shown, ctx.theme().text_muted);
   ctx.tooltip(bounds, row.locked ? "Unlock the layer to edit its keys"
@@ -943,8 +944,8 @@ void TimelinePanel::channel_visibility_toggle(RowContext &rc) {
                              : channel_color(row_channel_identity->property));
     if (channel_hidden) {
       ctx.draw_list().add_line(visibility_bounds.x, visibility_bounds.y,
-                               visibility_bounds.x + visibility_bounds.width,
-                               visibility_bounds.y + visibility_bounds.height,
+                               visibility_bounds.right(),
+                               visibility_bounds.bottom(),
                                1.0F, ctx.theme().warning);
     }
     if (visibility.clicked) {
@@ -1063,7 +1064,7 @@ void TimelinePanel::row_key_steps(RowContext &rc) {
         !target.has_value()
             ? alpha(ctx.theme().text_muted, 0.3F)
             : (owner ? ctx.theme().accent : ctx.theme().text_muted);
-    const float cx = bounds.x + bounds.width * 0.5F;
+    const float cx = bounds.center_x();
     const float cy = rc.centre_y;
     const float tip = forward ? 3.0F : -3.0F;
     const std::array<gui::UiPoint, 3U> arrow{
@@ -1279,14 +1280,18 @@ void TimelinePanel::layer_lane_cell(RowContext &rc) {
     // quiet band in its colour, so it reads as "always on", not as a clip.
     const float x0 = frame_to_x(static_cast<double>(first_i));
     const float x1 = frame_to_x(static_cast<double>(last_i));
-    const gui::Rect clip{x0, y + 5.0F, std::max(x1 - x0, 1.0F),
-                         row.height - 10.0F};
+    const gui::Rect clip = gui::span_x(
+        gui::inset(gui::Rect{graph.x, y, graph.width, row.height}, 0.0F, 5.0F),
+        x0, std::max(x1, x0 + 1.0F));
     ctx.panel(clip, alpha(row.color, row.element_visible ? 0.16F : 0.06F));
-    ctx.panel(gui::Rect{clip.x, clip.y, clip.width, 1.0F},
-              alpha(row.color, row.element_visible ? 0.45F : 0.18F));
+    {
+      gui::Rect top = clip;
+      ctx.panel(gui::cut_top(top, 1.0F),
+                alpha(row.color, row.element_visible ? 0.45F : 0.18F));
+    }
     if (row.element_kind == ElementKind::Media) {
       const float begin = std::max(clip.x, graph.x);
-      const float end = std::min(clip.x + clip.width, graph.x + graph.width);
+      const float end = std::min(clip.right(), graph.right());
       std::size_t sample = 0U;
       for (float x = begin + 2.0F; x < end - 1.0F; x += 5.0F) {
         const core::u64 pattern =
@@ -1329,8 +1334,8 @@ void TimelinePanel::track_bar_cell(RowContext &rc) {
     const scene::ClipTiming timing = shown_timing(element);
     for (const core::i64 cut : {timing.start, timing.start + timing.duration}) {
       const float x = time_axis_.x(static_cast<double>(cut), graph.x);
-      if (x > bar.x + 1.0F && x < bar.x + bar.width - 1.0F) {
-        ctx.panel(gui::Rect{x - 0.5F, bar.y + 3.0F, 1.0F, bar.height - 6.0F},
+      if (x > bar.x + 1.0F && x < bar.right() - 1.0F) {
+        ctx.panel(gui::rule_x(gui::inset(bar, 0.0F, 3.0F), x),
                   alpha(row.color, 0.6F * strength));
       }
     }
@@ -1339,13 +1344,12 @@ void TimelinePanel::track_bar_cell(RowContext &rc) {
   summary_lane_cell(rc, false);
   const float label_left = std::max(bar.x, graph.x) + 6.0F +
                            edge_grab_width(bar.width);
-  const float label_right = bar.x + bar.width - 6.0F;
+  const float label_right = bar.right() - 6.0F;
   const std::string count = std::to_string(rc.track_clips) +
                             (rc.track_clips == 1U ? " clip" : " clips");
   if (label_right - label_left >= ctx.font_width(count)) {
-    ctx.label(gui::Rect{label_left, bar.y, label_right - label_left,
-                        bar.height},
-              count, alpha(ctx.theme().text_muted, strength));
+    ctx.label(gui::span_x(bar, label_left, label_right), count,
+              alpha(ctx.theme().text_muted, strength));
   }
   if (row.node == selected_lane_) {
     ctx.outline(bar, ctx.theme().text, 1.5F);
@@ -1462,10 +1466,8 @@ void TimelinePanel::clip_bar_cell(RowContext &rc) {
   gui::Rect pictures = clip_bar;
   gui::Rect sound = clip_bar;
   if (has_waveform && clip_bar.height >= split_clip_height) {
-    const float band = std::max(std::floor(clip_bar.height * 0.36F), 14.0F);
-    pictures.height = clip_bar.height - band;
-    sound = gui::Rect{clip_bar.x, pictures.y + pictures.height, clip_bar.width,
-                      band};
+    sound = gui::cut_bottom(
+        pictures, std::max(std::floor(clip_bar.height * 0.36F), 14.0F));
     ctx.panel(sound, alpha(ctx.theme().background, 0.45F));
   }
   const bool drew_filmstrip = draw_clip_filmstrip(rc, live, pictures);
@@ -1538,8 +1540,8 @@ bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live,
       const float tile_width =
           clip_bar.height * static_cast<float>(timeline_filmstrip_tile_width) /
           static_cast<float>(timeline_filmstrip_tile_height);
-      const float clip_right = clip_bar.x + clip_bar.width;
-      const float visible_right = std::min(clip_right, graph.x + graph.width);
+      const float clip_right = clip_bar.right();
+      const float visible_right = std::min(clip_right, graph.right());
       const float first_tile = std::floor(
           std::max(std::max(clip_bar.x, graph.x) - clip_bar.x, 0.0F) /
           tile_width);
@@ -1582,8 +1584,8 @@ bool TimelinePanel::draw_clip_filmstrip(RowContext &rc, bool live,
       // atlas at visible timeline positions, with a fixed per-row budget.
       // Neither a very long placement nor many loops increases this work.
       const float begin = std::max(clip_bar.x, graph.x);
-      const float end = std::min(clip_bar.x + clip_bar.width,
-                                 graph.x + graph.width);
+      const float end = std::min(clip_bar.right(),
+                                 graph.right());
       if (end > begin) {
         const unsigned tiles = static_cast<unsigned>(std::clamp(
             std::ceil((end - begin) / 72.0F), 1.0F, 32.0F));
@@ -1634,7 +1636,7 @@ void TimelinePanel::draw_clip_waveform(RowContext &rc, bool drew_filmstrip,
     return time_axis_.frame(x, graph.x);
   };
   const Row &row = rc.row;
-  const float centre_y = area.y + area.height * 0.5F;
+  const float centre_y = area.center_y();
   auto &clip_element = rc.clip_element;
   auto &clip_timing = rc.clip_timing;
   const gui::Rect &clip_bar = area;
@@ -1647,7 +1649,7 @@ void TimelinePanel::draw_clip_waveform(RowContext &rc, bool drew_filmstrip,
       clip_element->sequence_count > 0U && clip_timing.duration > 0) {
     const float begin = std::max(clip_bar.x, graph.x) + 1.0F;
     const float end =
-        std::min(clip_bar.x + clip_bar.width, graph.x + graph.width) - 1.0F;
+        std::min(clip_bar.right(), graph.right()) - 1.0F;
     const float half_height = std::max(clip_bar.height * 0.42F, 1.0F);
     const scene::MediaFrameRate show_frame_rate{timeline.rate_numerator,
                                                  timeline.rate_denominator};
@@ -1701,17 +1703,13 @@ void TimelinePanel::draw_clip_edges(RowContext &rc) {
   const Row &row = rc.row;
   auto &clip_bar = rc.clip_bar;
 
-  ctx.panel(gui::Rect{clip_bar.x, clip_bar.y, clip_bar.width, 1.0F},
-            alpha(row.color, 0.85F));
-  ctx.panel(gui::Rect{clip_bar.x, clip_bar.y + clip_bar.height - 1.0F,
-                      clip_bar.width, 1.0F},
-            alpha(row.color, 0.85F));
+  gui::Rect rules = clip_bar;
+  ctx.panel(gui::cut_top(rules, 1.0F), alpha(row.color, 0.85F));
+  ctx.panel(gui::cut_bottom(rules, 1.0F), alpha(row.color, 0.85F));
   const float grab = edge_grab_width(clip_bar.width);
-  ctx.panel(gui::Rect{clip_bar.x, clip_bar.y, grab, clip_bar.height},
-            alpha(row.color, 0.68F));
-  ctx.panel(gui::Rect{clip_bar.x + clip_bar.width - grab, clip_bar.y, grab,
-                      clip_bar.height},
-            alpha(row.color, 0.68F));
+  gui::Rect ends = clip_bar;
+  ctx.panel(gui::cut_left(ends, grab), alpha(row.color, 0.68F));
+  ctx.panel(gui::cut_right(ends, grab), alpha(row.color, 0.68F));
 
 }
 
@@ -1728,13 +1726,13 @@ void TimelinePanel::draw_clip_ramps(RowContext &rc) {
   // the bar's foot at the cut to its head where the clip is fully in.
   const gui::UiColor ramp = alpha(ctx.theme().keyframe, 0.9F);
   if (clip_timing.fade_in > 0) {
-    ctx.draw_list().add_line(clip_bar.x, clip_bar.y + clip_bar.height,
+    ctx.draw_list().add_line(clip_bar.x, clip_bar.bottom(),
                              clip_fade_in_x, clip_bar.y, 1.0F, ramp);
   }
   if (clip_timing.fade_out > 0) {
     ctx.draw_list().add_line(clip_fade_out_x, clip_bar.y,
-                             clip_bar.x + clip_bar.width,
-                             clip_bar.y + clip_bar.height, 1.0F, ramp);
+                             clip_bar.right(),
+                             clip_bar.bottom(), 1.0F, ramp);
   }
   // The fade handles ride the bar's top edge as round knobs. They grow
   // and light under the pointer, and answer a press several units away,
@@ -1754,8 +1752,7 @@ void TimelinePanel::draw_clip_ramps(RowContext &rc) {
     if (near) {
       ctx.set_cursor(gui::Cursor::ResizeHorizontal);
       ctx.tooltip(gui::Rect{handle_x - fade_handle_reach, clip_bar.y - 4.0F,
-                            fade_handle_reach * 2.0F,
-                            fade_handle_reach + 4.0F},
+                            fade_handle_reach * 2.0F, fade_handle_reach + 4.0F},
                   "Drag to set the fade");
     }
   };
@@ -1781,7 +1778,7 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
   // visible start of a bar scrolled half off the left edge.
   const float name_left =
       std::max(clip_bar.x, graph.x) + 6.0F + edge_grab_width(clip_bar.width);
-  const float name_right = clip_bar.x + clip_bar.width - 6.0F;
+  const float name_right = clip_bar.right() - 6.0F;
   if (name_right - name_left >= 24.0F) {
     std::string name = row.label;
     if (clip_.drag == ClipDrag::Slip && clip_.node == row.node) {
@@ -1795,14 +1792,18 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
     }
     // On a tall row the name keeps to a band along the top, as a source
     // name sits over a clip's first frame, and leaves the pictures clear.
-    const float band = std::min(clip_bar.height, row_height - 6.0F);
+    gui::Rect below = clip_bar;
+    const gui::Rect line = gui::span_x(
+        gui::cut_top(below, std::min(clip_bar.height, row_height - 6.0F)),
+        name_left, name_right);
+    // The backing starts 4 before the text and fits it, 2 in from the band's
+    // top and bottom.
     const float text_width =
-        std::min(ctx.font_width(name) + 8.0F, name_right - name_left);
-    ctx.panel(gui::Rect{name_left - 4.0F, clip_bar.y + 2.0F, text_width,
-                        band - 4.0F},
+        std::min(ctx.font_width(name) + 8.0F, line.width);
+    ctx.panel(gui::inset(gui::span_x(line, line.x - 4.0F, line.x - 4.0F + text_width),
+                         0.0F, 2.0F),
               alpha(ctx.theme().background, 0.55F));
-    ctx.label(gui::Rect{name_left, clip_bar.y, name_right - name_left, band},
-              name,
+    ctx.label(line, name,
               clip_element->on_air ? ctx.theme().text
                                    : ctx.theme().text_muted);
   }
@@ -1834,20 +1835,20 @@ void TimelinePanel::draw_clip_hover(RowContext &rc) {
     if (edit_tool_ == TimelineEditTool::Razor) {
       const float cut_x =
           frame_to_x(static_cast<double>(razor_frame(p, px)));
-      ctx.panel(gui::Rect{cut_x - 0.5F, clip_bar.y - 2.0F, 1.5F,
-                          clip_bar.height + 4.0F},
+      // From half a pixel before the cut to a pixel after, 2 past the bar.
+      ctx.panel(gui::span_x(clip_bar.inflated(0.0F, 2.0F), cut_x - 0.5F,
+                            cut_x + 1.0F),
                 ctx.theme().warning);
     } else if (edit_tool_ == TimelineEditTool::Standard) {
       if (hovered == RowPart::FadeIn || hovered == RowPart::FadeOut) {
         // The handle itself shows the hover.
       } else if (hovered == RowPart::TrimIn) {
-        ctx.panel(gui::Rect{clip_bar.x, clip_bar.y, grab, clip_bar.height},
-                  row.color);
+        gui::Rect ends = clip_bar;
+        ctx.panel(gui::cut_left(ends, grab), row.color);
         ctx.set_cursor(gui::Cursor::ResizeHorizontal);
       } else if (hovered == RowPart::TrimOut) {
-        ctx.panel(gui::Rect{clip_bar.x + clip_bar.width - grab,
-                            clip_bar.y, grab, clip_bar.height},
-                  row.color);
+        gui::Rect ends = clip_bar;
+        ctx.panel(gui::cut_right(ends, grab), row.color);
         ctx.set_cursor(gui::Cursor::ResizeHorizontal);
       } else {
         ctx.set_cursor(gui::Cursor::Move);
@@ -2014,7 +2015,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
     keys_.duplicate = false;
     markers_.selected.clear();
     const float px = press_x;
-    const float midpoint = clip_bar.x + clip_bar.width * 0.5F;
+    const float midpoint = clip_bar.center_x();
     clip_.peer = doc::NodeId{};
     doc::NodeId dragged = row.node;
     scene::ClipTiming dragged_timing = clip_timing;
@@ -2154,7 +2155,7 @@ void TimelinePanel::note_row_menu_press(RowContext &rc) {
       ctx.pointer_y() >= rc.interaction_y &&
       ctx.pointer_y() < rc.interaction_y + rc.interaction_height &&
       ctx.pointer_x() >= rows_bounds.x &&
-      ctx.pointer_x() < rows_bounds.x + rows_bounds.width) {
+      ctx.pointer_x() < rows_bounds.right()) {
     p.scratch.right_row = rc.index;
   }
 }
@@ -2378,8 +2379,7 @@ void TimelinePanel::collect_graph(Pass &p,
         mix(mix(mix(id_, "graph key", channel.id.target.value()), "property",
                 static_cast<core::u64>(channel.id.property)),
             "frame", static_cast<core::u64>(key.frame)),
-        gui::Rect{key.x - key_hit_radius, key.y - key_hit_radius,
-                  key_hit_radius * 2.0F, key_hit_radius * 2.0F},
+        gui::around(key.x, key.y, key_hit_radius * 2.0F, key_hit_radius * 2.0F),
         HitPriority::Key, gui::Rect{key.x, key.y, 0.0F, 0.0F},
         row_part_tag(graph_row, RowPart::Key, index)};
     target.reach = key_hit_radius;
@@ -2419,7 +2419,7 @@ void TimelinePanel::collect_graph(Pass &p,
           mix(mix(mix(id_, "graph handle", channel.id.target.value()),
                   "frame", static_cast<core::u64>(key.frame)),
               "side", incoming ? 1U : 2U),
-          gui::Rect{x - reach, y - reach, reach * 2.0F, reach * 2.0F},
+          gui::around(x, y, reach * 2.0F, reach * 2.0F),
           HitPriority::Handle, gui::Rect{x, y, 0.0F, 0.0F},
           row_part_tag(graph_row, RowPart::Handle, handles.size() - 1U)};
       target.reach = reach;
@@ -2541,11 +2541,12 @@ void TimelinePanel::summary_lane_cell(RowContext &rc, bool span_bar) {
   if (span_bar) {
     const float x0 = time_axis_.x(static_cast<double>(summary.first), graph.x);
     const float x1 = time_axis_.x(static_cast<double>(summary.end), graph.x);
-    ctx.panel(gui::Rect{x0, centre_y - 1.5F, std::max(x1 - x0, 2.0F), 3.0F},
+    ctx.panel(gui::span_x(gui::rule_y(graph, centre_y, 3.0F), x0,
+                          std::max(x1, x0 + 2.0F)),
               alpha(row.color, row.element_visible ? 0.55F : 0.25F));
   }
   const float left = graph.x - summary_key_radius * 2.0F;
-  const float right = graph.x + graph.width + summary_key_radius * 2.0F;
+  const float right = graph.right() + summary_key_radius * 2.0F;
   for (const SummaryKey &key : p.built.keys(summary)) {
     const float x = time_axis_.x(static_cast<double>(key.frame), graph.x);
     if (x < left || x > right) {

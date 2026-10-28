@@ -1,5 +1,6 @@
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
+#include <mediaserver/gui/shapes.hpp>
 
 #include <algorithm>
 #include <array>
@@ -318,15 +319,7 @@ gui::Rect draw_pill(gui::UiContext &ctx, float x, float centre_y,
 
 void draw_filled_circle(gui::UiContext &ctx, float cx, float cy, float radius,
                         gui::UiColor color) {
-  constexpr std::size_t steps = 14U;
-  std::array<gui::UiPoint, steps> points{};
-  for (std::size_t index = 0U; index < steps; ++index) {
-    const float angle =
-        tau * static_cast<float>(index) / static_cast<float>(steps);
-    points[index] = gui::UiPoint{cx + std::cos(angle) * radius,
-                                 cy + std::sin(angle) * radius};
-  }
-  ctx.draw_list().add_convex_poly(points, color);
+  gui::add_disc(ctx.draw_list(), gui::UiPoint{cx, cy}, radius, color, 14U);
 }
 
 void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
@@ -334,6 +327,20 @@ void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
   // A soft halo makes a lit status read as lit, not as a coloured speck.
   draw_filled_circle(ctx, cx, cy, radius + 2.0F, with_alpha(color, 0.22F));
   draw_filled_circle(ctx, cx, cy, radius, color);
+}
+
+bool search_box(gui::UiContext &ctx, gui::UiId id, const gui::Rect &field,
+                std::string &value, std::string_view placeholder) {
+  const bool changed = ctx.text_field(id, field, value);
+  if (value.empty() && ctx.focus() != id) {
+    ctx.label(gui::inset(field, gui::Padding{19.0F, 0.0F, 4.0F, 0.0F}),
+              placeholder, ctx.theme().text_muted);
+  }
+  // The lens 9 in from the edge and a little above the middle, beside where
+  // the text starts.
+  gui::draw_icon(ctx.draw_list(), gui::Icon::Search, field.x + 10.5F,
+                 field.y + field.height * 0.46F + 1.5F, ctx.theme().text_muted);
+  return changed;
 }
 
 bool icon_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
@@ -414,13 +421,7 @@ void draw_drop_target(gui::UiContext &ctx, const gui::Rect &area,
 
 void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
                   gui::UiColor color) {
-  const std::array<gui::UiPoint, 4U> points{{
-      {cx, cy - radius},
-      {cx + radius, cy},
-      {cx, cy + radius},
-      {cx - radius, cy},
-  }};
-  ctx.draw_list().add_convex_poly(points, color);
+  gui::add_diamond(ctx.draw_list(), gui::UiPoint{cx, cy}, radius, color);
 }
 
 bool key_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,

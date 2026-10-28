@@ -92,6 +92,61 @@ namespace mediaserver::gui {
     return Rect{column.x, row.y, column.width, row.height};
 }
 
+// A `width` by `height` box centred on a point: a handle, a key, a port's hit
+// area - anything placed by where it is rather than by the box it sits in.
+[[nodiscard]] constexpr Rect around(
+    float centre_x, float centre_y, float width, float height) noexcept {
+    return Rect{centre_x - width * 0.5F, centre_y - height * 0.5F, width, height};
+}
+
+// `r`'s full height from x `from` to x `to`: the part of a row a span of time
+// covers, or of a lane a clip does. A span that ends before it starts is
+// empty. `span_y` is the same down a column.
+[[nodiscard]] constexpr Rect span_x(const Rect& r, float from, float to) noexcept {
+    return Rect{from, r.y, std::max(to - from, 0.0F), r.height};
+}
+
+[[nodiscard]] constexpr Rect span_y(const Rect& r, float from, float to) noexcept {
+    return Rect{r.x, from, r.width, std::max(to - from, 0.0F)};
+}
+
+// A `thickness`-wide rule down `r`'s full height, centred on x: a playhead, a
+// cut, a seam. `rule_y` runs across `r`, centred on y.
+[[nodiscard]] constexpr Rect rule_x(
+    const Rect& r, float x, float thickness = 1.0F) noexcept {
+    return Rect{x - thickness * 0.5F, r.y, thickness, r.height};
+}
+
+[[nodiscard]] constexpr Rect rule_y(
+    const Rect& r, float y, float thickness = 1.0F) noexcept {
+    return Rect{r.x, y - thickness * 0.5F, r.width, thickness};
+}
+
+// The box two corners span, given in either order: a rubber band, or the
+// sweep of a drag.
+[[nodiscard]] constexpr Rect spanning(float x0, float y0, float x1, float y1) noexcept {
+    return Rect{std::min(x0, x1), std::min(y0, y1),
+                std::max(x0, x1) - std::min(x0, x1),
+                std::max(y0, y1) - std::min(y0, y1)};
+}
+
+// Where two boxes overlap; empty, at the later edges, when they do not.
+[[nodiscard]] constexpr Rect intersection(const Rect& a, const Rect& b) noexcept {
+    const float left = std::max(a.x, b.x);
+    const float top = std::max(a.y, b.y);
+    return Rect{left, top, std::max(std::min(a.right(), b.right()) - left, 0.0F),
+                std::max(std::min(a.bottom(), b.bottom()) - top, 0.0F)};
+}
+
+// The smallest box holding both: a selection's extent, or a view and what it
+// views.
+[[nodiscard]] constexpr Rect enclosing(const Rect& a, const Rect& b) noexcept {
+    const float left = std::min(a.x, b.x);
+    const float top = std::min(a.y, b.y);
+    return Rect{left, top, std::max(a.right(), b.right()) - left,
+                std::max(a.bottom(), b.bottom()) - top};
+}
+
 // Row `index` of a list of `height`-tall rows `gap` apart down `list`,
 // scrolled up by `scroll`. Unlike a cut it is not clamped: a row past the
 // list's bottom is still placed there, for the clip to hide or the caller to

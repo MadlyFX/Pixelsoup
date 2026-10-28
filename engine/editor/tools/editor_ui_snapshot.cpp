@@ -708,7 +708,7 @@ int main(int argc, char **argv) {
                                   logical_width - scene_width - 12.0F,
                                   logical_height - output_height - 12.0F};
   const gui::Rect output_bounds{scene_width + 8.0F,
-                                timeline_bounds.y + timeline_bounds.height + 4.0F,
+                                timeline_bounds.bottom() + 4.0F,
                                 logical_width - scene_width - 12.0F,
                                 output_height};
 
@@ -991,7 +991,7 @@ int main(int argc, char **argv) {
       bool down = false;
       const float info_height =
           std::clamp(window.height * 0.32F, 120.0F, 220.0F);
-      const float info_y = window.y + window.height - info_height;
+      const float info_y = window.bottom() - info_height;
       if (view == "asset-viewer-model-parts" && pass >= 1 && pass <= 4) {
         const bool tab = pass <= 2;
         x = tab ? window.x + 6.0F + ctx.font_width("Details") + 24.0F + 10.0F
@@ -1124,7 +1124,7 @@ int main(int argc, char **argv) {
                  : hover_x,
         clicking ? (feed ? 101.0F
                     : tall || keys_sheet
-                        ? timeline_bounds.y + timeline_bounds.height - 9.0F
+                        ? timeline_bounds.bottom() - 9.0F
                          : timeline_bounds.y + (curves ? 17.0F : 112.0F))
                  : hover_y);
     input.set_mouse_button(gui::MouseButton::Left, clicks && pass == 0);

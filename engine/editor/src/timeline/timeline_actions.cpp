@@ -219,9 +219,9 @@ void TimelinePanel::handle_actions(Pass &p) {
   const auto zoom_about_playhead = [&](double factor) {
     const double anchor = static_cast<double>(timeline.show_frame);
     const float anchor_x = frame_to_x(anchor);
-    const float keep_x = anchor_x >= graph.x && anchor_x <= graph.x + graph.width
+    const float keep_x = anchor_x >= graph.x && anchor_x <= graph.right()
                              ? anchor_x
-                             : graph.x + graph.width * 0.5F;
+                             : graph.center_x();
     time_axis_.zoom_about(anchor, keep_x, graph.x, factor);
   };
   const auto set_in = [&](core::u64 at) {

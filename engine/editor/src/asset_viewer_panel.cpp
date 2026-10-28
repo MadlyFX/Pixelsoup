@@ -431,7 +431,7 @@ void AssetViewerPanel::draw_image(Pass &p) {
   // The picture renders above a strip that carries the probe readout.
   const gui::Rect picture_area{area.x, area.y, area.width,
                                area.height - readout_height};
-  const gui::Rect readout{area.x, picture_area.y + picture_area.height,
+  const gui::Rect readout{area.x, picture_area.bottom(),
                           area.width, readout_height};
   ctx.panel(readout, theme.panel);
 
@@ -608,9 +608,9 @@ void AssetViewerPanel::draw_scrub(Pass &p) {
     const float right = std::max(x_of(out), left + 2.0F);
     ctx.panel(gui::Rect{bar.x, bar.y, left - bar.x, bar.height},
               alpha(theme.background, 0.55F));
-    ctx.panel(gui::Rect{right, bar.y, bar.x + bar.width - right, bar.height},
+    ctx.panel(gui::Rect{right, bar.y, bar.right() - right, bar.height},
               alpha(theme.background, 0.55F));
-    ctx.panel(gui::Rect{left, bar.y + bar.height - 3.0F, right - left, 3.0F},
+    ctx.panel(gui::Rect{left, bar.bottom() - 3.0F, right - left, 3.0F},
               theme.accent);
     ctx.panel(gui::Rect{left, bar.y, 2.0F, bar.height}, theme.accent);
     ctx.panel(gui::Rect{right - 2.0F, bar.y, 2.0F, bar.height}, theme.accent);
@@ -687,7 +687,7 @@ void AssetViewerPanel::draw_transport(Pass &p) {
     loop_ = !loop_;
   }
   if (loop_) {
-    ctx.panel(gui::Rect{loop.x, loop.y + loop.height - 2.0F, loop.width, 2.0F},
+    ctx.panel(gui::Rect{loop.x, loop.bottom() - 2.0F, loop.width, 2.0F},
               theme.accent);
   }
   if (ctx.button(mix(id_, "in-to-out"), in_out, "In > Out")) {
@@ -709,7 +709,7 @@ void AssetViewerPanel::draw_transport(Pass &p) {
   const std::string time =
       asset_viewer_timecode(*p.media, p.input.show_rate, frame_) +
       numbers.data();
-  ctx.label(gui::Rect{x + 6.0F, row.y, std::max(row.x + row.width - x - 12.0F, 0.0F),
+  ctx.label(gui::Rect{x + 6.0F, row.y, std::max(row.right() - x - 12.0F, 0.0F),
                       row.height},
             time, theme.text);
 }
@@ -749,7 +749,7 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   ctx.tooltip(clear, "Clear In and Out");
 
   // From the right: the cuts and where they go.
-  float right = row.x + row.width - 8.0F;
+  float right = row.right() - 8.0F;
   const auto from_right = [&](float width) {
     right -= width;
     const gui::Rect at{right, y, width, h};
@@ -813,7 +813,7 @@ void AssetViewerPanel::draw_edit_row(Pass &p) {
   const gui::UiId menu = mix(id_, "used-in");
   if (ctx.button(mix(id_, "used"), used_button, used) && !uses.empty()) {
     ctx.open_context_menu(menu, used_button.x,
-                          used_button.y + used_button.height);
+                          used_button.bottom());
   }
   ctx.tooltip(used_button, uses.empty()
                                ? "Not placed in the scene on the Stage"
@@ -980,7 +980,7 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
   p.header = gui::Rect{bounds.x, bounds.y, bounds.width, header_height};
   p.image = gui::Rect{bounds.x, bounds.y + header_height, bounds.width,
                       std::max(bounds.height - header_height - bottom, 0.0F)};
-  p.scrub = gui::Rect{bounds.x, p.image.y + p.image.height, bounds.width,
+  p.scrub = gui::Rect{bounds.x, p.image.bottom(), bounds.width,
                       scrub_height};
   p.transport = gui::Rect{bounds.x, p.scrub.y + scrub_height, bounds.width,
                           transport_height};
@@ -1263,7 +1263,7 @@ void AssetViewerPanel::draw_model_image(Pass &p) {
   }
   const gui::Rect picture_area{area.x, area.y, area.width,
                                area.height - readout_height};
-  const gui::Rect readout{area.x, picture_area.y + picture_area.height,
+  const gui::Rect readout{area.x, picture_area.bottom(),
                           area.width, readout_height};
   ctx.panel(readout, theme.panel);
   p.frame.surface_width = static_cast<core::u32>(
@@ -1386,7 +1386,7 @@ void AssetViewerPanel::draw_model_tools(Pass &p) {
   };
   const auto lit = [&](const gui::Rect &at, bool on) {
     if (on) {
-      ctx.panel(gui::Rect{at.x, at.y + at.height - 2.0F, at.width, 2.0F},
+      ctx.panel(gui::Rect{at.x, at.bottom() - 2.0F, at.width, 2.0F},
                 theme.accent);
     }
   };
@@ -1438,7 +1438,7 @@ void AssetViewerPanel::draw_model_tools(Pass &p) {
   ctx.tooltip(figure, "A 1.8 m figure beside the model, for scale");
 
   if (part_.has_value()) {
-    const gui::Rect all{row.x + row.width - 78.0F, y, 70.0F, h};
+    const gui::Rect all{row.right() - 78.0F, y, 70.0F, h};
     if (all.x > x + 90.0F) {
       if (ctx.button(mix(id_, "all-parts"), all, "Show all")) {
         part_.reset();
@@ -1522,7 +1522,7 @@ void AssetViewerPanel::draw_model_parts(Pass &p, gui::FormLayout &rows) {
     const render::ModelPartFacts &part = facts->parts[index];
     const gui::Rect at = rows.next(list_row_height, 1.0F);
     const bool chosen = part_.has_value() && *part_ == index;
-    const bool visible = at.y + at.height > p.info.y && at.y < p.info.y + p.info.height;
+    const bool visible = at.bottom() > p.info.y && at.y < p.info.bottom();
     if (chosen) {
       ctx.panel(at, theme.selection);
     } else if (index % 2U == 1U) {
@@ -1591,7 +1591,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
   {
     const gui::Rect at = rows.next(p.ctx.theme().metrics.control, 6.0F);
     const gui::Rect play{at.x, at.y, 56.0F, at.height};
-    const gui::Rect loop{play.x + play.width + 4.0F, at.y, 48.0F, at.height};
+    const gui::Rect loop{play.right() + 4.0F, at.y, 48.0F, at.height};
     const bool chosen = clip_.has_value() && *clip_ < facts->clips.size();
     if (ctx.button(mix(id_, "clip-play"), play,
                    clip_playing_ ? "Pause" : "Play")) {
@@ -1611,7 +1611,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
       clip_origin_frame_ = clip_frame_;
     }
     if (clip_loop_) {
-      ctx.panel(gui::Rect{loop.x, loop.y + loop.height - 2.0F, loop.width, 2.0F},
+      ctx.panel(gui::Rect{loop.x, loop.bottom() - 2.0F, loop.width, 2.0F},
                 theme.accent);
     }
     ctx.tooltip(play, "Play or pause the clip (Space)");
@@ -1626,9 +1626,9 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
       shown = std::min(shown, duration);
       const std::string time = seconds_text(shown) + " / " + seconds_text(duration);
       const float time_width = ctx.font_width(time) + 12.0F;
-      const gui::Rect bar{loop.x + loop.width + 10.0F, at.y + 6.0F,
-                          std::max(at.x + at.width - time_width -
-                                       (loop.x + loop.width + 10.0F),
+      const gui::Rect bar{loop.right() + 10.0F, at.y + 6.0F,
+                          std::max(at.right() - time_width -
+                                       (loop.right() + 10.0F),
                                    10.0F),
                           at.height - 12.0F};
       ctx.panel(bar, theme.track);
@@ -1644,7 +1644,7 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
           clip_frame_ = static_cast<core::u64>(std::llround(t * duration * rate));
         }
       }
-      ctx.label(gui::Rect{bar.x + bar.width + 8.0F, at.y, time_width, at.height},
+      ctx.label(gui::Rect{bar.right() + 8.0F, at.y, time_width, at.height},
                 time, theme.text_muted);
     }
   }
@@ -1659,11 +1659,11 @@ void AssetViewerPanel::draw_model_animation(Pass &p, gui::FormLayout &rows) {
     ctx.label(gui::Rect{at.x + 8.0F, at.y, at.width * 0.7F, at.height}, name,
               theme.text);
     const float detail_width = ctx.font_width(detail) + 8.0F;
-    ctx.label(gui::Rect{at.x + at.width - detail_width, at.y, detail_width,
+    ctx.label(gui::Rect{at.right() - detail_width, at.y, detail_width,
                         at.height},
               detail, theme.text_muted);
     const bool visible =
-        at.y + at.height > p.info.y && at.y < p.info.y + p.info.height;
+        at.bottom() > p.info.y && at.y < p.info.bottom();
     return visible &&
            ctx.grab(mix(mix(id_, "clip"), std::to_string(index)), at).pressed;
   };
@@ -1692,7 +1692,7 @@ void AssetViewerPanel::draw_model_info(Pass &p) {
   const gui::Rect tabs{p.info.x, p.info.y, p.info.width, tab_height};
   ctx.panel(p.info, theme.panel);
   ctx.panel(tabs, theme.header);
-  ctx.panel(gui::Rect{tabs.x, tabs.y + tabs.height - 1.0F, tabs.width, 1.0F},
+  ctx.panel(gui::Rect{tabs.x, tabs.bottom() - 1.0F, tabs.width, 1.0F},
             theme.divider);
   const std::array<std::string, 3U> names{
       "Details",
@@ -1712,7 +1712,7 @@ void AssetViewerPanel::draw_model_info(Pass &p) {
       }
     }
     if (tab_ == static_cast<ModelTab>(index)) {
-      ctx.panel(gui::Rect{at.x, at.y + at.height - 2.0F, at.width, 2.0F},
+      ctx.panel(gui::Rect{at.x, at.bottom() - 2.0F, at.width, 2.0F},
                 theme.accent);
     }
     x += width + 4.0F;
@@ -1725,13 +1725,13 @@ void AssetViewerPanel::draw_model_info(Pass &p) {
     if (warnings != 0U) {
       const std::string text = counted(warnings, "warning", "warnings");
       const float width = ctx.font_width(text) + 12.0F;
-      ctx.label(gui::Rect{tabs.x + tabs.width - width, tabs.y, width,
+      ctx.label(gui::Rect{tabs.right() - width, tabs.y, width,
                           tabs.height},
                 text, theme.warning);
     }
   }
 
-  const gui::Rect content{p.info.x, tabs.y + tabs.height, p.info.width,
+  const gui::Rect content{p.info.x, tabs.bottom(), p.info.width,
                           std::max(p.info.height - tabs.height, 0.0F)};
   gui::Metrics metrics = theme.metrics;
   metrics.inset = 8.0F;
@@ -1799,7 +1799,7 @@ void AssetViewerPanel::draw_model(Pass &p) {
           ? std::clamp(bounds.height * 0.32F, 120.0F, 220.0F)
           : 0.0F;
   p.header = gui::Rect{bounds.x, bounds.y, bounds.width, header_height};
-  p.info = gui::Rect{bounds.x, bounds.y + bounds.height - info_height,
+  p.info = gui::Rect{bounds.x, bounds.bottom() - info_height,
                      bounds.width, info_height};
   p.tools = gui::Rect{bounds.x, p.info.y - tools_height, bounds.width,
                       tools_height};
@@ -1836,7 +1836,7 @@ void AssetViewerPanel::draw_drag_ghost(gui::UiContext &ctx,
     ctx.image(ghost, *image, gui::UiColor{1.0F, 1.0F, 1.0F, 0.82F});
   }
   ctx.panel(gui::Rect{ghost.x, ghost.y, ghost.width, 1.0F}, ctx.theme().accent);
-  ctx.panel(gui::Rect{ghost.x, ghost.y + ghost.height - 1.0F, ghost.width, 1.0F},
+  ctx.panel(gui::Rect{ghost.x, ghost.bottom() - 1.0F, ghost.width, 1.0F},
             ctx.theme().accent);
 }
 

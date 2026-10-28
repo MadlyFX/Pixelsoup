@@ -183,7 +183,7 @@ TimelineGraphView::sample_curve(const scene::ChannelKeyframes &channel,
     }
   };
   const double left = time.frame(area.x, area.x);
-  const double right = time.frame(area.x + area.width, area.x);
+  const double right = time.frame(area.right(), area.x);
   if (!std::isfinite(left) || !std::isfinite(right) || left < -limit ||
       right > limit) {
     return points;

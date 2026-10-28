@@ -651,7 +651,7 @@ void TimelinePanel::navigate(Pass &p) {
       const gui::Rect area = graph_area(p);
       timeline::ValueAxis &axis = graph_->axis();
       const float anchor_y = std::clamp(ctx.pointer_y(), area.y,
-                                        area.y + area.height);
+                                        area.bottom());
       axis.zoom_about(axis.value(anchor_y, area),
                       std::pow(1.15, static_cast<double>(ctx.wheel())));
     } else if (graph_mode_ && ctx.pointer_x() >= graph.x && ctx.ctrl_held()) {
@@ -701,7 +701,7 @@ void TimelinePanel::navigate(Pass &p) {
     if (ctx.pointer_x() < graph.x + edge_zone) {
       velocity = -std::clamp((graph.x + edge_zone - ctx.pointer_x()) /
                                 edge_zone, 0.0F, 1.0F);
-    } else if (ctx.pointer_x() > graph.x + graph.width - edge_zone) {
+    } else if (ctx.pointer_x() > graph.right() - edge_zone) {
       velocity = std::clamp((ctx.pointer_x() - graph.x - graph.width +
                              edge_zone) / edge_zone, 0.0F, 1.0F);
     }
@@ -825,12 +825,12 @@ void TimelinePanel::request_derivatives(Pass &p) {
         rows_bounds.y + row.top - row_scroll_;
     const float row_bottom = row_top + row.height;
     const bool visible = row_bottom > rows_bounds.y &&
-                         row_top < rows_bounds.y + rows_bounds.height;
+                         row_top < rows_bounds.bottom();
     std::size_t distance{};
     if (!visible) {
       const float gap = row_bottom <= rows_bounds.y
                             ? rows_bounds.y - row_bottom
-                            : row_top - (rows_bounds.y + rows_bounds.height);
+                            : row_top - (rows_bounds.bottom());
       distance = static_cast<std::size_t>(
           std::floor(std::max(gap, 0.0F) / row_height)) +
                  1U;
@@ -897,10 +897,14 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
   // Over the rows: what lies outside the In/Out range is dimmed rather than
   // hidden, cues and markers run their line down through the clips they are
   // timed against, then the snap guide and the playhead on top of all of it.
-  const gui::Rect time_area{graph.x, ruler.y, graph.width,
-                            ruler.height + strip.height + rows_bounds.height};
-  const gui::Rect lanes_area{graph.x, strip.y, graph.width,
-                             strip.height + rows_bounds.height};
+  // The graph runs from the ruler's top to the rows' foot; the lanes are
+  // the part of it from the marker strip down.
+  const gui::Rect &time_area = graph;
+  const gui::Rect lanes_area = gui::span_y(graph, strip.y, graph.bottom());
+  // Inside the lanes, ends included: a mark on the last frame still shows.
+  const auto on_graph = [&](float x) noexcept {
+    return x >= graph.x && x <= graph.right();
+  };
   // The dimming runs up through the ruler too, so the played range reads
   // from the top of the panel as well as across the clips.
   ctx.push_clip(time_area);
@@ -909,14 +913,10 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     const float out_x = frame_to_x(static_cast<double>(shown_last) + 1.0);
     const gui::UiColor dim = alpha(ctx.theme().background, 0.45F);
     if (in_x > graph.x) {
-      ctx.panel(gui::Rect{graph.x, time_area.y, in_x - graph.x,
-                          time_area.height},
-                dim);
+      ctx.panel(gui::span_x(time_area, graph.x, in_x), dim);
     }
-    if (out_x < graph.x + graph.width) {
-      ctx.panel(gui::Rect{out_x, time_area.y,
-                          graph.x + graph.width - out_x, time_area.height},
-                dim);
+    if (out_x < graph.right()) {
+      ctx.panel(gui::span_x(time_area, out_x, graph.right()), dim);
     }
   }
   ctx.pop_clip();
@@ -925,14 +925,14 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     for (const scene::TimelineMarker &marker : markers) {
       const float marker_x =
           frame_to_x(static_cast<double>(shown_marker_frame(marker)));
-      if (marker_x < graph.x || marker_x > graph.x + graph.width) {
+      if (!on_graph(marker_x)) {
         continue;
       }
       const gui::UiColor color =
           timeline.held_cue == marker.id
               ? ctx.theme().playhead
               : timeline_marker_color(marker.color);
-      ctx.panel(gui::Rect{marker_x, rows_bounds.y, 1.0F, rows_bounds.height},
+      ctx.panel(gui::span_x(rows_bounds, marker_x, marker_x + 1.0F),
                 alpha(color, marker.is_cue() ? 0.45F : 0.22F));
     }
   }
@@ -951,26 +951,24 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
                                : std::optional<core::i64>{})));
   if (guide.has_value()) {
     const float guide_x = frame_to_x(static_cast<double>(*guide));
-    if (guide_x >= graph.x && guide_x <= graph.x + graph.width) {
+    if (on_graph(guide_x)) {
       // A snap reads as a catch, not just a line: a pair of arrowheads
       // pinch the frame it caught on, one under the ruler pointing down and
       // one at the foot of the lanes pointing up, as an editor marks it.
       const gui::UiColor color = ctx.theme().accent;
-      ctx.draw_list().add_line(guide_x, ruler.y, guide_x,
-                               rows_bounds.y + rows_bounds.height, 1.5F,
+      const float bottom = rows_bounds.bottom();
+      ctx.draw_list().add_line(guide_x, ruler.y, guide_x, bottom, 1.5F,
                                alpha(color, 0.85F));
-      const float top = strip.y;
-      const float bottom = rows_bounds.y + rows_bounds.height;
-      ctx.draw_list().add_triangle(guide_x - 5.0F, top, guide_x + 5.0F, top,
-                                   guide_x, top + 6.0F, color);
-      ctx.draw_list().add_triangle(guide_x - 5.0F, bottom, guide_x, bottom - 6.0F,
-                                   guide_x + 5.0F, bottom, color);
+      gui::add_arrowhead(ctx.draw_list(), gui::UiPoint{guide_x, strip.y + 6.0F},
+                         gui::UiPoint{0.0F, 1.0F}, 6.0F, 5.0F, color);
+      gui::add_arrowhead(ctx.draw_list(), gui::UiPoint{guide_x, bottom - 6.0F},
+                         gui::UiPoint{0.0F, -1.0F}, 6.0F, 5.0F, color);
     }
   }
   if (playback_overlay_) {
     draw_playback_overlay(p);
   }
-  if (playhead_x >= graph.x && playhead_x <= graph.x + graph.width) {
+  if (on_graph(playhead_x)) {
     // A flag on the ruler carrying the time it stands on, as Sequencer's
     // does: the eye finds the playhead and reads it in one place. It stays
     // whole at either edge of the lanes, its point still on the frame.
@@ -979,21 +977,18 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     const float flag_height = std::max(ruler.height - 8.0F, 6.0F);
     const float flag_x =
         std::clamp(playhead_x - flag_width * 0.5F, graph.x,
-                   std::max(graph.x, graph.x + graph.width - flag_width));
+                   std::max(graph.x, graph.right() - flag_width));
     const gui::Rect flag{flag_x, ruler.y + 1.0F, flag_width, flag_height};
-    ctx.draw_list().add_line(playhead_x, flag.y + flag.height, playhead_x,
-                             rows_bounds.y + rows_bounds.height, 1.5F,
-                             ctx.theme().playhead);
+    ctx.draw_list().add_line(playhead_x, flag.bottom(), playhead_x,
+                             rows_bounds.bottom(), 1.5F, ctx.theme().playhead);
     ctx.panel(flag, ctx.theme().playhead);
-    const std::array<gui::UiPoint, 3U> point{{
-        {playhead_x - 4.5F, flag.y + flag.height},
-        {playhead_x + 4.5F, flag.y + flag.height},
-        {playhead_x, flag.y + flag.height + 5.0F},
-    }};
-    ctx.draw_list().add_convex_poly(point, ctx.theme().playhead);
-    ctx.label(gui::Rect{flag.x + 5.0F, flag.y, flag.width - 6.0F,
-                        flag.height},
-              label, ctx.theme().background);
+    // Its point, under the flag on the frame itself.
+    gui::add_arrowhead(ctx.draw_list(),
+                       gui::UiPoint{playhead_x, flag.bottom() + 5.0F},
+                       gui::UiPoint{0.0F, 1.0F}, 5.0F, 4.5F,
+                       ctx.theme().playhead);
+    ctx.label(gui::inset(flag, gui::Padding{5.0F, 0.0F, 1.0F, 0.0F}), label,
+              ctx.theme().background);
   }
   ctx.pop_clip();
 
@@ -1006,8 +1001,8 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     const float position =
         maximum_row_scroll > 0.0F ? row_scroll_ / maximum_row_scroll : 0.0F;
     ctx.push_clip(rows_bounds);
-    ctx.panel(gui::Rect{bounds.x + bounds.width - 4.0F,
-                        rows_bounds.y + travel * position, 3.0F, thumb_height},
+    ctx.panel(gui::Rect{bounds.right() - 4.0F, rows_bounds.y + travel * position,
+                        3.0F, thumb_height},
               ctx.theme().widget_hover);
     ctx.pop_clip();
   }
@@ -1025,7 +1020,9 @@ void TimelinePanel::draw_playback_overlay(Pass &p) {
   const auto frame_to_x = [&](double value) noexcept {
     return time_axis_.x(value, graph.x);
   };
-  const float graph_right = graph.x + graph.width;
+  const float graph_right = graph.right();
+  gui::Rect cache_bar = strip;
+  cache_bar = gui::cut_top(cache_bar, playback_cache_bar_height);
 
   // Each buffered run covers its frames edge to edge, so a single frame is
   // as wide as the frame is at this zoom - and never thinner than a pixel.
@@ -1037,8 +1034,7 @@ void TimelinePanel::draw_playback_overlay(Pass &p) {
     if (right < graph.x || left > graph_right) {
       continue;
     }
-    ctx.panel(gui::Rect{left, strip.y, std::max(right - left, 1.0F),
-                        playback_cache_bar_height},
+    ctx.panel(gui::span_x(cache_bar, left, std::max(right, left + 1.0F)),
               theme.good);
   }
 
@@ -1050,15 +1046,13 @@ void TimelinePanel::draw_playback_overlay(Pass &p) {
     if (node_x < graph.x || node_x > graph_right) {
       continue;
     }
-    ctx.draw_list().add_line(node_x, ruler.y + ruler.height - 7.0F, node_x,
-                             rows_bounds.y + rows_bounds.height, 1.0F,
-                             alpha(theme.keyframe, 0.85F));
-    const std::array<gui::UiPoint, 3U> tag{{
-        {node_x - 4.0F, ruler.y + ruler.height - 7.0F},
-        {node_x + 4.0F, ruler.y + ruler.height - 7.0F},
-        {node_x, ruler.y + ruler.height - 1.0F},
-    }};
-    ctx.draw_list().add_convex_poly(tag, theme.keyframe);
+    // From a tag pointing down at the ruler's foot, 6 high.
+    const float tag_top = ruler.bottom() - 7.0F;
+    ctx.draw_list().add_line(node_x, tag_top, node_x, rows_bounds.bottom(),
+                             1.0F, alpha(theme.keyframe, 0.85F));
+    gui::add_arrowhead(ctx.draw_list(),
+                       gui::UiPoint{node_x, ruler.bottom() - 1.0F},
+                       gui::UiPoint{0.0F, 1.0F}, 6.0F, 4.0F, theme.keyframe);
     std::string tip = node.name.empty()
                           ? "Render node " + std::to_string(node.node_index)
                           : node.name;
@@ -1068,9 +1062,7 @@ void TimelinePanel::draw_playback_overlay(Pass &p) {
              (node.latency_frames == 1U ? " frame" : " frames") +
              " behind what it has received";
     }
-    ctx.tooltip(gui::Rect{node_x - 5.0F, ruler.y + ruler.height - 8.0F,
-                          10.0F, 8.0F},
-                tip);
+    ctx.tooltip(gui::around(node_x, ruler.bottom() - 4.0F, 10.0F, 8.0F), tip);
   }
 }
 

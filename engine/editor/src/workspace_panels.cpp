@@ -6,6 +6,7 @@
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
+#include <mediaserver/gui/shapes.hpp>
 
 #include <algorithm>
 #include <array>
@@ -68,20 +69,6 @@ constexpr float inset = 6.0F;
   return color;
 }
 
-void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
-                 float radius, gui::UiColor color) {
-  constexpr std::size_t point_count = 12U;
-  constexpr float tau = 6.28318530718F;
-  std::array<gui::UiPoint, point_count> points{};
-  for (std::size_t index = 0U; index < point_count; ++index) {
-    const float angle =
-        tau * static_cast<float>(index) / static_cast<float>(point_count);
-    points[index] = gui::UiPoint{centre_x + std::cos(angle) * radius,
-                                 centre_y + std::sin(angle) * radius};
-  }
-  ctx.draw_list().add_convex_poly(points, color);
-}
-
 [[nodiscard]] std::string element_name(const ElementInfo &element) {
   return element_display_name(element);
 }
@@ -109,42 +96,17 @@ void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
   return std::find(selection.begin(), selection.end(), node) != selection.end();
 }
 
+// A search box inset in `bounds` by the panel's own margins.
 void search_field(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
                   std::string &value, std::string_view placeholder) {
-  const gui::Rect field{bounds.x + inset, bounds.y + 3.0F,
-                        std::max(bounds.width - inset * 2.0F, 0.0F),
-                        std::max(bounds.height - 6.0F, 0.0F)};
-  static_cast<void>(ctx.text_field(id, field, value));
-  if (value.empty() && ctx.focus() != id) {
-    ctx.label(
-        gui::Rect{field.x + 19.0F, field.y, field.width - 23.0F, field.height},
-        placeholder, ctx.theme().text_muted);
-  }
-  // A small magnifier, built from the same primitives as the rest of the
-  // chrome, keeps the search affordance readable with no icon dependency.
-  draw_circle(ctx, field.x + 9.0F, field.y + field.height * 0.46F, 3.0F,
-              ctx.theme().text_muted);
-  draw_circle(ctx, field.x + 9.0F, field.y + field.height * 0.46F, 1.7F,
-              ctx.theme().widget);
-  ctx.draw_list().add_line(
-      field.x + 11.0F, field.y + field.height * 0.46F + 2.0F, field.x + 14.0F,
-      field.y + field.height * 0.46F + 5.0F, 1.0F, ctx.theme().text_muted);
-}
-
-[[nodiscard]] gui::Rect intersect(const gui::Rect &a,
-                                  const gui::Rect &b) noexcept {
-  const float left = std::max(a.x, b.x);
-  const float top = std::max(a.y, b.y);
-  const float right = std::min(a.x + a.width, b.x + b.width);
-  const float bottom = std::min(a.y + a.height, b.y + b.height);
-  return gui::Rect{left, top, std::max(right - left, 0.0F),
-                   std::max(bottom - top, 0.0F)};
+  static_cast<void>(
+      search_box(ctx, id, gui::inset(bounds, inset, 3.0F), value, placeholder));
 }
 
 [[nodiscard]] gui::Interaction clipped_grab(gui::UiContext &ctx, gui::UiId id,
                                             const gui::Rect &bounds,
                                             const gui::Rect &clip) noexcept {
-  const gui::Rect hit = intersect(bounds, clip);
+  const gui::Rect hit = gui::intersection(bounds, clip);
   return hit.width > 0.0F && hit.height > 0.0F ? ctx.grab(id, hit)
                                                : gui::Interaction{};
 }
@@ -343,7 +305,8 @@ void draw_port_shape(gui::UiContext &ctx, compositor::PortValueType type,
                      float x, float y, float radius, gui::UiColor color) {
   switch (type) {
   case compositor::PortValueType::Image:
-    draw_circle(ctx, x, y, radius, color);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{x, y},
+                  radius, color);
     return;
   case compositor::PortValueType::Effect: {
     const float reach = radius * 1.25F;
@@ -1247,19 +1210,23 @@ void draw_node(gui::UiContext &ctx, const NodeBox &node) {
   ctx.panel(node.bounds, body);
   ctx.outline(node.bounds,
               node.highlighted ? ctx.theme().accent : ctx.theme().widget_hover);
-  ctx.panel(gui::Rect{node.bounds.x + 1.0F, node.bounds.y + 1.0F,
-                      node.bounds.width - 2.0F, 4.0F},
-            node.color);
-  ctx.label(gui::Rect{node.bounds.x + 9.0F, node.bounds.y + 7.0F,
-                      node.bounds.width - 16.0F, 17.0F},
-            node.title, ctx.theme().text);
-  ctx.label(gui::Rect{node.bounds.x + 9.0F, node.bounds.y + 23.0F,
-                      node.bounds.width - 16.0F, 16.0F},
-            node.detail, ctx.theme().text_muted);
-  draw_circle(ctx, node.bounds.x, node.bounds.y + node.bounds.height * 0.5F,
-              3.0F, ctx.theme().keyframe);
-  draw_circle(ctx, node.bounds.x + node.bounds.width,
-              node.bounds.y + node.bounds.height * 0.5F, 3.0F, node.color);
+  // A band in the node's colour inside the outline's top edge.
+  gui::Rect inside = gui::inset(node.bounds, 1.0F);
+  ctx.panel(gui::cut_top(inside, 4.0F), node.color);
+  // The title, and the detail under it overlapping its line by a pixel.
+  const gui::Rect text =
+      gui::inset(node.bounds, gui::Padding{9.0F, 7.0F, 7.0F, 0.0F});
+  ctx.label(gui::Rect{text.x, text.y, text.width, 17.0F}, node.title,
+            ctx.theme().text);
+  ctx.label(gui::Rect{text.x, text.y + 16.0F, text.width, 16.0F}, node.detail,
+            ctx.theme().text_muted);
+  // Its input and output, at the middle of either side.
+  gui::add_disc(ctx.draw_list(),
+                gui::UiPoint{node.bounds.x, node.bounds.center_y()}, 3.0F,
+                ctx.theme().keyframe);
+  gui::add_disc(ctx.draw_list(),
+                gui::UiPoint{node.bounds.right(), node.bounds.center_y()},
+                3.0F, node.color);
 }
 
 // A wire leaves its output and enters its input horizontally, as a cubic
@@ -2113,7 +2080,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                                : scale(theme.text, 0.92F)));
       ctx.label(name_bounds, element_display_name(element), name_color);
       if (!tag.empty()) {
-        ctx.label(gui::Rect{name_bounds.x + name_bounds.width + 4.0F, row.y,
+        ctx.label(gui::Rect{name_bounds.right() + 4.0F, row.y,
                             tag_width, row.height},
                   tag,
                   element.linked_failed ? theme.warning
@@ -2172,7 +2139,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               })) {
         drop = local < 0.5F ? DropKind::Before : DropKind::After;
         drop_target = &element;
-        drop_line_y = local < 0.5F ? row.y : row.y + row.height;
+        drop_line_y = local < 0.5F ? row.y : row.bottom();
         drop_line_x = depth_x;
       }
       if (drop == DropKind::Into) {
@@ -2181,7 +2148,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         auto &draw = ctx.draw_list();
         draw.add_rect(target_row.x, target_row.y, target_row.width, 1.0F,
                       theme.accent);
-        draw.add_rect(target_row.x, target_row.y + target_row.height - 1.0F,
+        draw.add_rect(target_row.x, target_row.bottom() - 1.0F,
                       target_row.width, 1.0F, theme.accent);
       }
     }
@@ -2221,7 +2188,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               surface->locked ? theme.text_muted
                               : (is_selected ? theme.text
                                              : scale(theme.text, 0.92F)));
-    ctx.label(gui::Rect{name_bounds.x + name_bounds.width + 4.0F, row.y,
+    ctx.label(gui::Rect{name_bounds.right() + 4.0F, row.y,
                         tag_width, row.height},
               tag, with_alpha(theme.text_muted, 0.85F));
     if (!surface->locked) {
@@ -2250,7 +2217,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
   if (drop == DropKind::Before || drop == DropKind::After) {
     ctx.panel(gui::Rect{drop_line_x, drop_line_y - 1.0F,
-                        std::max(list_bounds.x + list_bounds.width -
+                        std::max(list_bounds.right() -
                                      drop_line_x - 4.0F,
                                  0.0F),
                         2.0F},
@@ -2707,12 +2674,12 @@ void CompositorPanel::draw_wire_drop(gui::UiContext &ctx,
   for (const DrawnWire &drawn : drawn_wires_) {
     if (drawn.edge == drop.edge) {
       ctx.draw_list().add_polyline(drawn.points,
-                                   std::clamp(4.0F * zoom_, 3.0F, 6.0F),
+                                   std::clamp(4.0F * view_.zoom, 3.0F, 6.0F),
                                    ctx.theme().text);
     }
   }
   draw_port_shape(ctx, drop.type, drop.x, drop.y,
-                  std::max(4.0F, 6.0F * zoom_), ctx.theme().text);
+                  std::max(4.0F, 6.0F * view_.zoom), ctx.theme().text);
   std::string label{what};
   label += "  -  INSERT AFTER ";
   label += drop.after;
@@ -2731,10 +2698,10 @@ gui::Rect CompositorPanel::node_screen_bounds(
     const compositor::GraphNode &node) const noexcept {
   const std::optional<gui::UiPoint> pending = pending_position(node.node);
   const gui::UiPoint size = node_size(node);
-  return gui::Rect{
-      last_canvas_.x + pan_x_ + (pending ? pending->x : node.editor_x) * zoom_,
-      last_canvas_.y + pan_y_ + (pending ? pending->y : node.editor_y) * zoom_,
-      size.x * zoom_, size.y * zoom_};
+  return view_.to_screen(
+      last_canvas_, gui::Rect{pending ? pending->x : node.editor_x,
+                              pending ? pending->y : node.editor_y, size.x,
+                              size.y});
 }
 
 std::optional<std::pair<doc::NodeId, gui::Rect>>
@@ -2743,7 +2710,7 @@ CompositorPanel::node_at(const compositor::CompositorGraph &graph,
   if (!last_canvas_.contains(x, y)) return std::nullopt;
   for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
     const gui::Rect bounds = node_screen_bounds(*it);
-    if (bounds.contains(x, y)) return std::pair{it->node, intersect(bounds, last_canvas_)};
+    if (bounds.contains(x, y)) return std::pair{it->node, gui::intersection(bounds, last_canvas_)};
   }
   return std::nullopt;
 }
@@ -2784,7 +2751,7 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
   // operator can see.
   for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
     const gui::Rect bounds = node_screen_bounds(*it);
-    const float reach = compositor_port_radius * zoom_ + 4.0F;
+    const float reach = compositor_port_radius * view_.zoom + 4.0F;
     const gui::Rect with_dots{bounds.x - reach, bounds.y,
                               bounds.width + reach, bounds.height};
     if (!with_dots.contains(x, y)) {
@@ -2799,10 +2766,10 @@ CompositorPanel::input_port_at(const compositor::CompositorGraph &graph,
       }
       const float row_top =
           bounds.y +
-          (metrics_.header_height + metrics_.row_height * *place) * zoom_;
+          (metrics_.header_height + metrics_.row_height * *place) * view_.zoom;
       const gui::Rect row{bounds.x - reach, row_top,
                           bounds.width * 0.5F + reach,
-                          metrics_.row_height * zoom_};
+                          metrics_.row_height * view_.zoom};
       if (row.contains(x, y)) {
         return compositor::EdgeEndpoint{it->node, ports[index].index};
       }
@@ -2823,7 +2790,7 @@ std::optional<CompositorPortDrop> CompositorPanel::port_drop_target(
   // Later nodes draw on top, so on a tie the topmost wins.
   for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
     const gui::Rect bounds = node_screen_bounds(*it);
-    const float reach = compositor_port_radius * zoom_ + 4.0F;
+    const float reach = compositor_port_radius * view_.zoom + 4.0F;
     const auto ports = compositor::input_ports(it->kind);
     for (std::size_t index = 0U; index < ports.size(); ++index) {
       const compositor::PortDescriptor &port = ports[index];
@@ -2834,8 +2801,8 @@ std::optional<CompositorPortDrop> CompositorPanel::port_drop_target(
       }
       const float row_top =
           bounds.y +
-          (metrics_.header_height + metrics_.row_height * *place) * zoom_;
-      const float row_height = metrics_.row_height * zoom_;
+          (metrics_.header_height + metrics_.row_height * *place) * view_.zoom;
+      const float row_height = metrics_.row_height * view_.zoom;
       const gui::Rect row{bounds.x - reach, row_top,
                           bounds.width * 0.5F + reach, row_height};
       const float dot_y = row_top + row_height * 0.5F;
@@ -2874,8 +2841,8 @@ void CompositorPanel::draw_port_drop(gui::UiContext &ctx,
   ctx.push_clip(last_canvas_);
   const gui::UiColor color = port_color(ctx, drop.type);
   wire(ctx, ctx.pointer_x(), ctx.pointer_y(), drop.x, drop.y,
-       with_alpha(color, 0.9F), std::clamp(2.5F * zoom_, 2.0F, 4.0F), zoom_);
-  const float radius = std::max(2.5F, compositor_port_radius * zoom_) + 3.0F;
+       with_alpha(color, 0.9F), std::clamp(2.5F * view_.zoom, 2.0F, 4.0F), view_.zoom);
+  const float radius = std::max(2.5F, compositor_port_radius * view_.zoom) + 3.0F;
   draw_port_shape(ctx, drop.type, drop.x, drop.y, radius + 1.5F,
                   ctx.theme().text);
   draw_port_shape(ctx, drop.type, drop.x, drop.y, radius, color);
@@ -2900,12 +2867,9 @@ gui::UiPoint CompositorPanel::node_position_feeding(
   const gui::UiPoint size = new_node_size(kind);
   // A clear gap between the new node's output and the input it feeds.
   constexpr float gap = 70.0F;
-  const float graph_x = zoom_ > 0.0F ? (drop.x - last_canvas_.x - pan_x_) / zoom_
-                                     : 0.0F;
-  const float graph_y = zoom_ > 0.0F ? (drop.y - last_canvas_.y - pan_y_) / zoom_
-                                     : 0.0F;
-  return gui::UiPoint{graph_x - gap - size.x,
-                      graph_y - metrics_.header_height -
+  const gui::UiPoint at = view_.to_graph(last_canvas_, drop.x, drop.y);
+  return gui::UiPoint{at.x - gap - size.x,
+                      at.y - metrics_.header_height -
                           metrics_.row_height * 0.5F};
 }
 
@@ -3124,7 +3088,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                      minimum_parameter_width, maximum_parameter_width));
       canvas.width = std::max(content.width - width, 0.0F);
       parameter_bounds =
-          gui::Rect{canvas.x + canvas.width, content.y, width, content.height};
+          gui::Rect{canvas.right(), content.y, width, content.height};
       parameter_splitter =
           gui::Rect{parameter_bounds.x - splitter_reach, parameter_bounds.y,
                     splitter_reach * 2.0F, parameter_bounds.height};
@@ -3139,7 +3103,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           available);
       canvas.height = std::max(content.height - height, 0.0F);
       parameter_bounds =
-          gui::Rect{content.x, canvas.y + canvas.height, content.width, height};
+          gui::Rect{content.x, canvas.bottom(), content.width, height};
       parameter_splitter =
           gui::Rect{parameter_bounds.x, parameter_bounds.y - splitter_reach,
                     parameter_bounds.width, splitter_reach * 2.0F};
@@ -3155,13 +3119,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (resize.held) {
       if (parameter_side) {
         parameter_width_ = std::clamp(
-            content.x + content.width - ctx.pointer_x(),
+            content.right() - ctx.pointer_x(),
             minimum_parameter_width,
             std::clamp(content.width - minimum_graph_width,
                        minimum_parameter_width, maximum_parameter_width));
       } else {
         parameter_height_ = std::clamp(
-            content.y + content.height - ctx.pointer_y(),
+            content.bottom() - ctx.pointer_y(),
             std::min(minimum_parameter_height,
                      std::max(content.height - minimum_graph_height, 0.0F)),
             std::max(content.height - minimum_graph_height, 0.0F));
@@ -3173,22 +3137,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                             float anchor_y) noexcept {
     const float next =
         std::clamp(requested, compositor_minimum_zoom, compositor_maximum_zoom);
-    if (next == zoom_ || canvas.width <= 0.0F || canvas.height <= 0.0F) {
+    if (next == view_.zoom || canvas.width <= 0.0F || canvas.height <= 0.0F) {
       return;
     }
-    const float local_x = anchor_x - canvas.x;
-    const float local_y = anchor_y - canvas.y;
-    const float graph_x = (local_x - pan_x_) / zoom_;
-    const float graph_y = (local_y - pan_y_) / zoom_;
-    pan_x_ = local_x - graph_x * next;
-    pan_y_ = local_y - graph_y * next;
-    zoom_ = next;
+    view_.zoom_about(canvas, anchor_x, anchor_y, next);
   };
 
   ctx.push_clip(bounds);
   ctx.panel(bounds, scale(ctx.theme().background, 0.86F));
   ctx.panel(toolbar, ctx.theme().background);
-  ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
+  ctx.panel(gui::Rect{toolbar.x, toolbar.bottom() - 1.0F,
                       toolbar.width, 1.0F},
             ctx.theme().divider);
   const std::size_t output_count = static_cast<std::size_t>(std::count_if(
@@ -3225,16 +3183,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   if (toolbar.width >= 520.0F) {
-    const float navigation_x = add_button.x + add_button.width + 8.0F;
+    const float navigation_x = add_button.right() + 8.0F;
     const gui::Rect zoom_out{navigation_x, toolbar.y + 3.0F,
                              button_width("-", 22.0F), button_height};
-    const gui::Rect zoom_value{zoom_out.x + zoom_out.width + 2.0F,
+    const gui::Rect zoom_value{zoom_out.right() + 2.0F,
                                toolbar.y + 3.0F, button_width("250%", 48.0F),
                                button_height};
-    const gui::Rect zoom_in{zoom_value.x + zoom_value.width + 2.0F,
+    const gui::Rect zoom_in{zoom_value.right() + 2.0F,
                             toolbar.y + 3.0F, button_width("+", 22.0F),
                             button_height};
-    const gui::Rect reset_view{zoom_in.x + zoom_in.width + 4.0F,
+    const gui::Rect reset_view{zoom_in.right() + 4.0F,
                                toolbar.y + 3.0F, button_width("RESET", 54.0F),
                                button_height};
     const float anchor_x = canvas.x + canvas.width * 0.5F;
@@ -3259,12 +3217,12 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       return interaction.clicked;
     };
     if (navigation_button("compositor.zoom_out", zoom_out, "-")) {
-      set_zoom(zoom_ / compositor_zoom_step, anchor_x, anchor_y);
+      set_zoom(view_.zoom / compositor_zoom_step, anchor_x, anchor_y);
     }
     std::array<char, 16U> zoom_text{};
     const int zoom_length =
         std::snprintf(zoom_text.data(), zoom_text.size(), "%.0f%%",
-                      static_cast<double>(zoom_ * 100.0F));
+                      static_cast<double>(view_.zoom * 100.0F));
     if (navigation_button("compositor.zoom_reset", zoom_value,
                           std::string_view{zoom_text.data(),
                                            static_cast<std::size_t>(
@@ -3272,21 +3230,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       set_zoom(1.0F, anchor_x, anchor_y);
     }
     if (navigation_button("compositor.zoom_in", zoom_in, "+")) {
-      set_zoom(zoom_ * compositor_zoom_step, anchor_x, anchor_y);
+      set_zoom(view_.zoom * compositor_zoom_step, anchor_x, anchor_y);
     }
     if (navigation_button("compositor.view_reset", reset_view, "RESET")) {
-      zoom_ = 1.0F;
-      pan_x_ = 0.0F;
-      pan_y_ = 0.0F;
+      view_ = gui::CanvasView{};
     }
-    const gui::Rect map_toggle{reset_view.x + reset_view.width + 4.0F,
+    const gui::Rect map_toggle{reset_view.right() + 4.0F,
                                toolbar.y + 3.0F, button_width("MAP", 44.0F),
                                button_height};
     if (navigation_button("compositor.minimap_toggle", map_toggle, "MAP")) {
       minimap_ = !minimap_;
     }
     if (minimap_) {
-      ctx.panel(gui::Rect{map_toggle.x, map_toggle.y + map_toggle.height - 2.0F,
+      ctx.panel(gui::Rect{map_toggle.x, map_toggle.bottom() - 2.0F,
                           map_toggle.width, 2.0F},
                 ctx.theme().accent);
     }
@@ -3294,7 +3250,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // and selection actions at the toolbar's other end.
     constexpr std::string_view hint = "WHEEL ZOOM  /  MIDDLE-DRAG PAN";
     if (toolbar.width >= 760.0F) {
-      ctx.label(gui::Rect{map_toggle.x + map_toggle.width + 10.0F, toolbar.y,
+      ctx.label(gui::Rect{map_toggle.right() + 10.0F, toolbar.y,
                           std::ceil(ctx.font_width(hint)) + 2.0F,
                           toolbar.height},
                 hint, ctx.theme().text_muted);
@@ -3409,7 +3365,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const float remove_width = button_width(remove_label, 86.0F);
   const float trailing_control_width =
       has_selection ? remove_width + 12.0F : 0.0F;
-  ctx.label(gui::Rect{toolbar.x + toolbar.width - status_width - 8.0F -
+  ctx.label(gui::Rect{toolbar.right() - status_width - 8.0F -
                           trailing_control_width,
                       toolbar.y, status_width, toolbar.height},
             graph_status_text,
@@ -3418,7 +3374,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 : ctx.theme().warning);
   if (has_selection) {
     const gui::Rect remove_bounds{
-        toolbar.x + toolbar.width - remove_width - 8.0F, toolbar.y + 3.0F,
+        toolbar.right() - remove_width - 8.0F, toolbar.y + 3.0F,
         remove_width, button_height};
     gui::Interaction interaction{};
     if (!selected_required_output) {
@@ -3496,10 +3452,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // Kept inside the panel: shifted left or up from the pointer if needed.
     menu_bounds = gui::Rect{
         std::clamp(node_menu_->screen_x, bounds.x + 4.0F,
-                   std::max(bounds.x + bounds.width - width - 4.0F,
+                   std::max(bounds.right() - width - 4.0F,
                             bounds.x + 4.0F)),
         std::clamp(node_menu_->screen_y, bounds.y + compositor_toolbar_height,
-                   std::max(bounds.y + bounds.height - height - 4.0F,
+                   std::max(bounds.bottom() - height - 4.0F,
                             bounds.y + compositor_toolbar_height)),
         width, height};
     if (ctx.pointer_pressed() &&
@@ -3693,10 +3649,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const float width = 250.0F;
     context_bounds = gui::Rect{
         std::clamp(context_menu_->screen_x, bounds.x + 4.0F,
-                   std::max(bounds.x + bounds.width - width - 4.0F,
+                   std::max(bounds.right() - width - 4.0F,
                             bounds.x + 4.0F)),
         std::clamp(context_menu_->screen_y, bounds.y + compositor_toolbar_height,
-                   std::max(bounds.y + bounds.height - height - 4.0F,
+                   std::max(bounds.bottom() - height - 4.0F,
                             bounds.y + compositor_toolbar_height)),
         width, height};
     if ((ctx.pointer_pressed() || ctx.secondary_pointer_pressed()) &&
@@ -3729,7 +3685,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.wheel() != 0.0F && dragging_node_ == doc::NodeId{} &&
       !connecting_from_.has_value() && !relink_.has_value() &&
       !point_drag_.has_value()) {
-    set_zoom(zoom_ * std::pow(compositor_zoom_step, ctx.wheel()),
+    set_zoom(view_.zoom * std::pow(compositor_zoom_step, ctx.wheel()),
              ctx.pointer_x(), ctx.pointer_y());
   }
   if (ctx.middle_pointer_pressed() &&
@@ -3737,8 +3693,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     panning_ = true;
   }
   if (panning_ && ctx.middle_pointer_down()) {
-    pan_x_ += ctx.pointer_dx();
-    pan_y_ += ctx.pointer_dy();
+    view_.pan_x += ctx.pointer_dx();
+    view_.pan_y += ctx.pointer_dy();
   }
   if (ctx.middle_pointer_released()) {
     panning_ = false;
@@ -3777,15 +3733,12 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::UiPoint at =
           pending_position(layer->node)
               .value_or(gui::UiPoint{layer->editor_x, layer->editor_y});
-      const gui::Rect shown{canvas.x + pan_x_ + at.x * zoom_,
-                            canvas.y + pan_y_ + at.y * zoom_, size.x * zoom_,
-                            size.y * zoom_};
+      const gui::Rect placed{at.x, at.y, size.x, size.y};
+      const gui::Rect shown = view_.to_screen(canvas, placed);
       // Already wholly in view, the view stays where the operator left it.
       if (shown.x < canvas.x || shown.y < canvas.y ||
-          shown.x + shown.width > canvas.x + canvas.width ||
-          shown.y + shown.height > canvas.y + canvas.height) {
-        pan_x_ = canvas.width * 0.5F - (at.x + size.x * 0.5F) * zoom_;
-        pan_y_ = canvas.height * 0.5F - (at.y + size.y * 0.5F) * zoom_;
+          shown.right() > canvas.right() || shown.bottom() > canvas.bottom()) {
+        view_.centre_on(canvas, placed.center_x(), placed.center_y());
       }
       reveal_node_ = layer->node;
       reveal_until_ = reveal_requested_at_ + 1.5;
@@ -3839,14 +3792,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
       }
       const gui::UiPoint size = node_size(node);
-      const gui::Rect node_bounds{canvas.x + pan_x_ + editor_x * zoom_,
-                                  canvas.y + pan_y_ + editor_y * zoom_,
-                                  size.x * zoom_, size.y * zoom_};
+      const gui::Rect node_bounds =
+          view_.to_screen(canvas, gui::Rect{editor_x, editor_y, size.x, size.y});
       nodes.push_back(CompositorNodeVisual{std::addressof(node), node_bounds});
 
       // A port's target is its half of the row - dot and name - reaching a
       // little past the node edge so the dot itself is inside it too.
-      const float reach = compositor_port_radius * zoom_ + 4.0F;
+      const float reach = compositor_port_radius * view_.zoom + 4.0F;
       const auto append_ports =
           [&](std::span<const compositor::PortDescriptor> descriptors,
               std::vector<CompositorPortVisual> &destination, bool input) {
@@ -3860,10 +3812,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               const float row_top =
                   node_bounds.y +
                   (metrics_.header_height + metrics_.row_height * *place) *
-                      zoom_;
-              const float row_height = metrics_.row_height * zoom_;
+                      view_.zoom;
+              const float row_height = metrics_.row_height * view_.zoom;
               const float x =
-                  input ? node_bounds.x : node_bounds.x + node_bounds.width;
+                  input ? node_bounds.x : node_bounds.right();
               const gui::Rect hit =
                   input ? gui::Rect{node_bounds.x - reach, row_top,
                                     node_bounds.width * 0.5F + reach, row_height}
@@ -3883,12 +3835,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   build_visuals();
 
   const auto to_screen = [&](compositor::WirePoint point) noexcept {
-    return gui::UiPoint{canvas.x + pan_x_ + point.x * zoom_,
-                        canvas.y + pan_y_ + point.y * zoom_};
+    return view_.to_screen(canvas, point.x, point.y);
   };
   const auto to_graph = [&](float x, float y) noexcept {
-    return compositor::WirePoint{(x - canvas.x - pan_x_) / zoom_,
-                                 (y - canvas.y - pan_y_) / zoom_};
+    const gui::UiPoint at = view_.to_graph(canvas, x, y);
+    return compositor::WirePoint{at.x, at.y};
   };
   const auto edges_at = [&](compositor::EdgeEndpoint endpoint, bool source) {
     std::vector<doc::NodeId> found;
@@ -4071,13 +4022,6 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     return drawn;
   };
-  const auto union_rect = [](const gui::Rect &a, const gui::Rect &b) {
-    const float left = std::min(a.x, b.x);
-    const float top = std::min(a.y, b.y);
-    return gui::Rect{left, top,
-                     std::max(a.x + a.width, b.x + b.width) - left,
-                     std::max(a.y + a.height, b.y + b.height) - top};
-  };
   // The graph's extent in graph units: every node and comment box, or only
   // the selected nodes.
   const auto graph_extent = [&](bool only_selected) -> std::optional<gui::Rect> {
@@ -4092,13 +4036,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::UiPoint size = node_size(node);
       const gui::Rect box{held ? held->x : node.editor_x,
                           held ? held->y : node.editor_y, size.x, size.y};
-      extent = extent.has_value() ? union_rect(*extent, box) : box;
+      extent = extent.has_value() ? gui::enclosing(*extent, box) : box;
     }
     if (!only_selected) {
       for (const compositor::GraphComment &comment : compositor_graph.comments) {
         const compositor::GraphComment drawn = drawn_comment(comment);
         const gui::Rect box{drawn.x, drawn.y, drawn.width, drawn.height};
-        extent = extent.has_value() ? union_rect(*extent, box) : box;
+        extent = extent.has_value() ? gui::enclosing(*extent, box) : box;
       }
     }
     return extent;
@@ -4109,16 +4053,15 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   gui::Rect minimap_world{};
   float minimap_scale{};
   if (minimap_ && canvas.width >= 360.0F && canvas.height >= 220.0F) {
-    const gui::Rect view{-pan_x_ / zoom_, -pan_y_ / zoom_,
-                         canvas.width / zoom_, canvas.height / zoom_};
+    const gui::Rect view = view_.visible(canvas);
     const std::optional<gui::Rect> extent = graph_extent(false);
-    minimap_world = extent.has_value() ? union_rect(view, *extent) : view;
+    minimap_world = extent.has_value() ? gui::enclosing(view, *extent) : view;
     constexpr float apron = 60.0F;
     minimap_world = gui::Rect{minimap_world.x - apron, minimap_world.y - apron,
                               minimap_world.width + apron * 2.0F,
                               minimap_world.height + apron * 2.0F};
-    minimap = gui::Rect{canvas.x + canvas.width - 212.0F,
-                        canvas.y + canvas.height - 142.0F, 200.0F, 130.0F};
+    minimap = gui::Rect{canvas.right() - 212.0F,
+                        canvas.bottom() - 142.0F, 200.0F, 130.0F};
     minimap_scale = std::min(minimap.width / minimap_world.width,
                              minimap.height / minimap_world.height);
     const gui::Interaction interaction =
@@ -4131,8 +4074,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           minimap_world.x + (ctx.pointer_x() - minimap.x) / minimap_scale;
       const float graph_y =
           minimap_world.y + (ctx.pointer_y() - minimap.y) / minimap_scale;
-      pan_x_ = canvas.width * 0.5F - graph_x * zoom_;
-      pan_y_ = canvas.height * 0.5F - graph_y * zoom_;
+      view_.centre_on(canvas, graph_x, graph_y);
       build_visuals();
     }
   }
@@ -4244,18 +4186,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     frame.collapse = CompositorCollapseIntent{std::move(targets), fold};
   };
-  const bool chrome_readable = zoom_ >= compositor_chrome_zoom;
-  const bool inline_editable = zoom_ >= compositor_inline_edit_zoom &&
+  const bool chrome_readable = view_.zoom >= compositor_chrome_zoom;
+  const bool inline_editable = view_.zoom >= compositor_inline_edit_zoom &&
                                !node_menu_.has_value() &&
                                !context_menu_.has_value();
   // The toggle sits at the right end of the title line.
   const auto toggle_bounds = [&](const CompositorNodeVisual &visual) {
     const float side =
         std::max(compositor_text_height(ctx, compositor_title_text), 14.0F) *
-        zoom_;
-    return gui::Rect{visual.bounds.x + visual.bounds.width - side -
-                         4.0F * zoom_,
-                     visual.bounds.y + 5.0F * zoom_, side, side};
+        view_.zoom;
+    return gui::Rect{visual.bounds.right() - side -
+                         4.0F * view_.zoom,
+                     visual.bounds.y + 5.0F * view_.zoom, side, side};
   };
   // An inline value's row - below the port rows - and its field.
   const auto inline_row = [&](const CompositorNodeVisual &visual,
@@ -4269,19 +4211,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         visual.bounds.y + (metrics_.header_height +
                            metrics_.row_height *
                                static_cast<float>(port_rows + index)) *
-                              zoom_,
-        visual.bounds.width, metrics_.row_height * zoom_};
+                              view_.zoom,
+        visual.bounds.width, metrics_.row_height * view_.zoom};
   };
   const auto inline_field = [&](const gui::Rect &row) {
-    const float width = std::min(84.0F * zoom_, row.width * 0.5F);
-    return gui::Rect{row.x + row.width - compositor_pin_inset * zoom_ - width,
-                     row.y + 2.0F * zoom_, width,
-                     std::max(row.height - 4.0F * zoom_, 0.0F)};
+    gui::Rect inner = gui::inset(
+        row, gui::Padding{0.0F, 2.0F * view_.zoom,
+                          compositor_pin_inset * view_.zoom, 2.0F * view_.zoom});
+    return gui::cut_right(inner, std::min(84.0F * view_.zoom, row.width * 0.5F));
   };
   const auto inside_canvas = [&canvas](const gui::Rect &rect) noexcept {
     return rect.x >= canvas.x && rect.y >= canvas.y &&
-           rect.x + rect.width <= canvas.x + canvas.width &&
-           rect.y + rect.height <= canvas.y + canvas.height;
+           rect.right() <= canvas.right() &&
+           rect.bottom() <= canvas.bottom();
   };
   // The inline field under the pointer, if it is editable there.
   const auto over_inline_field = [&](const CompositorNodeVisual &visual) {
@@ -4385,7 +4327,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         selection_ =
             CompositorSelection{CompositorSelectionKind::Node, pressed_node};
         const bool on_title =
-            ctx.pointer_y() < visual.bounds.y + metrics_.header_height * zoom_;
+            ctx.pointer_y() < visual.bounds.y + metrics_.header_height * view_.zoom;
         if (on_title && clicks_.double_click(pressed_node.value() * 64U + 7U,
                                              ctx.time_seconds())) {
           // Double-click a node's title to rename it.
@@ -4397,8 +4339,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         } else {
           dragging_node_ = pressed_node;
           drag_moved_ = false;
-          drag_x_ = (visual.bounds.x - canvas.x - pan_x_) / zoom_;
-          drag_y_ = (visual.bounds.y - canvas.y - pan_y_) / zoom_;
+          const gui::UiPoint start =
+              view_.to_graph(canvas, visual.bounds.x, visual.bounds.y);
+          drag_x_ = start.x;
+          drag_y_ = start.y;
           drag_offset_x_ = ctx.pointer_x() - visual.bounds.x;
           drag_offset_y_ = ctx.pointer_y() - visual.bounds.y;
           drag_group_.clear();
@@ -4416,9 +4360,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (interaction.held && dragging_node_ == pressed_node) {
       ctx.set_cursor(gui::Cursor::Move);
       const float next_x =
-          (ctx.pointer_x() - canvas.x - pan_x_ - drag_offset_x_) / zoom_;
+          (ctx.pointer_x() - canvas.x - view_.pan_x - drag_offset_x_) / view_.zoom;
       const float next_y =
-          (ctx.pointer_y() - canvas.y - pan_y_ - drag_offset_y_) / zoom_;
+          (ctx.pointer_y() - canvas.y - view_.pan_y - drag_offset_y_) / view_.zoom;
       const bool stepped = next_x != drag_x_ || next_y != drag_y_;
       layout_changed = layout_changed || stepped;
       drag_moved_ = drag_moved_ || stepped;
@@ -4460,17 +4404,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
   }
-  const float comment_header = std::max(metrics_.row_height, 24.0F) * zoom_;
+  const float comment_header = std::max(metrics_.row_height, 24.0F) * view_.zoom;
   for (auto comment = compositor_graph.comments.rbegin();
        comment != compositor_graph.comments.rend(); ++comment) {
     const compositor::GraphComment drawn = drawn_comment(*comment);
-    const gui::Rect box{canvas.x + pan_x_ + drawn.x * zoom_,
-                        canvas.y + pan_y_ + drawn.y * zoom_,
-                        drawn.width * zoom_, drawn.height * zoom_};
+    const gui::Rect box = view_.to_screen(
+        canvas, gui::Rect{drawn.x, drawn.y, drawn.width, drawn.height});
     const gui::Rect title{box.x, box.y, box.width,
                           std::min(comment_header, box.height)};
-    const gui::Rect corner{box.x + box.width - 14.0F,
-                           box.y + box.height - 14.0F, 14.0F, 14.0F};
+    const gui::Rect corner{box.right() - 14.0F,
+                           box.bottom() - 14.0F, 14.0F, 14.0F};
     const gui::Interaction resize = clipped_grab(
         ctx, mix(id_, "compositor.comment.size", comment->node.value()), corner,
         canvas);
@@ -4508,8 +4451,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if ((resize.held || move.held) && comment_drag_.has_value() &&
         comment_drag_->comment == comment->node) {
-      const float dx = (ctx.pointer_x() - comment_drag_->press_x) / zoom_;
-      const float dy = (ctx.pointer_y() - comment_drag_->press_y) / zoom_;
+      const float dx = (ctx.pointer_x() - comment_drag_->press_x) / view_.zoom;
+      const float dy = (ctx.pointer_y() - comment_drag_->press_y) / view_.zoom;
       layout_changed = layout_changed || dx != comment_drag_->dx ||
                        dy != comment_drag_->dy;
       comment_drag_->dx = dx;
@@ -4585,7 +4528,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                std::move(points),
                                routed_wire(gui::UiPoint{from->x, from->y},
                                            screen,
-                                           gui::UiPoint{to->x, to->y}, zoom_)});
+                                           gui::UiPoint{to->x, to->y}, view_.zoom)});
   }
   // Distance from the pointer to a wire, and the stretch it is nearest.
   const auto nearest_segment = [&](const EdgeVisual &visual) {
@@ -4662,7 +4605,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   // Reroute points: drag to move, double-click to remove. Each is claimed
   // before the wires so a press on one never selects the wire under it.
-  const float point_radius = std::clamp(5.0F * zoom_, 4.0F, 7.0F);
+  const float point_radius = std::clamp(5.0F * view_.zoom, 4.0F, 7.0F);
   const auto emit_points = [&](doc::NodeId edge,
                                std::vector<compositor::WirePoint> points,
                                const std::vector<compositor::WirePoint> &from) {
@@ -4779,10 +4722,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         compositor_graph.comments.rbegin(), compositor_graph.comments.rend(),
         [&](const compositor::GraphComment &comment) {
           const compositor::GraphComment drawn = drawn_comment(comment);
-          return gui::Rect{canvas.x + pan_x_ + drawn.x * zoom_,
-                           canvas.y + pan_y_ + drawn.y * zoom_,
-                           drawn.width * zoom_, comment_header}
-              .contains(ctx.pointer_x(), ctx.pointer_y());
+          // Its title strip, which keeps its height at any zoom.
+          gui::Rect title = view_.to_screen(
+              canvas, gui::Rect{drawn.x, drawn.y, drawn.width, drawn.height});
+          title.height = comment_header;
+          return title.contains(ctx.pointer_x(), ctx.pointer_y());
         });
     if (node_under != nodes.rend()) {
       if (!is_selected(node_under->node->node)) {
@@ -4852,10 +4796,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         const bool inside =
             containing
                 ? b.x >= band.x && b.y >= band.y &&
-                      b.x + b.width <= band.x + band.width &&
-                      b.y + b.height <= band.y + band.height
-                : b.x < band.x + band.width && band.x < b.x + b.width &&
-                      b.y < band.y + band.height && band.y < b.y + b.height;
+                      b.right() <= band.right() &&
+                      b.bottom() <= band.bottom()
+                : b.x < band.right() && band.x < b.right() &&
+                      b.y < band.bottom() && band.y < b.bottom();
         if (!inside) {
           continue;
         }
@@ -4912,9 +4856,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const float fit = std::min(
         (canvas.width - margin * 2.0F) / std::max(target.width, 1.0F),
         (canvas.height - margin * 2.0F) / std::max(target.height, 1.0F));
-    zoom_ = std::clamp(fit, compositor_minimum_zoom, 1.5F);
-    pan_x_ = canvas.width * 0.5F - (target.x + target.width * 0.5F) * zoom_;
-    pan_y_ = canvas.height * 0.5F - (target.y + target.height * 0.5F) * zoom_;
+    view_.zoom = std::clamp(fit, compositor_minimum_zoom, 1.5F);
+    view_.centre_on(canvas, target.center_x(), target.center_y());
   };
   // Straighten Connection: each selected node moves up or down so the wire
   // into its first connected input runs level; a node with no input wire
@@ -5247,21 +5190,21 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.panel(canvas, scale(ctx.theme().background, 0.84F));
   // A quiet drafting-grid texture identifies this as a spatial graph surface
   // without competing with wires or implying rigid row/column alignment.
-  const float dot_spacing = 32.0F * zoom_;
+  const float dot_spacing = 32.0F * view_.zoom;
   constexpr float dot_size = 1.5F;
   const gui::UiColor dot_color = with_alpha(ctx.theme().divider, 0.42F);
   float first_dot_x =
-      canvas.x + std::fmod(pan_x_ + dot_spacing * 0.5F, dot_spacing);
+      canvas.x + std::fmod(view_.pan_x + dot_spacing * 0.5F, dot_spacing);
   float first_dot_y =
-      canvas.y + std::fmod(pan_y_ + dot_spacing * 0.5F, dot_spacing);
+      canvas.y + std::fmod(view_.pan_y + dot_spacing * 0.5F, dot_spacing);
   if (first_dot_x < canvas.x) {
     first_dot_x += dot_spacing;
   }
   if (first_dot_y < canvas.y) {
     first_dot_y += dot_spacing;
   }
-  for (float y = first_dot_y; y < canvas.y + canvas.height; y += dot_spacing) {
-    for (float x = first_dot_x; x < canvas.x + canvas.width; x += dot_spacing) {
+  for (float y = first_dot_y; y < canvas.bottom(); y += dot_spacing) {
+    for (float x = first_dot_x; x < canvas.right(); x += dot_spacing) {
       ctx.draw_list().add_rect(x - dot_size * 0.5F, y - dot_size * 0.5F,
                                dot_size, dot_size, dot_color);
     }
@@ -5272,9 +5215,9 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // become obscured by instructional chrome.
   if (compositor_graph.nodes.empty() || !compositor_graph.diagnostics.empty()) {
     const bool diagnostic = !compositor_graph.diagnostics.empty();
-    const gui::Rect guide{
-        canvas.x + 8.0F, canvas.y + 8.0F,
-        std::min(std::max(canvas.width - 16.0F, 0.0F), 660.0F), 28.0F};
+    gui::Rect top = gui::inset(canvas, 8.0F);
+    gui::Rect guide = gui::cut_top(top, 28.0F);
+    guide.width = std::min(guide.width, 660.0F);
     ctx.panel(guide, with_alpha(scale(ctx.theme().header, 0.92F), 0.94F));
     ctx.outline(guide,
                 diagnostic ? with_alpha(ctx.theme().warning, 0.72F)
@@ -5291,36 +5234,34 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     title += diagnostic ? compositor_diagnostic_message(
                               compositor_graph.diagnostics.front())
                         : std::string_view{"Add a Layer for each scene object"};
-    ctx.label(gui::Rect{guide.x + 8.0F, guide.y + 3.0F,
-                        std::max(guide.width - 16.0F, 0.0F), 22.0F},
-              title, diagnostic ? ctx.theme().warning : ctx.theme().text_muted);
+    ctx.label(gui::inset(guide, 8.0F, 3.0F), title,
+              diagnostic ? ctx.theme().warning : ctx.theme().text_muted);
     ctx.tooltip(guide, title + " · Connect the output on the right of a node to an input on the left. Layers feed Composite, then Output.");
   }
 
   for (const compositor::GraphComment &comment : compositor_graph.comments) {
     const compositor::GraphComment drawn = drawn_comment(comment);
-    const gui::Rect box{canvas.x + pan_x_ + drawn.x * zoom_,
-                        canvas.y + pan_y_ + drawn.y * zoom_,
-                        drawn.width * zoom_, drawn.height * zoom_};
+    const gui::Rect box = view_.to_screen(
+        canvas, gui::Rect{drawn.x, drawn.y, drawn.width, drawn.height});
     const bool chosen = selection_ == CompositorSelection{
                                           CompositorSelectionKind::Comment,
                                           comment.node};
     const gui::UiColor color = comment_color(drawn.color);
     ctx.panel(box, with_alpha(color, 0.07F));
-    const gui::Rect title{box.x, box.y, box.width,
-                          std::min(comment_header, box.height)};
+    gui::Rect below_title = box;
+    const gui::Rect title = gui::cut_top(below_title, comment_header);
     ctx.panel(title, with_alpha(blend_color(ctx.theme().header, color, 0.35F),
                                 0.92F));
     ctx.outline(box, chosen ? ctx.theme().accent : with_alpha(color, 0.55F),
                 chosen ? 2.0F : 1.0F);
     static_cast<void>(compositor_label(
         ctx,
-        gui::Rect{title.x + 8.0F * zoom_, title.y,
-                  std::max(title.width - 16.0F * zoom_, 0.0F), title.height},
-        drawn.title, ctx.theme().text, compositor_title_text, zoom_));
+        gui::Rect{title.x + 8.0F * view_.zoom, title.y,
+                  std::max(title.width - 16.0F * view_.zoom, 0.0F), title.height},
+        drawn.title, ctx.theme().text, compositor_title_text, view_.zoom));
     // The corner grip it resizes by.
-    const float grip_x = box.x + box.width - 4.0F;
-    const float grip_y = box.y + box.height - 4.0F;
+    const float grip_x = box.right() - 4.0F;
+    const float grip_y = box.bottom() - 4.0F;
     for (float offset = 4.0F; offset <= 10.0F; offset += 3.0F) {
       ctx.draw_list().add_line(grip_x - offset, grip_y, grip_x, grip_y - offset,
                                1.0F, with_alpha(color, 0.8F));
@@ -5328,7 +5269,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   // Wires scale with the graph but never thin below what reads on screen.
-  const float wire_width = std::clamp(2.0F * zoom_, 1.5F, 3.5F);
+  const float wire_width = std::clamp(2.0F * view_.zoom, 1.5F, 3.5F);
   // A selected node's flow stands out: every wire feeding it, directly or
   // further upstream, and every wire it feeds on its way to Output.
   std::set<doc::NodeId> upstream;
@@ -5361,15 +5302,16 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // A small numbered disc on a wire, or a problem mark.
   const auto wire_disc = [&](gui::UiPoint at, std::string_view text,
                              gui::UiColor ring, gui::UiColor fill) {
-    const float radius = std::max(6.0F, 7.0F * zoom_);
-    draw_circle(ctx, at.x, at.y, radius + 1.0F, ring);
-    draw_circle(ctx, at.x, at.y, radius, fill);
-    const float width = ctx.font_width(text, 0.75F);
-    ctx.label(gui::Rect{at.x - width * 0.5F - 1.0F, at.y - radius,
-                        width + 2.0F, radius * 2.0F},
+    const float radius = std::max(6.0F, 7.0F * view_.zoom);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{at.x, at.y},
+                  radius + 1.0F, ring);
+    gui::add_disc(ctx.draw_list(), gui::UiPoint{at.x, at.y},
+                  radius, fill);
+    const gui::Rect disc = gui::around(at.x, at.y, radius * 2.0F, radius * 2.0F);
+    ctx.label(gui::centered(disc, ctx.font_width(text, 0.75F) + 2.0F,
+                            disc.height),
               text, ctx.theme().text, 0.75F);
-    return gui::Rect{at.x - radius, at.y - radius, radius * 2.0F,
-                     radius * 2.0F};
+    return disc;
   };
   // The point a distance back along a wire from its input end.
   const auto back_along = [](std::span<const gui::UiPoint> points,
@@ -5440,10 +5382,11 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // Reroute points are small handles on the wire itself.
     for (const compositor::WirePoint point : visual.points) {
       const gui::UiPoint centre = to_screen(point);
-      draw_circle(ctx, centre.x, centre.y, point_radius + 1.0F,
-                  scale(ctx.theme().panel, 0.8F));
-      draw_circle(ctx, centre.x, centre.y, point_radius,
-                  selected || hovered ? ctx.theme().text : color);
+      gui::add_disc(ctx.draw_list(), gui::UiPoint{centre.x, centre.y},
+                    point_radius + 1.0F, scale(ctx.theme().panel, 0.8F));
+      gui::add_disc(ctx.draw_list(), gui::UiPoint{centre.x, centre.y},
+                    point_radius,
+                    selected || hovered ? ctx.theme().text : color);
     }
     if (!chrome_readable || drawn.points.size() < 2U) {
       continue;
@@ -5459,8 +5402,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         1U;
       const std::string number = std::to_string(rank);
       const gui::UiPoint at =
-          back_along(drawn.points, std::max(30.0F * zoom_, 22.0F));
-      const float radius = std::max(6.0F, 7.0F * zoom_);
+          back_along(drawn.points, std::max(30.0F * view_.zoom, 22.0F));
+      const float radius = std::max(6.0F, 7.0F * view_.zoom);
       order_discs_.push_back(
           OrderDisc{visual.edge->node, visual.edge->to, at.x, at.y, radius});
       if (order_drag_ == visual.edge->node) {
@@ -5509,7 +5452,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (!present && from != nullptr && to != nullptr) {
         wire(ctx, from->x, from->y, to->x, to->y,
              with_alpha(port_color(ctx, from->descriptor->type), 0.78F),
-             wire_width, zoom_);
+             wire_width, view_.zoom);
       }
     }
   }
@@ -5524,7 +5467,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const float end_x = snapped != nullptr ? snapped->x : ctx.pointer_x();
       const float end_y = snapped != nullptr ? snapped->y : ctx.pointer_y();
       wire(ctx, from->x, from->y, end_x, end_y,
-           port_color(ctx, connecting_type_), wire_width + 0.5F, zoom_);
+           port_color(ctx, connecting_type_), wire_width + 0.5F, view_.zoom);
     }
   }
   if (node_menu_.has_value() && node_menu_->from.has_value()) {
@@ -5532,7 +5475,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (const CompositorPortVisual *const from =
             find_port(outputs, *node_menu_->from)) {
       wire(ctx, from->x, from->y, node_menu_->screen_x, node_menu_->screen_y,
-           port_color(ctx, node_menu_->type), wire_width + 0.5F, zoom_);
+           port_color(ctx, node_menu_->type), wire_width + 0.5F, view_.zoom);
     }
   }
   if (relink_.has_value() && relink_->moving_source) {
@@ -5547,7 +5490,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           edge != nullptr ? find_port(inputs, edge->to) : nullptr;
       if (to != nullptr) {
         wire(ctx, start_x, start_y, to->x, to->y,
-             port_color(ctx, connecting_type_), wire_width + 0.5F, zoom_);
+             port_color(ctx, connecting_type_), wire_width + 0.5F, view_.zoom);
       }
     }
   }
@@ -5570,10 +5513,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       connecting_from_.has_value() ? find_port(outputs, *connecting_from_)
                                    : nullptr;
   const float node_title_height =
-      compositor_text_height(ctx, compositor_title_text) * zoom_;
+      compositor_text_height(ctx, compositor_title_text) * view_.zoom;
   const float node_detail_height =
-      compositor_text_height(ctx, compositor_detail_text) * zoom_;
-  const float port_radius = std::max(2.5F, compositor_port_radius * zoom_);
+      compositor_text_height(ctx, compositor_detail_text) * view_.zoom;
+  const float port_radius = std::max(2.5F, compositor_port_radius * view_.zoom);
 
   for (const CompositorNodeVisual &visual : nodes) {
     const bool selected = std::binary_search(
@@ -5584,55 +5527,54 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const gui::UiColor body = scale(ctx.theme().panel, 1.18F);
 
     // A soft drop shadow lifts the node off the grid.
-    const float shadow = std::max(2.0F, 3.0F * zoom_);
+    const float shadow = std::max(2.0F, 3.0F * view_.zoom);
     ctx.panel(gui::Rect{visual.bounds.x + shadow * 0.5F,
                         visual.bounds.y + shadow, visual.bounds.width,
                         visual.bounds.height},
               with_alpha(ctx.theme().background, 0.55F));
     ctx.panel(visual.bounds, body);
 
-    const gui::Rect node_header{
-        visual.bounds.x, visual.bounds.y, visual.bounds.width,
-        std::min(metrics_.header_height * zoom_, visual.bounds.height)};
+    gui::Rect below_header = visual.bounds;
+    gui::Rect node_header =
+        gui::cut_top(below_header, metrics_.header_height * view_.zoom);
     ctx.panel(node_header, blend_color(ctx.theme().header, kind, 0.16F));
-    ctx.panel(gui::Rect{node_header.x, node_header.y + node_header.height -
-                                           std::max(1.0F, 2.0F * zoom_),
-                        node_header.width, std::max(1.0F, 2.0F * zoom_)},
+    ctx.panel(gui::cut_bottom(node_header, std::max(1.0F, 2.0F * view_.zoom)),
               with_alpha(kind, 0.85F));
     ctx.outline(visual.bounds,
                 diagnostic ? ctx.theme().warning
                       : (selected ? ctx.theme().accent : ctx.theme().border),
-                selected || diagnostic ? std::max(1.0F, std::min(2.0F, 2.0F * zoom_))
+                selected || diagnostic ? std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom))
                                   : 1.0F);
 
     const std::string_view title =
         visual.node->label.empty()
             ? compositor::node_kind_name(visual.node->kind)
             : std::string_view{visual.node->label};
-    const float text_x = visual.bounds.x + compositor_node_padding * zoom_;
-    const float text_width =
-        std::max(visual.bounds.width - compositor_node_padding * 2.0F * zoom_,
-                 0.0F);
+    // The text lines, padded in from the sides; the title stops short of
+    // the problem badge and the toggle at its right when they show.
+    const gui::Rect text_area =
+        gui::inset(visual.bounds, compositor_node_padding * view_.zoom, 0.0F);
     const gui::Rect toggle = toggle_bounds(visual);
-    const gui::Rect title_bounds{
-        text_x, visual.bounds.y + 5.0F * zoom_,
+    const gui::Rect title_line{text_area.x, visual.bounds.y + 5.0F * view_.zoom,
+                               text_area.width, node_title_height};
+    const gui::Rect title_bounds =
         chrome_readable
-            ? std::max(toggle.x - toggle.width - 6.0F * zoom_ - text_x, 0.0F)
-            : text_width,
-        node_title_height};
+            ? gui::span_x(title_line, text_area.x,
+                          toggle.x - toggle.width - 6.0F * view_.zoom)
+            : title_line;
     const bool passed_through = bypassed(*visual.node);
     if (compositor_label(ctx, title_bounds, title, ctx.theme().text,
-                         compositor_title_text, zoom_)) {
+                         compositor_title_text, view_.zoom)) {
       const std::string detail =
           passed_through ? std::string{"BYPASSED"}
                          : compositor_node_detail(*visual.node, elements);
       static_cast<void>(compositor_label(
           ctx,
-          gui::Rect{text_x, title_bounds.y + node_title_height, text_width,
+          gui::Rect{text_area.x, title_line.bottom(), text_area.width,
                     node_detail_height},
           detail,
           passed_through ? compositor_bypass_color : ctx.theme().text_muted,
-          compositor_detail_text, zoom_));
+          compositor_detail_text, view_.zoom));
     }
 
     // Names share a row: an input on the left, an output on the right. Each
@@ -5642,7 +5584,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         return 0.0F;
       }
       const std::optional<float> baked =
-          ctx.text_size_at_most(compositor_pin_text * zoom_);
+          ctx.text_size_at_most(compositor_pin_text * view_.zoom);
       return baked.has_value() ? ctx.font_width(port->descriptor->name, *baked)
                                : 0.0F;
     };
@@ -5663,8 +5605,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (over) {
         ctx.panel(toggle, with_alpha(ctx.theme().widget_hover, 0.9F));
       }
-      draw_twirl(ctx, toggle.x + toggle.width * 0.5F,
-                 toggle.y + toggle.height * 0.5F, !folded,
+      draw_twirl(ctx, toggle.center_x(), toggle.center_y(), !folded,
                  over ? ctx.theme().text : ctx.theme().text_muted);
       ctx.tooltip(toggle, folded ? "Expand node" : "Collapse node");
       // Problems with the node are marked beside it, and named on hover: a
@@ -5691,28 +5632,29 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 problem.severity == compositor::DiagnosticSeverity::Error;
       }
       if (marked) {
-        const gui::Rect badge{toggle.x - toggle.width - 3.0F * zoom_, toggle.y,
+        const gui::Rect badge{toggle.x - toggle.width - 3.0F * view_.zoom, toggle.y,
                               toggle.width, toggle.height};
         const float radius = badge.width * 0.42F;
-        const float centre_x = badge.x + badge.width * 0.5F;
-        const float centre_y = badge.y + badge.height * 0.5F;
-        draw_circle(ctx, centre_x, centre_y, radius, ctx.theme().warning);
+        const float centre_x = badge.center_x();
+        const float centre_y = badge.center_y();
+        gui::add_disc(ctx.draw_list(), gui::UiPoint{centre_x, centre_y},
+                      radius, ctx.theme().warning);
         if (!error) {
-          draw_circle(ctx, centre_x, centre_y,
-                      std::max(radius - std::max(1.5F, 2.0F * zoom_), 0.0F),
-                      blend_color(ctx.theme().header, kind, 0.16F));
+          gui::add_disc(
+              ctx.draw_list(), gui::UiPoint{centre_x, centre_y},
+              std::max(radius - std::max(1.5F, 2.0F * view_.zoom), 0.0F),
+              blend_color(ctx.theme().header, kind, 0.16F));
         }
-        const float mark_width = ctx.font_width("!", 0.75F);
-        ctx.label(gui::Rect{centre_x - mark_width * 0.5F - 1.0F, badge.y,
-                            mark_width + 2.0F, badge.height},
+        ctx.label(gui::centered(badge, ctx.font_width("!", 0.75F) + 2.0F,
+                                badge.height),
                   "!", error ? ctx.theme().background : ctx.theme().warning,
                   0.75F);
         ctx.tooltip(badge, problems);
       }
     }
 
-    const float pin_inset = compositor_pin_inset * zoom_;
-    const float gap = compositor_pin_label_gap * zoom_;
+    const float pin_inset = compositor_pin_inset * view_.zoom;
+    const float gap = compositor_pin_label_gap * view_.zoom;
     const auto shown_ports = [&](const std::vector<CompositorPortVisual> &ports) {
       return static_cast<std::size_t>(std::count_if(
           ports.begin(), ports.end(),
@@ -5721,13 +5663,14 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           }));
     };
     const std::size_t rows = std::max(shown_ports(inputs), shown_ports(outputs));
+    const gui::Rect pins = gui::inset(visual.bounds, pin_inset, 0.0F);
     for (std::size_t row = 0U; row < rows; ++row) {
       const CompositorPortVisual *const input = row_port(inputs, row);
       const CompositorPortVisual *const output = row_port(outputs, row);
-      const float row_height = metrics_.row_height * zoom_;
+      const float row_height = metrics_.row_height * view_.zoom;
       const float input_width = port_label_width(input);
       const float output_width = port_label_width(output);
-      const float right = visual.bounds.x + visual.bounds.width - pin_inset;
+      const float right = pins.right();
       if (input != nullptr) {
         const bool compatible = connecting_source != nullptr &&
                                 can_connect(compositor_graph,
@@ -5736,24 +5679,21 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             output != nullptr ? right - output_width - gap : right;
         static_cast<void>(compositor_label(
             ctx,
-            gui::Rect{visual.bounds.x + pin_inset, input->y - row_height * 0.5F,
-                      std::max(limit - visual.bounds.x - pin_inset, 0.0F),
-                      row_height},
+            gui::span_x(gui::rule_y(pins, input->y, row_height), pins.x, limit),
             input->descriptor->name,
             compatible ? ctx.theme().text : ctx.theme().text_muted,
-            compositor_pin_text, zoom_));
+            compositor_pin_text, view_.zoom));
       }
       if (output != nullptr) {
         const float left =
-            input != nullptr ? visual.bounds.x + pin_inset + input_width + gap
-                             : visual.bounds.x + pin_inset;
+            input != nullptr ? pins.x + input_width + gap : pins.x;
         const float width = std::min(output_width, std::max(right - left, 0.0F));
         static_cast<void>(compositor_label(
             ctx,
-            gui::Rect{right - width, output->y - row_height * 0.5F, width,
-                      row_height},
+            gui::span_x(gui::rule_y(pins, output->y, row_height), right - width,
+                        right),
             output->descriptor->name, ctx.theme().text_muted,
-            compositor_pin_text, zoom_));
+            compositor_pin_text, view_.zoom));
       }
     }
 
@@ -5768,15 +5708,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const bool idle =
           inline_value_idle(compositor_graph, *visual.node, value);
       static_cast<void>(compositor_label(
-          ctx,
-          gui::Rect{visual.bounds.x + pin_inset, row.y,
-                    std::max(field.x - gap * 0.5F - visual.bounds.x - pin_inset,
-                             0.0F),
-                    row.height},
-          value.label,
+          ctx, gui::span_x(row, pins.x, field.x - gap * 0.5F), value.label,
           idle ? with_alpha(ctx.theme().text_muted, 0.5F)
                : ctx.theme().text_muted,
-          compositor_pin_text, zoom_));
+          compositor_pin_text, view_.zoom));
       const double current = inline_value_of(*visual.node, value.property);
       if (idle || !inline_editable || !inside_canvas(field)) {
         std::array<char, 32U> text{};
@@ -5787,14 +5722,15 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         const std::string_view shown{
             text.data(), static_cast<std::size_t>(std::max(length, 0))};
         const std::optional<float> baked =
-            ctx.text_size_at_most(compositor_pin_text * zoom_);
+            ctx.text_size_at_most(compositor_pin_text * view_.zoom);
         const float width =
             baked.has_value() ? ctx.font_width(shown, *baked) : 0.0F;
+        // Right-aligned in the field, cut at its left.
         static_cast<void>(compositor_label(
             ctx,
-            gui::Rect{field.x + std::max(field.width - width, 0.0F), row.y,
-                      std::min(width, field.width), row.height},
-            shown, ctx.theme().text, compositor_pin_text, zoom_));
+            gui::span_x(row, std::max(field.right() - width, field.x),
+                        field.right()),
+            shown, ctx.theme().text, compositor_pin_text, view_.zoom));
         continue;
       }
       const gui::UiId field_id =
@@ -5897,13 +5833,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // A bypassed node's body is dimmed below its title, which stays
     // readable, and edged in the transport's amber.
     if (passed_through) {
-      const float below = std::min(metrics_.header_height * zoom_,
+      const float below = std::min(metrics_.header_height * view_.zoom,
                                    visual.bounds.height);
       ctx.panel(gui::Rect{visual.bounds.x, visual.bounds.y + below,
                           visual.bounds.width, visual.bounds.height - below},
                 with_alpha(ctx.theme().background, 0.5F));
       ctx.outline(visual.bounds, with_alpha(compositor_bypass_color, 0.8F),
-                  std::max(1.0F, std::min(2.0F, 2.0F * zoom_)));
+                  std::max(1.0F, std::min(2.0F, 2.0F * view_.zoom)));
     }
     // Brought here from another panel: outlined, fading, for a moment.
     if (visual.node->node == reveal_node_ && ctx.time_seconds() < reveal_until_) {
@@ -5967,21 +5903,21 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   with_alpha(comment_color(drawn.color), 0.7F));
     }
     for (const CompositorNodeVisual &visual : nodes) {
-      ctx.panel(map((visual.bounds.x - canvas.x - pan_x_) / zoom_,
-                    (visual.bounds.y - canvas.y - pan_y_) / zoom_,
-                    visual.bounds.width / zoom_, visual.bounds.height / zoom_),
+      const gui::UiPoint at =
+          view_.to_graph(canvas, visual.bounds.x, visual.bounds.y);
+      ctx.panel(map(at.x, at.y, visual.bounds.width / view_.zoom,
+                    visual.bounds.height / view_.zoom),
                 with_alpha(compositor_node_color(ctx, visual.node->kind), 0.8F));
     }
-    ctx.outline(map(-pan_x_ / zoom_, -pan_y_ / zoom_, canvas.width / zoom_,
-               canvas.height / zoom_),
-                ctx.theme().text);
+    const gui::Rect seen = view_.visible(canvas);
+    ctx.outline(map(seen.x, seen.y, seen.width, seen.height), ctx.theme().text);
     ctx.outline(minimap, ctx.theme().border);
   }
   if (ctx.time_seconds() < notice_until_ && !notice_.empty()) {
     const float width = std::ceil(ctx.font_width(notice_)) + 20.0F;
     const float height = ctx.line_height() + 10.0F;
     const gui::Rect badge{canvas.x + 10.0F,
-                          canvas.y + canvas.height - height - 10.0F, width,
+                          canvas.bottom() - height - 10.0F, width,
                           height};
     ctx.panel(badge, with_alpha(ctx.theme().background, 0.94F));
     ctx.outline(badge, ctx.theme().border);
@@ -7037,8 +6973,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const float node_width = size.x;
       frame.add_node = CompositorAddIntent{
           item.kind,
-          (canvas.width * 0.5F - pan_x_) / zoom_ - node_width * 0.5F + cascade,
-          (canvas.height * 0.5F - pan_y_) / zoom_ - node_height * 0.5F +
+          (canvas.width * 0.5F - view_.pan_x) / view_.zoom - node_width * 0.5F + cascade,
+          (canvas.height * 0.5F - view_.pan_y) / view_.zoom - node_height * 0.5F +
               cascade};
       add_menu_open_ = false;
       add_category_.reset();
@@ -7271,13 +7207,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                                         : ctx.theme().text_muted;
         const float shortcut_width = ctx.font_width(entry.shortcut);
         ctx.label(gui::Rect{text_x, row.y,
-                            std::max(row.x + row.width - text_x -
+                            std::max(row.right() - text_x -
                                          shortcut_width - 14.0F,
                                      0.0F),
                             row.height},
                   entry.label, text);
         if (!entry.shortcut.empty()) {
-          ctx.label(gui::Rect{row.x + row.width - shortcut_width - 8.0F, row.y,
+          ctx.label(gui::Rect{row.right() - shortcut_width - 8.0F, row.y,
                               shortcut_width + 2.0F, row.height},
                     entry.shortcut, with_alpha(ctx.theme().text_muted, 0.8F));
         }
@@ -7395,9 +7331,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else if (const compositor::GraphComment *const comment =
                    comment_of(rename_->node)) {
       const compositor::GraphComment drawn = drawn_comment(*comment);
-      field = gui::Rect{canvas.x + pan_x_ + drawn.x * zoom_ + 4.0F,
-                        canvas.y + pan_y_ + drawn.y * zoom_ + 2.0F,
-                        std::max(drawn.width * zoom_ - 8.0F, 60.0F),
+      const gui::Rect box = view_.to_screen(
+          canvas, gui::Rect{drawn.x, drawn.y, drawn.width, drawn.height});
+      field = gui::Rect{box.x + 4.0F, box.y + 2.0F,
+                        std::max(box.width - 8.0F, 60.0F),
                         std::max(ctx.line_height() + 6.0F, 22.0F)};
     }
     const gui::UiId rename_id = mix(id_, "compositor.rename");
@@ -7478,11 +7415,11 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const std::string_view count_view{
       count.data(), static_cast<std::size_t>(std::max(count_length, 0))};
   const float count_width = ctx.font_width(count_view);
-  ctx.label(gui::Rect{header.x + header.width - count_width - 8.0F, header.y,
+  ctx.label(gui::Rect{header.right() - count_width - 8.0F, header.y,
                       count_width, header.height},
             count_view, ctx.theme().text_muted);
   ctx.panel(
-      gui::Rect{header.x, header.y + header.height - 1.0F, header.width, 1.0F},
+      gui::Rect{header.x, header.bottom() - 1.0F, header.width, 1.0F},
       ctx.theme().divider);
 
   const gui::Rect content{bounds.x, bounds.y + header_height, bounds.width,
@@ -7492,7 +7429,7 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          std::min(inputs_width, content.width), content.height};
   ctx.panel(inputs, ctx.theme().panel);
   ctx.panel(
-      gui::Rect{inputs.x + inputs.width - 1.0F, inputs.y, 1.0F, inputs.height},
+      gui::Rect{inputs.right() - 1.0F, inputs.y, 1.0F, inputs.height},
       ctx.theme().divider);
   ctx.label(
       gui::Rect{inputs.x + 8.0F, inputs.y + 1.0F, inputs.width - 16.0F, 19.0F},
@@ -7517,16 +7454,16 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               "No scene layers", ctx.theme().text_muted);
   }
 
-  const gui::Rect graph{inputs.x + inputs.width, content.y,
+  const gui::Rect graph{inputs.right(), content.y,
                         std::max(content.width - inputs.width, 0.0F),
                         content.height};
   // A restrained engineering-paper grid gives an empty graph useful scale.
-  for (float x = graph.x + 15.0F; x < graph.x + graph.width; x += 32.0F) {
-    ctx.draw_list().add_line(x, graph.y, x, graph.y + graph.height, 1.0F,
+  for (float x = graph.x + 15.0F; x < graph.right(); x += 32.0F) {
+    ctx.draw_list().add_line(x, graph.y, x, graph.bottom(), 1.0F,
                              with_alpha(ctx.theme().divider, 0.60F));
   }
-  for (float y = graph.y + 15.0F; y < graph.y + graph.height; y += 32.0F) {
-    ctx.draw_list().add_line(graph.x, y, graph.x + graph.width, y, 1.0F,
+  for (float y = graph.y + 15.0F; y < graph.bottom(); y += 32.0F) {
+    ctx.draw_list().add_line(graph.x, y, graph.right(), y, 1.0F,
                              with_alpha(ctx.theme().divider, 0.60F));
   }
 
@@ -7616,21 +7553,21 @@ void CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
-  wire(ctx, input_node.bounds.x + input_node.bounds.width,
+  wire(ctx, input_node.bounds.right(),
        input_node.bounds.y + input_node.bounds.height * 0.5F,
        analyzer_node.bounds.x,
        analyzer_node.bounds.y + analyzer_node.bounds.height * 0.5F,
        ctx.theme().accent);
   for (const NodeBox &element : element_nodes) {
-    wire(ctx, analyzer_node.bounds.x + analyzer_node.bounds.width,
+    wire(ctx, analyzer_node.bounds.right(),
          analyzer_node.bounds.y + analyzer_node.bounds.height * 0.5F,
          element.bounds.x, element.bounds.y + element.bounds.height * 0.5F,
          element.color);
-    wire(ctx, element.bounds.x + element.bounds.width,
+    wire(ctx, element.bounds.right(),
          element.bounds.y + element.bounds.height * 0.5F, grade_node.bounds.x,
          grade_node.bounds.y + grade_node.bounds.height * 0.5F, element.color);
   }
-  wire(ctx, grade_node.bounds.x + grade_node.bounds.width,
+  wire(ctx, grade_node.bounds.right(),
        grade_node.bounds.y + grade_node.bounds.height * 0.5F,
        output_node.bounds.x,
        output_node.bounds.y + output_node.bounds.height * 0.5F,
@@ -9203,7 +9140,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
 
     // Lifecycle actions: the same icon in the same place on every row.
-    const bool row_visible = intersect(line, list_bounds).height > 0.0F;
+    const bool row_visible = gui::intersection(line, list_bounds).height > 0.0F;
     float button_x = actions_column.right();
     std::size_t placed = 0U;
     const auto action = [&](std::string_view suffix, gui::Icon icon,

@@ -1197,7 +1197,7 @@ void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
     static_cast<void>(ctx.text_field(mix(id_, "ies.path", element.node.value()), path, ies_draft_));
     ctx.tooltip(path, ies_draft_.empty() ? "Choose an IES light profile" : ies_draft_);
     if (ctx.button(mix(id_, "ies.browse", element.node.value()),
-                   {field.x + field.width - browse_width, field.y, browse_width, field.height}, "Browse...")) {
+                   {field.right() - browse_width, field.y, browse_width, field.height}, "Browse...")) {
         FilePickerRequest request{FilePickerKind::IesProfile, ies_draft_, {}};
         for (const auto& item : selected_) {
             if (!item.locked && item.kind == ElementKind::PointLight &&
@@ -1793,9 +1793,9 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
             ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height},
                       labels[role], ctx.theme().text_muted);
             const bool browse = ctx.button(mix(id_, "generator.texture.browse", element.node.value() ^ role),
-                {row.x + row.width - controls, row.y, 74.0F, row.height}, "Browse...");
+                {row.right() - controls, row.y, 74.0F, row.height}, "Browse...");
             const bool clear = ctx.button(mix(id_, "generator.texture.clear", element.node.value() ^ role),
-                {row.x + row.width - 46.0F, row.y, 46.0F, row.height}, "Clear");
+                {row.right() - 46.0F, row.y, 46.0F, row.height}, "Clear");
             if (browse || clear) {
                 FilePickerRequest request{FilePickerKind::GeneratorTexture,
                     std::string{sources[role]}, {element.node}};
@@ -1844,9 +1844,9 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
                 const float controls = 124.0F;
                 ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height}, labels[role], ctx.theme().text_muted);
                 const bool browse = ctx.button(mix(id_, "texture.browse", role),
-                    {row.x + row.width - controls, row.y, 74.0F, row.height}, "Browse...");
+                    {row.right() - controls, row.y, 74.0F, row.height}, "Browse...");
                 const bool clear = ctx.button(mix(id_, "texture.clear", role),
-                    {row.x + row.width - 46.0F, row.y, 46.0F, row.height}, "Clear");
+                    {row.right() - 46.0F, row.y, 46.0F, row.height}, "Clear");
                 if (browse || clear) {
                     FilePickerRequest request{FilePickerKind::ModelTexture, {}, {element.node}};
                     request.model_source = element.source;
@@ -2251,15 +2251,15 @@ void InspectorPanel::draw_effects(
           NamedEdit{effect.source, std::string{scene::schema::effect_enabled},
                     effect.enabled ? 0.0 : 1.0});
     }
-    const float title_x = enable.x + enable.width + 6.0F;
+    const float title_x = enable.right() + 6.0F;
     ctx.label(gui::Rect{title_x, title_row.y,
-                        std::max(title_row.x + title_row.width - title_x -
+                        std::max(title_row.right() - title_x -
                                      remove_width - 4.0F,
                                  0.0F),
                         title_row.height},
               title,
               effect.enabled ? ctx.theme().text : ctx.theme().text_muted);
-    const gui::Rect remove{title_row.x + title_row.width - remove_width,
+    const gui::Rect remove{title_row.right() - remove_width,
                            title_row.y, remove_width, title_row.height};
     const gui::Interaction remove_it =
         ctx.grab(mix(id_, title, 8'000U + id_salt), remove);
@@ -2422,7 +2422,7 @@ void InspectorPanel::draw_effects(
                                effect.chroma_key.key_color.z, 1.0F});
       }
       const gui::Rect sample_button{
-          color_well.x + color_well.width + 6.0F, swatch.y,
+          color_well.right() + 6.0F, swatch.y,
           22.0F,
           swatch.height};
       const gui::Interaction sample_it = ctx.grab(
