@@ -45,6 +45,17 @@ struct Rect final {
     [[nodiscard]] Rect inflated(float dx, float dy) const noexcept {
         return Rect{x - dx, y - dy, width + dx * 2.0F, height + dy * 2.0F};
     }
+
+    // The far edges and the middle, so a caller anchoring to them says which
+    // edge it means instead of re-adding the extent.
+    [[nodiscard]] constexpr float right() const noexcept { return x + width; }
+    [[nodiscard]] constexpr float bottom() const noexcept { return y + height; }
+    [[nodiscard]] constexpr float center_x() const noexcept {
+        return x + width * 0.5F;
+    }
+    [[nodiscard]] constexpr float center_y() const noexcept {
+        return y + height * 0.5F;
+    }
 };
 
 // The direction children are stacked in. The other axis is the cross axis.

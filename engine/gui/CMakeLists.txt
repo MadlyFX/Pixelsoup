@@ -6,6 +6,7 @@ add_library(mediaserver_gui STATIC
     src/text.cpp
     src/input.cpp
     src/layout.cpp
+    src/form_layout.cpp
     src/ui_context.cpp
     src/color_picker.cpp
     src/dock.cpp
@@ -109,6 +110,24 @@ if(BUILD_TESTING)
         COMMAND mediaserver_gui_layout_tests
     )
     set_target_properties(mediaserver_gui_layout_tests PROPERTIES FOLDER "tests")
+
+    # Rectangle cuts, the form cursor and the scroll region: the layout steps
+    # below the solver. Arithmetic plus synthetic wheel input, so no GPU and no
+    # display.
+    add_executable(mediaserver_gui_form_layout_tests
+        tests/form_layout_tests.cpp
+    )
+    target_link_libraries(mediaserver_gui_form_layout_tests
+        PRIVATE
+            MediaServer::Gui
+    )
+    mediaserver_set_project_options(mediaserver_gui_form_layout_tests)
+
+    add_test(
+        NAME mediaserver.gui_form_layout
+        COMMAND mediaserver_gui_form_layout_tests
+    )
+    set_target_properties(mediaserver_gui_form_layout_tests PROPERTIES FOLDER "tests")
 
     # The dock tree is where rearranging goes wrong quietly - a collapse that
     # orphans a node, a drop that loses a panel - so its suite drives the tree

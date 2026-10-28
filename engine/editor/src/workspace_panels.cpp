@@ -4,6 +4,7 @@
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 
 #include <algorithm>
 #include <array>
@@ -7737,7 +7738,6 @@ constexpr float preferences_card_width = 620.0F;
 // than the window is cut to the window.
 constexpr float project_settings_card_height = 700.0F;
 constexpr float preferences_card_height = 780.0F;
-constexpr float preferences_field_pitch = 46.0F;
 
 [[nodiscard]] gui::Rect
 preferences_card(const gui::Rect &bounds,
@@ -7775,7 +7775,7 @@ void PreferencesPanel::open(const EditorPreferences &stored) {
   draft_ = stored;
   password_draft_.clear();
   password_edited_ = false;
-  scroll_ = 0.0F;
+  scroll_.reset();
   open_ = true;
 }
 
@@ -8190,9 +8190,9 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   if (!open_) {
     return result;
   }
+  const gui::Metrics &m = ctx.theme().metrics;
   const gui::Rect card = preferences_card(
       bounds, std::min(preferences_card_height, bounds.height));
-  const float buttons_y = card.y + card.height - 38.0F;
 
   // Dim the workspace. This is the drawing half only; the scrim's hit test is
   // registered at the end of this function, because a full-screen grab placed
@@ -8202,88 +8202,70 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   border(ctx, card, ctx.theme().divider);
   ctx.push_clip(card);
 
-  const gui::Rect header{card.x, card.y, card.width, 34.0F};
+  gui::Rect body = card;
+  gui::Rect header = gui::cut_top(body, m.header);
   ctx.panel(header, ctx.theme().header);
-  ctx.label(gui::Rect{header.x + 14.0F, header.y, header.width - 14.0F,
-                      header.height},
-            "PREFERENCES", ctx.theme().text);
-  ctx.panel(
-      gui::Rect{card.x, header.y + header.height - 1.0F, card.width, 1.0F},
-      ctx.theme().divider);
-  const gui::Rect content_bounds{
-      card.x, header.y + header.height, card.width,
-      std::max(buttons_y - 6.0F - (header.y + header.height), 0.0F)};
-  constexpr float scroll_content_height = 760.0F;
-  const float maximum_scroll =
-      std::max(scroll_content_height - content_bounds.height, 0.0F);
-  if (content_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * 36.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-  ctx.push_clip(content_bounds);
+  ctx.label(gui::inset(header, m.inset, 0.0F), "PREFERENCES", ctx.theme().text);
+  ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
+  const gui::Rect footer =
+      gui::inset(gui::cut_bottom(body, m.control + m.row_gap * 2.0F), m.inset,
+                 m.row_gap);
 
-  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F - scroll_,
-                      card.width - 28.0F, 18.0F},
+  // An empty field shows what belongs in it, until it has the keyboard.
+  const auto hint = [&](gui::UiId id, const gui::Rect &field,
+                        const std::string &value, std::string_view text) {
+    if (value.empty() && ctx.focus() != id) {
+      ctx.label(gui::inset(field, m.gap, 0.0F), text, ctx.theme().text_muted);
+    }
+  };
+  // A note under a field lines up with the field, not the label.
+  const auto field_note = [&](gui::Rect line) {
+    static_cast<void>(gui::cut_left(line, m.label_column));
+    return line;
+  };
+
+  gui::FormLayout form{body, m, scroll_.begin(ctx, body)};
+  ctx.label(form.caption(),
             "This machine only. Never saved in a project or sent to a node.",
             ctx.theme().text_muted);
+  form.space(m.row_gap);
 
-  float y = header.y + header.height + 32.0F - scroll_;
-  constexpr float label_width = 132.0F;
   for (const PreferencesField &field : preferences_fields()) {
-    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, field.label,
-              ctx.theme().text);
-    const gui::Rect input{card.x + 14.0F + label_width, y,
-                          card.width - 28.0F - label_width, 24.0F};
+    const gui::FormRow row = form.row();
+    ctx.label(row.label, field.label, ctx.theme().text);
     const gui::UiId field_id = mix(id_, field.label);
-    static_cast<void>(ctx.text_field(field_id, input, draft_.*(field.value)));
-    if ((draft_.*(field.value)).empty() && ctx.focus() != field_id) {
-      ctx.label(gui::Rect{input.x + 6.0F, input.y,
-                          std::max(input.width - 12.0F, 0.0F), input.height},
-                field.hint, ctx.theme().text_muted);
-    }
+    static_cast<void>(ctx.text_field(field_id, row.field, draft_.*(field.value)));
+    hint(field_id, row.field, draft_.*(field.value), field.hint);
     // Naming what the process is really using matters more than what is
     // stored: without it, an argument-driven launch looks like the settings
-    // are being ignored at random.
+    // are being ignored at random. The line is kept either way, so a field
+    // gaining an override does not push the rest of the form down.
+    const gui::Rect note = field_note(form.caption());
     if (state.*(field.overridden)) {
-      std::string note{"in use this run: "};
-      note.append(state.active.*(field.value));
-      note.append("  (command line)");
-      ctx.label(gui::Rect{input.x + 2.0F, y + 26.0F, input.width - 2.0F, 16.0F},
-                note, ctx.theme().warning);
+      std::string text{"in use this run: "};
+      text.append(state.active.*(field.value));
+      text.append("  (command line)");
+      ctx.label(note, text, ctx.theme().warning);
     }
-    y += preferences_field_pitch;
   }
 
   // ------------------------------------------------------- render nodes
   // The password Output Monitor controls render machines with. It is typed,
   // never shown back, and applies the moment it is saved.
-  y += 4.0F;
-  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
-            ctx.theme().divider);
-  y += 10.0F;
-  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
-            "RENDER NODES", ctx.theme().text);
-  y += 22.0F;
+  static_cast<void>(gui::draw_form_section(ctx, form, "RENDER NODES"));
   {
-    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Password",
-              ctx.theme().text);
-    const gui::Rect clear{card.x + card.width - 90.0F, y, 76.0F, 24.0F};
-    const gui::Rect input{
-        card.x + 14.0F + label_width, y,
-        std::max(clear.x - 8.0F - (card.x + 14.0F + label_width), 0.0F),
-        24.0F};
+    const gui::FormRow row = form.row();
+    ctx.label(row.label, "Password", ctx.theme().text);
+    gui::Rect input = row.field;
+    const gui::Rect clear = gui::cut_right(input, m.button_width);
+    static_cast<void>(gui::cut_right(input, m.gap));
     const gui::UiId password_id = mix(id_, "preferences.render-node-password");
     if (ctx.password_field(password_id, input, password_draft_)) {
       password_edited_ = true;
       draft_.render_node_password = !password_draft_.empty();
     }
-    if (password_draft_.empty() && ctx.focus() != password_id) {
-      ctx.label(gui::Rect{input.x + 6.0F, input.y,
-                          std::max(input.width - 12.0F, 0.0F), input.height},
-                draft_.render_node_password ? "Set - type to replace"
-                                            : "None",
-                ctx.theme().text_muted);
-    }
+    hint(password_id, input, password_draft_,
+         draft_.render_node_password ? "Set - type to replace" : "None");
     const bool clearable = draft_.render_node_password;
     if (preferences_button(ctx, mix(id_, "preferences.render-node-password.clear"),
                            clear, "CLEAR", clearable)) {
@@ -8291,7 +8273,6 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       password_edited_ = true;
       draft_.render_node_password = false;
     }
-    y += 28.0F;
     const std::string_view note =
         state.render_node_password_overridden
             ? "This run uses the password given on the command line."
@@ -8300,162 +8281,139 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
               "window. Applies when saved."
             : "No password: any Media Server on this network can start and "
               "stop render machines. Applies when saved.";
-    ctx.label(gui::Rect{input.x + 2.0F, y, card.width - 28.0F - label_width,
-                        16.0F},
-              note,
+    ctx.label(field_note(form.caption()), note,
               state.render_node_password_overridden ||
                       !draft_.render_node_password
                   ? ctx.theme().warning
                   : ctx.theme().text_muted);
-    y += 24.0F;
   }
 
-  y += 4.0F;
-  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
-            ctx.theme().divider);
-  y += 10.0F;
-  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F}, "PROXIES",
-            ctx.theme().text);
-  y += 22.0F;
-  static_cast<void>(ctx.checkbox(
-      mix(id_, "preferences.proxy.next-to-source"),
-      gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
-      draft_.proxy_cache_next_to_source, "Store next to source media"));
-  y += 30.0F;
-
-  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, "Cache folder",
-            ctx.theme().text);
-  const gui::Rect browse{card.x + card.width - 90.0F, y, 76.0F, 24.0F};
-  const gui::Rect proxy_input{
-      card.x + 14.0F + label_width, y,
-      std::max(browse.x - 8.0F - (card.x + 14.0F + label_width), 0.0F), 24.0F};
-  const bool custom_folder_enabled = !draft_.proxy_cache_next_to_source;
-  if (custom_folder_enabled) {
-    const gui::UiId folder_id = mix(id_, "preferences.proxy.cache-directory");
-    static_cast<void>(
-        ctx.text_field(folder_id, proxy_input, draft_.proxy_cache_directory));
-    if (draft_.proxy_cache_directory.empty() && ctx.focus() != folder_id) {
-      ctx.label(gui::Rect{proxy_input.x + 6.0F, proxy_input.y,
-                          std::max(proxy_input.width - 12.0F, 0.0F),
-                          proxy_input.height},
-                "Built-in per-user folder", ctx.theme().text_muted);
+  // ------------------------------------------------------------- proxies
+  static_cast<void>(gui::draw_form_section(ctx, form, "PROXIES"));
+  static_cast<void>(ctx.checkbox(mix(id_, "preferences.proxy.next-to-source"),
+                                 form.control(),
+                                 draft_.proxy_cache_next_to_source,
+                                 "Store next to source media"));
+  {
+    const gui::FormRow row = form.row();
+    ctx.label(row.label, "Cache folder", ctx.theme().text);
+    gui::Rect input = row.field;
+    const gui::Rect browse = gui::cut_right(input, m.button_width);
+    static_cast<void>(gui::cut_right(input, m.gap));
+    const bool custom_folder_enabled = !draft_.proxy_cache_next_to_source;
+    if (custom_folder_enabled) {
+      const gui::UiId folder_id = mix(id_, "preferences.proxy.cache-directory");
+      static_cast<void>(
+          ctx.text_field(folder_id, input, draft_.proxy_cache_directory));
+      hint(folder_id, input, draft_.proxy_cache_directory,
+           "Built-in per-user folder");
+    } else {
+      ctx.panel(input, ctx.theme().track);
+      ctx.label(gui::inset(input, m.gap, 0.0F),
+                "Resolved separately for each source", ctx.theme().text_muted);
     }
-  } else {
-    ctx.panel(proxy_input, ctx.theme().track);
-    ctx.label(gui::Rect{proxy_input.x + 6.0F, proxy_input.y,
-                        std::max(proxy_input.width - 12.0F, 0.0F),
-                        proxy_input.height},
-              "Resolved separately for each source", ctx.theme().text_muted);
-  }
-  if (preferences_button(ctx, mix(id_, "preferences.proxy.browse"), browse,
-                         "BROWSE", custom_folder_enabled)) {
-    const char *const selected =
-        tinyfd_selectFolderDialog("Select Proxy Cache Folder",
-                                  draft_.proxy_cache_directory.empty()
-                                      ? ""
-                                      : draft_.proxy_cache_directory.c_str());
-    if (selected != nullptr) {
-      draft_.proxy_cache_directory = selected;
+    if (preferences_button(ctx, mix(id_, "preferences.proxy.browse"), browse,
+                           "BROWSE", custom_folder_enabled)) {
+      const char *const selected = tinyfd_selectFolderDialog(
+          "Select Proxy Cache Folder", draft_.proxy_cache_directory.empty()
+                                           ? ""
+                                           : draft_.proxy_cache_directory.c_str());
+      if (selected != nullptr) {
+        draft_.proxy_cache_directory = selected;
+      }
     }
   }
-  y += 32.0F;
 
+  // A labelled slider with its exact value written after it. `position` is
+  // what the track moves; the caller turns it back into `shown`'s units.
+  constexpr float slider_value_width = 92.0F;
+  constexpr float slider_track_height = 12.0F;
+  const auto slider_row = [&](std::string_view label, std::string_view id,
+                              float &position, float minimum, float maximum,
+                              core::u32 shown, std::string_view suffix) {
+    const gui::FormRow row = form.row();
+    ctx.label(row.label, label, ctx.theme().text);
+    gui::Rect track_row = row.field;
+    const gui::Rect value =
+        gui::cut_right(track_row, slider_value_width);
+    const bool changed = ctx.slider(
+        mix(id_, id),
+        gui::centered(track_row, track_row.width, slider_track_height),
+        position, minimum, maximum);
+    std::string exact = std::to_string(shown);
+    exact.push_back(' ');
+    exact.append(suffix);
+    ctx.label(gui::inset(value, gui::Padding{m.gap, 0.0F, 0.0F, 0.0F}), exact,
+              ctx.theme().text_muted);
+    return changed;
+  };
   const auto integer_slider_row = [&](std::string_view label,
                                       std::string_view id, core::u32 &value,
                                       core::u32 minimum, core::u32 maximum,
                                       std::string_view suffix) {
-    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, label,
-              ctx.theme().text);
-    const float value_width = 92.0F;
-    const gui::Rect track{card.x + 14.0F + label_width, y + 6.0F,
-                          card.width - 28.0F - label_width - value_width,
-                          12.0F};
-    float slider_value = static_cast<float>(value);
-    if (ctx.slider(mix(id_, id), track, slider_value,
-                   static_cast<float>(minimum), static_cast<float>(maximum))) {
-      value = static_cast<core::u32>(std::lround(slider_value));
-      value = std::clamp(value, minimum, maximum);
+    float position = static_cast<float>(value);
+    if (slider_row(label, id, position, static_cast<float>(minimum),
+                   static_cast<float>(maximum), value, suffix)) {
+      value = std::clamp(static_cast<core::u32>(std::lround(position)), minimum,
+                         maximum);
     }
-    std::string exact = std::to_string(value);
-    exact.push_back(' ');
-    exact.append(suffix);
-    ctx.label(
-        gui::Rect{track.x + track.width + 8.0F, y, value_width - 8.0F, 24.0F},
-        exact, ctx.theme().text_muted);
-    y += 30.0F;
   };
-
   const auto power_of_two_slider_row = [&](std::string_view label,
                                            std::string_view id,
                                            core::u32 &value, core::u32 base,
                                            core::u32 maximum,
                                            std::string_view suffix) {
-    const float minimum_power = 0.0F;
     const float maximum_power =
         std::log2(static_cast<float>(maximum) / static_cast<float>(base));
     float power = std::log2(static_cast<float>(std::max(value, base)) /
                             static_cast<float>(base));
-    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F}, label,
-              ctx.theme().text);
-    const float value_width = 92.0F;
-    const gui::Rect track{card.x + 14.0F + label_width, y + 6.0F,
-                          card.width - 28.0F - label_width - value_width,
-                          12.0F};
-    if (ctx.slider(mix(id_, id), track, power, minimum_power, maximum_power)) {
+    if (slider_row(label, id, power, 0.0F, maximum_power, value, suffix)) {
       const auto exponent = static_cast<core::u32>(std::lround(power));
       value = std::min(base << exponent, maximum);
     }
-    std::string exact = std::to_string(value);
-    exact.push_back(' ');
-    exact.append(suffix);
-    ctx.label(
-        gui::Rect{track.x + track.width + 8.0F, y, value_width - 8.0F, 24.0F},
-        exact, ctx.theme().text_muted);
-    y += 30.0F;
   };
 
   power_of_two_slider_row("Cache limit", "preferences.proxy.cache-limit",
                           draft_.proxy_cache_gibibytes, 1U, 1'024U, "GiB");
 
-  ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 24.0F},
-            "Transcode priority", ctx.theme().text);
-  const float priority_x = card.x + 14.0F + label_width;
-  constexpr float priority_gap = 6.0F;
-  const float priority_width =
-      (card.x + card.width - 14.0F - priority_x - priority_gap * 2.0F) / 3.0F;
-  using Priority = EditorPreferences::TranscodePriority;
-  const auto priority_button = [&](std::string_view key, std::string_view label,
-                                   Priority value, float x) {
-    if (preferences_button(ctx, mix(id_, key),
-                           gui::Rect{x, y, priority_width, 24.0F}, label,
-                           draft_.proxy_transcode_priority != value)) {
-      draft_.proxy_transcode_priority = value;
+  {
+    using Priority = EditorPreferences::TranscodePriority;
+    struct PriorityChoice final {
+      std::string_view key;
+      std::string_view label;
+      Priority value;
+    };
+    constexpr std::array<PriorityChoice, 3U> priorities{{
+        {"preferences.proxy.priority.background", "BACKGROUND",
+         Priority::Background},
+        {"preferences.proxy.priority.balanced", "BALANCED", Priority::Balanced},
+        {"preferences.proxy.priority.fast", "FAST", Priority::Fast},
+    }};
+    const gui::FormRow row = form.row();
+    ctx.label(row.label, "Transcode priority", ctx.theme().text);
+    for (std::size_t index = 0U; index < priorities.size(); ++index) {
+      const PriorityChoice &choice = priorities[index];
+      if (preferences_button(
+              ctx, mix(id_, choice.key),
+              gui::column(row.field, index, priorities.size(), m.gap),
+              choice.label, draft_.proxy_transcode_priority != choice.value)) {
+        draft_.proxy_transcode_priority = choice.value;
+      }
     }
-  };
-  priority_button("preferences.proxy.priority.background", "BACKGROUND",
-                  Priority::Background, priority_x);
-  priority_button("preferences.proxy.priority.balanced", "BALANCED",
-                  Priority::Balanced,
-                  priority_x + priority_width + priority_gap);
-  priority_button("preferences.proxy.priority.fast", "FAST", Priority::Fast,
-                  priority_x + (priority_width + priority_gap) * 2.0F);
-  y += 32.0F;
+  }
 
-  result.clear_proxy_cache = preferences_button(
-      ctx, mix(id_, "preferences.proxy.clear"),
-      gui::Rect{card.x + 14.0F, y, 118.0F, 26.0F}, "CLEAR CACHE", true);
-  ctx.label(gui::Rect{card.x + 142.0F, y, card.width - 156.0F, 26.0F},
-            "Clears the cache currently in use, not this unsaved draft.",
-            ctx.theme().text_muted);
-  y += 36.0F;
+  {
+    const gui::FormRow row = form.row();
+    result.clear_proxy_cache = preferences_button(
+        ctx, mix(id_, "preferences.proxy.clear"), row.label, "CLEAR CACHE",
+        true);
+    ctx.label(gui::inset(row.field, gui::Padding{m.gap, 0.0F, 0.0F, 0.0F}),
+              "Clears the cache currently in use, not this unsaved draft.",
+              ctx.theme().text_muted);
+  }
 
-  ctx.panel(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 1.0F},
-            ctx.theme().divider);
-  y += 10.0F;
-  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
-            "OUTPUT PLAYBACK", ctx.theme().text);
-  y += 22.0F;
-
+  // ----------------------------------------------------- output playback
+  static_cast<void>(gui::draw_form_section(ctx, form, "OUTPUT PLAYBACK"));
   struct BufferPreset final {
     std::string_view key;
     std::string_view label;
@@ -8468,23 +8426,18 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       {"smooth", "SMOOTH", 12U, 12U},
       {"reliable", "RELIABLE", 24U, 24U},
   }};
-  constexpr float preset_gap = 6.0F;
-  const float preset_width = (card.width - 28.0F - preset_gap * 3.0F) / 4.0F;
+  const gui::Rect preset_row = form.control();
   for (std::size_t index = 0U; index < presets.size(); ++index) {
     const BufferPreset &preset = presets[index];
     const bool selected = draft_.output_buffer_frames == preset.buffer &&
                           draft_.output_read_ahead_frames == preset.read_ahead;
     if (preferences_button(ctx, mix(id_, preset.key),
-                           gui::Rect{card.x + 14.0F +
-                                         static_cast<float>(index) *
-                                             (preset_width + preset_gap),
-                                     y, preset_width, 24.0F},
+                           gui::column(preset_row, index, presets.size(), m.gap),
                            preset.label, !selected)) {
       draft_.output_buffer_frames = preset.buffer;
       draft_.output_read_ahead_frames = preset.read_ahead;
     }
   }
-  y += 32.0F;
 
   integer_slider_row("Output buffer", "preferences.playback.buffer",
                      draft_.output_buffer_frames, 0U, 60U, "frames");
@@ -8496,31 +8449,31 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   integer_slider_row("Trail", "preferences.playback.trail",
                      draft_.playback_trail_frames, 0U, 16U, "frames");
 
-  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+  ctx.label(form.caption(),
             "More buffering smooths output at the cost of latency and memory.",
             ctx.theme().text_muted);
-  y += 20.0F;
-  ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
+  ctx.label(form.caption(),
             "Saved settings apply the next time this program starts.",
             ctx.theme().text_muted);
-  y += 20.0F;
+  // Kept whether or not there is a message, so one arriving does not change
+  // how far the form scrolls.
+  const gui::Rect message = form.caption();
   if (!state.message.empty()) {
-    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F},
-              state.message, ctx.theme().text);
+    ctx.label(message, state.message, ctx.theme().text);
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, form.extent());
 
   // Retyping a set password is a change even though "set" is unchanged.
   const bool changed = draft_ != state.stored ||
                        (password_edited_ && !password_draft_.empty());
+  gui::Rect buttons = footer;
+  const gui::Rect save_button = gui::cut_right(buttons, m.button_width);
+  static_cast<void>(gui::cut_right(buttons, m.gap));
+  const gui::Rect cancel_button = gui::cut_right(buttons, m.button_width);
   const bool cancelled = preferences_button(
-      ctx, mix(id_, "preferences.cancel"),
-      gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
-      "CANCEL", true);
-  const bool saved = preferences_button(
-      ctx, mix(id_, "preferences.save"),
-      gui::Rect{card.x + card.width - 98.0F, buttons_y, 84.0F, 26.0F}, "SAVE",
-      changed);
+      ctx, mix(id_, "preferences.cancel"), cancel_button, "CANCEL", true);
+  const bool saved = preferences_button(ctx, mix(id_, "preferences.save"),
+                                        save_button, "SAVE", changed);
   ctx.pop_clip();
 
   // Last, so it only catches presses no control in the card wanted. A click on

@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/gui/input.hpp>
 #include <mediaserver/gui/layout.hpp>
+#include <mediaserver/gui/metrics.hpp>
 #include <mediaserver/gui/text.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 
@@ -88,6 +89,9 @@ struct Theme final {
     UiColor warning{0.937F, 0.427F, 0.353F, 1.0F};
 
     float padding{6.0F};
+
+    // The sizes panels are laid out with; see metrics.hpp.
+    Metrics metrics{};
 };
 
 // The pointer's shape. A widget asks for one while the pointer is over it, or

@@ -15,6 +15,7 @@
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/selection.hpp>
 #include <mediaserver/gui/layout.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/render/display_lut_cache.hpp>
@@ -1515,7 +1516,7 @@ public:
 private:
   gui::UiId id_{};
   bool open_{};
-  float scroll_{};
+  gui::ScrollRegion scroll_;
   EditorPreferences draft_;
   // The password being typed, and whether the operator touched it at all.
   std::string password_draft_;

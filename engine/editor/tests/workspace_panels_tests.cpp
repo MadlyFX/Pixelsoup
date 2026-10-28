@@ -3515,41 +3515,58 @@ struct PreferencesHarness final {
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
 
+  // The form's rhythm with the default metrics: 24px controls 6px apart, a
+  // 132px label column, 14px in from the card's sides. Each section's rule
+  // sits 10px below the row above it and its heading 10px below the rule.
+  // The footer buttons are 84px wide, 6px apart, 6px up from the card's
+  // bottom edge.
   [[nodiscard]] static gui::Rect cancel_button() {
-    return gui::Rect{card_x + card_width - 190.0F, card_y + card_height - 38.0F,
-                     84.0F, 26.0F};
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F - 6.0F - 84.0F,
+                     card_y + card_height - 30.0F, 84.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect save_button() {
-    return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
-                     84.0F, 26.0F};
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F,
+                     card_y + card_height - 30.0F, 84.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect first_field() {
     return gui::Rect{card_x + 14.0F + 132.0F, card_y + 66.0F,
                      card_width - 28.0F - 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect next_to_source_checkbox() {
-    return gui::Rect{card_x + 14.0F, card_y + 374.0F, card_width - 28.0F,
+    return gui::Rect{card_x + 14.0F, card_y + 402.0F, card_width - 28.0F,
                      24.0F};
   }
   [[nodiscard]] static gui::Rect clear_proxy_cache_button() {
-    return gui::Rect{card_x + 14.0F, card_y + 498.0F, 118.0F, 26.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 522.0F, 132.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect low_latency_preset() {
     const float width = (card_width - 28.0F - 18.0F) / 4.0F;
-    return gui::Rect{card_x + 14.0F, card_y + 566.0F, width, 24.0F};
+    return gui::Rect{card_x + 14.0F, card_y + 591.0F, width, 24.0F};
   }
   [[nodiscard]] static gui::Rect balanced_transcode_priority() {
     const float start = card_x + 14.0F + 132.0F;
     const float width = (card_x + card_width - 14.0F - start - 12.0F) / 3.0F;
-    return gui::Rect{start + width + 6.0F, card_y + 466.0F, width, 24.0F};
+    return gui::Rect{start + width + 6.0F, card_y + 492.0F, width, 24.0F};
   }
   // RENDER NODES: the password well, then its CLEAR button.
   [[nodiscard]] static gui::Rect password_field() {
-    return gui::Rect{card_x + 146.0F, card_y + 286.0F, 376.0F, 24.0F};
+    return gui::Rect{card_x + 146.0F, card_y + 309.0F, 370.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect clear_password_button() {
-    return gui::Rect{card_x + card_width - 90.0F, card_y + 286.0F, 76.0F,
-                     24.0F};
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F, card_y + 309.0F,
+                     84.0F, 24.0F};
+  }
+  // The form is 771px tall (its last line, the status message, ends 765px
+  // below the content's top, plus the 6px margin) in a 710px viewport
+  // between the 34px header and the 36px footer: 61px of scroll.
+  static constexpr float max_scroll = 771.0F - 710.0F;
+
+  editor::PreferencesFrame wheel(float notches) {
+    input.new_frame();
+    input.set_mouse_position(card_x + card_width * 0.5F, card_y + 300.0F);
+    input.add_wheel(notches);
+    ctx.new_frame();
+    return panel.draw(ctx, bounds, state);
   }
 
   editor::PreferencesFrame frame(float x, float y, bool down,
@@ -3670,6 +3687,29 @@ void playback_preset_is_part_of_the_saved_machine_draft() {
   UI_CHECK(result.save.has_value());
   UI_CHECK(result.save->output_buffer_frames == 3U);
   UI_CHECK(result.save->output_read_ahead_frames == 3U);
+}
+
+// The form measures its own height, so the wheel scrolls exactly as far as the
+// last line needs and no further - not to a constant that has to be grown by
+// hand every time a setting is added.
+void preferences_scroll_stops_at_the_end_of_the_form() {
+  PreferencesHarness harness;
+  harness.state.stored = stored_preferences();
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(harness.frame(0.0F, 0.0F, false));
+
+  static_cast<void>(harness.wheel(-40.0F));
+  gui::Rect preset = PreferencesHarness::low_latency_preset();
+  preset.y -= PreferencesHarness::max_scroll;
+  static_cast<void>(harness.click(preset));
+  UI_CHECK(harness.panel.draft().output_buffer_frames == 3U);
+  UI_CHECK(harness.panel.draft().output_read_ahead_frames == 3U);
+
+  // Reopening starts back at the top.
+  static_cast<void>(harness.click(PreferencesHarness::cancel_button()));
+  harness.panel.open(harness.state.stored);
+  static_cast<void>(harness.click(PreferencesHarness::low_latency_preset()));
+  UI_CHECK(harness.panel.draft().output_buffer_frames == 3U);
 }
 
 void transcode_priority_is_part_of_the_saved_machine_draft() {
@@ -4362,7 +4402,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 133U> cases{{
+constexpr std::array<Case, 134U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4608,6 +4648,8 @@ constexpr std::array<Case, 133U> cases{{
      &clear_proxy_cache_reports_without_saving_or_closing},
     {"playback preset is part of the saved machine draft",
      &playback_preset_is_part_of_the_saved_machine_draft},
+    {"preferences scroll stops at the end of the form",
+     &preferences_scroll_stops_at_the_end_of_the_form},
     {"transcode priority is part of the saved machine draft",
      &transcode_priority_is_part_of_the_saved_machine_draft},
     {"only a click outside the card dismisses it",
