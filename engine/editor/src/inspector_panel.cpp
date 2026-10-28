@@ -48,6 +48,15 @@ constexpr float label_max = 96.0F;
     return hash;
 }
 
+constexpr float scroll_step = 32.0F;
+
+// The Inspector's rows run `panel_inset` in from the panel's sides and top.
+[[nodiscard]] gui::Metrics inspector_metrics(gui::Metrics metrics) noexcept {
+    metrics.inset = panel_inset;
+    metrics.gap = panel_inset;
+    return metrics;
+}
+
 // Splits `bounds` into `count` equal columns with a gap between them.
 void columns(const gui::Rect& bounds, std::size_t count, float gap,
              std::span<gui::Rect> out) noexcept {
@@ -60,36 +69,6 @@ void columns(const gui::Rect& bounds, std::size_t count, float gap,
         out[i] = gui::Rect{bounds.x + static_cast<float>(i) * (width + gap),
                            bounds.y, width, bounds.height};
     }
-}
-
-void draw_diamond(gui::UiContext& ctx, float cx, float cy, float radius,
-                  gui::UiColor color) {
-    const std::array<gui::UiPoint, 4U> points{{
-        {cx, cy - radius},
-        {cx + radius, cy},
-        {cx, cy + radius},
-        {cx - radius, cy},
-    }};
-    ctx.draw_list().add_convex_poly(points, color);
-}
-
-[[nodiscard]] bool key_button(gui::UiContext& ctx, gui::UiId id,
-                              const gui::Rect& bounds, bool animated,
-                              bool keyed_here, gui::UiColor background) {
-    const gui::Interaction interaction = ctx.grab(id, bounds);
-    gui::UiColor color = keyed_here
-        ? ctx.theme().playhead
-        : (animated ? ctx.theme().keyframe : ctx.theme().text_muted);
-    if (interaction.hovered) {
-        color = ctx.theme().accent;
-    }
-    const float cx = bounds.x + bounds.width * 0.5F;
-    const float cy = bounds.y + bounds.height * 0.5F;
-    draw_diamond(ctx, cx, cy, interaction.held ? 5.0F : 4.5F, color);
-    if (!keyed_here && !interaction.held) {
-        draw_diamond(ctx, cx, cy, 2.4F, background);
-    }
-    return interaction.clicked;
 }
 
 [[nodiscard]] const scene::ChannelKeyframes* channel_for(
@@ -204,9 +183,7 @@ ElementInfo evaluated_element(
 }
 
 gui::Rect InspectorPanel::take_row(Cursor& cursor, float height) noexcept {
-    const gui::Rect row{cursor.column.x, cursor.y, cursor.column.width, height};
-    cursor.y += height;
-    return row;
+    return cursor.next(height, 0.0F);
 }
 
 void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
@@ -218,7 +195,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
                                 bool* key_requested, bool animated,
                                 bool keyed_here, std::size_t id_salt, int precision) {
     gui::Rect row = take_row(cursor, row_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
 
     float label_width = std::clamp(row.width * label_fraction, label_min, label_max);
     const float key_width = key_requested != nullptr ? 18.0F : 0.0F;
@@ -245,7 +222,7 @@ void InspectorPanel::vector_row(gui::UiContext& ctx, Cursor& cursor,
 
     if (stacked) {
         row = take_row(cursor, 26.0F);
-        cursor.y += 6.0F;
+        cursor.space(6.0F);
     }
     const gui::Rect fields{row.x + (stacked ? 0.0F : label_width), row.y,
                            std::max(row.width - (stacked ? 0.0F : label_width), 1.0F), row.height};
@@ -997,7 +974,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
 bool InspectorPanel::section(gui::UiContext& ctx, Cursor& cursor,
                              std::string_view title, bool& open) {
     const gui::Rect row = take_row(cursor, section_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
 
     const gui::Interaction it = ctx.grab(mix(id_, title, 1000U), row);
     if (it.clicked) {
@@ -1020,7 +997,7 @@ void InspectorPanel::draw_header(gui::UiContext& ctx, Cursor& cursor,
                                  const ElementInfo& element,
                                  std::size_t selected_count) {
     const gui::Rect row = take_row(cursor, 30.0F);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
 
     draw_element_icon(ctx, element, row.x + 8.0F, row.y + row.height * 0.5F,
                       ctx.theme().text_muted);
@@ -1054,7 +1031,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
     const auto action = [&](std::string_view name, std::string_view label) {
         if (ctx.button(mix(id_, name, element.node.value()), take_row(cursor, row_height), label))
             frame.text_edits.push_back({element.node, "link_action", std::string{name}});
-        cursor.y += row_gap;
+        cursor.space(row_gap);
     };
     if (!element.linked_collection) action(element.linked_held ? "follow" : "hold", element.linked_held
         ? "Follow source with offset" : "Hold shot placement");
@@ -1070,7 +1047,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
                     values[axis], 0.01, changed))
                 frame.named_edits.push_back({element.node, key, changed});
         }
-        cursor.y += row_gap;
+        cursor.space(row_gap);
     };
     if (!element.linked_collection) {
         vector("Shot position (world meters)", element.linked_world, "link_world_");
@@ -1099,7 +1076,7 @@ void InspectorPanel::draw_linked(gui::UiContext& ctx, Cursor& cursor,
         // Wrap worker diagnostics within the Inspector instead of clipping the
         // reason off the edge of a narrow dock.
         auto remaining = element.linked_status;
-        const auto width = std::max<std::size_t>(20, static_cast<std::size_t>(std::max(cursor.column.width,120.0F) / 7.0F));
+        const auto width = std::max<std::size_t>(20, static_cast<std::size_t>(std::max(cursor.width(),120.0F) / 7.0F));
         while (!remaining.empty()) {
             auto count = std::min(width,remaining.size());
             if (count < remaining.size()) { const auto space = remaining.rfind(' ',count); if (space != std::string::npos && space > 0) count = space; }
@@ -1200,7 +1177,7 @@ void InspectorPanel::draw_transform(gui::UiContext& ctx, Cursor& cursor,
         }
     }
 
-    cursor.y += 16.0F + row_gap;
+    cursor.space(16.0F + row_gap);
 
 }
 
@@ -1230,7 +1207,7 @@ void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
         }
         frame.file_picker = std::move(request);
     }
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const auto actions = take_row(cursor, 24.0F);
     const float half = (actions.width - 6.0F) * 0.5F;
     const bool apply = ctx.button(mix(id_, "ies.apply", element.node.value()), {actions.x, actions.y, half, actions.height}, "Apply");
@@ -1258,7 +1235,7 @@ void InspectorPanel::draw_ies(gui::UiContext& ctx, Cursor& cursor,
             vector_row(ctx, cursor, "IES aim", xyz, direction, 0.01F, aim, frame);
         }
     }
-    cursor.y += row_gap;
+    cursor.space(row_gap);
 }
 
 void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
@@ -1278,7 +1255,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
             return;
         }
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float label_width =
             std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
@@ -1313,7 +1290,7 @@ void InspectorPanel::draw_light(gui::UiContext& ctx, Cursor& cursor,
     // three floats do not read as a colour, and a light's tint is the thing an
     // operator judges by eye.
     const gui::Rect swatch = take_row(cursor, 14.0F);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const float label_width =
         std::clamp(swatch.width * label_fraction, label_min, label_max);
     ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
@@ -1513,7 +1490,7 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
                                             std::string_view value,
                                             bool mixed) {
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float label_width = std::clamp(
             row.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
@@ -1554,7 +1531,7 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
     static_row("Source", separator == std::string::npos ? std::string_view{element.source}
                : std::string_view{element.source}.substr(separator + 1U), source_mixed);
     if (!source_mixed && !element.source.empty())
-        ctx.tooltip({cursor.column.x, cursor.y - row_height - row_gap, cursor.column.width, row_height}, element.source);
+        ctx.tooltip(cursor.last(), element.source);
     if (element.kind == ElementKind::Media && element.sequence_count > 1U) {
         bool sequence_mixed = false;
         const ElementInfo* sequence_first = nullptr;
@@ -1605,7 +1582,7 @@ void InspectorPanel::draw_content(gui::UiContext& ctx, Cursor& cursor,
             ++frame.mixed_fields;
         }
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float label_width =
             std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
@@ -1666,7 +1643,7 @@ void InspectorPanel::draw_screen(gui::UiContext& ctx, Cursor& cursor,
     // reads "Height follows width", open reads nothing at all beyond the
     // aspect the plane currently has.
     const gui::Rect row = take_row(cursor, row_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const float label_width =
         std::clamp(row.width * label_fraction, label_min, label_max);
     ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "Aspect",
@@ -1698,7 +1675,7 @@ void InspectorPanel::draw_fill(gui::UiContext& ctx, Cursor& cursor,
         constexpr std::array<std::string_view, 3U> modes{
             "Solid", "Linear gradient", "Radial gradient"};
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float label_width =
             std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "Type",
@@ -1726,7 +1703,7 @@ void InspectorPanel::draw_fill(gui::UiContext& ctx, Cursor& cursor,
                                  const std::array<std::string_view, 4U>& keys,
                                  std::size_t salt) {
         const gui::Rect swatch = take_row(cursor, 14.0F);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float label_width =
             std::clamp(swatch.width * label_fraction, label_min, label_max);
         ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
@@ -1796,8 +1773,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     }
 
     if (imported_model)
-        ctx.tooltip({cursor.column.x, cursor.y - section_height - row_gap,
-                     cursor.column.width, section_height},
+        ctx.tooltip(cursor.last(),
                     element.linked ? "Each edited factor overrides source materials" : "Used for source parts without a material");
 
     if (element.kind == ElementKind::Object && !element.locked &&
@@ -1812,7 +1788,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
             element.material.emissive_texture};
         for (std::size_t role = 0U; role < labels.size(); ++role) {
             const auto row = take_row(cursor, row_height);
-            cursor.y += row_gap;
+            cursor.space(row_gap);
             constexpr float controls = 124.0F;
             ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height},
                       labels[role], ctx.theme().text_muted);
@@ -1859,12 +1835,12 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
             }
             static_cast<void>(ctx.dropdown(mix(id_, "material.part", element.node.value()),
                 take_row(cursor, row_height), material_part_options_, material_part_));
-            cursor.y += row_gap;
+            cursor.space(row_gap);
             constexpr std::array<std::string_view, 5U> labels{
                 "Base color", "Metal / rough", "Normal", "Occlusion", "Emission"};
             for (std::size_t role = 0; role < labels.size(); ++role) {
                 const auto row = take_row(cursor, row_height);
-                cursor.y += row_gap;
+                cursor.space(row_gap);
                 const float controls = 124.0F;
                 ctx.label({row.x, row.y, std::max(1.0F, row.width - controls), row.height}, labels[role], ctx.theme().text_muted);
                 const bool browse = ctx.button(mix(id_, "texture.browse", role),
@@ -1901,7 +1877,7 @@ void InspectorPanel::draw_material(gui::UiContext& ctx, Cursor& cursor,
     }
 
     const gui::Rect swatch = take_row(cursor, 14.0F);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const float label_width =
         std::clamp(swatch.width * label_fraction, label_min, label_max);
     ctx.label(gui::Rect{swatch.x, swatch.y, label_width, swatch.height},
@@ -2077,7 +2053,7 @@ void InspectorPanel::draw_compositing(
     }
 
     const gui::Rect row = take_row(cursor, row_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const float label_width =
         std::clamp(row.width * label_fraction, label_min, label_max);
     ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, "Blend Mode",
@@ -2135,7 +2111,7 @@ void InspectorPanel::draw_effects(
   });
   const auto add_effect = [&] {
     const auto add_row = take_row(cursor, row_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     if (const auto kind = draw_effect_picker(
             ctx, mix(id_, "effects.add", element.node.value()), add_row)) {
       for (const auto& selected : selected_) {
@@ -2243,7 +2219,7 @@ void InspectorPanel::draw_effects(
     }
     const std::size_t id_salt = static_cast<std::size_t>(effect.source.value());
     const gui::Rect title_row = take_row(cursor, 19.0F);
-    cursor.y += 2.0F;
+    cursor.space(2.0F);
     ctx.panel(title_row, ctx.theme().header);
     ctx.panel(gui::Rect{title_row.x, title_row.y, 2.0F, title_row.height},
               effect.enabled ? ctx.theme().accent : ctx.theme().track);
@@ -2301,7 +2277,7 @@ void InspectorPanel::draw_effects(
 
     if (structured_effect) {
       const gui::Rect note = take_row(cursor, 34.0F);
-      cursor.y += row_gap;
+      cursor.space(row_gap);
       ctx.panel(note, ctx.theme().track);
       constexpr float open_width = 82.0F;
       const gui::Rect open{note.x + std::max(note.width - open_width, 0.0F),
@@ -2396,7 +2372,7 @@ void InspectorPanel::draw_effects(
         vector_row(ctx, cursor, "Angle turns", scalar_axis, angle, 0.001F,
                    angle_binding, frame, nullptr, false, false, id_salt);
       }
-      cursor.y += 2.0F;
+      cursor.space(2.0F);
       return;
     }
 
@@ -2426,7 +2402,7 @@ void InspectorPanel::draw_effects(
                       summarize(key_color_bindings[index], frame).mixed;
       }
       const gui::Rect swatch = take_row(cursor, 18.0F);
-      cursor.y += row_gap;
+      cursor.space(row_gap);
       const float swatch_label_width =
           std::clamp(swatch.width * label_fraction, label_min, label_max);
       ctx.label(gui::Rect{swatch.x, swatch.y, swatch_label_width,
@@ -2490,7 +2466,7 @@ void InspectorPanel::draw_effects(
       named_scalar("High Soft", effect.luma_key.high_softness, 0.005F,
                    scene::schema::luma_key_high_softness);
       const gui::Rect invert_row = take_row(cursor, row_height);
-      cursor.y += row_gap;
+      cursor.space(row_gap);
       const float invert_label_width = std::clamp(
           invert_row.width * label_fraction, label_min, label_max);
       ctx.label(gui::Rect{invert_row.x, invert_row.y, invert_label_width,
@@ -2549,7 +2525,7 @@ void InspectorPanel::draw_effects(
         frame.panel_request = InspectorPanelRequest::Texture;
       }
     }
-    cursor.y += 2.0F;
+    cursor.space(2.0F);
   };
 
   // The stack is whatever effects this element carries. A switched-off one
@@ -2626,7 +2602,7 @@ void InspectorPanel::draw_camera_tracking(
     const auto well_row = [&](std::string_view label, std::string_view,
                               std::string_view id, bool lit, core::u64 salt) {
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
         ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
         return ctx.checkbox(mix(id_, id, element.node.value() + salt),
@@ -2641,7 +2617,7 @@ void InspectorPanel::draw_camera_tracking(
         if (sources[i].node == element.tracking_source) { selected_feed = i + 1U; bound = &sources[i]; }
     }
     const gui::Rect feed_row_bounds = take_row(cursor, row_height);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     const float feed_label_width = std::clamp(feed_row_bounds.width * label_fraction, label_min, label_max);
     ctx.label({feed_row_bounds.x, feed_row_bounds.y, feed_label_width, row_height}, "Feed", ctx.theme().text_muted);
     if (ctx.dropdown(mix(id_, "tracking feed", element.node.value()),
@@ -2655,7 +2631,7 @@ void InspectorPanel::draw_camera_tracking(
         // Library: it has no place on the stage, and the moment an operator
         // wants one is the moment they are pointing a camera at it.
         const gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         if (ctx.button(mix(id_, "tracking.add", element.node.value()),
                        gui::Rect{row.x, row.y, std::min(row.width, 128.0F),
                                  row.height},
@@ -2673,7 +2649,7 @@ void InspectorPanel::draw_camera_tracking(
         const auto feed_toggle = [&](std::string_view label, std::string_view text,
                                      std::string_view property, bool lit, core::u64 salt) {
             const gui::Rect row = take_row(cursor, row_height);
-            cursor.y += row_gap;
+            cursor.space(row_gap);
             const float lw = std::clamp(row.width * label_fraction, label_min, label_max);
             ctx.label({row.x, row.y, lw, row.height}, label, ctx.theme().text_muted);
             const gui::Rect well{row.x + lw, row.y, row.width - lw, row.height};
@@ -2769,7 +2745,7 @@ void InspectorPanel::draw_camera_tracking(
         feed_ = doc::NodeId{};
     } else if (sources.empty()) {
         const gui::Rect note = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         ctx.label(note, "Add a feed, then bind it to this camera",
                   ctx.theme().text_muted);
     }
@@ -2862,7 +2838,7 @@ void InspectorPanel::draw_skip_summary(gui::UiContext& ctx, Cursor& cursor,
             text += std::to_string(node.value());
         }
         const gui::Rect row = take_row(cursor, 18.0F);
-        cursor.y += 2.0F;
+        cursor.space(2.0F);
         ctx.label(row, text, ctx.theme().warning);
     };
     draw_nodes("Locked skipped:", frame.skipped_locked);
@@ -2896,8 +2872,7 @@ InspectorFrame InspectorPanel::draw_selection(
         drag_capture_ = {};
         selection_signature_ = signature;
         primary_signature_ = primary;
-        scroll_ = 0.0F;
-        content_height_ = 0.0F;
+        scroll_.reset();
     }
 
     if (selected.empty()) {
@@ -2945,19 +2920,9 @@ InspectorFrame InspectorPanel::draw_selection(
         : (fallback != selected_.end() ? &*fallback : nullptr);
 
     // The wheel scrolls the panel when the pointer is over it, clamped against
-    // last frame's measured height - this frame's is not known until the end.
-    if (bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-        ctx.wheel() != 0.0F) {
-        scroll_ -= ctx.wheel() * 32.0F;
-    }
-    scroll_ = std::clamp(scroll_, 0.0F,
-                         std::max(content_height_ - bounds.height, 0.0F));
-
-    ctx.push_clip(bounds);
-    Cursor cursor{gui::Rect{bounds.x + panel_inset, bounds.y,
-                            std::max(bounds.width - panel_inset * 2.0F, 1.0F),
-                            0.0F},
-                  bounds.y + panel_inset - scroll_};
+    // what the last frame measured until this one has measured itself.
+    Cursor cursor{bounds, inspector_metrics(ctx.theme().metrics),
+                  scroll_.begin(ctx, bounds, scroll_step)};
 
     const ElementInfo& header_element =
         displayed != nullptr ? *displayed : selected_.front();
@@ -2965,13 +2930,11 @@ InspectorFrame InspectorPanel::draw_selection(
                 std::max(declared_count, selected_.size()));
     if (displayed == nullptr) {
         const gui::Rect locked = take_row(cursor, 34.0F);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         ctx.panel(locked, ctx.theme().track);
         ctx.label(locked, "Selection is locked", ctx.theme().warning);
         draw_skip_summary(ctx, cursor, frame);
-        cursor.y += panel_inset;
-        content_height_ = cursor.y + scroll_ - bounds.y;
-        ctx.pop_clip();
+        scroll_.end(ctx, cursor.extent());
         fields_.cancel(ctx);
         drag_capture_ = {};
         keyframes_ = {};
@@ -2995,7 +2958,7 @@ InspectorFrame InspectorPanel::draw_selection(
         // clip's node and still what the clip returns to when it is dragged
         // out of the track, which is why nothing is erased to say this.
         const gui::Rect note = take_row(cursor, 34.0F);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         ctx.panel(note, ctx.theme().track);
         std::array<char, 96U> line{};
         const int length = displayed->screen_name.empty()
@@ -3013,11 +2976,11 @@ InspectorFrame InspectorPanel::draw_selection(
     }
 
     if (displayed->kind == ElementKind::Camera) {
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         draw_camera_tracking(ctx, cursor, *displayed, frame, sources);
     } else if (!is_light(displayed->kind) &&
                displayed->kind != ElementKind::Group) {
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);
         draw_fill(ctx, cursor, *displayed, frame);
@@ -3030,13 +2993,13 @@ InspectorFrame InspectorPanel::draw_selection(
 
     if (displayed->kind == ElementKind::Model && (!displayed->linked || !displayed->source.empty()) &&
         section(ctx, cursor, "MODEL ANIMATION", animation_open_)) {
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const auto& animation=displayed->animation;
         const auto toggle=[&](std::string_view property,bool value,std::string_view label) {
             if (ctx.checkbox(mix(id_,property,displayed->node.value()),take_row(cursor,row_height),value,label))
                 for (const auto& item:selected_) if (!item.locked && item.kind==ElementKind::Model)
                     frame.named_edits.push_back({item.node,std::string{property},value?1.0:0.0});
-            cursor.y+=row_gap;
+            cursor.space(row_gap);
         };
         toggle(scene::schema::animation_enabled,animation.enabled,"Animate model");
         toggle(scene::schema::animation_loop,animation.loop,"Loop playback");
@@ -3061,7 +3024,7 @@ InspectorFrame InspectorPanel::draw_selection(
     }
     if ((is_light(displayed->kind) || displayed->kind == ElementKind::Object || displayed->kind == ElementKind::Model) &&
         section(ctx, cursor, "BAKING", baking_open_)) {
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         const auto row = take_row(cursor, row_height);
         const bool light = is_light(displayed->kind);
         bool checked = light ? displayed->bake_indirect : displayed->bake_static;
@@ -3074,20 +3037,17 @@ InspectorFrame InspectorPanel::draw_selection(
 
     draw_skip_summary(ctx, cursor, frame);
     // Destructive actions follow the editing groups instead of interrupting them.
-    cursor.y += row_gap * 2.0F;
+    cursor.space(row_gap * 2.0F);
     const auto actions = take_row(cursor, row_height);
     if (!displayed->linked_collection && ctx.button(mix(id_, "delete", 0U),
             {actions.x, actions.y, std::min(actions.width, 96.0F), actions.height}, "Delete"))
         frame.delete_requested = true;
-    cursor.y += panel_inset;
-
-    content_height_ = cursor.y + scroll_ - bounds.y;
-    ctx.pop_clip();
-    const float maximum_scroll = std::max(content_height_ - bounds.height, 0.0F);
-    if (maximum_scroll > 0.0F) {
-        const float thumb = std::max(bounds.height * bounds.height / content_height_, 24.0F);
-        ctx.panel({bounds.x + bounds.width - 5.0F,
-                   bounds.y + scroll_ / maximum_scroll * (bounds.height - thumb), 3.0F, thumb}, ctx.theme().text_muted);
+    scroll_.end(ctx, cursor.extent());
+    // The bar runs 2px in from the panel's right edge.
+    const gui::Rect thumb = scroll_.thumb(
+        gui::Rect{bounds.right() - 5.0F, bounds.y, 3.0F, bounds.height}, 24.0F);
+    if (thumb.height > 0.0F) {
+        ctx.panel(thumb, ctx.theme().text_muted);
     }
 
     frame.editing = frame.editing || fields_.live();
@@ -3122,26 +3082,17 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
         drag_capture_ = {};
         selection_signature_.assign(1U, surface.node);
         primary_signature_ = surface.node;
-        scroll_ = 0.0F;
-        content_height_ = 0.0F;
+        scroll_.reset();
     }
     selected_.clear();
 
-    if (bounds.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-        ctx.wheel() != 0.0F) {
-        scroll_ -= ctx.wheel() * 32.0F;
-    }
-    scroll_ = std::clamp(scroll_, 0.0F,
-                         std::max(content_height_ - bounds.height, 0.0F));
-
-    ctx.push_clip(bounds);
-    Cursor cursor{gui::Rect{bounds.x + panel_inset, bounds.y,
-                            std::max(bounds.width - panel_inset * 2.0F, 1.0F),
-                            0.0F},
-                  bounds.y + panel_inset - scroll_};
+    // The wheel scrolls the panel when the pointer is over it, clamped against
+    // what the last frame measured until this one has measured itself.
+    Cursor cursor{bounds, inspector_metrics(ctx.theme().metrics),
+                  scroll_.begin(ctx, bounds, scroll_step)};
 
     const gui::Rect header = take_row(cursor, 30.0F);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
     ctx.label(gui::Rect{header.x + 8.0F, header.y, header.width - 8.0F,
                         header.height},
               surface.name.empty() ? std::string_view{"LED surface"}
@@ -3149,7 +3100,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
               ctx.theme().text);
     ctx.label(take_row(cursor, row_height), "LED surface",
               ctx.theme().text_muted);
-    cursor.y += row_gap;
+    cursor.space(row_gap);
 
     output::PhysicalSurface geometry = surface.geometry;
     FeedSurfaceTransform changed = FeedSurfaceTransform::None;
@@ -3164,7 +3115,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
                                     channels = {},
                                 std::span<const double> values = {}) {
         gui::Rect row = take_row(cursor, row_height);
-        cursor.y += row_gap;
+        cursor.space(row_gap);
         float label_width =
             std::clamp(row.width * label_fraction, label_min, label_max);
         const float key_width = channels.empty() ? 0.0F : 18.0F;
@@ -3206,7 +3157,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
         }
         if (stacked) {
             row = take_row(cursor, 26.0F);
-            cursor.y += 6.0F;
+            cursor.space(6.0F);
         }
         const gui::Rect fields{row.x + (stacked ? 0.0F : label_width), row.y,
                                std::max(row.width -
@@ -3311,9 +3262,7 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
             surface.mesh_scale,   changed};
     }
 
-    cursor.y += panel_inset;
-    content_height_ = cursor.y + scroll_ - bounds.y;
-    ctx.pop_clip();
+    scroll_.end(ctx, cursor.extent());
 
     frame.editing = fields_.live();
     if (!frame.editing) {

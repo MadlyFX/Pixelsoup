@@ -207,7 +207,7 @@ void TimelinePanel::draw_shortcut_sheet(Pass &p) {
       width, std::min(height, p.bounds.height - 16.0F)};
 
   ctx.panel(sheet, theme.background);
-  draw_border(ctx, sheet, theme.border);
+  ctx.outline(sheet, theme.border);
   ctx.label(gui::Rect{sheet.x + 12.0F, sheet.y + 4.0F, sheet.width - 24.0F,
                       line},
             "TIMELINE KEYS  -  press anywhere or Esc to close", theme.text);

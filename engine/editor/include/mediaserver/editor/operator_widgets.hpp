@@ -90,6 +90,34 @@ void draw_filled_circle(gui::UiContext &ctx, float cx, float cy, float radius,
                                std::string_view tooltip, bool engaged = false,
                                bool enabled = true);
 
+// A bordered text button for panel strips and list rows: dimmed and inert
+// while disabled, and filled with the selection colour while `selected` - a
+// toggle that is on. Returns true on the frame it is clicked.
+[[nodiscard]] bool action_button(gui::UiContext &ctx, gui::UiId id,
+                                 const gui::Rect &bounds,
+                                 std::string_view label, bool enabled,
+                                 bool selected = false);
+
+// A region that will take what is being dragged: tinted and outlined, more
+// strongly while `hovered`, with a callout in its top-left corner - at most
+// `callout_width` wide - saying what releasing there does. Every valid target
+// shows; the one under the pointer becomes materially stronger.
+void draw_drop_target(gui::UiContext &ctx, const gui::Rect &area,
+                      std::string_view instruction, bool hovered,
+                      float callout_width);
+
+// A diamond centred on (cx, cy), `radius` from its centre to each point.
+void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
+                  gui::UiColor color);
+
+// The key every keyable value carries, centred in `bounds`: hollow with no key
+// at this frame, filled with one, in the keyframe colour while the value is
+// animated elsewhere. `background` fills the hollow. Returns true on the
+// frame it is clicked.
+[[nodiscard]] bool key_button(gui::UiContext &ctx, gui::UiId id,
+                              const gui::Rect &bounds, bool animated,
+                              bool keyed_here, gui::UiColor background);
+
 // Recognises a second click on the same row within the double-click window.
 // Rows are compound widgets that see one click a frame, so the timing lives
 // here rather than in the input layer.

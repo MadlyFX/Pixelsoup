@@ -1,5 +1,9 @@
 #include <mediaserver/editor/workspace_panels.hpp>
 
+#include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/form_layout.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -33,8 +37,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     return result;
   if (target_ != target || stage_ != state.stage_node) {
     fields_.cancel(ctx);
-    scroll_ = 0.0F;
-    content_height_ = 0.0F;
+    scroll_.reset();
     target_ = target;
     stage_ = state.stage_node;
   }
@@ -45,65 +48,70 @@ SceneSettingsFrame SceneSettingsPanel::draw(
   bool changed = false;
   ctx.panel(bounds);
   ctx.push_clip(bounds);
-  const gui::Rect header{bounds.x + 10.0F, bounds.y + 6.0F,
-                         bounds.width - 20.0F, 30.0F};
-  ctx.label(header, target == SceneSettingsTarget::Renderer ? "Renderer"
-                                                            : "Environment");
-  ctx.panel({bounds.x, header.y + header.height + 4.0F, bounds.width, 1.0F},
-            ctx.theme().divider);
-  const gui::Rect body{bounds.x + 10.0F, header.y + header.height + 10.0F,
-                       std::max(bounds.width - 24.0F, 1.0F),
-                       std::max(bounds.height - 50.0F, 1.0F)};
-  const float maximum = std::max(content_height_ - body.height, 0.0F);
-  if (body.contains(ctx.pointer_x(), ctx.pointer_y()))
-    scroll_ -= ctx.wheel() * 36.0F;
-  scroll_ = std::clamp(scroll_, 0.0F, maximum);
-  ctx.push_clip(body);
-  float y = body.y - scroll_;
+
+  // The docked settings rhythm: rows taller than a dialog's, sections 8px
+  // apart, and the docked margin - with 4px more on the right, where the
+  // scroll bar runs.
+  constexpr float header_height = 40.0F;
+  constexpr float row_height = 26.0F;
+  constexpr float section_space = 8.0F;
+  constexpr float scroll_gutter = 4.0F;
+  constexpr float scroll_bar_width = 3.0F;
+  gui::Metrics m = ctx.theme().metrics;
+  m.control = row_height;
+  m.inset = m.panel_inset;
+
+  gui::Rect area = bounds;
+  ctx.label(gui::inset(gui::cut_top(area, header_height),
+                       gui::Padding{m.inset, m.gap, m.inset, 4.0F}),
+            target == SceneSettingsTarget::Renderer ? "Renderer"
+                                                    : "Environment");
+  ctx.panel(gui::cut_top(area, m.divider), ctx.theme().divider);
+  const gui::Rect body =
+      gui::inset(area, gui::Padding{0.0F, 0.0F, scroll_gutter, 0.0F});
+  gui::FormLayout form{body, m, scroll_.begin(ctx, body)};
+  // Labels share a column that grows with the panel, within limits.
   const float label_width = std::clamp(body.width * 0.44F, 80.0F, 150.0F);
+  constexpr float label_padding = 5.0F;
   const auto id = [&](std::string_view name) {
     return gui::ui_id(name) ^ 0x5CE0E5E77ULL ^ state.stage_node.value();
   };
-  const auto row = [&] {
-    const gui::Rect r{body.x, y, body.width, 26.0F};
-    y += 32.0F;
-    return r;
-  };
-  const auto well = [&](const gui::Rect &r, std::string_view label) {
-    if (ctx.font_width(label) > label_width - 10.0F) {
-      ctx.label(r, label, ctx.theme().text_muted);
-      const auto field = row();
-      return field;
+  // A label and its field on one row - or, when the label would not fit its
+  // column, the label on a row of its own with the field under it.
+  const auto well = [&](std::string_view label) {
+    gui::Rect field = form.control();
+    if (ctx.font_width(label) > label_width - label_padding * 2.0F) {
+      ctx.label(field, label, ctx.theme().text_muted);
+      return form.control();
     }
-    ctx.label({r.x, r.y, label_width - 5.0F, r.height}, label,
-              ctx.theme().text_muted);
-    return gui::Rect{r.x + label_width, r.y,
-                     std::max(r.width - label_width, 1.0F), r.height};
+    ctx.label(gui::inset(gui::cut_left(field, label_width),
+                         gui::Padding{0.0F, 0.0F, label_padding, 0.0F}),
+              label, ctx.theme().text_muted);
+    return field;
   };
   const auto section = [&](std::size_t index, std::string_view label) {
-    y += 8.0F;
-    const auto r = row();
+    form.space(section_space);
+    gui::Rect r = form.control();
     const auto interaction = ctx.grab(id(label), r);
     ctx.panel(r, ctx.theme().header);
-    ctx.label({r.x + 7.0F, r.y, 12.0F, r.height}, sections_[index] ? "v" : ">");
+    static_cast<void>(gui::cut_left(r, 7.0F));
+    ctx.label(gui::cut_left(r, 16.0F), sections_[index] ? "v" : ">");
     std::string title{label};
     for (std::size_t i = 1U; i < title.size(); ++i)
       if (title[i] >= 'A' && title[i] <= 'Z') title[i] += 'a' - 'A';
-    ctx.label({r.x + 23.0F, r.y, r.width - 27.0F, r.height}, title);
+    ctx.label(gui::inset(r, gui::Padding{0.0F, 0.0F, 4.0F, 0.0F}), title);
     if (interaction.clicked)
       sections_[index] = !sections_[index];
     return sections_[index];
   };
   const auto check = [&](std::string_view label, bool &value) {
-    const auto r = row();
-    if (ctx.checkbox(id(label), well(r, label), value, ""))
+    if (ctx.checkbox(id(label), well(label), value, ""))
       changed = true;
   };
   const auto choice = [&](std::string_view label, auto &value,
                           std::initializer_list<std::string_view> options) {
-    const auto r = row();
     auto selected = static_cast<std::size_t>(value);
-    if (ctx.dropdown(id(label), well(r, label),
+    if (ctx.dropdown(id(label), well(label),
                      std::span{options.begin(), options.size()}, selected)) {
       value = static_cast<std::remove_reference_t<decltype(value)>>(selected);
       changed = true;
@@ -112,9 +120,8 @@ SceneSettingsFrame SceneSettingsPanel::draw(
   const auto number = [&](std::string_view label, auto &value, double minimum,
                           double max_value, double speed = 0.01,
                           std::string_view unit = "", int precision = 3) {
-    const auto r = row();
     double edited{};
-    if (fields_.draw(ctx, id(label), well(r, label), unit,
+    if (fields_.draw(ctx, id(label), well(label), unit,
                      static_cast<double>(value), speed, edited, precision) &&
         std::isfinite(edited)) {
       value = static_cast<std::remove_reference_t<decltype(value)>>(
@@ -123,15 +130,15 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     }
   };
   const auto file = [&](std::string_view label, std::string &value, FilePickerKind kind) {
-    ctx.label(row(), label, ctx.theme().text_muted);
-    const auto r = row();
+    ctx.label(form.control(), label, ctx.theme().text_muted);
+    gui::Rect path = form.control();
     constexpr float browse_width = 70.0F;
-    const gui::Rect path{r.x, r.y, std::max(r.width - browse_width - 6.0F, 1.0F), r.height};
+    const gui::Rect browse = gui::cut_right(path, browse_width);
+    static_cast<void>(gui::cut_right(path, m.gap));
     if (ctx.text_field(id(label), path, value) && kind != FilePickerKind::BakeFolder)
       changed = true;
     ctx.tooltip(path, value.empty() ? "Choose a file or enter a path" : value);
-    if (ctx.button(id(std::string{label} + ".browse"),
-                   {r.x + r.width - browse_width, r.y, browse_width, r.height}, "Browse..."))
+    if (ctx.button(id(std::string{label} + ".browse"), browse, "Browse..."))
       result.file_picker = FilePickerRequest{kind, value, {}};
   };
   const auto object_choice = [&](std::string_view label, doc::NodeId &value) {
@@ -160,7 +167,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     options.reserve(names.size());
     for (const auto &name : names)
       options.push_back(name);
-    if (ctx.dropdown(id(label), well(row(), label), options, selected)) {
+    if (ctx.dropdown(id(label), well(label), options, selected)) {
       value = nodes[selected];
       changed = true;
     }
@@ -186,9 +193,10 @@ SceneSettingsFrame SceneSettingsPanel::draw(
     if (animated)
       value = sample(*channel, show_frame, value);
     value = std::clamp(value, minimum, max_value);
-    const auto r = row();
-    auto field = well(r, label);
-    field.width = std::max(field.width - 22.0F, 1.0F);
+    gui::Rect field = well(label);
+    constexpr float key_width = 20.0F;
+    const gui::Rect key = gui::cut_right(field, key_width);
+    static_cast<void>(gui::cut_right(field, 2.0F));
     double edited{};
     if (fields_.draw(ctx, id(label), field, unit, value, speed, edited, 3) &&
         std::isfinite(edited)) {
@@ -201,28 +209,15 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         changed = true;
       }
     }
-    const gui::Rect key{field.x + field.width + 2.0F, field.y, 20.0F, field.height};
-    const auto interaction = ctx.grab(id(label) ^ 0xD1AULL, key);
-    const float cx = key.x + 10.0F, cy = key.y + 11.0F;
-    const auto color = interaction.hovered ? ctx.theme().accent
-                       : keyed_here        ? ctx.theme().playhead
-                       : animated          ? ctx.theme().keyframe
-                                           : ctx.theme().text_muted;
-    const std::array<gui::UiPoint, 4> diamond{
-        {{cx, cy - 4.5F}, {cx + 4.5F, cy}, {cx, cy + 4.5F}, {cx - 4.5F, cy}}};
-    ctx.draw_list().add_convex_poly(diamond, color);
-    if (!keyed_here) {
-      const std::array<gui::UiPoint, 4> inside{
-          {{cx, cy - 2.5F}, {cx + 2.5F, cy}, {cx, cy + 2.5F}, {cx - 2.5F, cy}}};
-      ctx.draw_list().add_convex_poly(inside, ctx.theme().panel);
-    }
-    if (interaction.clicked && state.stage_node != doc::NodeId{})
+    if (key_button(ctx, id(label) ^ 0xD1AULL, key, animated, keyed_here,
+                   ctx.theme().panel) &&
+        state.stage_node != doc::NodeId{})
       result.keys.push_back({property, value, keyed_here});
   };
   if (target == SceneSettingsTarget::Renderer) {
     if (section(0, "RENDERING")) {
       if (state.program_renderer_differs)
-        ctx.label(row(), "Program keeps its published settings until PUBLISH",
+        ctx.label(form.control(), "Program keeps its published settings until PUBLISH",
                   ctx.theme().text_muted);
       choice("Backend", renderer.backend, {"Basic", "Advanced"});
       if (renderer.backend == scene::RendererBackend::Advanced) {
@@ -231,8 +226,8 @@ SceneSettingsFrame SceneSettingsPanel::draw(
                {"Interactive", "Balanced", "Cinematic"});
         if (renderer.ray_tracing || renderer.ddgi || renderer.restir ||
             renderer.denoising) {
-          ctx.label(row(), "Unsupported passes requested", ctx.theme().warning);
-          if (ctx.button(id("raster only"), row(),
+          ctx.label(form.control(), "Unsupported passes requested", ctx.theme().warning);
+          if (ctx.button(id("raster only"), form.control(),
                          "Clear unsupported passes")) {
             renderer.ray_tracing = false;
             renderer.ddgi = false;
@@ -281,7 +276,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
         check("Dither", renderer.color.dither);
         if (state.color_status != ColorStatus::Ready &&
             !renderer.color.show_lut_source.empty())
-          ctx.label(row(), color_status_text(state.color_status),
+          ctx.label(form.control(), color_status_text(state.color_status),
                     ctx.theme().warning);
       }
       if (section(3, "SHADOWS")) {
@@ -354,7 +349,7 @@ SceneSettingsFrame SceneSettingsPanel::draw(
                              -10000, 10000, 0.001, "turns");
           if (state.environment_status != EnvironmentStatus::Ready &&
               state.environment_status != EnvironmentStatus::NotAuthored)
-            ctx.label(row(), environment_status_text(state.environment_status),
+            ctx.label(form.control(), environment_status_text(state.environment_status),
                       ctx.theme().warning);
         }
       }
@@ -392,22 +387,22 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       file("Bake folder", bake_destination_, FilePickerKind::BakeFolder);
       if (!state.bake_status.empty()) {
         auto remaining=std::string_view{state.bake_status};
-        const auto columns=static_cast<std::size_t>(std::max(16.0F,(bounds.width-24.0F)/8.0F));
+        const auto columns=static_cast<std::size_t>(std::max(16.0F,form.width()/8.0F));
         while (!remaining.empty()) {
           auto count=std::min(columns,remaining.size());
           if (count<remaining.size()) { const auto space=remaining.rfind(' ',count); if (space!=std::string_view::npos && space>0) count=space; }
-          ctx.label(row(),remaining.substr(0,count),state.bake_status.starts_with("STALE") ? ctx.theme().warning : ctx.theme().text_muted);
+          ctx.label(form.control(),remaining.substr(0,count),state.bake_status.starts_with("STALE") ? ctx.theme().warning : ctx.theme().text_muted);
           remaining.remove_prefix(count); while (remaining.starts_with(' ')) remaining.remove_prefix(1);
         }
       }
       if (state.bake_running) {
-        if (ctx.button(id("cancel bake"), row(), "Cancel bake"))
+        if (ctx.button(id("cancel bake"), form.control(), "Cancel bake"))
           result.project.cancel_bake = true;
       } else {
         const bool ready = !bake_destination_.empty() &&
                            state.stage_node != doc::NodeId{} &&
                            renderer.backend == scene::RendererBackend::Advanced;
-        const auto action = row();
+        const auto action = form.control();
         if (ready && ctx.button(id("bake"), action, "Bake lighting")) {
           result.project.bake = scene::clamped(environment.baked);
           result.project.bake_destination = bake_destination_;
@@ -452,14 +447,13 @@ SceneSettingsFrame SceneSettingsPanel::draw(
       }
     }
   }
-  content_height_ = y + scroll_ - body.y + 6.0F;
-  ctx.pop_clip();
-  if (maximum > 0) {
-    const float thumb = body.height * body.height / content_height_;
-    ctx.panel({bounds.x + bounds.width - 5.0F,
-               body.y + scroll_ / maximum * (body.height - thumb), 3.0F, thumb},
-              ctx.theme().text_muted);
-  }
+  scroll_.end(ctx, form.extent());
+  // The bar runs down the gutter, 2px in from the panel's edge.
+  const gui::Rect thumb = scroll_.thumb(gui::Rect{
+      bounds.right() - scroll_bar_width - 2.0F, body.y, scroll_bar_width,
+      body.height});
+  if (thumb.height > 0.0F)
+    ctx.panel(thumb, ctx.theme().text_muted);
   ctx.pop_clip();
   if (changed) {
     values.renderer = scene::clamped(values.renderer);

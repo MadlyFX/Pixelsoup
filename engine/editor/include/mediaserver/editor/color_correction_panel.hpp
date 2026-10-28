@@ -2,6 +2,7 @@
 
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -44,8 +45,7 @@ public:
 
 private:
     gui::UiId id_{};
-    float scroll_{};
-    float content_height_{};
+    gui::ScrollRegion scroll_;
     NumberField fields_;
     doc::NodeId curve_drag_effect_{};
     std::size_t curve_drag_section_{};

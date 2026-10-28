@@ -2,6 +2,7 @@
 
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/metrics.hpp>
+#include <mediaserver/gui/ui_renderer.hpp>
 
 #include <string_view>
 
@@ -48,6 +49,12 @@ public:
     [[nodiscard]] FormRow row() noexcept;
     // A line of secondary text: a hint, a note, a status message.
     [[nodiscard]] Rect caption() noexcept;
+    // A caption under the field column, so a note about the row above lines
+    // up with its field rather than its label.
+    [[nodiscard]] Rect note() noexcept;
+    // A section heading with no rule: the first section under a divider the
+    // form does not own.
+    [[nodiscard]] Rect heading() noexcept;
     // A rule `section_gap` below the last row, and the heading
     // `section_gap` below the rule.
     [[nodiscard]] FormSection section() noexcept;
@@ -55,6 +62,9 @@ public:
 
     // Where the next row starts, on screen.
     [[nodiscard]] float cursor() const noexcept { return cursor_; }
+    // The strip the last call handed out: for a tooltip over a row that a
+    // helper laid out.
+    [[nodiscard]] Rect last() const noexcept { return last_; }
     // The column rows are laid across, without the vertical extent.
     [[nodiscard]] float left() const noexcept { return left_; }
     [[nodiscard]] float width() const noexcept { return width_; }
@@ -73,18 +83,24 @@ private:
     float cursor_{};
     // The bottom of the last row, so a trailing gap is not counted as content.
     float last_bottom_{};
+    Rect last_{};
 };
 
-// Draws a section's rule and heading in the theme's divider and text colours.
+// Draws a section's rule in the theme's divider colour and its heading in the
+// text colour, or in `heading`.
 FormSection draw_form_section(UiContext& ctx, FormLayout& form, std::string_view title);
+FormSection draw_form_section(UiContext& ctx, FormLayout& form, std::string_view title,
+                              UiColor heading);
 
 class ScrollRegion final {
 public:
     // Scrolls by this frame's wheel when the pointer is over `viewport`,
     // clamps against the content height measured last frame, and clips to
     // `viewport`. Returns the offset to lay the content out at. Must be
-    // matched by end().
+    // matched by end(). A notch moves `metrics.scroll_step`, or `step` - a
+    // list scrolls by whole rows.
     float begin(UiContext& ctx, const Rect& viewport);
+    float begin(UiContext& ctx, const Rect& viewport, float step);
     // Pops the clip and records `content_height` - FormLayout::extent() - so
     // the offset never runs past the end, this frame's content having
     // shrunk included.
@@ -93,6 +109,12 @@ public:
     [[nodiscard]] float offset() const noexcept { return offset_; }
     // How far the content can scroll: zero when it fits.
     [[nodiscard]] float max_offset() const noexcept;
+    // The height end() last recorded.
+    [[nodiscard]] float content_height() const noexcept { return content_height_; }
+    // The scroll bar's thumb in `track`: as tall as the share of the content
+    // in view but never shorter than `min_height`, as far down as the offset
+    // is through max_offset(). Zero height when the content fits.
+    [[nodiscard]] Rect thumb(const Rect& track, float min_height = 0.0F) const noexcept;
     // Back to the top, forgetting what was measured: a dialog reopening.
     void reset() noexcept { *this = ScrollRegion{}; }
 

@@ -3,6 +3,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -67,7 +68,7 @@ public:
 
 private:
   gui::UiId id_{};
-  float scroll_{};
+  gui::ScrollRegion scroll_;
   // Plain markers are navigation, not cues; they join the list on request.
   bool show_markers_{};
   bool focused_{};

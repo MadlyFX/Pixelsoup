@@ -1,5 +1,8 @@
 #include <mediaserver/editor/texture_panel.hpp>
 
+#include <mediaserver/gui/form_layout.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -26,11 +29,19 @@ TexturePanelFrame TexturePanel::draw(
 
     ctx.panel(bounds, ctx.theme().panel);
     constexpr float header_height = 26.0F;
-    const gui::Rect header{bounds.x, bounds.y, bounds.width, header_height};
+    gui::Metrics m = ctx.theme().metrics;
+    gui::Rect body = bounds;
+    gui::Rect header = gui::cut_top(body, header_height);
     ctx.panel(header, ctx.theme().header);
-    ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F,
-                        header.width, 1.0F},
-              ctx.theme().divider);
+    ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
+
+    // Why there is nothing to edit, in a short paragraph under the header.
+    const auto message = [&](std::string_view text, gui::UiColor color) {
+        fields_.cancel(ctx);
+        constexpr float message_height = 52.0F;
+        gui::Rect note = gui::inset(body, m.panel_inset);
+        ctx.label(gui::cut_top(note, message_height), text, color);
+    };
 
     const scene::EffectInstance* grain{};
     for (const scene::EffectInstance& effect : effects) {
@@ -41,31 +52,27 @@ TexturePanelFrame TexturePanel::draw(
         }
     }
     if (grain == nullptr) {
-        fields_.cancel(ctx);
-        ctx.label(gui::Rect{bounds.x + 10.0F, bounds.y + header_height + 10.0F,
-                            std::max(bounds.width - 20.0F, 0.0F), 52.0F},
-                  selected_layer == doc::NodeId{}
-                      ? "Select a layer to edit texture"
-                      : "Add Film Grain from the Effects panel",
-                  ctx.theme().text_muted);
+        message(selected_layer == doc::NodeId{}
+                    ? "Select a layer to edit texture"
+                    : "Add Film Grain from the Effects panel",
+                ctx.theme().text_muted);
         return frame;
     }
 
     const auto normalized = scene::normalized_film_grain(grain->film_grain);
     if (!normalized.has_value()) {
-        fields_.cancel(ctx);
-        ctx.label(gui::Rect{bounds.x + 10.0F, bounds.y + header_height + 10.0F,
-                            std::max(bounds.width - 20.0F, 0.0F), 52.0F},
-                  "Film Grain parameters are invalid", ctx.theme().warning);
+        message("Film Grain parameters are invalid", ctx.theme().warning);
         return frame;
     }
     const scene::FilmGrainParameters parameters = *normalized;
 
-    constexpr float inset = 8.0F;
-    constexpr float row_height = 24.0F;
-    constexpr float row_gap = 3.0F;
-    float y = bounds.y + header_height + 8.0F;
-    const float label_width = std::clamp(bounds.width * 0.42F, 82.0F, 132.0F);
+    // Tighter than a dialog: an 8px margin and 3px between rows, the label
+    // column a share of the panel within limits.
+    m.inset = 8.0F;
+    m.gap = 8.0F;
+    m.row_gap = 3.0F;
+    m.label_column = std::clamp(bounds.width * 0.42F, 82.0F, 132.0F);
+    gui::FormLayout form{body, m};
 
     const auto emit = [&](scene::FilmGrainParameters value,
                           gui::UiId focus, core::u64 property,
@@ -86,26 +93,18 @@ TexturePanelFrame TexturePanel::draw(
                                  double maximum, int decimals,
                                  core::u64 property,
                                  const auto& assign) {
-        const gui::Rect row{bounds.x + inset, y,
-                            std::max(bounds.width - inset * 2.0F, 0.0F),
-                            row_height};
-        y += row_height + row_gap;
-        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
-                  ctx.theme().text_muted);
-        const gui::Rect field{row.x + label_width, row.y,
-                              std::max(row.width - label_width, 1.0F),
-                              row.height};
+        const gui::FormRow row = form.row();
+        ctx.label(row.label, label, ctx.theme().text_muted);
         const gui::UiId field_id = mix(id_, property);
         double authored{};
         NumberFieldEdit edit{};
-        if (fields_.draw(ctx, field_id, field, {}, value, speed, authored,
+        if (fields_.draw(ctx, field_id, row.field, {}, value, speed, authored,
                          decimals, &edit) && std::isfinite(authored)) {
             scene::FilmGrainParameters changed = parameters;
             assign(changed, std::clamp(authored, minimum, maximum));
             emit(changed, field_id, property, &edit);
         }
     };
-
     numeric_row("AMOUNT", parameters.amount, 0.005,
                 scene::min_film_grain_amount,
                 scene::max_film_grain_amount, 3, 1U,
@@ -131,15 +130,9 @@ TexturePanelFrame TexturePanel::draw(
             value.seed = static_cast<core::u32>(std::round(authored));
         });
 
-    const gui::Rect mode_row{bounds.x + inset, y,
-                             std::max(bounds.width - inset * 2.0F, 0.0F),
-                             row_height};
-    y += row_height + row_gap;
-    ctx.label(gui::Rect{mode_row.x, mode_row.y, label_width, mode_row.height},
-              "CHANNEL MODE", ctx.theme().text_muted);
-    const gui::Rect mode_button{
-        mode_row.x + label_width, mode_row.y,
-        std::max(mode_row.width - label_width, 1.0F), mode_row.height};
+    const gui::FormRow mode_row = form.row();
+    ctx.label(mode_row.label, "CHANNEL MODE", ctx.theme().text_muted);
+    const gui::Rect mode_button = mode_row.field;
     const gui::Interaction mode_it =
         ctx.grab(mix(id_, 5U), mode_button);
     ctx.panel(mode_button, mode_it.hovered ? ctx.theme().widget_hover
@@ -156,9 +149,7 @@ TexturePanelFrame TexturePanel::draw(
         emit(changed, mix(id_, 5U), 5U, nullptr);
     }
 
-    const gui::Rect reset{bounds.x + inset, y,
-                          std::max(bounds.width - inset * 2.0F, 0.0F),
-                          row_height};
+    const gui::Rect reset = form.control();
     const gui::Interaction reset_it = ctx.grab(mix(id_, 6U), reset);
     ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
                                       : ctx.theme().widget);

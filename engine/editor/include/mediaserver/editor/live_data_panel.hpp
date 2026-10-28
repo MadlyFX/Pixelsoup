@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mediaserver/core/types.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -288,17 +289,18 @@ public:
   // diagnostics panel reporting its own geometry is unobjectionable, and it is
   // what lets the scroll behaviour be asserted without rendering pixels.
   [[nodiscard]] float content_height() const noexcept {
-    return content_height_;
+    return scroll_.content_height();
   }
-  [[nodiscard]] float scroll_offset() const noexcept { return scroll_; }
+  [[nodiscard]] float scroll_offset() const noexcept {
+    return scroll_.offset();
+  }
 
 private:
   gui::UiId id_{};
-  float scroll_{};
-  // How tall the body drew last frame. The scroll bound comes from this rather
-  // than from a separate row count, so the two cannot disagree about the size
-  // of the thing being scrolled.
-  float content_height_{};
+  // Bounded by how tall the body drew last frame rather than by a separate
+  // row count, so the two cannot disagree about the size of the thing being
+  // scrolled.
+  gui::ScrollRegion scroll_;
 };
 
 } // namespace mediaserver::editor

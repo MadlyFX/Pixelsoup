@@ -5,6 +5,7 @@
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/gui/ui_renderer.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <exception>
@@ -135,6 +136,23 @@ void columns_share_the_width_and_the_last_meets_the_edge() {
     UI_CHECK(near(gui::column(r, 0U, 0U, 7.0F).width, 0.0F));
 }
 
+void list_rows_step_down_from_the_scrolled_top_unclamped() {
+    constexpr gui::Rect list{10.0F, 100.0F, 200.0F, 50.0F};
+    UI_CHECK(same_rect(gui::list_row(list, 0U, 23.0F), 10.0F, 100.0F, 200.0F, 23.0F));
+    UI_CHECK(same_rect(gui::list_row(list, 3U, 23.0F, 40.0F), 10.0F, 129.0F, 200.0F, 23.0F));
+    // Past the bottom is still a whole row, not a clamped sliver.
+    UI_CHECK(same_rect(gui::list_row(list, 5U, 23.0F), 10.0F, 215.0F, 200.0F, 23.0F));
+    // Spaced rows keep their height; the gap is between them.
+    UI_CHECK(same_rect(gui::list_row(list, 2U, 23.0F, 0.0F, 4.0F), 10.0F, 154.0F, 200.0F,
+                       23.0F));
+}
+
+void a_cell_is_where_a_column_crosses_a_row() {
+    constexpr gui::Rect column{40.0F, 0.0F, 60.0F, 20.0F};
+    constexpr gui::Rect row{0.0F, 130.0F, 500.0F, 26.0F};
+    UI_CHECK(same_rect(gui::cell(column, row), 40.0F, 130.0F, 60.0F, 26.0F));
+}
+
 void form_rows_follow_the_metrics_rhythm() {
     const gui::Metrics metrics = odd_metrics();
     gui::FormLayout form{gui::Rect{50.0F, 100.0F, 400.0F, 300.0F}, metrics};
@@ -149,6 +167,10 @@ void form_rows_follow_the_metrics_rhythm() {
 
     const gui::Rect checkbox = form.control();
     UI_CHECK(same_rect(checkbox, 60.0F, 144.0F, 380.0F, 20.0F));
+    // What was last handed out survives the gap after it - and a section
+    // measures from that row, not from the gap.
+    form.space(4.0F);
+    UI_CHECK(same_rect(form.last(), 60.0F, 144.0F, 380.0F, 20.0F));
 
     // The rule is measured from the control's bottom (164), not from the
     // row gap the control left after it.
@@ -171,6 +193,20 @@ void a_section_after_a_caption_sits_as_far_from_it_as_after_a_row() {
     const gui::FormSection b = after_caption.section();
     UI_CHECK(near(a.rule.y - row.bottom(), 7.0F));
     UI_CHECK(near(b.rule.y - caption.bottom(), 7.0F));
+}
+
+void a_note_lines_up_with_the_field_and_a_heading_has_no_rule() {
+    const gui::Metrics metrics = odd_metrics();
+    gui::FormLayout form{gui::Rect{50.0F, 100.0F, 400.0F, 300.0F}, metrics};
+    const gui::Rect heading = form.heading();
+    UI_CHECK(same_rect(heading, 60.0F, 103.0F, 380.0F, 15.0F));
+    const gui::FormRow row = form.row();
+    UI_CHECK(near(row.label.y, 103.0F + 15.0F + 5.0F));
+    const gui::Rect note = form.note();
+    UI_CHECK(same_rect(note, row.field.x, row.field.bottom() + 5.0F,
+                       row.field.width, 15.0F));
+    // A note is a caption: the next row follows its caption gap.
+    UI_CHECK(near(form.control().y, note.bottom() + 1.0F));
 }
 
 void the_label_column_never_overruns_a_narrow_form() {
@@ -242,6 +278,57 @@ void scrolling_stops_at_the_measured_end() {
     UI_CHECK(near(h.frame(150.0F, 150.0F, 10.0F, 230.0F), 0.0F));
 }
 
+void the_thumb_shows_the_share_in_view_and_where_it_is() {
+    ScrollHarness h;
+    constexpr gui::Rect track{300.0F, 100.0F, 3.0F, 150.0F};
+    static_cast<void>(h.frame(150.0F, 150.0F, 0.0F, 120.0F));
+    UI_CHECK(near(h.scroll.thumb(track).height, 0.0F));
+
+    static_cast<void>(h.frame(150.0F, 150.0F, 0.0F, 600.0F));
+    UI_CHECK(same_rect(h.scroll.thumb(track), 300.0F, 100.0F, 3.0F, 37.5F));
+    static_cast<void>(h.frame(150.0F, 150.0F, -10.0F, 600.0F));
+    // 250 of 450: 250 / 450 * (150 - 37.5) below the track's top.
+    UI_CHECK(same_rect(h.scroll.thumb(track), 300.0F, 162.5F, 3.0F, 37.5F));
+}
+
+void a_list_scrolls_by_its_own_step() {
+    ScrollHarness h;
+    h.input.new_frame();
+    h.input.set_mouse_position(150.0F, 150.0F);
+    h.input.add_wheel(-2.0F);
+    h.ctx.new_frame();
+    UI_CHECK(near(h.scroll.begin(h.ctx, ScrollHarness::viewport, 17.0F), 34.0F));
+    h.scroll.end(h.ctx, 400.0F);
+}
+
+// The four edges, each `thickness` deep and inside the bounds, as the quads'
+// vertex extents: top, bottom, left, right.
+void an_outline_draws_four_edges_inside_its_bounds() {
+    ScrollHarness h;
+    h.ctx.new_frame();
+    const std::size_t before = h.list.vertices().size();
+    h.ctx.outline(gui::Rect{10.0F, 20.0F, 50.0F, 30.0F}, gui::UiColor{}, 3.0F);
+    const auto& vertices = h.list.vertices();
+    UI_CHECK(vertices.size() - before == 24U);
+    const auto extent = [&](std::size_t quad) {
+        float min_x = 1.0e9F, min_y = 1.0e9F, max_x = -1.0e9F, max_y = -1.0e9F;
+        for (std::size_t i = before + quad * 6U; i < before + quad * 6U + 6U; ++i) {
+            min_x = std::min(min_x, vertices[i].x);
+            min_y = std::min(min_y, vertices[i].y);
+            max_x = std::max(max_x, vertices[i].x);
+            max_y = std::max(max_y, vertices[i].y);
+        }
+        return gui::Rect{min_x, min_y, max_x - min_x, max_y - min_y};
+    };
+    UI_CHECK(same_rect(extent(0U), 10.0F, 20.0F, 50.0F, 3.0F));
+    UI_CHECK(same_rect(extent(1U), 10.0F, 47.0F, 50.0F, 3.0F));
+    UI_CHECK(same_rect(extent(2U), 10.0F, 20.0F, 3.0F, 30.0F));
+    UI_CHECK(same_rect(extent(3U), 57.0F, 20.0F, 3.0F, 30.0F));
+
+    h.ctx.outline(gui::Rect{10.0F, 20.0F, 0.0F, 30.0F}, gui::UiColor{});
+    UI_CHECK(h.list.vertices().size() - before == 24U);
+}
+
 void content_that_shrinks_pulls_the_offset_back() {
     ScrollHarness h;
     static_cast<void>(h.frame(150.0F, 150.0F, 0.0F, 600.0F));
@@ -278,9 +365,14 @@ int main() {
         {"centered_sits_in_the_middle", centered_sits_in_the_middle},
         {"columns_share_the_width_and_the_last_meets_the_edge",
          columns_share_the_width_and_the_last_meets_the_edge},
+        {"list_rows_step_down_from_the_scrolled_top_unclamped",
+         list_rows_step_down_from_the_scrolled_top_unclamped},
+        {"a_cell_is_where_a_column_crosses_a_row", a_cell_is_where_a_column_crosses_a_row},
         {"form_rows_follow_the_metrics_rhythm", form_rows_follow_the_metrics_rhythm},
         {"a_section_after_a_caption_sits_as_far_from_it_as_after_a_row",
          a_section_after_a_caption_sits_as_far_from_it_as_after_a_row},
+        {"a_note_lines_up_with_the_field_and_a_heading_has_no_rule",
+         a_note_lines_up_with_the_field_and_a_heading_has_no_rule},
         {"the_label_column_never_overruns_a_narrow_form",
          the_label_column_never_overruns_a_narrow_form},
         {"extent_is_the_content_height_whatever_the_scroll",
@@ -290,6 +382,11 @@ int main() {
         {"scrolling_stops_at_the_measured_end", scrolling_stops_at_the_measured_end},
         {"content_that_shrinks_pulls_the_offset_back",
          content_that_shrinks_pulls_the_offset_back},
+        {"the_thumb_shows_the_share_in_view_and_where_it_is",
+         the_thumb_shows_the_share_in_view_and_where_it_is},
+        {"a_list_scrolls_by_its_own_step", a_list_scrolls_by_its_own_step},
+        {"an_outline_draws_four_edges_inside_its_bounds",
+         an_outline_draws_four_edges_inside_its_bounds},
     };
 
     std::size_t failures = 0U;

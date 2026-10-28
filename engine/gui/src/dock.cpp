@@ -1,5 +1,7 @@
 #include <mediaserver/gui/dock.hpp>
 
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -49,19 +51,6 @@ constexpr float floating_edge_reach = 5.0F;
 }
 
 // One-unit outline, drawn as four rules so it never covers what it frames.
-void outline(UiContext& ctx, const Rect& bounds, UiColor color) {
-    if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
-        return;
-    }
-    UiDrawList& list = ctx.draw_list();
-    list.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
-    list.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
-                  color);
-    list.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
-    list.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F,
-                  bounds.height, color);
-}
-
 [[nodiscard]] UiColor mixed(UiColor a, UiColor b, float t) noexcept {
     return UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
                    a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
@@ -69,22 +58,33 @@ void outline(UiContext& ctx, const Rect& bounds, UiColor color) {
 
 [[nodiscard]] Rect floating_title_bounds(
     const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
-    return Rect{frame.frame.x, frame.frame.y, frame.frame.width,
-                metrics.title_bar};
+    Rect rest = frame.frame;
+    return cut_top(rest, metrics.title_bar);
 }
 
+// A square in the title bar's right end, 3px in from its edges.
 [[nodiscard]] Rect floating_close_bounds(
     const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
-    const float size = std::max(metrics.title_bar - 6.0F, 0.0F);
-    return Rect{frame.frame.x + frame.frame.width - size - 3.0F,
-                frame.frame.y + 3.0F, size, size};
+    const Rect corner = inset(floating_title_bounds(frame, metrics), 3.0F);
+    Rect lane = corner;
+    return cut_right(lane, corner.height);
+}
+
+// The title bar left of the close button: the frame's move handle, and
+// where its name goes.
+[[nodiscard]] Rect floating_title_lane(
+    const DockLayout::Floating& frame, const DockMetrics& metrics) noexcept {
+    const Rect title = floating_title_bounds(frame, metrics);
+    return Rect{title.x, title.y,
+                std::max(floating_close_bounds(frame, metrics).x - title.x, 0.0F),
+                title.height};
 }
 
 [[nodiscard]] Rect floating_resize_bounds(
     const DockLayout::Floating& frame) noexcept {
-    return Rect{frame.frame.x + frame.frame.width - floating_grip_size,
-                frame.frame.y + frame.frame.height - floating_grip_size,
-                floating_grip_size, floating_grip_size};
+    Rect corner = frame.frame;
+    corner = cut_bottom(corner, floating_grip_size);
+    return cut_right(corner, floating_grip_size);
 }
 
 [[nodiscard]] Rect floating_right_edge(
@@ -135,17 +135,16 @@ DockSide drop_side(const Rect& node, float x, float y, float edge) noexcept {
 }
 
 Rect drop_preview(const Rect& node, DockSide side) noexcept {
-    const float half_w = node.width * 0.5F;
-    const float half_h = node.height * 0.5F;
+    Rect half = node;
     switch (side) {
     case DockSide::Left:
-        return Rect{node.x, node.y, half_w, node.height};
+        return cut_left(half, node.width * 0.5F);
     case DockSide::Right:
-        return Rect{node.x + half_w, node.y, half_w, node.height};
+        return cut_right(half, node.width * 0.5F);
     case DockSide::Top:
-        return Rect{node.x, node.y, node.width, half_h};
+        return cut_top(half, node.height * 0.5F);
     case DockSide::Bottom:
-        return Rect{node.x, node.y + half_h, node.width, half_h};
+        return cut_bottom(half, node.height * 0.5F);
     case DockSide::Center:
         break;
     }
@@ -856,12 +855,9 @@ Rect DockLayout::content_of(DockId leaf) const noexcept {
     if (!valid(leaf) || nodes_[leaf].split) {
         return Rect{};
     }
-    const Rect& rect = nodes_[leaf].rect;
-    return Rect{
-        rect.x,
-        rect.y + metrics_.tab_bar,
-        rect.width,
-        std::max(rect.height - metrics_.tab_bar, 0.0F)};
+    Rect content = nodes_[leaf].rect;
+    static_cast<void>(cut_top(content, metrics_.tab_bar));
+    return content;
 }
 
 std::span<const PanelId> DockLayout::tabs_of(DockId leaf) const noexcept {
@@ -1062,11 +1058,14 @@ void DockHost::draw_leaf(
     // The strip is a shade darker than the panel it heads, so a row of tabs
     // reads as the panel's title bar; the showing tab is cut from the panel's
     // own colour and joins it.
-    const Rect strip{bounds.x, bounds.y, bounds.width, metrics_.tab_bar};
+    Rect body = bounds;
+    const Rect strip = cut_top(body, metrics_.tab_bar);
     const UiColor strip_color = mixed(theme.background, theme.panel, 0.55F);
     ctx.panel(strip, strip_color);
-    ctx.panel(Rect{strip.x, strip.y + strip.height - 1.0F, strip.width, 1.0F},
-              theme.border);
+    {
+        Rect rule = strip;
+        ctx.panel(cut_bottom(rule, 1.0F), theme.border);
+    }
 
     const PanelId active = layout_->active_of(leaf);
     ctx.push_clip(strip);
@@ -1093,19 +1092,20 @@ void DockHost::draw_leaf(
                                  !ctx.pointer_blocked();
         const bool closable = is_active || tab_pointed ||
                               ctx.active() == tab_close_id(panel);
-        const Rect close_bounds{
-            tab.x + tab.width - tab_close_extent, tab.y + 3.0F,
-            tab_close_extent - 3.0F, std::max(tab.height - 6.0F, 0.0F)};
+        // The close mark's target at the tab's right end; the rest of the
+        // tab, and 2px under the mark, drags it.
+        Rect close_lane = tab;
+        const Rect close_bounds =
+            inset(cut_right(close_lane, tab_close_extent),
+                  Padding{0.0F, 3.0F, 3.0F, 3.0F});
         const Interaction close = closable
             ? ctx.grab(tab_close_id(panel), close_bounds) : Interaction{};
         if (close.clicked) {
             close_panel_pending_ = panel;
         }
 
-        const Rect drag_bounds{tab.x, tab.y,
-                               std::max(tab.width - tab_close_extent + 2.0F,
-                                        0.0F),
-                               tab.height};
+        const Rect drag_bounds =
+            inset(tab, Padding{0.0F, 0.0F, tab_close_extent - 2.0F, 0.0F});
         const Interaction it = ctx.grab(tab_id(panel), drag_bounds);
         if (it.pressed) {
             layout_->set_active(leaf, panel);
@@ -1124,32 +1124,30 @@ void DockHost::draw_leaf(
             drop_pending_ = true;
         }
 
-        const UiColor body = is_active
+        const UiColor body_color = is_active
             ? theme.panel
             : (it.hovered ? mixed(strip_color, theme.widget_hover, 0.6F)
                           : strip_color);
-        ctx.panel(Rect{tab.x, tab.y, tab.width,
-                       tab.height - (is_active ? 0.0F : 1.0F)},
-                  body);
+        // An inactive tab stops a pixel short, leaving the strip's rule.
+        ctx.panel(is_active ? tab : inset(tab, Padding{0.0F, 0.0F, 0.0F, 1.0F}),
+                  body_color);
         if (is_active) {
             // An accent rule along the top marks the showing tab - readable at
             // a glance in a dark room - and the tab opens into the panel
             // below it rather than sitting on a line.
-            ctx.panel(Rect{tab.x, tab.y, tab.width, 2.0F}, theme.accent);
-            ctx.panel(Rect{tab.x + tab.width - 1.0F, tab.y, 1.0F, tab.height},
-                      theme.border);
+            Rect edges = tab;
+            Rect top = tab;
+            ctx.panel(cut_top(top, 2.0F), theme.accent);
+            ctx.panel(cut_right(edges, 1.0F), theme.border);
             if (tab.x > bounds.x) {
-                ctx.panel(Rect{tab.x, tab.y, 1.0F, tab.height}, theme.border);
+                ctx.panel(cut_left(edges, 1.0F), theme.border);
             }
         }
-        ctx.label(
-            Rect{tab.x + theme.padding * 1.5F, tab.y + 1.0F,
-                 std::max(tab.width - tab_close_extent -
-                              theme.padding * 1.5F,
-                          0.0F),
-                 tab.height},
-            title,
-            is_active ? theme.text : theme.text_muted);
+        // The title, a pixel low to sit on the tab's centre line.
+        Rect title_cell = inset(
+            tab, Padding{theme.padding * 1.5F, 0.0F, tab_close_extent, 0.0F});
+        title_cell.y += 1.0F;
+        ctx.label(title_cell, title, is_active ? theme.text : theme.text_muted);
         if (closable) {
             if (close.hovered || close.held) {
                 ctx.panel(close_bounds.inflated(-2.0F, -2.0F),
@@ -1181,7 +1179,7 @@ void DockHost::draw_leaf(
     }
     // Last, over the panel's own edge pixels: every leaf is framed, so two
     // dark panels side by side always read as two.
-    outline(ctx, bounds, theme.border);
+    ctx.outline(bounds, theme.border);
 }
 
 void DockHost::run_floating_chrome(UiContext& ctx) {
@@ -1213,10 +1211,7 @@ void DockHost::run_floating_chrome(UiContext& ctx) {
     }
 
     const Rect close_bounds = floating_close_bounds(*found, metrics_);
-    const Rect title = floating_title_bounds(*found, metrics_);
-    const Rect drag_title{
-        title.x, title.y,
-        std::max(close_bounds.x - title.x, 0.0F), title.height};
+    const Rect drag_title = floating_title_lane(*found, metrics_);
     const Rect resize_bounds = floating_resize_bounds(*found);
 
     const Interaction close = ctx.grab(frame_close_id(node), close_bounds);
@@ -1260,12 +1255,11 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         // A soft drop shadow and a lit frame, so a floating panel reads as
         // sitting above the docked ones rather than punched into them.
         for (int ring = 3; ring >= 1; --ring) {
-            const float spread = static_cast<float>(ring) * 2.0F;
-            ctx.panel(Rect{frame.frame.x - spread + 2.0F,
-                           frame.frame.y - spread + 4.0F,
-                           frame.frame.width + spread * 2.0F,
-                           frame.frame.height + spread * 2.0F},
-                      UiColor{0.0F, 0.0F, 0.0F, 0.14F});
+            // Each ring spreads 2px further, the shadow falling down-right.
+            Rect shadow = inset(frame.frame, -static_cast<float>(ring) * 2.0F);
+            shadow.x += 2.0F;
+            shadow.y += 4.0F;
+            ctx.panel(shadow, UiColor{0.0F, 0.0F, 0.0F, 0.14F});
         }
         ctx.panel(frame.frame, ctx.theme().background);
         ctx.panel(title, mixed(ctx.theme().header, ctx.theme().widget_hover, 0.4F));
@@ -1276,12 +1270,10 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         const bool lone_tab = !layout_->is_split(frame.node) &&
                               layout_->tabs_of(frame.node).size() == 1U;
         if (!lone_tab) {
-            ctx.label(
-                Rect{title.x + 8.0F, title.y,
-                     std::max(close_bounds.x - title.x - 12.0F, 0.0F),
-                     title.height},
-                layout_->title_of(layout_->active_of(frame.node)),
-                ctx.theme().text_muted);
+            ctx.label(inset(floating_title_lane(frame, metrics_),
+                            Padding{8.0F, 0.0F, 4.0F, 0.0F}),
+                      layout_->title_of(layout_->active_of(frame.node)),
+                      ctx.theme().text_muted);
         }
 
         const bool frontmost =
@@ -1293,17 +1285,12 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
             close_held ? ctx.theme().warning
                        : (close_hovered ? ctx.theme().text
                                         : ctx.theme().text_muted);
-        const float close_inset = 4.0F;
-        ctx.draw_list().add_line(
-            close_bounds.x + close_inset, close_bounds.y + close_inset,
-            close_bounds.x + close_bounds.width - close_inset,
-            close_bounds.y + close_bounds.height - close_inset, 1.3F,
-            close_color);
-        ctx.draw_list().add_line(
-            close_bounds.x + close_bounds.width - close_inset,
-            close_bounds.y + close_inset, close_bounds.x + close_inset,
-            close_bounds.y + close_bounds.height - close_inset, 1.3F,
-            close_color);
+        // A cross from corner to corner, 4px in.
+        const Rect mark = inset(close_bounds, 4.0F);
+        ctx.draw_list().add_line(mark.x, mark.y, mark.right(), mark.bottom(),
+                                 1.3F, close_color);
+        ctx.draw_list().add_line(mark.right(), mark.y, mark.x, mark.bottom(),
+                                 1.3F, close_color);
 
         const Rect grip = floating_resize_bounds(frame);
 
@@ -1336,8 +1323,8 @@ void DockHost::draw_floating(UiContext& ctx, const PanelDrawer& draw_panel,
         const bool edge_held =
             ctx.active() == resize_edge_id(frame.node, true) ||
             ctx.active() == resize_edge_id(frame.node, false);
-        outline(ctx, frame.frame,
-                edge_held ? ctx.theme().accent
+        ctx.outline(frame.frame,
+                    edge_held ? ctx.theme().accent
                           : mixed(ctx.theme().border, ctx.theme().text_muted, 0.35F));
     }
 }

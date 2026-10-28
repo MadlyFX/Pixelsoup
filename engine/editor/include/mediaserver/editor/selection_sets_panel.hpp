@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/selection_set.hpp>
@@ -60,7 +61,7 @@ private:
   doc::NodeId edit_name_owner_{};
   doc::NodeId last_clicked_{};
   double last_click_time_{};
-  float scroll_{};
+  gui::ScrollRegion scroll_;
 };
 
 } // namespace mediaserver::editor

@@ -3,6 +3,7 @@
 
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
+#include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
 
@@ -65,17 +66,6 @@ constexpr float inset = 6.0F;
   color.g *= amount;
   color.b *= amount;
   return color;
-}
-
-void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
-            float thickness = 1.0F) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - thickness, bounds.width,
-                thickness, color);
-  draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
-                bounds.height, color);
 }
 
 void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
@@ -1255,8 +1245,8 @@ void draw_node(gui::UiContext &ctx, const NodeBox &node) {
                                 ? scale(ctx.theme().selection, 1.22F)
                                 : scale(ctx.theme().panel, 1.08F);
   ctx.panel(node.bounds, body);
-  border(ctx, node.bounds,
-         node.highlighted ? ctx.theme().accent : ctx.theme().widget_hover);
+  ctx.outline(node.bounds,
+              node.highlighted ? ctx.theme().accent : ctx.theme().widget_hover);
   ctx.panel(gui::Rect{node.bounds.x + 1.0F, node.bounds.y + 1.0F,
                       node.bounds.width - 2.0F, 4.0F},
             node.color);
@@ -1549,33 +1539,13 @@ std::string_view compositor_diagnostic_severity_label(
 
 void draw_compositor_drop_target(gui::UiContext &ctx, const gui::Rect &bounds,
                                  std::string_view item_name) {
-  if (bounds.width <= 0.0F || bounds.height <= compositor_toolbar_height) {
-    return;
-  }
-  const gui::Rect canvas{bounds.x, bounds.y + compositor_toolbar_height,
-                         bounds.width,
-                         bounds.height - compositor_toolbar_height};
+  gui::Rect canvas = bounds;
+  static_cast<void>(gui::cut_top(canvas, compositor_toolbar_height));
   const bool hovered = canvas.contains(ctx.pointer_x(), ctx.pointer_y());
-  const gui::UiColor color =
-      with_alpha(ctx.theme().accent, hovered ? 1.0F : 0.36F);
-  ctx.panel(canvas, with_alpha(ctx.theme().accent, hovered ? 0.10F : 0.025F));
-  border(ctx, canvas, color, hovered ? 2.0F : 1.0F);
-
-  const gui::Rect callout{
-      canvas.x + 9.0F, canvas.y + 9.0F,
-      std::min(std::max(canvas.width - 18.0F, 0.0F), 360.0F), 30.0F};
-  if (callout.width <= 0.0F) {
-    return;
-  }
-  ctx.panel(callout, hovered ? ctx.theme().widget_active : ctx.theme().header);
-  border(ctx, callout, color, hovered ? 2.0F : 1.0F);
-  ctx.panel(gui::Rect{callout.x, callout.y, 3.0F, callout.height}, color);
   std::string label{hovered ? "RELEASE TO ADD NODE  ·  "
                             : "DROP IN NODE GRAPH  ·  "};
   label += item_name.empty() ? "ITEM" : item_name;
-  ctx.label(gui::Rect{callout.x + 10.0F, callout.y,
-                      std::max(callout.width - 14.0F, 0.0F), callout.height},
-            label, hovered ? ctx.theme().text : ctx.theme().text_muted);
+  draw_drop_target(ctx, canvas, label, hovered, 360.0F);
 }
 
 std::string_view output_node_connection_label(
@@ -1853,47 +1823,38 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   // ------------------------------------------------------------- toolbar
-  const gui::Rect toolbar{bounds.x, bounds.y, bounds.width,
-                          scene_toolbar_height};
+  gui::Rect area = bounds;
+  const gui::Rect toolbar = gui::cut_top(area, scene_toolbar_height);
+  const gui::Rect footer = gui::cut_bottom(area, scene_footer_height);
   ctx.panel(toolbar, theme.header);
-  ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
-                      toolbar.width, 1.0F},
-            theme.divider);
+  {
+    gui::Rect rule = toolbar;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+  }
   std::array<char, 32U> count_text{};
   const int count_length = std::snprintf(
       count_text.data(), count_text.size(), "%llu",
       static_cast<unsigned long long>(listed_count));
   const std::string_view count{
       count_text.data(), static_cast<std::size_t>(std::max(count_length, 0))};
-  const float count_width = ctx.font_width(count) + 12.0F;
-  search_field(ctx, mix(id_, "scene.search"),
-               gui::Rect{toolbar.x, toolbar.y + 2.0F,
-                         std::max(toolbar.width - count_width, 0.0F),
-                         toolbar.height - 4.0F},
+  // The search field, and the element count after it.
+  gui::Rect search = toolbar;
+  const gui::Rect count_box =
+      gui::cut_right(search, ctx.font_width(count) + 12.0F);
+  search_field(ctx, mix(id_, "scene.search"), gui::inset(search, 0.0F, 2.0F),
                search_, "Search scene");
-  ctx.label(gui::Rect{toolbar.x + toolbar.width - count_width + 2.0F,
-                      toolbar.y, count_width, toolbar.height},
-            count, theme.text_muted);
-  ctx.tooltip(gui::Rect{toolbar.x + toolbar.width - count_width, toolbar.y,
-                        count_width, toolbar.height},
-              "Elements in this scene");
+  ctx.label(gui::inset(count_box, gui::Padding{2.0F, 0.0F, 0.0F, 0.0F}), count,
+            theme.text_muted);
+  ctx.tooltip(count_box, "Elements in this scene");
 
   // ---------------------------------------------------------------- list
-  const gui::Rect list_bounds{
-      bounds.x, toolbar.y + toolbar.height, bounds.width,
-      std::max(bounds.height - toolbar.height - scene_footer_height, 0.0F)};
+  const gui::Rect list_bounds = area;
   constexpr float row_height = list_metrics::row_height;
   const std::size_t settings_rows = show_settings ? 2U : 0U;
   const float content_height =
       static_cast<float>(settings_rows + rows.size() + surface_rows.size()) *
           row_height +
       (show_settings ? 6.0F : 0.0F);
-  const float maximum_scroll =
-      std::max(content_height - list_bounds.height, 0.0F);
-  if (list_bounds.contains(pointer_x, pointer_y)) {
-    scroll_ -= ctx.wheel() * row_height * 3.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
 
   // Drag state from earlier frames: whether a press has travelled far enough
   // to be a move rather than a click.
@@ -1957,8 +1918,13 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   float drop_line_y{};
   float drop_line_x{};
 
-  ctx.push_clip(list_bounds);
-  float y = list_bounds.y - scroll_;
+  // Rows down the list, scrolled; the settings rows are set off from the
+  // scene's own by a rule.
+  gui::Metrics rows_metrics = theme.metrics;
+  rows_metrics.inset = 0.0F;
+  rows_metrics.gap = 0.0F;
+  gui::FormLayout list{list_bounds, rows_metrics,
+                       scroll_.begin(ctx, list_bounds, row_height * 3.0F)};
   bool pointer_over_content = false;
 
   if (show_settings) {
@@ -1966,7 +1932,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         settings{{{SceneSettingsTarget::Renderer, "Renderer"},
                   {SceneSettingsTarget::Environment, "Environment"}}};
     for (const auto &[target, label] : settings) {
-      const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
+      const gui::Rect row = list.next(row_height, 0.0F);
       const gui::Interaction interaction =
           clipped_grab(ctx, mix(id_, label), row, list_bounds);
       pointer_over_content =
@@ -2010,13 +1976,10 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         next.settings = target;
         request = next;
       }
-      y += row_height;
     }
     // A rule between the scene's settings and the things in it.
-    ctx.panel(gui::Rect{list_bounds.x + 8.0F, y + 2.0F,
-                        std::max(list_bounds.width - 16.0F, 0.0F), 1.0F},
-              theme.divider);
-    y += 6.0F;
+    list.space(2.0F);
+    ctx.panel(gui::inset(list.next(1.0F, 3.0F), 8.0F, 0.0F), theme.divider);
   }
 
   const float tree_x = list_bounds.x + list_metrics::toggle + 4.0F;
@@ -2025,10 +1988,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     const OutlinerRow &entry = rows[index];
     const ElementInfo &element = *entry.element;
-    const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
-    y += row_height;
-    if (row.y + row.height <= list_bounds.y ||
-        row.y >= list_bounds.y + list_bounds.height) {
+    const gui::Rect row = list.next(row_height, 0.0F);
+    if (row.bottom() <= list_bounds.y || row.y >= list_bounds.bottom()) {
       continue;
     }
     const bool row_hovered = !ctx.pointer_blocked() &&
@@ -2038,10 +1999,10 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const float centre_y = row.y + row.height * 0.5F;
     const float depth_x =
         tree_x + static_cast<float>(entry.depth) * list_metrics::indent;
-    const gui::Rect eye_bounds{row.x + 2.0F, row.y, list_metrics::toggle,
-                               row.height};
-    const gui::Rect lock_bounds{row.x + row.width - list_metrics::toggle - 2.0F,
-                                row.y, list_metrics::toggle, row.height};
+    // The eye at the far left, the padlock at the far right.
+    gui::Rect toggles = gui::inset(row, 2.0F, 0.0F);
+    const gui::Rect eye_bounds = gui::cut_left(toggles, list_metrics::toggle);
+    const gui::Rect lock_bounds = gui::cut_right(toggles, list_metrics::toggle);
     const gui::Rect twirl_bounds{depth_x, row.y, list_metrics::twirl_width,
                                  row.height};
     const float icon_x = depth_x + list_metrics::twirl_width + 8.0F;
@@ -2076,8 +2037,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (!is_selected) {
         ctx.panel(row, with_alpha(highlight, 0.2F));
       }
-      ctx.panel(gui::Rect{row.x + row.width - 3.0F, row.y, 3.0F, row.height},
-                highlight);
+      gui::Rect bar = row;
+      ctx.panel(gui::cut_right(bar, 3.0F), highlight);
     }
     if (is_selected) {
       ctx.panel(row, element.node == primary ? scale(theme.selection, 1.2F)
@@ -2228,10 +2189,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // The LED surfaces, after everything the scene holds. A click selects one
   // on Stage, as picking it there does; the padlock is its Feed Mapping lock.
   for (const output::ProjectionSurface *const surface : surface_rows) {
-    const gui::Rect row{list_bounds.x, y, list_bounds.width, row_height};
-    y += row_height;
-    if (row.y + row.height <= list_bounds.y ||
-        row.y >= list_bounds.y + list_bounds.height) {
+    const gui::Rect row = list.next(row_height, 0.0F);
+    if (row.bottom() <= list_bounds.y || row.y >= list_bounds.bottom()) {
       continue;
     }
     const bool row_hovered = !ctx.pointer_blocked() && !dragging_ &&
@@ -2245,8 +2204,8 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else if (row_hovered) {
       ctx.panel(row, with_alpha(theme.widget_hover, 0.7F));
     }
-    const gui::Rect lock_bounds{row.x + row.width - list_metrics::toggle - 2.0F,
-                                row.y, list_metrics::toggle, row.height};
+    gui::Rect toggles = gui::inset(row, 2.0F, 0.0F);
+    const gui::Rect lock_bounds = gui::cut_right(toggles, list_metrics::toggle);
     const float icon_x = tree_x + list_metrics::twirl_width + 8.0F;
     const float name_x = icon_x + 13.0F;
     draw_kind_icon(ctx, ElementKind::Track, scene::LocalLightKind::Point,
@@ -2309,13 +2268,13 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     request = std::move(clear);
   }
   if (rows.empty() && surface_rows.empty()) {
-    ctx.label(gui::Rect{list_bounds.x + 12.0F, y + 4.0F,
-                        std::max(list_bounds.width - 24.0F, 0.0F), row_height},
+    list.space(4.0F);
+    ctx.label(gui::inset(list.next(row_height, 0.0F), 12.0F, 0.0F),
               search_.empty() ? "Nothing in this scene yet - add from Library"
                               : "No matches",
               theme.text_muted);
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, content_height);
 
   // The drop, on release: into a group, or beside a sibling - which is a
   // reorder when the two already share a parent, and a move otherwise.
@@ -2377,11 +2336,11 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   // ------------------------------------------------------------- footer
-  const gui::Rect footer{bounds.x,
-                         bounds.y + bounds.height - scene_footer_height,
-                         bounds.width, scene_footer_height};
   ctx.panel(footer, theme.header);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F}, theme.divider);
+  {
+    gui::Rect rule = footer;
+    ctx.panel(gui::cut_top(rule, 1.0F), theme.divider);
+  }
   const auto primary_element = find(primary);
   const bool can_group =
       !selection.empty() &&
@@ -2396,9 +2355,7 @@ ScenePanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                ? element_display_name(*primary_element)
                                : std::to_string(selection.size()) +
                                      " selected");
-  ctx.label(gui::Rect{footer.x + 10.0F, footer.y,
-                      std::max(footer.width - 20.0F, 0.0F), footer.height},
-            selection_text,
+  ctx.label(gui::inset(footer, 10.0F, 0.0F), selection_text,
             selection.empty() ? theme.text_muted : theme.text);
 
   // ------------------------------------------------------ context menu
@@ -2763,7 +2720,7 @@ void CompositorPanel::draw_wire_drop(gui::UiContext &ctx,
   const float height = ctx.line_height() + 8.0F;
   const gui::Rect badge{drop.x + 12.0F, drop.y + 10.0F, width, height};
   ctx.panel(badge, with_alpha(ctx.theme().background, 0.92F));
-  border(ctx, badge, port_color(ctx, drop.type));
+  ctx.outline(badge, port_color(ctx, drop.type));
   ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
                       badge.height},
             label, ctx.theme().text);
@@ -2931,7 +2888,7 @@ void CompositorPanel::draw_port_drop(gui::UiContext &ctx,
   const gui::Rect badge{drop.x - radius - 10.0F - width,
                         drop.y - height * 0.5F, width, height};
   ctx.panel(badge, with_alpha(ctx.theme().background, 0.92F));
-  border(ctx, badge, color);
+  ctx.outline(badge, color);
   ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
                       badge.height},
             label, ctx.theme().text);
@@ -3472,8 +3429,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               interaction.held ? ctx.theme().widget_active
                                : (interaction.hovered ? ctx.theme().widget_hover
                                                       : ctx.theme().widget));
-    border(ctx, remove_bounds,
-           interaction.hovered ? ctx.theme().warning : ctx.theme().divider);
+    ctx.outline(remove_bounds,
+                interaction.hovered ? ctx.theme().warning : ctx.theme().divider);
     ctx.label(gui::Rect{remove_bounds.x + 7.0F, remove_bounds.y,
                         std::max(remove_bounds.width - 7.0F, 0.0F),
                         remove_bounds.height},
@@ -5319,8 +5276,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         canvas.x + 8.0F, canvas.y + 8.0F,
         std::min(std::max(canvas.width - 16.0F, 0.0F), 660.0F), 28.0F};
     ctx.panel(guide, with_alpha(scale(ctx.theme().header, 0.92F), 0.94F));
-    border(ctx, guide,
-           diagnostic ? with_alpha(ctx.theme().warning, 0.72F)
+    ctx.outline(guide,
+                diagnostic ? with_alpha(ctx.theme().warning, 0.72F)
                       : with_alpha(ctx.theme().accent, 0.42F));
     std::string title;
     if (diagnostic) {
@@ -5354,8 +5311,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           std::min(comment_header, box.height)};
     ctx.panel(title, with_alpha(blend_color(ctx.theme().header, color, 0.35F),
                                 0.92F));
-    border(ctx, box, chosen ? ctx.theme().accent : with_alpha(color, 0.55F),
-           chosen ? 2.0F : 1.0F);
+    ctx.outline(box, chosen ? ctx.theme().accent : with_alpha(color, 0.55F),
+                chosen ? 2.0F : 1.0F);
     static_cast<void>(compositor_label(
         ctx,
         gui::Rect{title.x + 8.0F * zoom_, title.y,
@@ -5642,10 +5599,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                            std::max(1.0F, 2.0F * zoom_),
                         node_header.width, std::max(1.0F, 2.0F * zoom_)},
               with_alpha(kind, 0.85F));
-    border(ctx, visual.bounds,
-           diagnostic ? ctx.theme().warning
+    ctx.outline(visual.bounds,
+                diagnostic ? ctx.theme().warning
                       : (selected ? ctx.theme().accent : ctx.theme().border),
-           selected || diagnostic ? std::max(1.0F, std::min(2.0F, 2.0F * zoom_))
+                selected || diagnostic ? std::max(1.0F, std::min(2.0F, 2.0F * zoom_))
                                   : 1.0F);
 
     const std::string_view title =
@@ -5945,19 +5902,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.panel(gui::Rect{visual.bounds.x, visual.bounds.y + below,
                           visual.bounds.width, visual.bounds.height - below},
                 with_alpha(ctx.theme().background, 0.5F));
-      border(ctx, visual.bounds, with_alpha(compositor_bypass_color, 0.8F),
-             std::max(1.0F, std::min(2.0F, 2.0F * zoom_)));
+      ctx.outline(visual.bounds, with_alpha(compositor_bypass_color, 0.8F),
+                  std::max(1.0F, std::min(2.0F, 2.0F * zoom_)));
     }
     // Brought here from another panel: outlined, fading, for a moment.
     if (visual.node->node == reveal_node_ && ctx.time_seconds() < reveal_until_) {
       const float left = static_cast<float>(reveal_until_ - ctx.time_seconds());
       const float grow = 3.0F;
-      border(ctx,
-             gui::Rect{visual.bounds.x - grow, visual.bounds.y - grow,
+      ctx.outline(gui::Rect{visual.bounds.x - grow, visual.bounds.y - grow,
                        visual.bounds.width + grow * 2.0F,
                        visual.bounds.height + grow * 2.0F},
-             with_alpha(ctx.theme().accent, std::clamp(left / 1.5F, 0.0F, 1.0F)),
-             2.0F);
+                  with_alpha(ctx.theme().accent, std::clamp(left / 1.5F, 0.0F, 1.0F)),
+                  2.0F);
     }
   }
   // An order number being dragged rides on the pointer, over the nodes.
@@ -5983,7 +5939,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const gui::Rect badge{ctx.pointer_x() + 14.0F, ctx.pointer_y() + 10.0F,
                             width, height};
       ctx.panel(badge, with_alpha(ctx.theme().background, 0.94F));
-      border(ctx, badge, ctx.theme().warning);
+      ctx.outline(badge, ctx.theme().warning);
       ctx.label(gui::Rect{badge.x + 8.0F, badge.y, badge.width - 8.0F,
                           badge.height},
                 reason, ctx.theme().warning);
@@ -5995,7 +5951,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          std::abs(ctx.pointer_x() - marquee_->start_x),
                          std::abs(ctx.pointer_y() - marquee_->start_y)};
     ctx.panel(band, with_alpha(ctx.theme().accent, 0.10F));
-    border(ctx, band, with_alpha(ctx.theme().accent, 0.75F));
+    ctx.outline(band, with_alpha(ctx.theme().accent, 0.75F));
   }
   if (minimap.width > 0.0F && minimap_scale > 0.0F) {
     const auto map = [&](float x, float y, float width, float height) {
@@ -6007,8 +5963,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.panel(minimap, with_alpha(ctx.theme().background, 0.92F));
     for (const compositor::GraphComment &comment : compositor_graph.comments) {
       const compositor::GraphComment drawn = drawn_comment(comment);
-      border(ctx, map(drawn.x, drawn.y, drawn.width, drawn.height),
-             with_alpha(comment_color(drawn.color), 0.7F));
+      ctx.outline(map(drawn.x, drawn.y, drawn.width, drawn.height),
+                  with_alpha(comment_color(drawn.color), 0.7F));
     }
     for (const CompositorNodeVisual &visual : nodes) {
       ctx.panel(map((visual.bounds.x - canvas.x - pan_x_) / zoom_,
@@ -6016,11 +5972,10 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     visual.bounds.width / zoom_, visual.bounds.height / zoom_),
                 with_alpha(compositor_node_color(ctx, visual.node->kind), 0.8F));
     }
-    border(ctx,
-           map(-pan_x_ / zoom_, -pan_y_ / zoom_, canvas.width / zoom_,
+    ctx.outline(map(-pan_x_ / zoom_, -pan_y_ / zoom_, canvas.width / zoom_,
                canvas.height / zoom_),
-           ctx.theme().text);
-    border(ctx, minimap, ctx.theme().border);
+                ctx.theme().text);
+    ctx.outline(minimap, ctx.theme().border);
   }
   if (ctx.time_seconds() < notice_until_ && !notice_.empty()) {
     const float width = std::ceil(ctx.font_width(notice_)) + 20.0F;
@@ -6029,7 +5984,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           canvas.y + canvas.height - height - 10.0F, width,
                           height};
     ctx.panel(badge, with_alpha(ctx.theme().background, 0.94F));
-    border(ctx, badge, ctx.theme().border);
+    ctx.outline(badge, ctx.theme().border);
     ctx.label(gui::Rect{badge.x + 10.0F, badge.y, badge.width - 10.0F,
                         badge.height},
               notice_, ctx.theme().text);
@@ -6040,37 +5995,35 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       parameter_bounds.height > 0.0F) {
     ctx.push_clip(parameter_bounds);
     ctx.panel(parameter_bounds, scale(ctx.theme().panel, 0.98F));
-    border(ctx, parameter_bounds, ctx.theme().divider);
-    ctx.panel(gui::Rect{parameter_bounds.x, parameter_bounds.y,
-                        parameter_bounds.width, 3.0F},
-              compositor_node_color(ctx, parameter_node->kind));
+    ctx.outline(parameter_bounds, ctx.theme().divider);
+    {
+      gui::Rect stripe = parameter_bounds;
+      ctx.panel(gui::cut_top(stripe, 3.0F),
+                compositor_node_color(ctx, parameter_node->kind));
+    }
     // The heading's lines are as tall as the font says, never clipped.
     const float heading_height = ctx.line_height();
     const float subheading_height =
         compositor_text_height(ctx, compositor_detail_text);
     const float header_height =
         std::max(32.0F, std::ceil(3.0F + heading_height + subheading_height));
-    ctx.label(gui::Rect{parameter_bounds.x + 8.0F, parameter_bounds.y + 2.0F,
-                        std::max(parameter_bounds.width - 16.0F, 0.0F),
-                        heading_height},
-              "PARAMETERS", ctx.theme().text);
+    gui::Rect heading =
+        gui::inset(parameter_bounds, gui::Padding{8.0F, 2.0F, 8.0F, 0.0F});
+    ctx.label(gui::cut_top(heading, heading_height), "PARAMETERS",
+              ctx.theme().text);
     static_cast<void>(compositor_label(
-        ctx,
-        gui::Rect{parameter_bounds.x + 8.0F,
-                  parameter_bounds.y + 2.0F + heading_height,
-                  std::max(parameter_bounds.width - 16.0F, 0.0F),
-                  subheading_height},
+        ctx, gui::cut_top(heading, subheading_height),
         compositor::node_kind_name(parameter_node->kind), ctx.theme().text_muted,
         compositor_detail_text, 1.0F));
     // Bypass is a node's own switch, beside its name.
     if (compositor::node_kind_bypassable(parameter_node->kind)) {
       const bool off = bypassed(*parameter_node);
       const std::string_view caption = off ? "BYPASSED" : "BYPASS";
-      const float bypass_width = std::ceil(ctx.font_width(caption)) + 16.0F;
-      const gui::Rect button{
-          parameter_bounds.x + parameter_bounds.width - 8.0F - bypass_width,
-          parameter_bounds.y + 5.0F, bypass_width,
-          std::max(header_height - 10.0F, 18.0F)};
+      gui::Rect corner =
+          gui::inset(parameter_bounds, gui::Padding{0.0F, 5.0F, 8.0F, 0.0F});
+      gui::Rect button =
+          gui::cut_right(corner, std::ceil(ctx.font_width(caption)) + 16.0F);
+      button.height = std::max(header_height - 10.0F, 18.0F);
       const gui::Interaction pressed = ctx.grab(
           mix(id_, "compositor.parameters.bypass"), button);
       if (pressed.clicked) {
@@ -6082,8 +6035,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.panel(button, off ? with_alpha(compositor_bypass_color, 0.85F)
                             : (pressed.hovered ? ctx.theme().widget_hover
                                                : ctx.theme().widget));
-      ctx.label(gui::Rect{button.x + 8.0F, button.y, button.width - 8.0F,
-                          button.height},
+      ctx.label(gui::inset(button, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F}),
                 caption, off ? ctx.theme().background : ctx.theme().text);
       ctx.tooltip(button, "Pass this node through as if it did nothing (D)");
     }
@@ -6094,10 +6046,8 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     constexpr float row_height = 22.0F;
     constexpr float row_stride = 26.0F;
     constexpr float scrollbar_width = 8.0F;
-    const gui::Rect parameter_body{
-        parameter_bounds.x, parameter_bounds.y + header_height,
-        parameter_bounds.width,
-        std::max(parameter_bounds.height - header_height, 0.0F)};
+    gui::Rect parameter_body = parameter_bounds;
+    static_cast<void>(gui::cut_top(parameter_body, header_height));
     const float maximum_scroll =
         std::max(parameter_content_height_ - parameter_body.height, 0.0F);
     const bool scrollable = maximum_scroll > 0.0F;
@@ -6105,13 +6055,19 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       parameter_scroll_ -= ctx.wheel() * row_stride * 2.0F;
     }
     parameter_scroll_ = std::clamp(parameter_scroll_, 0.0F, maximum_scroll);
-    const float content_x = parameter_body.x + 8.0F;
-    const float content_width =
-        std::max(parameter_body.width - 16.0F -
-                     (scrollable ? scrollbar_width : 0.0F),
-                 0.0F);
-    const float content_top = parameter_body.y + 4.0F;
-    float parameter_y = content_top - parameter_scroll_;
+    // Rows 8px in from the sides - and clear of the scroll bar while it
+    // shows - starting 4px under the heading.
+    gui::Metrics row_metrics = ctx.theme().metrics;
+    row_metrics.inset = 8.0F;
+    row_metrics.gap = 4.0F;
+    row_metrics.control = row_height;
+    row_metrics.row_gap = row_stride - row_height;
+    gui::FormLayout rows{
+        gui::inset(parameter_body,
+                   gui::Padding{0.0F, 0.0F,
+                                scrollable ? scrollbar_width : 0.0F, 0.0F}),
+        row_metrics, parameter_scroll_};
+    const float content_width = rows.width();
 
     // The label column fits this node's longest label. When the panel is
     // too narrow for that and a usable field, each label sits above its
@@ -6131,26 +6087,18 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // One labelled field row; returns where the field goes.
     const auto next_field = [&](std::string_view label) {
       if (stacked_labels) {
-        ctx.label(gui::Rect{content_x, parameter_y, content_width,
-                            stacked_label_height},
-                  label, ctx.theme().text_muted);
-        parameter_y += stacked_label_height;
-      }
-      const gui::Rect row{content_x, parameter_y, content_width, row_height};
-      parameter_y += row_stride;
-      if (!stacked_labels) {
-        ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
+        ctx.label(rows.next(stacked_label_height, 0.0F), label,
                   ctx.theme().text_muted);
       }
-      return gui::Rect{row.x + label_width, row.y,
-                       std::max(row.width - label_width, 0.0F), row.height};
+      gui::Rect field = rows.control();
+      const gui::Rect label_cell = gui::cut_left(field, label_width);
+      if (!stacked_labels) {
+        ctx.label(label_cell, label, ctx.theme().text_muted);
+      }
+      return field;
     };
     // A row spanning the panel, for buttons and notes.
-    const auto full_row = [&]() {
-      const gui::Rect row{content_x, parameter_y, content_width, row_height};
-      parameter_y += row_stride;
-      return row;
-    };
+    const auto full_row = [&]() { return rows.control(); };
     // A collapsible heading; true while its fields are shown.
     const auto section = [&](std::string_view title, core::u32 bit) {
       const gui::Rect row = full_row();
@@ -6642,7 +6590,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.panel(swatch, gui::UiColor{parameters->key_color.x,
                                      parameters->key_color.y,
                                      parameters->key_color.z, 1.0F});
-      border(ctx, swatch, ctx.theme().border);
+      ctx.outline(swatch, ctx.theme().border);
       scalar_field("KEY RED", CompositorProperty::ChromaKeyRed,
                    parameters->key_color.x, 0.005, 0.0F, 1.0F, 3);
       scalar_field("KEY GREEN", CompositorProperty::ChromaKeyGreen,
@@ -6942,7 +6890,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             const gui::Rect swatch = next_field(title);
             ctx.panel(swatch,
                       gui::UiColor{colour.r, colour.g, colour.b, 1.0F});
-            border(ctx, swatch, ctx.theme().border);
+            ctx.outline(swatch, ctx.theme().border);
             scalar_field("RED", properties[0U], colour.r, 0.005, 0.0F, 1.0F,
                          3);
             scalar_field("GREEN", properties[1U], colour.g, 0.005, 0.0F, 1.0F,
@@ -7003,15 +6951,13 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       break;
     }
     ctx.pop_clip();
-    parameter_content_height_ =
-        parameter_y + parameter_scroll_ - parameter_body.y + 4.0F;
+    parameter_content_height_ = rows.extent();
 
     // A draggable thumb shows where the visible rows sit in the whole list.
     if (scrollable && parameter_body.height > 0.0F) {
-      const gui::Rect track{
-          parameter_body.x + parameter_body.width - scrollbar_width - 2.0F,
-          parameter_body.y + 2.0F, scrollbar_width,
-          std::max(parameter_body.height - 4.0F, 0.0F)};
+      gui::Rect track =
+          gui::inset(parameter_body, gui::Padding{0.0F, 2.0F, 2.0F, 2.0F});
+      track = gui::cut_right(track, scrollbar_width);
       const float thumb_height = std::max(
           24.0F, track.height * parameter_body.height /
                      std::max(parameter_content_height_, 1.0F));
@@ -7046,7 +6992,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (add_menu_open_) {
     ctx.push_clip(palette_bounds);
     ctx.panel(palette_bounds, scale(ctx.theme().panel, 1.04F));
-    border(ctx, palette_bounds, ctx.theme().widget_hover);
+    ctx.outline(palette_bounds, ctx.theme().widget_hover);
     const gui::Rect palette_search{palette_bounds.x + 4.0F,
                                    palette_bounds.y + 4.0F,
                                    std::max(palette_bounds.width - 8.0F, 0.0F),
@@ -7199,7 +7145,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (node_menu_.has_value()) {
       ctx.push_clip(menu_bounds);
       ctx.panel(menu_bounds, scale(ctx.theme().panel, 1.04F));
-      border(ctx, menu_bounds, ctx.theme().widget_hover);
+      ctx.outline(menu_bounds, ctx.theme().widget_hover);
       const std::string placeholder =
           node_menu_->from.has_value()
               ? std::string{"Add a node taking "} +
@@ -7292,7 +7238,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else {
       ctx.push_clip(context_bounds);
       ctx.panel(context_bounds, scale(ctx.theme().panel, 1.04F));
-      border(ctx, context_bounds, ctx.theme().widget_hover);
+      ctx.outline(context_bounds, ctx.theme().widget_hover);
       float row_y = context_bounds.y + 4.0F;
       for (std::size_t index = 0U; index < context_items.size(); ++index) {
         const ContextItem &entry = context_items[index];
@@ -7469,7 +7415,7 @@ CompositorPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.push_clip(canvas);
       ctx.panel(*field, ctx.theme().background);
       static_cast<void>(ctx.text_field(rename_id, *field, rename_->text));
-      border(ctx, *field, ctx.theme().accent);
+      ctx.outline(*field, ctx.theme().accent);
       ctx.pop_clip();
       if (commit) {
         frame.rename = CompositorRenameIntent{rename_->node, rename_->text};
@@ -7730,23 +7676,63 @@ struct PreferencesField final {
   return fields;
 }
 
-constexpr float preferences_card_width = 620.0F;
+constexpr float modal_card_width = 620.0F;
 // The category tabs keep each focused pane compact enough to keep the project
-// dialog readable without hiding Apply/Cancel below a long settings form.
-// Tall enough for the longest category - Renderer with every optional row
-// shown plus the two lines reporting what ran - without clipping. A card taller
-// than the window is cut to the window.
+// dialog readable without hiding Apply/Cancel below a long settings form. A
+// card taller than the window is cut to the window, and its pane scrolls.
 constexpr float project_settings_card_height = 700.0F;
 constexpr float preferences_card_height = 780.0F;
 
-[[nodiscard]] gui::Rect
-preferences_card(const gui::Rect &bounds,
-                 float height = project_settings_card_height) {
-  const float x =
-      bounds.x + std::max((bounds.width - preferences_card_width) * 0.5F, 0.0F);
-  const float y = bounds.y + std::max((bounds.height - height) * 0.5F, 0.0F);
-  return gui::Rect{std::floor(x), std::floor(y), preferences_card_width,
-                   height};
+// The chrome both settings dialogs share: the workspace dimmed behind a card,
+// a titled header, and a footer strip the buttons are cut from. begin_modal()
+// pushes the card's clip and end_modal() pops it.
+struct ModalCard final {
+  gui::Rect card;
+  // Between the header and the footer.
+  gui::Rect body;
+  gui::Rect footer;
+};
+
+[[nodiscard]] ModalCard begin_modal(gui::UiContext &ctx,
+                                    const gui::Rect &bounds, float height,
+                                    std::string_view title) {
+  const gui::Metrics &m = ctx.theme().metrics;
+  height = std::min(height, bounds.height);
+  const gui::Rect centre = gui::centered(bounds, modal_card_width, height);
+  ModalCard modal{};
+  modal.card = gui::Rect{std::floor(std::max(centre.x, bounds.x)),
+                         std::floor(std::max(centre.y, bounds.y)),
+                         modal_card_width, height};
+
+  // Dim the workspace. This is the drawing half only; the scrim's hit test is
+  // registered by end_modal(), because a full-screen grab placed here would
+  // claim the pointer before any control in the card could.
+  ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
+  ctx.panel(modal.card, ctx.theme().background);
+  ctx.outline(modal.card, ctx.theme().divider);
+  ctx.push_clip(modal.card);
+
+  modal.body = modal.card;
+  gui::Rect header = gui::cut_top(modal.body, m.header);
+  ctx.panel(header, ctx.theme().header);
+  ctx.label(gui::inset(header, m.inset, 0.0F), title, ctx.theme().text);
+  ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
+  modal.footer =
+      gui::inset(gui::cut_bottom(modal.body, m.control + m.row_gap * 2.0F),
+                 m.inset, m.row_gap);
+  return modal;
+}
+
+// Pops the card's clip, then registers the scrim - last, so it only catches
+// presses no control in the card wanted. A click on the card's own background
+// lands here too and deliberately does nothing; only a click outside
+// dismisses.
+[[nodiscard]] bool end_modal(gui::UiContext &ctx, gui::UiId scrim_id,
+                             const gui::Rect &bounds, const ModalCard &modal) {
+  ctx.pop_clip();
+  const gui::Interaction scrim = ctx.grab(scrim_id, bounds);
+  return scrim.clicked &&
+         !modal.card.contains(ctx.pointer_x(), ctx.pointer_y());
 }
 
 [[nodiscard]] bool preferences_button(gui::UiContext &ctx, gui::UiId id,
@@ -7760,12 +7746,9 @@ preferences_card(const gui::Rect &bounds,
                                       : (it.hovered ? ctx.theme().widget_hover
                                                     : ctx.theme().widget));
   ctx.panel(bounds, body);
-  border(ctx, bounds, enabled ? ctx.theme().header : ctx.theme().divider);
-  const float text_width = ctx.font_width(label);
-  ctx.label(
-      gui::Rect{bounds.x + std::max((bounds.width - text_width) * 0.5F, 2.0F),
-                bounds.y, bounds.width, bounds.height},
-      label, enabled ? ctx.theme().text : ctx.theme().text_muted);
+  ctx.outline(bounds, enabled ? ctx.theme().header : ctx.theme().divider);
+  ctx.label_centered(bounds, label,
+                     enabled ? ctx.theme().text : ctx.theme().text_muted);
   return enabled && it.clicked;
 }
 
@@ -7867,6 +7850,7 @@ void ProjectSettingsPanel::open(
           ? std::optional<scene::LensProfile>{scene::clamped(*lens_profile)}
           : std::nullopt;
   category_ = Category::Tracking;
+  scroll_.reset();
   open_ = true;
 }
 
@@ -7877,125 +7861,87 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (!open_) {
     return result;
   }
-  const gui::Rect card = preferences_card(
-      bounds, std::min(project_settings_card_height, bounds.height));
-  const float buttons_y = card.y + card.height - 38.0F;
-  ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
-  ctx.panel(card, ctx.theme().background);
-  border(ctx, card, ctx.theme().divider);
-  ctx.push_clip(card);
+  const gui::Metrics &m = ctx.theme().metrics;
+  const ModalCard modal = begin_modal(
+      ctx, bounds, project_settings_card_height, "PROJECT SETTINGS");
 
-  const gui::Rect header{card.x, card.y, card.width, 34.0F};
-  ctx.panel(header, ctx.theme().header);
-  ctx.label(gui::Rect{header.x + 14.0F, header.y, header.width - 14.0F,
-                      header.height},
-            "PROJECT SETTINGS", ctx.theme().text);
-  ctx.panel(
-      gui::Rect{card.x, header.y + header.height - 1.0F, card.width, 1.0F},
-      ctx.theme().divider);
-  ctx.label(gui::Rect{card.x + 14.0F, header.y + header.height + 6.0F,
-                      card.width - 28.0F, 18.0F},
+  // The intro and the category tabs stay put; only the category's pane
+  // scrolls.
+  gui::Rect body = modal.body;
+  gui::FormLayout top{body, m};
+  ctx.label(top.caption(),
             "Saved in the project. Applies to every scene and every node.",
             ctx.theme().text_muted);
-
   // A focused category is much quicker to audit in a dark control room than a
   // very tall scrolling form. Keep each tab visible and leave Apply/Cancel
   // fixed at the bottom of the modal.
-  constexpr float tab_height = 24.0F;
-  constexpr float tab_gap = 6.0F;
-  const float tabs_y = header.y + header.height + 30.0F;
+  const gui::Rect tabs = top.control();
+  static_cast<void>(gui::cut_top(body, top.extent()));
+  ctx.panel(gui::inset(gui::cut_top(body, m.divider), m.inset, 0.0F),
+            ctx.theme().divider);
+
   // Tracking setup and lens calibration share the modal; scene controls live
   // in the Inspector.
-  constexpr float category_count = 2.0F;
-  const float tab_width =
-      (card.width - 28.0F - tab_gap * (category_count - 1.0F))
-      / category_count;
+  constexpr std::size_t category_count = 2U;
   const auto tab = [&](Category category, std::string_view id,
                        std::string_view label, std::size_t index) {
-    const gui::Rect tab_bounds{
-        card.x + 14.0F + static_cast<float>(index) * (tab_width + tab_gap),
-        tabs_y, tab_width, tab_height};
+    const gui::Rect tab_bounds =
+        gui::column(tabs, index, category_count, m.gap);
     const bool selected = category_ == category;
     const gui::Interaction interaction = ctx.grab(mix(id_, id), tab_bounds);
-    const gui::UiColor body =
+    const gui::UiColor fill =
         selected ? ctx.theme().selection
                  : (interaction.held && !interaction.released
                         ? ctx.theme().widget_active
                         : (interaction.hovered ? ctx.theme().widget_hover
                                                : ctx.theme().widget));
-    ctx.panel(tab_bounds, body);
-    border(ctx, tab_bounds,
-           selected ? ctx.theme().accent : ctx.theme().divider);
-    const float text_width = ctx.font_width(label);
-    ctx.label(
-        gui::Rect{tab_bounds.x +
-                      std::max((tab_bounds.width - text_width) * 0.5F, 2.0F),
-                  tab_bounds.y, tab_bounds.width, tab_bounds.height},
-        label, selected ? ctx.theme().text : ctx.theme().text_muted);
+    ctx.panel(tab_bounds, fill);
+    ctx.outline(tab_bounds,
+                selected ? ctx.theme().accent : ctx.theme().divider);
+    ctx.label_centered(tab_bounds, label,
+                       selected ? ctx.theme().text : ctx.theme().text_muted);
     if (interaction.clicked && !selected) {
       // A numeric field can own the keyboard while it is being typed. Its
       // pane is disappearing, so explicitly give that focus back first.
       tracking_fields_.cancel(ctx);
       category_ = category;
+      scroll_.reset();
     }
   };
   tab(Category::Tracking, "project.tab.tracking", "TRACKING", 0U);
   tab(Category::Lens, "project.tab.lens", "LENS", 1U);
-  ctx.panel(gui::Rect{card.x + 14.0F, tabs_y + tab_height + 7.0F,
-                      card.width - 28.0F, 1.0F},
-            ctx.theme().divider);
 
-  const gui::Rect content_bounds{
-      card.x, tabs_y + tab_height + 8.0F, card.width,
-      std::max(buttons_y - 8.0F - (tabs_y + tab_height + 8.0F), 0.0F)};
-  ctx.push_clip(content_bounds);
-
-  constexpr float label_width = 150.0F;
-  constexpr float row_pitch = 44.0F;
-  float y = content_bounds.y;
-  const auto section = [&](std::string_view title) {
-    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 18.0F}, title,
-              ctx.theme().accent);
-    y += 22.0F;
-  };
+  gui::FormLayout form{body, m, scroll_.begin(ctx, body)};
 
   if (category_ == Category::Tracking) {
-    section("INNER FRUSTUM");
+    ctx.label(form.heading(), "INNER FRUSTUM", ctx.theme().accent);
     static_cast<void>(ctx.checkbox(
-        mix(id_, "icvfx.enabled"),
-        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
+        mix(id_, "icvfx.enabled"), form.control(),
         renderer_draft_.icvfx.inner_frustum,
         "Draw tracked cameras' plates on the wall"));
-    y += 34.0F;
 
     const auto unsigned_row = [&](std::string_view label, std::string_view id,
                                   core::u32 &value, core::u32 maximum,
                                   std::string_view note) {
-      ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, label,
-                ctx.theme().text);
-      const gui::Rect field{card.x + 14.0F + label_width, y,
-                            card.width - 28.0F - label_width, 22.0F};
+      const gui::FormRow row = form.row();
+      ctx.label(row.label, label, ctx.theme().text);
       double edited{};
-      if (tracking_fields_.draw(ctx, mix(id_, id), field, "",
+      if (tracking_fields_.draw(ctx, mix(id_, id), row.field, "",
                                 static_cast<double>(value), 1.0, edited, 0) &&
           std::isfinite(edited)) {
         const double bounded =
             std::clamp(edited, 0.0, static_cast<double>(maximum));
         value = static_cast<core::u32>(std::llround(bounded));
       }
-      ctx.label(gui::Rect{field.x, y + 21.0F, field.width, 16.0F}, note,
-                ctx.theme().text_muted);
-      y += row_pitch;
+      ctx.label(form.note(), note, ctx.theme().text_muted);
     };
     unsigned_row("Latency", "icvfx.latency",
                  renderer_draft_.icvfx.latency_frames,
                  scene::max_icvfx_latency_frames,
                  "Control frames ahead; prediction estimates the pose at this stamp.");
-    static_cast<void>(ctx.checkbox(mix(id_, "icvfx.predict"),
-        gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 24.0F},
-        renderer_draft_.icvfx.pose_prediction,
-        "Predict camera motion on the Director"));
-    y += 30.0F;
+    static_cast<void>(ctx.checkbox(mix(id_, "icvfx.predict"), form.control(),
+                                   renderer_draft_.icvfx.pose_prediction,
+                                   "Predict camera motion on the Director"));
     unsigned_row("Fit samples", "icvfx.prediction-window",
                  renderer_draft_.icvfx.prediction_window,
                  scene::max_pose_prediction_window,
@@ -8006,8 +7952,8 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  renderer_draft_.icvfx.jitter_filter_percent, 100U,
                  "0 keeps raw motion; 100 uses the fitted pose. See Live Data errors.");
 
-    y += 4.0F;
-    section("NEW CAMERA DEFAULTS");
+    static_cast<void>(gui::draw_form_section(
+        ctx, form, "NEW CAMERA DEFAULTS", ctx.theme().accent));
     unsigned_row("Margin", "icvfx.margin",
                  renderer_draft_.icvfx.camera_defaults.margin_px,
                  scene::max_icvfx_margin_px,
@@ -8024,67 +7970,65 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                  renderer_draft_.icvfx.camera_defaults.resolution_denominator,
                  scene::max_icvfx_resolution_scale,
                  "Plate resolution denominator. Equal values render 1:1.");
-    ctx.label(gui::Rect{card.x + 14.0F, y, card.width - 28.0F, 16.0F},
+    ctx.label(form.caption(),
               "A camera keeps its own values once added; edit them in the "
               "Inspector.",
               ctx.theme().text_muted);
-    y += 20.0F;
   }
 
   // Lens controls deliberately author only calibration. Zoom/focus/iris are
   // sampled controls carried beside the tracked pose, so making them sliders in
   // this dialog would tempt an operator to put live frame state in the project.
   if (category_ == Category::Lens) {
-    section("LENS CALIBRATION");
+    ctx.label(form.heading(), "LENS CALIBRATION", ctx.theme().accent);
     const bool camera_available = state.camera_node != doc::NodeId{};
     const bool lens_enabled = lens_draft_.has_value();
-    ctx.label(gui::Rect{card.x + 14.0F, y, label_width, 22.0F}, "Projection",
+    constexpr float lens_choice_width = 116.0F;
+    const gui::FormRow projection = form.row();
+    ctx.label(projection.label, "Projection",
               camera_available ? ctx.theme().text : ctx.theme().text_muted);
-    const float lens_x = card.x + 14.0F + label_width;
+    gui::Rect choices = projection.field;
     if (preferences_button(ctx, mix(id_, "lens.calibrated"),
-                           gui::Rect{lens_x, y, 116.0F, 22.0F}, "CALIBRATED",
-                           camera_available && !lens_enabled)) {
+                           gui::cut_left(choices, lens_choice_width),
+                           "CALIBRATED", camera_available && !lens_enabled)) {
       lens_draft_ = scene::LensProfile{};
     }
+    static_cast<void>(gui::cut_left(choices, m.gap));
     if (preferences_button(ctx, mix(id_, "lens.legacy"),
-                           gui::Rect{lens_x + 124.0F, y, 116.0F, 22.0F},
+                           gui::cut_left(choices, lens_choice_width),
                            "LEGACY FOV", camera_available && lens_enabled)) {
       lens_draft_.reset();
     }
-    ctx.label(
-        gui::Rect{lens_x, y + 21.0F, card.width - 28.0F - label_width, 16.0F},
-        camera_available
-            ? "Sensor and distortion are calibration; live encoders are status."
-            : "No active stage camera is available for lens calibration.",
-        ctx.theme().text_muted);
-    y += row_pitch;
+    ctx.label(form.note(),
+              camera_available
+                  ? "Sensor and distortion are calibration; live encoders are status."
+                  : "No active stage camera is available for lens calibration.",
+              ctx.theme().text_muted);
 
     if (lens_draft_.has_value()) {
       scene::LensProfile &lens = *lens_draft_;
-      constexpr float lens_gap = 10.0F;
+      // Two scalars a row, each a label, a slider and its value; the columns
+      // are a card margin apart.
       constexpr float lens_label_width = 66.0F;
       constexpr float lens_value_width = 48.0F;
-      constexpr float lens_row_pitch = 26.0F;
-      const float lens_column_width = (card.width - 28.0F - lens_gap) * 0.5F;
-      const auto lens_scalar = [&](std::string_view label, float &value,
-                                   float minimum, float maximum,
-                                   const char *format, float x) {
-        ctx.label(gui::Rect{x, y, lens_label_width, 18.0F}, label,
+      constexpr float lens_track_height = 18.0F;
+      const auto lens_scalar = [&](gui::Rect cell, std::string_view label,
+                                   float &value, float minimum, float maximum,
+                                   const char *format) {
+        ctx.label(gui::cut_left(cell, lens_label_width), label,
                   ctx.theme().text);
-        const gui::Rect track{x + lens_label_width + 2.0F, y,
-                              lens_column_width - lens_label_width -
-                                  lens_value_width - 6.0F,
-                              18.0F};
-        static_cast<void>(
-            ctx.slider(mix(id_, label), track, value, minimum, maximum));
+        const gui::Rect shown = gui::cut_right(cell, lens_value_width);
+        static_cast<void>(gui::cut_right(cell, m.gap));
+        static_cast<void>(ctx.slider(
+            mix(id_, label), gui::centered(cell, cell.width, lens_track_height),
+            value, minimum, maximum));
         std::array<char, 24U> text{};
         const int length = std::snprintf(text.data(), text.size(), format,
                                          static_cast<double>(value));
-        ctx.label(
-            gui::Rect{track.x + track.width + 4.0F, y, lens_value_width, 18.0F},
-            std::string_view{text.data(),
-                             static_cast<std::size_t>(std::max(length, 0))},
-            ctx.theme().keyframe);
+        ctx.label(shown,
+                  std::string_view{text.data(),
+                                   static_cast<std::size_t>(std::max(length, 0))},
+                  ctx.theme().keyframe);
       };
       const auto lens_row = [&](std::string_view left_label, float &left_value,
                                 float left_minimum, float left_maximum,
@@ -8092,12 +8036,11 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                 std::string_view right_label,
                                 float &right_value, float right_minimum,
                                 float right_maximum, const char *right_format) {
-        lens_scalar(left_label, left_value, left_minimum, left_maximum,
-                    left_format, card.x + 14.0F);
-        lens_scalar(right_label, right_value, right_minimum, right_maximum,
-                    right_format,
-                    card.x + 14.0F + lens_column_width + lens_gap);
-        y += lens_row_pitch;
+        const gui::Rect strip = form.control();
+        lens_scalar(gui::column(strip, 0U, 2U, m.inset), left_label,
+                    left_value, left_minimum, left_maximum, left_format);
+        lens_scalar(gui::column(strip, 1U, 2U, m.inset), right_label,
+                    right_value, right_minimum, right_maximum, right_format);
       };
       lens_row("Sensor W", lens.sensor_width_mm,
                scene::min_lens_sensor_extent_mm,
@@ -8118,23 +8061,22 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                scene::max_lens_distortion_coefficient, "%.3f", "P1",
                lens.distortion.p1, -scene::max_lens_distortion_coefficient,
                scene::max_lens_distortion_coefficient, "%.3f");
-      lens_scalar(
-          "P2", lens.distortion.p2, -scene::max_lens_distortion_coefficient,
-          scene::max_lens_distortion_coefficient, "%.3f", card.x + 14.0F);
+      const gui::Rect last = form.control();
+      lens_scalar(gui::column(last, 0U, 2U, m.inset), "P2", lens.distortion.p2,
+                  -scene::max_lens_distortion_coefficient,
+                  scene::max_lens_distortion_coefficient, "%.3f");
       std::array<char, 48U> calibration_text{};
       const int calibration_length =
           std::snprintf(calibration_text.data(), calibration_text.size(),
                         "Imported table: %u points", lens.calibration_count);
-      ctx.label(gui::Rect{card.x + 14.0F + lens_column_width + lens_gap, y,
-                          lens_column_width, 18.0F},
+      ctx.label(gui::column(last, 1U, 2U, m.inset),
                 std::string_view{
                     calibration_text.data(),
                     static_cast<std::size_t>(std::max(calibration_length, 0))},
                 ctx.theme().text_muted);
-      y += lens_row_pitch;
     }
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, form.extent());
 
   draft_ = scene::clamped(draft_);
   renderer_draft_ = scene::clamped(renderer_draft_);
@@ -8146,25 +8088,21 @@ ProjectSettingsPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                        renderer_draft_ != state.renderer ||
                        environment_draft_ != state.environment ||
                        lens_draft_ != state.lens_profile;
+  gui::Rect buttons = modal.footer;
+  const gui::Rect defaults_button = gui::cut_left(buttons, m.button_width);
+  const gui::Rect apply_button = gui::cut_right(buttons, m.button_width);
+  static_cast<void>(gui::cut_right(buttons, m.gap));
+  const gui::Rect cancel_button = gui::cut_right(buttons, m.button_width);
   const bool reset = preferences_button(
-      ctx, mix(id_, "project.reset"),
-      gui::Rect{card.x + 14.0F, buttons_y, 84.0F, 26.0F}, "DEFAULTS",
+      ctx, mix(id_, "project.reset"), defaults_button, "DEFAULTS",
       renderer_draft_.icvfx != scene::IcvfxSettings{} ||
           lens_draft_.has_value());
   const bool cancelled = preferences_button(
-      ctx, mix(id_, "project.cancel"),
-      gui::Rect{card.x + card.width - 190.0F, buttons_y, 84.0F, 26.0F},
-      "CANCEL", true);
-  const bool applied = preferences_button(
-      ctx, mix(id_, "project.apply"),
-      gui::Rect{card.x + card.width - 98.0F, buttons_y, 84.0F, 26.0F}, "APPLY",
-      changed);
-  ctx.pop_clip();
-
-  // Registered last, so it catches only presses no control in the card wanted.
-  const gui::Interaction scrim = ctx.grab(mix(id_, "project.scrim"), bounds);
+      ctx, mix(id_, "project.cancel"), cancel_button, "CANCEL", true);
+  const bool applied = preferences_button(ctx, mix(id_, "project.apply"),
+                                          apply_button, "APPLY", changed);
   const bool dismissed =
-      scrim.clicked && !card.contains(ctx.pointer_x(), ctx.pointer_y());
+      end_modal(ctx, mix(id_, "project.scrim"), bounds, modal);
 
   if (reset) {
     tracking_fields_.cancel(ctx);
@@ -8191,25 +8129,8 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     return result;
   }
   const gui::Metrics &m = ctx.theme().metrics;
-  const gui::Rect card = preferences_card(
-      bounds, std::min(preferences_card_height, bounds.height));
-
-  // Dim the workspace. This is the drawing half only; the scrim's hit test is
-  // registered at the end of this function, because a full-screen grab placed
-  // here would claim the pointer before any control in the card could.
-  ctx.panel(bounds, gui::UiColor{0.0F, 0.0F, 0.0F, 0.55F});
-  ctx.panel(card, ctx.theme().background);
-  border(ctx, card, ctx.theme().divider);
-  ctx.push_clip(card);
-
-  gui::Rect body = card;
-  gui::Rect header = gui::cut_top(body, m.header);
-  ctx.panel(header, ctx.theme().header);
-  ctx.label(gui::inset(header, m.inset, 0.0F), "PREFERENCES", ctx.theme().text);
-  ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
-  const gui::Rect footer =
-      gui::inset(gui::cut_bottom(body, m.control + m.row_gap * 2.0F), m.inset,
-                 m.row_gap);
+  const ModalCard modal =
+      begin_modal(ctx, bounds, preferences_card_height, "PREFERENCES");
 
   // An empty field shows what belongs in it, until it has the keyboard.
   const auto hint = [&](gui::UiId id, const gui::Rect &field,
@@ -8218,13 +8139,8 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       ctx.label(gui::inset(field, m.gap, 0.0F), text, ctx.theme().text_muted);
     }
   };
-  // A note under a field lines up with the field, not the label.
-  const auto field_note = [&](gui::Rect line) {
-    static_cast<void>(gui::cut_left(line, m.label_column));
-    return line;
-  };
 
-  gui::FormLayout form{body, m, scroll_.begin(ctx, body)};
+  gui::FormLayout form{modal.body, m, scroll_.begin(ctx, modal.body)};
   ctx.label(form.caption(),
             "This machine only. Never saved in a project or sent to a node.",
             ctx.theme().text_muted);
@@ -8240,7 +8156,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
     // stored: without it, an argument-driven launch looks like the settings
     // are being ignored at random. The line is kept either way, so a field
     // gaining an override does not push the rest of the form down.
-    const gui::Rect note = field_note(form.caption());
+    const gui::Rect note = form.note();
     if (state.*(field.overridden)) {
       std::string text{"in use this run: "};
       text.append(state.active.*(field.value));
@@ -8281,7 +8197,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
               "window. Applies when saved."
             : "No password: any Media Server on this network can start and "
               "stop render machines. Applies when saved.";
-    ctx.label(field_note(form.caption()), note,
+    ctx.label(form.note(), note,
               state.render_node_password_overridden ||
                       !draft_.render_node_password
                   ? ctx.theme().warning
@@ -8466,7 +8382,7 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
   // Retyping a set password is a change even though "set" is unchanged.
   const bool changed = draft_ != state.stored ||
                        (password_edited_ && !password_draft_.empty());
-  gui::Rect buttons = footer;
+  gui::Rect buttons = modal.footer;
   const gui::Rect save_button = gui::cut_right(buttons, m.button_width);
   static_cast<void>(gui::cut_right(buttons, m.gap));
   const gui::Rect cancel_button = gui::cut_right(buttons, m.button_width);
@@ -8474,15 +8390,8 @@ PreferencesFrame PreferencesPanel::draw(gui::UiContext &ctx,
       ctx, mix(id_, "preferences.cancel"), cancel_button, "CANCEL", true);
   const bool saved = preferences_button(ctx, mix(id_, "preferences.save"),
                                         save_button, "SAVE", changed);
-  ctx.pop_clip();
-
-  // Last, so it only catches presses no control in the card wanted. A click on
-  // the card's own background lands here too and deliberately does nothing;
-  // only a click outside dismisses.
-  const gui::Interaction scrim =
-      ctx.grab(mix(id_, "preferences.scrim"), bounds);
   const bool dismissed =
-      scrim.clicked && !card.contains(ctx.pointer_x(), ctx.pointer_y());
+      end_modal(ctx, mix(id_, "preferences.scrim"), bounds, modal);
 
   if (saved) {
     result.save = draft_;
@@ -8684,34 +8593,34 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   // The cluster at a glance: one chip per fact, coloured by how it stands,
   // each carrying its full wording in a tooltip. What used to be two run-on
   // lines of capitals is now something the eye reads in one pass.
-  const gui::Rect summary{bounds.x, bounds.y, bounds.width, summary_height};
+  gui::Rect area = bounds;
+  const gui::Rect summary = gui::cut_top(area, summary_height);
   ctx.panel(summary, theme.header);
-  ctx.panel(gui::Rect{summary.x, summary.y + summary.height - 1.0F,
-                      summary.width, 1.0F},
-            theme.divider);
+  {
+    gui::Rect rule = summary;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+  }
+  // The frame number at the right; chips laid in from the left until the
+  // next would run into it.
+  gui::Rect chips = summary;
   const std::string frame_label = "Frame " + std::to_string(state.frame);
-  const float frame_width = ctx.font_width(frame_label) + 14.0F;
-  ctx.label(gui::Rect{summary.x + summary.width - frame_width, summary.y,
-                      frame_width, summary.height},
+  ctx.label(gui::cut_right(chips, ctx.font_width(frame_label) + 14.0F),
             frame_label, theme.text_muted);
-  float chip_x = summary.x + 8.0F;
-  const float chip_limit = summary.x + summary.width - frame_width - 6.0F;
+  chips = gui::inset(chips, gui::Padding{8.0F, 5.0F, 6.0F, 5.0F});
   const auto chip = [&](std::string_view text, gui::UiColor color,
                         std::string_view tip) {
     const float width = ctx.font_width(text) + 26.0F;
-    if (chip_x + width > chip_limit) {
+    if (width > chips.width) {
       return;
     }
-    const gui::Rect body{chip_x, summary.y + 5.0F, width,
-                         summary.height - 10.0F};
+    const gui::Rect body = gui::cut_left(chips, width);
+    static_cast<void>(gui::cut_left(chips, 6.0F));
     ctx.panel(body, with_alpha(color, 0.10F));
-    border(ctx, body, with_alpha(color, 0.40F));
-    draw_status_dot(ctx, body.x + 10.0F, body.y + body.height * 0.5F, color,
-                    3.0F);
-    ctx.label(gui::Rect{body.x + 19.0F, body.y, width - 20.0F, body.height},
-              text, theme.text);
+    ctx.outline(body, with_alpha(color, 0.40F));
+    draw_status_dot(ctx, body.x + 10.0F, body.center_y(), color, 3.0F);
+    ctx.label(gui::inset(body, gui::Padding{19.0F, 0.0F, 1.0F, 0.0F}), text,
+              theme.text);
     ctx.tooltip(body, tip);
-    chip_x += width + 6.0F;
   };
   const bool cluster_visible =
       state.cluster.health != ClusterHealth::Unmonitored ||
@@ -8881,42 +8790,46 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   const bool show_fps = fits(fps_width);
   const bool show_assets = any_assets && fits(assets_width);
   const bool show_sync = state.cluster.sync_required && fits(sync_width);
-  float column_right = bounds.x + bounds.width - 6.0F - actions_width;
+  // The columns, laid in from the right: the actions, then each shown fact;
+  // the name takes what is left after the twirl.
+  gui::Rect lanes =
+      gui::inset(bounds, gui::Padding{twirl_width + 4.0F, 0.0F, 6.0F, 0.0F});
+  const gui::Rect actions_column = gui::cut_right(lanes, actions_width);
   const auto place = [&](bool shown, float width) {
-    if (!shown) {
-      return 0.0F;
-    }
-    column_right -= width;
-    return column_right;
+    return shown ? gui::cut_right(lanes, width) : gui::Rect{};
   };
-  const float sync_x = place(show_sync, sync_width);
-  const float assets_x = place(show_assets, assets_width);
-  const float status_x = place(show_status, status_width);
-  const float fps_x = place(show_fps, fps_width);
-  const float resolution_x = place(show_resolution, resolution_width);
-  const float name_x = bounds.x + twirl_width + 4.0F;
-  const float name_width = std::max(column_right - name_x - 8.0F, 0.0F);
-  const float actions_x = bounds.x + bounds.width - 6.0F - actions_width;
+  const gui::Rect sync_column = place(show_sync, sync_width);
+  const gui::Rect assets_column = place(show_assets, assets_width);
+  const gui::Rect status_column = place(show_status, status_width);
+  const gui::Rect fps_column = place(show_fps, fps_width);
+  const gui::Rect resolution_column = place(show_resolution, resolution_width);
+  const gui::Rect name_column =
+      gui::inset(lanes, gui::Padding{0.0F, 0.0F, 8.0F, 0.0F});
+  const float sync_x = sync_column.x;
+  const float assets_x = assets_column.x;
+  const float status_x = status_column.x;
+  const float name_x = name_column.x;
+  const float name_width = name_column.width;
+  const float actions_x = actions_column.x;
 
-  const gui::Rect header{bounds.x, summary.y + summary.height, bounds.width,
-                         header_height};
+  const gui::Rect header = gui::cut_top(area, header_height);
   ctx.panel(header, theme.panel);
-  ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F, header.width,
-                      1.0F},
-            theme.divider);
-  const auto heading = [&](bool shown, float x, float width,
+  {
+    gui::Rect rule = header;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+  }
+  const auto heading = [&](bool shown, const gui::Rect &column,
                            std::string_view text) {
     if (shown) {
-      ctx.label(gui::Rect{x, header.y, width, header.height}, text,
-                theme.text_muted);
+      ctx.label(gui::cell(column, header), text, theme.text_muted);
     }
   };
-  heading(true, name_x, name_width, "OUTPUT");
-  heading(show_resolution, resolution_x, resolution_width, "RESOLUTION");
-  heading(show_fps, fps_x, fps_width, "FPS");
-  heading(show_status, status_x, status_width, "STATUS");
-  heading(show_assets, assets_x, assets_width, "ASSETS");
-  heading(show_sync, sync_x, sync_width, "SYNC");
+  heading(true, name_column, "OUTPUT");
+  heading(show_resolution, resolution_column, "RESOLUTION");
+  heading(show_fps, fps_column, "FPS");
+  heading(show_status, status_column, "STATUS");
+  heading(show_assets, assets_column, "ASSETS");
+  heading(show_sync, sync_column, "SYNC");
 
   // ----------------------------------------------------- row geometry
   // Details open under a row when it is clicked, so the evidence an operator
@@ -8988,21 +8901,12 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
           : 0.0F;
   const float program_height = row_height + program_details_height;
 
-  const gui::Rect list_bounds{
-      bounds.x, header.y + header.height, bounds.width,
-      std::max(bounds.y + bounds.height - footer_height -
-                   (header.y + header.height),
-               0.0F)};
+  const gui::Rect footer = gui::cut_bottom(area, footer_height);
+  const gui::Rect list_bounds = area;
   float content_height = program_height;
   for (const OutputMonitorState::Node &node : state.nodes) {
     content_height += node_height(node);
   }
-  const float maximum_scroll =
-      std::max(content_height - list_bounds.height, 0.0F);
-  if (list_bounds.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * row_height * 2.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
 
   const auto status_pill = [&](float x, float centre_y, std::string_view text,
                                gui::UiColor color, bool filled,
@@ -9024,17 +8928,36 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                   tag, theme.text_muted, false));
     }
     if (show_resolution) {
-      ctx.label(gui::Rect{resolution_x, row.y, resolution_width, row_height},
-                resolution, theme.text_muted);
+      ctx.label(gui::cell(resolution_column, row), resolution,
+                theme.text_muted);
     }
     if (show_fps) {
-      ctx.label(gui::Rect{fps_x, row.y, fps_width, row_height}, fps,
-                theme.text_muted);
+      ctx.label(gui::cell(fps_column, row), fps, theme.text_muted);
     }
   };
 
-  float y = list_bounds.y - scroll_;
-  ctx.push_clip(list_bounds);
+  float y = list_bounds.y - scroll_.begin(ctx, list_bounds, row_height * 2.0F);
+  // The `index`th action button from the right of a row's action column.
+  const auto action_bounds = [&](const gui::Rect &line, std::size_t index) {
+    gui::Rect slots = gui::cell(actions_column, line);
+    gui::Rect slot{};
+    for (std::size_t step = 0U; step <= index; ++step) {
+      slot = gui::cut_right(slots, 28.0F);
+    }
+    return gui::centered(gui::cut_left(slot, 26.0F), 26.0F, 24.0F);
+  };
+  // A row's details: lines of text down the name column, `top` below the
+  // row's own line.
+  const auto detail_lines = [&](const gui::Rect &line, const gui::Rect &row,
+                                float top) {
+    gui::Metrics metrics = theme.metrics;
+    metrics.inset = 0.0F;
+    metrics.gap = 0.0F;
+    return gui::FormLayout{
+        gui::Rect{name_x, line.bottom() + top,
+                  std::max(row.right() - name_x - 12.0F, 0.0F), 0.0F},
+        metrics};
+  };
 
   // ---------------------------------------------------------- Program
   const std::string program_resolution =
@@ -9042,11 +8965,14 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
   const std::string program_fps = fps_text(state.frames_per_second);
   {
     const gui::Rect row{bounds.x, y, bounds.width, program_height};
-    const gui::Rect line{bounds.x, y, bounds.width, row_height};
+    gui::Rect line = row;
+    line = gui::cut_top(line, row_height);
     ctx.panel(row, theme.row);
-    ctx.panel(gui::Rect{row.x, row.y + row.height - 1.0F, row.width, 1.0F},
-              theme.divider);
-    const float centre_y = line.y + row_height * 0.5F;
+    {
+      gui::Rect rule = row;
+      ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+    }
+    const float centre_y = line.center_y();
     if (state.cluster.conformance_active) {
       draw_twirl(ctx, bounds.x + 12.0F, centre_y, program_expanded_,
                  theme.text_muted);
@@ -9059,9 +8985,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     }
     if (state.cluster.conformance_active) {
       if (icon_button(ctx, mix(id_, "conformance.check"),
-                      gui::Rect{actions_x + actions_width - 28.0F,
-                                centre_y - 12.0F, 26.0F, 24.0F},
-                      gui::Icon::Restart,
+                      action_bounds(line, 0U), gui::Icon::Restart,
                       "Check the render cohort: every node renders the same "
                       "fixed scene and compares")) {
         frame.check_render_conformance = true;
@@ -9076,22 +9000,27 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       }
     }
     if (program_details_height > 0.0F) {
-      float dy = line.y + row_height + 4.0F;
-      const float dx = name_x;
-      const float dw = std::max(row.width - (dx - row.x) - 12.0F, 0.0F);
-      if (ctx.button(mix(id_, "timing.details"),
-                     gui::Rect{dx, dy, 160.0F, 20.0F},
-                     timing_expanded_ ? "Hide pass costs" : "Pass costs")) {
+      gui::FormLayout details = detail_lines(line, row, 4.0F);
+      // A details toggle: a 160px button, 4px above the next line.
+      const auto toggle_button = [&](std::string_view key,
+                                     std::string_view label) {
+        gui::Rect strip = details.next(20.0F, 4.0F);
+        return ctx.button(mix(id_, key), gui::cut_left(strip, 160.0F), label);
+      };
+      const auto text_line = [&](float indent = 0.0F) {
+        return gui::inset(details.next(detail_line, 0.0F),
+                          gui::Padding{indent, 0.0F, 0.0F, 0.0F});
+      };
+      if (toggle_button("timing.details",
+                        timing_expanded_ ? "Hide pass costs" : "Pass costs")) {
         timing_expanded_ = !timing_expanded_;
       }
-      dy += 24.0F;
       const core::FrameTiming &t = state.cluster.frame_timing;
       std::array<char, 256U> text{};
       if (t.sequence == 0U) {
-        ctx.label(gui::Rect{dx, dy, dw, detail_line},
-                  "Frame timing awaiting a completed submission",
+        ctx.label(text_line(), "Frame timing awaiting a completed submission",
                   theme.text_muted);
-        dy += detail_line * 2.0F;
+        details.space(detail_line);
       } else {
         std::snprintf(text.data(), text.size(),
                       "CPU record %.3f ms   GPU %s%.3f ms   Upload %.2f MiB",
@@ -9099,10 +9028,9 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                       t.gpu_valid ? "" : "unavailable ",
                       static_cast<double>(t.gpu_ns) / 1e6,
                       static_cast<double>(t.upload_bytes) / 1048576.0);
-        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
+        ctx.label(text_line(), text.data(),
                   t.over_budget(state.cluster.frame_budget_us) ? theme.warning
                                                                 : theme.text);
-        dy += detail_line;
         std::snprintf(
             text.data(), text.size(),
             "Present %.3f ms   Barrier %llu/%llu presents, %llu flips   "
@@ -9113,36 +9041,28 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
             static_cast<unsigned long long>(t.flips_in_sync),
             static_cast<double>(state.cluster.frame_budget_us) / 1000.0,
             state.cluster.frame_budget_us == 0U ? " (report only)" : "");
-        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
-                  theme.text_muted);
-        dy += detail_line;
+        ctx.label(text_line(), text.data(), theme.text_muted);
       }
       if (timing_expanded_) {
         std::snprintf(text.data(), text.size(),
                       "Completed submission %llu   Dropped intervals %llu",
                       static_cast<unsigned long long>(t.sequence),
                       static_cast<unsigned long long>(t.query_overflows));
-        ctx.label(gui::Rect{dx, dy, dw, detail_line}, text.data(),
-                  theme.text_muted);
-        dy += detail_line;
+        ctx.label(text_line(), text.data(), theme.text_muted);
         for (std::size_t i = 0U; i < core::render_pass_count; ++i) {
           std::snprintf(text.data(), text.size(), "%.*s  %.3f ms",
                         static_cast<int>(core::render_pass_names[i].size()),
                         core::render_pass_names[i].data(),
                         static_cast<double>(t.pass_ns[i]) / 1e6);
-          ctx.label(gui::Rect{dx + 12.0F, dy, dw - 12.0F, detail_line},
-                    text.data(),
+          ctx.label(text_line(12.0F), text.data(),
                     t.pass_ns[i] != 0U ? theme.text : theme.text_muted);
-          dy += detail_line;
         }
       }
-      if (ctx.button(mix(id_, "conformance.details"),
-                     gui::Rect{dx, dy, 160.0F, 20.0F},
-                     conformance_expanded_ ? "Hide pass digests"
-                                           : "Pass digests")) {
+      if (toggle_button("conformance.details",
+                        conformance_expanded_ ? "Hide pass digests"
+                                              : "Pass digests")) {
         conformance_expanded_ = !conformance_expanded_;
       }
-      dy += 24.0F;
       const auto &proof = state.cluster.conformance;
       std::string proof_summary;
       switch (proof.state) {
@@ -9162,30 +9082,24 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
         proof_summary += proof.strict_float ? "IEEE strict" : "experimental relaxed";
         break;
       }
-      ctx.label(gui::Rect{dx, dy, dw, detail_line}, proof_summary,
-                theme.text_muted);
-      dy += detail_line;
+      ctx.label(text_line(), proof_summary, theme.text_muted);
       if (conformance_expanded_) {
         const auto version = proof.adapter.driver_version;
-        ctx.label(gui::Rect{dx, dy, dw, detail_line},
-                  proof.adapter.name.data(), theme.text_muted);
-        dy += detail_line;
-        ctx.label(gui::Rect{dx, dy, dw, detail_line},
+        ctx.label(text_line(), proof.adapter.name.data(), theme.text_muted);
+        ctx.label(text_line(),
                   "Driver " + std::to_string(version >> 48U) + "." +
                       std::to_string((version >> 32U) & 65535U) + "." +
                       std::to_string((version >> 16U) & 65535U) + "." +
                       std::to_string(version & 65535U),
                   theme.text_muted);
-        dy += detail_line;
         constexpr char hex[] = "0123456789abcdef";
         std::string bundle;
         for (auto byte : proof.shader_bundle) {
           bundle += hex[byte >> 4U];
           bundle += hex[byte & 15U];
         }
-        ctx.label(gui::Rect{dx, dy, dw, detail_line}, "Shader SHA-256 " + bundle,
-                  theme.text_muted);
-        dy += detail_line * 2.0F;
+        ctx.label(text_line(), "Shader SHA-256 " + bundle, theme.text_muted);
+        details.space(detail_line);
         for (std::size_t i = 0; i < core::conformance_pass_count; ++i) {
           std::string pass{core::conformance_pass_names[i]};
           pass += "  ";
@@ -9198,9 +9112,8 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
           if (differs) {
             pass += "  first difference";
           }
-          ctx.label(gui::Rect{dx + 12.0F, dy, dw - 12.0F, detail_line}, pass,
+          ctx.label(text_line(12.0F), pass,
                     differs ? theme.warning : theme.text_muted);
-          dy += detail_line;
         }
       }
     }
@@ -9212,10 +9125,10 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     const OutputMonitorState::Node &node = state.nodes[index];
     const float height = node_height(node);
     const gui::Rect row{bounds.x, y, bounds.width, height};
-    const gui::Rect line{bounds.x, y, bounds.width, row_height};
+    gui::Rect line = row;
+    line = gui::cut_top(line, row_height);
     y += height;
-    if (row.y + row.height <= list_bounds.y ||
-        row.y >= list_bounds.y + list_bounds.height) {
+    if (row.bottom() <= list_bounds.y || row.y >= list_bounds.bottom()) {
       continue;
     }
     const bool expanded = expanded_.contains(node.device);
@@ -9226,9 +9139,11 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
     if (hovered) {
       ctx.panel(line, with_alpha(theme.widget_hover, 0.5F));
     }
-    ctx.panel(gui::Rect{row.x, row.y + row.height - 1.0F, row.width, 1.0F},
-              theme.divider);
-    const float centre_y = line.y + row_height * 0.5F;
+    {
+      gui::Rect rule = row;
+      ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+    }
+    const float centre_y = line.center_y();
     draw_twirl(ctx, bounds.x + 12.0F, centre_y, expanded,
                hovered ? theme.text : theme.text_muted);
     const std::string identity = feed_output_identity(node.node_index);
@@ -9289,12 +9204,13 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
 
     // Lifecycle actions: the same icon in the same place on every row.
     const bool row_visible = intersect(line, list_bounds).height > 0.0F;
-    float button_x = actions_x + actions_width;
+    float button_x = actions_column.right();
+    std::size_t placed = 0U;
     const auto action = [&](std::string_view suffix, gui::Icon icon,
                             std::string_view tip, OutputLifecycleAction kind,
                             bool enabled) {
-      button_x -= 28.0F;
-      const gui::Rect button{button_x, centre_y - 12.0F, 26.0F, 24.0F};
+      const gui::Rect button = action_bounds(line, placed++);
+      button_x = button.x;
       const gui::UiId button_id = mix(
           id_, suffix, node.device.value() * 8U + static_cast<core::u64>(kind));
       if (row_visible &&
@@ -9351,15 +9267,17 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
       }
     }
     if (expanded) {
-      float dy = line.y + row_height + 2.0F;
-      const float dw = std::max(row.width - (name_x - row.x) - 12.0F, 0.0F);
+      gui::FormLayout details = detail_lines(line, row, 2.0F);
+      // A key in a 110px column and its value 6px after it.
+      const auto detail = [&](std::string_view key, std::string_view value,
+                              gui::UiColor color) {
+        gui::Rect strip = details.next(detail_line, 0.0F);
+        ctx.label(gui::cut_left(strip, 110.0F), key, theme.text_muted);
+        static_cast<void>(gui::cut_left(strip, 6.0F));
+        ctx.label(strip, value, color);
+      };
       for (const auto &[key, value] : node_details(node)) {
-        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, key,
-                  theme.text_muted);
-        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
-                            detail_line},
-                  value, theme.text);
-        dy += detail_line;
+        detail(key, value, theme.text);
       }
       if (state.cluster.conformance_active) {
         const core::FrameTiming &t = node.frame_timing;
@@ -9370,14 +9288,10 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                       t.gpu_valid ? "" : "unavailable ",
                       static_cast<double>(t.gpu_ns) / 1e6,
                       static_cast<double>(t.present_ns) / 1e6);
-        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Frame timing",
-                  theme.text_muted);
-        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
-                            detail_line},
-                  t.sequence == 0U ? std::string_view{"awaiting a submission"}
-                                   : std::string_view{text.data()},
-                  theme.text);
-        dy += detail_line;
+        detail("Frame timing",
+               t.sequence == 0U ? std::string_view{"awaiting a submission"}
+                                : std::string_view{text.data()},
+               theme.text);
         const auto difference = core::compare_render_conformance(
             state.cluster.conformance, node.conformance);
         std::string check =
@@ -9386,20 +9300,12 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
             : difference.adapter_differs
                 ? std::string{"matches on another GPU / driver"}
                 : std::string{"matches"};
-        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Render check",
-                  theme.text_muted);
-        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
-                            detail_line},
-                  check,
-                  difference.reason == core::ConformanceMismatch::None
-                      ? theme.good
-                      : theme.warning);
-        dy += detail_line;
-        ctx.label(gui::Rect{name_x, dy, 110.0F, detail_line}, "Adapter",
-                  theme.text_muted);
-        ctx.label(gui::Rect{name_x + 116.0F, dy, std::max(dw - 116.0F, 0.0F),
-                            detail_line},
-                  node.conformance.adapter.name.data(), theme.text_muted);
+        detail("Render check", check,
+               difference.reason == core::ConformanceMismatch::None
+                   ? theme.good
+                   : theme.warning);
+        detail("Adapter", node.conformance.adapter.name.data(),
+               theme.text_muted);
       }
     }
   }
@@ -9409,24 +9315,24 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
               "physical outputs",
               theme.text_muted);
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, content_height);
 
-  if (maximum_scroll > 0.0F && list_bounds.height > 8.0F) {
-    const float thumb_height = std::max(
-        list_bounds.height * list_bounds.height / content_height, 16.0F);
-    const float thumb_range = std::max(list_bounds.height - thumb_height, 0.0F);
-    const float thumb_y =
-        list_bounds.y + thumb_range * (scroll_ / maximum_scroll);
-    ctx.panel(gui::Rect{list_bounds.x + list_bounds.width - 4.0F, thumb_y, 3.0F,
-                        thumb_height},
-              theme.widget_hover);
+  if (list_bounds.height > 8.0F) {
+    const gui::Rect thumb = scroll_.thumb(
+        gui::Rect{list_bounds.right() - 4.0F, list_bounds.y, 3.0F,
+                  list_bounds.height},
+        16.0F);
+    if (thumb.height > 0.0F) {
+      ctx.panel(thumb, theme.widget_hover);
+    }
   }
 
   // -------------------------------------------------------------- footer
-  const gui::Rect footer{bounds.x, bounds.y + bounds.height - footer_height,
-                         bounds.width, footer_height};
   ctx.panel(footer, theme.header);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F}, theme.divider);
+  {
+    gui::Rect rule = footer;
+    ctx.panel(gui::cut_top(rule, 1.0F), theme.divider);
+  }
   const auto actionable = [&](OutputLifecycleAction action) {
     return static_cast<std::size_t>(std::count_if(
         state.nodes.begin(), state.nodes.end(), [action](const auto &node) {
@@ -9437,14 +9343,13 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                 node.content_ready());
         }));
   };
-  float batch_right = footer.x + footer.width - 6.0F;
+  // Batch actions laid in from the right; the count takes what is left.
+  gui::Rect batch = gui::inset(footer, gui::Padding{0.0F, 4.0F, 6.0F, 4.0F});
   const auto batch_button = [&](std::string_view suffix, std::string_view label,
                                 OutputLifecycleAction action, bool caution) {
-    const float width = ctx.font_width(label) + 24.0F;
-    batch_right -= width;
-    const gui::Rect button{batch_right, footer.y + 4.0F, width,
-                           footer.height - 8.0F};
-    batch_right -= 6.0F;
+    const gui::Rect button =
+        gui::cut_right(batch, ctx.font_width(label) + 24.0F);
+    static_cast<void>(gui::cut_right(batch, 6.0F));
     const bool enabled = actionable(action) > 0U;
     const gui::Interaction interaction =
         enabled ? ctx.grab(mix(id_, suffix), button) : gui::Interaction{};
@@ -9459,15 +9364,12 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                                               0.30F)
                                                         : theme.widget_hover)
                                              : base)));
-    border(ctx, button,
-           !enabled ? theme.divider
+    ctx.outline(button,
+                !enabled ? theme.divider
                     : (caution ? with_alpha(theme.warning, 0.7F) : theme.border));
-    const float text_width = ctx.font_width(label);
-    ctx.label(gui::Rect{button.x + (button.width - text_width) * 0.5F, button.y,
-                        text_width + 2.0F, button.height},
-              label,
-              !enabled ? with_alpha(theme.text_muted, 0.6F)
-                       : (caution ? theme.warning : theme.text));
+    ctx.label_centered(button, label,
+                       !enabled ? with_alpha(theme.text_muted, 0.6F)
+                                : (caution ? theme.warning : theme.text));
     if (enabled && interaction.clicked && !frame.lifecycle.has_value()) {
       frame.lifecycle = OutputLifecycleRequest{{}, 0U, {}, action, true};
     }
@@ -9493,7 +9395,7 @@ OutputMonitorFrame OutputMonitorPanel::draw(gui::UiContext &ctx,
                                           : " render servers, ") +
                 std::to_string(live) + " live";
   ctx.label(gui::Rect{footer.x + 10.0F, footer.y,
-                      std::max(batch_right - footer.x - 14.0F, 0.0F),
+                      std::max(batch.right() - footer.x - 14.0F, 0.0F),
                       footer.height},
             count, theme.text_muted);
   ctx.pop_clip();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/mask_authoring.hpp>
@@ -238,7 +239,7 @@ private:
   // The row under a held pointer. Reordering is the drag, so the panel carries
   // no up/down controls.
   doc::NodeId drag_node_{};
-  float mask_scroll_{};
+  gui::ScrollRegion scroll_;
 };
 
 } // namespace mediaserver::editor

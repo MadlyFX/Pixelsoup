@@ -1,5 +1,6 @@
 #include <mediaserver/editor/color_correction_panel.hpp>
 
+#include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -91,11 +92,11 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
 
     ctx.panel(bounds, ctx.theme().panel);
     constexpr float header_height = 26.0F;
-    const gui::Rect header{bounds.x, bounds.y, bounds.width, header_height};
+    gui::Metrics m = ctx.theme().metrics;
+    gui::Rect content = bounds;
+    gui::Rect header = gui::cut_top(content, header_height);
     ctx.panel(header, ctx.theme().header);
-    ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F,
-                        header.width, 1.0F},
-              ctx.theme().divider);
+    ctx.panel(gui::cut_bottom(header, m.divider), ctx.theme().divider);
 
     const scene::EffectInstance* levels{};
     const scene::EffectInstance* lift_gamma_gain{};
@@ -146,16 +147,14 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             curves = &effect;
         }
     }
-    const gui::Rect content{bounds.x, bounds.y + header_height, bounds.width,
-                            std::max(bounds.height - header_height, 0.0F)};
     if (levels == nullptr && lift_gamma_gain == nullptr &&
         contrast_pivot == nullptr && color_matrix == nullptr &&
         white_balance == nullptr && curves == nullptr) {
         fields_.cancel(ctx);
-        scroll_ = 0.0F;
-        content_height_ = 0.0F;
-        ctx.label(gui::Rect{content.x + 10.0F, content.y + 10.0F,
-                            std::max(content.width - 20.0F, 0.0F), 52.0F},
+        scroll_.reset();
+        constexpr float message_height = 52.0F;
+        gui::Rect note = gui::inset(content, m.panel_inset);
+        ctx.label(gui::cut_top(note, message_height),
                   selected_layer == doc::NodeId{}
                       ? "Select a layer to grade"
                       : (colour_effect_switched_off
@@ -166,22 +165,75 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         return frame;
     }
 
-    const float maximum_scroll =
-        std::max(content_height_ - content.height, 0.0F);
-    if (content.contains(ctx.pointer_x(), ctx.pointer_y()) &&
-        ctx.wheel() != 0.0F) {
-        scroll_ = std::clamp(scroll_ - ctx.wheel() * 30.0F,
-                             0.0F, maximum_scroll);
-    } else {
-        scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-    }
-
-    constexpr float inset = 8.0F;
+    // Sections down a column 8px in from the sides: a 23px heading carrying
+    // the section's colour and its RESET, then 25px rows 2px apart, and 5px
+    // between sections.
     constexpr float heading_height = 23.0F;
-    constexpr float row_height = 25.0F;
-    constexpr float row_gap = 2.0F;
-    float y = content.y + 7.0F - scroll_;
-    ctx.push_clip(content);
+    constexpr float section_space = 5.0F;
+    m.inset = 8.0F;
+    m.gap = 7.0F;
+    m.control = 25.0F;
+    m.row_gap = 2.0F;
+    m.label_column = std::clamp((content.width - m.inset * 2.0F) * 0.44F,
+                                82.0F, 132.0F);
+    constexpr float scroll_step = 30.0F;
+    gui::FormLayout form{content, m, scroll_.begin(ctx, content, scroll_step)};
+
+    // A section's heading strip: its colour down the left edge and its title,
+    // with `title_room` kept clear at the right for the heading's button.
+    const auto section_heading = [&](std::string_view title,
+                                     gui::UiColor stripe,
+                                     float title_room = 61.0F) {
+        const gui::Rect heading = form.next(heading_height, m.row_gap);
+        ctx.panel(heading, ctx.theme().header);
+        gui::Rect rest = heading;
+        ctx.panel(gui::cut_left(rest, 3.0F), stripe);
+        ctx.label(gui::inset(rest, gui::Padding{6.0F, 0.0F, title_room, 0.0F}),
+                  title, ctx.theme().text);
+        return heading;
+    };
+    // A button at the heading's right end: RESET, or ENABLE for an unused
+    // curve. Returns true on the frame it is clicked.
+    const auto heading_button = [&](const gui::Rect& heading, gui::UiId id,
+                                    std::string_view label,
+                                    gui::UiColor hover, float width = 58.0F) {
+        gui::Rect strip = heading;
+        const gui::Rect button = gui::cut_right(strip, width);
+        const gui::Interaction it = ctx.grab(id, button);
+        ctx.panel(button, it.hovered ? ctx.theme().widget_hover
+                                     : ctx.theme().widget);
+        ctx.label(button, label, it.hovered ? hover : ctx.theme().text_muted);
+        return it.clicked;
+    };
+    // A label and a number field on one row. An entry, clamped into
+    // [minimum, maximum], that changes the value is an edit of `property` on
+    // `source`.
+    const auto number_row = [&](std::string_view label,
+                                gui::UiColor label_color, gui::UiId numeric_id,
+                                doc::NodeId source, std::string_view property,
+                                float value, double speed, int decimals,
+                                float minimum, float maximum) {
+        const gui::FormRow row = form.row();
+        ctx.label(row.label, label, label_color);
+        double authored{};
+        NumberFieldEdit numeric_edit{};
+        const std::size_t edits_before = frame.edits.size();
+        if (fields_.draw(ctx, numeric_id, row.field, {},
+                         static_cast<double>(value), speed, authored,
+                         decimals, &numeric_edit) &&
+            std::isfinite(authored)) {
+            const double normalized = std::clamp(
+                authored, static_cast<double>(minimum),
+                static_cast<double>(maximum));
+            if (normalized != static_cast<double>(value)) {
+                frame.edits.push_back(ColorCorrectionEdit{
+                    source, std::string{property}, normalized});
+            }
+        }
+        record_nudge(numeric_id, property, numeric_edit, edits_before);
+    };
+    const gui::UiColor muted = ctx.theme().text_muted;
+
     if (levels != nullptr) {
         const std::array<const scene::LevelsChannelParameters*, 4U> channels{{
             &levels->levels.master, &levels->levels.red, &levels->levels.green,
@@ -200,29 +252,13 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
              channel_index < channels.size(); ++channel_index) {
             const auto& channel = *channels[channel_index];
             const auto& properties = channel_properties[channel_index];
-            const gui::Rect heading{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-            ctx.panel(heading, ctx.theme().header);
-            ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                      colors[channel_index]);
-            ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                                std::max(heading.width - 70.0F, 0.0F),
-                                heading.height},
-                      names[channel_index], ctx.theme().text);
-            const gui::Rect reset{
-                heading.x + std::max(heading.width - 58.0F, 0.0F), heading.y,
-                58.0F, heading.height};
-            const gui::Interaction reset_it = ctx.grab(
-                mix(id_, levels->source.value() ^
-                             static_cast<core::u64>(0x100U + channel_index)),
-                reset);
-            ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                              : ctx.theme().widget);
-            ctx.label(reset, "RESET",
-                      reset_it.hovered ? colors[channel_index]
-                                       : ctx.theme().text_muted);
-            if (reset_it.clicked) {
+            const gui::Rect heading =
+                section_heading(names[channel_index], colors[channel_index]);
+            if (heading_button(
+                    heading,
+                    mix(id_, levels->source.value() ^
+                                 static_cast<core::u64>(0x100U + channel_index)),
+                    "RESET", colors[channel_index])) {
                 const auto emit_reset = [&](std::string_view property,
                                             double value, double current) {
                     if (current != value) {
@@ -238,16 +274,15 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 emit_reset(properties.output_white, 1.0,
                            channel.output_white);
             }
-            y += heading_height + row_gap;
 
             // Two familiar Levels rails make the tonal mapping readable at a
             // glance and editable in place. The fields below remain for exact
             // entry; they are no longer the only way to shape the image.
-            const gui::Rect input_rail{
-                content.x + inset + 8.0F, y + 4.0F,
-                std::max(content.width - inset * 2.0F - 16.0F, 0.0F), 12.0F};
-            const gui::Rect output_rail{
-                input_rail.x, y + 30.0F, input_rail.width, 8.0F};
+            const gui::Rect rails = form.next(52.0F, 0.0F);
+            const gui::Rect input_rail =
+                gui::inset(rails, gui::Padding{8.0F, 4.0F, 8.0F, 36.0F});
+            const gui::Rect output_rail =
+                gui::inset(rails, gui::Padding{8.0F, 30.0F, 8.0F, 14.0F});
             constexpr std::array<gui::UiColor, 5U> ramp{{
                 {0.04F, 0.04F, 0.04F, 1.0F},
                 {0.22F, 0.22F, 0.22F, 1.0F},
@@ -332,50 +367,23 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             direct_handle(channel_index * 32U + 0x1004U,
                           properties.output_white, channel.output_white,
                           channel.output_white, output_rail, 0.0F, 1.0F);
-            ctx.label({input_rail.x, y + 16.0F, 52.0F, 12.0F},
-                      "INPUT", ctx.theme().text_muted);
-            ctx.label({output_rail.x, y + 38.0F, 58.0F, 12.0F},
-                      "OUTPUT", ctx.theme().text_muted);
-            y += 52.0F;
+            // Each rail's name just under it.
+            ctx.label({input_rail.x, input_rail.bottom(), 52.0F, 12.0F},
+                      "INPUT", muted);
+            ctx.label({output_rail.x, output_rail.bottom(), 58.0F, 12.0F},
+                      "OUTPUT", muted);
 
+            const core::u64 channel_salt =
+                static_cast<core::u64>(channel_index) * 16U;
             const auto field = [&](std::string_view label,
                                    std::string_view property, float value,
                                    double speed, float minimum, float maximum,
                                    core::u64 salt) {
-                const gui::Rect row{
-                    content.x + inset, y,
-                    std::max(content.width - inset * 2.0F, 0.0F), row_height};
-                y += row_height + row_gap;
-                const float label_width =
-                    std::clamp(row.width * 0.44F, 82.0F, 132.0F);
-                ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
-                          label, ctx.theme().text_muted);
-                const gui::Rect well{
-                    row.x + label_width, row.y,
-                    std::max(row.width - label_width, 0.0F), row.height};
-                double authored{};
-                NumberFieldEdit numeric_edit{};
-                const gui::UiId numeric_id =
-                    mix(id_, levels->source.value() ^ salt);
-                const std::size_t edits_before = frame.edits.size();
-                if (fields_.draw(
-                        ctx, numeric_id, well, {},
-                        static_cast<double>(value), speed, authored, 3,
-                        &numeric_edit) &&
-                    std::isfinite(authored)) {
-                    const double normalized = std::clamp(
-                        authored, static_cast<double>(minimum),
-                        static_cast<double>(maximum));
-                    if (normalized != static_cast<double>(value)) {
-                        frame.edits.push_back(ColorCorrectionEdit{
-                            levels->source, std::string{property}, normalized});
-                    }
-                }
-                record_nudge(numeric_id, property, numeric_edit, edits_before);
+                number_row(label, muted,
+                           mix(id_, levels->source.value() ^ salt),
+                           levels->source, property, value, speed, 3,
+                           minimum, maximum);
             };
-
-            const core::u64 channel_salt =
-                static_cast<core::u64>(channel_index) * 16U;
             field("Input Black", properties.input_black, channel.input_black,
                   0.005, 0.0F,
                   std::max(channel.input_white - 0.0001F, 0.0F),
@@ -393,7 +401,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             field("Output White", properties.output_white,
                   channel.output_white, 0.005, 0.0F, 1.0F,
                   channel_salt + 5U);
-            y += 5.0F;
+            form.space(section_space);
         }
     }
 
@@ -434,35 +442,19 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         for (std::size_t section_index = 0U;
              section_index < sections.size(); ++section_index) {
             const VectorSection& section = sections[section_index];
-            const gui::Rect heading{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-            ctx.panel(heading, ctx.theme().header);
-            ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                      gui::UiColor{0.94F, 0.62F, 0.24F, 1.0F});
-            const std::string title =
+            const gui::Rect heading = section_heading(
                 std::string{"LIFT / GAMMA / GAIN  /  "} +
-                std::string{section.name};
-            ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                                std::max(heading.width - 70.0F, 0.0F),
-                                heading.height},
-                      title, ctx.theme().text);
-            const gui::Rect reset{
-                heading.x + std::max(heading.width - 58.0F, 0.0F), heading.y,
-                58.0F, heading.height};
-            const gui::Interaction reset_it = ctx.grab(
-                mix(id_, lift_gamma_gain->source.value() ^
-                             static_cast<core::u64>(0x400U + section_index)),
-                reset);
-            ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                              : ctx.theme().widget);
-            ctx.label(reset, "RESET", reset_it.hovered ? ctx.theme().keyframe
-                                                        : ctx.theme().text_muted);
+                    std::string{section.name},
+                gui::UiColor{0.94F, 0.62F, 0.24F, 1.0F});
             const std::array<float, 3U> values{{
                 section.value.x, section.value.y, section.value.z}};
             const std::array<float, 3U> identities{{
                 section.identity.x, section.identity.y, section.identity.z}};
-            if (reset_it.clicked) {
+            if (heading_button(
+                    heading,
+                    mix(id_, lift_gamma_gain->source.value() ^
+                                 static_cast<core::u64>(0x400U + section_index)),
+                    "RESET", ctx.theme().keyframe)) {
                 for (std::size_t component = 0U; component < 3U; ++component) {
                     if (values[component] != identities[component]) {
                         frame.edits.push_back(ColorCorrectionEdit{
@@ -472,13 +464,16 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     }
                 }
             }
-            y += heading_height + row_gap;
-            const float wheel_size = std::clamp(
-                content.width - inset * 2.0F - 38.0F, 78.0F, 118.0F);
-            const gui::Rect wheel{
-                content.x + inset, y, wheel_size, wheel_size};
-            const float centre_x = wheel.x + wheel.width * 0.5F;
-            const float centre_y = wheel.y + wheel.height * 0.5F;
+            // The colour wheel, and the luma slider beside it with its "Y"
+            // underneath.
+            const float wheel_size =
+                std::clamp(form.width() - 38.0F, 78.0F, 118.0F);
+            gui::Rect wheel_row = form.next(wheel_size, 18.0F);
+            const gui::Rect wheel = gui::cut_left(wheel_row, wheel_size);
+            static_cast<void>(gui::cut_left(wheel_row, 12.0F));
+            const gui::Rect luma = gui::cut_left(wheel_row, 18.0F);
+            const float centre_x = wheel.center_x();
+            const float centre_y = wheel.center_y();
             const float radius = std::max(wheel.width * 0.5F - 4.0F, 1.0F);
             constexpr std::size_t wheel_segments = 48U;
             for (std::size_t segment = 0U; segment < wheel_segments;
@@ -565,9 +560,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
             ctx.draw_list().add_rect(marker_x - 2.0F, marker_y - 2.0F,
                                      4.0F, 4.0F, ctx.theme().text);
 
-            const gui::Rect luma{
-                wheel.x + wheel.width + 12.0F, wheel.y, 18.0F, wheel.height};
-            ctx.panel({luma.x + 7.0F, luma.y, 4.0F, luma.height},
+            ctx.panel(gui::centered(luma, 4.0F, luma.height),
                       ctx.theme().track);
             const float luma_t = std::clamp(
                 (mean - section.minimum) /
@@ -602,77 +595,33 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                 frame.editing = true;
             }
             ctx.draw_list().add_line(luma.x + 2.0F, luma_y,
-                                     luma.x + luma.width - 2.0F, luma_y,
+                                     luma.right() - 2.0F, luma_y,
                                      3.0F, ctx.theme().text);
-            ctx.label({luma.x - 5.0F, luma.y + luma.height + 1.0F,
+            ctx.label({luma.x - 5.0F, luma.bottom() + 1.0F,
                        luma.width + 10.0F, 14.0F},
-                      "Y", ctx.theme().text_muted);
-            y += wheel.height + 18.0F;
+                      "Y", muted);
             for (std::size_t component = 0U; component < 3U; ++component) {
-                const gui::Rect row{
-                    content.x + inset, y,
-                    std::max(content.width - inset * 2.0F, 0.0F), row_height};
-                y += row_height + row_gap;
-                const float label_width =
-                    std::clamp(row.width * 0.44F, 82.0F, 132.0F);
-                ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
-                          component_names[component],
-                          component_colors[component]);
-                const gui::Rect well{
-                    row.x + label_width, row.y,
-                    std::max(row.width - label_width, 0.0F), row.height};
-                double authored{};
                 const core::u64 salt =
                     0x500U + static_cast<core::u64>(section_index) * 8U +
                     static_cast<core::u64>(component);
-                NumberFieldEdit numeric_edit{};
-                const gui::UiId numeric_id =
-                    mix(id_, lift_gamma_gain->source.value() ^ salt);
-                const std::size_t edits_before = frame.edits.size();
-                if (fields_.draw(
-                        ctx, numeric_id, well,
-                        {}, static_cast<double>(values[component]), 0.01,
-                        authored, 3, &numeric_edit) &&
-                    std::isfinite(authored)) {
-                    const double normalized = std::clamp(
-                        authored, static_cast<double>(section.minimum),
-                        static_cast<double>(section.maximum));
-                    if (normalized != static_cast<double>(values[component])) {
-                        frame.edits.push_back(ColorCorrectionEdit{
-                            lift_gamma_gain->source,
-                            std::string{section.properties[component]},
-                            normalized});
-                    }
-                }
-                record_nudge(numeric_id, section.properties[component],
-                             numeric_edit, edits_before);
+                number_row(component_names[component],
+                           component_colors[component],
+                           mix(id_, lift_gamma_gain->source.value() ^ salt),
+                           lift_gamma_gain->source,
+                           section.properties[component], values[component],
+                           0.01, 3, section.minimum, section.maximum);
             }
-            y += 5.0F;
+            form.space(section_space);
         }
     }
 
     if (contrast_pivot != nullptr) {
         const auto& parameters = contrast_pivot->contrast_pivot;
-        const gui::Rect heading{
-            content.x + inset, y,
-            std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-        ctx.panel(heading, ctx.theme().header);
-        ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                  gui::UiColor{0.72F, 0.48F, 0.98F, 1.0F});
-        ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                            std::max(heading.width - 70.0F, 0.0F),
-                            heading.height},
-                  "CONTRAST / PIVOT", ctx.theme().text);
-        const gui::Rect reset{
-            heading.x + std::max(heading.width - 58.0F, 0.0F), heading.y,
-            58.0F, heading.height};
-        const gui::Interaction reset_it = ctx.grab(
-            mix(id_, contrast_pivot->source.value() ^ 0x700U), reset);
-        ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                          : ctx.theme().widget);
-        ctx.label(reset, "RESET", reset_it.hovered ? ctx.theme().keyframe
-                                                    : ctx.theme().text_muted);
-        if (reset_it.clicked) {
+        const gui::Rect heading = section_heading(
+            "CONTRAST / PIVOT", gui::UiColor{0.72F, 0.48F, 0.98F, 1.0F});
+        if (heading_button(heading,
+                           mix(id_, contrast_pivot->source.value() ^ 0x700U),
+                           "RESET", ctx.theme().keyframe)) {
             if (parameters.contrast != 1.0F) {
                 frame.edits.push_back(ColorCorrectionEdit{
                     contrast_pivot->source,
@@ -684,40 +633,13 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     std::string{scene::schema::pivot}, 0.5});
             }
         }
-        y += heading_height + row_gap;
         const auto field = [&](std::string_view label,
                                std::string_view property, float value,
                                float minimum, float maximum, core::u64 salt) {
-            const gui::Rect row{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), row_height};
-            y += row_height + row_gap;
-            const float label_width =
-                std::clamp(row.width * 0.44F, 82.0F, 132.0F);
-            ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
-                      ctx.theme().text_muted);
-            const gui::Rect well{
-                row.x + label_width, row.y,
-                std::max(row.width - label_width, 0.0F), row.height};
-            double authored{};
-            NumberFieldEdit numeric_edit{};
-            const gui::UiId numeric_id =
-                mix(id_, contrast_pivot->source.value() ^ salt);
-            const std::size_t edits_before = frame.edits.size();
-            if (fields_.draw(
-                    ctx, numeric_id, well, {}, static_cast<double>(value),
-                    0.01, authored, 3, &numeric_edit) &&
-                std::isfinite(authored)) {
-                const double normalized = std::clamp(
-                    authored, static_cast<double>(minimum),
-                    static_cast<double>(maximum));
-                if (normalized != static_cast<double>(value)) {
-                    frame.edits.push_back(ColorCorrectionEdit{
-                        contrast_pivot->source, std::string{property},
-                        normalized});
-                }
-            }
-            record_nudge(numeric_id, property, numeric_edit, edits_before);
+            number_row(label, muted,
+                       mix(id_, contrast_pivot->source.value() ^ salt),
+                       contrast_pivot->source, property, value, 0.01, 3,
+                       minimum, maximum);
         };
         field("Contrast", scene::schema::contrast, parameters.contrast,
               scene::min_contrast_pivot_contrast,
@@ -725,31 +647,16 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         field("Pivot", scene::schema::pivot, parameters.pivot,
               scene::min_contrast_pivot_pivot,
               scene::max_contrast_pivot_pivot, 0x702U);
-        y += 5.0F;
+        form.space(section_space);
     }
 
     if (white_balance != nullptr) {
         const auto& parameters = white_balance->white_balance;
-        const gui::Rect heading{
-            content.x + inset, y,
-            std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-        ctx.panel(heading, ctx.theme().header);
-        ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                  gui::UiColor{0.98F, 0.70F, 0.42F, 1.0F});
-        ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                            std::max(heading.width - 70.0F, 0.0F),
-                            heading.height},
-                  "WHITE BALANCE", ctx.theme().text);
-        const gui::Rect reset{
-            heading.x + std::max(heading.width - 58.0F, 0.0F), heading.y,
-            58.0F, heading.height};
-        const gui::Interaction reset_it = ctx.grab(
-            mix(id_, white_balance->source.value() ^ 0xA00U), reset);
-        ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                          : ctx.theme().widget);
-        ctx.label(reset, "RESET", reset_it.hovered ? ctx.theme().keyframe
-                                                    : ctx.theme().text_muted);
-        if (reset_it.clicked) {
+        const gui::Rect heading = section_heading(
+            "WHITE BALANCE", gui::UiColor{0.98F, 0.70F, 0.42F, 1.0F});
+        if (heading_button(heading,
+                           mix(id_, white_balance->source.value() ^ 0xA00U),
+                           "RESET", ctx.theme().keyframe)) {
             if (parameters.temperature_kelvin !=
                 scene::d65_white_balance_temperature_kelvin) {
                 frame.edits.push_back(ColorCorrectionEdit{
@@ -763,41 +670,14 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     0.0});
             }
         }
-        y += heading_height + row_gap;
         const auto field = [&](std::string_view label,
                                std::string_view property, float value,
                                float minimum, float maximum, double speed,
                                int decimals, core::u64 salt) {
-            const gui::Rect row{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), row_height};
-            y += row_height + row_gap;
-            const float label_width =
-                std::clamp(row.width * 0.44F, 82.0F, 132.0F);
-            ctx.label(gui::Rect{row.x, row.y, label_width, row.height}, label,
-                      ctx.theme().text_muted);
-            const gui::Rect well{
-                row.x + label_width, row.y,
-                std::max(row.width - label_width, 0.0F), row.height};
-            double authored{};
-            NumberFieldEdit numeric_edit{};
-            const gui::UiId numeric_id =
-                mix(id_, white_balance->source.value() ^ salt);
-            const std::size_t edits_before = frame.edits.size();
-            if (fields_.draw(
-                    ctx, numeric_id, well, {}, static_cast<double>(value),
-                    speed, authored, decimals, &numeric_edit) &&
-                std::isfinite(authored)) {
-                const double normalized = std::clamp(
-                    authored, static_cast<double>(minimum),
-                    static_cast<double>(maximum));
-                if (normalized != static_cast<double>(value)) {
-                    frame.edits.push_back(ColorCorrectionEdit{
-                        white_balance->source, std::string{property},
-                        normalized});
-                }
-            }
-            record_nudge(numeric_id, property, numeric_edit, edits_before);
+            number_row(label, muted,
+                       mix(id_, white_balance->source.value() ^ salt),
+                       white_balance->source, property, value, speed,
+                       decimals, minimum, maximum);
         };
         field("Temperature (K)", scene::schema::temperature_kelvin,
               parameters.temperature_kelvin,
@@ -806,7 +686,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         field("Tint", scene::schema::tint, parameters.tint,
               scene::min_white_balance_tint, scene::max_white_balance_tint,
               0.01, 3, 0xA02U);
-        y += 5.0F;
+        form.space(section_space);
     }
 
     if (curves != nullptr) {
@@ -834,33 +714,22 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         for (std::size_t section_index = 0U;
              section_index < sections.size(); ++section_index) {
             const CurveSection& section = sections[section_index];
-            const gui::Rect heading{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-            ctx.panel(heading, ctx.theme().header);
-            ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                      section.color);
-            const std::string title =
-                std::string{"CURVES  /  "} + std::string{section.name};
-            ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                                std::max(heading.width - 112.0F, 0.0F),
-                                heading.height},
-                      title, ctx.theme().text);
             if (section.channel == nullptr) {
-                const gui::Rect add{
-                    heading.x + std::max(heading.width - 54.0F, 0.0F),
-                    heading.y, 54.0F, heading.height};
-                const gui::Interaction add_it = ctx.grab(
-                    mix(id_, curves->source.value() ^
-                                 static_cast<core::u64>(0xC00U +
-                                     section_index)),
-                    add);
-                ctx.panel(add, add_it.hovered ? ctx.theme().widget_hover
-                                              : ctx.theme().widget);
-                ctx.label(add, "ENABLE",
-                          add_it.hovered ? section.color
-                                         : ctx.theme().text_muted);
-                if (add_it.clicked) {
+                // An unused curve is a heading with ENABLE, set apart by
+                // its own space rather than a section's.
+                const gui::Rect heading = form.next(heading_height, 8.0F);
+                ctx.panel(heading, ctx.theme().header);
+                gui::Rect rest = heading;
+                ctx.panel(gui::cut_left(rest, 3.0F), section.color);
+                ctx.label(gui::inset(rest, gui::Padding{6.0F, 0.0F, 103.0F, 0.0F}),
+                          std::string{"CURVES  /  "} + std::string{section.name},
+                          ctx.theme().text);
+                if (heading_button(
+                        heading,
+                        mix(id_, curves->source.value() ^
+                                     static_cast<core::u64>(0xC00U +
+                                         section_index)),
+                        "ENABLE", section.color, 54.0F)) {
                     for (std::size_t point = 0U; point < 2U; ++point) {
                         const double value = static_cast<double>(point);
                         frame.edits.push_back(ColorCorrectionEdit{
@@ -875,24 +744,19 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                             value});
                     }
                 }
-                y += heading_height + 8.0F;
                 continue;
             }
 
             const auto& points = section.channel->points;
-            const gui::Rect reset{
-                heading.x + std::max(heading.width - 58.0F, 0.0F),
-                heading.y, 58.0F, heading.height};
-            const gui::Interaction reset_it = ctx.grab(
-                mix(id_, curves->source.value() ^
-                             static_cast<core::u64>(0xC10U + section_index)),
-                reset);
-            ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                              : ctx.theme().widget);
-            ctx.label(reset, "RESET", reset_it.hovered ? section.color
-                                                        : ctx.theme().text_muted);
+            const gui::Rect heading = section_heading(
+                std::string{"CURVES  /  "} + std::string{section.name},
+                section.color, 103.0F);
             const bool can_add = points.size() < scene::max_curve_control_points;
-            if (reset_it.clicked) {
+            if (heading_button(
+                    heading,
+                    mix(id_, curves->source.value() ^
+                                 static_cast<core::u64>(0xC10U + section_index)),
+                    "RESET", section.color)) {
                 for (std::size_t point = 0U; point < points.size(); ++point) {
                     if (points[point].y != points[point].x) {
                         frame.edits.push_back(ColorCorrectionEdit{
@@ -903,11 +767,9 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     }
                 }
             }
-            y += heading_height + row_gap;
 
-            const gui::Rect plot{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), 112.0F};
+            constexpr float plot_height = 112.0F;
+            const gui::Rect plot = form.next(plot_height, m.row_gap);
             ctx.panel(plot, ctx.theme().track);
             const gui::Interaction plot_it = ctx.grab(
                 mix(id_, curves->source.value() ^
@@ -1067,53 +929,28 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                                          active ? ctx.theme().text
                                                 : section.color);
             }
-            ctx.label({plot.x + 7.0F, plot.y + 4.0F,
-                       std::max(plot.width - 14.0F, 0.0F), 14.0F},
-                      can_add ? "CLICK TO ADD  /  DRAG POINTS"
-                              : "DRAG POINTS",
-                      ctx.theme().text_muted);
-            y += plot.height + row_gap;
+            {
+                gui::Rect hint = gui::inset(plot, 7.0F, 4.0F);
+                ctx.label(gui::cut_top(hint, 14.0F),
+                          can_add ? "CLICK TO ADD  /  DRAG POINTS"
+                                  : "DRAG POINTS",
+                          muted);
+            }
 
             for (std::size_t point = 1U; point + 1U < points.size(); ++point) {
                 const auto point_field = [&](std::string_view axis,
                                              std::string_view suffix,
                                              float value, float minimum,
                                              float maximum, core::u64 salt) {
-                    const gui::Rect row{
-                        content.x + inset, y,
-                        std::max(content.width - inset * 2.0F, 0.0F),
-                        row_height};
-                    y += row_height + row_gap;
-                    const float label_width =
-                        std::clamp(row.width * 0.44F, 82.0F, 132.0F);
                     const std::string label = "Point " +
                         std::to_string(point) + " " + std::string{axis};
-                    ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
-                              label, ctx.theme().text_muted);
-                    const gui::Rect well{
-                        row.x + label_width, row.y,
-                        std::max(row.width - label_width, 0.0F), row.height};
                     const std::string property =
                         curve_property(section.prefix, point, suffix);
-                    double authored{};
-                    NumberFieldEdit numeric_edit{};
-                    const gui::UiId numeric_id = mix(
-                        id_, curves->source.value() ^ salt ^
-                                 static_cast<core::u64>(point * 2U));
-                    const std::size_t edits_before = frame.edits.size();
-                    if (fields_.draw(ctx, numeric_id, well, {}, value, 0.005,
-                                     authored, 3, &numeric_edit) &&
-                        std::isfinite(authored)) {
-                        const double normalized = std::clamp(
-                            authored, static_cast<double>(minimum),
-                            static_cast<double>(maximum));
-                        if (normalized != static_cast<double>(value)) {
-                            frame.edits.push_back(ColorCorrectionEdit{
-                                curves->source, property, normalized});
-                        }
-                    }
-                    record_nudge(numeric_id, property, numeric_edit,
-                                 edits_before);
+                    number_row(label, muted,
+                               mix(id_, curves->source.value() ^ salt ^
+                                            static_cast<core::u64>(point * 2U)),
+                               curves->source, property, value, 0.005, 3,
+                               minimum, maximum);
                 };
                 const float minimum_x = points[point - 1U].x + 0.0001F;
                 const float maximum_x = points[point + 1U].x - 0.0001F;
@@ -1126,7 +963,7 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                             0xD40U + static_cast<core::u64>(section_index) *
                                 0x80U);
             }
-            y += 5.0F;
+            form.space(section_space);
         }
     }
 
@@ -1167,30 +1004,14 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
         for (std::size_t section_index = 0U;
              section_index < sections.size(); ++section_index) {
             const MatrixSection& section = sections[section_index];
-            const gui::Rect heading{
-                content.x + inset, y,
-                std::max(content.width - inset * 2.0F, 0.0F), heading_height};
-            ctx.panel(heading, ctx.theme().header);
-            ctx.panel(gui::Rect{heading.x, heading.y, 3.0F, heading.height},
-                      section.color);
-            const std::string title =
-                std::string{"CHANNEL MIXER  /  "} + std::string{section.name};
-            ctx.label(gui::Rect{heading.x + 9.0F, heading.y,
-                                std::max(heading.width - 70.0F, 0.0F),
-                                heading.height},
-                      title, ctx.theme().text);
-            const gui::Rect reset{
-                heading.x + std::max(heading.width - 58.0F, 0.0F), heading.y,
-                58.0F, heading.height};
-            const gui::Interaction reset_it = ctx.grab(
-                mix(id_, color_matrix->source.value() ^
-                             static_cast<core::u64>(0x800U + section_index)),
-                reset);
-            ctx.panel(reset, reset_it.hovered ? ctx.theme().widget_hover
-                                              : ctx.theme().widget);
-            ctx.label(reset, "RESET", reset_it.hovered ? section.color
-                                                        : ctx.theme().text_muted);
-            if (reset_it.clicked) {
+            const gui::Rect heading = section_heading(
+                std::string{"CHANNEL MIXER  /  "} + std::string{section.name},
+                section.color);
+            if (heading_button(
+                    heading,
+                    mix(id_, color_matrix->source.value() ^
+                                 static_cast<core::u64>(0x800U + section_index)),
+                    "RESET", section.color)) {
                 for (std::size_t index = 0U; index < 4U; ++index) {
                     if (section.values[index] != section.identities[index]) {
                         frame.edits.push_back(ColorCorrectionEdit{
@@ -1200,57 +1021,22 @@ ColorCorrectionFrame ColorCorrectionPanel::draw(
                     }
                 }
             }
-            y += heading_height + row_gap;
             for (std::size_t index = 0U; index < 4U; ++index) {
-                const gui::Rect row{
-                    content.x + inset, y,
-                    std::max(content.width - inset * 2.0F, 0.0F), row_height};
-                y += row_height + row_gap;
-                const float label_width =
-                    std::clamp(row.width * 0.44F, 82.0F, 132.0F);
-                ctx.label(gui::Rect{row.x, row.y, label_width, row.height},
-                          field_names[index], ctx.theme().text_muted);
-                const gui::Rect well{
-                    row.x + label_width, row.y,
-                    std::max(row.width - label_width, 0.0F), row.height};
-                double authored{};
                 const core::u64 salt =
                     0x900U + static_cast<core::u64>(section_index) * 8U +
                     static_cast<core::u64>(index);
-                NumberFieldEdit numeric_edit{};
-                const gui::UiId numeric_id =
-                    mix(id_, color_matrix->source.value() ^ salt);
-                const std::size_t edits_before = frame.edits.size();
-                if (fields_.draw(
-                        ctx, numeric_id, well,
-                        {}, static_cast<double>(section.values[index]), 0.01,
-                        authored, 3, &numeric_edit) &&
-                    std::isfinite(authored)) {
-                    const double normalized = std::clamp(
-                        authored,
-                        static_cast<double>(
-                            scene::min_color_matrix_coefficient),
-                        static_cast<double>(
-                            scene::max_color_matrix_coefficient));
-                    if (normalized !=
-                        static_cast<double>(section.values[index])) {
-                        frame.edits.push_back(ColorCorrectionEdit{
-                            color_matrix->source,
-                            std::string{section.properties[index]},
-                            normalized});
-                    }
-                }
-                record_nudge(numeric_id, section.properties[index],
-                             numeric_edit, edits_before);
+                number_row(field_names[index], muted,
+                           mix(id_, color_matrix->source.value() ^ salt),
+                           color_matrix->source, section.properties[index],
+                           section.values[index], 0.01, 3,
+                           scene::min_color_matrix_coefficient,
+                           scene::max_color_matrix_coefficient);
             }
-            y += 5.0F;
+            form.space(section_space);
         }
     }
-    ctx.pop_clip();
+    scroll_.end(ctx, form.extent());
 
-    content_height_ = std::max(y + scroll_ - content.y, 0.0F);
-    scroll_ = std::clamp(scroll_, 0.0F,
-                         std::max(content_height_ - content.height, 0.0F));
     frame.editing = frame.editing || fields_.live() ||
         curve_drag_effect_ != doc::NodeId{};
     return frame;

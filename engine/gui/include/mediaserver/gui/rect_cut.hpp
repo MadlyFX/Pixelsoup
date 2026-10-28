@@ -85,4 +85,21 @@ namespace mediaserver::gui {
     return Rect{x, r.y, width, r.height};
 }
 
+// Where a column crosses a row: `column`'s x and width, `row`'s y and height.
+// A table lays its columns out once, across its heading, and every row takes
+// its cells from them.
+[[nodiscard]] constexpr Rect cell(const Rect& column, const Rect& row) noexcept {
+    return Rect{column.x, row.y, column.width, row.height};
+}
+
+// Row `index` of a list of `height`-tall rows `gap` apart down `list`,
+// scrolled up by `scroll`. Unlike a cut it is not clamped: a row past the
+// list's bottom is still placed there, for the clip to hide or the caller to
+// skip.
+[[nodiscard]] inline Rect list_row(const Rect& list, std::size_t index, float height,
+                                   float scroll = 0.0F, float gap = 0.0F) noexcept {
+    return Rect{list.x, list.y - scroll + static_cast<float>(index) * (height + gap),
+                list.width, height};
+}
+
 } // namespace mediaserver::gui

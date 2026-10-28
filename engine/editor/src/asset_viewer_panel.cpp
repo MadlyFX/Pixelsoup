@@ -1,6 +1,7 @@
 #include <mediaserver/editor/asset_viewer_panel.hpp>
 
 #include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/scene/timeline_edit.hpp>
 
 #include <algorithm>
@@ -96,6 +97,62 @@ rendition_tooltip(AssetViewerRendition rendition) noexcept {
     return "The asset's own file";
   }
 }
+
+// A viewer's header strip: controls laid in from the right while the title
+// keeps 160px, then the title and status chips from the left in what is left.
+class HeaderBar final {
+public:
+  HeaderBar(gui::UiContext &ctx, const gui::Rect &bar)
+      : ctx_(ctx), bar_(bar),
+        controls_(gui::inset(bar, gui::Padding{0.0F, 3.0F, 4.0F, 3.0F})) {
+    ctx.panel(bar, ctx.theme().header);
+    gui::Rect rule = bar;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), ctx.theme().divider);
+  }
+
+  [[nodiscard]] bool room(float width) const noexcept {
+    return controls_.width - width > 160.0F;
+  }
+  // The next control from the right, `gap` short of the one after it; a
+  // group of controls that touch passes zero.
+  [[nodiscard]] gui::Rect place(float width, float gap = 4.0F) noexcept {
+    const gui::Rect at = gui::cut_right(controls_, width);
+    static_cast<void>(gui::cut_right(controls_, gap));
+    return at;
+  }
+  // The title, left of the controls, as wide as it needs; chips follow it.
+  gui::Rect title(std::string_view text) {
+    gui::Rect lane = bar_;
+    lane.width = std::max(controls_.right() - bar_.x, 0.0F);
+    gui::Rect title_lane =
+        gui::inset(lane, gui::Padding{8.0F, 0.0F, 4.0F, 0.0F});
+    const gui::Rect rect =
+        gui::cut_left(title_lane, ctx_.font_width(text) + 4.0F);
+    ctx_.label(rect, text, ctx_.theme().text);
+    chips_ = gui::inset(
+        lane, gui::Padding{rect.right() - bar_.x + 8.0F, 6.0F, 0.0F, 6.0F});
+    return rect;
+  }
+  // A tinted status chip after the title, dropped when it would not fit.
+  void chip(std::string_view text, gui::UiColor color, std::string_view tip) {
+    const float width = ctx_.font_width(text) + 12.0F;
+    if (text.empty() || width > chips_.width) {
+      return;
+    }
+    const gui::Rect rect = gui::cut_left(chips_, width);
+    static_cast<void>(gui::cut_left(chips_, 6.0F));
+    ctx_.panel(rect, alpha(color, 0.18F));
+    ctx_.label(gui::inset(rect, gui::Padding{6.0F, 0.0F, 0.0F, 0.0F}), text,
+               color);
+    ctx_.tooltip(rect, tip);
+  }
+
+private:
+  gui::UiContext &ctx_;
+  gui::Rect bar_;
+  gui::Rect controls_;
+  gui::Rect chips_;
+};
 
 } // namespace
 
@@ -259,36 +316,40 @@ void AssetViewerPanel::request_edit(Pass &p, SourceEditMode mode) {
   p.frame.source_edit = AssetViewerSourceEdit{mode, in, out - in + 1U};
 }
 
+void AssetViewerPanel::history_buttons(gui::UiContext &ctx,
+                                       const gui::Rect &back,
+                                       const gui::Rect &forward) {
+  if (ctx.button(mix(id_, "back"), back, "<") && history_index_ > 0U &&
+      !history_.empty()) {
+    --history_index_;
+    const doc::NodeId wanted = history_[history_index_];
+    asset_ = doc::NodeId{};
+    open(wanted);
+    // open() already reached this entry; keep the forward history.
+  }
+  if (ctx.button(mix(id_, "forward"), forward, ">") &&
+      history_index_ + 1U < history_.size()) {
+    ++history_index_;
+    const doc::NodeId wanted = history_[history_index_];
+    asset_ = doc::NodeId{};
+    open(wanted);
+  }
+  ctx.tooltip(back, "Previous asset");
+  ctx.tooltip(forward, "Next asset");
+}
+
 void AssetViewerPanel::draw_header(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const gui::Theme &theme = ctx.theme();
-  const gui::Rect &bar = p.header;
-  ctx.panel(bar, theme.header);
-  ctx.panel(gui::Rect{bar.x, bar.y + bar.height - 1.0F, bar.width, 1.0F},
-            theme.divider);
-
   // Controls from the right, each only while there is room for it and the
   // name to its left.
-  float right = bar.x + bar.width - 4.0F;
-  const float y = bar.y + 3.0F;
-  const float h = bar.height - 6.0F;
-  const auto room = [&](float width) {
-    return right - width > bar.x + 160.0F;
-  };
-  const auto place = [&](float width) {
-    right -= width;
-    const gui::Rect at{right, y, width, h};
-    right -= 4.0F;
-    return at;
-  };
-  if (p.media != nullptr && room(126.0F)) {
-    const gui::Rect plus = place(22.0F);
+  HeaderBar bar{ctx, p.header};
+  if (p.media != nullptr && bar.room(126.0F)) {
+    const gui::Rect plus = bar.place(22.0F, 0.0F);
     std::array<char, 24U> stops{};
     std::snprintf(stops.data(), stops.size(), "EV %+.1f", exposure_);
-    right += 4.0F;
-    const gui::Rect value = place(56.0F);
-    right += 4.0F;
-    const gui::Rect minus = place(22.0F);
+    const gui::Rect value = bar.place(56.0F, 0.0F);
+    const gui::Rect minus = bar.place(22.0F);
     if (ctx.button(mix(id_, "ev-"), minus, "-")) {
       exposure_ = std::max(exposure_ - 0.5F, -8.0F);
     }
@@ -300,21 +361,20 @@ void AssetViewerPanel::draw_header(Pass &p) {
     }
     ctx.tooltip(value, "A display-only exposure offset; click to reset");
   }
-  if (p.media != nullptr && room(78.0F)) {
+  if (p.media != nullptr && bar.room(78.0F)) {
     static constexpr std::array<std::string_view, 5U> channels{
         "RGB", "Red", "Green", "Blue", "Luma"};
     std::size_t selected = static_cast<std::size_t>(channel_);
-    if (ctx.dropdown(mix(id_, "channel"), place(78.0F), channels, selected)) {
+    if (ctx.dropdown(mix(id_, "channel"), bar.place(78.0F), channels,
+                     selected)) {
       channel_ = static_cast<AssetViewerChannel>(
           std::min<std::size_t>(selected, channels.size() - 1U));
     }
   }
-  if (p.media != nullptr && room(140.0F)) {
-    const gui::Rect actual = place(46.0F);
-    right += 4.0F;
-    const gui::Rect fit = place(40.0F);
-    right += 4.0F;
-    const gui::Rect zoom_text = place(46.0F);
+  if (p.media != nullptr && bar.room(140.0F)) {
+    const gui::Rect actual = bar.place(46.0F, 0.0F);
+    const gui::Rect fit = bar.place(40.0F, 0.0F);
+    const gui::Rect zoom_text = bar.place(46.0F);
     const float scale = asset_viewer_scale(
         framing_, asset_viewer_pixels(*p.media), p.image.width * p.ppu,
         std::max(p.image.height - readout_height, 1.0F) * p.ppu);
@@ -330,55 +390,22 @@ void AssetViewerPanel::draw_header(Pass &p) {
     }
     ctx.tooltip(actual, "One source pixel to one screen pixel");
   }
-  if (room(52.0F)) {
-    const gui::Rect forward = place(24.0F);
-    right += 4.0F;
-    const gui::Rect back = place(24.0F);
-    const bool can_back = history_index_ > 0U && !history_.empty();
-    const bool can_forward = history_index_ + 1U < history_.size();
-    if (ctx.button(mix(id_, "back"), back, "<") && can_back) {
-      --history_index_;
-      const doc::NodeId wanted = history_[history_index_];
-      asset_ = doc::NodeId{};
-      open(wanted);
-      // open() already reached this entry; keep the forward history.
-    }
-    if (ctx.button(mix(id_, "forward"), forward, ">") && can_forward) {
-      ++history_index_;
-      const doc::NodeId wanted = history_[history_index_];
-      asset_ = doc::NodeId{};
-      open(wanted);
-    }
-    ctx.tooltip(back, "Previous asset");
-    ctx.tooltip(forward, "Next asset");
+  if (bar.room(52.0F)) {
+    const gui::Rect forward = bar.place(24.0F, 0.0F);
+    history_buttons(ctx, bar.place(24.0F), forward);
   }
 
   std::string title = p.asset != nullptr
                           ? std::string{assets::asset_display_name(*p.asset)}
                           : std::string{"Asset Viewer"};
-  const float title_width =
-      std::min(ctx.font_width(title) + 4.0F, std::max(right - bar.x - 12.0F, 0.0F));
-  const gui::Rect title_rect{bar.x + 8.0F, bar.y, title_width, bar.height};
-  ctx.label(title_rect, title, theme.text);
+  const gui::Rect title_rect = bar.title(title);
   if (p.asset != nullptr) {
     ctx.tooltip(title_rect, assets::asset_source(*p.asset));
   }
 
   // The file the picture is from, and whether it is still arriving.
-  float chip_x = title_rect.x + title_rect.width + 8.0F;
   const auto chip = [&](std::string_view text, gui::UiColor color,
-                        std::string_view tip) {
-    const float width = ctx.font_width(text) + 12.0F;
-    if (text.empty() || chip_x + width > right) {
-      return;
-    }
-    const gui::Rect rect{chip_x, bar.y + 6.0F, width, bar.height - 12.0F};
-    ctx.panel(rect, alpha(color, 0.18F));
-    ctx.label(gui::Rect{rect.x + 6.0F, rect.y, rect.width - 6.0F, rect.height},
-              text, color);
-    ctx.tooltip(rect, tip);
-    chip_x += width + 6.0F;
-  };
+                        std::string_view tip) { bar.chip(text, color, tip); };
   if (p.media != nullptr && p.input.director != nullptr &&
       p.input.director->shown.asset == asset_) {
     const AssetViewerRendition rendition = p.input.director->rendition;
@@ -1161,28 +1188,13 @@ void AssetViewerPanel::draw_model_header(Pass &p) {
   gui::UiContext &ctx = p.ctx;
   const gui::Theme &theme = ctx.theme();
   const AssetViewerModelInput &model = *p.input.model;
-  const gui::Rect &bar = p.header;
-  ctx.panel(bar, theme.header);
-  ctx.panel(gui::Rect{bar.x, bar.y + bar.height - 1.0F, bar.width, 1.0F},
-            theme.divider);
-  float right = bar.x + bar.width - 4.0F;
-  const float y = bar.y + 3.0F;
-  const float h = bar.height - 6.0F;
-  const auto room = [&](float width) {
-    return right - width > bar.x + 160.0F;
-  };
-  const auto place = [&](float width) {
-    right -= width;
-    const gui::Rect at{right, y, width, h};
-    right -= 4.0F;
-    return at;
-  };
-  if (room(112.0F)) {
+  HeaderBar bar{ctx, p.header};
+  if (bar.room(112.0F)) {
     static constexpr std::array<std::string_view, 6U> shadings{
         "Lit", "Unlit", "Lights only", "Wireframe", "UV checker",
         "World normals"};
     std::size_t selected = static_cast<std::size_t>(shading_);
-    const gui::Rect at = place(112.0F);
+    const gui::Rect at = bar.place(112.0F);
     if (ctx.dropdown(mix(id_, "shading"), at, shadings, selected)) {
       shading_ = static_cast<render::ViewShading>(
           std::min<std::size_t>(selected, shadings.size() - 1U));
@@ -1190,11 +1202,11 @@ void AssetViewerPanel::draw_model_header(Pass &p) {
     ctx.tooltip(at, "How the model is shaded here. UV checker shows its "
                     "texture mapping; World normals its facing.");
   }
-  if (room(120.0F)) {
+  if (bar.room(120.0F)) {
     static constexpr std::array<std::string_view, 3U> environments{
         "Studio", "Stage scene", "HDRI image..."};
     std::size_t selected = static_cast<std::size_t>(look_.environment);
-    const gui::Rect at = place(120.0F);
+    const gui::Rect at = bar.place(120.0F);
     if (ctx.dropdown(mix(id_, "environment"), at, environments, selected)) {
       if (selected == 2U) {
         p.frame.choose_hdri = true;
@@ -1208,48 +1220,15 @@ void AssetViewerPanel::draw_model_header(Pass &p) {
                               "What lights the model. Only the viewer changes; "
                               "nothing is authored."});
   }
-  if (room(52.0F)) {
-    const gui::Rect forward = place(24.0F);
-    right += 4.0F;
-    const gui::Rect back = place(24.0F);
-    if (ctx.button(mix(id_, "back"), back, "<") && history_index_ > 0U &&
-        !history_.empty()) {
-      --history_index_;
-      const doc::NodeId wanted = history_[history_index_];
-      asset_ = doc::NodeId{};
-      open(wanted);
-    }
-    if (ctx.button(mix(id_, "forward"), forward, ">") &&
-        history_index_ + 1U < history_.size()) {
-      ++history_index_;
-      const doc::NodeId wanted = history_[history_index_];
-      asset_ = doc::NodeId{};
-      open(wanted);
-    }
-    ctx.tooltip(back, "Previous asset");
-    ctx.tooltip(forward, "Next asset");
+  if (bar.room(52.0F)) {
+    const gui::Rect forward = bar.place(24.0F, 0.0F);
+    history_buttons(ctx, bar.place(24.0F), forward);
   }
 
   const std::string title{assets::asset_display_name(*p.asset)};
-  const float title_width = std::min(ctx.font_width(title) + 4.0F,
-                                     std::max(right - bar.x - 12.0F, 0.0F));
-  const gui::Rect title_rect{bar.x + 8.0F, bar.y, title_width, bar.height};
-  ctx.label(title_rect, title, theme.text);
-  ctx.tooltip(title_rect, assets::asset_source(*p.asset));
-  float chip_x = title_rect.x + title_rect.width + 8.0F;
+  ctx.tooltip(bar.title(title), assets::asset_source(*p.asset));
   const auto chip = [&](std::string_view text, gui::UiColor color,
-                        std::string_view tip) {
-    const float width = ctx.font_width(text) + 12.0F;
-    if (chip_x + width > right) {
-      return;
-    }
-    const gui::Rect rect{chip_x, bar.y + 6.0F, width, bar.height - 12.0F};
-    ctx.panel(rect, alpha(color, 0.18F));
-    ctx.label(gui::Rect{rect.x + 6.0F, rect.y, rect.width - 6.0F, rect.height},
-              text, color);
-    ctx.tooltip(rect, tip);
-    chip_x += width + 6.0F;
-  };
+                        std::string_view tip) { bar.chip(text, color, tip); };
   if (p.model->projection_mesh) {
     chip("PROJECTION MESH", theme.text_muted,
          "A projection mesh: its UV0 is the mapping the wall is calibrated "

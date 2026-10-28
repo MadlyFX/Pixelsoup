@@ -325,7 +325,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
           continue;
         }
         const bool hovered = &target == layer_lane_hovered;
-        draw_border(ctx, target.bounds,
+        ctx.outline(target.bounds,
                     hovered ? ctx.theme().accent
                             : alpha(ctx.theme().accent, 0.28F),
                     hovered ? 2.0F : 1.0F);
@@ -408,7 +408,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
         continue;
       }
       const bool hovered = &target == clip_drop_hovered;
-      draw_border(ctx, target.bounds,
+      ctx.outline(target.bounds,
                   hovered ? ctx.theme().accent
                           : alpha(ctx.theme().accent, 0.28F),
                   hovered ? 2.0F : 1.0F);
@@ -430,7 +430,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
                    1.0F),
           row_height - 6.0F};
       ctx.panel(preview_bar, alpha(ctx.theme().accent, 0.24F));
-      draw_border(ctx, preview_bar, alpha(ctx.theme().accent, 0.90F), 1.0F);
+      ctx.outline(preview_bar, alpha(ctx.theme().accent, 0.90F), 1.0F);
     }
 
     std::string ghost_label{"MOVE  "};
@@ -498,7 +498,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     const gui::Rect status{bounds.x + 8.0F, bounds.y + bounds.height - 30.0F,
                            std::max(bounds.width - 16.0F, 0.0F), 24.0F};
     ctx.panel(status, ctx.theme().background);
-    draw_border(ctx, status,
+    ctx.outline(status,
                 clip_.status_error ? ctx.theme().warning : ctx.theme().accent,
                 1.0F);
     ctx.label(gui::Rect{status.x + 8.0F, status.y,

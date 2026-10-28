@@ -6,6 +6,8 @@
 
 #include <mediaserver/editor/cues_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
+#include <mediaserver/gui/form_layout.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 
 #include "timeline_graph_view.hpp"
 #include "timeline_hits.hpp"
@@ -502,6 +504,17 @@ inline constexpr float row_switch_width = 18.0F;
          std::string{text.substr(tail)};
 }
 
+// A popup hanging from the toolbar: filled, and ruled along its top and
+// down both sides, open where it meets the toolbar's edge.
+inline void draw_hanging_popup(gui::UiContext &ctx, const gui::Rect &popup) {
+  ctx.panel(popup, ctx.theme().background);
+  gui::Rect top = popup;
+  ctx.panel(gui::cut_top(top, 1.0F), ctx.theme().divider);
+  gui::Rect sides = popup;
+  ctx.panel(gui::cut_left(sides, 1.0F), ctx.theme().divider);
+  ctx.panel(gui::cut_right(sides, 1.0F), ctx.theme().divider);
+}
+
 inline void draw_separator(gui::UiContext &ctx, float x, const gui::Rect &toolbar) {
   ctx.panel(gui::Rect{x, toolbar.y + 8.0F, 1.0F, toolbar.height - 16.0F},
             ctx.theme().divider);
@@ -551,31 +564,6 @@ enum class MenuCommand : core::u8 {
 // state an operator must never lose track of.
 [[nodiscard]] inline std::string cue_tag(std::size_t number) {
   return "Q" + std::to_string(number);
-}
-
-inline void draw_border(gui::UiContext &ctx, const gui::Rect &bounds,
-                 gui::UiColor color, float thickness = 1.0F) {
-  if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
-    return;
-  }
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - thickness, bounds.width,
-                thickness, color);
-  draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
-                bounds.height, color);
-}
-
-inline void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
-                  gui::UiColor color) {
-  const std::array<gui::UiPoint, 4U> points{{
-      {cx, cy - radius},
-      {cx + radius, cy},
-      {cx, cy + radius},
-      {cx - radius, cy},
-  }};
-  ctx.draw_list().add_convex_poly(points, color);
 }
 
 inline void draw_circle(gui::UiContext &ctx, float cx, float cy, float radius,
@@ -671,25 +659,6 @@ inline void nearer_key(std::optional<core::i64> &best,
   if (at != frames.begin() && (!best.has_value() || *(at - 1) > *best)) {
     best = *(at - 1);
   }
-}
-
-[[nodiscard]] inline bool key_button(gui::UiContext &ctx, gui::UiId id,
-                              const gui::Rect &bounds, bool animated,
-                              bool keyed_here, gui::UiColor background) {
-  const gui::Interaction interaction = ctx.grab(id, bounds);
-  gui::UiColor color =
-      keyed_here ? ctx.theme().playhead
-                 : (animated ? ctx.theme().keyframe : ctx.theme().text_muted);
-  if (interaction.hovered) {
-    color = ctx.theme().accent;
-  }
-  const float cx = bounds.x + bounds.width * 0.5F;
-  const float cy = bounds.y + bounds.height * 0.5F;
-  draw_diamond(ctx, cx, cy, interaction.held ? 5.0F : 4.5F, color);
-  if (!keyed_here && !interaction.held) {
-    draw_diamond(ctx, cx, cy, 2.4F, background);
-  }
-  return interaction.clicked;
 }
 
 [[nodiscard]] inline core::i64 signed_frame(core::u64 frame) noexcept {

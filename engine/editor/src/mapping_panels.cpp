@@ -1,5 +1,8 @@
 #include <mediaserver/editor/mapping_panels.hpp>
 
+#include <mediaserver/gui/form_layout.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <mediaserver/core/output_limits.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
 
@@ -305,20 +308,6 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
   return color;
 }
 
-void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
-            float thickness = 1.0F) {
-  if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
-    return;
-  }
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - thickness, bounds.width,
-                thickness, color);
-  draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
-                bounds.height, color);
-}
-
 void draw_remove(gui::UiContext &ctx, float x, float y,
                  gui::UiColor color) {
   ctx.draw_list().add_line(x - 3.0F, y - 3.0F, x + 3.0F, y + 3.0F, 1.0F,
@@ -343,20 +332,16 @@ void circle(gui::UiContext &ctx, float x, float y, float radius,
 
 void title(gui::UiContext &ctx, const gui::Rect &bounds, std::string_view name,
            std::string_view trailing) {
-  const gui::Rect header{bounds.x, bounds.y, bounds.width,
-                         std::min(bounds.height, title_height)};
+  gui::Rect header = bounds;
+  header = gui::cut_top(header, title_height);
   ctx.panel(header, ctx.theme().background);
-  ctx.panel(
-      gui::Rect{header.x, header.y + header.height - 1.0F, header.width, 1.0F},
-      ctx.theme().divider);
-  ctx.label(
-      gui::Rect{header.x + 9.0F, header.y, header.width - 18.0F, header.height},
-      name, ctx.theme().text);
+  gui::Rect rule = header;
+  ctx.panel(gui::cut_bottom(rule, 1.0F), ctx.theme().divider);
+  gui::Rect text = gui::inset(header, 9.0F, 0.0F);
+  ctx.label(text, name, ctx.theme().text);
   if (!trailing.empty()) {
-    const float width = ctx.font_width(trailing);
-    ctx.label(gui::Rect{header.x + header.width - width - 9.0F, header.y, width,
-                        header.height},
-              trailing, ctx.theme().text_muted);
+    ctx.label(gui::cut_right(text, ctx.font_width(trailing)), trailing,
+              ctx.theme().text_muted);
   }
 }
 
@@ -384,6 +369,71 @@ kind_index(topology::HardwareDeviceKind kind) noexcept {
     }
   }
   return 0U;
+}
+
+// The palette's settings rows: 23px rows that touch, a 77px label column,
+// 9px in from the palette's sides.
+[[nodiscard]] gui::Metrics palette_metrics() noexcept {
+  gui::Metrics metrics{};
+  metrics.inset = 9.0F;
+  metrics.gap = 0.0F;
+  metrics.control = details_row_height;
+  metrics.row_gap = 0.0F;
+  metrics.label_column = 77.0F;
+  return metrics;
+}
+
+// The palette column under the title, top to bottom: the DRAG TO PLACE
+// header, a card per device kind, then PROJECT SETUP - the control port and
+// the scene canvas - and SYNC POLICY. Drawing and the bounds that tests and
+// hit-tests ask for both read the rows from here.
+struct PaletteLayout final {
+  gui::Rect column;
+  gui::Rect header;
+  // Card `i` is list_row(cards, i, palette_row_height, 0, card gap).
+  gui::Rect cards;
+  gui::Rect setup_rule;
+  gui::Rect setup_heading;
+  gui::FormRow control_port;
+  gui::Rect setup_status;
+  gui::FormRow canvas_width;
+  gui::FormRow canvas_height;
+  gui::Rect sync_rule;
+  gui::Rect sync_heading;
+  gui::Rect sync_mode;
+  // Where the sync policy's own rows begin.
+  float sync_rows{};
+};
+
+[[nodiscard]] PaletteLayout palette_layout(const gui::Rect &bounds) noexcept {
+  PaletteLayout layout{};
+  gui::Rect area = bounds;
+  static_cast<void>(gui::cut_top(area, title_height));
+  layout.column = gui::cut_left(area, hardware_palette_width(bounds));
+  gui::Rect rest = layout.column;
+  layout.header = gui::inset(gui::cut_top(rest, palette_header_height), 9.0F,
+                             0.0F);
+  layout.cards = gui::inset(
+      gui::cut_top(rest, static_cast<float>(device_kinds.size()) *
+                             palette_row_step),
+      7.0F, 0.0F);
+  // Rules run 2px wider than the rows on each side.
+  const gui::Rect rule_span = gui::inset(layout.column, 7.0F, 0.0F);
+  gui::FormLayout form{rest, palette_metrics()};
+  form.space(4.0F);
+  layout.setup_rule = gui::cell(rule_span, form.next(1.0F, 3.0F));
+  layout.setup_heading = form.next(19.0F, 3.0F);
+  layout.control_port = form.row();
+  form.space(1.0F);
+  layout.setup_status = form.next(17.0F, 3.0F);
+  layout.canvas_width = form.row();
+  layout.canvas_height = form.row();
+  form.space(3.0F);
+  layout.sync_rule = gui::cell(rule_span, form.next(1.0F, 3.0F));
+  layout.sync_heading = form.next(19.0F, 3.0F);
+  layout.sync_mode = form.next(details_row_height - 2.0F, 2.0F);
+  layout.sync_rows = form.cursor();
+  return layout;
 }
 
 [[nodiscard]] gui::UiColor
@@ -423,27 +473,27 @@ void draw_device_icon(gui::UiContext &ctx, topology::HardwareDeviceKind kind,
     const gui::Rect screen{x, y, 18.0F, 12.0F};
     draw.add_rect(screen.x, screen.y, screen.width, screen.height,
                   alpha(color, 0.20F));
-    border(ctx, screen, color);
+    ctx.outline(screen, color);
     draw.add_line(x + 6.0F, y, x + 6.0F, y + 12.0F, 1.0F, color);
     draw.add_line(x + 12.0F, y, x + 12.0F, y + 12.0F, 1.0F, color);
     return;
   }
   if (kind == topology::HardwareDeviceKind::LedProcessor) {
     draw.add_rect(x, y, 18.0F, 12.0F, alpha(color, 0.18F));
-    border(ctx, gui::Rect{x, y, 18.0F, 12.0F}, color);
+    ctx.outline(gui::Rect{x, y, 18.0F, 12.0F}, color);
     draw.add_rect(x + 3.0F, y + 3.0F, 2.0F, 2.0F, color);
     draw.add_rect(x + 7.0F, y + 3.0F, 8.0F, 2.0F, color);
     draw.add_rect(x + 3.0F, y + 7.0F, 12.0F, 2.0F, alpha(color, 0.65F));
     return;
   }
   if (kind == topology::HardwareDeviceKind::OperatorMachine) {
-    border(ctx, gui::Rect{x + 1.0F, y, 16.0F, 10.0F}, color);
+    ctx.outline(gui::Rect{x + 1.0F, y, 16.0F, 10.0F}, color);
     draw.add_line(x + 9.0F, y + 10.0F, x + 9.0F, y + 13.0F, 1.0F, color);
     draw.add_line(x + 5.0F, y + 13.0F, x + 13.0F, y + 13.0F, 1.0F, color);
     return;
   }
   draw.add_rect(x, y, 18.0F, 12.0F, alpha(color, 0.18F));
-  border(ctx, gui::Rect{x, y, 18.0F, 12.0F}, color);
+  ctx.outline(gui::Rect{x, y, 18.0F, 12.0F}, color);
   draw.add_rect(x + 3.0F, y + 3.0F, 2.0F, 2.0F, color);
   draw.add_rect(x + 7.0F, y + 3.0F, 8.0F, 2.0F, color);
   draw.add_rect(x + 3.0F, y + 7.0F, 12.0F, 2.0F, alpha(color, 0.65F));
@@ -731,8 +781,8 @@ void draw_device(gui::UiContext &ctx, const IsometricProjection &projection,
   ctx.draw_list().add_line(bounds.x + 18.0F, bounds.y + 2.0F,
                            bounds.x + bounds.width - 2.0F, bounds.y + 2.0F,
                            1.0F, alpha(color, 0.72F));
-  border(ctx, face, selected ? ctx.theme().accent : ctx.theme().widget_hover,
-         selected ? 2.0F : 1.0F);
+  ctx.outline(face, selected ? ctx.theme().accent : ctx.theme().widget_hover,
+              selected ? 2.0F : 1.0F);
   ctx.panel(gui::Rect{face.x + 1.0F, face.y + 1.0F, 3.0F, face.height - 2.0F},
             color);
   draw_device_icon(ctx, device.kind, face.x + 10.0F, face.y + 8.0F, color);
@@ -1358,11 +1408,12 @@ free_grid_cell(const topology::HardwareMap &map) noexcept {
 } // namespace
 
 gui::Rect hardware_mapping_canvas(const gui::Rect &bounds) noexcept {
-  const float palette_width = hardware_palette_width(bounds);
-  const float details_width = hardware_details_width(bounds);
-  return gui::Rect{bounds.x + palette_width, bounds.y + title_height,
-                   std::max(bounds.width - palette_width - details_width, 0.0F),
-                   std::max(bounds.height - title_height, 0.0F)};
+  // Between the palette on the left and the details column on the right.
+  gui::Rect canvas = bounds;
+  static_cast<void>(gui::cut_top(canvas, title_height));
+  static_cast<void>(gui::cut_left(canvas, hardware_palette_width(bounds)));
+  static_cast<void>(gui::cut_right(canvas, hardware_details_width(bounds)));
+  return canvas;
 }
 
 IsometricProjection
@@ -1387,35 +1438,20 @@ HardwareMappingPanel::view_projection(const gui::Rect &bounds) const noexcept {
 gui::Rect
 hardware_palette_item_bounds(const gui::Rect &bounds,
                              topology::HardwareDeviceKind kind) noexcept {
-  const float palette_width = hardware_palette_width(bounds);
-  return gui::Rect{bounds.x + 7.0F,
-                   bounds.y + title_height + palette_header_height +
-                       static_cast<float>(kind_index(kind)) * palette_row_step,
-                   std::max(palette_width - 14.0F, 0.0F), palette_row_height};
+  return gui::list_row(palette_layout(bounds).cards, kind_index(kind),
+                       palette_row_height, 0.0F,
+                       palette_row_step - palette_row_height);
 }
 
 gui::Rect
 hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
-  const float palette_width = hardware_palette_width(bounds);
-  const float setup_y = bounds.y + title_height + palette_header_height +
-                        static_cast<float>(device_kinds.size()) *
-                            palette_row_step +
-                        4.0F;
-  return gui::Rect{bounds.x + 9.0F, setup_y + 138.0F,
-                   std::max(palette_width - 18.0F, 0.0F),
-                   details_row_height - 2.0F};
+  return palette_layout(bounds).sync_mode;
 }
 
 gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
                                        bool height) noexcept {
-  const float palette_width = hardware_palette_width(bounds);
-  const float setup_y = bounds.y + title_height + palette_header_height +
-                        static_cast<float>(device_kinds.size()) *
-                            palette_row_step +
-                        4.0F;
-  return gui::Rect{bounds.x + 86.0F,
-                   setup_y + 70.0F + (height ? details_row_height : 0.0F),
-                   std::max(palette_width - 95.0F, 0.0F), details_row_height};
+  const PaletteLayout layout = palette_layout(bounds);
+  return (height ? layout.canvas_height : layout.canvas_width).field;
 }
 
 gui::Rect
@@ -1643,9 +1679,10 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         valid_selection ? std::string_view{}
                         : std::string_view{configured_count});
   if (valid_selection) {
-    const gui::Rect remove_bounds{
-        bounds.x + std::max(bounds.width - 130.0F, 0.0F), bounds.y + 3.0F,
-        std::min(124.0F, bounds.width), 20.0F};
+    gui::Rect title_strip = bounds;
+    title_strip = gui::inset(gui::cut_top(title_strip, title_height),
+                             gui::Padding{0.0F, 3.0F, 6.0F, 3.0F});
+    const gui::Rect remove_bounds = gui::cut_right(title_strip, 124.0F);
     const std::string_view label =
         selection_.kind == HardwareSelectionKind::Device
             ? std::string_view{"REMOVE DEVICE"}
@@ -1771,16 +1808,18 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.pop_clip();
 
   // Palette: these are authored device kinds, not pretend discovered hosts.
-  const float palette_width = hardware_palette_width(bounds);
-  const gui::Rect palette{bounds.x, bounds.y + title_height, palette_width,
-                          std::max(bounds.height - title_height, 0.0F)};
+  const PaletteLayout layout = palette_layout(bounds);
+  const gui::Rect palette = layout.column;
   ctx.panel(palette, scale(ctx.theme().panel, 0.94F));
-  ctx.panel(gui::Rect{palette.x + palette.width - 1.0F, palette.y, 1.0F,
-                      palette.height},
-            ctx.theme().divider);
-  ctx.label(gui::Rect{palette.x + 9.0F, palette.y, palette.width - 18.0F,
-                      palette_header_height},
-            "DRAG TO PLACE", ctx.theme().text_muted);
+  {
+    gui::Rect edge = palette;
+    ctx.panel(gui::cut_right(edge, 1.0F), ctx.theme().divider);
+  }
+  ctx.label(layout.header, "DRAG TO PLACE", ctx.theme().text_muted);
+  // Whether a palette row fits above the palette's bottom edge.
+  const auto fits = [&](const gui::Rect &row) {
+    return row.bottom() <= palette.bottom();
+  };
 
   for (const topology::HardwareDeviceKind kind : device_kinds) {
     const gui::Rect item = hardware_palette_item_bounds(bounds, kind);
@@ -1790,16 +1829,16 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                         ? ctx.theme().selection
                         : (interaction.hovered ? ctx.theme().widget_hover
                                                : ctx.theme().row));
-    border(ctx, item,
-           interaction.held ? ctx.theme().accent : ctx.theme().divider);
+    ctx.outline(item,
+                interaction.held ? ctx.theme().accent : ctx.theme().divider);
     const gui::UiColor color = device_color(ctx.theme(), kind);
     draw_device_icon(ctx, kind, item.x + 10.0F, item.y + 9.0F, color);
-    ctx.label(
-        gui::Rect{item.x + 38.0F, item.y + 2.0F, item.width - 43.0F, 19.0F},
-        topology::device_kind_name(kind), ctx.theme().text);
-    ctx.label(
-        gui::Rect{item.x + 38.0F, item.y + 20.0F, item.width - 43.0F, 16.0F},
-        "CONFIGURED DEVICE", ctx.theme().text_muted);
+    // The kind's name over what it is, right of the icon.
+    const gui::Rect text = gui::inset(item, gui::Padding{38.0F, 0.0F, 5.0F, 0.0F});
+    ctx.label(gui::inset(text, gui::Padding{0.0F, 2.0F, 0.0F, 21.0F}),
+              topology::device_kind_name(kind), ctx.theme().text);
+    ctx.label(gui::inset(text, gui::Padding{0.0F, 20.0F, 0.0F, 6.0F}),
+              "CONFIGURED DEVICE", ctx.theme().text_muted);
 
     if (interaction.pressed) {
       drag_kind_ = DragKind::Palette;
@@ -1819,25 +1858,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // One lifecycle port range governs the project. Render Servers contribute
   // their host and node index; asking operators to retype host:port on every
   // card made a wall configuration both repetitive and easy to diverge.
-  const float setup_y =
-      palette.y + palette_header_height +
-      static_cast<float>(device_kinds.size()) * palette_row_step + 4.0F;
-  if (setup_y + 54.0F <= palette.y + palette.height) {
-    ctx.panel(gui::Rect{palette.x + 7.0F, setup_y,
-                        std::max(palette.width - 14.0F, 0.0F), 1.0F},
-              ctx.theme().divider);
-    ctx.label(gui::Rect{palette.x + 9.0F, setup_y + 4.0F,
-                        std::max(palette.width - 18.0F, 0.0F), 19.0F},
-              "PROJECT SETUP", ctx.theme().text_muted);
-    const gui::Rect port_bounds{palette.x + 86.0F, setup_y + 26.0F,
-                                std::max(palette.width - 95.0F, 0.0F),
-                                details_row_height};
-    ctx.label(
-        gui::Rect{palette.x + 9.0F, setup_y + 26.0F, 74.0F, details_row_height},
-        "Control port", ctx.theme().text_muted);
+  if (fits(layout.control_port.field)) {
+    ctx.panel(layout.setup_rule, ctx.theme().divider);
+    ctx.label(layout.setup_heading, "PROJECT SETUP", ctx.theme().text_muted);
+    ctx.label(layout.control_port.label, "Control port",
+              ctx.theme().text_muted);
     double changed_port{};
     if (settings_numbers_.draw(
-            ctx, mix(id_, "hardware.settings.control-port"), port_bounds, {},
+            ctx, mix(id_, "hardware.settings.control-port"),
+            layout.control_port.field, {},
             static_cast<double>(map.control.base_port), 1.0, changed_port, 0)) {
       const auto rounded = static_cast<core::i64>(std::llround(std::clamp(
           changed_port, 1.0,
@@ -1848,9 +1877,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     const std::string_view setup_status =
         map.control.authored ? std::string_view{"SAVED PROJECT RANGE"}
                              : std::string_view{"DEFAULT - EDIT TO SAVE"};
-    ctx.label(gui::Rect{palette.x + 9.0F, setup_y + 50.0F,
-                        std::max(palette.width - 18.0F, 0.0F), 17.0F},
-              setup_status, ctx.theme().text_muted);
+    ctx.label(layout.setup_status, setup_status, ctx.theme().text_muted);
   }
 
   // The canvas every scene renders, which canvas feed mappings crop. Its
@@ -1858,12 +1885,13 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // move under the pointer when one appears.
   if (scene::valid(scene_canvas)) {
     const auto canvas_row = [&](bool height) {
-      const gui::Rect field = hardware_canvas_field_bounds(bounds, height);
-      if (field.y + field.height > palette.y + palette.height) {
+      const gui::FormRow row =
+          height ? layout.canvas_height : layout.canvas_width;
+      if (!fits(row.field)) {
         return;
       }
-      ctx.label(gui::Rect{palette.x + 9.0F, field.y, 74.0F, field.height},
-                height ? "Canvas H" : "Canvas W", ctx.theme().text_muted);
+      ctx.label(row.label, height ? "Canvas H" : "Canvas W",
+                ctx.theme().text_muted);
       const core::u32 current =
           height ? scene_canvas.height : scene_canvas.width;
       double edited{};
@@ -1871,7 +1899,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               ctx,
               mix(id_, height ? "hardware.settings.canvas-height"
                               : "hardware.settings.canvas-width"),
-              field, "px", static_cast<double>(current), 1.0, edited, 0)) {
+              row.field, "px", static_cast<double>(current), 1.0, edited, 0)) {
         return;
       }
       const auto rounded = static_cast<core::u32>(std::llround(std::clamp(
@@ -1891,25 +1919,23 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // The project synchronization policy sits directly under the control port
   // because both are project settings, and because the sync groups this
   // policy governs are derived from the very cables drawn in this panel.
-  const float sync_y = setup_y + 118.0F;
-  const gui::Rect sync_mode_button = hardware_sync_mode_button_bounds(bounds);
-  if (sync_y + 24.0F <= palette.y + palette.height) {
-    const float rail_x = palette.x + 9.0F;
-    const float rail_width = std::max(palette.width - 18.0F, 0.0F);
-    ctx.panel(gui::Rect{palette.x + 7.0F, sync_y - 6.0F,
-                        std::max(palette.width - 14.0F, 0.0F), 1.0F},
-              ctx.theme().divider);
-    ctx.label(gui::Rect{rail_x, sync_y - 2.0F, rail_width, 19.0F},
-              "SYNC POLICY", ctx.theme().text_muted);
+  if (fits(layout.sync_mode)) {
+    ctx.panel(layout.sync_rule, ctx.theme().divider);
+    ctx.label(layout.sync_heading, "SYNC POLICY", ctx.theme().text_muted);
 
     sync::SyncPolicy edited = sync_policy;
     bool changed = false;
-    const auto cycle_button = [&](std::string_view suffix, float y,
+    // The policy's rows continue down the palette from the MODE button.
+    gui::Metrics rows_metrics = palette_metrics();
+    gui::FormLayout rows{
+        gui::Rect{palette.x, layout.sync_rows, palette.width,
+                  std::max(palette.bottom() - layout.sync_rows, 0.0F)},
+        rows_metrics};
+    const auto cycle_button = [&](std::string_view suffix,
+                                  const gui::Rect &button,
                                   std::string_view label,
                                   bool emphasised) -> bool {
-      const gui::Rect button{sync_mode_button.x, y, sync_mode_button.width,
-                             sync_mode_button.height};
-      if (y + button.height > palette.y + palette.height) {
+      if (!fits(button)) {
         return false;
       }
       const gui::Interaction interaction = ctx.grab(mix(id_, suffix), button);
@@ -1917,17 +1943,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                     ? scale(ctx.theme().selection, 0.9F)
                                     : ctx.theme().widget;
       ctx.panel(button, interaction.hovered ? scale(base, 1.2F) : base);
-      border(ctx, button, ctx.theme().divider);
-      ctx.label(gui::Rect{button.x + 6.0F, button.y,
-                          std::max(button.width - 12.0F, 0.0F), button.height},
-                label,
+      ctx.outline(button, ctx.theme().divider);
+      ctx.label(gui::inset(button, 6.0F, 0.0F), label,
                 emphasised ? ctx.theme().text : ctx.theme().text_muted);
       return interaction.clicked;
     };
 
     std::string mode_label{"MODE: "};
     mode_label += sync::sync_mode_name(sync_policy.mode);
-    if (cycle_button("hardware.sync.mode", sync_y + 20.0F, mode_label,
+    if (cycle_button("hardware.sync.mode", layout.sync_mode, mode_label,
                      sync_policy.requires_physical_sync())) {
       switch (sync_policy.mode) {
       case sync::SyncMode::Unsynced:
@@ -1943,21 +1967,17 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       changed = true;
     }
 
-    float row_y = sync_y + 20.0F + details_row_height;
     const auto number_row = [&](std::string_view suffix,
                                 std::string_view label, double value,
                                 double minimum, double maximum,
                                 double &result) -> bool {
-      if (row_y + details_row_height > palette.y + palette.height) {
+      const gui::FormRow row = rows.row();
+      if (!fits(row.field)) {
         return false;
       }
-      ctx.label(gui::Rect{rail_x, row_y, 74.0F, details_row_height}, label,
-                ctx.theme().text_muted);
-      const gui::Rect field{rail_x + 77.0F, row_y,
-                            std::max(rail_width - 77.0F, 0.0F),
-                            details_row_height};
+      ctx.label(row.label, label, ctx.theme().text_muted);
       double edited_value{};
-      if (!sync_numbers_.draw(ctx, mix(id_, suffix), field, {}, value, 1.0,
+      if (!sync_numbers_.draw(ctx, mix(id_, suffix), row.field, {}, value, 1.0,
                               edited_value, 0)) {
         return false;
       }
@@ -1975,7 +1995,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height;
       if (number_row("hardware.sync.height", "Height",
                      static_cast<double>(sync_policy.required_timing.height),
                      1.0, static_cast<double>(sync::max_sync_timing_height),
@@ -1984,7 +2003,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height;
       if (number_row(
               "hardware.sync.rate-num", "Rate num",
               static_cast<double>(
@@ -1995,7 +2013,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height;
       if (number_row(
               "hardware.sync.rate-den", "Rate den",
               static_cast<double>(
@@ -2006,25 +2023,25 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height;
       if (number_row("hardware.sync.group", "Swap group",
                      static_cast<double>(sync_policy.group), 1.0,
                      static_cast<double>(sync::max_sync_group_id), next)) {
         edited.group = static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height;
       if (number_row("hardware.sync.barrier", "Barrier",
                      static_cast<double>(sync_policy.barrier), 1.0,
                      static_cast<double>(sync::max_sync_barrier_id), next)) {
         edited.barrier = static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      row_y += details_row_height + 2.0F;
+      rows.space(2.0F);
 
       std::string failure_label{"ON FAILURE: "};
       failure_label += sync::sync_failure_policy_name(sync_policy.failure);
-      if (cycle_button("hardware.sync.failure", row_y, failure_label,
+      if (cycle_button("hardware.sync.failure",
+                       rows.next(details_row_height - 2.0F, 2.0F),
+                       failure_label,
                        sync_policy.failure ==
                            sync::SyncFailurePolicy::Strict)) {
         edited.failure = sync_policy.failure == sync::SyncFailurePolicy::Strict
@@ -2032,11 +2049,11 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             : sync::SyncFailurePolicy::Strict;
         changed = true;
       }
-      row_y += details_row_height;
 
       std::string late_label{"LATE FRAME: "};
       late_label += sync::late_frame_policy_name(sync_policy.late_frame);
-      if (cycle_button("hardware.sync.late-frame", row_y, late_label,
+      if (cycle_button("hardware.sync.late-frame",
+                       rows.next(details_row_height - 2.0F, 4.0F), late_label,
                        sync_policy.late_frame ==
                            sync::LateFramePolicy::HoldGroup)) {
         edited.late_frame =
@@ -2045,18 +2062,17 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             : sync::LateFramePolicy::HoldGroup;
         changed = true;
       }
-      row_y += details_row_height + 2.0F;
     }
 
-    if (row_y + 17.0F <= palette.y + palette.height) {
+    const gui::Rect status = rows.next(17.0F, 0.0F);
+    if (fits(status)) {
       const std::string_view sync_status =
           !sync_policy.authored
               ? std::string_view{"DEFAULT - EDIT TO SAVE"}
               : (sync_policy.requires_physical_sync()
                      ? std::string_view{"SAVED - VERIFIED IN OUTPUT MONITOR"}
                      : std::string_view{"SAVED - NO PHYSICAL TIMING CLAIM"});
-      ctx.label(gui::Rect{rail_x, row_y, rail_width, 17.0F}, sync_status,
-                ctx.theme().text_muted);
+      ctx.label(status, sync_status, ctx.theme().text_muted);
     }
 
     if (changed) {
@@ -2620,8 +2636,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           ? ctx.theme().selection
                           : (interaction.hovered ? ctx.theme().widget_hover
                                                  : ctx.theme().row));
-      border(ctx, card,
-             on_map ? ctx.theme().good
+      ctx.outline(card,
+                  on_map ? ctx.theme().good
                     : (dragging_this ? ctx.theme().accent
                                      : ctx.theme().divider));
       draw_device_icon(
@@ -2655,7 +2671,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                 bool pointing_right) {
       ctx.panel(area, interaction.hovered ? ctx.theme().widget_hover
                                           : scale(ctx.theme().panel, 0.90F));
-      border(ctx, area, ctx.theme().divider);
+      ctx.outline(area, ctx.theme().divider);
       const float middle_x = area.x + area.width * 0.5F;
       const float middle_y = area.y + area.height * 0.5F;
       const float tip = pointing_right ? 3.0F : -3.0F;
@@ -2712,28 +2728,38 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           ? map.device(selection_.node)
           : nullptr;
   sync_details(selected_device);
-  const float details_width = hardware_details_width(bounds);
-  if (details_width > 0.0F) {
-    const gui::Rect details{bounds.x + bounds.width - details_width,
-                            bounds.y + title_height, details_width,
-                            std::max(bounds.height - title_height, 0.0F)};
+  gui::Rect details = bounds;
+  static_cast<void>(gui::cut_top(details, title_height));
+  details = gui::cut_right(details, hardware_details_width(bounds));
+  if (details.width > 0.0F) {
     ctx.panel(details, scale(ctx.theme().panel, 0.96F));
-    ctx.panel(gui::Rect{details.x, details.y, 1.0F, details.height},
-              ctx.theme().divider);
-    ctx.label(gui::Rect{details.x + 10.0F, details.y + 3.0F,
-                        details.width - 20.0F, 22.0F},
-              "DEVICE DETAILS", ctx.theme().text_muted);
+    {
+      gui::Rect edge = details;
+      ctx.panel(gui::cut_left(edge, 1.0F), ctx.theme().divider);
+      gui::Rect heading = gui::inset(details, gui::Padding{10.0F, 3.0F, 10.0F, 0.0F});
+      ctx.label(gui::cut_top(heading, 22.0F), "DEVICE DETAILS",
+                ctx.theme().text_muted);
+    }
 
     if (selected_device != nullptr && details_node_ == selected_device->node) {
-      float y = details.y + 31.0F;
+      // Labelled rows 23px tall and 4px apart under the heading, a 72px
+      // label column, 9px in from the column's sides.
+      gui::Metrics m = ctx.theme().metrics;
+      m.inset = 9.0F;
+      m.gap = 31.0F;
+      m.control = details_row_height;
+      m.row_gap = 4.0F;
+      m.label_column = details_label_width;
+      gui::FormLayout form{details, m};
       const auto labelled_bounds = [&](std::string_view label) {
-        ctx.label(gui::Rect{details.x + 9.0F, y, details_label_width,
-                            details_row_height},
-                  label, ctx.theme().text_muted);
-        return gui::Rect{
-            details.x + details_label_width + 9.0F, y,
-            std::max(details.width - details_label_width - 18.0F, 0.0F),
-            details_row_height};
+        const gui::FormRow row = form.row();
+        ctx.label(row.label, label, ctx.theme().text_muted);
+        return row.field;
+      };
+      // A line of text across the column, `height` tall and `gap` above
+      // whatever follows.
+      const auto line = [&](float height, float gap) {
+        return form.next(height, gap);
       };
       const gui::UiId name_id =
           mix(id_, "hardware.details.name", details_node_.value());
@@ -2741,7 +2767,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (ctx.text_field(name_id, name_bounds, details_name_)) {
         details_name_dirty_ = true;
       }
-      y += 28.0F;
       const gui::UiId address_id =
           mix(id_, "hardware.details.address", details_node_.value());
       const bool render_server =
@@ -2753,28 +2778,22 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       if (render_server && details_address_.empty() &&
           ctx.focus() != address_id) {
-        ctx.label(gui::Rect{address_bounds.x + 6.0F, address_bounds.y,
-                            std::max(address_bounds.width - 12.0F, 0.0F),
-                            address_bounds.height},
+        ctx.label(gui::inset(address_bounds, 6.0F, 0.0F),
                   "LOCAL (127.0.0.1)", ctx.theme().text_muted);
       }
-      y += 28.0F;
       if (render_server) {
         const gui::Rect target_bounds = labelled_bounds("Control");
         ctx.panel(target_bounds, ctx.theme().track);
-        border(ctx, target_bounds, ctx.theme().divider);
+        ctx.outline(target_bounds, ctx.theme().divider);
         const std::optional<std::string> target =
             topology::lifecycle_endpoint_for(map, *selected_device);
         ctx.push_clip(target_bounds);
-        ctx.label(gui::Rect{target_bounds.x + 6.0F, target_bounds.y,
-                            std::max(target_bounds.width - 12.0F, 0.0F),
-                            target_bounds.height},
+        ctx.label(gui::inset(target_bounds, 6.0F, 0.0F),
                   target.has_value() ? std::string_view{*target}
                                      : std::string_view{"UNAVAILABLE"},
                   target.has_value() ? ctx.theme().text_muted
                                      : ctx.theme().warning);
         ctx.pop_clip();
-        y += 27.0F;
       }
 
       const auto emit_number = [&](std::string_view label,
@@ -2819,7 +2838,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         emit_number("Node index", topology::schema::node_index, 4U,
                     selected_device->node_index, 0U,
                     topology::max_hardware_node_index);
-        y += 27.0F;
         {
           // Whose playhead the Timeline draws beside the editor's.
           const gui::Rect main_bounds = labelled_bounds("Timeline");
@@ -2834,7 +2852,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           ctx.tooltip(main_bounds,
                       "Show this node's playhead on the Timeline. One node "
                       "per show; choosing it clears the others.");
-          y += 27.0F;
         }
         std::vector<const topology::HardwareOutputBinding *> bindings;
         for (const topology::HardwareOutputBinding &binding :
@@ -2885,10 +2902,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           }
           return nullptr;
         };
-        ctx.label(gui::Rect{details.x + 9.0F, y, details.width - 18.0F,
-                            19.0F},
-                  "OUTPUT DEPLOYMENT", ctx.theme().text_muted);
-        y += 20.0F;
+        ctx.label(line(19.0F, 1.0F), "OUTPUT DEPLOYMENT",
+                  ctx.theme().text_muted);
         for (const topology::HardwareOutputBinding *binding : bindings) {
           const topology::HardwareVideoOutput *const observed =
               target_for(binding->target);
@@ -2907,17 +2922,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               "  FEED " + std::to_string(binding->feed_index) +
               (!current ? "  MISSING"
                         : (mode_matches ? "  READY" : "  MODE MISMATCH"));
-          const gui::Rect row{details.x + 9.0F, y,
-                              details.width - 18.0F, 22.0F};
+          const gui::Rect row = line(22.0F, 2.0F);
           if (ctx.button(mix(id_, "hardware.binding.select",
                              binding->node.value()),
                          row, label)) {
             details_output_binding_ = binding->node;
           }
-          y += 24.0F;
         }
-        ctx.label(gui::Rect{details.x + 9.0F, y,
-                            details.width - 18.0F, 19.0F},
+        ctx.label(line(19.0F, 3.0F),
                   deployment_runtime == nullptr ||
                           !runtime_inventory_is_usable(deployment_runtime)
                       ? "START LISTENER, THEN WIRE VIDEO OUT"
@@ -2926,7 +2938,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                           !runtime_inventory_is_usable(deployment_runtime)
                       ? ctx.theme().warning
                       : ctx.theme().text_muted);
-        y += 22.0F;
 
         const topology::HardwareOutputBinding *const selected_binding =
             map.output_binding(details_output_binding_);
@@ -2950,7 +2961,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               frame.output_binding_edit = HardwareOutputBindingEdit{
                   changed_binding};
             }
-            y += 27.0F;
           };
           emit_binding_number("Feed", 0U, selected_binding->feed_index, 0U,
                               topology::max_hardware_node_index,
@@ -2978,7 +2988,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             frame.output_binding_edit = HardwareOutputBindingEdit{
                 changed_binding};
           }
-          y += 27.0F;
           const auto precision_field = labelled_bounds("Precision");
           if (ctx.button(mix(id_, "hardware.binding.precision", selected_binding->node.value()),
               precision_field, selected_binding->output_bit_depth == 10U ? "10-BIT RGB"
@@ -2987,7 +2996,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 : selected_binding->output_bit_depth == 10U ? 16U : 8U;
             frame.output_binding_edit = HardwareOutputBindingEdit{changed_binding};
           }
-          y += 27.0F;
           emit_binding_number("Width", 1U, selected_binding->width, 1U,
                               topology::max_hardware_output_width,
                               changed_binding.width);
@@ -3006,8 +3014,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               next_unbound_target();
           if (target_for(selected_binding->target) == nullptr &&
               replacement != nullptr) {
-            const gui::Rect repair{details.x + 9.0F, y,
-                                   details.width - 18.0F, 22.0F};
+            const gui::Rect repair = line(22.0F, 3.0F);
             if (ctx.button(mix(id_, "hardware.binding.repair",
                                selected_binding->node.value()),
                            repair, "REPAIR WITH NEXT ACTIVE OUTPUT")) {
@@ -3021,13 +3028,9 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               frame.output_binding_edit = HardwareOutputBindingEdit{
                   changed_binding};
             }
-            y += 25.0F;
           }
-          ctx.label(gui::Rect{details.x + 9.0F, y,
-                              details.width - 18.0F, 19.0F},
-                    "DISCONNECT CABLE TO REMOVE OUTPUT",
+          ctx.label(line(19.0F, 3.0F), "DISCONNECT CABLE TO REMOVE OUTPUT",
                     ctx.theme().text_muted);
-          y += 22.0F;
         }
 
         if (!explicit_output_bindings) {
@@ -3043,27 +3046,18 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                 details_node_, std::string{topology::schema::window_mode},
                 doc::PropertyValue{std::string{window_mode_property(next)}}};
           }
-          y += 27.0F;
           const std::string_view settings_source =
               hardware_window_settings_source_text(
                   selected_device->window_mode);
-          ctx.label(gui::Rect{details.x + details_label_width + 9.0F, y,
-                              std::max(details.width - details_label_width -
-                                           18.0F,
-                                       0.0F),
-                              18.0F},
-                    settings_source,
+          ctx.label(form.note(), settings_source,
                     selected_device->window_mode ==
                             topology::HardwareWindowMode::Inherit
                         ? ctx.theme().warning
                         : ctx.theme().text_muted);
-          y += 20.0F;
           emit_signed_number("Desktop X", topology::schema::desktop_x, 5U,
                              selected_device->desktop_x);
-          y += 27.0F;
           emit_signed_number("Desktop Y", topology::schema::desktop_y, 6U,
                              selected_device->desktop_y);
-          y += 27.0F;
         }
       }
       if (!explicit_output_bindings) {
@@ -3073,41 +3067,28 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             render_server ? topology::max_hardware_output_height : 32'768U;
         emit_number("Width", topology::schema::width, 0U,
                     selected_device->width, 1U, maximum_width);
-        y += 27.0F;
         emit_number("Height", topology::schema::height, 1U,
                     selected_device->height, 1U, maximum_height);
-        y += 27.0F;
         emit_number("Refresh", topology::schema::refresh_numerator, 2U,
                     selected_device->refresh_numerator, 1U, 240'000U);
-        y += 27.0F;
         emit_number("Rate div", topology::schema::refresh_denominator, 3U,
                     selected_device->refresh_denominator, 1U, 1001U);
       }
 
       if (render_server) {
-        y += 30.0F;
-        ctx.panel(gui::Rect{details.x + 9.0F, y, details.width - 18.0F, 1.0F},
-                  ctx.theme().divider);
-        y += 5.0F;
-        ctx.label(gui::Rect{details.x + 9.0F, y, details.width - 18.0F, 19.0F},
-                  "LIVE SYSTEM", ctx.theme().text_muted);
-        y += 20.0F;
+        form.space(3.0F);
+        ctx.panel(line(1.0F, 4.0F), ctx.theme().divider);
+        ctx.label(line(19.0F, 1.0F), "LIVE SYSTEM", ctx.theme().text_muted);
 
         const auto live_row = [&](std::string_view label,
                                   std::string_view value, gui::UiColor color) {
-          if (y + 19.0F > details.y + details.height - 5.0F) {
+          if (form.cursor() + 19.0F > details.bottom() - 5.0F) {
             return false;
           }
-          ctx.label(gui::Rect{details.x + 9.0F, y, details_label_width, 19.0F},
-                    label, ctx.theme().text_muted);
-          const gui::Rect value_bounds{
-              details.x + details_label_width + 9.0F, y,
-              std::max(details.width - details_label_width - 18.0F, 0.0F),
-              19.0F};
-          ctx.push_clip(value_bounds);
+          gui::Rect value_bounds = line(19.0F, 1.0F);
+          ctx.label(gui::cut_left(value_bounds, details_label_width), label,
+                    ctx.theme().text_muted);
           ctx.label(value_bounds, value, color);
-          ctx.pop_clip();
-          y += 20.0F;
           return true;
         };
 
@@ -3225,23 +3206,23 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       ctx.focus() == address_id;
     } else if (selection_.kind == HardwareSelectionKind::Link) {
       const topology::HardwareLink *const link = map.link(selection_.node);
-      ctx.label(gui::Rect{details.x + 10.0F, details.y + 34.0F,
-                          details.width - 20.0F, 22.0F},
-                "CABLE", ctx.theme().text);
+      gui::Rect lines =
+          gui::inset(details, gui::Padding{10.0F, 34.0F, 10.0F, 0.0F});
+      ctx.label(gui::cut_top(lines, 22.0F), "CABLE", ctx.theme().text);
+      static_cast<void>(gui::cut_top(lines, 3.0F));
       if (link != nullptr) {
         const std::string route = std::to_string(link->from.device.value()) +
                                   ":" + std::to_string(link->from.port) +
                                   "  ->  " +
                                   std::to_string(link->to.device.value()) +
                                   ":" + std::to_string(link->to.port);
-        ctx.label(gui::Rect{details.x + 10.0F, details.y + 59.0F,
-                            details.width - 20.0F, 22.0F},
-                  route, ctx.theme().keyframe);
+        ctx.label(gui::cut_top(lines, 22.0F), route, ctx.theme().keyframe);
       }
     } else {
-      ctx.label(gui::Rect{details.x + 10.0F, details.y + 35.0F,
-                          details.width - 20.0F, 44.0F},
-                "Select a device or cable", ctx.theme().text_muted);
+      gui::Rect message =
+          gui::inset(details, gui::Padding{10.0F, 35.0F, 10.0F, 0.0F});
+      ctx.label(gui::cut_top(message, 44.0F), "Select a device or cable",
+                ctx.theme().text_muted);
     }
   }
 
@@ -3456,19 +3437,46 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     frame.consume_delete = true;
   }
 
-  const float list_width = feed_list_width(bounds);
-  const gui::Rect content{bounds.x, bounds.y + title_height, bounds.width,
-                          std::max(bounds.height - title_height, 0.0F)};
-  const gui::Rect list{content.x, content.y, list_width, content.height};
-  const gui::Rect work{content.x + list_width, content.y,
-                       std::max(content.width - list_width, 0.0F),
-                       content.height};
+  gui::Rect content = bounds;
+  static_cast<void>(gui::cut_top(content, title_height));
+  const gui::Rect list = gui::cut_left(content, feed_list_width(bounds));
+  const gui::Rect work = content;
   ctx.panel(list, scale(ctx.theme().panel, 0.94F));
-  ctx.panel(gui::Rect{list.x + list.width - 1.0F, list.y, 1.0F, list.height},
-            ctx.theme().divider);
-  ctx.label(gui::Rect{list.x + 9.0F, list.y, list.width - 18.0F,
-                      feed_list_header_height},
+  {
+    gui::Rect edge = list;
+    ctx.panel(gui::cut_right(edge, 1.0F), ctx.theme().divider);
+  }
+  // Down the list column: buttons and rows 6px in from its sides, headings
+  // 3px further in.
+  gui::Metrics column_metrics = ctx.theme().metrics;
+  column_metrics.inset = 6.0F;
+  column_metrics.gap = 0.0F;
+  gui::FormLayout list_column{list, column_metrics};
+  ctx.label(gui::inset(list_column.next(feed_list_header_height, 0.0F), 3.0F, 0.0F),
             "WINDOW VIEWPORTS", ctx.theme().text_muted);
+  // A full-width button that adds to the list, dimmed when it cannot.
+  const auto add_button = [&](gui::UiId id, const gui::Rect &button,
+                              std::string_view label, bool enabled) {
+    const gui::Interaction interaction =
+        enabled ? ctx.grab(id, button) : gui::Interaction{};
+    ctx.panel(button, enabled ? (interaction.hovered ? ctx.theme().widget_hover
+                                                     : ctx.theme().widget)
+                              : ctx.theme().track);
+    ctx.outline(button, enabled && interaction.hovered ? ctx.theme().accent
+                                                       : ctx.theme().divider);
+    ctx.label(button, label,
+              enabled ? ctx.theme().text : ctx.theme().text_muted);
+    return interaction.clicked;
+  };
+  // The colour bar down a row's left edge.
+  const auto row_stripe = [](gui::Rect row) {
+    return gui::inset(gui::cut_left(row, 5.0F),
+                      gui::Padding{2.0F, 4.0F, 0.0F, 4.0F});
+  };
+  // The rule left of a row's action button.
+  const auto action_rule = [](gui::Rect action, float inset) {
+    return gui::inset(gui::cut_left(action, 1.0F), 0.0F, inset);
+  };
 
   const output::OutputMap *const selected_viewport =
       selected_map_node_.has_value()
@@ -3486,25 +3494,14 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   }
   const bool below_limit = feed_map.maps.size() < output::max_output_maps;
   const bool can_add = canvas.width > 0U && canvas.height > 0U && below_limit;
-  const gui::Rect add_bounds{list.x + 6.0F, list.y + feed_list_header_height,
-                             std::max(list.width - 12.0F, 0.0F),
-                             feed_add_button_height};
-  const gui::Interaction add_interaction =
-      can_add ? ctx.grab(mix(id_, "feed.add"), add_bounds) : gui::Interaction{};
-  ctx.panel(add_bounds,
-            can_add ? (add_interaction.hovered ? ctx.theme().widget_hover
-                                               : ctx.theme().widget)
-                    : ctx.theme().track);
-  border(ctx, add_bounds,
-         can_add && add_interaction.hovered ? ctx.theme().accent
-                                            : ctx.theme().divider);
-  ctx.label(add_bounds,
-            !below_limit
-                ? std::string_view{"VIEWPORT LIMIT"}
-                : (can_add ? std::string_view{"+ ADD VIEWPORT"}
-                           : std::string_view{"CANVAS REQUIRED"}),
-            can_add ? ctx.theme().text : ctx.theme().text_muted);
-  if (add_interaction.clicked) {
+  const gui::Rect add_bounds = list_column.next(
+      feed_add_button_height, feed_add_button_step - feed_add_button_height);
+  if (add_button(mix(id_, "feed.add"), add_bounds,
+                 !below_limit
+                     ? std::string_view{"VIEWPORT LIMIT"}
+                     : (can_add ? std::string_view{"+ ADD VIEWPORT"}
+                                : std::string_view{"CANVAS REQUIRED"}),
+                 can_add)) {
     const scene::Canvas window =
         feed_window_raster(*add_index, canvas, hardware);
     const scene::CanvasRect source =
@@ -3585,19 +3582,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     const core::u32 viewport_ordinal =
         feed_viewport_ordinal(feed_map, map);
     const std::string title = feed_viewport_title(map, viewport_ordinal);
-    const gui::Rect row{list.x + 6.0F,
-                        list.y + feed_list_header_height +
-                            feed_add_button_step +
-                            static_cast<float>(index) * feed_row_step,
-                        std::max(list.width - 12.0F, 0.0F), feed_row_height};
+    const gui::Rect row =
+        list_column.next(feed_row_height, feed_row_step - feed_row_height);
+    // The row's name and details, then DUPLICATE and REMOVE at its end.
     const float action_width = std::min(26.0F, row.width * 0.25F);
-    const gui::Rect row_content{
-        row.x, row.y, std::max(row.width - action_width * 2.0F, 0.0F),
-        row.height};
-    const gui::Rect duplicate{row_content.x + row_content.width, row.y,
-                              action_width, row.height};
-    const gui::Rect remove{duplicate.x + duplicate.width, row.y, action_width,
-                           row.height};
+    gui::Rect row_content = row;
+    const gui::Rect remove = gui::cut_right(row_content, action_width);
+    const gui::Rect duplicate = gui::cut_right(row_content, action_width);
     const bool renaming = rename_.editing(map.node.value());
     const gui::Interaction interaction =
         renaming ? gui::Interaction{}
@@ -3614,11 +3605,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                   duplicate_interaction.hovered
                               ? ctx.theme().widget_hover
                               : ctx.theme().row));
-    ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
-              feed_color(ctx.theme(), map.node_index));
-    const gui::Rect title_bounds{row.x + 10.0F, row.y + 1.0F,
-                                 std::max(row_content.width - 14.0F, 0.0F),
-                                 17.0F};
+    ctx.panel(row_stripe(row), feed_color(ctx.theme(), map.node_index));
+    const gui::Rect title_bounds = gui::inset(
+        row_content, gui::Padding{10.0F, 1.0F, 4.0F, row.height - 18.0F});
     if (renaming) {
       if (auto name = rename_.draw(ctx, title_bounds)) {
         frame.organize = FeedOrganizeRequest{FeedOrganizeAction::Rename,
@@ -3627,21 +3616,17 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     } else {
       ctx.label(title_bounds, title, ctx.theme().text);
     }
-    ctx.label(gui::Rect{row.x + 10.0F, row.y + 16.0F,
-                        std::max(row_content.width - 14.0F, 0.0F), 15.0F},
+    ctx.label(gui::inset(row_content,
+                         gui::Padding{10.0F, 16.0F, 4.0F, row.height - 31.0F}),
               feed_row_details(map), ctx.theme().text_muted);
     ctx.tooltip(row_content, feed_row_tooltip(map, title, feed_map));
-    ctx.panel(gui::Rect{duplicate.x, duplicate.y + 6.0F, 1.0F,
-                        std::max(duplicate.height - 12.0F, 0.0F)},
-              ctx.theme().divider);
+    ctx.panel(action_rule(duplicate, 6.0F), ctx.theme().divider);
     gui::draw_icon(ctx.draw_list(), gui::Icon::Duplicate,
-                   duplicate.x + duplicate.width * 0.5F,
-                   duplicate.y + duplicate.height * 0.5F,
+                   duplicate.center_x(), duplicate.center_y(),
                    duplicate_interaction.hovered ? ctx.theme().text
                                                  : ctx.theme().text_muted);
     ctx.tooltip(duplicate, "Duplicate viewport");
-    draw_remove(ctx, remove.x + remove.width * 0.5F,
-                remove.y + remove.height * 0.5F,
+    draw_remove(ctx, remove.center_x(), remove.center_y(),
                 remove_interaction.hovered ? ctx.theme().warning
                                            : ctx.theme().text_muted);
     if (interaction.pressed) {
@@ -3672,11 +3657,11 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     viewport_rows.push_back(ViewportRow{row, map.node, map.node_index});
     if (surface_drag_active) {
       surface_drop_targets.emplace_back(row, map.node);
-      border(ctx, row,
-             row.contains(ctx.pointer_x(), ctx.pointer_y())
+      ctx.outline(row,
+                  row.contains(ctx.pointer_x(), ctx.pointer_y())
                  ? ctx.theme().accent
                  : alpha(ctx.theme().accent, 0.35F),
-             row.contains(ctx.pointer_x(), ctx.pointer_y()) ? 2.0F : 1.0F);
+                  row.contains(ctx.pointer_x(), ctx.pointer_y()) ? 2.0F : 1.0F);
     }
   }
 
@@ -3718,63 +3703,29 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     }
   }
 
-  float surface_y = list.y + feed_list_header_height + feed_add_button_step +
-                    static_cast<float>(feed_map.maps.size()) * feed_row_step +
-                    7.0F;
-  ctx.label(gui::Rect{list.x + 9.0F, surface_y, list.width - 18.0F,
-                      feed_details_label_height},
+  list_column.space(7.0F);
+  ctx.label(gui::inset(list_column.next(feed_details_label_height, 3.0F), 3.0F,
+                       0.0F),
             "PROJECTION SURFACES", ctx.theme().text_muted);
-  surface_y += 19.0F;
   const bool can_add_surface =
       scene::valid(canvas) &&
       feed_map.surfaces.size() < output::max_projection_surfaces;
-  const gui::Rect add_surface_bounds{list.x + 6.0F, surface_y,
-                                     std::max(list.width - 12.0F, 0.0F),
-                                     feed_add_button_height};
-  const gui::Interaction add_surface_interaction =
-      can_add_surface
-          ? ctx.grab(mix(id_, "feed.surface.add"), add_surface_bounds)
-          : gui::Interaction{};
-  ctx.panel(add_surface_bounds,
-            can_add_surface
-                ? (add_surface_interaction.hovered ? ctx.theme().widget_hover
-                                                   : ctx.theme().widget)
-                : ctx.theme().track);
-  border(ctx, add_surface_bounds,
-         can_add_surface && add_surface_interaction.hovered
-             ? ctx.theme().accent
-             : ctx.theme().divider);
-  ctx.label(add_surface_bounds,
-            can_add_surface ? std::string_view{"+ ADD SURFACE"}
-                            : std::string_view{"SURFACE LIMIT"},
-            can_add_surface ? ctx.theme().text : ctx.theme().text_muted);
-  if (add_surface_interaction.clicked) {
+  if (add_button(mix(id_, "feed.surface.add"),
+                 list_column.next(feed_add_button_height,
+                             feed_add_button_step - feed_add_button_height),
+                 can_add_surface ? std::string_view{"+ ADD SURFACE"}
+                                 : std::string_view{"SURFACE LIMIT"},
+                 can_add_surface)) {
     frame.surface_add =
         FeedSurfaceAddRequest{default_surface_name(feed_map.surfaces.size()),
                               default_surface(canvas)};
   }
-  surface_y += feed_add_button_step;
-  const gui::Rect import_mesh_bounds{list.x + 6.0F, surface_y,
-                                     std::max(list.width - 12.0F, 0.0F),
-                                     feed_add_button_height};
-  const gui::Interaction import_mesh_interaction =
-      can_add_surface
-          ? ctx.grab(mix(id_, "feed.surface.import-mesh"), import_mesh_bounds)
-          : gui::Interaction{};
-  ctx.panel(import_mesh_bounds,
-            can_add_surface
-                ? (import_mesh_interaction.hovered ? ctx.theme().widget_hover
-                                                   : ctx.theme().widget)
-                : ctx.theme().track);
-  border(ctx, import_mesh_bounds,
-         can_add_surface && import_mesh_interaction.hovered
-             ? ctx.theme().accent
-             : ctx.theme().divider);
-  ctx.label(import_mesh_bounds,
-            can_add_surface ? std::string_view{"+ IMPORT UV MESH"}
-                            : std::string_view{"SURFACE LIMIT"},
-            can_add_surface ? ctx.theme().text : ctx.theme().text_muted);
-  if (import_mesh_interaction.clicked) {
+  if (add_button(mix(id_, "feed.surface.import-mesh"),
+                 list_column.next(feed_add_button_height,
+                             feed_surface_row_step - feed_add_button_height),
+                 can_add_surface ? std::string_view{"+ IMPORT UV MESH"}
+                                 : std::string_view{"SURFACE LIMIT"},
+                 can_add_surface)) {
     FeedSurfaceAddRequest request{
         default_mesh_surface_name(feed_map.surfaces.size()),
         default_mesh_surface(canvas),
@@ -3787,30 +3738,19 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     request.assign_map_node = selected_map_node_;
     frame.surface_add = std::move(request);
   }
-  surface_y += feed_surface_row_step;
   // Collected for the drag resolution below: a surface dropped on another
   // surface row reorders the list instead of assigning it to an output.
   std::vector<std::pair<gui::Rect, doc::NodeId>> surface_rows;
   surface_rows.reserve(feed_map.surfaces.size());
   for (const output::ProjectionSurface &surface : feed_map.surfaces) {
-    const gui::Rect row{list.x + 6.0F, surface_y,
-                        std::max(list.width - 12.0F, 0.0F),
-                        feed_surface_row_height};
-    const float remove_width = std::min(26.0F, row.width);
-    const float lock_width =
-        std::min(26.0F, std::max(row.width - remove_width, 0.0F));
-    const float duplicate_width = std::min(
-        26.0F, std::max(row.width - remove_width - lock_width, 0.0F));
-    const float action_width = remove_width + lock_width + duplicate_width;
-    const gui::Rect row_content{row.x, row.y,
-                                std::max(row.width - action_width, 0.0F),
-                                row.height};
-    const gui::Rect duplicate{row_content.x + row_content.width, row.y,
-                              duplicate_width, row.height};
-    const gui::Rect lock{duplicate.x + duplicate.width, row.y, lock_width,
-                         row.height};
-    const gui::Rect remove{lock.x + lock.width, row.y, remove_width,
-                           row.height};
+    const gui::Rect row = list_column.next(
+        feed_surface_row_height,
+        feed_surface_row_step - feed_surface_row_height);
+    // The name, then DUPLICATE, LOCK and REMOVE at the row's end.
+    gui::Rect row_content = row;
+    const gui::Rect remove = gui::cut_right(row_content, 26.0F);
+    const gui::Rect lock = gui::cut_right(row_content, 26.0F);
+    const gui::Rect duplicate = gui::cut_right(row_content, 26.0F);
     const bool renaming = rename_.editing(surface.node.value());
     const gui::Interaction interaction =
         surface.locked || renaming
@@ -3835,11 +3775,10 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                   duplicate_interaction.hovered
                               ? ctx.theme().widget_hover
                               : ctx.theme().row));
-    ctx.panel(gui::Rect{row.x + 2.0F, row.y + 4.0F, 3.0F, row.height - 8.0F},
+    ctx.panel(row_stripe(row),
               selected ? ctx.theme().accent : ctx.theme().keyframe);
-    const gui::Rect name_bounds{row.x + 10.0F, row.y,
-                                std::max(row_content.width - 14.0F, 0.0F),
-                                row.height};
+    const gui::Rect name_bounds =
+        gui::inset(row_content, gui::Padding{10.0F, 0.0F, 4.0F, 0.0F});
     if (renaming) {
       if (auto name = rename_.draw(ctx, name_bounds)) {
         frame.organize = FeedOrganizeRequest{FeedOrganizeAction::Rename,
@@ -3856,30 +3795,22 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     ctx.tooltip(row_content, surface.locked
                                  ? std::string_view{"Unlock to rename or move"}
                                  : std::string_view{surface.name});
-    ctx.panel(gui::Rect{duplicate.x, duplicate.y + 5.0F, 1.0F,
-                        std::max(duplicate.height - 10.0F, 0.0F)},
-              ctx.theme().divider);
+    ctx.panel(action_rule(duplicate, 5.0F), ctx.theme().divider);
     gui::draw_icon(ctx.draw_list(), gui::Icon::Duplicate,
-                   duplicate.x + duplicate.width * 0.5F,
-                   duplicate.y + duplicate.height * 0.5F,
+                   duplicate.center_x(), duplicate.center_y(),
                    duplicate_interaction.hovered ? ctx.theme().text
                                                  : ctx.theme().text_muted);
     ctx.tooltip(duplicate, "Duplicate surface");
-    ctx.panel(gui::Rect{lock.x, lock.y + 5.0F, 1.0F,
-                        std::max(lock.height - 10.0F, 0.0F)},
-              ctx.theme().divider);
-    gui::draw_padlock_glyph(ctx.draw_list(), lock.x + lock.width * 0.5F,
-                            lock.y + lock.height * 0.5F, surface.locked,
+    ctx.panel(action_rule(lock, 5.0F), ctx.theme().divider);
+    gui::draw_padlock_glyph(ctx.draw_list(), lock.center_x(),
+                            lock.center_y(), surface.locked,
                             surface.locked || lock_interaction.hovered
                                 ? ctx.theme().warning
                                 : ctx.theme().text_muted);
     ctx.tooltip(lock, surface.locked ? std::string_view{"Unlock surface"}
                                      : std::string_view{"Lock surface"});
-    ctx.panel(gui::Rect{remove.x, remove.y + 5.0F, 1.0F,
-                        std::max(remove.height - 10.0F, 0.0F)},
-              ctx.theme().divider);
-    draw_remove(ctx, remove.x + remove.width * 0.5F,
-                remove.y + remove.height * 0.5F,
+    ctx.panel(action_rule(remove, 5.0F), ctx.theme().divider);
+    draw_remove(ctx, remove.center_x(), remove.center_y(),
                 remove_interaction.hovered ? ctx.theme().warning
                                            : ctx.theme().text_muted);
     if (interaction.pressed) {
@@ -3911,7 +3842,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       frame.surface_remove = FeedSurfaceDeleteRequest{surface.node};
     }
     surface_rows.emplace_back(row, surface.node);
-    surface_y += feed_surface_row_step;
   }
   rename_.end_frame(ctx);
   sync_surface_details();
@@ -3973,7 +3903,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             division == 2U ? 1.0F : 0.6F,
             alpha(ctx.theme().widget, division == 2U ? 0.64F : 0.34F));
       }
-      border(ctx, screen, ctx.theme().widget_hover);
+      ctx.outline(screen, ctx.theme().widget_hover);
     }
 
     for (const output::OutputMap &map : feed_map.maps) {
@@ -4068,18 +3998,18 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
 
       const gui::UiColor color = feed_color(ctx.theme(), map.node_index);
       ctx.panel(rectangle, alpha(color, selected ? 0.30F : 0.19F));
-      border(ctx, rectangle, selected ? ctx.theme().accent : color,
-             selected ? 2.0F : 1.0F);
+      ctx.outline(rectangle, selected ? ctx.theme().accent : color,
+                  selected ? 2.0F : 1.0F);
       if (surface_drag_active) {
         const bool under_pointer =
             rectangle.contains(ctx.pointer_x(), ctx.pointer_y());
         surface_drop_targets.emplace_back(rectangle, map.node);
         ctx.panel(rectangle,
                   alpha(ctx.theme().accent, under_pointer ? 0.26F : 0.10F));
-        border(ctx, rectangle,
-               under_pointer ? ctx.theme().accent
+        ctx.outline(rectangle,
+                    under_pointer ? ctx.theme().accent
                              : alpha(ctx.theme().accent, 0.45F),
-               under_pointer ? 2.0F : 1.0F);
+                    under_pointer ? 2.0F : 1.0F);
       }
       ctx.panel(gui::Rect{rectangle.x + 1.0F, rectangle.y + 1.0F,
                           std::max(rectangle.width - 2.0F, 0.0F), 18.0F},
@@ -4098,7 +4028,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                                        rectangle.y + rectangle.height - 5.0F,
                                        10.0F, 10.0F};
         ctx.panel(current_handle, ctx.theme().accent);
-        border(ctx, current_handle, ctx.theme().background);
+        ctx.outline(current_handle, ctx.theme().background);
       }
     }
 
@@ -4260,14 +4190,17 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
     rectangle_numbers_.cancel(ctx);
   }
   if (details_width > 0.0F) {
-    const gui::Rect details{bounds.x + bounds.width - details_width,
-                            bounds.y + title_height, details_width,
-                            std::max(bounds.height - title_height, 0.0F)};
+    gui::Rect details = bounds;
+    static_cast<void>(gui::cut_top(details, title_height));
+    details = gui::cut_right(details, details_width);
     ctx.panel(details, scale(ctx.theme().panel, 0.96F));
-    ctx.panel(gui::Rect{details.x, details.y, 1.0F, details.height},
-              ctx.theme().divider);
-    const gui::Rect projection_title{details.x + 10.0F, details.y + 3.0F,
-                                     details.width - 20.0F, 20.0F};
+    {
+      gui::Rect edge = details;
+      ctx.panel(gui::cut_left(edge, 1.0F), ctx.theme().divider);
+    }
+    gui::Rect title_strip =
+        gui::inset(details, gui::Padding{10.0F, 3.0F, 10.0F, 0.0F});
+    const gui::Rect projection_title = gui::cut_top(title_strip, 20.0F);
     if (selected_map != nullptr) {
       ctx.label(projection_title,
                 feed_output_identity(selected_map->node_index),
@@ -4276,20 +4209,23 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       ctx.label(projection_title, "OUTPUT PROJECTION", ctx.theme().text_muted);
     }
 
-    float details_y = details.y + 28.0F;
+    // Rows down the column 10px in from its sides; each call says how tall
+    // the next strip is and how far below it the one after starts.
+    gui::Metrics details_metrics = ctx.theme().metrics;
+    details_metrics.inset = 10.0F;
+    details_metrics.gap = 28.0F;
+    gui::FormLayout details_column{details, details_metrics};
+    constexpr float field_height = 22.0F;
+    constexpr float field_gap = 3.0F;
     if (selected_map != nullptr) {
-      ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F,
-                          feed_details_label_height},
+      ctx.label(details_column.next(feed_details_label_height, 1.0F),
                 feed_runtime_binding(selected_map->node_index),
                 ctx.theme().text_muted);
-      details_y += 17.0F;
       const bool has_surfaces = !feed_map.surfaces.empty();
-      const float mode_width = (details.width - 23.0F) * 0.5F;
-      const gui::Rect canvas_mode{
-          details.x + 10.0F, details_y,
-          has_surfaces ? mode_width : details.width - 20.0F, 22.0F};
-      const gui::Rect physical_mode{canvas_mode.x + mode_width + 3.0F,
-                                    details_y, mode_width, 22.0F};
+      const gui::Rect modes = details_column.next(field_height, 4.0F);
+      const gui::Rect canvas_mode =
+          has_surfaces ? gui::column(modes, 0U, 2U, field_gap) : modes;
+      const gui::Rect physical_mode = gui::column(modes, 1U, 2U, field_gap);
       if (ctx.button(mix(id_, "feed.mode.canvas", selected_map->node.value()),
                      canvas_mode, "CANVAS") &&
           selected_map->projection != output::FeedProjection::CanvasSlice) {
@@ -4320,11 +4256,10 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       }
       if (selected_map->projection == output::FeedProjection::CanvasSlice ||
           !has_surfaces) {
-        border(ctx, canvas_mode, ctx.theme().accent, 1.5F);
+        ctx.outline(canvas_mode, ctx.theme().accent, 1.5F);
       } else {
-        border(ctx, physical_mode, ctx.theme().accent, 1.5F);
+        ctx.outline(physical_mode, ctx.theme().accent, 1.5F);
       }
-      details_y += 26.0F;
 
       std::string_view status{"SHARED CANVAS CROP"};
       gui::UiColor status_color = ctx.theme().text_muted;
@@ -4342,25 +4277,18 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           status_color = ctx.theme().warning;
         }
       }
-      ctx.label(
-          gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 18.0F},
-          status, status_color);
-      details_y += 21.0F;
+      ctx.label(details_column.next(18.0F, 3.0F), status, status_color);
 
     // A project with no surfaces authored has no surface row: a heading over an
     // empty well is a container invented to hold an exception.
     if (has_surfaces) {
-      ctx.label(gui::Rect{details.x + 10.0F, details_y,
-                          details.width - 20.0F, feed_details_label_height},
-                "SURFACE", ctx.theme().text_muted);
-      details_y += 17.0F;
+      ctx.label(details_column.next(feed_details_label_height, 1.0F), "SURFACE",
+                ctx.theme().text_muted);
       // A surface reaches an output by being dragged onto it, so this row
       // states the surface that is on this one and takes the drop as well. It
       // is not a stepper: cycling blindly through a wall's surfaces to find
       // the right one is the gesture nobody could decide on.
-      const gui::Rect surface_choice{details.x + 10.0F, details_y,
-                                     std::max(details.width - 20.0F, 0.0F),
-                                     22.0F};
+      const gui::Rect surface_choice = details_column.next(field_height, 7.0F);
       const output::ProjectionSurface *const assigned =
           feed_map.surface_for(selected_map->surface);
       const gui::Interaction assignment_interaction =
@@ -4372,9 +4300,7 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       ctx.panel(surface_choice, assignment_interaction.hovered
                                     ? ctx.theme().widget_hover
                                     : ctx.theme().track);
-      const gui::Rect assignment_label{
-          surface_choice.x + 7.0F, surface_choice.y,
-          std::max(surface_choice.width - 14.0F, 0.0F), surface_choice.height};
+      const gui::Rect assignment_label = gui::inset(surface_choice, 7.0F, 0.0F);
       if (assigned != nullptr) {
         ctx.label(assignment_label,
                   assigned->name.empty()
@@ -4393,40 +4319,35 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       }
       if (surface_drag_active) {
         surface_drop_targets.emplace_back(surface_choice, selected_map->node);
-        border(ctx, surface_choice,
-               surface_choice.contains(ctx.pointer_x(), ctx.pointer_y())
+        ctx.outline(surface_choice,
+                    surface_choice.contains(ctx.pointer_x(), ctx.pointer_y())
                    ? ctx.theme().accent
                    : alpha(ctx.theme().accent, 0.45F),
-               1.0F);
+                    1.0F);
       }
-      details_y += 29.0F;
     }
     } else {
-      ctx.label(
-          gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 40.0F},
-          "Select an output region to choose its projection.",
-          ctx.theme().text_muted);
-      details_y += 73.0F;
+      ctx.label(details_column.next(40.0F, 33.0F),
+                "Select an output region to choose its projection.",
+                ctx.theme().text_muted);
     }
 
     sync_surface_details();
-    ctx.panel(
-        gui::Rect{details.x + 9.0F, details_y, details.width - 18.0F, 1.0F},
-        ctx.theme().divider);
-    details_y += 6.0F;
-    ctx.label(
-        gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 20.0F},
-        "SURFACE CALIBRATION", ctx.theme().text_muted);
-    details_y += 22.0F;
+    // The rule runs a pixel wider than the rows on each side.
+    ctx.panel(gui::cell(gui::inset(details, 9.0F, 0.0F), details_column.next(1.0F, 5.0F)),
+              ctx.theme().divider);
+    const gui::Rect calibration_heading = details_column.next(20.0F, 2.0F);
+    ctx.label(calibration_heading, "SURFACE CALIBRATION",
+              ctx.theme().text_muted);
 
     const output::ProjectionSurface *const details_surface =
         feed_map.surface_for(surface_details_node_);
     if (details_surface != nullptr) {
       const bool details_locked = details_surface->locked;
       if (details_locked) {
-        ctx.label(gui::Rect{details.x + details.width - 78.0F,
-                            details_y - 22.0F, 68.0F, 20.0F},
-                  "LOCKED", ctx.theme().warning);
+        gui::Rect locked_strip = calibration_heading;
+        ctx.label(gui::cut_right(locked_strip, 68.0F), "LOCKED",
+                  ctx.theme().warning);
         ctx.push_pointer_block();
       }
       const auto emit_surface_edit = [&](FeedSurfaceTransform transform =
@@ -4463,46 +4384,38 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         value = static_cast<float>(std::clamp(changed, minimum, maximum));
         emit_surface_edit(transform);
       };
-      const auto field_columns = [&](std::size_t count) {
+      // `count` fields across the next row, `gap_after` above the row
+      // after it - first behind a label, for labelled_columns.
+      const auto field_columns = [&](std::size_t count, float gap_after) {
+        const gui::Rect strip = details_column.next(field_height, gap_after);
         std::array<gui::Rect, 3U> fields{};
-        const float gap = 3.0F;
-        const float available =
-            details.width - 20.0F - gap * static_cast<float>(count - 1U);
-        const float width = available / static_cast<float>(count);
         for (std::size_t index = 0U; index < count; ++index) {
-          fields[index] = gui::Rect{
-              details.x + 10.0F + static_cast<float>(index) * (width + gap),
-              details_y, width, 22.0F};
+          fields[index] = gui::column(strip, index, count, field_gap);
         }
         return fields;
       };
       const auto labelled_columns = [&](std::string_view label,
-                                        std::size_t count) {
+                                        std::size_t count,
+                                        float gap_after = 5.0F) {
         constexpr float label_width = 50.0F;
-        constexpr float gap = 3.0F;
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, label_width, 22.0F},
-                  label, ctx.theme().text_muted);
+        gui::Rect strip = details_column.next(field_height, gap_after);
+        ctx.label(gui::cut_left(strip, label_width), label,
+                  ctx.theme().text_muted);
+        static_cast<void>(gui::cut_left(strip, field_gap));
         std::array<gui::Rect, 3U> fields{};
-        const float start_x = details.x + 10.0F + label_width + gap;
-        const float available = details.width - 20.0F - label_width - gap -
-                                gap * static_cast<float>(count - 1U);
-        const float width = available / static_cast<float>(count);
         for (std::size_t index = 0U; index < count; ++index) {
-          fields[index] =
-              gui::Rect{start_x + static_cast<float>(index) * (width + gap),
-                        details_y, width, 22.0F};
+          fields[index] = gui::column(strip, index, count, field_gap);
         }
         return fields;
       };
 
-      const auto page_fields = field_columns(2U);
+      const auto page_fields = field_columns(2U, 7.0F);
       if (ctx.button(mix(id_, "feed.surface.geometry-page"), page_fields[0], "GEOMETRY")) surface_color_page_ = false;
       if (ctx.button(mix(id_, "feed.surface.color-page"), page_fields[1], "COLOUR")) surface_color_page_ = true;
-      details_y += 29.0F;
       const gui::UiId name_id = mix(id_, "feed.surface.name", surface_details_node_.value());
       const gui::UiId camera_id = mix(id_, "feed.surface.camera-inverse", surface_details_node_.value());
       if (!surface_color_page_) {
-      auto fields = field_columns(3U);
+      auto fields = field_columns(3U, 5.0F);
       const gui::Rect planar_shape = fields[0U];
       const gui::Rect arc_shape = fields[1U];
       const gui::Rect mesh_shape = fields[2U];
@@ -4538,14 +4451,12 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
               : (surface_shape_ == output::ProjectionSurfaceShape::HorizontalArc
                      ? arc_shape
                      : mesh_shape);
-      border(ctx, selected_shape, ctx.theme().accent, 1.5F);
-      details_y += 27.0F;
+      ctx.outline(selected_shape, ctx.theme().accent, 1.5F);
 
       fields = labelled_columns("NAME", 1U);
       if (ctx.text_field(name_id, fields[0U], surface_name_)) {
         surface_name_dirty_ = true;
       }
-      details_y += 27.0F;
 
       fields = labelled_columns(
           surface_shape_ == output::ProjectionSurfaceShape::ImportedMesh
@@ -4564,7 +4475,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
           mix(id_, "feed.surface.center.z", surface_details_node_.value()),
           fields[2U], "Z", surface_geometry_.center.z, 0.01, -1'000'000.0,
           1'000'000.0, 3, FeedSurfaceTransform::PositionZ);
-      details_y += 27.0F;
 
       constexpr double pi = 3.14159265358979323846;
       double yaw_degrees =
@@ -4584,7 +4494,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         surface_geometry_.up = scene::Vec3{0.0F, 1.0F, 0.0F};
         emit_surface_edit(FeedSurfaceTransform::Yaw);
       }
-      details_y += 27.0F;
 
       if (surface_shape_ == output::ProjectionSurfaceShape::HorizontalArc) {
         fields = labelled_columns("ARC", 2U);
@@ -4616,22 +4525,17 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
                   static_cast<double>(output::max_horizontal_arc_columns))));
           emit_surface_edit();
         }
-        details_y += 27.0F;
       }
 
       if (surface_shape_ == output::ProjectionSurfaceShape::ImportedMesh) {
         const std::string mesh_status =
             mesh_source_status(surface_mesh_source_);
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F,
-                            16.0F},
-                  mesh_status,
+        ctx.label(details_column.next(16.0F, 0.0F), mesh_status,
                   surface_mesh_source_.empty() ? ctx.theme().warning
                                                : ctx.theme().text_muted);
-        details_y += 16.0F;
         if (ctx.button(mix(id_, "feed.surface.mesh.browse",
                            surface_details_node_.value()),
-                       gui::Rect{details.x + 10.0F, details_y,
-                                 details.width - 20.0F, 22.0F},
+                       details_column.next(field_height, 5.0F),
                        surface_mesh_source_.empty() ? "CHOOSE UV MESH"
                                                     : "REPLACE UV MESH")) {
           mesh_browse_pending_ = true;
@@ -4654,7 +4558,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
               surface_mesh_scale_,
               FeedSurfaceTransform::None};
         }
-        details_y += 27.0F;
         fields = labelled_columns("SCALE", 1U);
         double changed_scale{};
         if (surface_numbers_.draw(ctx,
@@ -4670,7 +4573,6 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             emit_surface_edit();
           }
         }
-        details_y += 27.0F;
       }
 
       if (surface_shape_ != output::ProjectionSurfaceShape::ImportedMesh) {
@@ -4683,16 +4585,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
             mix(id_, "feed.surface.height", surface_details_node_.value()),
             fields[1U], "H", surface_geometry_.height, 0.01, 0.01, 1'000'000.0,
             3);
-        details_y += 27.0F;
       } else {
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F,
-                            16.0F},
+        ctx.label(details_column.next(16.0F, 4.0F),
                   "AUTHORED COORDINATES / SHARED ORIGIN",
                   ctx.theme().text_muted);
-        details_y += 20.0F;
       }
 
-      fields = labelled_columns("RASTER", 2U);
+      fields = labelled_columns("RASTER", 2U, 7.0F);
       const auto draw_raster = [&](gui::UiId field_id, const gui::Rect &field,
                                    std::string_view axis, core::u32 &value) {
         double changed{};
@@ -4711,16 +4610,13 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
       draw_raster(
           mix(id_, "feed.surface.raster.height", surface_details_node_.value()),
           fields[1U], "H", surface_geometry_.raster.height);
-      details_y += 29.0F;
 
       } else {
         bool changed = ctx.checkbox(mix(id_, "feed.surface.color-enabled", surface_details_node_.value()),
-            gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 24.0F},
-            surface_color_.enabled, "Enable compensation");
-        details_y += 32.0F;
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 20.0F},
-            "WALL PRIMARIES (LINEAR)", ctx.theme().text_muted);
-        details_y += 24.0F;
+            details_column.next(24.0F, 8.0F), surface_color_.enabled,
+            "Enable compensation");
+        ctx.label(details_column.next(20.0F, 4.0F), "WALL PRIMARIES (LINEAR)",
+                  ctx.theme().text_muted);
         constexpr std::array<std::string_view,3> rows{"RED", "GREEN", "BLUE"};
         for (std::size_t row = 0; row < 3U; ++row) {
           const auto cells = labelled_columns(rows[row], 3U);
@@ -4732,19 +4628,16 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
               surface_color_.primaries[index] = static_cast<float>(std::clamp(value, -16.0, 16.0)); changed = true;
             }
           }
-          details_y += 27.0F;
         }
-        details_y += 10.0F;
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 20.0F},
-            "CAMERA IDT INVERSE (.cube)", ctx.theme().text_muted);
-        details_y += 23.0F;
-        changed |= ctx.text_field(camera_id, gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 24.0F},
-            surface_color_.camera_inverse_lut_source);
-        details_y += 32.0F;
-        ctx.label(gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 18.0F},
-            "Measured for this wall / camera.", ctx.theme().text_muted);
-        ctx.label(gui::Rect{details.x + 10.0F, details_y + 18.0F, details.width - 20.0F, 18.0F},
-            "Applied after the show look.", ctx.theme().text_muted);
+        details_column.space(10.0F);
+        ctx.label(details_column.next(20.0F, 3.0F), "CAMERA IDT INVERSE (.cube)",
+                  ctx.theme().text_muted);
+        changed |= ctx.text_field(camera_id, details_column.next(24.0F, 8.0F),
+                                  surface_color_.camera_inverse_lut_source);
+        ctx.label(details_column.next(18.0F, 0.0F), "Measured for this wall / camera.",
+                  ctx.theme().text_muted);
+        ctx.label(details_column.next(18.0F, 0.0F), "Applied after the show look.",
+                  ctx.theme().text_muted);
         if (changed) {
           emit_surface_edit();
           if (frame.surface_edit) frame.surface_edit->color = surface_color_;
@@ -4760,10 +4653,9 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
         ctx.pop_pointer_block();
       }
     } else {
-      ctx.label(
-          gui::Rect{details.x + 10.0F, details_y, details.width - 20.0F, 40.0F},
-          "Add or select a physical surface to calibrate it.",
-          ctx.theme().text_muted);
+      ctx.label(details_column.next(40.0F, 0.0F),
+                "Add or select a physical surface to calibrate it.",
+                ctx.theme().text_muted);
     }
   }
 

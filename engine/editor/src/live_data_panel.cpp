@@ -1,5 +1,7 @@
 #include <mediaserver/editor/live_data_panel.hpp>
 
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -12,19 +14,9 @@ namespace mediaserver::editor {
 namespace {
 
 constexpr float title_height = 25.0F;
+// Lines of figures, touching: denser than form rows.
 constexpr float row_height = 20.0F;
-constexpr float section_height = 24.0F;
-constexpr float label_width = 132.0F;
-
-void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
-                color);
-  draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F, bounds.height,
-                color);
-}
+constexpr float badge_width = 110.0F;
 
 [[nodiscard]] std::string format(const char *pattern, double value) {
   std::array<char, 64U> text{};
@@ -196,14 +188,12 @@ std::string_view pose_prediction_state_name(scene::PosePredictionState state) no
 void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                          const LiveDataState &state) {
   ctx.panel(bounds, ctx.theme().panel);
-  const gui::Rect title{bounds.x, bounds.y, bounds.width, title_height};
+  gui::Metrics m = ctx.theme().metrics;
+  m.inset = m.panel_inset;
+  gui::Rect body = bounds;
+  const gui::Rect title = gui::cut_top(body, title_height);
   ctx.panel(title, ctx.theme().header);
-  ctx.label(gui::Rect{title.x + 10.0F, title.y, title.width - 20.0F,
-                      title.height},
-            "LIVE DATA", ctx.theme().text);
-
-  const gui::Rect body{bounds.x, bounds.y + title_height, bounds.width,
-                       std::max(bounds.height - title_height, 0.0F)};
+  ctx.label(gui::inset(title, m.inset, 0.0F), "LIVE DATA", ctx.theme().text);
 
   // Scrolled by what the last frame actually drew, rather than by a second
   // implementation of how tall the content is.
@@ -219,30 +209,21 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   // 400 px against roughly 630 px of body at the default layout, so the second
   // camera was cut mid-way and a third was never drawn at all, with no way for
   // an operator to reach it.
-  const float maximum_scroll = std::max(content_height_ - body.height, 0.0F);
-  if (body.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * row_height * 3.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-
-  ctx.push_clip(body);
-  const float content_top = body.y + 6.0F - scroll_;
-  float y = content_top;
+  gui::FormLayout form{body, m, scroll_.begin(ctx, body, row_height * 3.0F)};
 
   const auto section = [&](std::string_view heading) {
-    ctx.label(gui::Rect{body.x + 10.0F, y, body.width - 20.0F, 18.0F}, heading,
-              ctx.theme().accent);
-    y += section_height;
+    ctx.label(form.heading(), heading, ctx.theme().accent);
+  };
+  // A name in the label column and its value after it; rows touch.
+  const auto line = [&](std::string_view name) {
+    gui::Rect value = form.next(row_height, 0.0F);
+    ctx.label(gui::cut_left(value, m.label_column), name,
+              ctx.theme().text_muted);
+    return value;
   };
   const auto row = [&](std::string_view name, std::string_view value,
                        gui::UiColor color) {
-    ctx.label(gui::Rect{body.x + 10.0F, y, label_width, row_height}, name,
-              ctx.theme().text_muted);
-    ctx.label(gui::Rect{body.x + 10.0F + label_width, y,
-                        std::max(body.width - 20.0F - label_width, 0.0F),
-                        row_height},
-              value, color);
-    y += row_height;
+    ctx.label(line(name), value, color);
   };
   const auto plain_row = [&](std::string_view name, std::string_view value) {
     row(name, value, ctx.theme().text);
@@ -269,15 +250,12 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         : tracking.state == TrackingLinkState::BindFailed
             ? ctx.theme().warning
             : ctx.theme().text_muted;
-    const gui::Rect badge{body.x + 10.0F + label_width, y, 110.0F, row_height};
+    gui::Rect link = line("Link");
+    const gui::Rect badge = gui::cut_left(link, badge_width);
     ctx.panel(badge, ctx.theme().widget);
-    border(ctx, badge, state_color);
-    ctx.label(gui::Rect{badge.x + 6.0F, badge.y, badge.width - 12.0F,
-                        badge.height},
+    ctx.outline(badge, state_color);
+    ctx.label(gui::inset(badge, m.gap, 0.0F),
               tracking_link_state_name(tracking.state), state_color);
-    ctx.label(gui::Rect{body.x + 10.0F, y, label_width, row_height}, "Link",
-              ctx.theme().text_muted);
-    y += row_height;
 
     if (!tracking.last_error.empty()) {
       row("Error", tracking.last_error, ctx.theme().warning);
@@ -461,23 +439,20 @@ void LiveDataPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   plain_row("Latency",
             format_unsigned("%llu frames", state.icvfx.latency_frames));
 
-  content_height_ = (y - content_top) + 6.0F;
+  scroll_.end(ctx, form.extent());
 
-  ctx.pop_clip();
   // A scrollable panel has to say so. Without it a clipped panel and a short
   // one look identical, and the operator has no reason to try the wheel.
-  if (maximum_scroll > 0.0F && content_height_ > 0.0F) {
-    constexpr float track_width = 3.0F;
-    const float visible = std::clamp(body.height / content_height_, 0.0F, 1.0F);
-    const float thumb_height = std::max(visible * body.height, 24.0F);
-    const float travel = std::max(body.height - thumb_height, 0.0F);
-    const float thumb_y =
-        body.y + travel * std::clamp(scroll_ / maximum_scroll, 0.0F, 1.0F);
-    ctx.panel(gui::Rect{body.x + body.width - track_width - 2.0F, thumb_y,
-                        track_width, thumb_height},
-              ctx.theme().divider);
+  constexpr float track_width = 3.0F;
+  constexpr float minimum_thumb = 24.0F;
+  const gui::Rect thumb = scroll_.thumb(
+      gui::Rect{body.right() - track_width - 2.0F, body.y, track_width,
+                body.height},
+      minimum_thumb);
+  if (thumb.height > 0.0F) {
+    ctx.panel(thumb, ctx.theme().divider);
   }
-  border(ctx, bounds, ctx.theme().divider);
+  ctx.outline(bounds, ctx.theme().divider);
 }
 
 } // namespace mediaserver::editor

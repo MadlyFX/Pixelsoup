@@ -37,42 +37,34 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   // takes the space between when there is room for it.
   const gui::Theme &theme = ctx.theme();
   ctx.panel(toolbar, theme.header);
-  ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
-                      toolbar.width, 1.0F},
-            theme.divider);
-  const float control_y = toolbar.y + 6.0F;
+  {
+    gui::Rect rule = toolbar;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+  }
   constexpr float button_height = 22.0F;
   const bool show_key_tools = !keyframes.empty() || !keys_.selected.empty();
 
-  float right_x = toolbar.x + toolbar.width - 6.0F;
+  // One strip of controls 6px in from the toolbar's edges: GO and the cue
+  // arm from its end, the left group from its start, and the In/Out range in
+  // whatever room is left between them.
+  gui::Rect bar = gui::inset(toolbar, gui::Padding{6.0F, 6.0F, 6.0F, 0.0F});
+  bar = gui::cut_top(bar, button_height);
   gui::Rect go_button{};
   gui::Rect armed_button{};
   if (any_cue) {
-    go_button = gui::Rect{right_x - 100.0F, control_y, 100.0F, button_height};
-    armed_button = gui::Rect{go_button.x - 4.0F - icon_button_width,
-                             control_y, icon_button_width, button_height};
-    right_x = armed_button.x - 8.0F;
+    go_button = gui::cut_right(bar, 100.0F);
+    static_cast<void>(gui::cut_right(bar, 4.0F));
+    armed_button = gui::cut_right(bar, icon_button_width);
+    static_cast<void>(gui::cut_right(bar, 8.0F));
   }
-  // Everything left of the marker group, measured from the panel's edge.
-  const float left_extent = show_key_tools ? 766.0F : 718.0F;
-  // Wide enough for its caption and the longest value it can show, so the
-  // range never reads as "IN 00:00:0...".
-  const float range_field_width =
-      std::max(96.0F, 8.0F + ctx.font_width("OUT") + 6.0F +
-                          ctx.font_width(timecode(p, last)) + 8.0F);
-  const bool show_range =
-      right_x - (toolbar.x + left_extent) >= range_field_width * 2.0F + 12.0F;
-  gui::Rect in_field{};
-  gui::Rect out_field{};
-  if (show_range) {
-    out_field = gui::Rect{right_x - range_field_width, control_y,
-                          range_field_width, button_height};
-    in_field = gui::Rect{out_field.x - 4.0F - range_field_width, control_y,
-                         range_field_width, button_height};
-    right_x = in_field.x - 8.0F;
-  }
-  const auto fits = [&](float x, float width) noexcept {
-    return x + width <= right_x;
+  // Whether a control `width` wide fits before the right-hand group, and
+  // the next control's place. A control that does not fit still takes its
+  // place, so everything after it is dropped too.
+  const auto fits = [&](float width) noexcept { return width <= bar.width; };
+  const auto place = [&](float width, float gap_after) {
+    const gui::Rect at = gui::cut_left(bar, width);
+    static_cast<void>(gui::cut_left(bar, gap_after));
+    return at;
   };
 
   // A time field: drag sideways to scrub a frame per pixel, click to type a
@@ -130,32 +122,43 @@ void TimelinePanel::draw_toolbar(Pass &p) {
       }
     }
     ctx.panel(field, interaction.hovered ? theme.widget_hover : theme.track);
-    ctx.panel(gui::Rect{field.x, field.y, 2.0F, field.height}, color);
-    float text_x = field.x + 8.0F;
+    gui::Rect edge = field;
+    ctx.panel(gui::cut_left(edge, 2.0F), color);
+    // The caption, then the time.
+    gui::Rect text = gui::inset(field, gui::Padding{8.0F, 0.0F, 2.0F, 0.0F});
     if (!caption.empty()) {
-      ctx.label(gui::Rect{text_x, field.y, 28.0F, field.height}, caption,
-                theme.text_muted);
-      text_x += ctx.font_width(caption) + 6.0F;
+      gui::Rect caption_cell = text;
+      ctx.label(gui::cut_left(caption_cell, 28.0F), caption, theme.text_muted);
+      static_cast<void>(gui::cut_left(text, ctx.font_width(caption) + 6.0F));
     }
-    ctx.label(gui::Rect{text_x, field.y,
-                        std::max(field.x + field.width - text_x - 2.0F, 0.0F),
-                        field.height},
-              timecode(p, value), color);
+    ctx.label(text, timecode(p, value), color);
     ctx.tooltip(field, "Drag to scrub, click to type a timecode or frame");
     return result;
   };
 
-  float bar_x = toolbar.x + 6.0F;
   const auto transport_icon = [&](std::string_view name, float width,
                                   gui::Icon icon, TransportRequest request,
                                   std::string_view tip, bool engaged = false) {
-    if (fits(bar_x, width) &&
-        icon_button(ctx, mix(id_, name),
-                    gui::Rect{bar_x, control_y, width, button_height}, icon,
-                    engaged, tip, theme.playhead)) {
+    const bool fitted = fits(width);
+    const gui::Rect at = place(width, 2.0F);
+    if (fitted && icon_button(ctx, mix(id_, name), at, icon, engaged, tip,
+                              theme.playhead)) {
       frame.transport = request;
     }
-    bar_x += width + 2.0F;
+  };
+  // An icon button in the left group, `gap_after` short of the next.
+  const auto bar_icon = [&](std::string_view name, gui::Icon icon,
+                            bool engaged, std::string_view tip,
+                            float gap_after = 2.0F) {
+    const bool fitted = fits(icon_button_width);
+    const gui::Rect at = place(icon_button_width, gap_after);
+    return fitted && icon_button(ctx, mix(id_, name), at, icon, engaged, tip,
+                                 theme.accent);
+  };
+  const auto separate = [&] {
+    static_cast<void>(gui::cut_left(bar, 2.0F));
+    draw_separator(ctx, bar.x, toolbar);
+    static_cast<void>(gui::cut_left(bar, 4.0F));
   };
   transport_icon("to start", icon_button_width, gui::Icon::ToStart,
                  TransportRequest::GoToStart, "Go to In (Home)");
@@ -172,41 +175,40 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                  "Forward one frame (Right), one second (Shift+Right)");
   transport_icon("to end", icon_button_width, gui::Icon::ToEnd,
                  TransportRequest::GoToEnd, "Go to Out (End)");
-  bar_x += 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "loop"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Loop, timeline.loop,
-                  "Loop the In/Out range", theme.accent)) {
+  static_cast<void>(gui::cut_left(bar, 2.0F));
+  if (bar_icon("loop", gui::Icon::Loop, timeline.loop, "Loop the In/Out range",
+               8.0F)) {
     frame.range = RangeRequest{first, last, !timeline.loop};
   }
-  bar_x += icon_button_width + 8.0F;
 
   // Where the Stage playhead is. Typing a time goes there; dragging scrubs.
   constexpr float readout_width = 110.0F;
-  if (fits(bar_x, readout_width)) {
-    if (const auto moved = time_field(
-            mix(id_, "playhead time"),
-            gui::Rect{bar_x, control_y, readout_width, button_height}, {},
-            timeline.show_frame, std::max(last, timeline.show_frame),
-            theme.playhead)) {
-      frame.seek_to_frame = std::clamp(*moved, first, last);
+  {
+    const bool fitted = fits(readout_width);
+    const gui::Rect readout = place(readout_width, 4.0F);
+    if (fitted) {
+      if (const auto moved = time_field(
+              mix(id_, "playhead time"), readout, {}, timeline.show_frame,
+              std::max(last, timeline.show_frame), theme.playhead)) {
+        frame.seek_to_frame = std::clamp(*moved, first, last);
+      }
     }
   }
-  bar_x += readout_width + 4.0F;
 
   constexpr float rate_width = 70.0F;
   gui::Rect rate_button{};
   auto &rate_popup = p.rate_popup;
-  if (fits(bar_x, rate_width)) {
-    rate_button = gui::Rect{bar_x, control_y, rate_width, button_height};
+  const bool rate_fits = fits(rate_width);
+  const gui::Rect rate_slot = place(rate_width, 4.0F);
+  if (rate_fits) {
+    rate_button = rate_slot;
     if (ctx.button(mix(id_, "show rate"), rate_button, rate_label(timeline))) {
       toolbar_.rate_menu_open = !toolbar_.rate_menu_open;
       key_tools_.open = false;
     }
     constexpr float popup_width = 104.0F;
     constexpr float choice_height = 21.0F;
-    rate_popup = gui::Rect{rate_button.x, toolbar.y + toolbar.height - 2.0F,
+    rate_popup = gui::Rect{rate_button.x, toolbar.bottom() - 2.0F,
                            popup_width,
                            8.0F + choice_height *
                                       static_cast<float>(common_rates.size())};
@@ -225,7 +227,6 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   } else {
     toolbar_.rate_menu_open = false;
   }
-  bar_x += rate_width + 4.0F;
 
   // The pointer tools. Each acts on the clip it is pressed on.
   struct ToolChoice final {
@@ -248,49 +249,39 @@ void TimelinePanel::draw_toolbar(Pass &p) {
       {TimelineEditTool::Razor, gui::Icon::Razor, "tool razor",
        "Razor: cut a clip where clicked; Shift cuts every track (C)"},
   }};
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
+  draw_separator(ctx, bar.x, toolbar);
+  static_cast<void>(gui::cut_left(bar, 4.0F));
   for (const ToolChoice &choice : tool_choices) {
     // The enlarged marks still fit the existing width, keeping transport and
-    // editing controls reachable at the same compact panel sizes.
+    // editing controls reachable at the same compact panel sizes; they stand
+    // taller than the strip, centred in the toolbar.
     constexpr float tool_width = icon_button_width;
     constexpr float tool_height = button_height * edit_tool_scale;
-    if (fits(bar_x, tool_width) &&
-        icon_button(ctx, mix(id_, choice.name),
-                    gui::Rect{bar_x, toolbar.y + (toolbar.height - tool_height) * 0.5F,
-                              tool_width, tool_height},
-                    choice.icon, edit_tool_ == choice.tool, choice.tip,
-                    theme.accent, edit_tool_scale)) {
+    const bool fitted = fits(tool_width);
+    const gui::Rect at = gui::centered(gui::cell(place(tool_width, 2.0F), toolbar),
+                                       tool_width, tool_height);
+    if (fitted &&
+        icon_button(ctx, mix(id_, choice.name), at, choice.icon,
+                    edit_tool_ == choice.tool, choice.tip, theme.accent,
+                    edit_tool_scale)) {
       edit_tool_ = choice.tool;
     }
-    bar_x += tool_width + 2.0F;
   }
-  bar_x += 2.0F;
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
+  separate();
 
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "snap"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Snap, snapping_,
-                  "Snapping to the playhead, cuts, keys and markers (S)",
-                  theme.accent)) {
+  if (bar_icon("snap", gui::Icon::Snap, snapping_,
+               "Snapping to the playhead, cuts, keys and markers (S)")) {
     snapping_ = !snapping_;
   }
-  bar_x += icon_button_width + 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "fit"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Fit, false, "Zoom to fit the range (\\)",
-                  theme.accent)) {
+  if (bar_icon("fit", gui::Icon::Fit, false, "Zoom to fit the range (\\)")) {
     zoom_to_fit(p);
   }
-  bar_x += icon_button_width + 2.0F;
   constexpr float curves_width = 52.0F;
-  if (fits(bar_x, curves_width) &&
-      text_toggle(ctx, mix(id_, "graph mode"),
-                  gui::Rect{bar_x, control_y, curves_width, button_height},
-                  "Curves", graph_mode_,
+  const bool curves_fit = fits(curves_width);
+  const gui::Rect curves_toggle = place(curves_width, 2.0F);
+  if (curves_fit &&
+      text_toggle(ctx, mix(id_, "graph mode"), curves_toggle, "Curves",
+                  graph_mode_,
                   "Draw animated values as curves instead of keys")) {
     graph_mode_ = !graph_mode_;
     // Entering Curves shows every value the graph will draw.
@@ -298,14 +289,13 @@ void TimelinePanel::draw_toolbar(Pass &p) {
       graph_->request_fit();
     }
   }
-  bar_x += curves_width + 2.0F;
 
   // Key selection tools live behind one button, shown only when there is
   // animation to use them on.
   constexpr float keys_width = 46.0F;
   gui::Rect key_tools_button{};
-  if (show_key_tools && fits(bar_x, keys_width)) {
-    key_tools_button = gui::Rect{bar_x, control_y, keys_width, button_height};
+  if (show_key_tools && fits(keys_width)) {
+    key_tools_button = place(keys_width, 2.0F);
     if (text_toggle(ctx, mix(id_, "key tools"), key_tools_button, "Keys",
                     key_tools_.open,
                     "Key selection, value and time-scale tools")) {
@@ -315,7 +305,6 @@ void TimelinePanel::draw_toolbar(Pass &p) {
         key_tools_.scale_open = false;
       }
     }
-    bar_x += keys_width + 2.0F;
   } else {
     key_tools_.open = false;
     key_tools_.scale_open = false;
@@ -323,8 +312,8 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   const float key_popup_width = std::min(338.0F, bounds.width);
   p.key_tools_popup = gui::Rect{
       std::clamp(key_tools_button.x, bounds.x,
-                 std::max(bounds.x, bounds.x + bounds.width - key_popup_width)),
-      toolbar.y + toolbar.height - 2.0F, key_popup_width, 224.0F};
+                 std::max(bounds.x, bounds.right() - key_popup_width)),
+      toolbar.bottom() - 2.0F, key_popup_width, 224.0F};
   auto &key_tools_popup = p.key_tools_popup;
   p.scale_numerator_id = mix(id_, "scale numerator");
   auto &scale_numerator_id = p.scale_numerator_id;
@@ -348,9 +337,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     ctx.push_pointer_block();
     scratch.key_popup_pointer_blocked = true;
   }
-  bar_x += 2.0F;
-  draw_separator(ctx, bar_x, toolbar);
-  bar_x += 4.0F;
+  separate();
 
   // New markers take the next number and a colour that says what they are:
   // plain markers green, holds red, loops purple. The operator recolours and
@@ -373,37 +360,38 @@ void TimelinePanel::draw_toolbar(Pass &p) {
   auto &playhead = p.playhead;
   // Snapping pulls onto the playhead the operator can see.
   p.shown_playhead = signed_frame(timeline.show_frame);
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "add marker"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Marker, false, "Add a marker at the playhead (M)",
-                  theme.accent)) {
+  if (bar_icon("add marker", gui::Icon::Marker, false,
+               "Add a marker at the playhead (M)")) {
     create_marker(p, playhead, scene::CueAction::None);
   }
-  bar_x += icon_button_width + 2.0F;
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "add cue"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Hold, false,
-                  "Add a hold cue at the playhead (Q); Shift+Q adds a loop",
-                  theme.accent)) {
+  if (bar_icon("add cue", gui::Icon::Hold, false,
+               "Add a hold cue at the playhead (Q); Shift+Q adds a loop")) {
     create_marker(p, playhead, scene::CueAction::Hold);
   }
-  bar_x += icon_button_width + 2.0F;
   // Playback's own state, after what the operator authors: the cache bar
   // and the render nodes' playheads.
-  if (fits(bar_x, icon_button_width) &&
-      icon_button(ctx, mix(id_, "playback overlay"),
-                  gui::Rect{bar_x, control_y, icon_button_width, button_height},
-                  gui::Icon::Cache, playback_overlay_,
-                  "Show the frames this machine has decoded ready (green "
-                  "bar) and where each render node is playing (white "
-                  "playheads)",
-                  theme.accent)) {
+  if (bar_icon("playback overlay", gui::Icon::Cache, playback_overlay_,
+               "Show the frames this machine has decoded ready (green "
+               "bar) and where each render node is playing (white "
+               "playheads)",
+               0.0F)) {
     playback_overlay_ = !playback_overlay_;
   }
-  bar_x += icon_button_width + 2.0F;
 
+  // Exact In/Out entry, right-aligned before GO, when what is left holds
+  // both fields - each wide enough for its caption and the longest value it
+  // can show, so the range never reads as "IN 00:00:0...".
+  const float range_field_width =
+      std::max(96.0F, 8.0F + ctx.font_width("OUT") + 6.0F +
+                          ctx.font_width(timecode(p, last)) + 8.0F);
+  const bool show_range = bar.width >= range_field_width * 2.0F + 12.0F;
+  gui::Rect in_field{};
+  gui::Rect out_field{};
+  if (show_range) {
+    out_field = gui::cut_right(bar, range_field_width);
+    static_cast<void>(gui::cut_right(bar, 4.0F));
+    in_field = gui::cut_right(bar, range_field_width);
+  }
   if (show_range) {
     if (const auto entered = time_field(mix(id_, "range first"), in_field,
                                         "IN", first, last, theme.text)) {
@@ -446,7 +434,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                                   ? 0.55F
                                   : (go.hovered ? 0.40F : 0.28F)));
     if (!running) {
-      draw_border(ctx, go_button, go_color);
+      ctx.outline(go_button, go_color);
     }
     std::string go_text;
     if (running) {
@@ -464,8 +452,7 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     } else {
       go_text = "GO";
     }
-    ctx.label(gui::Rect{go_button.x + 9.0F, go_button.y,
-                        go_button.width - 12.0F, go_button.height},
+    ctx.label(gui::inset(go_button, gui::Padding{9.0F, 0.0F, 3.0F, 0.0F}),
               go_text, running ? theme.text_muted : theme.text);
     ctx.tooltip(go_button,
                 "GO (Enter): run from a hold, release a loop, or play to the "
@@ -556,27 +543,18 @@ void TimelinePanel::draw_rate_menu(Pass &p) {
     ctx.pop_pointer_block();
   }
   if (toolbar_.rate_menu_open) {
-    ctx.panel(rate_popup, ctx.theme().background);
-    ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, rate_popup.width, 1.0F},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{rate_popup.x, rate_popup.y, 1.0F, rate_popup.height},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{rate_popup.x + rate_popup.width - 1.0F, rate_popup.y,
-                        1.0F, rate_popup.height},
-              ctx.theme().divider);
-    float choice_y = rate_popup.y + 4.0F;
+    draw_hanging_popup(ctx, rate_popup);
+    const gui::Rect choices = gui::inset(rate_popup, 4.0F);
     for (std::size_t index = 0U; index < common_rates.size(); ++index) {
       const RateChoice &choice = common_rates[index];
-      const gui::Rect row{rate_popup.x + 4.0F, choice_y,
-                          rate_popup.width - 8.0F, 21.0F};
+      const gui::Rect row = gui::list_row(choices, index, 21.0F);
       const gui::Interaction interaction =
           ctx.grab(mix(id_, "show rate choice", index), row);
       ctx.panel(row, same_rate(timeline, choice.rate)
                          ? ctx.theme().selection
                          : (interaction.hovered ? ctx.theme().widget_hover
                                                 : ctx.theme().row));
-      ctx.label(gui::Rect{row.x + 7.0F, row.y, std::max(row.width - 7.0F, 0.0F),
-                          row.height},
+      ctx.label(gui::inset(row, gui::Padding{7.0F, 0.0F, 0.0F, 0.0F}),
                 choice.label,
                 same_rate(timeline, choice.rate) ? ctx.theme().text
                                                  : ctx.theme().text_muted);
@@ -586,7 +564,6 @@ void TimelinePanel::draw_rate_menu(Pass &p) {
         }
         toolbar_.rate_menu_open = false;
       }
-      choice_y += 21.0F;
     }
   }
 

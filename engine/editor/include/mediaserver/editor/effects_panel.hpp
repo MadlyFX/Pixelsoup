@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -67,7 +68,7 @@ public:
 
 private:
     gui::UiId id_{};
-    float scroll_{};
+    gui::ScrollRegion scroll_;
     std::string search_;
     std::optional<scene::EffectKind> dragging_;
     float drag_start_x_{};

@@ -829,6 +829,18 @@ void UiContext::panel(const Rect& bounds, UiColor color) {
     list_.add_rect(bounds.x, bounds.y, bounds.width, bounds.height, color);
 }
 
+void UiContext::outline(const Rect& bounds, UiColor color, float thickness) {
+    if (bounds.width <= 0.0F || bounds.height <= 0.0F || thickness <= 0.0F) {
+        return;
+    }
+    list_.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
+    list_.add_rect(bounds.x, bounds.bottom() - thickness, bounds.width,
+                   thickness, color);
+    list_.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
+    list_.add_rect(bounds.right() - thickness, bounds.y, thickness,
+                   bounds.height, color);
+}
+
 void UiContext::label(const Rect& bounds, std::string_view text) {
     label(bounds, text, theme_.text);
 }
@@ -864,6 +876,20 @@ void UiContext::label(
     } else {
         draw_label(list_, font_, bounds, bounds.x, text, color, size);
     }
+    list_.pop_clip();
+}
+
+void UiContext::label_centered(
+    const Rect& bounds, std::string_view text, UiColor color) {
+    const float text_width = font_.measure(text, 1.0F);
+    if (text_width > bounds.width) {
+        label(bounds, text, color);
+        return;
+    }
+    if (bounds.height <= 0.0F) return;
+    list_.push_clip(bounds.x, bounds.y, bounds.width, bounds.height);
+    draw_label(list_, font_, bounds, bounds.x + (bounds.width - text_width) * 0.5F,
+               text, color, 1.0F);
     list_.pop_clip();
 }
 

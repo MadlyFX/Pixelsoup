@@ -6,6 +6,7 @@
 #include <mediaserver/editor/file_picker.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/number_field.hpp>
+#include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
 #include <mediaserver/scene/scene.hpp>
@@ -186,11 +187,7 @@ class InspectorPanel final {
   private:
     // A vertical cursor down the panel, so a section that collapses simply
     // stops advancing it. Rebuilt every frame; nothing here survives one.
-    struct Cursor final {
-        // The content column: the panel inset on both sides.
-        gui::Rect column{};
-        float y{};
-    };
+    using Cursor = gui::FormLayout;
 
     void draw_ies(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     void draw_linked(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
@@ -341,8 +338,7 @@ class InspectorPanel final {
     gui::UiId id_{};
     // How far the contents are scrolled up, in pixels. Clamped to what actually
     // overflowed, which is only known after a frame has been laid out.
-    float scroll_{};
-    float content_height_{};
+    gui::ScrollRegion scroll_;
 
     NumberField fields_;
     // Evaluated snapshots and model spans are valid only during draw(). They

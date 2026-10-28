@@ -3794,124 +3794,60 @@ struct ProjectSettingsHarness final {
   static constexpr float card_height = 700.0F;
   static constexpr float card_x = (1600.0F - card_width) * 0.5F;
   static constexpr float card_y = (900.0F - card_height) * 0.5F;
-  static constexpr float tab_y = card_y + 64.0F;
-  static constexpr float tab_height = 24.0F;
-  static constexpr float tab_gap = 6.0F;
-  static constexpr float category_count = 2.0F;
-  static constexpr float tab_width =
-      (card_width - 28.0F - tab_gap * (category_count - 1.0F))
-      / category_count;
-  static constexpr float content_y = card_y + 96.0F;
 
+  // The default metrics: under the 34px header, the intro caption 6px down
+  // (18px tall, 2px after) and the 24px tabs 6px apart; the fixed part ends
+  // 6px below them, then a 1px rule, then the scrolling pane, whose first
+  // row is 6px down. Rows are 24px with 6px between, notes 18px with 2px
+  // after, 14px in from the card's sides, fields after a 132px label column.
+  static constexpr float tab_y = card_y + 34.0F + 6.0F + 18.0F + 2.0F;
+  static constexpr float content_y = tab_y + 24.0F + 6.0F + 1.0F + 6.0F;
+  static constexpr float tab_width = (card_width - 28.0F - 6.0F) / 2.0F;
+
+  // DEFAULTS on the left; CANCEL and APPLY on the right, 6px apart; all 84px
+  // wide and 6px up from the card's bottom edge.
   [[nodiscard]] static gui::Rect defaults_button() {
-    return gui::Rect{card_x + 14.0F, card_y + card_height - 38.0F, 84.0F,
-                     26.0F};
+    return gui::Rect{card_x + 14.0F, card_y + card_height - 30.0F, 84.0F,
+                     24.0F};
   }
   [[nodiscard]] static gui::Rect cancel_button() {
-    return gui::Rect{card_x + card_width - 190.0F, card_y + card_height - 38.0F,
-                     84.0F, 26.0F};
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F - 6.0F - 84.0F,
+                     card_y + card_height - 30.0F, 84.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect apply_button() {
-    return gui::Rect{card_x + card_width - 98.0F, card_y + card_height - 38.0F,
-                     84.0F, 26.0F};
+    return gui::Rect{card_x + card_width - 14.0F - 84.0F,
+                     card_y + card_height - 30.0F, 84.0F, 24.0F};
   }
   [[nodiscard]] static gui::Rect category_tab(std::size_t index) {
     return gui::Rect{card_x + 14.0F +
-                         static_cast<float>(index) * (tab_width + tab_gap),
-                     tab_y, tab_width, tab_height};
-  }
-  [[nodiscard]] static gui::Rect renderer_tab() { return category_tab(0U); }
-  [[nodiscard]] static gui::Rect image_tab() { return category_tab(1U); }
-  // Colour sits beside Image: both are how the finished picture is treated.
-  [[nodiscard]] static gui::Rect color_tab() { return category_tab(2U); }
-  // Environment sits between Colour and Tracking: it is content the operator
-  // sets alongside the look, not a timing or calibration policy.
-  [[nodiscard]] static gui::Rect environment_tab() {
-    return category_tab(3U);
+                         static_cast<float>(index) * (tab_width + 6.0F),
+                     tab_y, tab_width, 24.0F};
   }
   [[nodiscard]] static gui::Rect tracking_tab() { return category_tab(0U); }
   [[nodiscard]] static gui::Rect lens_tab() { return category_tab(1U); }
-  // COLOUR: a DISPLAY TRANSFORM heading then the transform row, a SHOW LOOK
-  // heading then the field row, an OUTPUT heading then the dither checkbox.
-  [[nodiscard]] static gui::Rect srgb_transform_button() {
-    return gui::Rect{card_x + 14.0F + 150.0F, content_y + 22.0F, 116.0F,
-                     22.0F};
-  }
-  [[nodiscard]] static gui::Rect dither_checkbox() {
-    return gui::Rect{card_x + 14.0F,
-                     content_y + 22.0F + 44.0F + 22.0F + 44.0F + 22.0F,
-                     card_width - 28.0F, 24.0F};
-  }
-  // Gaussian Blur is the first section: a 22px heading then three 44px rows.
-  // Directional Blur contributes its heading and one row before Brightness.
-  [[nodiscard]] static gui::Rect gain_button() {
-    const float y =
-        content_y + 22.0F + 44.0F * 3.0F + 4.0F + 22.0F + 44.0F + 4.0F + 22.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F + 124.0F, y, 116.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect advanced_button() {
-    const float y = content_y + 22.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F + 124.0F, y, 116.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect required_button() {
-    const float y = content_y + 22.0F + 44.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F + 124.0F, y, 116.0F, 22.0F};
-  }
-  // The two shadow rows follow Backend, Availability, and Profile, and are
-  // drawn only while Advanced is selected.
-  [[nodiscard]] static gui::Rect shadow_cascades_track() {
-    const float y = content_y + 22.0F + 44.0F * 3.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F, y,
-                     card_width - 28.0F - 150.0F - 66.0F - 8.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect gi_strength_track() {
-    const float y = content_y + 22.0F + 44.0F * 4.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F, y,
-                     card_width - 28.0F - 150.0F - 66.0F - 8.0F, 22.0F};
-  }
-  // The antialiasing row follows Backend, Availability, Profile, Shadow
-  // cascades and Bounced light.
-  [[nodiscard]] static gui::Rect antialiasing_button(int index) {
-    const float y = content_y + 22.0F + 44.0F * 5.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F
-                         + (96.0F + 8.0F) * static_cast<float>(index),
-                     y, 96.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect jitter_samples_track() {
-    const float y = content_y + 22.0F + 44.0F * 6.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F, y,
-                     card_width - 28.0F - 150.0F - 66.0F - 8.0F, 22.0F};
-  }
-  // Follows the antialiasing row, and the jitter row when that is drawn.
-  [[nodiscard]] static gui::Rect occlusion_radius_track(bool with_jitter) {
-    const float y =
-        content_y + 22.0F + 44.0F * (with_jitter ? 7.0F : 6.0F);
-    return gui::Rect{card_x + 14.0F + 150.0F, y,
-                     card_width - 28.0F - 150.0F - 66.0F - 8.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect raster_only_button() {
-    const float profile_y = content_y + 22.0F + 44.0F * 2.0F;
-    return gui::Rect{card_x + card_width - 14.0F - 104.0F, profile_y + 24.0F,
-                     104.0F, 18.0F};
-  }
+  // LENS CALIBRATION heading, then the Projection row's first choice.
   [[nodiscard]] static gui::Rect calibrated_lens_button() {
-    const float y = content_y + 22.0F;
-    return gui::Rect{card_x + 14.0F + 150.0F, y, 116.0F, 22.0F};
-  }
-  [[nodiscard]] static gui::Rect lens_sensor_width_track() {
-    const float y = content_y + 22.0F + 44.0F;
-    constexpr float lens_gap = 10.0F;
-    constexpr float lens_label_width = 66.0F;
-    constexpr float lens_value_width = 48.0F;
-    const float lens_column_width = (card_width - 28.0F - lens_gap) * 0.5F;
-    return gui::Rect{
-        card_x + 14.0F + lens_label_width + 2.0F, y,
-        lens_column_width - lens_label_width - lens_value_width - 6.0F, 18.0F};
-  }
-  // INNER FRUSTUM heading, then the enable checkbox and the two plate rows.
-  [[nodiscard]] static gui::Rect inner_frustum_checkbox() {
-    return gui::Rect{card_x + 14.0F, content_y + 22.0F, card_width - 28.0F,
+    return gui::Rect{card_x + 14.0F + 132.0F, content_y + 24.0F, 116.0F,
                      24.0F};
+  }
+  // After the Projection row and its note: two columns 14px apart, each a
+  // 66px label, the track, a 6px gap and a 48px value. The track is 18px
+  // tall, centred in its row.
+  [[nodiscard]] static gui::Rect lens_sensor_width_track() {
+    const float y = content_y + 24.0F + 30.0F + 20.0F;
+    const float column = (card_width - 28.0F - 14.0F) * 0.5F;
+    return gui::Rect{card_x + 14.0F + 66.0F, y + 3.0F,
+                     column - 66.0F - 48.0F - 6.0F, 18.0F};
+  }
+  // INNER FRUSTUM heading, then the enable checkbox; Latency and its note,
+  // then the prediction checkbox.
+  [[nodiscard]] static gui::Rect inner_frustum_checkbox() {
+    return gui::Rect{card_x + 14.0F, content_y + 24.0F, card_width - 28.0F,
+                     24.0F};
+  }
+  [[nodiscard]] static gui::Rect predict_checkbox() {
+    return gui::Rect{card_x + 14.0F, content_y + 24.0F + 30.0F + 30.0F + 20.0F,
+                     card_width - 28.0F, 24.0F};
   }
 
   editor::ProjectSettingsFrame frame(float x, float y, bool down) {
@@ -4194,9 +4130,7 @@ void the_tracking_category_authors_the_inner_frustum_policy() {
   static_cast<void>(harness.click(ProjectSettingsHarness::tracking_tab()));
   static_cast<void>(
       harness.click(ProjectSettingsHarness::inner_frustum_checkbox()));
-  const gui::Rect predict{ProjectSettingsHarness::card_x + 14.0F,
-      ProjectSettingsHarness::content_y + 22.0F + 34.0F + 44.0F,
-      ProjectSettingsHarness::card_width - 28.0F, 24.0F};
+  const gui::Rect predict = ProjectSettingsHarness::predict_checkbox();
   static_cast<void>(harness.click(predict));
   const auto applied = harness.click(ProjectSettingsHarness::apply_button());
   UI_CHECK(applied.apply.has_value());

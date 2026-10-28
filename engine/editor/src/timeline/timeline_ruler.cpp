@@ -42,17 +42,21 @@ void TimelinePanel::draw_ruler(Pass &p) {
   p.search_id = mix(id_, "search");
   auto &search_id = p.search_id;
   ctx.panel(ruler, theme.header);
-  ctx.panel(gui::Rect{ruler.x, ruler.y, list_width, ruler.height},
-            theme.row_alt);
+  // Over the layer list: search, Auto Key, and a new track at the right.
+  gui::Rect head = ruler;
+  head = gui::cut_left(head, list_width);
+  ctx.panel(head, theme.row_alt);
   const float auto_key_width = list_width >= 160.0F ? 72.0F : 0.0F;
-  const gui::Rect search_bounds{ruler.x + 5.0F, ruler.y + 2.0F,
-                                std::max(list_width - 37.0F - auto_key_width, 0.0F),
-                                std::max(ruler.height - 4.0F, 0.0F)};
+  gui::Rect search_bounds =
+      gui::inset(head, gui::Padding{5.0F, 2.0F, 5.0F, 2.0F});
+  const gui::Rect create_lane = gui::cut_right(search_bounds, icon_button_width);
+  static_cast<void>(gui::cut_right(search_bounds, 3.0F));
+  const gui::Rect auto_key =
+      gui::inset(gui::cut_right(search_bounds, auto_key_width),
+                 gui::Padding{0.0F, 0.0F, 3.0F, 0.0F});
   static_cast<void>(ctx.text_field(search_id, search_bounds, search_));
   if (search_.empty() && ctx.focus() != search_id) {
-    ctx.label(gui::Rect{search_bounds.x + 19.0F, search_bounds.y,
-                        std::max(search_bounds.width - 23.0F, 0.0F),
-                        search_bounds.height},
+    ctx.label(gui::inset(search_bounds, gui::Padding{19.0F, 0.0F, 4.0F, 0.0F}),
               "Search Timeline...", theme.text_muted);
   }
   const float search_cy = search_bounds.y + search_bounds.height * 0.46F;
@@ -62,21 +66,14 @@ void TimelinePanel::draw_ruler(Pass &p) {
                            search_bounds.x + 14.0F, search_cy + 5.0F, 1.0F,
                            theme.text_muted);
   if (auto_key_width > 0.0F &&
-      text_toggle(ctx, mix(id_, "auto key"),
-                  gui::Rect{ruler.x + list_width - 32.0F - auto_key_width,
-                            ruler.y + 2.0F, auto_key_width - 3.0F,
-                            std::max(ruler.height - 4.0F, 0.0F)},
-                  "Auto Key", auto_key_,
+      text_toggle(ctx, mix(id_, "auto key"), auto_key, "Auto Key", auto_key_,
                   "Auto Key (Shift+K): edits to animated properties create keys. "
                   "Off edits base values; existing animation still plays. "
                   "Use a property diamond to add or remove a key explicitly.")) {
     auto_key_ = !auto_key_;
   }
   if (list_width >= 60.0F &&
-      icon_button(ctx, mix(id_, "create lane"),
-                  gui::Rect{ruler.x + list_width - 29.0F, ruler.y + 2.0F,
-                            icon_button_width,
-                            std::max(ruler.height - 4.0F, 0.0F)},
+      icon_button(ctx, mix(id_, "create lane"), create_lane,
                   gui::Icon::Plus, false, "New track", theme.accent)) {
     frame.lane_edits.push_back(
         TimelineLaneEdit{TimelineLaneAction::Create, {}, {}});
@@ -127,7 +124,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
   // Where a razor pressed at `px` cuts: the frame under it, pulled onto the
   // playhead, a marker, or another cut when snapping.
 
-  ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+  ctx.push_clip(gui::cell(graph, ruler));
   {
     // Labels drop the hours while the whole view is inside the first one,
     // which leaves room for a label every second at an ordinary zoom.
@@ -206,7 +203,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
                             range_handle_reach * 2.0F, ruler.height};
     const gui::Rect out_grip{out_x - range_handle_reach, ruler.y,
                              range_handle_reach * 2.0F, ruler.height};
-    ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+    ctx.push_clip(gui::cell(graph, ruler));
     const gui::Interaction in_it = ctx.grab(mix(id_, "range in"), in_grip);
     const gui::Interaction out_it = ctx.grab(mix(id_, "range out"), out_grip);
     ctx.pop_clip();
@@ -251,7 +248,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
     } else if (ruler_.range_drag != RangeHandle::None && !held.held) {
       ruler_.range_drag = RangeHandle::None;
     }
-    ctx.push_clip(gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+    ctx.push_clip(gui::cell(graph, ruler));
     const float bar_left = frame_to_x(static_cast<double>(shown_first));
     const float bar_right = frame_to_x(static_cast<double>(shown_last));
     ctx.panel(gui::Rect{bar_left, ruler.y + ruler.height - 3.0F,
@@ -275,7 +272,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
   // pointer while held, including the release frame.
   const gui::Interaction ruler_it =
       ctx.grab(mix(id_, "ruler"),
-               gui::Rect{graph.x, ruler.y, graph.width, ruler.height});
+               gui::cell(graph, ruler));
   if (ruler_it.held) {
     frame.seek_to_frame =
         rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
@@ -622,7 +619,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
       ctx.panel(chip, alpha(color, chosen ? 0.95F : 0.72F));
       ctx.panel(gui::Rect{marker_x, top, 2.0F, height + 3.0F}, color);
       if (chosen || upcoming) {
-        draw_border(ctx, chip, chosen ? theme.text : alpha(theme.text, 0.6F));
+        ctx.outline(chip, chosen ? theme.text : alpha(theme.text, 0.6F));
       }
       gui::draw_icon(ctx.draw_list(),
                      marker.cue == scene::CueAction::Hold ? gui::Icon::Hold

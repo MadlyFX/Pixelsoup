@@ -201,6 +201,9 @@ private:
   void seek(core::u32 frame, core::u32 count) noexcept;
   void advance(Pass &p);
   void draw_header(Pass &p);
+  // The < and > that step back and forward through the assets viewed.
+  void history_buttons(gui::UiContext &ctx, const gui::Rect &back,
+                       const gui::Rect &forward);
   void draw_image(Pass &p);
   void draw_scrub(Pass &p);
   void draw_transport(Pass &p);

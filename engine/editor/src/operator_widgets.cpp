@@ -1,4 +1,5 @@
 #include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 
 #include <algorithm>
 #include <array>
@@ -37,17 +38,6 @@ void circle_outline(gui::UiContext &ctx, float cx, float cy, float radius,
                              cx + std::cos(a1) * radius,
                              cy + std::sin(a1) * radius, thickness, color);
   }
-}
-
-void rect_outline(gui::UiContext &ctx, const gui::Rect &bounds,
-                  gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
-                color);
-  draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F, bounds.height,
-                color);
 }
 
 [[nodiscard]] std::string title_case(std::string_view text) {
@@ -96,8 +86,8 @@ void draw_element_icon(gui::UiContext &ctx, const ElementInfo &element,
     const gui::Rect cabin{cx - 4.0F, cy - 5.5F, 7.0F, 3.5F};
     draw.add_rect(body.x, body.y, body.width, body.height,
                   with_alpha(color, 0.22F));
-    rect_outline(ctx, body, color);
-    rect_outline(ctx, cabin, color);
+    ctx.outline(body, color);
+    ctx.outline(cabin, color);
     draw_filled_circle(ctx, cx - 4.0F, cy + 4.0F, 2.0F, color);
     draw_filled_circle(ctx, cx + 4.0F, cy + 4.0F, 2.0F, color);
     return;
@@ -116,7 +106,7 @@ void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
     // A frame of film with a play mark: something that runs.
     const gui::Rect frame{cx - 6.5F, cy - 5.0F, 13.0F, 10.0F};
     draw.add_rect(frame.x, frame.y, frame.width, frame.height, fill);
-    rect_outline(ctx, frame, color);
+    ctx.outline(frame, color);
     draw.add_triangle(cx - 2.0F, cy - 2.5F, cx + 3.0F, cy, cx - 2.0F,
                       cy + 2.5F, color);
     return;
@@ -146,7 +136,7 @@ void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
     const gui::Rect body{cx - 7.0F, cy - 3.5F, 14.0F, 9.0F};
     draw.add_rect(cx - 7.0F, cy - 6.0F, 6.0F, 3.0F, color);
     draw.add_rect(body.x, body.y, body.width, body.height, fill);
-    rect_outline(ctx, body, color);
+    ctx.outline(body, color);
     return;
   }
   case ElementKind::DirectionalLight: {
@@ -177,7 +167,7 @@ void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
       const gui::Rect panel{cx - 6.0F, cy - 4.0F, 12.0F, 8.0F};
       draw.add_rect(panel.x, panel.y, panel.width, panel.height,
                     with_alpha(color, 0.55F));
-      rect_outline(ctx, panel, color);
+      ctx.outline(panel, color);
       return;
     }
     // A point: a bulb with a halo.
@@ -188,7 +178,7 @@ void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
   case ElementKind::Camera: {
     const gui::Rect body{cx - 7.0F, cy - 4.0F, 9.0F, 8.0F};
     draw.add_rect(body.x, body.y, body.width, body.height, fill);
-    rect_outline(ctx, body, color);
+    ctx.outline(body, color);
     draw.add_triangle(cx + 2.0F, cy, cx + 7.0F, cy - 4.0F, cx + 7.0F,
                       cy + 4.0F, color);
     return;
@@ -318,7 +308,7 @@ gui::Rect draw_pill(gui::UiContext &ctx, float x, float centre_y,
               text, gui::UiColor{0.04F, 0.05F, 0.06F, 1.0F});
   } else {
     ctx.panel(bounds, with_alpha(color, 0.16F));
-    rect_outline(ctx, bounds, with_alpha(color, 0.65F));
+    ctx.outline(bounds, with_alpha(color, 0.65F));
     ctx.label(gui::Rect{bounds.x + 6.0F, bounds.y, bounds.width - 6.0F,
                         bounds.height},
               text, color);
@@ -359,9 +349,8 @@ bool icon_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
     ctx.panel(bounds, theme.widget_active);
   } else if (engaged) {
     ctx.panel(bounds, with_alpha(theme.accent, 0.20F));
-    ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - 2.0F,
-                        bounds.width, 2.0F},
-              theme.accent);
+    gui::Rect underline = bounds;
+    ctx.panel(gui::cut_bottom(underline, 2.0F), theme.accent);
   } else if (interaction.hovered) {
     ctx.panel(bounds, theme.widget_hover);
   }
@@ -371,10 +360,85 @@ bool icon_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
                           : (interaction.hovered ? theme.text
                                                  : mixed(theme.text_muted,
                                                          theme.text, 0.35F)));
-  gui::draw_icon(ctx.draw_list(), icon, bounds.x + bounds.width * 0.5F,
-                 bounds.y + bounds.height * 0.5F, color);
+  gui::draw_icon(ctx.draw_list(), icon, bounds.center_x(), bounds.center_y(),
+                 color);
   ctx.tooltip(bounds, tooltip);
   return enabled && interaction.clicked;
+}
+
+bool action_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
+                   std::string_view label, bool enabled, bool selected) {
+  const gui::Interaction interaction =
+      enabled ? ctx.grab(id, bounds) : gui::Interaction{};
+  const gui::UiColor fill = !enabled
+      ? ctx.theme().track
+      : (interaction.held
+             ? ctx.theme().widget_active
+             : (selected ? ctx.theme().selection
+                         : (interaction.hovered ? ctx.theme().widget_hover
+                                                : ctx.theme().widget)));
+  ctx.panel(bounds, fill);
+  ctx.outline(bounds, enabled ? ctx.theme().header : ctx.theme().divider);
+  ctx.label(bounds, label, enabled ? ctx.theme().text
+                                  : ctx.theme().text_muted);
+  return enabled && interaction.clicked;
+}
+
+void draw_drop_target(gui::UiContext &ctx, const gui::Rect &area,
+                      std::string_view instruction, bool hovered,
+                      float callout_width) {
+  if (area.width <= 0.0F || area.height <= 0.0F) {
+    return;
+  }
+  const gui::UiColor color =
+      with_alpha(ctx.theme().accent, hovered ? 1.0F : 0.35F);
+  const float stroke = hovered ? 2.0F : 1.0F;
+  ctx.panel(area, with_alpha(ctx.theme().accent, hovered ? 0.12F : 0.025F));
+  ctx.outline(area, color, stroke);
+
+  constexpr float margin = 9.0F;
+  constexpr float callout_height = 30.0F;
+  gui::Rect corner = gui::inset(area, margin);
+  gui::Rect strip = gui::cut_top(corner, callout_height);
+  const gui::Rect callout = gui::cut_left(strip, callout_width);
+  if (callout.width <= 0.0F || callout.height <= 0.0F) {
+    return;
+  }
+  ctx.panel(callout, hovered ? ctx.theme().widget_active : ctx.theme().header);
+  ctx.outline(callout, color, stroke);
+  gui::Rect text = callout;
+  ctx.panel(gui::cut_left(text, 3.0F), color);
+  ctx.label(gui::inset(text, gui::Padding{7.0F, 0.0F, 4.0F, 0.0F}),
+            instruction, hovered ? ctx.theme().text : ctx.theme().text_muted);
+}
+
+void draw_diamond(gui::UiContext &ctx, float cx, float cy, float radius,
+                  gui::UiColor color) {
+  const std::array<gui::UiPoint, 4U> points{{
+      {cx, cy - radius},
+      {cx + radius, cy},
+      {cx, cy + radius},
+      {cx - radius, cy},
+  }};
+  ctx.draw_list().add_convex_poly(points, color);
+}
+
+bool key_button(gui::UiContext &ctx, gui::UiId id, const gui::Rect &bounds,
+                bool animated, bool keyed_here, gui::UiColor background) {
+  const gui::Interaction interaction = ctx.grab(id, bounds);
+  gui::UiColor color =
+      keyed_here ? ctx.theme().playhead
+                 : (animated ? ctx.theme().keyframe : ctx.theme().text_muted);
+  if (interaction.hovered) {
+    color = ctx.theme().accent;
+  }
+  const float cx = bounds.center_x();
+  const float cy = bounds.center_y();
+  draw_diamond(ctx, cx, cy, interaction.held ? 5.0F : 4.5F, color);
+  if (!keyed_here && !interaction.held) {
+    draw_diamond(ctx, cx, cy, 2.4F, background);
+  }
+  return interaction.clicked;
 }
 
 bool ClickTracker::double_click(core::u64 key, double now) noexcept {

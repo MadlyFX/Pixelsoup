@@ -1,5 +1,7 @@
 #include <mediaserver/editor/library_panel.hpp>
 
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -62,17 +64,6 @@ constexpr gui::UiColor changed_color{0.93F, 0.66F, 0.24F, 1.0F};
   color.g *= amount;
   color.b *= amount;
   return color;
-}
-
-void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
-            float thickness = 1.0F) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, thickness, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - thickness, bounds.width,
-                thickness, color);
-  draw.add_rect(bounds.x, bounds.y, thickness, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - thickness, bounds.y, thickness,
-                bounds.height, color);
 }
 
 void draw_circle(gui::UiContext &ctx, float centre_x, float centre_y,
@@ -414,7 +405,7 @@ void draw_folder_icon(gui::UiContext &ctx, const gui::Rect &bounds,
   draw.add_rect(x, y, width * 0.42F, height * 0.2F, color);
   draw.add_rect(x, y + height * 0.14F, width, height * 0.86F,
                 with_alpha(color, open ? 0.55F : 0.85F));
-  border(ctx, gui::Rect{x, y + height * 0.14F, width, height * 0.86F}, color);
+  ctx.outline(gui::Rect{x, y + height * 0.14F, width, height * 0.86F}, color);
 }
 
 // The List and Grid switches: three bars, and four tiles.
@@ -639,10 +630,9 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
   if (action == LibraryAddAction::Media) {
     draw.add_rect(bounds.x + 2.0F, bounds.y + 3.0F, bounds.width - 4.0F,
                   bounds.height - 6.0F, with_alpha(color, 0.24F));
-    border(ctx,
-           gui::Rect{bounds.x + 2.0F, bounds.y + 3.0F, bounds.width - 4.0F,
+    ctx.outline(gui::Rect{bounds.x + 2.0F, bounds.y + 3.0F, bounds.width - 4.0F,
                      bounds.height - 6.0F},
-           color);
+                color);
     draw.add_triangle(centre_x - 2.0F, centre_y - 4.0F, centre_x - 2.0F,
                       centre_y + 4.0F, centre_x + 4.0F, centre_y, color);
     return;
@@ -661,7 +651,7 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
                        bounds.height - 6.0F};
   draw.add_rect(cube.x, cube.y, cube.width, cube.height,
                 with_alpha(color, 0.18F));
-  border(ctx, cube, color);
+  ctx.outline(cube, color);
   if (action == LibraryAddAction::Sphere) {
     draw_circle(ctx, centre_x, centre_y, cube.width * 0.46F, color);
     draw_circle(ctx, centre_x, centre_y, cube.width * 0.33F,
@@ -1054,7 +1044,7 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
       const gui::Rect card{image.x + offset, image.y - offset, image.width,
                            image.height};
       ctx.panel(card, with_alpha(theme.header, 0.85F));
-      border(ctx, card, with_alpha(theme.border, 0.9F));
+      ctx.outline(card, with_alpha(theme.border, 0.9F));
     }
   }
   ctx.panel(image, with_alpha(scale(theme.track, 0.84F), 0.92F));
@@ -1070,7 +1060,7 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
         gui::Rect{image.x + (image.width - icon) * 0.5F,
                   image.y + (image.height - icon) * 0.5F, icon, icon});
   }
-  border(ctx, image, theme.accent);
+  ctx.outline(image, theme.accent);
   const gui::Rect caption{image.x, image.y + image.height, image.width, 18.0F};
   ctx.panel(caption, with_alpha(theme.background, 0.92F));
   ctx.label(gui::Rect{caption.x + 5.0F, caption.y, caption.width - 10.0F,
@@ -1368,13 +1358,12 @@ LibraryFrame LibraryPanel::draw_impl(
   // ------------------------------------------------------------ chrome
   ctx.push_clip(bounds);
   ctx.panel(bounds);
+  gui::Rect regions = bounds;
   {
-    const gui::Rect header{bounds.x, bounds.y, bounds.width,
-                           std::min(bounds.height, title_height)};
+    const gui::Rect header = gui::cut_top(regions, title_height);
     ctx.panel(header, theme.background);
-    ctx.panel(gui::Rect{header.x, header.y + header.height - 1.0F,
-                        header.width, 1.0F},
-              theme.divider);
+    gui::Rect rule = header;
+    ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
     // Files that changed on disk: the one thing in the Library that needs
     // an answer, so it sits where it is seen.
     if (!changed_shown.empty()) {
@@ -1382,15 +1371,15 @@ LibraryFrame LibraryPanel::draw_impl(
           std::to_string(changed_shown.size()) +
           (changed_shown.size() == 1U ? " CHANGED SOURCE - ACCEPT"
                                       : " CHANGED SOURCES - ACCEPT ALL");
-      const gui::Rect chip{header.x + 6.0F, header.y + 3.0F,
-                           ctx.font_width(label) + 16.0F, header.height - 6.0F};
+      gui::Rect chips = gui::inset(header, 6.0F, 3.0F);
+      const gui::Rect chip =
+          gui::cut_left(chips, ctx.font_width(label) + 16.0F);
       const gui::Interaction interaction =
           ctx.grab(mix(id_, "library.accept_all"), chip);
       ctx.panel(chip, interaction.hovered ? changed_color
                                           : scale(changed_color, 0.8F));
-      ctx.label(gui::Rect{chip.x + 8.0F, chip.y, chip.width - 8.0F,
-                          chip.height},
-                label, theme.background);
+      ctx.label(gui::inset(chip, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F}), label,
+                theme.background);
       ctx.tooltip(chip, "These files changed on disk since they were imported. "
                         "Accept re-reads them and records the new revision; "
                         "one Undo puts the old one back.");
@@ -1402,37 +1391,40 @@ LibraryFrame LibraryPanel::draw_impl(
     if (!registry.folders.empty()) {
       count += " | " + std::to_string(registry.folders.size()) + " FOLDERS";
     }
-    const float width = ctx.font_width(count);
-    ctx.label(gui::Rect{header.x + header.width - width - 8.0F, header.y,
-                        width, header.height},
-              count, theme.text_muted);
+    gui::Rect trailing = gui::inset(header, 8.0F, 0.0F);
+    ctx.label(gui::cut_right(trailing, ctx.font_width(count)), count,
+              theme.text_muted);
   }
 
   // The toolbar: search, a new folder, import and rescan.
-  const gui::Rect toolbar{bounds.x, bounds.y + title_height, bounds.width,
-                          toolbar_height};
+  const gui::Rect toolbar = gui::cut_top(regions, toolbar_height);
   constexpr float folder_button_width = 26.0F;
   constexpr float import_width = 62.0F;
   constexpr float rescan_width = 64.0F;
   const bool room_for_import = bounds.width > 220.0F;
   const bool room_for_rescan = bounds.width > 300.0F;
-  const float buttons_width =
-      folder_button_width + (room_for_import ? import_width : 0.0F) +
-      (room_for_rescan ? rescan_width : 0.0F);
-  const gui::Rect search_bounds{toolbar.x, toolbar.y,
-                                std::max(toolbar.width - buttons_width, 0.0F),
-                                toolbar.height};
+  // The buttons after the search field, each a slot with its gap on the
+  // right; cut from the right edge, last first.
+  gui::Rect search_bounds = toolbar;
+  const gui::Rect rescan_slot =
+      room_for_rescan ? gui::cut_right(search_bounds, rescan_width)
+                      : gui::Rect{};
+  const gui::Rect import_slot =
+      room_for_import ? gui::cut_right(search_bounds, import_width)
+                      : gui::Rect{};
+  const gui::Rect folder_slot =
+      gui::cut_right(search_bounds, folder_button_width);
+  const auto slot_button = [](const gui::Rect &slot, float gap) {
+    return gui::inset(slot, gui::Padding{0.0F, 2.0F, gap, 2.0F});
+  };
   {
-    const gui::Rect field{search_bounds.x + 6.0F, search_bounds.y + 3.0F,
-                          std::max(search_bounds.width - 12.0F, 0.0F),
-                          std::max(search_bounds.height - 6.0F, 0.0F)};
+    const gui::Rect field = gui::inset(search_bounds, 6.0F, 3.0F);
     const gui::UiId search_id = mix(id_, "library.search");
     if (ctx.text_field(search_id, field, search_)) {
       scroll_ = 0.0F;
     }
     if (search_.empty() && ctx.focus() != search_id) {
-      ctx.label(gui::Rect{field.x + 19.0F, field.y,
-                          std::max(field.width - 23.0F, 0.0F), field.height},
+      ctx.label(gui::inset(field, gui::Padding{19.0F, 0.0F, 4.0F, 0.0F}),
                 "Search Assets and Generators...", theme.text_muted);
     }
     draw_circle(ctx, field.x + 9.0F, field.y + field.height * 0.46F, 3.0F,
@@ -1445,13 +1437,11 @@ LibraryFrame LibraryPanel::draw_impl(
                              field.y + field.height * 0.46F + 5.0F, 1.0F,
                              theme.text_muted);
   }
-  float button_x = search_bounds.x + search_bounds.width;
   const gui::UiId menu_id = mix(id_, "library.menu");
   bool open_import_menu = false;
   bool create_folder = false;
   {
-    const gui::Rect button{button_x, toolbar.y + 2.0F, folder_button_width - 2.0F,
-                           toolbar.height - 4.0F};
+    const gui::Rect button = slot_button(folder_slot, 2.0F);
     const gui::Interaction interaction =
         ctx.grab(mix(id_, "library.new_folder"), button);
     if (interaction.hovered) {
@@ -1464,35 +1454,23 @@ LibraryFrame LibraryPanel::draw_impl(
               theme.accent);
     ctx.tooltip(button, "New Folder");
     create_folder = interaction.clicked;
-    button_x += folder_button_width;
   }
   if (room_for_import) {
-    if (ctx.button(mix(id_, "library.import"),
-                   gui::Rect{button_x, toolbar.y + 2.0F, import_width - 4.0F,
-                             toolbar.height - 4.0F},
+    if (ctx.button(mix(id_, "library.import"), slot_button(import_slot, 4.0F),
                    "IMPORT")) {
       open_import_menu = true;
     }
-    button_x += import_width;
   }
   if (room_for_rescan) {
-    if (ctx.button(mix(id_, "library.rescan"),
-                   gui::Rect{button_x, toolbar.y + 2.0F, rescan_width - 4.0F,
-                             toolbar.height - 4.0F},
+    if (ctx.button(mix(id_, "library.rescan"), slot_button(rescan_slot, 4.0F),
                    "RESCAN")) {
       frame.rescan_assets = true;
     }
   }
 
-  const gui::Rect subheader{bounds.x, toolbar.y + toolbar.height, bounds.width,
-                            subheader_height};
-  const gui::Rect footer{bounds.x,
-                         bounds.y + std::max(bounds.height - footer_height,
-                                             title_height + toolbar_height),
-                         bounds.width, footer_height};
-  const gui::Rect area{
-      bounds.x, subheader.y + subheader.height, bounds.width,
-      std::max(footer.y - (subheader.y + subheader.height), 0.0F)};
+  const gui::Rect subheader = gui::cut_top(regions, subheader_height);
+  const gui::Rect footer = gui::cut_bottom(regions, footer_height);
+  const gui::Rect area = regions;
 
   // Geometry of one view or the other.
   const float list_thumb_height = std::round(16.0F + list_zoom_ * 64.0F);
@@ -1553,11 +1531,14 @@ LibraryFrame LibraryPanel::draw_impl(
   const float view_height =
       std::max(area.height - (needs_x ? scrollbar_size : 0.0F), 0.0F);
   const bool needs_y = !list || content_height > view_height;
-  const gui::Rect content{area.x, area.y,
-                          std::max(area.width -
-                                       (needs_y ? scrollbar_size : 0.0F),
-                                   0.0F),
-                          view_height};
+  // The rows, less the scrollbars' own strips.
+  gui::Rect content = area;
+  if (needs_x) {
+    static_cast<void>(gui::cut_bottom(content, scrollbar_size));
+  }
+  if (needs_y) {
+    static_cast<void>(gui::cut_right(content, scrollbar_size));
+  }
   const float maximum_scroll_x =
       list ? std::max(columns_width - content.width + 6.0F, 0.0F) : 0.0F;
   const float maximum_scroll = std::max(content_height - content.height, 0.0F);
@@ -1809,8 +1790,8 @@ LibraryFrame LibraryPanel::draw_impl(
           gui::Rect{preview.x + (preview.width - icon) * 0.5F,
                     preview.y + (preview.height - icon) * 0.5F, icon, icon});
     }
-    border(ctx, preview,
-           with_alpha(thumbnails_enabled
+    ctx.outline(preview,
+                with_alpha(thumbnails_enabled
                           ? library_thumbnail_color(ctx, thumbnail.state)
                           : theme.border,
                       0.78F));
@@ -2081,7 +2062,7 @@ LibraryFrame LibraryPanel::draw_impl(
       if (drop_folder.has_value() && entry.kind == Entry::Kind::Folder &&
           *drop_folder == entry.id) {
         ctx.panel(row, with_alpha(theme.accent, 0.2F));
-        border(ctx, row, theme.accent);
+        ctx.outline(row, theme.accent);
       }
 
       // The Name column: depth, twirl, thumbnail or icon, name.
@@ -2367,7 +2348,7 @@ LibraryFrame LibraryPanel::draw_impl(
       }
       if (drop_here) {
         ctx.panel(tile, with_alpha(theme.accent, 0.2F));
-        border(ctx, tile, theme.accent);
+        ctx.outline(tile, theme.accent);
       }
       const gui::Rect name_bounds{tile.x + 4.0F, image.y + image.height + 3.0F,
                                   tile.width - 8.0F, 16.0F};
@@ -2522,7 +2503,7 @@ LibraryFrame LibraryPanel::draw_impl(
       if (drop_here) {
         drop_folder = path[step].first;
         ctx.panel(crumb, with_alpha(theme.accent, 0.25F));
-        border(ctx, crumb, theme.accent);
+        ctx.outline(crumb, theme.accent);
       } else if (interaction.hovered && !last) {
         ctx.panel(crumb, theme.widget_hover);
       }
@@ -2656,14 +2637,15 @@ LibraryFrame LibraryPanel::draw_impl(
   // Files from the desktop: a frame round the panel while they are over it,
   // and an import into the folder they land on.
   if (file_drag) {
-    border(ctx, content.inflated(-1.0F, -1.0F), theme.accent, 2.0F);
+    ctx.outline(content.inflated(-1.0F, -1.0F), theme.accent, 2.0F);
     const std::string_view hint = "Drop to import into the Library";
-    const float width = ctx.font_width(hint) + 16.0F;
-    const gui::Rect badge{content.x + (content.width - width) * 0.5F,
-                          content.y + content.height - 30.0F, width, 22.0F};
+    // Centred near the bottom of the rows.
+    gui::Rect bottom = gui::inset(content, gui::Padding{0.0F, 0.0F, 0.0F, 8.0F});
+    bottom = gui::cut_bottom(bottom, 22.0F);
+    const gui::Rect badge =
+        gui::centered(bottom, ctx.font_width(hint) + 16.0F, bottom.height);
     ctx.panel(badge, theme.accent);
-    ctx.label(gui::Rect{badge.x + 8.0F, badge.y, width - 8.0F, badge.height},
-              hint, theme.background);
+    ctx.label_centered(badge, hint, theme.background);
   }
   if (files_dropped) {
     frame.import_files.assign(ctx.dropped_files().begin(),
@@ -2673,11 +2655,18 @@ LibraryFrame LibraryPanel::draw_impl(
 
   // ------------------------------------------------------------ footer
   ctx.panel(footer, theme.background);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F}, theme.divider);
   {
-    float x = footer.x + 4.0F;
+    gui::Rect rule = footer;
+    ctx.panel(gui::cut_top(rule, 1.0F), theme.divider);
+  }
+  {
+    // The view switches, the thumbnail size, and what is selected at the
+    // right.
+    gui::Rect strip = gui::inset(footer, gui::Padding{4.0F, 0.0F, 8.0F, 0.0F});
     for (const LibraryView choice : {LibraryView::List, LibraryView::Grid}) {
-      const gui::Rect button{x, footer.y + 2.0F, 24.0F, footer.height - 4.0F};
+      const gui::Rect button =
+          gui::inset(gui::cut_left(strip, 26.0F),
+                     gui::Padding{0.0F, 2.0F, 2.0F, 2.0F});
       const gui::Interaction interaction = ctx.grab(
           mix(id_, "library.view", static_cast<core::u64>(choice)), button);
       const bool engaged = view_ == choice;
@@ -2693,17 +2682,18 @@ LibraryFrame LibraryPanel::draw_impl(
         view_ = choice;
         scroll_ = 0.0F;
       }
-      x += 26.0F;
     }
-    x += 6.0F;
-    const float slider_width = std::min(110.0F, footer.width - x - 90.0F);
+    static_cast<void>(gui::cut_left(strip, 6.0F));
+    const float slider_width = std::min(110.0F, strip.width - 82.0F);
     if (slider_width > 30.0F) {
       // The thumbnail size, small to large, as in every bin's zoom slider.
+      gui::Rect zoom = strip;
       draw_library_icon(ctx, LibraryAddAction::Media,
-                        gui::Rect{x, footer.y + 7.0F, 9.0F, 9.0F});
+                        gui::Rect{zoom.x, footer.y + 7.0F, 9.0F, 9.0F});
+      static_cast<void>(gui::cut_left(zoom, 12.0F));
       float size = icon_size();
-      const gui::Rect slider{x + 12.0F, footer.y + 4.0F, slider_width,
-                             footer.height - 8.0F};
+      const gui::Rect slider =
+          gui::inset(gui::cut_left(zoom, slider_width), 0.0F, 4.0F);
       if (ctx.slider(mix(id_, "library.zoom"), slider, size, 0.0F, 1.0F)) {
         set_icon_size(size);
       }
@@ -2726,10 +2716,8 @@ LibraryFrame LibraryPanel::draw_impl(
     }
     if (!summary.empty()) {
       const std::string shown = fit(ctx, summary, 140.0F);
-      const float width = ctx.font_width(shown);
-      ctx.label(gui::Rect{footer.x + footer.width - width - 8.0F, footer.y,
-                          width, footer.height},
-                shown, theme.text_muted);
+      ctx.label(gui::cut_right(strip, ctx.font_width(shown)), shown,
+                theme.text_muted);
     }
   }
 
@@ -2866,10 +2854,8 @@ LibraryFrame LibraryPanel::draw_impl(
           list ? MenuCommand::ShowGrid : MenuCommand::ShowList);
     }
     ctx.open_context_menu(menu_id,
-                          open_import_menu ? button_x - import_width - 2.0F
-                                           : pointer_x,
-                          open_import_menu ? toolbar.y + toolbar.height
-                                           : pointer_y);
+                          open_import_menu ? import_slot.x - 2.0F : pointer_x,
+                          open_import_menu ? toolbar.bottom() : pointer_y);
   }
   const auto request_folder = [&](doc::NodeId parent) {
     // A name no sibling has, so the new folder is easy to find.

@@ -15,10 +15,10 @@ FormLayout::FormLayout(const Rect& content, const Metrics& metrics, float scroll
       last_bottom_{content.y - scroll + metrics.gap} {}
 
 Rect FormLayout::next(float height, float gap_after) noexcept {
-    const Rect strip{left_, cursor_, width_, height};
+    last_ = Rect{left_, cursor_, width_, height};
     last_bottom_ = cursor_ + height;
     cursor_ = last_bottom_ + gap_after;
-    return strip;
+    return last_;
 }
 
 Rect FormLayout::control() noexcept {
@@ -37,14 +37,23 @@ Rect FormLayout::caption() noexcept {
     return next(metrics_.caption, metrics_.caption_gap);
 }
 
+Rect FormLayout::note() noexcept {
+    const Rect line = caption();
+    const float label = std::min(metrics_.label_column, line.width);
+    return Rect{line.x + label, line.y, line.width - label, line.height};
+}
+
+Rect FormLayout::heading() noexcept {
+    return next(metrics_.caption, metrics_.row_gap);
+}
+
 FormSection FormLayout::section() noexcept {
     // The rule sits `section_gap` below the last row's bottom, whatever gap
     // that row left behind it, so sections read the same after a field as
     // after a caption.
     cursor_ = last_bottom_ + metrics_.section_gap;
     const Rect rule = next(metrics_.divider, metrics_.section_gap);
-    const Rect heading = next(metrics_.caption, metrics_.row_gap);
-    return FormSection{rule, heading};
+    return FormSection{rule, heading()};
 }
 
 float FormLayout::extent() const noexcept {
@@ -52,9 +61,14 @@ float FormLayout::extent() const noexcept {
 }
 
 FormSection draw_form_section(UiContext& ctx, FormLayout& form, std::string_view title) {
+    return draw_form_section(ctx, form, title, ctx.theme().text);
+}
+
+FormSection draw_form_section(UiContext& ctx, FormLayout& form, std::string_view title,
+                              UiColor heading) {
     const FormSection section = form.section();
     ctx.panel(section.rule, ctx.theme().divider);
-    ctx.label(section.heading, title, ctx.theme().text);
+    ctx.label(section.heading, title, heading);
     return section;
 }
 
@@ -62,10 +76,25 @@ float ScrollRegion::max_offset() const noexcept {
     return std::max(content_height_ - viewport_height_, 0.0F);
 }
 
+Rect ScrollRegion::thumb(const Rect& track, float min_height) const noexcept {
+    const float range = max_offset();
+    if (range <= 0.0F || content_height_ <= 0.0F) {
+        return Rect{track.x, track.y, track.width, 0.0F};
+    }
+    const float share = track.height * std::min(viewport_height_ / content_height_, 1.0F);
+    const float height = std::min(std::max(share, min_height), track.height);
+    return Rect{track.x, track.y + offset_ / range * (track.height - height), track.width,
+                height};
+}
+
 float ScrollRegion::begin(UiContext& ctx, const Rect& viewport) {
+    return begin(ctx, viewport, ctx.theme().metrics.scroll_step);
+}
+
+float ScrollRegion::begin(UiContext& ctx, const Rect& viewport, float step) {
     viewport_height_ = viewport.height;
     if (viewport.contains(ctx.pointer_x(), ctx.pointer_y())) {
-        offset_ -= ctx.wheel() * ctx.theme().metrics.scroll_step;
+        offset_ -= ctx.wheel() * step;
     }
     // Before anything is measured there is nothing to clamp against but the
     // top; end() catches the bottom once the content has said how tall it is.

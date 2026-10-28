@@ -319,7 +319,7 @@ void TimelinePanel::draw_navigator(Pass &p) {
   const gui::Rect thumb{thumb_left, bar.y + 2.0F, thumb_right - thumb_left,
                         bar.height - 3.0F};
   ctx.panel(thumb, thumb_hot ? theme.widget_hover : theme.widget);
-  draw_border(ctx, thumb, thumb_hot ? theme.accent : theme.text_muted);
+  ctx.outline(thumb, thumb_hot ? theme.accent : theme.text_muted);
   const auto grip = [&](float x, bool hot) {
     ctx.panel(gui::Rect{x - 1.0F, thumb.y + 3.0F, 2.0F,
                         std::max(thumb.height - 6.0F, 1.0F)},

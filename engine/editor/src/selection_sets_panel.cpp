@@ -1,5 +1,8 @@
 #include <mediaserver/editor/selection_sets_panel.hpp>
 
+#include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <string>
 #include <string_view>
@@ -11,6 +14,10 @@ constexpr float title_height = 25.0F;
 constexpr float create_height = 27.0F;
 constexpr float footer_height = 54.0F;
 constexpr float row_height = 23.0F;
+constexpr float edit_height = 21.0F;
+// Space around and between the strip controls, and a row's text inset.
+constexpr float pad = 3.0F;
+constexpr float text_inset = 7.0F;
 constexpr double double_click_seconds = 0.35;
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, std::string_view name,
@@ -23,32 +30,6 @@ constexpr double double_click_seconds = 0.35;
   hash ^= index + 0x9e3779b9ULL;
   hash *= 1099511628211ULL;
   return hash;
-}
-
-void border(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
-                color);
-  draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F, bounds.height,
-                color);
-}
-
-[[nodiscard]] bool action_button(gui::UiContext &ctx, gui::UiId id,
-                                 const gui::Rect &bounds,
-                                 std::string_view label, bool enabled) {
-  const gui::Interaction interaction =
-      enabled ? ctx.grab(id, bounds) : gui::Interaction{};
-  ctx.panel(bounds, !enabled
-                        ? ctx.theme().track
-                        : (interaction.held
-                               ? ctx.theme().widget_active
-                               : (interaction.hovered ? ctx.theme().widget_hover
-                                                      : ctx.theme().widget)));
-  border(ctx, bounds, enabled ? ctx.theme().header : ctx.theme().divider);
-  ctx.label(bounds, label, enabled ? ctx.theme().text : ctx.theme().text_muted);
-  return enabled && interaction.clicked;
 }
 
 [[nodiscard]] bool valid_name(std::string_view name) noexcept {
@@ -87,27 +68,17 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
 
   ctx.push_clip(bounds);
   ctx.panel(bounds);
-  const gui::Rect title{bounds.x, bounds.y, bounds.width,
-                        std::min(bounds.height, title_height)};
+  gui::Rect area = bounds;
+  gui::Rect title = gui::cut_top(area, title_height);
   ctx.panel(title, ctx.theme().background);
-  ctx.panel(
-      gui::Rect{title.x, title.y + title.height - 1.0F, title.width, 1.0F},
-      ctx.theme().divider);
+  ctx.panel(gui::cut_bottom(title, 1.0F), ctx.theme().divider);
 
-  const gui::Rect create_row{
-      bounds.x, bounds.y + title_height, bounds.width,
-      std::min(create_height, std::max(bounds.height - title_height, 0.0F))};
+  const gui::Rect create_row = gui::cut_top(area, create_height);
   ctx.panel(create_row, ctx.theme().background);
   constexpr float save_width = 76.0F;
-  const gui::Rect save_bounds{
-      create_row.x + std::max(create_row.width - save_width - 3.0F, 0.0F),
-      create_row.y + 3.0F,
-      std::min(save_width, std::max(create_row.width - 6.0F, 0.0F)),
-      std::max(create_row.height - 6.0F, 0.0F)};
-  const gui::Rect new_name_bounds{
-      create_row.x + 3.0F, create_row.y + 3.0F,
-      std::max(save_bounds.x - create_row.x - 6.0F, 0.0F),
-      std::max(create_row.height - 6.0F, 0.0F)};
+  gui::Rect new_name_bounds = gui::inset(create_row, pad);
+  const gui::Rect save_bounds = gui::cut_right(new_name_bounds, save_width);
+  static_cast<void>(gui::cut_right(new_name_bounds, pad));
   static_cast<void>(ctx.text_field(mix(id_, "selection-set.new-name"),
                                    new_name_bounds, new_name_));
   if (action_button(ctx, mix(id_, "selection-set.save-new"), save_bounds,
@@ -118,34 +89,20 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
         SelectionSetPanelAction::SaveNew, {}, new_name_};
   }
 
-  const gui::Rect footer{
-      bounds.x,
-      bounds.y + std::max(bounds.height - footer_height, title_height),
-      bounds.width,
-      std::min(footer_height, std::max(bounds.height - title_height, 0.0F))};
-  const gui::Rect list{
-      bounds.x, create_row.y + create_row.height, bounds.width,
-      std::max(footer.y - create_row.y - create_row.height, 0.0F)};
-  const float content_height = row_height * static_cast<float>(sets.size());
-  const float maximum_scroll = std::max(content_height - list.height, 0.0F);
-  if (list.contains(ctx.pointer_x(), ctx.pointer_y())) {
-    scroll_ -= ctx.wheel() * row_height * 2.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-
-  ctx.push_clip(list);
-  float y = list.y - scroll_;
+  const gui::Rect footer = gui::cut_bottom(area, footer_height);
+  const gui::Rect list = area;
+  const float scroll = scroll_.begin(ctx, list, row_height * 2.0F);
   if (sets.empty()) {
-    ctx.label(gui::Rect{list.x + 7.0F, list.y,
-                        std::max(list.width - 14.0F, 0.0F),
-                        std::min(list.height, row_height)},
+    gui::Rect first = list;
+    ctx.label(gui::inset(gui::cut_top(first, row_height), text_inset, 0.0F),
               "NO SAVED SETS", ctx.theme().text_muted);
   }
-  std::size_t row_index{};
-  for (const scene::SelectionSetSummary &set : sets) {
-    const gui::Rect row{list.x, y, list.width, row_height};
+  const bool pointer_in_list = list.contains(ctx.pointer_x(), ctx.pointer_y());
+  for (std::size_t row_index = 0U; row_index < sets.size(); ++row_index) {
+    const scene::SelectionSetSummary &set = sets[row_index];
+    const gui::Rect row = gui::list_row(list, row_index, row_height, scroll);
     const gui::Interaction interaction =
-        list.contains(ctx.pointer_x(), ctx.pointer_y())
+        pointer_in_list
             ? ctx.grab(mix(id_, "selection-set.row", set.node.value()), row)
             : gui::Interaction{};
     gui::UiColor color =
@@ -156,18 +113,16 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
       color = ctx.theme().widget_hover;
     }
     ctx.panel(row, color);
-    ctx.label(gui::Rect{row.x + 7.0F, row.y,
-                        std::max(row.width * 0.55F - 7.0F, 0.0F), row.height},
-              set.name,
+    // The name takes a little over half the row; the member count the rest.
+    gui::Rect text = gui::inset(row, text_inset, 0.0F);
+    ctx.label(gui::cut_left(text, row.width * 0.55F - text_inset), set.name,
               set.node == selected_set ? ctx.theme().text
                                        : ctx.theme().text_muted);
     std::string count = std::to_string(set.member_count) + " MEMBERS";
     if (set.missing_count != 0U) {
       count += " / " + std::to_string(set.missing_count) + " MISSING";
     }
-    ctx.label(gui::Rect{row.x + row.width * 0.55F, row.y,
-                        std::max(row.width * 0.45F - 7.0F, 0.0F), row.height},
-              count,
+    ctx.label(text, count,
               set.missing_count == 0U ? ctx.theme().text_muted
                                       : ctx.theme().warning);
     if (interaction.clicked) {
@@ -190,16 +145,16 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
         last_click_time_ = now;
       }
     }
-    y += row_height;
-    ++row_index;
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, row_height * static_cast<float>(sets.size()));
 
+  // The selected set's name, then its four actions in a row.
   ctx.panel(footer, ctx.theme().background);
-  ctx.panel(gui::Rect{footer.x, footer.y, footer.width, 1.0F},
-            ctx.theme().divider);
-  const gui::Rect edit_bounds{footer.x + 3.0F, footer.y + 3.0F,
-                              std::max(footer.width - 6.0F, 0.0F), 21.0F};
+  gui::Rect rule = footer;
+  ctx.panel(gui::cut_top(rule, 1.0F), ctx.theme().divider);
+  gui::Rect actions = gui::inset(footer, pad);
+  const gui::Rect edit_bounds = gui::cut_top(actions, edit_height);
+  static_cast<void>(gui::cut_top(actions, pad));
   if (selected_set) {
     static_cast<void>(ctx.text_field(mix(id_, "selection-set.edit-name"),
                                      edit_bounds, edit_name_));
@@ -208,15 +163,9 @@ SelectionSetPanelFrame SelectionSetsPanel::draw(
     ctx.label(edit_bounds, "SELECT A SET", ctx.theme().text_muted);
   }
 
-  constexpr float gap = 3.0F;
-  const float button_width =
-      std::max((footer.width - 6.0F - gap * 3.0F) / 4.0F, 0.0F);
-  const float button_y = footer.y + 27.0F;
-  const float button_height = std::max(footer.height - 30.0F, 0.0F);
+  constexpr std::size_t action_count = 4U;
   const auto button_bounds = [&](std::size_t index) {
-    return gui::Rect{footer.x + 3.0F +
-                         static_cast<float>(index) * (button_width + gap),
-                     button_y, button_width, button_height};
+    return gui::column(actions, index, action_count, pad);
   };
   if (action_button(
           ctx, mix(id_, "selection-set.replace"), button_bounds(0U), "REPLACE",

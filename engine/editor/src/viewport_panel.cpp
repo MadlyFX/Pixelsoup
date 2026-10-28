@@ -1,6 +1,7 @@
 #include <mediaserver/editor/viewport_panel.hpp>
 #include <mediaserver/editor/light_guides.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
 
 #include <mediaserver/scene/manipulate.hpp>
 
@@ -2719,13 +2720,11 @@ void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
                                value +
                                "    ENTER / CLICK  CONFIRM    ESC / RIGHT-CLICK"
                                "  CANCEL";
-    const gui::Rect bar{image.x + 8.0F, image.y + 8.0F,
-                        std::max(std::min(image.width - 16.0F, 640.0F), 0.0F),
-                        22.0F};
+    gui::Rect corner = gui::inset(image, 8.0F);
+    corner = gui::cut_top(corner, 22.0F);
+    const gui::Rect bar = gui::cut_left(corner, 640.0F);
     ctx.panel(bar, ctx.theme().background);
-    ctx.label(gui::Rect{bar.x + 8.0F, bar.y, std::max(bar.width - 16.0F, 0.0F),
-                        bar.height},
-              status, ctx.theme().text);
+    ctx.label(gui::inset(bar, 8.0F, 0.0F), status, ctx.theme().text);
 }
 
 namespace {
@@ -2736,12 +2735,12 @@ constexpr gui::UiColor measure_shade{0.04F, 0.05F, 0.06F, 0.86F};
 
 void measure_badge(gui::UiContext& ctx, float x, float y,
                    std::string_view text, bool strong) {
-    const float width = ctx.font_width(text) + 12.0F;
-    const gui::Rect badge{x - width * 0.5F, y, width, 20.0F};
+    // Centred on x, its top at y.
+    const gui::Rect badge = gui::centered(gui::Rect{x, y, 0.0F, 20.0F},
+                                          ctx.font_width(text) + 12.0F, 20.0F);
     ctx.panel(badge, strong ? measure_color : measure_shade);
-    ctx.label(gui::Rect{badge.x + 6.0F, badge.y, badge.width - 6.0F,
-                        badge.height},
-              text, strong ? measure_ink : measure_color);
+    ctx.label(gui::inset(badge, gui::Padding{6.0F, 0.0F, 0.0F, 0.0F}), text,
+              strong ? measure_ink : measure_color);
 }
 
 // The Measure tool's picture: each segment with its length at its middle,
@@ -2835,13 +2834,12 @@ void draw_measurements(gui::UiContext& ctx, gui::UiDrawList& list,
     const std::string_view hint =
         "MEASURE   Click two points.  Shift+click adds to a path.  "
         "Esc clears; M or Esc again leaves.";
-    const float hint_width = ctx.font_width(hint);
-    ctx.panel(gui::Rect{image.x + 6.0F, image.y + 6.0F, hint_width + 14.0F,
-                        22.0F},
-              measure_shade);
-    ctx.label(gui::Rect{image.x + 13.0F, image.y + 6.0F, hint_width + 4.0F,
-                        22.0F},
-              hint, measure_color);
+    gui::Rect corner = gui::inset(image, 6.0F);
+    corner = gui::cut_top(corner, 22.0F);
+    const gui::Rect box = gui::cut_left(corner, ctx.font_width(hint) + 14.0F);
+    ctx.panel(box, measure_shade);
+    ctx.label(gui::inset(box, gui::Padding{7.0F, 0.0F, 3.0F, 0.0F}), hint,
+              measure_color);
 }
 
 // The corner of a Stage image its view menu, `width` wide, occupies; empty
@@ -3012,11 +3010,13 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                                  float frames_per_second) {
     const gui::Theme& theme = ctx.theme();
     ctx.panel(toolbar, theme.background);
-    ctx.panel(gui::Rect{toolbar.x, toolbar.y + toolbar.height - 1.0F,
-                        toolbar.width, 1.0F},
-              theme.divider);
-    const float top = toolbar.y + 3.0F;
-    const float height = toolbar.height - 7.0F;
+    {
+        gui::Rect rule = toolbar;
+        ctx.panel(gui::cut_bottom(rule, 1.0F), theme.divider);
+    }
+    // Controls are taken from both ends of one strip, 3px under the top and
+    // 4px clear of the rule.
+    gui::Rect bar = gui::inset(toolbar, gui::Padding{6.0F, 3.0F, 8.0F, 4.0F});
     const auto separator = [&](float x) {
         ctx.panel(gui::Rect{std::floor(x), toolbar.y + 8.0F, 1.0F,
                             toolbar.height - 17.0F},
@@ -3032,18 +3032,12 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                       std::max(frames_per_second, 0.0F));
     const std::string_view fps{
         fps_text.data(), static_cast<std::size_t>(std::max(fps_length, 0))};
-    const float fps_width = ctx.font_width(fps);
-    float right = toolbar.x + toolbar.width - 8.0F;
-    ctx.label(gui::Rect{right - fps_width, toolbar.y, fps_width + 2.0F,
-                        toolbar.height},
+    ctx.label(gui::cell(gui::cut_right(bar, ctx.font_width(fps)), toolbar),
               fps, theme.text_muted);
-    right -= fps_width + 8.0F;
-
-    const float resolution_width = resolution_control_width(ctx);
-    right -= resolution_width;
+    static_cast<void>(gui::cut_right(bar, 8.0F));
     draw_resolution_control(ctx,
-                            gui::Rect{right, top, resolution_width, height});
-    right -= toolbar_group_gap;
+                            gui::cut_right(bar, resolution_control_width(ctx)));
+    static_cast<void>(gui::cut_right(bar, toolbar_group_gap));
 
     static constexpr std::array<std::string_view, move_snap_choices.size()>
         distances{"0.01 m", "0.1 m", "0.5 m", "1 m", "5 m"};
@@ -3062,21 +3056,22 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
     const float angle_width =
         toolbar_menu_width(ctx, degrees[turn_step], true);
     constexpr float display_menu_width = 38.0F;
-    float left = toolbar.x + 6.0F;
+    constexpr float snap_gap = 2.0F;
     const float tools_width = 4.0F * toolbar_button + toolbar_group_gap +
                               toolbar_button + toolbar_group_gap +
-                              toolbar_button + 2.0F + distance_width + 2.0F +
-                              angle_width + 2.0F + toolbar_button;
-    if (left + tools_width + toolbar_group_gap + display_menu_width <= right) {
+                              toolbar_button + snap_gap + distance_width +
+                              snap_gap + angle_width + snap_gap +
+                              toolbar_button;
+    if (tools_width + toolbar_group_gap + display_menu_width <= bar.width) {
         const auto tool = [&](core::u64 salt, gui::Icon icon, bool engaged,
                               std::string_view hint) {
-            const gui::Rect rect{left, top, toolbar_button, height};
-            left += toolbar_button;
-            return icon_button(ctx, mix(id_, salt), rect, icon, hint, engaged);
+            return icon_button(ctx, mix(id_, salt),
+                               gui::cut_left(bar, toolbar_button), icon, hint,
+                               engaged);
         };
         const auto next_group = [&] {
-            left += toolbar_group_gap;
-            separator(left - toolbar_group_gap * 0.5F);
+            static_cast<void>(gui::cut_left(bar, toolbar_group_gap));
+            separator(bar.x - toolbar_group_gap * 0.5F);
         };
         if (tool(10U, gui::Icon::MoveTool,
                  !measuring_ && tool_ == TransformTool::Move,
@@ -3128,8 +3123,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                  "while dragging.")) {
             snapping_ = !snapping_;
         }
-        left += 2.0F;
-        const gui::Rect distance{left, top, distance_width, height};
+        static_cast<void>(gui::cut_left(bar, snap_gap));
+        const gui::Rect distance = gui::cut_left(bar, distance_width);
         const gui::UiId distance_menu = mix(id_, 22U);
         if (toolbar_menu(ctx, mix(id_, 16U), distance, gui::Icon::Grid,
                          distances[move_step], ctx.menu_open(distance_menu),
@@ -3146,8 +3141,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                 snap_steps_.move = move_snap_choices[*chosen];
             }
         }
-        left += distance_width + 2.0F;
-        const gui::Rect angle{left, top, angle_width, height};
+        static_cast<void>(gui::cut_left(bar, snap_gap));
+        const gui::Rect angle = gui::cut_left(bar, angle_width);
         const gui::UiId angle_menu = mix(id_, 23U);
         if (toolbar_menu(ctx, mix(id_, 17U), angle, gui::Icon::Angle,
                          degrees[turn_step], ctx.menu_open(angle_menu), true,
@@ -3165,7 +3160,7 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                     rotate_snap_choices_degrees[*chosen] / 360.0F;
             }
         }
-        left += angle_width + 2.0F;
+        static_cast<void>(gui::cut_left(bar, snap_gap));
         if (tool(18U, gui::Icon::Surface, surface_snapping_,
                  "Surface snapping: an element dragged by its body rides "
                  "over whatever is under the pointer and rests on it. Hold "
@@ -3177,17 +3172,16 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
 
     // The display toggles, right-aligned before the preview controls.
     constexpr float toggles_width = 4.0F * toolbar_button;
-    if (left + toolbar_group_gap + toggles_width <= right) {
-        separator(right + toolbar_group_gap * 0.5F);
-        float x = right - toggles_width;
+    if (toolbar_group_gap + toggles_width <= bar.width) {
+        separator(bar.right() + toolbar_group_gap * 0.5F);
+        gui::Rect toggles = gui::cut_right(bar, toggles_width);
         const auto toggle = [&](core::u64 salt, gui::Icon icon, bool& shown,
                                 std::string_view hint) {
             if (icon_button(ctx, mix(id_, salt),
-                            gui::Rect{x, top, toolbar_button, height}, icon,
+                            gui::cut_left(toggles, toolbar_button), icon,
                             hint, shown)) {
                 shown = !shown;
             }
-            x += toolbar_button;
         };
         toggle(1U, gui::Icon::Grid, show_grid_,
                "Grid: the floor grid, its spacing following the zoom.");
@@ -3198,11 +3192,10 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
                "Gizmo: the selection's transform handles.");
         toggle(19U, gui::Icon::Bounds, show_bounds_,
                "Bounds: every element's bounding box, selected or not.");
-    } else if (left + toolbar_group_gap + display_menu_width <= right) {
-        separator(right + toolbar_group_gap * 0.5F);
+    } else if (toolbar_group_gap + display_menu_width <= bar.width) {
+        separator(bar.right() + toolbar_group_gap * 0.5F);
         // One menu holds them, so they stay reachable in a narrow dock.
-        const gui::Rect show{right - display_menu_width, top,
-                             display_menu_width, height};
+        const gui::Rect show = gui::cut_right(bar, display_menu_width);
         const gui::UiId show_menu = mix(id_, 20U);
         const gui::Interaction it = ctx.grab(mix(id_, 21U), show);
         ctx.cursor_for(it, gui::Cursor::Hand);
@@ -4317,11 +4310,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     if (role_ == ViewportRole::Stage && show_grid_) {
         const float step = draw_grid(list, frame.image, scene);
         const std::string text = "Grid " + format_metres(step);
-        const float width = ctx.font_width(text) + 14.0F;
-        ctx.label(gui::Rect{frame.image.x + frame.image.width - width,
-                            frame.image.y + frame.image.height - 26.0F, width,
-                            22.0F},
-                  text, ctx.theme().text_muted);
+        // The grid's spacing in the bottom-right corner.
+        gui::Rect foot = gui::inset(frame.image,
+                                    gui::Padding{0.0F, 0.0F, 0.0F, 4.0F});
+        foot = gui::cut_bottom(foot, 22.0F);
+        ctx.label(gui::cut_right(foot, ctx.font_width(text) + 14.0F), text,
+                  ctx.theme().text_muted);
     }
     if (role_ == ViewportRole::Stage && show_overlays_) {
         for (const scene::SceneScreen& screen : scene.screens) {
@@ -4409,13 +4403,13 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 const std::string text =
                     "W " + format_metres(size.x) + "   H " +
                     format_metres(size.y) + "   D " + format_metres(size.z);
-                const float width = ctx.font_width(text) + 14.0F;
-                const gui::Rect badge{frame.image.x + 6.0F,
-                                      frame.image.y + frame.image.height - 28.0F,
-                                      width, 22.0F};
+                // The size in the bottom-left corner.
+                gui::Rect foot = gui::inset(frame.image, 6.0F);
+                foot = gui::cut_bottom(foot, 22.0F);
+                const gui::Rect badge =
+                    gui::cut_left(foot, ctx.font_width(text) + 14.0F);
                 ctx.panel(badge, gui::UiColor{0.04F, 0.05F, 0.06F, 0.82F});
-                ctx.label(gui::Rect{badge.x + 7.0F, badge.y, width - 7.0F,
-                                    badge.height},
+                ctx.label(gui::inset(badge, gui::Padding{7.0F, 0.0F, 0.0F, 0.0F}),
                           text, ctx.theme().text);
                 ctx.tooltip(badge,
                             "The selection's bounding box along the world X "

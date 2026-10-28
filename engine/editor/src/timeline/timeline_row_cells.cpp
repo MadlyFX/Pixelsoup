@@ -141,8 +141,7 @@ void TimelinePanel::draw_rows(Pass &p) {
         const float left = static_cast<float>(reveal_until_ - ctx.time_seconds());
         gui::UiColor color = ctx.theme().accent;
         color.a = std::clamp(left / 1.5F, 0.0F, 1.0F);
-        draw_border(ctx,
-                    gui::Rect{rows_bounds.x, rc.y,
+        ctx.outline(gui::Rect{rows_bounds.x, rc.y,
                               graph.x + graph.width - rows_bounds.x,
                               rc.row.height},
                     color, 2.0F);
@@ -1349,7 +1348,7 @@ void TimelinePanel::track_bar_cell(RowContext &rc) {
               count, alpha(ctx.theme().text_muted, strength));
   }
   if (row.node == selected_lane_) {
-    draw_border(ctx, bar, ctx.theme().text, 1.5F);
+    ctx.outline(bar, ctx.theme().text, 1.5F);
   }
   if (!row.locked) {
     draw_clip_hover(rc);
@@ -1808,7 +1807,7 @@ void TimelinePanel::draw_clip_label(RowContext &rc) {
                                    : ctx.theme().text_muted);
   }
   if (selected(row.node, selection)) {
-    draw_border(ctx, clip_bar, ctx.theme().text, 1.5F);
+    ctx.outline(clip_bar, ctx.theme().text, 1.5F);
   }
 }
 
@@ -2267,7 +2266,7 @@ void TimelinePanel::scrub_held_lane(Pass &p, const gui::Interaction &lane) {
 gui::Rect TimelinePanel::graph_area(const Pass &p) const noexcept {
   const gui::Rect &graph = p.layout.graph;
   const gui::Rect &rows_bounds = p.layout.rows;
-  return gui::Rect{graph.x, rows_bounds.y, graph.width, rows_bounds.height};
+  return gui::cell(graph, rows_bounds);
 }
 
 // What the Curves graph shows: every channel whose row is on screen in the

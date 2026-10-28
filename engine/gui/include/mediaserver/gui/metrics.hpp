@@ -16,8 +16,11 @@ struct Metrics final {
     float row_gap{6.0F};
     // Between controls side by side, and the text padding inside a field.
     float gap{6.0F};
-    // From a panel or card edge to its content.
+    // From a dialog card's edge to its content.
     float inset{14.0F};
+    // From a docked panel's edge to its content: narrower than a card's,
+    // because a dock is narrow to begin with.
+    float panel_inset{10.0F};
     // The label column of a form, left of its fields.
     float label_column{132.0F};
     // A line of secondary text, or a section heading.

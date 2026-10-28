@@ -34,32 +34,35 @@ void TimelinePanel::draw_key_tools(Pass &p) {
     ctx.pop_pointer_block();
   }
   if (key_tools_.open) {
-    ctx.panel(key_tools_popup, ctx.theme().background);
-    ctx.panel(gui::Rect{key_tools_popup.x, key_tools_popup.y,
-                        key_tools_popup.width, 1.0F},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{key_tools_popup.x, key_tools_popup.y, 1.0F,
-                        key_tools_popup.height},
-              ctx.theme().divider);
-    ctx.panel(gui::Rect{key_tools_popup.x + key_tools_popup.width - 1.0F,
-                        key_tools_popup.y, 1.0F, key_tools_popup.height},
-              ctx.theme().divider);
+    draw_hanging_popup(ctx, key_tools_popup);
+    // Rows of 22px controls 6px apart, 6px in from the popup's sides and top.
+    gui::Metrics metrics = ctx.theme().metrics;
+    metrics.inset = 6.0F;
+    metrics.gap = 6.0F;
+    metrics.control = 22.0F;
+    metrics.row_gap = 6.0F;
+    gui::FormLayout rows{key_tools_popup, metrics};
+    // A greyed stand-in for a button with nothing to act on.
+    const auto disabled_button = [&](const gui::Rect &at,
+                                     std::string_view label) {
+      ctx.panel(at, ctx.theme().track);
+      ctx.label(at, label, ctx.theme().text_muted);
+    };
 
-    float tool_x = key_tools_popup.x + 6.0F;
-    const float tool_y = key_tools_popup.y + 6.0F;
-    if (ctx.button(mix(id_, "key selection shape"),
-                   gui::Rect{tool_x, tool_y, 53.0F, 22.0F},
+    gui::Rect tools = rows.control();
+    if (ctx.button(mix(id_, "key selection shape"), gui::cut_left(tools, 53.0F),
                    keys_.lasso_mode ? "LASSO" : "BOX")) {
       keys_.lasso_mode = !keys_.lasso_mode;
       keys_.marquee_tracking = false;
       keys_.marquee_active = false;
       keys_.lasso_points.clear();
     }
-    tool_x += 56.0F;
+    static_cast<void>(gui::cut_left(tools, 3.0F));
     const std::vector<TimelineKeyAddress> keys = selected_addresses();
+    const gui::Rect fit_selected = gui::cut_left(tools, 59.0F);
+    static_cast<void>(gui::cut_left(tools, 3.0F));
     if (!keys.empty()) {
-      if (ctx.button(mix(id_, "fit selected keys"),
-                     gui::Rect{tool_x, tool_y, 59.0F, 22.0F}, "FIT SEL")) {
+      if (ctx.button(mix(id_, "fit selected keys"), fit_selected, "FIT SEL")) {
         core::i64 selected_first = keys.front().frame;
         core::i64 selected_last = keys.front().frame;
         for (const TimelineKeyAddress &key : keys) {
@@ -104,16 +107,13 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         }
       }
     } else {
-      const gui::Rect disabled{tool_x, tool_y, 59.0F, 22.0F};
-      ctx.panel(disabled, ctx.theme().track);
-      ctx.label(disabled, "FIT SEL", ctx.theme().text_muted);
+      disabled_button(fit_selected, "FIT SEL");
     }
-    tool_x += 62.0F;
     // Zooming and panning either axis is a wheel gesture over the graph, so
     // there are no stepper buttons here for it. What is left is the one thing
     // the wheel cannot do: put the whole animation back on screen.
-    if (ctx.button(mix(id_, "fit curves"),
-                   gui::Rect{tool_x, tool_y, 74.0F, 22.0F}, "FIT ALL")) {
+    if (ctx.button(mix(id_, "fit curves"), gui::cut_left(tools, 74.0F),
+                   "FIT ALL")) {
       const double span =
           std::max(static_cast<double>(last_i) - static_cast<double>(first_i),
                    1.0);
@@ -127,23 +127,25 @@ void TimelinePanel::draw_key_tools(Pass &p) {
       }
     }
 
-    const float channel_y = tool_y + 28.0F;
+    // The active channel, its visibility, and its value at the playhead.
+    gui::Rect channel_row = rows.control();
     if (graph_->active().has_value()) {
       std::array<char, 128U> active_label{};
       const int active_length = std::snprintf(
           active_label.data(), active_label.size(), "%s - #%llu",
           channel_label(graph_->active()->property).data(),
           static_cast<unsigned long long>(graph_->active()->target.value()));
-      ctx.label(gui::Rect{key_tools_popup.x + 6.0F, channel_y, 170.0F, 22.0F},
+      ctx.label(gui::cut_left(channel_row, 170.0F),
                 std::string_view{
                     active_label.data(),
                     static_cast<std::size_t>(std::max(active_length, 0))},
                 channel_color(graph_->active()->property));
       const bool hidden = !graph_->visible(*graph_->active());
-      if (ctx.button(
-              mix(id_, "active channel visibility"),
-              gui::Rect{key_tools_popup.x + 178.0F, channel_y, 50.0F, 22.0F},
-              hidden ? "SHOW" : "HIDE")) {
+      static_cast<void>(gui::cut_left(channel_row, 2.0F));
+      const gui::Rect visibility = gui::cut_left(channel_row, 50.0F);
+      static_cast<void>(gui::cut_left(channel_row, 4.0F));
+      if (ctx.button(mix(id_, "active channel visibility"), visibility,
+                     hidden ? "SHOW" : "HIDE")) {
         if (hidden) {
           graph_->set_visible(*graph_->active(), true);
         } else {
@@ -178,54 +180,45 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         double changed_value = *sampled;
         const double speed = std::max(std::fabs(*sampled) * 0.01, 0.01);
         if (key_tools_.value_field.draw(
-                ctx, mix(id_, "playhead key value"),
-                gui::Rect{key_tools_popup.x + 232.0F, channel_y,
-                          key_tools_popup.width - 238.0F, 22.0F},
-                "", *sampled, speed, changed_value, 4)) {
+                ctx, mix(id_, "playhead key value"), channel_row, "",
+                *sampled, speed, changed_value, 4)) {
           frame.keys.push_back(TimelineKeyEdit{
               graph_->active()->target, graph_->active()->property,
               timeline.show_frame, changed_value, false, false});
         }
       } else {
-        ctx.label(gui::Rect{key_tools_popup.x + 232.0F, channel_y,
-                            key_tools_popup.width - 238.0F, 22.0F},
-                  "NO VALUE", ctx.theme().text_muted);
+        ctx.label(channel_row, "NO VALUE", ctx.theme().text_muted);
       }
     } else {
-      ctx.label(gui::Rect{key_tools_popup.x + 6.0F, channel_y,
-                          key_tools_popup.width - 12.0F, 22.0F},
-                "Select a key to edit its value at the playhead",
+      ctx.label(channel_row, "Select a key to edit its value at the playhead",
                 ctx.theme().text_muted);
     }
 
-    const float scale_button_y = channel_y + 28.0F;
+    // SCALE, and how many keys it would act on.
+    gui::Rect scale_row = rows.control();
+    const gui::Rect scale_button = gui::cut_left(scale_row, 62.0F);
+    static_cast<void>(gui::cut_left(scale_row, 7.0F));
     if (!keys.empty()) {
-      if (ctx.button(
-              mix(id_, "toggle key scale"),
-              gui::Rect{key_tools_popup.x + 6.0F, scale_button_y, 62.0F, 22.0F},
-              key_tools_.scale_open ? "SCALE*" : "SCALE")) {
+      if (ctx.button(mix(id_, "toggle key scale"), scale_button,
+                     key_tools_.scale_open ? "SCALE*" : "SCALE")) {
         key_tools_.scale_open = !key_tools_.scale_open;
       }
     } else {
-      const gui::Rect disabled{key_tools_popup.x + 6.0F, scale_button_y, 62.0F,
-                               22.0F};
-      ctx.panel(disabled, ctx.theme().track);
-      ctx.label(disabled, "SCALE", ctx.theme().text_muted);
+      disabled_button(scale_button, "SCALE");
       key_tools_.scale_open = false;
     }
     std::array<char, 64U> selection_label{};
     const int selection_length =
         std::snprintf(selection_label.data(), selection_label.size(),
                       "%zu selected", keys.size());
-    ctx.label(gui::Rect{key_tools_popup.x + 75.0F, scale_button_y,
-                        key_tools_popup.width - 81.0F, 22.0F},
+    ctx.label(scale_row,
               std::string_view{
                   selection_label.data(),
                   static_cast<std::size_t>(std::max(selection_length, 0))},
               ctx.theme().text_muted);
 
     if (key_tools_.scale_open) {
-      const float anchor_y = scale_button_y + 28.0F;
+      const gui::Rect anchor_row = rows.control();
       constexpr std::array<std::pair<scene::KeyTimeAnchor, std::string_view>,
                            4U>
           anchors{{
@@ -234,10 +227,9 @@ void TimelinePanel::draw_key_tools(Pass &p) {
               {scene::KeyTimeAnchor::Playhead, "PLAYHEAD"},
               {scene::KeyTimeAnchor::User, "USER"},
           }};
-      float anchor_x = key_tools_popup.x + 6.0F;
-      const float anchor_width = (key_tools_popup.width - 21.0F) / 4.0F;
       for (std::size_t index = 0U; index < anchors.size(); ++index) {
-        const gui::Rect anchor_bounds{anchor_x, anchor_y, anchor_width, 22.0F};
+        const gui::Rect anchor_bounds =
+            gui::column(anchor_row, index, anchors.size(), 3.0F);
         const gui::Interaction interaction =
             ctx.grab(mix(id_, "scale anchor", index), anchor_bounds);
         ctx.panel(anchor_bounds,
@@ -252,29 +244,23 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         if (interaction.clicked) {
           key_tools_.scale_anchor = anchors[index].first;
         }
-        anchor_x += anchor_width + 3.0F;
       }
 
-      const float rational_y = anchor_y + 28.0F;
-      ctx.label(gui::Rect{key_tools_popup.x + 6.0F, rational_y, 18.0F, 22.0F},
-                "N", ctx.theme().text_muted);
-      static_cast<void>(ctx.text_field(
-          scale_numerator_id,
-          gui::Rect{key_tools_popup.x + 24.0F, rational_y, 62.0F, 22.0F},
-          key_tools_.scale_numerator));
-      ctx.label(gui::Rect{key_tools_popup.x + 91.0F, rational_y, 18.0F, 22.0F},
-                "D", ctx.theme().text_muted);
-      static_cast<void>(ctx.text_field(
-          scale_denominator_id,
-          gui::Rect{key_tools_popup.x + 109.0F, rational_y, 62.0F, 22.0F},
-          key_tools_.scale_denominator));
-      ctx.label(gui::Rect{key_tools_popup.x + 177.0F, rational_y, 43.0F, 22.0F},
-                "MARK", ctx.theme().text_muted);
-      static_cast<void>(
-          ctx.text_field(scale_user_anchor_id,
-                         gui::Rect{key_tools_popup.x + 220.0F, rational_y,
-                                   key_tools_popup.width - 226.0F, 22.0F},
-                         key_tools_.scale_user_anchor));
+      // The ratio N/D, and the marker frame a USER anchor scales about.
+      gui::Rect rational = rows.control();
+      ctx.label(gui::cut_left(rational, 18.0F), "N", ctx.theme().text_muted);
+      static_cast<void>(ctx.text_field(scale_numerator_id,
+                                       gui::cut_left(rational, 62.0F),
+                                       key_tools_.scale_numerator));
+      static_cast<void>(gui::cut_left(rational, 5.0F));
+      ctx.label(gui::cut_left(rational, 18.0F), "D", ctx.theme().text_muted);
+      static_cast<void>(ctx.text_field(scale_denominator_id,
+                                       gui::cut_left(rational, 62.0F),
+                                       key_tools_.scale_denominator));
+      static_cast<void>(gui::cut_left(rational, 6.0F));
+      ctx.label(gui::cut_left(rational, 43.0F), "MARK", ctx.theme().text_muted);
+      static_cast<void>(ctx.text_field(scale_user_anchor_id, rational,
+                                       key_tools_.scale_user_anchor));
 
       const std::optional<core::i64> numerator =
           parse_integer(key_tools_.scale_numerator);
@@ -303,7 +289,10 @@ void TimelinePanel::draw_key_tools(Pass &p) {
                                    key_scale_preview.has_value() &&
                                    key_scale_preview->signature == *signature;
       const bool apply_ready = preview_matches && key_scale_preview->valid;
-      const float preview_y = rational_y + 28.0F;
+      // What applying would do, and APPLY at the right.
+      gui::Rect preview_row = rows.control();
+      const gui::Rect apply_bounds = gui::cut_right(preview_row, 64.0F);
+      static_cast<void>(gui::cut_right(preview_row, 6.0F));
       std::array<char, 128U> preview_label{};
       int preview_length{};
       if (!rational_valid) {
@@ -321,17 +310,13 @@ void TimelinePanel::draw_key_tools(Pass &p) {
             key_scale_preview->applied, key_scale_preview->collisions,
             key_scale_preview->skips);
       }
-      ctx.label(gui::Rect{key_tools_popup.x + 6.0F, preview_y,
-                          key_tools_popup.width - 82.0F, 22.0F},
+      ctx.label(preview_row,
                 std::string_view{
                     preview_label.data(),
                     static_cast<std::size_t>(std::max(preview_length, 0))},
                 !rational_valid || (preview_matches && !apply_ready)
                     ? ctx.theme().warning
                     : ctx.theme().text_muted);
-      const gui::Rect apply_bounds{key_tools_popup.x + key_tools_popup.width -
-                                       70.0F,
-                                   preview_y, 64.0F, 22.0F};
       if (apply_ready) {
         if (ctx.button(mix(id_, "apply key scale"), apply_bounds, "APPLY")) {
           frame.key_batch = TimelineKeyBatchEdit{TimelineKeyBatchAction::Scale,
@@ -339,8 +324,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
           key_tools_.scale_open = false;
         }
       } else {
-        ctx.panel(apply_bounds, ctx.theme().track);
-        ctx.label(apply_bounds, "APPLY", ctx.theme().text_muted);
+        disabled_button(apply_bounds, "APPLY");
       }
     }
   }

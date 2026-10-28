@@ -1,5 +1,7 @@
 #include <mediaserver/editor/cues_panel.hpp>
 
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -46,18 +48,6 @@ constexpr core::u32 sent_marker_draws = 240U;
 [[nodiscard]] gui::UiColor alpha(gui::UiColor color, float opacity) noexcept {
   color.a = opacity;
   return color;
-}
-
-void outline(gui::UiContext &ctx, const gui::Rect &bounds, gui::UiColor color,
-             float thickness = 1.0F) {
-  ctx.panel(gui::Rect{bounds.x, bounds.y, bounds.width, thickness}, color);
-  ctx.panel(gui::Rect{bounds.x, bounds.y + bounds.height - thickness,
-                      bounds.width, thickness},
-            color);
-  ctx.panel(gui::Rect{bounds.x, bounds.y, thickness, bounds.height}, color);
-  ctx.panel(gui::Rect{bounds.x + bounds.width - thickness, bounds.y,
-                      thickness, bounds.height},
-            color);
 }
 
 [[nodiscard]] std::string_view action_word(scene::CueAction cue) noexcept {
@@ -154,7 +144,7 @@ std::string format_cue_seconds(core::u32 milliseconds) {
 }
 
 void CuesPanel::reset() noexcept {
-  scroll_ = 0.0F;
+  scroll_.reset();
   name_node_ = doc::NodeId{};
   name_draft_.clear();
   note_node_ = doc::NodeId{};
@@ -293,30 +283,31 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   };
 
   // --- Header: the panel's name, then the two switches it owns.
-  const gui::Rect header{bounds.x, bounds.y, bounds.width, header_height};
+  gui::Rect area = bounds;
+  const gui::Rect header = gui::cut_top(area, header_height);
   ctx.panel(header, theme.header);
-  ctx.label(gui::Rect{header.x + 10.0F, header.y, 120.0F, header.height},
-            "CUE STACK", theme.text_muted);
   {
-    float x = header.x + header.width - 8.0F;
+    gui::Rect title = gui::inset(header, 10.0F, 0.0F);
+    ctx.label(gui::cut_left(title, 120.0F), "CUE STACK", theme.text_muted);
+  }
+  {
+    // Laid in from the right edge, the first switch outermost.
+    gui::Rect switches = gui::inset(header, 8.0F, 5.0F);
     const auto toggle = [&](std::string_view name, std::string_view label,
                             bool engaged, std::string_view tip,
                             gui::UiColor color) {
-      const float width = std::max(ctx.font_width(label) + 20.0F, 56.0F);
-      x -= width;
-      const gui::Rect button{x, header.y + 5.0F, width, header.height - 10.0F};
-      x -= 4.0F;
+      const gui::Rect button = gui::cut_right(
+          switches, std::max(ctx.font_width(label) + 20.0F, 56.0F));
+      static_cast<void>(gui::cut_right(switches, 4.0F));
       const gui::Interaction it = ctx.grab(mix(id_, name), button);
       ctx.panel(button, engaged ? alpha(color, 0.25F)
                                 : (it.hovered ? theme.widget_hover
                                               : theme.widget));
       if (engaged) {
-        ctx.panel(gui::Rect{button.x, button.y + button.height - 2.0F,
-                            button.width, 2.0F},
-                  color);
+        gui::Rect underline = button;
+        ctx.panel(gui::cut_bottom(underline, 2.0F), color);
       }
-      ctx.label(gui::Rect{button.x + 10.0F, button.y, button.width - 12.0F,
-                          button.height},
+      ctx.label(gui::inset(button, gui::Padding{10.0F, 0.0F, 2.0F, 0.0F}),
                 label, engaged ? theme.text : theme.text_muted);
       ctx.tooltip(button, tip);
       return it.clicked;
@@ -335,15 +326,14 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   }
 
   // --- GO, and the two lines an operator reads before pressing it.
-  const gui::Rect band{bounds.x, header.y + header.height, bounds.width,
-                       go_band_height};
+  const gui::Rect band = gui::cut_top(area, go_band_height);
   ctx.panel(band, theme.row_alt);
   const bool any_cue = cue_count > 0U;
   const bool running =
       timeline.playing && timeline.looping_cue == doc::NodeId{};
-  const gui::Rect go{band.x + 8.0F, band.y + 6.0F,
-                     std::clamp(band.width * 0.38F, 120.0F, 260.0F),
-                     band.height - 12.0F};
+  gui::Rect band_content = gui::inset(band, 8.0F, 6.0F);
+  const gui::Rect go = gui::cut_left(
+      band_content, std::clamp(band.width * 0.38F, 120.0F, 260.0F));
   {
     const gui::Interaction it = ctx.grab(mix(id_, "go"), go);
     if (it.clicked) {
@@ -356,29 +346,27 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                           ? 0.6F
                                           : (it.hovered ? 0.42F : 0.3F))
                        : (it.hovered ? theme.widget_hover : theme.widget));
-    outline(ctx, go, live ? color : theme.divider, live ? 2.0F : 1.0F);
-    const std::string_view word = "GO";
-    ctx.label(gui::Rect{go.x + (go.width - ctx.font_width(word)) * 0.5F,
-                        go.y + 4.0F, go.width, go.height * 0.5F},
-              word, live ? theme.text : theme.text_muted);
+    ctx.outline(go, live ? color : theme.divider, live ? 2.0F : 1.0F);
+    // GO across the top half, what it will do across the bottom.
+    const float half = go.height * 0.5F;
+    ctx.label_centered(
+        gui::inset(go, gui::Padding{0.0F, 4.0F, 0.0F, half - 4.0F}), "GO",
+        live ? theme.text : theme.text_muted);
     std::string under;
     if (timeline.looping_cue != doc::NodeId{}) {
       under = "release loop";
     } else if (timeline.next_cue != doc::NodeId{}) {
       under = describe(timeline.next_cue);
     }
-    ctx.label(gui::Rect{go.x + std::max((go.width - ctx.font_width(under)) *
-                                            0.5F,
-                                        6.0F),
-                        go.y + go.height * 0.5F, go.width - 12.0F,
-                        go.height * 0.5F - 4.0F},
-              under, live ? theme.text : theme.text_muted);
+    ctx.label_centered(gui::inset(go, gui::Padding{6.0F, half, 6.0F, 4.0F}),
+                       under, live ? theme.text : theme.text_muted);
     ctx.tooltip(go, "GO (Space or Enter here): run from a hold, release a "
                     "loop, or play to the next cue");
   }
   {
-    const float text_x = go.x + go.width + 14.0F;
-    const float text_width = std::max(band.x + band.width - text_x - 8.0F, 0.0F);
+    gui::Rect lines = gui::inset(band_content,
+                                 gui::Padding{14.0F, 2.0F, 0.0F, 0.0F});
+    constexpr float line_height = 22.0F;
     std::string state;
     gui::UiColor state_color = theme.text_muted;
     if (!any_cue) {
@@ -401,8 +389,8 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     } else {
       state = "STOPPED";
     }
-    ctx.label(gui::Rect{text_x, band.y + 8.0F, text_width, 22.0F}, state,
-              state_color);
+    ctx.label(gui::cut_top(lines, line_height), state, state_color);
+    static_cast<void>(gui::cut_top(lines, 2.0F));
     if (any_cue && timeline.cues_armed &&
         timeline.next_cue != doc::NodeId{}) {
       std::string next = "NEXT  " + describe(timeline.next_cue);
@@ -411,46 +399,50 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       } else if (const auto index = find(timeline.next_cue)) {
         next += "   at " + timecode(markers[*index].frame);
       }
-      ctx.label(gui::Rect{text_x, band.y + 32.0F, text_width, 22.0F}, next,
-                theme.text);
+      ctx.label(gui::cut_top(lines, line_height), next, theme.text);
     }
   }
 
-  // --- Columns.
-  const gui::Rect columns{bounds.x, band.y + band.height, bounds.width,
-                          columns_height};
+  // --- Columns: laid across the heading once; every row takes its cells
+  // from them. The right 30px is the delete button's lane.
+  const gui::Rect columns = gui::cut_top(area, columns_height);
   ctx.panel(columns, theme.header);
-  const float number_x = columns.x + 10.0F;
-  const float swatch_x = columns.x + 50.0F;
-  const float name_x = columns.x + 66.0F;
-  const float flexible =
-      std::max(columns.width - (name_x - columns.x) - 60.0F - 104.0F - 30.0F,
-               60.0F);
-  const float name_width = std::max(flexible * 0.45F, 60.0F);
-  const float action_x = name_x + name_width + 6.0F;
-  const float time_x = action_x + 60.0F;
+  constexpr float column_gap = 6.0F;
+  constexpr float narrow_gap = 4.0F;
+  gui::Rect lanes = gui::inset(columns, gui::Padding{10.0F, 0.0F, 30.0F, 0.0F});
+  const gui::Rect number_column = gui::cut_left(lanes, 36.0F);
+  static_cast<void>(gui::cut_left(lanes, narrow_gap));
+  const gui::Rect swatch_column = gui::cut_left(lanes, 10.0F);
+  static_cast<void>(gui::cut_left(lanes, column_gap));
+  // The name takes a share of what the fixed columns leave.
+  const float flexible = std::max(lanes.width - 60.0F - 104.0F, 60.0F);
+  const gui::Rect name_column =
+      gui::cut_left(lanes, std::max(flexible * 0.45F, 60.0F));
+  static_cast<void>(gui::cut_left(lanes, column_gap));
+  const gui::Rect action_column = gui::cut_left(lanes, 54.0F);
+  static_cast<void>(gui::cut_left(lanes, column_gap));
+  const gui::Rect time_column = gui::cut_left(lanes, 100.0F);
+  static_cast<void>(gui::cut_left(lanes, narrow_gap));
   // A Loop's timing sits beside its time and the note gives up the room. A
   // panel too narrow for it shows the chosen Loop's timing in a bar above
   // the footer instead, so it is never out of reach.
-  const float wait_x = time_x + 104.0F;
-  const float fade_x = wait_x + timing_width + 4.0F;
-  const bool timing_columns =
-      fade_x + timing_width <= columns.x + columns.width - 30.0F;
-  const float note_x =
-      timing_columns ? fade_x + timing_width + 4.0F : time_x + 104.0F;
-  const float note_width =
-      std::max(columns.x + columns.width - 30.0F - note_x, 0.0F);
-  const auto heading = [&](float x, float width, std::string_view text) {
-    ctx.label(gui::Rect{x, columns.y, width, columns.height}, text,
-              theme.text_muted);
+  const gui::Rect without_timing = lanes;
+  const gui::Rect wait_column = gui::cut_left(lanes, timing_width);
+  static_cast<void>(gui::cut_left(lanes, narrow_gap));
+  const gui::Rect fade_column = gui::cut_left(lanes, timing_width);
+  static_cast<void>(gui::cut_left(lanes, narrow_gap));
+  const bool timing_columns = fade_column.width >= timing_width;
+  const gui::Rect note_column = timing_columns ? lanes : without_timing;
+  const auto heading = [&](const gui::Rect &column, std::string_view text) {
+    ctx.label(gui::cell(column, columns), text, theme.text_muted);
   };
-  heading(number_x, 36.0F, "#");
-  heading(name_x, name_width, "NAME");
-  heading(action_x, 56.0F, "ACTION");
-  heading(time_x, 100.0F, "TIME");
+  heading(number_column, "#");
+  heading(name_column, "NAME");
+  heading(action_column, "ACTION");
+  heading(time_column, "TIME");
   if (timing_columns) {
-    heading(wait_x, timing_width, "WAIT");
-    heading(fade_x, timing_width, "FADE");
+    heading(wait_column, "WAIT");
+    heading(fade_column, "FADE");
   }
   std::optional<std::size_t> timing_subject;
   if (!timing_columns) {
@@ -462,8 +454,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
     }
   }
-  const float timing_bar_height = timing_subject.has_value() ? 28.0F : 0.0F;
-  heading(note_x, note_width, "NOTE");
+  heading(note_column, "NOTE");
 
   // A Loop's WAIT and FADE: a drag scrubs and lands once on release, a
   // click chooses the cue, and a double-click types seconds.
@@ -553,12 +544,8 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     ctx.panel(cell, it.held ? theme.widget_active
                             : (it.hovered ? theme.widget_hover
                                           : theme.widget));
-    const std::string label = format_cue_seconds(shown);
-    ctx.label(gui::Rect{cell.x + std::max((cell.width -
-                                           ctx.font_width(label)) * 0.5F,
-                                          2.0F),
-                        cell.y, cell.width - 4.0F, cell.height},
-              label, shown == 0U ? theme.text_muted : theme.accent);
+    ctx.label_centered(gui::inset(cell, 2.0F, 0.0F), format_cue_seconds(shown),
+                       shown == 0U ? theme.text_muted : theme.accent);
     ctx.tooltip(cell, tip);
     return commit;
   };
@@ -586,27 +573,22 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   };
 
-  // --- Rows, scrolled by the wheel.
-  const gui::Rect list{bounds.x, columns.y + columns.height, bounds.width,
-                       std::max(bounds.y + bounds.height - footer_height -
-                                    timing_bar_height - columns.y -
-                                    columns.height,
-                                0.0F)};
-  const float content = static_cast<float>(listed.size()) * row_height;
-  const float maximum_scroll = std::max(content - list.height, 0.0F);
-  if (list.contains(ctx.pointer_x(), ctx.pointer_y()) && ctx.wheel() != 0.0F) {
-    scroll_ -= ctx.wheel() * row_height * 2.0F;
-  }
-  scroll_ = std::clamp(scroll_, 0.0F, maximum_scroll);
-  ctx.push_clip(list);
+  // --- Rows, scrolled by the wheel, between the columns and the footer - and
+  // the chosen Loop's timing bar, when the columns have no room for it.
+  const gui::Rect footer = gui::cut_bottom(area, footer_height);
+  constexpr float timing_bar_height = 28.0F;
+  const gui::Rect timing_strip =
+      timing_subject.has_value() ? gui::cut_bottom(area, timing_bar_height)
+                                 : gui::Rect{};
+  const gui::Rect list = area;
+  const float scroll = scroll_.begin(ctx, list, row_height * 2.0F);
   for (std::size_t row = 0U; row < listed.size(); ++row) {
     const std::size_t index = listed[row];
     const scene::TimelineMarker &marker = markers[index];
-    const float y = list.y + static_cast<float>(row) * row_height - scroll_;
-    if (y + row_height <= list.y || y >= list.y + list.height) {
+    const gui::Rect bar = gui::list_row(list, row, row_height, scroll);
+    if (bar.bottom() <= list.y || bar.y >= list.bottom()) {
       continue;
     }
-    const gui::Rect bar{list.x, y, list.width, row_height};
     const bool chosen = is_selected(marker.id);
     const bool held = timeline.held_cue == marker.id;
     const bool looping = timeline.looping_cue == marker.id;
@@ -615,26 +597,36 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       marker.frame < static_cast<core::i64>(timeline.show_frame);
     ctx.panel(bar, chosen ? theme.selection
                           : (row % 2U == 0U ? theme.row : theme.row_alt));
-    if (held) {
-      ctx.panel(bar, alpha(theme.playhead, 0.22F));
-      ctx.panel(gui::Rect{bar.x, bar.y, 3.0F, bar.height}, theme.playhead);
-    } else if (looping) {
-      ctx.panel(bar, alpha(theme.accent, 0.2F));
-      ctx.panel(gui::Rect{bar.x, bar.y, 3.0F, bar.height}, theme.accent);
-    } else if (upcoming && timeline.cues_armed) {
-      ctx.panel(gui::Rect{bar.x, bar.y, 3.0F, bar.height}, theme.good);
+    {
+      // The state stripe down the row's left edge.
+      gui::Rect stripe = bar;
+      stripe = gui::cut_left(stripe, 3.0F);
+      if (held) {
+        ctx.panel(bar, alpha(theme.playhead, 0.22F));
+        ctx.panel(stripe, theme.playhead);
+      } else if (looping) {
+        ctx.panel(bar, alpha(theme.accent, 0.2F));
+        ctx.panel(stripe, theme.accent);
+      } else if (upcoming && timeline.cues_armed) {
+        ctx.panel(stripe, theme.good);
+      }
     }
     const gui::UiColor text =
         past ? theme.text_muted : theme.text;
 
     // The swatch recolours, the action word cycles, and the x deletes;
     // everything else on the row selects it, and a double-click goes there.
-    const gui::Rect swatch{swatch_x, y + 8.0F, 10.0F, 10.0F};
-    const gui::Rect action{action_x, y + 3.0F, 54.0F, row_height - 6.0F};
-    const gui::Rect remove{list.x + list.width - 26.0F, y + 4.0F, 18.0F,
-                           row_height - 8.0F};
-    const gui::Rect name_cell{name_x, y, name_width, row_height};
-    const gui::Rect note_cell{note_x, y, note_width, row_height};
+    constexpr float swatch_size = 10.0F;
+    const gui::Rect swatch = gui::centered(gui::cell(swatch_column, bar),
+                                           swatch_size, swatch_size);
+    const gui::Rect action =
+        gui::inset(gui::cell(action_column, bar), 0.0F, 3.0F);
+    gui::Rect remove_lane = bar;
+    remove_lane = gui::cut_right(remove_lane, 26.0F);
+    const gui::Rect remove =
+        gui::inset(gui::cut_left(remove_lane, 18.0F), 0.0F, 4.0F);
+    const gui::Rect name_cell = gui::cell(name_column, bar);
+    const gui::Rect note_cell = gui::cell(note_column, bar);
     const gui::Interaction swatch_it =
         ctx.grab(mix(id_, "swatch", marker.id.value()), swatch);
     const gui::Interaction action_it =
@@ -645,10 +637,10 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             ? ctx.grab(mix(id_, "remove", marker.id.value()), remove)
             : gui::Interaction{};
     const bool loop_cue = marker.cue == scene::CueAction::Loop;
-    const gui::Rect wait_cell{wait_x, y + 3.0F, timing_width,
-                              row_height - 6.0F};
-    const gui::Rect fade_cell{fade_x, y + 3.0F, timing_width,
-                              row_height - 6.0F};
+    const gui::Rect wait_cell =
+        gui::inset(gui::cell(wait_column, bar), 0.0F, 3.0F);
+    const gui::Rect fade_cell =
+        gui::inset(gui::cell(fade_column, bar), 0.0F, 3.0F);
     const gui::Interaction wait_it =
         loop_cue && timing_columns
             ? ctx.grab(mix(id_, "wait", marker.id.value()), wait_cell)
@@ -709,17 +701,16 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       click_time_ = now;
     }
 
-    ctx.label(gui::Rect{number_x, y, 36.0F, row_height}, tag(index),
+    ctx.label(gui::cell(number_column, bar), tag(index),
               marker.is_cue() ? text : theme.text_muted);
     ctx.panel(swatch, timeline_marker_color(marker.color));
     if (swatch_it.hovered) {
-      outline(ctx, swatch, theme.text);
+      ctx.outline(swatch, theme.text);
     }
     if (name_node_ == marker.id) {
       const gui::UiId field = mix(id_, "name", marker.id.value());
       static_cast<void>(ctx.text_field(
-          field, gui::Rect{name_x, y + 3.0F, name_width, row_height - 6.0F},
-          name_draft_));
+          field, gui::inset(name_cell, 0.0F, 3.0F), name_draft_));
       if (ctx.focus() != field) {
         if (name_draft_ != marker.name &&
             name_draft_.size() <= scene::max_timeline_marker_name_bytes) {
@@ -736,8 +727,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.label(name_cell, marker.name, text);
     }
     ctx.panel(action, action_it.hovered ? theme.widget_hover : theme.widget);
-    ctx.label(gui::Rect{action.x + 8.0F, action.y, action.width - 10.0F,
-                        action.height},
+    ctx.label(gui::inset(action, gui::Padding{8.0F, 0.0F, 2.0F, 0.0F}),
               action_word(marker.cue),
               marker.cue == scene::CueAction::Hold
                   ? timeline_marker_color(0U)
@@ -749,7 +739,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (upcoming && timeline.playing && timeline.frames_to_next_cue) {
       time = "in " + seconds_text(*timeline.frames_to_next_cue, timeline);
     }
-    ctx.label(gui::Rect{time_x, y, 100.0F, row_height}, time,
+    ctx.label(gui::cell(time_column, bar), time,
               upcoming ? theme.good : text);
 
     if (loop_cue && timing_columns) {
@@ -758,8 +748,7 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     if (note_node_ == marker.id) {
       const gui::UiId field = mix(id_, "note", marker.id.value());
       static_cast<void>(ctx.text_field(
-          field, gui::Rect{note_x, y + 3.0F, note_width, row_height - 6.0F},
-          note_draft_));
+          field, gui::inset(note_cell, 0.0F, 3.0F), note_draft_));
       if (ctx.focus() != field) {
         if (note_draft_ != marker.note &&
             note_draft_.size() <= scene::max_timeline_marker_note_bytes) {
@@ -777,8 +766,8 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
     if (hovered_row || chosen) {
       ctx.panel(remove, remove_it.hovered ? theme.warning : theme.widget);
-      const float cx = remove.x + remove.width * 0.5F;
-      const float cy = remove.y + remove.height * 0.5F;
+      const float cx = remove.center_x();
+      const float cy = remove.center_y();
       ctx.draw_list().add_line(cx - 3.5F, cy - 3.5F, cx + 3.5F, cy + 3.5F,
                                1.5F, theme.text);
       ctx.draw_list().add_line(cx - 3.5F, cy + 3.5F, cx + 3.5F, cy - 3.5F,
@@ -786,30 +775,24 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.tooltip(remove, marker.is_cue() ? "Delete cue" : "Delete marker");
     }
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, static_cast<float>(listed.size()) * row_height);
 
   // --- The chosen Loop's timing, when the columns do not fit.
   if (timing_subject.has_value()) {
     const scene::TimelineMarker &marker = markers[*timing_subject];
-    const gui::Rect strip{bounds.x,
-                          bounds.y + bounds.height - footer_height -
-                              timing_bar_height,
-                          bounds.width, timing_bar_height};
-    ctx.panel(strip, theme.row_alt);
-    float x = strip.x + 8.0F;
+    ctx.panel(timing_strip, theme.row_alt);
+    gui::Rect line = gui::inset(timing_strip, 8.0F, 0.0F);
     const auto caption = [&](std::string_view text) {
-      const float width = ctx.font_width(text) + 6.0F;
-      ctx.label(gui::Rect{x, strip.y, width, strip.height}, text,
+      ctx.label(gui::cut_left(line, ctx.font_width(text) + 6.0F), text,
                 theme.text_muted);
-      x += width;
     };
     caption(tag(*timing_subject) + " WAIT");
-    const gui::Rect wait_cell{x, strip.y + 4.0F, timing_width,
-                              strip.height - 8.0F};
-    x += timing_width + 8.0F;
+    const gui::Rect wait_cell =
+        gui::inset(gui::cut_left(line, timing_width), 0.0F, 4.0F);
+    static_cast<void>(gui::cut_left(line, 8.0F));
     caption("FADE");
-    const gui::Rect fade_cell{x, strip.y + 4.0F, timing_width,
-                              strip.height - 8.0F};
+    const gui::Rect fade_cell =
+        gui::inset(gui::cut_left(line, timing_width), 0.0F, 4.0F);
     const gui::Interaction wait_it =
         ctx.grab(mix(id_, "wait", marker.id.value()), wait_cell);
     const gui::Interaction fade_it =
@@ -819,20 +802,18 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   // --- Footer: creation at the playhead, the one thing here with nothing to
   // drag.
-  const gui::Rect footer{bounds.x, bounds.y + bounds.height - footer_height,
-                         bounds.width, footer_height};
   ctx.panel(footer, theme.header);
   {
-    float x = footer.x + 8.0F;
+    gui::Rect buttons = gui::inset(footer, 8.0F, 5.0F);
     const auto add = [&](std::string_view name, std::string_view label,
                          scene::CueAction cue, core::u8 color) {
       const float width = ctx.font_width(label) + 20.0F;
-      if (x + width > footer.x + footer.width - 8.0F) {
+      if (width > buttons.width) {
         return;
       }
-      if (ctx.button(mix(id_, name),
-                     gui::Rect{x, footer.y + 5.0F, width, footer.height - 10.0F},
-                     label)) {
+      const gui::Rect button = gui::cut_left(buttons, width);
+      static_cast<void>(gui::cut_left(buttons, 4.0F));
+      if (ctx.button(mix(id_, name), button, label)) {
         TimelineMarkerEdit edit{};
         edit.action = TimelineMarkerAction::Create;
         edit.marker.frame = static_cast<core::i64>(timeline.show_frame);
@@ -848,7 +829,6 @@ CuesPanelFrame CuesPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
         frame.marker_edits.push_back(std::move(edit));
       }
-      x += width + 4.0F;
     };
     add("add hold", "+ HOLD CUE", scene::CueAction::Hold, 0U);
     add("add loop", "+ LOOP CUE", scene::CueAction::Loop, 6U);

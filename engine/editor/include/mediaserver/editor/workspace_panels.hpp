@@ -130,7 +130,7 @@ public:
 private:
   gui::UiId id_{};
   std::string search_;
-  float scroll_{};
+  gui::ScrollRegion scroll_;
   // Branches the operator closed. Everything starts open; selecting
   // something inside a closed branch opens it again.
   std::set<doc::NodeId> collapsed_;
@@ -1243,7 +1243,7 @@ private:
   bool program_expanded_{};
   std::set<doc::NodeId> expanded_;
   gui::UiId id_{};
-  float scroll_{};
+  gui::ScrollRegion scroll_;
 };
 
 // Machine-local settings the operator would otherwise pass on the command
@@ -1451,8 +1451,7 @@ private:
   NumberField fields_;
   SceneSettingsTarget target_{SceneSettingsTarget::None};
   doc::NodeId stage_{};
-  float scroll_{};
-  float content_height_{};
+  gui::ScrollRegion scroll_;
   std::array<bool, 10> sections_{{true,false,false,false,false,false,true,false,false,false}};
   std::string bake_destination_{"lighting"};
 };
@@ -1486,6 +1485,7 @@ private:
   scene::Environment environment_draft_{};
   std::optional<scene::LensProfile> lens_draft_;
   NumberField tracking_fields_;
+  gui::ScrollRegion scroll_;
 };
 
 // The Preferences dialog: modal, editor-local, and authoring nothing.

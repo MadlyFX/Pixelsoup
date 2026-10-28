@@ -1,5 +1,8 @@
 #include <mediaserver/editor/masks_panel.hpp>
 
+#include <mediaserver/editor/operator_widgets.hpp>
+#include <mediaserver/gui/rect_cut.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -17,7 +20,9 @@ constexpr float title_height = 25.0F;
 constexpr float tools_height = 28.0F;
 constexpr float row_height = 26.0F;
 constexpr float control_height = 24.0F;
+// Space around and between the strip controls, and a row's text inset.
 constexpr float gap = 3.0F;
+constexpr float text_inset = 7.0F;
 constexpr float maximum_list_height = 130.0F;
 // Matches the Timeline's track headers: the first click selects a row, a
 // second one inside this window opens its name.
@@ -33,37 +38,6 @@ constexpr double rename_click_seconds = 0.35;
   hash ^= index + 0x9e3779b9ULL;
   hash *= 1099511628211ULL;
   return hash;
-}
-
-void border(gui::UiContext &ctx, const gui::Rect &bounds,
-            gui::UiColor color) {
-  auto &draw = ctx.draw_list();
-  draw.add_rect(bounds.x, bounds.y, bounds.width, 1.0F, color);
-  draw.add_rect(bounds.x, bounds.y + bounds.height - 1.0F, bounds.width, 1.0F,
-                color);
-  draw.add_rect(bounds.x, bounds.y, 1.0F, bounds.height, color);
-  draw.add_rect(bounds.x + bounds.width - 1.0F, bounds.y, 1.0F,
-                bounds.height, color);
-}
-
-[[nodiscard]] bool action_button(gui::UiContext &ctx, gui::UiId id,
-                                 const gui::Rect &bounds,
-                                 std::string_view label, bool enabled,
-                                 bool selected = false) {
-  const gui::Interaction interaction =
-      enabled ? ctx.grab(id, bounds) : gui::Interaction{};
-  const gui::UiColor fill = !enabled
-      ? ctx.theme().track
-      : (interaction.held
-             ? ctx.theme().widget_active
-             : (selected ? ctx.theme().selection
-                         : (interaction.hovered ? ctx.theme().widget_hover
-                                                : ctx.theme().widget)));
-  ctx.panel(bounds, fill);
-  border(ctx, bounds, enabled ? ctx.theme().header : ctx.theme().divider);
-  ctx.label(bounds, label, enabled ? ctx.theme().text
-                                  : ctx.theme().text_muted);
-  return enabled && interaction.clicked;
 }
 
 [[nodiscard]] std::string_view kind_label(scene::MaskKind kind) noexcept {
@@ -275,32 +249,22 @@ MasksPanelFrame MasksPanel::draw(
 
   ctx.push_clip(bounds);
   ctx.panel(bounds);
-  const gui::Rect title{bounds.x, bounds.y, bounds.width,
-                        std::min(bounds.height, title_height)};
+  gui::Rect area = bounds;
+  gui::Rect title = gui::cut_top(area, title_height);
   ctx.panel(title, ctx.theme().background);
-  ctx.panel(gui::Rect{title.x, title.y + title.height - 1.0F,
-                      title.width, 1.0F},
-            ctx.theme().divider);
   const std::string_view title_text =
       target.coordinate_space == scene::MaskCoordinateSpace::AuthoredCanvas
           ? "CANVAS SPACE"
           : "SOURCE SPACE";
-  ctx.label(gui::Rect{title.x + 7.0F, title.y,
-                      std::max(title.width - 14.0F, 0.0F), title.height},
-            title_text, ctx.theme().text);
+  ctx.label(gui::inset(title, text_inset, 0.0F), title_text, ctx.theme().text);
+  ctx.panel(gui::cut_bottom(title, 1.0F), ctx.theme().divider);
 
-  const gui::Rect tools{
-      bounds.x, bounds.y + title_height, bounds.width,
-      std::min(tools_height,
-               std::max(bounds.height - title_height, 0.0F))};
+  const gui::Rect tools = gui::cut_top(area, tools_height);
   ctx.panel(tools, ctx.theme().background);
-  const float tool_width = std::max((tools.width - gap * 4.0F) / 3.0F, 0.0F);
+  const gui::Rect tool_strip = gui::inset(tools, gap);
   const bool can_create = authoring_enabled && target.scene && target.target;
   const auto tool_bounds = [&](std::size_t index) noexcept {
-    return gui::Rect{tools.x + gap +
-                         static_cast<float>(index) * (tool_width + gap),
-                     tools.y + 3.0F, tool_width,
-                     std::max(tools.height - 6.0F, 0.0F)};
+    return gui::column(tool_strip, index, 3U, gap);
   };
   const auto create = [&](MaskCreateTool tool) {
     const gui::KeyMods modifiers = current_modifiers(ctx);
@@ -329,31 +293,21 @@ MasksPanelFrame MasksPanel::draw(
   const float detail_reserve = selected != nullptr
       ? (selected->kind == scene::MaskKind::Bezier ? 170.0F : 81.0F)
       : 0.0F;
-  const float below_tools = std::max(
-      bounds.height - title_height - tools_height, 0.0F);
   const float list_height = std::clamp(
-      below_tools - detail_reserve, std::min(row_height * 2.0F, below_tools),
-      std::min(maximum_list_height, below_tools));
-  const gui::Rect list{bounds.x, tools.y + tools.height,
-                       bounds.width, list_height};
-  const float content_height = row_height * static_cast<float>(rows.size());
-  const float maximum_scroll = std::max(content_height - list.height, 0.0F);
+      area.height - detail_reserve, std::min(row_height * 2.0F, area.height),
+      std::min(maximum_list_height, area.height));
+  const gui::Rect list = gui::cut_top(area, list_height);
   const bool pointer_in_list =
       list.contains(ctx.pointer_x(), ctx.pointer_y());
-  if (pointer_in_list) {
-    mask_scroll_ -= ctx.wheel() * row_height * 2.0F;
-  }
-  mask_scroll_ = std::clamp(mask_scroll_, 0.0F, maximum_scroll);
+  const float scroll = scroll_.begin(ctx, list, row_height * 2.0F);
 
-  ctx.push_clip(list);
-  float row_y = list.y - mask_scroll_;
   // A mask dragged up or down the list reorders the stack. Each frame steps one
   // place toward the row under the pointer rather than jumping to an absolute
   // index, so the model keeps normalising order the one way it already does and
   // the whole drag stays one gesture.
   std::size_t hovered_index = rows.size();
   if (pointer_in_list && !rows.empty()) {
-    const float local = ctx.pointer_y() - list.y + mask_scroll_;
+    const float local = ctx.pointer_y() - list.y + scroll;
     if (local >= 0.0F) {
       const auto candidate = static_cast<std::size_t>(local / row_height);
       if (candidate < rows.size()) {
@@ -363,17 +317,21 @@ MasksPanelFrame MasksPanel::draw(
   }
   for (std::size_t index = 0U; index < rows.size(); ++index) {
     const scene::MaskInstance &mask = *rows[index];
-    const gui::Rect row{list.x, row_y, list.width, row_height};
+    const gui::Rect row = gui::list_row(list, index, row_height, scroll);
     const bool is_selected = mask.source == frame.selection.mask;
     ctx.panel(row, is_selected
                        ? ctx.theme().selection
                        : (index % 2U == 0U ? ctx.theme().row
                                           : ctx.theme().row_alt));
     if (mask.source == drag_node_) {
-      ctx.panel(gui::Rect{row.x, row.y, 2.0F, row.height}, ctx.theme().accent);
+      gui::Rect marker = row;
+      ctx.panel(gui::cut_left(marker, 2.0F), ctx.theme().accent);
     }
-    const gui::Rect enabled_bounds{row.x + 3.0F, row.y + 3.0F, 29.0F,
-                                   row.height - 6.0F};
+    // The on/off toggle at the left, DELETE at the right, the mask's name,
+    // kind, combine and any fault between them.
+    gui::Rect controls = gui::inset(row, gap);
+    constexpr float toggle_width = 29.0F;
+    const gui::Rect enabled_bounds = gui::cut_left(controls, toggle_width);
     if (action_button(ctx, mix(id_, "mask.enabled", mask.source.value()),
                       enabled_bounds, mask.enabled ? "ON" : "OFF",
                       authoring_enabled, mask.enabled)) {
@@ -391,31 +349,24 @@ MasksPanelFrame MasksPanel::draw(
     // also means the operator never has to select one row and then verify a
     // distant footer before acting.
     constexpr float delete_width = 52.0F;
-    const gui::Rect delete_bounds{
-        row.x + std::max(row.width - delete_width - 3.0F, 0.0F),
-        row.y + 3.0F, delete_width, row.height - 6.0F};
+    const gui::Rect delete_bounds = gui::cut_right(controls, delete_width);
     if (action_button(ctx, mix(id_, "mask.delete", mask.source.value()),
                       delete_bounds, "DELETE", authoring_enabled)) {
       frame.intent = MaskDeleteIntent{
           target.scene, target.target, mask.source};
     }
-    const gui::Rect body{row.x + 35.0F, row.y,
-                         std::max(row.width - 35.0F - delete_width - 5.0F,
-                                  0.0F),
-                         row.height};
-    const float name_width = std::max(body.width * 0.42F, 0.0F);
-    const gui::Rect name_bounds{body.x + 5.0F, body.y + 2.0F,
-                                std::max(name_width - 8.0F, 0.0F),
-                                std::max(body.height - 4.0F, 0.0F)};
+    const gui::Rect body = gui::inset(
+        row, gui::Padding{gap * 2.0F + toggle_width, 0.0F,
+                          gap + delete_width + 2.0F, 0.0F});
+    gui::Rect columns = body;
+    const gui::Rect name_column = gui::cut_left(columns, body.width * 0.42F);
+    const gui::Rect name_bounds =
+        gui::inset(name_column, gui::Padding{5.0F, 2.0F, 3.0F, 2.0F});
     const bool renaming = rename_node_ == mask.source && authoring_enabled;
     // The name field owns its part of the row while it is open, so a row being
     // renamed is grabbed by the strip right of it - the same bargain the
     // Timeline strikes with a track header.
-    const gui::Rect grab_bounds =
-        renaming ? gui::Rect{body.x + name_width, body.y,
-                             std::max(body.width - name_width, 0.0F),
-                             body.height}
-                 : body;
+    const gui::Rect grab_bounds = renaming ? columns : body;
     const gui::Interaction interaction =
         pointer_in_list
             ? ctx.grab(mix(id_, "mask.row", mask.source.value()), grab_bounds)
@@ -434,16 +385,13 @@ MasksPanelFrame MasksPanel::draw(
       ctx.label(name_bounds, mask.name,
                 is_selected ? ctx.theme().text : ctx.theme().text_muted);
     }
-    ctx.label(gui::Rect{body.x + name_width, body.y, 56.0F, body.height},
-              kind_label(mask.kind), ctx.theme().text_muted);
-    ctx.label(gui::Rect{body.x + name_width + 56.0F, body.y, 38.0F,
-                        body.height},
-              combine_label(mask.combine), ctx.theme().text_muted);
+    ctx.label(gui::cut_left(columns, 56.0F), kind_label(mask.kind),
+              ctx.theme().text_muted);
+    ctx.label(gui::cut_left(columns, 38.0F), combine_label(mask.combine),
+              ctx.theme().text_muted);
     if (const scene::MaskDiagnostic *diagnostic =
             first_diagnostic(mask, diagnostics)) {
-      ctx.label(gui::Rect{body.x + name_width + 94.0F, body.y,
-                          std::max(body.width - name_width - 99.0F, 0.0F),
-                          body.height},
+      ctx.label(gui::inset(columns, gui::Padding{0.0F, 0.0F, 5.0F, 0.0F}),
                 mask_diagnostic_message(diagnostic->kind),
                 ctx.theme().warning);
     }
@@ -479,7 +427,6 @@ MasksPanelFrame MasksPanel::draw(
         click_time_ = now;
       }
     }
-    row_y += row_height;
   }
   if (drag_node_ != doc::NodeId{} && hovered_index < rows.size() &&
       rows[hovered_index]->source != drag_node_) {
@@ -495,50 +442,49 @@ MasksPanelFrame MasksPanel::draw(
           hovered_index < from ? from - 1U : from + 1U};
     }
   }
-  ctx.pop_clip();
+  scroll_.end(ctx, row_height * static_cast<float>(rows.size()));
 
   selected = find_mask(rows, frame.selection.mask);
-  const gui::Rect details{bounds.x, list.y + list.height, bounds.width,
-                          std::max(bounds.y + bounds.height - list.y -
-                                       list.height,
-                                   0.0F)};
+  const gui::Rect details = area;
   ctx.panel(details, ctx.theme().background);
-  ctx.panel(gui::Rect{details.x, details.y, details.width, 1.0F},
-            ctx.theme().divider);
+  gui::Rect rule = details;
+  ctx.panel(gui::cut_top(rule, 1.0F), ctx.theme().divider);
   if (selected == nullptr) {
     ctx.pop_clip();
     return frame;
   }
 
-  float y = details.y + 4.0F;
+  // Rows of controls 3px apart and 3px in from the sides, starting 4px under
+  // the rule.
+  gui::Metrics m = ctx.theme().metrics;
+  m.control = control_height;
+  m.row_gap = gap;
+  m.inset = gap;
+  m.gap = 4.0F;
+  gui::FormLayout form{details, m};
   constexpr std::array combines{
       scene::MaskCombine::Add, scene::MaskCombine::Subtract,
       scene::MaskCombine::Intersect, scene::MaskCombine::Difference};
-  const float toggle_width = 62.0F;
+  constexpr float invert_width = 62.0F;
   // The row's own toggle is the mask's on/off state, so this block carries the
   // controls a row has no room for and never a second copy of one it has.
-  const gui::Rect invert_button{details.x + gap, y, toggle_width,
-                                control_height};
+  gui::Rect combine_strip = form.control();
+  const gui::Rect invert_button = gui::cut_left(combine_strip, invert_width);
+  static_cast<void>(gui::cut_left(combine_strip, gap));
   if (action_button(ctx, mix(id_, "mask.invert"), invert_button, "INVERT",
                     authoring_enabled, selected->invert)) {
     frame.intent = MaskInvertIntent{target.scene, target.target,
                                     selected->source, !selected->invert};
   }
-  const float combine_x = invert_button.x + invert_button.width + gap;
-  const float combine_width = std::max(
-      (details.x + details.width - combine_x - gap * 4.0F) / 4.0F, 0.0F);
   for (std::size_t index = 0U; index < combines.size(); ++index) {
-    const gui::Rect button{
-        combine_x + static_cast<float>(index) * (combine_width + gap), y,
-        combine_width, control_height};
-    if (action_button(ctx, mix(id_, "mask.combine", index), button,
+    if (action_button(ctx, mix(id_, "mask.combine", index),
+                      gui::column(combine_strip, index, combines.size(), gap),
                       combine_label(combines[index]), authoring_enabled,
                       selected->combine == combines[index])) {
       frame.intent = MaskCombineIntent{
           target.scene, target.target, selected->source, combines[index]};
     }
   }
-  y += control_height + gap;
 
   const auto draw_number = [&](gui::UiId field_id, const gui::Rect &field_bounds,
                                std::string_view label, double value,
@@ -554,8 +500,6 @@ MasksPanelFrame MasksPanel::draw(
     }
     return authoring_enabled && changed && std::isfinite(out);
   };
-  const float scalar_width =
-      std::max((details.width - gap * 4.0F) / 3.0F, 0.0F);
   constexpr std::array scalar_properties{
       MaskScalarProperty::Opacity, MaskScalarProperty::FeatherCanvasPx,
       MaskScalarProperty::ExpansionCanvasPx};
@@ -565,10 +509,10 @@ MasksPanelFrame MasksPanel::draw(
   constexpr std::array<std::string_view, 3U> scalar_labels{
       "OPACITY", "FEATHER", "EXPAND"};
   constexpr std::array<double, 3U> scalar_speeds{0.005, 0.25, 0.25};
+  const gui::Rect scalar_strip = form.control();
   for (std::size_t index = 0U; index < scalar_properties.size(); ++index) {
-    const gui::Rect field{
-        details.x + gap + static_cast<float>(index) * (scalar_width + gap), y,
-        scalar_width, control_height};
+    const gui::Rect field =
+        gui::column(scalar_strip, index, scalar_properties.size(), gap);
     double value{};
     NumberFieldEdit edit{};
     if (draw_number(mix(id_, "mask.scalar", index), field,
@@ -592,7 +536,6 @@ MasksPanelFrame MasksPanel::draw(
           scalar_properties[index], canonical, edit};
     }
   }
-  y += control_height + gap;
 
   if (selected->kind != scene::MaskKind::Bezier) {
     constexpr std::array components{
@@ -602,11 +545,10 @@ MasksPanelFrame MasksPanel::draw(
     const std::array values{selected->bounds.left, selected->bounds.top,
                             selected->bounds.right,
                             selected->bounds.bottom};
-    const float width = std::max((details.width - gap * 5.0F) / 4.0F, 0.0F);
+    const gui::Rect bounds_strip = form.control();
     for (std::size_t index = 0U; index < components.size(); ++index) {
-      const gui::Rect field{
-          details.x + gap + static_cast<float>(index) * (width + gap), y,
-          width, control_height};
+      const gui::Rect field =
+          gui::column(bounds_strip, index, components.size(), gap);
       double value{};
       NumberFieldEdit edit{};
       if (draw_number(mix(id_, "mask.bounds", index), field, labels[index],
@@ -634,7 +576,6 @@ MasksPanelFrame MasksPanel::draw(
             components[index], edit};
       }
     }
-    y += control_height + gap;
   } else {
     // A point is picked by clicking it on the Stage, which is where it is.
     // This row states which one that left selected and how many the path has;
@@ -662,14 +603,11 @@ MasksPanelFrame MasksPanel::draw(
                             selected->points.size())
             : std::snprintf(points_text.data(), points_text.size(),
                             "%zu POINTS", selected->points.size());
-    ctx.label(gui::Rect{details.x + gap, y,
-                        std::max(details.width - gap * 2.0F, 0.0F),
-                        control_height},
+    ctx.label(form.control(),
               std::string_view{points_text.data(),
                                static_cast<std::size_t>(
                                    std::max(points_length, 0))},
               has_selected_point ? ctx.theme().text : ctx.theme().text_muted);
-    y += control_height + gap;
 
     const scene::MaskPoint *point = frame.selection.point.has_value()
         ? find_point(*selected, *frame.selection.point)
@@ -683,14 +621,13 @@ MasksPanelFrame MasksPanel::draw(
           "X", "Y", "IN X", "IN Y", "OUT X", "OUT Y"};
       const std::array values{point->x, point->y, point->in_x, point->in_y,
                               point->out_x, point->out_y};
-      const float width = std::max((details.width - gap * 3.0F) / 2.0F, 0.0F);
+      // Two to a row: the point, then its in and out handles.
+      gui::Rect pair_strip{};
       for (std::size_t index = 0U; index < components.size(); ++index) {
-        const std::size_t column = index % 2U;
-        const std::size_t row_index = index / 2U;
-        const gui::Rect field{
-            details.x + gap + static_cast<float>(column) * (width + gap),
-            y + static_cast<float>(row_index) * (control_height + gap), width,
-            control_height};
+        if (index % 2U == 0U) {
+          pair_strip = form.control();
+        }
+        const gui::Rect field = gui::column(pair_strip, index % 2U, 2U, gap);
         double value{};
         NumberFieldEdit edit{};
         if (draw_number(mix(id_, "mask.point-value", index), field,
@@ -724,14 +661,11 @@ MasksPanelFrame MasksPanel::draw(
               std::move(patch), components[index], edit};
         }
       }
-      y += 3.0F * (control_height + gap);
     }
 
-    const float half = std::max((details.width - gap * 3.0F) * 0.5F, 0.0F);
-    const gui::Rect insert_button{details.x + gap, y, half, control_height};
-    const gui::Rect delete_point_button{insert_button.x + half + gap, y, half,
-                                        control_height};
-    if (action_button(ctx, mix(id_, "mask.point.insert"), insert_button,
+    const gui::Rect point_actions = form.control();
+    if (action_button(ctx, mix(id_, "mask.point.insert"),
+                      gui::column(point_actions, 0U, 2U, gap),
                       "INSERT POINT", authoring_enabled &&
                           selected->points.size() <
                               scene::max_mask_points_per_mask)) {
@@ -743,7 +677,8 @@ MasksPanelFrame MasksPanel::draw(
           target.scene, target.target, selected->source, insertion_index,
           insertion_geometry(*selected, frame.selection.point)};
     }
-    if (action_button(ctx, mix(id_, "mask.point.delete"), delete_point_button,
+    if (action_button(ctx, mix(id_, "mask.point.delete"),
+                      gui::column(point_actions, 1U, 2U, gap),
                       "DELETE POINT",
                       authoring_enabled && frame.selection.point.has_value() &&
                           selected->points.size() > 3U)) {
@@ -751,7 +686,6 @@ MasksPanelFrame MasksPanel::draw(
           target.scene, target.target, selected->source,
           *frame.selection.point};
     }
-    y += control_height + gap;
   }
 
   ctx.pop_clip();

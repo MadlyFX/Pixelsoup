@@ -292,6 +292,9 @@ public:
     // do not clip on their own; push a clip rect for that.
     void panel(const Rect& bounds);
     void panel(const Rect& bounds, UiColor color);
+    // A border of `thickness` drawn inside `bounds`: top, bottom, left, right.
+    // Empty bounds draw nothing.
+    void outline(const Rect& bounds, UiColor color, float thickness = 1.0F);
 
     // Left-aligned, vertically centred text inside `bounds`.
     void label(const Rect& bounds, std::string_view text);
@@ -299,6 +302,9 @@ public:
     // The same, at a baked text size from text_size_at_most().
     void label(const Rect& bounds, std::string_view text, UiColor color,
                float size);
+    // Centred horizontally as well. Text wider than `bounds` is shortened
+    // from the left edge, as label() shortens it.
+    void label_centered(const Rect& bounds, std::string_view text, UiColor color);
     // Hover details retain long paths and diagnostics without occupying rows.
     void tooltip(const Rect& bounds, std::string_view text);
 
