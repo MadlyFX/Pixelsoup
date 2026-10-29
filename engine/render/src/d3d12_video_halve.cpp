@@ -72,7 +72,7 @@ class SurfacePool final : public std::enable_shared_from_this<SurfacePool> {
     explicit SurfacePool(ComPtr<ID3D12Device> device)
         : device_(std::move(device)) {}
 
-    [[nodiscard]] std::optional<HalvedVideoSurface>
+    [[nodiscard]] std::optional<VideoSurfaceCopy>
     acquire(UINT width, UINT height, DXGI_FORMAT format) noexcept {
         ComPtr<ID3D12Resource> surface;
         {
@@ -103,7 +103,7 @@ class SurfacePool final : public std::enable_shared_from_this<SurfacePool> {
         }
         ID3D12Resource *const raw = surface.Detach();
         try {
-            HalvedVideoSurface result{};
+            VideoSurfaceCopy result{};
             result.resource = raw;
             result.width = width;
             result.height = height;
@@ -232,7 +232,7 @@ class Halver final {
         return device_.Get();
     }
 
-    [[nodiscard]] std::optional<HalvedVideoSurface>
+    [[nodiscard]] std::optional<VideoSurfaceCopy>
     run(ID3D12Resource *source, UINT width, UINT height,
         bool ten_bit) noexcept {
         // Both the half-size surface and its 4:2:0 chroma must be whole.
@@ -251,6 +251,32 @@ class Halver final {
             return_context(std::move(context));
         }
         return halved;
+    }
+
+    [[nodiscard]] std::optional<VideoSurfaceCopy>
+    crop(ID3D12Resource *source, UINT width, UINT height,
+         bool ten_bit) noexcept {
+        // The picture and its 4:2:0 chroma must be whole, and lie inside the
+        // surface it is cut from.
+        if (source == nullptr || width < 2U || height < 2U ||
+            width % 2U != 0U || height % 2U != 0U) {
+            return std::nullopt;
+        }
+        const D3D12_RESOURCE_DESC described = source->GetDesc();
+        if (described.Width < width || described.Height < height ||
+            described.Format != plane_formats(ten_bit).surface) {
+            return std::nullopt;
+        }
+        std::unique_ptr<Context> context = acquire_context();
+        if (context == nullptr) {
+            return std::nullopt;
+        }
+        auto cropped =
+            record_crop_and_wait(*context, source, width, height, ten_bit);
+        if (cropped.has_value()) {
+            return_context(std::move(context));
+        }
+        return cropped;
     }
 
   private:
@@ -308,7 +334,7 @@ class Halver final {
         }
     }
 
-    [[nodiscard]] std::optional<HalvedVideoSurface>
+    [[nodiscard]] std::optional<VideoSurfaceCopy>
     record_and_wait(Context &context, ID3D12Resource *source, UINT width,
                     UINT height, bool ten_bit) noexcept {
         const PlaneFormats formats = plane_formats(ten_bit);
@@ -446,23 +472,77 @@ class Halver final {
                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
         list.ResourceBarrier(static_cast<UINT>(out_of_copy.size()),
                              out_of_copy.data());
-        if (FAILED(list.Close())) {
+        if (!submit_and_wait(context)) {
             return std::nullopt;
+        }
+        return surface;
+    }
+
+    [[nodiscard]] std::optional<VideoSurfaceCopy>
+    record_crop_and_wait(Context &context, ID3D12Resource *source, UINT width,
+                         UINT height, bool ten_bit) noexcept {
+        auto surface =
+            pool_->acquire(width, height, plane_formats(ten_bit).surface);
+        if (!surface.has_value()) {
+            return std::nullopt;
+        }
+        if (FAILED(context.allocator->Reset()) ||
+            FAILED(context.list->Reset(context.allocator.Get(), nullptr))) {
+            return std::nullopt;
+        }
+        ID3D12GraphicsCommandList &list = *context.list.Get();
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = surface->resource;
+        barrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        list.ResourceBarrier(1U, &barrier);
+        // The source is read through implicit promotion to COPY_SOURCE and
+        // decays back to COMMON, where the decoder can write it again.
+        const auto copy_plane = [&](UINT subresource, UINT plane_width,
+                                    UINT plane_height) {
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = surface->resource;
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.SubresourceIndex = subresource;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = source;
+            from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            from.SubresourceIndex = subresource;
+            const D3D12_BOX picture{0U, 0U, 0U, plane_width, plane_height, 1U};
+            list.CopyTextureRegion(&destination, 0U, 0U, 0U, &from, &picture);
+        };
+        copy_plane(0U, width, height);
+        copy_plane(1U, width / 2U, height / 2U);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+        list.ResourceBarrier(1U, &barrier);
+        if (!submit_and_wait(context)) {
+            return std::nullopt;
+        }
+        return surface;
+    }
+
+    [[nodiscard]] static bool submit_and_wait(Context &context) noexcept {
+        if (FAILED(context.list->Close())) {
+            return false;
         }
         ID3D12CommandList *const lists[] = {context.list.Get()};
         context.queue->ExecuteCommandLists(1U, lists);
         const UINT64 target = ++context.fence_value;
         if (FAILED(context.queue->Signal(context.fence.Get(), target))) {
-            return std::nullopt;
+            return false;
         }
         if (context.fence->GetCompletedValue() < target) {
             if (FAILED(context.fence->SetEventOnCompletion(target,
                                                            context.event))) {
-                return std::nullopt;
+                return false;
             }
             WaitForSingleObject(context.event, INFINITE);
         }
-        return surface;
+        return true;
     }
 
     ComPtr<ID3D12Device> device_;
@@ -495,7 +575,7 @@ class Halver final {
 
 } // namespace
 
-std::optional<HalvedVideoSurface> halve_video_surface(
+std::optional<VideoSurfaceCopy> halve_video_surface(
     ID3D12Device *device, ID3D12Resource *source, core::u32 width,
     core::u32 height, bool ten_bit) noexcept {
     if (device == nullptr) {
@@ -511,9 +591,30 @@ std::optional<HalvedVideoSurface> halve_video_surface(
     }
 }
 
+std::optional<VideoSurfaceCopy> crop_video_surface(
+    ID3D12Device *device, ID3D12Resource *source, core::u32 width,
+    core::u32 height, bool ten_bit) noexcept {
+    if (device == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        const auto halver = halver_for(device);
+        return halver == nullptr
+            ? std::nullopt
+            : halver->crop(source, width, height, ten_bit);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 #else
 
-std::optional<HalvedVideoSurface> halve_video_surface(
+std::optional<VideoSurfaceCopy> halve_video_surface(
+    ID3D12Device *, ID3D12Resource *, core::u32, core::u32, bool) noexcept {
+    return std::nullopt;
+}
+
+std::optional<VideoSurfaceCopy> crop_video_surface(
     ID3D12Device *, ID3D12Resource *, core::u32, core::u32, bool) noexcept {
     return std::nullopt;
 }

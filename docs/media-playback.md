@@ -165,9 +165,6 @@ video-plane path per source when any of them is not true:
 - the process renders scenes on one device. A decoded surface belongs to the
   device that made it, so a second scene device retires the path rather than
   handing a surface to the wrong one;
-- the decoder's surface is exactly the picture size. A shader samples a whole
-  mip in normalized coordinates and no view can crop one, so a surface padded
-  out to a macroblock grid would stretch the picture;
 - the source resolves to Rec.709;
 - the surface is NV12 or P010. Both depths are carried: an eight-bit surface
   is read as R8/Rg8 plane views and a ten-bit one as R16/Rg16, and the RHI
@@ -178,6 +175,19 @@ video-plane path per source when any of them is not true:
 Such a frame is held until the renderer is finished with it: releasing it
 would return the surface to the decoder's pool while a submitted command list
 is still reading it.
+
+HEVC and AV1 surfaces are padded to 128 pixels, as the DXVA specification asks
+and as FFmpeg's own D3D11VA path already does. FFmpeg 7.1's D3D12VA path
+allocates them at the picture size instead, and a picture whose height is not
+a whole number of coding blocks - 2160 is not - is then decoded past the end
+of its surface: on an RTX 3090 the driver removes the device, which is the
+renderer's device too. A shader samples a whole mip in normalized
+coordinates and no view can crop one, so a padded surface cannot be sampled
+where it lies; its picture is copied on the device into a surface of exactly
+its size (`crop_video_surface` in `engine/render/src/d3d12_video_halve.cpp`)
+and the decoder gets its own surface back at once. A half-resolution clip
+halves straight from the padded surface instead. H.264 surfaces are already
+the picture size and are still sampled in place.
 
 ## A clip shown smaller than its source
 
