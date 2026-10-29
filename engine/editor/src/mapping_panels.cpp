@@ -5,7 +5,9 @@
 #include <mediaserver/gui/shapes.hpp>
 
 #include <mediaserver/core/output_limits.hpp>
+#include <mediaserver/editor/hardware_sprites.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <algorithm>
 #include <array>
@@ -29,8 +31,8 @@ namespace topology = mediaserver::topology;
 
 constexpr float title_height = 26.0F;
 constexpr float palette_header_height = 28.0F;
-constexpr float palette_row_height = 42.0F;
-constexpr float palette_row_step = 47.0F;
+constexpr float palette_row_height = 46.0F;
+constexpr float palette_row_step = 50.0F;
 constexpr float device_width = 160.0F;
 constexpr float device_height = 56.0F;
 constexpr float details_label_width = 72.0F;
@@ -50,12 +52,44 @@ constexpr float feed_surface_row_height = 28.0F;
 constexpr float feed_surface_row_step = 31.0F;
 constexpr float feed_details_label_height = 16.0F;
 
-constexpr std::array<topology::HardwareDeviceKind, 4U> device_kinds{{
-    topology::HardwareDeviceKind::RenderServer,
-    topology::HardwareDeviceKind::OperatorMachine,
-    topology::HardwareDeviceKind::LedProcessor,
-    topology::HardwareDeviceKind::LedWall,
+// What the palette offers to drag onto the map. A NovaStar processor is an
+// LED Processor that arrives already speaking its protocol.
+struct PaletteEntry final {
+  topology::HardwareDeviceKind kind{};
+  topology::HardwareProcessorProtocol protocol{};
+  std::string_view name;
+  std::string_view blurb;
+};
+
+constexpr std::array<PaletteEntry, 5U> palette_entries{{
+    {topology::HardwareDeviceKind::RenderServer,
+     topology::HardwareProcessorProtocol::Generic, "Render server",
+     "Runs a render node"},
+    {topology::HardwareDeviceKind::OperatorMachine,
+     topology::HardwareProcessorProtocol::Generic, "Operator machine",
+     "Drives the show"},
+    {topology::HardwareDeviceKind::LedProcessor,
+     topology::HardwareProcessorProtocol::Generic, "LED processor",
+     "Any brand, unmonitored"},
+    {topology::HardwareDeviceKind::LedProcessor,
+     topology::HardwareProcessorProtocol::NovastarCoex, "NovaStar processor",
+     "COEX, read over the network"},
+    {topology::HardwareDeviceKind::LedWall,
+     topology::HardwareProcessorProtocol::Generic, "LED wall",
+     "Fed by a processor"},
 }};
+
+[[nodiscard]] std::size_t
+palette_index(topology::HardwareDeviceKind kind,
+              topology::HardwareProcessorProtocol protocol) noexcept {
+  for (std::size_t index = 0U; index < palette_entries.size(); ++index) {
+    if (palette_entries[index].kind == kind &&
+        palette_entries[index].protocol == protocol) {
+      return index;
+    }
+  }
+  return 0U;
+}
 
 enum class PortTargetState : core::u8 {
   None,
@@ -75,6 +109,8 @@ struct PresentedHardwarePort final {
   topology::HardwarePort port{};
   const topology::HardwareVideoOutput *output{};
   RuntimePortState runtime_state{RuntimePortState::Unknown};
+  // A processor input as the processor reported it.
+  const topology::HardwareProcessorInput *input{};
 };
 
 struct HardwareDevicePresentation final {
@@ -86,6 +122,8 @@ struct HardwareDevicePresentation final {
   core::u8 video_port_count{};
   core::u8 active_video_output_count{};
   const topology::HardwareRuntimeNode *runtime{};
+  // What a monitored LED processor last reported.
+  const topology::HardwareProcessorNode *processor{};
   // A Render Server no cable touches: kept on the map, not in the show.
   bool parked{};
 
@@ -167,6 +205,68 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
       ++presentation.video_port_count;
     }
   };
+
+  if (device.kind == topology::HardwareDeviceKind::LedProcessor) {
+    // LED OUT, then every input worth showing in number order: input one,
+    // inputs a cable reaches, and inputs the processor reports, named as
+    // the processor names them.
+    const topology::HardwareProcessorNode *const observed =
+        runtime_snapshot.processor(device.node);
+    presentation.processor = observed;
+    if (const topology::HardwarePort *const out = topology::find_port(
+            device.kind, topology::processor_led_output_port)) {
+      append(*out, nullptr, RuntimePortState::Unknown);
+    }
+    std::array<bool,
+               static_cast<std::size_t>(topology::max_processor_video_inputs) +
+                   1U>
+        visible{};
+    visible[1U] = true;
+    for (const topology::HardwareLink &link : map.links) {
+      if (link.to.device == device.node) {
+        visible[topology::processor_input_number(link.to.port)] = true;
+      }
+    }
+    const bool reporting =
+        observed != nullptr && !observed->stale &&
+        observed->reachability == topology::HardwareRuntimeReachability::Online;
+    if (observed != nullptr) {
+      for (const topology::HardwareProcessorInput &input : observed->inputs) {
+        if (input.number >= 1U &&
+            input.number <= topology::max_processor_video_inputs) {
+          visible[input.number] = true;
+        }
+      }
+    }
+    for (core::u8 number = 1U; number <= topology::max_processor_video_inputs;
+         ++number) {
+      if (!visible[number]) {
+        continue;
+      }
+      const topology::HardwarePort *const description = topology::find_port(
+          device.kind, topology::processor_input_port(number));
+      if (description == nullptr) {
+        continue;
+      }
+      topology::HardwarePort shown = *description;
+      const topology::HardwareProcessorInput *const reported =
+          observed != nullptr ? observed->input(number) : nullptr;
+      if (reported != nullptr && !reported->name.empty()) {
+        shown.name = reported->name;
+      }
+      const RuntimePortState state =
+          reported != nullptr
+              ? (reported->signal ? RuntimePortState::Active
+                                  : RuntimePortState::Unknown)
+              : (reporting ? RuntimePortState::Missing
+                           : RuntimePortState::Unknown);
+      append(shown, nullptr, state);
+      if (presentation.port_count != 0U) {
+        presentation.ports[presentation.port_count - 1U].input = reported;
+      }
+    }
+    return presentation;
+  }
 
   if (device.kind != topology::HardwareDeviceKind::RenderServer) {
     for (const topology::HardwarePort &port :
@@ -341,7 +441,7 @@ void title(gui::UiContext &ctx, const gui::Rect &bounds, std::string_view name,
   if (bounds.width <= 0.0F) {
     return 0.0F;
   }
-  const float preferred = std::clamp(bounds.width * 0.22F, 150.0F, 190.0F);
+  const float preferred = std::clamp(bounds.width * 0.22F, 150.0F, 210.0F);
   return std::min(preferred, bounds.width * 0.46F);
 }
 
@@ -349,18 +449,8 @@ void title(gui::UiContext &ctx, const gui::Rect &bounds, std::string_view name,
   if (bounds.width < 720.0F) {
     return 0.0F;
   }
-  return std::min(std::clamp(bounds.width * 0.24F, 205.0F, 250.0F),
+  return std::min(std::clamp(bounds.width * 0.24F, 205.0F, 320.0F),
                   bounds.width * 0.30F);
-}
-
-[[nodiscard]] std::size_t
-kind_index(topology::HardwareDeviceKind kind) noexcept {
-  for (std::size_t index = 0U; index < device_kinds.size(); ++index) {
-    if (device_kinds[index] == kind) {
-      return index;
-    }
-  }
-  return 0U;
 }
 
 // The palette's settings rows: 23px rows that touch, a 77px label column,
@@ -406,7 +496,7 @@ struct PaletteLayout final {
   layout.header = gui::inset(gui::cut_top(rest, palette_header_height), 9.0F,
                              0.0F);
   layout.cards = gui::inset(
-      gui::cut_top(rest, static_cast<float>(device_kinds.size()) *
+      gui::cut_top(rest, static_cast<float>(palette_entries.size()) *
                              palette_row_step),
       7.0F, 0.0F);
   // Rules run 2px wider than the rows on each side.
@@ -486,46 +576,72 @@ void draw_device_icon(gui::UiContext &ctx, topology::HardwareDeviceKind kind,
   draw.add_rect(x + 3.0F, y + 7.0F, 12.0F, 2.0F, alpha(color, 0.65F));
 }
 
-void draw_hardware_grid(gui::UiContext &ctx,
-                        const IsometricProjection &projection) {
-  auto &draw = ctx.draw_list();
-  const gui::UiColor faint = alpha(ctx.theme().widget, 0.42F);
-  const gui::UiColor major = alpha(ctx.theme().widget_hover, 0.60F);
-  for (core::i32 row = -9; row <= 9; ++row) {
-    const IsoPoint a = project_isometric(projection, -9, row);
-    const IsoPoint b = project_isometric(projection, 9, row);
-    draw.add_line(a.x, a.y, b.x, b.y, row == 0 ? 1.2F : 0.7F,
-                  row == 0 ? major : faint);
+// The sprite a device is drawn with.
+[[nodiscard]] HardwareSprite
+sprite_for(const topology::HardwareDevice &device) noexcept {
+  switch (device.kind) {
+  case topology::HardwareDeviceKind::RenderServer:
+    return HardwareSprite::RenderServer;
+  case topology::HardwareDeviceKind::OperatorMachine:
+    return HardwareSprite::OperatorMachine;
+  case topology::HardwareDeviceKind::LedProcessor:
+    return device.protocol == topology::HardwareProcessorProtocol::NovastarCoex
+               ? HardwareSprite::ProcessorNovastar
+               : HardwareSprite::Processor;
+  case topology::HardwareDeviceKind::LedWall:
+    return HardwareSprite::LedWall;
   }
-  for (core::i32 column = -9; column <= 9; ++column) {
-    const IsoPoint a = project_isometric(projection, column, -9);
-    const IsoPoint b = project_isometric(projection, column, 9);
-    draw.add_line(a.x, a.y, b.x, b.y, column == 0 ? 1.2F : 0.7F,
-                  column == 0 ? major : faint);
-  }
+  return HardwareSprite::RenderServer;
 }
 
-[[nodiscard]] float presented_device_height(
-    const topology::HardwareDevice &device,
-    const HardwareDevicePresentation &presentation) noexcept {
-  if (device.kind != topology::HardwareDeviceKind::RenderServer ||
-      presentation.video_port_count <= 1U) {
-    return device_height;
-  }
-  return device_height +
-         static_cast<float>(presentation.video_port_count - 1U) *
-             hardware_port_row_step;
+// Screen units per sprite pixel. A map cell is 32 sprite pixels across, so
+// the pixel art keeps its proportions to the floor at any zoom.
+[[nodiscard]] float art_pixel(const IsometricProjection &projection) noexcept {
+  return projection.tile_width / 32.0F;
 }
 
-[[nodiscard]] gui::Rect presented_device_bounds(
-    const IsometricProjection &projection,
-    const topology::HardwareDevice &device,
-    const HardwareDevicePresentation &presentation) noexcept {
-  const IsoPoint point =
+[[nodiscard]] IsoPoint project_point(const IsometricProjection &projection,
+                                     float x, float y) noexcept {
+  return IsoPoint{projection.origin_x + (x - y) * projection.tile_width * 0.5F,
+                  projection.origin_y + (x + y) * projection.tile_height * 0.5F};
+}
+
+// Where a device's sprite is drawn: its ground anchor on the device's cell.
+[[nodiscard]] gui::Rect
+sprite_bounds(const IsometricProjection &projection,
+              const topology::HardwareDevice &device) noexcept {
+  const HardwareSpriteFrame &frame = hardware_sprite_frame(sprite_for(device));
+  const float px = art_pixel(projection);
+  const IsoPoint ground =
       project_isometric(projection, device.grid_x, device.grid_y);
-  return gui::Rect{point.x - device_width * 0.5F,
-                   point.y - device_height * 0.60F, device_width,
-                   presented_device_height(device, presentation)};
+  return gui::Rect{ground.x - static_cast<float>(frame.anchor_x) * px,
+                   ground.y - static_cast<float>(frame.anchor_y) * px,
+                   static_cast<float>(frame.width) * px,
+                   static_cast<float>(frame.height) * px};
+}
+
+// Ports run down a column on the face they plug into, this many sprite
+// pixels apart, the first this far below the column's top.
+constexpr float port_step_pixels = 7.5F;
+constexpr float port_inset_pixels = 2.0F;
+
+// How many ports of `direction` come before port `index` in the card.
+[[nodiscard]] std::size_t
+port_ordinal(const HardwareDevicePresentation &presentation, core::u8 index,
+             topology::HardwarePortDirection direction) noexcept {
+  std::size_t ordinal{};
+  for (std::size_t position = 0U; position < presentation.port_count;
+       ++position) {
+    const topology::HardwarePort &port = presentation.ports[position].port;
+    if (port.direction != direction) {
+      continue;
+    }
+    if (port.index == index) {
+      return ordinal;
+    }
+    ++ordinal;
+  }
+  return ordinal;
 }
 
 [[nodiscard]] IsoPoint
@@ -533,29 +649,94 @@ presented_port_position(const IsometricProjection &projection,
                         const topology::HardwareDevice &device,
                         const HardwareDevicePresentation &presentation,
                         core::u8 port_index) noexcept {
-  const gui::Rect bounds =
-      presented_device_bounds(projection, device, presentation);
+  const gui::Rect sprite = sprite_bounds(projection, device);
   const PresentedHardwarePort *const shown = presentation.find(port_index);
   const topology::HardwarePort *const description =
       shown != nullptr ? &shown->port
                        : topology::find_port(device.kind, port_index);
   if (description == nullptr) {
-    return IsoPoint{bounds.x + bounds.width * 0.5F,
-                    bounds.y + device_height - 13.0F};
+    return IsoPoint{sprite.x + sprite.width * 0.5F,
+                    sprite.y + sprite.height * 0.5F};
   }
+  const HardwareSpriteFrame &frame = hardware_sprite_frame(sprite_for(device));
+  const float px = art_pixel(projection);
+  const bool input =
+      description->direction == topology::HardwarePortDirection::Input;
+  const HardwareSpriteColumn &column = input ? frame.inputs : frame.outputs;
+  const auto ordinal = static_cast<float>(
+      port_ordinal(presentation, port_index, description->direction));
+  // A pixel outside the face, so a socket reads as plugged into its edge.
   const float x =
-      description->direction == topology::HardwarePortDirection::Input
-          ? bounds.x
-          : bounds.right();
-  float y = bounds.y + device_height - 13.0F;
-  if (device.kind == topology::HardwareDeviceKind::RenderServer &&
-      description->signal == topology::HardwareSignal::Video &&
-      description->direction == topology::HardwarePortDirection::Output) {
-    y += static_cast<float>(presentation.video_ordinal(port_index)) *
-         hardware_port_row_step;
-  }
+      sprite.x + (static_cast<float>(column.x) + (input ? -1.0F : 1.0F)) * px;
+  const float y = sprite.y +
+                  (static_cast<float>(column.top) + port_inset_pixels) * px +
+                  ordinal * port_step_pixels * px;
   return IsoPoint{x, y};
 }
+
+// The sprite, and below it any ports a busy machine runs on past its face.
+[[nodiscard]] gui::Rect presented_device_bounds(
+    const IsometricProjection &projection,
+    const topology::HardwareDevice &device,
+    const HardwareDevicePresentation &presentation) noexcept {
+  gui::Rect bounds = sprite_bounds(projection, device);
+  float lowest = bounds.bottom();
+  for (std::size_t position = 0U; position < presentation.port_count;
+       ++position) {
+    const IsoPoint port = presented_port_position(
+        projection, device, presentation, presentation.ports[position].port.index);
+    lowest = std::max(lowest, port.y + port_radius + 2.0F);
+  }
+  bounds.height = lowest - bounds.y;
+  return bounds;
+}
+
+// The ground just in front of a device, where its cables reach the floor.
+[[nodiscard]] float cable_ground(const IsometricProjection &projection,
+                                 const topology::HardwareDevice &device) noexcept {
+  return project_isometric(projection, device.grid_x, device.grid_y).y +
+         4.0F * art_pixel(projection);
+}
+
+// A cable as it lies on the stage: out of its socket, down to the floor,
+// along the two grid axes, and up into the input it plugs into.
+struct CableRoute final {
+  std::array<IsoPoint, 7U> points{};
+};
+
+// Each port's cable keeps a lane of its own - out a little further and down
+// a little nearer for each port above it - so cables leaving one machine
+// together never lie on top of one another.
+[[nodiscard]] CableRoute
+cable_route(const IsometricProjection &projection, IsoPoint from,
+            float from_ground, std::size_t from_lane,
+            const gui::Rect &from_device, IsoPoint to, float to_ground,
+            std::size_t to_lane, const gui::Rect &to_device) noexcept {
+  const float px = art_pixel(projection);
+  const float out_lane = 3.0F * static_cast<float>(from_lane) * px;
+  const float in_lane = 3.0F * static_cast<float>(to_lane) * px;
+  const IsoPoint out{from.x + 3.0F * px + out_lane, from.y};
+  const IsoPoint down{out.x, std::max(from_ground + out_lane * 0.5F, from.y)};
+  const IsoPoint in{to.x - 3.0F * px - in_lane, to.y};
+  const IsoPoint up{in.x, std::max(to_ground + in_lane * 0.5F, to.y)};
+  // Along grid x (2, 1) and then grid y (-2, 1), or the other way about:
+  // whichever turns clear of both devices, so the turn - where a cable is
+  // picked and its warning drawn - is never hidden behind one.
+  const float dx = up.x - down.x;
+  const float dy = up.y - down.y;
+  const float along_x = (dx * 0.5F + dy) * 0.5F;
+  const float along_y = (dy - dx * 0.5F) * 0.5F;
+  const IsoPoint x_first{down.x + 2.0F * along_x, down.y + along_x};
+  const IsoPoint y_first{down.x - 2.0F * along_y, down.y + along_y};
+  const auto covered = [&](const IsoPoint &point) {
+    return from_device.contains(point.x, point.y) ||
+           to_device.contains(point.x, point.y);
+  };
+  const IsoPoint corner =
+      covered(x_first) && !covered(y_first) ? y_first : x_first;
+  return CableRoute{{from, out, down, corner, up, in, to}};
+}
+
 
 [[nodiscard]] std::string
 runtime_output_status(const HardwareDevicePresentation &presentation) {
@@ -669,6 +850,89 @@ runtime_status_color(const gui::Theme &theme,
              : theme.warning;
 }
 
+// How bright sprites are drawn: as painted by day, dimmed with the night
+// theme's text so the map never outshines the wall.
+[[nodiscard]] gui::UiColor sprite_tint(const gui::Theme &theme,
+                                       float opacity = 1.0F) noexcept {
+  const float level = std::clamp(theme.text.g / 0.89F, 0.35F, 1.0F);
+  return gui::UiColor{level, level, level, opacity};
+}
+
+// What a processor card says about itself, and its light.
+[[nodiscard]] std::string
+processor_status_text(const topology::HardwareDevice &device,
+                      const topology::HardwareProcessorNode *observed) {
+  if (device.protocol == topology::HardwareProcessorProtocol::Generic) {
+    return "Generic, not monitored";
+  }
+  if (device.address.empty()) {
+    return "Set its IP address to monitor it";
+  }
+  if (observed == nullptr ||
+      observed->reachability == topology::HardwareRuntimeReachability::Probing) {
+    return "Checking " + device.address;
+  }
+  const std::string who = !observed->model.empty()
+                              ? observed->model
+                              : std::string{"NovaStar"};
+  switch (observed->reachability) {
+  case topology::HardwareRuntimeReachability::Online:
+    return "Online, " + who;
+  case topology::HardwareRuntimeReachability::ConfigurationError:
+    return "Refused: " + observed->detail;
+  case topology::HardwareRuntimeReachability::Offline:
+    return observed->stale ? "Offline, last report kept"
+                           : "Offline: " + observed->detail;
+  default:
+    break;
+  }
+  return "Not monitored";
+}
+
+[[nodiscard]] gui::UiColor
+processor_status_color(const gui::Theme &theme,
+                       const topology::HardwareDevice &device,
+                       const topology::HardwareProcessorNode *observed) noexcept {
+  if (device.protocol == topology::HardwareProcessorProtocol::Generic ||
+      device.address.empty()) {
+    return theme.text_muted;
+  }
+  if (observed == nullptr ||
+      observed->reachability == topology::HardwareRuntimeReachability::Probing) {
+    return theme.caution;
+  }
+  return observed->reachability == topology::HardwareRuntimeReachability::Online
+             ? theme.good
+             : theme.warning;
+}
+
+// A sprite fitted into `area`, or the kind's line icon without a sheet.
+void draw_sprite_thumbnail(gui::UiContext &ctx, const gui::Rect &area,
+                           const topology::HardwareDevice &device,
+                           const rhi::Texture *sheet, float opacity = 1.0F) {
+  const HardwareSpriteFrame &frame = hardware_sprite_frame(sprite_for(device));
+  if (sheet == nullptr) {
+    draw_device_icon(ctx, device.kind, area.x + (area.width - 18.0F) * 0.5F,
+                     area.y + (area.height - 13.0F) * 0.5F,
+                     alpha(device_color(ctx.theme(), device.kind), opacity));
+    return;
+  }
+  const float fit = std::min(area.width / static_cast<float>(frame.width),
+                             area.height / static_cast<float>(frame.height));
+  const float width = static_cast<float>(frame.width) * fit;
+  const float height = static_cast<float>(frame.height) * fit;
+  const auto sheet_width = static_cast<float>(hardware_sprite_sheet_width());
+  const auto sheet_height = static_cast<float>(hardware_sprite_sheet_height());
+  ctx.draw_list().add_sprite(
+      area.x + (area.width - width) * 0.5F,
+      area.y + (area.height - height) * 0.5F, width, height, *sheet,
+      static_cast<float>(frame.x) / sheet_width,
+      static_cast<float>(frame.y) / sheet_height,
+      static_cast<float>(frame.x + frame.width) / sheet_width,
+      static_cast<float>(frame.y + frame.height) / sheet_height,
+      sprite_tint(ctx.theme(), opacity));
+}
+
 [[nodiscard]] std::string capacity_text(core::u64 bytes) {
   std::array<char, 48U> text{};
   constexpr double gibibyte = 1024.0 * 1024.0 * 1024.0;
@@ -744,89 +1008,195 @@ next_window_mode(topology::HardwareWindowMode mode) noexcept {
   return topology::HardwareWindowMode::Inherit;
 }
 
-void draw_device(gui::UiContext &ctx, const IsometricProjection &projection,
-                 const topology::HardwareDevice &device,
-                 const HardwareDevicePresentation &presentation, bool selected,
-                 bool dragging) {
-  const gui::Rect bounds =
-      presented_device_bounds(projection, device, presentation);
-  const gui::UiColor color = device_color(ctx.theme(), device.kind);
-  const gui::UiColor body = selected ? scale(ctx.theme().selection, 1.22F)
-                                     : scale(ctx.theme().panel, 1.08F);
-  ctx.panel(bounds, alpha(ctx.theme().divider, 0.72F));
-  // The face sits under a 9-deep bevel, 2 in from the card's other edges.
-  const gui::Rect face =
-      gui::inset(bounds, gui::Padding{2.0F, 9.0F, 2.0F, 2.0F});
-  ctx.panel(face, dragging ? scale(body, 1.15F) : body);
-
-  // The bevel: the card's top face receding from the face's top edge.
-  const float back = bounds.y + 2.0F;
-  const std::array<gui::UiPoint, 4U> top{{
-      {face.x, face.y},
-      {bounds.x + 18.0F, back},
-      {face.right(), back},
-      {bounds.right() - 18.0F, face.y},
-  }};
-  ctx.draw_list().add_convex_poly(top, scale(body, 1.23F));
-  ctx.draw_list().add_line(bounds.x + 18.0F, back, face.right(), back, 1.0F,
-                           alpha(color, 0.72F));
-  ctx.outline(face, selected ? ctx.theme().accent : ctx.theme().widget_hover,
-              selected ? 2.0F : 1.0F);
-  {
-    gui::Rect stripe = gui::inset(face, 1.0F);
-    ctx.panel(gui::cut_left(stripe, 3.0F), color);
+// A device as pixel art: its sprite from the sheet or, with no sheet (a
+// headless test), a plain shaded box standing on its cell.
+void draw_device_sprite(gui::UiContext &ctx,
+                        const IsometricProjection &projection,
+                        const topology::HardwareDevice &device,
+                        const rhi::Texture *sheet, float opacity) {
+  const gui::Rect bounds = sprite_bounds(projection, device);
+  const HardwareSpriteFrame &frame = hardware_sprite_frame(sprite_for(device));
+  if (sheet != nullptr) {
+    const auto sheet_width = static_cast<float>(hardware_sprite_sheet_width());
+    const auto sheet_height = static_cast<float>(hardware_sprite_sheet_height());
+    ctx.draw_list().add_sprite(
+        bounds.x, bounds.y, bounds.width, bounds.height, *sheet,
+        static_cast<float>(frame.x) / sheet_width,
+        static_cast<float>(frame.y) / sheet_height,
+        static_cast<float>(frame.x + frame.width) / sheet_width,
+        static_cast<float>(frame.y + frame.height) / sheet_height,
+        sprite_tint(ctx.theme(), opacity));
+    return;
   }
-  draw_device_icon(ctx, device.kind, face.x + 10.0F, face.y + 8.0F, color);
-  // Text is clipped to the card face while port circles remain free to sit on
-  // its outer edge. Runtime status and connector names are supplied by remote
-  // machines and can legitimately be wider than this compact topology card.
-  ctx.push_clip(face);
-  // The name beside the icon, the status under both, and a server's
-  // outputs listed under the name.
-  gui::Rect name = gui::inset(face, gui::Padding{34.0F, 3.0F, 5.0F, 0.0F});
-  ctx.label(gui::cut_top(name, 18.0F), device.name, ctx.theme().text);
-  const std::string status = runtime_card_status(presentation);
-  gui::Rect status_line =
-      gui::inset(face, gui::Padding{10.0F, 20.0F, 5.0F, 0.0F});
-  ctx.label(gui::cut_top(status_line, 15.0F), status,
-            runtime_status_color(ctx.theme(), presentation));
-  const gui::Rect outputs =
-      gui::inset(face, gui::Padding{34.0F, 33.0F, 9.0F, 0.0F});
-
-  if (device.kind == topology::HardwareDeviceKind::RenderServer) {
-    for (std::size_t position = 0U; position < presentation.port_count;
-         ++position) {
-      const PresentedHardwarePort &shown = presentation.ports[position];
-      if (shown.port.signal != topology::HardwareSignal::Video ||
-          shown.port.direction != topology::HardwarePortDirection::Output) {
-        continue;
-      }
-      const std::size_t ordinal = presentation.video_ordinal(shown.port.index);
-      std::string label = "OUT " + std::to_string(shown.port.index) + "  " +
-                          std::string{shown.port.name};
-      if (shown.runtime_state == RuntimePortState::Missing) {
-        label += "  MISSING";
-      } else if (shown.runtime_state == RuntimePortState::Stale) {
-        label += "  LAST SEEN";
-      }
-      const gui::UiColor label_color =
-          shown.runtime_state == RuntimePortState::Missing
-              ? ctx.theme().warning
-              : (shown.runtime_state == RuntimePortState::Active
-                     ? ctx.theme().text_muted
-                     : scale(ctx.theme().text_muted, 0.82F));
-      ctx.label(gui::list_row(outputs, ordinal, 15.0F, 0.0F,
-                              hardware_port_row_step - 15.0F),
-                label, label_color);
-    }
-  }
-  ctx.pop_clip();
+  const float px = art_pixel(projection);
+  const IsoPoint ground =
+      project_isometric(projection, device.grid_x, device.grid_y);
+  const float half = std::min(bounds.width * 0.30F, 24.0F * px);
+  const float rise = std::max(bounds.height * 0.45F, 10.0F * px);
+  const gui::UiColor color = alpha(device_color(ctx.theme(), device.kind), opacity);
+  const std::array<gui::UiPoint, 4U> top{{{ground.x, ground.y - rise - half * 0.5F},
+                                          {ground.x + half, ground.y - rise},
+                                          {ground.x, ground.y - rise + half * 0.5F},
+                                          {ground.x - half, ground.y - rise}}};
+  const std::array<gui::UiPoint, 4U> left{{{ground.x - half, ground.y - rise},
+                                           {ground.x, ground.y - rise + half * 0.5F},
+                                           {ground.x, ground.y + half * 0.5F},
+                                           {ground.x - half, ground.y}}};
+  const std::array<gui::UiPoint, 4U> right{{{ground.x, ground.y - rise + half * 0.5F},
+                                            {ground.x + half, ground.y - rise},
+                                            {ground.x + half, ground.y},
+                                            {ground.x, ground.y + half * 0.5F}}};
+  ctx.draw_list().add_convex_poly(left, scale(color, 0.55F));
+  ctx.draw_list().add_convex_poly(right, scale(color, 0.38F));
+  ctx.draw_list().add_convex_poly(top, scale(color, 0.85F));
 }
 
-void draw_port(gui::UiContext &ctx, const IsoPoint &point,
-               const topology::HardwarePort &port, bool pending,
-               PortTargetState target_state,
-               RuntimePortState runtime_state = RuntimePortState::Unknown) {
+// The stage the hardware stands on: a raised platform of floor tiles, each
+// cell centred on a grid point, reaching three cells past every device.
+// `highlight` is a cell to light (where a drag would put something);
+// `selected` a cell to ring (the selected device's).
+void draw_floor(gui::UiContext &ctx, const IsometricProjection &projection,
+                const topology::HardwareMap &map,
+                std::optional<std::pair<core::i32, core::i32>> highlight,
+                std::optional<std::pair<core::i32, core::i32>> selected) {
+  core::i32 min_x = -4;
+  core::i32 max_x = 4;
+  core::i32 min_y = -4;
+  core::i32 max_y = 4;
+  for (const topology::HardwareDevice &device : map.devices) {
+    min_x = std::min(min_x, device.grid_x - 3);
+    max_x = std::max(max_x, device.grid_x + 3);
+    min_y = std::min(min_y, device.grid_y - 3);
+    max_y = std::max(max_y, device.grid_y + 3);
+  }
+  if (highlight.has_value()) {
+    min_x = std::min(min_x, highlight->first - 1);
+    max_x = std::max(max_x, highlight->first + 1);
+    min_y = std::min(min_y, highlight->second - 1);
+    max_y = std::max(max_y, highlight->second + 1);
+  }
+  constexpr core::i32 reach = 48;
+  min_x = std::max(min_x, -reach);
+  min_y = std::max(min_y, -reach);
+  max_x = std::min(max_x, reach);
+  max_y = std::min(max_y, reach);
+
+  auto &draw = ctx.draw_list();
+  const gui::Theme &theme = ctx.theme();
+  const float px = art_pixel(projection);
+  const float depth = 6.0F * px;
+  const auto cell = [&](float x, float y) {
+    return std::array<gui::UiPoint, 4U>{{
+        {project_point(projection, x - 0.5F, y - 0.5F).x,
+         project_point(projection, x - 0.5F, y - 0.5F).y},
+        {project_point(projection, x + 0.5F, y - 0.5F).x,
+         project_point(projection, x + 0.5F, y - 0.5F).y},
+        {project_point(projection, x + 0.5F, y + 0.5F).x,
+         project_point(projection, x + 0.5F, y + 0.5F).y},
+        {project_point(projection, x - 0.5F, y + 0.5F).x,
+         project_point(projection, x - 0.5F, y + 0.5F).y},
+    }};
+  };
+  // The platform's two front faces, under the near edges of the floor.
+  const auto corner = [&](float x, float y) {
+    const IsoPoint p = project_point(projection, x, y);
+    return gui::UiPoint{p.x, p.y};
+  };
+  const float near_x = static_cast<float>(max_x) + 0.5F;
+  const float near_y = static_cast<float>(max_y) + 0.5F;
+  const float far_x = static_cast<float>(min_x) - 0.5F;
+  const float far_y = static_cast<float>(min_y) - 0.5F;
+  const gui::UiPoint left_far = corner(far_x, near_y);
+  const gui::UiPoint near_corner = corner(near_x, near_y);
+  const gui::UiPoint right_far = corner(near_x, far_y);
+  const std::array<gui::UiPoint, 4U> left_face{{
+      left_far, near_corner, {near_corner.x, near_corner.y + depth},
+      {left_far.x, left_far.y + depth}}};
+  const std::array<gui::UiPoint, 4U> right_face{{
+      near_corner, right_far, {right_far.x, right_far.y + depth},
+      {near_corner.x, near_corner.y + depth}}};
+  draw.add_convex_poly(left_face, scale(theme.widget, 0.62F));
+  draw.add_convex_poly(right_face, scale(theme.widget, 0.46F));
+
+  const gui::UiColor light = scale(theme.widget, 0.92F);
+  const gui::UiColor dark = scale(theme.widget, 0.80F);
+  for (core::i32 y = min_y; y <= max_y; ++y) {
+    for (core::i32 x = min_x; x <= max_x; ++x) {
+      draw.add_convex_poly(cell(static_cast<float>(x), static_cast<float>(y)),
+                           ((x + y) & 1) == 0 ? light : dark);
+    }
+  }
+  // Seams between the tiles, quieter than the tiles themselves.
+  const gui::UiColor seam = alpha(theme.divider, 0.65F);
+  for (core::i32 y = min_y; y <= max_y + 1; ++y) {
+    const gui::UiPoint a = corner(far_x, static_cast<float>(y) - 0.5F);
+    const gui::UiPoint b = corner(near_x, static_cast<float>(y) - 0.5F);
+    draw.add_line(a.x, a.y, b.x, b.y, 1.0F, seam);
+  }
+  for (core::i32 x = min_x; x <= max_x + 1; ++x) {
+    const gui::UiPoint a = corner(static_cast<float>(x) - 0.5F, far_y);
+    const gui::UiPoint b = corner(static_cast<float>(x) - 0.5F, near_y);
+    draw.add_line(a.x, a.y, b.x, b.y, 1.0F, seam);
+  }
+  // A lit lip along the platform's near edges.
+  draw.add_line(left_far.x, left_far.y, near_corner.x, near_corner.y, 1.0F,
+                scale(theme.widget_hover, 1.15F));
+  draw.add_line(near_corner.x, near_corner.y, right_far.x, right_far.y, 1.0F,
+                scale(theme.widget_hover, 1.15F));
+
+  if (selected.has_value()) {
+    const auto ring = cell(static_cast<float>(selected->first),
+                           static_cast<float>(selected->second));
+    draw.add_convex_poly(ring, alpha(theme.accent, 0.18F));
+    for (std::size_t index = 0U; index < ring.size(); ++index) {
+      const gui::UiPoint &a = ring[index];
+      const gui::UiPoint &b = ring[(index + 1U) % ring.size()];
+      draw.add_line(a.x, a.y, b.x, b.y, std::max(1.0F, px), theme.accent);
+    }
+  }
+  if (highlight.has_value()) {
+    const auto lit = cell(static_cast<float>(highlight->first),
+                          static_cast<float>(highlight->second));
+    draw.add_convex_poly(lit, alpha(theme.accent, 0.30F));
+  }
+}
+
+// A device's name tag above its sprite: a status light and its name, and
+// on hover or selection a second line saying what state it is in.
+void draw_nameplate(gui::UiContext &ctx, const gui::Rect &sprite,
+                    std::string_view name, gui::UiColor light,
+                    std::string_view status, bool selected, bool hovered) {
+  const std::string_view shown = name.empty() ? std::string_view{"Device"} : name;
+  const float width = std::clamp(ctx.font_width(shown) + 26.0F, 56.0F, 210.0F);
+  const gui::Rect plate{sprite.x + (sprite.width - width) * 0.5F,
+                        sprite.y - 12.0F, width, 20.0F};
+  ctx.rounded(plate, alpha(ctx.theme().panel, 0.94F), plate.height * 0.5F);
+  ctx.rounded_outline(plate,
+                      selected ? ctx.theme().accent : ctx.theme().border,
+                      plate.height * 0.5F, selected ? 1.5F : 1.0F);
+  draw_status_dot(ctx, plate.x + 10.0F, plate.y + plate.height * 0.5F, light);
+  ctx.push_clip(plate);
+  ctx.label(gui::inset(plate, gui::Padding{18.0F, 0.0F, 7.0F, 0.0F}), shown,
+            ctx.theme().text);
+  ctx.pop_clip();
+  if ((selected || hovered) && !status.empty()) {
+    const float status_width =
+        std::min(ctx.font_width(status) + 16.0F, 300.0F);
+    const gui::Rect chip{sprite.x + (sprite.width - status_width) * 0.5F,
+                         plate.bottom() + 2.0F, status_width, 17.0F};
+    ctx.rounded(chip, alpha(ctx.theme().track, 0.92F), chip.height * 0.5F);
+    ctx.push_clip(chip);
+    ctx.label(gui::inset(chip, 8.0F, 0.0F), status, ctx.theme().text_muted);
+    ctx.pop_clip();
+  }
+}
+
+// A port as a jack on the device's face: a dark socket in a rim of its
+// signal's colour. A cable drag lights the jacks it may end on.
+void draw_socket(gui::UiContext &ctx, const IsoPoint &point,
+                 const topology::HardwarePort &port, float px, bool pending,
+                 PortTargetState target_state,
+                 RuntimePortState runtime_state = RuntimePortState::Unknown) {
   const gui::UiColor base_color = signal_color(ctx.theme(), port.signal);
   const gui::UiColor color = runtime_state == RuntimePortState::Missing
                                  ? ctx.theme().warning
@@ -834,27 +1204,98 @@ void draw_port(gui::UiContext &ctx, const IsoPoint &point,
                                         ? scale(base_color, 0.48F)
                                         : base_color);
   const bool targeted = target_state != PortTargetState::None;
-  const gui::UiColor target_color =
+  const gui::UiColor rim =
       target_state == PortTargetState::Compatible
           ? ctx.theme().good
           : (target_state == PortTargetState::None ? color
                                                    : ctx.theme().warning);
-  circle(ctx, point.x, point.y, pending ? 8.0F : (targeted ? 7.0F : 6.0F),
-         alpha(ctx.theme().divider, 0.98F));
-  circle(ctx, point.x, point.y, targeted ? port_radius + 1.0F : port_radius,
-         target_color);
-  if (port.direction == topology::HardwarePortDirection::Input) {
-    circle(ctx, point.x, point.y, 2.1F, ctx.theme().panel);
-    if (target_state == PortTargetState::Occupied) {
-      ctx.draw_list().add_line(point.x - 3.0F, point.y - 3.0F, point.x + 3.0F,
-                               point.y + 3.0F, 1.2F, ctx.theme().warning);
-      ctx.draw_list().add_line(point.x + 3.0F, point.y - 3.0F, point.x - 3.0F,
-                               point.y + 3.0F, 1.2F, ctx.theme().warning);
-    }
-  } else {
-    gui::add_arrowhead(ctx.draw_list(), gui::UiPoint{point.x + 2.5F, point.y},
-                       gui::UiPoint{1.0F, 0.0F}, 4.5F, 2.5F, ctx.theme().panel);
+  const float half = std::max(3.0F, 2.5F * px) + (pending || targeted ? 1.0F : 0.0F);
+  const gui::Rect jack{point.x - half, point.y - half * 0.8F, half * 2.0F,
+                       half * 1.6F};
+  if (targeted || pending) {
+    ctx.draw_list().add_rounded_glow(jack.x, jack.y, jack.width, jack.height,
+                                     2.0F, 5.0F,
+                                     alpha(rim, ctx.theme().glow + 0.25F));
   }
+  ctx.draw_list().add_rect(jack.x - 1.0F, jack.y - 1.0F, jack.width + 2.0F,
+                           jack.height + 2.0F, alpha(ctx.theme().background, 0.95F));
+  ctx.draw_list().add_rect(jack.x, jack.y, jack.width, jack.height, rim);
+  const float inset = std::max(1.0F, px * 0.75F);
+  ctx.draw_list().add_rect(jack.x + inset, jack.y + inset,
+                           jack.width - inset * 2.0F,
+                           jack.height - inset * 2.0F,
+                           alpha(ctx.theme().background, 0.95F));
+  if (target_state == PortTargetState::Occupied) {
+    draw_remove(ctx, point.x, point.y, ctx.theme().warning);
+  }
+}
+
+// A cable's run along the floor, or the short risers at either end that
+// climb the device faces to their sockets.
+enum class CablePart : core::u8 {
+  Floor,
+  Risers,
+};
+
+void draw_cable(gui::UiContext &ctx, const CableRoute &route, float px,
+                gui::UiColor color, bool selected, CablePart part) {
+  auto &draw = ctx.draw_list();
+  const float width = std::max(2.0F, px * (selected ? 2.0F : 1.5F));
+  const auto segment = [&](std::size_t from, std::size_t to) {
+    const IsoPoint &a = route.points[from];
+    const IsoPoint &b = route.points[to];
+    draw.add_line(a.x, a.y, b.x, b.y, width + 2.0F,
+                  alpha(ctx.theme().background, 0.92F));
+    draw.add_line(a.x, a.y, b.x, b.y, width, color);
+  };
+  if (part == CablePart::Floor) {
+    segment(2U, 3U);
+    segment(3U, 4U);
+    return;
+  }
+  segment(0U, 1U);
+  segment(1U, 2U);
+  segment(4U, 5U);
+  segment(5U, 6U);
+}
+
+[[nodiscard]] float point_segment_distance(float px, float py, float x0,
+                                           float y0, float x1,
+                                           float y1) noexcept {
+  const float dx = x1 - x0;
+  const float dy = y1 - y0;
+  const float length_squared = dx * dx + dy * dy;
+  if (length_squared <= 0.0001F) {
+    return std::hypot(px - x0, py - y0);
+  }
+  const float t = std::clamp(((px - x0) * dx + (py - y0) * dy) / length_squared,
+                             0.0F, 1.0F);
+  return std::hypot(px - (x0 + t * dx), py - (y0 + t * dy));
+}
+
+[[nodiscard]] bool cable_hit(const CableRoute &route, float x,
+                             float y) noexcept {
+  constexpr float tolerance = 6.0F;
+  for (std::size_t index = 0U; index + 1U < route.points.size(); ++index) {
+    const IsoPoint &a = route.points[index];
+    const IsoPoint &b = route.points[index + 1U];
+    if (point_segment_distance(x, y, a.x, a.y, b.x, b.y) <= tolerance) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A small amber triangle with a bang, where a cable's signal is wrong.
+void draw_signal_badge(gui::UiContext &ctx, const IsoPoint &at,
+                       gui::UiColor color) {
+  auto &draw = ctx.draw_list();
+  draw.add_triangle(at.x, at.y - 9.0F, at.x + 9.0F, at.y + 6.0F, at.x - 9.0F,
+                    at.y + 6.0F, alpha(ctx.theme().background, 0.95F));
+  draw.add_triangle(at.x, at.y - 7.0F, at.x + 7.0F, at.y + 5.0F, at.x - 7.0F,
+                    at.y + 5.0F, color);
+  draw.add_rect(at.x - 1.0F, at.y - 3.0F, 2.0F, 4.5F, ctx.theme().background);
+  draw.add_rect(at.x - 1.0F, at.y + 2.5F, 2.0F, 1.5F, ctx.theme().background);
 }
 
 void draw_wire(gui::UiContext &ctx, const IsoPoint &from, const IsoPoint &to,
@@ -876,31 +1317,6 @@ void draw_wire(gui::UiContext &ctx, const IsoPoint &from, const IsoPoint &to,
   gui::add_arrowhead(draw, gui::UiPoint{to.x, to.y},
                      gui::UiPoint{to.x >= middle_x ? 1.0F : -1.0F, 0.0F}, 7.0F,
                      4.0F, color);
-}
-
-[[nodiscard]] float point_segment_distance(float px, float py, float x0,
-                                           float y0, float x1,
-                                           float y1) noexcept {
-  const float dx = x1 - x0;
-  const float dy = y1 - y0;
-  const float length_squared = dx * dx + dy * dy;
-  if (length_squared <= 0.0001F) {
-    return std::hypot(px - x0, py - y0);
-  }
-  const float t = std::clamp(((px - x0) * dx + (py - y0) * dy) / length_squared,
-                             0.0F, 1.0F);
-  return std::hypot(px - (x0 + t * dx), py - (y0 + t * dy));
-}
-
-[[nodiscard]] bool wire_hit(const IsoPoint &from, const IsoPoint &to, float x,
-                            float y) noexcept {
-  const float middle_x = (from.x + to.x) * 0.5F;
-  constexpr float tolerance = 6.0F;
-  return point_segment_distance(x, y, from.x, from.y, middle_x, from.y) <=
-             tolerance ||
-         point_segment_distance(x, y, middle_x, from.y, middle_x, to.y) <=
-             tolerance ||
-         point_segment_distance(x, y, middle_x, to.y, to.x, to.y) <= tolerance;
 }
 
 [[nodiscard]] bool
@@ -1355,6 +1771,29 @@ discovered_status(const topology::HardwareMap &map,
   return {"DRAG OR CLICK TO ADD", DiscoveredTone::Add, nullptr};
 }
 
+// The processor card already at the address a search found it on.
+[[nodiscard]] const topology::HardwareDevice *
+discovered_processor_device(
+    const topology::HardwareMap &map,
+    const topology::HardwareDiscoveredProcessor &found) noexcept {
+  const auto bare = [](std::string_view address) {
+    const std::size_t colon = address.rfind(':');
+    return address.size() > 5U && colon != std::string_view::npos &&
+                   address.substr(colon) == ":8001" &&
+                   address.find(':') == colon
+               ? address.substr(0U, colon)
+               : address;
+  };
+  for (const topology::HardwareDevice &device : map.devices) {
+    if (device.kind == topology::HardwareDeviceKind::LedProcessor &&
+        !device.address.empty() &&
+        bare(device.address) == bare(found.address)) {
+      return &device;
+    }
+  }
+  return nullptr;
+}
+
 [[nodiscard]] core::u64
 discovered_key(const topology::HardwareDiscoveredMachine &machine) noexcept {
   core::u64 hash = 1469598103934665603ULL;
@@ -1413,9 +1852,11 @@ gui::Rect hardware_mapping_canvas(const gui::Rect &bounds) noexcept {
 IsometricProjection
 hardware_mapping_projection(const gui::Rect &bounds) noexcept {
   const gui::Rect canvas = hardware_mapping_canvas(bounds);
-  const float tile_width = std::clamp(canvas.width * 0.082F, 52.0F, 72.0F);
+  // Two screen units to a sprite pixel: the pixel art lands on whole pixels
+  // at the default zoom.
+  constexpr float tile_width = 64.0F;
   return IsometricProjection{canvas.x + canvas.width * 0.47F,
-                             canvas.y + std::min(canvas.height * 0.25F, 112.0F),
+                             canvas.y + std::min(canvas.height * 0.30F, 150.0F),
                              tile_width, tile_width * 0.50F};
 }
 
@@ -1432,14 +1873,25 @@ HardwareMappingPanel::view_projection(const gui::Rect &bounds) const noexcept {
 gui::Rect
 hardware_palette_item_bounds(const gui::Rect &bounds,
                              topology::HardwareDeviceKind kind) noexcept {
-  return gui::list_row(palette_layout(bounds).cards, kind_index(kind),
-                       palette_row_height, 0.0F,
+  return hardware_palette_item_bounds(
+      bounds, kind, topology::HardwareProcessorProtocol::Generic);
+}
+
+gui::Rect hardware_palette_item_bounds(
+    const gui::Rect &bounds, topology::HardwareDeviceKind kind,
+    topology::HardwareProcessorProtocol protocol) noexcept {
+  return gui::list_row(palette_layout(bounds).cards,
+                       palette_index(kind, protocol), palette_row_height, 0.0F,
                        palette_row_step - palette_row_height);
 }
 
 gui::Rect
 hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept {
   return palette_layout(bounds).sync_mode;
+}
+
+gui::Rect hardware_control_port_field_bounds(const gui::Rect &bounds) noexcept {
+  return palette_layout(bounds).control_port.field;
 }
 
 gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
@@ -1451,13 +1903,15 @@ gui::Rect hardware_canvas_field_bounds(const gui::Rect &bounds,
 gui::Rect
 hardware_discovery_strip_bounds(const gui::Rect &bounds,
                                 const topology::HardwareDiscovery &discovery) noexcept {
-  if (discovery.state == topology::HardwareDiscoveryState::Off) {
+  if (discovery.state == topology::HardwareDiscoveryState::Off &&
+      !discovery.processor_search_available) {
     return {};
   }
   const gui::Rect canvas = hardware_mapping_canvas(bounds);
+  const bool cards =
+      !discovery.machines.empty() || !discovery.processors.empty();
   const float height =
-      discovery_header_height +
-      (discovery.machines.empty() ? 0.0F : discovery_card_height + 8.0F);
+      discovery_header_height + (cards ? discovery_card_height + 8.0F : 0.0F);
   if (canvas.width <= 0.0F ||
       canvas.height < height + discovery_minimum_view_height) {
     return {};
@@ -1472,7 +1926,7 @@ hardware_discovered_card_bounds(const gui::Rect &bounds,
                                 std::size_t index) noexcept {
   const gui::Rect strip = hardware_discovery_strip_bounds(bounds, discovery);
   if (strip.height <= discovery_header_height ||
-      index >= discovery.machines.size()) {
+      index >= discovery.machines.size() + discovery.processors.size()) {
     return {};
   }
   return gui::Rect{strip.x + 8.0F + static_cast<float>(index) *
@@ -1515,28 +1969,17 @@ hardware_discovered_status_text(const topology::HardwareMap &map,
 gui::Rect
 hardware_device_bounds(const IsometricProjection &projection,
                        const topology::HardwareDevice &device) noexcept {
-  const IsoPoint point =
-      project_isometric(projection, device.grid_x, device.grid_y);
-  return gui::Rect{point.x - device_width * 0.5F,
-                   point.y - device_height * 0.60F, device_width,
-                   device_height};
+  return sprite_bounds(projection, device);
 }
 
 IsoPoint hardware_port_position(const IsometricProjection &projection,
                                 const topology::HardwareDevice &device,
                                 core::u8 port) noexcept {
-  const gui::Rect bounds = hardware_device_bounds(projection, device);
-  const topology::HardwarePort *const description =
-      topology::find_port(device.kind, port);
-  if (description == nullptr) {
-    return IsoPoint{bounds.x + bounds.width * 0.5F,
-                    bounds.bottom() - 11.0F};
-  }
-  const float x =
-      description->direction == topology::HardwarePortDirection::Input
-          ? bounds.x
-          : bounds.right();
-  return IsoPoint{x, bounds.bottom() - 13.0F};
+  return presented_port_position(
+      projection, device,
+      hardware_presentation(topology::HardwareMap{}, device,
+                            topology::HardwareRuntimeSnapshot{}),
+      port);
 }
 
 gui::Rect hardware_presented_device_bounds(
@@ -1555,6 +1998,39 @@ IsoPoint hardware_presented_port_position(
   const HardwareDevicePresentation presentation =
       hardware_presentation(map, device, runtime);
   return presented_port_position(projection, device, presentation, port);
+}
+
+std::optional<IsoPoint> hardware_cable_point(
+    const IsometricProjection &projection, const topology::HardwareMap &map,
+    const topology::HardwareRuntimeSnapshot &runtime, doc::NodeId link) noexcept {
+  const topology::HardwareLink *const cable = map.link(link);
+  if (cable == nullptr) {
+    return std::nullopt;
+  }
+  const topology::HardwareDevice *const from = map.device(cable->from.device);
+  const topology::HardwareDevice *const to = map.device(cable->to.device);
+  if (from == nullptr || to == nullptr) {
+    return std::nullopt;
+  }
+  const HardwareDevicePresentation from_presentation =
+      hardware_presentation(map, *from, runtime);
+  const HardwareDevicePresentation to_presentation =
+      hardware_presentation(map, *to, runtime);
+  const CableRoute route = cable_route(
+      projection,
+      presented_port_position(projection, *from, from_presentation,
+                              cable->from.port),
+      cable_ground(projection, *from),
+      port_ordinal(from_presentation, cable->from.port,
+                   topology::HardwarePortDirection::Output),
+      sprite_bounds(projection, *from),
+      presented_port_position(projection, *to, to_presentation,
+                              cable->to.port),
+      cable_ground(projection, *to),
+      port_ordinal(to_presentation, cable->to.port,
+                   topology::HardwarePortDirection::Input),
+      sprite_bounds(projection, *to));
+  return route.points[3U];
 }
 
 std::string
@@ -1700,6 +2176,43 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const gui::Rect view{canvas.x, canvas.y, canvas.width,
                        std::max(canvas.height - strip.height, 0.0F)};
 
+  // Centre the stage on its devices, zoomed out until every one fits with
+  // its name tag, when the panel opens or the operator asks.
+  if (frame_pending_ && view.width > 1.0F && view.height > 1.0F) {
+    frame_pending_ = false;
+    if (!map.devices.empty()) {
+      const IsometricProjection base = hardware_mapping_projection(bounds);
+      IsometricProjection unit = base;
+      unit.origin_x = 0.0F;
+      unit.origin_y = 0.0F;
+      float left = std::numeric_limits<float>::max();
+      float top = std::numeric_limits<float>::max();
+      float right = std::numeric_limits<float>::lowest();
+      float bottom = std::numeric_limits<float>::lowest();
+      for (const topology::HardwareDevice &device : map.devices) {
+        const gui::Rect sprite = sprite_bounds(unit, device);
+        left = std::min(left, sprite.x);
+        top = std::min(top, sprite.y - 34.0F);
+        right = std::max(right, sprite.right());
+        bottom = std::max(bottom, sprite.bottom());
+      }
+      float zoom = std::clamp(
+          std::min({1.0F, view.width * 0.9F / std::max(right - left, 1.0F),
+                    view.height * 0.85F / std::max(bottom - top, 1.0F)}),
+          minimum_view_zoom, maximum_view_zoom);
+      // Near enough to the full size is the full size, where every sprite
+      // pixel lands on whole screen pixels.
+      if (zoom > 0.9F) {
+        zoom = 1.0F;
+      }
+      view_.zoom = zoom;
+      view_.pan_x = view.x + view.width * 0.5F - base.origin_x -
+                    zoom * (left + right) * 0.5F;
+      view_.pan_y = view.y + view.height * 0.5F - base.origin_y -
+                    zoom * (top + bottom) * 0.5F;
+    }
+  }
+
   // Navigation changes only this panel's screen-space projection. Device
   // placement and movement still unproject to the same integer document
   // grid, so no camera/view state leaks into topology authoring intents.
@@ -1760,20 +2273,26 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return hardware_presentation(map, device, runtime);
   };
   ctx.panel(canvas, scale(ctx.theme().background, 0.84F));
-  ctx.push_clip(view);
-  draw_hardware_grid(ctx, projection);
 
-  // Existing authored cables sit behind the cards.
-  for (const topology::HardwareLink &link : map.links) {
+  // What each cable into a monitored processor carries.
+  const std::vector<topology::HardwareSignalCheck> signal_checks =
+      topology::check_processor_signals(map, runtime);
+  const auto check_for =
+      [&](doc::NodeId link) -> const topology::HardwareSignalCheck * {
+    for (const topology::HardwareSignalCheck &check : signal_checks) {
+      if (check.link == link) {
+        return &check;
+      }
+    }
+    return nullptr;
+  };
+  const auto route_for =
+      [&](const topology::HardwareLink &link) -> std::optional<CableRoute> {
     const topology::HardwareDevice *const from = map.device(link.from.device);
     const topology::HardwareDevice *const to = map.device(link.to.device);
-    if (from == nullptr || to == nullptr) {
-      continue;
-    }
-    const topology::HardwarePort *const port =
-        topology::find_port(from->kind, link.from.port);
-    if (port == nullptr) {
-      continue;
+    if (from == nullptr || to == nullptr ||
+        topology::find_port(from->kind, link.from.port) == nullptr) {
+      return std::nullopt;
     }
     const topology::HardwareDevice displayed_from = displayed(*from);
     const topology::HardwareDevice displayed_to = displayed(*to);
@@ -1781,14 +2300,64 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         presentation_for(displayed_from);
     const HardwareDevicePresentation to_presentation =
         presentation_for(displayed_to);
-    draw_wire(ctx,
-              presented_port_position(projection, displayed_from,
-                                      from_presentation, link.from.port),
-              presented_port_position(projection, displayed_to, to_presentation,
-                                      link.to.port),
-              signal_color(ctx.theme(), port->signal),
-              selection_ ==
-                  HardwareSelection{HardwareSelectionKind::Link, link.node});
+    return cable_route(
+        projection,
+        presented_port_position(projection, displayed_from, from_presentation,
+                                link.from.port),
+        cable_ground(projection, displayed_from),
+        port_ordinal(from_presentation, link.from.port,
+                     topology::HardwarePortDirection::Output),
+        sprite_bounds(projection, displayed_from),
+        presented_port_position(projection, displayed_to, to_presentation,
+                                link.to.port),
+        cable_ground(projection, displayed_to),
+        port_ordinal(to_presentation, link.to.port,
+                     topology::HardwarePortDirection::Input),
+        sprite_bounds(projection, displayed_to));
+  };
+  const auto cable_color = [&](const topology::HardwareLink &link) {
+    const topology::HardwareDevice *const from = map.device(link.from.device);
+    const topology::HardwarePort *const port =
+        from != nullptr ? topology::find_port(from->kind, link.from.port)
+                        : nullptr;
+    const topology::HardwareSignalCheck *const check = check_for(link.node);
+    if (check != nullptr &&
+        check->issue != topology::HardwareSignalIssue::None) {
+      return ctx.theme().caution;
+    }
+    return port != nullptr ? signal_color(ctx.theme(), port->signal)
+                           : ctx.theme().text_muted;
+  };
+
+  // The floor lights the cell a drag would put something on, and rings the
+  // selected device's.
+  std::optional<std::pair<core::i32, core::i32>> drop_cell;
+  if (drag_kind_ == DragKind::Device) {
+    drop_cell = std::pair{preview_x_, preview_y_};
+  } else if ((drag_kind_ == DragKind::Palette ||
+              drag_kind_ == DragKind::Discovered ||
+              drag_kind_ == DragKind::DiscoveredProcessor) &&
+             view.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    drop_cell = unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
+  }
+  std::optional<std::pair<core::i32, core::i32>> selected_cell;
+  if (selection_.kind == HardwareSelectionKind::Device) {
+    if (const topology::HardwareDevice *const chosen =
+            map.device(selection_.node)) {
+      const topology::HardwareDevice shown = displayed(*chosen);
+      selected_cell = std::pair{shown.grid_x, shown.grid_y};
+    }
+  }
+  ctx.push_clip(view);
+  draw_floor(ctx, projection, map, drop_cell, selected_cell);
+  // Cables lie on the floor, behind the devices they run between.
+  for (const topology::HardwareLink &link : map.links) {
+    if (const std::optional<CableRoute> route = route_for(link)) {
+      draw_cable(ctx, *route, art_pixel(projection), cable_color(link),
+                 selection_ ==
+                     HardwareSelection{HardwareSelectionKind::Link, link.node},
+                 CablePart::Floor);
+    }
   }
 
   ctx.pop_clip();
@@ -1807,38 +2376,67 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     return row.bottom() <= palette.bottom();
   };
 
-  for (const topology::HardwareDeviceKind kind : device_kinds) {
-    const gui::Rect item = hardware_palette_item_bounds(bounds, kind);
+  // Every palette picture is drawn after the loop, in one sprite run: one
+  // render pass for all of them rather than one per row.
+  std::array<std::pair<gui::Rect, topology::HardwareDevice>,
+             palette_entries.size()>
+      thumbnails{};
+  std::size_t thumbnail_count{};
+  for (std::size_t index = 0U; index < palette_entries.size(); ++index) {
+    const PaletteEntry &entry = palette_entries[index];
+    const gui::Rect item =
+        hardware_palette_item_bounds(bounds, entry.kind, entry.protocol);
+    if (!fits(item)) {
+      continue;
+    }
     const gui::Interaction interaction =
-        ctx.grab(mix(id_, "hardware.palette", kind_index(kind)), item);
-    ctx.panel(item, interaction.held
-                        ? ctx.theme().selection
-                        : (interaction.hovered ? ctx.theme().widget_hover
-                                               : ctx.theme().row));
-    ctx.outline(item,
-                interaction.held ? ctx.theme().accent : ctx.theme().divider);
-    const gui::UiColor color = device_color(ctx.theme(), kind);
-    draw_device_icon(ctx, kind, item.x + 10.0F, item.y + 9.0F, color);
-    // The kind's name over what it is, right of the icon.
-    const gui::Rect text = gui::inset(item, gui::Padding{38.0F, 0.0F, 5.0F, 0.0F});
-    ctx.label(gui::inset(text, gui::Padding{0.0F, 2.0F, 0.0F, 21.0F}),
-              topology::device_kind_name(kind), ctx.theme().text);
-    ctx.label(gui::inset(text, gui::Padding{0.0F, 20.0F, 0.0F, 6.0F}),
-              "CONFIGURED DEVICE", ctx.theme().text_muted);
+        ctx.grab(mix(id_, "hardware.palette", index), item);
+    ctx.rounded(item,
+                interaction.held
+                    ? ctx.theme().selection
+                    : (interaction.hovered ? ctx.theme().widget_hover
+                                           : ctx.theme().row),
+                ctx.theme().radius);
+    ctx.rounded_outline(item,
+                        interaction.held ? ctx.theme().accent
+                                         : ctx.theme().divider,
+                        ctx.theme().radius);
+    topology::HardwareDevice sample{};
+    sample.kind = entry.kind;
+    sample.protocol = entry.protocol;
+    thumbnails[thumbnail_count++] = {
+        gui::Rect{item.x + 4.0F, item.y + 4.0F, 40.0F, item.height - 8.0F},
+        sample};
+    // The kind's name over what it is, right of the picture.
+    const gui::Rect text =
+        gui::inset(item, gui::Padding{50.0F, 0.0F, 5.0F, 0.0F});
+    ctx.push_clip(text);
+    ctx.label(gui::inset(text, gui::Padding{0.0F, 4.0F, 0.0F, 23.0F}),
+              entry.name, ctx.theme().text);
+    ctx.label(gui::inset(text, gui::Padding{0.0F, 23.0F, 0.0F, 6.0F}),
+              entry.blurb, ctx.theme().text_muted);
+    ctx.pop_clip();
 
     if (interaction.pressed) {
       drag_kind_ = DragKind::Palette;
-      palette_kind_ = kind;
+      palette_kind_ = entry.kind;
+      palette_protocol_ = entry.protocol;
     }
     if (interaction.released && drag_kind_ == DragKind::Palette &&
-        palette_kind_ == kind) {
+        palette_kind_ == entry.kind && palette_protocol_ == entry.protocol) {
       if (view.contains(ctx.pointer_x(), ctx.pointer_y())) {
         const auto [grid_x, grid_y] =
             unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
-        frame.place = HardwarePlaceRequest{kind, grid_x, grid_y};
+        HardwarePlaceRequest request{entry.kind, grid_x, grid_y};
+        request.protocol = entry.protocol;
+        frame.place = std::move(request);
       }
       drag_kind_ = DragKind::None;
     }
+  }
+  for (std::size_t index = 0U; index < thumbnail_count; ++index) {
+    draw_sprite_thumbnail(ctx, thumbnails[index].first,
+                          thumbnails[index].second, sprites_);
   }
 
   // One lifecycle port range governs the project. Render Servers contribute
@@ -2281,14 +2879,18 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     }
   }
 
-  // Device cards move in grid space and author once on release.
+  // Devices move in grid space and author once on release.
+  doc::NodeId hovered_device{};
   for (const topology::HardwareDevice &original : map.devices) {
-    topology::HardwareDevice device = displayed(original);
+    const topology::HardwareDevice device = displayed(original);
     const HardwareDevicePresentation presentation = presentation_for(device);
     const gui::Rect device_bounds =
         presented_device_bounds(projection, device, presentation);
     const gui::Interaction interaction = ctx.grab(
         mix(id_, "hardware.device", original.node.value()), device_bounds);
+    if (interaction.hovered) {
+      hovered_device = original.node;
+    }
     if (interaction.pressed) {
       const HardwareSelection chosen{HardwareSelectionKind::Device,
                                      original.node};
@@ -2312,8 +2914,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                               ctx.pointer_y() - drag_offset_y_);
       preview_x_ = grid_x;
       preview_y_ = grid_y;
-      device.grid_x = preview_x_;
-      device.grid_y = preview_y_;
     }
     if (interaction.released && drag_kind_ == DragKind::Device &&
         drag_device_ == original.node) {
@@ -2323,55 +2923,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       drag_kind_ = DragKind::None;
       drag_device_ = {};
     }
-
-    draw_device(ctx, projection, device, presentation,
-                selection_ == HardwareSelection{HardwareSelectionKind::Device,
-                                                original.node},
-                drag_kind_ == DragKind::Device &&
-                    drag_device_ == original.node);
   }
 
-  // Draw ports last so their small targets remain readable over each card.
-  for (const topology::HardwareDevice &original : map.devices) {
-    topology::HardwareDevice device = displayed(original);
-    const HardwareDevicePresentation presentation = presentation_for(device);
-    for (std::size_t position = 0U; position < presentation.port_count;
-         ++position) {
-      const PresentedHardwarePort &shown = presentation.ports[position];
-      const topology::HardwarePort &port = shown.port;
-      const topology::HardwareEndpoint endpoint{original.node, port.index};
-      const PortTargetState state =
-          pending_link_.has_value() &&
-                  port.direction == topology::HardwarePortDirection::Input
-              ? target_state(endpoint)
-              : PortTargetState::None;
-      draw_port(
-          ctx,
-          presented_port_position(projection, device, presentation, port.index),
-          port, pending_link_ == endpoint, state, shown.runtime_state);
-    }
-  }
-
-  // Link hit testing follows the foreground controls, so ports and devices
-  // win where geometry overlaps a cable endpoint.
+  // Cable hit testing follows the devices, so a port or a device wins where
+  // it overlaps a cable.
   for (const topology::HardwareLink &link : map.links) {
-    const topology::HardwareDevice *const from = map.device(link.from.device);
-    const topology::HardwareDevice *const to = map.device(link.to.device);
-    if (from == nullptr || to == nullptr) {
-      continue;
-    }
-    const topology::HardwareDevice displayed_from = displayed(*from);
-    const topology::HardwareDevice displayed_to = displayed(*to);
-    const HardwareDevicePresentation from_presentation =
-        presentation_for(displayed_from);
-    const HardwareDevicePresentation to_presentation =
-        presentation_for(displayed_to);
-    const IsoPoint from_point = presented_port_position(
-        projection, displayed_from, from_presentation, link.from.port);
-    const IsoPoint to_point = presented_port_position(
-        projection, displayed_to, to_presentation, link.to.port);
-    const bool hit =
-        wire_hit(from_point, to_point, ctx.pointer_x(), ctx.pointer_y());
+    const std::optional<CableRoute> route = route_for(link);
+    const bool hit = route.has_value() &&
+                     cable_hit(*route, ctx.pointer_x(), ctx.pointer_y());
     const gui::Rect hit_bounds =
         hit ? gui::Rect{ctx.pointer_x() - 1.0F, ctx.pointer_y() - 1.0F, 2.0F,
                         2.0F}
@@ -2383,6 +2942,172 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       selection_ = chosen;
       frame.selection = chosen;
     }
+  }
+
+  // The stage, drawn back to front so a nearer device stands in front of one
+  // behind it: every sprite in one run, then the cables' risers up the faces,
+  // the sockets, and last the name tags.
+  struct Shown final {
+    topology::HardwareDevice device;
+    HardwareDevicePresentation presentation;
+    doc::NodeId node{};
+    float opacity{1.0F};
+  };
+  std::vector<Shown> shown;
+  shown.reserve(map.devices.size() + 1U);
+  for (const topology::HardwareDevice &original : map.devices) {
+    topology::HardwareDevice device = displayed(original);
+    if (drag_kind_ == DragKind::Device && drag_device_ == original.node) {
+      device.grid_x = preview_x_;
+      device.grid_y = preview_y_;
+    }
+    HardwareDevicePresentation presentation = presentation_for(device);
+    shown.push_back(Shown{std::move(device), presentation, original.node,
+                          drag_kind_ == DragKind::Device &&
+                                  drag_device_ == original.node
+                              ? 0.85F
+                              : 1.0F});
+  }
+  // What a palette or network drag would place, at the cell under the
+  // pointer.
+  if ((drag_kind_ == DragKind::Palette || drag_kind_ == DragKind::Discovered ||
+       drag_kind_ == DragKind::DiscoveredProcessor) &&
+      view.contains(ctx.pointer_x(), ctx.pointer_y())) {
+    const auto [grid_x, grid_y] =
+        unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
+    topology::HardwareDevice ghost{};
+    if (drag_kind_ == DragKind::Palette) {
+      ghost.kind = palette_kind_;
+      ghost.protocol = palette_protocol_;
+      ghost.name = std::string{palette_entries[palette_index(
+                                                   palette_kind_,
+                                                   palette_protocol_)]
+                                   .name};
+    } else if (drag_kind_ == DragKind::Discovered) {
+      ghost.kind = topology::HardwareDeviceKind::RenderServer;
+      ghost.name = discovered_drag_.hostname;
+      ghost.address = discovered_drag_.address;
+      ghost.node_index = discovered_drag_.node_index;
+    } else {
+      ghost.kind = topology::HardwareDeviceKind::LedProcessor;
+      ghost.protocol = discovered_processor_drag_.protocol;
+      ghost.name = discovered_processor_drag_.name;
+      ghost.address = discovered_processor_drag_.address;
+    }
+    ghost.grid_x = grid_x;
+    ghost.grid_y = grid_y;
+    HardwareDevicePresentation presentation = presentation_for(ghost);
+    shown.push_back(Shown{std::move(ghost), presentation, doc::NodeId{}, 0.6F});
+  }
+  std::stable_sort(shown.begin(), shown.end(),
+                   [](const Shown &left, const Shown &right) {
+                     const core::i64 left_depth =
+                         static_cast<core::i64>(left.device.grid_x) +
+                         left.device.grid_y;
+                     const core::i64 right_depth =
+                         static_cast<core::i64>(right.device.grid_x) +
+                         right.device.grid_y;
+                     return left_depth < right_depth;
+                   });
+  for (const Shown &entry : shown) {
+    draw_device_sprite(ctx, projection, entry.device, sprites_, entry.opacity);
+  }
+  const float px = art_pixel(projection);
+  for (const topology::HardwareLink &link : map.links) {
+    if (const std::optional<CableRoute> route = route_for(link)) {
+      draw_cable(ctx, *route, px, cable_color(link),
+                 selection_ ==
+                     HardwareSelection{HardwareSelectionKind::Link, link.node},
+                 CablePart::Risers);
+      const topology::HardwareSignalCheck *const check = check_for(link.node);
+      if (check != nullptr &&
+          check->issue != topology::HardwareSignalIssue::None) {
+        const IsoPoint &corner = route->points[3U];
+        draw_signal_badge(ctx, corner, ctx.theme().caution);
+        ctx.tooltip(gui::Rect{corner.x - 9.0F, corner.y - 9.0F, 18.0F, 16.0F},
+                    topology::signal_check_text(*check));
+      }
+    }
+  }
+  for (const Shown &entry : shown) {
+    if (entry.node == doc::NodeId{}) {
+      continue;
+    }
+    const bool selected =
+        selection_ == HardwareSelection{HardwareSelectionKind::Device, entry.node};
+    const bool labelled = selected || hovered_device == entry.node;
+    for (std::size_t position = 0U; position < entry.presentation.port_count;
+         ++position) {
+      const PresentedHardwarePort &port_shown = entry.presentation.ports[position];
+      const topology::HardwarePort &port = port_shown.port;
+      const topology::HardwareEndpoint endpoint{entry.node, port.index};
+      const PortTargetState state =
+          pending_link_.has_value() &&
+                  port.direction == topology::HardwarePortDirection::Input
+              ? target_state(endpoint)
+              : PortTargetState::None;
+      const IsoPoint point = presented_port_position(
+          projection, entry.device, entry.presentation, port.index);
+      draw_socket(ctx, point, port, px, pending_link_ == endpoint, state,
+                  port_shown.runtime_state);
+      // Port names beside the sockets of the device in hand, and of every
+      // input a cable could end on.
+      if (labelled || state == PortTargetState::Compatible) {
+        std::string label{port.name};
+        if (entry.device.kind == topology::HardwareDeviceKind::RenderServer &&
+            port.direction == topology::HardwarePortDirection::Output) {
+          label = "OUT " + std::to_string(port.index) + "  " + label;
+        } else if (entry.device.kind ==
+                       topology::HardwareDeviceKind::LedProcessor &&
+                   port.direction == topology::HardwarePortDirection::Input &&
+                   port_shown.input != nullptr) {
+          label = "IN " +
+                  std::to_string(topology::processor_input_number(port.index)) +
+                  "  " + label;
+        }
+        if (port_shown.runtime_state == RuntimePortState::Missing) {
+          label += "  MISSING";
+        } else if (port_shown.runtime_state == RuntimePortState::Stale) {
+          label += "  LAST SEEN";
+        }
+        const float width = std::min(ctx.font_width(label) + 12.0F, 220.0F);
+        const bool input =
+            port.direction == topology::HardwarePortDirection::Input;
+        const gui::Rect tag{input ? point.x - 9.0F - width : point.x + 9.0F,
+                            point.y - 7.0F, width, 14.0F};
+        ctx.rounded(tag, alpha(ctx.theme().track, 0.90F), tag.height * 0.5F);
+        ctx.push_clip(tag);
+        ctx.label(gui::inset(tag, 6.0F, 0.0F), label,
+                  port_shown.runtime_state == RuntimePortState::Missing
+                      ? ctx.theme().warning
+                      : ctx.theme().text_muted);
+        ctx.pop_clip();
+      }
+    }
+  }
+  for (const Shown &entry : shown) {
+    const gui::Rect sprite = sprite_bounds(projection, entry.device);
+    std::string status;
+    gui::UiColor light = ctx.theme().text_muted;
+    switch (entry.device.kind) {
+    case topology::HardwareDeviceKind::RenderServer:
+      status = runtime_card_status(entry.presentation);
+      light = runtime_status_color(ctx.theme(), entry.presentation);
+      break;
+    case topology::HardwareDeviceKind::LedProcessor:
+      status = processor_status_text(entry.device, entry.presentation.processor);
+      light = processor_status_color(ctx.theme(), entry.device,
+                                     entry.presentation.processor);
+      break;
+    case topology::HardwareDeviceKind::OperatorMachine:
+    case topology::HardwareDeviceKind::LedWall:
+      break;
+    }
+    const bool selected =
+        entry.node != doc::NodeId{} &&
+        selection_ == HardwareSelection{HardwareSelectionKind::Device, entry.node};
+    draw_nameplate(ctx, sprite, entry.device.name, light, status, selected,
+                   entry.node != doc::NodeId{} && hovered_device == entry.node);
   }
 
   if (pending_link_.has_value()) {
@@ -2460,30 +3185,12 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   ctx.label(gui::Rect{view.right() - navigation_width - 10.0F,
                       view.bottom() - 21.0F, navigation_width, 17.0F},
             navigation_label, ctx.theme().text_muted);
-
-  if (drag_kind_ == DragKind::Palette) {
-    const auto [grid_x, grid_y] =
-        unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
-    topology::HardwareDevice ghost{};
-    ghost.kind = palette_kind_;
-    ghost.name = std::string{topology::device_kind_name(palette_kind_)};
-    ghost.grid_x = grid_x;
-    ghost.grid_y = grid_y;
-    const HardwareDevicePresentation ghost_presentation =
-        presentation_for(ghost);
-    draw_device(ctx, projection, ghost, ghost_presentation, true, true);
-  }
-  if (drag_kind_ == DragKind::Discovered) {
-    const auto [grid_x, grid_y] =
-        unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
-    topology::HardwareDevice ghost{};
-    ghost.kind = topology::HardwareDeviceKind::RenderServer;
-    ghost.name = discovered_drag_.hostname;
-    ghost.address = discovered_drag_.address;
-    ghost.node_index = discovered_drag_.node_index;
-    ghost.grid_x = grid_x;
-    ghost.grid_y = grid_y;
-    draw_device(ctx, projection, ghost, presentation_for(ghost), true, true);
+  if (!map.devices.empty() &&
+      icon_button(ctx, mix(id_, "hardware.frame"),
+                  gui::Rect{view.right() - navigation_width - 40.0F,
+                            view.bottom() - 25.0F, 24.0F, 24.0F},
+                  gui::Icon::Fit, "Frame every device")) {
+    frame_pending_ = true;
   }
 
   if (map.devices.empty()) {
@@ -2537,22 +3244,59 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         summary += " - " + discovery.detail;
       }
       summary_color = ctx.theme().warning;
-    } else if (discovery.machines.empty()) {
-      summary = "SEARCHING - NONE FOUND. RENDER MACHINES ANSWER ON UDP " +
-                std::to_string(discovery.port);
+    } else if (discovery.machines.empty() && discovery.processors.empty()) {
+      summary =
+          discovery.state == topology::HardwareDiscoveryState::Searching
+              ? "SEARCHING - NONE FOUND. RENDER MACHINES ANSWER ON UDP " +
+                    std::to_string(discovery.port)
+              : std::string{"NO RENDER MACHINE SEARCH IN THIS EDITOR"};
     } else {
+      const std::size_t found =
+          discovery.machines.size() + discovery.processors.size();
       summary = std::to_string(discovery.machines.size()) +
-                (discovery.machines.size() == 1U ? " MACHINE" : " MACHINES") +
-                " - DRAG ONE ONTO THE MAP";
+                (discovery.machines.size() == 1U ? " MACHINE" : " MACHINES");
+      if (!discovery.processors.empty()) {
+        summary += ", " + std::to_string(discovery.processors.size()) +
+                   (discovery.processors.size() == 1U ? " PROCESSOR"
+                                                      : " PROCESSORS");
+      }
+      summary += found == 1U ? " - DRAG IT ONTO THE MAP"
+                             : " - DRAG ONE ONTO THE MAP";
+    }
+    // LED processors do not announce themselves: a search, on request,
+    // tries their API port on every host of the local subnets.
+    float search_width = 0.0F;
+    if (discovery.processor_search_available) {
+      search_width = 150.0F;
+      const gui::Rect search{strip.right() - search_width - 6.0F,
+                             strip.y + 2.0F, search_width,
+                             discovery_header_height - 4.0F};
+      if (pill_button(ctx, mix(id_, "hardware.processors.search"), search,
+                      gui::Icon::Search,
+                      discovery.processor_search_running ? "Searching..."
+                                                         : "Find processors",
+                      "Search the local network for NovaStar processors: "
+                      "tries their API port (8001) on every host of this "
+                      "machine's subnets",
+                      ButtonTone::Quiet,
+                      !discovery.processor_search_running)) {
+        frame.search_processors = true;
+      }
+      search_width += 12.0F;
     }
     ctx.label(gui::Rect{strip.x + heading_width + 21.0F, strip.y + 3.0F,
-                        std::max(strip.width - heading_width - 30.0F, 0.0F),
+                        std::max(strip.width - heading_width - 30.0F -
+                                     search_width,
+                                 0.0F),
                         19.0F},
               summary, summary_color);
 
     const float step = discovery_card_width + discovery_card_gap;
     const float content =
-        static_cast<float>(discovery.machines.size()) * step + 10.0F;
+        static_cast<float>(discovery.machines.size() +
+                           discovery.processors.size()) *
+            step +
+        10.0F;
     if (std::abs(wheel) > 0.0001F &&
         strip.contains(ctx.pointer_x(), ctx.pointer_y()) &&
         drag_kind_ == DragKind::None) {
@@ -2568,10 +3312,11 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                                discovery_card_height};
     const gui::Rect right_arrow{strip.right() - arrow_width, cards_y,
                                 arrow_width, discovery_card_height};
-    const bool can_scroll_left =
-        !discovery.machines.empty() && discovered_scroll_ > 0.5F;
+    const bool any_cards =
+        !discovery.machines.empty() || !discovery.processors.empty();
+    const bool can_scroll_left = any_cards && discovered_scroll_ > 0.5F;
     const bool can_scroll_right =
-        !discovery.machines.empty() && discovered_scroll_ < max_scroll - 0.5F;
+        any_cards && discovered_scroll_ < max_scroll - 0.5F;
     gui::Interaction left_interaction{};
     gui::Interaction right_interaction{};
     if (can_scroll_left) {
@@ -2652,6 +3397,68 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                            ? ctx.theme().warning
                            : ctx.theme().text_muted));
     }
+    // Processors the last search found, after the machines.
+    for (std::size_t index = 0U; index < discovery.processors.size(); ++index) {
+      const topology::HardwareDiscoveredProcessor &found =
+          discovery.processors[index];
+      gui::Rect card = hardware_discovered_card_bounds(
+          bounds, discovery, discovery.machines.size() + index);
+      card.x -= discovered_scroll_;
+      const gui::Interaction interaction = ctx.grab(
+          mix(id_, found.address, 0x50524fU), card);
+      const topology::HardwareDevice *const placed =
+          discovered_processor_device(map, found);
+      if (interaction.pressed) {
+        if (placed != nullptr) {
+          select_device(*placed);
+        } else {
+          drag_kind_ = DragKind::DiscoveredProcessor;
+          discovered_processor_drag_ = found;
+          discovered_press_x_ = ctx.pointer_x();
+          discovered_press_y_ = ctx.pointer_y();
+        }
+      }
+      const bool dragging_this =
+          drag_kind_ == DragKind::DiscoveredProcessor &&
+          discovered_processor_drag_.address == found.address;
+      if (dragging_this) {
+        dragged = interaction;
+      }
+      if (card.x > strip.right() || card.right() < strip.x) {
+        continue;
+      }
+      ctx.rounded(card,
+                  dragging_this ? ctx.theme().selection
+                                : (interaction.hovered ? ctx.theme().widget_hover
+                                                       : ctx.theme().row),
+                  ctx.theme().radius);
+      ctx.rounded_outline(card,
+                          placed != nullptr
+                              ? ctx.theme().good
+                              : (dragging_this ? ctx.theme().accent
+                                               : ctx.theme().divider),
+                          ctx.theme().radius);
+      topology::HardwareDevice sample{};
+      sample.kind = topology::HardwareDeviceKind::LedProcessor;
+      sample.protocol = found.protocol;
+      draw_sprite_thumbnail(
+          ctx, gui::Rect{card.x + 3.0F, card.y + 4.0F, 34.0F, card.height - 8.0F},
+          sample, sprites_, placed != nullptr ? 0.55F : 1.0F);
+      const float text_x = card.x + 41.0F;
+      const float text_width = std::max(card.width - 46.0F, 0.0F);
+      ctx.push_clip(card);
+      ctx.label(gui::Rect{text_x, card.y + 2.0F, text_width, 17.0F}, found.name,
+                placed != nullptr ? ctx.theme().text_muted : ctx.theme().text);
+      ctx.label(gui::Rect{text_x, card.y + 18.0F, text_width, 15.0F},
+                found.address + "  " +
+                    std::string{topology::processor_protocol_name(found.protocol)},
+                ctx.theme().text_muted);
+      ctx.label(gui::Rect{text_x, card.y + 33.0F, text_width, 15.0F},
+                placed != nullptr ? "ON MAP - CLICK TO SELECT"
+                                  : "DRAG ONTO THE MAP, OR CLICK TO ADD",
+                placed != nullptr ? ctx.theme().good : ctx.theme().text_muted);
+      ctx.pop_clip();
+    }
     const auto draw_arrow = [&](const gui::Rect &area,
                                 const gui::Interaction &interaction,
                                 bool pointing_right) {
@@ -2699,6 +3506,40 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           const auto [grid_x, grid_y] = free_grid_cell(map);
           place_discovered(discovered_drag_, grid_x, grid_y);
         }
+      }
+      drag_kind_ = DragKind::None;
+    } else if (!dragged->held) {
+      drag_kind_ = DragKind::None;
+    }
+  }
+
+  if (drag_kind_ == DragKind::DiscoveredProcessor) {
+    // As for a machine: a processor that drops out of the list mid-drag
+    // keeps the capture its card took.
+    if (!dragged.has_value()) {
+      dragged = ctx.grab(
+          mix(id_, discovered_processor_drag_.address, 0x50524fU),
+          gui::Rect{});
+    }
+    const auto place_processor = [&](core::i32 grid_x, core::i32 grid_y) {
+      HardwarePlaceRequest request{topology::HardwareDeviceKind::LedProcessor,
+                                   grid_x, grid_y};
+      request.machine = HardwarePlaceMachine{discovered_processor_drag_.name,
+                                             discovered_processor_drag_.address,
+                                             0U};
+      request.protocol = discovered_processor_drag_.protocol;
+      frame.place = std::move(request);
+    };
+    if (dragged->released) {
+      const float moved = std::hypot(ctx.pointer_x() - discovered_press_x_,
+                                     ctx.pointer_y() - discovered_press_y_);
+      if (view.contains(ctx.pointer_x(), ctx.pointer_y())) {
+        const auto [grid_x, grid_y] =
+            unproject_isometric(projection, ctx.pointer_x(), ctx.pointer_y());
+        place_processor(grid_x, grid_y);
+      } else if (dragged->clicked && moved < link_drag_threshold * 2.0F) {
+        const auto [grid_x, grid_y] = free_grid_cell(map);
+        place_processor(grid_x, grid_y);
       }
       drag_kind_ = DragKind::None;
     } else if (!dragged->held) {
@@ -2757,6 +3598,30 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           mix(id_, "hardware.details.address", details_node_.value());
       const bool render_server =
           selected_device->kind == topology::HardwareDeviceKind::RenderServer;
+      const bool processor =
+          selected_device->kind == topology::HardwareDeviceKind::LedProcessor;
+      if (processor) {
+        // How the Director reaches it. NovaStar COEX reads the processor's
+        // inputs, EDIDs and screens; Generic leaves it a box with cables.
+        const gui::Rect protocol_bounds = labelled_bounds("Protocol");
+        if (ctx.button(mix(id_, "hardware.details.protocol",
+                           details_node_.value()),
+                       protocol_bounds,
+                       topology::processor_protocol_name(
+                           selected_device->protocol))) {
+          const bool generic = selected_device->protocol ==
+                               topology::HardwareProcessorProtocol::Generic;
+          frame.property_edit = HardwarePropertyEdit{
+              details_node_, std::string{topology::schema::protocol},
+              doc::PropertyValue{std::string{
+                  generic ? topology::schema::novastar_coex_protocol
+                          : topology::schema::generic_protocol}}};
+        }
+        ctx.tooltip(protocol_bounds,
+                    "How the Director reaches this processor. NovaStar COEX "
+                    "reads its inputs, EDIDs and screens over HTTP (port "
+                    "8001); Generic is not monitored.");
+      }
       const gui::Rect address_bounds =
           labelled_bounds(render_server ? "Host IP" : "Address");
       if (ctx.text_field(address_id, address_bounds, details_address_)) {
@@ -2766,6 +3631,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           ctx.focus() != address_id) {
         ctx.label(gui::inset(address_bounds, 6.0F, 0.0F),
                   "LOCAL (127.0.0.1)", ctx.theme().text_muted);
+      }
+      if (processor && details_address_.empty() &&
+          ctx.focus() != address_id) {
+        ctx.label(gui::inset(address_bounds, 6.0F, 0.0F),
+                  selected_device->protocol ==
+                          topology::HardwareProcessorProtocol::Generic
+                      ? "OPTIONAL"
+                      : "E.G. 192.168.0.40",
+                  ctx.theme().text_muted);
       }
       if (render_server) {
         const gui::Rect target_bounds = labelled_bounds("Control");
@@ -3177,6 +4051,99 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         }
       }
 
+      if (processor &&
+          selected_device->protocol !=
+              topology::HardwareProcessorProtocol::Generic) {
+        form.space(3.0F);
+        ctx.panel(line(1.0F, 4.0F), ctx.theme().divider);
+        ctx.label(line(19.0F, 1.0F), "PROCESSOR", ctx.theme().text_muted);
+        const auto room = [&](float height) {
+          return form.cursor() + height <= details.bottom() - 5.0F;
+        };
+        const auto row = [&](std::string_view label, std::string_view value,
+                             gui::UiColor color) {
+          if (!room(19.0F)) {
+            return false;
+          }
+          gui::Rect value_bounds = line(19.0F, 1.0F);
+          ctx.label(gui::cut_left(value_bounds, details_label_width), label,
+                    ctx.theme().text_muted);
+          ctx.push_clip(value_bounds);
+          ctx.label(value_bounds, value, color);
+          ctx.pop_clip();
+          return true;
+        };
+        const topology::HardwareProcessorNode *const observed =
+            runtime.processor(selected_device->node);
+        static_cast<void>(
+            row("Status", processor_status_text(*selected_device, observed),
+                processor_status_color(ctx.theme(), *selected_device,
+                                       observed)));
+        if (observed != nullptr) {
+          if (!observed->name.empty()) {
+            static_cast<void>(row("Name", observed->name, ctx.theme().text));
+          }
+          for (const topology::HardwareProcessorInput &input :
+               observed->inputs) {
+            std::string value = input.name;
+            value += input.signal
+                         ? "  " + topology::format_video_mode(
+                                      input.width, input.height,
+                                      input.refresh_millihertz)
+                         : std::string{"  no signal"};
+            if (!row("In " + std::to_string(input.number), value,
+                     input.signal ? ctx.theme().text : ctx.theme().text_muted)) {
+              break;
+            }
+            if (input.edid_width != 0U &&
+                !row("", "EDID " + topology::format_video_mode(
+                                       input.edid_width, input.edid_height,
+                                       input.edid_refresh_millihertz),
+                     ctx.theme().text_muted)) {
+              break;
+            }
+          }
+          for (const topology::HardwareProcessorScreen &screen :
+               observed->screens) {
+            const std::string value =
+                (screen.name.empty() ? std::string{"Screen"} : screen.name) +
+                "  " + std::to_string(screen.width) + "x" +
+                std::to_string(screen.height) + ", " +
+                std::to_string(screen.cabinets) + " cabinets";
+            if (!row("Screen", value, ctx.theme().text_muted)) {
+              break;
+            }
+          }
+          if (!observed->notice.empty()) {
+            static_cast<void>(row("", observed->notice,
+                                  observed->notice_failed ? ctx.theme().warning
+                                                          : ctx.theme().good));
+          }
+        }
+        // An input whose EDID offers another mode than the output cabled to
+        // it sends can be told to offer the output's.
+        for (const topology::HardwareSignalCheck &check : signal_checks) {
+          if (check.processor != selected_device->node ||
+              check.issue != topology::HardwareSignalIssue::EdidMismatch ||
+              !check.edid_writable || !room(24.0F)) {
+            continue;
+          }
+          const std::string label =
+              "SET IN " + std::to_string(check.input) + " EDID TO " +
+              topology::format_video_mode(check.width, check.height,
+                                          check.refresh_millihertz);
+          const gui::Rect button = line(22.0F, 3.0F);
+          if (ctx.button(mix(id_, "hardware.details.edid",
+                             details_node_.value() * 32U + check.input),
+                         button, label)) {
+            frame.processor_edid = HardwareProcessorEdidRequest{
+                check.processor, check.input, check.width, check.height,
+                check.refresh_millihertz};
+          }
+          ctx.tooltip(button, topology::signal_check_text(check));
+        }
+      }
+
       if (details_name_dirty_ && ctx.focus() != name_id) {
         frame.property_edit = HardwarePropertyEdit{
             details_node_, std::string{topology::schema::name},
@@ -3197,12 +4164,81 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       ctx.label(gui::cut_top(lines, 22.0F), "CABLE", ctx.theme().text);
       static_cast<void>(gui::cut_top(lines, 3.0F));
       if (link != nullptr) {
-        const std::string route = std::to_string(link->from.device.value()) +
-                                  ":" + std::to_string(link->from.port) +
-                                  "  ->  " +
-                                  std::to_string(link->to.device.value()) +
-                                  ":" + std::to_string(link->to.port);
-        ctx.label(gui::cut_top(lines, 22.0F), route, ctx.theme().keyframe);
+        const auto end_text = [&](const topology::HardwareEndpoint &end) {
+          const topology::HardwareDevice *const device = map.device(end.device);
+          if (device == nullptr) {
+            return std::string{"Missing device"};
+          }
+          const HardwareDevicePresentation presentation =
+              hardware_presentation(map, *device, runtime);
+          const PresentedHardwarePort *const shown = presentation.find(end.port);
+          return device->name + "  " +
+                 (shown != nullptr ? std::string{shown->port.name}
+                                   : port_label(device->kind, end.port));
+        };
+        ctx.push_clip(lines);
+        ctx.label(gui::cut_top(lines, 19.0F), end_text(link->from),
+                  ctx.theme().keyframe);
+        ctx.label(gui::cut_top(lines, 19.0F), "to", ctx.theme().text_muted);
+        ctx.label(gui::cut_top(lines, 19.0F), end_text(link->to),
+                  ctx.theme().keyframe);
+        ctx.pop_clip();
+        static_cast<void>(gui::cut_top(lines, 6.0F));
+        if (const topology::HardwareSignalCheck *const check =
+                check_for(link->node)) {
+          const std::string sent =
+              "Sends " + topology::format_video_mode(check->width, check->height,
+                                                     check->refresh_millihertz);
+          ctx.label(gui::cut_top(lines, 19.0F), sent, ctx.theme().text_muted);
+          if (check->issue == topology::HardwareSignalIssue::None) {
+            ctx.label(gui::cut_top(lines, 19.0F), "Processor receives it",
+                      ctx.theme().good);
+          } else {
+            // What is wrong, then what the processor reports, one short line
+            // each so a narrow rail never cuts the numbers off.
+            const std::string input = "Input " + std::to_string(check->input);
+            const std::string seen = topology::format_video_mode(
+                check->seen_width, check->seen_height,
+                check->seen_refresh_millihertz);
+            std::string_view headline;
+            std::string detail;
+            switch (check->issue) {
+            case topology::HardwareSignalIssue::EdidMismatch:
+              headline = "EDID mismatch";
+              detail = input + " EDID offers " + seen;
+              break;
+            case topology::HardwareSignalIssue::ModeMismatch:
+              headline = "Mode mismatch";
+              detail = input + " receives " + seen;
+              break;
+            case topology::HardwareSignalIssue::NoSignal:
+              headline = "No signal";
+              detail = input + " sees nothing";
+              break;
+            case topology::HardwareSignalIssue::None:
+              break;
+            }
+            ctx.push_clip(lines);
+            ctx.label(gui::cut_top(lines, 19.0F), headline, ctx.theme().caution);
+            ctx.label(gui::cut_top(lines, 19.0F), detail, ctx.theme().caution);
+            ctx.pop_clip();
+            if (check->issue == topology::HardwareSignalIssue::EdidMismatch &&
+                check->edid_writable) {
+              static_cast<void>(gui::cut_top(lines, 4.0F));
+              const gui::Rect button = gui::cut_top(lines, 22.0F);
+              if (ctx.button(mix(id_, "hardware.link.edid", link->node.value()),
+                             button, "MATCH PROCESSOR EDID")) {
+                frame.processor_edid = HardwareProcessorEdidRequest{
+                    check->processor, check->input, check->width,
+                    check->height, check->refresh_millihertz};
+              }
+              ctx.tooltip(button,
+                          "Have the processor offer this output's mode on "
+                          "its input, so the render machine's GPU is offered "
+                          "it too");
+            }
+          }
+        }
       }
     } else {
       gui::Rect message =
@@ -3280,12 +4316,11 @@ std::string feed_runtime_binding(core::u32 node_index) {
                      static_cast<std::size_t>(std::max(length, 0))};
 }
 
-FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
-                                        const gui::Rect &bounds,
-                                        scene::Canvas canvas,
-                                        const output::FeedMap &feed_map,
-                                        core::u64 show_frame,
-                                        const topology::HardwareMap *hardware) {
+FeedMappingFrame FeedMappingPanel::draw(
+    gui::UiContext &ctx, const gui::Rect &bounds, scene::Canvas canvas,
+    const output::FeedMap &feed_map, core::u64 show_frame,
+    const topology::HardwareMap *hardware,
+    const topology::HardwareRuntimeSnapshot *runtime) {
   FeedMappingFrame frame{};
   if (bounds.width <= 0.0F || bounds.height <= 0.0F) {
     rectangle_numbers_.cancel(ctx);
@@ -3411,11 +4446,72 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   const bool valid_selection =
       selected_map_node_.has_value() &&
       feed_map.map_node(*selected_map_node_) != nullptr;
-  title(ctx, bounds, "FEED MAPPING",
-        valid_selection
-            ? std::string_view{}
-            : (feed_map.maps.empty() ? std::string_view{"NOT CONFIGURED"}
-                                     : std::string_view{"CONFIGURED"}));
+  title(ctx, bounds, "FEED MAPPING", {});
+  {
+    // Build from hardware sits at the right of the title, the status left
+    // of it.
+    gui::Rect header = bounds;
+    header = gui::cut_top(header, title_height);
+    const bool cabled =
+        hardware != nullptr &&
+        std::any_of(hardware->links.begin(), hardware->links.end(),
+                    [&](const topology::HardwareLink &link) {
+                      const topology::HardwareDevice *const from =
+                          hardware->device(link.from.device);
+                      return from != nullptr &&
+                             from->kind ==
+                                 topology::HardwareDeviceKind::RenderServer &&
+                             link.from.port >=
+                                 topology::first_render_server_video_port;
+                    });
+    const float build_width = std::min(176.0F, header.width * 0.42F);
+    const gui::Rect build{header.right() - build_width - 5.0F, header.y + 3.0F,
+                          build_width, title_height - 6.0F};
+    if (!valid_selection) {
+      const std::string_view status = feed_map.maps.empty()
+                                          ? std::string_view{"NOT CONFIGURED"}
+                                          : std::string_view{"CONFIGURED"};
+      const float status_width = ctx.font_width(status);
+      ctx.label(gui::Rect{build.x - status_width - 10.0F, header.y,
+                          status_width, header.height},
+                status, ctx.theme().text_muted);
+    }
+    if (pill_button(
+            ctx, mix(id_, "feed.build"), build, gui::Icon::Map,
+            "Build from hardware",
+            cabled ? "Lay out the canvas and the viewports of every cabled "
+                     "window from Hardware Map and what its processors "
+                     "report. Replaces those windows' viewports; one undo "
+                     "puts them back."
+                   : "Cable render outputs to a processor or a wall in "
+                     "Hardware Map first",
+            ButtonTone::Quiet, cabled)) {
+      const topology::HardwareRuntimeSnapshot none{};
+      output::FeedLayoutPlan plan = output::plan_feed_layout(
+          *hardware, runtime != nullptr ? *runtime : none);
+      build_notes_.clear();
+      if (plan.empty()) {
+        build_notes_.push_back("Nothing to build: no cabled output has a "
+                               "window to lay out");
+      } else {
+        std::array<char, 112U> summary{};
+        std::snprintf(summary.data(), summary.size(),
+                      "Built a %ux%u canvas with %zu %s in %zu %s",
+                      plan.canvas.width, plan.canvas.height,
+                      plan.viewports.size(),
+                      plan.viewports.size() == 1U ? "viewport" : "viewports",
+                      plan.windows.size(),
+                      plan.windows.size() == 1U ? "window" : "windows");
+        build_notes_.emplace_back(summary.data());
+      }
+      build_notes_.insert(build_notes_.end(), plan.notes.begin(),
+                          plan.notes.end());
+      build_notes_until_ = ctx.time_seconds() + 12.0;
+      if (!plan.empty()) {
+        frame.layout = FeedLayoutRequest{std::move(plan), 0U};
+      }
+    }
+  }
   if (focused_ && valid_selection && !ctx.typing() &&
       !surface_numbers_.live() && !rectangle_numbers_.live() &&
       ctx.key_pressed(gui::Key::Delete)) {
@@ -4716,6 +5812,28 @@ FeedMappingFrame FeedMappingPanel::draw(gui::UiContext &ctx,
   frame.dragging = drag_kind_ != DragKind::None || surface_drag_active ||
                    (row_drag_node_ != doc::NodeId{} && row_drag_moved_);
   frame.editing = frame.editing || rename_.active();
+
+  // What the last build did, over the bottom of the panel for a while.
+  if (!build_notes_.empty() && ctx.time_seconds() < build_notes_until_) {
+    constexpr float line = 18.0F;
+    const std::size_t lines = std::min<std::size_t>(build_notes_.size(), 6U);
+    const float width = std::min(bounds.width - 24.0F, 560.0F);
+    const gui::Rect card{bounds.x + 12.0F,
+                         bounds.bottom() - 16.0F -
+                             static_cast<float>(lines) * line - 14.0F,
+                         width, static_cast<float>(lines) * line + 14.0F};
+    ctx.shadow(card, ctx.theme().radius);
+    ctx.rounded(card, ctx.theme().widget, ctx.theme().radius);
+    gui::Rect text = gui::inset(card, 12.0F, 7.0F);
+    for (std::size_t index = 0U; index < lines; ++index) {
+      ctx.label(gui::cut_top(text, line), build_notes_[index],
+                index == 0U ? ctx.theme().text : ctx.theme().text_muted);
+    }
+    if (card.contains(ctx.pointer_x(), ctx.pointer_y()) &&
+        ctx.pointer_pressed()) {
+      build_notes_until_ = 0.0;
+    }
+  }
   ctx.pop_clip();
   return frame;
 }

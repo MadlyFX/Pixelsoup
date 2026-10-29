@@ -10,6 +10,7 @@
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/output/perspective_mapping.hpp>
 
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -97,5 +98,15 @@ schedule_feed_organize(cmd::DirectorScheduler &scheduler,
 schedule_feed_map_delete(cmd::DirectorScheduler &scheduler,
                          const editor::FeedMapDeleteRequest &request,
                          cmd::FrameNumber apply_at);
+
+// Build from hardware: erases every viewport of the windows the plan lays
+// out and adds the plan's, named and in order, in the request's transaction.
+// `ids` holds one fresh id per planned viewport. The canvas is the caller's,
+// written in the same transaction.
+[[nodiscard]] bool
+schedule_feed_layout(cmd::DirectorScheduler &scheduler,
+                     const editor::FeedLayoutRequest &request,
+                     std::span<const doc::NodeId> ids,
+                     cmd::FrameNumber apply_at);
 
 } // namespace mediaserver::app

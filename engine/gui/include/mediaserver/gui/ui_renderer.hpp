@@ -64,6 +64,9 @@ struct UiBatch final {
     // straight into a panel - the plan's "viewports are just textures in the
     // widget tree, with zero copies" - and costs one more pass, not a copy.
     const rhi::Texture* texture{};
+    // Sample `texture` with nearest filtering: pixel art drawn larger than
+    // its own pixels stays crisp instead of blurring between them.
+    bool nearest{};
 };
 
 // A frame's worth of 2D drawing, accumulated on the CPU then handed to the
@@ -249,6 +252,21 @@ public:
         float v1,
         UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
 
+    // The same region drawn with nearest filtering, so each texel lands as a
+    // hard-edged block - pixel art at any zoom. The texture is borrowed as
+    // for add_image.
+    void add_sprite(
+        float x,
+        float y,
+        float width,
+        float height,
+        const rhi::Texture& texture,
+        float u0,
+        float v0,
+        float u1,
+        float v1,
+        UiColor tint = UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+
     // Scales everything drawn since vertex `first` about (centre_x,
     // centre_y) - logical units - by `factor`. A whole compound mark grows
     // or shrinks as one, text included, without redrawing it: how a dragged
@@ -281,10 +299,12 @@ private:
         float u1,
         float v1,
         UiColor color,
-        const rhi::Texture* texture);
+        const rhi::Texture* texture,
+        bool nearest = false);
     // Opens (or continues) the batch this run belongs to. Returns false when the
     // current clip rectangle is empty, in which case the caller emits nothing.
-    [[nodiscard]] bool begin_run(const rhi::Texture* texture);
+    [[nodiscard]] bool begin_run(const rhi::Texture* texture,
+                                 bool nearest = false);
     // One vertex sampling the white texel, counted into the open batch. Only
     // valid straight after a begin_run() that returned true.
     void push_solid(float x, float y, UiColor color);
@@ -369,10 +389,12 @@ private:
     UiRenderer(
         rhi::GraphicsPipeline pipeline,
         rhi::Sampler sampler,
+        rhi::Sampler nearest_sampler,
         rhi::StorageBuffer vertices) noexcept;
 
     rhi::GraphicsPipeline pipeline_;
     rhi::Sampler sampler_;
+    rhi::Sampler nearest_sampler_;
     rhi::StorageBuffer vertex_buffer_;
     rhi::Texture atlas_;
     rhi::Texture depth_;

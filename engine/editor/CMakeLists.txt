@@ -44,8 +44,26 @@ add_library(mediaserver_editor STATIC
     src/workspace_panels.cpp
     src/scene_settings_panel.cpp
     src/mapping_panels.cpp
+    src/hardware_sprites.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
 )
 add_library(MediaServer::Editor ALIAS mediaserver_editor)
+
+# The Hardware Map's pixel-art sheet ships inside the editor, so a packaged
+# build never looks for it beside the executable.
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/assets/hardware_sprites.png"
+        "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
+        -DNAMESPACE=mediaserver::editor::detail
+        -DSYMBOL=hardware_sprites_png
+        -P "${PROJECT_SOURCE_DIR}/cmake/EmbedFile.cmake"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/hardware_sprites.png"
+        "${PROJECT_SOURCE_DIR}/cmake/EmbedFile.cmake"
+    VERBATIM
+)
 # The shell is one very large translation unit; Debug builds pass the
 # default COFF section limit.
 if(MSVC)
@@ -639,6 +657,8 @@ if(BUILD_TESTING)
     add_executable(mediaserver_editor_mapping_tests
         tests/mapping_panels_tests.cpp
         src/mapping_panels.cpp
+        src/hardware_sprites.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/hardware_sprites_png.cpp"
         src/number_field.cpp
         src/operator_widgets.cpp
     )

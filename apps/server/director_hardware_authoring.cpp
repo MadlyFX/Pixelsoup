@@ -40,6 +40,17 @@ hardware_kind_property(topology::HardwareDeviceKind kind) noexcept {
     return topology::schema::render_server_kind;
 }
 
+[[nodiscard]] std::string_view hardware_protocol_property(
+    topology::HardwareProcessorProtocol protocol) noexcept {
+    switch (protocol) {
+    case topology::HardwareProcessorProtocol::Generic:
+        return topology::schema::generic_protocol;
+    case topology::HardwareProcessorProtocol::NovastarCoex:
+        return topology::schema::novastar_coex_protocol;
+    }
+    return topology::schema::generic_protocol;
+}
+
 [[nodiscard]] doc::Node
 make_hardware_device(doc::NodeId id,
                      const editor::HardwarePlaceRequest &request,
@@ -84,6 +95,12 @@ make_hardware_device(doc::NodeId id,
                             doc::PropertyValue{std::int64_t{60}});
     node.properties.emplace(std::string{topology::schema::refresh_denominator},
                             doc::PropertyValue{std::int64_t{1}});
+    if (request.kind == topology::HardwareDeviceKind::LedProcessor) {
+        node.properties.emplace(
+            std::string{topology::schema::protocol},
+            doc::PropertyValue{
+                std::string{hardware_protocol_property(request.protocol)}});
+    }
     if (request.kind == topology::HardwareDeviceKind::RenderServer) {
         node.properties.emplace(std::string{topology::schema::window_mode},
                                 doc::PropertyValue{std::string{
@@ -202,7 +219,8 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         edit.property == topology::schema::window_mode ||
         edit.property == topology::schema::desktop_x ||
         edit.property == topology::schema::desktop_y ||
-        edit.property == topology::schema::main_node;
+        edit.property == topology::schema::main_node ||
+        edit.property == topology::schema::protocol;
     const doc::Node *const existing =
         scheduler.projected_document().get(edit.device);
     if (!allowed || existing == nullptr ||
@@ -229,6 +247,17 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
     if (edit.property == topology::schema::main_node &&
         std::get_if<bool>(&edit.value) == nullptr) {
         return true;
+    }
+    // A protocol says how to reach a processor; nothing else has one.
+    if (edit.property == topology::schema::protocol) {
+        const auto *const protocol = std::get_if<std::string>(&edit.value);
+        if (kind_text == nullptr ||
+            *kind_text != topology::schema::led_processor_kind ||
+            protocol == nullptr ||
+            (*protocol != topology::schema::generic_protocol &&
+             *protocol != topology::schema::novastar_coex_protocol)) {
+            return true;
+        }
     }
     // One main node per show: choosing one clears every other in the same
     // transaction, so a single undo puts the previous choice back.

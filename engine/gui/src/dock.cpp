@@ -923,6 +923,15 @@ std::span<const DockLayout::Floating> DockLayout::floating() const noexcept {
     return floating_;
 }
 
+DockId DockLayout::floating_frame_of(PanelId panel) const noexcept {
+    const DockId leaf = leaf_of(panel);
+    if (leaf == no_dock) {
+        return no_dock;
+    }
+    const Floating* const frame = floating_for(leaf);
+    return frame != nullptr ? frame->node : no_dock;
+}
+
 DockId DockLayout::floating_at(float x, float y) const noexcept {
     for (auto it = floating_.rbegin(); it != floating_.rend(); ++it) {
         if (it->frame.contains(x, y)) {

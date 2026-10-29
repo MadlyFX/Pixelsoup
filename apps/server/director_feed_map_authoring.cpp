@@ -655,4 +655,73 @@ schedule_feed_map_delete(cmd::DirectorScheduler &scheduler,
                                cmd::TransactionId{request.gesture}, apply_at);
 }
 
+[[nodiscard]] bool
+schedule_feed_layout(cmd::DirectorScheduler &scheduler,
+                     const editor::FeedLayoutRequest &request,
+                     std::span<const doc::NodeId> ids,
+                     cmd::FrameNumber apply_at) {
+    const output::FeedLayoutPlan &plan = request.plan;
+    if (plan.empty() || ids.size() < plan.viewports.size()) {
+        return true;
+    }
+    const cmd::UndoContextId context{3U};
+    const cmd::TransactionId transaction{request.gesture};
+    for (const core::u32 window : plan.windows) {
+        const std::vector<const doc::Node *> existing =
+            find_feed_map_nodes(scheduler.projected_document(), window);
+        std::vector<doc::NodeId> erased;
+        erased.reserve(existing.size());
+        for (const doc::Node *node : existing) {
+            erased.push_back(node->id);
+        }
+        for (const doc::NodeId id : erased) {
+            if (!schedule_erase_node(scheduler, id, context, transaction,
+                                     apply_at)) {
+                return false;
+            }
+        }
+    }
+    std::vector<std::int64_t> order(plan.windows.size(), 0);
+    for (std::size_t index = 0U; index < plan.viewports.size(); ++index) {
+        const output::FeedLayoutViewport &viewport = plan.viewports[index];
+        const auto window = std::find(plan.windows.begin(),
+                                      plan.windows.end(), viewport.window);
+        if (window == plan.windows.end()) {
+            continue;
+        }
+        doc::Node node{};
+        node.id = ids[index];
+        node.type = std::string{output::schema::map_type};
+        const auto put = [&](std::string_view key, doc::PropertyValue value) {
+            node.properties.emplace(std::string{key}, std::move(value));
+        };
+        const auto whole = [](core::u32 value) {
+            return doc::PropertyValue{static_cast<std::int64_t>(value)};
+        };
+        put(output::schema::node_index, whole(viewport.window));
+        put(output::schema::source_x, whole(viewport.source.x));
+        put(output::schema::source_y, whole(viewport.source.y));
+        put(output::schema::source_width, whole(viewport.source.width));
+        put(output::schema::source_height, whole(viewport.source.height));
+        put(output::schema::viewport_x, whole(viewport.viewport.x));
+        put(output::schema::viewport_y, whole(viewport.viewport.y));
+        put(output::schema::viewport_width, whole(viewport.viewport.width));
+        put(output::schema::viewport_height, whole(viewport.viewport.height));
+        put(output::schema::projection,
+            doc::PropertyValue{std::string{output::schema::projection_canvas}});
+        put(output::schema::surface_id, doc::PropertyValue{std::int64_t{0}});
+        put(output::schema::map_name, doc::PropertyValue{viewport.name});
+        std::int64_t &position = order[static_cast<std::size_t>(
+            window - plan.windows.begin())];
+        put(output::schema::list_order, doc::PropertyValue{position++});
+        const doc::NodeId id = node.id;
+        if (!scheduler.schedule_edit(cmd::PutNode{std::move(node)},
+                                     cmd::EraseNode{id}, context, transaction,
+                                     apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace mediaserver::app

@@ -526,6 +526,9 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
         pending_feed_organize.insert(pending_feed_organize.end(),
                                      editor_frame.feed_organize.begin(),
                                      editor_frame.feed_organize.end());
+        if (editor_frame.feed_layout.has_value()) {
+            pending_feed_layout = std::move(editor_frame.feed_layout);
+        }
         pending_feed_surface_adds.insert(
             pending_feed_surface_adds.end(),
             editor_frame.feed_surface_adds.begin(),

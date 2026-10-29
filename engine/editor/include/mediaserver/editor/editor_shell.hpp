@@ -972,6 +972,8 @@ struct EditorFrame final {
   // these vectors never expose a cancelled or invalid native-file choice.
   std::vector<FeedProjectionEdit> feed_projection_edits;
   std::vector<FeedOrganizeRequest> feed_organize;
+  // Build from hardware: one plan, applied as one undoable edit.
+  std::optional<FeedLayoutRequest> feed_layout;
   std::vector<FeedSurfaceAddRequest> feed_surface_adds;
   std::vector<FeedSurfaceEditRequest> feed_surface_edits;
   std::vector<FeedSurfaceDeleteRequest> feed_surface_deletes;
@@ -1026,6 +1028,10 @@ struct EditorFrame final {
   // Fixed lifecycle action from Output Monitor. The Director hands this to a
   // background controller; EditorShell never performs network I/O.
   std::optional<OutputLifecycleRequest> output_lifecycle;
+  // From Hardware Map: search the network for LED processors, and set a
+  // processor input's EDID. The Director's processor monitor does both.
+  bool search_processors{};
+  std::vector<HardwareProcessorEdidRequest> processor_edid_writes;
   // Elements to delete this frame, and the shared gesture for the deletion.
   std::vector<doc::NodeId> deletes;
   core::u64 delete_gesture{};

@@ -125,6 +125,17 @@ parse_kind(std::string_view value) noexcept {
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<HardwareProcessorProtocol>
+parse_protocol(std::string_view value) noexcept {
+    if (value == schema::generic_protocol) {
+        return HardwareProcessorProtocol::Generic;
+    }
+    if (value == schema::novastar_coex_protocol) {
+        return HardwareProcessorProtocol::NovastarCoex;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::optional<HardwareWindowMode>
 parse_window_mode(std::string_view value) noexcept {
     if (value == schema::inherit_window_mode) {
@@ -189,6 +200,11 @@ void HardwareMapModel::put(const doc::Node& node) {
         if (!window_mode.has_value()) {
             reader.fail();
         }
+        const auto protocol = parse_protocol(
+            reader.text(schema::protocol, schema::generic_protocol));
+        if (!protocol.has_value()) {
+            reader.fail();
+        }
         if (!as_i32(reader.integer(schema::grid_x, 0), x) ||
             !as_i32(reader.integer(schema::grid_y, 0), y) ||
             !as_i32(reader.integer(schema::desktop_x, 0), desktop_x) ||
@@ -228,7 +244,10 @@ void HardwareMapModel::put(const doc::Node& node) {
                                : HardwareWindowMode::Inherit,
                            desktop_x, desktop_y,
                            parsed_kind == HardwareDeviceKind::RenderServer &&
-                               main_node});
+                               main_node,
+                           parsed_kind == HardwareDeviceKind::LedProcessor
+                               ? *protocol
+                               : HardwareProcessorProtocol::Generic});
         return;
     }
 

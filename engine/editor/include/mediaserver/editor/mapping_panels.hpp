@@ -8,6 +8,7 @@
 #include <mediaserver/gui/canvas_view.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
+#include <mediaserver/output/feed_layout.hpp>
 #include <mediaserver/output/feed_map.hpp>
 #include <mediaserver/render/mapped_scene.hpp>
 #include <mediaserver/scene/canvas.hpp>
@@ -63,6 +64,11 @@ hardware_mapping_projection(const gui::Rect &bounds) noexcept;
 [[nodiscard]] gui::Rect
 hardware_palette_item_bounds(const gui::Rect &bounds,
                              topology::HardwareDeviceKind kind) noexcept;
+// The palette entry for a kind that arrives speaking a protocol: the
+// NovaStar processor is an LED Processor with NovaStar COEX already set.
+[[nodiscard]] gui::Rect hardware_palette_item_bounds(
+    const gui::Rect &bounds, topology::HardwareDeviceKind kind,
+    topology::HardwareProcessorProtocol protocol) noexcept;
 
 // The MODE cycle button of the SYNC POLICY section in the palette rail.
 // Exposed as a pure presentation query, like the palette item bounds above,
@@ -71,13 +77,19 @@ hardware_palette_item_bounds(const gui::Rect &bounds,
 [[nodiscard]] gui::Rect
 hardware_sync_mode_button_bounds(const gui::Rect &bounds) noexcept;
 
+// The Control port field of PROJECT SETUP.
+[[nodiscard]] gui::Rect
+hardware_control_port_field_bounds(const gui::Rect &bounds) noexcept;
+
 // The Canvas W (or, with `height`, Canvas H) field of PROJECT SETUP.
 [[nodiscard]] gui::Rect
 hardware_canvas_field_bounds(const gui::Rect &bounds, bool height) noexcept;
 
 // The DETECTED ON NETWORK strip along the bottom of the canvas, and one of
-// its cards (unscrolled). Empty while discovery is off, or when the canvas is
-// too short to give it room. The map is navigated and edited only above it.
+// its cards (unscrolled): render machines first, then LED processors a
+// search found. Empty while neither discovery nor processor search is
+// available, or when the canvas is too short to give it room. The map is
+// navigated and edited only above it.
 [[nodiscard]] gui::Rect
 hardware_discovery_strip_bounds(const gui::Rect &bounds,
                                 const topology::HardwareDiscovery &discovery) noexcept;
@@ -124,6 +136,13 @@ hardware_port_position(const IsometricProjection &projection,
     const topology::HardwareDevice &device,
     const topology::HardwareRuntimeSnapshot &runtime, core::u8 port) noexcept;
 
+// The corner where a cable turns on the stage floor: a point on the cable
+// away from either device, where its signal warning is drawn. Nothing for a
+// cable the map does not have.
+[[nodiscard]] std::optional<IsoPoint> hardware_cable_point(
+    const IsometricProjection &projection, const topology::HardwareMap &map,
+    const topology::HardwareRuntimeSnapshot &runtime, doc::NodeId link) noexcept;
+
 // Exact card status used by the runtime-aware panel. Exposed as a pure
 // presentation query so tests and accessibility surfaces can preserve the
 // distinction between a detected zero-output machine and unavailable
@@ -167,7 +186,12 @@ struct HardwarePlaceRequest final {
   core::i32 grid_x{};
   core::i32 grid_y{};
   core::u64 gesture{};
+  // A render machine, or a processor found on the network: the card starts
+  // with its name and address (and, for a machine, its node index).
   std::optional<HardwarePlaceMachine> machine;
+  // LED Processors only: the protocol the card is reached by.
+  topology::HardwareProcessorProtocol protocol{
+      topology::HardwareProcessorProtocol::Generic};
 
   bool operator==(const HardwarePlaceRequest &) const = default;
 };
@@ -279,6 +303,21 @@ struct HardwareSyncPolicyEdit final {
   bool operator==(const HardwareSyncPolicyEdit &) const = default;
 };
 
+// Asks an LED processor to offer one mode on one input, so the render
+// machine driving it is offered the mode its output is set to. A request to
+// the device, not a document edit: nothing undoes it, and the outcome comes
+// back as the processor's notice.
+struct HardwareProcessorEdidRequest final {
+  doc::NodeId processor{};
+  // The VIDEO IN number on the processor's card.
+  core::u8 input{};
+  core::u32 width{};
+  core::u32 height{};
+  core::u32 refresh_millihertz{};
+
+  bool operator==(const HardwareProcessorEdidRequest &) const = default;
+};
+
 // Removing a device also requires the authoring boundary to erase its incident
 // cable nodes. The tagged selection preserves that distinction without making
 // the panel depend on document command types.
@@ -302,6 +341,9 @@ struct HardwareMappingFrame final {
   std::optional<HardwareSyncPolicyEdit> sync_policy_edit;
   std::optional<HardwareOutputBindingEdit> output_binding_edit;
   std::optional<HardwareOutputBindingDelete> output_binding_delete;
+  // The operator pressed Search for LED processors.
+  bool search_processors{};
+  std::optional<HardwareProcessorEdidRequest> processor_edid;
   // Emitted by the visible REMOVE DEVICE / DISCONNECT CABLE action. For a
   // device, the authoring layer should erase incident link nodes in the same
   // transaction before erasing the device node.
@@ -358,6 +400,16 @@ public:
   view_projection(const gui::Rect &bounds) const noexcept;
   [[nodiscard]] float view_zoom() const noexcept { return view_.zoom; }
 
+  // The pixel-art sheet devices are drawn from (see hardware_sprites.hpp),
+  // owned by whoever owns the device. Without one - a headless test - each
+  // device is a plain shaded box.
+  void set_sprites(const rhi::Texture *sheet) noexcept { sprites_ = sheet; }
+
+  // Centres the map on its devices, zoomed out until they all fit, on the
+  // next draw. The shell asks when the panel opens; the map's Fit button
+  // asks too.
+  void frame_devices() noexcept { frame_pending_ = true; }
+
   // Drops document-owned interaction state after replacing the project.
   // View pan/zoom is editor-local and intentionally survives.
   void reset_project_state() noexcept {
@@ -390,6 +442,8 @@ private:
     Device,
     // A card from the DETECTED ON NETWORK strip.
     Discovered,
+    // A processor card from the same strip.
+    DiscoveredProcessor,
   };
 
   gui::UiId id_{};
@@ -398,6 +452,10 @@ private:
   DragKind drag_kind_{DragKind::None};
   topology::HardwareDeviceKind palette_kind_{
       topology::HardwareDeviceKind::RenderServer};
+  topology::HardwareProcessorProtocol palette_protocol_{
+      topology::HardwareProcessorProtocol::Generic};
+  const rhi::Texture *sprites_{};
+  bool frame_pending_{};
   doc::NodeId drag_device_{};
   core::i32 drag_original_x_{};
   core::i32 drag_original_y_{};
@@ -419,6 +477,7 @@ private:
 
   // A copy, so a machine that stops answering mid-drag can still be dropped.
   topology::HardwareDiscoveredMachine discovered_drag_;
+  topology::HardwareDiscoveredProcessor discovered_processor_drag_;
   float discovered_press_x_{};
   float discovered_press_y_{};
   float discovered_scroll_{};
@@ -600,6 +659,15 @@ struct FeedOrganizeRequest final {
   bool operator==(const FeedOrganizeRequest &) const = default;
 };
 
+// Build from hardware: the canvas and every viewport of the windows the
+// plan lays out, replacing what those windows had, as one undoable edit.
+struct FeedLayoutRequest final {
+  output::FeedLayoutPlan plan;
+  core::u64 gesture{};
+
+  bool operator==(const FeedLayoutRequest &) const = default;
+};
+
 struct FeedSurfaceLockRequest final {
   doc::NodeId node{};
   bool locked{};
@@ -629,6 +697,7 @@ struct FeedMappingFrame final {
   std::optional<FeedSurfaceDeleteRequest> surface_remove;
   std::optional<FeedSurfaceLockRequest> surface_lock;
   std::optional<FeedOrganizeRequest> organize;
+  std::optional<FeedLayoutRequest> layout;
   // Delete was handled by this focused panel, so the shell must not also
   // delete the current scene selection.
   bool consume_delete{};
@@ -657,7 +726,9 @@ public:
                                        const output::FeedMap &feed_map,
                                        core::u64 show_frame = 0U,
                                        const topology::HardwareMap *hardware =
-                                           nullptr);
+                                           nullptr,
+                                       const topology::HardwareRuntimeSnapshot
+                                           *runtime = nullptr);
 
   [[nodiscard]] std::optional<doc::NodeId> selected_map_node() const noexcept {
     return selected_map_node_;
@@ -767,6 +838,9 @@ private:
   NumberField rectangle_numbers_;
   bool rectangle_mesh_domain_{};
   bool focused_{};
+  // What the last Build from hardware did, shown until this time.
+  std::vector<std::string> build_notes_;
+  double build_notes_until_{};
 
   friend bool detail::wait_for_feed_mapping_projection_cache_for_test(
       FeedMappingPanel &panel) noexcept;

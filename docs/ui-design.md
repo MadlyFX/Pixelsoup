@@ -46,6 +46,13 @@ Every colour comes from `gui::Theme`. Do not add inline RGB values in panels.
 If a new meaning needs a colour, add it to `Theme`, with a comment saying
 what it means, and to `night_theme()`.
 
+The one exception is pixel art. The Hardware Map draws its devices from a
+sprite sheet (`engine/editor/assets/hardware_sprites.png`) with its own
+palette, through `UiDrawList::add_sprite` so each art pixel stays a hard
+block, and dims it with the theme's text level at night. Everything around
+the sprites - floor, cables, sockets, name tags - still takes its colours
+from `Theme`.
+
 | Theme colour | Means | Never use it for |
 | --- | --- | --- |
 | `good` (green) | On air, healthy, playing | Decoration or selection |

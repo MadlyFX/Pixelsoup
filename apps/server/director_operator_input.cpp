@@ -146,6 +146,7 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_feed_map_deletes.clear();
     pending_feed_projection_edits.clear();
     pending_feed_organize.clear();
+    pending_feed_layout.reset();
     pending_feed_surface_adds.clear();
     pending_feed_surface_edits.clear();
     pending_feed_surface_deletes.clear();

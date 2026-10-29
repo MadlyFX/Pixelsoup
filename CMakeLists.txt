@@ -72,6 +72,10 @@ add_subdirectory(engine/output)
 # intentionally separate, so this document projection remains headless and
 # deterministic like scene and output.
 add_subdirectory(engine/topology)
+# Device control protocols for the hardware on the map that is not a render
+# machine - LED processors first. Headless: sockets and JSON on a thread of
+# their own, with observations kept apart from the authored topology.
+add_subdirectory(engine/devices)
 # Camera tracking. Protocol parsers, a bounded pose slot, and the per-frame
 # pose channel. It names no socket, no scene, and no renderer, which is what
 # keeps a tracker read structurally impossible anywhere but the Director.
@@ -130,7 +134,8 @@ if(BUILD_TESTING)
     mediaserver_test_area(scene engine/scene engine/track engine/assets)
     mediaserver_test_area(compositor engine/compositor)
     mediaserver_test_area(particles libs/ajfx)
-    mediaserver_test_area(output engine/output engine/topology engine/sync)
+    mediaserver_test_area(output engine/output engine/topology engine/sync
+        engine/devices)
     mediaserver_test_area(render engine/shaders engine/rhi engine/render)
     mediaserver_test_area(editor engine/ui engine/gui engine/editor)
     mediaserver_test_area(server apps/server)

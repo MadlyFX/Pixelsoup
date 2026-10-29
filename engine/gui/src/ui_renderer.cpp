@@ -146,6 +146,13 @@ void UiDrawList::add_image_region(
     quad(x, y, width, height, u0, v0, u1, v1, tint, &texture);
 }
 
+void UiDrawList::add_sprite(
+    float x, float y, float width, float height,
+    const rhi::Texture& texture, float u0, float v0, float u1, float v1,
+    UiColor tint) {
+    quad(x, y, width, height, u0, v0, u1, v1, tint, &texture, true);
+}
+
 void UiDrawList::add_triangle(
     float x0,
     float y0,
@@ -616,7 +623,7 @@ void UiDrawList::add_outline_box(
     add_rect(x + width - t, y + t, t, height - 2.0F * t, color);
 }
 
-bool UiDrawList::begin_run(const rhi::Texture* texture) {
+bool UiDrawList::begin_run(const rhi::Texture* texture, bool nearest) {
     const Clip clip = current_clip();
     // Fully-clipped geometry contributes nothing; skip it so an offscreen
     // widget costs no vertices.
@@ -631,7 +638,8 @@ bool UiDrawList::begin_run(const rhi::Texture* texture) {
         && batches_.back().clip_min_y == clip.min_y
         && batches_.back().clip_max_x == clip.max_x
         && batches_.back().clip_max_y == clip.max_y
-        && batches_.back().texture == texture;
+        && batches_.back().texture == texture
+        && batches_.back().nearest == nearest;
     if (!same_run) {
         batches_.push_back(UiBatch{
             static_cast<core::u32>(vertices_.size()),
@@ -640,7 +648,8 @@ bool UiDrawList::begin_run(const rhi::Texture* texture) {
             clip.min_y,
             clip.max_x,
             clip.max_y,
-            texture});
+            texture,
+            nearest});
     }
     return true;
 }
@@ -682,7 +691,8 @@ void UiDrawList::quad(
     float u1,
     float v1,
     UiColor color,
-    const rhi::Texture* texture) {
+    const rhi::Texture* texture,
+    bool nearest) {
     float x0{};
     float x1{};
     float y0{};
@@ -692,7 +702,7 @@ void UiDrawList::quad(
     if (x1 <= x0 || y1 <= y0) {
         return;
     }
-    if (!begin_run(texture)) {
+    if (!begin_run(texture, nearest && texture != nullptr)) {
         return;
     }
 
@@ -715,9 +725,11 @@ void UiDrawList::quad(
 UiRenderer::UiRenderer(
     rhi::GraphicsPipeline pipeline,
     rhi::Sampler sampler,
+    rhi::Sampler nearest_sampler,
     rhi::StorageBuffer vertices) noexcept
     : pipeline_(std::move(pipeline))
     , sampler_(std::move(sampler))
+    , nearest_sampler_(std::move(nearest_sampler))
     , vertex_buffer_(std::move(vertices)) {}
 
 bool UiRenderer::shaders_available() noexcept {
@@ -760,7 +772,8 @@ core::Result<UiRenderer, RenderError> UiRenderer::create(
         return Result::failure(RenderError::ShaderFormatUnsupported);
     }
     auto sampler = device.create_sampler(rhi::Filter::Linear);
-    if (!sampler) {
+    auto nearest_sampler = device.create_sampler(rhi::Filter::Nearest);
+    if (!sampler || !nearest_sampler) {
         return Result::failure(RenderError::Unavailable);
     }
     auto vertices = device.create_storage_buffer(
@@ -771,6 +784,7 @@ core::Result<UiRenderer, RenderError> UiRenderer::create(
     return Result::success(UiRenderer{
         std::move(pipeline).value(),
         std::move(sampler).value(),
+        std::move(nearest_sampler).value(),
         std::move(vertices).value()});
 #else
     static_cast<void>(device);
@@ -845,7 +859,8 @@ bool UiRenderer::render(
         static_cast<float>(width), static_cast<float>(height), 0.0F, 0.0F};
     const rhi::StorageBuffer* const vertex_buffers[] = {&vertex_buffer_};
 
-    const auto record = [&](const rhi::Texture& texture, bool first) {
+    const auto record = [&](const rhi::Texture& texture, bool nearest,
+                            bool first) {
         rhi::PulledDraw draw{};
         draw.pipeline = &pipeline_;
         draw.vertex_buffers = vertex_buffers;
@@ -855,7 +870,7 @@ bool UiRenderer::render(
         draw.batch_uniform_stride = sizeof(BatchConstants);
         draw.batches = pass_batches_;
         draw.texture = &texture;
-        draw.sampler = &sampler_;
+        draw.sampler = nearest ? &nearest_sampler_ : &sampler_;
         // The first pass clears; the rest compose over what it left, so the
         // painter's order across textures is still the CPU draw order.
         draw.load = !first;
@@ -874,11 +889,13 @@ bool UiRenderer::render(
     std::size_t index = 0U;
     while (index < batches.size()) {
         const rhi::Texture* const texture = batches[index].texture;
+        const bool nearest = batches[index].nearest;
         batch_scratch_.clear();
         pass_batches_.clear();
 
         std::size_t end = index;
-        while (end < batches.size() && batches[end].texture == texture) {
+        while (end < batches.size() && batches[end].texture == texture
+               && batches[end].nearest == nearest) {
             const UiBatch& batch = batches[end];
             ++end;
             if (batch.vertex_count == 0U) {
@@ -898,7 +915,8 @@ bool UiRenderer::render(
         if (pass_batches_.empty()) {
             continue;
         }
-        if (!record(texture != nullptr ? *texture : atlas_, first_pass)) {
+        if (!record(texture != nullptr ? *texture : atlas_, nearest,
+                    first_pass)) {
             return false;
         }
         first_pass = false;
@@ -908,7 +926,7 @@ bool UiRenderer::render(
         // Nothing to draw, but the target still owes its clear.
         batch_scratch_.clear();
         pass_batches_.clear();
-        return record(atlas_, true);
+        return record(atlas_, false, true);
     }
     return true;
 }

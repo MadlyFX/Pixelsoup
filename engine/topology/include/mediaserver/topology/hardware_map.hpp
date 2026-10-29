@@ -42,6 +42,28 @@ device_kind_name(HardwareDeviceKind kind) noexcept {
   return "Device";
 }
 
+// How the Director talks to an LED processor. A generic processor is a
+// passive box on the map - a name and its cables, nothing asked of it. A
+// vendor protocol makes the Director ask the processor itself what it
+// receives, what its inputs advertise, and how its screen is laid out.
+enum class HardwareProcessorProtocol : core::u8 {
+  Generic,
+  // NovaStar COEX controllers (MX40 Pro, MX30, MX20, KU20, CX40 Pro...),
+  // through their HTTP API on port 8001.
+  NovastarCoex,
+};
+
+[[nodiscard]] constexpr std::string_view
+processor_protocol_name(HardwareProcessorProtocol protocol) noexcept {
+  switch (protocol) {
+  case HardwareProcessorProtocol::Generic:
+    return "Generic";
+  case HardwareProcessorProtocol::NovastarCoex:
+    return "NovaStar COEX";
+  }
+  return "Generic";
+}
+
 enum class HardwareSignal : core::u8 {
   Network,
   Video,
@@ -78,9 +100,33 @@ inline constexpr core::u8 first_render_server_video_port = 1U;
 inline constexpr core::u8 last_render_server_video_port =
     max_hardware_video_outputs;
 
+// An LED processor takes up to this many video inputs. Input one keeps port 0
+// and LED OUT keeps port 1, where the single-input processor had them, so
+// input two onward take the port of their own number.
+inline constexpr core::u8 max_processor_video_inputs = 16U;
+inline constexpr core::u8 processor_led_output_port = 1U;
+
+// The port a processor's 1-based video input number is cabled to.
+[[nodiscard]] constexpr core::u8
+processor_input_port(core::u8 input) noexcept {
+  return input <= 1U ? 0U : input;
+}
+
+// The 1-based video input a processor port is, or zero for LED OUT and
+// ports a processor does not have.
+[[nodiscard]] constexpr core::u8
+processor_input_number(core::u8 port) noexcept {
+  if (port == 0U) {
+    return 1U;
+  }
+  return port >= 2U && port <= max_processor_video_inputs ? port : 0U;
+}
+
 // These are the baseline ports shown without runtime observations. Render
 // Servers expose CONTROL IN plus legacy VIDEO OUT 1 here; find_port also
 // describes logical video outputs 2..32 so saved links remain valid offline.
+// Processors likewise show VIDEO IN 1 and LED OUT; find_port describes
+// inputs 2..16.
 [[nodiscard]] std::span<const HardwarePort>
 ports_for(HardwareDeviceKind kind) noexcept;
 
@@ -115,6 +161,10 @@ struct HardwareDevice final {
   // The Render Server whose playhead the editor's Timeline draws beside its
   // own. One per show; the Director clears the others when one is chosen.
   bool main_node{};
+  // LED Processors only: how the Director reaches it. A vendor protocol
+  // talks to `address` (a numeric IP, optionally with a :port for a
+  // simulator); Generic leaves the processor unmonitored.
+  HardwareProcessorProtocol protocol{HardwareProcessorProtocol::Generic};
 
   bool operator==(const HardwareDevice &) const = default;
 };
