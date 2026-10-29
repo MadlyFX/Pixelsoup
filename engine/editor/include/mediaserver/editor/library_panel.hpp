@@ -117,6 +117,32 @@ enum class LibraryMediaDecodeState : core::u8 {
   Unavailable,
 };
 
+// The editor's own 720p proxy of a UHD asset, made on the Director for
+// Stage, Program and the Asset Viewer to play. Until it is ready those views
+// play the source, more slowly; each ten seconds of it plays as soon as it
+// is made.
+enum class LibraryEditorProxyState : core::u8 {
+  Queued,
+  Making,
+  Ready,
+  Failed,
+};
+
+struct LibraryEditorProxy final {
+  LibraryEditorProxyState state{LibraryEditorProxyState::Queued};
+  core::u64 made_frames{};
+  core::u64 total_frames{};
+
+  bool operator==(const LibraryEditorProxy &) const = default;
+};
+
+// How much of an editor proxy is made, 0 to 1; a made one is 1.
+[[nodiscard]] float library_editor_proxy_fraction(
+    const LibraryEditorProxy &proxy) noexcept;
+// "Editor proxy 40%" and the like, for a Library row.
+[[nodiscard]] std::string
+library_editor_proxy_status(const LibraryEditorProxy &proxy);
+
 struct LibraryProxyRuntimeObservation final {
   doc::NodeId asset{};
   std::optional<assets::DerivativeKey> key;
@@ -125,6 +151,8 @@ struct LibraryProxyRuntimeObservation final {
   LibraryProxyRuntimeIssue issue{LibraryProxyRuntimeIssue::None};
   std::optional<LibraryProxyTranscodeProgress> transcode_progress;
   LibraryMediaDecodeState media_decode{LibraryMediaDecodeState::Unknown};
+  // Empty for an asset the editor plays from its source.
+  std::optional<LibraryEditorProxy> editor_proxy;
 
   bool operator==(const LibraryProxyRuntimeObservation &) const = default;
 };

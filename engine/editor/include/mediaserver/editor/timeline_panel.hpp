@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/waveform.hpp>
 #include <mediaserver/core/types.hpp>
@@ -169,6 +170,10 @@ struct EditorTimeline final {
 // The marker palette. The document stores the index; the editor owns the hue,
 // so every panel that shows a marker paints it the same.
 [[nodiscard]] gui::UiColor timeline_marker_color(core::u8 index) noexcept;
+// A plateset moment's colour, the same for its kind wherever it shows: a
+// stop red, a turn amber like an indicator, a bump blue, shade purple.
+[[nodiscard]] gui::UiColor
+plateset_moment_color(assets::PlatesetMomentKind kind) noexcept;
 [[nodiscard]] std::string_view timeline_marker_color_name(
     core::u8 index) noexcept;
 
@@ -666,8 +671,7 @@ struct TimelineTimeAxis final {
 // the placement, so it moves with the footage and is never authored here.
 struct TimelineMoment final {
   core::i64 frame{};
-  std::string name;
-  core::u8 color{};
+  assets::PlatesetMomentKind kind{assets::PlatesetMomentKind::Stopped};
   // The placed front plate it rides on.
   doc::NodeId clip{};
 
@@ -882,7 +886,7 @@ public:
   }
   [[nodiscard]] bool snapping_enabled() const noexcept { return snapping_; }
   [[nodiscard]] bool auto_key_enabled() const noexcept { return auto_key_; }
-  // Whether the cache bar and the render nodes' playheads are drawn.
+  // Whether kept plateset moments have their band under the markers.
   [[nodiscard]] bool moments_visible() const noexcept {
     return moments_visible_;
   }

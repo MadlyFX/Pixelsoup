@@ -243,9 +243,16 @@ proxy is made. The Stage banner counts only clips with nothing to show.
 Stage and Program Output each have a **Proxy / Full res** media menu beside
 their preview resolution, and the Asset Viewer has one in its header. Each
 view's choice is its own and is kept with the window layout. **Full res**
-decodes the source in that view. Hovering the menu says how many of the
-view's clips drew a proxy on the last frame and how many are still showing
-their source until their proxy is ready. While a mask is selected or the
+decodes the source in that view. Stage's menu carries a cyan bar along its
+foot while any of the project's editor proxies is still being made; it fills
+as they are made, whichever file Stage is showing, and goes away when all
+are. Program's menu fills a bar while any of its clips still plays its
+source because its proxy is being made. Hovering the menu says how many of
+the view's clips drew a proxy on the last frame, how many are waiting, how
+much of their proxies is made and, on Stage, how much of the project's.
+The Library's Status column shows each clip's editor proxy as queued,
+being made (with a percentage and a bar), ready or failed, and the Asset
+Viewer's Proxy menu does the same for the open clip. While a mask is selected or the
 eyedropper is armed, every view shows the source and returns to its choice
 afterwards.
 

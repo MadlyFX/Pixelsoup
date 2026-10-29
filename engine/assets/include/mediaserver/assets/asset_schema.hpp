@@ -41,8 +41,9 @@ inline constexpr std::string_view plateset_offset_suffix = "_offset";
 inline constexpr std::string_view plateset_half_resolution =
     "plateset_half_resolution";
 // Moments kept from the front plate: `moment_<n>_frame` (front plate source
-// frame), `moment_<n>_name` and `moment_<n>_color`, numbered from zero with
-// no gaps. They belong to the footage, so they follow every placement.
+// frame) and `moment_<n>_kind` (`stopped`, `turning_left`, `turning_right`,
+// `bump`, `into_shade`), numbered from zero with no gaps. They belong to the
+// footage, so they follow every placement.
 inline constexpr std::string_view plateset_moment_prefix = "moment_";
 
 inline constexpr std::string_view display_name = "display_name";

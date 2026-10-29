@@ -888,11 +888,23 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         observe_timeline_playback(tick, inputs);
         next_editor_refresh = Clock::now() + editor_refresh_interval;
         refresh_history_state();
+        // Stage's menu also shows how far the whole project's editor
+        // proxies have got.
+        const ProxyGenerationWorker::Totals all_proxies =
+            director_proxy_generator != nullptr
+                ? director_proxy_generator->totals()
+                : ProxyGenerationWorker::Totals{};
         editor->set_view_media_counts(
             editor::ViewMediaCounts{program_view_proxies.proxied,
-                                    program_view_proxies.waiting},
+                                    program_view_proxies.waiting,
+                                    program_view_proxies.waiting_made_frames,
+                                    program_view_proxies.waiting_total_frames},
             editor::ViewMediaCounts{stage_view_proxies.proxied,
-                                    stage_view_proxies.waiting});
+                                    stage_view_proxies.waiting,
+                                    stage_view_proxies.waiting_made_frames,
+                                    stage_view_proxies.waiting_total_frames,
+                                    all_proxies.made_frames,
+                                    all_proxies.total_frames});
         auto editor_frame = editor->frame(
             scene_frame, timeline, keyframes, elements, effects,
             hardware_map, feed_map, switcher_view, asset_registry,
@@ -1971,6 +1983,29 @@ PhaseExit DirectorShowLoop::project_output_media(DirectorTick &tick) {
             project_output_node_media_runtime(
                 asset_registry, asset_manifest.digest, hardware_map,
                 barrier, library_proxy_runtime);
+            // Beside what the output nodes report: the editor's own proxy
+            // of each asset, made here for Stage, Program and the Asset
+            // Viewer.
+            if (director_proxy_generator != nullptr) {
+                for (editor::LibraryProxyRuntimeObservation &observation :
+                     library_proxy_runtime) {
+                    const auto status =
+                        director_proxy_generator->status_for(
+                            observation.asset);
+                    if (!status.has_value()) {
+                        continue;
+                    }
+                    using From = ProxyGenerationWorker::AssetStatus::State;
+                    using To = editor::LibraryEditorProxyState;
+                    const To state =
+                        status->state == From::Queued   ? To::Queued
+                        : status->state == From::Making ? To::Making
+                        : status->state == From::Ready  ? To::Ready
+                                                        : To::Failed;
+                    observation.editor_proxy = editor::LibraryEditorProxy{
+                        state, status->made_frames, status->total_frames};
+                }
+            }
         } catch (const std::bad_alloc &) {
             std::cerr << "could not project output-node media runtime "
                          "observations\n";

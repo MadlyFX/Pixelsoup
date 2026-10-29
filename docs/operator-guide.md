@@ -373,8 +373,14 @@ what it returns to when it is dragged out of the track - they are simply not
 what it renders with. A track's grade runs after the clip's, because the look
 an operator sets on a wall is meant to survive whichever plate is up.
 
-Screens are outlined in the Stage viewport, so a track with nothing on it, a
-muted one, and one between clips are all still findable and still have a gizmo.
+Clicking a picture on the Stage selects the screen it is playing on, since
+that is what stands there and what a drag moves: click a plate and drag, and
+that one screen moves. Under an LED Car Process the screen's own transform
+is an offset inside the rig's placement for its slot, so each angle can be
+nudged on its own while the rig still moves them all. The clip itself is
+selected from the Timeline. Screens are outlined in the Stage viewport, so
+a track with nothing on it, a muted one, and one between clips are all
+still findable and still have a gizmo.
 They are carried in the evaluated scene rather than re-derived by each panel,
 which is what makes the editor and the renderer agree about where a screen is.
 
@@ -547,9 +553,10 @@ A marker or cue on the strip below the ruler is grabbed by its tag, which also
 answers a short way left of its line.
 The exact IN and OUT number fields remain available for typed or dragged range
 entry. The adjacent Set In and Set Out controls take the current playhead in
-one click and preserve Loop. If a local Preview playhead is outside the old
-range, the other endpoint moves only as far as needed to keep the new range
-valid. Frames outside In and Out are dimmed from the ruler down through every
+one click and preserve Loop. The playhead can be parked outside In and Out -
+scrub, click or type past either end - so I or O can extend the range there;
+if it is outside, the other endpoint moves only as far as needed to keep the
+new range valid. Playing from outside the range starts at In. Frames outside In and Out are dimmed from the ruler down through every
 track, so the part of the show that plays reads at a glance.
 
 The ruler labels whole seconds and minutes, and fills the space between with
@@ -950,6 +957,14 @@ The Library has two views, switched from the icons at the left of its footer:
   to open it. Each tile names its duration and resolution, or its vertex
   count and texture size.
 
+A UHD clip's Status says how its editor proxy is coming along: **Editor
+proxy queued**, **Editor proxy 40%** with a cyan bar filling under
+the row, **Editor proxy ready**, or **Editor proxy failed** in amber. Until
+it is ready, Stage, Program and the Asset Viewer play that clip's source,
+which is slower; the part under the playhead is made first, so playback
+there gets faster within seconds. Hover the Status for the details. See
+[Editor proxies](media-playback.md#editor-proxies).
+
 The footer slider sets the thumbnail size, and so does Ctrl+wheel over the
 content. Each view keeps its own size.
 
@@ -1145,6 +1160,9 @@ Require Proxy policy asks for. **PROXY REQUIRED - NOT READY** draws nothing,
 as the wall would, and **OFFLINE** is a missing file. The **Proxy / Full res**
 menu in the header chooses which file the viewer decodes; Full res shows the
 source's own pixels for checking detail, whatever Stage and Program use.
+While the open clip's proxy is still being made, the Proxy menu carries a
+bar along its foot that fills as the proxy is made; its tooltip gives the
+percentage.
 A status that does not fit beside a long name is left out. **DECODING** means frames are still arriving; the last complete one is
 held. The viewer decodes through its own cache, so scrubbing it never counts
 against Program's asset readiness.
@@ -1315,10 +1333,15 @@ for **Stopped**, **Turning right/left**, **Bump** and **Into shade**, each
 at the frame it begins (Sync by Motion finds them too). Click one to keep
 it, again to let it go, or **Keep All**. Kept moments belong to the
 plateset, in front plate frames: wherever the set is placed they are drawn
-on the Timeline's marker strip as small diamonds, and they move with the
-footage when the take is moved, trimmed or slipped. Hover one for its name;
-click it to go there. The diamond-on-a-staff button in the Timeline toolbar
-shows or hides them. They are not cues and never stop the show.
+in a **Moments** band under the Timeline's marker strip, and they move with
+the footage when the take is moved, trimmed or slipped. Each kind always
+has its own colour - a stop red, a turn amber, a bump blue, shade purple -
+and says what it is beside its diamond: in full where the next moment
+leaves room, as a short tag (**Stop**, **Left**, **Right**, **Bump**,
+**Shade**) where it leaves less, and only on hover where moments crowd
+together; zoom in to read them. Click one to go there. The
+diamond-on-a-staff button in the Timeline toolbar shows or hides the band.
+They are not cues and never stop the show.
 
 **Placing a plateset.** Drag it from the Library onto the Timeline (it
 starts where it lands) or the Stage (at the playhead). Each plate gets a
@@ -1595,7 +1618,7 @@ PTP/genlock/frame-lock integration boundary.
 Use Library to import media or models, then drag them into Stage. The Inspector
 and Timeline author ordinary document commands, so their changes participate in
 replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
-Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
+Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo; **Ctrl+S** saves the project. A
 new edit after undo starts a new branch and clears redo only for that authoring
 context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
 of those two histories the global actions navigate.
@@ -2089,7 +2112,7 @@ From the left:
 | Box resting on a line | Surface snapping |
 | Grid, frame corners, three axes, corner brackets | Show the floor grid, guides, gizmo and every element's bounds |
 | Screen with Full / Half / Quarter | The resolution Stage renders at |
-| Framed square with Proxy / Full res | Which file Stage decodes for UHD video - see [Editor proxies](media-playback.md#editor-proxies) |
+| Framed square with Proxy / Full res | Which file Stage decodes for UHD video - see [Editor proxies](media-playback.md#editor-proxies). On Stage a bar along its foot fills as the project's editor proxies are made; on Program it fills while some clips still play their source waiting for theirs |
 
 The rate at the right end is how fast Stage is drawing. Program Output's bar
 carries the same media and resolution menus, chosen separately from Stage's. Over the image's

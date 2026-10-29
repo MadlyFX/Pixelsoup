@@ -860,6 +860,13 @@ void the_worker_runs_from_the_needed_segment_then_from_the_start() {
         worker.set_needs(needs);
         worker.request(media);
         PROXY_CHECK(worker_finished(worker, *key));
+        // The editor reads the finished proxy as made, all of it.
+        using Status = app::ProxyGenerationWorker::AssetStatus;
+        PROXY_CHECK((worker.status_for(media.id) ==
+                     Status{Status::State::Ready, 1'500U, 1'500U}));
+        PROXY_CHECK(!worker.status_for(doc::NodeId{999U}).has_value());
+        PROXY_CHECK((worker.totals() ==
+                     app::ProxyGenerationWorker::Totals{1'500U, 1'500U}));
     }
     using Range = std::optional<server::ProxySourceRange>;
     PROXY_CHECK((state->ranges ==
@@ -910,6 +917,89 @@ void the_worker_leaves_a_run_for_a_newly_needed_segment() {
     // Segment 0 was made once: one piece per segment in all.
     PROXY_CHECK(state->pieces.size() == 5U);
     PROXY_CHECK(state->joins == 1U);
+}
+
+// A proxy finished in an earlier session is ready at once, even with its
+// segments gone; one that cannot be made reads as failed.
+void the_worker_reports_made_and_failed_proxies() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "earlier.mov";
+    write_file(source, bytes("earlier-source"));
+    assets::MediaAsset media = asset(source, 119U);
+    media.frame_count = 600U;
+    const auto key = assets::requested_proxy_key(media);
+    PROXY_CHECK(key.has_value());
+    const fs::path cache_root = temporary.path() / "cache";
+    const auto first = std::make_shared<BackendState>();
+    first->source_frames = 600U;
+    {
+        app::ProxyGenerationWorker worker{
+            std::make_unique<server::ProxyGenerationService>(
+                open_cache(cache_root),
+                std::make_unique<ControlledBackend>(first))};
+        worker.request(media);
+        PROXY_CHECK(worker_finished(worker, *key));
+    }
+    PROXY_CHECK(first->joins == 1U);
+    // The segments are trimmed away; the joined proxy stays.
+    {
+        server::ProxyGenerationService service{open_cache(cache_root)};
+        PROXY_CHECK(service.inspect(*key).value().state ==
+                    assets::DerivativeState::Ready);
+    }
+    std::error_code ignored;
+    for (core::u32 segment = 0U; segment < 2U; ++segment) {
+        server::ProxyGenerationService service{open_cache(cache_root)};
+        const auto entry = service.inspect(
+            assets::derivative_segment_key(*key, segment));
+        PROXY_CHECK(entry.has_value());
+        fs::remove(entry.value().path, ignored);
+        const auto gone =
+            service.inspect(assets::derivative_segment_key(*key, segment));
+        PROXY_CHECK(!gone.has_value() ||
+                    gone.value().state != assets::DerivativeState::Ready);
+    }
+    const auto second = std::make_shared<BackendState>();
+    second->source_frames = 600U;
+    {
+        app::ProxyGenerationWorker worker{
+            std::make_unique<server::ProxyGenerationService>(
+                open_cache(cache_root),
+                std::make_unique<ControlledBackend>(second))};
+        worker.request(media);
+        PROXY_CHECK(worker_finished(worker, *key));
+        using Status = app::ProxyGenerationWorker::AssetStatus;
+        PROXY_CHECK(worker.status_for(media.id).has_value() &&
+                    worker.status_for(media.id)->state ==
+                        Status::State::Ready);
+    }
+    PROXY_CHECK(second->calls == 0U);
+
+    // Never probed for length, so made as one file, and the encoder fails.
+    TemporaryDirectory other;
+    const fs::path broken_source = other.path() / "broken.mov";
+    write_file(broken_source, bytes("broken-source"));
+    assets::MediaAsset broken = asset(broken_source, 121U);
+    broken.frame_count.reset();
+    const auto broken_key = assets::requested_proxy_key(broken);
+    PROXY_CHECK(broken_key.has_value());
+    const auto failing = std::make_shared<BackendState>();
+    failing->failure = server::ProxyBackendError{
+        server::ProxyBackendErrorCode::EncodeFailed, {}};
+    {
+        app::ProxyGenerationWorker worker{
+            std::make_unique<server::ProxyGenerationService>(
+                open_cache(other.path() / "cache"),
+                std::make_unique<ControlledBackend>(failing))};
+        worker.request(broken);
+        PROXY_CHECK(worker_finished(worker, *broken_key));
+        using Status = app::ProxyGenerationWorker::AssetStatus;
+        PROXY_CHECK(worker.status_for(broken.id).has_value() &&
+                    worker.status_for(broken.id)->state ==
+                        Status::State::Failed);
+        // A failed proxy is left out of the project's totals.
+        PROXY_CHECK((worker.totals() == app::ProxyGenerationWorker::Totals{}));
+    }
 }
 
 void next_to_source_storage_routes_from_each_media_path() {
@@ -975,7 +1065,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 16U> cases{{
     {"unavailable default fails closed without publishing",
      &unavailable_default_fails_closed_without_publishing},
     {"successful backend publishes keyed payload and sidecar",
@@ -1002,6 +1092,8 @@ constexpr std::array<Case, 15U> cases{{
      &the_worker_runs_from_the_needed_segment_then_from_the_start},
     {"the worker leaves a run for a newly needed segment",
      &the_worker_leaves_a_run_for_a_newly_needed_segment},
+    {"the worker reports made and failed proxies",
+     &the_worker_reports_made_and_failed_proxies},
     {"next-to-source storage routes from each media path",
      &next_to_source_storage_routes_from_each_media_path},
     {"clearing a proxy root preserves unrelated files and the root",

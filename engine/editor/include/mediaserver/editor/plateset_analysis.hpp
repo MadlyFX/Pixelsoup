@@ -26,8 +26,7 @@ enum class PlatesetAnalysisState : core::u8 {
 // frames, offered as a timeline marker.
 struct PlatesetMotionEvent final {
   core::i64 frame{};
-  std::string name;
-  core::u8 color{};
+  assets::PlatesetMomentKind kind{assets::PlatesetMomentKind::Stopped};
 
   bool operator==(const PlatesetMotionEvent &) const = default;
 };

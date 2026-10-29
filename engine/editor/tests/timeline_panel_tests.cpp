@@ -149,16 +149,22 @@ struct Harness final {
   std::vector<editor::TimelineWaveformObservation> waveforms;
   assets::WaveformEnvelope waveform_bins{};
   std::vector<scene::TimelineMarker> markers;
+  std::vector<editor::TimelineMoment> moments;
 
   gui::Rect bounds{0.0F, 0.0F, 1000.0F, 400.0F};
 
   // One editor frame. Overlays are drawn as the shell draws them, after the
   // panel, which is where a context menu learns where its entries are.
   editor::TimelinePanelFrame draw() {
-    editor::TimelinePanelFrame out = panel.draw(
-        ctx, bounds, timeline, keys, elements, selection, primary, effects,
-        surfaces, selected_surface, lanes, clipboard_span, key_scale_preview,
-        filmstrips, waveforms, markers);
+    editor::TimelineDrawInput drawn{timeline,   keys,
+                                    elements,   selection,
+                                    primary,    effects,
+                                    surfaces,   selected_surface,
+                                    lanes,      clipboard_span,
+                                    key_scale_preview, filmstrips,
+                                    waveforms,  markers};
+    drawn.moments = moments;
+    editor::TimelinePanelFrame out = panel.draw(ctx, bounds, drawn);
     ctx.draw_overlays(gui::Rect{0.0F, 0.0F, 2'000.0F, 2'000.0F});
     return out;
   }
@@ -344,7 +350,7 @@ void timecode_reads_and_writes_the_forms_an_operator_types() {
   UI_CHECK(!editor::parse_timecode("ten", 25U, 1U, 0U));
 }
 
-void the_ruler_scrubs_and_clamps_to_the_show_range() {
+void the_ruler_scrubs_past_the_show_range() {
   Harness h;
   // At 1000px wide the list is 260px and the 0..100 range fits the 740px
   // graph. One quarter across is frame 25.
@@ -353,10 +359,14 @@ void the_ruler_scrubs_and_clamps_to_the_show_range() {
   UI_CHECK(pressed.seek_to_frame.has_value());
   UI_CHECK(pressed.seek_to_frame.value() == 25U);
 
-  // Capture survives leaving the ruler and clamps at OUT.
+  // Capture survives leaving the ruler and runs on past OUT, so a new Out
+  // can be set beyond the current one; before frame zero it stops at zero.
   const editor::TimelinePanelFrame outside = h.frame(1400.0F, 45.0F, true);
   UI_CHECK(outside.seek_to_frame.has_value());
-  UI_CHECK(outside.seek_to_frame.value() == 100U);
+  UI_CHECK(outside.seek_to_frame.value() == 154U);
+  const editor::TimelinePanelFrame before = h.frame(100.0F, 45.0F, true);
+  UI_CHECK(before.seek_to_frame.has_value());
+  UI_CHECK(before.seek_to_frame.value() == 0U);
 }
 
 void a_layer_row_selects_and_ctrl_click_toggles_exactly() {
@@ -3680,6 +3690,48 @@ void the_dope_sheet_and_the_graph_share_one_time_axis() {
   return channel;
 }
 
+// Kept moments read without a hover: each kind always in its own colour,
+// named beside its diamond in a band of its own under the markers
+// (y=76..94 at this size), unless the next moment leaves no room. A click
+// on one goes there.
+void kept_moments_say_what_they_are() {
+  const auto same = [](gui::UiColor left, gui::UiColor right) {
+    return left.r == right.r && left.g == right.g && left.b == right.b;
+  };
+  using Kind = assets::PlatesetMomentKind;
+  UI_CHECK(editor::timeline_marker_color_name(0U) == "Red" &&
+           same(editor::plateset_moment_color(Kind::Stopped),
+                editor::timeline_marker_color(0U)));
+  UI_CHECK(editor::timeline_marker_color_name(5U) == "Blue" &&
+           same(editor::plateset_moment_color(Kind::Bump),
+                editor::timeline_marker_color(5U)));
+  UI_CHECK(same(editor::plateset_moment_color(Kind::TurningLeft),
+                editor::plateset_moment_color(Kind::TurningRight)));
+  UI_CHECK(!same(editor::plateset_moment_color(Kind::TurningLeft),
+                 editor::plateset_moment_color(Kind::IntoShade)));
+
+  Harness h{gui::FontAtlas::placeholder()};
+  h.moments = {{60, Kind::TurningLeft, clip_node},
+               {20, Kind::Stopped, clip_node},
+               {21, Kind::Bump, clip_node}};
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(text_in(h.list, gui::Rect{0.0F, 76.0F, 250.0F, 18.0F}) ==
+           "Moments");
+  // Frame 20 is x=408, a frame before the bump: too close to say anything.
+  UI_CHECK(text_in(h.list, gui::Rect{412.0F, 76.0F, 6.0F, 18.0F}).empty());
+  UI_CHECK(text_in(h.list, gui::Rect{420.0F, 76.0F, 200.0F, 18.0F}) ==
+           "Bump");
+  UI_CHECK(text_in(h.list, gui::Rect{706.0F, 76.0F, 200.0F, 18.0F}) ==
+           "Turning left");
+  UI_CHECK(h.click(711.0F, 85.0F).seek_to_frame == std::optional<std::uint64_t>{60U});
+
+  // Hidden, the band goes and the rows close up under the markers.
+  h.moments.clear();
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(text_in(h.list, gui::Rect{0.0F, 76.0F, 1000.0F, 18.0F}) !=
+           "Moments");
+}
+
 void rows_show_each_channel_evaluated_at_the_playhead() {
   Harness h{gui::FontAtlas::placeholder()};
   h.keys = {weighted_position_x()};
@@ -4888,7 +4940,7 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 134U> cases{{
+constexpr std::array<Case, 135U> cases{{
     {"soloing a group shows what is inside it",
      &soloing_a_group_shows_what_is_inside_it},
     {"a track is listed once, by its header",
@@ -5053,8 +5105,9 @@ constexpr std::array<Case, 134U> cases{{
      &filmstrips_request_exact_visible_keys_and_do_not_retry_failures},
     {"waveforms request exact keys and draw only valid ready envelopes",
      &waveforms_request_exact_keys_and_draw_only_valid_ready_envelopes},
-    {"the ruler scrubs and clamps to the show range",
-     &the_ruler_scrubs_and_clamps_to_the_show_range},
+    {"the ruler scrubs past the show range",
+     &the_ruler_scrubs_past_the_show_range},
+    {"kept moments say what they are", &kept_moments_say_what_they_are},
     {"a layer row selects and Ctrl click toggles exactly",
      &a_layer_row_selects_and_ctrl_click_toggles_exactly},
     {"a Shift layer click carries only visible top-level rows",

@@ -666,6 +666,15 @@ inline void nearer_key(std::optional<core::i64> &best,
   return static_cast<core::u64>(std::floor(std::clamp(frame, lo, hi) + 0.5));
 }
 
+// A frame the playhead can be moved to: any frame from zero up, inside the
+// In/Out range or not.
+[[nodiscard]] inline core::u64 seekable_frame(double frame) noexcept {
+  if (!std::isfinite(frame) || frame <= 0.0) {
+    return 0U;
+  }
+  return static_cast<core::u64>(std::floor(std::min(frame, 9.0e15) + 0.5));
+}
+
 [[nodiscard]] inline core::u64 entered_frame(double value) noexcept {
   if (!std::isfinite(value) || value <= 0.0) {
     return 0U;

@@ -55,9 +55,7 @@ struct MotionSync final {
 
 struct MotionEvent final {
   core::i64 frame{};
-  std::string name;
-  // An index into the marker palette.
-  core::u8 color{};
+  assets::PlatesetMomentKind kind{assets::PlatesetMomentKind::Stopped};
 
   bool operator==(const MotionEvent &) const = default;
 };

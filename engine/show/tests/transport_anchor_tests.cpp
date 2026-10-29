@@ -1,4 +1,4 @@
-#include <mediaserver/show/transport_authority.hpp>
+﻿#include <mediaserver/show/transport_authority.hpp>
 #include <mediaserver/show/transport_state.hpp>
 
 #include <array>
@@ -261,7 +261,6 @@ void the_authority_re_anchors_only_on_operator_action() {
     SHOW_CHECK(sought);
     SHOW_CHECK(sought.value().state == TransportState::Paused);
     SHOW_CHECK(transport.frame_at(control(900U)) == ShowFrame{432U});
-    SHOW_CHECK(!transport.seek(ShowFrame{1'000U}, control(23U)));
 
     // Resuming continues from exactly the sought frame.
     SHOW_CHECK(transport.play(control(23U)));
@@ -374,15 +373,17 @@ void set_range_changes_length_and_loop_and_clamps_the_position() {
     SHOW_CHECK(created);
     auto transport = std::move(created).value();
 
-    // Park the show at 500, then shrink the range and turn on looping.
+    // Play from 500, then shrink the range and turn on looping.
     SHOW_CHECK(transport.seek(ShowFrame{500U}, control(1U)));
+    SHOW_CHECK(transport.play(control(2U)));
     auto ranged =
         transport.set_range(ShowFrame{0U}, ShowFrame{120U}, true, control(2U));
     SHOW_CHECK(ranged);
     SHOW_CHECK(ranged.value().last_frame == ShowFrame{120U});
     SHOW_CHECK(ranged.value().loop);
-    // The position was outside the new range, so it clamps to the last frame.
+    // A playing show outside the new range clamps to its last frame.
     SHOW_CHECK(ranged.value().anchor_show_frame == ShowFrame{120U});
+    SHOW_CHECK(transport.pause(control(3U)));
     SHOW_CHECK(transport.anchor().first_frame == ShowFrame{0U});
 
     // Playing now wraps at the new, shorter length.
@@ -394,6 +395,47 @@ void set_range_changes_length_and_loop_and_clamps_the_position() {
     // A degenerate range (last before first) is refused.
     SHOW_CHECK(
         !transport.set_range(ShowFrame{50U}, ShowFrame{10U}, false, control(200U)));
+}
+
+void a_paused_playhead_parks_outside_in_out_and_play_starts_at_in() {
+    const show::ShowClockConfig config{
+        rate_50, ShowFrame{100U}, ShowFrame{199U}, false};
+    auto created = show::TransportAuthority::create(config, control(0U));
+    SHOW_CHECK(created);
+    auto transport = std::move(created).value();
+
+    // Paused, a seek past Out lands exactly there.
+    auto past = transport.seek(ShowFrame{340U}, control(1U));
+    SHOW_CHECK(past);
+    SHOW_CHECK(past.value().anchor_show_frame == ShowFrame{340U});
+    SHOW_CHECK(show::valid_transport_anchor(past.value()));
+    SHOW_CHECK(transport.frame_at(control(50U)) == ShowFrame{340U});
+    // Before In, too.
+    SHOW_CHECK(transport.seek(ShowFrame{7U}, control(2U)));
+    SHOW_CHECK(transport.frame_at(control(50U)) == ShowFrame{7U});
+
+    // A range change leaves a parked playhead where it is.
+    auto ranged =
+        transport.set_range(ShowFrame{100U}, ShowFrame{150U}, false, control(3U));
+    SHOW_CHECK(ranged);
+    SHOW_CHECK(ranged.value().anchor_show_frame == ShowFrame{7U});
+
+    // Playing from outside starts at In.
+    auto played = transport.play(control(4U));
+    SHOW_CHECK(played);
+    SHOW_CHECK(played.value().anchor_show_frame == ShowFrame{100U});
+    SHOW_CHECK(transport.frame_at(control(9U)) == ShowFrame{105U});
+
+    // A seek outside while playing parks the show paused there.
+    auto parked = transport.seek(ShowFrame{260U}, control(10U));
+    SHOW_CHECK(parked);
+    SHOW_CHECK(parked.value().state == TransportState::Paused);
+    SHOW_CHECK(transport.frame_at(control(90U)) == ShowFrame{260U});
+
+    // A playing anchor outside the range is still invalid.
+    auto playing = parked.value();
+    playing.state = TransportState::Playing;
+    SHOW_CHECK(!show::valid_transport_anchor(playing));
 }
 
 [[nodiscard]] show::TransportAuthority cued_transport(
@@ -860,7 +902,7 @@ void an_operator_anchor_ahead_of_the_stream_decides_the_position() {
                == std::optional<TransportAnchor>{stop});
 }
 
-constexpr std::array<show::test::Case, 30U> cases{{
+constexpr std::array<show::test::Case, 31U> cases{{
     {"a playing anchor advances one show frame per control frame",
      &a_playing_anchor_advances_one_show_frame_per_control_frame},
     {"a paused or stopped anchor suppresses the whole term",
@@ -895,6 +937,8 @@ constexpr std::array<show::test::Case, 30U> cases{{
      &changing_rate_preserves_position_and_round_trips},
     {"set range changes length and loop and clamps the position",
      &set_range_changes_length_and_loop_and_clamps_the_position},
+    {"a paused playhead parks outside In/Out and play starts at In",
+     &a_paused_playhead_parks_outside_in_out_and_play_starts_at_in},
     {"a hold cue stops on its own frame and GO runs to the next",
      &a_hold_cue_stops_on_its_own_frame_and_go_runs_to_the_next},
     {"a loop cue repeats its section until GO lets it run on",

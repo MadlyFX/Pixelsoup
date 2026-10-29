@@ -22,9 +22,25 @@ namespace mediaserver::assets {
 [[nodiscard]] std::string_view plateset_slot_tag(PlatesetSlot slot) noexcept;
 [[nodiscard]] std::string plateset_slot_property(PlatesetSlot slot);
 [[nodiscard]] std::string plateset_offset_property(PlatesetSlot slot);
-// `moment_<index>_<field>`, field being frame, name or color.
+// `moment_<index>_<field>`, field being frame or kind.
 [[nodiscard]] std::string plateset_moment_property(std::size_t index,
                                                    std::string_view field);
+// A moment kind's document key (`turning_left`), the name it reads by
+// (`Turning left`) and a short one for tight spaces (`Left`).
+[[nodiscard]] std::string_view
+plateset_moment_key(PlatesetMomentKind kind) noexcept;
+[[nodiscard]] std::optional<PlatesetMomentKind>
+plateset_moment_kind_from_key(std::string_view key) noexcept;
+[[nodiscard]] std::string_view
+plateset_moment_label(PlatesetMomentKind kind) noexcept;
+[[nodiscard]] std::string_view
+plateset_moment_tag(PlatesetMomentKind kind) noexcept;
+
+inline constexpr std::array<PlatesetMomentKind, 5U> all_plateset_moment_kinds{
+    PlatesetMomentKind::Stopped,      PlatesetMomentKind::TurningLeft,
+    PlatesetMomentKind::TurningRight, PlatesetMomentKind::Bump,
+    PlatesetMomentKind::IntoShade,
+};
 
 // The slots a rig template offers, in port order.
 [[nodiscard]] std::span<const PlatesetSlot>

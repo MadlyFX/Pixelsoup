@@ -334,6 +334,22 @@ void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
   draw_filled_circle(ctx, cx, cy, radius, color);
 }
 
+void draw_proxy_progress(gui::UiContext &ctx, gui::UiId id,
+                         const gui::Rect &control, float fraction) {
+  const gui::Theme &theme = ctx.theme();
+  // Along the control's foot below its text, filling in quickly as
+  // segments land.
+  const gui::Rect track{control.x + 8.0F, control.bottom() - 2.0F,
+                        std::max(control.width - 16.0F, 0.0F), 2.0F};
+  ctx.rounded(track, with_alpha(theme.track, 0.9F), track.height * 0.5F);
+  const float shown = ctx.ease(id, std::clamp(fraction, 0.0F, 1.0F));
+  if (shown > 0.0F) {
+    ctx.rounded(gui::Rect{track.x, track.y, track.width * shown,
+                          track.height},
+                theme.accent, track.height * 0.5F);
+  }
+}
+
 bool search_box(gui::UiContext &ctx, gui::UiId id, const gui::Rect &field,
                 std::string &value, std::string_view placeholder) {
   const bool changed = ctx.text_field(id, field, value);

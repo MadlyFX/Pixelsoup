@@ -282,11 +282,9 @@ std::optional<doc::Root> plan_library_edit(const doc::Root& root,
                 plateset_moment_property(index, "frame"),
                 doc::PropertyValue{static_cast<std::int64_t>(moments[index].frame)});
             changed.properties.insert_or_assign(
-                plateset_moment_property(index, "name"),
-                doc::PropertyValue{moments[index].name});
-            changed.properties.insert_or_assign(
-                plateset_moment_property(index, "color"),
-                doc::PropertyValue{static_cast<std::int64_t>(moments[index].color)});
+                plateset_moment_property(index, "kind"),
+                doc::PropertyValue{
+                    std::string{plateset_moment_key(moments[index].kind)}});
         }
         if (changed == *existing) {
             return std::nullopt;

@@ -188,7 +188,7 @@ void write_cached(const std::filesystem::path &path,
 
 [[nodiscard]] editor::PlatesetMotionEvent
 to_editor(const app::MotionEvent &event) {
-  return editor::PlatesetMotionEvent{event.frame, event.name, event.color};
+  return editor::PlatesetMotionEvent{event.frame, event.kind};
 }
 
 } // namespace

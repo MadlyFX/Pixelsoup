@@ -32,6 +32,21 @@ gui::UiColor timeline_marker_color(core::u8 index) noexcept {
   return palette[index % palette.size()];
 }
 
+gui::UiColor plateset_moment_color(assets::PlatesetMomentKind kind) noexcept {
+  switch (kind) {
+  case assets::PlatesetMomentKind::Stopped:
+    return timeline_marker_color(0U);
+  case assets::PlatesetMomentKind::TurningLeft:
+  case assets::PlatesetMomentKind::TurningRight:
+    return timeline_marker_color(1U);
+  case assets::PlatesetMomentKind::Bump:
+    return timeline_marker_color(5U);
+  case assets::PlatesetMomentKind::IntoShade:
+    return timeline_marker_color(6U);
+  }
+  return timeline_marker_color(0U);
+}
+
 std::string_view timeline_marker_color_name(core::u8 index) noexcept {
   constexpr std::array<std::string_view, scene::timeline_marker_colors> names{
       {"Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Pink"}};
@@ -533,8 +548,8 @@ bool TimelinePanel::open_pass(Pass &p) {
                            target_lane.has_value();
   insert_target_lane_ = target_lane;
 
-  p.layout =
-      timeline::layout_timeline(bounds, list_width_);
+  p.layout = timeline::layout_timeline(
+      bounds, list_width_, moments_visible_ && !p.input.moments.empty());
   graph_bounds_ = p.layout.graph;
   // The part of the graph that is time rather than the ruler's own band.
   p.fps =
@@ -996,26 +1011,19 @@ void TimelinePanel::draw_time_overlays(Pass &p) {
     draw_playback_overlay(p);
   }
   if (on_graph(playhead_x)) {
-    // A flag on the ruler carrying the time it stands on, as Sequencer's
-    // does: the eye finds the playhead and reads it in one place. It stays
-    // whole at either edge of the lanes, its point still on the frame.
-    const std::string label = timecode(p, timeline.show_frame);
-    const float flag_width = ctx.font_width(label) + 10.0F;
+    // The playhead's head on the ruler: a mark the eye finds, its point on
+    // the frame. The time itself reads in the toolbar.
+    const float flag_width = 10.0F;
     const float flag_height = std::max(ruler.height - 8.0F, 6.0F);
-    const float flag_x =
-        std::clamp(playhead_x - flag_width * 0.5F, graph.x,
-                   std::max(graph.x, graph.right() - flag_width));
-    const gui::Rect flag{flag_x, ruler.y + 1.0F, flag_width, flag_height};
+    const gui::Rect flag{playhead_x - flag_width * 0.5F, ruler.y + 1.0F,
+                         flag_width, flag_height};
     ctx.draw_list().add_line(playhead_x, flag.bottom(), playhead_x,
                              rows_bounds.bottom(), 1.5F, ctx.theme().playhead);
     ctx.panel(flag, ctx.theme().playhead);
-    // Its point, under the flag on the frame itself.
     gui::add_arrowhead(ctx.draw_list(),
                        gui::UiPoint{playhead_x, flag.bottom() + 5.0F},
                        gui::UiPoint{0.0F, 1.0F}, 5.0F, 4.5F,
                        ctx.theme().playhead);
-    ctx.label(gui::inset(flag, gui::Padding{5.0F, 0.0F, 1.0F, 0.0F}), label,
-              ctx.theme().background);
   }
   ctx.pop_clip();
 

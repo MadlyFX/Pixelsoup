@@ -577,6 +577,31 @@ void proxy_runtime_status_labels_explain_resolution_and_failure() {
            "PROXY FAILED (FRAME MAPPING FAILED)");
 }
 
+// The editor's own proxy reads in the operator's words, rounding down so
+// 100% only ever means made.
+void editor_proxy_status_says_how_much_is_made() {
+  using State = editor::LibraryEditorProxyState;
+  editor::LibraryEditorProxy proxy{State::Queued, 0U, 2'928U};
+  UI_CHECK(editor::library_editor_proxy_status(proxy) ==
+           "Editor proxy queued");
+  UI_CHECK(editor::library_editor_proxy_fraction(proxy) == 0.0F);
+  proxy = {State::Making, 1'171U, 2'928U};
+  UI_CHECK(editor::library_editor_proxy_status(proxy) ==
+           "Editor proxy 39%");
+  proxy.made_frames = 2'927U;
+  UI_CHECK(editor::library_editor_proxy_status(proxy) ==
+           "Editor proxy 99%");
+  proxy = {State::Making, 5U, 0U};
+  UI_CHECK(editor::library_editor_proxy_status(proxy) ==
+           "Editor proxy 0%");
+  proxy = {State::Ready, 0U, 0U};
+  UI_CHECK(editor::library_editor_proxy_status(proxy) == "Editor proxy ready");
+  UI_CHECK(editor::library_editor_proxy_fraction(proxy) == 1.0F);
+  proxy.state = State::Failed;
+  UI_CHECK(editor::library_editor_proxy_status(proxy) ==
+           "Editor proxy failed");
+}
+
 // ---------------------------------------------------------- changed sources
 
 // After a RESCAN finds files that changed on disk, the Library says so in its
@@ -1103,7 +1128,7 @@ void an_empty_plateset_comes_from_the_background_menu() {
                editor::LibraryColumn::Type) == "Plateset (2)");
 }
 
-constexpr std::array<Case, 38U> cases{{
+constexpr std::array<Case, 39U> cases{{
     {"changed sources are offered for acceptance",
      &changed_sources_are_offered_for_acceptance},
     {"the horizontal scrollbar drags without touching rows",
@@ -1135,6 +1160,8 @@ constexpr std::array<Case, 38U> cases{{
      &cpu_only_media_asks_for_a_full_resolution_proxy_and_warns},
     {"proxy runtime status labels explain resolution and failure",
      &proxy_runtime_status_labels_explain_resolution_and_failure},
+    {"editor proxy status says how much is made",
+     &editor_proxy_status_says_how_much_is_made},
     {"a drag out carries the whole selection under a thumbnail",
      &a_drag_out_carries_the_whole_selection_under_a_thumbnail},
     {"dragging onto a folder files the asset there",

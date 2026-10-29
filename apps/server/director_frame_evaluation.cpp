@@ -536,10 +536,28 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 all.begin() +
                     static_cast<std::ptrdiff_t>(stage_observations_end),
                 all.end());
-            program_view_proxies = summarize_view_proxies(program_drawn);
-            stage_view_proxies = summarize_view_proxies(all.subspan(
-                program_observations_end,
-                stage_observations_end - program_observations_end));
+            // How far the waiting clips' proxies are made, for the menu
+            // to show when playback will get faster.
+            ProxyProgressLookup progress;
+            if (director_proxy_generator != nullptr) {
+                progress = [this](doc::NodeId asset)
+                    -> std::optional<std::pair<core::u64, core::u64>> {
+                    const auto status =
+                        director_proxy_generator->status_for(asset);
+                    if (!status.has_value()) {
+                        return std::nullopt;
+                    }
+                    return std::pair{status->made_frames,
+                                     status->total_frames};
+                };
+            }
+            program_view_proxies =
+                summarize_view_proxies(program_drawn, progress);
+            stage_view_proxies = summarize_view_proxies(
+                all.subspan(program_observations_end,
+                            stage_observations_end -
+                                program_observations_end),
+                progress);
         }
         // The Stage-view scene - an edit preview or a solo - is the Stage
         // scene evaluated once more, so it is finished the same way: the

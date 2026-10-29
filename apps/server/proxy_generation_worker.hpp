@@ -100,6 +100,8 @@ class ProxyGenerationWorker final {
                     : 0U,
                 true,
                 true,
+                asset.id,
+                false,
             });
         } catch (const std::bad_alloc &) {
             scheduled_.resize(scheduled_size);
@@ -138,6 +140,64 @@ class ProxyGenerationWorker final {
         }
     }
 
+    // Where an asset's newest proxy job stands, for the editor to show:
+    // waiting its turn, being made and how far, made, or failed. Empty for
+    // an asset never requested.
+    struct AssetStatus final {
+        enum class State : core::u8 { Queued, Making, Ready, Failed };
+        State state{State::Queued};
+        core::u64 made_frames{};
+        core::u64 total_frames{};
+
+        bool operator==(const AssetStatus &) const = default;
+    };
+    [[nodiscard]] std::optional<AssetStatus>
+    status_for(doc::NodeId asset) const {
+        std::scoped_lock lock{mutex_};
+        const auto found =
+            std::find_if(progress_.rbegin(), progress_.rend(),
+                         [&](const ProgressRecord &record) {
+                             return record.asset == asset;
+                         });
+        if (found == progress_.rend()) {
+            return std::nullopt;
+        }
+        using State = AssetStatus::State;
+        const State state = found->visible
+            ? (found->queued ? State::Queued : State::Making)
+            : (found->failed ? State::Failed : State::Ready);
+        return AssetStatus{state, found->completed_frames,
+                           found->total_frames};
+    }
+
+    // Every requested asset's newest proxy, added up: frames made, and
+    // frames in all. A failed proxy counts in neither, so a finished
+    // project reads as complete.
+    struct Totals final {
+        core::u64 made_frames{};
+        core::u64 total_frames{};
+
+        bool operator==(const Totals &) const = default;
+    };
+    [[nodiscard]] Totals totals() const {
+        std::scoped_lock lock{mutex_};
+        Totals sum;
+        for (std::size_t index = 0U; index < progress_.size(); ++index) {
+            const ProgressRecord &record = progress_[index];
+            const bool superseded = std::any_of(
+                progress_.begin() + static_cast<std::ptrdiff_t>(index) + 1,
+                progress_.end(), [&](const ProgressRecord &later) {
+                    return later.asset == record.asset;
+                });
+            if (superseded || (!record.visible && record.failed)) {
+                continue;
+            }
+            sum.made_frames += record.completed_frames;
+            sum.total_frames += record.total_frames;
+        }
+        return sum;
+    }
+
     [[nodiscard]] std::optional<ProgressSnapshot>
     progress_for(const assets::DerivativeKey &key) const {
         std::scoped_lock lock{mutex_};
@@ -161,6 +221,9 @@ class ProxyGenerationWorker final {
         core::u32 segments{};
         std::vector<bool> done;
         core::u64 done_frames{};
+        // Whether the worker has looked for a proxy already made, as one
+        // from an earlier session, before making any of it.
+        bool looked{};
     };
     // One generate() call: a run of segments, the join once all are made,
     // or the whole file.
@@ -255,6 +318,9 @@ class ProxyGenerationWorker final {
         core::u64 total_frames{};
         bool queued{};
         bool visible{};
+        doc::NodeId asset{};
+        // Set when the job ended without a proxy.
+        bool failed{};
     };
 
     void begin(const assets::DerivativeKey &key) {
@@ -280,12 +346,16 @@ class ProxyGenerationWorker final {
         }
     }
 
-    void finish_locked(const assets::DerivativeKey &key) {
+    void finish_locked(const assets::DerivativeKey &key, bool made) {
         const auto found = std::find_if(
             progress_.begin(), progress_.end(),
             [&](const ProgressRecord &record) { return record.key == key; });
         if (found != progress_.end()) {
             found->visible = false;
+            found->failed = !made;
+            if (made) {
+                found->completed_frames = found->total_frames;
+            }
         }
     }
 
@@ -295,6 +365,7 @@ class ProxyGenerationWorker final {
             assets::MediaAsset asset;
             assets::DerivativeKey key;
             core::u64 done_frames{};
+            bool looked{};
             {
                 std::unique_lock lock{mutex_};
                 condition_.wait(lock, stop,
@@ -306,6 +377,24 @@ class ProxyGenerationWorker final {
                 asset = pending_[pick.job].asset;
                 key = pending_[pick.job].key;
                 done_frames = pending_[pick.job].done_frames;
+                looked = std::exchange(pending_[pick.job].looked, true);
+            }
+            // A proxy made in an earlier session is finished, even when the
+            // segments it was joined from are gone; nothing is remade.
+            if (!looked) {
+                const auto made = artifacts_->inspect(asset, key);
+                if (made.has_value() &&
+                    made.value().state == assets::DerivativeState::Ready) {
+                    std::scoped_lock lock{mutex_};
+                    finish_locked(key, true);
+                    const auto job = std::find_if(
+                        pending_.begin(), pending_.end(),
+                        [&](const Job &value) { return value.key == key; });
+                    if (job != pending_.end()) {
+                        pending_.erase(job);
+                    }
+                    continue;
+                }
             }
             begin(key);
             const bool yield = playing_.load(std::memory_order_relaxed);
@@ -380,7 +469,7 @@ class ProxyGenerationWorker final {
                 job->done_frames = 0U;
                 continue;
             }
-            finish_locked(key);
+            finish_locked(key, generated.has_value());
             pending_.erase(job);
         }
     }

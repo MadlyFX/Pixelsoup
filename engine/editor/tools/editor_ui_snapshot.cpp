@@ -65,7 +65,9 @@
 //   are unwired; compositor-background selects the Background instead;
 //   asset-viewer draws the Asset Viewer on a 24 fps plate with a marked
 //   range and its filmstrip (the picture is the filmstrip atlas, standing
-//   in for a render), and asset-viewer-empty draws it with nothing open;
+//   in for a render), asset-viewer-proxy the same while the plate's
+//   editor proxy is 40% made, and asset-viewer-empty draws it with nothing
+//   open;
 //   asset-viewer-model renders a real model (MEDIASERVER_SNAPSHOT_MODEL, or
 //   Models/DamagedHelmet) in the viewer's look-dev scene through the
 //   renderer, Advanced unless MEDIASERVER_SNAPSHOT_BACKEND=basic, with its
@@ -778,7 +780,9 @@ int main(int argc, char **argv) {
     plate.start_timecode = "01:00:00:00";
     viewer_assets.assets.push_back(assets::Asset{plate});
   }
-  if (view == "asset-viewer") {
+  const bool plate_view =
+      view == "asset-viewer" || view == "asset-viewer-proxy";
+  if (plate_view) {
     viewer_panel.open(doc::NodeId{40U}, 312U, std::pair{240U, 455U});
   }
   // A real model, loaded by the model cache the renderer reads and drawn by
@@ -1088,7 +1092,7 @@ int main(int argc, char **argv) {
       editor::AssetViewerDrawInput in{};
       in.assets = &viewer_assets;
       in.director = &director;
-      in.image = view == "asset-viewer" && filmstrip_texture.has_value()
+      in.image = plate_view && filmstrip_texture.has_value()
                      ? &*filmstrip_texture
                      : nullptr;
       in.show_rate = scene::MediaFrameRate{25U, 1U};
@@ -1097,6 +1101,10 @@ int main(int argc, char **argv) {
       in.elements = uses;
       in.lanes = lanes;
       in.pixels_per_unit = scale;
+      if (view == "asset-viewer-proxy") {
+        in.editor_proxy = editor::LibraryEditorProxy{
+            editor::LibraryEditorProxyState::Making, 576U, 1'440U};
+      }
       static_cast<void>(viewer_panel.draw(ctx, window, in));
       ctx.draw_overlays(window);
       continue;
@@ -1104,15 +1112,17 @@ int main(int argc, char **argv) {
     if (library_view) {
       static editor::LibraryPanel library_panel{gui::ui_id("snapshot.library")};
       static const assets::AssetRegistry library = sample_library();
+      const bool wide = view == "library" || view == "library-proxies";
       const gui::Rect library_bounds{4.0F, 4.0F,
-                                     view == "library" ? logical_width - 8.0F
-                                                       : 520.0F,
+                                     wide ? logical_width - 8.0F : 520.0F,
                                      logical_height - 8.0F};
       if (pass == 0) {
         // Two files changed on disk since import, as a RESCAN reports them.
         const std::array<doc::NodeId, 2U> changed{
             {doc::NodeId{20U}, doc::NodeId{22U}}};
-        library_panel.set_changed_sources(changed);
+        if (view != "library-proxies") {
+          library_panel.set_changed_sources(changed);
+        }
         library_panel.set_view(view == "library-grid"
                                    ? editor::LibraryView::Grid
                                    : editor::LibraryView::List);
@@ -1143,8 +1153,25 @@ int main(int argc, char **argv) {
       input.set_mouse_button(gui::MouseButton::Left, down);
       ctx.new_frame(1.0);
       ctx.panel(window, ctx.theme().background);
+      // `library-proxies`: the editor proxies of three plates being made,
+      // waiting and made.
+      std::vector<editor::LibraryProxyRuntimeObservation> proxies;
+      if (view == "library-proxies") {
+        using State = editor::LibraryEditorProxyState;
+        const auto add = [&](core::u64 id, State state, core::u64 made,
+                             core::u64 total) {
+          editor::LibraryProxyRuntimeObservation observation{};
+          observation.asset = doc::NodeId{id};
+          observation.editor_proxy =
+              editor::LibraryEditorProxy{state, made, total};
+          proxies.push_back(observation);
+        };
+        add(20U, State::Making, 576U, 1'440U);
+        add(21U, State::Queued, 0U, 8'640U);
+        add(22U, State::Ready, 26'973U, 26'973U);
+      }
       static_cast<void>(library_panel.draw(ctx, library_bounds, library, {},
-                                           {}));
+                                           {}, proxies));
       library_panel.draw_drag_ghost(ctx);
       ctx.draw_overlays(window);
       continue;

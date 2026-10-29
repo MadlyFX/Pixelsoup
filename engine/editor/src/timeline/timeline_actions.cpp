@@ -672,10 +672,8 @@ void TimelinePanel::handle_actions(Pass &p) {
         break;
       case MenuCommand::GoToMarker:
         if (const auto index = marker_index(p, entry.node)) {
-          frame.seek_to_frame = std::clamp(
-              static_cast<core::u64>(
-                  std::max<core::i64>(markers[*index].frame, 0)),
-              first, last);
+          frame.seek_to_frame = static_cast<core::u64>(
+                  std::max<core::i64>(markers[*index].frame, 0));
         }
         break;
       case MenuCommand::DeleteMarker:
@@ -739,9 +737,7 @@ void TimelinePanel::handle_actions(Pass &p) {
         }
       }
       if (target.has_value()) {
-        frame.seek_to_frame = std::clamp(
-            static_cast<core::u64>(std::max<core::i64>(*target, 0)), first,
-            last);
+        frame.seek_to_frame = static_cast<core::u64>(std::max<core::i64>(*target, 0));
       }
     }
     if (ctx.key_pressed(gui::Key::TrimHeadToPlayhead)) {
@@ -1059,8 +1055,7 @@ void TimelinePanel::step_to_selected_key(Pass &p, bool forward) {
   }
   if (target.has_value()) {
     p.frame.seek_to_frame =
-        std::clamp(static_cast<core::u64>(std::max<core::i64>(*target, 0)),
-                   p.first, p.last);
+        static_cast<core::u64>(std::max<core::i64>(*target, 0));
   }
 }
 

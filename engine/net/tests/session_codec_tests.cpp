@@ -477,6 +477,8 @@ void priority_transport_admits_only_operator_anchors() {
         refused.error() == net::SessionEncodeError::InvalidPriorityTransport);
 
     auto outside = priority_transport();
+    // Only a playing show must sit inside its range.
+    outside.anchor.state = show::TransportState::Playing;
     outside.anchor.anchor_show_frame = show::ShowFrame{9'001U};
     refused = net::encode_session(net::SessionMessage{outside});
     SESSION_CHECK(!refused.has_value());

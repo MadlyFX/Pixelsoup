@@ -204,6 +204,64 @@ std::string plateset_moment_property(std::size_t index,
     return name;
 }
 
+std::string_view plateset_moment_key(PlatesetMomentKind kind) noexcept {
+    switch (kind) {
+    case PlatesetMomentKind::Stopped:
+        return "stopped";
+    case PlatesetMomentKind::TurningLeft:
+        return "turning_left";
+    case PlatesetMomentKind::TurningRight:
+        return "turning_right";
+    case PlatesetMomentKind::Bump:
+        return "bump";
+    case PlatesetMomentKind::IntoShade:
+        return "into_shade";
+    }
+    return "stopped";
+}
+
+std::optional<PlatesetMomentKind>
+plateset_moment_kind_from_key(std::string_view key) noexcept {
+    for (const PlatesetMomentKind kind : all_plateset_moment_kinds) {
+        if (plateset_moment_key(kind) == key) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string_view plateset_moment_label(PlatesetMomentKind kind) noexcept {
+    switch (kind) {
+    case PlatesetMomentKind::Stopped:
+        return "Stopped";
+    case PlatesetMomentKind::TurningLeft:
+        return "Turning left";
+    case PlatesetMomentKind::TurningRight:
+        return "Turning right";
+    case PlatesetMomentKind::Bump:
+        return "Bump";
+    case PlatesetMomentKind::IntoShade:
+        return "Into shade";
+    }
+    return "Stopped";
+}
+
+std::string_view plateset_moment_tag(PlatesetMomentKind kind) noexcept {
+    switch (kind) {
+    case PlatesetMomentKind::Stopped:
+        return "Stop";
+    case PlatesetMomentKind::TurningLeft:
+        return "Left";
+    case PlatesetMomentKind::TurningRight:
+        return "Right";
+    case PlatesetMomentKind::Bump:
+        return "Bump";
+    case PlatesetMomentKind::IntoShade:
+        return "Shade";
+    }
+    return "Stop";
+}
+
 std::span<const PlatesetSlot> plateset_rig_slots(PlatesetRig rig) noexcept {
     switch (rig) {
     case PlatesetRig::Nine:

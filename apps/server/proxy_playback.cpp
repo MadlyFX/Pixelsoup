@@ -443,31 +443,58 @@ ProxyAssetRuntimeResult collect_proxy_asset_runtime(
 }
 
 ViewProxySummary summarize_view_proxies(
-    std::span<const ProxyPlacementObservation> observations) noexcept {
+    std::span<const ProxyPlacementObservation> observations,
+    const ProxyProgressLookup &progress) noexcept {
+    using Reason = assets::ProxyPlaybackReason;
+    // On the source only until its proxy is made.
+    const auto waiting = [](const ProxyPlacementObservation &observation) {
+        const Reason reason = observation.resolution.reason;
+        return !observation.offline &&
+               observation.resolution.selection ==
+                   assets::ProxyPlaybackSelection::Source &&
+               (reason == Reason::CacheMissing ||
+                reason == Reason::CacheQueued ||
+                reason == Reason::CacheGenerating);
+    };
     ViewProxySummary summary{};
     for (std::size_t index = 0U; index < observations.size(); ++index) {
         const ProxyPlacementObservation &observation = observations[index];
+        const auto earlier = observations.first(index);
         // A transition evaluates the same placement twice; count it once.
         const bool repeated = std::any_of(
-            observations.begin(),
-            observations.begin() + static_cast<std::ptrdiff_t>(index),
-            [&](const ProxyPlacementObservation &earlier) {
-                return earlier.placement == observation.placement;
+            earlier.begin(), earlier.end(),
+            [&](const ProxyPlacementObservation &before) {
+                return before.placement == observation.placement;
             });
         if (repeated || observation.offline) {
             continue;
         }
-        using Reason = assets::ProxyPlaybackReason;
-        const Reason reason = observation.resolution.reason;
         if (observation.resolution.selection ==
             assets::ProxyPlaybackSelection::Proxy) {
             ++summary.proxied;
-        } else if (observation.resolution.selection ==
-                       assets::ProxyPlaybackSelection::Source &&
-                   (reason == Reason::CacheMissing ||
-                    reason == Reason::CacheQueued ||
-                    reason == Reason::CacheGenerating)) {
-            ++summary.waiting;
+            continue;
+        }
+        if (!waiting(observation)) {
+            continue;
+        }
+        ++summary.waiting;
+        // Clips of one asset wait on the same proxy.
+        const bool counted = std::any_of(
+            earlier.begin(), earlier.end(),
+            [&](const ProxyPlacementObservation &before) {
+                return before.asset == observation.asset && waiting(before);
+            });
+        if (!progress || counted) {
+            continue;
+        }
+        try {
+            if (const auto made = progress(observation.asset)) {
+                summary.waiting_made_frames += made->first;
+                summary.waiting_total_frames += made->second;
+            }
+        } catch (...) {
+            // Progress is a hint for the operator; the counts stand
+            // without it.
         }
     }
     return summary;

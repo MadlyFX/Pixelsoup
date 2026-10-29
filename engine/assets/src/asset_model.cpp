@@ -310,19 +310,17 @@ void AssetModel::put(const doc::Node& node) {
             if (!frame.has_value()) {
                 break;
             }
-            PlatesetMoment moment{};
-            moment.frame = *frame;
-            moment.name =
-                reader.text(plateset_moment_property(index, "name"), "");
-            const std::int64_t color =
-                reader.optional_integer(plateset_moment_property(index, "color"))
-                    .value_or(0);
-            if (*frame < 0 || color < 0 || color > 255) {
+            if (*frame < 0) {
                 reader.fail();
                 break;
             }
-            moment.color = static_cast<core::u8>(color);
-            plateset.moments.push_back(std::move(moment));
+            // A kind this build does not know says nothing it could show.
+            const std::optional<PlatesetMomentKind> kind =
+                plateset_moment_kind_from_key(reader.text(
+                    plateset_moment_property(index, "kind"), ""));
+            if (kind.has_value()) {
+                plateset.moments.push_back(PlatesetMoment{*frame, *kind});
+            }
         }
         std::stable_sort(plateset.moments.begin(), plateset.moments.end(),
                          [](const PlatesetMoment& left,

@@ -83,6 +83,8 @@ enum class Key : core::u8 {
     EasyEase,
     // Ctrl+D: duplicate the selection in place, as in every node editor.
     Duplicate,
+    // Ctrl+S: save the project.
+    Save,
     // Ctrl+1 to Ctrl+9: keep the 3D view in that slot, as Unreal's
     // bookmarks; the bare digit returns to it. Contiguous, so slot n is
     // SaveView1 + n.

@@ -205,8 +205,7 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                     hash_u64(hash, static_cast<core::u64>(held.moments.size()));
                     for (const PlatesetMoment& moment : held.moments) {
                         hash_u64(hash, static_cast<core::u64>(moment.frame));
-                        hash_text(hash, moment.name);
-                        hash_byte(hash, moment.color);
+                        hash_byte(hash, static_cast<core::u8>(moment.kind));
                     }
                 } else if constexpr (std::is_same_v<Held, MediaAsset>) {
                     hash_byte(hash, held.dimensions.has_value() ? 1U : 0U);

@@ -8,12 +8,14 @@
 #include <mediaserver/scene/scene.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stop_token>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace mediaserver::app {
@@ -102,12 +104,22 @@ using ProxyAssetRuntimeResult =
 struct ViewProxySummary final {
     core::u32 proxied{};
     core::u32 waiting{};
+    // How much of the waiting placements' proxies is made, each asset
+    // counted once, as `progress` reported it.
+    core::u64 waiting_made_frames{};
+    core::u64 waiting_total_frames{};
 
     bool operator==(const ViewProxySummary &) const = default;
 };
 
+// Frames made and in all of an asset's proxy, or empty when unknown.
+using ProxyProgressLookup =
+    std::function<std::optional<std::pair<core::u64, core::u64>>(
+        doc::NodeId asset)>;
+
 [[nodiscard]] ViewProxySummary summarize_view_proxies(
-    std::span<const ProxyPlacementObservation> observations) noexcept;
+    std::span<const ProxyPlacementObservation> observations,
+    const ProxyProgressLookup &progress = {}) noexcept;
 
 [[nodiscard]] std::string_view
 proxy_placement_issue_name(ProxyPlacementIssue issue) noexcept;
