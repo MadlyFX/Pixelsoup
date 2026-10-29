@@ -2,9 +2,11 @@
 
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/device.hpp>
+#include <ajfx/package.hpp>
 #include <ajfx/result.hpp>
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +53,8 @@ struct EmitterKernelSource final {
 // HLSL for the shared kernels: entry points "scan_blocks", "scan_totals",
 // "scatter" and "finalize".
 [[nodiscard]] std::string runtime_kernel_source();
+// HLSL for the sprite renderer: entry points "sprite_vertex" and "sprite_pixel".
+[[nodiscard]] std::string sprite_shader_source();
 
 struct EmitterKernels final {
     std::vector<std::uint8_t> update;
@@ -63,10 +67,28 @@ struct KernelSet final {
     std::vector<std::uint8_t> scan_totals;
     std::vector<std::uint8_t> scatter;
     std::vector<std::uint8_t> finalize;
+    std::vector<std::uint8_t> sprite_vertex;
+    std::vector<std::uint8_t> sprite_pixel;
     std::vector<EmitterKernels> emitters;
 };
 
-// Generates and compiles every kernel an effect needs.
+// Generates and compiles every kernel and shader an effect needs.
 [[nodiscard]] Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler);
+
+// Identifies the generated source a kernel set was compiled from: the effect's
+// kernels and this library's shared HLSL. Kernels carried in a package are
+// used only when it matches, so a package from an older ajfx, or with an
+// edited effect, never runs mismatched bytecode.
+[[nodiscard]] std::uint64_t kernel_source_hash(const Effect& effect);
+
+// Package entries holding the kernels, under "kernels/<format>/", for
+// write_package's `extra` entries.
+[[nodiscard]] std::vector<PackageEntry> kernel_package_entries(const Effect& effect, const KernelSet& kernels);
+
+// The kernels a package carries for `format`, checked against the effect it
+// holds. Fails with KernelsUnavailable when there are none for the format or
+// they were compiled from different source.
+[[nodiscard]] Result<KernelSet> read_package_kernels(std::span<const std::uint8_t> package, const Effect& effect,
+                                                     ShaderFormat format);
 
 } // namespace ajfx::gpu

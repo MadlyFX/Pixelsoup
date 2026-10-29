@@ -72,13 +72,16 @@ public:
 
     [[nodiscard]] gpu::ShaderFormat format() const noexcept override { return gpu::ShaderFormat::Dxil; }
 
-    Result<std::vector<std::uint8_t>> compile_compute(std::string_view source, std::string_view entry_point,
-                                                      std::string_view name) override {
+    Result<std::vector<std::uint8_t>> compile(std::string_view source, std::string_view entry_point,
+                                              gpu::ShaderStage stage, std::string_view name) override {
         const std::wstring entry = widen(entry_point);
         const std::wstring file = widen(name);
+        const wchar_t* profile = stage == gpu::ShaderStage::Vertex ? L"vs_6_2"
+                                 : stage == gpu::ShaderStage::Pixel ? L"ps_6_2"
+                                                                     : L"cs_6_2";
         // IEEE-strict arithmetic with denormals preserved: no contraction
         // into fused multiply-adds, so results follow the source's order.
-        const wchar_t* arguments[] = {file.c_str(), L"-E", entry.c_str(), L"-T", L"cs_6_2", L"-HV", L"2021",
+        const wchar_t* arguments[] = {file.c_str(), L"-E", entry.c_str(), L"-T", profile, L"-HV", L"2021",
                                       L"-Gis",      L"-denorm", L"preserve", L"-WX", L"-O3", L"-Qstrip_debug",
                                       L"-Qstrip_reflect"};
         const DxcBuffer buffer{source.data(), source.size(), DXC_CP_UTF8};

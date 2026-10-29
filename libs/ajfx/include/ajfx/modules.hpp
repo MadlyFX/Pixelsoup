@@ -353,6 +353,9 @@ struct SpriteRenderer final {
     std::uint32_t flipbook_columns{1U};
     std::uint32_t flipbook_rows{1U};
     bool sort{true};
+    // With velocity facing, sprites lengthen by the distance travelled in
+    // this many seconds: motion streaks for sparks and rain.
+    float stretch{0.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -362,6 +365,7 @@ struct SpriteRenderer final {
         visit("flipbook_columns", self.flipbook_columns);
         visit("flipbook_rows", self.flipbook_rows);
         visit("sort", self.sort);
+        visit("stretch", self.stretch);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };

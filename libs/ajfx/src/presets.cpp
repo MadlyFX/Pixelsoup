@@ -27,12 +27,13 @@ Effect sparks() {
         .init(ShapeLocation{.shape = Shape::Sphere, .radius = 0.05F})
         .init(Velocity{.speed_min = 3.0F, .speed_max = 6.0F, .spread = 35.0F})
         .init(InitColor{.a = bind("color"), .b = bind("color")})
-        .init(InitSize{.min = 0.01F, .max = 0.025F})
+        .init(InitSize{.min = 0.02F, .max = 0.04F})
         .update(Gravity{})
         .update(Drag{.coefficient = 0.4F})
         .update(PlaneCollision{.restitution = 0.35F, .friction = 0.2F})
         .update(ColorOverLife{.keys = {{0.0F, Color{1.0F, 1.0F, 1.0F, 1.0F}}, {1.0F, Color{0.4F, 0.1F, 0.0F, 0.0F}}}})
-        .renderer(SpriteRenderer{.blend = BlendMode::Additive, .facing = Facing::Velocity, .sort = false});
+        .renderer(SpriteRenderer{.blend = BlendMode::Additive, .facing = Facing::Velocity, .sort = false,
+                                 .stretch = 0.04F});
     return finish(builder);
 }
 
@@ -72,7 +73,7 @@ Effect confetti() {
         .init(ShapeLocation{.shape = Shape::Point})
         .init(Velocity{.speed_min = 4.0F, .speed_max = 8.0F, .spread = 40.0F})
         .init(InitColor{.a = bind("color_a"), .b = bind("color_b")})
-        .init(InitSize{.min = 0.03F, .max = 0.05F})
+        .init(InitSize{.min = 0.06F, .max = 0.1F})
         .init(InitRotation{})
         .update(Gravity{.acceleration = Vec3{0.0F, -4.0F, 0.0F}})
         .update(Drag{.coefficient = 1.5F})

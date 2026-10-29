@@ -9,5 +9,6 @@ namespace ajfx::detail {
 extern const std::string_view hlsl_random;
 extern const std::string_view hlsl_particles;
 extern const std::string_view hlsl_runtime;
+extern const std::string_view hlsl_sprite;
 
 } // namespace ajfx::detail

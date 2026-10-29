@@ -55,7 +55,8 @@ endfunction()
 # changes, and editing a shader re-runs this configure step.
 set(_ajfx_embedded "// Generated from libs/ajfx/shaders by libs/ajfx/CMakeLists.txt; do not edit.\n")
 string(APPEND _ajfx_embedded "#include \"hlsl_sources.hpp\"\n\nnamespace ajfx::detail {\n")
-foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl)
+foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl
+                              sprite:ajfx_sprite.hlsl)
     string(REPLACE ":" ";" _ajfx_pair "${_ajfx_shader}")
     list(GET _ajfx_pair 0 _ajfx_name)
     list(GET _ajfx_pair 1 _ajfx_file)
@@ -88,6 +89,7 @@ add_library(ajfx STATIC
     src/builder.cpp
     src/effect.cpp
     src/gpu/kernels.cpp
+    src/gpu/renderer.cpp
     src/gpu/simulation.cpp
     src/json.cpp
     src/package.cpp
@@ -163,6 +165,16 @@ if(AJFX_BUILD_D3D12)
     endfunction()
 endif()
 
+# The sample viewer, built by default only when ajfx is the top-level project.
+option(AJFX_BUILD_EXAMPLES "Build the ajfx sample viewer" ${PROJECT_IS_TOP_LEVEL})
+if(AJFX_BUILD_D3D12 AND AJFX_BUILD_EXAMPLES)
+    add_executable(ajfx_viewer examples/viewer/main.cpp)
+    target_link_libraries(ajfx_viewer PRIVATE ajfx::d3d12)
+    ajfx_set_options(ajfx_viewer)
+    ajfx_copy_dxc(ajfx_viewer)
+    set_target_properties(ajfx_viewer PROPERTIES FOLDER "examples")
+endif()
+
 if(BUILD_TESTING)
     add_executable(ajfx_random_tests tests/random_tests.cpp)
     target_link_libraries(ajfx_random_tests PRIVATE ajfx::ajfx)
@@ -185,7 +197,7 @@ if(BUILD_TESTING)
         # Kernel generation runs anywhere; compiling and running need DXC and
         # a D3D12 device, and report "skipped" (77) without them. The d3d12
         # suite runs the backend under the debug layer.
-        foreach(suite IN ITEMS kernels gpu d3d12)
+        foreach(suite IN ITEMS kernels gpu render d3d12)
             add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
             target_link_libraries(ajfx_${suite}_tests PRIVATE ajfx::d3d12)
             ajfx_set_options(ajfx_${suite}_tests)
@@ -194,5 +206,19 @@ if(BUILD_TESTING)
             set_tests_properties(ajfx.${suite} PROPERTIES SKIP_RETURN_CODE 77)
             set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
         endforeach()
+    endif()
+
+    if(TARGET ajfx_viewer)
+        # End to end: export a package with kernels, then play it from the
+        # package alone and capture a frame.
+        add_test(NAME ajfx.viewer_export
+            COMMAND ajfx_viewer --preset smoke --export "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.ajfx")
+        add_test(NAME ajfx.viewer_capture
+            COMMAND ajfx_viewer --package "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.ajfx" --seconds 3
+                    --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.png")
+        set_tests_properties(ajfx.viewer_export PROPERTIES FIXTURES_SETUP ajfx_viewer_package)
+        set_tests_properties(ajfx.viewer_capture PROPERTIES
+            FIXTURES_REQUIRED ajfx_viewer_package
+            PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")
     endif()
 endif()

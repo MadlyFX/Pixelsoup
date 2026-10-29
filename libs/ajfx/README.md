@@ -20,12 +20,12 @@ dependency on it so it can move to its own repository once the API settles.
 
 ## Status
 
-Phase 2a, the GPU simulation: per-emitter fused kernels generated from the
-module stacks, a D3D12 reference backend and a runtime compiler, running the
-CPU reference's simulation on the GPU with stable compaction and indirect
-dispatch. Nothing draws yet; sprites and a sample application are next. The
-roadmap is the "Particles and volumes" section of the media server's
-[`next-steps-plan.md`](../../next-steps-plan.md).
+Phase 2, the GPU runtime: per-emitter fused kernels generated from the module
+stacks, a D3D12 reference backend and runtime compiler, the simulation on the
+GPU with stable compaction and indirect dispatch, a sprite renderer, kernels
+carried precompiled in `.ajfx` packages, and a sample viewer. Integration with
+the media server is next. The roadmap is the "Particles and volumes" section
+of the media server's [`next-steps-plan.md`](../../next-steps-plan.md).
 
 ## Getting started
 
@@ -93,9 +93,13 @@ auto compiler = ajfx::d3d12::create_shader_compiler().value(); // dxcompiler.dll
 ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *compiler).value();
 auto gpu = ajfx::gpu::GpuSimulation::create(*device, effect, kernels, /*instance_seed=*/7).value();
 
+auto renderer = ajfx::gpu::ParticleRenderer::create(*device, kernels, ajfx::gpu::TextureFormat::Rgba8Unorm).value();
+auto target = device->create_render_target(1280, 720, ajfx::gpu::TextureFormat::Rgba8Unorm, "frame").value();
+
 gpu.advance_to(240);  // records the steps
+renderer.render(gpu, ajfx::gpu::Camera::look_at(eye, target_point, up, fov, aspect, 0.1F, 100.0F), target);
 device->flush();      // runs them
-ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // particles, live count, layout
+ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // or draw it yourself
 ```
 
 - Each emitter gets an update kernel that runs its whole update stack per
@@ -113,9 +117,21 @@ ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // particles, live c
   and colours match within floating-point tolerance, since GPU `sin`, `cos`,
   `sqrt` and division round differently. Reruns on one device are
   bit-identical, and `save`/`restore` checkpoints resume exactly.
-- A host implements `gpu::Device` (buffers, compute pipelines, dispatch,
-  indirect dispatch, copies, barriers) to run ajfx on its own renderer. Hosts
-  that ship precompiled kernels need no `ShaderCompiler` at runtime.
+- `ParticleRenderer` draws each emitter with one indirect draw whose
+  instance count the simulation wrote: camera-facing soft discs, or quads
+  aligned to velocity and stretched by `SpriteRenderer::stretch` seconds of
+  motion, blended alpha, additive or premultiplied. Alpha-blended emitters draw
+  in birth order, which is deterministic but not depth-sorted yet.
+- A host implements `gpu::Device` (buffers, compute and graphics pipelines,
+  dispatch and draw, direct and indirect, copies, barriers, render targets) to
+  run ajfx on its own renderer, or reads `EmitterBuffers` and draws itself.
+- `write_package(effect, gpu::kernel_package_entries(effect, kernels))` stores
+  the compiled kernels in the package, and `gpu::read_package_kernels` loads
+  them, so a host plays effects without a compiler. Kernels are keyed by a
+  hash of the generated source; a package from another ajfx version, or with
+  an edited module stack, is refused with a reason rather than run with
+  mismatched bytecode. Changing only values (a speed, a colour) keeps the
+  kernels valid.
 
 About a million live particles take 1.9 ms a step on an RTX 3090 (2.2 ms
 with curl noise), measured as wall-clock time for recording and execution
@@ -128,12 +144,37 @@ before any tuning.
 | `include/ajfx/` | Public C++ API; `gpu/` for the GPU runtime, `d3d12.hpp` for the backend |
 | `src/` | Library implementation; `gpu/` holds kernel generation and the GPU simulation |
 | `backends/d3d12/` | The D3D12 device and the DXC compiler (target `ajfx::d3d12`, Windows) |
+| `examples/viewer/` | `ajfx_viewer`: plays, scrubs, captures and exports effects |
 | `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
 
-Planned additions: a Vulkan backend, `renderers/` (sprite, ribbon, mesh, light
-passes), `volume/` (raymarched voxel volumes) and `studio/` (the authoring
+Planned additions: a Vulkan backend, ribbon, mesh and light rendering,
+`volume/` (raymarched voxel volumes) and `studio/` (the authoring
 application).
+
+## Sample viewer
+
+`ajfx_viewer` is built when ajfx is the top-level project
+(`AJFX_BUILD_EXAMPLES`).
+
+```bash
+ajfx_viewer --preset smoke
+```
+
+Drag to orbit, wheel to zoom, Space to pause, Left and Right to seek a second
+(backwards through GPU checkpoints, landing exactly where playing would have),
+Home to restart, 1 to 3 to switch preset.
+
+```bash
+ajfx_viewer --preset sparks --export sparks.ajfx
+```
+
+```bash
+ajfx_viewer --package sparks.ajfx --seconds 2 --capture sparks.png
+```
+
+The first writes a package with precompiled kernels; the second plays it
+without compiling and saves a frame.
 
 ## The .ajfx package
 

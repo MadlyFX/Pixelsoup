@@ -246,7 +246,7 @@ int main() {
     // AJFX_TEST_DEBUG_LAYER=1 fails any flush the debug layer objects to.
     const char* force_warp = std::getenv("AJFX_TEST_WARP");
     const bool debug_layer = std::getenv("AJFX_TEST_DEBUG_LAYER") != nullptr;
-    Result<std::unique_ptr<gpu::Device>> device =
+    Result<std::unique_ptr<d3d12::Device>> device =
         d3d12::create_device({.warp = force_warp != nullptr, .debug_layer = debug_layer});
     if (!device && force_warp == nullptr) {
         device = d3d12::create_device({.warp = true, .debug_layer = debug_layer});

@@ -20,6 +20,9 @@ enum class ErrorCode {
     GpuUnavailable,
     ShaderCompilation,
     DeviceFailure,
+    // A package has no precompiled kernels for the device, or they were
+    // compiled from source that no longer matches.
+    KernelsUnavailable,
 };
 
 struct Error final {

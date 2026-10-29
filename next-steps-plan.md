@@ -899,11 +899,18 @@ feedback forces evaluate any frame directly.
      lifetimes match the CPU reference exactly and the rest within
      tolerance; reruns are bit-identical; clean under the D3D12 debug layer.
      About a million particles take 1.9 ms a step on an RTX 3090, untuned.
-   - 2b: sprite drawing (graphics pipelines, indirect draw, depth-sorted
-     alpha), precompiled kernels carried in `.ajfx` packages, and a sample
-     application. Tuning candidates: structure-of-arrays records, writing
-     survivors straight to the compacted buffer, a single-pass scan, and
-     batching barriers across emitters; measure with GPU timestamps first.
+   - 2b, done: graphics pipelines, render targets, indirect draws and window
+     presentation in the backend; a sprite renderer (camera-facing or
+     velocity-aligned with motion stretch; alpha, additive and premultiplied);
+     kernels precompiled into `.ajfx` packages, keyed by a hash of their
+     generated source so stale bytecode is refused; and `ajfx_viewer`, which
+     plays, scrubs through GPU checkpoints, captures and exports. Rendering
+     tests check pixels against hand-computed coverage.
+   - Open: depth sorting for alpha-blended emitters moves to phase 5 with the
+     other rendering work. Tuning candidates: structure-of-arrays records,
+     writing survivors straight to the compacted buffer, a single-pass scan,
+     and batching barriers across emitters; measure with GPU timestamps
+     first.
 3. RHI: writable storage buffers in compute and indirect dispatch/draw (shared
    with the GPU-driven culling item above).
 4. Integration: `.ajfx` import as a library asset (content-hash identity,

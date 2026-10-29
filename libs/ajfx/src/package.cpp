@@ -661,15 +661,20 @@ Result<std::vector<PackageEntry>> read_container(std::span<const std::uint8_t> b
     return entries;
 }
 
-Result<std::vector<std::uint8_t>> write_package(const Effect& effect) {
+Result<std::vector<std::uint8_t>> write_package(const Effect& effect, std::vector<PackageEntry> extra) {
     Result<bool> valid = validate(effect);
     if (!valid) {
         return valid.error();
     }
+    std::set<std::string_view> names;
+    for (const PackageEntry& entry : extra) {
+        if (entry.name.empty() || entry.name == effect_entry || !names.insert(entry.name).second) {
+            return malformed("entry '" + entry.name + "' is empty, reserved or repeated");
+        }
+    }
     const std::string json = effect_to_json(effect);
-    std::vector<PackageEntry> entries;
-    entries.push_back({std::string{effect_entry}, std::vector<std::uint8_t>(json.begin(), json.end())});
-    return write_container(std::move(entries));
+    extra.push_back({std::string{effect_entry}, std::vector<std::uint8_t>(json.begin(), json.end())});
+    return write_container(std::move(extra));
 }
 
 Result<Effect> read_package(std::span<const std::uint8_t> bytes) {

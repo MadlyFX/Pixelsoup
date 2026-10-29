@@ -4,8 +4,10 @@
 #include "pack.hpp"
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <variant>
 
 namespace ajfx::gpu {
@@ -274,6 +276,10 @@ std::string runtime_kernel_source() {
     return expand_includes(detail::hlsl_runtime);
 }
 
+std::string sprite_shader_source() {
+    return std::string{detail::hlsl_sprite};
+}
+
 Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler) {
     Result<bool> valid = validate(effect);
     if (!valid) {
@@ -284,7 +290,17 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
     const std::string runtime = runtime_kernel_source();
     for (const auto& [entry, out] : {std::pair{"scan_blocks", &set.scan_blocks}, std::pair{"scan_totals", &set.scan_totals},
                                      std::pair{"scatter", &set.scatter}, std::pair{"finalize", &set.finalize}}) {
-        Result<std::vector<std::uint8_t>> code = compiler.compile_compute(runtime, entry, std::string{"ajfx "} + entry);
+        Result<std::vector<std::uint8_t>> code =
+            compiler.compile(runtime, entry, ShaderStage::Compute, std::string{"ajfx "} + entry);
+        if (!code) {
+            return code.error();
+        }
+        *out = std::move(code).value();
+    }
+    const std::string sprite = sprite_shader_source();
+    for (const auto& [entry, stage, out] : {std::tuple{"sprite_vertex", ShaderStage::Vertex, &set.sprite_vertex},
+                                            std::tuple{"sprite_pixel", ShaderStage::Pixel, &set.sprite_pixel}}) {
+        Result<std::vector<std::uint8_t>> code = compiler.compile(sprite, entry, stage, std::string{"ajfx "} + entry);
         if (!code) {
             return code.error();
         }
@@ -294,16 +310,122 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
     for (std::size_t i = 0U; i < sources.size(); ++i) {
         const std::string name = "ajfx " + effect.name + "/" + effect.emitters[i].name;
         EmitterKernels& kernels = set.emitters.emplace_back();
-        Result<std::vector<std::uint8_t>> update = compiler.compile_compute(sources[i].source, "update", name + " update");
+        Result<std::vector<std::uint8_t>> update =
+            compiler.compile(sources[i].source, "update", ShaderStage::Compute, name + " update");
         if (!update) {
             return update.error();
         }
-        Result<std::vector<std::uint8_t>> spawn = compiler.compile_compute(sources[i].source, "spawn", name + " spawn");
+        Result<std::vector<std::uint8_t>> spawn =
+            compiler.compile(sources[i].source, "spawn", ShaderStage::Compute, name + " spawn");
         if (!spawn) {
             return spawn.error();
         }
         kernels.update = std::move(update).value();
         kernels.spawn = std::move(spawn).value();
+    }
+    return set;
+}
+
+namespace {
+
+std::string_view format_name(ShaderFormat format) {
+    switch (format) {
+    case ShaderFormat::Dxil:
+        return "dxil";
+    }
+    return "unknown";
+}
+
+void hash_bytes(std::uint64_t& hash, std::string_view bytes) {
+    for (const char c : bytes) {
+        hash ^= static_cast<std::uint8_t>(c);
+        hash *= 0x100000001b3ULL;
+    }
+}
+
+// Every kernel set entry and its name within kernels/<format>/.
+std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(KernelSet& set,
+                                                                               std::size_t emitters) {
+    std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named{
+        {"runtime/scan_blocks", &set.scan_blocks}, {"runtime/scan_totals", &set.scan_totals},
+        {"runtime/scatter", &set.scatter},         {"runtime/finalize", &set.finalize},
+        {"sprite/vertex", &set.sprite_vertex},     {"sprite/pixel", &set.sprite_pixel},
+    };
+    set.emitters.resize(emitters);
+    for (std::size_t i = 0U; i < emitters; ++i) {
+        named.emplace_back("emitter/" + std::to_string(i) + "/update", &set.emitters[i].update);
+        named.emplace_back("emitter/" + std::to_string(i) + "/spawn", &set.emitters[i].spawn);
+    }
+    return named;
+}
+
+} // namespace
+
+std::uint64_t kernel_source_hash(const Effect& effect) {
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    // Lengths separate the pieces so moving text between them changes the hash.
+    const auto add = [&hash](std::string_view text) {
+        hash_bytes(hash, std::to_string(text.size()) + ":");
+        hash_bytes(hash, text);
+    };
+    add(runtime_kernel_source());
+    add(sprite_shader_source());
+    for (const EmitterKernelSource& source : generate_kernel_sources(effect)) {
+        add(source.source);
+    }
+    return hash;
+}
+
+std::vector<PackageEntry> kernel_package_entries(const Effect& effect, const KernelSet& kernels) {
+    const std::string prefix = "kernels/" + std::string{format_name(kernels.format)} + "/";
+    KernelSet copy = kernels;
+    std::vector<PackageEntry> entries;
+    for (auto& [name, code] : named_kernels(copy, kernels.emitters.size())) {
+        entries.push_back({prefix + name, std::move(*code)});
+    }
+    std::vector<std::uint8_t> hash(8U);
+    const std::uint64_t value = kernel_source_hash(effect);
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        hash[i] = static_cast<std::uint8_t>(value >> (8U * i));
+    }
+    entries.push_back({prefix + "source_hash", std::move(hash)});
+    return entries;
+}
+
+Result<KernelSet> read_package_kernels(std::span<const std::uint8_t> package, const Effect& effect,
+                                       ShaderFormat format) {
+    Result<std::vector<PackageEntry>> entries = read_container(package);
+    if (!entries) {
+        return entries.error();
+    }
+    const std::string prefix = "kernels/" + std::string{format_name(format)} + "/";
+    std::map<std::string, const std::vector<std::uint8_t>*> by_name;
+    for (const PackageEntry& entry : entries.value()) {
+        by_name.emplace(entry.name, &entry.data);
+    }
+    const auto unavailable = [&](const std::string& why) {
+        return Error{ErrorCode::KernelsUnavailable,
+                     "package kernels for " + std::string{format_name(format)} + " cannot be used: " + why};
+    };
+    const auto hash = by_name.find(prefix + "source_hash");
+    if (hash == by_name.end()) {
+        return unavailable("the package has none");
+    }
+    std::uint64_t stored = 0U;
+    for (std::size_t i = 0U; i < 8U && i < hash->second->size(); ++i) {
+        stored |= static_cast<std::uint64_t>((*hash->second)[i]) << (8U * i);
+    }
+    if (hash->second->size() != 8U || stored != kernel_source_hash(effect)) {
+        return unavailable("they were compiled from different source; recompile them with this version of ajfx");
+    }
+    KernelSet set;
+    set.format = format;
+    for (auto& [name, code] : named_kernels(set, effect.emitters.size())) {
+        const auto found = by_name.find(prefix + name);
+        if (found == by_name.end() || found->second->empty()) {
+            return unavailable("'" + prefix + name + "' is missing");
+        }
+        *code = *found->second;
     }
     return set;
 }

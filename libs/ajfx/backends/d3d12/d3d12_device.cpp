@@ -9,10 +9,12 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
+#include <climits>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <memory>
-#include <cstring>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -64,22 +66,32 @@ D3D12_RESOURCE_DESC buffer_desc(std::uint64_t bytes, D3D12_RESOURCE_FLAGS flags)
     return desc;
 }
 
-constexpr std::uint64_t upload_page_bytes = 1U << 20U;
+DXGI_FORMAT dxgi_format(gpu::TextureFormat format) {
+    return format == gpu::TextureFormat::Rgba16Float ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+}
 
-class Device final : public gpu::Device {
+std::size_t bytes_per_pixel(gpu::TextureFormat format) {
+    return format == gpu::TextureFormat::Rgba16Float ? 8U : 4U;
+}
+
+constexpr std::uint64_t upload_page_bytes = 1U << 20U;
+constexpr std::uint32_t max_render_targets = 256U;
+
+class DeviceImpl final : public Device {
 public:
-    static Result<std::unique_ptr<gpu::Device>> create(const DeviceOptions& options) {
-        auto device = std::unique_ptr<Device>(new Device());
+    static Result<std::unique_ptr<Device>> create(const DeviceOptions& options) {
+        auto device = std::unique_ptr<DeviceImpl>(new DeviceImpl());
         if (std::optional<Error> error = device->initialise(options)) {
             return *std::move(error);
         }
-        return std::unique_ptr<gpu::Device>{std::move(device)};
+        return std::unique_ptr<Device>{std::move(device)};
     }
 
-    ~Device() override {
+    ~DeviceImpl() override {
         if (queue_ && fence_) {
             (void)wait_idle();
         }
+        swap_chains_.clear();
         if (event_ != nullptr) {
             CloseHandle(event_);
         }
@@ -88,20 +100,22 @@ public:
     [[nodiscard]] gpu::ShaderFormat shader_format() const noexcept override { return gpu::ShaderFormat::Dxil; }
     [[nodiscard]] std::string_view adapter_name() const noexcept override { return adapter_name_; }
 
+    // ------------------------------------------------------------ buffers
+
     Result<gpu::Buffer> create_buffer(std::uint64_t bytes, std::string_view name) override {
         const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
         const D3D12_RESOURCE_DESC desc = buffer_desc(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        ComPtr<ID3D12Resource> resource;
+        Record record;
         // Committed resources on an implicit heap are zero-filled.
         const HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                                                             D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                            IID_PPV_ARGS(&resource));
+                                                            IID_PPV_ARGS(&record.resource));
         if (FAILED(hr)) {
             return failure(ErrorCode::DeviceFailure, "creating a " + std::to_string(bytes) + "-byte buffer", hr);
         }
-        resource->SetName(widen(name).c_str());
+        record.resource->SetName(widen(name).c_str());
         const std::uint32_t id = next_id_++;
-        buffers_.emplace(id, BufferRecord{std::move(resource)});
+        buffers_.emplace(id, std::move(record));
         return gpu::Buffer{id};
     }
 
@@ -115,33 +129,8 @@ public:
         buffers_.erase(found);
     }
 
-    Result<gpu::Pipeline> create_compute_pipeline(std::span<const std::uint8_t> bytecode,
-                                                  std::string_view name) override {
-        D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
-        desc.pRootSignature = root_signature_.Get();
-        desc.CS = {bytecode.data(), bytecode.size()};
-        ComPtr<ID3D12PipelineState> pipeline;
-        const HRESULT hr = device_->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline));
-        if (FAILED(hr)) {
-            return failure(ErrorCode::DeviceFailure, "creating pipeline '" + std::string{name} + "'", hr);
-        }
-        pipeline->SetName(widen(name).c_str());
-        const std::uint32_t id = next_id_++;
-        pipelines_.emplace(id, std::move(pipeline));
-        return gpu::Pipeline{id};
-    }
-
-    void destroy_pipeline(gpu::Pipeline pipeline) override {
-        const auto found = pipelines_.find(pipeline.id);
-        if (found == pipelines_.end()) {
-            return;
-        }
-        retired_pipelines_.push_back(std::move(found->second));
-        pipelines_.erase(found);
-    }
-
     void write_buffer(gpu::Buffer buffer, std::uint64_t offset, std::span<const std::uint8_t> bytes) override {
-        BufferRecord* record = find(buffer);
+        Record* record = find(buffer);
         if (record == nullptr || bytes.empty()) {
             return;
         }
@@ -155,8 +144,8 @@ public:
 
     void copy_buffer(gpu::Buffer destination, std::uint64_t destination_offset, gpu::Buffer source,
                      std::uint64_t source_offset, std::uint64_t bytes) override {
-        BufferRecord* to = find(destination);
-        BufferRecord* from = find(source);
+        Record* to = find(destination);
+        Record* from = find(source);
         if (to == nullptr || from == nullptr || to == from || bytes == 0U) {
             note(Error{ErrorCode::DeviceFailure, "copy_buffer needs two different, valid buffers"});
             return;
@@ -166,28 +155,197 @@ public:
         list_->CopyBufferRegion(to->resource.Get(), destination_offset, from->resource.Get(), source_offset, bytes);
     }
 
+    Result<std::vector<std::uint8_t>> read_buffer(gpu::Buffer buffer, std::uint64_t offset,
+                                                  std::uint64_t bytes) override {
+        Record* record = find(buffer);
+        if (record == nullptr) {
+            return Error{ErrorCode::DeviceFailure, "read_buffer of an unknown buffer"};
+        }
+        if (bytes == 0U) {
+            return std::vector<std::uint8_t>{};
+        }
+        Result<ComPtr<ID3D12Resource>> readback = create_readback(bytes);
+        if (!readback) {
+            return readback.error();
+        }
+        transition(*record, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list_->CopyBufferRegion(readback.value().Get(), 0U, record->resource.Get(), offset, bytes);
+        return finish_readback(readback.value().Get(), bytes, [bytes](const std::uint8_t* mapped) {
+            return std::vector<std::uint8_t>(mapped, mapped + bytes);
+        });
+    }
+
+    // ------------------------------------------------------------ pipelines
+
+    Result<gpu::Pipeline> create_compute_pipeline(std::span<const std::uint8_t> bytecode,
+                                                  std::string_view name) override {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = root_signature_.Get();
+        desc.CS = {bytecode.data(), bytecode.size()};
+        ComPtr<ID3D12PipelineState> pipeline;
+        const HRESULT hr = device_->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating pipeline '" + std::string{name} + "'", hr);
+        }
+        return add_pipeline(std::move(pipeline), name);
+    }
+
+    Result<gpu::Pipeline> create_graphics_pipeline(const gpu::GraphicsPipelineDesc& g, std::string_view name) override {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = root_signature_.Get();
+        desc.VS = {g.vertex.data(), g.vertex.size()};
+        desc.PS = {g.pixel.data(), g.pixel.size()};
+        // Pixel shaders output premultiplied colour.
+        D3D12_RENDER_TARGET_BLEND_DESC& blend = desc.BlendState.RenderTarget[0];
+        blend.BlendEnable = g.blend != gpu::Blend::Opaque;
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = g.blend == gpu::Blend::Additive ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = blend.DestBlend;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        desc.SampleMask = UINT_MAX;
+        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthClipEnable = TRUE;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.NumRenderTargets = 1U;
+        desc.RTVFormats[0] = dxgi_format(g.format);
+        desc.SampleDesc.Count = 1U;
+        ComPtr<ID3D12PipelineState> pipeline;
+        const HRESULT hr = device_->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating pipeline '" + std::string{name} + "'", hr);
+        }
+        return add_pipeline(std::move(pipeline), name);
+    }
+
+    void destroy_pipeline(gpu::Pipeline pipeline) override {
+        const auto found = pipelines_.find(pipeline.id);
+        if (found == pipelines_.end()) {
+            return;
+        }
+        retired_pipelines_.push_back(std::move(found->second));
+        pipelines_.erase(found);
+    }
+
+    // ------------------------------------------------------------ textures
+
+    Result<gpu::Texture> create_render_target(std::uint32_t width, std::uint32_t height, gpu::TextureFormat format,
+                                              std::string_view name) override {
+        if (width == 0U || height == 0U || width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+            return Error{ErrorCode::DeviceFailure, "render target size " + std::to_string(width) + "x" +
+                                                       std::to_string(height) + " is not supported"};
+        }
+        if (free_rtv_slots_.empty()) {
+            return Error{ErrorCode::DeviceFailure, "too many render targets"};
+        }
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1U;
+        desc.MipLevels = 1U;
+        desc.Format = dxgi_format(format);
+        desc.SampleDesc.Count = 1U;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        TextureRecord record;
+        const HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                            D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                            IID_PPV_ARGS(&record.resource));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating a render target", hr);
+        }
+        record.resource->SetName(widen(name).c_str());
+        record.rtv_slot = free_rtv_slots_.back();
+        free_rtv_slots_.pop_back();
+        record.rtv = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+        record.rtv.ptr += static_cast<SIZE_T>(record.rtv_slot) * rtv_size_;
+        device_->CreateRenderTargetView(record.resource.Get(), nullptr, record.rtv);
+        record.width = width;
+        record.height = height;
+        record.format = format;
+        const std::uint32_t id = next_id_++;
+        textures_.emplace(id, std::move(record));
+        return gpu::Texture{id};
+    }
+
+    void destroy_texture(gpu::Texture texture) override {
+        const auto found = textures_.find(texture.id);
+        if (found == textures_.end()) {
+            return;
+        }
+        retired_.push_back(std::move(found->second.resource));
+        retired_rtv_slots_.push_back(found->second.rtv_slot);
+        textures_.erase(found);
+    }
+
+    Result<std::vector<std::uint8_t>> read_texture(gpu::Texture texture) override {
+        const auto found = textures_.find(texture.id);
+        if (found == textures_.end()) {
+            return Error{ErrorCode::DeviceFailure, "read_texture of an unknown texture"};
+        }
+        TextureRecord& record = found->second;
+        const D3D12_RESOURCE_DESC desc = record.resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 total = 0U;
+        device_->GetCopyableFootprints(&desc, 0U, 1U, 0U, &footprint, nullptr, nullptr, &total);
+        Result<ComPtr<ID3D12Resource>> readback = create_readback(total);
+        if (!readback) {
+            return readback.error();
+        }
+        transition(record, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = readback.value().Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = record.resource.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list_->CopyTextureRegion(&to, 0U, 0U, 0U, &from, nullptr);
+        const std::size_t row = static_cast<std::size_t>(record.width) * bytes_per_pixel(record.format);
+        const std::uint32_t height = record.height;
+        return finish_readback(readback.value().Get(), total, [&](const std::uint8_t* mapped) {
+            std::vector<std::uint8_t> out(row * height);
+            for (std::uint32_t y = 0U; y < height; ++y) {
+                std::memcpy(out.data() + y * row,
+                            mapped + footprint.Offset + static_cast<std::size_t>(y) * footprint.Footprint.RowPitch,
+                            row);
+            }
+            return out;
+        });
+    }
+
+    // ------------------------------------------------------------ recording
+
     void dispatch(const gpu::Dispatch& d) override {
         const auto pipeline = pipelines_.find(d.pipeline.id);
         if (pipeline == pipelines_.end()) {
             note(Error{ErrorCode::DeviceFailure, "dispatch of an unknown pipeline"});
             return;
         }
-        BufferRecord* indirect = d.indirect.valid() ? find(d.indirect) : nullptr;
+        if (rendering_ != nullptr) {
+            note(Error{ErrorCode::DeviceFailure, "dispatch inside begin_rendering/end_rendering"});
+            return;
+        }
+        Record* indirect = d.indirect.valid() ? find(d.indirect) : nullptr;
         if (d.indirect.valid() && indirect == nullptr) {
             note(Error{ErrorCode::DeviceFailure, "dispatch with an unknown indirect buffer"});
+            return;
+        }
+        std::array<D3D12_GPU_VIRTUAL_ADDRESS, gpu::max_bound_buffers> addresses{};
+        if (!prepare_buffers(d.buffers, indirect, addresses)) {
             return;
         }
         list_->SetComputeRootSignature(root_signature_.Get());
         list_->SetPipelineState(pipeline->second.Get());
         list_->SetComputeRoot32BitConstants(0U, gpu::root_constant_count, d.constants.data(), 0U);
         for (std::uint32_t slot = 0U; slot < gpu::max_bound_buffers; ++slot) {
-            BufferRecord* record = d.buffers[slot].valid() ? find(d.buffers[slot]) : &buffers_.at(dummy_.id);
-            if (record == nullptr || record == indirect) {
-                note(Error{ErrorCode::DeviceFailure, "dispatch binds an unknown buffer or its indirect buffer"});
-                return;
-            }
-            transition(*record, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            list_->SetComputeRootUnorderedAccessView(1U + slot, record->resource->GetGPUVirtualAddress());
+            list_->SetComputeRootUnorderedAccessView(1U + slot, addresses[slot]);
         }
         if (indirect != nullptr) {
             transition(*indirect, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -198,6 +356,61 @@ public:
         }
     }
 
+    void begin_rendering(gpu::Texture target, const std::array<float, 4>* clear_color) override {
+        const auto found = textures_.find(target.id);
+        if (found == textures_.end() || rendering_ != nullptr) {
+            note(Error{ErrorCode::DeviceFailure, "begin_rendering needs a valid target and no open rendering"});
+            return;
+        }
+        TextureRecord& record = found->second;
+        transition(record, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list_->OMSetRenderTargets(1U, &record.rtv, FALSE, nullptr);
+        const D3D12_VIEWPORT viewport{0.0F, 0.0F, static_cast<float>(record.width), static_cast<float>(record.height),
+                                      0.0F, 1.0F};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(record.width), static_cast<LONG>(record.height)};
+        list_->RSSetViewports(1U, &viewport);
+        list_->RSSetScissorRects(1U, &scissor);
+        if (clear_color != nullptr) {
+            list_->ClearRenderTargetView(record.rtv, clear_color->data(), 0U, nullptr);
+        }
+        rendering_ = &record;
+    }
+
+    void draw(const gpu::Draw& d) override {
+        const auto pipeline = pipelines_.find(d.pipeline.id);
+        if (rendering_ == nullptr || pipeline == pipelines_.end()) {
+            note(Error{ErrorCode::DeviceFailure, "draw needs a known pipeline inside begin_rendering"});
+            return;
+        }
+        Record* indirect = d.indirect.valid() ? find(d.indirect) : nullptr;
+        if (d.indirect.valid() && indirect == nullptr) {
+            note(Error{ErrorCode::DeviceFailure, "draw with an unknown indirect buffer"});
+            return;
+        }
+        std::array<D3D12_GPU_VIRTUAL_ADDRESS, gpu::max_bound_buffers> addresses{};
+        if (!prepare_buffers(d.buffers, indirect, addresses)) {
+            return;
+        }
+        list_->SetGraphicsRootSignature(root_signature_.Get());
+        list_->SetPipelineState(pipeline->second.Get());
+        list_->SetGraphicsRoot32BitConstants(0U, gpu::root_constant_count, d.constants.data(), 0U);
+        for (std::uint32_t slot = 0U; slot < gpu::max_bound_buffers; ++slot) {
+            list_->SetGraphicsRootUnorderedAccessView(1U + slot, addresses[slot]);
+        }
+        list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (indirect != nullptr) {
+            transition(*indirect, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+            list_->ExecuteIndirect(draw_signature_.Get(), 1U, indirect->resource.Get(), d.indirect_offset, nullptr,
+                                   0U);
+        } else if (d.vertex_count > 0U && d.instance_count > 0U) {
+            list_->DrawInstanced(d.vertex_count, d.instance_count, 0U, 0U);
+        }
+    }
+
+    void end_rendering() override {
+        rendering_ = nullptr;
+    }
+
     void barrier() override {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -205,18 +418,32 @@ public:
         list_->ResourceBarrier(1U, &barrier);
     }
 
+    // ------------------------------------------------------------ submission
+
     Result<bool> flush() override {
+        rendering_ = nullptr;
         HRESULT hr = list_->Close();
         if (SUCCEEDED(hr)) {
             ID3D12CommandList* lists[] = {list_.Get()};
             queue_->ExecuteCommandLists(1U, lists);
         }
         // The recorded transitions happened only if the list ran.
-        for (auto& [id, record] : buffers_) {
+        const auto settle = [hr](Record& record) {
             if (SUCCEEDED(hr)) {
                 record.executed = record.state;
             } else {
                 record.state = record.executed;
+            }
+        };
+        for (auto& [id, record] : buffers_) {
+            settle(record);
+        }
+        for (auto& [id, record] : textures_) {
+            settle(record);
+        }
+        for (auto& [window, swap] : swap_chains_) {
+            for (Record& buffer : swap.buffers) {
+                settle(buffer);
             }
         }
         const Result<bool> waited = wait_idle();
@@ -233,6 +460,8 @@ public:
         upload_used_ = upload_capacity_;
         retired_.clear();
         retired_pipelines_.clear();
+        free_rtv_slots_.insert(free_rtv_slots_.end(), retired_rtv_slots_.begin(), retired_rtv_slots_.end());
+        retired_rtv_slots_.clear();
 
         if (std::optional<Error> error = std::exchange(deferred_, std::nullopt)) {
             return *std::move(error);
@@ -252,52 +481,60 @@ public:
         return true;
     }
 
-    Result<std::vector<std::uint8_t>> read_buffer(gpu::Buffer buffer, std::uint64_t offset,
-                                                  std::uint64_t bytes) override {
-        BufferRecord* record = find(buffer);
-        if (record == nullptr) {
-            return Error{ErrorCode::DeviceFailure, "read_buffer of an unknown buffer"};
+    Result<bool> present(void* window, gpu::Texture texture) override {
+        const auto found = textures_.find(texture.id);
+        if (window == nullptr || found == textures_.end() || found->second.format != gpu::TextureFormat::Rgba8Unorm) {
+            return Error{ErrorCode::DeviceFailure, "present needs a window and an Rgba8Unorm render target"};
         }
-        if (bytes == 0U) {
-            return std::vector<std::uint8_t>{};
+        TextureRecord& record = found->second;
+        SwapChain& swap = swap_chains_[window];
+        if (!swap.chain || swap.width != record.width || swap.height != record.height) {
+            if (std::optional<Error> error = prepare_swap_chain(window, swap, record.width, record.height)) {
+                swap_chains_.erase(window);
+                return *std::move(error);
+            }
         }
-        const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
-        const D3D12_RESOURCE_DESC desc = buffer_desc(bytes, D3D12_RESOURCE_FLAG_NONE);
-        ComPtr<ID3D12Resource> readback;
-        HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                      IID_PPV_ARGS(&readback));
-        if (FAILED(hr)) {
-            return failure(ErrorCode::DeviceFailure, "creating a readback buffer", hr);
-        }
-        transition(*record, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list_->CopyBufferRegion(readback.Get(), 0U, record->resource.Get(), offset, bytes);
+        Record& back = swap.buffers[swap.chain->GetCurrentBackBufferIndex()];
+        transition(back, D3D12_RESOURCE_STATE_COPY_DEST);
+        transition(record, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list_->CopyResource(back.resource.Get(), record.resource.Get());
+        transition(back, D3D12_RESOURCE_STATE_PRESENT);
         Result<bool> flushed = flush();
         if (!flushed) {
-            return flushed.error();
+            return flushed;
         }
-        void* mapped = nullptr;
-        const D3D12_RANGE range{0U, static_cast<SIZE_T>(bytes)};
-        hr = readback->Map(0U, &range, &mapped);
+        const HRESULT hr = swap.chain->Present(1U, 0U);
         if (FAILED(hr)) {
-            return failure(ErrorCode::DeviceFailure, "mapping a readback buffer", hr);
+            return failure(ErrorCode::DeviceFailure, "presenting", hr);
         }
-        std::vector<std::uint8_t> out(static_cast<std::size_t>(bytes));
-        std::memcpy(out.data(), mapped, out.size());
-        const D3D12_RANGE nothing{0U, 0U};
-        readback->Unmap(0U, &nothing);
-        return out;
+        return true;
     }
 
 private:
-    struct BufferRecord final {
+    // A buffer or texture with its state as of the end of the recorded work,
+    // and as of the last work that ran.
+    struct Record {
         ComPtr<ID3D12Resource> resource;
-        // As of the end of the recorded work, and of the last work that ran.
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
         D3D12_RESOURCE_STATES executed{D3D12_RESOURCE_STATE_COMMON};
     };
 
-    Device() = default;
+    struct TextureRecord final : Record {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+        std::uint32_t rtv_slot{0U};
+        std::uint32_t width{0U};
+        std::uint32_t height{0U};
+        gpu::TextureFormat format{gpu::TextureFormat::Rgba8Unorm};
+    };
+
+    struct SwapChain final {
+        ComPtr<IDXGISwapChain3> chain;
+        std::vector<Record> buffers;
+        std::uint32_t width{0U};
+        std::uint32_t height{0U};
+    };
+
+    DeviceImpl() = default;
 
     std::optional<Error> initialise(const DeviceOptions& options) {
         if (options.debug_layer) {
@@ -306,8 +543,7 @@ private:
                 debug->EnableDebugLayer();
             }
         }
-        ComPtr<IDXGIFactory6> factory;
-        HRESULT hr = CreateDXGIFactory2(0U, IID_PPV_ARGS(&factory));
+        HRESULT hr = CreateDXGIFactory2(0U, IID_PPV_ARGS(&factory_));
         if (FAILED(hr)) {
             return failure(ErrorCode::GpuUnavailable, "creating a DXGI factory", hr);
         }
@@ -315,13 +551,13 @@ private:
         std::vector<ComPtr<IDXGIAdapter1>> candidates;
         if (options.warp) {
             ComPtr<IDXGIAdapter1> warp;
-            if (SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)))) {
+            if (SUCCEEDED(factory_->EnumWarpAdapter(IID_PPV_ARGS(&warp)))) {
                 candidates.push_back(warp);
             }
         } else {
             ComPtr<IDXGIAdapter1> adapter;
-            for (UINT i = 0U; factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                                                  IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
+            for (UINT i = 0U; factory_->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                                   IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
                  ++i) {
                 DXGI_ADAPTER_DESC1 desc{};
                 adapter->GetDesc1(&desc);
@@ -368,7 +604,7 @@ private:
         }
 
         // Sixteen root constants at b0 and eight root UAVs at u0..u7: no
-        // descriptor heaps, and every kernel shares one signature.
+        // descriptor heaps, and every kernel and draw shares one signature.
         D3D12_ROOT_PARAMETER parameters[1U + gpu::max_bound_buffers]{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants = {0U, 0U, gpu::root_constant_count};
@@ -389,14 +625,24 @@ private:
             return failure(ErrorCode::GpuUnavailable, "creating the root signature", hr);
         }
 
-        D3D12_INDIRECT_ARGUMENT_DESC argument{};
-        argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC signature{};
-        signature.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
-        signature.NumArgumentDescs = 1U;
-        signature.pArgumentDescs = &argument;
-        if (FAILED(hr = device_->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&dispatch_signature_)))) {
-            return failure(ErrorCode::GpuUnavailable, "creating the dispatch signature", hr);
+        if (std::optional<Error> error = create_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+                                                          sizeof(D3D12_DISPATCH_ARGUMENTS), dispatch_signature_)) {
+            return error;
+        }
+        if (std::optional<Error> error =
+                create_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS), draw_signature_)) {
+            return error;
+        }
+
+        D3D12_DESCRIPTOR_HEAP_DESC rtv_heap{};
+        rtv_heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtv_heap.NumDescriptors = max_render_targets;
+        if (FAILED(hr = device_->CreateDescriptorHeap(&rtv_heap, IID_PPV_ARGS(&rtv_heap_)))) {
+            return failure(ErrorCode::GpuUnavailable, "creating the render target heap", hr);
+        }
+        rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        for (std::uint32_t slot = max_render_targets; slot > 0U; --slot) {
+            free_rtv_slots_.push_back(slot - 1U);
         }
 
         Result<gpu::Buffer> dummy = create_buffer(256U, "ajfx unbound slot");
@@ -405,6 +651,28 @@ private:
         }
         dummy_ = dummy.value();
         return std::nullopt;
+    }
+
+    std::optional<Error> create_signature(D3D12_INDIRECT_ARGUMENT_TYPE type, UINT stride,
+                                          ComPtr<ID3D12CommandSignature>& out) {
+        D3D12_INDIRECT_ARGUMENT_DESC argument{};
+        argument.Type = type;
+        D3D12_COMMAND_SIGNATURE_DESC signature{};
+        signature.ByteStride = stride;
+        signature.NumArgumentDescs = 1U;
+        signature.pArgumentDescs = &argument;
+        const HRESULT hr = device_->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&out));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::GpuUnavailable, "creating an indirect argument signature", hr);
+        }
+        return std::nullopt;
+    }
+
+    gpu::Pipeline add_pipeline(ComPtr<ID3D12PipelineState> pipeline, std::string_view name) {
+        pipeline->SetName(widen(name).c_str());
+        const std::uint32_t id = next_id_++;
+        pipelines_.emplace(id, std::move(pipeline));
+        return gpu::Pipeline{id};
     }
 
     HRESULT recreate_command_list() {
@@ -442,7 +710,7 @@ private:
         return error;
     }
 
-    BufferRecord* find(gpu::Buffer buffer) {
+    Record* find(gpu::Buffer buffer) {
         const auto found = buffers_.find(buffer.id);
         return found == buffers_.end() ? nullptr : &found->second;
     }
@@ -453,7 +721,7 @@ private:
         }
     }
 
-    void transition(BufferRecord& record, D3D12_RESOURCE_STATES state) {
+    void transition(Record& record, D3D12_RESOURCE_STATES state) {
         if (record.state == state) {
             return;
         }
@@ -465,6 +733,95 @@ private:
         barrier.Transition.StateAfter = state;
         list_->ResourceBarrier(1U, &barrier);
         record.state = state;
+    }
+
+    // Transitions every bound buffer for read-write access and resolves its
+    // address; unbound slots get a small placeholder. False (with a deferred
+    // error) if a buffer is unknown or is also the indirect argument buffer.
+    bool prepare_buffers(const std::array<gpu::Buffer, gpu::max_bound_buffers>& buffers, const Record* indirect,
+                         std::array<D3D12_GPU_VIRTUAL_ADDRESS, gpu::max_bound_buffers>& addresses) {
+        for (std::uint32_t slot = 0U; slot < gpu::max_bound_buffers; ++slot) {
+            Record* record = buffers[slot].valid() ? find(buffers[slot]) : &buffers_.at(dummy_.id);
+            if (record == nullptr || record == indirect) {
+                note(Error{ErrorCode::DeviceFailure, "binding an unknown buffer or the indirect argument buffer"});
+                return false;
+            }
+            transition(*record, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            addresses[slot] = record->resource->GetGPUVirtualAddress();
+        }
+        return true;
+    }
+
+    Result<ComPtr<ID3D12Resource>> create_readback(std::uint64_t bytes) {
+        const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        const D3D12_RESOURCE_DESC desc = buffer_desc(bytes, D3D12_RESOURCE_FLAG_NONE);
+        ComPtr<ID3D12Resource> readback;
+        const HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                            IID_PPV_ARGS(&readback));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating a readback buffer", hr);
+        }
+        return readback;
+    }
+
+    // Flushes, maps the readback buffer and lets `extract` copy out of it.
+    template <class Extract>
+    Result<std::vector<std::uint8_t>> finish_readback(ID3D12Resource* readback, std::uint64_t bytes, Extract extract) {
+        Result<bool> flushed = flush();
+        if (!flushed) {
+            return flushed.error();
+        }
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0U, static_cast<SIZE_T>(bytes)};
+        const HRESULT hr = readback->Map(0U, &range, &mapped);
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "mapping a readback buffer", hr);
+        }
+        std::vector<std::uint8_t> out = extract(static_cast<const std::uint8_t*>(mapped));
+        const D3D12_RANGE nothing{0U, 0U};
+        readback->Unmap(0U, &nothing);
+        return out;
+    }
+
+    std::optional<Error> prepare_swap_chain(void* window, SwapChain& swap, std::uint32_t width, std::uint32_t height) {
+        // Nothing recorded may still refer to the old buffers.
+        if (Result<bool> flushed = flush(); !flushed) {
+            return flushed.error();
+        }
+        swap.buffers.clear();
+        HRESULT hr = S_OK;
+        if (swap.chain) {
+            hr = swap.chain->ResizeBuffers(0U, width, height, DXGI_FORMAT_UNKNOWN, 0U);
+        } else {
+            DXGI_SWAP_CHAIN_DESC1 desc{};
+            desc.Width = width;
+            desc.Height = height;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1U;
+            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            desc.BufferCount = 2U;
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            ComPtr<IDXGISwapChain1> chain;
+            hr = factory_->CreateSwapChainForHwnd(queue_.Get(), static_cast<HWND>(window), &desc, nullptr, nullptr,
+                                                  &chain);
+            if (SUCCEEDED(hr)) {
+                (void)factory_->MakeWindowAssociation(static_cast<HWND>(window), DXGI_MWA_NO_ALT_ENTER);
+                hr = chain.As(&swap.chain);
+            }
+        }
+        for (UINT i = 0U; SUCCEEDED(hr) && i < 2U; ++i) {
+            Record& buffer = swap.buffers.emplace_back();
+            hr = swap.chain->GetBuffer(i, IID_PPV_ARGS(&buffer.resource));
+            buffer.state = D3D12_RESOURCE_STATE_PRESENT;
+            buffer.executed = D3D12_RESOURCE_STATE_PRESENT;
+        }
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating the window's swap chain", hr);
+        }
+        swap.width = width;
+        swap.height = height;
+        return std::nullopt;
     }
 
     // Copies bytes into upload memory that lives until the next flush.
@@ -516,6 +873,7 @@ private:
         return true;
     }
 
+    ComPtr<IDXGIFactory6> factory_;
     ComPtr<ID3D12Device> device_;
     ComPtr<ID3D12InfoQueue> info_queue_;
     ComPtr<ID3D12CommandQueue> queue_;
@@ -524,12 +882,19 @@ private:
     ComPtr<ID3D12Fence> fence_;
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12CommandSignature> dispatch_signature_;
+    ComPtr<ID3D12CommandSignature> draw_signature_;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap_;
+    std::uint32_t rtv_size_{0U};
+    std::vector<std::uint32_t> free_rtv_slots_;
     HANDLE event_{nullptr};
     std::uint64_t fence_value_{0U};
     std::string adapter_name_;
 
-    std::unordered_map<std::uint32_t, BufferRecord> buffers_;
+    std::unordered_map<std::uint32_t, Record> buffers_;
     std::unordered_map<std::uint32_t, ComPtr<ID3D12PipelineState>> pipelines_;
+    std::unordered_map<std::uint32_t, TextureRecord> textures_;
+    std::unordered_map<void*, SwapChain> swap_chains_;
+    TextureRecord* rendering_{nullptr};
     std::uint32_t next_id_{1U};
     gpu::Buffer dummy_;
 
@@ -540,13 +905,14 @@ private:
 
     std::vector<ComPtr<ID3D12Resource>> retired_;
     std::vector<ComPtr<ID3D12PipelineState>> retired_pipelines_;
+    std::vector<std::uint32_t> retired_rtv_slots_;
     std::optional<Error> deferred_;
 };
 
 } // namespace
 
-Result<std::unique_ptr<gpu::Device>> create_device(const DeviceOptions& options) {
-    return Device::create(options);
+Result<std::unique_ptr<Device>> create_device(const DeviceOptions& options) {
+    return DeviceImpl::create(options);
 }
 
 } // namespace ajfx::d3d12

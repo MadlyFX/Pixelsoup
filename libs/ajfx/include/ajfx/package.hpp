@@ -44,8 +44,11 @@ struct PackageEntry final {
 // Parses and validates effect.json text.
 [[nodiscard]] Result<Effect> effect_from_json(std::string_view json);
 
-// A complete package for the effect. Fails if the effect does not validate.
-[[nodiscard]] Result<std::vector<std::uint8_t>> write_package(const Effect& effect);
+// A complete package for the effect, with any `extra` entries (precompiled
+// kernels, textures). Fails if the effect does not validate or an extra entry
+// is named effect.json.
+[[nodiscard]] Result<std::vector<std::uint8_t>> write_package(const Effect& effect,
+                                                              std::vector<PackageEntry> extra = {});
 // Reads, checks and validates a package.
 [[nodiscard]] Result<Effect> read_package(std::span<const std::uint8_t> bytes);
 

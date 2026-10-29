@@ -89,7 +89,7 @@ void invalid_use_is_reported_and_the_device_recovers() {
 } // namespace
 
 int main() {
-    Result<std::unique_ptr<gpu::Device>> device = d3d12::create_device({.debug_layer = true});
+    Result<std::unique_ptr<d3d12::Device>> device = d3d12::create_device({.debug_layer = true});
     if (!device) {
         device = d3d12::create_device({.warp = true, .debug_layer = true});
     }

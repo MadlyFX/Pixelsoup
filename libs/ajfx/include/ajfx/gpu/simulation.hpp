@@ -26,10 +26,13 @@ namespace ajfx::gpu {
 
 // Where a host finds an emitter's particles: `stride`-byte records laid out
 // by `layout`, in `particles`, with the live count as the first uint32 of
-// `counters`.
+// `counters`. `args` holds draw arguments at `draw_args_offset` (six
+// vertices, one instance per live particle) for an indirect draw.
 struct EmitterBuffers final {
     Buffer particles;
     Buffer counters;
+    Buffer args;
+    std::uint64_t draw_args_offset{0U};
     ParticleLayout layout;
     std::uint32_t capacity{0U};
 };

@@ -2,10 +2,13 @@
 
 #include <ajfx/d3d12.hpp>
 #include <ajfx/gpu/kernels.hpp>
+#include <ajfx/package.hpp>
 #include <ajfx/presets.hpp>
 
 #include <iostream>
 #include <string>
+#include <variant>
+#include <vector>
 
 namespace {
 
@@ -94,13 +97,50 @@ void compiled_bytecode_is_reproducible() {
     }
 }
 
+void kernels_travel_in_packages_and_go_stale_with_their_source() {
+    Result<std::unique_ptr<gpu::ShaderCompiler>> compiler = d3d12::create_shader_compiler();
+    if (!compiler) {
+        return;
+    }
+    const Effect effect = presets::smoke();
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *compiler.value()).value();
+    const std::vector<std::uint8_t> package =
+        write_package(effect, gpu::kernel_package_entries(effect, kernels)).value();
+
+    // The effect still reads, and the kernels come back byte for byte.
+    AJFX_CHECK(read_package(package).value() == effect);
+    const Result<gpu::KernelSet> read = gpu::read_package_kernels(package, effect, gpu::ShaderFormat::Dxil);
+    AJFX_CHECK(read.ok());
+    AJFX_CHECK(read.value().scan_blocks == kernels.scan_blocks && read.value().finalize == kernels.finalize);
+    AJFX_CHECK(read.value().sprite_vertex == kernels.sprite_vertex && read.value().sprite_pixel == kernels.sprite_pixel);
+    AJFX_CHECK(read.value().emitters.size() == 1U && read.value().emitters[0].update == kernels.emitters[0].update &&
+               read.value().emitters[0].spawn == kernels.emitters[0].spawn);
+
+    // Kernels compiled for one effect are refused for another.
+    Effect edited = effect;
+    std::get<Drag>(edited.emitters[0].update[2]).coefficient = 0.9F; // data, not code: same kernels
+    AJFX_CHECK(gpu::read_package_kernels(package, edited, gpu::ShaderFormat::Dxil).ok());
+    edited.emitters[0].update.pop_back(); // a module removed: different code
+    const Result<gpu::KernelSet> stale = gpu::read_package_kernels(package, edited, gpu::ShaderFormat::Dxil);
+    AJFX_CHECK(!stale.ok() && stale.error().code == ErrorCode::KernelsUnavailable);
+    AJFX_CHECK(contains(stale.error().message, "different source"));
+
+    // A package written without kernels says so.
+    const Result<gpu::KernelSet> none =
+        gpu::read_package_kernels(write_package(effect).value(), effect, gpu::ShaderFormat::Dxil);
+    AJFX_CHECK(!none.ok() && contains(none.error().message, "has none"));
+    // And effect.json cannot be smuggled in as an extra entry.
+    AJFX_CHECK(!write_package(effect, {{"effect.json", {1U}}}).ok());
+}
+
 void compile_errors_are_reported() {
     Result<std::unique_ptr<gpu::ShaderCompiler>> compiler = d3d12::create_shader_compiler();
     if (!compiler) {
         return;
     }
     Result<std::vector<std::uint8_t>> broken =
-        compiler.value()->compile_compute("[numthreads(1,1,1)] void main() { undefined_thing(); }", "main", "broken");
+        compiler.value()->compile("[numthreads(1,1,1)] void main() { undefined_thing(); }", "main",
+                                  gpu::ShaderStage::Compute, "broken");
     AJFX_CHECK(!broken.ok() && broken.error().code == ErrorCode::ShaderCompilation);
     AJFX_CHECK(contains(broken.error().message, "undefined_thing"));
 }
@@ -113,6 +153,8 @@ int main() {
         {"module_calls_carry_their_data_offsets_and_ids", module_calls_carry_their_data_offsets_and_ids},
         {"generation_is_deterministic", generation_is_deterministic},
         {"compiled_bytecode_is_reproducible", compiled_bytecode_is_reproducible},
+        {"kernels_travel_in_packages_and_go_stale_with_their_source",
+         kernels_travel_in_packages_and_go_stale_with_their_source},
         {"compile_errors_are_reported", compile_errors_are_reported},
     };
     return ajfx::test::run(cases);

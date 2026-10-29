@@ -21,9 +21,10 @@ constexpr std::uint32_t group_size = 256U;
 constexpr std::uint32_t block_size = 4096U;
 constexpr std::uint32_t max_groups_x = 65535U;
 constexpr std::uint64_t counters_bytes = 16U; // alive, compacted, refused, unused
-constexpr std::uint64_t args_bytes = 24U;     // particle groups, block groups
+constexpr std::uint64_t args_bytes = 40U;     // particle groups, block groups, draw
 constexpr std::uint64_t particle_args = 0U;
 constexpr std::uint64_t block_args = 12U;
+constexpr std::uint64_t draw_args = 24U;
 
 struct EmitterGpu final {
     Buffer particles[2];
@@ -311,7 +312,8 @@ void GpuSimulation::reset() {
 
 EmitterBuffers GpuSimulation::emitter_buffers(std::size_t emitter) const {
     const EmitterGpu& e = state_->emitters[emitter];
-    return {e.particles[state_->current], e.counters, e.layout, state_->effect.emitters[emitter].capacity};
+    return {e.particles[state_->current], e.counters, e.args, draw_args, e.layout,
+            state_->effect.emitters[emitter].capacity};
 }
 
 Result<std::vector<std::uint8_t>> GpuSimulation::read_particle_bytes(std::size_t emitter) {

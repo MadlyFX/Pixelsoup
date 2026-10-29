@@ -296,6 +296,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     SpriteRenderer::fields(emitter.renderer, renderer);
     renderer.require(emitter.renderer.flipbook_columns >= 1U && emitter.renderer.flipbook_rows >= 1U, "flipbook",
                      "needs at least one column and row");
+    renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
     if (renderer.error()) {
         return renderer.error();
     }
