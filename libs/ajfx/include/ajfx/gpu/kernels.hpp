@@ -1,0 +1,72 @@
+#pragma once
+
+#include <ajfx/effect.hpp>
+#include <ajfx/gpu/device.hpp>
+#include <ajfx/result.hpp>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+// Kernel generation.
+//
+// Every emitter gets its own fused kernels: an update kernel that runs the
+// whole update stack per particle in one pass, and a spawn kernel that runs
+// the init stack for each newborn. Their source is generated from the module
+// stacks and is deterministic text, so the same effect always compiles to the
+// same bytecode with the same compiler. Compaction and bookkeeping kernels are
+// shared by every effect.
+namespace ajfx::gpu {
+
+// Byte offsets of each attribute in a particle record; -1 for one the
+// emitter's modules never touch, which then takes its default. Only what an
+// emitter uses is stored.
+struct ParticleLayout final {
+    std::int32_t position{-1};
+    std::int32_t velocity{-1};
+    std::int32_t age{-1};
+    std::int32_t lifetime{-1};
+    std::int32_t spawn_index{-1};
+    std::int32_t color{-1};
+    std::int32_t base_color{-1};
+    std::int32_t size{-1};
+    std::int32_t base_size{-1};
+    std::int32_t rotation{-1};
+    std::uint32_t stride{0U};
+
+    friend bool operator==(const ParticleLayout&, const ParticleLayout&) = default;
+};
+
+[[nodiscard]] ParticleLayout particle_layout(const Emitter& emitter);
+
+struct EmitterKernelSource final {
+    std::string source; // entry points "update" and "spawn"
+    ParticleLayout layout;
+    // Floats of per-step module data the kernels read, in front of the birth ages.
+    std::uint32_t module_floats{0U};
+};
+
+// HLSL for each emitter, in emitter order.
+[[nodiscard]] std::vector<EmitterKernelSource> generate_kernel_sources(const Effect& effect);
+// HLSL for the shared kernels: entry points "scan_blocks", "scan_totals",
+// "scatter" and "finalize".
+[[nodiscard]] std::string runtime_kernel_source();
+
+struct EmitterKernels final {
+    std::vector<std::uint8_t> update;
+    std::vector<std::uint8_t> spawn;
+};
+
+struct KernelSet final {
+    ShaderFormat format{ShaderFormat::Dxil};
+    std::vector<std::uint8_t> scan_blocks;
+    std::vector<std::uint8_t> scan_totals;
+    std::vector<std::uint8_t> scatter;
+    std::vector<std::uint8_t> finalize;
+    std::vector<EmitterKernels> emitters;
+};
+
+// Generates and compiles every kernel an effect needs.
+[[nodiscard]] Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler);
+
+} // namespace ajfx::gpu

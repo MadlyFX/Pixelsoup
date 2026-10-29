@@ -50,20 +50,59 @@ function(ajfx_set_options target)
     endif()
 endfunction()
 
+# The HLSL in shaders/ is embedded in the library, so generating kernels at
+# runtime needs no files beside the executable. Rewritten only when it
+# changes, and editing a shader re-runs this configure step.
+set(_ajfx_embedded "// Generated from libs/ajfx/shaders by libs/ajfx/CMakeLists.txt; do not edit.\n")
+string(APPEND _ajfx_embedded "#include \"hlsl_sources.hpp\"\n\nnamespace ajfx::detail {\n")
+foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl)
+    string(REPLACE ":" ";" _ajfx_pair "${_ajfx_shader}")
+    list(GET _ajfx_pair 0 _ajfx_name)
+    list(GET _ajfx_pair 1 _ajfx_file)
+    set(_ajfx_path "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_ajfx_file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ajfx_path}")
+    file(READ "${_ajfx_path}" _ajfx_text)
+    string(LENGTH "${_ajfx_text}" _ajfx_length)
+    string(APPEND _ajfx_embedded "\nextern const std::string_view hlsl_${_ajfx_name};\n")
+    string(APPEND _ajfx_embedded "const std::string_view hlsl_${_ajfx_name} =\n")
+    # Pieces stay well under MSVC's limit for a single string literal.
+    set(_ajfx_at 0)
+    while(_ajfx_at LESS _ajfx_length)
+        string(SUBSTRING "${_ajfx_text}" ${_ajfx_at} 2000 _ajfx_piece)
+        string(APPEND _ajfx_embedded "    R\"ajfx(${_ajfx_piece})ajfx\"\n")
+        math(EXPR _ajfx_at "${_ajfx_at} + 2000")
+    endwhile()
+    string(APPEND _ajfx_embedded "    ;\n")
+endforeach()
+string(APPEND _ajfx_embedded "\n} // namespace ajfx::detail\n")
+set(_ajfx_embedded_path "${CMAKE_CURRENT_BINARY_DIR}/generated/ajfx_hlsl_sources.cpp")
+set(_ajfx_previous "")
+if(EXISTS "${_ajfx_embedded_path}")
+    file(READ "${_ajfx_embedded_path}" _ajfx_previous)
+endif()
+if(NOT _ajfx_previous STREQUAL _ajfx_embedded)
+    file(WRITE "${_ajfx_embedded_path}" "${_ajfx_embedded}")
+endif()
+
 add_library(ajfx STATIC
     src/builder.cpp
     src/effect.cpp
+    src/gpu/kernels.cpp
+    src/gpu/simulation.cpp
     src/json.cpp
     src/package.cpp
     src/presets.cpp
     src/simulation.cpp
     src/version.cpp
+    "${_ajfx_embedded_path}"
 )
 add_library(ajfx::ajfx ALIAS ajfx)
 
 target_include_directories(ajfx
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu"
 )
 ajfx_set_options(ajfx)
 set_target_properties(ajfx PROPERTIES FOLDER "libs")
@@ -72,6 +111,57 @@ set_target_properties(ajfx PROPERTIES FOLDER "libs")
 # the host's shader compiler can add it to its include path.
 set(AJFX_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
     CACHE INTERNAL "ajfx HLSL include directory")
+
+# The D3D12 reference backend and the DXC-backed runtime compiler.
+if(WIN32)
+    option(AJFX_BUILD_D3D12 "Build the D3D12 reference backend" ON)
+else()
+    set(AJFX_BUILD_D3D12 OFF)
+endif()
+
+if(AJFX_BUILD_D3D12)
+    add_library(ajfx_d3d12 STATIC
+        backends/d3d12/d3d12_device.cpp
+        backends/d3d12/dxc_compiler.cpp
+    )
+    add_library(ajfx::d3d12 ALIAS ajfx_d3d12)
+    target_link_libraries(ajfx_d3d12 PUBLIC ajfx::ajfx PRIVATE d3d12 dxgi)
+    ajfx_set_options(ajfx_d3d12)
+    set_target_properties(ajfx_d3d12 PROPERTIES FOLDER "libs")
+
+    # dxcompiler.dll and dxil.dll are loaded at runtime; executables that
+    # compile kernels get a copy beside them. Defaults to the newest Windows
+    # SDK that ships them.
+    set(AJFX_DXC_DIR "" CACHE PATH "Directory holding dxcompiler.dll and dxil.dll")
+    set(_ajfx_dxc_dir "${AJFX_DXC_DIR}")
+    if(NOT _ajfx_dxc_dir)
+        file(GLOB _ajfx_dxc_candidates
+            "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/dxcompiler.dll"
+            "C:/Program Files/Windows Kits/10/bin/*/x64/dxcompiler.dll")
+        list(SORT _ajfx_dxc_candidates COMPARE NATURAL ORDER DESCENDING)
+        foreach(_ajfx_candidate IN LISTS _ajfx_dxc_candidates)
+            get_filename_component(_ajfx_candidate_dir "${_ajfx_candidate}" DIRECTORY)
+            if(EXISTS "${_ajfx_candidate_dir}/dxil.dll")
+                set(_ajfx_dxc_dir "${_ajfx_candidate_dir}")
+                break()
+            endif()
+        endforeach()
+    endif()
+    if(_ajfx_dxc_dir)
+        message(STATUS "ajfx: DXC from ${_ajfx_dxc_dir}")
+    else()
+        message(STATUS "ajfx: no dxcompiler.dll found; GPU tests will be skipped")
+    endif()
+
+    function(ajfx_copy_dxc target)
+        if(_ajfx_dxc_dir)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_ajfx_dxc_dir}/dxcompiler.dll" "${_ajfx_dxc_dir}/dxil.dll"
+                    "$<TARGET_FILE_DIR:${target}>")
+        endif()
+    endfunction()
+endif()
 
 if(BUILD_TESTING)
     add_executable(ajfx_random_tests tests/random_tests.cpp)
@@ -90,4 +180,19 @@ if(BUILD_TESTING)
         add_test(NAME ajfx.${suite} COMMAND ajfx_${suite}_tests)
         set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
     endforeach()
+
+    if(AJFX_BUILD_D3D12)
+        # Kernel generation runs anywhere; compiling and running need DXC and
+        # a D3D12 device, and report "skipped" (77) without them. The d3d12
+        # suite runs the backend under the debug layer.
+        foreach(suite IN ITEMS kernels gpu d3d12)
+            add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
+            target_link_libraries(ajfx_${suite}_tests PRIVATE ajfx::d3d12)
+            ajfx_set_options(ajfx_${suite}_tests)
+            ajfx_copy_dxc(ajfx_${suite}_tests)
+            add_test(NAME ajfx.${suite} COMMAND ajfx_${suite}_tests)
+            set_tests_properties(ajfx.${suite} PROPERTIES SKIP_RETURN_CODE 77)
+            set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
+        endforeach()
+    endif()
 endif()

@@ -20,11 +20,12 @@ dependency on it so it can move to its own repository once the API settles.
 
 ## Status
 
-Phase 1, the CPU reference: the effect model, fifteen built-in modules,
-published parameters, the builder API, three presets, the `.ajfx` package
-format and a CPU simulator with checkpointed seeking. Nothing draws yet; the
-GPU runtime is next. The roadmap is the "Particles and volumes" section of the
-media server's [`next-steps-plan.md`](../../next-steps-plan.md).
+Phase 2a, the GPU simulation: per-emitter fused kernels generated from the
+module stacks, a D3D12 reference backend and a runtime compiler, running the
+CPU reference's simulation on the GPU with stable compaction and indirect
+dispatch. Nothing draws yet; sprites and a sample application are next. The
+roadmap is the "Particles and volumes" section of the media server's
+[`next-steps-plan.md`](../../next-steps-plan.md).
 
 ## Getting started
 
@@ -81,17 +82,56 @@ can be bound to a published parameter with `ajfx::bind`.
 - `Simulation::create` takes an instance seed so two placements of one effect
   differ while each stays reproducible.
 
+## Running on the GPU
+
+```cpp
+#include <ajfx/d3d12.hpp>
+#include <ajfx/gpu/simulation.hpp>
+
+auto device = ajfx::d3d12::create_device().value();            // or {.warp = true}
+auto compiler = ajfx::d3d12::create_shader_compiler().value(); // dxcompiler.dll + dxil.dll
+ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *compiler).value();
+auto gpu = ajfx::gpu::GpuSimulation::create(*device, effect, kernels, /*instance_seed=*/7).value();
+
+gpu.advance_to(240);  // records the steps
+device->flush();      // runs them
+ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // particles, live count, layout
+```
+
+- Each emitter gets an update kernel that runs its whole update stack per
+  particle in one pass, and a spawn kernel that runs its init stack per
+  newborn. Their HLSL is generated from the module stacks
+  (`generate_kernel_sources`) and is deterministic text. Shared kernels do a
+  two-level prefix sum and scatter that keep survivors in birth order, and
+  write the next step's indirect dispatch sizes. Nothing is read back while
+  it runs.
+- Particle records store only the attributes an emitter's modules use
+  (`particle_layout`).
+- Births are scheduled on the CPU by the same code the reference uses, so
+  particles appear at the same steps with the same ages and spawn indices.
+  Spawning, deaths, ages and lifetimes match the reference exactly; positions
+  and colours match within floating-point tolerance, since GPU `sin`, `cos`,
+  `sqrt` and division round differently. Reruns on one device are
+  bit-identical, and `save`/`restore` checkpoints resume exactly.
+- A host implements `gpu::Device` (buffers, compute pipelines, dispatch,
+  indirect dispatch, copies, barriers) to run ajfx on its own renderer. Hosts
+  that ship precompiled kernels need no `ShaderCompiler` at runtime.
+
+About a million live particles take 1.9 ms a step on an RTX 3090 (2.2 ms
+with curl noise), measured as wall-clock time for recording and execution
+before any tuning.
+
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `include/ajfx/` | Public C++ API |
-| `src/` | Library implementation |
-| `shaders/` | HLSL a host compiles into its kernels (`AJFX_SHADER_INCLUDE_DIR`) |
+| `include/ajfx/` | Public C++ API; `gpu/` for the GPU runtime, `d3d12.hpp` for the backend |
+| `src/` | Library implementation; `gpu/` holds kernel generation and the GPU simulation |
+| `backends/d3d12/` | The D3D12 device and the DXC compiler (target `ajfx::d3d12`, Windows) |
+| `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
 
-Planned additions: `src/gpu` (runtime, backend interface), `backends/`
-(D3D12, Vulkan reference backends), `renderers/` (sprite, ribbon, mesh, light
+Planned additions: a Vulkan backend, `renderers/` (sprite, ribbon, mesh, light
 passes), `volume/` (raymarched voxel volumes) and `studio/` (the authoring
 application).
 
@@ -139,6 +179,13 @@ ctest --test-dir out/ajfx
 
 Inside the media server it is part of every configuration; `area-particles`
 builds and runs just its tests.
+
+The GPU suites need a D3D12 device with shader model 6.2 (hardware, or WARP
+with `AJFX_TEST_WARP=1`) and `dxcompiler.dll` with `dxil.dll`. CMake copies
+them beside the tests from `AJFX_DXC_DIR`, by default the newest Windows SDK
+that ships them. Without either, those suites report "skipped". `ajfx.d3d12`
+runs the backend under the D3D12 debug layer; `AJFX_TEST_DEBUG_LAYER=1` turns
+it on for `ajfx.gpu` too.
 
 ## License
 

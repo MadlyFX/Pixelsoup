@@ -3,6 +3,8 @@
 #include <ajfx/random.hpp>
 
 #include "noise.hpp"
+#include "gpu/pack.hpp"
+#include "step_inputs.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,49 +20,11 @@ namespace {
 // Size of a particle with no size module, in world units.
 constexpr float default_size = 0.1F;
 
-std::size_t parameter_index(const Effect& effect, std::string_view name) {
-    for (std::size_t i = 0U; i < effect.parameters.size(); ++i) {
-        if (effect.parameters[i].name == name) {
-            return i;
-        }
-    }
-    return 0U; // unreachable for a validated effect
-}
-
-// Module inputs resolved against this step's parameter values.
-struct Inputs final {
-    const Effect& effect;
-    std::span<const ParameterValue> values;
-
-    [[nodiscard]] const ParameterValue& bound(const std::string& name) const {
-        return values[parameter_index(effect, name)];
-    }
-    [[nodiscard]] float operator()(const FloatInput& in) const {
-        return in.bound() ? bound(in.parameter)[0] : in.value;
-    }
-    [[nodiscard]] Vec3 operator()(const Vec3Input& in) const {
-        if (!in.bound()) {
-            return in.value;
-        }
-        const ParameterValue& v = bound(in.parameter);
-        return {v[0], v[1], v[2]};
-    }
-    [[nodiscard]] Color operator()(const ColorInput& in) const {
-        if (!in.bound()) {
-            return in.value;
-        }
-        const ParameterValue& v = bound(in.parameter);
-        return {v[0], v[1], v[2], v[3]};
-    }
-};
+using detail::Inputs;
+using detail::normalized;
 
 float mix(float a, float b, float t) {
     return a + (b - a) * t;
-}
-
-Vec3 normalized(Vec3 v) {
-    const float length_squared = dot(v, v);
-    return length_squared > 0.0F ? v * (1.0F / std::sqrt(length_squared)) : Vec3{};
 }
 
 Color times(Color a, Color b) {
@@ -391,26 +355,12 @@ void Simulation::reset() {
     state_ = SimulationState{};
     state_.emitters.resize(effect_.emitters.size());
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
-        const auto& spawn = effect_.emitters[i].spawn;
-        const auto rates = std::count_if(spawn.begin(), spawn.end(),
-                                         [](const SpawnModule& m) { return std::holds_alternative<SpawnRate>(m); });
-        state_.emitters[i].rate_carry.assign(static_cast<std::size_t>(rates), 0.0);
+        state_.emitters[i].rate_carry.assign(detail::rate_module_count(effect_.emitters[i]), 0.0);
     }
 }
 
 void Simulation::step(const ParameterProvider* parameters) {
-    values_.resize(effect_.parameters.size());
-    for (std::size_t i = 0U; i < values_.size(); ++i) {
-        values_[i] = effect_.parameters[i].default_value;
-    }
-    if (parameters != nullptr) {
-        parameters->values_at(state_.tick, values_);
-    }
-    for (std::size_t i = 0U; i < values_.size(); ++i) {
-        for (float& component : values_[i]) {
-            component = std::clamp(component, effect_.parameters[i].min, effect_.parameters[i].max);
-        }
-    }
+    detail::resolve_values(effect_, parameters, state_.tick, values_);
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
         step_emitter(i, values_);
     }
@@ -470,56 +420,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         }
         ++s.spawned;
     };
-    std::size_t rate_slot = 0U;
-    for (const SpawnModule& module : emitter.spawn) {
-        if (const SpawnRate* spawn_rate = std::get_if<SpawnRate>(&module)) {
-            double& carry = s.rate_carry[rate_slot++];
-            const double births = std::max(0.0, static_cast<double>(step.in(spawn_rate->rate))) / rate;
-            if (births <= 0.0) {
-                continue;
-            }
-            const double total = carry + births;
-            const double count = std::floor(total);
-            // The m-th birth happens when the running total crosses m + 1.
-            for (double m = 0.0; m < count; m += 1.0) {
-                const double fraction = (m + 1.0 - carry) / births;
-                birth((1.0 - fraction) / rate);
-            }
-            carry = total - count;
-        } else if (const SpawnBurst* burst = std::get_if<SpawnBurst>(&module)) {
-            const double time = burst->time;
-            const double interval = burst->interval;
-            const bool repeats = interval > 0.0 && burst->cycles != 1U;
-            std::uint64_t k = 0U;
-            if (repeats && time < step.start) {
-                k = static_cast<std::uint64_t>(std::ceil((step.start - time) / interval));
-                // Correct the division's rounding in either direction.
-                while (k > 0U && time + static_cast<double>(k - 1U) * interval >= step.start) {
-                    --k;
-                }
-                while (time + static_cast<double>(k) * interval < step.start) {
-                    ++k;
-                }
-            }
-            for (;; ++k) {
-                if (k > 0U && (!repeats || (burst->cycles != 0U && k >= burst->cycles))) {
-                    break;
-                }
-                const double at = time + static_cast<double>(k) * interval;
-                if (at >= step.end) {
-                    break;
-                }
-                if (at >= step.start) {
-                    for (std::uint32_t c = 0U; c < burst->count; ++c) {
-                        birth(step.end - at);
-                    }
-                }
-                if (!repeats) {
-                    break;
-                }
-            }
-        }
-    }
+    detail::for_each_birth(emitter, step.in, s.rate_carry, step.start, step.end, rate, birth);
 
     // Initialise the newborns, carry them through the part of the step they
     // lived, then give them their appearance at that age.

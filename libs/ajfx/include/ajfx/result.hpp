@@ -15,6 +15,11 @@ enum class ErrorCode {
     BudgetExceeded,
     MalformedPackage,
     UnsupportedVersion,
+    // The GPU side: no usable device or compiler, a failed compile, or a
+    // device error while running.
+    GpuUnavailable,
+    ShaderCompilation,
+    DeviceFailure,
 };
 
 struct Error final {
