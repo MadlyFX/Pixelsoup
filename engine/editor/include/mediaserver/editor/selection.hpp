@@ -70,6 +70,23 @@ public:
     range_anchor_ = node;
   }
 
+  // Exactly `nodes`, with `primary` - which joins them if it is not among
+  // them - as the primary and the range anchor.
+  void replace(std::span<const doc::NodeId> nodes, doc::NodeId primary) {
+    if (primary == doc::NodeId{}) {
+      clear();
+      return;
+    }
+    members_.assign(nodes.begin(), nodes.end());
+    members_.push_back(primary);
+    std::erase(members_, doc::NodeId{});
+    std::sort(members_.begin(), members_.end());
+    members_.erase(std::unique(members_.begin(), members_.end()),
+                   members_.end());
+    primary_ = primary;
+    range_anchor_ = primary;
+  }
+
   void set_primary(doc::NodeId node) noexcept {
     if (!contains(node)) {
       return;

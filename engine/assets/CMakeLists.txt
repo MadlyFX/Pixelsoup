@@ -9,6 +9,7 @@ add_library(mediaserver_assets STATIC
     src/asset_registry.cpp
     src/asset_model.cpp
     src/library_edit.cpp
+    src/plateset.cpp
 )
 add_library(MediaServer::Assets ALIAS mediaserver_assets)
 
@@ -38,6 +39,21 @@ if(BUILD_TESTING)
         COMMAND mediaserver_assets_model_tests
     )
     set_target_properties(mediaserver_assets_model_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_assets_plateset_tests
+        tests/plateset_tests.cpp
+    )
+    target_link_libraries(mediaserver_assets_plateset_tests
+        PRIVATE MediaServer::Assets
+    )
+    mediaserver_set_project_options(mediaserver_assets_plateset_tests)
+    add_test(
+        NAME mediaserver.assets_plateset
+        COMMAND mediaserver_assets_plateset_tests
+    )
+    set_target_properties(mediaserver_assets_plateset_tests
         PROPERTIES FOLDER "tests"
     )
 

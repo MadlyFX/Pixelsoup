@@ -4,6 +4,7 @@ add_library(mediaserver_editor STATIC
     src/editor_shell.cpp
     src/asset_viewer.cpp
     src/asset_viewer_panel.cpp
+    src/plateset_editor.cpp
     src/model_facts_worker.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
@@ -45,6 +46,11 @@ add_library(mediaserver_editor STATIC
     src/mapping_panels.cpp
 )
 add_library(MediaServer::Editor ALIAS mediaserver_editor)
+# The shell is one very large translation unit; Debug builds pass the
+# default COFF section limit.
+if(MSVC)
+    set_source_files_properties(src/editor_shell.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
+endif()
 
 target_include_directories(mediaserver_editor
     PUBLIC
@@ -522,6 +528,20 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_workspace_tests
     )
     set_target_properties(mediaserver_editor_workspace_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_plateset_tests
+        tests/plateset_editor_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_plateset_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_plateset_tests)
+    add_test(
+        NAME mediaserver.editor_plateset
+        COMMAND mediaserver_editor_plateset_tests
+    )
+    set_target_properties(mediaserver_editor_plateset_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_library_tests
         tests/library_panel_tests.cpp

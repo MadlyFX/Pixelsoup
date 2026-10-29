@@ -151,6 +151,12 @@ struct ElementInfo final {
     // Node id zero denotes the implicit lane and is never authored.
     doc::NodeId timeline_lane{};
     core::i64 clip_order{};
+    // Clip-only: the Library plateset this clip is a plate of, the slot it
+    // plays in, and its take. Plates of one take that share a start and a
+    // length are edited as one.
+    doc::NodeId plateset{};
+    std::string plateset_slot;
+    core::i64 plateset_take{};
     // False for a clip the current show frame does not include. It is still a
     // real, editable placement - the Timeline needs its row and its bar - so it
     // is marked rather than omitted.

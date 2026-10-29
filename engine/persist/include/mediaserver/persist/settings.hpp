@@ -136,6 +136,11 @@ valid_proxy_transcode_priority(ProxyTranscodePriority priority) noexcept {
            priority == ProxyTranscodePriority::Fast;
 }
 
+// The ceiling for proxy generation while nothing plays; every job started
+// during playback takes the Background budget whatever this says.
+inline constexpr ProxyTranscodePriority default_proxy_transcode_priority =
+    ProxyTranscodePriority::Fast;
+
 // The machine-local settings an operator would otherwise have to pass on the
 // command line every launch. Text fields are optional; numeric fields carry
 // the built-in values when no record has overridden them.
@@ -172,7 +177,7 @@ struct Preferences final {
     std::uint32_t playback_cache_mebibytes{default_playback_cache_mebibytes};
     std::uint32_t playback_trail_frames{default_playback_trail_frames};
     ProxyTranscodePriority proxy_transcode_priority{
-        ProxyTranscodePriority::Background};
+        default_proxy_transcode_priority};
 
     // This machine as a render machine: what `media-server` launched with no
     // arguments runs. An empty director means it has not been set up, and that
@@ -220,7 +225,7 @@ struct Preferences final {
                output_read_ahead_frames == default_output_read_ahead_frames &&
                playback_cache_mebibytes == default_playback_cache_mebibytes &&
                playback_trail_frames == default_playback_trail_frames &&
-               proxy_transcode_priority == ProxyTranscodePriority::Background &&
+               proxy_transcode_priority == default_proxy_transcode_priority &&
                render_machine_director.empty() &&
                render_machine_node_index == 0U &&
                render_machine_control_port == 0U &&

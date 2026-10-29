@@ -179,6 +179,10 @@ struct DerivativeKey final {
     core::u32 generator_version{};
     Sha256Digest profile_signature;
     Sha256Digest digest;
+    // A segmented proxy's pieces: segment n holds source frames
+    // proxy_segment_range(n, ...). Empty is the whole derivative, whose key
+    // is unchanged by segmentation.
+    std::optional<core::u32> segment;
 
     bool operator==(const DerivativeKey&) const = default;
 };
@@ -186,6 +190,30 @@ struct DerivativeKey final {
 [[nodiscard]] DerivativeKey make_derivative_key(
     doc::NodeId asset, const ContentFingerprint& fingerprint,
     const DerivativeProfile& profile) noexcept;
+// The key of one segment of the derivative `whole` names.
+[[nodiscard]] DerivativeKey
+derivative_segment_key(const DerivativeKey& whole, core::u32 segment) noexcept;
+
+// A segment is about ten seconds of source: long enough that playback crosses
+// few boundaries, short enough that the one under the playhead encodes in a
+// second or two at Fast (about 170 4K frames a second on the Director).
+inline constexpr core::u32 proxy_segment_seconds = 10U;
+struct ProxySegmentRange final {
+    core::u64 first{};
+    core::u64 count{};
+
+    bool operator==(const ProxySegmentRange&) const = default;
+};
+[[nodiscard]] core::u64 proxy_segment_frames(MediaFrameRate rate) noexcept;
+// Zero when the source is empty or its rate is invalid.
+[[nodiscard]] core::u32 proxy_segment_count(core::u64 frame_count,
+                                            MediaFrameRate rate) noexcept;
+[[nodiscard]] std::optional<ProxySegmentRange>
+proxy_segment_range(core::u32 segment, core::u64 frame_count,
+                    MediaFrameRate rate) noexcept;
+[[nodiscard]] std::optional<core::u32>
+proxy_segment_of(core::u64 source_frame, core::u64 frame_count,
+                 MediaFrameRate rate) noexcept;
 [[nodiscard]] bool valid_derivative_key(const DerivativeKey& key) noexcept;
 [[nodiscard]] std::string derivative_key_string(const DerivativeKey& key);
 

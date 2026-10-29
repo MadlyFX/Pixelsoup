@@ -191,7 +191,12 @@ public:
         std::stop_token) override {
         ++state_->calls;
         write_file(request.output_file, state_->payload);
-        auto map = assets::make_identity_proxy_frame_map(frame_count_, rate_);
+        // A segment covers its range of the source; a join, or a whole-file
+        // encode, all of it.
+        const server::ProxySourceRange covered = request.range.value_or(
+            server::ProxySourceRange{0U, frame_count_});
+        auto map = assets::make_identity_proxy_frame_map(covered.count, rate_,
+                                                         covered.first);
         PLAYBACK_CHECK(map.has_value());
         return server::ProxyBackendResult::success(server::ProxyBackendOutput{
             request.source_fingerprint,
@@ -206,7 +211,7 @@ public:
             },
             server::ProxyEncodedMetadata{
                 assets::PixelDimensions{1'280U, 720U},
-                frame_count_, rate_, 1U, 1U, 0U,
+                covered.count, rate_, 1U, 1U, 0U,
                 assets::DerivativeColorPrimaries::Rec709,
                 assets::DerivativeTransfer::Rec709,
                 assets::DerivativeMatrix::Rec709,
@@ -437,6 +442,93 @@ void ready_proxy_uses_the_exact_fractional_rate_map_without_identity_drift() {
     PLAYBACK_CHECK(state->calls == 1U);
 }
 
+// Before the whole proxy exists, a published segment plays the frames it
+// holds, as frames of its own file; frames whose segment is not published
+// play the source. Near the end of a segment the next one is decoded ahead,
+// and once the segments are joined the whole file takes over.
+void published_segments_play_until_the_whole_proxy_is_ready() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "segmented.mov";
+    write_file(source, bytes("segmented-source"));
+    constexpr assets::MediaFrameRate rate{24'000U, 1'001U};
+    // Segments of 240, 240 and 120 frames.
+    const auto asset = media_asset(
+        source, assets::ProxyPlaybackPolicy::PreferProxy, 93U, 600U, rate);
+    auto state = std::make_shared<BackendState>();
+    server::ProxyGenerationService artifacts{
+        open_cache(temporary.path() / "cache"),
+        std::make_unique<Backend>(state, rate, 600U)};
+    using Step = server::ProxyGenerationService::Step;
+    PLAYBACK_CHECK(artifacts.generate(asset, {}, {}, Step{false, 1U}));
+    app::ProxyPlaybackService playback{artifacts};
+
+    // Resolves until nothing more changes: segments are copied out one at a
+    // time, off the calling thread.
+    const auto settle = [&](core::u32 frame) {
+        auto resolved = playback.resolve(evaluated_scene(asset, frame),
+                                         registry(asset), availability(asset));
+        PLAYBACK_CHECK(resolved.has_value());
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        for (int quiet = 0; quiet < 20 &&
+             std::chrono::steady_clock::now() < deadline;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            auto next = playback.resolve(evaluated_scene(asset, frame),
+                                         registry(asset),
+                                         availability(asset));
+            PLAYBACK_CHECK(next.has_value());
+            quiet = next.value().scene.media == resolved.value().scene.media &&
+                    next.value().scene.media_prewarm ==
+                        resolved.value().scene.media_prewarm &&
+                    next.value().placements == resolved.value().placements
+                ? quiet + 1 : 0;
+            resolved = std::move(next);
+        }
+        return std::move(resolved).value();
+    };
+
+    // Frame 300 is frame 60 of segment 1, read from the segment's own file.
+    auto in_segment = settle(300U);
+    PLAYBACK_CHECK(in_segment.placements.front().resolution.selection ==
+                   assets::ProxyPlaybackSelection::Proxy);
+    PLAYBACK_CHECK(in_segment.placements.front().proxy_frame_index == 60U);
+    const auto& segment_media = in_segment.scene.media.front();
+    PLAYBACK_CHECK(segment_media.source != asset.source);
+    PLAYBACK_CHECK(fs::is_regular_file(segment_media.source));
+    PLAYBACK_CHECK(segment_media.frame_index == 60U);
+    PLAYBACK_CHECK(segment_media.loop_count == 0U);
+    PLAYBACK_CHECK(in_segment.scene.media_prewarm.empty());
+
+    // Frame 100 lies in segment 0, which is not published: the source plays.
+    auto outside = settle(100U);
+    PLAYBACK_CHECK(outside.placements.front().resolution.selection ==
+                   assets::ProxyPlaybackSelection::Source);
+    PLAYBACK_CHECK(outside.scene.media.front().source == asset.source);
+    PLAYBACK_CHECK(outside.scene.media.front().frame_index == 100U);
+
+    // Ten frames before segment 2, once it is published, it is decoded
+    // ahead from its first frame.
+    PLAYBACK_CHECK(artifacts.generate(asset, {}, {}, Step{false, 2U}));
+    static_cast<void>(settle(480U));
+    auto near_end = settle(470U);
+    PLAYBACK_CHECK(near_end.scene.media.front().frame_index == 230U);
+    PLAYBACK_CHECK(near_end.scene.media_prewarm.size() == 1U);
+    const auto& upcoming = near_end.scene.media_prewarm.front();
+    PLAYBACK_CHECK(upcoming.frame_index == 0U);
+    PLAYBACK_CHECK(upcoming.frames_until_start == 10U);
+    PLAYBACK_CHECK(upcoming.source != segment_media.source);
+    PLAYBACK_CHECK(upcoming.asset == asset.id);
+
+    // Joined, the whole proxy plays frame 300 as its own frame 300.
+    PLAYBACK_CHECK(artifacts.generate(asset, {}, {}, Step{false, 0U}));
+    PLAYBACK_CHECK(artifacts.generate(asset, {}, {}, Step{false, {}, true}));
+    auto whole = settle(300U);
+    PLAYBACK_CHECK(whole.placements.front().resolution.selection ==
+                   assets::ProxyPlaybackSelection::Proxy);
+    PLAYBACK_CHECK(whole.scene.media.front().frame_index == 300U);
+    PLAYBACK_CHECK(whole.scene.media.front().source != segment_media.source);
+}
+
 void upcoming_proxies_materialize_before_air_without_holding_program() {
     TemporaryDirectory temporary;
     const fs::path source = temporary.path() / "upcoming.mov";
@@ -624,12 +716,47 @@ void placement_runtime_aggregation_uses_the_documented_worst_state() {
     PLAYBACK_CHECK(backend_state->calls == 0U);
 }
 
+void view_summaries_count_each_placement_once_and_only_waiting_fallbacks() {
+    using Reason = assets::ProxyPlaybackReason;
+    using Selection = assets::ProxyPlaybackSelection;
+    const auto observed = [](core::u64 placement, Selection selection,
+                             Reason reason, bool offline = false) {
+        app::ProxyPlacementObservation observation{};
+        observation.placement = doc::NodeId{placement};
+        observation.asset = doc::NodeId{placement + 100U};
+        observation.resolution.selection = selection;
+        observation.resolution.reason = reason;
+        observation.offline = offline;
+        return observation;
+    };
+    const std::array<app::ProxyPlacementObservation, 9U> drawn{{
+        observed(1U, Selection::Proxy, Reason::None),
+        // A transition draws placement 1 again; it is still one clip.
+        observed(1U, Selection::Proxy, Reason::None),
+        observed(2U, Selection::Proxy, Reason::None),
+        observed(3U, Selection::Source, Reason::CacheGenerating),
+        observed(4U, Selection::Source, Reason::CacheQueued),
+        observed(5U, Selection::Source, Reason::CacheMissing),
+        // Source by policy, a failed proxy and an offline clip are not
+        // waiting for anything.
+        observed(6U, Selection::Source, Reason::SourcePolicy),
+        observed(7U, Selection::Source, Reason::CacheFailed),
+        observed(8U, Selection::Source, Reason::CacheGenerating, true),
+    }};
+    const app::ViewProxySummary summary = app::summarize_view_proxies(drawn);
+    PLAYBACK_CHECK(summary.proxied == 2U);
+    PLAYBACK_CHECK(summary.waiting == 3U);
+    PLAYBACK_CHECK(app::summarize_view_proxies({}) == app::ViewProxySummary{});
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 11U> cases{{
+    {"published segments play until the whole proxy is ready",
+     &published_segments_play_until_the_whole_proxy_is_ready},
     {"upcoming proxies materialize before air without holding Program",
      &upcoming_proxies_materialize_before_air_without_holding_program},
     {"Source selects only the same ready source",
@@ -648,6 +775,8 @@ constexpr std::array<Case, 9U> cases{{
      &off_air_ready_inspection_never_materializes_or_decodes_the_proxy},
     {"placement runtime aggregation uses the documented worst state",
      &placement_runtime_aggregation_uses_the_documented_worst_state},
+    {"view summaries count each placement once and only waiting fallbacks",
+     &view_summaries_count_each_placement_once_and_only_waiting_fallbacks},
 }};
 
 } // namespace

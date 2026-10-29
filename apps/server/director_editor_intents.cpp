@@ -212,6 +212,22 @@ PhaseExit DirectorShowLoop::queue_editor_edits(
             return 1;
         }
     }
+    for (const auto &place : editor_frame.plateset_places) {
+        try {
+            pending_plateset_places.push_back(place);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue a plateset placement\n";
+            return 1;
+        }
+    }
+    for (const auto &swap : editor_frame.plateset_swaps) {
+        try {
+            pending_plateset_swaps.push_back(swap);
+        } catch (const std::bad_alloc &) {
+            std::cerr << "could not queue a plateset swap\n";
+            return 1;
+        }
+    }
     for (const auto &split : editor_frame.clip_splits) {
         try {
             pending_clip_splits.push_back(split);

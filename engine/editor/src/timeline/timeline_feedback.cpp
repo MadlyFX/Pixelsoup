@@ -106,6 +106,10 @@ std::string TimelinePanel::drag_readout(Pass &p) {
     case ClipDrag::None:
       break;
     }
+    // A take's bar moves every plate of the take.
+    if (clip_.take && !text.empty()) {
+      text = "TAKE " + text;
+    }
     guide = clip_.snap_guide;
   } else if (track_.drag != ClipDrag::None && track_.moved) {
     switch (track_.drag) {

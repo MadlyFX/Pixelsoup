@@ -1,5 +1,8 @@
 #include "timeline_lane_authoring.hpp"
 
+#include "channel_node_id.hpp"
+#include "clip_timing_authoring.hpp"
+
 #include <mediaserver/scene/scene_schema.hpp>
 
 #include <algorithm>
@@ -100,6 +103,68 @@ nodes_of(const doc::Root& root) {
         }
     }
     return result;
+}
+
+// A placement's timing as the document holds it; a clip missing either
+// placement property is unplaced, which a cut neither moves nor splits.
+[[nodiscard]] std::optional<scene::ClipTiming> clip_timing(
+    const doc::Node& clip) noexcept {
+    const auto* const start = integer(clip, scene::schema::clip_start);
+    const auto* const duration = integer(clip, scene::schema::clip_duration);
+    if (start == nullptr || duration == nullptr) {
+        return std::nullopt;
+    }
+    const auto read = [&](std::string_view name) {
+        const auto* const value = integer(clip, name);
+        return value != nullptr ? *value : std::int64_t{};
+    };
+    scene::ClipTiming timing{};
+    timing.start = *start;
+    timing.duration = *duration;
+    timing.source_in = read(scene::schema::source_in);
+    timing.fade_in = read(scene::schema::fade_in);
+    timing.fade_out = read(scene::schema::fade_out);
+    if (!timing.placed()) {
+        return std::nullopt;
+    }
+    return timing;
+}
+
+void put_clip_timing(doc::Node& clip, const scene::ClipTiming& timing) {
+    put_integer(clip, scene::schema::clip_start, timing.start);
+    put_integer(clip, scene::schema::clip_duration, timing.duration);
+    put_integer(clip, scene::schema::source_in, timing.source_in);
+    put_integer(clip, scene::schema::fade_in, timing.fade_in);
+    put_integer(clip, scene::schema::fade_out, timing.fade_out);
+}
+
+[[nodiscard]] const std::string* text(
+    const doc::Node& node, std::string_view property) noexcept {
+    const auto found = node.properties.find(property);
+    return found == node.properties.end()
+        ? nullptr
+        : std::get_if<std::string>(&found->second);
+}
+
+// The second half of a split track is named for the first: "Plates" becomes
+// "Plates (2)", and splitting either again counts on to a number not taken.
+[[nodiscard]] std::string split_name(
+    std::string_view name, const std::vector<std::string>& taken) {
+    std::string base{name};
+    if (const auto open = base.rfind(" (");
+        open != std::string::npos && base.size() > open + 3U
+        && base.back() == ')'
+        && std::all_of(base.begin() + static_cast<std::ptrdiff_t>(open + 2U),
+                       base.end() - 1,
+                       [](char digit) { return digit >= '0' && digit <= '9'; })) {
+        base.resize(open);
+    }
+    for (std::size_t number = 2U;; ++number) {
+        std::string candidate = base + " (" + std::to_string(number) + ")";
+        if (std::find(taken.begin(), taken.end(), candidate) == taken.end()) {
+            return candidate;
+        }
+    }
 }
 
 [[nodiscard]] std::vector<doc::NodeId> lane_ids(
@@ -308,6 +373,222 @@ core::Result<LaneAuthorPlan, LaneAuthorError> plan_lane_authoring(
                 && reference(node, scene::schema::lane_id) == lane.id) {
                 clips.push_back(id);
             }
+        }
+        if (request.action == LaneAuthorAction::Split) {
+            if (read_bool(lane, scene::schema::lane_locked)) {
+                return Result::failure(LaneAuthorError::Locked);
+            }
+            if (lanes.size() >= scene::max_scene_lanes) {
+                return Result::failure(LaneAuthorError::LaneLimit);
+            }
+            const core::i64 cut = request.frame;
+            // Every placed clip stays (it ends by the cut), moves whole (it
+            // starts at or after it), or is cut in two.
+            struct Cut final {
+                doc::NodeId clip{};
+                ClipSplitTiming halves;
+            };
+            std::vector<doc::NodeId> moving;
+            std::vector<Cut> cutting;
+            bool staying{};
+            for (const doc::NodeId clip_id : clips) {
+                const doc::Node& clip = nodes.at(clip_id);
+                const auto timing = clip_timing(clip);
+                if (!timing.has_value()) {
+                    continue;
+                }
+                if (timing->start + timing->duration <= cut) {
+                    staying = true;
+                    continue;
+                }
+                if (read_bool(clip, scene::schema::locked)) {
+                    return Result::failure(LaneAuthorError::Locked);
+                }
+                if (timing->start >= cut) {
+                    moving.push_back(clip_id);
+                    continue;
+                }
+                const auto* const count =
+                    integer(clip, scene::schema::sequence_count);
+                const std::int64_t frames = count != nullptr ? *count : 1;
+                if (frames <= 0
+                    || static_cast<core::u64>(frames)
+                        > std::numeric_limits<core::u32>::max()) {
+                    return Result::failure(LaneAuthorError::InvalidDocument);
+                }
+                std::optional<scene::MediaFrameRate> source_rate;
+                const auto* const numerator =
+                    integer(clip, scene::schema::source_rate_numerator);
+                const auto* const denominator =
+                    integer(clip, scene::schema::source_rate_denominator);
+                const std::int64_t num = numerator != nullptr ? *numerator : 0;
+                const std::int64_t den =
+                    denominator != nullptr ? *denominator : 0;
+                if (num != 0 || den != 0) {
+                    if (num <= 0 || den <= 0
+                        || static_cast<core::u64>(num)
+                            > std::numeric_limits<core::u32>::max()
+                        || static_cast<core::u64>(den)
+                            > std::numeric_limits<core::u32>::max()) {
+                        return Result::failure(
+                            LaneAuthorError::InvalidDocument);
+                    }
+                    source_rate = scene::MediaFrameRate{
+                        static_cast<core::u32>(num),
+                        static_cast<core::u32>(den)};
+                }
+                const auto halves = split_clip_timing(
+                    *timing, cut, static_cast<core::u32>(frames),
+                    request.show_rate, source_rate);
+                if (!halves.has_value()) {
+                    return Result::failure(LaneAuthorError::InvalidDocument);
+                }
+                staying = true;
+                cutting.push_back(Cut{clip_id, *halves});
+            }
+            if (!staying || (moving.empty() && cutting.empty())) {
+                return Result::failure(LaneAuthorError::NothingToSplit);
+            }
+
+            constexpr core::u64 maximum = static_cast<core::u64>(
+                std::numeric_limits<std::int64_t>::max());
+            const auto allocate = [&]() -> std::optional<doc::NodeId> {
+                while (next_node <= maximum
+                       && plan.document.contains(doc::NodeId{next_node})) {
+                    ++next_node;
+                }
+                if (next_node == 0U || next_node > maximum) {
+                    return std::nullopt;
+                }
+                return doc::NodeId{next_node++};
+            };
+            const auto reference_to = [](doc::NodeId id) {
+                return static_cast<std::int64_t>(id.value());
+            };
+            const auto second_id = allocate();
+            if (!second_id.has_value()) {
+                return Result::failure(LaneAuthorError::IdExhausted);
+            }
+
+            // The new track is the same screen - every property the track
+            // has - under a name of its own, directly in front of it.
+            std::vector<std::string> names;
+            for (const doc::NodeId id : lanes) {
+                if (const auto* const taken =
+                        text(nodes.at(id), scene::schema::lane_name)) {
+                    names.push_back(*taken);
+                }
+            }
+            const auto* const own_name = text(lane, scene::schema::lane_name);
+            const std::string name =
+                split_name(own_name != nullptr ? *own_name : "Track", names);
+            if (name.size() > 128U) {
+                return Result::failure(LaneAuthorError::InvalidName);
+            }
+            doc::Node second = lane;
+            second.id = *second_id;
+            second.properties.insert_or_assign(
+                std::string{scene::schema::lane_name}, doc::PropertyValue{name});
+            plan.document = plan.document.set(second);
+            plan.created = second.id;
+            plan.changed.push_back(second.id);
+            lanes.insert(std::next(std::find(lanes.begin(), lanes.end(),
+                                             lane.id)),
+                         second.id);
+            for (std::size_t order = 0U; order < lanes.size(); ++order) {
+                doc::Node updated = *plan.document.get(lanes[order]);
+                const auto normalized = static_cast<std::int64_t>(order) * 10;
+                const auto* const current =
+                    integer(updated, scene::schema::lane_order);
+                if (current == nullptr || *current != normalized) {
+                    put_integer(updated, scene::schema::lane_order, normalized);
+                    plan.document = plan.document.set(updated);
+                    plan.changed.push_back(updated.id);
+                }
+            }
+
+            // Its keys and its look come with it, so the screen neither jumps
+            // nor changes grade at the cut. Each channel is copied to the node
+            // the new owner's own key edits address.
+            const auto copy_channels = [&](doc::NodeId from, doc::NodeId to) {
+                for (core::u64 component = 0U;
+                     component
+                     < static_cast<core::u64>(scene::PropertyChannel::Count);
+                     ++component) {
+                    const doc::Node* const channel =
+                        plan.document.get(channel_node_id(from, component));
+                    if (channel == nullptr
+                        || channel->type != scene::schema::channel_type) {
+                        continue;
+                    }
+                    doc::Node copy = *channel;
+                    copy.id = channel_node_id(to, component);
+                    if (plan.document.contains(copy.id)) {
+                        return false;
+                    }
+                    put_integer(copy, scene::schema::channel_target,
+                                reference_to(to));
+                    plan.document = plan.document.set(copy);
+                    plan.changed.push_back(copy.id);
+                }
+                return true;
+            };
+            if (!copy_channels(lane.id, second.id)) {
+                return Result::failure(LaneAuthorError::InvalidDocument);
+            }
+            for (const auto& [id, node] : nodes) {
+                if (node.type != scene::schema::effect_type
+                    || reference(node, scene::schema::effect_target)
+                        != lane.id) {
+                    continue;
+                }
+                const auto effect_id = allocate();
+                if (!effect_id.has_value()) {
+                    return Result::failure(LaneAuthorError::IdExhausted);
+                }
+                doc::Node effect = node;
+                effect.id = *effect_id;
+                put_integer(effect, scene::schema::effect_target,
+                            reference_to(second.id));
+                plan.document = plan.document.set(effect);
+                plan.changed.push_back(effect.id);
+                if (!copy_channels(id, effect.id)) {
+                    return Result::failure(LaneAuthorError::InvalidDocument);
+                }
+            }
+
+            for (const doc::NodeId clip_id : moving) {
+                doc::Node clip = nodes.at(clip_id);
+                put_integer(clip, scene::schema::lane_id,
+                            reference_to(second.id));
+                plan.document = plan.document.set(clip);
+                plan.changed.push_back(clip.id);
+            }
+            // As the clip razor cuts: the head keeps its node and the tail is
+            // a new placement of the same source, on the new track.
+            for (const Cut& piece : cutting) {
+                const auto tail_id = allocate();
+                if (!tail_id.has_value()) {
+                    return Result::failure(LaneAuthorError::IdExhausted);
+                }
+                doc::Node head = nodes.at(piece.clip);
+                doc::Node tail = head;
+                put_clip_timing(head, piece.halves.left);
+                tail.id = *tail_id;
+                put_clip_timing(tail, piece.halves.right);
+                put_integer(tail, scene::schema::lane_id,
+                            reference_to(second.id));
+                plan.document = plan.document.set(head);
+                plan.document = plan.document.set(tail);
+                plan.changed.push_back(head.id);
+                plan.changed.push_back(tail.id);
+            }
+            std::sort(plan.changed.begin(), plan.changed.end());
+            plan.changed.erase(
+                std::unique(plan.changed.begin(), plan.changed.end()),
+                plan.changed.end());
+            plan.next_node = next_node;
+            return Result::success(std::move(plan));
         }
         if (request.action == LaneAuthorAction::DeleteEmpty
             && !clips.empty()) {

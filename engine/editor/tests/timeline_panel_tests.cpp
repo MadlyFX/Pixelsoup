@@ -2312,24 +2312,34 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
 
   // Everything else a track can have done to it is on its own menu: Rename,
   // Mute, Lock; for a track holding clips, the edits its bar makes as one
-  // clip - split under the playhead, In/Out to its span; New Track; then the
-  // two explicit destructive choices, delete its clips or move them to a
-  // named track. There is no ambiguous delete on a non-empty track.
+  // clip - split it into two tracks at the playhead, In/Out to its span;
+  // Clear Keyframes; New Track; then the two explicit destructive choices,
+  // delete its clips or move them to a named track. There is no ambiguous
+  // delete on a non-empty track.
   const editor::TimelinePanelFrame split_track = h.choose(80.0F, 112.0F, 3U);
-  UI_CHECK(split_track.clip_splits ==
-           (std::vector<editor::TimelineClipSplit>{{clip_node, 50}}));
+  UI_CHECK(split_track.clip_splits.empty());
+  UI_CHECK(split_track.lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {editor::TimelineLaneAction::Split, lane_node, {}, {}, 50}}));
   const editor::TimelinePanelFrame track_range = h.choose(80.0F, 112.0F, 4U);
   UI_CHECK(track_range.range.has_value());
   UI_CHECK(track_range.range->first == 20U);
   UI_CHECK(track_range.range->last == 59U);
 
-  const editor::TimelinePanelFrame deleted_clips = h.choose(80.0F, 112.0F, 6U);
+  const editor::TimelinePanelFrame cleared = h.choose(80.0F, 112.0F, 5U);
+  UI_CHECK(!cleared.keys.empty());
+  UI_CHECK(std::all_of(cleared.keys.begin(), cleared.keys.end(),
+                       [](const editor::TimelineKeyEdit &key) {
+                         return key.target == lane_node && key.clear;
+                       }));
+
+  const editor::TimelinePanelFrame deleted_clips = h.choose(80.0F, 112.0F, 7U);
   UI_CHECK(deleted_clips.lane_edits.size() == 1U);
   UI_CHECK(deleted_clips.lane_edits.front().action ==
            editor::TimelineLaneAction::DeleteClips);
   UI_CHECK(deleted_clips.lane_edits.front().lane == lane_node);
 
-  const editor::TimelinePanelFrame moved_clips = h.choose(80.0F, 112.0F, 7U);
+  const editor::TimelinePanelFrame moved_clips = h.choose(80.0F, 112.0F, 8U);
   UI_CHECK(moved_clips.lane_edits.size() == 1U);
   UI_CHECK(moved_clips.lane_edits.front().action ==
            editor::TimelineLaneAction::DeleteMoveClips);
@@ -2341,8 +2351,9 @@ void track_rows_and_toolbar_emit_typed_lane_actions() {
   UI_CHECK(menu_muted.lane_edits.front().action ==
            editor::TimelineLaneAction::ToggleMute);
 
-  // The empty Background track offers a plain delete.
-  const editor::TimelinePanelFrame emptied = h.choose(80.0F, 88.0F, 4U);
+  // The empty Background track has nothing to split or mark, and offers a
+  // plain delete.
+  const editor::TimelinePanelFrame emptied = h.choose(80.0F, 88.0F, 5U);
   UI_CHECK(emptied.lane_edits.size() == 1U);
   UI_CHECK(emptied.lane_edits.front().action ==
            editor::TimelineLaneAction::DeleteEmpty);
@@ -4356,11 +4367,12 @@ void soloing_a_group_shows_what_is_inside_it() {
 }
 
 // Foreground holds the clip (20..60) and a second clip (70..80); Background is
-// empty. At 1000 wide the graph starts at x=260 with 7.4 pixels a frame. Rows
-// run Background y=76..100, Foreground y=100..124 - its bar over 20..80 at
-// x=408..852 - the clip y=124..148, the second clip y=148..172, then the
-// object. The Director also lists each track as an element, as it does for
-// the Inspector.
+// empty. At 1000 wide the graph starts at x=260 with 7.4 pixels a frame. The
+// Director also lists each track as an element, as it does for the Inspector,
+// so each open track lists its Properties first. Rows run Background
+// y=76..100, its Properties 100..124, Foreground y=124..148 - its bar over
+// 20..80 at x=408..852 - its Properties 148..172, the clip y=172..196, the
+// second clip y=196..220, then the object.
 const doc::NodeId second_clip_node{8U};
 
 void two_clip_track(Harness &h) {
@@ -4389,16 +4401,16 @@ void a_track_is_listed_once_by_its_header() {
   Harness h;
   two_clip_track(h);
   static_cast<void>(h.frame(0.0F, 0.0F, false));
-  // The object is the last row, y=172..196; nothing is listed after it.
-  const editor::TimelinePanelFrame object_click = h.click(80.0F, 184.0F);
+  // The object is the last row, y=220..244; nothing is listed after it.
+  const editor::TimelinePanelFrame object_click = h.click(80.0F, 232.0F);
   UI_CHECK(object_click.selection.has_value() &&
            object_click.selection->node == object_node);
-  UI_CHECK(!h.click(80.0F, 208.0F).selection.has_value());
+  UI_CHECK(!h.click(80.0F, 256.0F).selection.has_value());
   // The header is the track's source-replacement target.
   bool header_target = false;
   for (const auto &target : h.panel.replacement_targets()) {
     header_target = header_target || (target.node == lane_node &&
-                                      target.bounds.y == 100.0F);
+                                      target.bounds.y == 124.0F);
   }
   UI_CHECK(header_target);
 }
@@ -4408,11 +4420,11 @@ void dragging_a_clip_bar_up_or_down_reorders_it_in_its_track() {
   two_clip_track(h);
   // The second clip's bar (x=778..852) lifted straight up onto the upper
   // half of the first clip's row lands above it, and its time is untouched.
-  static_cast<void>(h.frame(800.0F, 160.0F, false));
-  static_cast<void>(h.frame(800.0F, 160.0F, true));
-  const editor::TimelinePanelFrame lifted = h.frame(800.0F, 128.0F, true);
+  static_cast<void>(h.frame(800.0F, 208.0F, false));
+  static_cast<void>(h.frame(800.0F, 208.0F, true));
+  const editor::TimelinePanelFrame lifted = h.frame(800.0F, 176.0F, true);
   UI_CHECK(lifted.layer_reorders.empty());
-  const editor::TimelinePanelFrame dropped = h.frame(800.0F, 128.0F, false);
+  const editor::TimelinePanelFrame dropped = h.frame(800.0F, 176.0F, false);
   UI_CHECK(dropped.clip_edits.empty());
   UI_CHECK(dropped.layer_reorders ==
            (std::vector<editor::TimelineLayerReorder>{
@@ -4421,11 +4433,11 @@ void dragging_a_clip_bar_up_or_down_reorders_it_in_its_track() {
 
   // Moved in time as well, it reports both, and the shell makes them one
   // step. Back over its own row it only moves in time.
-  static_cast<void>(h.frame(800.0F, 160.0F, false));
-  static_cast<void>(h.frame(800.0F, 160.0F, true));
+  static_cast<void>(h.frame(800.0F, 208.0F, false));
+  static_cast<void>(h.frame(800.0F, 208.0F, true));
   const editor::TimelinePanelFrame both = [&] {
-    static_cast<void>(h.frame(763.0F, 142.0F, true));
-    return h.frame(763.0F, 142.0F, false);
+    static_cast<void>(h.frame(763.0F, 190.0F, true));
+    return h.frame(763.0F, 190.0F, false);
   }();
   UI_CHECK(both.clip_edits.size() == 1U);
   UI_CHECK(both.clip_edits.front().timing ==
@@ -4435,10 +4447,10 @@ void dragging_a_clip_bar_up_or_down_reorders_it_in_its_track() {
            (std::vector<editor::TimelineLayerReorder>{
                {second_clip_node, clip_node,
                 editor::TimelineLayerPlacement::After}}));
-  static_cast<void>(h.frame(800.0F, 160.0F, false));
-  static_cast<void>(h.frame(800.0F, 160.0F, true));
-  static_cast<void>(h.frame(837.0F, 162.0F, true));
-  const editor::TimelinePanelFrame in_place = h.frame(837.0F, 162.0F, false);
+  static_cast<void>(h.frame(800.0F, 208.0F, false));
+  static_cast<void>(h.frame(800.0F, 208.0F, true));
+  static_cast<void>(h.frame(837.0F, 210.0F, true));
+  const editor::TimelinePanelFrame in_place = h.frame(837.0F, 210.0F, false);
   UI_CHECK(in_place.clip_edits.size() == 1U);
   UI_CHECK(in_place.layer_reorders.empty());
 }
@@ -4447,16 +4459,16 @@ void a_track_bar_moves_trims_and_cuts_the_track_as_one_clip() {
   Harness h;
   two_clip_track(h);
   // A press on the bar selects the track and lifts every clip on it.
-  static_cast<void>(h.frame(500.0F, 112.0F, false));
-  const editor::TimelinePanelFrame pressed = h.frame(500.0F, 112.0F, true);
+  static_cast<void>(h.frame(500.0F, 136.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(500.0F, 136.0F, true);
   UI_CHECK(pressed.selection.has_value());
   UI_CHECK(pressed.selection->node == lane_node);
   UI_CHECK(!pressed.seek_to_frame.has_value());
   UI_CHECK(h.panel.dragging_clip());
-  const editor::TimelinePanelFrame moving = h.frame(574.0F, 112.0F, true);
+  const editor::TimelinePanelFrame moving = h.frame(574.0F, 136.0F, true);
   UI_CHECK(moving.clip_edits.empty());
   UI_CHECK(moving.drag_readout.starts_with("TRACK +"));
-  const editor::TimelinePanelFrame moved = h.frame(574.0F, 112.0F, false);
+  const editor::TimelinePanelFrame moved = h.frame(574.0F, 136.0F, false);
   UI_CHECK(moved.clip_edits ==
            (std::vector<editor::TimelineClipEdit>{
                {clip_node, scene::ClipTiming{30, 40, 0, 0, 0}, std::nullopt},
@@ -4468,8 +4480,8 @@ void a_track_bar_moves_trims_and_cuts_the_track_as_one_clip() {
   // Carried onto Background's band, it takes Background's place in the
   // stack - with no change in time, only the reorder.
   static_cast<void>(h.frame(0.0F, 0.0F, false));
-  static_cast<void>(h.frame(500.0F, 112.0F, false));
-  static_cast<void>(h.frame(500.0F, 112.0F, true));
+  static_cast<void>(h.frame(500.0F, 136.0F, false));
+  static_cast<void>(h.frame(500.0F, 136.0F, true));
   static_cast<void>(h.frame(500.0F, 88.0F, true));
   const editor::TimelinePanelFrame reordered = h.frame(500.0F, 88.0F, false);
   UI_CHECK(reordered.clip_edits.empty());
@@ -4480,41 +4492,115 @@ void a_track_bar_moves_trims_and_cuts_the_track_as_one_clip() {
 
   // Its head trims the clip that opens the track, the source sliding with
   // it; its tail the clip that closes it.
-  static_cast<void>(h.frame(410.0F, 112.0F, false));
-  static_cast<void>(h.frame(410.0F, 112.0F, true));
-  static_cast<void>(h.frame(447.0F, 112.0F, true));
-  UI_CHECK(h.frame(447.0F, 112.0F, false).clip_edits ==
+  static_cast<void>(h.frame(410.0F, 136.0F, false));
+  static_cast<void>(h.frame(410.0F, 136.0F, true));
+  static_cast<void>(h.frame(447.0F, 136.0F, true));
+  UI_CHECK(h.frame(447.0F, 136.0F, false).clip_edits ==
            (std::vector<editor::TimelineClipEdit>{
                {clip_node, scene::ClipTiming{25, 35, 5, 0, 0},
                 std::nullopt}}));
-  static_cast<void>(h.frame(850.0F, 112.0F, false));
-  static_cast<void>(h.frame(850.0F, 112.0F, true));
-  static_cast<void>(h.frame(813.0F, 112.0F, true));
-  UI_CHECK(h.frame(813.0F, 112.0F, false).clip_edits ==
+  static_cast<void>(h.frame(850.0F, 136.0F, false));
+  static_cast<void>(h.frame(850.0F, 136.0F, true));
+  static_cast<void>(h.frame(813.0F, 136.0F, true));
+  UI_CHECK(h.frame(813.0F, 136.0F, false).clip_edits ==
            (std::vector<editor::TimelineClipEdit>{
                {second_clip_node, scene::ClipTiming{70, 5, 0, 0, 0},
                 std::nullopt}}));
 
-  // The razor cuts every clip on the track where it lands - frame 30 is
-  // x=482 - and nothing between clips.
+  // The razor splits the track into two tracks where it lands, as it splits
+  // a clip into two clips: frame 30 is x=482, inside the first clip, and the
+  // Director cuts that clip across the two. Between the clips - frame 65 is
+  // x=741 - it splits with nothing to cut. Shift cuts every clip on every
+  // track instead, and adds no track.
   h.focus();
   static_cast<void>(h.type("c"));
-  static_cast<void>(h.frame(482.0F, 112.0F, false));
-  UI_CHECK(h.frame(482.0F, 112.0F, true).clip_splits ==
+  const auto razor = [&](float x, gui::KeyMods mods = gui::KeyMods::None) {
+    static_cast<void>(h.frame(x, 136.0F, false, mods));
+    editor::TimelinePanelFrame cut = h.frame(x, 136.0F, true, mods);
+    static_cast<void>(h.frame(x, 136.0F, false, mods));
+    return cut;
+  };
+  const editor::TimelinePanelFrame inside = razor(482.0F);
+  UI_CHECK(inside.clip_splits.empty());
+  UI_CHECK(inside.lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {editor::TimelineLaneAction::Split, lane_node, {}, {}, 30}}));
+  UI_CHECK(razor(741.0F).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {editor::TimelineLaneAction::Split, lane_node, {}, {}, 65}}));
+  const editor::TimelinePanelFrame blade = razor(482.0F, gui::KeyMods::Shift);
+  UI_CHECK(blade.lane_edits.empty());
+  UI_CHECK(blade.clip_splits ==
            (std::vector<editor::TimelineClipSplit>{{clip_node, 30}}));
-  static_cast<void>(h.frame(482.0F, 112.0F, false));
-  static_cast<void>(h.frame(741.0F, 112.0F, false));
-  UI_CHECK(h.frame(741.0F, 112.0F, true).clip_splits.empty());
-  static_cast<void>(h.frame(741.0F, 112.0F, false));
   static_cast<void>(h.type("v"));
 
   // A locked clip keeps the track from moving apart.
   h.elements[2U].locked = true;
-  static_cast<void>(h.frame(500.0F, 112.0F, false));
-  static_cast<void>(h.frame(500.0F, 112.0F, true));
+  static_cast<void>(h.frame(500.0F, 136.0F, false));
+  static_cast<void>(h.frame(500.0F, 136.0F, true));
   UI_CHECK(!h.panel.dragging_clip());
-  static_cast<void>(h.frame(574.0F, 112.0F, true));
-  UI_CHECK(h.frame(574.0F, 112.0F, false).clip_edits.empty());
+  static_cast<void>(h.frame(574.0F, 136.0F, true));
+  UI_CHECK(h.frame(574.0F, 136.0F, false).clip_edits.empty());
+}
+
+// A track keys like any layer: its Properties foldout lists the screen's
+// transform and opacity, and their diamonds key the track itself. X marks a
+// selected track's clips, [ and ] step to its keys, and Ctrl+K splits it.
+void a_track_keys_marks_and_splits_like_a_layer() {
+  Harness h;
+  two_clip_track(h);
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  // Foreground's Properties row is y=148..172, its twirl at x=46..62. Open,
+  // Position follows at 172..196, then Rotation, Scale and Opacity
+  // (244..268); the key diamonds sit at x=226..244.
+  static_cast<void>(h.click(54.0F, 160.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  const editor::TimelinePanelFrame position = h.click(235.0F, 184.0F);
+  UI_CHECK(position.keys.size() == 3U);
+  for (const editor::TimelineKeyEdit &key : position.keys) {
+    UI_CHECK(key.target == lane_node);
+  }
+  UI_CHECK(position.keys[0].component == scene::PropertyChannel::PositionX);
+  const editor::TimelinePanelFrame opacity = h.click(235.0F, 256.0F);
+  UI_CHECK(opacity.keys.size() == 1U);
+  UI_CHECK(opacity.keys.front().target == lane_node);
+  UI_CHECK(opacity.keys.front().component == scene::PropertyChannel::Opacity);
+  // The clips still follow the track's properties: the first is y=268..292.
+  const editor::TimelinePanelFrame clip = h.click(150.0F, 280.0F);
+  UI_CHECK(clip.selection.has_value() && clip.selection->node == clip_node);
+
+  // With the track selected and no clip, X marks the span its clips cover,
+  // the keys step along its own channels, and Ctrl+K splits it at the
+  // playhead (50, inside the first clip).
+  h.selection = {lane_node};
+  h.primary = lane_node;
+  h.keys.push_back(scene::ChannelKeyframes{
+      lane_node, scene::PropertyChannel::Opacity, {30, 64}});
+  h.focus();
+  const editor::TimelinePanelFrame marked = h.type("x");
+  UI_CHECK(marked.range.has_value());
+  UI_CHECK(marked.range->first == 20U);
+  UI_CHECK(marked.range->last == 79U);
+  const editor::TimelinePanelFrame split = h.key(gui::Key::Split);
+  UI_CHECK(split.clip_splits.empty());
+  UI_CHECK(split.lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {editor::TimelineLaneAction::Split, lane_node, {}, {}, 50}}));
+  UI_CHECK(h.type("[").seek_to_frame == Seek{30U});
+  UI_CHECK(h.type("]").seek_to_frame == Seek{64U});
+
+  // A selected clip still marks and cuts itself, not its track.
+  h.selection = {lane_node, second_clip_node};
+  const editor::TimelinePanelFrame clip_marked = h.type("x");
+  UI_CHECK(clip_marked.range.has_value());
+  UI_CHECK(clip_marked.range->first == 70U);
+  UI_CHECK(clip_marked.range->last == 79U);
+  UI_CHECK(h.key(gui::Key::Split).lane_edits.empty());
+
+  // A locked track neither splits nor offers to.
+  h.selection = {lane_node};
+  h.lanes.front().locked = true;
+  UI_CHECK(h.key(gui::Key::Split).lane_edits.empty());
 }
 
 void the_list_seam_drags_and_double_click_fits_the_names() {
@@ -4557,12 +4643,252 @@ void the_list_seam_drags_and_double_click_fits_the_names() {
   UI_CHECK(std::abs(h.panel.list_width() - fitted) < 0.5F);
 }
 
+// A placed plateset: the front plate (the harness clip) on FRONT and a left
+// plate on LEFT, one take at frames 20..60. LEFT is in front of FRONT, so it
+// is listed first; the front plate still leads the take.
+const doc::NodeId plateset_node{300U};
+const doc::NodeId left_plate_node{8U};
+
+void placed_plateset(Harness &h) {
+  editor::ElementInfo &front = h.elements[1U];
+  front.timeline_lane = lane_node;
+  front.plateset = plateset_node;
+  front.plateset_slot = "front";
+  front.plateset_take = 9;
+  editor::ElementInfo left = front;
+  left.node = left_plate_node;
+  left.timeline_lane = destination_lane_node;
+  left.plateset_slot = "left";
+  h.elements.push_back(left);
+  for (const doc::NodeId track : {lane_node, destination_lane_node}) {
+    editor::ElementInfo screen{};
+    screen.node = track;
+    screen.kind = editor::ElementKind::Track;
+    h.elements.push_back(screen);
+  }
+  h.lanes.push_back(scene::TimelineLane{lane_node, scene::SceneId{100U}, 10,
+                                        "FRONT / Chicago drive", false, false,
+                                        scene::BlendMode::Normal, false});
+  h.lanes.push_back(scene::TimelineLane{
+      destination_lane_node, scene::SceneId{100U}, 20, "LEFT / Chicago drive",
+      false, false, scene::BlendMode::Normal, false});
+  h.keys.clear();
+}
+
+void set_take_timing(Harness &h, const scene::ClipTiming &timing) {
+  for (editor::ElementInfo &element : h.elements) {
+    if (element.plateset == plateset_node) {
+      element.timing = timing;
+    }
+  }
+}
+
+[[nodiscard]] bool track_listed(const Harness &h, doc::NodeId lane,
+                                float y) {
+  for (const auto &target : h.panel.replacement_targets()) {
+    if (target.track && target.node == lane && target.bounds.y == y) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The take row acts on its set as one. With a track Other in front of it
+// (y=76..100) the row sits at y=100..124. At 1400 wide the list is 340: its
+// eye is at x=4..28, its lock at 312..336 and its solo at 290..308. Each
+// sets every track of the set that is not there yet; its menu folds,
+// switches, cuts, ranges, opens and removes the set; and dragging it lands
+// its tracks together, in their order.
+void a_take_row_switches_and_moves_its_set_as_one() {
+  Harness h;
+  h.bounds.width = 1'400.0F;
+  placed_plateset(h);
+  const doc::NodeId other_lane{42U};
+  h.lanes.push_back(scene::TimelineLane{other_lane, scene::SceneId{100U}, 30,
+                                        "Other", false, false,
+                                        scene::BlendMode::Normal, false});
+  for (scene::TimelineLane &lane : h.lanes) {
+    lane.muted = lane.id == destination_lane_node;
+  }
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(h.panel.take_at(120.0F, 112.0F) == std::optional{clip_node});
+
+  using Action = editor::TimelineLaneAction;
+  UI_CHECK(h.click(16.0F, 112.0F).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::ToggleMute, lane_node, {}}}));
+  UI_CHECK(h.click(324.0F, 112.0F).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::ToggleLock, destination_lane_node, {}},
+               {Action::ToggleLock, lane_node, {}}}));
+  static_cast<void>(h.click(299.0F, 112.0F));
+  UI_CHECK(h.panel.soloed() ==
+           (std::set<doc::NodeId>{lane_node, destination_lane_node}));
+  static_cast<void>(h.click(299.0F, 112.0F));
+  UI_CHECK(h.panel.soloed().empty());
+
+  // Its menu: List Plate Tracks, Mute Plates, Lock Plates, Split Take at
+  // Playhead (frame 50), Set In/Out to Plateset, Open Plateset in Asset
+  // Viewer, Delete Plateset Tracks and Plates.
+  static_cast<void>(h.choose(120.0F, 112.0F, 0U));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(track_listed(h, destination_lane_node, 124.0F));
+  static_cast<void>(h.choose(120.0F, 112.0F, 0U));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(!track_listed(h, destination_lane_node, 124.0F));
+  UI_CHECK(h.choose(120.0F, 112.0F, 1U).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::ToggleMute, lane_node, {}}}));
+  UI_CHECK(h.choose(120.0F, 112.0F, 3U).clip_splits ==
+           (std::vector<editor::TimelineClipSplit>{{clip_node, 50}}));
+  const editor::TimelinePanelFrame ranged = h.choose(120.0F, 112.0F, 4U);
+  UI_CHECK(ranged.range.has_value() && ranged.range->first == 20U &&
+           ranged.range->last == 59U);
+  const editor::TimelinePanelFrame opened = h.choose(120.0F, 112.0F, 5U);
+  UI_CHECK(opened.view_clip.has_value() && opened.view_clip->plateset &&
+           opened.view_clip->clip == clip_node);
+  UI_CHECK(h.choose(120.0F, 112.0F, 6U).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::DeleteClips, destination_lane_node, {}},
+               {Action::DeleteClips, lane_node, {}}}));
+
+  // Dragged up over Other, the set goes in front of it, back track first so
+  // each lands in front of the last: FRONT before Other, then LEFT in front
+  // of FRONT. One gesture, so one undo step.
+  static_cast<void>(h.frame(120.0F, 112.0F, false));
+  static_cast<void>(h.frame(120.0F, 112.0F, true));
+  UI_CHECK(h.frame(1'200.0F, 87.0F, true).lane_edits.empty());
+  UI_CHECK(h.frame(1'200.0F, 87.0F, false).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::MoveTo, lane_node, {}, other_lane},
+               {Action::MoveTo, destination_lane_node, {}, lane_node}}));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  // Other dragged down onto the closed row goes behind the whole set,
+  // never between its tracks.
+  static_cast<void>(h.frame(80.0F, 88.0F, false));
+  static_cast<void>(h.frame(80.0F, 88.0F, true));
+  static_cast<void>(h.frame(1'200.0F, 112.0F, true));
+  UI_CHECK(h.frame(1'200.0F, 112.0F, false).lane_edits ==
+           (std::vector<editor::TimelineLaneEdit>{
+               {Action::MoveTo, other_lane, {}, lane_node}}));
+}
+
+// Its two tracks fold into one take row, y=76..100, whose bar (x=408..704,
+// y=79..97) moves, trims and cuts the take by its front plate: the panel
+// reports the front plate's edit alone, and the shell carries it to the
+// rest of the take. Double-clicking the bar lists the tracks; its twirl
+// folds them again.
+void a_placed_plateset_reads_as_one_take_row() {
+  Harness h;
+  placed_plateset(h);
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  for (const auto &target : h.panel.replacement_targets()) {
+    UI_CHECK(!target.track);
+  }
+  // The row and its bar stand for the take, which a plateset dropped there
+  // swaps.
+  UI_CHECK(h.panel.take_at(500.0F, 88.0F) == std::optional{clip_node});
+  UI_CHECK(h.panel.take_at(120.0F, 88.0F) == std::optional{clip_node});
+  UI_CHECK(!h.panel.take_at(500.0F, 112.0F).has_value());
+  // Closed, the object follows straight after the take row.
+  const editor::TimelinePanelFrame object_click = h.click(80.0F, 112.0F);
+  UI_CHECK(object_click.selection.has_value() &&
+           object_click.selection->node == object_node);
+
+  // Choosing the row chooses every plate, the front one leading.
+  const editor::TimelinePanelFrame row_click = h.click(120.0F, 88.0F);
+  UI_CHECK(row_click.selection.has_value());
+  UI_CHECK(row_click.selection->node == clip_node);
+  UI_CHECK(row_click.selection->action == editor::SelectionAction::Replace);
+  UI_CHECK(row_click.selection->members ==
+           (std::vector<doc::NodeId>{left_plate_node, clip_node}));
+
+  // A drag on the bar moves the take: one edit, the front plate's, with no
+  // change of track and no reorder even when carried over another row.
+  static_cast<void>(h.frame(500.0F, 88.0F, false));
+  const editor::TimelinePanelFrame pressed = h.frame(500.0F, 88.0F, true);
+  UI_CHECK(pressed.selection.has_value() &&
+           pressed.selection->node == clip_node &&
+           pressed.selection->members.size() == 2U);
+  UI_CHECK(!pressed.seek_to_frame.has_value());
+  UI_CHECK(h.panel.dragging_clip());
+  const editor::TimelinePanelFrame moving = h.frame(574.0F, 112.0F, true);
+  UI_CHECK(moving.clip_edits.empty());
+  UI_CHECK(moving.drag_readout.starts_with("TAKE +"));
+  const editor::TimelinePanelFrame moved = h.frame(574.0F, 112.0F, false);
+  UI_CHECK(moved.clip_edits ==
+           (std::vector<editor::TimelineClipEdit>{
+               {clip_node, scene::ClipTiming{30, 40, 0, 0, 0},
+                std::nullopt}}));
+  UI_CHECK(moved.layer_reorders.empty());
+  UI_CHECK(moved.lane_edits.empty());
+  UI_CHECK(!h.panel.dragging_clip());
+
+  // The Director adopts it on every plate; the tail (x=778) trims the take.
+  set_take_timing(h, scene::ClipTiming{30, 40, 0, 0, 0});
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  static_cast<void>(h.frame(776.0F, 88.0F, false));
+  static_cast<void>(h.frame(776.0F, 88.0F, true));
+  static_cast<void>(h.frame(813.0F, 88.0F, true));
+  UI_CHECK(h.frame(813.0F, 88.0F, false).clip_edits ==
+           (std::vector<editor::TimelineClipEdit>{
+               {clip_node, scene::ClipTiming{30, 45, 0, 0, 0},
+                std::nullopt}}));
+  set_take_timing(h, scene::ClipTiming{30, 45, 0, 0, 0});
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+
+  // The razor cuts the front plate where it lands - frame 40 is x=556 -
+  // and the shell cuts the rest of the take with it.
+  h.focus();
+  static_cast<void>(h.type("c"));
+  static_cast<void>(h.frame(556.0F, 88.0F, false));
+  UI_CHECK(h.frame(556.0F, 88.0F, true).clip_splits ==
+           (std::vector<editor::TimelineClipSplit>{{clip_node, 40}}));
+  static_cast<void>(h.frame(556.0F, 88.0F, false));
+  static_cast<void>(h.type("v"));
+
+  // A double-click on the bar lists the plates' tracks under the row, one
+  // indent in: LEFT at y=100, FRONT at y=172, each with its Properties and
+  // its clip, and each still a track of its own.
+  static_cast<void>(h.click(500.0F, 88.0F));
+  static_cast<void>(h.click(500.0F, 88.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(track_listed(h, destination_lane_node, 100.0F));
+  UI_CHECK(track_listed(h, lane_node, 172.0F));
+  const editor::TimelinePanelFrame track_click = h.click(120.0F, 112.0F);
+  UI_CHECK(track_click.selection.has_value() &&
+           track_click.selection->node == destination_lane_node &&
+           track_click.selection->members.empty());
+  // The left plate's own bar (y=148..172) still edits that plate alone.
+  static_cast<void>(h.frame(600.0F, 160.0F, false));
+  const editor::TimelinePanelFrame plate_press = h.frame(600.0F, 160.0F, true);
+  UI_CHECK(plate_press.selection.has_value() &&
+           plate_press.selection->node == left_plate_node &&
+           plate_press.selection->members.empty());
+  static_cast<void>(h.frame(600.0F, 160.0F, false));
+
+  // The twirl folds them back into the row.
+  static_cast<void>(h.click(38.0F, 88.0F));
+  static_cast<void>(h.frame(0.0F, 0.0F, false));
+  UI_CHECK(!track_listed(h, destination_lane_node, 100.0F));
+  UI_CHECK(h.click(80.0F, 112.0F).selection->node == object_node);
+
+  // A locked plate keeps the take from moving apart: its bar takes no drag.
+  h.elements[2U].locked = true;
+  static_cast<void>(h.frame(500.0F, 88.0F, false));
+  static_cast<void>(h.frame(500.0F, 88.0F, true));
+  UI_CHECK(!h.panel.dragging_clip());
+  static_cast<void>(h.frame(574.0F, 88.0F, true));
+  UI_CHECK(h.frame(574.0F, 88.0F, false).clip_edits.empty());
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 131U> cases{{
+constexpr std::array<Case, 134U> cases{{
     {"soloing a group shows what is inside it",
      &soloing_a_group_shows_what_is_inside_it},
     {"a track is listed once, by its header",
@@ -4812,6 +5138,12 @@ constexpr std::array<Case, 131U> cases{{
      &the_dope_sheet_and_the_graph_share_one_time_axis},
     {"a track twirl closes it to its header",
      &a_track_twirl_closes_it_to_its_header},
+    {"a track keys, marks and splits like a layer",
+     &a_track_keys_marks_and_splits_like_a_layer},
+    {"a placed plateset reads as one take row",
+     &a_placed_plateset_reads_as_one_take_row},
+    {"a take row switches and moves its set as one",
+     &a_take_row_switches_and_moves_its_set_as_one},
 }};
 
 } // namespace

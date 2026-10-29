@@ -5,6 +5,7 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -102,7 +103,74 @@ struct ModelAsset final {
     bool operator==(const ModelAsset&) const = default;
 };
 
-using Asset = std::variant<MediaAsset, ModelAsset>;
+// The slots of a vehicle process plateset, in LED Car Process input port
+// order: eight wall plates clockwise from the front, then the ceiling
+// reflection. The value is the port index, so a slot wires to its socket
+// without a lookup table.
+enum class PlatesetSlot : core::u8 {
+    Front,
+    FrontRight,
+    Right,
+    BackRight,
+    Back,
+    BackLeft,
+    Left,
+    FrontLeft,
+    Ceiling,
+};
+
+inline constexpr std::size_t plateset_slot_count = 9U;
+
+// Rig templates: which slots the Library offers for this array.
+enum class PlatesetRig : core::u8 {
+    Nine,
+    Five,
+    Three,
+};
+
+struct PlatesetSlotAssignment final {
+    // The asset.media node playing in this slot; zero is an empty slot.
+    doc::NodeId media{};
+    // Source frames of this plate before the take's common start. Never
+    // negative: the plate that starts last has zero.
+    core::i64 offset{};
+
+    bool operator==(const PlatesetSlotAssignment&) const = default;
+};
+
+// A moment kept from the front plate - a stop, a turn - at that plate's own
+// source frame, so it stays with the footage wherever the take is placed.
+struct PlatesetMoment final {
+    core::i64 frame{};
+    std::string name;
+    // An index into the marker palette.
+    core::u8 color{};
+
+    bool operator==(const PlatesetMoment&) const = default;
+};
+
+inline constexpr std::size_t max_plateset_moments = 256U;
+
+struct PlatesetAsset final {
+    doc::NodeId id{};
+    std::string display_name;
+    PlatesetRig rig{PlatesetRig::Nine};
+    std::array<PlatesetSlotAssignment, plateset_slot_count> slots{};
+    // Placed plates decode at half size: a quarter of the memory per frame.
+    bool half_resolution{};
+    // In front plate frame order.
+    std::vector<PlatesetMoment> moments;
+    doc::NodeId folder{};
+
+    [[nodiscard]] const PlatesetSlotAssignment&
+    slot(PlatesetSlot role) const noexcept {
+        return slots[static_cast<std::size_t>(role)];
+    }
+
+    bool operator==(const PlatesetAsset&) const = default;
+};
+
+using Asset = std::variant<MediaAsset, ModelAsset, PlatesetAsset>;
 
 enum class AssetKind : core::u8 {
     Media,
@@ -110,6 +178,7 @@ enum class AssetKind : core::u8 {
     ProjectionMesh,
     IesProfile,
     ColorLut,
+    Plateset,
 };
 
 [[nodiscard]] AssetKind asset_kind(const Asset& asset) noexcept;

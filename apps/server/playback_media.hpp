@@ -7,6 +7,7 @@
 #include "playback.hpp"
 #include "project_assets.hpp"
 #include "proxy_generation_service.hpp"
+#include "proxy_generation_worker.hpp"
 #include "proxy_playback.hpp"
 
 #include <mediaserver/assets/asset_registry.hpp>
@@ -25,8 +26,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <span>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -72,170 +75,6 @@ struct ProxyCacheClearResult final {
 [[nodiscard]] ProxyCacheClearResult
 clear_proxy_cache(const PlaybackOptions &options,
                   const assets::AssetRegistry &registry) noexcept;
-
-// Proxy encoding is intentionally serialized: one camera-original decode can
-// already use the machine's available CPU, while the live renderer must keep
-// priority. Playback and generation use separate cache handles so inspecting
-// a ready artifact never waits behind a minutes-long transcode.
-class ProxyGenerationWorker final {
-  public:
-    struct ProgressSnapshot final {
-        assets::DerivativeKey key;
-        core::u64 completed_frames{};
-        core::u64 total_frames{};
-        bool queued{};
-    };
-
-    explicit ProxyGenerationWorker(
-        std::unique_ptr<server::ProxyGenerationService> artifacts)
-        : artifacts_(std::move(artifacts)),
-          worker_([this](std::stop_token stop) { run(stop); }) {}
-
-    ProxyGenerationWorker(const ProxyGenerationWorker &) = delete;
-    ProxyGenerationWorker &operator=(const ProxyGenerationWorker &) = delete;
-
-    ~ProxyGenerationWorker() {
-        worker_.request_stop();
-        condition_.notify_all();
-    }
-
-    void request(const assets::MediaAsset &asset) {
-        if (artifacts_ == nullptr || asset.proxy_playback_policy ==
-                                         assets::ProxyPlaybackPolicy::Source) {
-            return;
-        }
-        const auto key = assets::requested_proxy_key(asset);
-        if (!key.has_value()) {
-            return;
-        }
-        std::scoped_lock lock{mutex_};
-        const auto known =
-            std::find(scheduled_.begin(), scheduled_.end(), *key);
-        if (known != scheduled_.end()) {
-            return;
-        }
-        const std::size_t scheduled_size = scheduled_.size();
-        const std::size_t pending_size = pending_.size();
-        const std::size_t progress_size = progress_.size();
-        try {
-            scheduled_.push_back(*key);
-            pending_.push_back(asset);
-            progress_.push_back(ProgressRecord{
-                *key,
-                0U,
-                asset.frame_count.has_value()
-                    ? static_cast<core::u64>(*asset.frame_count)
-                    : 0U,
-                true,
-                true,
-            });
-        } catch (const std::bad_alloc &) {
-            scheduled_.resize(scheduled_size);
-            pending_.resize(pending_size);
-            progress_.resize(progress_size);
-            return;
-        }
-        condition_.notify_one();
-    }
-
-    [[nodiscard]] std::optional<ProgressSnapshot>
-    progress_for(const assets::DerivativeKey &key) const {
-        std::scoped_lock lock{mutex_};
-        const auto found =
-            std::find_if(progress_.begin(), progress_.end(),
-                         [&](const ProgressRecord &record) {
-                             return record.key == key && record.visible;
-                         });
-        if (found == progress_.end()) {
-            return std::nullopt;
-        }
-        return ProgressSnapshot{found->key, found->completed_frames,
-                                found->total_frames, found->queued};
-    }
-
-  private:
-    struct ProgressRecord final {
-        assets::DerivativeKey key;
-        core::u64 completed_frames{};
-        core::u64 total_frames{};
-        bool queued{};
-        bool visible{};
-    };
-
-    void begin(const assets::DerivativeKey &key) {
-        std::scoped_lock lock{mutex_};
-        const auto found = std::find_if(
-            progress_.begin(), progress_.end(),
-            [&](const ProgressRecord &record) { return record.key == key; });
-        if (found != progress_.end()) {
-            found->queued = false;
-        }
-    }
-
-    void update(const assets::DerivativeKey &key, core::u64 completed,
-                core::u64 total) {
-        std::scoped_lock lock{mutex_};
-        const auto found = std::find_if(
-            progress_.begin(), progress_.end(),
-            [&](const ProgressRecord &record) { return record.key == key; });
-        if (found != progress_.end()) {
-            found->queued = false;
-            found->total_frames = total;
-            found->completed_frames = std::min(completed, total);
-        }
-    }
-
-    void finish(const assets::DerivativeKey &key) {
-        std::scoped_lock lock{mutex_};
-        const auto found = std::find_if(
-            progress_.begin(), progress_.end(),
-            [&](const ProgressRecord &record) { return record.key == key; });
-        if (found != progress_.end()) {
-            found->visible = false;
-        }
-    }
-
-    void run(std::stop_token stop) {
-        while (!stop.stop_requested()) {
-            std::optional<assets::MediaAsset> asset;
-            {
-                std::unique_lock lock{mutex_};
-                condition_.wait(lock, stop,
-                                [this] { return !pending_.empty(); });
-                if (stop.stop_requested()) {
-                    return;
-                }
-                asset = std::move(pending_.front());
-                pending_.pop_front();
-            }
-            const auto key = assets::requested_proxy_key(*asset);
-            if (!key.has_value()) {
-                continue;
-            }
-            begin(*key);
-            const auto generated = artifacts_->generate(
-                *asset, stop,
-                [this, key = *key](core::u64 completed, core::u64 total) {
-                    update(key, completed, total);
-                });
-            finish(*key);
-            if (!generated && !stop.stop_requested()) {
-                std::cerr << "proxy generation failed for asset "
-                          << asset->id.value() << " (code "
-                          << static_cast<unsigned>(generated.error().code)
-                          << ")\n";
-            }
-        }
-    }
-
-    std::unique_ptr<server::ProxyGenerationService> artifacts_;
-    mutable std::mutex mutex_;
-    std::condition_variable_any condition_;
-    std::deque<assets::MediaAsset> pending_;
-    std::vector<assets::DerivativeKey> scheduled_;
-    std::vector<ProgressRecord> progress_;
-    std::jthread worker_;
-};
 
 [[nodiscard]] assets::AssetRegistry
 editor_playback_registry(const assets::AssetRegistry &authored);

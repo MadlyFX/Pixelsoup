@@ -3,6 +3,7 @@
 #include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/plateset.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
 
 #include <algorithm>
@@ -221,7 +222,7 @@ read_fingerprint(Reader& reader) {
 
 core::u32 AssetCounters::over_capacity() const noexcept {
     const core::u64 valid = static_cast<core::u64>(media) + models +
-        projection_meshes;
+        projection_meshes + platesets;
     const core::u64 unique =
         valid > duplicate_sources ? valid - duplicate_sources : 0U;
     return unique > max_project_assets
@@ -248,6 +249,91 @@ void AssetModel::put(const doc::Node& node) {
         }
         folders_.insert_or_assign(
             node.id, AssetFolder{node.id, std::move(display_name), parent});
+        return;
+    }
+    if (node.type == schema::plateset_type) {
+        Reader reader{node.properties};
+        PlatesetAsset plateset{};
+        plateset.id = node.id;
+        plateset.display_name = reader.text(schema::display_name, "");
+        plateset.folder = read_folder(reader);
+        const std::string rig = reader.text(schema::plateset_rig,
+                                            schema::plateset_rig_nine);
+        const std::optional<PlatesetRig> parsed_rig =
+            plateset_rig_from_key(rig);
+        if (!parsed_rig.has_value()) {
+            reader.fail();
+        } else {
+            plateset.rig = *parsed_rig;
+        }
+        // A slot names a media node by id and an offset in source frames.
+        // A slot naming itself, a negative id or a negative offset is
+        // malformed; a slot naming a node that is not media is kept and
+        // reported by readiness, so deleting a plate never hides the set.
+        for (const PlatesetSlot slot : all_plateset_slots) {
+            PlatesetSlotAssignment& assignment =
+                plateset.slots[static_cast<std::size_t>(slot)];
+            const std::optional<std::int64_t> media =
+                reader.optional_integer(plateset_slot_property(slot));
+            if (media.has_value()) {
+                if (*media <= 0 ||
+                    static_cast<core::u64>(*media) == node.id.value()) {
+                    reader.fail();
+                } else {
+                    assignment.media =
+                        doc::NodeId{static_cast<core::u64>(*media)};
+                }
+            }
+            const std::optional<std::int64_t> offset =
+                reader.optional_integer(plateset_offset_property(slot));
+            if (offset.has_value()) {
+                if (*offset < 0) {
+                    reader.fail();
+                } else {
+                    assignment.offset = *offset;
+                }
+            }
+        }
+        if (const auto found = node.properties.find(
+                schema::plateset_half_resolution);
+            found != node.properties.end()) {
+            const auto* const half = std::get_if<bool>(&found->second);
+            if (half == nullptr) {
+                reader.fail();
+            } else {
+                plateset.half_resolution = *half;
+            }
+        }
+        for (std::size_t index = 0U; index < max_plateset_moments; ++index) {
+            const std::optional<std::int64_t> frame = reader.optional_integer(
+                plateset_moment_property(index, "frame"));
+            if (!frame.has_value()) {
+                break;
+            }
+            PlatesetMoment moment{};
+            moment.frame = *frame;
+            moment.name =
+                reader.text(plateset_moment_property(index, "name"), "");
+            const std::int64_t color =
+                reader.optional_integer(plateset_moment_property(index, "color"))
+                    .value_or(0);
+            if (*frame < 0 || color < 0 || color > 255) {
+                reader.fail();
+                break;
+            }
+            moment.color = static_cast<core::u8>(color);
+            plateset.moments.push_back(std::move(moment));
+        }
+        std::stable_sort(plateset.moments.begin(), plateset.moments.end(),
+                         [](const PlatesetMoment& left,
+                            const PlatesetMoment& right) {
+                             return left.frame < right.frame;
+                         });
+        if (!reader.ok() || plateset.display_name.empty()) {
+            ++counters_.rejected;
+            return;
+        }
+        entries_.insert_or_assign(node.id, Asset{std::move(plateset)});
         return;
     }
     if (node.type != schema::media_type && node.type != schema::model_type &&
@@ -379,10 +465,18 @@ void AssetModel::recount() noexcept {
     core::u32 media = 0U;
     core::u32 models = 0U;
     core::u32 projection_meshes = 0U;
+    core::u32 platesets = 0U;
     core::u32 duplicates = 0U;
     std::set<std::pair<AssetKind, std::string_view>> sources;
     for (const auto& [id, asset] : entries_) {
         static_cast<void>(id);
+        // A plateset has no source to share, so it is never a duplicate.
+        if (std::holds_alternative<PlatesetAsset>(asset)) {
+            if (platesets != std::numeric_limits<core::u32>::max()) {
+                ++platesets;
+            }
+            continue;
+        }
         core::u32& count = std::holds_alternative<MediaAsset>(asset)
             ? media
             : (std::get<ModelAsset>(asset).projection_mesh
@@ -399,6 +493,7 @@ void AssetModel::recount() noexcept {
     counters_.media = media;
     counters_.models = models;
     counters_.projection_meshes = projection_meshes;
+    counters_.platesets = platesets;
     counters_.duplicate_sources = duplicates;
 }
 
@@ -429,7 +524,7 @@ void AssetModel::apply(const doc::Delta& delta) {
 AssetRegistry AssetModel::evaluate() const {
     AssetRegistry registry{};
     const core::u64 valid = static_cast<core::u64>(counters_.media) +
-        counters_.models + counters_.projection_meshes;
+        counters_.models + counters_.projection_meshes + counters_.platesets;
     const core::u64 unique = valid > counters_.duplicate_sources
                                  ? valid - counters_.duplicate_sources
                                  : 0U;
@@ -439,7 +534,8 @@ AssetRegistry AssetModel::evaluate() const {
     std::set<std::pair<AssetKind, std::string_view>> sources;
     for (const auto& [id, asset] : entries_) {
         static_cast<void>(id);
-        if (!sources.insert({asset_kind(asset), asset_source(asset)}).second) {
+        if (!std::holds_alternative<PlatesetAsset>(asset) &&
+            !sources.insert({asset_kind(asset), asset_source(asset)}).second) {
             continue;
         }
         if (registry.assets.size() >= max_project_assets) {

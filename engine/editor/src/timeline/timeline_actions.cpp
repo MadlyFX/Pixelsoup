@@ -224,6 +224,21 @@ void TimelinePanel::handle_actions(Pass &p) {
                              : graph.center_x();
     time_axis_.zoom_about(anchor, keep_x, graph.x, factor);
   };
+  // A track splits into two tracks at the cut, as a clip splits into two
+  // clips: the Director moves what plays from the cut on to a second track.
+  const auto split_track = [&](doc::NodeId lane, core::i64 cut) {
+    TimelineLaneEdit split{TimelineLaneAction::Split, lane, {}};
+    split.frame = cut;
+    frame.lane_edits.push_back(std::move(split));
+  };
+  // The tracks the operator has selected, by their headers or bars.
+  std::vector<doc::NodeId> selected_tracks;
+  for (const scene::TimelineLane &lane : lanes) {
+    if (!lane.implicit &&
+        (selected(lane.id, selection) || lane.id == selected_lane_)) {
+      selected_tracks.push_back(lane.id);
+    }
+  }
   const auto set_in = [&](core::u64 at) {
     frame.range = RangeRequest{at, std::max(last, at), timeline.loop};
   };
@@ -325,7 +340,6 @@ void TimelinePanel::handle_actions(Pass &p) {
                     MenuCommand::ToggleTrackLock, lane->id);
           // The track's own bar edits it as one clip; so does its menu.
           bool spanned = false;
-          bool under_playhead = false;
           core::i64 track_first = 0;
           core::i64 track_last = 0;
           for (const ElementInfo &held : elements) {
@@ -338,18 +352,18 @@ void TimelinePanel::handle_actions(Pass &p) {
             track_last = spanned ? std::max(track_last, held.timing.last_frame())
                                  : held.timing.last_frame();
             spanned = true;
-            under_playhead = under_playhead ||
-                             (editable_clip(held) &&
-                              playhead > held.timing.start &&
-                              playhead <= held.timing.last_frame());
           }
-          if (under_playhead && !lane->locked) {
-            add_entry("Split Track at Playhead",
+          if (!lane->locked &&
+              track_splittable(elements, lane->id, signed_frame(acting_frame))) {
+            add_entry("Split Track at Playhead      Ctrl+K",
                       MenuCommand::SplitTrackAtPlayhead, lane->id);
           }
           if (spanned) {
-            add_entry("Set In/Out to Track", MenuCommand::RangeToClip,
+            add_entry("Set In/Out to Track      X", MenuCommand::RangeToClip,
                       lane->id, track_first, {}, track_last);
+          }
+          if (!lane->locked) {
+            add_entry("Clear Keyframes", MenuCommand::ClearKeys, lane->id);
           }
           if (clipboard_span.has_value() && *clipboard_span > 0 &&
               !lane->locked) {
@@ -381,6 +395,42 @@ void TimelinePanel::handle_actions(Pass &p) {
           }
           open_menu = true;
         }
+      } else if (row.kind == Row::Kind::PlatesetHeader) {
+        // The set as one thing: its tracks folded or listed, switched,
+        // cut, ranged and removed together.
+        const PlatesetGroup &group = p.built.platesets[row.plateset];
+        const bool listed = rows_state_.expanded_platesets.contains(row.node);
+        add_entry(listed ? "Fold Plate Tracks" : "List Plate Tracks",
+                  MenuCommand::TogglePlatesetOpen, row.node);
+        add_entry(row.muted ? "Unmute Plates" : "Mute Plates",
+                  MenuCommand::TogglePlatesetMute, row.node);
+        add_entry(row.locked ? "Unlock Plates" : "Lock Plates",
+                  MenuCommand::TogglePlatesetLock, row.node);
+        bool spanned = false;
+        core::i64 set_first = 0;
+        core::i64 set_last = 0;
+        for (const PlatesetTake &take : group.takes) {
+          const core::i64 take_last = take.start + take.duration - 1;
+          if (!take.locked && playhead > take.start && playhead <= take_last) {
+            add_entry("Split Take at Playhead", MenuCommand::SplitAtPlayhead,
+                      take.lead);
+          }
+          set_first = spanned ? std::min(set_first, take.start) : take.start;
+          set_last = spanned ? std::max(set_last, take_last) : take_last;
+          spanned = true;
+        }
+        if (spanned) {
+          add_entry("Set In/Out to Plateset", MenuCommand::RangeToClip,
+                    row.node, set_first, {}, set_last);
+          add_entry("Open Plateset in Asset Viewer",
+                    MenuCommand::OpenPlatesetInAssetViewer,
+                    group.takes.front().lead);
+        }
+        if (!row.locked) {
+          add_entry("Delete Plateset Tracks and Plates",
+                    MenuCommand::DeletePlatesetTracks, row.node);
+        }
+        open_menu = true;
       } else if (row.kind == Row::Kind::Layer && !row.surface) {
         const ElementInfo *const element = find_element(elements, row.node);
         if (element != nullptr && !element->locked) {
@@ -454,22 +504,67 @@ void TimelinePanel::handle_actions(Pass &p) {
         }
         return {};
       };
+      // The placed set a take row's entry names, while it is still placed.
+      const auto plateset_named =
+          [&](doc::NodeId key) -> const PlatesetGroup * {
+        const auto found = std::find_if(
+            p.built.platesets.begin(), p.built.platesets.end(),
+            [&](const PlatesetGroup &group) { return group.key == key; });
+        return found != p.built.platesets.end() ? &*found : nullptr;
+      };
+      const auto switch_plateset = [&](doc::NodeId key,
+                                       TimelineLaneAction action) {
+        const PlatesetGroup *const group = plateset_named(key);
+        if (group == nullptr) {
+          return;
+        }
+        // Every track to the state the row does not show yet.
+        const bool all = std::all_of(
+            group->lanes.begin(), group->lanes.end(), [&](doc::NodeId id) {
+              return std::any_of(
+                  lanes.begin(), lanes.end(),
+                  [&](const scene::TimelineLane &lane) {
+                    return lane.id == id &&
+                           (action == TimelineLaneAction::ToggleMute
+                                ? lane.muted
+                                : lane.locked);
+                  });
+            });
+        for (TimelineLaneEdit &edit :
+             plateset_switch_edits(*group, lanes, action, !all)) {
+          frame.lane_edits.push_back(std::move(edit));
+        }
+      };
       switch (static_cast<MenuCommand>(entry.command)) {
+      case MenuCommand::TogglePlatesetOpen:
+        if (!rows_state_.expanded_platesets.erase(entry.node)) {
+          rows_state_.expanded_platesets.insert(entry.node);
+        }
+        break;
+      case MenuCommand::TogglePlatesetMute:
+        switch_plateset(entry.node, TimelineLaneAction::ToggleMute);
+        break;
+      case MenuCommand::TogglePlatesetLock:
+        switch_plateset(entry.node, TimelineLaneAction::ToggleLock);
+        break;
+      case MenuCommand::DeletePlatesetTracks:
+        if (const PlatesetGroup *const group = plateset_named(entry.node)) {
+          for (const doc::NodeId lane : group->lanes) {
+            frame.lane_edits.push_back(TimelineLaneEdit{
+                TimelineLaneAction::DeleteClips, lane, {}});
+          }
+        }
+        break;
+      case MenuCommand::OpenPlatesetInAssetViewer:
+        frame.view_clip = TimelineViewClipRequest{entry.node, false, true};
+        break;
       case MenuCommand::SplitAtPlayhead:
         frame.clip_splits.push_back(
             TimelineClipSplit{entry.node, signed_frame(acting_frame)});
         break;
-      case MenuCommand::SplitTrackAtPlayhead: {
-        const core::i64 cut = signed_frame(acting_frame);
-        for (const ElementInfo &element : elements) {
-          if (editable_clip(element) && element.timeline_lane == entry.node &&
-              cut > element.timing.start &&
-              cut <= element.timing.last_frame()) {
-            frame.clip_splits.push_back(TimelineClipSplit{element.node, cut});
-          }
-        }
+      case MenuCommand::SplitTrackAtPlayhead:
+        split_track(entry.node, signed_frame(acting_frame));
         break;
-      }
       case MenuCommand::RippleDeleteSelection:
         ripple_delete(selected_clips);
         break;
@@ -662,6 +757,19 @@ void TimelinePanel::handle_actions(Pass &p) {
               TimelineClipSplit{clip->node, signed_frame(acting_frame)});
         }
       }
+      // A selected track splits as a selected clip does.
+      if (selected_clips.empty()) {
+        const core::i64 cut = signed_frame(acting_frame);
+        for (const doc::NodeId lane : selected_tracks) {
+          const auto held = std::find_if(
+              lanes.begin(), lanes.end(),
+              [&](const scene::TimelineLane &each) { return each.id == lane; });
+          if (held != lanes.end() && !held->locked &&
+              track_splittable(elements, lane, cut)) {
+            split_track(lane, cut);
+          }
+        }
+      }
     }
     if ((ctx.key_pressed(gui::Key::Delete) ||
          ctx.key_pressed(gui::Key::Backspace)) &&
@@ -688,21 +796,38 @@ void TimelinePanel::handle_actions(Pass &p) {
         set_out(acting_frame);
         break;
       case 'x':
-      case 'X':
-        // Mark the selected clips: In/Out around them.
-        if (!selected_clips.empty()) {
-          core::i64 begin = selected_clips.front()->timing.start;
-          core::i64 end = selected_clips.front()->timing.last_frame();
-          for (const ElementInfo *clip : selected_clips) {
-            begin = std::min(begin, clip->timing.start);
-            end = std::max(end, clip->timing.last_frame());
+      case 'X': {
+        // Mark the selected clips: In/Out around them. With no clip selected,
+        // a selected track marks every placed clip on it, as its bar shows.
+        std::optional<std::pair<core::i64, core::i64>> marked;
+        const auto mark = [&](const scene::ClipTiming &timing) {
+          marked = marked.has_value()
+                       ? std::pair{std::min(marked->first, timing.start),
+                                   std::max(marked->second,
+                                            timing.last_frame())}
+                       : std::pair{timing.start, timing.last_frame()};
+        };
+        for (const ElementInfo *clip : selected_clips) {
+          mark(clip->timing);
+        }
+        if (selected_clips.empty()) {
+          for (const ElementInfo &element : elements) {
+            if (element.kind == ElementKind::Media &&
+                element.timing.placed() &&
+                std::find(selected_tracks.begin(), selected_tracks.end(),
+                          element.timeline_lane) != selected_tracks.end()) {
+              mark(element.timing);
+            }
           }
+        }
+        if (marked.has_value()) {
           frame.range = RangeRequest{
-              static_cast<core::u64>(std::max<core::i64>(begin, 0)),
-              static_cast<core::u64>(std::max<core::i64>(end, 0)),
+              static_cast<core::u64>(std::max<core::i64>(marked->first, 0)),
+              static_cast<core::u64>(std::max<core::i64>(marked->second, 0)),
               timeline.loop};
         }
         break;
+      }
       case 'm':
       case 'M': {
         // On an existing marker, M names it - the quickest way to label a

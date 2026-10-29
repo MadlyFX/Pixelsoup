@@ -96,6 +96,8 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     key_scale_preview.reset();
     pending_clip_timings.clear();
     pending_clip_splits.clear();
+    pending_plateset_places.clear();
+    pending_plateset_swaps.clear();
     pending_lane_edits.clear();
     pending_marker_edits.clear();
     pending_layer_orders.clear();

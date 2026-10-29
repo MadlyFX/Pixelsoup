@@ -1,5 +1,7 @@
 #include "timeline_lane_authoring.hpp"
 
+#include "channel_node_id.hpp"
+
 #include <mediaserver/cmd/director_scheduler.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
@@ -366,6 +368,181 @@ void one_lane_plan_is_one_atomic_undoable_transaction() {
     LANE_CHECK(doc::diff(scheduler.projected_document(), root).changes.empty());
 }
 
+[[nodiscard]] doc::Node placed(core::u64 id, core::u64 lane_id,
+                               std::int64_t start, std::int64_t duration) {
+    doc::Node node = clip(id, 1U, lane_id);
+    node.properties.insert_or_assign(std::string{scene::schema::clip_start},
+                                     whole(start));
+    node.properties.insert_or_assign(std::string{scene::schema::clip_duration},
+                                     whole(duration));
+    node.properties.insert_or_assign(
+        std::string{scene::schema::sequence_count}, whole(500));
+    return node;
+}
+
+[[nodiscard]] doc::NodeId channel_of(core::u64 target,
+                                     scene::PropertyChannel component) {
+    return app::channel_node_id(doc::NodeId{target},
+                                static_cast<core::u64>(component));
+}
+
+[[nodiscard]] app::LaneAuthorRequest split_at(core::u64 lane_id,
+                                              std::int64_t frame) {
+    app::LaneAuthorRequest request{app::LaneAuthorAction::Split,
+                                   scene::SceneId{1U}, doc::NodeId{lane_id}};
+    request.frame = frame;
+    request.show_rate = scene::MediaFrameRate{24U, 1U};
+    return request;
+}
+
+// Foreground (lane 10) holds 0..10, 20..40 with ramps, and 40..50, plus an
+// opacity channel and a brightness effect with its own channel. Background
+// (lane 20) holds 20..40, which a cut on Foreground must not touch.
+[[nodiscard]] doc::Root split_document() {
+    doc::Root root = base_document();
+    doc::Node screen = *root.get(doc::NodeId{10U});
+    screen.properties.insert_or_assign(std::string{scene::schema::position_x},
+                                       doc::PropertyValue{3.5});
+    root = root.set(screen);
+    root = root.set(placed(50U, 10U, 0, 10));
+    doc::Node ramped = placed(51U, 10U, 20, 20);
+    ramped.properties.insert_or_assign(std::string{scene::schema::fade_in},
+                                       whole(2));
+    ramped.properties.insert_or_assign(std::string{scene::schema::fade_out},
+                                       whole(4));
+    root = root.set(ramped);
+    root = root.set(placed(52U, 10U, 40, 10));
+    root = root.set(placed(53U, 20U, 20, 20));
+    root = root.set(channel(
+        channel_of(10U, scene::PropertyChannel::Opacity).value(), 1U, 10U));
+    root = root.set(effect(60U, 1U, 10U));
+    root = root.set(channel(
+        channel_of(60U, scene::PropertyChannel::Brightness).value(), 1U, 60U));
+    return root;
+}
+
+void split_gives_what_follows_the_cut_to_a_copy_of_the_track() {
+    const doc::Root root = split_document();
+    auto result = app::plan_lane_authoring(root, split_at(10U, 25), 100U);
+    LANE_CHECK(result);
+    const doc::Root& after = result.value().document;
+    // The new track is the next free identity, the same screen under its own
+    // name, directly in front of the track it came from.
+    LANE_CHECK(result.value().created == doc::NodeId{100U});
+    const doc::Node& second = *after.get(doc::NodeId{100U});
+    LANE_CHECK(second.type == scene::schema::timeline_lane_type);
+    LANE_CHECK(text(second, scene::schema::lane_name) == "Foreground (2)");
+    const auto x = second.properties.find(scene::schema::position_x);
+    LANE_CHECK(x != second.properties.end()
+               && std::get<double>(x->second) == 3.5);
+    LANE_CHECK(integer(*after.get(doc::NodeId{20U}), scene::schema::lane_order)
+               == 0);
+    LANE_CHECK(integer(*after.get(doc::NodeId{10U}), scene::schema::lane_order)
+               == 10);
+    LANE_CHECK(integer(second, scene::schema::lane_order) == 20);
+
+    // Before the cut stays, from it moves, and across it is cut in two: the
+    // head keeps its node and its head ramp, the tail is the next identity
+    // after the copied effect, starting on the source frame showing at the
+    // cut and keeping the tail ramp.
+    LANE_CHECK(*after.get(doc::NodeId{50U}) == *root.get(doc::NodeId{50U}));
+    LANE_CHECK(integer(*after.get(doc::NodeId{52U}), scene::schema::lane_id)
+               == 100);
+    const doc::Node& head = *after.get(doc::NodeId{51U});
+    LANE_CHECK(integer(head, scene::schema::lane_id) == 10);
+    LANE_CHECK(integer(head, scene::schema::clip_start) == 20);
+    LANE_CHECK(integer(head, scene::schema::clip_duration) == 5);
+    LANE_CHECK(integer(head, scene::schema::fade_in) == 2);
+    LANE_CHECK(integer(head, scene::schema::fade_out) == 0);
+    const doc::Node& tail = *after.get(doc::NodeId{102U});
+    LANE_CHECK(tail.type == scene::schema::media_type);
+    LANE_CHECK(integer(tail, scene::schema::lane_id) == 100);
+    LANE_CHECK(integer(tail, scene::schema::clip_start) == 25);
+    LANE_CHECK(integer(tail, scene::schema::clip_duration) == 15);
+    LANE_CHECK(integer(tail, scene::schema::source_in) == 5);
+    LANE_CHECK(integer(tail, scene::schema::fade_in) == 0);
+    LANE_CHECK(integer(tail, scene::schema::fade_out) == 4);
+    // Another track's clip under the cut is not this track's to cut.
+    LANE_CHECK(*after.get(doc::NodeId{53U}) == *root.get(doc::NodeId{53U}));
+
+    // The track's keys and look come with it, each channel at the node the
+    // new owner's own key edits address.
+    const doc::Node* const opacity =
+        after.get(channel_of(100U, scene::PropertyChannel::Opacity));
+    LANE_CHECK(opacity != nullptr);
+    LANE_CHECK(integer(*opacity, scene::schema::channel_target) == 100);
+    const doc::Node& look = *after.get(doc::NodeId{101U});
+    LANE_CHECK(look.type == scene::schema::effect_type);
+    LANE_CHECK(integer(look, scene::schema::effect_target) == 100);
+    const doc::Node* const brightness =
+        after.get(channel_of(101U, scene::PropertyChannel::Brightness));
+    LANE_CHECK(brightness != nullptr);
+    LANE_CHECK(integer(*brightness, scene::schema::channel_target) == 101);
+    // The originals are untouched.
+    LANE_CHECK(*after.get(channel_of(10U, scene::PropertyChannel::Opacity))
+               == *root.get(channel_of(10U, scene::PropertyChannel::Opacity)));
+    LANE_CHECK(*after.get(doc::NodeId{60U}) == *root.get(doc::NodeId{60U}));
+    LANE_CHECK(result.value().next_node == 103U);
+
+    // Splitting either half again counts on rather than nesting names.
+    auto again = app::plan_lane_authoring(after, split_at(100U, 45), 103U);
+    LANE_CHECK(again);
+    LANE_CHECK(text(*again.value().document.get(again.value().created),
+                    scene::schema::lane_name)
+               == "Foreground (3)");
+
+    // The split is one undo step.
+    cmd::DirectorScheduler scheduler{root};
+    LANE_CHECK(scheduler.schedule_document_replace(
+        after, cmd::UndoContextId{2U}, cmd::TransactionId{7U},
+        cmd::FrameNumber{1U}));
+    LANE_CHECK(scheduler.schedule_undo(cmd::UndoContextId{2U},
+                                       cmd::TransactionId{8U},
+                                       cmd::FrameNumber{1U}));
+    LANE_CHECK(doc::diff(scheduler.projected_document(), root).changes.empty());
+}
+
+void split_refuses_a_move_and_what_is_locked() {
+    const doc::Root root = split_document();
+    // A cut before every clip, or after them all, would leave one track
+    // empty: that is a move, and is not done as one.
+    for (const std::int64_t frame : {std::int64_t{0}, std::int64_t{50}}) {
+        auto refused = app::plan_lane_authoring(root, split_at(10U, frame), 100U);
+        LANE_CHECK(!refused);
+        LANE_CHECK(refused.error() == app::LaneAuthorError::NothingToSplit);
+    }
+    // A gap between clips is a clean place to split; nothing is cut.
+    auto gap = app::plan_lane_authoring(root, split_at(10U, 15), 100U);
+    LANE_CHECK(gap);
+    LANE_CHECK(integer(*gap.value().document.get(doc::NodeId{51U}),
+                       scene::schema::lane_id) == 100);
+    LANE_CHECK(*gap.value().document.get(doc::NodeId{50U})
+               == *root.get(doc::NodeId{50U}));
+
+    doc::Node locked_lane = *root.get(doc::NodeId{10U});
+    locked_lane.properties.insert_or_assign(
+        std::string{scene::schema::lane_locked}, doc::PropertyValue{true});
+    auto lane_locked = app::plan_lane_authoring(
+        root.set(locked_lane), split_at(10U, 25), 100U);
+    LANE_CHECK(!lane_locked);
+    LANE_CHECK(lane_locked.error() == app::LaneAuthorError::Locked);
+
+    // A locked clip the cut would move refuses it; one before the cut does
+    // not care.
+    doc::Node pinned = *root.get(doc::NodeId{52U});
+    pinned.properties.insert_or_assign(std::string{scene::schema::locked},
+                                       doc::PropertyValue{true});
+    auto clip_locked = app::plan_lane_authoring(
+        root.set(pinned), split_at(10U, 25), 100U);
+    LANE_CHECK(!clip_locked);
+    LANE_CHECK(clip_locked.error() == app::LaneAuthorError::Locked);
+    doc::Node early = *root.get(doc::NodeId{50U});
+    early.properties.insert_or_assign(std::string{scene::schema::locked},
+                                      doc::PropertyValue{true});
+    LANE_CHECK(app::plan_lane_authoring(root.set(early), split_at(10U, 25),
+                                        100U));
+}
+
 } // namespace
 
 int main() {
@@ -388,6 +565,10 @@ int main() {
              &create_respects_the_evaluated_scene_lane_budget},
         Test{"lane plan schedules one atomic undo transaction",
              &one_lane_plan_is_one_atomic_undoable_transaction},
+        Test{"split gives what follows the cut to a copy of the track",
+             &split_gives_what_follows_the_cut_to_a_copy_of_the_track},
+        Test{"split refuses a move and what is locked",
+             &split_refuses_a_move_and_what_is_locked},
     };
     std::size_t passed{};
     for (const Test& test : tests) {

@@ -455,6 +455,13 @@ inline constexpr std::string_view mask_point_out_y = "mask_point_out_y";
 // overlaps whose starts are equal, with node id as the final stable tie-break.
 inline constexpr std::string_view lane_id = "lane_id";
 inline constexpr std::string_view clip_order = "clip_order";
+// A clip placed as one plate of a vehicle process plateset: the Library
+// plateset it came from, the slot it plays in, and the take it belongs to.
+// Clips sharing a take, a start and a length are edited as one; none of
+// these change what is drawn, so they stay out of the scene digest.
+inline constexpr std::string_view plateset_asset = "plateset_asset";
+inline constexpr std::string_view plateset_slot = "plateset_slot";
+inline constexpr std::string_view plateset_take = "plateset_take";
 
 // ---------------------------------------------------------------------------
 // scene.effect

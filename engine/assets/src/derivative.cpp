@@ -1,7 +1,10 @@
 #include <mediaserver/assets/derivative.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
+#include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -103,7 +106,7 @@ constexpr std::array<DerivativeProfile, 6U> profiles{{
     {
         DerivativeProfileId::Proxy720pCfrH264,
         "proxy-720p-cfr-h264",
-        1U,
+        2U,
         1U,
         DerivativeKind::Proxy,
         DerivativeContainer::Mp4,
@@ -120,10 +123,10 @@ constexpr std::array<DerivativeProfile, 6U> profiles{{
         DerivativeMatrix::Rec709,
         DerivativeColorRange::Limited,
         DerivativeAlphaPolicy::None,
-        DerivativeAudioLayout::Stereo,
-        DerivativeAudioCodec::Aac,
-        48'000U,
-        192'000U,
+        DerivativeAudioLayout::None,
+        DerivativeAudioCodec::None,
+        0U,
+        0U,
         DerivativeOrientationPolicy::PreserveSourceMetadata,
         DerivativePixelAspectPolicy::PreserveSourceMetadata,
         DerivativeFitPolicy::ScaleWithinBounds,
@@ -268,7 +271,8 @@ void hash_profile(Sha256Hasher& hash,
 Sha256Digest key_digest(doc::NodeId asset,
                         const ContentFingerprint& fingerprint,
                         const DerivativeProfile& profile,
-                        const Sha256Digest& signature) noexcept {
+                        const Sha256Digest& signature,
+                        std::optional<core::u32> segment = std::nullopt) noexcept {
     Sha256Hasher hash;
     hash_bytes(hash, "mediaserver.derivative-key.v1\0");
     hash_u64(hash, asset.value());
@@ -278,6 +282,10 @@ Sha256Digest key_digest(doc::NodeId asset,
     hash_u32(hash, profile.profile_version);
     hash_u32(hash, profile.generator_version);
     hash.update(signature.bytes);
+    if (segment.has_value()) {
+        hash_bytes(hash, "segment\0");
+        hash_u32(hash, *segment);
+    }
     return hash.finish();
 }
 
@@ -374,7 +382,61 @@ bool valid_derivative_key(const DerivativeKey& key) noexcept {
     const Sha256Digest signature = derivative_profile_signature(*profile);
     return key.profile_signature == signature &&
         key.digest == key_digest(key.asset, key.fingerprint, *profile,
-                                 signature);
+                                 signature, key.segment);
+}
+
+DerivativeKey derivative_segment_key(const DerivativeKey& whole,
+                                     core::u32 segment) noexcept {
+    DerivativeKey key = whole;
+    key.segment = segment;
+    if (const DerivativeProfile* const profile =
+            derivative_profile(whole.profile)) {
+        key.digest = key_digest(key.asset, key.fingerprint, *profile,
+                                key.profile_signature, segment);
+    }
+    return key;
+}
+
+core::u64 proxy_segment_frames(MediaFrameRate rate) noexcept {
+    if (rate.numerator == 0U || rate.denominator == 0U) {
+        return 0U;
+    }
+    const core::u64 frames =
+        (static_cast<core::u64>(rate.numerator) * proxy_segment_seconds +
+         rate.denominator / 2U) / rate.denominator;
+    return frames == 0U ? 1U : frames;
+}
+
+core::u32 proxy_segment_count(core::u64 frame_count,
+                              MediaFrameRate rate) noexcept {
+    const core::u64 frames = proxy_segment_frames(rate);
+    if (frames == 0U || frame_count == 0U) {
+        return 0U;
+    }
+    const core::u64 count = (frame_count + frames - 1U) / frames;
+    return count > std::numeric_limits<core::u32>::max()
+        ? 0U : static_cast<core::u32>(count);
+}
+
+std::optional<ProxySegmentRange>
+proxy_segment_range(core::u32 segment, core::u64 frame_count,
+                    MediaFrameRate rate) noexcept {
+    if (segment >= proxy_segment_count(frame_count, rate)) {
+        return std::nullopt;
+    }
+    const core::u64 frames = proxy_segment_frames(rate);
+    const core::u64 first = static_cast<core::u64>(segment) * frames;
+    return ProxySegmentRange{first, std::min(frames, frame_count - first)};
+}
+
+std::optional<core::u32>
+proxy_segment_of(core::u64 source_frame, core::u64 frame_count,
+                 MediaFrameRate rate) noexcept {
+    const core::u64 frames = proxy_segment_frames(rate);
+    if (frames == 0U || source_frame >= frame_count) {
+        return std::nullopt;
+    }
+    return static_cast<core::u32>(source_frame / frames);
 }
 
 std::string derivative_key_string(const DerivativeKey& key) {

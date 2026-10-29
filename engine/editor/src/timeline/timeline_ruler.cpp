@@ -381,6 +381,36 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
               status, status_color);
   }
 
+  // Kept plateset moments, under the markers: a tick in the moment's colour
+  // with a small diamond at its foot. They follow their footage, so they
+  // are read and visited here, never dragged.
+  if (moments_visible_ && !p.input.moments.empty()) {
+    ctx.push_clip(strip_graph);
+    for (std::size_t index = 0U; index < p.input.moments.size(); ++index) {
+      const TimelineMoment &moment = p.input.moments[index];
+      const float x = frame_to_x(static_cast<double>(moment.frame));
+      if (x < strip_graph.x - 4.0F || x > strip_graph.right() + 4.0F) {
+        continue;
+      }
+      const gui::UiColor color = timeline_marker_color(moment.color);
+      ctx.draw_list().add_line(x, strip.y + 3.0F, x, strip.bottom() - 4.0F,
+                               1.0F, alpha(color, 0.7F));
+      const float foot = strip.bottom() - 5.0F;
+      draw_diamond(ctx, x, foot, 3.5F, color);
+      const gui::Rect hit{x - 4.0F, strip.y, 8.0F, strip.height - 1.0F};
+      const gui::Interaction interaction =
+          ctx.grab(mix(id_, "moment", index), hit);
+      ctx.tooltip(hit, moment.name + "  " +
+                           timecode(p, static_cast<core::u64>(std::max<core::i64>(moment.frame, 0))) +
+                           "  (click to go there)");
+      if (interaction.clicked) {
+        frame.seek_to_frame = static_cast<core::u64>(
+            std::max<core::i64>(moment.frame, 0));
+      }
+    }
+    ctx.pop_clip();
+  }
+
   // Where each marker draws this frame: a drag previews from the panel.
   struct MarkerHit final {
     std::size_t index{};

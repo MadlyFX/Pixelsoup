@@ -146,6 +146,9 @@ struct Decoder final {
     // Every frame is held at half size: halved on the device before the
     // decoder's surface is released, or in system memory before upload.
     bool half_resolution{};
+    // Every frame is interleaved RGBA in system memory, for a reader on the
+    // CPU rather than the media shader: no renderer surface, no video planes.
+    bool rgba_only{};
     int stream{-1};
     double fps{25.0};
     core::i64 start_pts{};
@@ -337,6 +340,46 @@ class SharedHardwareDevice final {
     return device;
 }
 
+#if defined(_WIN32)
+// Gives a D3D12VA decoder surfaces padded the way FFmpeg's own DXVA2 and
+// D3D11VA paths pad them. FFmpeg 7.1's D3D12VA path allocates at the picture
+// size instead, and an HEVC picture whose height is not a multiple of its
+// coding block - 2160 is not - is then written past the end of its surface:
+// on the RTX 3090 the driver removes the device on the first such frame or
+// within twenty, taking the renderer's own device with it. The DXVA HEVC
+// specification asks for 128-pixel alignment, as for AV1; other codecs keep
+// FFmpeg's picture-sized surfaces, which they decode into correctly and the
+// renderer samples in place.
+//
+// Leaves FFmpeg to build its own frames context when this one cannot be made.
+void attach_padded_frames(AVCodecContext *context) noexcept {
+    if (context->codec_id != AV_CODEC_ID_HEVC &&
+        context->codec_id != AV_CODEC_ID_AV1) {
+        return;
+    }
+    AVBufferRef *frames = nullptr;
+    if (avcodec_get_hw_frames_parameters(context, context->hw_device_ctx,
+                                         AV_PIX_FMT_D3D12, &frames) < 0) {
+        return;
+    }
+    auto *const described = reinterpret_cast<AVHWFramesContext *>(frames->data);
+    constexpr int alignment = 128;
+    const auto padded = [](int extent) {
+        return (extent + alignment - 1) / alignment * alignment;
+    };
+    described->width =
+        padded(std::max(described->width, context->coded_width));
+    described->height =
+        padded(std::max(described->height, context->coded_height));
+    if (av_hwframe_ctx_init(frames) < 0) {
+        av_buffer_unref(&frames);
+        return;
+    }
+    av_buffer_unref(&context->hw_frames_ctx);
+    context->hw_frames_ctx = frames;
+}
+#endif
+
 [[nodiscard]] AVPixelFormat
 select_decoder_format(AVCodecContext *context,
                       const AVPixelFormat *formats) noexcept {
@@ -344,6 +387,11 @@ select_decoder_format(AVCodecContext *context,
     const AVPixelFormat *candidate = formats;
     while (*candidate != AV_PIX_FMT_NONE) {
         if (decoder != nullptr && *candidate == decoder->hardware_format) {
+#if defined(_WIN32)
+            if (*candidate == AV_PIX_FMT_D3D12) {
+                attach_padded_frames(context);
+            }
+#endif
             decoder->hardware_active = true;
             return *candidate;
         }
@@ -575,10 +623,12 @@ stream_frame_rate(const AVStream *stream) noexcept {
                             : 25.0;
 }
 
-[[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source) {
+[[nodiscard]] std::unique_ptr<Decoder> open_decoder(const std::string &source,
+                                                    bool rgba_only = false) {
     auto decoder = std::make_unique<Decoder>();
     const MediaSourceVariant variant = media_source_variant(source);
     decoder->half_resolution = variant.half_resolution;
+    decoder->rgba_only = rgba_only;
     const std::string path{variant.path};
     if (avformat_open_input(&decoder->format, path.c_str(), nullptr,
                             nullptr) != 0) {
@@ -610,7 +660,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
     // limits unknown/software streams to two concurrent jobs while allowing
     // confirmed hardware streams to use its additional bounded lanes.
     const bool hardware_configured =
-        configure_hardware_decoder(*decoder, *codec, true);
+        configure_hardware_decoder(*decoder, *codec, !rgba_only);
     const auto configure_software_threads = [&]() {
         const unsigned hardware_threads =
             std::max(1U, std::thread::hardware_concurrency());
@@ -703,14 +753,16 @@ stream_frame_rate(const AVStream *stream) noexcept {
         return DecodedFrame{};
     }
     // A shader samples the whole surface in normalized coordinates, so a
-    // picture that does not fill its own coded size cannot be read in place.
-    // The RHI refuses such a surface too; checking here keeps the frame
-    // reference and the fence wait off the path that is about to give up.
+    // picture that does not fill its surface - an HEVC surface padded to its
+    // coding blocks - cannot be read in place; the RHI refuses one too. Such
+    // a picture is copied out on the device below instead.
     const D3D12_RESOURCE_DESC described = hardware->texture->GetDesc();
-    if (described.Width != static_cast<UINT64>(width) ||
-        described.Height != static_cast<UINT>(height)) {
+    if (described.Width < static_cast<UINT64>(width) ||
+        described.Height < static_cast<UINT>(height)) {
         return DecodedFrame{};
     }
+    const bool padded = described.Width != static_cast<UINT64>(width) ||
+                        described.Height != static_cast<UINT>(height);
     // The surface's own format decides how its planes are read, and the two
     // this renderer knows are the two the media shader resolves. Anything
     // else - 4:2:2, 12-bit, a format a later codec introduces - goes back
@@ -731,42 +783,56 @@ stream_frame_rate(const AVStream *stream) noexcept {
         WaitForSingleObject(hardware->sync_ctx.event, INFINITE);
     }
 
+    // A copy made on the device owns its own surface, so the decoder has its
+    // one back the moment this returns.
+    const auto adopt_copy = [&](detail::VideoSurfaceCopy copy) noexcept {
+        DecodedFrame out{};
+        try {
+            DecodedGpuFrame gpu{};
+            gpu.retained = std::move(copy.owner);
+            gpu.device = device;
+            gpu.resource =
+                rhi::NativeHandle{rhi::BackendKind::D3d12,
+                                  rhi::NativeObjectKind::Texture, copy.resource};
+            gpu.bytes = static_cast<std::size_t>(copy.width) *
+                        static_cast<std::size_t>(copy.height) * 3U / 2U *
+                        (ten_bit ? 2U : 1U);
+            out.width = copy.width;
+            out.height = copy.height;
+            out.chroma = ChromaExtent{copy.width / 2U, copy.height / 2U};
+            out.layout = ten_bit
+                ? (colour.limited ? DecodedPixelLayout::P010Rec709Limited
+                                  : DecodedPixelLayout::P010Rec709Full)
+                : (colour.limited ? DecodedPixelLayout::Nv12Rec709Limited
+                                  : DecodedPixelLayout::Nv12Rec709Full);
+            out.gpu = std::move(gpu);
+        } catch (...) {
+            return DecodedFrame{};
+        }
+        return out;
+    };
+
     // A half-resolution clip keeps the halved copy and lets the decoder have
     // its surface back now, so read-ahead holds quarter-size frames. If the
-    // copy cannot be made the clip keeps the full-size surface: the picture
-    // stays right and only the saving is lost.
+    // copy cannot be made the clip keeps the full-size picture: it stays
+    // right and only the saving is lost. The halving reads texels by
+    // position, so it reads a padded surface's picture as it is.
     if (decoder.half_resolution) {
         auto halved = detail::halve_video_surface(
             static_cast<ID3D12Device *>(device.value), hardware->texture,
             static_cast<core::u32>(width), static_cast<core::u32>(height),
             ten_bit);
         if (halved.has_value()) {
-            DecodedFrame out{};
-            try {
-                DecodedGpuFrame gpu{};
-                gpu.retained = std::move(halved->owner);
-                gpu.device = device;
-                gpu.resource = rhi::NativeHandle{
-                    rhi::BackendKind::D3d12, rhi::NativeObjectKind::Texture,
-                    halved->resource};
-                gpu.bytes = static_cast<std::size_t>(halved->width) *
-                            static_cast<std::size_t>(halved->height) * 3U /
-                            2U * (ten_bit ? 2U : 1U);
-                out.width = halved->width;
-                out.height = halved->height;
-                out.chroma = ChromaExtent{halved->width / 2U,
-                                          halved->height / 2U};
-                out.layout = ten_bit
-                    ? (colour.limited ? DecodedPixelLayout::P010Rec709Limited
-                                      : DecodedPixelLayout::P010Rec709Full)
-                    : (colour.limited ? DecodedPixelLayout::Nv12Rec709Limited
-                                      : DecodedPixelLayout::Nv12Rec709Full);
-                out.gpu = std::move(gpu);
-            } catch (...) {
-                return DecodedFrame{};
-            }
-            return out;
+            return adopt_copy(std::move(*halved));
         }
+    }
+    if (padded) {
+        auto cropped = detail::crop_video_surface(
+            static_cast<ID3D12Device *>(device.value), hardware->texture,
+            static_cast<core::u32>(width), static_cast<core::u32>(height),
+            ten_bit);
+        return cropped.has_value() ? adopt_copy(std::move(*cropped))
+                                   : DecodedFrame{};
     }
 
     AVFrame *retained = av_frame_alloc();
@@ -859,11 +925,11 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     av_frame_unref(decoder.frame);
                     return out;
                 }
-                // This clip's surfaces cannot be sampled where they lie - a
-                // coded size larger than the picture, or colour this renderer
-                // does not read as video planes. Stop offering them and read
-                // the rest of the clip back through system memory below,
-                // which the same decoder context still supports.
+                // This clip's surfaces cannot be sampled where they lie or
+                // copied out on the device - colour this renderer does not
+                // read as video planes, or a copy that failed. Stop offering
+                // them and read the rest of the clip back through system
+                // memory below, which the same decoder context still supports.
                 decoder.resident_on_renderer = false;
             }
 #endif
@@ -892,7 +958,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
             const bool rec709 = colour.rec709;
             const bool limited = colour.limited;
             const bool full = colour.full;
-            if (decoder.hardware_active &&
+            if (!decoder.rgba_only && decoder.hardware_active &&
                 source_frame->format == AV_PIX_FMT_NV12 && rec709 &&
                 (limited || full) &&
                 width % 2 == 0 && height % 2 == 0 &&
@@ -919,7 +985,7 @@ stream_frame_rate(const AVStream *stream) noexcept {
                     return out;
                 }
             }
-            if (decoder.hardware_active &&
+            if (!decoder.rgba_only && decoder.hardware_active &&
                 source_frame->format == AV_PIX_FMT_P010LE && rec709 &&
                 (limited || full) && width % 2 == 0 && height % 2 == 0 &&
                 source_frame->linesize[0] >= width * 2 &&
@@ -965,7 +1031,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
             const AVPixelFormat source_format =
                 static_cast<AVPixelFormat>(source_frame->format);
             if (!decoder.target_chosen) {
-                decoder.target = choose_scaler_target(source_format, colour);
+                decoder.target = decoder.rgba_only
+                    ? ScalerTarget{}
+                    : choose_scaler_target(source_format, colour);
                 decoder.target_chosen = true;
             }
             if (decoder.target.direct) {
@@ -1199,6 +1267,9 @@ stream_frame_rate(const AVStream *stream) noexcept {
 // and walks frames, seeking only when the request is not the next frame.
 class FfmpegSource final : public MediaSource {
   public:
+    FfmpegSource() = default;
+    explicit FfmpegSource(bool rgba_only) noexcept : rgba_only_(rgba_only) {}
+
     [[nodiscard]] bool hardware_configured() const noexcept {
         return std::any_of(
             decoders_.begin(), decoders_.end(), [](const auto &entry) {
@@ -1236,7 +1307,7 @@ class FfmpegSource final : public MediaSource {
                                       core::u32 frame_index) override {
         auto found = decoders_.find(source);
         if (found == decoders_.end()) {
-            auto decoder = open_decoder(source);
+            auto decoder = open_decoder(source, rgba_only_);
             if (decoder == nullptr) {
                 return DecodedFrame{};
             }
@@ -1281,6 +1352,7 @@ class FfmpegSource final : public MediaSource {
 
   private:
     std::map<std::string, std::unique_ptr<Decoder>> decoders_;
+    bool rgba_only_{};
 };
 
 // Normalize once when a renderer first sees a source. This deliberately avoids
@@ -2199,6 +2271,40 @@ void hold_video_registry_lock_for_test(
 
 std::unique_ptr<MediaSource> make_media_source() {
     return std::make_unique<DispatchMediaSource>();
+}
+
+namespace {
+
+// Synchronous and private to its owner: it shares neither the process-wide
+// video scheduler nor the renderer's decode device, so a reader on the CPU
+// never holds a surface or a read-ahead budget the show is using.
+class RgbaMediaSource final : public MediaSource {
+  public:
+    [[nodiscard]] std::string key(const std::string &source,
+                                  core::u32 frame_index) const override {
+        return is_video_path(source)
+            ? video_.key(source, frame_index)
+            : images_.key(std::string{media_source_variant(source).path},
+                          frame_index);
+    }
+
+    [[nodiscard]] DecodedFrame decode(const std::string &source,
+                                      core::u32 frame_index) override {
+        return is_video_path(source)
+            ? video_.decode(source, frame_index)
+            : images_.decode(std::string{media_source_variant(source).path},
+                             frame_index);
+    }
+
+  private:
+    ImageSequenceSource images_;
+    FfmpegSource video_{true};
+};
+
+} // namespace
+
+std::unique_ptr<MediaSource> make_rgba_media_source() {
+    return std::make_unique<RgbaMediaSource>();
 }
 
 MediaDecodeStats media_decode_stats() { return video_registry().stats(); }

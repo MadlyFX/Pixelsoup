@@ -67,9 +67,13 @@ void profile_catalog_freezes_output_semantics() {
     DERIVATIVE_CHECK(proxy != nullptr);
     DERIVATIVE_CHECK(proxy->frame_rate_policy ==
                      assets::DerivativeFrameRatePolicy::PreserveSource);
+    // The editor proxy carries no audio; version 2 retired the AAC track.
+    DERIVATIVE_CHECK(proxy->profile_version == 2U);
+    DERIVATIVE_CHECK(proxy->audio_layout ==
+                     assets::DerivativeAudioLayout::None);
     DERIVATIVE_CHECK(proxy->audio_codec ==
-                     assets::DerivativeAudioCodec::Aac);
-    DERIVATIVE_CHECK(proxy->audio_sample_rate == 48'000U);
+                     assets::DerivativeAudioCodec::None);
+    DERIVATIVE_CHECK(proxy->audio_sample_rate == 0U);
 
     const auto* full_resolution = assets::derivative_profile(
         assets::DerivativeProfileId::ProxySourceCfrHevcMain10);
@@ -122,6 +126,55 @@ void every_identity_member_changes_the_key() {
     DERIVATIVE_CHECK(base.digest != other_semantics.digest);
     DERIVATIVE_CHECK(base.profile_signature !=
                      other_semantics.profile_signature);
+}
+
+// Segments of a proxy are ten seconds of source each, the last one short, and
+// each is keyed apart from the others and from the whole file, whose key does
+// not change.
+void proxy_segments_cover_the_source_and_key_apart() {
+    const assets::MediaFrameRate rate{24'000U, 1'001U};
+    // 23.976 fps: ten seconds is 240 frames (239.76, rounded).
+    DERIVATIVE_CHECK(assets::proxy_segment_frames(rate) == 240U);
+    DERIVATIVE_CHECK(assets::proxy_segment_count(2'928U, rate) == 13U);
+    DERIVATIVE_CHECK(assets::proxy_segment_count(240U, rate) == 1U);
+    DERIVATIVE_CHECK(assets::proxy_segment_count(0U, rate) == 0U);
+    DERIVATIVE_CHECK(assets::proxy_segment_count(
+                         10U, assets::MediaFrameRate{0U, 1U}) == 0U);
+    DERIVATIVE_CHECK(assets::proxy_segment_range(0U, 2'928U, rate) ==
+                     assets::ProxySegmentRange{0U, 240U});
+    DERIVATIVE_CHECK(assets::proxy_segment_range(5U, 2'928U, rate) ==
+                     assets::ProxySegmentRange{1'200U, 240U});
+    DERIVATIVE_CHECK(assets::proxy_segment_range(12U, 2'928U, rate) ==
+                     assets::ProxySegmentRange{2'880U, 48U});
+    DERIVATIVE_CHECK(!assets::proxy_segment_range(13U, 2'928U, rate));
+    DERIVATIVE_CHECK(assets::proxy_segment_of(0U, 2'928U, rate) == 0U);
+    DERIVATIVE_CHECK(assets::proxy_segment_of(239U, 2'928U, rate) == 0U);
+    DERIVATIVE_CHECK(assets::proxy_segment_of(240U, 2'928U, rate) == 1U);
+    DERIVATIVE_CHECK(assets::proxy_segment_of(2'927U, 2'928U, rate) == 12U);
+    DERIVATIVE_CHECK(!assets::proxy_segment_of(2'928U, 2'928U, rate));
+
+    const auto* profile = assets::derivative_profile(
+        assets::DerivativeProfileId::Proxy720pCfrH264);
+    DERIVATIVE_CHECK(profile != nullptr);
+    const auto whole = assets::make_derivative_key(
+        doc::NodeId{7U}, fingerprint("plate"), *profile);
+    DERIVATIVE_CHECK(!whole.segment.has_value());
+    const auto first = assets::derivative_segment_key(whole, 0U);
+    const auto second = assets::derivative_segment_key(whole, 1U);
+    DERIVATIVE_CHECK(first.segment == 0U);
+    DERIVATIVE_CHECK(assets::valid_derivative_key(first));
+    DERIVATIVE_CHECK(assets::valid_derivative_key(second));
+    DERIVATIVE_CHECK(first.digest != whole.digest);
+    DERIVATIVE_CHECK(first.digest != second.digest);
+    DERIVATIVE_CHECK(assets::derivative_cache_relative_path(first) !=
+                     assets::derivative_cache_relative_path(whole));
+    // A segment index changed without its digest is not a valid key.
+    auto forged = first;
+    forged.segment = 1U;
+    DERIVATIVE_CHECK(!assets::valid_derivative_key(forged));
+    auto unsegmented = first;
+    unsegmented.segment.reset();
+    DERIVATIVE_CHECK(!assets::valid_derivative_key(unsegmented));
 }
 
 void cache_paths_are_content_addressed_and_machine_local() {
@@ -186,7 +239,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"proxy segments cover the source and key apart",
+     &proxy_segments_cover_the_source_and_key_apart},
     {"profile catalog freezes output semantics",
      &profile_catalog_freezes_output_semantics},
     {"every identity member changes the key",

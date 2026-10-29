@@ -3,6 +3,7 @@
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/assets/library_edit.hpp>
+#include <mediaserver/assets/plateset.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
@@ -257,16 +258,10 @@ inline constexpr std::size_t library_column_count =
 [[nodiscard]] std::optional<LibraryImportAction>
 library_import_kind(std::string_view path);
 
-// SMPTE timecode at `rate`. `timecode_frames` reads "HH:MM:SS:FF" (a ';'
-// or '.' before the frames marks drop-frame) as a frame number, or nothing
-// when it is not a timecode at that rate; `timecode_text` writes a frame
-// number back. Drop-frame applies only at 29.97 and 59.94 and their
-// multiples; any other rate counts every frame.
-[[nodiscard]] std::optional<core::i64>
-timecode_frames(std::string_view timecode, assets::MediaFrameRate rate);
-[[nodiscard]] std::string timecode_text(core::i64 frame,
-                                        assets::MediaFrameRate rate,
-                                        bool drop_frame);
+// SMPTE timecode at `rate`, shared with the plateset sync: see
+// assets/plateset.hpp.
+using assets::timecode_frames;
+using assets::timecode_text;
 
 // One library interaction. Importing adds a persistent project asset,
 // viewing opens one in the Asset Viewer, and the organisation edits only
@@ -317,6 +312,14 @@ struct LibraryFrame final {
 
   bool operator==(const LibraryFrame &) const = default;
 };
+
+// The draw-only mark for a plateset: a car seen from above with its plates
+// around it. Shared with the Asset Viewer and the drag ghost. With
+// `highlight`, that slot's plate is lit and the others dimmed, so the mark
+// says which plate a slot is for.
+void draw_plateset_icon(
+    gui::UiContext &ctx, const gui::Rect &bounds,
+    std::optional<assets::PlatesetSlot> highlight = std::nullopt);
 
 // The project's Library, laid out the way editorial and engine asset
 // browsers are: a toolbar to search, import and make folders; a List view
@@ -451,6 +454,7 @@ private:
   std::string ghost_label_;
   const rhi::Texture *ghost_texture_{};
   bool ghost_model_{};
+  bool ghost_plateset_{};
   // The generator a ghost stands for, drawn as its icon.
   std::optional<LibraryAddAction> ghost_generator_;
   std::size_t ghost_count_{};
@@ -458,6 +462,11 @@ private:
   std::optional<std::string> pending_folder_name_;
   doc::NodeId pending_folder_parent_{};
   std::set<doc::NodeId> known_folders_;
+  // A plateset this panel asked for: opened in the Asset Viewer once it
+  // appears, and named straight away when it was made empty.
+  std::optional<std::string> pending_plateset_name_;
+  bool pending_plateset_rename_{};
+  std::set<doc::NodeId> known_platesets_;
   // The open context menu: what it was opened on and what each entry does,
   // fixed when it opened so what the operator reads is what a choice does.
   doc::NodeId menu_target_{};

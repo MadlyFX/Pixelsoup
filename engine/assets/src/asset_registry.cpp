@@ -65,6 +65,9 @@ AssetKind asset_kind(const Asset& asset) noexcept {
     if (std::holds_alternative<MediaAsset>(asset)) {
         return AssetKind::Media;
     }
+    if (std::holds_alternative<PlatesetAsset>(asset)) {
+        return AssetKind::Plateset;
+    }
     return std::get<ModelAsset>(asset).projection_mesh
         ? AssetKind::ProjectionMesh
         : AssetKind::Model;
@@ -85,16 +88,28 @@ std::string_view asset_display_name(const Asset& asset) noexcept {
 std::string_view asset_source(const Asset& asset) noexcept {
     return std::visit(
         [](const auto& held) noexcept -> std::string_view {
-            return held.source;
+            if constexpr (std::is_same_v<std::remove_cvref_t<decltype(held)>,
+                                         PlatesetAsset>) {
+                return {};
+            } else {
+                return held.source;
+            }
         },
         asset);
 }
 
 const std::optional<ContentFingerprint>&
 asset_fingerprint(const Asset& asset) noexcept {
+    // A plateset names other assets and has no content of its own.
+    static const std::optional<ContentFingerprint> none;
     return std::visit(
         [](const auto& held) -> const std::optional<ContentFingerprint>& {
-            return held.fingerprint;
+            if constexpr (std::is_same_v<std::remove_cvref_t<decltype(held)>,
+                                         PlatesetAsset>) {
+                return none;
+            } else {
+                return held.fingerprint;
+            }
         },
         asset);
 }
@@ -180,7 +195,20 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
         std::visit(
             [&hash](const auto& held) noexcept {
                 using Held = std::remove_cvref_t<decltype(held)>;
-                if constexpr (std::is_same_v<Held, MediaAsset>) {
+                if constexpr (std::is_same_v<Held, PlatesetAsset>) {
+                    hash_byte(hash, static_cast<core::u8>(held.rig));
+                    for (const PlatesetSlotAssignment& slot : held.slots) {
+                        hash_u64(hash, slot.media.value());
+                        hash_u64(hash, static_cast<core::u64>(slot.offset));
+                    }
+                    hash_byte(hash, held.half_resolution ? 1U : 0U);
+                    hash_u64(hash, static_cast<core::u64>(held.moments.size()));
+                    for (const PlatesetMoment& moment : held.moments) {
+                        hash_u64(hash, static_cast<core::u64>(moment.frame));
+                        hash_text(hash, moment.name);
+                        hash_byte(hash, moment.color);
+                    }
+                } else if constexpr (std::is_same_v<Held, MediaAsset>) {
                     hash_byte(hash, held.dimensions.has_value() ? 1U : 0U);
                     if (held.dimensions.has_value()) {
                         hash_u32(hash, held.dimensions->width);

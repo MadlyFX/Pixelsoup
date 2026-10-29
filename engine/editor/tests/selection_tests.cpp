@@ -92,12 +92,31 @@ void modifier_resolution_never_conflates_ctrl_with_shift() {
            editor::SelectionAction::Range);
 }
 
+void a_set_replaces_the_selection_around_its_primary() {
+  editor::NodeSelection selection;
+  selection.replace(doc::NodeId{90U});
+  constexpr std::array plates{doc::NodeId{30U}, doc::NodeId{10U},
+                              doc::NodeId{30U}};
+  selection.replace(plates, doc::NodeId{20U});
+  constexpr std::array expected{doc::NodeId{10U}, doc::NodeId{20U},
+                                doc::NodeId{30U}};
+  UI_CHECK(std::ranges::equal(selection.members(), expected));
+  UI_CHECK(selection.primary() == doc::NodeId{20U});
+  // The primary anchors a following Shift range.
+  constexpr std::array visible{doc::NodeId{20U}, doc::NodeId{40U}};
+  selection.apply(editor::SelectionAction::Range, doc::NodeId{40U}, visible);
+  constexpr std::array ranged{doc::NodeId{20U}, doc::NodeId{40U}};
+  UI_CHECK(std::ranges::equal(selection.members(), ranged));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
+    {"a set replaces the selection around its primary",
+     &a_set_replaces_the_selection_around_its_primary},
     {"membership is unique and sorted without losing primary",
      &membership_is_unique_and_sorted_without_losing_primary},
     {"Ctrl toggle removes exactly one member",

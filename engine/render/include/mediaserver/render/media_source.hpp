@@ -144,6 +144,14 @@ class ImageSequenceSource final : public MediaSource {
 // still or image sequence ignores the request and decodes at full size.
 [[nodiscard]] std::unique_ptr<MediaSource> make_media_source();
 
+// The same routing for a reader that wants pixels on the CPU rather than a
+// texture: every video frame is interleaved Rgba8 in system memory, converted
+// with the colour the planar path resolves, never a decoder surface or the
+// two-plane layouts the media shader reads. Synchronous and unshared - each
+// instance opens its own decoders - so it belongs on a worker, not a frame
+// path. Stills decode exactly as make_media_source() decodes them.
+[[nodiscard]] std::unique_ptr<MediaSource> make_rgba_media_source();
+
 struct MediaSourceVariant final {
     std::string_view path;
     bool half_resolution{};

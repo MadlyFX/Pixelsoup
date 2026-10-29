@@ -1290,7 +1290,7 @@ struct EditorPreferences final {
   core::u32 output_read_ahead_frames{12U};
   core::u32 playback_cache_mebibytes{2'048U};
   core::u32 playback_trail_frames{};
-  TranscodePriority proxy_transcode_priority{TranscodePriority::Background};
+  TranscodePriority proxy_transcode_priority{TranscodePriority::Fast};
 
   bool operator==(const EditorPreferences &) const = default;
 };

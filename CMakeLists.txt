@@ -90,6 +90,10 @@ add_subdirectory(engine/assets)
 # deterministic radial transforms) without depending on the GPU renderer.
 add_subdirectory(engine/compositor)
 
+# Particles and volumes, kept free of media server dependencies so it can be
+# published on its own; see libs/ajfx/README.md.
+add_subdirectory(libs/ajfx)
+
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a
 # headless node can drive a GPU output target without ever creating one.
@@ -125,6 +129,7 @@ if(BUILD_TESTING)
     mediaserver_test_area(persist engine/persist)
     mediaserver_test_area(scene engine/scene engine/track engine/assets)
     mediaserver_test_area(compositor engine/compositor)
+    mediaserver_test_area(particles libs/ajfx)
     mediaserver_test_area(output engine/output engine/topology engine/sync)
     mediaserver_test_area(render engine/shaders engine/rhi engine/render)
     mediaserver_test_area(editor engine/ui engine/gui engine/editor)

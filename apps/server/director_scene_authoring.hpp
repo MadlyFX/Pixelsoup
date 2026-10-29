@@ -146,7 +146,8 @@ schedule_asset_proxy_edit(cmd::DirectorScheduler &scheduler,
 [[nodiscard]] bool
 schedule_asset_library_edit(cmd::DirectorScheduler &scheduler,
                             const editor::AssetLibraryEditIntent &request,
-                            doc::NodeId new_folder, cmd::FrameNumber apply_at);
+                            doc::NodeId new_folder, cmd::FrameNumber apply_at,
+                            scene::MediaFrameRate show_rate);
 
 [[nodiscard]] bool schedule_delete(cmd::DirectorScheduler &scheduler,
                                    doc::NodeId node, core::u64 gesture,

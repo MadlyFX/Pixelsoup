@@ -116,7 +116,8 @@ bool valid_proxy_frame_map(const ProxyFrameMap& map) noexcept {
 }
 
 ProxyFrameMapResult make_identity_proxy_frame_map(
-    core::u64 frame_count, MediaFrameRate frame_rate) noexcept {
+    core::u64 frame_count, MediaFrameRate frame_rate,
+    core::u64 first_source_frame) noexcept {
     try {
         if (frame_rate.numerator == 0U || frame_rate.denominator == 0U) {
             return ProxyFrameMapResult::failure(
@@ -134,8 +135,14 @@ ProxyFrameMapResult make_identity_proxy_frame_map(
         }
         map.source_time_by_proxy_frame.reserve(
             static_cast<std::size_t>(frame_count));
+        if (first_source_frame >
+            std::numeric_limits<core::u64>::max() - frame_count) {
+            return ProxyFrameMapResult::failure(
+                error(ProxyFrameMapErrorCode::InvalidMap));
+        }
         for (core::u64 ordinal = 0U; ordinal < frame_count; ++ordinal) {
-            auto time = presentation_time_for_frame(ordinal, frame_rate);
+            auto time = presentation_time_for_frame(
+                first_source_frame + ordinal, frame_rate);
             if (!time) {
                 return ProxyFrameMapResult::failure(time.error());
             }

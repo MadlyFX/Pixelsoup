@@ -31,6 +31,8 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -39,6 +41,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace mediaserver::server {
 namespace {
@@ -344,6 +347,9 @@ open_encoder(AVCodecContext *&opened, const ProxySourceMetadata &source,
         context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         AVDictionary *options{};
         const std::string quality = std::to_string(profile.quality);
+        if (nvenc || !bitrate_encoder) {
+            av_dict_set(&options, "forced-idr", "1", 0);
+        }
         if (nvenc) {
             av_dict_set(&options, "preset", nvenc_preset(priority), 0);
             av_dict_set(&options, "rc", "vbr", 0);
@@ -425,7 +431,10 @@ probe_output(const std::filesystem::path &path,
     const int audio_index = av_find_best_stream(
         format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     const bool encoded_audio = audio_index >= 0;
-    if (encoded_audio != source.has_audio) {
+    const bool expected_audio =
+        source.has_audio &&
+        profile.audio_codec != assets::DerivativeAudioCodec::None;
+    if (encoded_audio != expected_audio) {
         return std::nullopt;
     }
     if (encoded_audio) {
@@ -517,6 +526,9 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
             return failure(ProxyBackendErrorCode::MetadataUnavailable);
         }
         report_progress(request, 0U, metadata->frame_count);
+        if (!request.join_segments.empty()) {
+            return join(request, *metadata, measured.value(), stop);
+        }
         const AVCodec *const decoder =
             avcodec_find_decoder(source_stream.codecpar->codec_id);
         std::unique_ptr<AVCodecContext, CodecCloser> decode{
@@ -526,8 +538,12 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
             return failure(ProxyBackendErrorCode::EncodeFailed);
         }
         // Jobs remain serialized. This setting controls only how much CPU the
-        // one active source decode may use.
-        decode->thread_count = codec_thread_count(priority_);
+        // one active source decode may use. The budget is chosen when the job
+        // starts: a job begun during playback keeps the Background budget.
+        const ProxyTranscodePriority priority =
+            request.yield_to_playback ? ProxyTranscodePriority::Background
+                                      : priority_;
+        decode->thread_count = codec_thread_count(priority);
         decode->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
         if (avcodec_open2(decode.get(), decoder, nullptr) < 0) {
             return failure(ProxyBackendErrorCode::EncodeFailed);
@@ -537,21 +553,37 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
             fitted_dimensions(metadata->dimensions, request.profile);
         AVCodecContext *raw_encode{};
         const AVCodec *const encoder = open_encoder(
-            raw_encode, *metadata, dimensions, request.profile, priority_);
+            raw_encode, *metadata, dimensions, request.profile, priority);
         std::unique_ptr<AVCodecContext, CodecCloser> encode{raw_encode};
         if (encoder == nullptr || !encode) {
             return failure(ProxyBackendErrorCode::Unavailable);
         }
 
+        // A profile without audio, such as the editor's 720p proxy, skips
+        // the source's audio entirely: nothing decodes or encodes it.
+        const bool with_audio =
+            metadata->has_audio &&
+            request.profile.audio_codec != assets::DerivativeAudioCodec::None;
+        const ProxySourceRange range =
+            request.range.value_or(ProxySourceRange{0U, metadata->frame_count});
+        const bool pieces = request.piece_frames != 0U;
+        if (range.count == 0U || range.first >= metadata->frame_count ||
+            range.count > metadata->frame_count - range.first ||
+            (request.range.has_value() && with_audio) ||
+            (pieces && (!request.range.has_value() || !request.piece_done))) {
+            // A range of a profile with audio would need the audio cut on
+            // the same frames; no such profile is encoded in ranges.
+            return failure(ProxyBackendErrorCode::Unavailable);
+        }
         const int audio_index =
-            metadata->has_audio
+            with_audio
                 ? av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1,
                                       nullptr, 0)
                 : -1;
         std::unique_ptr<AVCodecContext, CodecCloser> audio_decode;
         std::unique_ptr<AVCodecContext, CodecCloser> audio_encode;
         const AVCodec *audio_encoder{};
-        if (metadata->has_audio) {
+        if (with_audio) {
             AVStream &audio_source = *input->streams[audio_index];
             const AVCodec *const audio_decoder =
                 avcodec_find_decoder(audio_source.codecpar->codec_id);
@@ -583,43 +615,57 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
             }
         }
 
-        AVFormatContext *raw_output{};
-        const std::string output_path = request.output_file.string();
-        if (avformat_alloc_output_context2(&raw_output, nullptr, "mp4",
-                                           output_path.c_str()) < 0 ||
-            raw_output == nullptr) {
-            return failure(ProxyBackendErrorCode::EncodeFailed);
-        }
-        std::unique_ptr<AVFormatContext, OutputCloser> output{raw_output};
-        AVStream *const encoded_stream =
-            avformat_new_stream(output.get(), encoder);
-        if (encoded_stream == nullptr ||
-            avcodec_parameters_from_context(encoded_stream->codecpar,
-                                            encode.get()) < 0) {
-            return failure(ProxyBackendErrorCode::AllocationFailed);
-        }
-        encoded_stream->time_base = encode->time_base;
-        encoded_stream->avg_frame_rate = encode->framerate;
-        encoded_stream->sample_aspect_ratio = encode->sample_aspect_ratio;
+        std::unique_ptr<AVFormatContext, OutputCloser> output;
+        AVStream *encoded_stream{};
         AVStream *audio_stream{};
-        if (audio_encode) {
-            audio_stream = avformat_new_stream(output.get(), audio_encoder);
-            if (audio_stream == nullptr ||
-                avcodec_parameters_from_context(audio_stream->codecpar,
-                                                audio_encode.get()) < 0) {
-                return failure(ProxyBackendErrorCode::AllocationFailed);
+        const auto open_output =
+            [&](const std::filesystem::path &path)
+            -> std::optional<ProxyBackendErrorCode> {
+            AVFormatContext *raw_output{};
+            const std::string output_path = path.string();
+            if (avformat_alloc_output_context2(&raw_output, nullptr, "mp4",
+                                               output_path.c_str()) < 0 ||
+                raw_output == nullptr) {
+                return ProxyBackendErrorCode::EncodeFailed;
             }
-            audio_stream->time_base = audio_encode->time_base;
-        }
-        if (avio_open(&output->pb, output_path.c_str(), AVIO_FLAG_WRITE) < 0) {
-            return failure(ProxyBackendErrorCode::EncodeFailed);
-        }
-        AVDictionary *mux_options{};
-        av_dict_set(&mux_options, "movflags", "+faststart", 0);
-        const int header = avformat_write_header(output.get(), &mux_options);
-        av_dict_free(&mux_options);
-        if (header < 0) {
-            return failure(ProxyBackendErrorCode::EncodeFailed);
+            output.reset(raw_output);
+            encoded_stream = avformat_new_stream(output.get(), encoder);
+            if (encoded_stream == nullptr ||
+                avcodec_parameters_from_context(encoded_stream->codecpar,
+                                                encode.get()) < 0) {
+                return ProxyBackendErrorCode::AllocationFailed;
+            }
+            encoded_stream->time_base = encode->time_base;
+            encoded_stream->avg_frame_rate = encode->framerate;
+            encoded_stream->sample_aspect_ratio = encode->sample_aspect_ratio;
+            if (audio_encode) {
+                audio_stream =
+                    avformat_new_stream(output.get(), audio_encoder);
+                if (audio_stream == nullptr ||
+                    avcodec_parameters_from_context(audio_stream->codecpar,
+                                                    audio_encode.get()) < 0) {
+                    return ProxyBackendErrorCode::AllocationFailed;
+                }
+                audio_stream->time_base = audio_encode->time_base;
+            }
+            if (avio_open(&output->pb, output_path.c_str(), AVIO_FLAG_WRITE) <
+                0) {
+                return ProxyBackendErrorCode::EncodeFailed;
+            }
+            AVDictionary *mux_options{};
+            av_dict_set(&mux_options, "movflags", "+faststart", 0);
+            const int header =
+                avformat_write_header(output.get(), &mux_options);
+            av_dict_free(&mux_options);
+            if (header < 0) {
+                return ProxyBackendErrorCode::EncodeFailed;
+            }
+            return std::nullopt;
+        };
+        if (const auto failed = open_output(
+                pieces ? proxy_piece_path(request.output_file, 0U)
+                       : request.output_file)) {
+            return failure(*failed);
         }
 
         std::unique_ptr<AVPacket, PacketCloser> input_packet{av_packet_alloc()};
@@ -674,6 +720,54 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
         }
 
         core::u64 frame_count{};
+        // The piece being written, how many frames it holds, and the output
+        // of the one handed over last.
+        core::u32 piece{};
+        core::u64 piece_packets{};
+        bool piece_refused = false;
+        std::optional<ProxyBackendOutput> last_piece;
+        const auto piece_size = [&](core::u32 index) -> core::u64 {
+            const core::u64 first =
+                static_cast<core::u64>(index) * request.piece_frames;
+            return std::min(request.piece_frames, range.count - first);
+        };
+        // Closes the current piece, proves it holds exactly its frames, and
+        // hands it to the caller.
+        const auto finish_piece = [&]() -> bool {
+            if (piece_packets != piece_size(piece) ||
+                av_write_trailer(output.get()) < 0) {
+                return false;
+            }
+            if (output->pb != nullptr) {
+                static_cast<void>(avio_closep(&output->pb));
+            }
+            output.reset();
+            const std::filesystem::path file =
+                proxy_piece_path(request.output_file, piece);
+            const auto probed =
+                probe_output(file, *metadata, request.profile);
+            auto map = assets::make_identity_proxy_frame_map(
+                piece_packets, metadata->frame_rate,
+                range.first +
+                    static_cast<core::u64>(piece) * request.piece_frames);
+            if (!probed || !map || probed->frame_count != piece_packets) {
+                std::cerr << "proxy piece " << piece
+                          << " contract validation failed: packets="
+                          << piece_packets << " probed="
+                          << (probed ? probed->frame_count : 0U) << '\n';
+                return false;
+            }
+            last_piece = ProxyBackendOutput{measured.value(), *metadata,
+                                            *probed, std::move(map).value()};
+            const bool last =
+                static_cast<core::u64>(piece + 1U) * request.piece_frames >=
+                range.count;
+            if (!request.piece_done(piece, *last_piece) && !last) {
+                piece_refused = true;
+                return false;
+            }
+            return true;
+        };
         const auto write_packets = [&]() -> bool {
             while (true) {
                 const int received =
@@ -683,6 +777,46 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
                 }
                 if (received < 0) {
                     return false;
+                }
+                if (pieces) {
+                    // Encoder timestamps count frames of the range. A frame
+                    // past this piece must open the next one as an IDR;
+                    // anything else would make the next piece undecodable
+                    // on its own.
+                    const std::int64_t piece_first =
+                        static_cast<std::int64_t>(piece) *
+                        static_cast<std::int64_t>(request.piece_frames);
+                    const std::int64_t piece_end =
+                        piece_first +
+                        static_cast<std::int64_t>(piece_size(piece));
+                    if (output_packet->pts >= piece_end) {
+                        if ((output_packet->flags & AV_PKT_FLAG_KEY) == 0 ||
+                            output_packet->pts != piece_end ||
+                            !finish_piece()) {
+                            av_packet_unref(output_packet.get());
+                            return false;
+                        }
+                        ++piece;
+                        piece_packets = 0U;
+                        if (open_output(proxy_piece_path(request.output_file,
+                                                         piece))) {
+                            av_packet_unref(output_packet.get());
+                            return false;
+                        }
+                    } else if (output_packet->pts < piece_first) {
+                        av_packet_unref(output_packet.get());
+                        return false;
+                    }
+                    // Each piece's timestamps start at zero, as a segment
+                    // encoded on its own does.
+                    const std::int64_t shift =
+                        static_cast<std::int64_t>(piece) *
+                        static_cast<std::int64_t>(request.piece_frames);
+                    output_packet->pts -= shift;
+                    if (output_packet->dts != AV_NOPTS_VALUE) {
+                        output_packet->dts -= shift;
+                    }
+                    ++piece_packets;
                 }
                 av_packet_rescale_ts(output_packet.get(), encode->time_base,
                                      encoded_stream->time_base);
@@ -709,15 +843,41 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
                 return false;
             }
             converted->pts = static_cast<std::int64_t>(frame_count);
+            converted->pict_type =
+                pieces && frame_count != 0U &&
+                        frame_count % request.piece_frames == 0U
+                    ? AV_PICTURE_TYPE_I
+                    : AV_PICTURE_TYPE_NONE;
             ++frame_count;
-            if (frame_count == metadata->frame_count ||
-                frame_count % 8U == 0U) {
-                report_progress(request, frame_count, metadata->frame_count);
+            if (frame_count == range.count || frame_count % 8U == 0U) {
+                report_progress(request, frame_count, range.count);
             }
             if (avcodec_send_frame(encode.get(), converted.get()) < 0) {
                 return false;
             }
             return write_packets();
+        };
+        // A range numbers each decoded frame from its timestamp, exactly as
+        // the playback decoder does, so proxy frame j is the picture the
+        // source shows as frame first + j. A whole-file encode counts frames.
+        const std::int64_t start_pts = source_stream.start_time == AV_NOPTS_VALUE
+            ? 0 : source_stream.start_time;
+        const AVRational frame_duration{
+            static_cast<int>(metadata->frame_rate.denominator),
+            static_cast<int>(metadata->frame_rate.numerator)};
+        bool range_complete = false;
+        const auto source_index = [&]() -> std::optional<core::u64> {
+            const std::int64_t pts =
+                decoded->best_effort_timestamp == AV_NOPTS_VALUE
+                    ? decoded->pts : decoded->best_effort_timestamp;
+            if (pts == AV_NOPTS_VALUE) {
+                return std::nullopt;
+            }
+            const std::int64_t index = av_rescale_q_rnd(
+                pts - start_pts, source_stream.time_base, frame_duration,
+                static_cast<AVRounding>(AV_ROUND_NEAR_INF |
+                                        AV_ROUND_PASS_MINMAX));
+            return static_cast<core::u64>(std::max<std::int64_t>(index, 0));
         };
         const auto drain_decoder = [&]() -> bool {
             while (true) {
@@ -726,12 +886,45 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
                 if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) {
                     return true;
                 }
-                if (received < 0 || !convert_and_send()) {
+                if (received < 0) {
                     return false;
                 }
+                if (request.range.has_value()) {
+                    const auto index = source_index();
+                    if (!index.has_value()) {
+                        return false;
+                    }
+                    if (*index < range.first || range_complete) {
+                        av_frame_unref(decoded.get());
+                        continue;
+                    }
+                    // A frame the seek skipped past is a gap; the range
+                    // fails rather than mislabel what follows.
+                    if (*index != range.first + frame_count) {
+                        return false;
+                    }
+                }
+                if (!convert_and_send()) {
+                    return false;
+                }
+                // A whole-file encode reads to the end, so trailing audio
+                // packets are still muxed.
+                range_complete =
+                    request.range.has_value() && frame_count == range.count;
                 av_frame_unref(decoded.get());
             }
         };
+        if (range.first != 0U) {
+            const std::int64_t target =
+                start_pts + av_rescale_q(static_cast<std::int64_t>(range.first),
+                                         frame_duration,
+                                         source_stream.time_base);
+            if (av_seek_frame(input.get(), video_index, target,
+                              AVSEEK_FLAG_BACKWARD) < 0) {
+                return failure(ProxyBackendErrorCode::EncodeFailed);
+            }
+            avcodec_flush_buffers(decode.get());
+        }
 
         std::int64_t encoded_audio_samples{};
         const auto write_audio_packets = [&]() -> bool {
@@ -855,14 +1048,17 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
             }
         };
 
-        while (av_read_frame(input.get(), input_packet.get()) >= 0) {
+        while (!range_complete &&
+               av_read_frame(input.get(), input_packet.get()) >= 0) {
             if (stop.stop_requested()) {
                 return failure(ProxyBackendErrorCode::Cancelled);
             }
             if (input_packet->stream_index == video_index &&
                 (avcodec_send_packet(decode.get(), input_packet.get()) < 0 ||
                  !drain_decoder())) {
-                return failure(ProxyBackendErrorCode::EncodeFailed);
+                return failure(piece_refused || stop.stop_requested()
+                                   ? ProxyBackendErrorCode::Cancelled
+                                   : ProxyBackendErrorCode::EncodeFailed);
             }
             if (audio_decode && input_packet->stream_index == audio_index &&
                 (avcodec_send_packet(audio_decode.get(), input_packet.get()) <
@@ -882,11 +1078,19 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
         if (avcodec_send_packet(decode.get(), nullptr) < 0 ||
             !drain_decoder() || avcodec_send_frame(encode.get(), nullptr) < 0 ||
             !write_packets() || !audio_finished ||
-            frame_count != metadata->frame_count ||
-            av_write_trailer(output.get()) < 0) {
-            return failure(stop.stop_requested()
+            frame_count != range.count) {
+            return failure(stop.stop_requested() || piece_refused
                                ? ProxyBackendErrorCode::Cancelled
                                : ProxyBackendErrorCode::OutputValidationFailed);
+        }
+        if (pieces) {
+            if (!finish_piece() || !last_piece.has_value()) {
+                return failure(ProxyBackendErrorCode::OutputValidationFailed);
+            }
+            return ProxyBackendResult::success(std::move(*last_piece));
+        }
+        if (av_write_trailer(output.get()) < 0) {
+            return failure(ProxyBackendErrorCode::OutputValidationFailed);
         }
         if (output->pb != nullptr) {
             static_cast<void>(avio_closep(&output->pb));
@@ -896,7 +1100,7 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
         const auto encoded =
             probe_output(request.output_file, *metadata, request.profile);
         auto frame_map = assets::make_identity_proxy_frame_map(
-            frame_count, metadata->frame_rate);
+            frame_count, metadata->frame_rate, range.first);
         if (!encoded || !frame_map || encoded->frame_count != frame_count) {
             std::cerr << "proxy output contract validation failed: decoded="
                       << frame_count
@@ -913,6 +1117,145 @@ class FfmpegProxyEncoder final : public ProxyEncoderBackend {
     }
 
   private:
+    // The whole-file proxy from its segments, by copying their packets into
+    // one MP4 one after another. Nothing is decoded or encoded, so it takes
+    // as long as reading and writing the bytes. Segments made by different
+    // encoders, whose stream headers differ, cannot be joined; the caller
+    // then encodes the whole file instead.
+    ProxyBackendResult join(const ProxyEncodeRequest &request,
+                            const ProxySourceMetadata &metadata,
+                            const assets::ContentFingerprint &measured,
+                            std::stop_token stop) const {
+        if (request.range.has_value() ||
+            request.profile.audio_codec != assets::DerivativeAudioCodec::None) {
+            return failure(ProxyBackendErrorCode::Unavailable);
+        }
+        const std::string output_path = request.output_file.string();
+        AVFormatContext *raw_output{};
+        if (avformat_alloc_output_context2(&raw_output, nullptr, "mp4",
+                                           output_path.c_str()) < 0 ||
+            raw_output == nullptr) {
+            return failure(ProxyBackendErrorCode::EncodeFailed);
+        }
+        std::unique_ptr<AVFormatContext, OutputCloser> output{raw_output};
+        std::unique_ptr<AVPacket, PacketCloser> packet{av_packet_alloc()};
+        if (!packet) {
+            return failure(ProxyBackendErrorCode::AllocationFailed);
+        }
+        AVStream *joined{};
+        std::vector<core::u8> extradata;
+        std::int64_t offset{};
+        core::u64 frames{};
+        for (const std::filesystem::path &segment : request.join_segments) {
+            if (stop.stop_requested()) {
+                return failure(ProxyBackendErrorCode::Cancelled);
+            }
+            AVFormatContext *raw_input{};
+            const std::string segment_path = segment.string();
+            if (avformat_open_input(&raw_input, segment_path.c_str(), nullptr,
+                                    nullptr) < 0 ||
+                raw_input == nullptr) {
+                return failure(ProxyBackendErrorCode::SourceUnavailable);
+            }
+            std::unique_ptr<AVFormatContext, InputCloser> input{raw_input};
+            if (avformat_find_stream_info(input.get(), nullptr) < 0) {
+                return failure(ProxyBackendErrorCode::MetadataUnavailable);
+            }
+            const int index = av_find_best_stream(
+                input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+            if (index < 0) {
+                return failure(ProxyBackendErrorCode::MetadataUnavailable);
+            }
+            const AVStream &stream = *input->streams[index];
+            const std::vector<core::u8> headers(
+                stream.codecpar->extradata,
+                stream.codecpar->extradata + stream.codecpar->extradata_size);
+            if (joined == nullptr) {
+                joined = avformat_new_stream(output.get(), nullptr);
+                if (joined == nullptr ||
+                    avcodec_parameters_copy(joined->codecpar,
+                                            stream.codecpar) < 0) {
+                    return failure(ProxyBackendErrorCode::AllocationFailed);
+                }
+                joined->codecpar->codec_tag = 0;
+                joined->time_base = stream.time_base;
+                joined->avg_frame_rate = stream.avg_frame_rate;
+                joined->sample_aspect_ratio = stream.sample_aspect_ratio;
+                extradata = headers;
+                if (avio_open(&output->pb, output_path.c_str(),
+                              AVIO_FLAG_WRITE) < 0) {
+                    return failure(ProxyBackendErrorCode::EncodeFailed);
+                }
+                AVDictionary *mux_options{};
+                av_dict_set(&mux_options, "movflags", "+faststart", 0);
+                const int header =
+                    avformat_write_header(output.get(), &mux_options);
+                av_dict_free(&mux_options);
+                if (header < 0) {
+                    return failure(ProxyBackendErrorCode::EncodeFailed);
+                }
+            } else if (headers != extradata ||
+                       stream.codecpar->width != joined->codecpar->width ||
+                       stream.codecpar->height != joined->codecpar->height) {
+                return failure(ProxyBackendErrorCode::OutputValidationFailed);
+            }
+            // Each segment's timestamps start at zero; shifted by the frames
+            // before it, the joined file numbers its frames as the source.
+            const AVRational frame_duration = av_inv_q(
+                stream.avg_frame_rate.num > 0 ? stream.avg_frame_rate
+                                              : stream.r_frame_rate);
+            const std::int64_t shift =
+                av_rescale_q(offset, frame_duration, joined->time_base);
+            std::int64_t segment_frames{};
+            while (av_read_frame(input.get(), packet.get()) >= 0) {
+                if (packet->stream_index != index) {
+                    av_packet_unref(packet.get());
+                    continue;
+                }
+                av_packet_rescale_ts(packet.get(), stream.time_base,
+                                     joined->time_base);
+                if (packet->pts != AV_NOPTS_VALUE) {
+                    packet->pts += shift;
+                }
+                if (packet->dts != AV_NOPTS_VALUE) {
+                    packet->dts += shift;
+                }
+                packet->stream_index = joined->index;
+                packet->pos = -1;
+                ++segment_frames;
+                if (av_interleaved_write_frame(output.get(), packet.get()) <
+                    0) {
+                    return failure(
+                        ProxyBackendErrorCode::OutputValidationFailed);
+                }
+            }
+            offset += segment_frames;
+            frames += static_cast<core::u64>(segment_frames);
+            report_progress(request, frames, metadata.frame_count);
+        }
+        if (joined == nullptr || frames != metadata.frame_count ||
+            av_write_trailer(output.get()) < 0) {
+            return failure(ProxyBackendErrorCode::OutputValidationFailed);
+        }
+        if (output->pb != nullptr) {
+            static_cast<void>(avio_closep(&output->pb));
+        }
+        output.reset();
+        const auto encoded =
+            probe_output(request.output_file, metadata, request.profile);
+        auto frame_map = assets::make_identity_proxy_frame_map(
+            frames, metadata.frame_rate);
+        if (!encoded || !frame_map || encoded->frame_count != frames) {
+            return failure(ProxyBackendErrorCode::OutputValidationFailed);
+        }
+        return ProxyBackendResult::success(ProxyBackendOutput{
+            measured,
+            metadata,
+            *encoded,
+            std::move(frame_map).value(),
+        });
+    }
+
     static void report_progress(const ProxyEncodeRequest &request,
                                 core::u64 completed, core::u64 total) noexcept {
         if (!request.progress) {

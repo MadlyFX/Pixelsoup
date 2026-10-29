@@ -195,6 +195,16 @@ TimelinePanel::lane_point_at(float x, float y) const noexcept {
   return std::nullopt;
 }
 
+std::optional<doc::NodeId> TimelinePanel::take_at(float x,
+                                                  float y) const noexcept {
+  for (const TakeTarget &target : take_targets_) {
+    if (target.bounds.contains(x, y)) {
+      return target.lead;
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<core::i64> TimelinePanel::frame_at(float x,
                                                  float y) const noexcept {
   if (!graph_bounds_.contains(x, y)) {
@@ -209,11 +219,13 @@ std::optional<core::i64> TimelinePanel::frame_at(float x,
 
 void TimelinePanel::reset_project_state() noexcept {
   replacement_targets_.clear();
+  take_targets_.clear();
   time_axis_ = TimelineTimeAxis{};
   row_scroll_ = 0.0F;
   rows_state_.expanded_layers.clear();
   rows_state_.expanded_groups.clear();
   rows_state_.expanded_hierarchies.clear();
+  rows_state_.expanded_platesets.clear();
   rows_state_.hierarchy_selection = doc::NodeId{};
   // Rows sized alone belong to that project's clips; every clip row's
   // height is a view preference and stays.
@@ -275,6 +287,7 @@ void TimelinePanel::reset_project_state() noexcept {
   clip_.moved = false;
   clip_.drop_lane.reset();
   clip_.snap_guide.reset();
+  clip_.take = false;
   clip_landing_.reset();
   track_ = TrackGesture{};
   list_fit_width_ = 0.0F;
@@ -322,6 +335,7 @@ TimelinePanelFrame TimelinePanel::draw(gui::UiContext &ctx,
                                        const gui::Rect &bounds,
                                        const TimelineDrawInput &input) {
   replacement_targets_.clear();
+  take_targets_.clear();
   Pass p{ctx, bounds, input};
   if (!open_pass(p)) {
     return std::move(p.frame);
@@ -572,7 +586,20 @@ bool TimelinePanel::open_pass(Pass &p) {
   // A row pointed at from another panel is listed: its track open, and
   // every group above it.
   if (reveal_scroll_) {
-    if (const ElementInfo *const element = find_element(elements, reveal_node_)) {
+    // A plate's track, or a clip on one, opens its take row too.
+    const ElementInfo *const revealed = find_element(elements, reveal_node_);
+    const doc::NodeId revealed_lane =
+        revealed != nullptr && revealed->kind == ElementKind::Media
+            ? revealed->timeline_lane
+            : reveal_node_;
+    for (const timeline::PlatesetGroup &group :
+         timeline::plateset_groups(elements, lanes, p.input.platesets)) {
+      if (std::find(group.lanes.begin(), group.lanes.end(), revealed_lane) !=
+          group.lanes.end()) {
+        rows_state_.expanded_platesets.insert(group.key);
+      }
+    }
+    if (const ElementInfo *const element = revealed) {
       if (element->timeline_lane != doc::NodeId{}) {
         rows_state_.collapsed_lanes.erase(element->timeline_lane);
       }
@@ -593,7 +620,7 @@ bool TimelinePanel::open_pass(Pass &p) {
   p.built = build_rows(
       rows_state_,
       RowsInput{elements, lanes, surfaces, effects, keyframes,
-                timeline.show_frame, search_, anchor},
+                timeline.show_frame, search_, anchor, p.input.platesets},
       ctx.theme());
 
 

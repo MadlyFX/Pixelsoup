@@ -542,6 +542,12 @@ enum class MenuCommand : core::u8 {
   // The entry's frame holds the scene::KeyEase it applies.
   EaseKeys,
   OpenInAssetViewer,
+  // A take row's: its node is the row's, which names the placed set.
+  TogglePlatesetOpen,
+  TogglePlatesetMute,
+  TogglePlatesetLock,
+  DeletePlatesetTracks,
+  OpenPlatesetInAssetViewer,
 };
 
 // A cue's tag: the number in a filled chip. Held cues burn in the transport
@@ -799,6 +805,9 @@ struct Row final {
     Group,
     Component,
     Property,
+    // A placed plateset's take row, over the tracks of its plates. Its node
+    // is the lowest of those tracks' ids, which names it while it lasts.
+    PlatesetHeader,
   };
 
   Kind kind{Kind::Layer};
@@ -842,6 +851,15 @@ struct Row final {
   std::size_t end{};
   // A closed parent's entry in RowList::summaries, or no_row.
   std::size_t summary{no_row};
+  // A plateset take row's entry in RowList::platesets, or no_row.
+  std::size_t plateset{no_row};
+  // What the list shows for the row's name when that is not its label: a
+  // plate's track under its take row shows its slot alone, since the row
+  // above already names the set. Renaming still starts from the label.
+  std::string shown_label;
+  // What it shows instead when even that does not fit: the slot's tag, as
+  // the rig diagram marks it - "TOP" for "CEILING REFLECTION".
+  std::string short_label;
 };
 
 // How round a clip's corners are: soft at any height, but never so round a
@@ -888,6 +906,7 @@ row_channels(const Row &row) noexcept {
   case Row::Kind::LaneHeader:
   case Row::Kind::Layer:
   case Row::Kind::PropertiesHeader:
+  case Row::Kind::PlatesetHeader:
     break;
   }
   return std::nullopt;
@@ -940,6 +959,34 @@ inline constexpr float group_value_width = 132.0F;
 [[nodiscard]] inline bool editable_clip(const ElementInfo &element) noexcept {
   return !element.locked && element.kind == ElementKind::Media &&
          element.timing.placed();
+}
+
+// Whether a cut at `cut` can split the track into two: something must play on
+// it before the cut and something from the cut on, and nothing the cut moves
+// or divides may be locked. The Director checks the same against its own
+// document before it authors the split.
+[[nodiscard]] inline bool track_splittable(std::span<const ElementInfo> elements,
+                                           doc::NodeId lane,
+                                           core::i64 cut) noexcept {
+  bool before = false;
+  bool after = false;
+  for (const ElementInfo &element : elements) {
+    if (element.kind != ElementKind::Media || element.timeline_lane != lane ||
+        !element.timing.placed()) {
+      continue;
+    }
+    const core::i64 end = element.timing.start + element.timing.duration;
+    if (end <= cut) {
+      before = true;
+      continue;
+    }
+    if (element.locked) {
+      return false;
+    }
+    before = before || element.timing.start < cut;
+    after = true;
+  }
+  return before && after;
 }
 
 [[nodiscard]] inline bool orderable_layer(const ElementInfo &element) noexcept {
@@ -1128,6 +1175,53 @@ struct RowSummary final {
   bool operator==(const RowSummary &) const = default;
 };
 
+// One take of a placed plateset as its take row draws it: the plates that
+// share a take, a start and a length - the unit the shell edits as one - and
+// the plate a bar gesture edits on the take's behalf: the front plate, or
+// the first listed when there is none.
+struct PlatesetTake final {
+  core::i64 take{};
+  core::i64 start{};
+  core::i64 duration{};
+  doc::NodeId lead{};
+  // Every plate of the take, in the order its tracks are listed.
+  std::vector<doc::NodeId> clips;
+  // A plate or its track is locked, so the take cannot move as one.
+  bool locked{};
+};
+
+// A placed plateset: the tracks whose clips are all plates of one Library
+// plateset, joined by the takes they share - so two placements of one set
+// are two rows, and a razored take stays one. The document still holds one
+// track per plate; this grouping is the Timeline's view of them.
+struct PlatesetGroup final {
+  // The lowest of its tracks' ids: the row's node and its fold state's key.
+  doc::NodeId key{};
+  doc::NodeId plateset{};
+  std::string name;
+  // Its tracks, front first, as the list shows them.
+  std::vector<doc::NodeId> lanes;
+  // Its takes, earliest first.
+  std::vector<PlatesetTake> takes;
+};
+
+// The placed platesets among `lanes`, each named from `names` or else after
+// what its tracks' names share past "SLOT / ". A placement whose tracks
+// another track sits between is listed as one row per unbroken run, so the
+// list never shows tracks out of their stacking order.
+[[nodiscard]] std::vector<PlatesetGroup>
+plateset_groups(std::span<const ElementInfo> elements,
+                std::span<const scene::TimelineLane> lanes,
+                std::span<const TimelinePlateset> names);
+
+// The edits that switch every track of `group` to `on` for mute or lock: a
+// toggle for each track not already there, so the take row's switch sets
+// the whole set rather than flipping each track.
+[[nodiscard]] std::vector<TimelineLaneEdit>
+plateset_switch_edits(const PlatesetGroup &group,
+                      std::span<const scene::TimelineLane> lanes,
+                      TimelineLaneAction action, bool on);
+
 // The rows the Timeline lists this frame, top to bottom, the selectable
 // layer and track nodes among them in that order, and the summaries of the
 // closed parents among them.
@@ -1136,6 +1230,8 @@ struct RowList final {
   std::vector<doc::NodeId> visible_order;
   std::vector<RowSummary> summaries;
   std::vector<SummaryKey> summary_keys;
+  // The placed platesets the take rows stand for.
+  std::vector<PlatesetGroup> platesets;
 
   [[nodiscard]] std::span<const SummaryKey>
   keys(const RowSummary &summary) const {
@@ -1153,6 +1249,8 @@ struct RowsInput final {
   std::string_view search;
   // The selection anchor, whose ancestors open when it changes.
   doc::NodeId anchor{};
+  // The Library's names for the platesets placed plates come from.
+  std::span<const TimelinePlateset> plateset_names;
 };
 
 // Builds the rows from separate object and property twirls. A parent opens to
@@ -1204,6 +1302,12 @@ struct LaneDropTarget final {
   gui::Rect bounds{};
   std::string_view label;
   bool locked{};
+  // A take row: it stands for a run of tracks, and a reorder lands in front
+  // of `front` or behind `back`, never between them. Only a reorder lands
+  // on one; a clip goes to a track.
+  bool block{};
+  doc::NodeId front{};
+  doc::NodeId back{};
 };
 
 } // namespace mediaserver::editor::timeline
@@ -1367,6 +1471,18 @@ struct TimelinePanel::RowContext final {
   gui::Rect clip_bar{};
   float clip_fade_in_x{};
   float clip_fade_out_x{};
+  // A plateset take row's bars, one per take, as its lead plate is shown.
+  struct TakeBar final {
+    std::size_t take{};
+    gui::Rect bar{};
+    scene::ClipTiming timing{};
+    float fade_in_x{};
+    float fade_out_x{};
+  };
+  std::vector<TakeBar> take_bars;
+  // Which of the row's bars clip_bar and the clip drawing helpers are on: a
+  // take row draws each in turn. Always zero on any other row.
+  std::size_t clip_item{};
   const std::vector<core::i64> *component_frames{};
   std::vector<float> component_x;
   std::vector<float> component_y;

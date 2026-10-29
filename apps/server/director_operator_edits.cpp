@@ -4,6 +4,7 @@
 
 #include "clip_clipboard.hpp"
 #include "director_clip_authoring.hpp"
+#include "plateset_authoring.hpp"
 #include "director_compositor_authoring.hpp"
 #include "director_effect_authoring.hpp"
 #include "director_feed_map_authoring.hpp"
@@ -67,6 +68,8 @@ PhaseExit DirectorShowLoop::apply_scene_edits(OperatorFrame &op) {
         key_scale_preview.reset();
         pending_clip_timings.clear();
         pending_clip_splits.clear();
+        pending_plateset_places.clear();
+        pending_plateset_swaps.clear();
         pending_lane_edits.clear();
         pending_marker_edits.clear();
         pending_layer_orders.clear();
@@ -555,6 +558,67 @@ PhaseExit DirectorShowLoop::apply_clip_requests(OperatorFrame &op) {
         }
     }
     pending_clip_splits.clear();
+    const scene::MediaFrameRate show_rate{transport.anchor().rate.numerator,
+                                          transport.anchor().rate.denominator};
+    for (const auto &request : pending_plateset_places) {
+        PlatesetPlacementRequest place{};
+        place.scene = request.scene;
+        place.plateset = request.plateset;
+        place.start = request.start;
+        place.show_rate = show_rate;
+        place.rig = request.rig == editor::PlatesetRigChoice::Replace
+                        ? PlatesetRigChoice::Replace
+                        : (request.rig == editor::PlatesetRigChoice::NewRig
+                               ? PlatesetRigChoice::NewRig
+                               : PlatesetRigChoice::Auto);
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        auto planned = plan_plateset_placement(scheduler.projected_document(),
+                                               place, next_new_node);
+        if (!planned) {
+            project_message = plateset_authoring_error_text(planned.error());
+            continue;
+        }
+        next_new_node = std::max(next_new_node, planned.value().next_node);
+        if (!scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{request.gesture}, frame)) {
+            std::cerr << "could not place a plateset for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        project_message =
+            planned.value().skipped.empty()
+                ? std::string{"PLATESET PLACED"}
+                : "PLATESET PLACED; " +
+                      std::to_string(planned.value().skipped.size()) +
+                      " SOCKETS KEPT THEIR WIRES";
+    }
+    pending_plateset_places.clear();
+    for (const auto &request : pending_plateset_swaps) {
+        auto planned = plan_plateset_swap(scheduler.projected_document(),
+                                          request.clip, request.plateset);
+        if (!planned) {
+            project_message = plateset_authoring_error_text(planned.error());
+            continue;
+        }
+        if (!scheduler.schedule_document_replace(
+                planned.value().document, cmd::UndoContextId{2U},
+                cmd::TransactionId{request.gesture}, frame)) {
+            std::cerr << "could not swap a take for frame " << frame.value()
+                      << '\n';
+            return 1;
+        }
+        project_message =
+            planned.value().unmatched.empty()
+                ? std::string{"TAKE SWAPPED"}
+                : "TAKE SWAPPED; " +
+                      std::to_string(planned.value().unmatched.size()) +
+                      " PLATES HAD NO MATCH AND STAYED";
+    }
+    pending_plateset_swaps.clear();
     return std::nullopt;
 }
 
@@ -716,20 +780,42 @@ PhaseExit DirectorShowLoop::apply_element_and_lane_requests(OperatorFrame &op) {
         case editor::TimelineLaneAction::DeleteMoveClips:
             action = LaneAuthorAction::DeleteMoveClips;
             break;
+        case editor::TimelineLaneAction::Split:
+            action = LaneAuthorAction::Split;
+            break;
         }
         auto planned = plan_lane_authoring(
             scheduler.projected_document(),
-            LaneAuthorRequest{action, edit.scene, edit.lane,
-                              edit.destination, edit.name},
+            LaneAuthorRequest{
+                action, edit.scene, edit.lane, edit.destination, edit.name,
+                edit.frame,
+                scene::MediaFrameRate{transport.anchor().rate.numerator,
+                                      transport.anchor().rate.denominator}},
             next_new_node);
         if (!planned) {
             // Stale selection and a lane becoming non-empty are
             // benign operator races. The planner has not authored
             // anything, so history and redo remain untouched.
-            project_message =
-                planned.error() == LaneAuthorError::NonEmptyLane
-                    ? "TRACK DELETE REJECTED - TRACK IS NOT EMPTY"
-                    : "TRACK EDIT REJECTED";
+            switch (planned.error()) {
+            case LaneAuthorError::NonEmptyLane:
+                project_message = "TRACK DELETE REJECTED - TRACK IS NOT EMPTY";
+                break;
+            case LaneAuthorError::Locked:
+                project_message =
+                    "TRACK SPLIT REJECTED - UNLOCK THE TRACK AND ITS CLIPS";
+                break;
+            case LaneAuthorError::NothingToSplit:
+                project_message = "TRACK SPLIT REJECTED - CUT WHERE THE "
+                                  "TRACK HAS CLIPS ON BOTH SIDES";
+                break;
+            case LaneAuthorError::LaneLimit:
+                project_message =
+                    "TRACK EDIT REJECTED - THE SCENE HOLDS THE MOST TRACKS";
+                break;
+            default:
+                project_message = "TRACK EDIT REJECTED";
+                break;
+            }
             continue;
         }
         const doc::Delta delta =
@@ -1339,14 +1425,19 @@ PhaseExit DirectorShowLoop::apply_property_and_effect_requests(OperatorFrame &op
     pending_asset_proxy_edits.clear();
     for (const auto &request : pending_asset_library_edits) {
         doc::NodeId folder{};
-        if (request.edit.kind == assets::LibraryEdit::Kind::CreateFolder) {
+        if (request.edit.kind == assets::LibraryEdit::Kind::CreateFolder ||
+            request.edit.kind ==
+                assets::LibraryEdit::Kind::CreatePlateset) {
             while (scheduler.projected_document().contains(
                 doc::NodeId{next_new_node})) {
                 ++next_new_node;
             }
             folder = doc::NodeId{next_new_node++};
         }
-        if (!schedule_asset_library_edit(scheduler, request, folder, frame)) {
+        if (!schedule_asset_library_edit(
+                scheduler, request, folder, frame,
+                scene::MediaFrameRate{transport.anchor().rate.numerator,
+                                      transport.anchor().rate.denominator})) {
             std::cerr << "could not author a Library edit for frame "
                       << frame.value() << '\n';
             return 1;

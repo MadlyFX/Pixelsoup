@@ -54,6 +54,9 @@ struct WorkspaceLayoutState final {
   // Whether the History strip is put away. Records older than the field read
   // as shown.
   bool history_hidden{};
+  // Each view's media rendition. Records older than the field read as Proxy.
+  MediaRendition stage_media{MediaRendition::Proxy};
+  MediaRendition program_media{MediaRendition::Proxy};
 };
 
 // The zoom range the editor offers, in percent.

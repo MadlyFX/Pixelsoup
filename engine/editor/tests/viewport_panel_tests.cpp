@@ -2564,11 +2564,13 @@ void light_guides_respect_stage_selection_and_guides_toggle() {
     draw(true);
     UI_CHECK(cutoff_vertices() > 0);
     // Guides, the second of the four display toggles. They end a group gap
-    // before the resolution menu, which ends 8 before the frame rate, which
-    // ends 8 before the toolbar's right edge.
+    // before the media menu, which ends 4 before the resolution menu, which
+    // ends 8 before the frame rate, which ends 8 before the toolbar's right
+    // edge.
     const float right = Harness::bounds.width - 8.0F -
                         h.ctx.font_width("60 fps") - 8.0F -
-                        (23.0F + h.ctx.font_width("Full") + 19.0F) - 9.0F;
+                        (23.0F + h.ctx.font_width("Full") + 19.0F) - 4.0F -
+                        (23.0F + h.ctx.font_width("Proxy") + 19.0F) - 9.0F;
     const float guides_x = right - 4.0F * 26.0F + 26.0F + 13.0F;
     draw(true, guides_x, true);
     draw(true, guides_x, false);
@@ -2623,6 +2625,50 @@ void preview_resolution_controls_preserve_logical_picking() {
         UI_CHECK(h.scene.canvas.width == 1920U && h.scene.canvas.height == 1080U);
         static_cast<void>(click(500.0F, 500.0F, false));
     }
+}
+
+void media_menu_chooses_the_views_rendition_and_precise_work_shows_source() {
+    Harness h;
+    editor::ViewportPanel stage{gui::ui_id("media.stage"), editor::ViewportRole::Stage};
+    const auto click = [&](float x, float y, bool down) {
+        h.input.new_frame();
+        h.input.set_mouse_position(x, y);
+        h.input.set_mouse_button(gui::MouseButton::Left, down);
+        h.ctx.new_frame();
+        const auto result = stage.draw(h.ctx, Harness::bounds, h.target, h.scene);
+        h.ctx.draw_overlays(Harness::bounds);
+        return result;
+    };
+    static_cast<void>(click(500.0F, 500.0F, false));
+    UI_CHECK(stage.media() == editor::MediaRendition::Proxy);
+    UI_CHECK(stage.drawn_media() == editor::MediaRendition::Proxy);
+    // The media menu ends 4 before the resolution menu; its second entry is
+    // Full res.
+    const float resolution_width = 23.0F + h.ctx.font_width("Full") + 19.0F;
+    const float media_width = 23.0F + h.ctx.font_width("Proxy") + 19.0F;
+    const float media_x = Harness::bounds.width - 8.0F -
+                          h.ctx.font_width("60 fps") - 8.0F -
+                          resolution_width - 4.0F - media_width;
+    static_cast<void>(click(media_x + media_width * 0.5F, 14.0F, true));
+    static_cast<void>(click(media_x + media_width * 0.5F, 14.0F, false));
+    const float full_y = 3.0F + 22.0F + 2.0F + 24.0F + 12.0F;
+    static_cast<void>(click(media_x + 20.0F, full_y, false));
+    static_cast<void>(click(media_x + 20.0F, full_y, true));
+    static_cast<void>(click(media_x + 20.0F, full_y, false));
+    UI_CHECK(stage.media() == editor::MediaRendition::Full);
+    UI_CHECK(stage.resolution() == editor::PreviewResolution::Full);
+    UI_CHECK(h.panel.media() == editor::MediaRendition::Proxy);
+
+    // Precise work draws the source whatever the choice, and leaves the
+    // choice itself alone for when it ends.
+    stage.set_media(editor::MediaRendition::Proxy);
+    stage.set_precise_work(true);
+    UI_CHECK(stage.media() == editor::MediaRendition::Proxy);
+    UI_CHECK(stage.drawn_media() == editor::MediaRendition::Full);
+    stage.set_precise_work(false);
+    UI_CHECK(stage.drawn_media() == editor::MediaRendition::Proxy);
+    stage.set_media(static_cast<editor::MediaRendition>(7U));
+    UI_CHECK(stage.media() == editor::MediaRendition::Proxy);
 }
 
 void stage_orbit_preserves_authored_exposure() {
@@ -2844,7 +2890,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 69U> cases{{
+constexpr std::array<Case, 70U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2855,6 +2901,7 @@ constexpr std::array<Case, 69U> cases{{
     {"the stage view menus choose projection layout and shading",
      &the_stage_view_menus_choose_projection_layout_and_shading},
     {"preview resolution controls preserve logical picking", &preview_resolution_controls_preserve_logical_picking},
+    {"media menu chooses the view's rendition and precise work shows the source", &media_menu_chooses_the_views_rendition_and_precise_work_shows_source},
     {"light sources and cutoffs have authored world dimensions", &light_sources_and_cutoffs_have_authored_world_dimensions},
     {"rectangle guides follow roll aim and emitting faces", &rectangle_guides_follow_roll_aim_and_emitting_faces},
     {"spot guides show inner outer angles and radial cutoff", &spot_guides_show_inner_outer_angles_and_radial_cutoff},

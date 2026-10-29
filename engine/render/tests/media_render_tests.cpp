@@ -3091,6 +3091,102 @@ void a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready() {
     MEDIA_CHECK(stats.resident_frames == 1U);
 }
 
+// A placement that moves from its source to its proxy - another file of the
+// same asset - keeps the source's picture until the proxy has a frame, and
+// that wait counts as a late frame, not a blank one. Moving to a file of no
+// stated rendition is a cut and holds nothing.
+void a_rendition_switch_holds_the_source_picture_until_the_proxy_is_ready() {
+    struct State final {
+        std::atomic_bool proxy_ready{};
+    };
+    class Source final : public render::MediaSource {
+    public:
+        explicit Source(std::shared_ptr<State> value)
+            : state(std::move(value)) {}
+        std::string key(const std::string& path,
+                        core::u32 frame) const override {
+            return path + "#" + std::to_string(frame);
+        }
+        render::MediaDecodeScheduling scheduling(
+            const std::string&) const noexcept override {
+            return render::MediaDecodeScheduling::SourceManaged;
+        }
+        render::DecodedFrame decode(const std::string& path,
+                                    core::u32) override {
+            const bool proxy = path.starts_with("proxy");
+            render::DecodedFrame frame;
+            frame.width = frame.height = proxy ? 4U : 8U;
+            frame.pixels.assign(
+                static_cast<std::size_t>(frame.width) * frame.height * 4U,
+                proxy ? 200U : 10U);
+            return frame;
+        }
+        std::shared_ptr<const render::DecodedFrame> try_decode(
+            const std::string& path, core::u32 frame) override {
+            if (path != "plate.mp4" && !state->proxy_ready) {
+                return nullptr;
+            }
+            return std::make_shared<const render::DecodedFrame>(
+                decode(path, frame));
+        }
+        std::shared_ptr<const render::DecodedFrame> try_prefetched(
+            const std::string&, core::u32, core::u64) override {
+            return nullptr;
+        }
+        std::shared_ptr<State> state;
+    };
+    auto device = open_device();
+    const auto state = std::make_shared<State>();
+    render::MediaCache cache{std::make_unique<Source>(state)};
+
+    constexpr core::u64 placement = 7U;
+    constexpr core::u64 asset = 41U;
+    const auto frame = [&](const std::string& source, core::u32 index,
+                           core::u64 rendition) {
+        auto acquired = device.acquire_commands();
+        MEDIA_CHECK(acquired);
+        auto commands = std::move(acquired).value();
+        cache.begin_frame();
+        const auto resolved = cache.resolve(device, commands, source, index,
+                                            {0U, 100U}, placement, rendition);
+        const auto stats = cache.stats();
+        cache.end_frame();
+        auto submitted = device.submit(std::move(commands));
+        MEDIA_CHECK(submitted && std::move(submitted).value().wait());
+        return std::pair{resolved, stats};
+    };
+    const auto extent = [](const render::ResolvedMediaFrame& resolved) {
+        return resolved ? resolved.primary->width() : 0U;
+    };
+    bool shown = false;
+    for (core::u32 index = 0U; !shown && index < 8U; ++index) {
+        shown = extent(frame("plate.mp4", index, asset).first) == 8U;
+    }
+    MEDIA_CHECK(shown);
+
+    // The proxy is chosen but still decoding: the source picture stays.
+    for (core::u32 index = 8U; index < 11U; ++index) {
+        const auto [resolved, stats] = frame("proxy-a.mp4", index, asset);
+        MEDIA_CHECK(extent(resolved) == 8U);
+        MEDIA_CHECK(stats.pending_requests == 1U);
+        MEDIA_CHECK(stats.held_frames == 1U);
+        MEDIA_CHECK(stats.blank_requests == 0U);
+    }
+    state->proxy_ready = true;
+    bool replaced = false;
+    for (core::u32 attempt = 0U; !replaced && attempt < 8U; ++attempt) {
+        replaced = extent(frame("proxy-a.mp4", 11U, asset).first) == 4U;
+    }
+    MEDIA_CHECK(replaced);
+
+    // Another file with no rendition stated is a cut: nothing is held, and
+    // the blank wait is counted.
+    state->proxy_ready = false;
+    const auto [cut, cut_stats] = frame("proxy-b.mp4", 12U, 0U);
+    MEDIA_CHECK(!cut);
+    MEDIA_CHECK(cut_stats.blank_requests == 1U);
+}
+
 class LargeReadySource final : public render::MediaSource {
 public:
     LargeReadySource(core::u32 width, core::u32 height) {
@@ -3212,9 +3308,11 @@ void backwards_scrubbing_reclaims_abandoned_large_uploads() {
     MEDIA_CHECK(ready);
 }
 
-constexpr std::array<Case, 49U> cases{{
+constexpr std::array<Case, 50U> cases{{
     {"a resolution switch holds the last picture until the new size is ready",
      &a_resolution_switch_holds_the_last_picture_until_the_new_size_is_ready},
+    {"a rendition switch holds the source picture until the proxy is ready",
+     &a_rendition_switch_holds_the_source_picture_until_the_proxy_is_ready},
     {"a deleted clip releases its residency and tells its decoder",
      &a_deleted_clip_releases_its_residency_and_tells_its_decoder},
     {"native NV12 colors match Rec709 reference pixels",

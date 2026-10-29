@@ -11,6 +11,18 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <d3d12.h>
+#include <d3d12video.h>
+#pragma comment(lib, "dxguid.lib")
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -1252,7 +1264,232 @@ void ten_bit_video_keeps_its_depth() {
                 == rhi::TextureFormat::Rg16Unorm);
 }
 
-constexpr std::array<Case, 17U> cases{{
+#if defined(_WIN32)
+// Whether the device's own video decoder says it decodes HEVC Main10 at this
+// size into P010. Asked of D3D12 directly rather than of FFmpeg or
+// probe_media_decode_support, so the test below cannot excuse itself through
+// the code it is checking.
+[[nodiscard]] bool hevc_main10_decodes_on(const rhi::Device &device,
+                                          UINT width, UINT height) {
+    auto *const native =
+        static_cast<ID3D12Device *>(device.native_handle().value);
+    ID3D12VideoDevice *video = nullptr;
+    if (native == nullptr ||
+        FAILED(native->QueryInterface(IID_PPV_ARGS(&video)))) {
+        return false;
+    }
+    D3D12_FEATURE_DATA_VIDEO_DECODE_SUPPORT support{};
+    support.Configuration.DecodeProfile = D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
+    support.Configuration.BitstreamEncryption =
+        D3D12_BITSTREAM_ENCRYPTION_TYPE_NONE;
+    support.Configuration.InterlaceType =
+        D3D12_VIDEO_FRAME_CODED_INTERLACE_TYPE_NONE;
+    support.Width = width;
+    support.Height = height;
+    support.DecodeFormat = DXGI_FORMAT_P010;
+    support.FrameRate = DXGI_RATIONAL{24U, 1U};
+    const bool supported =
+        SUCCEEDED(video->CheckFeatureSupport(
+            D3D12_FEATURE_VIDEO_DECODE_SUPPORT, &support, sizeof(support))) &&
+        (support.SupportFlags & D3D12_VIDEO_DECODE_SUPPORT_FLAG_SUPPORTED)
+            != 0;
+    video->Release();
+    return supported;
+}
+#endif
+
+// A UHD ten-bit HEVC clip plays on the renderer's device, frame after frame.
+//
+// 2160 is not a whole number of HEVC coding blocks, and a decoder surface of
+// exactly the picture's size was written past its end: the driver removed
+// the device on the first frame or within twenty, and every frame after that
+// failed to get a surface at all. So this decodes a run of frames rather
+// than one, each from a distinct picture, and reads the last rows of the
+// picture back - a surface cut from the wrong place, or not cut at all,
+// shows the band at the bottom moved or missing.
+//
+// Wherever D3D12 itself says the device decodes HEVC Main10 at this size,
+// every frame must arrive on the device; a machine that cannot is the only
+// one that skips.
+void a_uhd_ten_bit_hevc_clip_plays_on_the_renderers_device() {
+#if defined(_WIN32)
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto created = rhi::Device::create(config);
+    if (!created || !created.value().capabilities().external_memory) {
+        return;
+    }
+    auto device = std::move(created).value();
+    constexpr core::u32 width = 3'840U;
+    constexpr core::u32 height = 2'160U;
+    if (!hevc_main10_decodes_on(device, width, height)) {
+        return;
+    }
+    constexpr std::array<const char*, 3U> encoders{{
+        "hevc_nvenc", "hevc_mf", "libx265"}};
+    const AVCodec* encoder = nullptr;
+    for (const char* name : encoders) {
+        encoder = avcodec_find_encoder_by_name(name);
+        if (encoder != nullptr) {
+            break;
+        }
+    }
+    VIDEO_CHECK(encoder != nullptr);
+
+    // Each frame's picture: one luma level above a 48-row band of another,
+    // both moving with the frame so no frame can stand in for its neighbour.
+    // Ten-bit codes; the band starts on a 64-row boundary so it is not
+    // smeared by the encoder's blocks.
+    constexpr int frames = 24;
+    constexpr core::u32 band_top = 2'112U;
+    const auto upper_code = [](int index) { return 160 + index * 24; };
+    const auto band_code = [](int index) { return 940 - index * 4; };
+
+    const auto directory =
+        std::filesystem::current_path() / "out" / "codec-fixtures";
+    std::filesystem::create_directories(directory);
+    const auto path = (directory / "device-resident-uhd10.mp4").string();
+    {
+        CodecFixtureWriter writer;
+        writer.codec = avcodec_alloc_context3(encoder);
+        VIDEO_CHECK(writer.codec != nullptr);
+        writer.codec->width = static_cast<int>(width);
+        writer.codec->height = static_cast<int>(height);
+        writer.codec->time_base = AVRational{1, 24};
+        writer.codec->framerate = AVRational{24, 1};
+        writer.codec->pix_fmt = AV_PIX_FMT_P010LE;
+        writer.codec->profile = AV_PROFILE_HEVC_MAIN_10;
+        writer.codec->gop_size = 12;
+        writer.codec->max_b_frames = 0;
+        writer.codec->colorspace = AVCOL_SPC_BT709;
+        writer.codec->color_range = AVCOL_RANGE_MPEG;
+        VIDEO_CHECK(avcodec_open2(writer.codec, encoder, nullptr) >= 0);
+        VIDEO_CHECK(avformat_alloc_output_context2(
+            &writer.format, nullptr, "mp4", path.c_str()) >= 0);
+        AVStream* stream = avformat_new_stream(writer.format, nullptr);
+        VIDEO_CHECK(stream != nullptr);
+        stream->time_base = writer.codec->time_base;
+        stream->avg_frame_rate = writer.codec->framerate;
+        VIDEO_CHECK(avcodec_parameters_from_context(
+            stream->codecpar, writer.codec) >= 0);
+        VIDEO_CHECK(
+            avio_open(&writer.format->pb, path.c_str(), AVIO_FLAG_WRITE) >= 0);
+        VIDEO_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+        writer.frame = av_frame_alloc();
+        writer.packet = av_packet_alloc();
+        VIDEO_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+        writer.frame->format = writer.codec->pix_fmt;
+        writer.frame->width = writer.codec->width;
+        writer.frame->height = writer.codec->height;
+        VIDEO_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+        const auto drain = [&] {
+            int status{};
+            while ((status = avcodec_receive_packet(
+                        writer.codec, writer.packet)) == 0) {
+                if (writer.packet->duration == 0) writer.packet->duration = 1;
+                av_packet_rescale_ts(writer.packet, writer.codec->time_base,
+                                     stream->time_base);
+                writer.packet->stream_index = stream->index;
+                VIDEO_CHECK(av_interleaved_write_frame(
+                    writer.format, writer.packet) >= 0);
+                av_packet_unref(writer.packet);
+            }
+            VIDEO_CHECK(status == AVERROR(EAGAIN) || status == AVERROR_EOF);
+        };
+        const auto fill_row = [&](int plane, core::u32 row, int code) {
+            // P010 keeps ten bits in the high bits of each sixteen-bit word.
+            auto* const words = reinterpret_cast<std::uint16_t*>(
+                writer.frame->data[plane]
+                + static_cast<std::ptrdiff_t>(row)
+                      * writer.frame->linesize[plane]);
+            std::fill_n(words, width,
+                        static_cast<std::uint16_t>(code << 6U));
+        };
+        for (int index = 0; index < frames; ++index) {
+            VIDEO_CHECK(av_frame_make_writable(writer.frame) >= 0);
+            for (core::u32 row = 0U; row < height; ++row) {
+                fill_row(0, row,
+                         row < band_top ? upper_code(index) : band_code(index));
+            }
+            for (core::u32 row = 0U; row < height / 2U; ++row) {
+                fill_row(1, row, 512);
+            }
+            writer.frame->pts = index;
+            writer.frame->duration = 1;
+            VIDEO_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+            drain();
+        }
+        VIDEO_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+        drain();
+        VIDEO_CHECK(av_write_trailer(writer.format) >= 0);
+    }
+
+    render::offer_video_decode_device(device);
+    auto source = render::make_media_source();
+    // The luma code a frame shows at one row, read back from its plane.
+    const auto luma_codes = [&](const rhi::Texture &luma) {
+        const core::u32 bytes = width * height * 2U;
+        auto readback = device.create_readback(bytes);
+        VIDEO_CHECK(readback.has_value());
+        auto acquired = device.acquire_commands();
+        VIDEO_CHECK(acquired.has_value());
+        auto commands = std::move(acquired).value();
+        VIDEO_CHECK(commands.download(luma, readback.value()));
+        auto submitted = device.submit(std::move(commands));
+        VIDEO_CHECK(submitted.has_value());
+        VIDEO_CHECK(std::move(submitted).value().wait());
+        const auto mapped = readback.value().map();
+        VIDEO_CHECK(mapped.size() >= bytes);
+        std::vector<int> at_rows;
+        for (const core::u32 row : {0U, 1'000U, band_top - 1U, band_top,
+                                    height - 1U}) {
+            const std::size_t at =
+                (static_cast<std::size_t>(row) * width + width / 2U) * 2U;
+            at_rows.push_back(static_cast<int>(
+                (static_cast<unsigned>(mapped[at])
+                 | (static_cast<unsigned>(mapped[at + 1U]) << 8U)) >> 6U));
+        }
+        readback.value().unmap();
+        return at_rows;
+    };
+    const auto close_to = [](int value, int expected) {
+        return std::abs(value - expected) <= 6;
+    };
+    for (int index = 0; index < frames; ++index) {
+        const auto frame =
+            await_frame(*source, path, static_cast<core::u32>(index), 0U,
+                        std::chrono::seconds{20});
+        VIDEO_CHECK(frame->valid());
+        VIDEO_CHECK(frame->source_frame == static_cast<core::u32>(index));
+        VIDEO_CHECK(frame->width == width && frame->height == height);
+        VIDEO_CHECK(frame->layout
+                    == render::DecodedPixelLayout::P010Rec709Limited);
+        VIDEO_CHECK(frame->chroma == (render::ChromaExtent{1'920U, 1'080U}));
+        VIDEO_CHECK(frame->pixels.empty());
+        VIDEO_CHECK(frame->gpu.has_value());
+        VIDEO_CHECK(frame->gpu->device == device.native_handle());
+        VIDEO_CHECK(frame->gpu->bytes == width * height * 3U);
+        auto planes = device.import_video_planes(
+            frame->gpu->resource, frame->width, frame->height,
+            rhi::TextureFormat::R16Unorm, rhi::TextureFormat::Rg16Unorm);
+        VIDEO_CHECK(planes.has_value());
+        if (index % 8 != 7) {
+            continue;
+        }
+        const auto codes = luma_codes(planes.value().luma);
+        VIDEO_CHECK(close_to(codes[0], upper_code(index)));
+        VIDEO_CHECK(close_to(codes[1], upper_code(index)));
+        VIDEO_CHECK(close_to(codes[2], upper_code(index)));
+        VIDEO_CHECK(close_to(codes[3], band_code(index)));
+        VIDEO_CHECK(close_to(codes[4], band_code(index)));
+    }
+#endif
+}
+
+constexpr std::array<Case, 18U> cases{{
     {"halving averages each two by two block",
      &halving_averages_each_two_by_two_block},
     {"ready frames report what shared residency holds",
@@ -1285,6 +1522,8 @@ constexpr std::array<Case, 17U> cases{{
      &a_decoded_frame_stays_on_the_renderers_device},
     {"ten-bit video keeps its depth",
      &ten_bit_video_keeps_its_depth},
+    {"a UHD ten-bit HEVC clip plays on the renderer's device",
+     &a_uhd_ten_bit_hevc_clip_plays_on_the_renderers_device},
 }};
 
 } // namespace

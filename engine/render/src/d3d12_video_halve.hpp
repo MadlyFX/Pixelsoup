@@ -10,11 +10,11 @@ struct ID3D12Resource;
 
 namespace mediaserver::render::detail {
 
-// A half-size copy of a decoded video surface, on the device the decoder wrote
-// it on. `owner` keeps the surface alive and returns it to a small pool when
-// the last reference goes, so a playing clip reuses a handful of surfaces
-// rather than allocating one per frame.
-struct HalvedVideoSurface final {
+// A copy of a decoded video surface - halved, or cut to its picture - on the
+// device the decoder wrote it on. `owner` keeps the surface alive and returns
+// it to a small pool when the last reference goes, so a playing clip reuses a
+// handful of surfaces rather than allocating one per frame.
+struct VideoSurfaceCopy final {
     ID3D12Resource *resource{};
     std::shared_ptr<void> owner;
     core::u32 width{};
@@ -33,7 +33,20 @@ struct HalvedVideoSurface final {
 // views. The picture must halve to an even extent, as NV12 and P010 require;
 // anything else, or any D3D12 failure, returns nothing and the caller keeps
 // the full-size surface.
-[[nodiscard]] std::optional<HalvedVideoSurface> halve_video_surface(
+[[nodiscard]] std::optional<VideoSurfaceCopy> halve_video_surface(
+    ID3D12Device *device, ID3D12Resource *source, core::u32 width,
+    core::u32 height, bool ten_bit) noexcept;
+
+// Copies the top-left `width` x `height` picture of a padded NV12 or P010
+// surface into a new surface of exactly that size, and waits for the GPU, so
+// the caller can release the decoder's surface the moment this returns. The
+// renderer samples a whole surface in normalized coordinates, so a picture
+// with decoder padding below or beside it cannot be read where it lies.
+//
+// The same contract as halve_video_surface otherwise: a decode worker only,
+// `source` idle and in COMMON, the result left in COMMON, an even picture,
+// and nothing returned on any D3D12 failure.
+[[nodiscard]] std::optional<VideoSurfaceCopy> crop_video_surface(
     ID3D12Device *device, ID3D12Resource *source, core::u32 width,
     core::u32 height, bool ten_bit) noexcept;
 

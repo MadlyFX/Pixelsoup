@@ -19,6 +19,9 @@ add_executable(media-server
     clip_clipboard.cpp
     key_clipboard.cpp
     timeline_lane_authoring.cpp
+    plateset_authoring.cpp
+    plateset_motion.cpp
+    plateset_motion_service.cpp
     timeline_marker_authoring.cpp
     timeline_edit_authoring.cpp
     edit_coalescing_policy.cpp
@@ -369,6 +372,25 @@ if(BUILD_TESTING)
         PROPERTIES FOLDER "tests"
     )
 
+    add_executable(mediaserver_plateset_motion_tests
+        plateset_motion.cpp
+        tests/plateset_motion_tests.cpp
+    )
+    target_include_directories(mediaserver_plateset_motion_tests
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(mediaserver_plateset_motion_tests
+        PRIVATE MediaServer::Assets
+    )
+    mediaserver_set_project_options(mediaserver_plateset_motion_tests)
+    add_test(
+        NAME mediaserver.server_plateset_motion
+        COMMAND mediaserver_plateset_motion_tests
+    )
+    set_target_properties(mediaserver_plateset_motion_tests
+        PROPERTIES FOLDER "tests"
+    )
+
     add_executable(mediaserver_timeline_marker_authoring_tests
         timeline_marker_authoring.cpp
         tests/timeline_marker_authoring_tests.cpp
@@ -440,6 +462,17 @@ if(BUILD_TESTING)
         mediaserver_set_project_options(mediaserver_compositor_authoring_tests)
         add_test(NAME mediaserver.server_compositor_authoring COMMAND mediaserver_compositor_authoring_tests)
         set_target_properties(mediaserver_compositor_authoring_tests PROPERTIES FOLDER "tests")
+        add_executable(mediaserver_plateset_authoring_tests
+            plateset_authoring.cpp
+            timeline_lane_authoring.cpp
+            director_compositor_authoring.cpp
+            edit_coalescing_policy.cpp
+            tests/plateset_authoring_tests.cpp)
+        target_include_directories(mediaserver_plateset_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(mediaserver_plateset_authoring_tests PRIVATE MediaServer::Editor MediaServer::Cmd MediaServer::Assets MediaServer::Scene)
+        mediaserver_set_project_options(mediaserver_plateset_authoring_tests)
+        add_test(NAME mediaserver.server_plateset_authoring COMMAND mediaserver_plateset_authoring_tests)
+        set_target_properties(mediaserver_plateset_authoring_tests PROPERTIES FOLDER "tests")
         add_executable(mediaserver_feed_map_authoring_tests
             director_feed_map_authoring.cpp
             director_compositor_authoring.cpp
@@ -722,8 +755,15 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}"
                 ${STB_INCLUDE_DIRS}
         )
+        target_include_directories(mediaserver_thumbnail_service_tests
+            SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS}
+        )
+        target_link_directories(mediaserver_thumbnail_service_tests
+            PRIVATE ${FFMPEG_LIBRARY_DIRS}
+        )
         target_link_libraries(mediaserver_thumbnail_service_tests
             PRIVATE MediaServer::Assets MediaServer::Render Threads::Threads
+                    ${FFMPEG_LIBRARIES}
         )
         mediaserver_set_project_options(mediaserver_thumbnail_service_tests)
         add_test(
