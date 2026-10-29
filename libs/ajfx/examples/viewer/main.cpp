@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <windowsx.h>
 
+#include "../common/playback.hpp"
 #include "png.hpp"
 
 #include <ajfx/d3d12.hpp>
@@ -45,130 +46,16 @@ namespace {
 
 using namespace ajfx;
 
-constexpr std::array<float, 4> background{0.015F, 0.017F, 0.022F, 1.0F};
-constexpr std::uint64_t checkpoint_interval = 60U;
-constexpr std::size_t checkpoint_limit = 64U;
-
-std::optional<Effect> preset(const std::string& name) {
-    if (name == "sparks") {
-        return presets::sparks();
-    }
-    if (name == "smoke") {
-        return presets::smoke();
-    }
-    if (name == "confetti") {
-        return presets::confetti();
-    }
-    return std::nullopt;
-}
-
-std::optional<std::vector<std::uint8_t>> read_file(const std::string& path) {
-    std::ifstream stream{path, std::ios::binary};
-    if (!stream) {
-        return std::nullopt;
-    }
-    return std::vector<std::uint8_t>{std::istreambuf_iterator<char>{stream}, {}};
-}
+using samples::background;
+using samples::Orbit;
+using samples::Player;
+using samples::preset;
+using samples::read_file;
 
 int fail(const std::string& message) {
     std::fprintf(stderr, "ajfx_viewer: %s\n", message.c_str());
     return 1;
 }
-
-// One effect on the GPU, with checkpoints so the timeline can be scrubbed in
-// either direction and land exactly where playing would have.
-class Player final {
-public:
-    static Result<std::unique_ptr<Player>> create(gpu::Device& device, gpu::ShaderCompiler* compiler, Effect effect,
-                                                  const std::vector<std::uint8_t>* package) {
-        std::optional<gpu::KernelSet> kernels;
-        if (package != nullptr) {
-            Result<gpu::KernelSet> carried = gpu::read_package_kernels(*package, effect, device.shader_format());
-            if (carried) {
-                kernels = std::move(carried).value();
-                std::printf("using the package's precompiled kernels\n");
-            } else {
-                std::printf("%s\n", carried.error().message.c_str());
-            }
-        }
-        if (!kernels) {
-            if (compiler == nullptr) {
-                return Error{ErrorCode::KernelsUnavailable, "no precompiled kernels and no compiler"};
-            }
-            Result<gpu::KernelSet> compiled = gpu::compile_kernels(effect, *compiler);
-            if (!compiled) {
-                return compiled.error();
-            }
-            kernels = std::move(compiled).value();
-        }
-        Result<gpu::GpuSimulation> simulation = gpu::GpuSimulation::create(device, effect, *kernels, 1U);
-        if (!simulation) {
-            return simulation.error();
-        }
-        Result<gpu::ParticleRenderer> renderer =
-            gpu::ParticleRenderer::create(device, *kernels, gpu::TextureFormat::Rgba8Unorm);
-        if (!renderer) {
-            return renderer.error();
-        }
-        return std::unique_ptr<Player>(
-            new Player(std::move(effect), *std::move(kernels), std::move(simulation).value(), std::move(renderer).value()));
-    }
-
-    // Moves to `target` steps, from the nearest checkpoint when going back.
-    void seek(std::uint64_t target) {
-        if (target < simulation_.tick()) {
-            auto at = checkpoints_.upper_bound(target);
-            if (at == checkpoints_.begin()) {
-                simulation_.reset();
-            } else {
-                simulation_.restore(std::prev(at)->second);
-            }
-        }
-        while (simulation_.tick() < target) {
-            if (simulation_.tick() % checkpoint_interval == 0U && !checkpoints_.contains(simulation_.tick())) {
-                Result<gpu::GpuCheckpoint> saved = simulation_.save();
-                if (saved) {
-                    if (checkpoints_.size() == checkpoint_limit) {
-                        checkpoints_.erase(checkpoints_.begin());
-                    }
-                    checkpoints_.emplace(simulation_.tick(), std::move(saved).value());
-                }
-            }
-            simulation_.step();
-        }
-    }
-
-    const Effect& effect() const { return effect_; }
-    const gpu::KernelSet& kernels() const { return kernels_; }
-    gpu::GpuSimulation& simulation() { return simulation_; }
-    gpu::ParticleRenderer& renderer() { return renderer_; }
-
-private:
-    Player(Effect effect, gpu::KernelSet kernels, gpu::GpuSimulation simulation, gpu::ParticleRenderer renderer)
-        : effect_{std::move(effect)},
-          kernels_{std::move(kernels)},
-          simulation_{std::move(simulation)},
-          renderer_{std::move(renderer)} {}
-
-    Effect effect_;
-    gpu::KernelSet kernels_;
-    gpu::GpuSimulation simulation_;
-    gpu::ParticleRenderer renderer_;
-    std::map<std::uint64_t, gpu::GpuCheckpoint> checkpoints_;
-};
-
-struct Orbit final {
-    float yaw{0.6F};
-    float pitch{0.25F};
-    float distance{7.0F};
-
-    [[nodiscard]] gpu::Camera camera(float aspect) const {
-        const Vec3 target{0.0F, 1.2F, 0.0F};
-        const Vec3 eye{target.x + distance * std::cos(pitch) * std::sin(yaw), target.y + distance * std::sin(pitch),
-                       target.z + distance * std::cos(pitch) * std::cos(yaw)};
-        return gpu::Camera::look_at(eye, target, Vec3{0.0F, 1.0F, 0.0F}, 0.9F, aspect, 0.05F, 200.0F);
-    }
-};
 
 // ------------------------------------------------------------ window
 
@@ -407,6 +294,9 @@ int main(int argc, char** argv) {
         Player::create(*device.value(), compiler_ptr, *effect, package ? &*package : nullptr);
     if (!player) {
         return fail(player.error().message);
+    }
+    if (!player.value()->kernel_note().empty()) {
+        std::printf("%s\n", player.value()->kernel_note().c_str());
     }
 
     if (!options->export_path.empty()) {

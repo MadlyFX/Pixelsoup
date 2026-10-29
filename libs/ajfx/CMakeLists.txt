@@ -173,6 +173,13 @@ if(AJFX_BUILD_D3D12 AND AJFX_BUILD_EXAMPLES)
     ajfx_set_options(ajfx_viewer)
     ajfx_copy_dxc(ajfx_viewer)
     set_target_properties(ajfx_viewer PROPERTIES FOLDER "examples")
+
+    # A windowed media player for .ajfx files (no console).
+    add_executable(ajfx_player WIN32 examples/player/main.cpp)
+    target_link_libraries(ajfx_player PRIVATE ajfx::d3d12 comctl32 comdlg32 shell32 advapi32)
+    ajfx_set_options(ajfx_player)
+    ajfx_copy_dxc(ajfx_player)
+    set_target_properties(ajfx_player PROPERTIES FOLDER "examples")
 endif()
 
 if(BUILD_TESTING)
@@ -218,6 +225,13 @@ if(BUILD_TESTING)
                     --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.png")
         set_tests_properties(ajfx.viewer_export PROPERTIES FIXTURES_SETUP ajfx_viewer_package)
         set_tests_properties(ajfx.viewer_capture PROPERTIES
+            FIXTURES_REQUIRED ajfx_viewer_package
+            PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")
+        # The player's open-and-frame path, offscreen.
+        add_test(NAME ajfx.player_screenshot
+            COMMAND ajfx_player "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.ajfx"
+                    --screenshot "${CMAKE_CURRENT_BINARY_DIR}/player-smoke.png" --seconds 3)
+        set_tests_properties(ajfx.player_screenshot PROPERTIES
             FIXTURES_REQUIRED ajfx_viewer_package
             PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")
     endif()

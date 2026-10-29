@@ -176,6 +176,35 @@ ajfx_viewer --package sparks.ajfx --seconds 2 --capture sparks.png
 The first writes a package with precompiled kernels; the second plays it
 without compiling and saves a frame.
 
+## Player
+
+`ajfx_player` is a small media player for `.ajfx` files, built alongside the
+viewer. Open a file from the command line, File > Open, or by dropping it on
+the window. It has play and pause, a scrub bar, a loop length, stepping one
+simulation step at a time, and orbit and zoom with the view framed to
+everything the effect reaches during the loop.
+
+The status bar is for checking a package: live particles (per emitter when
+there are several), the current step, the time a frame takes, and whether the
+package's precompiled kernels were used or why they could not be. A file that
+cannot be played shows the library's error, which names what is wrong.
+
+File > Associate .ajfx files with this player (or `ajfx_player --register`)
+makes double-clicking an `.ajfx` file open it, for the current Windows user
+only; Remove the association (`--unregister`) undoes it. The association
+points at the executable it was made from, so make it again after moving the
+player.
+
+| Key | Action |
+| --- | --- |
+| Space | Play or pause |
+| Home | Restart |
+| Left, Right | Back or forward a second |
+| `,` `.` | Previous or next simulation step (pauses) |
+| L | Loop on or off |
+| F, or double-click the view | Frame the effect |
+| Ctrl+O, F5 | Open, reload |
+
 ## The .ajfx package
 
 A small container of named entries, sorted by name, with an FNV-1a checksum
