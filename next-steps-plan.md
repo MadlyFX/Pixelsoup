@@ -11,8 +11,9 @@ contracts; check current code before treating an individual item as missing.
 - Light cards, outer-frustum color-correction windows and plate chromakey:
   replicate and digest authored regions, emissive cards and deterministic wall
   markers; verify feathering and placement across output-node seams.
-- Bindless descriptors, writable storage buffers and indirect submission before
-  GPU-driven culling or BLAS/TLAS/ray-query effects. Preserve deterministic
+- Bindless descriptors before GPU-driven culling or BLAS/TLAS/ray-query
+  effects; writable buffers and indirect dispatch and draw now exist in the
+  D3D12 RHI (see the particles section). Preserve deterministic
   instance ordering, honest capability gates and cohort conformance.
 - Physical two-node genlock/present-barrier and camera latency qualification,
   recorded capture procedures and a pinned driver matrix; an editor-as-remote
@@ -911,11 +912,18 @@ feedback forces evaluate any frame directly.
      writing survivors straight to the compacted buffer, a single-pass scan,
      and batching barriers across emitters; measure with GPU timestamps
      first.
-3. RHI: writable storage buffers in compute and indirect dispatch/draw (shared
-   with the GPU-driven culling item above).
+3. RHI: writable buffers in compute, indirect dispatch and single-batch
+   indirect pulled draws, and buffer readback, on D3D12 (the SDL backend
+   reports them unsupported). Done.
+   ajfx kernels take their constants at b0 in space 1 and buffers at u0..u7,
+   the RHI's own layout, so packaged kernels run unchanged on either backend.
+   `render::ParticleDevice` implements ajfx's GPU interface on the RHI and
+   records into the renderer's command lists; on one GPU it leaves particle
+   records byte-identical to ajfx's own D3D12 device.
 4. Integration: `.ajfx` import as a library asset (content-hash identity,
-   parsed and its kernels created on a worker, never on the frame path), an
-   RHI adapter pass in `engine/render`, and a `scene.particle_effect` node
+   parsed and its kernels created on a worker, never on the frame path), a
+   render pass that steps effects through `render::ParticleDevice` and draws
+   their sprites, and a `scene.particle_effect` node
    referencing the asset with its parameter values normalized, replicated and
    digested. Show-frame driving and seeking, placement by dragging from the
    Library, published parameters in the Inspector with keyframes, and

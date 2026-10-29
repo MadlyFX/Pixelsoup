@@ -14,7 +14,7 @@
 // The model is deliberately narrow. Every buffer is device-local and usable
 // as a raw read-write buffer, a copy source or destination, and an indirect
 // argument buffer. Every kernel and draw sees the same binding layout: sixteen
-// 32-bit root constants (register b0) and up to eight raw read-write buffers
+// 32-bit root constants (register b0, space 1) and up to eight raw read-write buffers
 // (registers u0 to u7), unbound slots left empty. Textures are render targets
 // only. A backend tracks each buffer's state and inserts the
 // transitions a use needs; `barrier` orders read-write access between

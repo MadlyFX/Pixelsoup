@@ -3,7 +3,7 @@
 // pulled from the particle records; the record layout arrives as offsets,
 // with 0xffffffff for an attribute the emitter does not store.
 
-cbuffer AjfxSprite : register(b0) {
+cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_stride;
     uint sprite_position;
     uint sprite_velocity;

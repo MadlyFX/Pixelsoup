@@ -125,6 +125,10 @@ ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // or draw it yourse
 - A host implements `gpu::Device` (buffers, compute and graphics pipelines,
   dispatch and draw, direct and indirect, copies, barriers, render targets) to
   run ajfx on its own renderer, or reads `EmitterBuffers` and draws itself.
+  Kernels bind sixteen 32-bit constants at `b0, space1` and up to eight raw
+  read-write buffers at `u0`..`u7` in space 0; a host whose compute layout
+  matches runs packaged kernels unchanged. The media server's
+  `render::ParticleDevice` is one such host, compute only.
 - `write_package(effect, gpu::kernel_package_entries(effect, kernels))` stores
   the compiled kernels in the package, and `gpu::read_package_kernels` loads
   them, so a host plays effects without a compiler. Kernels are keyed by a

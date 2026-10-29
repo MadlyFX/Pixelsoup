@@ -154,12 +154,15 @@ if(AJFX_BUILD_D3D12)
     else()
         message(STATUS "ajfx: no dxcompiler.dll found; GPU tests will be skipped")
     endif()
+    # Cached so ajfx_copy_dxc works when called from another directory: a
+    # function sees its caller's variables, not those where it was defined.
+    set(AJFX_DXC_RUNTIME_DIR "${_ajfx_dxc_dir}" CACHE INTERNAL "Directory ajfx copies dxcompiler.dll from")
 
     function(ajfx_copy_dxc target)
-        if(_ajfx_dxc_dir)
+        if(AJFX_DXC_RUNTIME_DIR)
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${_ajfx_dxc_dir}/dxcompiler.dll" "${_ajfx_dxc_dir}/dxil.dll"
+                    "${AJFX_DXC_RUNTIME_DIR}/dxcompiler.dll" "${AJFX_DXC_RUNTIME_DIR}/dxil.dll"
                     "$<TARGET_FILE_DIR:${target}>")
         endif()
     endfunction()

@@ -72,7 +72,7 @@ void d3d12_release_texture(void* state, void* texture) noexcept;
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
 d3d12_create_storage_buffer(void* state, core::u32 bytes) noexcept;
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
-d3d12_create_geometry_buffer(void* state, core::u32 bytes) noexcept;
+d3d12_create_geometry_buffer(void* state, core::u32 bytes, bool writable = false) noexcept;
 void d3d12_release_storage_buffer(void* state, void* buffer) noexcept;
 [[nodiscard]] bool d3d12_buffer_safe_to_release(void* state, void* buffer) noexcept;
 
@@ -154,6 +154,8 @@ void d3d12_release_commands(void* state, void* commands) noexcept;
     void* destination) noexcept;
 [[nodiscard]] bool d3d12_download(
     void* commands, void* source, void* readback, core::u32 mip = 0U, core::u32 layer = 0U) noexcept;
+[[nodiscard]] bool d3d12_download_buffer(
+    void* commands, void* source, core::u32 offset, core::u32 bytes, void* readback) noexcept;
 
 [[nodiscard]] core::Result<void*, RhiError>
 d3d12_submit(void* state, void* commands) noexcept;

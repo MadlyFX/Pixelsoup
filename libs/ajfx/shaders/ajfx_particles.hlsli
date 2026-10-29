@@ -14,7 +14,10 @@
 
 #include "ajfx_random.hlsli"
 
-cbuffer AjfxConstants : register(b0) {
+// b0 in space 1 is where the media server's RHI binds a dispatch's uniform bytes,
+// and u0..u7 in space 0 where it binds writable buffers, so these kernels run
+// unchanged on either backend.
+cbuffer AjfxConstants : register(b0, space1) {
     uint ajfx_stride;       // bytes per particle record
     uint ajfx_capacity;
     uint ajfx_birth_count;

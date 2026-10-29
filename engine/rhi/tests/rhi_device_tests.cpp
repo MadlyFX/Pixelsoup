@@ -265,7 +265,11 @@ void native_d3d12_is_nonblocking_and_preserves_linear_float_pixels() {
     // Explicit barriers are callable now; async compute still is not.
     RHI_CHECK(capabilities.explicit_barriers);
     RHI_CHECK(!capabilities.async_compute);
-    RHI_CHECK(!capabilities.indirect_draw);
+    // Writable buffers and indirect dispatch and draw are callable; see
+    // rhi_compute_buffer_tests.cpp.
+    RHI_CHECK(capabilities.writable_buffers);
+    RHI_CHECK(capabilities.indirect_dispatch);
+    RHI_CHECK(capabilities.indirect_draw);
     RHI_CHECK(!capabilities.acceleration_structures);
     RHI_CHECK(!capabilities.ray_queries);
     RHI_CHECK(!capabilities.advanced_ray_tracing());

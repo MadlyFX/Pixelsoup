@@ -296,6 +296,8 @@ struct D3d12Buffer final {
         D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     };
     bool device_local{};
+    // Created with UAV access: a dispatch may bind it read-write.
+    bool writable{};
     std::array<RecordingState, max_command_contexts> recording_states{};
     core::u32 recording_uses{};
     core::u64 last_submission{};
@@ -360,6 +362,9 @@ struct ComputeLayout final {
     core::u32 storage_count{};
     core::u32 uniform_base{invalid_descriptor};
     core::u32 uniform_count{};
+    // Read-write buffers, as root UAVs after the storage textures' registers.
+    core::u32 writable_base{invalid_descriptor};
+    core::u32 writable_count{};
 };
 
 struct D3d12ComputePipeline final {
@@ -441,6 +446,11 @@ struct D3d12Device final {
     DescriptorHeap views;
     DescriptorHeap samplers;
     std::array<D3d12Sampler*, cpu_sampler_capacity> sampler_cache{};
+    // Indirect argument layouts, made on first use. None changes root
+    // arguments, so one serves every pipeline.
+    ComPtr<ID3D12CommandSignature> dispatch_signature;
+    ComPtr<ID3D12CommandSignature> draw_signature;
+    ComPtr<ID3D12CommandSignature> draw_indexed_signature;
     std::string adapter_name;
     // What the chosen adapter has to itself. Zero on an integrated part, and
     // the measure the selection above uses to find the real GPU.
@@ -1382,11 +1392,17 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     // the same journal a cancelled list rolls back. Everything runs on the
     // direct queue.
     capabilities.compute = true;
+    // Callable: create_writable_buffer makes a UAV-capable device-local
+    // buffer, a dispatch binds it read-write as a root UAV with a UAV barrier
+    // between dependent dispatches, and indirect arguments drive a dispatch
+    // or a single-batch pulled draw through ExecuteIndirect.
+    capabilities.writable_buffers = true;
+    capabilities.indirect_dispatch = true;
+    capabilities.indirect_draw = true;
     // The adapter may support these, and the backend owns internal resource
     // transitions, but this RHI still exposes no callable bindless,
-    // explicit-barrier, async-compute, indirect-draw, acceleration-structure,
-    // or ray-query operation. Do not advertise raw hardware potential as a
-    // renderer contract.
+    // acceleration-structure or ray-query operation. Do not advertise raw
+    // hardware potential as a renderer contract.
     capabilities.bindless = false;
     // Callable: CommandList::transition puts a texture into a named state
     // through the same journal every implicit transition uses, so a plan
@@ -1396,7 +1412,6 @@ core::Result<D3d12CreatedDevice, RhiError> create_d3d12_device(
     // transitions. Dispatch on the direct queue is not that, and saying so
     // here is the point of keeping the two flags apart.
     capabilities.async_compute = false;
-    capabilities.indirect_draw = false;
     capabilities.acceleration_structures = false;
     capabilities.ray_queries = false;
     // Plane views of a decoder's own surfaces, through import_video_planes.
@@ -1931,7 +1946,7 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_storage_buffer(
 }
 
 core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
-    void* value, core::u32 bytes) noexcept {
+    void* value, core::u32 bytes, bool writable) noexcept {
     using Result = core::Result<D3d12CreatedResource, RhiError>;
     auto* state = as_device(value);
     if (state == nullptr || bytes == 0U) {
@@ -1943,8 +1958,12 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
     }
     buffer->bytes = bytes;
     buffer->device_local = true;
+    buffer->writable = writable;
     const auto heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-    const auto desc = buffer_desc(align_up(bytes, 16U));
+    auto desc = buffer_desc(align_up(bytes, 16U));
+    if (writable) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
     if (FAILED(state->device->CreateCommittedResource(
             &heap, D3D12_HEAP_FLAG_NONE, &desc,
             D3D12_RESOURCE_STATE_COMMON, nullptr,
@@ -2388,7 +2407,24 @@ core::Result<void*, RhiError> d3d12_create_compute_pipeline(
         parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
         parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
-    if (parameter_count > max_parameters) {
+    // Read-write buffers continue the UAV registers after the storage
+    // textures. Root UAVs need no descriptor, so binding one costs nothing at
+    // record time; the shader indexes it as a raw or structured buffer.
+    pipeline->layout.writable_count = compute.writable_buffer_count;
+    if (compute.writable_buffer_count > 0U) {
+        pipeline->layout.writable_base = parameter_count;
+    }
+    for (core::u32 index = 0U;
+         index < compute.writable_buffer_count && parameter_count < max_parameters; ++index) {
+        auto& parameter = parameters[parameter_count++];
+        parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        parameter.Descriptor.ShaderRegister = compute.storage_texture_count + index;
+        parameter.Descriptor.RegisterSpace = 0U;
+        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+        parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
+    if (parameter_count > max_parameters ||
+        compute.writable_buffer_count > max_parameters) {
         delete pipeline;
         return Result::failure(RhiError::InvalidConfiguration);
     }
@@ -2846,6 +2882,65 @@ bool d3d12_draw_instanced_quads(
     return true;
 }
 
+// The command signature for one kind of indirect argument, made the first
+// time it is needed. Null if the device refuses it.
+[[nodiscard]] ID3D12CommandSignature* indirect_signature(
+    D3d12Device& state, D3D12_INDIRECT_ARGUMENT_TYPE type) noexcept {
+    ComPtr<ID3D12CommandSignature>* slot = &state.dispatch_signature;
+    UINT stride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    if (type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW) {
+        slot = &state.draw_signature;
+        stride = sizeof(D3D12_DRAW_ARGUMENTS);
+    } else if (type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) {
+        slot = &state.draw_indexed_signature;
+        stride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+    }
+    if (!*slot) {
+        D3D12_INDIRECT_ARGUMENT_DESC argument{};
+        argument.Type = type;
+        D3D12_COMMAND_SIGNATURE_DESC desc{};
+        desc.ByteStride = stride;
+        desc.NumArgumentDescs = 1U;
+        desc.pArgumentDescs = &argument;
+        if (FAILED(state.device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(slot->GetAddressOf())))) {
+            return nullptr;
+        }
+    }
+    return slot->Get();
+}
+
+// The device-local buffer behind indirect arguments, if they fit in it.
+[[nodiscard]] D3d12Buffer* indirect_buffer(
+    const IndirectArguments& arguments, core::u32 argument_bytes) noexcept {
+    if (arguments.buffer == nullptr || !*arguments.buffer) {
+        return nullptr;
+    }
+    auto* const buffer = as_buffer(arguments.buffer->backend_handle());
+    if (buffer == nullptr || !buffer->device_local || arguments.offset % 4U != 0U ||
+        arguments.offset > buffer->bytes || buffer->bytes - arguments.offset < argument_bytes) {
+        return nullptr;
+    }
+    return buffer;
+}
+
+// Puts a writable buffer into UAV access for a dispatch. Already there means an
+// earlier dispatch in this recording had it, so a UAV barrier orders that
+// dispatch's writes before this one's accesses.
+[[nodiscard]] bool bind_writable_buffer(CommandContext& commands, D3d12Buffer& buffer) noexcept {
+    auto* const entry = buffer_state(commands, buffer);
+    if (entry == nullptr) {
+        return false;
+    }
+    if (entry->state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = buffer.resource.Get();
+        commands.list->ResourceBarrier(1U, &barrier);
+        return true;
+    }
+    return transition_buffer(commands, buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
 bool d3d12_draw_pulled(
     void* command_value,
     void* color_value,
@@ -2866,6 +2961,21 @@ bool d3d12_draw_pulled(
         return false;
     }
     auto* state = commands->owner;
+    // Indirect counts replace the one batch's.
+    D3d12Buffer* draw_arguments = nullptr;
+    ID3D12CommandSignature* draw_signature = nullptr;
+    if (draw.indirect.buffer != nullptr) {
+        const bool indexed = draw.index_buffer != nullptr;
+        draw_arguments = draw.batches.size() != 1U ? nullptr
+            : indirect_buffer(draw.indirect, indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                                                     : sizeof(D3D12_DRAW_ARGUMENTS));
+        draw_signature = draw_arguments == nullptr ? nullptr
+            : indirect_signature(*state, indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+                                                 : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW);
+        if (draw_signature == nullptr) {
+            return false;
+        }
+    }
     if (draw.additional_targets.size() + 1U > max_color_targets) {
         return false;
     }
@@ -2987,7 +3097,13 @@ bool d3d12_draw_pulled(
                 return false;
             }
         }
-        if (draw.index_buffer != nullptr) {
+        if (draw_arguments != nullptr) {
+            if (!transition_buffer(*commands, *draw_arguments, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)) {
+                return false;
+            }
+            commands->list->ExecuteIndirect(
+                draw_signature, 1U, draw_arguments->resource.Get(), draw.indirect.offset, nullptr, 0U);
+        } else if (draw.index_buffer != nullptr) {
             commands->list->DrawIndexedInstanced(
                 draw.batches[index].vertex_count,
                 draw.batches[index].instance_count,
@@ -3262,11 +3378,39 @@ bool d3d12_dispatch(
     }
     // A zero-group dispatch is refused rather than recorded as a no-op. It is
     // always a caller that computed its group count wrong, and silently doing
-    // nothing is the hardest version of that to find.
-    if (work.groups_x == 0U || work.groups_y == 0U || work.groups_z == 0U) {
+    // nothing is the hardest version of that to find. Indirect counts are the
+    // GPU's to choose and may be zero.
+    const bool indirect = work.indirect.buffer != nullptr;
+    if (!indirect && (work.groups_x == 0U || work.groups_y == 0U || work.groups_z == 0U)) {
         return false;
     }
     auto* state = commands->owner;
+    // Everything that can refuse is checked before the first barrier, so a
+    // refused dispatch leaves the list as it found it.
+    D3d12Buffer* arguments = nullptr;
+    ID3D12CommandSignature* signature = nullptr;
+    if (indirect) {
+        arguments = indirect_buffer(work.indirect, sizeof(D3D12_DISPATCH_ARGUMENTS));
+        signature = arguments == nullptr
+            ? nullptr : indirect_signature(*state, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+        if (signature == nullptr) {
+            return false;
+        }
+    }
+    if (work.writable_buffers.size() != pipeline->layout.writable_count) {
+        return false;
+    }
+    std::array<D3d12Buffer*, 32U> writable{};
+    for (std::size_t index = 0U; index < work.writable_buffers.size(); ++index) {
+        auto* const buffer = work.writable_buffers[index] == nullptr
+            ? nullptr : as_buffer(work.writable_buffers[index]->backend_handle());
+        if (buffer == nullptr || !buffer->writable || buffer == arguments ||
+            std::find(writable.begin(), writable.begin() + static_cast<std::ptrdiff_t>(index), buffer)
+                != writable.begin() + static_cast<std::ptrdiff_t>(index)) {
+            return false;
+        }
+        writable[index] = buffer;
+    }
     commands->list->SetComputeRootSignature(pipeline->root_signature.Get());
     commands->list->SetPipelineState(pipeline->pipeline.Get());
     ID3D12DescriptorHeap* heaps[]{
@@ -3307,7 +3451,23 @@ bool d3d12_dispatch(
         commands->list->SetComputeRootConstantBufferView(
             pipeline->layout.uniform_base, address);
     }
-    commands->list->Dispatch(work.groups_x, work.groups_y, work.groups_z);
+    for (core::u32 index = 0U; index < pipeline->layout.writable_count; ++index) {
+        if (!bind_writable_buffer(*commands, *writable[index])) {
+            return false;
+        }
+        commands->list->SetComputeRootUnorderedAccessView(
+            pipeline->layout.writable_base + index,
+            writable[index]->resource->GetGPUVirtualAddress());
+    }
+    if (indirect) {
+        if (!transition_buffer(*commands, *arguments, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)) {
+            return false;
+        }
+        commands->list->ExecuteIndirect(
+            signature, 1U, arguments->resource.Get(), work.indirect.offset, nullptr, 0U);
+    } else {
+        commands->list->Dispatch(work.groups_x, work.groups_y, work.groups_z);
+    }
     return true;
 }
 
@@ -3476,6 +3636,42 @@ bool d3d12_download(
     to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     to.PlacedFootprint = footprint;
     commands->list->CopyTextureRegion(&to, 0U, 0U, 0U, &from, nullptr);
+    return true;
+}
+
+bool d3d12_download_buffer(
+    void* command_value, void* source_value, core::u32 offset, core::u32 bytes,
+    void* readback_value) noexcept {
+    auto* commands = as_commands(command_value);
+    auto* source = as_buffer(source_value);
+    auto* readback = as_readback(readback_value);
+    if (commands == nullptr || source == nullptr || readback == nullptr ||
+        !commands->recording || commands->owner == nullptr || !source->device_local ||
+        bytes == 0U || offset > source->bytes || source->bytes - offset < bytes ||
+        bytes > readback->bytes) {
+        return false;
+    }
+    if (bytes > readback->capacity) {
+        const auto heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
+        const auto buffer = buffer_desc(bytes);
+        ComPtr<ID3D12Resource> replacement;
+        if (FAILED(commands->owner->device->CreateCommittedResource(
+                &heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                IID_PPV_ARGS(&replacement)))) {
+            return false;
+        }
+        readback->resource = std::move(replacement);
+        readback->capacity = bytes;
+    }
+    // One row: the bytes, unpadded.
+    readback->row_bytes = bytes;
+    readback->row_pitch = bytes;
+    readback->rows = 1U;
+    if (!transition_buffer(*commands, *source, D3D12_RESOURCE_STATE_COPY_SOURCE)) {
+        return false;
+    }
+    commands->list->CopyBufferRegion(readback->resource.Get(), 0U, source->resource.Get(), offset, bytes);
     return true;
 }
 
@@ -3749,7 +3945,7 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_storage_buffer(
 }
 void d3d12_release_storage_buffer(void*, void*) noexcept {}
 core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
-    void*, core::u32) noexcept {
+    void*, core::u32, bool) noexcept {
     return core::Result<D3d12CreatedResource, RhiError>::failure(
         RhiError::Unavailable);
 }
@@ -3800,6 +3996,7 @@ bool d3d12_clear(void*, void*, Color) noexcept { return false; }
 bool d3d12_transition(void*, void*, ResourceState) noexcept { return false; }
 bool d3d12_blit(void*, void*, void*, Filter) noexcept { return false; }
 bool d3d12_download(void*, void*, void*, core::u32, core::u32) noexcept { return false; }
+bool d3d12_download_buffer(void*, void*, core::u32, core::u32, void*) noexcept { return false; }
 bool d3d12_copy_region(void*, void*, ViewportRect, void*) noexcept {
     return false;
 }

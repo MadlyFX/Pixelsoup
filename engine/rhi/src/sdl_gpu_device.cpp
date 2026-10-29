@@ -386,7 +386,8 @@ StorageBuffer::StorageBuffer(StorageBuffer&& other) noexcept
       staging_(std::exchange(other.staging_, nullptr)),
       backend_(std::exchange(other.backend_, BackendKind::SdlGpu)),
       bytes_(std::exchange(other.bytes_, 0U)),
-      ranged_(std::exchange(other.ranged_, false)) {}
+      ranged_(std::exchange(other.ranged_, false)),
+      writable_(std::exchange(other.writable_, false)) {}
 
 StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
     if (this != &other) {
@@ -398,6 +399,7 @@ StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
         backend_ = std::exchange(other.backend_, BackendKind::SdlGpu);
         bytes_ = std::exchange(other.bytes_, 0U);
         ranged_ = std::exchange(other.ranged_, false);
+        writable_ = std::exchange(other.writable_, false);
     }
     return *this;
 }
@@ -1181,6 +1183,12 @@ bool CommandList::draw_pulled(
             return false;
         }
     }
+    // Indirect counts replace exactly one batch's, and only where the
+    // capability says a backend reads them.
+    if (draw.indirect.buffer != nullptr
+        && (!device_->capabilities().indirect_draw || draw.batches.size() != 1U)) {
+        return false;
+    }
 
     if (backend_ == BackendKind::D3d12) {
         return detail::d3d12_draw_pulled(
@@ -1586,6 +1594,19 @@ bool CommandList::blit(
     blit.filter = as_filter(filter);
     SDL_BlitGPUTexture(static_cast<SDL_GPUCommandBuffer*>(handle_), &blit);
     return true;
+}
+
+bool CommandList::download(const StorageBuffer& source, core::u32 offset, core::u32 bytes,
+                           Readback& into) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !source || !into || !source.ranged_ ||
+        bytes > into.bytes_) {
+        return false;
+    }
+    // Only the native backend reads device-local buffers back.
+    if (backend_ != BackendKind::D3d12) {
+        return false;
+    }
+    return detail::d3d12_download_buffer(handle_, source.handle_, offset, bytes, into.handle_);
 }
 
 bool CommandList::download(const Texture& source, Readback& into, core::u32 mip, core::u32 layer) noexcept {
@@ -2157,6 +2178,27 @@ core::Result<StorageBuffer, RhiError> Device::create_storage_buffer(
     }
     return Result::success(StorageBuffer{
         *this, buffer, buffer, staging, BackendKind::SdlGpu, bytes});
+}
+
+core::Result<StorageBuffer, RhiError> Device::create_writable_buffer(
+    core::u32 bytes) noexcept {
+    using Result = core::Result<StorageBuffer, RhiError>;
+    if (handle_ == nullptr) {
+        return Result::failure(RhiError::Unavailable);
+    }
+    if (!capabilities_.writable_buffers) {
+        return Result::failure(RhiError::OperationUnsupported);
+    }
+    if (bytes == 0U) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    auto created = detail::d3d12_create_geometry_buffer(handle_, bytes, true);
+    if (!created) {
+        return Result::failure(created.error());
+    }
+    return Result::success(StorageBuffer{
+        *this, created.value().state, created.value().native, nullptr,
+        BackendKind::D3d12, bytes, true, true});
 }
 
 core::Result<StorageBuffer, RhiError> Device::create_geometry_buffer(

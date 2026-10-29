@@ -44,8 +44,12 @@ different build.
 ## Support boundaries
 
 There is no native Vulkan backend, bindless material path, async-compute
-execution, indirect GPU-driven submission, BLAS/TLAS/ray-query rendering,
-DDGI/ReSTIR/SVGF pipeline or external-memory interop. Requested unsupported
+execution, GPU-driven scene culling or submission, BLAS/TLAS/ray-query rendering,
+DDGI/ReSTIR/SVGF pipeline or external-memory interop. The D3D12 RHI does
+provide writable buffers and indirect dispatch and single-batch indirect pulled
+draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`); ajfx particle
+simulations run on them through `render::ParticleDevice`, but nothing in the
+scene draws particles yet. Requested unsupported
 features fail capability/readiness checks. Offline baked GI and probe/planar
 reflections do not establish support for those features.
 

@@ -607,7 +607,7 @@ private:
         // descriptor heaps, and every kernel and draw shares one signature.
         D3D12_ROOT_PARAMETER parameters[1U + gpu::max_bound_buffers]{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        parameters[0].Constants = {0U, 0U, gpu::root_constant_count};
+        parameters[0].Constants = {0U, 1U, gpu::root_constant_count}; // b0, space 1
         parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         for (std::uint32_t slot = 0U; slot < gpu::max_bound_buffers; ++slot) {
             parameters[1U + slot].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;

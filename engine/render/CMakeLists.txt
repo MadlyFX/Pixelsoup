@@ -69,6 +69,7 @@ add_library(mediaserver_render STATIC
     src/bloom.cpp
     src/bloom_chain.cpp
     src/froxel_grid.cpp
+    src/particle_device.cpp
     src/volumetric_fog.cpp
     src/shadow_atlas.cpp
     src/slice_apron.cpp
@@ -118,6 +119,9 @@ target_link_libraries(mediaserver_render
         MediaServer::Compositor
         MediaServer::Output
         MediaServer::Rhi
+        # The particle device implements ajfx's GPU interface, so ajfx's
+        # headers are part of this library's own.
+        ajfx::ajfx
     PRIVATE
         MediaServer::Assets
         MediaServer::Net
@@ -733,6 +737,32 @@ if(BUILD_TESTING)
     set_target_properties(mediaserver_render_froxel_grid_tests PROPERTIES
         FOLDER "tests"
     )
+
+    # ajfx particles on this RHI: the same kernels on ajfx's own D3D12 device
+    # and on the RHI must leave identical particle records. Compiles the
+    # kernels with ajfx's runtime compiler, so it needs dxcompiler.dll beside
+    # it; the media server itself only ever loads precompiled kernels.
+    if(TARGET ajfx::d3d12)
+        add_executable(mediaserver_render_particle_device_tests
+            tests/particle_device_tests.cpp
+        )
+        target_link_libraries(mediaserver_render_particle_device_tests
+            PRIVATE MediaServer::Render ajfx::d3d12
+        )
+        mediaserver_set_project_options(mediaserver_render_particle_device_tests)
+        ajfx_copy_dxc(mediaserver_render_particle_device_tests)
+        add_test(
+            NAME mediaserver.render_particle_device
+            COMMAND mediaserver_render_particle_device_tests
+        )
+        set_tests_properties(mediaserver.render_particle_device PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+        )
+        set_target_properties(mediaserver_render_particle_device_tests PROPERTIES
+            FOLDER "tests"
+        )
+    endif()
 
     # The shadow atlas allocator is pure CPU on purpose: the property that
     # matters is that two nodes reach the same assignment, and that is decided
