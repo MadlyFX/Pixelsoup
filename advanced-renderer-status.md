@@ -47,9 +47,12 @@ There is no native Vulkan backend, bindless material path, async-compute
 execution, GPU-driven scene culling or submission, BLAS/TLAS/ray-query rendering,
 DDGI/ReSTIR/SVGF pipeline or external-memory interop. The D3D12 RHI does
 provide writable buffers and indirect dispatch and single-batch indirect pulled
-draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`); ajfx particle
-simulations run on them through `render::ParticleDevice`, but nothing in the
-scene draws particles yet. Requested unsupported
+draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`). ajfx particle
+effects run on them: `render::ParticlePass` simulates an instance to its show
+frame's step within a per-frame step budget (holding, and refusing to draw,
+while a seek catches up from its checkpoints) and draws its sprites over a
+view's colour, depth-tested against its depth. No scene node places effects
+yet, so nothing in a rendered scene draws particles. Requested unsupported
 features fail capability/readiness checks. Offline baked GI and probe/planar
 reflections do not establish support for those features.
 

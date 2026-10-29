@@ -1,0 +1,318 @@
+#include <mediaserver/render/particle_pass.hpp>
+
+#include <ajfx/builder.hpp>
+#include <ajfx/d3d12.hpp>
+#include <ajfx/presets.hpp>
+
+#include <array>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// The particle pass draws a simulated effect where the camera says, tests it
+// against the scene's depth, follows the show frame exactly, and holds while
+// a seek is still catching up rather than drawing particles from the wrong
+// moment.
+namespace {
+
+namespace core = mediaserver::core;
+namespace render = mediaserver::render;
+namespace rhi = mediaserver::rhi;
+namespace scene = mediaserver::scene;
+
+void check(bool condition, const char* expression, int line) {
+    if (!condition) {
+        throw std::runtime_error{std::string{"line "} + std::to_string(line) + ": check failed: " + expression};
+    }
+}
+
+#define PASS_CHECK(...) check(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __LINE__)
+
+constexpr core::u32 size = 64U;
+
+std::unique_ptr<rhi::Device> g_device;
+std::unique_ptr<ajfx::gpu::ShaderCompiler> g_compiler;
+std::unique_ptr<ajfx::d3d12::Device> g_reference;
+
+[[nodiscard]] scene::Mat4 identity() {
+    scene::Mat4 m;
+    for (core::u32 i = 0U; i < 4U; ++i) {
+        m.set(i, i, 1.0F);
+    }
+    return m;
+}
+
+[[nodiscard]] scene::Mat4 translation(float x, float y, float z) {
+    scene::Mat4 m = identity();
+    m.set(0U, 3U, x);
+    m.set(1U, 3U, y);
+    m.set(2U, 3U, z);
+    return m;
+}
+
+// Looking down -Z from the origin: 4 world units across the 64 pixels, so 16
+// pixels a unit, every particle at reversed depth 0.5.
+[[nodiscard]] scene::ViewMatrices orthographic() {
+    scene::ViewMatrices view;
+    view.view = identity();
+    view.projection = identity();
+    view.projection.set(0U, 0U, 0.5F);
+    view.projection.set(1U, 1U, 0.5F);
+    view.projection.set(2U, 2U, 0.0F);
+    view.projection.set(2U, 3U, 0.5F);
+    view.view_projection = view.projection;
+    return view;
+}
+
+// One still particle of `diameter` at the origin.
+[[nodiscard]] ajfx::Effect still(float diameter, ajfx::Color color, ajfx::BlendMode blend) {
+    ajfx::EffectBuilder builder{"still"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = color, .b = color})
+        .init(ajfx::InitSize{.min = diameter, .max = diameter})
+        .renderer(ajfx::SpriteRenderer{.blend = blend});
+    return builder.build().value();
+}
+
+[[nodiscard]] render::ParticlePass make_pass(render::ParticleSettings settings = {}) {
+    auto pass = render::ParticlePass::create(*g_device, rhi::TextureFormat::Rgba8Unorm, settings);
+    if (!pass) {
+        std::cout << pass.error().message << '\n';
+    }
+    PASS_CHECK(pass);
+    return std::move(pass).value();
+}
+
+[[nodiscard]] render::ParticleInstance make_instance(render::ParticlePass& pass, const ajfx::Effect& effect,
+                                                     core::u32 seed = 3U) {
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    auto instance = pass.create_instance(effect, kernels, seed);
+    if (!instance) {
+        std::cout << instance.error().message << '\n';
+    }
+    PASS_CHECK(instance);
+    return std::move(instance).value();
+}
+
+struct Frame final {
+    std::vector<core::u8> pixels;
+    [[nodiscard]] core::u8 red(core::u32 x, core::u32 y) const {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U];
+    }
+    [[nodiscard]] core::u8 alpha(core::u32 x, core::u32 y) const {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + 3U];
+    }
+};
+
+// Advances to `frame` of a 24 fps show (one call) and draws into fresh
+// targets cleared to transparent black and the given depth.
+[[nodiscard]] Frame render_frame(render::ParticlePass& pass, render::ParticleInstance& instance, core::u64 frame,
+                                 const scene::Mat4& placement, float depth_clear = 0.0F) {
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U));
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.depth_clear = depth_clear;
+    PASS_CHECK(pass.draw(commands, instance, orthographic(), placement, targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+void a_particle_draws_where_the_camera_sees_it() {
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance =
+        make_instance(pass, still(1.0F, ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, ajfx::BlendMode::Alpha));
+    const Frame frame = render_frame(pass, instance, 1U, identity());
+    // (32, 32) is 1/32 unit from the particle each way: coverage 1 - 2/256.
+    PASS_CHECK(frame.red(32U, 32U) >= 251U && frame.alpha(32U, 32U) >= 251U);
+    // Six pixels right: uv.x = 13/16, coverage 0.336.
+    PASS_CHECK(frame.red(38U, 32U) >= 83U && frame.red(38U, 32U) <= 88U);
+    PASS_CHECK(frame.alpha(42U, 32U) == 0U && frame.alpha(0U, 0U) == 0U);
+
+    // Placed one unit right, it lands 16 pixels right.
+    render::ParticleInstance moved =
+        make_instance(pass, still(1.0F, ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, ajfx::BlendMode::Alpha));
+    const Frame shifted = render_frame(pass, moved, 1U, translation(1.0F, 0.0F, 0.0F));
+    PASS_CHECK(shifted.red(48U, 32U) >= 251U);
+    PASS_CHECK(shifted.alpha(32U, 32U) == 0U);
+}
+
+void the_scene_depth_hides_particles_behind_it() {
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance =
+        make_instance(pass, still(1.0F, ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, ajfx::BlendMode::Alpha));
+    // Reversed depth: a scene surface at 1 (the near plane) covers the
+    // particle at 0.5; the far plane at 0 does not.
+    PASS_CHECK(render_frame(pass, instance, 1U, identity(), 1.0F).alpha(32U, 32U) == 0U);
+    PASS_CHECK(render_frame(pass, instance, 1U, identity(), 0.0F).alpha(32U, 32U) >= 251U);
+}
+
+void additive_particles_add_without_covering() {
+    render::ParticlePass pass = make_pass();
+    ajfx::EffectBuilder builder{"pair"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 2U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = ajfx::Color{0.25F, 0.25F, 0.25F, 1.0F}, .b = ajfx::Color{0.25F, 0.25F, 0.25F, 1.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Additive});
+    render::ParticleInstance instance = make_instance(pass, builder.build().value());
+    const Frame frame = render_frame(pass, instance, 1U, identity());
+    // Two quarter-grey particles add to about half; additive leaves the
+    // scene's alpha (transparent here) alone.
+    PASS_CHECK(frame.red(32U, 32U) >= 124U && frame.red(32U, 32U) <= 128U);
+    PASS_CHECK(frame.alpha(32U, 32U) == 0U);
+}
+
+[[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    ajfx::gpu::GpuSimulation reference = ajfx::gpu::GpuSimulation::create(*g_reference, effect, kernels, 3U).value();
+    reference.advance_to(step);
+    return reference.read_particle_bytes(0U).value();
+}
+
+void seeks_hold_until_caught_up_then_match_playing_through() {
+    render::ParticleSettings settings;
+    settings.step_budget = 16U;
+    settings.checkpoint_interval = 120U;
+    settings.checkpoint_count = 4U;
+    render::ParticlePass pass = make_pass(settings);
+    const ajfx::Effect effect = ajfx::presets::smoke();
+    render::ParticleInstance instance = make_instance(pass, effect);
+
+    const auto advance = [&](core::u64 frame) {
+        auto acquired = g_device->acquire_commands();
+        PASS_CHECK(acquired);
+        rhi::CommandList commands = std::move(acquired).value();
+        const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+        if (!reached) {
+            // Behind: drawing is refused.
+            rhi::Texture* none = nullptr;
+            PASS_CHECK(!pass.draw(commands, instance, orthographic(), identity(), render::ParticleTargets{none, none}));
+        }
+        auto submitted = g_device->submit(std::move(commands));
+        PASS_CHECK(submitted);
+        PASS_CHECK(std::move(submitted).value().wait());
+        PASS_CHECK(!pass.take_error());
+        return reached;
+    };
+
+    // Playing: every 24 fps frame is two or three 60 Hz steps, within budget.
+    for (core::u64 frame = 0U; frame <= 48U; ++frame) {
+        PASS_CHECK(advance(frame));
+    }
+    PASS_CHECK(instance.step() == 120U);
+
+    // A jump to 10 s (step 600) is 480 steps away: 30 frames of 16.
+    int frames = 1;
+    while (!advance(240U)) {
+        ++frames;
+        PASS_CHECK(frames < 100);
+    }
+    PASS_CHECK(frames == 30);
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference_records(effect, 600U));
+
+    // Back to 250: the checkpoint at 240 is ten steps away, so one frame.
+    PASS_CHECK(advance(100U));
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference_records(effect, 250U));
+    // Forward to 490 reuses the checkpoint at 480 rather than stepping 240.
+    PASS_CHECK(advance(196U));
+    PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference_records(effect, 490U));
+}
+
+void devices_without_particles_are_refused() {
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::SdlGpu;
+    auto sdl = rhi::Device::create(config);
+    if (sdl) {
+        auto refused = render::ParticlePass::create(sdl.value(), rhi::TextureFormat::Rgba8Unorm);
+        PASS_CHECK(!refused && refused.error().code == render::ParticleErrorCode::Unsupported);
+    }
+}
+
+} // namespace
+
+int main() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        std::cout << "skipped: no D3D12 device\n";
+        return 77;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+#if !defined(NDEBUG)
+    config.debug = true;
+#endif
+    auto device = rhi::Device::create(config);
+    ajfx::Result<std::unique_ptr<ajfx::gpu::ShaderCompiler>> compiler = ajfx::d3d12::create_shader_compiler();
+    ajfx::Result<std::unique_ptr<ajfx::d3d12::Device>> reference = ajfx::d3d12::create_device();
+    if (!device || !compiler || !reference) {
+        std::cout << "skipped: " << (!compiler ? compiler.error().message : "no D3D12 device") << '\n';
+        return 77;
+    }
+    g_device = std::make_unique<rhi::Device>(std::move(device).value());
+    g_compiler = std::move(compiler).value();
+    g_reference = std::move(reference).value();
+
+    struct Case final {
+        const char* name;
+        void (*run)();
+    };
+    const Case cases[] = {
+        {"a_particle_draws_where_the_camera_sees_it", a_particle_draws_where_the_camera_sees_it},
+        {"the_scene_depth_hides_particles_behind_it", the_scene_depth_hides_particles_behind_it},
+        {"additive_particles_add_without_covering", additive_particles_add_without_covering},
+        {"seeks_hold_until_caught_up_then_match_playing_through",
+         seeks_hold_until_caught_up_then_match_playing_through},
+        {"devices_without_particles_are_refused", devices_without_particles_are_refused},
+    };
+    int failures = 0;
+    for (const Case& test : cases) {
+        try {
+            test.run();
+            std::cout << "[pass] " << test.name << '\n';
+        } catch (const std::exception& error) {
+            ++failures;
+            std::cout << "[FAIL] " << test.name << ": " << error.what() << '\n';
+        }
+    }
+    g_reference.reset();
+    g_compiler.reset();
+    g_device.reset();
+    return failures == 0 ? 0 : 1;
+}

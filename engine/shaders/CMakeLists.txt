@@ -519,6 +519,13 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         compute_gather.comp.hlsl cs_6_2
         mediaserver_compute_gather_comp_dxil compute_gather_comp_dxil.h)
+    # ajfx particle sprites, drawn over the scene from the simulation's records.
+    mediaserver_compile_dxil(
+        particle_sprite.vert.hlsl vs_6_2
+        mediaserver_particle_sprite_vert_dxil particle_sprite_vert_dxil.h)
+    mediaserver_compile_dxil(
+        particle_sprite.frag.hlsl ps_6_2
+        mediaserver_particle_sprite_frag_dxil particle_sprite_frag_dxil.h)
     # Test probes for writable buffers and indirect dispatch and draw.
     mediaserver_compile_dxil(
         buffer_scale_probe.comp.hlsl cs_6_2

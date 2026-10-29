@@ -403,6 +403,24 @@ Result<GpuCheckpoint> GpuSimulation::save() {
     return GpuCheckpoint{std::move(data)};
 }
 
+void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {
+    State& s = *state_;
+    GpuCheckpoint::Data& data = *checkpoint.data_;
+    data.tick = s.tick;
+    data.current = s.current;
+    for (std::size_t i = 0U; i < s.emitters.size() && i < data.emitters.size(); ++i) {
+        const EmitterGpu& e = s.emitters[i];
+        GpuCheckpoint::Data::Emitter& saved = data.emitters[i];
+        const std::uint64_t record_bytes =
+            static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
+        saved.spawned = e.spawned;
+        saved.rate_carry = e.rate_carry;
+        s.device->copy_buffer(saved.particles, 0U, e.particles[s.current], 0U, record_bytes);
+        s.device->copy_buffer(saved.counters, 0U, e.counters, 0U, counters_bytes);
+        s.device->copy_buffer(saved.args, 0U, e.args, 0U, args_bytes);
+    }
+}
+
 void GpuSimulation::restore(const GpuCheckpoint& checkpoint) {
     State& s = *state_;
     const GpuCheckpoint::Data& data = *checkpoint.data_;

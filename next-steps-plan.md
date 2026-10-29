@@ -921,9 +921,12 @@ feedback forces evaluate any frame directly.
    records into the renderer's command lists; on one GPU it leaves particle
    records byte-identical to ajfx's own D3D12 device.
 4. Integration: `.ajfx` import as a library asset (content-hash identity,
-   parsed and its kernels created on a worker, never on the frame path), a
-   render pass that steps effects through `render::ParticleDevice` and draws
-   their sprites, and a `scene.particle_effect` node
+   parsed and its kernels created on a worker, never on the frame path), the
+   render pass (`render::ParticlePass`, done: show-frame stepping within a
+   step budget, a preallocated checkpoint ring for seeks, holding while behind,
+   sprites drawn from the camera's axes with the slice's projection,
+   depth-tested without depth writes; no particle motion vectors yet), wiring
+   that pass into the scene renderer, and a `scene.particle_effect` node
    referencing the asset with its parameter values normalized, replicated and
    digested. Show-frame driving and seeking, placement by dragging from the
    Library, published parameters in the Inspector with keyframes, and
