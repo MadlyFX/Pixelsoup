@@ -1003,7 +1003,7 @@ save_preferences_impl(const std::filesystem::path &preferences_file,
                        preferences.playback_trail_frames);
     }
     if (preferences.proxy_transcode_priority !=
-        ProxyTranscodePriority::Background) {
+        default_proxy_transcode_priority) {
         put_preference(
             payload, PreferenceKey::ProxyTranscodePriority,
             static_cast<std::uint32_t>(preferences.proxy_transcode_priority));

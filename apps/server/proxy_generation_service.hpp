@@ -76,6 +76,26 @@ struct ProxyEncodedMetadata final {
     bool operator==(const ProxyEncodedMetadata&) const = default;
 };
 
+struct ProxyBackendOutput final {
+    // Fingerprint of the exact source byte stream consumed by the encoder.
+    // This closes the gap where a path could change and then be restored
+    // between the service's before/after verification passes.
+    assets::ContentFingerprint encoded_source_fingerprint;
+    ProxySourceMetadata source_metadata;
+    ProxyEncodedMetadata encoded_metadata;
+    assets::ProxyFrameMap frame_map;
+};
+
+// A run of source frames encoded as a proxy file of its own: frame j of the
+// file is source frame `first + j`, numbered as the playback decoder numbers
+// them, and the file opens on a keyframe.
+struct ProxySourceRange final {
+    core::u64 first{};
+    core::u64 count{};
+
+    bool operator==(const ProxySourceRange&) const = default;
+};
+
 struct ProxyEncodeRequest final {
     // This is the persistent Library identity. The backend has no API for
     // creating or replacing an Asset node.
@@ -88,17 +108,30 @@ struct ProxyEncodeRequest final {
     // every outcome after packaging or failure.
     std::filesystem::path output_file;
     ProxyEncodeProgressCallback progress;
+    // Set while the show or the editor plays: the backend encodes this job
+    // within its smallest CPU budget whatever priority it was configured
+    // with, so generation never competes with playback decode.
+    bool yield_to_playback{};
+    // Empty encodes the whole source.
+    std::optional<ProxySourceRange> range;
+    // Set instead when every segment is ready: the backend joins these
+    // segment files, in order, into the whole-file proxy without decoding
+    // the source again.
+    std::vector<std::filesystem::path> join_segments;
+    // Set with `range` to encode it in one pass as consecutive files of this
+    // many source frames (the last may be shorter), each opening on a
+    // keyframe and written to proxy_piece_path(output_file, piece). Each is
+    // handed to `piece_done` as soon as it is complete, which owns the file
+    // from then on; returning false stops the encode, which then reports
+    // Cancelled. The result describes the last piece.
+    core::u64 piece_frames{};
+    std::function<bool(core::u32 piece, const ProxyBackendOutput&)>
+        piece_done;
 };
 
-struct ProxyBackendOutput final {
-    // Fingerprint of the exact source byte stream consumed by the encoder.
-    // This closes the gap where a path could change and then be restored
-    // between the service's before/after verification passes.
-    assets::ContentFingerprint encoded_source_fingerprint;
-    ProxySourceMetadata source_metadata;
-    ProxyEncodedMetadata encoded_metadata;
-    assets::ProxyFrameMap frame_map;
-};
+// Where a piece of a split encode is written.
+[[nodiscard]] std::filesystem::path
+proxy_piece_path(const std::filesystem::path& output_file, core::u32 piece);
 
 enum class ProxyBackendErrorCode : core::u8 {
     Unavailable,
@@ -222,10 +255,17 @@ using ProxyArtifactLoadResult =
 
 [[nodiscard]] bool
 valid_proxy_source_metadata(const ProxySourceMetadata& metadata) noexcept;
+// `range` is the run of source frames a segment encodes; empty checks a
+// whole-file output.
 [[nodiscard]] bool valid_proxy_backend_output(
     const ProxyBackendOutput& output,
     const assets::DerivativeProfile& profile,
-    core::u64 maximum_proxy_frames) noexcept;
+    core::u64 maximum_proxy_frames,
+    std::optional<ProxySourceRange> range = std::nullopt) noexcept;
+// The source frames segment `segment` of this source covers.
+[[nodiscard]] std::optional<ProxySourceRange>
+proxy_segment_source_range(core::u32 segment,
+                           const ProxySourceMetadata& source) noexcept;
 
 // Synchronous machine-local generator/publication boundary. Callers choose the
 // worker/thread policy; cancellation is observed during source verification,
@@ -249,9 +289,31 @@ public:
     ProxyGenerationService(ProxyGenerationService&&) = delete;
     ProxyGenerationService& operator=(ProxyGenerationService&&) = delete;
 
+    // What one generate() call makes. The default is the whole-file proxy,
+    // encoded from the source.
+    struct Step final {
+        // Encode within the Background budget whatever the backend's
+        // priority; see ProxyEncodeRequest::yield_to_playback.
+        bool yield_to_playback{};
+        // Encode only this segment, under its own key.
+        std::optional<core::u32> segment;
+        // Make the whole-file proxy by joining the asset's published
+        // segments; fails with CacheNotReady while any is missing.
+        bool join_segments{};
+        // With `segment`: encode this many consecutive segments from it in
+        // one pass, publishing each as it is made, which saves reopening the
+        // source and the encoder for every segment. `published` hears of each
+        // one; returning false stops the run there, and generate() then
+        // reports Cancelled. A run stopped or failed part way keeps the
+        // segments it published.
+        core::u32 segments{1U};
+        std::function<bool(core::u32 segment,
+                           const ProxyGenerationReceipt& receipt)>
+            published;
+    };
     [[nodiscard]] ProxyGenerationResult generate(
         const assets::MediaAsset& asset, std::stop_token stop = {},
-        ProxyEncodeProgressCallback progress = {}) noexcept;
+        ProxyEncodeProgressCallback progress = {}, Step step = {}) noexcept;
     [[nodiscard]] ProxyArtifactLoadResult load(
         const assets::DerivativeKey& key, std::stop_token stop = {},
         bool verify_payload_digest = true) noexcept;
@@ -283,6 +345,15 @@ private:
         assets::DerivativeCache& cache,
         const assets::DerivativeKey& key,
         std::stop_token stop, bool verify_payload_digest = true) noexcept;
+    // Checks one encoded file against its source and range and publishes it
+    // under `key`. Throws only what generate() catches.
+    [[nodiscard]] ProxyGenerationResult publish_encoded(
+        const assets::MediaAsset& asset, assets::DerivativeCache& cache,
+        const assets::DerivativeKey& key,
+        const std::filesystem::path& raw_path,
+        const ProxyBackendOutput& encoded,
+        std::optional<ProxySourceRange> range,
+        const assets::ContentFingerprint& before, std::stop_token stop);
 
     std::unique_ptr<assets::DerivativeCache> fixed_cache_;
     std::optional<NextToSourceProxyCacheConfig> next_to_source_cache_;

@@ -19,6 +19,32 @@ inline constexpr std::string_view projection_mesh_type =
 // naming its parent folder, exactly as an asset names the folder it is in.
 inline constexpr std::string_view folder_type = "asset.folder";
 
+// A vehicle process plateset: the camera angles of one driving take, each
+// filed in the LED Car Process slot it plays in. It names media assets rather
+// than files, so it has no source of its own and never enters a manifest.
+inline constexpr std::string_view plateset_type = "asset.plateset";
+// Which rig template the plateset is laid out for (`nine`, `five`, `three`).
+// Absent is nine. It decides which slots the Library offers, never which
+// assigned slot plays: an assignment outside the template is kept.
+inline constexpr std::string_view plateset_rig = "plateset_rig";
+inline constexpr std::string_view plateset_rig_nine = "nine";
+inline constexpr std::string_view plateset_rig_five = "five";
+inline constexpr std::string_view plateset_rig_three = "three";
+// Per slot, `slot_<role>` names the asset.media node playing there and
+// `slot_<role>_offset` is the sync offset: how many source frames of that
+// plate come before the take's common start. Roles are the LED Car Process
+// socket names in `plateset_slot_key` order.
+inline constexpr std::string_view plateset_slot_prefix = "slot_";
+inline constexpr std::string_view plateset_offset_suffix = "_offset";
+// Every placed plate of the set decodes at half size. Present and true, or
+// absent.
+inline constexpr std::string_view plateset_half_resolution =
+    "plateset_half_resolution";
+// Moments kept from the front plate: `moment_<n>_frame` (front plate source
+// frame), `moment_<n>_name` and `moment_<n>_color`, numbered from zero with
+// no gaps. They belong to the footage, so they follow every placement.
+inline constexpr std::string_view plateset_moment_prefix = "moment_";
+
 inline constexpr std::string_view display_name = "display_name";
 // The asset.folder node an asset (or folder) is filed under. Absent: the
 // Library's top level. Organisation only; it never affects rendering.

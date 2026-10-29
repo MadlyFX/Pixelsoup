@@ -96,6 +96,19 @@ using ProxyAssetRuntimeResult =
     core::Result<std::vector<ProxyAssetRuntimeObservation>,
                  ProxyPlaybackError>;
 
+// What one editor view's clips decoded, for the view's media menu: how many
+// distinct placements drew a proxy, and how many fell back to the source
+// only while their proxy is missing, queued or generating.
+struct ViewProxySummary final {
+    core::u32 proxied{};
+    core::u32 waiting{};
+
+    bool operator==(const ViewProxySummary &) const = default;
+};
+
+[[nodiscard]] ViewProxySummary summarize_view_proxies(
+    std::span<const ProxyPlacementObservation> observations) noexcept;
+
 [[nodiscard]] std::string_view
 proxy_placement_issue_name(ProxyPlacementIssue issue) noexcept;
 [[nodiscard]] std::string_view proxy_playback_reason_name(

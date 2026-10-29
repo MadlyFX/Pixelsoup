@@ -201,7 +201,7 @@ int run_node_playback(net::NodeSessionService &service,
             open_proxy_playback_artifacts(options, "node proxy generator");
         if (generation_artifacts != nullptr) {
             node_proxy_generator = std::make_unique<ProxyGenerationWorker>(
-                std::move(generation_artifacts));
+                std::move(generation_artifacts), true);
         }
     }
     MediaDecodeSupportWorker node_decode_support;
@@ -1691,6 +1691,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::unique_ptr<net::ClusterDiscoveryBrowser> discovery_browser;
     std::error_code discovery_error;
     std::unique_ptr<server::ThumbnailService> thumbnail_service;
+    std::unique_ptr<server::PlatesetMotionService> plateset_motion;
     std::vector<assets::DerivativeKey> retained_thumbnail_keys;
     std::vector<assets::DerivativeKey> retained_filmstrip_keys;
     std::vector<editor::LibraryProxyRuntimeObservation> library_proxy_runtime;
@@ -1740,6 +1741,28 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
             return 1;
         }
         editor = std::move(created_editor).value();
+        // Plateset motion signatures are cached beside the other
+        // derivatives; without a cache root they are only kept this session.
+        {
+            std::error_code motion_path_error;
+            std::filesystem::path motion_root =
+                derivative_cache_root(options, motion_path_error);
+            if (motion_path_error) {
+                motion_root.clear();
+            } else {
+                motion_root /= "motion-v1";
+            }
+            try {
+                plateset_motion = std::make_unique<server::PlatesetMotionService>(
+                    std::move(motion_root));
+            } catch (const std::system_error &error) {
+                std::cerr << "could not start plateset analysis: "
+                          << error.what() << '\n';
+            } catch (const std::bad_alloc &) {
+                std::cerr << "could not start plateset analysis: "
+                             "allocation failed\n";
+            }
+        }
         {
             std::error_code cache_path_error;
             const std::filesystem::path cache_root =
@@ -1956,6 +1979,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::optional<editor::ProjectSettingsEdit> pending_project_settings;
     std::vector<editor::ClipTimingEdit> pending_clip_timings;
     std::vector<editor::ClipSplitIntent> pending_clip_splits;
+    std::vector<editor::PlatesetPlaceIntent> pending_plateset_places;
+    std::vector<editor::PlatesetSwapIntent> pending_plateset_swaps;
     std::vector<editor::TimelineLaneEditIntent> pending_lane_edits;
     std::vector<editor::TimelineMarkerEditIntent> pending_marker_edits;
     std::optional<bool> pending_cues_armed;
@@ -2387,6 +2412,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .discovery_browser = discovery_browser,
         .discovery_error = discovery_error,
         .thumbnail_service = thumbnail_service,
+        .plateset_motion = plateset_motion,
         .retained_thumbnail_keys = retained_thumbnail_keys,
         .retained_filmstrip_keys = retained_filmstrip_keys,
         .library_proxy_runtime = library_proxy_runtime,
@@ -2422,6 +2448,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_project_settings = pending_project_settings,
         .pending_clip_timings = pending_clip_timings,
         .pending_clip_splits = pending_clip_splits,
+        .pending_plateset_places = pending_plateset_places,
+        .pending_plateset_swaps = pending_plateset_swaps,
         .pending_lane_edits = pending_lane_edits,
         .pending_marker_edits = pending_marker_edits,
         .pending_cues_armed = pending_cues_armed,

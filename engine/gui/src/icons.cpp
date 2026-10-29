@@ -560,6 +560,10 @@ void draw_icon(
         pen.outline(-6.0F, -6.0F, 12.0F, 12.0F, 1.2F);
         pen.rect(-4.0F, -4.0F, 4.0F, 4.0F);
         return;
+    case Icon::Moments:
+        pen.stroke({{0.0F, -1.0F}, {0.0F, 6.5F}});
+        pen.fill({{0.0F, -7.0F}, {3.5F, -3.5F}, {0.0F, 0.0F}, {-3.5F, -3.5F}});
+        return;
     case Icon::Search:
         // A lens up and to the left, its handle running down to the right.
         pen.shifted(-1.5F, -1.5F).stroked_arc(2.35F, 0.0F, tau, 1.3F, 16U);

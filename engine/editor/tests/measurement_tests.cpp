@@ -506,8 +506,8 @@ void a_narrow_stage_keeps_its_display_toggles_in_a_menu() {
     Harness h;
     // The toolbar's widths: the tools from the left - four tools, the
     // orientation, snapping, the two step menus and surface snapping, with
-    // two group gaps - and the frame rate and resolution menu from the
-    // right. A Stage just wide enough for the tools and the 38-wide display
+    // two group gaps - and the frame rate, resolution and media menus from
+    // the right. A Stage just wide enough for the tools and the 38-wide display
     // menu, but not the four 26-wide toggles, gets the menu.
     const auto menu_width = [&](std::string_view value, float extra) {
         return 23.0F + h.ctx.font_width(value) + extra + 19.0F;
@@ -516,7 +516,8 @@ void a_narrow_stage_keeps_its_display_toggles_in_a_menu() {
                             26.0F + 2.0F + menu_width("1 m", 0.0F) + 2.0F +
                             menu_width("5", 5.0F) + 2.0F + 26.0F;
     const float right_reserve = 8.0F + h.ctx.font_width("60 fps") + 8.0F +
-                                menu_width("Full", 0.0F) + 9.0F;
+                                menu_width("Full", 0.0F) + 4.0F +
+                                menu_width("Proxy", 0.0F) + 9.0F;
     const float width = tools_end + 9.0F + 38.0F + 30.0F + right_reserve;
     MEASURE_CHECK(tools_end + 9.0F + 4.0F * 26.0F > width - right_reserve);
     h.bounds = gui::Rect{0.0F, 0.0F, width, 700.0F};

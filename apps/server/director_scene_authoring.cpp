@@ -1,6 +1,7 @@
 #include "director_scene_authoring.hpp"
 
 #include "director_editor_view.hpp"
+#include "plateset_authoring.hpp"
 #include "director_key_authoring.hpp"
 #include "model_source_authoring.hpp"
 
@@ -1413,11 +1414,23 @@ schedule_asset_proxy_edit(cmd::DirectorScheduler &scheduler,
 bool schedule_asset_library_edit(
     cmd::DirectorScheduler &scheduler,
     const editor::AssetLibraryEditIntent &request, doc::NodeId new_folder,
-    cmd::FrameNumber apply_at) {
-    const std::optional<doc::Root> planned = assets::plan_library_edit(
+    cmd::FrameNumber apply_at, scene::MediaFrameRate show_rate) {
+    std::optional<doc::Root> planned = assets::plan_library_edit(
         scheduler.projected_document(), request.edit, new_folder);
     if (!planned.has_value()) {
         return true;
+    }
+    // Placed plates stay in sync with their set: an offset change moves
+    // their source in by the same frames, in the same undo step.
+    if (request.edit.kind ==
+        assets::LibraryEdit::Kind::SetPlatesetHalfResolution) {
+        planned = follow_plateset_resolution(std::move(*planned),
+                                             request.edit.target);
+    }
+    if (request.edit.kind == assets::LibraryEdit::Kind::SetPlatesetOffsets) {
+        planned = follow_plateset_offsets(scheduler.projected_document(),
+                                          std::move(*planned),
+                                          request.edit.target, show_rate);
     }
     // Organising the Library is a direct UI action, undone from the same
     // globally reachable context as removing an asset.

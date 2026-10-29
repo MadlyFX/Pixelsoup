@@ -1,15 +1,207 @@
 #include "timeline_internal.hpp"
 
+#include <mediaserver/assets/plateset.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace mediaserver::editor::timeline {
+
+std::vector<PlatesetGroup>
+plateset_groups(std::span<const ElementInfo> elements,
+                std::span<const scene::TimelineLane> lanes,
+                std::span<const TimelinePlateset> names) {
+  // Each track whose clips are all plates of one set, front first as the
+  // list shows tracks, with the takes it holds. A track with a clip from
+  // anywhere else, or from two sets, stays an ordinary track.
+  struct PlateLane final {
+    const scene::TimelineLane *lane{};
+    doc::NodeId plateset{};
+    std::vector<core::i64> takes;
+    // Its place in the stack as listed, counting every track.
+    std::size_t position{};
+  };
+  std::vector<PlateLane> plate_lanes;
+  std::size_t position = 0U;
+  for (auto held = lanes.rbegin(); held != lanes.rend(); ++held) {
+    if (held->implicit) {
+      continue;
+    }
+    PlateLane entry{&*held, {}, {}, position++};
+    bool plates_only = true;
+    for (const ElementInfo &element : elements) {
+      if (element.kind != ElementKind::Media ||
+          element.timeline_lane != held->id) {
+        continue;
+      }
+      if (element.plateset == doc::NodeId{} ||
+          (entry.plateset != doc::NodeId{} &&
+           element.plateset != entry.plateset)) {
+        plates_only = false;
+        break;
+      }
+      entry.plateset = element.plateset;
+      if (element.plateset_take != 0 &&
+          std::find(entry.takes.begin(), entry.takes.end(),
+                    element.plateset_take) == entry.takes.end()) {
+        entry.takes.push_back(element.plateset_take);
+      }
+    }
+    if (plates_only && entry.plateset != doc::NodeId{}) {
+      plate_lanes.push_back(std::move(entry));
+    }
+  }
+  // Tracks sharing a take belong to one placement. Each track points at the
+  // frontmost track of its placement, so a track that bridges two takes -
+  // the halves of a razored take - joins them.
+  std::vector<std::size_t> root(plate_lanes.size());
+  for (std::size_t index = 0U; index < root.size(); ++index) {
+    root[index] = index;
+  }
+  const auto find_root = [&](std::size_t index) {
+    while (root[index] != index) {
+      index = root[index] = root[root[index]];
+    }
+    return index;
+  };
+  for (std::size_t later = 0U; later < plate_lanes.size(); ++later) {
+    for (std::size_t earlier = 0U; earlier < later; ++earlier) {
+      const PlateLane &a = plate_lanes[earlier];
+      const PlateLane &b = plate_lanes[later];
+      const bool shared =
+          a.plateset == b.plateset &&
+          std::any_of(a.takes.begin(), a.takes.end(), [&](core::i64 take) {
+            return std::find(b.takes.begin(), b.takes.end(), take) !=
+                   b.takes.end();
+          });
+      if (shared) {
+        const std::size_t first = find_root(earlier);
+        const std::size_t second = find_root(later);
+        root[std::max(first, second)] = std::min(first, second);
+      }
+    }
+  }
+
+  // One row per unbroken run of a placement's tracks: a track that sits
+  // between them, the set's or any other, starts a new row below it.
+  std::vector<PlatesetGroup> groups;
+  std::vector<std::size_t> group_of(plate_lanes.size(), no_row);
+  std::vector<std::size_t> last_position(plate_lanes.size(), 0U);
+  for (std::size_t index = 0U; index < plate_lanes.size(); ++index) {
+    const std::size_t owner = find_root(index);
+    if (group_of[owner] != no_row &&
+        plate_lanes[index].position != last_position[owner] + 1U) {
+      group_of[owner] = no_row;
+    }
+    last_position[owner] = plate_lanes[index].position;
+    if (group_of[owner] == no_row) {
+      group_of[owner] = groups.size();
+      groups.push_back(PlatesetGroup{plate_lanes[index].lane->id,
+                                     plate_lanes[index].plateset});
+    }
+    PlatesetGroup &group = groups[group_of[owner]];
+    group.key = std::min(group.key, plate_lanes[index].lane->id);
+    group.lanes.push_back(plate_lanes[index].lane->id);
+  }
+
+  for (PlatesetGroup &group : groups) {
+    const auto named = std::find_if(
+        names.begin(), names.end(), [&](const TimelinePlateset &entry) {
+          return entry.asset == group.plateset;
+        });
+    if (named != names.end() && !named->name.empty()) {
+      group.name = named->name;
+    } else {
+      // Placement names each track "SLOT / set", so what follows the slot
+      // on every track is the set's name.
+      std::optional<std::string> shared;
+      for (const doc::NodeId id : group.lanes) {
+        const auto lane = std::find_if(
+            lanes.begin(), lanes.end(),
+            [&](const scene::TimelineLane &held) { return held.id == id; });
+        const std::size_t cut = lane->name.find(" / ");
+        const std::string suffix =
+            cut == std::string::npos ? std::string{} : lane->name.substr(cut + 3U);
+        if (!shared.has_value()) {
+          shared = suffix;
+        } else if (*shared != suffix) {
+          shared = std::string{};
+        }
+      }
+      group.name = shared.has_value() && !shared->empty() ? *shared
+                                                          : "Plateset";
+    }
+
+    // The takes: plates sharing a take, a start and a length, which is what
+    // the shell edits as one. A plate moved on its own is a take of its own.
+    for (const doc::NodeId id : group.lanes) {
+      const auto lane = std::find_if(
+          lanes.begin(), lanes.end(),
+          [&](const scene::TimelineLane &held) { return held.id == id; });
+      for (const ElementInfo &element : elements) {
+        if (element.kind != ElementKind::Media || element.timeline_lane != id ||
+            !element.timing.placed()) {
+          continue;
+        }
+        auto take = std::find_if(
+            group.takes.begin(), group.takes.end(),
+            [&](const PlatesetTake &held) {
+              return held.take == element.plateset_take &&
+                     held.start == element.timing.start &&
+                     held.duration == element.timing.duration;
+            });
+        if (take == group.takes.end()) {
+          group.takes.push_back(PlatesetTake{element.plateset_take,
+                                             element.timing.start,
+                                             element.timing.duration,
+                                             element.node});
+          take = std::prev(group.takes.end());
+        }
+        take->clips.push_back(element.node);
+        take->locked = take->locked || element.locked || lane->locked;
+        if (element.plateset_slot == "front") {
+          take->lead = element.node;
+        }
+      }
+    }
+    std::stable_sort(group.takes.begin(), group.takes.end(),
+                     [](const PlatesetTake &left, const PlatesetTake &right) {
+                       return left.start != right.start
+                                  ? left.start < right.start
+                                  : left.take < right.take;
+                     });
+  }
+  return groups;
+}
+
+std::vector<TimelineLaneEdit>
+plateset_switch_edits(const PlatesetGroup &group,
+                      std::span<const scene::TimelineLane> lanes,
+                      TimelineLaneAction action, bool on) {
+  std::vector<TimelineLaneEdit> edits;
+  for (const doc::NodeId id : group.lanes) {
+    const auto lane = std::find_if(
+        lanes.begin(), lanes.end(),
+        [&](const scene::TimelineLane &held) { return held.id == id; });
+    if (lane == lanes.end()) {
+      continue;
+    }
+    const bool now =
+        action == TimelineLaneAction::ToggleMute ? lane->muted : lane->locked;
+    if (now != on) {
+      edits.push_back(TimelineLaneEdit{action, id, {}});
+    }
+  }
+  return edits;
+}
 
 RowList build_rows(RowsState &state, const RowsInput &input,
                    const gui::Theme &theme) {
@@ -23,35 +215,10 @@ RowList build_rows(RowsState &state, const RowsInput &input,
   const doc::NodeId anchor = input.anchor;
   std::vector<Row> rows;
   rows.reserve(elements.size() * 7U + surfaces.size() * 4U);
-  const auto append_element = [&](const ElementInfo &element,
-                                  std::size_t base_indent = 0U,
-                                  bool hierarchy = false,
-                                  bool include_context = false) {
-    const std::string name = layer_name(element);
-    if (!include_context && !matches(name, search) &&
-        !matches(kind_name(element), search)) {
-      return;
-    }
-    const bool transformable = animatable(element);
-    rows.push_back(Row{Row::Kind::Layer, element.node, 0U, 0U, name,
-                       element_kind_color(element), element.kind, base_indent,
-                       transformable || hierarchy});
-    rows.back().locked = element.locked;
-    rows.back().element_visible = element.visible;
-    rows.back().hierarchy = hierarchy;
-    if (hierarchy) {
-      if (!state.expanded_hierarchies.contains(element.node) && search.empty()) {
-        return;
-      }
-      if (transformable) {
-        rows.push_back(Row{Row::Kind::PropertiesHeader, element.node, 0U, 0U,
-                           "Properties", theme.text_muted, element.kind,
-                           ++base_indent, true});
-      }
-    }
-    if (!transformable || state.expanded_layers.count(element.node.value()) == 0U) {
-      return;
-    }
+  // The rows an open layer or Properties foldout lists: the element's
+  // keyable channels, one indent below `base_indent`.
+  const auto append_properties = [&](const ElementInfo &element,
+                                     std::size_t base_indent) {
     if (element.kind == ElementKind::Environment) {
       for (auto index = static_cast<std::size_t>(scene::PropertyChannel::SkyTimeOfDay);
            index <= static_cast<std::size_t>(scene::PropertyChannel::SkyIlluminance); ++index) {
@@ -208,6 +375,37 @@ RowList build_rows(RowsState &state, const RowsInput &input,
                          property, effect.source, displayed_value});
     }
   };
+  const auto append_element = [&](const ElementInfo &element,
+                                  std::size_t base_indent = 0U,
+                                  bool hierarchy = false,
+                                  bool include_context = false) {
+    const std::string name = layer_name(element);
+    if (!include_context && !matches(name, search) &&
+        !matches(kind_name(element), search)) {
+      return;
+    }
+    const bool transformable = animatable(element);
+    rows.push_back(Row{Row::Kind::Layer, element.node, 0U, 0U, name,
+                       element_kind_color(element), element.kind, base_indent,
+                       transformable || hierarchy});
+    rows.back().locked = element.locked;
+    rows.back().element_visible = element.visible;
+    rows.back().hierarchy = hierarchy;
+    if (hierarchy) {
+      if (!state.expanded_hierarchies.contains(element.node) && search.empty()) {
+        return;
+      }
+      if (transformable) {
+        rows.push_back(Row{Row::Kind::PropertiesHeader, element.node, 0U, 0U,
+                           "Properties", theme.text_muted, element.kind,
+                           ++base_indent, true});
+      }
+    }
+    if (!transformable || state.expanded_layers.count(element.node.value()) == 0U) {
+      return;
+    }
+    append_properties(element, base_indent);
+  };
 
   // Explicit tracks and their clips arrive in compositing order: lowest first,
   // which is the one drawn first and therefore the one at the back. The list
@@ -218,24 +416,26 @@ RowList build_rows(RowsState &state, const RowsInput &input,
   // loose-clip reorder authors group_order, so those clips deliberately fall
   // through to the ordinary layer stack below.
   std::set<doc::NodeId> emitted_media;
-  for (auto held = lanes.rbegin(); held != lanes.rend(); ++held) {
-    const scene::TimelineLane &lane = *held;
-    if (lane.implicit) {
-      continue;
+  // Whether a search lists the track: its name, or a clip on it, matches.
+  const auto lane_listed = [&](const scene::TimelineLane &lane) {
+    if (matches(lane.name, search)) {
+      return true;
     }
-    bool matching_child{};
     for (const ElementInfo &element : elements) {
       if (element.kind == ElementKind::Media &&
           element.timeline_lane == lane.id &&
           (matches(layer_name(element), search) ||
            matches(kind_name(element.kind), search))) {
-        matching_child = true;
-        break;
+        return true;
       }
     }
-    if (!matches(lane.name, search) && !matching_child) {
-      continue;
-    }
+    return false;
+  };
+  // A track's header and, while it is open, its Properties foldout and its
+  // clips, `base_indent` deep: a plate's track sits one in, under its take
+  // row.
+  const auto append_lane = [&](const scene::TimelineLane &lane,
+                               std::size_t base_indent) {
     Row header{Row::Kind::LaneHeader,
                lane.id,
                0U,
@@ -243,7 +443,7 @@ RowList build_rows(RowsState &state, const RowsInput &input,
                lane.name,
                theme.accent,
                ElementKind::Media,
-               0U,
+               base_indent,
                true};
     header.locked = lane.locked;
     header.muted = lane.muted;
@@ -269,18 +469,133 @@ RowList build_rows(RowsState &state, const RowsInput &input,
     // inside it.
     const bool lane_open =
         !search.empty() || !state.collapsed_lanes.contains(lane.id);
+    // A track is a screen, and keys like any other layer: its own channels
+    // sit in a Properties foldout above its clips, as a group's do above its
+    // children.
+    const auto screen = std::find_if(
+        elements.begin(), elements.end(), [&](const ElementInfo &element) {
+          return element.kind == ElementKind::Track && element.node == lane.id;
+        });
+    if (lane_open && screen != elements.end()) {
+      const std::size_t first_row = rows.size();
+      rows.push_back(Row{Row::Kind::PropertiesHeader, lane.id, 0U, 0U,
+                         "Properties", theme.text_muted, ElementKind::Track,
+                         base_indent + 1U, true});
+      if (state.expanded_layers.contains(lane.id.value())) {
+        append_properties(*screen, base_indent + 1U);
+      }
+      for (std::size_t row = first_row; row < rows.size(); ++row) {
+        rows[row].lane_member = true;
+        rows[row].lane_owner = lane.id;
+      }
+    }
     for (const ElementInfo *element : lane_clips) {
       emitted_media.insert(element->node);
       if (!lane_open) {
         continue;
       }
       const std::size_t first_row = rows.size();
-      append_element(*element, 1U);
+      append_element(*element, base_indent + 1U);
       // A clip's property rows belong to its lane too, so dropping onto an
       // expanded clip's Opacity row is not a hole in the target band.
       for (std::size_t row = first_row; row < rows.size(); ++row) {
         rows[row].lane_member = true;
         rows[row].lane_owner = lane.id;
+      }
+    }
+  };
+  // A placed plateset's tracks are listed together under its take row, where
+  // its frontmost track would be; closed, the row stands for all of them.
+  std::vector<PlatesetGroup> platesets =
+      plateset_groups(elements, lanes, input.plateset_names);
+  std::map<doc::NodeId, std::size_t> plateset_of_lane;
+  for (std::size_t index = 0U; index < platesets.size(); ++index) {
+    for (const doc::NodeId lane : platesets[index].lanes) {
+      plateset_of_lane.emplace(lane, index);
+    }
+  }
+  for (const ElementInfo &element : elements) {
+    if (element.kind == ElementKind::Media &&
+        plateset_of_lane.contains(element.timeline_lane)) {
+      emitted_media.insert(element.node);
+    }
+  }
+  std::vector<bool> plateset_listed(platesets.size(), false);
+  const auto lane_with = [&](doc::NodeId id) {
+    return std::find_if(
+        lanes.begin(), lanes.end(),
+        [&](const scene::TimelineLane &held) { return held.id == id; });
+  };
+  for (auto held = lanes.rbegin(); held != lanes.rend(); ++held) {
+    const scene::TimelineLane &lane = *held;
+    if (lane.implicit) {
+      continue;
+    }
+    const auto grouped = plateset_of_lane.find(lane.id);
+    if (grouped == plateset_of_lane.end()) {
+      if (lane_listed(lane)) {
+        append_lane(lane, 0U);
+      }
+      continue;
+    }
+    if (plateset_listed[grouped->second]) {
+      continue;
+    }
+    plateset_listed[grouped->second] = true;
+    const PlatesetGroup &group = platesets[grouped->second];
+    // A search for the set lists all of its tracks; otherwise those it
+    // finds something on.
+    const bool named = matches(group.name, search);
+    std::vector<const scene::TimelineLane *> members;
+    for (const doc::NodeId id : group.lanes) {
+      const auto member = lane_with(id);
+      if (member != lanes.end() && (named || lane_listed(*member))) {
+        members.push_back(&*member);
+      }
+    }
+    if (members.empty()) {
+      continue;
+    }
+    Row header{Row::Kind::PlatesetHeader,
+               group.key,
+               0U,
+               0U,
+               group.name,
+               theme.accent,
+               ElementKind::Media,
+               0U,
+               true};
+    header.plateset = grouped->second;
+    // The row's switches read lit while every track of the set is.
+    const auto every = [&](auto flag) {
+      return std::all_of(group.lanes.begin(), group.lanes.end(),
+                         [&](doc::NodeId id) {
+                           const auto member = lane_with(id);
+                           return member != lanes.end() && flag(*member);
+                         });
+    };
+    header.locked =
+        every([](const scene::TimelineLane &member) { return member.locked; });
+    header.muted =
+        every([](const scene::TimelineLane &member) { return member.muted; });
+    rows.push_back(std::move(header));
+    if (search.empty() && !state.expanded_platesets.contains(group.key)) {
+      continue;
+    }
+    for (const scene::TimelineLane *member : members) {
+      const std::size_t track_row = rows.size();
+      append_lane(*member, 1U);
+      // "LEFT / Take 4" under the row that already says "Take 4".
+      const std::size_t cut = member->name.find(" / ");
+      if (cut != std::string::npos && cut > 0U &&
+          cut + 3U < member->name.size()) {
+        rows[track_row].shown_label = member->name.substr(0U, cut);
+        for (const assets::PlatesetSlot slot : assets::all_plateset_slots) {
+          if (assets::plateset_slot_label(slot) ==
+              rows[track_row].shown_label) {
+            rows[track_row].short_label = assets::plateset_slot_tag(slot);
+          }
+        }
       }
     }
   }
@@ -455,7 +770,8 @@ RowList build_rows(RowsState &state, const RowsInput &input,
       const output::ProjectionSurface *const surface =
           find_surface(surfaces, row.node);
       row.locked = surface != nullptr && surface->locked;
-    } else if (row.kind != Row::Kind::LaneHeader) {
+    } else if (row.kind != Row::Kind::LaneHeader &&
+               row.kind != Row::Kind::PlatesetHeader) {
       const ElementInfo *const element = find_element(elements, row.node);
       row.locked = element != nullptr && element->locked;
     }
@@ -554,7 +870,8 @@ RowList build_rows(RowsState &state, const RowsInput &input,
     Row &row = rows[index];
     if (row.end != index + 1U ||
         (row.kind != Row::Kind::LaneHeader && row.kind != Row::Kind::Layer &&
-         row.kind != Row::Kind::PropertiesHeader)) {
+         row.kind != Row::Kind::PropertiesHeader &&
+         row.kind != Row::Kind::PlatesetHeader)) {
       continue;
     }
     covered.clear();
@@ -576,10 +893,24 @@ RowList build_rows(RowsState &state, const RowsInput &input,
       }
     };
     bool own_only = false;
-    if (row.kind == Row::Kind::LaneHeader) {
+    if (row.kind == Row::Kind::PlatesetHeader) {
+      // A closed take row: every plate and every plate's track.
+      const std::vector<doc::NodeId> &held = platesets[row.plateset].lanes;
       for (const ElementInfo &element : elements) {
-        if (element.kind == ElementKind::Media &&
-            element.timeline_lane == row.node) {
+        const doc::NodeId lane = element.kind == ElementKind::Media
+                                     ? element.timeline_lane
+                                     : element.node;
+        if ((element.kind == ElementKind::Media ||
+             element.kind == ElementKind::Track) &&
+            std::find(held.begin(), held.end(), lane) != held.end()) {
+          covered.push_back(&element);
+        }
+      }
+    } else if (row.kind == Row::Kind::LaneHeader) {
+      for (const ElementInfo &element : elements) {
+        if ((element.kind == ElementKind::Media &&
+             element.timeline_lane == row.node) ||
+            (element.kind == ElementKind::Track && element.node == row.node)) {
           covered.push_back(&element);
         }
       }
@@ -635,7 +966,8 @@ RowList build_rows(RowsState &state, const RowsInput &input,
     summaries.push_back(summary);
   }
   return RowList{std::move(rows), std::move(visible_order),
-                 std::move(summaries), std::move(summary_keys)};
+                 std::move(summaries), std::move(summary_keys),
+                 std::move(platesets)};
 }
 
 } // namespace mediaserver::editor::timeline

@@ -162,8 +162,15 @@ ProxyPlaybackResolution resolve_proxy_playback(
             asset, source_readiness,
             ProxyPlaybackReason::CacheObservationMissing, key);
     }
+    // The whole proxy, or one segment of it standing in until the whole one
+    // is ready; the frame map then says which source frames it holds.
+    const auto covers = [&key](const DerivativeKey& observed) {
+        return observed == *key ||
+            (observed.segment.has_value() &&
+             observed == derivative_segment_key(*key, *observed.segment));
+    };
     if (!valid_derivative_key(cache_observation->key) ||
-        cache_observation->key != *key) {
+        !covers(cache_observation->key)) {
         return unavailable_proxy(asset, source_readiness,
                                  ProxyPlaybackReason::CacheKeyMismatch, key);
     }
@@ -178,7 +185,7 @@ ProxyPlaybackResolution resolve_proxy_playback(
                                  ProxyPlaybackReason::FrameMapMissing, key);
     }
     if (!valid_derivative_key(frame_map_observation->key) ||
-        frame_map_observation->key != *key) {
+        frame_map_observation->key != cache_observation->key) {
         return unavailable_proxy(
             asset, source_readiness,
             ProxyPlaybackReason::FrameMapKeyMismatch, key);

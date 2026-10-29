@@ -53,6 +53,7 @@
 #include "cluster_lifecycle_controller.hpp"
 #include "director_live_data.hpp"
 #include "history_labels.hpp"
+#include "plateset_motion_service.hpp"
 #include "thumbnail_service.hpp"
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
@@ -224,6 +225,7 @@ struct DirectorShowLoop final {
     std::unique_ptr<net::ClusterDiscoveryBrowser> &discovery_browser;
     std::error_code &discovery_error;
     std::unique_ptr<server::ThumbnailService> &thumbnail_service;
+    std::unique_ptr<server::PlatesetMotionService> &plateset_motion;
     std::vector<assets::DerivativeKey> &retained_thumbnail_keys;
     std::vector<assets::DerivativeKey> &retained_filmstrip_keys;
     std::vector<editor::LibraryProxyRuntimeObservation> &library_proxy_runtime;
@@ -259,6 +261,8 @@ struct DirectorShowLoop final {
     std::optional<editor::ProjectSettingsEdit> &pending_project_settings;
     std::vector<editor::ClipTimingEdit> &pending_clip_timings;
     std::vector<editor::ClipSplitIntent> &pending_clip_splits;
+    std::vector<editor::PlatesetPlaceIntent> &pending_plateset_places;
+    std::vector<editor::PlatesetSwapIntent> &pending_plateset_swaps;
     std::vector<editor::TimelineLaneEditIntent> &pending_lane_edits;
     std::vector<editor::TimelineMarkerEditIntent> &pending_marker_edits;
     std::optional<bool> &pending_cues_armed;
@@ -453,6 +457,14 @@ struct DirectorShowLoop final {
     show::BoundaryLateness boundary_lateness{};
     ControlBacklogWatch backlog_watch{};
     core::u64 reported_lockstep_demotions{};
+    // Whether the editor's Program and Stage views last asked for the
+    // source instead of working proxies. Director-local and never part of a
+    // digest: a render node always decodes what the project asks for.
+    bool editor_program_full_media{};
+    bool editor_stage_full_media{};
+    // What those views drew on the last evaluated frame.
+    ViewProxySummary program_view_proxies{};
+    ViewProxySummary stage_view_proxies{};
 #if defined(MEDIASERVER_HAS_GUI)
     // The Timeline's cache bar. A placement off air has no evaluated media
     // to say which file it decodes, so the last one seen on air is kept.
@@ -469,6 +481,8 @@ struct DirectorShowLoop final {
     // and which file that is, and the ranges it cut into tracks that wait
     // for the next sealed frame. Director-local; nothing here is replicated.
     std::optional<editor::AssetViewerRequest> asset_viewer_request{};
+    // The plateset the Asset Viewer had open last frame.
+    std::optional<doc::NodeId> plateset_viewed{};
     std::optional<scene::Scene> asset_viewer_frame{};
     editor::AssetViewerRendition asset_viewer_rendition{
         editor::AssetViewerRendition::None};

@@ -3,6 +3,7 @@
 // Keyframe command authoring: channel nodes, key edits, retimes and the
 // status messages key operations report.
 
+#include "channel_node_id.hpp"
 #include "edit_coalescing_policy.hpp"
 #include "key_clipboard.hpp"
 
@@ -42,9 +43,6 @@ scene_key_addresses(std::span<const editor::TimelineKeyAddress> addresses);
 [[nodiscard]] std::string
 key_batch_message(editor::TimelineKeyBatchAction action,
                   const scene::KeyEditReport &report);
-
-[[nodiscard]] doc::NodeId channel_node_id(doc::NodeId target,
-                                          core::u64 component_index) noexcept;
 
 [[nodiscard]] doc::Node make_channel_node(doc::NodeId id, doc::NodeId target,
                                           std::string_view component);

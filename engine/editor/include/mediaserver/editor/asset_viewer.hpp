@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mediaserver/editor/plateset_analysis.hpp>
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/assets/derivative.hpp>
 #include <mediaserver/core/types.hpp>
@@ -44,6 +45,8 @@ enum class AssetViewerChannel : core::u8 {
 struct AssetViewerRequest final {
   doc::NodeId asset{};
   core::u32 source_frame{};
+  // Decode the source even when a proxy is ready, for inspecting pixels.
+  bool full_resolution{};
 
   bool operator==(const AssetViewerRequest &) const = default;
 };
@@ -82,6 +85,10 @@ struct AssetViewerInput final {
   AssetViewerRequest shown{};
   AssetViewerRendition rendition{AssetViewerRendition::None};
   std::optional<AssetViewerFilmstrip> filmstrip;
+  // The motion analysis of the plateset the viewer reported open last
+  // frame, when it has one.
+  doc::NodeId plateset{};
+  PlatesetAnalysisView plateset_analysis{};
 };
 
 // How many frames the viewer can step through: the probed frame count, or one

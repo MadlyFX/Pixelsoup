@@ -3,6 +3,7 @@
 #include <mediaserver/assets/asset_registry.hpp>
 #include <mediaserver/editor/asset_viewer.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/plateset_editor.hpp>
 #include <mediaserver/gui/form_layout.hpp>
 #include <mediaserver/gui/layout.hpp>
 #include <mediaserver/gui/ui_context.hpp>
@@ -88,6 +89,11 @@ struct AssetViewerDrawInput final {
   float pixels_per_unit{1.0F};
   // Set while the open asset is a model or projection mesh.
   const AssetViewerModelInput *model{};
+  // For a plateset: the Library's thumbnails for its slot tiles, whether a
+  // Library drag is in flight, and what motion analysis has found.
+  std::span<const LibraryThumbnailObservation> thumbnails;
+  bool dragging_assets{};
+  const PlatesetAnalysisView *plateset_analysis{};
 };
 
 struct AssetViewerFrame final {
@@ -110,6 +116,8 @@ struct AssetViewerFrame final {
   std::optional<std::pair<core::u32, core::u32>> probe;
   // The viewer took this frame's Space or arrow keys.
   bool consumed_keys{};
+  // What the plateset page asked for, while a plateset is open.
+  std::optional<PlatesetEditorFrame> plateset;
 
   bool operator==(const AssetViewerFrame &) const = default;
 };
@@ -123,7 +131,8 @@ struct AssetViewerFrame final {
 // marks, zoom, channel - is editor-local and resets with the project.
 class AssetViewerPanel final {
 public:
-  explicit AssetViewerPanel(gui::UiId id) noexcept : id_(id) {}
+  explicit AssetViewerPanel(gui::UiId id) noexcept
+      : id_(id), plateset_editor_(id ^ 0x5A17E5E7ULL) {}
 
   // Shows `asset` from `frame`, with In and Out at `marks` when given, and
   // adds it to the history the back and forward buttons step through.
@@ -153,6 +162,12 @@ public:
   void reset_project_state() noexcept;
 
   [[nodiscard]] doc::NodeId asset() const noexcept { return asset_; }
+  [[nodiscard]] const PlatesetEditor &plateset_editor() const noexcept {
+    return plateset_editor_;
+  }
+  [[nodiscard]] PlatesetEditor &plateset_editor() noexcept {
+    return plateset_editor_;
+  }
   [[nodiscard]] core::u32 frame() const noexcept { return frame_; }
   [[nodiscard]] bool focused() const noexcept { return focused_; }
   [[nodiscard]] bool playing() const noexcept { return direction_ != 0; }
@@ -225,6 +240,7 @@ private:
       core::u32 count) const noexcept;
 
   gui::UiId id_{};
+  PlatesetEditor plateset_editor_;
   doc::NodeId asset_{};
   std::vector<doc::NodeId> history_;
   std::size_t history_index_{};
@@ -239,6 +255,7 @@ private:
   bool in_to_out_{};
   AssetViewerFraming framing_{};
   AssetViewerChannel channel_{AssetViewerChannel::Rgb};
+  bool full_resolution_{};
   float exposure_{};
   bool focused_{};
   bool scrubbing_{};

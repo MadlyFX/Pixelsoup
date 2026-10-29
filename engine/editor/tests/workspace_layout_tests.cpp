@@ -241,8 +241,30 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(!night.value().history_hidden);
   LAYOUT_CHECK(!older.value().history_hidden);
 
+  // Bits 3 and 4 are the Stage and Program media renditions, each on its
+  // own; older records decode proxies.
+  LAYOUT_CHECK(older.value().stage_media == editor::MediaRendition::Proxy);
+  LAYOUT_CHECK(older.value().program_media == editor::MediaRendition::Proxy);
+  state.program_media = editor::MediaRendition::Full;
+  const auto program_full = editor::decode_workspace_layout(
+      editor::encode_workspace_layout(state).value());
+  LAYOUT_CHECK(program_full);
+  LAYOUT_CHECK(program_full.value().program_media ==
+               editor::MediaRendition::Full);
+  LAYOUT_CHECK(program_full.value().stage_media ==
+               editor::MediaRendition::Proxy);
+  LAYOUT_CHECK(program_full.value().history_hidden);
+  state.program_media = editor::MediaRendition::Proxy;
+  state.stage_media = editor::MediaRendition::Full;
+  const auto stage_full = editor::decode_workspace_layout(
+      editor::encode_workspace_layout(state).value());
+  LAYOUT_CHECK(stage_full);
+  LAYOUT_CHECK(stage_full.value().stage_media == editor::MediaRendition::Full);
+  LAYOUT_CHECK(stage_full.value().program_media ==
+               editor::MediaRendition::Proxy);
+
   auto unknown = encoded;
-  unknown[44U] = std::byte{0x09U};
+  unknown[44U] = std::byte{0x21U};
   LAYOUT_CHECK(!editor::decode_workspace_layout(unknown));
 }
 

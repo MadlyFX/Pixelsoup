@@ -4721,7 +4721,7 @@ bool SceneRenderer::render(
             ? ResolvedMediaFrame{} : media_cache.resolve(
             *device_, commands, media_source, clip.frame_index,
             MediaLoopWindow{clip.loop_first, clip.loop_count},
-            clip.source_node.value());
+            clip.source_node.value(), clip.asset.value());
         if (!media_frame) {
             media_frame = ResolvedMediaFrame{&offline_media_};
         }

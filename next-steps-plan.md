@@ -450,6 +450,285 @@ frame mapping at fractional rates, alpha and colour metadata, missing-cache
 fallback policy, LRU pinning, and the invariant that no derivative creates or
 rewrites a document asset id.
 
+#### Editor proxies: fast editing media without waiting for a transcode
+
+Positioning, trimming and layout do not need full-resolution plates, but the
+editor decodes every video and image sequence at source size. The goal is that
+the Director's editor surfaces use a 720p rendition automatically, the operator
+never waits for a transcode before working, and full resolution is one toggle
+away for rotoscoping, tracking and fine colour work. Output nodes keep drawing
+the source, or the authored higher-quality proxy, exactly as today.
+
+**What already exists.** The `proxy-720p-cfr-h264` profile (1280x720, CFR at
+the source rate, 8-bit 4:2:0 Rec.709, GOP 60, AAC stereo), the
+`proxy-source-cfr-hevc-main10` profile, the FFmpeg backend that prefers NVENC
+([ffmpeg_proxy_encoder.cpp](apps/server/ffmpeg_proxy_encoder.cpp)), exact
+source-time frame maps, the keyed derivative cache with size-bounded LRU, the
+authored Source/Prefer/Require policy, Library and Asset Viewer status chips,
+and a single background generation worker
+([playback_media.hpp](apps/server/playback_media.hpp)). The Director takes the
+authored scene digest before proxy substitution, so a Director-local rendition
+choice cannot disturb cohort agreement.
+
+**What stands in the way today.**
+
+- The Director already gives every video larger than 1920 x 1080 an
+  editor-only 720p working proxy (`editor_playback_registry` in
+  [playback_media.cpp](apps/server/playback_media.cpp)), generated on the
+  Director when the asset enters the project and never on a node. Until
+  phase 1 there was no way to see the source in the editor instead.
+- A proxy is usable only after the whole file is encoded. The encode is
+  about 98% of generation time; the source fingerprint is a size and
+  modification-time signature and costs nothing, and verification, packaging
+  and materialisation add about 2 s for a two-minute 4K plate (see the
+  baseline below).
+- Decode and scaling are CPU-only (software decode, `sws_scale`), one asset
+  at a time on one worker. The default Background priority caps the decoder
+  at two threads, which makes it 4.4x slower than Fast on 4K H.264: the CPU
+  decode, not NVENC, sets the speed.
+- Scrubbing and reverse play do not reach exact frames for the source or for
+  a proxy (see the baseline), so a smaller rendition alone does not make
+  J/K/L or a playhead drag responsive.
+- The profile drops alpha and has no image-sequence path; the encoder opens
+  only container files. An 8-bit Rec.709 rendition of a linear or HDR EXR
+  plate looks wrong under grading or keying.
+- The profile encodes AAC audio, although the program has no audio path.
+
+**Phase 1: an editor-only rendition (done 2026-10-29).** Generation on
+import and the source fallback already existed. Phase 1 added:
+
+- A **Proxy / Full res** media menu on Stage and on Program Output, each
+  view's own, kept in the workspace layout (flag bits, so older records read
+  as Proxy). The Asset Viewer header has the same choice. Nothing is
+  replicated or digested; the Director resolves Program and transitions,
+  Stage and the Stage view, and the viewer through the authored registry for
+  Full res and the working-proxy registry for Proxy. An authored Prefer or
+  Require policy still applies in every view.
+- While a mask is selected or the eyedropper is armed every view draws the
+  source and returns to its choice afterwards.
+- The menu's tooltip reports what the view drew on the last frame: clips on
+  proxies, clips on their source until their proxy is ready, and under Full
+  res the clips whose asset asks for a proxy everywhere.
+
+Still open from the phase 1 intent:
+
+- Library row actions **Regenerate proxy** and **Use full res for this
+  asset**, and cache eviction that prefers editor proxies of unused assets.
+- The Asset Viewer's rendition chip is dropped when it does not fit beside a
+  long name; the header needs a narrower layout for the long Source states.
+- Working proxies cover UHD video only; image sequences wait for phase 3.
+
+**Phase 2 findings, 2026-10-29** (before any phase 2 change):
+
+- Keyframe interval hardly matters. Seek to an exact frame on a 720p proxy
+  took 71, 63 and 60 ms at GOP 60, 12 and 4, against a 60 ms floor of
+  request, decode hand-off and two renders; scrub and reverse results did not
+  change. Keep GOP 60.
+- Drag scrubbing works on proxies: a four-frame step holds the previous
+  step's frame for one tick and never blanks, where four 4K sources blank on
+  every tick. The decode registry clears queued read-ahead on each new
+  current-frame request, so read-ahead never runs ahead of a drag.
+- Reverse play fails on every rendition because each backward request seeks
+  and decodes a whole GOP to keep one frame (`decode_until` in
+  `engine/render/src/ffmpeg_source.cpp`). Retaining a backward-decoded GOP
+  in the shared frame map is the fix; it lives in the decode registry that
+  output nodes use too.
+- Proxy encodes still carry AAC audio, which nothing plays.
+
+**Phase 2, done 2026-10-29: playback-aware priority, no audio.** Measured on
+the Release Director (RTX 3090, 5800X) with the project's driving plates, on
+an otherwise idle machine:
+
+| Generation running | 10 proxies made in, segmented | Paused loop wake mean / late | Playback, 4 proxies | Playback, 4K source |
+| --- | --- | --- | --- | --- |
+| None | - | 2.2 ms / 64-67% | 712 / 720 exact | 720 / 720 exact |
+| Background | 829 s (887 s one segment per encode) | 1.9 ms / 46% | 718 / 720 | 720 / 720 |
+| Balanced | not run | - | 720 / 720 | 720 / 720 |
+| Fast | 213 s (262 s one segment per encode) | 2.2 ms / 49% | 720 / 720 | 718 / 720 |
+
+Playback is `mediaserver_render_media_video_benchmark --d3d12 --frames 360`
+beside one encoder benchmark, one run per cell. Neither playback nor the
+paused loop shows a cost from generation at any priority: the differences
+are run-to-run noise, and the late share of the paused loop varies more
+between idle runs than with generation. An earlier pass taken while a video
+render ran elsewhere on the Director lost 4-6 frames at Balanced and Fast;
+that was the render. Whole-file generation of the same ten proxies took
+677 s at Background and 209 s at Fast during that render.
+
+- Each job takes its CPU budget when it starts: the Preferences priority,
+  now **Fast** by default, while nothing plays; Background while the show or
+  the Preview playhead plays. A render node's generator always yields.
+  A long Fast job begun just before play keeps Fast until it ends; segmented
+  generation below shrinks that window to one segment.
+- The 720p profile is version 2 with no audio; the encoder skips the
+  source's audio when the profile has none, and both validators accept only
+  an audio-free output for it.
+
+**Phase 2, done 2026-10-29: segments, made by need, and a seamless switch.**
+
+- The editor profile is made in segments of ten seconds of source
+  (`proxy_segment_range`), each keyed by `derivative_segment_key` and
+  published as its own cache envelope with a frame map in absolute source
+  time. The worker makes the segment under each Program and Stage
+  placement's requested frame first and carries on to the end of the file,
+  then makes the start of the file, and joins the published segments into
+  the whole-file proxy by remuxing them. Each such run of segments is one
+  encode (`ProxyEncodeRequest::piece_frames`): the encoder starts a new file
+  on a forced IDR at every segment boundary and the service publishes each
+  segment as it is handed over. Between segments the worker looks again and
+  leaves the run when a view needs a segment outside it or play starts or
+  stops; what the run made is kept. A run reports segments the cache
+  already holds at its start and encodes from the first missing one.
+  The resolver plays a published segment until the whole proxy is ready, and
+  prewarms the next segment within a second of the boundary.
+- A placement that moves between files of the same asset keeps showing its
+  last picture until the new file has a frame (`MediaCache::resolve`'s
+  `rendition`), and the Stage loading banner counts only placements with
+  nothing to show (`blank_requests`). Copying the old file's hold state into
+  the new file's entry stalled the cache for good; the hand-over now borrows
+  the old file's picture and keeps that file on air instead.
+- Measured idle on a two-minute 4K H.264 plate at Fast, three interleaved
+  pairs: the first segment is drawable after 1.8 s; one run makes all
+  thirteen in 18.8-19.4 s against 18.3-18.8 s for a whole-file encode, and
+  the join adds 1.6 s. Encoding one segment per encode took 24.2-24.5 s,
+  because each segment reopened the source and encoder (about 0.2 s), seeked
+  and refilled the decoder's threads (encoding at about 140 fps against
+  176). The joined proxy decodes to the same pictures as a whole-file
+  encode at every boundary (identical at the same index, 31-45 dB one frame
+  off).
+- Concurrent encodes hardly raise throughput at Fast: 18.2 s for one plate,
+  15.1 s a plate for two and 14.7 s for four. At Background, which caps the
+  encoder's threads, four concurrent encodes take 21.6 s a plate against
+  75.7 s for one. CPU decode of the source is the ceiling at Fast, so there
+  is no encoder pool.
+- Live in the Release editor with an empty cache: a clip showed its proxy
+  about 9 s after launch (including about 5 s of startup), and 18 s of
+  playback across segment boundaries drew a picture in every capture, with
+  no banner.
+
+Still open from this phase:
+
+- Segments stay in the cache after the join until its size limit trims them,
+  and materialised segments stay in the session folder until the session
+  ends; delete both once the joined proxy is materialised and nothing reads
+  them.
+- A backward jump onto another file of the same asset keeps the old picture
+  until the new one decodes, which the same-file path deliberately does not.
+- The Asset Viewer's requested frame does not yet steer the order.
+- Joining reads every segment back from the cache to a work file before
+  remuxing; about 1.6 s of the 20 s for a two-minute plate.
+- Segments made at different priorities may carry different stream headers
+  (encoder presets), which the join refuses; the worker then encodes the
+  whole file again. A run that starts or stops play now ends at a segment
+  boundary, so a playback toggle mid-proxy can trigger this. Not yet
+  measured.
+- Decode on the GPU where the source codec allows it (D3D12VA or NVDEC for
+  H.264, HEVC, AV1), scale on the GPU, and hand frames to NVENC without a CPU
+  round trip. ProRes, DNx and other software codecs keep CPU decode but
+  parallelise by segment instead of by one long stream.
+- Use a short GOP for the editor profile, about 0.5 s or intra-only, chosen
+  from measured scrub cost and file size, so random and backwards seeks decode
+  at most a few frames.
+- Make the editor cache scrub and play backwards. Today a drag at four frames
+  per tick holds a previous frame on every render, and reverse play draws no
+  exact frame at all, for 4K sources and 720p proxies alike. A scrub should
+  show the nearest decoded frame at or before the request instead of holding
+  the last one; reverse play needs GOP-wise backwards decoding with the
+  decoded GOP retained. Proxies then make both cheap: a 720p GOP is about a
+  ninth of a 4K one.
+
+**Phase 3: image sequences and alpha.**
+
+- Image sequences get a per-frame editor rendition rather than a video
+  stream: each source frame scaled to fit 1280x720 and stored as an
+  individually addressable frame, so it is usable the moment it is written and
+  frames can be produced on all cores in any order. Scheduling follows the
+  phase 2 rule, starting at the playhead.
+- Store it in a GPU-ready format that keeps the source's range: BC6H (or
+  half-float) for float and HDR sources such as EXR and HDR, BC7 for 8-bit
+  sources with alpha, keeping the source's colour metadata. The editor then
+  uploads compressed blocks with no decode.
+- Sources with alpha (ProRes 4444, PNG and EXR sequences) need an editor
+  rendition that keeps alpha. Use the per-frame path for sequences; for
+  video, a second alpha plane or an alpha-capable codec chosen by measurement.
+  Until then, an asset with alpha stays Source in the editor rather than
+  compositing without its matte.
+- Lift the "Video only" rule in [scene.hpp:1849](engine/scene/include/mediaserver/scene/scene.hpp:1849)
+  for the editor rendition, not for nodes.
+
+**Not in scope.** Nodes using a 720p rendition, and any automatic downgrade on
+a late node: a node that cannot keep up reports and holds by policy. The
+existing authored Require Proxy with `proxy-source-cfr-hevc-main10` remains the
+route for a higher-quality node rendition (for example ProRes to GPU-decodable
+10-bit HEVC); a node-side automatic source-resolution proxy is a separate
+future decision.
+
+**Measure first, and after each phase.** On the RTX 3090 Director and the RTX
+2060 node, with representative 4K H.264, 4K HEVC 10-bit, 4K ProRes 422 HQ and
+a 4K EXR sequence:
+
+- time to the first proxy frame under the playhead after import, and time to
+  a complete proxy;
+- editor frame time, decode and upload time and held frames while scrubbing
+  four 4K plates, Source versus Proxy;
+- editor frame-loop impact while generation runs at each transcode priority;
+- forward and backward scrub latency against GOP length.
+
+**Baseline, 2026-10-28** (RTX 3090 Director, Ryzen 7 5800X, Release; the
+2060 node and the frame-loop impact of generation are not yet measured).
+Generation uses `mediaserver_proxy_encoder_benchmark SOURCE CACHE OUT
+proxy-720p-cfr-h264 PRIORITY`, a fresh cache per run:
+
+| Source (4K) | Length | Background | Fast |
+| --- | --- | --- | --- |
+| H.264 High 8-bit, 82 Mb/s | 122 s | 75.6 s (39 fps) | 18.1-18.4 s (171-177 fps) |
+| HEVC Main10 | 20 s | 12.5 s (39 fps) | not run |
+| ProRes 422 HQ 10-bit | 20 s | 16.2 s (30 fps) | 4.0 s (128 fps) |
+| EXR half sequence | 4 s | no proxy path | no proxy path |
+
+Editor decode uses `mediaserver_render_media_video_benchmark --d3d12`, which
+records Program and Stage through one media cache as the editor does.
+*Seek* is the time until both renders draw the exact frame after a jump
+(`--seek-targets 20`); *play*, *scrub* (`--stride 4`) and *reverse* report the
+share of renders at 24 fps that drew the exact frame:
+
+| Clip | Seek mean / p95 | Play | Scrub x4 | Reverse | Peak VRAM, play |
+| --- | --- | --- | --- | --- | --- |
+| H.264 source | 149 / 220 ms | 100% | 0% (94% held) | 0% | 1.8 GB |
+| H.264 proxy | 74 / 93 ms | 100% | 0% (all held) | 0% | 0.28 GB |
+| ProRes source | 144 / 156 ms | 85% | 0% (none drawn) | 0% | 0.25 GB |
+| ProRes proxy | 78 / 95 ms | 100% | 0% (all held) | 0% | 0.28 GB |
+| HEVC Main10 source | never ready | 0% | 0% | 0% | - |
+| HEVC Main10 proxy | 77 / 95 ms | 100% | 0% (all held) | 0% | 0.28 GB |
+| EXR source | 196 / 218 ms | 0% | 17% | 0% | 0.06 GB |
+| 4 x H.264 source | 559 / 825 ms | 88% | 0% (none drawn) | - | 2.6 GB |
+| 4 x H.264 proxy | 287 / 406 ms | 100% | 0% (all held) | - | 0.35 GB |
+
+What the baseline says:
+
+- The proxy halves seek time, keeps four plates at full playback, and cuts
+  playback VRAM by 5-7x (5.5 GB to 0.47 GB for four plates while
+  scrubbing).
+- Fast generation already outruns realtime by 5-7x; Background does not
+  (1.2-1.6x). Thread count, not NVENC, is the limit.
+- Scrub and reverse fail for every rendition; that is cache behaviour, not
+  resolution (phase 2).
+- 4K HEVC Main10 never decodes on the Advanced renderer's device: D3D12VA
+  reports `Could not create the texture` for every frame, while the Basic
+  renderer plays the same file at 98% and the proxy encoder reads it. This is
+  a decode defect independent of proxies.
+- A 4K EXR sequence cannot play at 24 fps from source (about 200 ms a frame),
+  which makes phase 3 the largest editor win for EXR plates.
+
+**Tests.** Rendition switching never moves a cut, keyframe or placement
+(fractional rates included); nodes and their digests are unchanged by the
+editor preference; an authored Prefer or Require still overrides it; segment
+fallback draws source for unready segments and the proxy for ready ones on the
+same clip; segment priority follows the playhead; a provisional key is
+adopted only when the final fingerprint matches, and is discarded when the
+file changed; alpha sources never draw without their matte; eviction never
+removes a drawn rendition. Each workflow is exercised in the shipping editor.
+
 #### External effect extensibility
 
 - OFX and GLSL support remains deferred until plugin identity/versioning,
@@ -527,3 +806,182 @@ Add hardware devices with their APIs or SDKs, make configuration as transparent 
 - Novastar Coex, Brompton, Megapixel and Colorlight LED processors
 - Blackmagic Hyperdeck and Aja Ki Pro recorders
 - Evertz and Brainstorm master clock generators
+
+## Particles and volumes (`libs/ajfx`)
+
+### Problem
+
+The renderer has no particle or volumetric effects beyond the froxel fog, and
+there is no off-the-shelf GPU particle library whose simulation is
+deterministic. Here that matters more than usual: every node must draw the same
+particles at a given show frame, and a timeline seek must land on exactly what
+playback would have shown.
+
+### Deliverable
+
+`libs/ajfx`, a GPU particle and volume library with no media server
+dependencies, so it can be published on its own once its API settles.
+Effects are stacks of typed modules authored with presets, a C++ builder API
+or an effect file. Custom modules are HLSL snippets fused into each emitter's
+kernel. The library defines a small GPU backend interface and can instead hand
+a host the passes to record into its own render graph; the media server
+adapts its RHI that way. D3D12 and Vulkan reference backends ship with the
+library.
+
+Determinism rules: randomness is an integer hash of `(emitter seed, spawn
+index, stream)`; fixed simulation step; live lists compacted by prefix sum,
+never atomic append; budgets fixed up front and refused when exceeded. Seeks
+restore from a checkpoint ring and resimulate forward; emitters with no
+feedback forces evaluate any frame directly.
+
+### Phases
+
+0. Skeleton: standalone CMake project, `area-particles` test area,
+   deterministic hash with an HLSL twin. Done.
+1. Effect model, attributes, about a dozen built-in modules, builder API,
+   effect file format and a CPU reference simulator. Tests: bit-identical
+   reruns, seek equivalence, budget refusal.
+2. GPU runtime on the D3D12 reference backend: kernel fusion, pools, prefix-sum
+   compaction, indirect arguments, sprites and a sample app. Tests: CPU/GPU
+   parity and bit-identical GPU reruns.
+3. RHI: writable storage buffers in compute and indirect dispatch/draw (shared
+   with the GPU-driven culling item above).
+4. Integration: RHI adapter pass in `engine/render`, a `scene.particle_effect`
+   node that is normalized, replicated and digested, show-frame driving,
+   seeking and editor placement. The Basic renderer fails readiness with a
+   specific reason. Two-node agreement on the cluster.
+5. GPU sort, ribbons, mesh particles, particle lights, soft particles, motion
+   vectors, and depth and SDF collision.
+6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,
+   media), hot reload, debug statistics and profiling markers.
+7. Publication: Vulkan backend, documentation, examples, presets, a license
+   and versioned releases. A node-graph editor can sit on the module model
+   later.
+
+Volumes track (after phase 5), a companion module sharing the same backend,
+hashing, budgets and checkpoints:
+
+- V1: procedural volumes (noise and SDF shapes) injected into the froxel fog.
+- V2: per-volume raymarching with self-shadowing, composited with sorted
+  particles.
+- V3: cellular flood-fill volumes through a voxelized scene (CS2-style smoke).
+- V4: sparse smoke and fire simulation, with particles depositing into the grid
+  and advecting in its velocity.
+
+Volumes are simulated once in world space and raymarched per node against the
+full-canvas camera, like the froxel grid. Ray jitter is hashed from the show
+frame and canvas coordinates; any temporal history resets with the temporal
+document digest. They need true 3D textures in the RHI.
+
+### Exit criteria
+
+Every effect is reproducible bit for bit on rerun and after a seek, matches
+across a two-node slice boundary, stays within its declared budget or reports
+why not, and has a measured GPU cost.
+
+## Vehicle process platesets
+
+### Problem
+
+The LED Car Process node arranges up to seven plates (Front, four
+three-quarter/side, Back and Ceiling Reflection) around a vehicle, but each
+plate is still an independent clip, layer and wire. An operator has to import
+the camera angles, line them up by hand, keep every trim and move in step
+across tracks, and wire each Scene Layer to the right socket. Changing to
+another take repeats all of it. Import already records each clip's
+`media_start_timecode`, but nothing uses it to align plates.
+
+### Deliverable
+
+A plateset: a library asset whose slots hold the camera-angle media for one
+take, placed on the timeline as a single clip and wired to an LED Car Process
+rig automatically.
+
+- Slots use the LED Car Process socket roles, taken from one shared
+  vocabulary. Rig templates (9, 5 and 3 camera) choose which slots exist.
+  Dropping several media assets onto an empty plateset proposes slot
+  assignments from file names and metadata (`FRONT`, `CAM_B`, reel names);
+  the operator corrects them by dragging.
+- Per-slot sync offsets belong to the plateset, not to a timeline placement,
+  so every use of a take is in sync. They affect the image, so they are
+  normalized, replicated and included in the scene digest.
+- Readiness is checked when the plateset is built: mismatched frame rates or
+  drop-frame modes, no common overlap, and an empty Front slot fail with a
+  specific reason. The plateset estimates its decode load against the
+  measured budget and offers derivative or proxy profiles when it is over,
+  rather than failing on stage.
+- On the timeline a plateset clip moves, trims, slips and splits every plate
+  together. Expanding it shows a row per slot for local corrections (grade,
+  mask, transform), which stay layer-local as LED Car Process slot transforms
+  already do. Swap Take, or dropping another plateset onto the clip, replaces
+  every plate in place and keeps trims, effects and wiring.
+- Dropping a plateset into a scene with no LED Car Process creates one, wires
+  each filled slot to its socket and connects it toward Output in one undo
+  step through the Director's document authority, and highlights the new node
+  in the Compositor. An existing rig with free sockets is reused; an occupied
+  rig asks whether to replace its plates or add a second rig. Preferably the
+  node takes the plateset clip as a single input, so swapping takes or adding
+  a slot never rewires the graph.
+- Sync by Timecode, on the plateset's context menu, aligns slots by their
+  start timecode and trims to the span every plate covers. Mixed frame rates
+  are refused with the reason rather than rounded. The expanded clip shows
+  each slot's offset and the common span.
+- Footage without timecode is synced from the plates themselves, without a
+  model: every camera on the rig sees the same bumps, so frame-to-frame
+  vertical motion correlates across slots to the frame; yaw from turns,
+  brightness steps under bridges and tunnels, and scratch audio confirm it.
+  Checking the start and end of a take reports drift between cameras that
+  share timecode without genlock.
+- The same motion signal proposes markers (turning left/right, stopped,
+  accelerating, rough road, tunnel). Analysis runs on a bounded Director-side
+  worker, never on the control or frame path, and is cached beside the asset
+  by content hash. Results are suggestions; they become authored markers only
+  when the operator accepts them.
+
+### Status
+
+Phases 1 to 4 are in place (see the operator guide's Vehicle process
+platesets): the plateset asset with slots, rig templates, name-based
+proposals, readiness and the decode budget; placement as a track and clip
+per plate wired into an LED Car Process with the rig choice; take editing
+and Swap Take; Sync by Timecode with offsets that placed plates follow;
+background motion analysis with confidence, drift and suggested markers;
+and the Timeline's take row, which folds a placement's plate tracks into one
+collapsible row whose bars move, trim and cut each take, whose eye, solo and
+lock switch the whole set, whose menu folds, cuts, ranges, opens and
+deletes it, and which drags to reorder its tracks as a block.
+
+Still open:
+
+- Motion sync relies on shared shake. On the stabilised Chicago array in
+  `Models/media/driving` it finds the plates essentially in sync but with
+  low confidence; a stronger shared signal (optical-flow speed profiles
+  that tolerate stabilisation) would help, measured against plates with a
+  known offset.
+- Phase 5, the optional vision model for semantic tags, is not started.
+- Ripple, roll and slide on a plate act on that plate alone.
+
+Follow-on ideas, each to be designed on its own:
+
+- Interactive lighting: sample each plate's edges and average colour to drive
+  emissive light cards or DMX fixtures, so passing headlights and tunnel
+  lights reach the actors in sync. Shares the light-card work above.
+- Motion curves from the detected bumps and turns to drive a motion base,
+  camera shake or lighting flicker.
+- A Back to One cue that returns every plate to the take's start mark.
+- A loop finder for points where all plates match closely enough to loop a
+  drive under a crossfade.
+- Event search and, where cameras recorded GPS, a route map that scrubs the
+  plateset.
+- Flip Drive: swap left and right slots and flop them to fake the other side
+  of the road or a right-hand-drive car.
+- A Stage overlay showing plate seams while tuning Horizontal Blend and Array
+  Scale.
+
+### Exit criteria
+
+A nine-camera take can be imported, assigned, synced and placed with its rig
+wired in a handful of gestures through the shipping workflow, each one undoable
+as one step. Sync offsets reach every node and the digest, two nodes agree on
+the composed rig at the same show frame, an over-budget plateset reports why
+before it goes live, and analysis never stalls the control thread.

@@ -325,6 +325,18 @@ void an_empty_field_means_no_preference_and_survives_a_round_trip() {
     RECENT_CHECK(loaded.value() == partial);
     RECENT_CHECK(loaded.value().wal_path.empty());
     RECENT_CHECK(loaded.value().lifecycle_password_key.empty());
+    RECENT_CHECK(loaded.value().proxy_transcode_priority ==
+                 persist::ProxyTranscodePriority::Fast);
+
+    // Background is no longer the default, so choosing it must be stored.
+    partial.proxy_transcode_priority =
+        persist::ProxyTranscodePriority::Background;
+    RECENT_CHECK(!partial.empty());
+    RECENT_CHECK(persist::save_preferences(file, partial));
+    const auto background = persist::load_preferences(file);
+    RECENT_CHECK(background);
+    RECENT_CHECK(background.value().proxy_transcode_priority ==
+                 persist::ProxyTranscodePriority::Background);
 
     // Clearing every field is a real choice: it restores the built-in
     // defaults, and it must persist rather than being read as corruption.

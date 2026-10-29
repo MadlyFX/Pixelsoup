@@ -162,18 +162,6 @@ key_batch_message(editor::TimelineKeyBatchAction action,
 // the document. Preserve the original low-nibble address space for the first
 // sixteen channels, while assigning later channels to a disjoint high-bit
 // prefix with five component bits.
-[[nodiscard]] doc::NodeId channel_node_id(doc::NodeId target,
-                                          core::u64 component_index) noexcept {
-    constexpr core::u64 legacy_channel_id_base = 0x7C00'0000'0000'0000ULL;
-    constexpr core::u64 extended_channel_id_base = 0x7D00'0000'0000'0000ULL;
-    if (component_index < 16U) {
-        return doc::NodeId{legacy_channel_id_base | (target.value() << 4U) |
-                           component_index};
-    }
-    return doc::NodeId{extended_channel_id_base | (target.value() << 5U) |
-                       component_index};
-}
-
 [[nodiscard]] doc::Node make_channel_node(doc::NodeId id, doc::NodeId target,
                                           std::string_view component) {
     doc::Node node{};

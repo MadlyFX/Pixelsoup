@@ -34,6 +34,10 @@ struct MediaCacheStats final {
     core::u64 planar_uploads{};
     core::u64 pending_requests{};
     core::u64 held_frames{};
+    // Pending requests that had no picture at all to show: the placement drew
+    // its offline placeholder. A pending request that held its last picture
+    // is a late frame, not a missing one.
+    core::u64 blank_requests{};
 
     bool operator==(const MediaCacheStats &) const = default;
 };
@@ -125,10 +129,17 @@ class MediaCache final {
     // must never show each other's picture while one of them is waiting. Both
     // default to "not stated", which is the behaviour of a caller that has
     // neither - one clip per file, read ahead in a straight line.
+    //
+    // `rendition` names the picture the file is one rendition of - the media
+    // asset. A placement that moves from one file to another of the same
+    // rendition, such as from its source to its proxy, keeps showing what it
+    // held until the new file has a frame, as a change of resolution does.
+    // Zero means not stated: a different file is then a cut.
     [[nodiscard]] ResolvedMediaFrame
     resolve(rhi::Device &device, rhi::CommandList &commands,
             const std::string &source_template, core::u32 frame_index,
-            MediaLoopWindow window = {}, core::u64 clip = 0U);
+            MediaLoopWindow window = {}, core::u64 clip = 0U,
+            core::u64 rendition = 0U);
 
     // Asks the source to decode a frame nothing is drawing yet - the first
     // frame of a clip that is about to cut in. Uploads nothing and resolves
@@ -305,6 +316,11 @@ class MediaCache final {
     static constexpr core::i64 max_playback_stride = 4;
 
     [[nodiscard]] ResolvedMediaFrame held_frame(const ClipKey &clip);
+    [[nodiscard]] ResolvedMediaFrame
+    resolve_placement(rhi::Device &device, rhi::CommandList &commands,
+                      const std::string &source_template,
+                      core::u32 frame_index, MediaLoopWindow window,
+                      core::u64 clip);
     [[nodiscard]] ResolvedMediaFrame candidate_frame(
         UploadCandidate &candidate, const ClipKey &clip,
         core::u32 resolved_frame) noexcept;
@@ -360,6 +376,14 @@ class MediaCache final {
     std::map<ClipKey, std::string> last_by_clip_;
     std::map<ClipKey, core::u32> last_frame_by_clip_;
     std::map<ClipKey, core::u32> last_request_by_clip_;
+    // The file each placement last drew a picture of, and its rendition.
+    // While the placement's newly chosen file of the same rendition has
+    // nothing yet, that picture stands in and the file stays on air.
+    struct Shown final {
+        core::u64 rendition{};
+        ClipKey key;
+    };
+    std::map<core::u64, Shown> shown_by_clip_;
     std::map<ClipKey, ReadAheadRequest> read_ahead_requests_;
     std::map<std::string, std::size_t> decoded_frame_bytes_;
     // Which placements were drawn in the previous pass, so a clip coming back

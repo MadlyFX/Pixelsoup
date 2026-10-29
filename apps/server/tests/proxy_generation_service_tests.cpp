@@ -1,4 +1,5 @@
 #include "proxy_generation_service.hpp"
+#include "proxy_generation_worker.hpp"
 
 #include <mediaserver/assets/content_fingerprint.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
@@ -7,10 +8,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -25,6 +29,7 @@
 
 namespace {
 
+namespace app = mediaserver::app;
 namespace assets = mediaserver::assets;
 namespace core = mediaserver::core;
 namespace doc = mediaserver::doc;
@@ -118,16 +123,23 @@ void write_file(const fs::path& path, std::span<const core::u8> content) {
     };
 }
 
+// What a backend reports for a source of `source_frames` frames: the whole
+// file, or the run of it a segment covers.
 [[nodiscard]] server::ProxyBackendOutput backend_output(
-    const assets::ContentFingerprint& consumed_fingerprint) {
+    const assets::ContentFingerprint& consumed_fingerprint,
+    core::u64 source_frames = 3U,
+    std::optional<server::ProxySourceRange> range = std::nullopt) {
     const assets::MediaFrameRate rate{30'000U, 1'001U};
-    auto map = assets::make_identity_proxy_frame_map(3U, rate);
+    const server::ProxySourceRange covered =
+        range.value_or(server::ProxySourceRange{0U, source_frames});
+    auto map = assets::make_identity_proxy_frame_map(covered.count, rate,
+                                                     covered.first);
     PROXY_CHECK(map.has_value());
     return server::ProxyBackendOutput{
         consumed_fingerprint,
         server::ProxySourceMetadata{
             assets::PixelDimensions{1'920U, 1'080U},
-            3U,
+            source_frames,
             rate,
             1U,
             1U,
@@ -140,7 +152,7 @@ void write_file(const fs::path& path, std::span<const core::u8> content) {
         },
         server::ProxyEncodedMetadata{
             assets::PixelDimensions{1'280U, 720U},
-            3U,
+            covered.count,
             rate,
             1U,
             1U,
@@ -152,10 +164,10 @@ void write_file(const fs::path& path, std::span<const core::u8> content) {
             assets::DerivativeContainer::Mp4,
             assets::DerivativeCodec::H264,
             assets::DerivativePixelFormat::Yuv420p,
-            assets::DerivativeAudioLayout::Stereo,
-            assets::DerivativeAudioCodec::Aac,
-            48'000U,
-            192'000U,
+            assets::DerivativeAudioLayout::None,
+            assets::DerivativeAudioCodec::None,
+            0U,
+            0U,
         },
         std::move(map).value(),
     };
@@ -176,6 +188,18 @@ struct BackendState final {
     doc::NodeId requested_asset{};
     std::optional<assets::DerivativeKey> requested_key;
     fs::path requested_output;
+    std::optional<bool> requested_yield;
+    std::optional<server::ProxySourceRange> requested_range;
+    // The bytes of each file a join request named, in order.
+    std::vector<std::vector<core::u8>> joined;
+    core::u64 source_frames{3U};
+    // Every request's range in order (empty for a whole file or a join),
+    // how many joins were asked for, and each piece handed over.
+    std::vector<std::optional<server::ProxySourceRange>> ranges;
+    core::u32 joins{};
+    std::vector<server::ProxySourceRange> pieces;
+    // Runs before each piece is handed over.
+    std::function<void(core::u32 piece)> on_piece;
 };
 
 class ControlledBackend final : public server::ProxyEncoderBackend {
@@ -193,6 +217,19 @@ public:
             state_->requested_asset = request.asset;
             state_->requested_key = request.key;
             state_->requested_output = request.output_file;
+            state_->requested_yield = request.yield_to_playback;
+            state_->requested_range = request.range;
+            state_->ranges.push_back(request.range);
+            if (!request.join_segments.empty()) {
+                ++state_->joins;
+            }
+            state_->joined.clear();
+            for (const fs::path& segment : request.join_segments) {
+                std::ifstream input{segment, std::ios::binary};
+                state_->joined.emplace_back(
+                    std::istreambuf_iterator<char>{input},
+                    std::istreambuf_iterator<char>{});
+            }
         }
         state_->condition.notify_all();
 
@@ -201,8 +238,49 @@ public:
             request.progress(3U, 3U);
         }
 
+        // A run hands over one piece per segment, each named like a
+        // segment encoded alone, and stops when the caller refuses one.
+        if (request.piece_frames != 0U && request.range.has_value()) {
+            const core::u64 end = request.range->first + request.range->count;
+            std::optional<server::ProxyBackendOutput> last;
+            for (core::u32 piece = 0U;; ++piece) {
+                const core::u64 first =
+                    request.range->first +
+                    static_cast<core::u64>(piece) * request.piece_frames;
+                if (first >= end) {
+                    break;
+                }
+                const server::ProxySourceRange covered{
+                    first, std::min(request.piece_frames, end - first)};
+                write_file(server::proxy_piece_path(request.output_file,
+                                                    piece),
+                           bytes("segment-" + std::to_string(first)));
+                {
+                    std::scoped_lock lock{state_->mutex};
+                    state_->pieces.push_back(covered);
+                }
+                if (state_->on_piece) {
+                    state_->on_piece(piece);
+                }
+                last = backend_output(request.source_fingerprint,
+                                      state_->source_frames, covered);
+                if (!request.piece_done(piece, *last) &&
+                    covered.first + covered.count < end) {
+                    return server::ProxyBackendResult::failure(
+                        server::ProxyBackendError{
+                            server::ProxyBackendErrorCode::Cancelled, {}});
+                }
+            }
+            return server::ProxyBackendResult::success(std::move(*last));
+        }
         if (!state_->omit_output_file) {
-            write_file(request.output_file, state_->payload);
+            // A segment's payload names its first frame, so a join can be
+            // checked for order.
+            write_file(request.output_file,
+                       request.range.has_value()
+                           ? bytes("segment-" +
+                                   std::to_string(request.range->first))
+                           : state_->payload);
         }
         if (state_->wait_for_cancellation) {
             std::stop_callback wake{stop, [this] {
@@ -223,7 +301,8 @@ public:
         }
         server::ProxyBackendOutput output = state_->output.has_value()
             ? *state_->output
-            : backend_output(request.source_fingerprint);
+            : backend_output(request.source_fingerprint,
+                             state_->source_frames, request.range);
         return server::ProxyBackendResult::success(std::move(output));
     }
 
@@ -297,6 +376,7 @@ void successful_backend_publishes_keyed_payload_and_sidecar() {
         const auto generated = service.generate(media);
         PROXY_CHECK(generated.has_value());
         PROXY_CHECK(!generated.value().cache_hit);
+        PROXY_CHECK(state->requested_yield == false);
         PROXY_CHECK(generated.value().asset == media.id);
         PROXY_CHECK(generated.value().key == *expected_key);
         PROXY_CHECK(generated.value().key.asset == media.id);
@@ -423,6 +503,20 @@ void metadata_and_frame_map_validation_rejects_semantic_drift() {
     state->output = backend_output(media.fingerprint.value());
     state->output->frame_map.proxy_frame_rate =
         assets::MediaFrameRate{24U, 1U};
+    result = service.generate(media);
+    PROXY_CHECK(!result);
+    PROXY_CHECK(result.error().code ==
+                server::ProxyGenerationErrorCode::InvalidMetadata);
+
+    // The source has audio, but the editor proxy profile carries none.
+    state->output = backend_output(media.fingerprint.value());
+    PROXY_CHECK(state->output->source_metadata.has_audio);
+    state->output->encoded_metadata.audio_layout =
+        assets::DerivativeAudioLayout::Stereo;
+    state->output->encoded_metadata.audio_codec =
+        assets::DerivativeAudioCodec::Aac;
+    state->output->encoded_metadata.audio_sample_rate = 48'000U;
+    state->output->encoded_metadata.audio_bitrate = 192'000U;
     result = service.generate(media);
     PROXY_CHECK(!result);
     PROXY_CHECK(result.error().code ==
@@ -558,6 +652,266 @@ void backend_frame_progress_reaches_generation_callers() {
                     {1U, 3U}, {3U, 3U}});
 }
 
+void a_job_started_during_playback_asks_the_backend_to_yield() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "playing.mov";
+    write_file(source, bytes("playing-source"));
+    const assets::MediaAsset media = asset(source, 103U);
+    const auto state = std::make_shared<BackendState>();
+    server::ProxyGenerationService service{
+        open_cache(temporary.path() / "cache"),
+        std::make_unique<ControlledBackend>(state)};
+
+    const auto generated = service.generate(
+        media, {}, {}, server::ProxyGenerationService::Step{true});
+
+    PROXY_CHECK(generated.has_value());
+    PROXY_CHECK(state->calls == 1U);
+    PROXY_CHECK(state->requested_yield == true);
+}
+
+// A proxy made in segments: each segment encodes only its frames and is
+// published under its own key, and once all are published they join into the
+// whole-file proxy, in source order, without another encode.
+void segments_publish_apart_and_join_into_the_whole_proxy() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "long.mov";
+    write_file(source, bytes("long-source"));
+    assets::MediaAsset media = asset(source, 107U);
+    // 450 frames at 29.97: segments of 300 and 150 frames.
+    media.frame_count = 450U;
+    const auto state = std::make_shared<BackendState>();
+    state->source_frames = 450U;
+    server::ProxyGenerationService service{
+        open_cache(temporary.path() / "cache"),
+        std::make_unique<ControlledBackend>(state)};
+    using Step = server::ProxyGenerationService::Step;
+
+    auto second = service.generate(media, {}, {}, Step{false, 1U});
+    PROXY_CHECK(second.has_value());
+    PROXY_CHECK((state->requested_range ==
+                 server::ProxySourceRange{300U, 150U}));
+    PROXY_CHECK(second.value().key.segment == 1U);
+    PROXY_CHECK(second.value().frame_map.source_time_by_proxy_frame.size() ==
+                150U);
+    const auto whole_key = assets::requested_proxy_key(media);
+    PROXY_CHECK(whole_key.has_value());
+    PROXY_CHECK(second.value().key ==
+                assets::derivative_segment_key(*whole_key, 1U));
+
+    // Not every segment is published yet.
+    auto early = service.generate(media, {}, {}, Step{false, {}, true});
+    PROXY_CHECK(!early);
+    PROXY_CHECK(early.error().code ==
+                server::ProxyGenerationErrorCode::CacheNotReady);
+
+    // A segment whose frames start one frame late is refused.
+    state->output = backend_output(media.fingerprint.value(), 450U,
+                                   server::ProxySourceRange{1U, 300U});
+    auto shifted = service.generate(media, {}, {}, Step{false, 0U});
+    PROXY_CHECK(!shifted);
+    PROXY_CHECK(shifted.error().code ==
+                server::ProxyGenerationErrorCode::InvalidMetadata);
+    state->output.reset();
+
+    auto first = service.generate(media, {}, {}, Step{false, 0U});
+    PROXY_CHECK(first.has_value());
+    PROXY_CHECK((state->requested_range ==
+                 server::ProxySourceRange{0U, 300U}));
+
+    const core::u32 encodes = state->calls;
+    auto joined = service.generate(media, {}, {}, Step{false, {}, true});
+    PROXY_CHECK(joined.has_value());
+    PROXY_CHECK(state->calls == encodes + 1U);
+    PROXY_CHECK(!state->requested_range.has_value());
+    PROXY_CHECK((state->joined ==
+                 std::vector<std::vector<core::u8>>{bytes("segment-0"),
+                                                    bytes("segment-300")}));
+    PROXY_CHECK(joined.value().key == *whole_key);
+    PROXY_CHECK(joined.value().frame_map.source_time_by_proxy_frame.size() ==
+                450U);
+    PROXY_CHECK(service.inspect(*whole_key).value().state ==
+                assets::DerivativeState::Ready);
+    // The whole proxy is now a cache hit; nothing is joined again.
+    auto again = service.generate(media);
+    PROXY_CHECK(again.has_value() && again.value().cache_hit);
+    PROXY_CHECK(state->calls == encodes + 1U);
+}
+
+// A run makes several segments in one encode and publishes each as it is
+// handed over; a run stopped part way keeps what it published.
+void a_run_publishes_each_segment_from_one_encode() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "run.mov";
+    write_file(source, bytes("run-source"));
+    assets::MediaAsset media = asset(source, 109U);
+    // 750 frames at 29.97: segments of 300, 300 and 150 frames.
+    media.frame_count = 750U;
+    const auto state = std::make_shared<BackendState>();
+    state->source_frames = 750U;
+    const fs::path cache_root = temporary.path() / "cache";
+    server::ProxyGenerationService service{
+        open_cache(cache_root), std::make_unique<ControlledBackend>(state)};
+    using Step = server::ProxyGenerationService::Step;
+    const auto whole_key = assets::requested_proxy_key(media);
+    PROXY_CHECK(whole_key.has_value());
+    const auto ready = [&](core::u32 segment) {
+        const auto entry = service.inspect(
+            assets::derivative_segment_key(*whole_key, segment));
+        return entry.has_value() &&
+               entry.value().state == assets::DerivativeState::Ready;
+    };
+
+    // A run past the last segment is refused before anything is encoded.
+    auto past = service.generate(media, {}, {}, Step{false, 1U, false, 3U});
+    PROXY_CHECK(!past);
+    PROXY_CHECK(past.error().code ==
+                server::ProxyGenerationErrorCode::InvalidProfile);
+    PROXY_CHECK(state->calls == 0U);
+
+    // Stopped after its first segment: that one is published, the run
+    // reports Cancelled, and no piece is left in the work folder.
+    std::vector<core::u32> heard;
+    auto stopped = service.generate(
+        media, {}, {},
+        Step{false, 0U, false, 3U,
+             [&](core::u32 segment, const server::ProxyGenerationReceipt&) {
+                 heard.push_back(segment);
+                 return false;
+             }});
+    PROXY_CHECK(!stopped);
+    PROXY_CHECK(stopped.error().code ==
+                server::ProxyGenerationErrorCode::Cancelled);
+    PROXY_CHECK((heard == std::vector<core::u32>{0U}));
+    PROXY_CHECK(ready(0U));
+    PROXY_CHECK(!ready(1U));
+    PROXY_CHECK(!work_files_exist(cache_root));
+
+    // Run again from the start: segment 0, already made, is reported as
+    // made, and one encode covers the rest, cut at 300 frames.
+    heard.clear();
+    const core::u32 before = state->calls;
+    auto run = service.generate(
+        media, {}, {},
+        Step{false, 0U, false, 3U,
+             [&](core::u32 segment,
+                 const server::ProxyGenerationReceipt& receipt) {
+                 heard.push_back(segment);
+                 PROXY_CHECK(receipt.key ==
+                             assets::derivative_segment_key(*whole_key,
+                                                            segment));
+                 return true;
+             }});
+    PROXY_CHECK(run.has_value());
+    PROXY_CHECK(state->calls == before + 1U);
+    PROXY_CHECK((state->requested_range ==
+                 server::ProxySourceRange{300U, 450U}));
+    PROXY_CHECK((heard == std::vector<core::u32>{0U, 1U, 2U}));
+    PROXY_CHECK((state->pieces.back() ==
+                 server::ProxySourceRange{600U, 150U}));
+    PROXY_CHECK(run.value().key ==
+                assets::derivative_segment_key(*whole_key, 2U));
+    PROXY_CHECK(run.value().frame_map.source_time_by_proxy_frame.size() ==
+                150U);
+    PROXY_CHECK(ready(1U) && ready(2U));
+    PROXY_CHECK(!work_files_exist(cache_root));
+
+    // The run's segments join as segments made alone do.
+    auto joined = service.generate(media, {}, {}, Step{false, {}, true});
+    PROXY_CHECK(joined.has_value());
+    PROXY_CHECK((state->joined ==
+                 std::vector<std::vector<core::u8>>{bytes("segment-0"),
+                                                    bytes("segment-300"),
+                                                    bytes("segment-600")}));
+}
+
+// Waits for the worker to finish every job it was given.
+[[nodiscard]] bool worker_finished(const app::ProxyGenerationWorker& worker,
+                                   const assets::DerivativeKey& key) {
+    for (int attempt = 0; attempt < 1'000; ++attempt) {
+        if (!worker.progress_for(key).has_value()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    return false;
+}
+
+// The worker makes the rest of the file from the segment a view needs in
+// one run, then the start of the file in another, then joins them.
+void the_worker_runs_from_the_needed_segment_then_from_the_start() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "worker.mov";
+    write_file(source, bytes("worker-source"));
+    assets::MediaAsset media = asset(source, 113U);
+    // Five segments of 300 frames.
+    media.frame_count = 1'500U;
+    const auto state = std::make_shared<BackendState>();
+    state->source_frames = 1'500U;
+    const auto key = assets::requested_proxy_key(media);
+    PROXY_CHECK(key.has_value());
+    {
+        app::ProxyGenerationWorker worker{
+            std::make_unique<server::ProxyGenerationService>(
+                open_cache(temporary.path() / "cache"),
+                std::make_unique<ControlledBackend>(state))};
+        const std::array<app::ProxyGenerationWorker::Need, 1U> needs{
+            {{media.id, 960U}}};
+        worker.set_needs(needs);
+        worker.request(media);
+        PROXY_CHECK(worker_finished(worker, *key));
+    }
+    using Range = std::optional<server::ProxySourceRange>;
+    PROXY_CHECK((state->ranges ==
+                 std::vector<Range>{server::ProxySourceRange{900U, 600U},
+                                    server::ProxySourceRange{0U, 900U},
+                                    std::nullopt}));
+    PROXY_CHECK(state->joins == 1U);
+    PROXY_CHECK(state->pieces.size() == 5U);
+}
+
+// Between segments the worker looks again: a view that now needs a segment
+// outside the run ends it, and what it made is kept rather than remade.
+void the_worker_leaves_a_run_for_a_newly_needed_segment() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "jump.mov";
+    write_file(source, bytes("jump-source"));
+    assets::MediaAsset media = asset(source, 117U);
+    media.frame_count = 1'500U;
+    const auto state = std::make_shared<BackendState>();
+    state->source_frames = 1'500U;
+    const auto key = assets::requested_proxy_key(media);
+    PROXY_CHECK(key.has_value());
+    {
+        app::ProxyGenerationWorker worker{
+            std::make_unique<server::ProxyGenerationService>(
+                open_cache(temporary.path() / "cache"),
+                std::make_unique<ControlledBackend>(state))};
+        // The playhead jumps to segment 3 as the first run hands over its
+        // first segment.
+        const std::array<app::ProxyGenerationWorker::Need, 1U> jump{
+            {{media.id, 1'000U}}};
+        bool jumped = false;
+        state->on_piece = [&](core::u32) {
+            if (!jumped) {
+                jumped = true;
+                worker.set_needs(jump);
+            }
+        };
+        worker.request(media);
+        PROXY_CHECK(worker_finished(worker, *key));
+    }
+    using Range = std::optional<server::ProxySourceRange>;
+    PROXY_CHECK((state->ranges ==
+                 std::vector<Range>{server::ProxySourceRange{0U, 1'500U},
+                                    server::ProxySourceRange{900U, 600U},
+                                    server::ProxySourceRange{300U, 600U},
+                                    std::nullopt}));
+    // Segment 0 was made once: one piece per segment in all.
+    PROXY_CHECK(state->pieces.size() == 5U);
+    PROXY_CHECK(state->joins == 1U);
+}
+
 void next_to_source_storage_routes_from_each_media_path() {
     TemporaryDirectory temporary;
     const fs::path media_directory = temporary.path() / "media";
@@ -621,7 +975,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 15U> cases{{
     {"unavailable default fails closed without publishing",
      &unavailable_default_fails_closed_without_publishing},
     {"successful backend publishes keyed payload and sidecar",
@@ -638,6 +992,16 @@ constexpr std::array<Case, 10U> cases{{
      &cache_envelopes_with_invalid_sidecars_are_not_cache_hits},
     {"backend frame progress reaches generation callers",
      &backend_frame_progress_reaches_generation_callers},
+    {"a job started during playback asks the backend to yield",
+     &a_job_started_during_playback_asks_the_backend_to_yield},
+    {"segments publish apart and join into the whole proxy",
+     &segments_publish_apart_and_join_into_the_whole_proxy},
+    {"a run publishes each segment from one encode",
+     &a_run_publishes_each_segment_from_one_encode},
+    {"the worker runs from the needed segment then from the start",
+     &the_worker_runs_from_the_needed_segment_then_from_the_start},
+    {"the worker leaves a run for a newly needed segment",
+     &the_worker_leaves_a_run_for_a_newly_needed_segment},
     {"next-to-source storage routes from each media path",
      &next_to_source_storage_routes_from_each_media_path},
     {"clearing a proxy root preserves unrelated files and the root",

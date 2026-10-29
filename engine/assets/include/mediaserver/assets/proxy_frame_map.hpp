@@ -62,8 +62,11 @@ struct ProxyFrameMap final {
 [[nodiscard]] bool valid_proxy_frame_map(const ProxyFrameMap& map) noexcept;
 
 using ProxyFrameMapResult = core::Result<ProxyFrameMap, ProxyFrameMapError>;
+// Proxy frame j is source frame first_source_frame + j: a whole-file proxy
+// starts at zero, a segment at its first frame.
 [[nodiscard]] ProxyFrameMapResult make_identity_proxy_frame_map(
-    core::u64 frame_count, MediaFrameRate frame_rate) noexcept;
+    core::u64 frame_count, MediaFrameRate frame_rate,
+    core::u64 first_source_frame = 0U) noexcept;
 
 using ProxyFrameLookupResult =
     core::Result<std::optional<core::u64>, ProxyFrameMapError>;

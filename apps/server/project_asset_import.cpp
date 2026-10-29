@@ -4,6 +4,7 @@
 #include <mediaserver/assets/asset_path.hpp>
 #include <mediaserver/assets/asset_schema.hpp>
 #include <mediaserver/assets/content_fingerprint.hpp>
+#include <mediaserver/assets/plateset.hpp>
 #include <mediaserver/assets/proxy_policy.hpp>
 #include <mediaserver/output/feed_map_schema.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
@@ -41,7 +42,15 @@ ProjectAssetImportResult prepare_project_asset_import(
     }
     const assets::ContentFingerprint measured =
         std::move(fingerprint).value();
-    std::visit([&measured](auto& held) { held.fingerprint = measured; }, asset);
+    std::visit(
+        [&measured](auto& held) {
+            // A plateset names other assets and is never imported from a file.
+            if constexpr (!std::is_same_v<std::decay_t<decltype(held)>,
+                                          assets::PlatesetAsset>) {
+                held.fingerprint = measured;
+            }
+        },
+        asset);
     return ProjectAssetImportResult::success(std::move(asset));
 }
 
@@ -53,8 +62,7 @@ doc::Node make_project_asset_node(doc::NodeId id,
         return doc::PropertyValue{static_cast<std::int64_t>(value)};
     };
     const auto real = [](double value) { return doc::PropertyValue{value}; };
-    std::visit(
-        [&](const auto& asset) {
+    const auto write = [&](const auto& asset) {
             using Asset = std::decay_t<decltype(asset)>;
             if constexpr (std::is_same_v<Asset, assets::MediaAsset>) {
                 node.type = std::string{assets::schema::media_type};
@@ -193,6 +201,13 @@ doc::Node make_project_asset_node(doc::NodeId id,
                         real(asset.bounds->maximum_z));
                 }
             }
+        };
+    std::visit(
+        [&write](const auto& asset) {
+            if constexpr (!std::is_same_v<std::decay_t<decltype(asset)>,
+                                          assets::PlatesetAsset>) {
+                write(asset);
+            }
         },
         imported);
     return node;
@@ -236,7 +251,8 @@ namespace {
 [[nodiscard]] bool is_asset_node(const doc::Node& node) noexcept {
     return node.type == assets::schema::media_type ||
            node.type == assets::schema::model_type ||
-           node.type == assets::schema::projection_mesh_type;
+           node.type == assets::schema::projection_mesh_type ||
+           node.type == assets::schema::plateset_type;
 }
 
 [[nodiscard]] ProjectAssetAuthoringError authoring_error(
@@ -320,6 +336,21 @@ ProjectAssetDeleteResult plan_project_asset_delete(
                     references_asset(found->second, asset)) {
                     references.push_back(ProjectAssetReference{
                         change.id, std::string{property}});
+                }
+            }
+            // A plate in a plateset is in use: removing it would leave the
+            // set with a hole the operator did not ask for.
+            if (change.after->type == assets::schema::plateset_type) {
+                for (const assets::PlatesetSlot slot :
+                     assets::all_plateset_slots) {
+                    const std::string property =
+                        assets::plateset_slot_property(slot);
+                    const auto found = change.after->properties.find(property);
+                    if (found != change.after->properties.end() &&
+                        references_asset(found->second, asset)) {
+                        references.push_back(
+                            ProjectAssetReference{change.id, property});
+                    }
                 }
             }
         }

@@ -424,13 +424,37 @@ labelled with its clip count. The bar edits the track as though it were one
 clip: drag it to move every clip on the track by the same amount, snapping
 either end to cuts on other tracks, the playhead and markers; drag its left or
 right end to trim the clip that opens or closes the track; with the
-**Razor (`C`)** click it to cut every clip on the track there (Shift: every
-track). Ripple, Roll, Slip and Slide have no single cut to act on, so the bar
+**Razor (`C`)** click it to split the track in two there, as the razor splits
+a clip in two. Ripple, Roll, Slip and Slide have no single cut to act on, so the bar
 answers them as Selection does. Carry the bar onto another track's band and
 the track takes that place in the stack, the same reorder a header drag makes;
 moved in time as well, both are one undo step. A track with a locked clip
-refuses the drag rather than leave that clip behind. The track's menu also
-offers **Split Track at Playhead** and **Set In/Out to Track**.
+refuses the drag rather than leave that clip behind.
+
+A placed plateset's tracks are listed together under one **take row**; see
+[Vehicle process platesets](#vehicle-process-platesets).
+
+**Splitting a track.** The razor on a track's bar, **Split Track at Playhead**
+on its menu, or `Ctrl+K` with the track selected and no clip selected cuts the
+track into two tracks. The track keeps what plays before the cut; a new track
+directly in front of it - the same screen, format, blend, grade, effects and
+keyframes, named after it ("Plates" gives "Plates (2)") - takes what plays from
+the cut on. A clip straddling the cut is split the way the clip razor splits
+it, its tail going to the new track. The split is one undo step. It needs
+something on both sides of the cut, and is refused on a locked track or when
+it would move or cut a locked clip. Shift with the razor still cuts every clip
+on every track where it lands, without making tracks. A compositor Scene Layer
+that names the original track does not pick up the new one.
+
+**Keyframing a track.** An open track lists a **Properties** foldout above its
+clips, as a group lists one above its children. It holds the screen's
+Position, Rotation, Scale and Opacity and any keyable effect on the track,
+with the same key diamonds, key steps and Curves as a layer's channels, and a
+closed track's header shows its own keys among its clips'. `[` and `]` step
+through a selected track's keys, and **Clear Keyframes** on the track's menu
+removes them. With the aspect lock closed a screen's height follows its width,
+so key Scale X; a Scale Y key is ignored. `X` with a track selected (and no
+clip) sets In/Out around every clip on it, as **Set In/Out to Track** does.
 
 **Solo.** Every row the Stage draws - an object, a model, a clip, a light, a
 group, a Blender collection and a track - carries a **Solo** switch just
@@ -750,9 +774,10 @@ of the layer list, for a sheet of every key the Timeline answers; any press or
   earliest selected clip of each track. Without Alt the arrows step the
   playhead as before.
 
-`Ctrl+K` cuts the selected clips at the playhead, `Shift+Delete` ripple
-deletes them, `I` and `O` set the range, `Up` and `Down` jump between cuts and
-markers, and `=`, `-` and `\` zoom.
+`Ctrl+K` cuts the selected clips at the playhead (a selected track, with no
+clip selected, splits into two tracks), `Shift+Delete` ripple deletes them,
+`I` and `O` set the range, `X` sets it around the selected clips or track,
+`Up` and `Down` jump between cuts and markers, and `=`, `-` and `\` zoom.
 
 **Curves** turns the lanes into one graph the full height of the layer
 list. Every channel listed on screen below an open layer - and every
@@ -1115,9 +1140,12 @@ path.
 project and found on this machine. **SOURCE - NOT CHECKED** is the asset's own
 file when nothing in the project uses it: presence is only asked of required
 content, so a missing file shows the grey placeholder rather than a warning.
-**PROXY** follows the asset's Prefer or Require Proxy policy, **PROXY REQUIRED
-- NOT READY** draws nothing, as the wall would, and **OFFLINE** is a missing
-file. **DECODING** means frames are still arriving; the last complete one is
+**PROXY** is a UHD asset's 720p editor proxy, or the proxy its Prefer or
+Require Proxy policy asks for. **PROXY REQUIRED - NOT READY** draws nothing,
+as the wall would, and **OFFLINE** is a missing file. The **Proxy / Full res**
+menu in the header chooses which file the viewer decodes; Full res shows the
+source's own pixels for checking detail, whatever Stage and Program use.
+A status that does not fit beside a long name is left out. **DECODING** means frames are still arriving; the last complete one is
 held. The viewer decodes through its own cache, so scrubbing it never counts
 against Program's asset readiness.
 
@@ -1227,6 +1255,140 @@ drawn on the editor's GPU when the Library first
 shows it and kept in this machine's derivative cache like a media thumbnail
 (the `model-turntable-320x180-srgb` profile). It is drawn again when the file
 changes.
+
+### Vehicle process platesets
+
+A plateset is the camera angles of one driving take, each filed in the LED
+Car Process slot it plays in: Front, the four three-quarter and side
+positions, Back, and the Ceiling Reflection. It is a Library asset like any
+other - it lists, renames, files into folders and drags - but it names
+media assets rather than a file, so it is never copied to a render node on
+its own.
+
+**Making one.** Select a take's plates in the Library, right-click and choose
+**New Plateset from Selection**. Each plate goes in the slot its file name
+gives (`FC`, `FRONT`, `FL`, `REAR_RIGHT`, `SL`, `TOP`, `UP` and similar; the
+last such tag in the name counts), the set is named after what the names
+share, and it opens in the Asset Viewer. **New Plateset** on the Library's
+background menu makes an empty one. A plate the names place nowhere goes in
+the first empty slot.
+
+**The plateset page.** The Asset Viewer shows the rig from above, front up,
+with a tile per slot. Drag a plate from the Library onto a tile to play it
+there; drag several onto the rig to fill the empty slots their names
+propose. Each tile's mark lights the plate it is for - the ceiling plate
+is the one over the car - until a plate is in it; then it shows that
+plate's thumbnail. The x on a tile empties it. **3 / 5 / 9 camera** chooses which
+slots the page offers; a plate in a slot the template does not offer stays.
+Each tile's **SYNC** field is that plate's offset: the source frames it
+skips so every plate starts on the same instant. A scrub or a typed value is
+one undo step.
+
+**Readiness** lists what stands between the set and the stage, slot by
+slot: no front plate, a missing or unprobed plate, plates at different
+frame rates or mixing drop-frame and non-drop timecode, and no frame every
+plate covers after its offset. These refuse placement. **Decode** compares
+what the plates would decode per second with what this installation was
+measured to keep up with (four 3840x2160 24 fps plates on the reference
+Director); over it is a warning, not a refusal, with **Prefer 720p proxies
+for every plate** to bring it in.
+
+**Half resolution decode (all plates)** holds every placed plate of the set
+at half size: a quarter of the memory per decoded frame. It does not make
+decoding cheaper. Ticking it changes every placement in one undo step, and
+new placements follow it.
+
+**Sync by Timecode** lines the plates up by the start timecode each file
+carries and says which plates stopped it when it cannot. **Sync by Motion**
+decodes every plate in the background, once - signatures are cached by
+content - and lines them up by the bumps every camera on the car shares.
+It reports each plate's offset with a dot for how sure it is (green is
+applied, amber and red keep their offsets) and how far it drifts between
+the start and the end of the take. **Apply** authors only the sure ones.
+Footage that has been stabilised, or that is already in sync and smooth,
+can share too little shake to sync from the picture; the page says so
+rather than guessing. Light is deliberately not used: a shadow reaches the
+front camera before the rear one.
+
+**Find Moments** reads the front plate alone - a ninth of the decoding -
+for **Stopped**, **Turning right/left**, **Bump** and **Into shade**, each
+at the frame it begins (Sync by Motion finds them too). Click one to keep
+it, again to let it go, or **Keep All**. Kept moments belong to the
+plateset, in front plate frames: wherever the set is placed they are drawn
+on the Timeline's marker strip as small diamonds, and they move with the
+footage when the take is moved, trimmed or slipped. Hover one for its name;
+click it to go there. The diamond-on-a-staff button in the Timeline toolbar
+shows or hides them. They are not cues and never stop the show.
+
+**Placing a plateset.** Drag it from the Library onto the Timeline (it
+starts where it lands) or the Stage (at the playhead). Each plate gets a
+track named after its slot and the take, its raster set to the plate's,
+and a clip lasting the frames every plate covers. The scene's compositor
+gets a Scene Layer per track wired to the matching socket of an LED Car
+Process, created and fed to Output (composited over what Output already
+shows) when the scene has none. When the scene's rig already plays
+something on a socket the plates need, a menu asks whether to replace those
+plates, add a second LED Car Process, or keep its wires and fill only the
+free sockets. The whole placement is one undo step.
+
+**The take row.** On the Timeline a placed plateset reads as one track: a
+take row, marked with the plateset's car and named after the set (as the
+Library names it, or after what its tracks' names share), with how many
+plates it holds - and how many takes, once a cut has made more than one. It
+starts closed, listing only the row, whose lane draws a bar per take from
+its first frame to its last, with its fade ramps and a hairline per plate.
+The bar edits the take as a clip: drag it to move the take, drag an end to
+trim it, pull a fade knob, Slip it, or click it with the **Razor (`C`)** to
+cut it (`Shift` cuts every clip on every track, as on a clip). Each is the
+same edit the front plate's own clip makes, so it is one undo step and every
+plate of the take follows; a move never changes tracks or stack order.
+Ripple, Roll and Slide would move one plate's neighbours alone, so the bar
+answers them as Selection does. A take with a locked plate or track takes no
+drag. Clicking the row or a bar selects every plate it stands for - the
+row all of its takes, a bar its own - with the front plate shown in the
+Inspector, so Delete and Copy act on the whole take.
+
+The row's eye, **Solo** and padlock switch every track of the set at once:
+each reads lit while all of its tracks are, and a click brings every track
+to the same state. Drag the row by its name to move all of its tracks up or
+down the stack together, in their order; a track dropped onto a closed row
+goes in front of or behind the whole set, never between its tracks. A set
+with a locked track stays where it is. Right-click the row to **List** or
+**Fold Plate Tracks**, **Mute** or **Lock Plates**, **Split Take at
+Playhead**, **Set In/Out to Plateset**, **Open Plateset in Asset Viewer**,
+or **Delete Plateset Tracks and Plates**, which removes every track of the
+set with its plate in one undo step.
+
+Twirl the row open, or double-click it or a bar, to list the plates' tracks
+under it, one indent in. Each is named by its slot alone - **LEFT**, or its
+tag **L** when the list is too narrow - since the row above names the set;
+hover for the track's full name, which renaming still starts from. Each is
+still its own track and screen: its own grade, mute, lock, solo, target,
+keys and clips, edited as before, and the row stays above them with its
+bars. Open or closed is the operator's view,
+not saved in the project; a search opens it, and pointing at a plate from
+another panel opens it. A track joins the row while every clip on it is a
+plate of that set; tracks that share a take are one placement, so two
+placements of one set are two rows, and the halves of a razored take stay in
+one. The row sits where its frontmost track would be, and its tracks keep
+their numbers whether it is open or closed. A track moved in between a
+set's tracks parts the row in two, one above it and one below, so the list
+always shows the stacking order the Stage draws; moving it out joins them
+again. The document still holds one track per
+plate; the row is only how the Timeline shows them, and changes nothing the
+Stage, Program or the render nodes draw.
+
+**Editing a take.** Moving, trimming, fading, slipping or cutting one plate
+of a placed take does the same to every plate of it: plates sharing a take,
+a start and a length are one unit. A plate moved on its own leaves its take,
+and its take row shows it as a bar of its own.
+Changing the set's offsets moves every placed plate's source in by the
+difference, and shortens the take if a plate would now run out. Drop
+another plateset onto a placed plate, or onto its take row (a bar there
+picks that take), to **swap the take**: each plate plays
+the new set's media for its slot at the same take position, keeping its
+trims, track, grade and wiring; tracks named after the old take are
+renamed, and plates the new set has no slot for stay as they were.
 
 ## Render-node lifecycle control
 
@@ -1927,8 +2089,10 @@ From the left:
 | Box resting on a line | Surface snapping |
 | Grid, frame corners, three axes, corner brackets | Show the floor grid, guides, gizmo and every element's bounds |
 | Screen with Full / Half / Quarter | The resolution Stage renders at |
+| Framed square with Proxy / Full res | Which file Stage decodes for UHD video - see [Editor proxies](media-playback.md#editor-proxies) |
 
-The rate at the right end is how fast Stage is drawing. Over the image's
+The rate at the right end is how fast Stage is drawing. Program Output's bar
+carries the same media and resolution menus, chosen separately from Stage's. Over the image's
 top-right corner, the shading menu and the view menu name how this view
 shades and what it looks through.
 
@@ -2031,8 +2195,8 @@ Process Group** at the top level, or a group's row for **New Group Inside** and
 **New Vehicle Process Group Inside**. The new group lands at the front of its
 siblings, is selected, and opens its name for typing. Drag rows onto it to file
 them. A vehicle process group is shown with a vehicle icon and is otherwise an
-ordinary group for now; it is the container the vehicle processing workflow
-will build on.
+ordinary group; the vehicle processing workflow itself is built on
+[platesets](#vehicle-process-platesets).
 
 **Highlight Color...** in a row's right-click menu marks the selected rows with
 one of the eight marker colours - a tint across the row and a bar at its right

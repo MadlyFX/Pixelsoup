@@ -16,6 +16,27 @@ enum class PreviewResolution : core::u8 { Full, Half, Quarter };
            resolution == PreviewResolution::Quarter;
 }
 
+// Which file an editor view decodes for its video. Proxy draws a UHD clip's
+// 720p working proxy once one is ready, and the source until then; Full
+// always draws the source. Like the preview resolution it is the editor's
+// own: render nodes always decode what the project asks for.
+enum class MediaRendition : core::u8 { Proxy, Full };
+
+[[nodiscard]] constexpr bool valid(MediaRendition rendition) noexcept {
+    return rendition == MediaRendition::Proxy ||
+           rendition == MediaRendition::Full;
+}
+
+// What a view's clips drew on the last frame, as the Director resolved them:
+// how many drew a proxy, and how many show their source only until their
+// proxy is ready.
+struct ViewMediaCounts final {
+    core::u32 proxied{};
+    core::u32 waiting{};
+
+    bool operator==(const ViewMediaCounts&) const = default;
+};
+
 struct PreviewExtent final {
     core::u32 width{};
     core::u32 height{};

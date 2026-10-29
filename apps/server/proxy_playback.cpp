@@ -442,6 +442,37 @@ ProxyAssetRuntimeResult collect_proxy_asset_runtime(
     }
 }
 
+ViewProxySummary summarize_view_proxies(
+    std::span<const ProxyPlacementObservation> observations) noexcept {
+    ViewProxySummary summary{};
+    for (std::size_t index = 0U; index < observations.size(); ++index) {
+        const ProxyPlacementObservation &observation = observations[index];
+        // A transition evaluates the same placement twice; count it once.
+        const bool repeated = std::any_of(
+            observations.begin(),
+            observations.begin() + static_cast<std::ptrdiff_t>(index),
+            [&](const ProxyPlacementObservation &earlier) {
+                return earlier.placement == observation.placement;
+            });
+        if (repeated || observation.offline) {
+            continue;
+        }
+        using Reason = assets::ProxyPlaybackReason;
+        const Reason reason = observation.resolution.reason;
+        if (observation.resolution.selection ==
+            assets::ProxyPlaybackSelection::Proxy) {
+            ++summary.proxied;
+        } else if (observation.resolution.selection ==
+                       assets::ProxyPlaybackSelection::Source &&
+                   (reason == Reason::CacheMissing ||
+                    reason == Reason::CacheQueued ||
+                    reason == Reason::CacheGenerating)) {
+            ++summary.waiting;
+        }
+    }
+    return summary;
+}
+
 ProxyPlaybackService::ProxyPlaybackService(
     server::ProxyGenerationService& artifacts)
     : ProxyPlaybackService(&artifacts) {}
@@ -817,6 +848,74 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                 }
             }
 
+            // Until the whole proxy is ready, the segment holding the
+            // requested frame stands in for it as soon as that segment is
+            // published and copied out. The segment after it is copied out
+            // next, and near the boundary it is decoded ahead of time, so
+            // playback crosses into it without waiting on a cold file.
+            std::optional<core::u32> segment;
+            const MaterializedProxy* next_segment{};
+            core::u64 frames_to_next_segment{};
+            if (cache.has_value() && !materialized_path.has_value() &&
+                artifacts_ != nullptr && asset->frame_count.has_value() &&
+                asset->frame_rate.has_value() && !stop.stop_requested()) {
+                const auto wanted = assets::proxy_segment_of(
+                    original.frame_index, *asset->frame_count,
+                    *asset->frame_rate);
+                const auto ready_segment =
+                    [&](core::u32 index) -> const MaterializedProxy* {
+                    const auto segment_key =
+                        assets::derivative_segment_key(*key, index);
+                    const auto local = std::find_if(
+                        materialized_.begin(), materialized_.end(),
+                        [&](const MaterializedProxy& value) {
+                            return value.key == segment_key;
+                        });
+                    if (local != materialized_.end()) {
+                        return authored_probe_matches(*asset,
+                                                      local->source_metadata)
+                            ? &*local : nullptr;
+                    }
+                    const bool failed = std::any_of(
+                        failed_materializations_.begin(),
+                        failed_materializations_.end(),
+                        [&](const FailedMaterialization& value) {
+                            return value.key == segment_key;
+                        });
+                    if (failed || pending_materialization_ != nullptr) {
+                        return nullptr;
+                    }
+                    const auto inspected =
+                        artifacts_->inspect(*asset, segment_key);
+                    if (inspected && inspected.value().state ==
+                                         assets::DerivativeState::Ready) {
+                        static_cast<void>(
+                            start_materialization(*asset, segment_key));
+                    }
+                    return nullptr;
+                };
+                if (wanted.has_value()) {
+                    if (const MaterializedProxy* const local =
+                            ready_segment(*wanted)) {
+                        segment = *wanted;
+                        cache = assets::ProxyCacheObservation{
+                            local->key, assets::DerivativeState::Ready};
+                        proxy_source_metadata = &local->source_metadata;
+                        frame_map = &local->frame_map;
+                        materialized_path = local->path;
+                        const auto range = assets::proxy_segment_range(
+                            *wanted, *asset->frame_count, *asset->frame_rate);
+                        if (range.has_value() &&
+                            range->first + range->count <
+                                *asset->frame_count) {
+                            frames_to_next_segment = range->first +
+                                range->count - original.frame_index;
+                            next_segment = ready_segment(*wanted + 1U);
+                        }
+                    }
+                }
+            }
+
             observation.resolution = assets::resolve_proxy_playback(
                 *asset, readiness,
                 cache.has_value() ? &*cache : nullptr,
@@ -854,7 +953,10 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                         // Convert the source loop bounds through the same exact
                         // time map used for the opening frame.
                         selected.loop_count = 0U;
-                        if (original.loop_count != 0U) {
+                        // A segment is part of the clip, so the clip's loop
+                        // window would cross into other files; it reads
+                        // ahead in a straight line instead.
+                        if (original.loop_count != 0U && !segment.has_value()) {
                             const auto first_time = assets::presentation_time_for_frame(
                                 original.loop_first, proxy_source_metadata->frame_rate);
                             const auto last_time = assets::presentation_time_for_frame(
@@ -877,6 +979,22 @@ ProxyPlaybackResult ProxyPlaybackService::resolve(
                         }
                     }
                 }
+            }
+
+            if (!warming && segment.has_value() && next_segment != nullptr &&
+                observation.resolution.selection ==
+                    assets::ProxyPlaybackSelection::Proxy &&
+                frames_to_next_segment <=
+                    assets::proxy_segment_frames(*asset->frame_rate) /
+                        assets::proxy_segment_seconds) {
+                scene::MediaPrewarm next_start{};
+                next_start.source = next_segment->path.string();
+                next_start.frame_index = 0U;
+                next_start.source_node = original.source_node;
+                next_start.asset = original.asset;
+                next_start.frames_until_start = frames_to_next_segment;
+                next_start.resolution = original.resolution;
+                ready_prewarm.push_back(std::move(next_start));
             }
 
             observation.offline = observation.resolution.selection == assets::ProxyPlaybackSelection::Unready &&

@@ -1024,7 +1024,86 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 36U> cases{{
+// ---------------------------------------------------------------- platesets
+
+[[nodiscard]] assets::AssetRegistry take_plates() {
+  assets::AssetRegistry registry;
+  const std::array<std::pair<core::u64, const char *>, 3U> plates{{
+      {31U, "Take 7 FRONT.mp4"}, {32U, "Take 7 LEFT.mp4"},
+      {33U, "Take 7 RIGHT.mp4"}}};
+  for (const auto &[id, name] : plates) {
+    assets::MediaAsset media{};
+    media.id = doc::NodeId{id};
+    media.display_name = name;
+    media.source = std::string{"C:/show/plates/"} + name;
+    media.frame_count = 2'400U;
+    media.frame_rate = assets::MediaFrameRate{24U, 1U};
+    registry.assets.emplace_back(std::move(media));
+  }
+  return registry;
+}
+
+// Selecting a take's plates and choosing New Plateset from Selection makes
+// one set with each plate in the slot its name gives, the smallest rig that
+// holds them, and the name the files share; the set opens in the Asset
+// Viewer once it exists.
+void a_plateset_is_made_from_the_selected_plates() {
+  Harness harness;
+  harness.registry = take_plates();
+  harness.collapse_generators();
+  const float first_row = 102.0F + asset_row_height * 0.5F;
+  const float third_row = 102.0F + asset_row_height * 2.5F;
+  static_cast<void>(harness.click(120.0F, first_row));
+  static_cast<void>(harness.click(120.0F, third_row, gui::KeyMods::Shift));
+  UI_CHECK(harness.panel.selection().size() == 3U);
+  static_cast<void>(harness.right_click(120.0F, first_row));
+  // Open, Rename, New Folder, Remove, New Plateset from Selection.
+  const editor::LibraryFrame chosen = harness.choose(120.0F, first_row, 4U);
+  UI_CHECK(chosen.library_edits.size() == 1U);
+  const assets::LibraryEdit &edit = chosen.library_edits.front();
+  UI_CHECK(edit.kind == assets::LibraryEdit::Kind::CreatePlateset);
+  UI_CHECK(edit.name == "Take 7");
+  UI_CHECK(edit.rig == assets::PlatesetRig::Three);
+  UI_CHECK(edit.slots[static_cast<std::size_t>(assets::PlatesetSlot::Front)] ==
+           doc::NodeId{31U});
+  UI_CHECK(edit.slots[static_cast<std::size_t>(assets::PlatesetSlot::Left)] ==
+           doc::NodeId{32U});
+  UI_CHECK(edit.slots[static_cast<std::size_t>(assets::PlatesetSlot::Right)] ==
+           doc::NodeId{33U});
+
+  // The Director answers with the new set.
+  assets::PlatesetAsset plateset{};
+  plateset.id = doc::NodeId{90U};
+  plateset.display_name = "Take 7";
+  plateset.rig = assets::PlatesetRig::Three;
+  harness.registry.assets.emplace_back(plateset);
+  const editor::LibraryFrame arrived = harness.frame(-1.0F, -1.0F, false);
+  UI_CHECK(arrived.view_asset == doc::NodeId{90U});
+  UI_CHECK(harness.panel.selection().size() == 1U);
+  UI_CHECK(harness.panel.selection()[0] == doc::NodeId{90U});
+}
+
+void an_empty_plateset_comes_from_the_background_menu() {
+  Harness harness;
+  harness.registry = take_plates();
+  harness.collapse_generators();
+  static_cast<void>(harness.right_click(120.0F, 400.0F));
+  // New Folder, New Plateset.
+  const editor::LibraryFrame chosen = harness.choose(120.0F, 400.0F, 1U);
+  UI_CHECK(chosen.library_edits.size() == 1U);
+  UI_CHECK(chosen.library_edits.front().kind ==
+           assets::LibraryEdit::Kind::CreatePlateset);
+  UI_CHECK(chosen.library_edits.front().name == "Plateset");
+  UI_CHECK(chosen.library_edits.front().slots ==
+           (std::array<doc::NodeId, assets::plateset_slot_count>{}));
+  UI_CHECK(editor::library_column_text(
+               assets::Asset{assets::PlatesetAsset{
+                   doc::NodeId{91U}, "Night", assets::PlatesetRig::Nine,
+                   {{{doc::NodeId{31U}, 0}, {}, {doc::NodeId{33U}, 4}}}}},
+               editor::LibraryColumn::Type) == "Plateset (2)");
+}
+
+constexpr std::array<Case, 38U> cases{{
     {"changed sources are offered for acceptance",
      &changed_sources_are_offered_for_acceptance},
     {"the horizontal scrollbar drags without touching rows",
@@ -1093,6 +1172,10 @@ constexpr std::array<Case, 36U> cases{{
     {"long lists scroll and clip interaction to the list",
      &long_lists_scroll_and_clip_interaction_to_the_list},
     {"empty space does nothing", &empty_space_does_nothing},
+    {"a plateset is made from the selected plates",
+     &a_plateset_is_made_from_the_selected_plates},
+    {"an empty plateset comes from the background menu",
+     &an_empty_plateset_comes_from_the_background_menu},
 }};
 
 } // namespace

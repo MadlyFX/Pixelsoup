@@ -32,14 +32,14 @@ constexpr std::array<Shortcut, 11U> playback_keys{{
     {"[  ]", "Previous / next key on the selection"},
     {"Enter", "GO: run from a hold or to the next cue"},
     {"I  O", "Set In / Out at the playhead"},
-    {"X", "Set In/Out around the selected clips"},
+    {"X", "Set In/Out around the selected clips or track"},
     {"M", "Add a marker, or name the one here"},
     {"F", "Match frame in the Asset Viewer"},
 }};
 
 constexpr std::array<Shortcut, 11U> editing_keys{{
     {"V B N Y U C", "Select, Ripple, Roll, Slip, Slide, Razor"},
-    {"Ctrl+K", "Cut the selected clips at the playhead"},
+    {"Ctrl+K", "Cut the selected clips or track at the playhead"},
     {"Alt+Q  Alt+W", "Trim head / tail to the playhead, ripple"},
     {"Alt+Left  Right", "Nudge with the tool (Shift: a second)"},
     {"Shift+Delete", "Ripple delete the selected clips"},

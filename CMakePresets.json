@@ -158,6 +158,14 @@
       ]
     },
     {
+      "name": "area-particles",
+      "displayName": "Debug GUI: particle tests only",
+      "configurePreset": "windows-msvc-debug-gui",
+      "targets": [
+        "tests-particles"
+      ]
+    },
+    {
       "name": "area-output",
       "displayName": "Debug GUI: output tests only",
       "configurePreset": "windows-msvc-debug-gui",
@@ -345,6 +353,23 @@
       "filter": {
         "include": {
           "label": "^compositor$"
+        }
+      },
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "area-particles",
+      "displayName": "Debug GUI: particle tests",
+      "description": "Run after cmake --build --preset area-particles.",
+      "configurePreset": "windows-msvc-debug-gui",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^particles$"
         }
       },
       "execution": {

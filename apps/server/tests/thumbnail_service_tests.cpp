@@ -5,10 +5,18 @@
 
 #include <stb_image.h>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+}
+
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -288,6 +296,168 @@ void production_decoder_generates_a_still_thumbnail() {
     THUMBNAIL_CHECK(loaded.value().payload.size() > 24U);
 }
 
+struct VideoFixtureWriter final {
+    AVFormatContext* format{};
+    AVCodecContext* codec{};
+    AVFrame* frame{};
+    AVPacket* packet{};
+
+    ~VideoFixtureWriter() {
+        av_packet_free(&packet);
+        av_frame_free(&frame);
+        avcodec_free_context(&codec);
+        if (format != nullptr) {
+            if (format->pb != nullptr) {
+                avio_closep(&format->pb);
+            }
+            avformat_free_context(format);
+        }
+    }
+};
+
+// Three flat 4:2:0 frames with no colour tag, as camera originals arrive:
+// grey, then Rec.709 limited-range pure red, then grey. At 720 lines the
+// renderer reads an untagged source as Rec.709, which is what sends an HD or
+// UHD plate down its two-plane path rather than to RGBA.
+void write_untagged_hd_video(const fs::path& path) {
+    const std::string name = path.string();
+    VideoFixtureWriter writer;
+    const AVCodec* const encoder = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+    THUMBNAIL_CHECK(encoder != nullptr);
+    writer.codec = avcodec_alloc_context3(encoder);
+    THUMBNAIL_CHECK(writer.codec != nullptr);
+    writer.codec->width = 1'280;
+    writer.codec->height = 720;
+    writer.codec->time_base = AVRational{1, 24};
+    writer.codec->framerate = AVRational{24, 1};
+    writer.codec->pix_fmt = AV_PIX_FMT_YUV420P;
+    writer.codec->gop_size = 1;
+    writer.codec->thread_count = 1;
+    writer.codec->qmin = 1;
+    writer.codec->qmax = 2;
+    THUMBNAIL_CHECK(avcodec_open2(writer.codec, encoder, nullptr) >= 0);
+    THUMBNAIL_CHECK(avformat_alloc_output_context2(
+                        &writer.format, nullptr, "mov", name.c_str()) >= 0);
+    AVStream* const stream = avformat_new_stream(writer.format, nullptr);
+    THUMBNAIL_CHECK(stream != nullptr);
+    stream->time_base = writer.codec->time_base;
+    stream->avg_frame_rate = writer.codec->framerate;
+    THUMBNAIL_CHECK(avcodec_parameters_from_context(
+                        stream->codecpar, writer.codec) >= 0);
+    THUMBNAIL_CHECK(avio_open(&writer.format->pb, name.c_str(),
+                              AVIO_FLAG_WRITE) >= 0);
+    THUMBNAIL_CHECK(avformat_write_header(writer.format, nullptr) >= 0);
+    writer.frame = av_frame_alloc();
+    writer.packet = av_packet_alloc();
+    THUMBNAIL_CHECK(writer.frame != nullptr && writer.packet != nullptr);
+    writer.frame->format = writer.codec->pix_fmt;
+    writer.frame->width = writer.codec->width;
+    writer.frame->height = writer.codec->height;
+    THUMBNAIL_CHECK(av_frame_get_buffer(writer.frame, 0) >= 0);
+    const auto drain = [&] {
+        int status = 0;
+        while ((status = avcodec_receive_packet(writer.codec,
+                                                writer.packet)) == 0) {
+            if (writer.packet->duration == 0) {
+                writer.packet->duration = 1;
+            }
+            av_packet_rescale_ts(writer.packet, writer.codec->time_base,
+                                 stream->time_base);
+            writer.packet->stream_index = stream->index;
+            THUMBNAIL_CHECK(av_interleaved_write_frame(
+                                writer.format, writer.packet) >= 0);
+            av_packet_unref(writer.packet);
+        }
+        THUMBNAIL_CHECK(status == AVERROR(EAGAIN) || status == AVERROR_EOF);
+    };
+    constexpr std::array<std::array<core::u8, 3U>, 3U> levels{{
+        {{126U, 128U, 128U}},
+        {{63U, 102U, 240U}},
+        {{126U, 128U, 128U}},
+    }};
+    for (std::size_t index = 0U; index < levels.size(); ++index) {
+        THUMBNAIL_CHECK(av_frame_make_writable(writer.frame) >= 0);
+        for (int plane = 0; plane < 3; ++plane) {
+            const int rows = plane == 0 ? writer.frame->height
+                                        : writer.frame->height / 2;
+            const int columns = plane == 0 ? writer.frame->width
+                                           : writer.frame->width / 2;
+            for (int row = 0; row < rows; ++row) {
+                std::fill_n(writer.frame->data[plane] +
+                                static_cast<std::ptrdiff_t>(row) *
+                                    writer.frame->linesize[plane],
+                            columns, levels[index][plane]);
+            }
+        }
+        writer.frame->pts = static_cast<std::int64_t>(index);
+        writer.frame->duration = 1;
+        THUMBNAIL_CHECK(avcodec_send_frame(writer.codec, writer.frame) >= 0);
+        drain();
+    }
+    THUMBNAIL_CHECK(avcodec_send_frame(writer.codec, nullptr) >= 0);
+    drain();
+    THUMBNAIL_CHECK(av_write_trailer(writer.format) >= 0);
+}
+
+void production_decoder_generates_an_hd_video_thumbnail() {
+    TemporaryDirectory temporary;
+    const fs::path source_path = temporary.path() / "plate.mov";
+    write_untagged_hd_video(source_path);
+    const assets::MediaAsset asset = make_asset(
+        doc::NodeId{43U}, source_path, 3U);
+    server::ThumbnailService service{
+        open_cache(temporary.path() / "cache"),
+        server::ThumbnailServiceConfig{1U, 4U, 2U, 16U}};
+
+    const auto requested = service.request(asset);
+    THUMBNAIL_CHECK(requested);
+    std::optional<server::ThumbnailSnapshot> settled;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds{30};
+    while (std::chrono::steady_clock::now() < deadline) {
+        settled = service.snapshot(requested.value().key);
+        if (settled.has_value() &&
+            (settled->state == assets::DerivativeState::Ready ||
+             settled->state == assets::DerivativeState::Failed)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    THUMBNAIL_CHECK(settled.has_value());
+    THUMBNAIL_CHECK(settled->failure == server::ThumbnailFailureCode::None);
+    THUMBNAIL_CHECK(settled->state == assets::DerivativeState::Ready);
+    // A tenth of the way in, rounded up: the middle, red frame.
+    THUMBNAIL_CHECK(settled->source_ordinal == 1U);
+    THUMBNAIL_CHECK(settled->attempted_frames == 1U);
+
+    const auto loaded = service.load(settled->key);
+    THUMBNAIL_CHECK(loaded);
+    const std::vector<core::u8>& png = loaded.value().payload;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* const decoded = stbi_load_from_memory(
+        png.data(), static_cast<int>(png.size()), &width, &height, &channels,
+        4);
+    THUMBNAIL_CHECK(decoded != nullptr);
+    THUMBNAIL_CHECK(width == 320 && height == 180);
+    // 16:9 fills the tile, so even its corner is opaque picture.
+    const std::size_t centre =
+        (static_cast<std::size_t>(90) * 320U + 160U) * 4U;
+    const std::array<core::u8, 4U> middle{
+        decoded[centre], decoded[centre + 1U], decoded[centre + 2U],
+        decoded[centre + 3U]};
+    const core::u8 corner_alpha = decoded[3U];
+    stbi_image_free(decoded);
+    THUMBNAIL_CHECK(corner_alpha == 0xffU);
+    // Rec.709 puts these codes at full red; read with the 601 matrix the red
+    // would land near 233 instead.
+    THUMBNAIL_CHECK(middle[0] >= 245U);
+    THUMBNAIL_CHECK(middle[1] <= 12U);
+    THUMBNAIL_CHECK(middle[2] <= 12U);
+    THUMBNAIL_CHECK(middle[3] == 0xffU);
+}
+
 void filmstrip_uses_uniform_ordinals_and_one_manifest_cache_key() {
     TemporaryDirectory temporary;
     const fs::path source_path = temporary.path() / "source.bin";
@@ -498,29 +668,54 @@ void source_change_during_decode_is_not_published() {
                     assets::DerivativeState::Missing);
 }
 
-void no_valid_frame_reports_failed_after_exact_fallback_order() {
+void no_valid_frame_reports_failed_after_bounded_fallback_order() {
     TemporaryDirectory temporary;
-    const fs::path source_path = temporary.path() / "source.bin";
-    write(source_path, "decode failure revision");
-    const assets::MediaAsset asset = make_asset(
-        doc::NodeId{81U}, source_path, 3U);
+    const fs::path short_path = temporary.path() / "short.bin";
+    const fs::path long_path = temporary.path() / "long.bin";
+    write(short_path, "decode failure revision");
+    write(long_path, "long decode failure revision");
     auto decoder = std::make_shared<DecoderState>();
-    decoder->frame_count = 3U;
     decoder->valid_ordinal.reset();
     server::ThumbnailService service{
         open_cache(temporary.path() / "cache"),
         server::ThumbnailServiceConfig{1U, 4U, 2U, 16U},
         factory(decoder)};
 
-    const auto requested = service.request(asset);
-    THUMBNAIL_CHECK(requested);
-    const server::ThumbnailSnapshot failed = wait_for_state(
-        service, requested.value().key,
+    // A short clip is tried whole: forward from a tenth of the way in, then
+    // back toward the start.
+    const auto short_requested = service.request(
+        make_asset(doc::NodeId{81U}, short_path, 3U));
+    THUMBNAIL_CHECK(short_requested);
+    const server::ThumbnailSnapshot short_failed = wait_for_state(
+        service, short_requested.value().key,
         assets::DerivativeState::Failed);
-    THUMBNAIL_CHECK(failed.failure ==
+    THUMBNAIL_CHECK(short_failed.failure ==
                     server::ThumbnailFailureCode::NoValidFrame);
+    THUMBNAIL_CHECK(short_failed.attempted_frames == 3U);
     THUMBNAIL_CHECK(decoded_ordinals(decoder) ==
                     std::vector<core::u32>{1U, 2U, 0U});
+
+    // A long one gives up after 24 frames from its tenth, rather than
+    // reading thousands of frames it cannot decode.
+    {
+        std::lock_guard lock{decoder->mutex};
+        decoder->ordinals.clear();
+    }
+    const auto long_requested = service.request(
+        make_asset(doc::NodeId{82U}, long_path, 2'000U));
+    THUMBNAIL_CHECK(long_requested);
+    const server::ThumbnailSnapshot long_failed = wait_for_state(
+        service, long_requested.value().key,
+        assets::DerivativeState::Failed);
+    THUMBNAIL_CHECK(long_failed.failure ==
+                    server::ThumbnailFailureCode::NoValidFrame);
+    THUMBNAIL_CHECK(long_failed.attempted_frames == 24U);
+    THUMBNAIL_CHECK(long_failed.source_ordinal == 223U);
+    std::vector<core::u32> expected;
+    for (core::u32 ordinal = 200U; ordinal < 224U; ++ordinal) {
+        expected.push_back(ordinal);
+    }
+    THUMBNAIL_CHECK(decoded_ordinals(decoder) == expected);
 }
 
 [[nodiscard]] assets::ModelAsset make_model(doc::NodeId id,
@@ -662,11 +857,13 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 10U> cases{{
+constexpr std::array<Case, 11U> cases{{
     {"deterministic probe PNG and asset identity",
      &deterministic_probe_png_and_asset_identity},
     {"production decoder generates a still thumbnail",
      &production_decoder_generates_a_still_thumbnail},
+    {"production decoder generates an HD video thumbnail",
+     &production_decoder_generates_an_hd_video_thumbnail},
     {"filmstrip uses uniform ordinals and one manifest cache key",
      &filmstrip_uses_uniform_ordinals_and_one_manifest_cache_key},
     {"retain cancels in-flight work", &retain_cancels_in_flight_work},
@@ -676,8 +873,8 @@ constexpr std::array<Case, 10U> cases{{
      &fingerprint_mismatch_is_visible_stale_and_never_decodes},
     {"source change during decode is not published",
      &source_change_during_decode_is_not_published},
-    {"no valid frame reports failed after exact fallback order",
-     &no_valid_frame_reports_failed_after_exact_fallback_order},
+    {"no valid frame reports failed after bounded fallback order",
+     &no_valid_frame_reports_failed_after_bounded_fallback_order},
     {"invalid assets never enter the queue",
      &invalid_assets_never_enter_the_queue},
     {"model thumbnails wait for the editor's picture",

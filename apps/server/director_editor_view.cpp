@@ -358,6 +358,28 @@ namespace mediaserver::app {
         info.source_frame_rate = clip.frame_rate;
         info.timeline_lane = clip.lane;
         info.clip_order = clip.order;
+        if (const doc::Node *const plate =
+                scheduler.projected_document().get(clip.node)) {
+            const auto whole = [plate](std::string_view name) {
+                const auto found = plate->properties.find(name);
+                const auto *const value =
+                    found != plate->properties.end()
+                        ? std::get_if<std::int64_t>(&found->second)
+                        : nullptr;
+                return value != nullptr ? *value : std::int64_t{};
+            };
+            info.plateset = doc::NodeId{static_cast<core::u64>(
+                std::max<std::int64_t>(whole(scene::schema::plateset_asset), 0))};
+            info.plateset_take = whole(scene::schema::plateset_take);
+            const auto slot =
+                plate->properties.find(scene::schema::plateset_slot);
+            if (slot != plate->properties.end()) {
+                if (const auto *const key =
+                        std::get_if<std::string>(&slot->second)) {
+                    info.plateset_slot = *key;
+                }
+            }
+        }
         info.parent_group = clip.parent_group;
         info.group_order = clip.group_order;
         info.locked = info.locked || clip.locked;
@@ -866,6 +888,11 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         observe_timeline_playback(tick, inputs);
         next_editor_refresh = Clock::now() + editor_refresh_interval;
         refresh_history_state();
+        editor->set_view_media_counts(
+            editor::ViewMediaCounts{program_view_proxies.proxied,
+                                    program_view_proxies.waiting},
+            editor::ViewMediaCounts{stage_view_proxies.proxied,
+                                    stage_view_proxies.waiting});
         auto editor_frame = editor->frame(
             scene_frame, timeline, keyframes, elements, effects,
             hardware_map, feed_map, switcher_view, asset_registry,
@@ -880,6 +907,42 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
         ++editor_frame_calls;
         // Shown again next frame only while the panel keeps asking.
         asset_viewer_request = editor_frame.asset_viewer;
+        editor_program_full_media =
+            editor_frame.program_media == editor::MediaRendition::Full;
+        editor_stage_full_media =
+            editor_frame.stage_media == editor::MediaRendition::Full;
+        plateset_viewed = editor_frame.plateset_viewed;
+        if (editor_frame.plateset_analyse.has_value() &&
+            plateset_motion != nullptr) {
+            const assets::Asset *const asset =
+                director_asset_registry.asset(*editor_frame.plateset_analyse);
+            const auto *const set =
+                asset != nullptr ? std::get_if<assets::PlatesetAsset>(asset)
+                                 : nullptr;
+            if (set != nullptr) {
+                server::PlateSources plates{};
+                for (std::size_t slot = 0U; slot < plates.size(); ++slot) {
+                    const assets::Asset *const plate =
+                        director_asset_registry.asset(set->slots[slot].media);
+                    const auto *const media =
+                        plate != nullptr
+                            ? std::get_if<assets::MediaAsset>(plate)
+                            : nullptr;
+                    if (media == nullptr || !media->frame_rate.has_value()) {
+                        continue;
+                    }
+                    plates[slot] = server::PlateSource{
+                        media->source, media->fingerprint,
+                        media->frame_count.value_or(0U), *media->frame_rate};
+                }
+                plateset_motion->analyse(
+                    set->id, std::move(plates),
+                    editor_frame.plateset_pathway ==
+                            editor::PlatesetAnalysisPathway::Moments
+                        ? server::PlatesetMotionService::Pathway::Moments
+                        : server::PlatesetMotionService::Pathway::Sync);
+            }
+        }
         if (const PhaseExit exit =
                 apply_editor_services(inputs, editor_frame)) {
             return exit;
@@ -1849,6 +1912,10 @@ PhaseExit DirectorShowLoop::observe_timeline_filmstrips(
 
 void DirectorShowLoop::project_asset_viewer(EditorViewInputs &inputs) {
     editor::AssetViewerInput &viewer = inputs.asset_viewer;
+    if (plateset_viewed.has_value() && plateset_motion != nullptr) {
+        viewer.plateset = *plateset_viewed;
+        viewer.plateset_analysis = plateset_motion->view(*plateset_viewed);
+    }
     if (!asset_viewer_request.has_value() ||
         !asset_viewer_frame.has_value()) {
         return;

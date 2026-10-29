@@ -61,6 +61,10 @@ inline constexpr core::u32 maximum_thumbnail_pending_requests = 256U;
 inline constexpr core::u32 maximum_thumbnail_snapshots = 4'096U;
 inline constexpr core::u64 maximum_thumbnail_payload_bytes =
     16U * 1'024U * 1'024U;
+// A thumbnail tries at most this many frames, in the profile's probe order,
+// before reporting NoValidFrame. Without it a clip nothing can decode is read
+// end to end: minutes of one worker for a long UHD plate.
+inline constexpr core::u32 maximum_thumbnail_probe_frames = 24U;
 
 struct ThumbnailServiceStats final {
     core::u64 queued{};

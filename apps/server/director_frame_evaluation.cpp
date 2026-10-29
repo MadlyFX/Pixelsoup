@@ -73,6 +73,10 @@ void DirectorShowLoop::begin_frame(DirectorTick &tick) {
         preview_transport.has_value()
             ? preview_transport->state() == show::TransportState::Playing
             : transport.state() == show::TransportState::Playing;
+    if (director_proxy_generator != nullptr) {
+        director_proxy_generator->set_playing(
+            stage_playing || input.state == show::TransportState::Playing);
+    }
 
     // The Director previews the whole canvas of the replicated scene, so it
     // shows what the wall shows between its nodes. It evaluates from its
@@ -468,29 +472,74 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             blender_links.sample(render::linked_stage_sample(stage_scene_frame,input.control_frame.value()));
         authored_scene_digest = scene::digest(scene_frame);
 
+        // Each editor view decodes working proxies unless it asked for the
+        // source; the authored registry is exactly what a render node plays.
+        const assets::AssetRegistry &program_media_registry =
+            editor_program_full_media ? asset_registry
+                                      : director_playback_asset_registry;
+        const assets::AssetRegistry &stage_media_registry =
+            editor_stage_full_media ? asset_registry
+                                    : director_playback_asset_registry;
         std::vector<ProxyPlacementObservation> observations;
         bool proxies_ready = resolve_scene_proxies(
-            director_proxy_playback, scene_frame,
-            director_playback_asset_registry, director_asset_availability,
-            observations);
+            director_proxy_playback, scene_frame, program_media_registry,
+            director_asset_availability, observations);
+        const std::size_t program_observations_end = observations.size();
         proxies_ready = resolve_scene_proxies(
                             director_proxy_playback, stage_scene_frame,
-                            director_playback_asset_registry,
+                            stage_media_registry,
                             director_asset_availability, observations) &&
                         proxies_ready;
+        const std::size_t stage_observations_end = observations.size();
+        if (director_proxy_generator != nullptr) {
+            // The frames Program and Stage ask for decide which proxy
+            // segments are made next.
+            std::array<ProxyGenerationWorker::Need, 32U> needs{};
+            std::size_t count = 0U;
+            for (std::size_t index = 0U;
+                 index < stage_observations_end && count < needs.size();
+                 ++index) {
+                const ProxyPlacementObservation &placed = observations[index];
+                if (placed.asset != doc::NodeId{}) {
+                    needs[count++] = ProxyGenerationWorker::Need{
+                        placed.asset, placed.source_frame_index};
+                }
+            }
+            director_proxy_generator->set_needs(
+                std::span<const ProxyGenerationWorker::Need>{needs.data(),
+                                                             count});
+        }
         if (switcher_progress.active || loop_blend.has_value()) {
             proxies_ready =
                 resolve_scene_proxies(
                     director_proxy_playback, transition_from_frame,
-                    director_playback_asset_registry,
+                    program_media_registry,
                     director_asset_availability, observations) &&
                 proxies_ready;
             proxies_ready =
                 resolve_scene_proxies(
                     director_proxy_playback, transition_to_frame,
-                    director_playback_asset_registry,
+                    program_media_registry,
                     director_asset_availability, observations) &&
                 proxies_ready;
+        }
+        {
+            // What each view drew, for its media menu. A transition's two
+            // scenes are Program's.
+            const std::span<const ProxyPlacementObservation> all{observations};
+            std::vector<ProxyPlacementObservation> program_drawn(
+                all.begin(),
+                all.begin() +
+                    static_cast<std::ptrdiff_t>(program_observations_end));
+            program_drawn.insert(
+                program_drawn.end(),
+                all.begin() +
+                    static_cast<std::ptrdiff_t>(stage_observations_end),
+                all.end());
+            program_view_proxies = summarize_view_proxies(program_drawn);
+            stage_view_proxies = summarize_view_proxies(all.subspan(
+                program_observations_end,
+                stage_observations_end - program_observations_end));
         }
         // The Stage-view scene - an edit preview or a solo - is the Stage
         // scene evaluated once more, so it is finished the same way: the
@@ -504,7 +553,7 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
             std::vector<ProxyPlacementObservation> repeated;
             static_cast<void>(resolve_scene_proxies(
                 director_proxy_playback, *tick.stage_view_frame,
-                director_playback_asset_registry, director_asset_availability,
+                stage_media_registry, director_asset_availability,
                 repeated));
         }
 #if defined(MEDIASERVER_HAS_GUI)
@@ -549,7 +598,9 @@ PhaseExit DirectorShowLoop::evaluate_scene(DirectorTick &tick) {
                 std::vector<ProxyPlacementObservation> viewed;
                 static_cast<void>(resolve_scene_proxies(
                     director_proxy_playback, viewer,
-                    director_playback_asset_registry,
+                    asset_viewer_request->full_resolution
+                        ? asset_registry
+                        : director_playback_asset_registry,
                     required ? director_asset_availability : unchecked,
                     viewed));
                 if (!viewed.empty()) {

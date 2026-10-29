@@ -28,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Optional, real-file Release benchmark. It records the production
@@ -49,6 +50,15 @@ struct Options final {
     double minimum_ready_ratio{-1.0};
     double maximum_render_ms{-1.0};
     std::optional<std::size_t> second_clip_offset;
+    // Image sequences have no probed length; this supplies it.
+    std::size_t sequence_frames{};
+    // Frames advanced per tick: 1 is playback, larger values model a
+    // scrub drag. Reverse walks backwards from the last frame.
+    std::size_t stride{1U};
+    bool reverse{};
+    // When non-zero, measure time-to-exact-frame for this many seeks
+    // instead of cadence playback.
+    std::size_t seek_targets{};
     bool hold_frame{};
     bool radial_plates{};
     bool buffered_output{};
@@ -81,7 +91,8 @@ struct Options final {
             "[--hold-frame] [--radial-plates] [--buffered-output] [--d3d12] "
             "[--half-resolution] "
             "[--second-clip-offset N] [--min-ready-ratio 0..1] "
-            "[--max-render-ms MS]"};
+            "[--max-render-ms MS] [--sequence-frames N] [--stride N] "
+            "[--reverse] [--seek-targets N]"};
     }
     Options options{};
     options.paths.emplace_back(argv[1]);
@@ -107,6 +118,10 @@ struct Options final {
             options.half_resolution = true;
             continue;
         }
+        if (argument == "--reverse") {
+            options.reverse = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             throw std::runtime_error{"option is missing its value"};
         }
@@ -121,6 +136,12 @@ struct Options final {
             options.cadence_fps = parse_positive(value);
         } else if (argument == "--second-clip-offset") {
             options.second_clip_offset = parse_count(value);
+        } else if (argument == "--sequence-frames") {
+            options.sequence_frames = parse_count(value);
+        } else if (argument == "--stride") {
+            options.stride = parse_count(value);
+        } else if (argument == "--seek-targets") {
+            options.seek_targets = parse_count(value);
         } else if (argument == "--min-ready-ratio") {
             options.minimum_ready_ratio = std::stod(std::string{value});
             if (!std::isfinite(options.minimum_ready_ratio)
@@ -281,6 +302,120 @@ void record_cache_result(
     }
 }
 
+// Seek latency: every clip jumps to the same target, and the editor's two
+// renders repeat at about 500 Hz until both draw that exact frame. Targets
+// step through the file by the golden ratio, so consecutive seeks land far
+// apart and in both directions, as a playhead click or fast drag does.
+[[nodiscard]] int run_seeks(
+    const Options& options, rhi::Device& device,
+    render::SceneRenderer& program, render::SceneRenderer& stage,
+    scene::Scene& frame, render::MediaCache& cache,
+    const std::map<std::string, render::MediaProbe>& source_metadata) {
+    std::size_t shortest = std::numeric_limits<std::size_t>::max();
+    for (const auto& [path, metadata] : source_metadata) {
+        shortest = std::min(
+            shortest, static_cast<std::size_t>(metadata.frame_count));
+    }
+    const auto render_until_exact = [&](core::u32 target) {
+        for (auto& clip : frame.media) {
+            clip.frame_index = target;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        std::size_t renders = 0U;
+        while (true) {
+            auto acquired = device.acquire_commands();
+            if (!acquired) {
+                throw std::runtime_error{"command-list acquisition failed"};
+            }
+            auto commands = std::move(acquired).value();
+            cache.begin_frame();
+            const bool program_ok = program.render(
+                commands, frame, scene::whole(frame.canvas),
+                render::SceneRenderOptions{}, cache);
+            const bool stage_ok = stage.render(
+                commands, frame, scene::whole(frame.canvas),
+                render::SceneRenderOptions{}, cache);
+            const render::MediaCacheStats stats = cache.stats();
+            if (!program_ok || !stage_ok) {
+                throw std::runtime_error{"SceneRenderer record failed"};
+            }
+            auto submitted = device.submit(std::move(commands));
+            if (!submitted || !std::move(submitted).value().wait()) {
+                throw std::runtime_error{"GPU submission failed"};
+            }
+            cache.end_frame();
+            ++renders;
+            const std::size_t accounted =
+                static_cast<std::size_t>(stage.stats().media) +
+                static_cast<std::size_t>(stage.stats().culled_media);
+            const double elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            if (stats.held_frames == 0U && stats.pending_requests == 0U &&
+                accounted == frame.media.size()) {
+                return std::pair{elapsed, renders};
+            }
+            if (elapsed > 10'000.0) {
+                return std::pair{-1.0, renders};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+    };
+    // Opens every decoder before anything is timed.
+    static_cast<void>(render_until_exact(0U));
+    std::vector<double> latencies;
+    std::size_t timeouts = 0U;
+    std::size_t renders_total = 0U;
+    double position = 0.0;
+    for (std::size_t seek = 0U; seek < options.seek_targets; ++seek) {
+        position = std::fmod(position + 0.6180339887498949, 1.0);
+        const auto target = static_cast<core::u32>(
+            position * static_cast<double>(shortest - 1U));
+        const auto [latency, renders] = render_until_exact(target);
+        renders_total += renders;
+        if (latency < 0.0) {
+            ++timeouts;
+        } else {
+            latencies.push_back(latency);
+        }
+    }
+    std::sort(latencies.begin(), latencies.end());
+    const auto percentile = [&](double fraction) {
+        if (latencies.empty()) {
+            return 0.0;
+        }
+        const auto index = static_cast<std::size_t>(
+            fraction * static_cast<double>(latencies.size() - 1U) + 0.5);
+        return latencies[index];
+    };
+    double sum = 0.0;
+    for (const double latency : latencies) {
+        sum += latency;
+    }
+    const render::MediaProbe& first = source_metadata.at(options.paths.front());
+    std::cout << std::fixed << std::setprecision(1)
+              << "sources=" << options.paths.size()
+              << " backend=" << (options.d3d12 ? "D3D12" : "SDL")
+              << " source_size=" << first.width << 'x' << first.height
+              << " source_frames=" << first.frame_count
+              << " codec=" << first.codec
+              << " pixel_format=" << first.pixel_format
+              << " simultaneous_clips=" << frame.media.size() << '\n'
+              << "seeks=" << options.seek_targets
+              << " timeouts=" << timeouts
+              << " seek_ms_mean="
+              << (latencies.empty()
+                      ? 0.0
+                      : sum / static_cast<double>(latencies.size()))
+              << " seek_ms_p50=" << percentile(0.5)
+              << " seek_ms_p95=" << percentile(0.95)
+              << " seek_ms_max=" << percentile(1.0)
+              << " renders_per_seek="
+              << static_cast<double>(renders_total) /
+                     static_cast<double>(options.seek_targets)
+              << '\n';
+    return timeouts == 0U ? 0 : 1;
+}
+
 [[nodiscard]] int run(const Options& options) {
 #if !defined(NDEBUG)
     if (options.minimum_ready_ratio >= 0.0
@@ -293,7 +428,11 @@ void record_cache_result(
 
     std::map<std::string, render::MediaProbe> source_metadata;
     for (const auto& path : options.paths) {
-        const render::MediaProbe metadata = render::probe_media(path);
+        render::MediaProbe metadata = render::probe_media(path);
+        if (options.sequence_frames > 0U && metadata.frame_count < 2U) {
+            metadata.frame_count =
+                static_cast<core::u32>(options.sequence_frames);
+        }
         if (metadata.frame_count < 2U) {
             throw std::runtime_error{
                 "video probe found fewer than two frames: " + path};
@@ -333,6 +472,11 @@ void record_cache_result(
             ? render::MediaCacheConfig::buffered_output()
             : render::MediaCacheConfig{}};
 
+    if (options.seek_targets > 0U) {
+        return run_seeks(options, device, program, stage, frame,
+                         shared_media_cache, source_metadata);
+    }
+
     const render::MediaDecodeStats decode_before = render::media_decode_stats();
     Measurements measured{};
     const std::size_t total = options.warmup + options.frames;
@@ -347,9 +491,12 @@ void record_cache_result(
                 : *options.second_clip_offset;
             const auto source_frames = static_cast<std::size_t>(
                 source_metadata.at(frame.media[clip].source).frame_count);
+            const std::size_t walked =
+                (options.hold_frame ? offset
+                                    : ordinal * options.stride + offset) %
+                source_frames;
             frame.media[clip].frame_index = static_cast<core::u32>(
-                (options.hold_frame ? offset : ordinal + offset)
-                % source_frames);
+                options.reverse ? source_frames - 1U - walked : walked);
         }
         auto acquired = device.acquire_commands();
         if (!acquired) {

@@ -285,6 +285,8 @@ enum class Icon : core::u8 {
     // Half, which is the share of the pixels Half keeps.
     FullResolution,
     HalfResolution,
+    // A diamond on a short staff: a moment kept from a plate's footage.
+    Moments,
     // A magnifier: a search field's mark.
     Search,
     // The show bar and the actions that used to be words. Drawn as soft

@@ -3022,6 +3022,8 @@ void ViewportPanel::draw_toolbar(gui::UiContext& ctx, const gui::Rect& toolbar,
     static_cast<void>(gui::cut_right(bar, 8.0F));
     draw_resolution_control(ctx,
                             gui::cut_right(bar, resolution_control_width(ctx)));
+    static_cast<void>(gui::cut_right(bar, 4.0F));
+    draw_media_control(ctx, gui::cut_right(bar, media_control_width(ctx)));
     static_cast<void>(gui::cut_right(bar, toolbar_group_gap));
 
     static constexpr std::array<std::string_view, move_snap_choices.size()>
@@ -3246,6 +3248,66 @@ void ViewportPanel::draw_resolution_control(gui::UiContext& ctx,
     }
 }
 
+namespace {
+
+constexpr std::array<std::string_view, 2U> media_names{"Proxy", "Full res"};
+
+} // namespace
+
+float ViewportPanel::media_control_width(
+    const gui::UiContext& ctx) const noexcept {
+    return toolbar_menu_width(
+        ctx, media_names[static_cast<std::size_t>(drawn_media())]);
+}
+
+void ViewportPanel::draw_media_control(gui::UiContext& ctx,
+                                       const gui::Rect& bounds) {
+    const MediaRendition drawn = drawn_media();
+    const gui::UiId menu = mix(id_, 25U);
+    if (toolbar_menu(ctx, mix(id_, 5U), bounds,
+                     drawn == MediaRendition::Full
+                         ? gui::Icon::FullResolution
+                         : gui::Icon::HalfResolution,
+                     media_names[static_cast<std::size_t>(drawn)],
+                     ctx.menu_open(menu))) {
+        ctx.open_context_menu(menu, bounds.x, bounds.bottom());
+    }
+    std::string tip;
+    if (precise_work_ && media_ == MediaRendition::Proxy) {
+        tip = "Media: full resolution while a mask is selected or the "
+              "eyedropper is armed, then back to proxies.";
+    } else if (drawn == MediaRendition::Full) {
+        tip = media_counts_.proxied == 0U
+                  ? "Media: every clip plays its source. Proxies keep being "
+                    "made for when you switch back."
+                  : "Media: clips play their source, except " +
+                        std::to_string(media_counts_.proxied) +
+                        " whose asset asks for a proxy everywhere.";
+    } else {
+        tip = "Media: UHD video plays a 720p proxy here; outputs always "
+              "play the source.";
+        const auto clips = [](core::u32 count) {
+            return std::to_string(count) + (count == 1U ? " clip" : " clips");
+        };
+        if (media_counts_.proxied > 0U) {
+            tip += " " + clips(media_counts_.proxied) + " on proxies.";
+        }
+        if (media_counts_.waiting > 0U) {
+            tip += " " + clips(media_counts_.waiting) +
+                   " on the source until " +
+                   (media_counts_.waiting == 1U ? "its proxy is"
+                                                : "their proxies are") +
+                   " ready.";
+        }
+    }
+    ctx.tooltip(bounds, tip);
+    std::array<bool, 2U> current{};
+    current[static_cast<std::size_t>(media_)] = true;
+    if (const auto chosen = ctx.context_menu(menu, media_names, current)) {
+        media_ = static_cast<MediaRendition>(*chosen);
+    }
+}
+
 void ViewportPanel::copy_tools_from(const ViewportPanel& other) noexcept {
     tool_ = other.tool_;
     orientation_ = other.orientation_;
@@ -3260,6 +3322,7 @@ void ViewportPanel::copy_tools_from(const ViewportPanel& other) noexcept {
     show_gizmo_ = other.show_gizmo_;
     show_bounds_ = other.show_bounds_;
     resolution_ = other.resolution_;
+    media_ = other.media_;
 }
 
 void ViewportPanel::draw_stage_shading_menu(gui::UiContext& ctx,

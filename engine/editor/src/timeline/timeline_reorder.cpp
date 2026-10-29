@@ -69,6 +69,28 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
   auto &lane_drop_targets = p.lane_drop_targets;
   lane_drop_targets.reserve(lanes.size());
   for (std::size_t index = 0U; index < rows.size(); ++index) {
+    // A take row stands for its run of tracks, open or closed: a reorder
+    // dropped on it lands in front of the run or behind it, whole. Over an
+    // open row's own tracks, theirs - pushed after it - win.
+    if (rows[index].kind == Row::Kind::PlatesetHeader) {
+      const PlatesetGroup &group = p.built.platesets[rows[index].plateset];
+      const float top = std::max(
+          rows_bounds.y + row_top(rows, index) - row_scroll_, rows_bounds.y);
+      const float bottom =
+          std::min(rows_bounds.y + row_top(rows, rows[index].end) - row_scroll_,
+                   rows_bounds.bottom());
+      if (bottom > top && !group.lanes.empty()) {
+        LaneDropTarget target{
+            group.lanes.front(),
+            gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
+            rows[index].label, rows[index].locked};
+        target.block = true;
+        target.front = group.lanes.front();
+        target.back = group.lanes.back();
+        lane_drop_targets.push_back(target);
+      }
+      continue;
+    }
     if (rows[index].kind != Row::Kind::LaneHeader) {
       continue;
     }
@@ -85,7 +107,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     if (bottom > top) {
       lane_drop_targets.push_back(LaneDropTarget{
           lane, gui::Rect{rows_bounds.x, top, rows_bounds.width, bottom - top},
-          rows[index].label, rows[index].locked});
+          rows[index].label, rows[index].locked, false, lane, lane});
     }
   }
 
@@ -112,7 +134,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
   // will become a child of that track. Keeping these feedback vocabularies
   // separate prevents a reorder from looking like nesting.
   scratch.clip_move_feedback =
-      clip_drag_active && clip_.drag == ClipDrag::Move;
+      clip_drag_active && clip_.drag == ClipDrag::Move && !clip_.take;
   p.clip_drop_hovered = nullptr;
   auto &clip_drop_hovered = p.clip_drop_hovered;
   if (scratch.clip_move_feedback && clip_.drop_lane.has_value() &&
@@ -120,7 +142,8 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
     const auto target = std::find_if(
         lane_drop_targets.begin(), lane_drop_targets.end(),
         [&](const LaneDropTarget &candidate) {
-          return !candidate.locked && candidate.lane == *clip_.drop_lane;
+          return !candidate.locked && !candidate.block &&
+                 candidate.lane == *clip_.drop_lane;
         });
     if (target != lane_drop_targets.end()) {
       clip_drop_hovered = &*target;
@@ -158,7 +181,7 @@ void TimelinePanel::resolve_reorder_targets(Pass &p) {
               const auto target = std::find_if(
                   lane_drop_targets.begin(), lane_drop_targets.end(),
                   [&](const LaneDropTarget &candidate) {
-                    return !candidate.locked &&
+                    return !candidate.locked && !candidate.block &&
                            candidate.lane == *assignment;
                   });
               if (target != lane_drop_targets.end()) {
@@ -226,6 +249,17 @@ void TimelinePanel::resolve_track_drop(Pass &p) {
       }
     }
     const auto dragged = std::find(stack.begin(), stack.end(), reorder_.lane_node);
+    // The run the drag carries, back to front as the stack holds it.
+    std::vector<doc::NodeId> block;
+    for (const doc::NodeId lane : stack) {
+      if (std::find(reorder_.lane_block.begin(), reorder_.lane_block.end(),
+                    lane) != reorder_.lane_block.end()) {
+        block.push_back(lane);
+      }
+    }
+    if (block.empty() && dragged != stack.end()) {
+      block.push_back(reorder_.lane_node);
+    }
     if (dragged == stack.end()) {
       // The track went away under the drag - a peer deleted it, or the scene
       // changed. Nothing to reorder and nothing to report.
@@ -242,19 +276,45 @@ void TimelinePanel::resolve_track_drop(Pass &p) {
       }
 
       if (lane_drop_hovered != nullptr) {
-        const auto destination =
-            std::find(stack.begin(), stack.end(), lane_drop_hovered->lane);
-        if (destination != stack.end() && destination != dragged) {
-          const bool toward_front = destination > dragged;
-          scratch.lane_drop_landing_y =
-              toward_front ? lane_drop_hovered->bounds.y
-                            : lane_drop_hovered->bounds.y +
-                                  lane_drop_hovered->bounds.height;
-          if (!ctx.pointer_down()) {
-            frame.lane_edits.push_back(TimelineLaneEdit{
-                TimelineLaneAction::MoveTo, reorder_.lane_node, {},
-                lane_drop_hovered->lane});
-            lane_drop_committed = true;
+        const auto carried = [&](doc::NodeId lane) {
+          return std::find(block.begin(), block.end(), lane) != block.end();
+        };
+        const auto front_most =
+            std::find(stack.begin(), stack.end(), block.back());
+        const auto back_most =
+            std::find(stack.begin(), stack.end(), block.front());
+        const auto target_front =
+            std::find(stack.begin(), stack.end(), lane_drop_hovered->front);
+        const auto target_back =
+            std::find(stack.begin(), stack.end(), lane_drop_hovered->back);
+        if (target_front != stack.end() && target_back != stack.end() &&
+            !carried(lane_drop_hovered->front) &&
+            !carried(lane_drop_hovered->back)) {
+          const bool toward_front = target_back > front_most;
+          const bool toward_back = target_front < back_most;
+          if (toward_front || toward_back) {
+            scratch.lane_drop_landing_y =
+                toward_front ? lane_drop_hovered->bounds.y
+                             : lane_drop_hovered->bounds.y +
+                                   lane_drop_hovered->bounds.height;
+            if (!ctx.pointer_down()) {
+              // Each track lands beside the one before it, so the run
+              // keeps its order: in front of the target from the back of
+              // the run, behind it from the front.
+              doc::NodeId beside = toward_front ? lane_drop_hovered->front
+                                                : lane_drop_hovered->back;
+              const auto move = [&](doc::NodeId lane) {
+                frame.lane_edits.push_back(TimelineLaneEdit{
+                    TimelineLaneAction::MoveTo, lane, {}, beside});
+                beside = lane;
+              };
+              if (toward_front) {
+                std::for_each(block.begin(), block.end(), move);
+              } else {
+                std::for_each(block.rbegin(), block.rend(), move);
+              }
+              lane_drop_committed = true;
+            }
           }
         }
       }
@@ -268,6 +328,9 @@ void TimelinePanel::resolve_track_drop(Pass &p) {
       if (reorder_.layer_nodes.size() > 1U) {
         scratch.lane_drag_label = std::to_string(reorder_.layer_nodes.size()) + " layers";
       }
+      if (!reorder_.lane_block_label.empty()) {
+        scratch.lane_drag_label = reorder_.lane_block_label;
+      }
     }
     if (!ctx.pointer_down()) {
       if (reorder_.lane_moved && !lane_drop_committed) {
@@ -275,6 +338,8 @@ void TimelinePanel::resolve_track_drop(Pass &p) {
             reorder_.layer_nodes, ctx.pointer_x(), ctx.pointer_y()};
       }
       reorder_.lane_node = doc::NodeId{};
+      reorder_.lane_block.clear();
+      reorder_.lane_block_label.clear();
       reorder_.layer_nodes.clear();
       reorder_.lane_start_x = 0.0F;
       reorder_.lane_start_y = 0.0F;
@@ -313,7 +378,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
   // strongly.
   const auto outline_targets = [&](const LaneDropTarget *hovered) {
     for (const LaneDropTarget &target : lane_drop_targets) {
-      if (target.locked) {
+      if (target.locked || target.block) {
         continue;
       }
       const bool under = &target == hovered;
@@ -380,7 +445,7 @@ void TimelinePanel::draw_drag_feedback(Pass &p) {
     const auto band = std::find_if(
         lane_drop_targets.begin(), lane_drop_targets.end(),
         [&](const LaneDropTarget &target) {
-          return target.lane == track_.destination;
+          return !target.block && target.lane == track_.destination;
         });
     if (dragged != stack.end() && destination != stack.end() &&
         band != lane_drop_targets.end()) {

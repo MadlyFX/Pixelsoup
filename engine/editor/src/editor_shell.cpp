@@ -2411,6 +2411,11 @@ struct EditorShell::Impl final {
   core::u64 clip_edit_gesture{};
   core::u64 lane_edit_gesture{};
   core::u64 next_edit_gesture{1U};
+  // A plateset placement waiting on the operator's answer about the rig.
+  std::optional<PlatesetPlaceIntent> pending_plateset_place;
+  // The Library is carrying assets right now (as of its last draw), so the
+  // plateset page can light its slots as drop targets.
+  bool library_dragging{};
   std::vector<PendingMediaProbe> pending_media_probes;
   bool manipulating{};
   bool semantic_boundary{};
@@ -2455,8 +2460,10 @@ struct EditorShell::Impl final {
       if (decoded && docks.restore(decoded.value().docks)) {
         for (StageViewport &view : stage_views) {
           view.panel.set_resolution(decoded.value().stage_resolution);
+          view.panel.set_media(decoded.value().stage_media);
         }
         program_panel.set_resolution(decoded.value().program_resolution);
+        program_panel.set_media(decoded.value().program_media);
         saved_workspace_layout.assign(workspace_layout.begin(),
                                       workspace_layout.end());
       }
@@ -2662,6 +2669,19 @@ struct EditorShell::Impl final {
     semantic_boundary = true;
   }
 
+  // Several nodes chosen as one - a plateset take's plates - with `primary`
+  // the one the Inspector shows.
+  void select_set(std::span<const doc::NodeId> nodes, doc::NodeId primary) {
+    scene_settings_selection = SceneSettingsTarget::None;
+    pending_group_members.clear();
+    pending_group_frames = 0U;
+    pending_new_group_parent.reset();
+    scene_selection.replace(nodes, primary);
+    delete_domain = DeleteDomain::Scene;
+    history_context = HistoryContext::Scene;
+    semantic_boundary = true;
+  }
+
   void toggle(doc::NodeId node) {
     scene_settings_selection = SceneSettingsTarget::None;
     pending_group_members.clear();
@@ -2844,6 +2864,14 @@ bool EditorShell::upload_timeline_filmstrip(
 void EditorShell::retain_timeline_filmstrip_textures(
     std::span<const assets::DerivativeKey> keys) noexcept {
   impl_->timeline_filmstrip_textures.retain(keys);
+}
+
+void EditorShell::set_view_media_counts(ViewMediaCounts program,
+                                        ViewMediaCounts stage) noexcept {
+  impl_->program_panel.set_media_counts(program);
+  for (auto &view : impl_->stage_views) {
+    view.panel.set_media_counts(stage);
+  }
 }
 
 bool EditorShell::apply_selection_set_recall(
@@ -3935,9 +3963,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                            stage_previews[index].height},
                          renderer.scene_linear_output());
       StageAssetStatus &status = stage_assets[index];
+      // Only media with nothing to show raises the banner: a clip holding
+      // its last picture while the next frame, or its proxy, decodes is
+      // already on screen.
       status = stage_asset_status(
           renderer.renderer_passes().geometry,
-          renderer.media_cache_stats().pending_requests,
+          renderer.media_cache_stats().blank_requests,
           rendered_stage != nullptr ? display.color_state()
                                     : render::DisplayLutState::Ready);
       if (!stage_targets_ready[index]) {
@@ -4007,7 +4038,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 viewer.renderer->scene_linear_output());
         viewer.model_status = stage_asset_status(
             viewer.renderer->renderer_passes().geometry,
-            viewer.renderer->media_cache_stats().pending_requests,
+            viewer.renderer->media_cache_stats().blank_requests,
             viewer.display->color_state());
         viewer.decoding =
             !viewer.renderer->renderer_passes().geometry.assets.ready;
@@ -5394,7 +5425,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                      std::optional<scene::ClipTiming> timing =
                                          std::nullopt) {
     const assets::Asset *const found = asset_registry.asset(id);
-    if (found == nullptr) {
+    if (found == nullptr ||
+        std::holds_alternative<assets::PlatesetAsset>(*found)) {
       return;
     }
     if (const auto *const media = std::get_if<assets::MediaAsset>(found)) {
@@ -5452,6 +5484,86 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   std::optional<AssetViewerDrop> pending_viewer_drop;
   bool viewer_drawn_now = false;
   std::optional<doc::NodeId> dragging_asset;
+  // The Asset Viewer drew a plateset's rig this frame, so a Library drop
+  // can land on its slots.
+  bool plateset_editor_drawn = false;
+  // The thumbnails its slot tiles show, kept and made like the Library's.
+  std::vector<assets::DerivativeKey> plateset_thumbnail_keys;
+  // Kept plateset moments where the Stage scene plays them: each placed
+  // front plate's moments, through its clip's trim and rate, inside it.
+  std::vector<TimelineMoment> timeline_moments;
+  for (const ElementInfo &plate : elements) {
+    if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
+        plate.plateset_slot != "front" || !plate.timing.placed()) {
+      continue;
+    }
+    const assets::Asset *const asset = asset_registry.asset(plate.plateset);
+    const auto *const set =
+        asset != nullptr ? std::get_if<assets::PlatesetAsset>(asset) : nullptr;
+    if (set == nullptr) {
+      continue;
+    }
+    const scene::MediaFrameRate source = plate.source_frame_rate.value_or(
+        scene::MediaFrameRate{timeline.rate_numerator,
+                              timeline.rate_denominator});
+    if (source.numerator == 0U || timeline.rate_denominator == 0U) {
+      continue;
+    }
+    for (const assets::PlatesetMoment &moment : set->moments) {
+      const core::i64 into = moment.frame - plate.timing.source_in;
+      if (into < 0) {
+        continue;
+      }
+      const core::i64 show =
+          plate.timing.start +
+          into * static_cast<core::i64>(timeline.rate_numerator) *
+              static_cast<core::i64>(source.denominator) /
+              (static_cast<core::i64>(timeline.rate_denominator) *
+               static_cast<core::i64>(source.numerator));
+      if (show < plate.timing.start ||
+          show >= plate.timing.start + plate.timing.duration) {
+        continue;
+      }
+      timeline_moments.push_back(
+          TimelineMoment{show, moment.name, moment.color, plate.node});
+    }
+  }
+  // The Library's names for the platesets placed plates come from, for the
+  // Timeline's take rows.
+  std::vector<TimelinePlateset> timeline_platesets;
+  for (const ElementInfo &plate : elements) {
+    if (plate.kind != ElementKind::Media || plate.plateset == doc::NodeId{} ||
+        std::any_of(timeline_platesets.begin(), timeline_platesets.end(),
+                    [&](const TimelinePlateset &named) {
+                      return named.asset == plate.plateset;
+                    })) {
+      continue;
+    }
+    const assets::Asset *const asset = asset_registry.asset(plate.plateset);
+    if (const auto *const set =
+            asset != nullptr ? std::get_if<assets::PlatesetAsset>(asset)
+                             : nullptr) {
+      timeline_platesets.push_back(
+          TimelinePlateset{plate.plateset, set->display_name});
+    }
+  }
+  // The other plates of `clip`'s take: the same take, start and length.
+  // A plate moved or trimmed on its own has left its take.
+  const auto take_siblings = [&elements](const ElementInfo &clip) {
+    std::vector<const ElementInfo *> plates;
+    if (clip.plateset_take == 0) {
+      return plates;
+    }
+    for (const ElementInfo &other : elements) {
+      if (other.node != clip.node && other.kind == ElementKind::Media &&
+          other.plateset_take == clip.plateset_take &&
+          other.timing.start == clip.timing.start &&
+          other.timing.duration == clip.timing.duration && !other.locked) {
+        plates.push_back(std::addressof(other));
+      }
+    }
+    return plates;
+  };
   std::vector<doc::NodeId> dragging_assets;
   std::optional<LibraryAddAction> dragging_generator;
   std::optional<LibraryGeneratorDrop> pending_generator_drop;
@@ -5468,6 +5580,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   SceneSettingsFrame live_scene_settings;
   std::optional<InspectorPanelRequest> pending_inspector_panel;
   const bool color_sample_active = impl.color_sample_request.has_value();
+  // Sampling a colour or shaping a mask is judged against the real pixels,
+  // so every view shows the source while either is under way.
+  const bool precise_media_work =
+      color_sample_active || impl.mask_selection.mask != doc::NodeId{};
+  for (auto &view : impl.stage_views) {
+    view.panel.set_precise_work(precise_media_work);
+  }
+  impl.program_panel.set_precise_work(precise_media_work);
   const ElementInfo *const mask_target_element =
       find_element(elements, impl.anchor());
   const bool mask_target_supported =
@@ -5624,6 +5744,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       return;
     }
     impl.show_panel(panel_asset_viewer);
+    // A take row opens the set its plates come from, rig and all.
+    if (request.plateset && clip->plateset != doc::NodeId{}) {
+      impl.asset_viewer_panel.open(clip->plateset);
+      return;
+    }
     const assets::Asset *const asset =
         asset_registry.asset_for_source(clip->source, assets::AssetKind::Media);
     const auto *const media =
@@ -6019,8 +6144,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                            output_bar.height},
                  "Masks", ui.theme().accent);
       }
-      const float output_name_width =
-          std::min(190.0F, std::max(output_bar.width - 170.0F, 60.0F));
+      const float media_width = impl.program_panel.media_control_width(ui);
+      const float output_name_width = std::min(
+          190.0F,
+          std::max(output_bar.width - 174.0F - media_width, 60.0F));
       const gui::Rect output_name{output_bar.x + 6.0F, output_bar.y + 3.0F,
                                   output_name_width, output_bar.height - 6.0F};
       // The preview resolution, as on the Stage toolbar: a screen and the
@@ -6033,6 +6160,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       impl.program_panel.draw_resolution_control(
           ui, gui::Rect{resolution_x, output_bar.y + 3.0F, resolution_width,
                         20.0F});
+      if (resolution_x - media_width - 4.0F >= output_name.right() + 4.0F) {
+        impl.program_panel.draw_media_control(
+            ui, gui::Rect{resolution_x - media_width - 4.0F,
+                          output_bar.y + 3.0F, media_width, 20.0F});
+      }
       std::array<char, 64U> output_identity{};
       if (program_output != nullptr) {
         static_cast<void>(std::snprintf(
@@ -6844,8 +6976,39 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       viewer_input.lanes = timeline_lanes;
       viewer_input.pixels_per_unit = impl.window.ui_scale();
       viewer_input.model = viewed_model != nullptr ? &model_input : nullptr;
+      viewer_input.thumbnails = thumbnails;
+      viewer_input.dragging_assets = impl.library_dragging;
+      const doc::NodeId viewed_set = impl.asset_viewer_panel.asset();
+      if (asset_viewer.plateset == viewed_set &&
+          viewed_set != doc::NodeId{}) {
+        viewer_input.plateset_analysis = &asset_viewer.plateset_analysis;
+      }
       const AssetViewerFrame viewed =
           impl.asset_viewer_panel.draw(ui, bounds, viewer_input);
+      if (viewed.plateset.has_value()) {
+        plateset_editor_drawn = true;
+        result.plateset_viewed = viewed_set;
+        if (viewed.plateset->analyse.has_value()) {
+          result.plateset_analyse = viewed_set;
+          result.plateset_pathway = *viewed.plateset->analyse;
+        }
+        plateset_thumbnail_keys = viewed.plateset->thumbnails;
+        const core::u64 gesture = impl.next_edit_gesture++;
+        for (const assets::LibraryEdit &edit : viewed.plateset->edits) {
+          result.asset_library_edits.push_back(
+              AssetLibraryEditIntent{edit, gesture});
+        }
+        for (const LibraryProxyPolicyIntent &proxy :
+             viewed.plateset->proxy_edits) {
+          result.asset_proxy_edits.push_back(AssetProxyEditIntent{
+              proxy.asset, proxy.requested_profile, proxy.policy, gesture});
+        }
+        if (!viewed.plateset->edits.empty() ||
+            !viewed.plateset->proxy_edits.empty()) {
+          impl.history_context = HistoryContext::Scene;
+          impl.semantic_boundary = true;
+        }
+      }
       result.asset_viewer = viewed.request;
       impl.viewer.model_request = viewed.model_view;
       if (viewed.choose_hdri) {
@@ -6955,6 +7118,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       }
       dragging_asset = library.dragging_asset;
       dragging_assets = library.dragging_assets;
+      impl.library_dragging = library.dragging_asset.has_value();
       if (library.asset_drop.has_value()) {
         pending_asset_drop = library.asset_drop;
       }
@@ -7395,6 +7559,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               .key_scale_preview = key_scale_preview,
               .filmstrips = filmstrips,
               .markers = timeline_markers,
+              .moments = timeline_moments,
+              .platesets = timeline_platesets,
           });
       result.filmstrip_requests = timeline_frame.filmstrip_requests;
       route_marker_edits(timeline_frame.marker_edits);
@@ -7478,7 +7644,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           impl.stage_surface_selection.reset();
           switch (request.action) {
           case SelectionAction::Replace:
-            impl.select_only(request.node);
+            if (request.members.empty()) {
+              impl.select_only(request.node);
+            } else {
+              impl.select_set(request.members, request.node);
+            }
             break;
           case SelectionAction::Toggle:
             impl.toggle(request.node);
@@ -7533,6 +7703,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const TimelineClipEdit &edit : timeline_frame.clip_edits) {
           result.clip_timings.push_back(ClipTimingEdit{
               edit.clip, edit.timing, impl.clip_edit_gesture, edit.lane});
+          // The other plates of a take move, trim and fade with this one:
+          // the same change to start, length and source in, the same ramps.
+          const ElementInfo *const edited = find_element(elements, edit.clip);
+          if (edited == nullptr) {
+            continue;
+          }
+          for (const ElementInfo *const plate : take_siblings(*edited)) {
+            if (std::any_of(timeline_frame.clip_edits.begin(),
+                            timeline_frame.clip_edits.end(),
+                            [plate](const TimelineClipEdit &other) {
+                              return other.clip == plate->node;
+                            })) {
+              continue;
+            }
+            scene::ClipTiming timing = plate->timing;
+            timing.start += edit.timing.start - edited->timing.start;
+            timing.duration = edit.timing.duration;
+            timing.source_in = std::max<core::i64>(
+                0, timing.source_in + edit.timing.source_in -
+                       edited->timing.source_in);
+            timing.fade_in = edit.timing.fade_in;
+            timing.fade_out = edit.timing.fade_out;
+            result.clip_timings.push_back(ClipTimingEdit{
+                plate->node, timing, impl.clip_edit_gesture, std::nullopt});
+          }
         }
       }
       // A clip or track bar dragged to a new time and a new place in the
@@ -7553,6 +7748,19 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const TimelineClipSplit &split : timeline_frame.clip_splits) {
           result.clip_splits.push_back(
               ClipSplitIntent{split.clip, split.frame, gesture});
+          // A razor through one plate cuts its whole take.
+          if (const ElementInfo *const cut = find_element(elements, split.clip)) {
+            for (const ElementInfo *const plate : take_siblings(*cut)) {
+              if (std::none_of(timeline_frame.clip_splits.begin(),
+                               timeline_frame.clip_splits.end(),
+                               [plate](const TimelineClipSplit &other) {
+                                 return other.clip == plate->node;
+                               })) {
+                result.clip_splits.push_back(
+                    ClipSplitIntent{plate->node, split.frame, gesture});
+              }
+            }
+          }
         }
       }
       for (const TimelineRename &rename : timeline_frame.renames) {
@@ -7593,7 +7801,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const TimelineLaneEdit &edit : timeline_frame.lane_edits) {
           result.lane_edits.push_back(TimelineLaneEditIntent{
               edit.action, authored_stage.id, edit.lane, edit.name,
-              impl.lane_edit_gesture, edit.destination});
+              impl.lane_edit_gesture, edit.destination, edit.frame});
         }
         impl.history_context = HistoryContext::Scene;
       }
@@ -7621,6 +7829,18 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           result.timeline_edits.push_back(TimelineEditIntent{
               authored_stage.id, request, show_rate, timeline.show_frame,
               transaction});
+          // A slip of one plate slips its take.
+          if (const auto *const slip = std::get_if<TimelineSlipRequest>(&request)) {
+            if (const ElementInfo *const slipped =
+                    find_element(elements, slip->clip)) {
+              for (const ElementInfo *const plate : take_siblings(*slipped)) {
+                result.timeline_edits.push_back(TimelineEditIntent{
+                    authored_stage.id,
+                    TimelineSlipRequest{plate->node, slip->delta}, show_rate,
+                    timeline.show_frame, transaction});
+              }
+            }
+          }
         }
         impl.history_context = HistoryContext::Scene;
       }
@@ -8015,7 +8235,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     const bool snap = impl.stage().panel.snapping() != ui.ctrl_held();
     for (std::size_t index = 0U; index < ids.size(); ++index) {
       const assets::Asset *const asset = asset_registry.asset(ids[index]);
-      if (asset == nullptr) {
+      if (asset == nullptr ||
+          std::holds_alternative<assets::PlatesetAsset>(*asset)) {
         continue;
       }
       const float x = dropped.x + step * static_cast<float>(index);
@@ -8521,6 +8742,164 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   }
 
+  // A plateset let go on the Timeline or Stage is placed: on a placed
+  // plate it swaps that take; anywhere else on the Timeline it starts where
+  // it lands, and on Stage at the playhead. When the scene's rig already
+  // plays something on the sockets it needs, the operator is asked first.
+  if (pending_asset_drop.has_value() && !switcher.rehearsal_locked) {
+    const auto &drop = *pending_asset_drop;
+    const assets::Asset *const dropped = asset_registry.asset(drop.asset);
+    const auto *const plateset =
+        dropped != nullptr ? std::get_if<assets::PlatesetAsset>(dropped)
+                           : nullptr;
+    const bool on_timeline =
+        timeline_panel_drawn &&
+        timeline_panel_bounds.contains(drop.screen_x, drop.screen_y);
+    const bool on_rig = plateset_editor_drawn &&
+                        impl.asset_viewer_panel.plateset_editor().rig_contains(
+                            drop.screen_x, drop.screen_y);
+    if (plateset != nullptr && !on_rig) {
+      std::optional<doc::NodeId> take_clip;
+      if (on_timeline) {
+        for (const auto &target : impl.timeline_panel.replacement_targets()) {
+          const ElementInfo *const plate = find_element(elements, target.node);
+          if (target.bounds.contains(drop.screen_x, drop.screen_y) &&
+              plate != nullptr && plate->plateset_take != 0) {
+            take_clip = target.node;
+            break;
+          }
+        }
+        // A plateset's take row stands for its plates.
+        if (!take_clip.has_value()) {
+          take_clip =
+              impl.timeline_panel.take_at(drop.screen_x, drop.screen_y);
+        }
+      }
+      if (take_clip.has_value()) {
+        result.plateset_swaps.push_back(PlatesetSwapIntent{
+            authored_stage.id, *take_clip, plateset->id,
+            impl.next_edit_gesture++});
+      } else {
+        core::i64 start = static_cast<core::i64>(timeline.show_frame);
+        if (on_timeline) {
+          if (const auto at = impl.timeline_panel.frame_at(drop.screen_x,
+                                                           drop.screen_y)) {
+            start = std::max<core::i64>(*at, 0);
+          }
+        }
+        // Busy: the scene's first rig already has a wire on a socket one of
+        // these plates plays in.
+        const compositor::GraphNode *rig = nullptr;
+        for (const compositor::GraphNode &node : compositor_graph.nodes) {
+          if (node.kind == compositor::NodeKind::LedCarProcess &&
+              (rig == nullptr || node.node < rig->node)) {
+            rig = std::addressof(node);
+          }
+        }
+        bool busy = false;
+        if (rig != nullptr) {
+          for (const compositor::GraphEdge &edge : compositor_graph.edges) {
+            if (edge.to.node == rig->node &&
+                edge.to.port < assets::plateset_slot_count &&
+                plateset->slots[edge.to.port].media != doc::NodeId{}) {
+              busy = true;
+            }
+          }
+        }
+        PlatesetPlaceIntent place{authored_stage.id, plateset->id, start,
+                                  PlatesetRigChoice::Auto, 0U};
+        if (busy) {
+          impl.pending_plateset_place = place;
+          ui.open_context_menu(gui::ui_id("plateset.rig.choice"),
+                               drop.screen_x, drop.screen_y);
+        } else {
+          place.gesture = impl.next_edit_gesture++;
+          result.plateset_places.push_back(place);
+        }
+      }
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+      pending_asset_drop.reset();
+    }
+  }
+  if (impl.pending_plateset_place.has_value()) {
+    constexpr std::array<std::string_view, 3U> choices{
+        "Replace the plates on the LED Car Process",
+        "Add a second LED Car Process",
+        "Keep its wires; fill the free sockets"};
+    const gui::UiId menu = gui::ui_id("plateset.rig.choice");
+    if (const auto chosen = ui.context_menu(menu, choices)) {
+      PlatesetPlaceIntent place = *impl.pending_plateset_place;
+      place.rig = *chosen == 0U   ? PlatesetRigChoice::Replace
+                  : *chosen == 1U ? PlatesetRigChoice::NewRig
+                                  : PlatesetRigChoice::Auto;
+      place.gesture = impl.next_edit_gesture++;
+      result.plateset_places.push_back(place);
+      impl.pending_plateset_place.reset();
+    } else if (!ui.menu_open(menu)) {
+      impl.pending_plateset_place.reset();
+    }
+  }
+
+  // Plates let go on an open plateset's rig: one on a slot plays there;
+  // several anywhere on the rig fill the empty slots their names propose.
+  if (pending_asset_drop.has_value() && plateset_editor_drawn) {
+    const auto &drop = *pending_asset_drop;
+    const PlatesetEditor &rig = impl.asset_viewer_panel.plateset_editor();
+    const assets::Asset *const open =
+        asset_registry.asset(impl.asset_viewer_panel.asset());
+    const auto *const plateset =
+        open != nullptr ? std::get_if<assets::PlatesetAsset>(open) : nullptr;
+    if (plateset != nullptr && rig.rig_contains(drop.screen_x, drop.screen_y)) {
+      const std::vector<doc::NodeId> dropped =
+          drop.assets.empty() ? std::vector<doc::NodeId>{drop.asset}
+                              : drop.assets;
+      std::vector<const assets::MediaAsset *> plates;
+      for (const doc::NodeId id : dropped) {
+        const assets::Asset *const asset = asset_registry.asset(id);
+        if (const auto *const media =
+                asset != nullptr ? std::get_if<assets::MediaAsset>(asset)
+                                 : nullptr) {
+          plates.push_back(media);
+        }
+      }
+      const core::u64 gesture = impl.next_edit_gesture++;
+      const auto assign = [&](assets::PlatesetSlot slot, doc::NodeId media) {
+        assets::LibraryEdit edit{};
+        edit.kind = assets::LibraryEdit::Kind::SetPlatesetSlot;
+        edit.target = plateset->id;
+        edit.slot = slot;
+        edit.media = media;
+        result.asset_library_edits.push_back(
+            AssetLibraryEditIntent{std::move(edit), gesture});
+      };
+      const auto slot = rig.slot_at(drop.screen_x, drop.screen_y);
+      if (plates.size() == 1U && slot.has_value()) {
+        assign(*slot, plates.front()->id);
+      } else if (!plates.empty()) {
+        const assets::PlatesetProposal proposal =
+            assets::propose_plateset(plates);
+        std::vector<doc::NodeId> loose = proposal.unplaced;
+        for (const assets::PlatesetSlot candidate :
+             assets::all_plateset_slots) {
+          const std::size_t index = static_cast<std::size_t>(candidate);
+          if (plateset->slots[index].media != doc::NodeId{}) {
+            continue;
+          }
+          if (proposal.slots[index] != doc::NodeId{}) {
+            assign(candidate, proposal.slots[index]);
+          }
+        }
+        // What the names did not place lands where it was dropped.
+        if (slot.has_value() && !loose.empty()) {
+          assign(*slot, loose.front());
+        }
+      }
+      impl.history_context = HistoryContext::Scene;
+      impl.semantic_boundary = true;
+      pending_asset_drop.reset();
+    }
+  }
   if (pending_asset_drop.has_value()) {
     const auto &drop = *pending_asset_drop;
     if (const auto port = port_drop_at(drop.screen_x, drop.screen_y,
@@ -8619,6 +8998,38 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.adds.push_back(std::move(add));
       impl.history_context = HistoryContext::Scene;
       impl.semantic_boundary = true;
+    }
+  }
+
+  // The plateset page's thumbnails ride with the Library's: kept while it
+  // shows them, and asked for when they are not made yet.
+  if (!plateset_thumbnail_keys.empty()) {
+    if (!result.thumbnail_retain.has_value()) {
+      result.thumbnail_retain = LibraryThumbnailRetainIntent{};
+    }
+    for (const assets::DerivativeKey &key : plateset_thumbnail_keys) {
+      auto &kept = result.thumbnail_retain->keys;
+      if (std::find(kept.begin(), kept.end(), key) == kept.end()) {
+        kept.push_back(key);
+      }
+      const auto observed = std::find_if(
+          thumbnails.begin(), thumbnails.end(),
+          [&key](const LibraryThumbnailObservation &entry) {
+            return entry.key == key;
+          });
+      const bool wanted =
+          observed == thumbnails.end() ||
+          observed->state == LibraryThumbnailState::Placeholder ||
+          observed->state == LibraryThumbnailState::Stale;
+      const bool asked = std::any_of(
+          result.thumbnail_requests.begin(), result.thumbnail_requests.end(),
+          [&key](const LibraryThumbnailRequestIntent &request) {
+            return request.key == key;
+          });
+      if (wanted && !asked) {
+        result.thumbnail_requests.push_back(LibraryThumbnailRequestIntent{
+            key, LibraryThumbnailRequestPriority::Visible});
+      }
     }
   }
 
@@ -8966,6 +9377,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.key_batch.has_value() ||
       !result.clip_timings.empty() ||
       !result.clip_splits.empty() || !result.lane_edits.empty() ||
+      !result.plateset_places.empty() || !result.plateset_swaps.empty() ||
       !result.element_flags.empty() || !result.renames.empty() ||
       !result.highlights.empty() ||
       !result.timeline_edits.empty() ||
@@ -9019,6 +9431,16 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   }
   result.close_semantic_coalescing = impl.semantic_boundary;
 
+  result.program_media = impl.program_panel.drawn_media();
+  result.stage_media = std::any_of(
+                           impl.stage_views.begin(), impl.stage_views.end(),
+                           [](const auto &view) {
+                             return view.panel.drawn_media() ==
+                                    MediaRendition::Full;
+                           })
+                           ? MediaRendition::Full
+                           : MediaRendition::Proxy;
+
   // A drag can update a seam or floating rectangle every display frame. Wait
   // for release, then emit only the final arrangement so persistence never
   // turns a pointer gesture into a stream of disk writes.
@@ -9031,7 +9453,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         std::min(impl.compositor_panel.parameter_panel_width(),
                  max_compositor_parameter_width),
         impl.compositor_panel.minimap_shown(), impl.night,
-        impl.history_hidden});
+        impl.history_hidden, impl.stage_views[0U].panel.media(),
+        impl.program_panel.media()});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;

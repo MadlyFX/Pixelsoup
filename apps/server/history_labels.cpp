@@ -1,5 +1,9 @@
 #include "history_labels.hpp"
 
+#include <mediaserver/scene/scene_schema.hpp>
+
+#include <cstdint>
+
 #include <algorithm>
 #include <array>
 #include <map>
@@ -284,6 +288,34 @@ editor::HistoryStep describe_history_step(
         step.kind = editor::HistoryStepKind::Change;
     }
 
+    // A plateset placement or take swap touches a track, a clip and wiring
+    // per plate; what the operator did was one thing.
+    const auto plates = [](const auto& nodes) {
+        return static_cast<std::size_t>(std::count_if(
+            nodes.begin(), nodes.end(), [](const doc::Node* node) {
+                return node->type == scene::schema::media_type &&
+                       node->properties.contains(scene::schema::plateset_take);
+            }));
+    };
+    const std::size_t swapped = static_cast<std::size_t>(std::count_if(
+        modified.begin(), modified.end(), [](const NetChange* change) {
+            const auto set = [](const doc::Node& node) {
+                const auto found =
+                    node.properties.find(scene::schema::plateset_asset);
+                return found == node.properties.end()
+                           ? doc::PropertyValue{std::int64_t{0}}
+                           : found->second;
+            };
+            return change->after->type == scene::schema::media_type &&
+                   set(*change->before) != set(*change->after);
+        }));
+    if (const std::size_t placed = plates(added); placed > 0U) {
+        step.label = "Place plateset (" + std::to_string(placed) +
+                     (placed == 1U ? " plate)" : " plates)");
+    } else if (swapped > 0U) {
+        step.label = "Swap take (" + std::to_string(swapped) +
+                     (swapped == 1U ? " plate)" : " plates)");
+    } else
     // Adding or deleting usually renumbers or rewires its neighbours too; the
     // node that came or went is what the operator did.
     if (!added.empty()) {

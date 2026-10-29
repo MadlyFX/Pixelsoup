@@ -206,6 +206,65 @@ It does not reduce decode cost or decoded-frame memory: the full-resolution
 frame is still decoded and held. Holding a clip at half resolution, below,
 does.
 
+## Editor proxies
+
+The editor decodes a 720p H.264 proxy for every video asset larger than
+1920 x 1080 instead of its source. The Director makes these proxies itself,
+in the background, as soon as such an asset is in the project; output nodes
+never make or play them, and they are not saved with the project. Until an
+asset's proxy is ready its clips show the source, so nothing waits.
+Switching between proxy and source maps through the proxy's frame table, so
+no cut or key moves by a frame.
+
+A proxy is made in segments of about ten seconds of source, each usable as
+soon as it is published. The segment under each clip's playhead in Program
+and Stage is made first, then the rest of the file from there, then its
+start; when every segment is made they are joined, without encoding again,
+into one proxy file, which then replaces them. Consecutive segments come
+from one encode that starts a new file at each boundary, so making a proxy
+in segments costs little more than making it whole. A clip whose segment is not made
+yet shows its source. Moving from one file to another of the same asset -
+source to proxy, segment to segment, segments to the joined file - is not a
+cut: the clip keeps its last picture until the new file has a frame, and
+within a second of a segment's end the next segment is opened ahead, so no
+clip shows the offline placeholder or raises the loading banner while its
+proxy is made. The Stage banner counts only clips with nothing to show.
+
+Stage and Program Output each have a **Proxy / Full res** media menu beside
+their preview resolution, and the Asset Viewer has one in its header. Each
+view's choice is its own and is kept with the window layout. **Full res**
+decodes the source in that view. Hovering the menu says how many of the
+view's clips drew a proxy on the last frame and how many are still showing
+their source until their proxy is ready. While a mask is selected or the
+eyedropper is armed, every view shows the source and returns to its choice
+afterwards.
+
+An asset's own **Prefer** or **Require Proxy** policy still applies in every
+view, as it does on the wall, so such a clip can draw a proxy under Full res;
+the menu's tooltip counts those. Proxies use the cache folder and size limit
+in Preferences, and carry no audio track.
+
+**Transcode priority** in Preferences is the most CPU a proxy may use while
+nothing plays; it defaults to **Fast**. A segment that starts while the show,
+or the Preview playhead, is playing uses the Background budget instead, so
+generation does not take frames from playback. A render node always
+generates its output proxies at Background, as whole files.
+
+Measured on an RTX 3090 Director with one 4K H.264 plate, a seek in the
+editor reaches its exact frame in 74 ms on the proxy against 149 ms on the
+source, four plates play every frame at 24 fps (88% on the source), and
+playback holds 0.28 GB of video memory per plate instead of 1.8 GB. The
+proxy takes 76 s to make for a two-minute plate at Background priority and
+18 s at Fast as one file. In segments at Fast, the first ten seconds are
+drawable after 2 s; all thirteen segments take 19 s and the join 1.6 s.
+The editor made the project's ten proxies in 829 s at Background and 213 s
+at Fast. While a proxy is made, at any priority, editor playback
+of four proxies and of a 4K source loses no more frames than it does idle.
+Running more than one encode at once makes Fast proxies only about 20%
+sooner: decoding the 4K source on the CPU is the limit. Dragging the playhead shows the frame one display tick behind
+the pointer on proxies; on four 4K sources it can show nothing until the drag
+stops. Playing backwards does not yet reach exact frames on either file.
+
 ## Holding a video clip at half resolution
 
 A video clip can be held at half resolution (**Inspector > Content >

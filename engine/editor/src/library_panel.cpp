@@ -1,4 +1,5 @@
 #include <mediaserver/editor/library_panel.hpp>
+#include <mediaserver/assets/plateset.hpp>
 
 #include <mediaserver/gui/rect_cut.hpp>
 #include <mediaserver/gui/shapes.hpp>
@@ -230,19 +231,6 @@ constexpr std::array<ColumnSpec, library_column_count> column_specs{{
          *media.frame_count > 1U;
 }
 
-[[nodiscard]] core::u32 nominal_rate(assets::MediaFrameRate rate) noexcept {
-  if (rate.denominator == 0U || rate.numerator == 0U) {
-    return 0U;
-  }
-  return static_cast<core::u32>(
-      std::llround(static_cast<double>(rate.numerator) /
-                   static_cast<double>(rate.denominator)));
-}
-
-[[nodiscard]] bool drop_frame_rate(core::u32 nominal) noexcept {
-  return nominal != 0U && nominal % 30U == 0U;
-}
-
 [[nodiscard]] bool drop_frame_text(std::string_view timecode) noexcept {
   return timecode.find(';') != std::string_view::npos ||
          timecode.find('.') != std::string_view::npos;
@@ -423,6 +411,8 @@ enum class MenuCommand : core::u8 {
   Rescan,
   ShowList,
   ShowGrid,
+  NewPlateset,
+  NewPlatesetFromSelection,
   // Followed by one command per column: show or hide it.
   ToggleColumn,
 };
@@ -649,6 +639,47 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
   }
 }
 
+} // namespace
+
+void draw_plateset_icon(gui::UiContext &ctx, const gui::Rect &bounds,
+                        std::optional<assets::PlatesetSlot> highlight) {
+  const gui::UiColor color = ctx.theme().accent;
+  const gui::UiColor dim =
+      highlight.has_value() ? with_alpha(color, 0.3F) : color;
+  auto &draw = ctx.draw_list();
+  const float size = std::min(bounds.width, bounds.height);
+  const float cx = bounds.x + bounds.width * 0.5F;
+  const float cy = bounds.y + bounds.height * 0.5F;
+  // The car: a rounded body, longer than it is wide, nose up.
+  const gui::Rect body{cx - size * 0.13F, cy - size * 0.22F, size * 0.26F,
+                       size * 0.44F};
+  ctx.rounded(body, with_alpha(color, 0.3F), size * 0.08F);
+  draw.add_rect(body.x + size * 0.04F, body.y + size * 0.06F,
+                body.width - size * 0.08F, size * 0.08F,
+                with_alpha(color, 0.75F));
+  // Eight plates around it, clockwise from the front in socket order.
+  const float radius = size * 0.4F;
+  const float plate = std::max(2.0F, size * 0.1F);
+  const gui::UiColor lit = ctx.theme().text;
+  for (int index = 0; index < 8; ++index) {
+    const float turn = static_cast<float>(index) / 8.0F * 6.2831853F;
+    const float px = cx + std::sin(turn) * radius;
+    const float py = cy - std::cos(turn) * radius;
+    const bool chosen =
+        highlight.has_value() && static_cast<int>(*highlight) == index;
+    const float side = chosen ? plate * 1.7F : plate;
+    draw.add_rect(px - side * 0.5F, py - side * 0.5F, side, side,
+                  chosen ? lit : dim);
+  }
+  // The ceiling plate is the one over the car.
+  if (highlight == assets::PlatesetSlot::Ceiling) {
+    const float side = plate * 1.7F;
+    draw.add_rect(cx - side * 0.5F, cy - side * 0.5F, side, side, lit);
+  }
+}
+
+namespace {
+
 void draw_cpu_decode_warning(gui::UiContext &ctx, const gui::Rect &bounds) {
   auto &draw = ctx.draw_list();
   const gui::UiColor red = ctx.theme().warning;
@@ -671,88 +702,22 @@ std::string_view library_column_title(LibraryColumn column) {
                                         : spec(column).title;
 }
 
-std::optional<core::i64> timecode_frames(std::string_view timecode,
-                                         assets::MediaFrameRate rate) {
-  const core::u32 fps = nominal_rate(rate);
-  if (fps == 0U) {
-    return std::nullopt;
-  }
-  std::array<core::i64, 4U> fields{};
-  std::size_t field = 0U;
-  bool digits = false;
-  for (const char character : timecode) {
-    if (character >= '0' && character <= '9') {
-      if (fields[field] > 1'000'000) {
-        return std::nullopt;
-      }
-      fields[field] = fields[field] * 10 + (character - '0');
-      digits = true;
-    } else if (character == ':' || character == ';' || character == '.') {
-      if (!digits || ++field >= fields.size()) {
-        return std::nullopt;
-      }
-      digits = false;
-    } else {
-      return std::nullopt;
-    }
-  }
-  if (field != 3U || !digits) {
-    return std::nullopt;
-  }
-  const auto [hours, minutes, seconds, frames] = fields;
-  if (minutes >= 60 || seconds >= 60 ||
-      frames >= static_cast<core::i64>(fps)) {
-    return std::nullopt;
-  }
-  const core::i64 nominal = static_cast<core::i64>(fps);
-  core::i64 total = ((hours * 60 + minutes) * 60 + seconds) * nominal + frames;
-  if (drop_frame_text(timecode) && drop_frame_rate(fps)) {
-    const core::i64 dropped = nominal / 15;
-    const core::i64 total_minutes = hours * 60 + minutes;
-    total -= dropped * (total_minutes - total_minutes / 10);
-  }
-  return total;
-}
-
-std::string timecode_text(core::i64 frame, assets::MediaFrameRate rate,
-                          bool drop_frame) {
-  const core::u32 fps = nominal_rate(rate);
-  if (fps == 0U) {
-    return {};
-  }
-  const core::i64 nominal = static_cast<core::i64>(fps);
-  const bool drop = drop_frame && drop_frame_rate(fps);
-  // Timecode wraps at 24 hours; the frames in a real day at this rate.
-  const core::i64 dropped = drop ? nominal / 15 : 0;
-  const core::i64 per_ten_minutes = nominal * 600 - dropped * 9;
-  const core::i64 day = per_ten_minutes * 6 * 24;
-  frame %= day;
-  if (frame < 0) {
-    frame += day;
-  }
-  if (drop) {
-    const core::i64 per_minute = nominal * 60 - dropped;
-    const core::i64 tens = frame / per_ten_minutes;
-    const core::i64 rest = frame % per_ten_minutes;
-    frame += dropped * 9 * tens +
-             (rest > dropped ? dropped * ((rest - dropped) / per_minute) : 0);
-  }
-  const core::i64 frames = frame % nominal;
-  const core::i64 seconds = (frame / nominal) % 60;
-  const core::i64 minutes = (frame / (nominal * 60)) % 60;
-  const core::i64 hours = frame / (nominal * 3600);
-  std::array<char, 32U> text{};
-  const int length = std::snprintf(
-      text.data(), text.size(), "%02lld:%02lld:%02lld%c%02lld",
-      static_cast<long long>(hours), static_cast<long long>(minutes),
-      static_cast<long long>(seconds), drop ? ';' : ':',
-      static_cast<long long>(frames));
-  return std::string{text.data(),
-                     static_cast<std::size_t>(std::max(length, 0))};
-}
-
 std::string library_column_text(const assets::Asset &asset,
                                 LibraryColumn column) {
+  if (const auto *const plateset = std::get_if<assets::PlatesetAsset>(&asset)) {
+    if (column == LibraryColumn::Name) {
+      return plateset->display_name;
+    }
+    if (column == LibraryColumn::Type) {
+      const auto plates = std::count_if(
+          plateset->slots.begin(), plateset->slots.end(),
+          [](const assets::PlatesetSlotAssignment &slot) {
+            return slot.media != doc::NodeId{};
+          });
+      return "Plateset (" + std::to_string(plates) + ")";
+    }
+    return {};
+  }
   const auto *const media = std::get_if<assets::MediaAsset>(&asset);
   const auto *const model = std::get_if<assets::ModelAsset>(&asset);
   const auto number = [](const auto &value) -> std::string {
@@ -1031,6 +996,11 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
     ctx.image(image, *ghost_texture_, gui::UiColor{1.0F, 1.0F, 1.0F, 0.82F});
   } else {
     const float icon = 26.0F;
+    if (ghost_plateset_ && !ghost_generator_.has_value()) {
+      draw_plateset_icon(ctx, gui::Rect{image.x + (image.width - icon) * 0.5F,
+                                        image.y + (image.height - icon) * 0.5F,
+                                        icon, icon});
+    } else
     draw_library_icon(
         ctx, ghost_generator_.has_value()
                  ? *ghost_generator_
@@ -1112,6 +1082,30 @@ LibraryFrame LibraryPanel::draw_impl(
       rename_.begin(ctx, folder.id.value(), folder.display_name);
       pending_folder_name_.reset();
       known_folders_.clear();
+      break;
+    }
+  }
+
+  // A plateset this panel created has arrived: select it and open it in
+  // the Asset Viewer, where its slots are.
+  if (pending_plateset_name_.has_value()) {
+    for (const assets::Asset &asset : registry.assets) {
+      const auto *const plateset = std::get_if<assets::PlatesetAsset>(&asset);
+      if (plateset == nullptr || known_platesets_.contains(plateset->id) ||
+          plateset->display_name != *pending_plateset_name_) {
+        continue;
+      }
+      selection_.assign(1U, plateset->id);
+      anchor_ = plateset->id;
+      if (plateset->folder != doc::NodeId{}) {
+        expanded_.insert(plateset->folder);
+      }
+      frame.view_asset = plateset->id;
+      if (pending_plateset_rename_) {
+        rename_.begin(ctx, plateset->id.value(), plateset->display_name);
+      }
+      pending_plateset_name_.reset();
+      known_platesets_.clear();
       break;
     }
   }
@@ -1757,10 +1751,16 @@ LibraryFrame LibraryPanel::draw_impl(
       const float icon =
           std::min({std::max(16.0F, preview.height * 0.4F), preview.width,
                     preview.height});
-      draw_library_icon(
-          ctx, media ? LibraryAddAction::Media : LibraryAddAction::Model,
-          gui::Rect{preview.x + (preview.width - icon) * 0.5F,
-                    preview.y + (preview.height - icon) * 0.5F, icon, icon});
+      const gui::Rect icon_bounds{preview.x + (preview.width - icon) * 0.5F,
+                                  preview.y + (preview.height - icon) * 0.5F,
+                                  icon, icon};
+      if (std::holds_alternative<assets::PlatesetAsset>(asset)) {
+        draw_plateset_icon(ctx, icon_bounds);
+      } else {
+        draw_library_icon(
+            ctx, media ? LibraryAddAction::Media : LibraryAddAction::Model,
+            icon_bounds);
+      }
     }
     ctx.outline(preview,
                 with_alpha(thumbnails_enabled
@@ -2519,8 +2519,11 @@ LibraryFrame LibraryPanel::draw_impl(
       ghost_live_ = !released;
       ghost_count_ = drag_items_.size();
       ghost_model_ = false;
+      ghost_plateset_ = false;
       if (const assets::Asset *const asset = registry.asset(lead)) {
         ghost_label_ = std::string{assets::asset_display_name(*asset)};
+        ghost_plateset_ =
+            std::holds_alternative<assets::PlatesetAsset>(*asset);
         ghost_model_ =
             assets::asset_kind(*asset) != assets::AssetKind::Media;
         if (thumbnails_enabled && !ghost_model_) {
@@ -2787,6 +2790,15 @@ LibraryFrame LibraryPanel::draw_impl(
       add(selection_.size() > 1U ? "Remove Selected from Library   Del"
                                  : "Remove from Library   Del",
           MenuCommand::Remove);
+      const auto media_selected = std::count_if(
+          selection_.begin(), selection_.end(), [&registry](doc::NodeId id) {
+            const assets::Asset *const asset = registry.asset(id);
+            return asset != nullptr &&
+                   std::holds_alternative<assets::MediaAsset>(*asset);
+          });
+      if (media_selected > 0 && is_selected(*menu_on)) {
+        add("New Plateset from Selection", MenuCommand::NewPlatesetFromSelection);
+      }
     } else {
       add(list ? (expanded_.contains(*menu_on) ? "Collapse" : "Expand")
                : "Open",
@@ -2812,6 +2824,7 @@ LibraryFrame LibraryPanel::draw_impl(
     open_menu({});
     if (!open_import_menu) {
       add("New Folder", MenuCommand::NewFolder);
+      add("New Plateset", MenuCommand::NewPlateset);
     }
     add("Import Media...", MenuCommand::ImportMedia);
     add("Import Model...", MenuCommand::ImportModel);
@@ -2858,6 +2871,89 @@ LibraryFrame LibraryPanel::draw_impl(
       expanded_.insert(parent);
     }
   };
+  // A plateset, empty or with its slots proposed from the selected plates'
+  // file names. Named after what those names share, so a take's set reads
+  // as the take.
+  const auto request_plateset = [&](doc::NodeId parent, bool from_selection) {
+    assets::LibraryEdit edit{};
+    edit.kind = assets::LibraryEdit::Kind::CreatePlateset;
+    edit.destination = parent;
+    std::string name;
+    if (from_selection) {
+      std::vector<const assets::MediaAsset *> plates;
+      for (const doc::NodeId id : selection_) {
+        const assets::Asset *const asset = registry.asset(id);
+        if (const auto *const media = asset != nullptr
+                ? std::get_if<assets::MediaAsset>(asset)
+                : nullptr) {
+          plates.push_back(media);
+        }
+      }
+      if (plates.empty()) {
+        return;
+      }
+      const assets::PlatesetProposal proposal =
+          assets::propose_plateset(plates);
+      edit.slots = proposal.slots;
+      edit.rig = proposal.rig;
+      // A plate the names placed nowhere still goes in an empty slot, in
+      // port order, so nothing selected silently drops out of the set.
+      for (const doc::NodeId loose : proposal.unplaced) {
+        for (doc::NodeId &slot : edit.slots) {
+          if (slot == doc::NodeId{}) {
+            slot = loose;
+            edit.rig = assets::PlatesetRig::Nine;
+            break;
+          }
+        }
+      }
+      std::string shared{plates.front()->display_name};
+      if (const std::size_t dot = shared.rfind('.');
+          dot != std::string::npos && dot > 0U) {
+        shared.resize(dot);
+      }
+      for (const assets::MediaAsset *const plate : plates) {
+        std::size_t common = 0U;
+        while (common < shared.size() &&
+               common < plate->display_name.size() &&
+               shared[common] == plate->display_name[common]) {
+          ++common;
+        }
+        shared.resize(common);
+      }
+      while (!shared.empty() &&
+             std::isalnum(static_cast<unsigned char>(shared.back())) == 0) {
+        shared.pop_back();
+      }
+      if (plates.size() > 1U && shared.size() >= 3U) {
+        name = shared;
+      }
+    }
+    const auto taken = [&registry](const std::string &candidate) {
+      return std::any_of(registry.assets.begin(), registry.assets.end(),
+                         [&candidate](const assets::Asset &asset) {
+                           return std::holds_alternative<assets::PlatesetAsset>(
+                                      asset) &&
+                                  assets::asset_display_name(asset) ==
+                                      candidate;
+                         });
+    };
+    const std::string base = name.empty() ? std::string{"Plateset"} : name;
+    name = base;
+    for (int suffix = 2; taken(name) && suffix < 1000; ++suffix) {
+      name = base + " " + std::to_string(suffix);
+    }
+    edit.name = name;
+    frame.library_edits.push_back(std::move(edit));
+    pending_plateset_name_ = std::move(name);
+    pending_plateset_rename_ = !from_selection;
+    known_platesets_.clear();
+    for (const assets::Asset &asset : registry.assets) {
+      if (std::holds_alternative<assets::PlatesetAsset>(asset)) {
+        known_platesets_.insert(assets::asset_id(asset));
+      }
+    }
+  };
   if (create_folder) {
     request_folder(new_folder_parent);
   }
@@ -2892,6 +2988,18 @@ LibraryFrame LibraryPanel::draw_impl(
         case MenuCommand::NewFolderInside:
           request_folder(target);
           break;
+        case MenuCommand::NewPlateset:
+          request_plateset(list ? doc::NodeId{}
+                                : (generators_open_ ? doc::NodeId{} : folder_),
+                           false);
+          break;
+        case MenuCommand::NewPlatesetFromSelection: {
+          const assets::Asset *const asset = registry.asset(target);
+          request_plateset(asset != nullptr ? registry.folder_of(*asset)
+                                            : doc::NodeId{},
+                           true);
+          break;
+        }
         case MenuCommand::MoveToTop: {
           assets::LibraryEdit edit{};
           edit.kind = assets::LibraryEdit::Kind::Move;

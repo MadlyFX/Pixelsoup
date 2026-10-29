@@ -668,6 +668,9 @@ void MediaCache::begin_frame() noexcept {
     // Retaining its hold would eventually make every texture ineligible for
     // reuse at the byte limit. Pending recording snapshots protect their own
     // resources independently through resident_is_held().
+    std::erase_if(shown_by_clip_, [this](const auto& entry) {
+        return !on_air_.contains(entry.second.key);
+    });
     for (auto held = last_by_clip_.begin(); held != last_by_clip_.end();) {
         if (on_air_.contains(held->first)) {
             ++held;
@@ -1278,7 +1281,7 @@ bool MediaCache::adopt_generation(core::u64 generation,
             } else { candidate_bytes_-=entry->bytes; entry=candidates_.erase(entry); }
         }
         while(!resident_.empty()) erase(resident_.begin());
-        last_by_clip_.clear(); last_frame_by_clip_.clear(); last_request_by_clip_.clear();
+        last_by_clip_.clear(); last_frame_by_clip_.clear(); last_request_by_clip_.clear(); shown_by_clip_.clear();
         read_ahead_requests_.clear(); on_air_.clear(); on_air_now_.clear(); decoded_frame_bytes_.clear();
         authored_generation_=generation;
     }
@@ -1415,6 +1418,9 @@ bool MediaCache::refresh_source(
     erase_clip_state(last_by_clip_);
     erase_clip_state(last_frame_by_clip_);
     erase_clip_state(last_request_by_clip_);
+    std::erase_if(shown_by_clip_, [&source_template](const auto& entry) {
+        return entry.second.key.first == source_template;
+    });
     erase_clip_state(read_ahead_requests_);
     for (auto entry = on_air_.begin(); entry != on_air_.end();) {
         if (entry->first == source_template) {
@@ -1436,6 +1442,44 @@ bool MediaCache::refresh_source(
 }
 
 ResolvedMediaFrame MediaCache::resolve(
+    rhi::Device& device,
+    rhi::CommandList& commands,
+    const std::string& source_template,
+    core::u32 frame_index,
+    MediaLoopWindow window,
+    core::u64 clip,
+    core::u64 rendition) {
+    const core::u64 pending = stats_.pending_requests;
+    ResolvedMediaFrame resolved = resolve_placement(
+        device, commands, source_template, frame_index, window, clip);
+    const bool waiting = stats_.pending_requests != pending;
+    if (rendition != 0U && clip != 0U) {
+        const auto shown = shown_by_clip_.find(clip);
+        if (resolved) {
+            shown_by_clip_.insert_or_assign(
+                clip, Shown{rendition, ClipKey{source_template, clip}});
+        } else if (waiting && shown != shown_by_clip_.end() &&
+                   shown->second.rendition == rendition &&
+                   shown->second.key.first != source_template &&
+                   on_air_.contains(shown->second.key)) {
+            // A move to another file of the same rendition - from a source
+            // to its proxy, or between a proxy's segments - is not a cut.
+            // Until the new file has a frame the placement shows what the
+            // old one last gave it, and that file stays on air so its
+            // picture is kept.
+            resolved = held_frame(shown->second.key);
+            if (resolved) {
+                on_air_now_.insert(shown->second.key);
+            }
+        }
+    }
+    if (!resolved && waiting) {
+        ++stats_.blank_requests;
+    }
+    return resolved;
+}
+
+ResolvedMediaFrame MediaCache::resolve_placement(
     rhi::Device& device,
     rhi::CommandList& commands,
     const std::string& source_template,

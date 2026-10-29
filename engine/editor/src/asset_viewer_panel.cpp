@@ -88,7 +88,8 @@ rendition_tooltip(AssetViewerRendition rendition) noexcept {
     return "Nothing in the project uses this asset, so no machine has "
            "checked its file. A missing file shows the grey placeholder.";
   case AssetViewerRendition::Proxy:
-    return "Playing its proxy, by the asset's proxy policy";
+    return "Playing its proxy: a UHD asset's 720p working proxy, or the "
+           "proxy its policy asks for";
   case AssetViewerRendition::ProxyUnready:
     return "Require Proxy, and no proxy is ready on this machine. Nothing "
            "is decoded, as on the wall.";
@@ -371,6 +372,18 @@ void AssetViewerPanel::draw_header(Pass &p) {
       channel_ = static_cast<AssetViewerChannel>(
           std::min<std::size_t>(selected, channels.size() - 1U));
     }
+  }
+  if (p.media != nullptr && bar.room(84.0F)) {
+    static constexpr std::array<std::string_view, 2U> renditions{"Proxy",
+                                                                 "Full res"};
+    std::size_t selected = full_resolution_ ? 1U : 0U;
+    const gui::Rect rect = bar.place(84.0F);
+    if (ctx.dropdown(mix(id_, "media"), rect, renditions, selected)) {
+      full_resolution_ = selected == 1U;
+    }
+    ctx.tooltip(rect, "Proxy plays a UHD asset's 720p proxy once it is "
+                      "ready. Full res always decodes the source, for "
+                      "checking pixels.");
   }
   if (p.media != nullptr && bar.room(140.0F)) {
     const gui::Rect actual = bar.place(46.0F, 0.0F);
@@ -980,6 +993,21 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
     stop();
   }
 
+  // A plateset has no picture of its own: its page is the rig and its slots.
+  if (const auto *const plateset =
+          p.asset != nullptr ? std::get_if<assets::PlatesetAsset>(p.asset)
+                             : nullptr) {
+    ctx.push_clip(bounds);
+    PlatesetEditorInput plateset_input{};
+    plateset_input.plateset = plateset;
+    plateset_input.assets = input.assets;
+    plateset_input.thumbnails = input.thumbnails;
+    plateset_input.dragging_assets = input.dragging_assets;
+    plateset_input.analysis = input.plateset_analysis;
+    p.frame.plateset = plateset_editor_.draw(ctx, bounds, plateset_input);
+    ctx.pop_clip();
+    return p.frame;
+  }
   ctx.panel(bounds, ctx.theme().panel);
   ctx.push_clip(bounds);
   if (p.model != nullptr && input.model != nullptr) {
@@ -1009,7 +1037,7 @@ AssetViewerFrame AssetViewerPanel::draw(gui::UiContext &ctx,
   ctx.pop_clip();
 
   if (p.media != nullptr) {
-    p.frame.request = AssetViewerRequest{asset_, frame_};
+    p.frame.request = AssetViewerRequest{asset_, frame_, full_resolution_};
   }
   return p.frame;
 }

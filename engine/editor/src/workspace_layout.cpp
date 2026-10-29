@@ -33,6 +33,8 @@ constexpr std::uint16_t header_size = 48U;
 constexpr std::uint32_t minimap_flag = 1U;
 constexpr std::uint32_t night_flag = 2U;
 constexpr std::uint32_t history_hidden_flag = 4U;
+constexpr std::uint32_t stage_full_media_flag = 8U;
+constexpr std::uint32_t program_full_media_flag = 16U;
 constexpr std::size_t fixed_node_size = 28U;
 constexpr std::size_t floating_size = 20U;
 constexpr std::size_t closed_size = 40U;
@@ -193,7 +195,13 @@ encode_workspace_layout(const WorkspaceLayoutState &workspace) noexcept {
     append_float(bytes, workspace.compositor_parameter_width);
     append_u32(bytes, (workspace.compositor_minimap ? minimap_flag : 0U) |
                           (workspace.night_dim ? night_flag : 0U) |
-                          (workspace.history_hidden ? history_hidden_flag : 0U));
+                          (workspace.history_hidden ? history_hidden_flag : 0U) |
+                          (workspace.stage_media == MediaRendition::Full
+                               ? stage_full_media_flag
+                               : 0U) |
+                          (workspace.program_media == MediaRendition::Full
+                               ? program_full_media_flag
+                               : 0U));
 
     for (const gui::DockLayout::State::Node &node : state.nodes) {
       append_u8(bytes, node.split ? 1U : 0U);
@@ -325,12 +333,19 @@ decode_workspace_layout(std::span<const std::byte> bytes) noexcept {
       std::uint32_t flags{};
       // Unknown flags are refused rather than silently dropped on resave.
       if (!reader.u32(flags) ||
-          (flags & ~(minimap_flag | night_flag | history_hidden_flag)) != 0U) {
+          (flags & ~(minimap_flag | night_flag | history_hidden_flag |
+                     stage_full_media_flag | program_full_media_flag)) != 0U) {
         return decode_failure(WorkspaceLayoutError::InvalidFormat);
       }
       workspace.compositor_minimap = (flags & minimap_flag) != 0U;
       workspace.night_dim = (flags & night_flag) != 0U;
       workspace.history_hidden = (flags & history_hidden_flag) != 0U;
+      workspace.stage_media = (flags & stage_full_media_flag) != 0U
+                                  ? MediaRendition::Full
+                                  : MediaRendition::Proxy;
+      workspace.program_media = (flags & program_full_media_flag) != 0U
+                                    ? MediaRendition::Full
+                                    : MediaRendition::Proxy;
     }
     workspace.window_width = window_width;
     workspace.window_height = window_height;

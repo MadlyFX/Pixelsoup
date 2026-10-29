@@ -1,5 +1,6 @@
 #include "../src/timeline/timeline_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <iostream>
@@ -324,12 +325,237 @@ void ruler_ticks_divide_whole_frames_and_labels_drop_a_zero_hour() {
   ROWS_CHECK(timeline::compact_timecode("1200", true) == "1200");
 }
 
+// A placed plateset beside Deck: FRONT and LEFT tracks holding one take (7)
+// from frame 100, razored at 150 so both plates carry a second take from
+// there to 170. FRONT is behind
+// LEFT, so LEFT is listed first. A second placement of the same set, on its
+// own track, is take 8; a track holding a plate and an ordinary clip is an
+// ordinary track.
+constexpr doc::NodeId chicago{300U};
+constexpr doc::NodeId front_lane{301U};
+constexpr doc::NodeId left_lane{302U};
+constexpr doc::NodeId again_lane{303U};
+constexpr doc::NodeId mixed_lane{304U};
+constexpr doc::NodeId front_plate{311U};
+constexpr doc::NodeId left_plate{312U};
+constexpr doc::NodeId front_tail{313U};
+constexpr doc::NodeId left_tail{314U};
+constexpr doc::NodeId again_plate{315U};
+constexpr doc::NodeId mixed_plate{316U};
+constexpr doc::NodeId mixed_clip{317U};
+
+void place_plateset(Fixture &f) {
+  const auto lane = [](doc::NodeId id, mediaserver::core::i64 order,
+                       std::string name) {
+    return scene::TimelineLane{id, scene::SceneId{1U}, order, std::move(name),
+                               false, false, scene::BlendMode::Normal, false};
+  };
+  f.lanes.push_back(lane(front_lane, 20, "FRONT / Chicago drive"));
+  f.lanes.push_back(lane(left_lane, 30, "LEFT / Chicago drive"));
+  f.lanes.push_back(lane(again_lane, 40, "FRONT / Chicago drive"));
+  f.lanes.push_back(lane(mixed_lane, 50, "Mixed"));
+  using mediaserver::core::i64;
+  const auto place = [&](doc::NodeId node, doc::NodeId on, std::string slot,
+                         i64 take, i64 start, i64 duration) {
+    auto out = element(node, editor::ElementKind::Media, slot, std::nullopt);
+    out.timeline_lane = on;
+    out.plateset = chicago;
+    out.plateset_slot = std::move(slot);
+    out.plateset_take = take;
+    out.timing = scene::ClipTiming{start, duration, 0, 0, 0};
+    f.elements.push_back(out);
+  };
+  place(front_plate, front_lane, "front", 7, 100, 50);
+  place(left_plate, left_lane, "left", 7, 100, 50);
+  place(front_tail, front_lane, "front", 7, 150, 20);
+  place(left_tail, left_lane, "left", 7, 150, 20);
+  place(again_plate, again_lane, "front", 8, 300, 10);
+  place(mixed_plate, mixed_lane, "front", 9, 400, 10);
+  auto ordinary =
+      element(mixed_clip, editor::ElementKind::Media, "Other", std::nullopt);
+  ordinary.timeline_lane = mixed_lane;
+  ordinary.timing = scene::ClipTiming{410, 10, 0, 0, 0};
+  f.elements.push_back(ordinary);
+  for (const doc::NodeId track : {front_lane, left_lane, again_lane,
+                                  mixed_lane}) {
+    f.elements.push_back(
+        element(track, editor::ElementKind::Track, "", std::nullopt));
+  }
+}
+
+void a_placed_platesets_tracks_fold_into_one_take_row() {
+  Fixture f;
+  place_plateset(f);
+  const RowList list = f.build();
+  // Two placements, two rows; the mixed track stays a track.
+  ROWS_CHECK(list.platesets.size() == 2U);
+  const std::size_t take_row = find(list, Row::Kind::PlatesetHeader, front_lane);
+  const std::size_t again_row =
+      find(list, Row::Kind::PlatesetHeader, again_lane);
+  const std::size_t mixed = find(list, Row::Kind::LaneHeader, mixed_lane);
+  ROWS_CHECK(list.rows[mixed].indent == 0U);
+  ROWS_CHECK(listed(list, mixed_plate) && listed(list, mixed_clip));
+  // Listed where its frontmost track would be: after the later placement and
+  // the mixed track, before Deck, which keeps its own header and clips.
+  ROWS_CHECK(mixed < again_row && again_row < take_row);
+  ROWS_CHECK(take_row < find(list, Row::Kind::LaneHeader, deck));
+  ROWS_CHECK(listed(list, shot_one));
+
+  // Closed by default: the row alone, named after what its tracks share.
+  const Row &row = list.rows[take_row];
+  ROWS_CHECK(row.label == "Chicago drive");
+  ROWS_CHECK(row.expandable && row.indent == 0U);
+  ROWS_CHECK(row.end == take_row + 1U);
+  ROWS_CHECK(!listed(list, left_lane) && !listed(list, front_plate) &&
+             !listed(list, left_tail));
+  // Its group: both tracks, LEFT first, and the two takes the razor left,
+  // each led by its front plate.
+  const timeline::PlatesetGroup &group = list.platesets[row.plateset];
+  ROWS_CHECK(group.plateset == chicago && group.key == front_lane);
+  ROWS_CHECK(group.lanes == (std::vector<doc::NodeId>{left_lane, front_lane}));
+  ROWS_CHECK(group.takes.size() == 2U);
+  ROWS_CHECK(group.takes[0].start == 100 && group.takes[0].duration == 50 &&
+             group.takes[0].lead == front_plate &&
+             group.takes[0].clips ==
+                 (std::vector<doc::NodeId>{left_plate, front_plate}));
+  ROWS_CHECK(group.takes[1].start == 150 && group.takes[1].lead == front_tail);
+  ROWS_CHECK(!group.takes[0].locked);
+  // Closed, it summarises every plate.
+  const timeline::RowSummary *closed = summary(list, take_row);
+  ROWS_CHECK(closed != nullptr && closed->first == 100 && closed->end == 170);
+
+  // The Library's name wins over the tracks'.
+  const std::array<editor::TimelinePlateset, 1U> names{
+      {{chicago, "Chicago drive, take 3"}}};
+  const RowList named = timeline::build_rows(
+      f.state,
+      timeline::RowsInput{f.elements, f.lanes, {}, {}, f.keys, 0U, f.search,
+                          {}, names},
+      f.theme);
+  ROWS_CHECK(named.rows[find(named, Row::Kind::PlatesetHeader, front_lane)]
+                 .label == "Chicago drive, take 3");
+
+  // Open, its tracks follow it one indent in, each still a track with its
+  // Properties and its clips; Deck is unaffected.
+  f.state.expanded_platesets = {front_lane};
+  const RowList open = f.build();
+  const std::size_t header = find(open, Row::Kind::PlatesetHeader, front_lane);
+  const std::size_t left = find(open, Row::Kind::LaneHeader, left_lane);
+  const std::size_t front = find(open, Row::Kind::LaneHeader, front_lane);
+  ROWS_CHECK(left == header + 1U && left < front);
+  ROWS_CHECK(open.rows[left].indent == 1U && open.rows[left].parent == header);
+  ROWS_CHECK(open.rows[front].parent == header);
+  const std::size_t plate_row = find(open, Row::Kind::Layer, front_plate);
+  ROWS_CHECK(open.rows[plate_row].parent == front &&
+             open.rows[plate_row].indent == 2U &&
+             open.rows[plate_row].lane_owner == front_lane);
+  ROWS_CHECK(open.rows[header].end == find(open, Row::Kind::LaneHeader, deck));
+  ROWS_CHECK(summary(open, header) == nullptr);
+  ROWS_CHECK(open.rows[find(open, Row::Kind::LaneHeader, deck)].indent == 0U);
+  // The row is not a selectable layer or track itself.
+  for (const doc::NodeId node : open.visible_order) {
+    ROWS_CHECK(node != again_lane);
+  }
+
+  // A locked plate locks its take.
+  for (editor::ElementInfo &held : f.elements) {
+    held.locked = held.locked || held.node == front_plate;
+  }
+  f.state.expanded_platesets.clear();
+  const RowList locked = f.build();
+  ROWS_CHECK(locked.platesets[locked.rows[find(locked,
+                                               Row::Kind::PlatesetHeader,
+                                               front_lane)]
+                                  .plateset]
+                 .takes[0]
+                 .locked);
+
+  // A search for the set lists its tracks under the row, as a search for a
+  // track's name lists the track.
+  f.search = "chicago";
+  const RowList found = f.build();
+  const std::size_t searched =
+      find(found, Row::Kind::PlatesetHeader, front_lane);
+  ROWS_CHECK(found.rows[find(found, Row::Kind::LaneHeader, left_lane)].parent ==
+             searched);
+  ROWS_CHECK(found.rows[find(found, Row::Kind::LaneHeader, front_lane)]
+                 .parent == searched);
+  ROWS_CHECK(!listed(found, shot_one));
+}
+
+// Open, a plate's track shows its slot alone under the row that names the
+// set. A track sitting between the set's tracks parts the row in two, so
+// the list keeps the stacking order; the row's switch sets every track of
+// its own run that is not there yet.
+void a_take_row_parts_around_a_track_between_its_own() {
+  Fixture f;
+  place_plateset(f);
+  f.state.expanded_platesets = {front_lane};
+  const RowList open = f.build();
+  const Row &left = open.rows[find(open, Row::Kind::LaneHeader, left_lane)];
+  ROWS_CHECK(left.shown_label == "LEFT" && left.short_label == "L");
+  ROWS_CHECK(left.label == "LEFT / Chicago drive");
+  ROWS_CHECK(open.rows[find(open, Row::Kind::LaneHeader, mixed_lane)]
+                 .shown_label.empty());
+
+  for (scene::TimelineLane &lane : f.lanes) {
+    lane.muted = lane.id == left_lane;
+  }
+  const timeline::PlatesetGroup &whole =
+      open.platesets[open.rows[find(open, Row::Kind::PlatesetHeader,
+                                    front_lane)]
+                         .plateset];
+  ROWS_CHECK(timeline::plateset_switch_edits(
+                 whole, f.lanes, editor::TimelineLaneAction::ToggleMute,
+                 true) ==
+             (std::vector<editor::TimelineLaneEdit>{
+                 {editor::TimelineLaneAction::ToggleMute, front_lane, {}}}));
+  ROWS_CHECK(timeline::plateset_switch_edits(
+                 whole, f.lanes, editor::TimelineLaneAction::ToggleMute,
+                 false) ==
+             (std::vector<editor::TimelineLaneEdit>{
+                 {editor::TimelineLaneAction::ToggleMute, left_lane, {}}}));
+
+  constexpr doc::NodeId between{305U};
+  // Lanes arrive in stack order, back first.
+  f.lanes.insert(
+      std::find_if(f.lanes.begin(), f.lanes.end(),
+                   [](const scene::TimelineLane &lane) {
+                     return lane.id == left_lane;
+                   }),
+      scene::TimelineLane{between, scene::SceneId{1U}, 25, "Between", false,
+                          false, scene::BlendMode::Normal, false});
+  f.state.expanded_platesets.clear();
+  const RowList parted = f.build();
+  ROWS_CHECK(parted.platesets.size() == 3U);
+  const std::size_t left_row =
+      find(parted, Row::Kind::PlatesetHeader, left_lane);
+  const std::size_t between_row =
+      find(parted, Row::Kind::LaneHeader, between);
+  const std::size_t front_row =
+      find(parted, Row::Kind::PlatesetHeader, front_lane);
+  ROWS_CHECK(left_row < between_row && between_row < front_row);
+  const timeline::PlatesetGroup &upper =
+      parted.platesets[parted.rows[left_row].plateset];
+  const timeline::PlatesetGroup &lower =
+      parted.platesets[parted.rows[front_row].plateset];
+  ROWS_CHECK(upper.lanes == std::vector<doc::NodeId>{left_lane});
+  ROWS_CHECK(lower.lanes == std::vector<doc::NodeId>{front_lane});
+  ROWS_CHECK(upper.takes.size() == 2U && upper.takes[0].lead == left_plate &&
+             upper.takes[0].clips == std::vector<doc::NodeId>{left_plate});
+  ROWS_CHECK(lower.takes[0].lead == front_plate);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 9U> cases{{
+    {"a take row parts around a track between its own",
+     &a_take_row_parts_around_a_track_between_its_own},
+    {"a placed plateset's tracks fold into one take row",
+     &a_placed_platesets_tracks_fold_into_one_take_row},
     {"clip rows take their own height or every clip row's",
      &clip_rows_take_their_own_height_or_every_clip_rows},
     {"ruler ticks divide whole frames and labels drop a zero hour",

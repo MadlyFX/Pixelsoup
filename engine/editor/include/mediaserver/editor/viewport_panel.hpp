@@ -420,6 +420,23 @@ class ViewportPanel final {
     [[nodiscard]] float resolution_control_width(
         const gui::UiContext& ctx) const noexcept;
     void draw_resolution_control(gui::UiContext& ctx, const gui::Rect& bounds);
+    // The chosen media rendition, and the one drawn: precise work (a mask
+    // selected or the eyedropper armed) shows the source whatever the choice.
+    [[nodiscard]] MediaRendition media() const noexcept { return media_; }
+    void set_media(MediaRendition media) noexcept {
+        if (valid(media)) media_ = media;
+    }
+    void set_precise_work(bool precise) noexcept { precise_work_ = precise; }
+    void set_media_counts(ViewMediaCounts counts) noexcept {
+        media_counts_ = counts;
+    }
+    [[nodiscard]] MediaRendition drawn_media() const noexcept {
+        return precise_work_ ? MediaRendition::Full : media_;
+    }
+    // The media menu: a film icon and what this view decodes.
+    [[nodiscard]] float media_control_width(
+        const gui::UiContext& ctx) const noexcept;
+    void draw_media_control(gui::UiContext& ctx, const gui::Rect& bounds);
     // Surface and vertex snapping for a Move drag: true when it placed the
     // element exactly, so the grid step leaves `delta` alone.
     [[nodiscard]] bool snap_drag(const gui::UiContext& ctx,
@@ -645,6 +662,9 @@ class ViewportPanel final {
     bool swallow_pointer_{};
     bool show_grid_{true};
     PreviewResolution resolution_{PreviewResolution::Full};
+    MediaRendition media_{MediaRendition::Proxy};
+    bool precise_work_{};
+    ViewMediaCounts media_counts_{};
     bool show_overlays_{true};
     bool show_gizmo_{true};
     bool dragging_{};

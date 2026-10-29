@@ -379,6 +379,14 @@ void TimelinePanel::draw_toolbar(Pass &p) {
                0.0F)) {
     playback_overlay_ = !playback_overlay_;
   }
+  if (!p.input.moments.empty() || !moments_visible_) {
+    if (bar_icon("plateset moments", gui::Icon::Moments, moments_visible_,
+                 "Show the moments kept from placed platesets - stops, "
+                 "turns, bumps - where their footage plays them",
+                 0.0F)) {
+      moments_visible_ = !moments_visible_;
+    }
+  }
 
   // Exact In/Out entry, right-aligned before GO, when what is left holds
   // both fields - each wide enough for its caption and the longest value it

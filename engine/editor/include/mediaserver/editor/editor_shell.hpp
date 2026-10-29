@@ -311,6 +311,36 @@ struct ClipSplitIntent final {
   bool operator==(const ClipSplitIntent &) const = default;
 };
 
+// What a plateset placement does with an LED Car Process whose sockets the
+// plates need: the operator's answer when the shell asked.
+enum class PlatesetRigChoice : core::u8 {
+  Auto,
+  Replace,
+  NewRig,
+};
+
+// A Library plateset let go on the Timeline or Stage: a track and clip per
+// plate from `start`, wired into a rig, as one undo step.
+struct PlatesetPlaceIntent final {
+  scene::SceneId scene{};
+  doc::NodeId plateset{};
+  core::i64 start{};
+  PlatesetRigChoice rig{PlatesetRigChoice::Auto};
+  core::u64 gesture{};
+
+  bool operator==(const PlatesetPlaceIntent &) const = default;
+};
+
+// A plateset let go on a placed plate: its take plays the new set instead.
+struct PlatesetSwapIntent final {
+  scene::SceneId scene{};
+  doc::NodeId clip{};
+  doc::NodeId plateset{};
+  core::u64 gesture{};
+
+  bool operator==(const PlatesetSwapIntent &) const = default;
+};
+
 // See TimelineElementFlagEdit. The shell attaches the active scene and one
 // gesture so a run of toggles collapses into a single undo step.
 struct ElementFlagIntent final {
@@ -844,6 +874,8 @@ struct EditorFrame final {
   std::vector<ClipTimingEdit> clip_timings;
   // Clips cut at the playhead this frame.
   std::vector<ClipSplitIntent> clip_splits;
+  std::vector<PlatesetPlaceIntent> plateset_places;
+  std::vector<PlatesetSwapIntent> plateset_swaps;
   // The Timeline edit being dragged, for the Director to evaluate the Stage
   // at its edit point. Reported every frame the drag runs; absent returns
   // the Stage to the playhead. Authors nothing.
@@ -866,6 +898,17 @@ struct EditorFrame final {
   // What the Asset Viewer wants to show on the next frame, while it is on
   // screen with a media asset open. Authors nothing.
   std::optional<AssetViewerRequest> asset_viewer;
+  // What Program and the Stage views decode on the next frame: each view's
+  // media choice, or the source while precise work is under way. Every Stage
+  // view shares one Stage scene, so any view on Full decodes the source.
+  // Authors nothing and never reaches a render node.
+  MediaRendition program_media{MediaRendition::Proxy};
+  MediaRendition stage_media{MediaRendition::Proxy};
+  // The plateset open in the Asset Viewer, so the Director can return its
+  // analysis next frame; and a request to analyse it.
+  std::optional<doc::NodeId> plateset_viewed;
+  std::optional<doc::NodeId> plateset_analyse;
+  PlatesetAnalysisPathway plateset_pathway{PlatesetAnalysisPathway::Sync};
   // Markers and cues created, moved, renamed, or deleted this frame, from the
   // Timeline or the Cue Stack.
   std::vector<TimelineMarkerEditIntent> marker_edits;
@@ -1061,6 +1104,11 @@ public:
         const AssetViewerInput &asset_viewer = {},
         // The scene and compositor edit history for the History strip.
         const HistoryState &history_state = {}) noexcept;
+
+  // What Program's clips and the Stage's clips drew on the Director's last
+  // evaluated frame, for each view's media menu. Kept until set again.
+  void set_view_media_counts(ViewMediaCounts program,
+                             ViewMediaCounts stage) noexcept;
 
   // Applies a Director-validated recall without authoring a command or
   // touching any non-Scene selection domain. Returns false if the scene is no
