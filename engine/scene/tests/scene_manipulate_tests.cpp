@@ -276,6 +276,30 @@ void imported_model_bounds_extend_picking_beyond_the_unit_proxy() {
     MANIP_CHECK(nearest->node == model.source_node);
 }
 
+// A clip playing on a track is a picture on that track's screen, so a press
+// on it picks the track, whose transform is the one that places it. A loose
+// clip stands on its own and is picked itself.
+void a_clip_on_a_track_picks_its_track() {
+    scene::Scene scn{};
+    scn.camera = front_camera();
+    scene::MediaInstance on_track = clip_at(scene::Vec3{0.0F, 0.0F, 0.0F}, 2.0F);
+    on_track.timeline_lane = doc::NodeId{41U};
+    scn.media.push_back(on_track);
+    scene::MediaInstance loose = clip_at(scene::Vec3{3.0F, 0.0F, 0.0F}, 1.0F);
+    loose.source_node = doc::NodeId{8U};
+    scn.media.push_back(loose);
+
+    const auto centre = scene::project_to_canvas(
+        scn.camera, canvas, scene::Vec3{0.0F, 0.0F, 0.0F});
+    const auto hits = scene::pick_scene_all(scn, canvas, centre.x, centre.y);
+    MANIP_CHECK(hits.size() == 1U);
+    MANIP_CHECK(hits.front().node == doc::NodeId{41U});
+    const auto beside = scene::project_to_canvas(
+        scn.camera, canvas, scene::Vec3{3.0F, 0.0F, 0.0F});
+    const auto picked = scene::pick_scene(scn, canvas, beside.x, beside.y);
+    MANIP_CHECK(picked.has_value() && picked->node == doc::NodeId{8U});
+}
+
 void scene_picking_prefers_nearer_geometry_over_farther_geometry() {
     scene::Scene scn{};
     scn.canvas = canvas;
@@ -402,7 +426,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 13U> cases{{
+constexpr std::array<Case, 14U> cases{{
     {"a horizontal drag moves along camera right",
      &a_horizontal_drag_moves_along_camera_right},
     {"a vertical drag moves along camera up",
@@ -420,6 +444,7 @@ constexpr std::array<Case, 13U> cases{{
      &scene_picking_hits_objects_models_and_point_lights},
     {"imported model bounds extend picking beyond the unit proxy",
      &imported_model_bounds_extend_picking_beyond_the_unit_proxy},
+    {"a clip on a track picks its track", &a_clip_on_a_track_picks_its_track},
     {"scene picking prefers nearer geometry over farther geometry",
      &scene_picking_prefers_nearer_geometry_over_farther_geometry},
     {"a directional light has a pickable editor anchor",

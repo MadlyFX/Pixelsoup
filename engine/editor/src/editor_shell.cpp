@@ -1169,44 +1169,17 @@ draw_application_header(gui::UiContext &ui, float width,
     }
     const std::string count =
         std::to_string(live) + " / " + std::to_string(total) + " live";
-    const float text_width = roomy ? std::max(ui.font_width(caption), ui.font_width(count)) : 0.0F;
-    const std::size_t columns = std::max<std::size_t>((std::min<std::size_t>(total, 8U) + 1U) / 2U, 1U);
-    const float leds = 9.0F * static_cast<float>(columns) + 4.0F * static_cast<float>(columns - 1U);
+    const float text_width = std::max(ui.font_width(caption), ui.font_width(count));
     const gui::Rect card = gui::centered(
-        gui::cut_right(right, leds + text_width + (roomy ? 38.0F : 26.0F)),
-        leds + text_width + (roomy ? 38.0F : 26.0F), 46.0F);
+        gui::cut_right(right, text_width + 32.0F), text_width + 32.0F, 46.0F);
     static_cast<void>(gui::cut_right(right, 8.0F));
     const gui::UiId id = gui::ui_id("editor.show-bar.health");
     const gui::Interaction it = ui.grab(id, card);
     ui.cursor_for(it, gui::Cursor::Hand);
     const float hover = ui.ease(id ^ gui::ui_id("hover"), it.hovered ? 1.0F : 0.0F);
     ui.rounded(card, gui::blend(theme.header, theme.widget, hover), 14.0F);
-    // One light per render server, two rows deep.
-    const float led_x = card.x + 13.0F;
-    for (std::size_t index = 0U; index < std::min<std::size_t>(total, 8U); ++index) {
-      const OutputMonitorState::Node &node = outputs.nodes[index];
-      using Status = OutputMonitorState::Node::Status;
-      gui::UiColor color = theme.text_muted;
-      if (node.connection == OutputMonitorState::Node::Connection::Live) {
-        color = node.content_ready() ? theme.good : theme.caution;
-      } else if (node.connection == OutputMonitorState::Node::Connection::CatchingUp ||
-                 node.status == Status::Starting || node.status == Status::Probing) {
-        color = theme.caution;
-      } else if (node.status == Status::Faulted || node.status == Status::Unreachable ||
-                 node.status == Status::ProtocolError || node.output_failed()) {
-        color = theme.warning;
-      }
-      const float cx = led_x + 4.5F + 13.0F * static_cast<float>(index / 2U);
-      const float cy = card.center_y() + (index % 2U == 0U ? -6.5F : 6.5F);
-      draw_status_dot(ui, cx, cy, color, 4.0F);
-    }
-    if (total == 0U) {
-      draw_status_dot(ui, led_x + 4.5F, card.center_y(), theme.text_muted, 4.0F);
-    }
-    if (roomy) {
-      two_lines(gui::Rect{led_x + leds + 12.0F, card.y, text_width + 4.0F, card.height},
-                caption, caption_color, count, theme.text);
-    }
+    two_lines(gui::Rect{card.x + 14.0F, card.y, text_width + 4.0F, card.height},
+              caption, caption_color, count, theme.text);
     ui.tooltip(card, std::string{caption} + ": " + count +
                          ". Click for the Output Monitor");
     actions.show_outputs = it.clicked;
@@ -1701,7 +1674,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   // must still be able to read where the live show is without leaving Preview.
   reading(switcher.rehearsal_mode ? "Preview" : "Program",
           "frame " + std::to_string(timeline.show_frame),
-          ui.theme().accent,
+          std::nullopt,
           ui.theme().text);
   reading("", timeline.playing ? "Playing" : "Paused",
           std::nullopt,
@@ -5525,7 +5498,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         continue;
       }
       timeline_moments.push_back(
-          TimelineMoment{show, moment.name, moment.color, plate.node});
+          TimelineMoment{show, moment.kind, plate.node});
     }
   }
   // The Library's names for the platesets placed plates come from, for the
@@ -6978,6 +6951,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       viewer_input.model = viewed_model != nullptr ? &model_input : nullptr;
       viewer_input.thumbnails = thumbnails;
       viewer_input.dragging_assets = impl.library_dragging;
+      for (const LibraryProxyRuntimeObservation &observation :
+           library_proxy_runtime) {
+        if (observation.asset == impl.asset_viewer_panel.asset()) {
+          viewer_input.editor_proxy = observation.editor_proxy;
+          break;
+        }
+      }
       const doc::NodeId viewed_set = impl.asset_viewer_panel.asset();
       if (asset_viewer.plateset == viewed_set &&
           viewed_set != doc::NodeId{}) {
@@ -9083,6 +9063,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       result.history = HistoryRequest{HistoryAction::Redo,
                                       impl.history_context,
                                       impl.next_edit_gesture++};
+    }
+  }
+  if (global_edit_shortcut_allowed && !result.save_project.has_value() &&
+      ui.key_pressed(gui::Key::Save)) {
+    if (!project.path.empty()) {
+      result.save_project = ProjectFileRequest{std::string{project.path}};
+    } else if (auto path = choose_project_to_save(project.path);
+               path.has_value()) {
+      result.save_project = ProjectFileRequest{std::move(*path)};
     }
   }
   if (global_edit_shortcut_allowed && !delete_consumed &&

@@ -33,6 +33,14 @@ enum class MediaRendition : core::u8 { Proxy, Full };
 struct ViewMediaCounts final {
     core::u32 proxied{};
     core::u32 waiting{};
+    // Of the proxies the waiting clips need, how many frames are made of
+    // how many, each asset counted once.
+    core::u64 waiting_made_frames{};
+    core::u64 waiting_total_frames{};
+    // Every editor proxy in the project, made or not: frames made and in
+    // all. Stage's menu shows it; zero total for a view that does not.
+    core::u64 all_made_frames{};
+    core::u64 all_total_frames{};
 
     bool operator==(const ViewMediaCounts&) const = default;
 };

@@ -106,6 +106,9 @@ namespace {
         if (code == SDLK_D) {
             return Key::Duplicate;
         }
+        if (code == SDLK_S) {
+            return Key::Save;
+        }
         if (code == SDLK_EQUALS || code == SDLK_PLUS || code == SDLK_KP_PLUS) {
             return Key::ZoomIn;
         }

@@ -522,19 +522,26 @@ void moments_and_half_resolution_are_kept_on_the_set() {
     assets::LibraryEdit moments{};
     moments.kind = assets::LibraryEdit::Kind::SetPlatesetMoments;
     moments.target = doc::NodeId{180U};
-    moments.moments = {{412, "Turning right", 4U}, {53, "Stopped", 3U}};
+    moments.moments = {{412, assets::PlatesetMomentKind::TurningRight},
+                       {53, assets::PlatesetMomentKind::IntoShade}};
     root = *assets::plan_library_edit(root, moments);
     const assets::AssetRegistry registry = evaluate(root);
     const assets::PlatesetAsset* take = plateset_in(registry, 180U);
     PLATESET_CHECK(take->moments.size() == 2U);
     PLATESET_CHECK(take->moments[0].frame == 53);
-    PLATESET_CHECK(take->moments[0].name == "Stopped");
-    PLATESET_CHECK(take->moments[1].color == 4U);
+    PLATESET_CHECK(take->moments[0].kind ==
+                   assets::PlatesetMomentKind::IntoShade);
+    PLATESET_CHECK(take->moments[1].kind ==
+                   assets::PlatesetMomentKind::TurningRight);
+    PLATESET_CHECK(std::get<std::string>(
+                       root.get(doc::NodeId{180U})
+                           ->properties.at("moment_1_kind")) ==
+                   "turning_right");
     const core::u64 with_moments = assets::digest(evaluate(root));
     PLATESET_CHECK(with_moments != plain);
 
     // Keeping fewer drops the rest; the numbering has no gaps.
-    moments.moments = {{412, "Turning right", 4U}};
+    moments.moments = {{412, assets::PlatesetMomentKind::TurningRight}};
     root = *assets::plan_library_edit(root, moments);
     PLATESET_CHECK(plateset_in(evaluate(root), 180U)->moments.size() == 1U);
     PLATESET_CHECK(!root.get(doc::NodeId{180U})->properties.contains(

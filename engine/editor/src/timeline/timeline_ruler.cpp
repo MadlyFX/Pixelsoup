@@ -1,5 +1,7 @@
 #include "timeline_internal.hpp"
 
+#include <mediaserver/assets/plateset.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -9,7 +11,8 @@
 // The Timeline's ruler and marker strip. The ruler heads the layer list with
 // search, Auto Key and a new track, reads in timecode or frames, carries the
 // In/Out range bar and scrubs; the strip under it holds markers and cues,
-// which select, drag, rename and convert in place.
+// which select, drag, rename and convert in place, and a band under that
+// the kept plateset moments while they are shown.
 namespace mediaserver::editor {
 using namespace timeline;
 
@@ -20,7 +23,6 @@ void TimelinePanel::draw_ruler(Pass &p) {
   TimelinePanelFrame &frame = p.frame;
   const float &list_width = p.layout.list_width;
   const gui::Rect &ruler = p.layout.ruler;
-  const gui::Rect &strip = p.layout.strip;
   const gui::Rect &rows_bounds = p.layout.rows;
   const gui::Rect &graph = p.layout.graph;
   const auto frame_to_x = [&](double value) noexcept {
@@ -93,7 +95,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
     const bool lit = drag.held || drag.hovered;
     ctx.panel(gui::Rect{graph.x - (lit ? 1.0F : 0.0F), ruler.y,
                         lit ? 2.0F : 1.0F,
-                        ruler.height + strip.height + rows_bounds.height},
+                        rows_bounds.bottom() - ruler.y},
               drag.held ? theme.accent
                         : (drag.hovered ? theme.text_muted : theme.border));
     // A grip at the top of the seam says it moves.
@@ -266,7 +268,7 @@ void TimelinePanel::draw_ruler(Pass &p) {
                gui::cell(graph, ruler));
   if (ruler_it.held) {
     frame.seek_to_frame =
-        rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+        seekable_frame(x_to_frame(ctx.pointer_x()));
   }
 
 }
@@ -381,26 +383,77 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
               status, status_color);
   }
 
-  // Kept plateset moments, under the markers: a tick in the moment's colour
-  // with a small diamond at its foot. They follow their footage, so they
+  // Kept plateset moments, in their own band under the markers: a diamond
+  // in the colour of its kind, which says what it is beside it - in full
+  // where the next moment leaves room, as a tag where it leaves less, and
+  // on hover alone where it leaves none. They follow their footage, so they
   // are read and visited here, never dragged.
-  if (moments_visible_ && !p.input.moments.empty()) {
-    ctx.push_clip(strip_graph);
-    for (std::size_t index = 0U; index < p.input.moments.size(); ++index) {
-      const TimelineMoment &moment = p.input.moments[index];
+  const gui::Rect &moments_band = p.layout.moments;
+  const gui::Rect &moments_graph = p.layout.moments_graph;
+  if (moments_band.height > 0.0F) {
+    ctx.panel(gui::Rect{moments_band.x, moments_band.y, list_width,
+                        moments_band.height},
+              theme.row_alt);
+    ctx.label(gui::Rect{moments_band.x + 8.0F, moments_band.y,
+                        std::max(list_width - 12.0F, 0.0F),
+                        moments_band.height},
+              "Moments", theme.text_muted);
+    ctx.panel(moments_graph, theme.background);
+    ctx.panel(gui::Rect{moments_band.x, moments_band.bottom() - 1.0F,
+                        moments_band.width, 1.0F},
+              theme.divider);
+    const std::span<const TimelineMoment> moments = p.input.moments;
+    std::vector<std::size_t> order(moments.size());
+    for (std::size_t index = 0U; index < order.size(); ++index) {
+      order[index] = index;
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&](std::size_t left, std::size_t right) {
+                       return moments[left].frame < moments[right].frame;
+                     });
+    const float middle = moments_band.y + (moments_band.height - 1.0F) * 0.5F;
+    ctx.push_clip(moments_graph);
+    for (std::size_t place = 0U; place < order.size(); ++place) {
+      const TimelineMoment &moment = moments[order[place]];
       const float x = frame_to_x(static_cast<double>(moment.frame));
-      if (x < strip_graph.x - 4.0F || x > strip_graph.right() + 4.0F) {
+      // Room up to the next moment along that is not on the same frame.
+      float room = moments_graph.right() + 200.0F - x;
+      for (std::size_t later = place + 1U; later < order.size(); ++later) {
+        if (moments[order[later]].frame > moment.frame) {
+          room = frame_to_x(static_cast<double>(moments[order[later]].frame)) -
+                 x;
+          break;
+        }
+      }
+      if (x + room < moments_graph.x || x > moments_graph.right() + 4.0F) {
         continue;
       }
-      const gui::UiColor color = timeline_marker_color(moment.color);
-      ctx.draw_list().add_line(x, strip.y + 3.0F, x, strip.bottom() - 4.0F,
-                               1.0F, alpha(color, 0.7F));
-      const float foot = strip.bottom() - 5.0F;
-      draw_diamond(ctx, x, foot, 3.5F, color);
-      const gui::Rect hit{x - 4.0F, strip.y, 8.0F, strip.height - 1.0F};
+      const gui::UiColor color = plateset_moment_color(moment.kind);
+      ctx.draw_list().add_line(x, moments_band.y + 2.0F, x,
+                               moments_band.bottom() - 3.0F, 1.0F,
+                               alpha(color, 0.5F));
+      draw_diamond(ctx, x, middle, 4.0F, color);
+      const std::string_view name = assets::plateset_moment_label(moment.kind);
+      const std::string_view tag = assets::plateset_moment_tag(moment.kind);
+      const float text_room = room - 15.0F;
+      const std::string_view said =
+          ctx.font_width(name) <= text_room
+              ? name
+              : (ctx.font_width(tag) <= text_room ? tag : std::string_view{});
+      const float said_width = said.empty() ? 0.0F : ctx.font_width(said);
+      if (!said.empty()) {
+        ctx.label(gui::Rect{x + 8.0F, moments_band.y, said_width + 2.0F,
+                            moments_band.height - 1.0F},
+                  said, color);
+      }
+      const gui::Rect hit{x - 5.0F, moments_band.y, said_width + 15.0F,
+                          moments_band.height - 1.0F};
       const gui::Interaction interaction =
-          ctx.grab(mix(id_, "moment", index), hit);
-      ctx.tooltip(hit, moment.name + "  " +
+          ctx.grab(mix(id_, "moment", order[place]), hit);
+      if (interaction.hovered) {
+        ctx.outline(hit, alpha(color, 0.6F));
+      }
+      ctx.tooltip(hit, std::string{name} + "  " +
                            timecode(p, static_cast<core::u64>(std::max<core::i64>(moment.frame, 0))) +
                            "  (click to go there)");
       if (interaction.clicked) {
@@ -501,9 +554,8 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
           } else {
             // A click goes there, so the markers are a way around the show.
             frame.seek_to_frame =
-                std::clamp(static_cast<core::u64>(std::max<core::i64>(
-                               markers[hit->index].frame, 0)),
-                           first, last);
+                static_cast<core::u64>(std::max<core::i64>(
+                               markers[hit->index].frame, 0));
             markers_.click = markers[hit->index].id;
             markers_.click_time = now;
           }
@@ -570,7 +622,7 @@ void TimelinePanel::draw_marker_strip(Pass &p) {
   }
   if (strip_it.held) {
     frame.seek_to_frame =
-        rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+        seekable_frame(x_to_frame(ctx.pointer_x()));
   }
 
   // Draw: loop brackets under everything, then flags and tags.

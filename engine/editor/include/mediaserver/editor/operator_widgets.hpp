@@ -79,6 +79,10 @@ gui::Rect draw_pill(gui::UiContext &ctx, float x, float centre_y,
                     bool filled = true);
 void draw_status_dot(gui::UiContext &ctx, float cx, float cy,
                      gui::UiColor color, float radius = 3.5F);
+// Proxies still being made, on a media control: along its foot, a rounded
+// track that fills, eased, to `fraction` made.
+void draw_proxy_progress(gui::UiContext &ctx, gui::UiId id,
+                         const gui::Rect &control, float fraction);
 void draw_filled_circle(gui::UiContext &ctx, float cx, float cy, float radius,
                         gui::UiColor color);
 

@@ -119,7 +119,7 @@ struct TransportBlend final {
 };
 
 // True when the anchor is self-consistent: a usable rate, a non-degenerate
-// inclusive range, and an anchor position inside it.
+// inclusive range, and - while playing - an anchor position inside it.
 [[nodiscard]] bool valid_transport_anchor(const TransportAnchor& anchor) noexcept;
 
 // The derivation every node performs. Exact integer arithmetic on replicated

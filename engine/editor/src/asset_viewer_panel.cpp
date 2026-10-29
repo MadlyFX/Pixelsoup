@@ -381,9 +381,27 @@ void AssetViewerPanel::draw_header(Pass &p) {
     if (ctx.dropdown(mix(id_, "media"), rect, renditions, selected)) {
       full_resolution_ = selected == 1U;
     }
-    ctx.tooltip(rect, "Proxy plays a UHD asset's 720p proxy once it is "
+    const std::optional<LibraryEditorProxy> &proxy = p.input.editor_proxy;
+    const bool coming =
+        proxy.has_value() &&
+        (proxy->state == LibraryEditorProxyState::Queued ||
+         proxy->state == LibraryEditorProxyState::Making);
+    std::string tip = "Proxy plays a UHD asset's 720p proxy once it is "
                       "ready. Full res always decodes the source, for "
-                      "checking pixels.");
+                      "checking pixels.";
+    if (coming) {
+      tip += " " + library_editor_proxy_status(*proxy) +
+             ": until it is made this plays the source, more slowly. The "
+             "part at the playhead is made first.";
+    } else if (proxy.has_value() &&
+               proxy->state == LibraryEditorProxyState::Failed) {
+      tip += " The proxy failed, so this plays the source.";
+    }
+    ctx.tooltip(rect, tip);
+    if (coming && !full_resolution_) {
+      draw_proxy_progress(ctx, mix(id_, "media-proxy"), rect,
+                         library_editor_proxy_fraction(*proxy));
+    }
   }
   if (p.media != nullptr && bar.room(140.0F)) {
     const gui::Rect actual = bar.place(46.0F, 0.0F);

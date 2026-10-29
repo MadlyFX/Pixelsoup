@@ -138,13 +138,21 @@ struct PlatesetSlotAssignment final {
     bool operator==(const PlatesetSlotAssignment&) const = default;
 };
 
+// What the car did. Its kind is all a moment says: the name it reads by and
+// the colour it is drawn in follow from it, the same on every take.
+enum class PlatesetMomentKind : core::u8 {
+    Stopped,
+    TurningLeft,
+    TurningRight,
+    Bump,
+    IntoShade,
+};
+
 // A moment kept from the front plate - a stop, a turn - at that plate's own
 // source frame, so it stays with the footage wherever the take is placed.
 struct PlatesetMoment final {
     core::i64 frame{};
-    std::string name;
-    // An index into the marker palette.
-    core::u8 color{};
+    PlatesetMomentKind kind{PlatesetMomentKind::Stopped};
 
     bool operator==(const PlatesetMoment&) const = default;
 };

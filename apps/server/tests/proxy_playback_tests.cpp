@@ -16,11 +16,13 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -746,7 +748,34 @@ void view_summaries_count_each_placement_once_and_only_waiting_fallbacks() {
     const app::ViewProxySummary summary = app::summarize_view_proxies(drawn);
     PLAYBACK_CHECK(summary.proxied == 2U);
     PLAYBACK_CHECK(summary.waiting == 3U);
+    PLAYBACK_CHECK(summary.waiting_total_frames == 0U);
     PLAYBACK_CHECK(app::summarize_view_proxies({}) == app::ViewProxySummary{});
+
+    // With progress: each waiting asset's proxy counts once, however many
+    // of its clips wait, and assets not waiting are not asked about.
+    std::vector<doc::NodeId> asked;
+    const app::ProxyProgressLookup progress =
+        [&](doc::NodeId asset)
+        -> std::optional<std::pair<core::u64, core::u64>> {
+        asked.push_back(asset);
+        return std::pair<core::u64, core::u64>{asset.value() - 100U,
+                                               asset.value() * 10U};
+    };
+    std::array<app::ProxyPlacementObservation, 4U> shared{{
+        observed(3U, Selection::Source, Reason::CacheGenerating),
+        observed(4U, Selection::Source, Reason::CacheQueued),
+        observed(9U, Selection::Source, Reason::CacheGenerating),
+        observed(6U, Selection::Source, Reason::SourcePolicy),
+    }};
+    // Placement 9 shows the same asset as placement 3.
+    shared[2U].asset = doc::NodeId{103U};
+    const app::ViewProxySummary made =
+        app::summarize_view_proxies(shared, progress);
+    PLAYBACK_CHECK(made.waiting == 3U);
+    PLAYBACK_CHECK((asked == std::vector<doc::NodeId>{doc::NodeId{103U},
+                                                      doc::NodeId{104U}}));
+    PLAYBACK_CHECK(made.waiting_made_frames == 3U + 4U);
+    PLAYBACK_CHECK(made.waiting_total_frames == 1'030U + 1'040U);
 }
 
 struct Case final {

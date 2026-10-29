@@ -663,7 +663,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         return std::any_of(plateset.moments.begin(), plateset.moments.end(),
                            [&event](const assets::PlatesetMoment &moment) {
                              return moment.frame == event.frame &&
-                                    moment.name == event.name;
+                                    moment.kind == event.kind;
                            });
       };
       const auto keep = [&](std::vector<assets::PlatesetMoment> moments) {
@@ -685,8 +685,7 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         std::vector<assets::PlatesetMoment> moments = plateset.moments;
         for (const PlatesetMotionEvent &event : analysis.events) {
           if (!kept(event)) {
-            moments.push_back(
-                assets::PlatesetMoment{event.frame, event.name, event.color});
+            moments.push_back(assets::PlatesetMoment{event.frame, event.kind});
           }
         }
         keep(std::move(moments));
@@ -710,10 +709,11 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
         }
         draw_status_dot(ctx, event_row.x + 6.0F,
                         event_row.y + event_row.height * 0.5F,
-                        is_kept ? timeline_marker_color(event.color)
+                        is_kept ? plateset_moment_color(event.kind)
                                 : theme.border);
         ctx.label(gui::inset(event_row, gui::Padding{16.0F, 0.0F, 0.0F, 0.0F}),
-                  std::to_string(event.frame) + "   " + event.name,
+                  std::to_string(event.frame) + "   " +
+                      std::string{assets::plateset_moment_label(event.kind)},
                   is_kept || interaction.hovered ? theme.text
                                                  : theme.text_muted);
         ctx.tooltip(event_row, is_kept ? "Kept: click to let it go"
@@ -722,11 +722,10 @@ PlatesetEditorFrame PlatesetEditor::draw(gui::UiContext &ctx,
           std::vector<assets::PlatesetMoment> moments = plateset.moments;
           if (is_kept) {
             std::erase_if(moments, [&event](const assets::PlatesetMoment &m) {
-              return m.frame == event.frame && m.name == event.name;
+              return m.frame == event.frame && m.kind == event.kind;
             });
           } else {
-            moments.push_back(
-                assets::PlatesetMoment{event.frame, event.name, event.color});
+            moments.push_back(assets::PlatesetMoment{event.frame, event.kind});
           }
           keep(std::move(moments));
         }

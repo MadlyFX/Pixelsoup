@@ -191,8 +191,9 @@ void TimelinePanel::draw_toolbar(Pass &p) {
     if (fitted) {
       if (const auto moved = time_field(
               mix(id_, "playhead time"), readout, {}, timeline.show_frame,
-              std::max(last, timeline.show_frame), theme.playhead)) {
-        frame.seek_to_frame = std::clamp(*moved, first, last);
+              std::max(last, timeline.show_frame) + 1'000'000U,
+              theme.playhead)) {
+        frame.seek_to_frame = *moved;
       }
     }
   }

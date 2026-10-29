@@ -43,6 +43,12 @@ AnchorResult TransportAuthority::re_anchor(
             TransportCommandError::ControlFrameRegression);
     }
 
+    // Playing from a playhead parked outside In/Out starts at In.
+    if (state == TransportState::Playing
+        && (position < anchor_.first_frame || anchor_.last_frame < position)) {
+        position = anchor_.first_frame;
+    }
+
     auto updated = anchor_;
     updated.anchor_control_frame = at;
     updated.anchor_show_frame = position;
@@ -329,10 +335,14 @@ AnchorResult TransportAuthority::stop(cmd::FrameNumber at) noexcept {
 AnchorResult TransportAuthority::seek(
     ShowFrame target,
     cmd::FrameNumber at) noexcept {
-    if (target < anchor_.first_frame || anchor_.last_frame < target) {
-        return AnchorResult::failure(TransportCommandError::FrameOutOfRange);
-    }
-    return re_anchor(target, anchor_.state, anchor_.direction, at);
+    // Inside In/Out a seek keeps the state; outside it parks the show paused,
+    // since only a paused or stopped show may rest there.
+    const bool inside = anchor_.first_frame <= target && target <= anchor_.last_frame;
+    const TransportState state =
+        inside || anchor_.state != TransportState::Playing
+        ? anchor_.state
+        : TransportState::Paused;
+    return re_anchor(target, state, anchor_.direction, at);
 }
 
 AnchorResult TransportAuthority::set_direction(
@@ -380,13 +390,16 @@ AnchorResult TransportAuthority::set_range(
             TransportCommandError::InvalidConfiguration);
     }
 
-    // Keep where the show is, clamped into the new bounds.
+    // Keep where the show is. A playing show is clamped into the new bounds;
+    // a paused or stopped one stays put, inside or not.
     ShowFrame position = frame_at(at);
-    if (position < first) {
-        position = first;
-    }
-    if (last < position) {
-        position = last;
+    if (anchor_.state == TransportState::Playing) {
+        if (position < first) {
+            position = first;
+        }
+        if (last < position) {
+            position = last;
+        }
     }
 
     auto updated = anchor_;

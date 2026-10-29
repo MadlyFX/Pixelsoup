@@ -128,6 +128,9 @@ namespace mediaserver::app {
     camera.properties.emplace(
         std::string{scene::schema::scene_id},
         doc::PropertyValue{static_cast<std::int64_t>(scene_id.value())});
+    // A scene's default camera starts locked so a stray drag cannot move it.
+    camera.properties.emplace(std::string{scene::schema::locked},
+                              doc::PropertyValue{true});
     camera.properties.emplace(std::string{scene::schema::position_z},
                               doc::PropertyValue{6.0});
     doc::Root root;

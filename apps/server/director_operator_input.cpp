@@ -919,6 +919,9 @@ PhaseExit DirectorShowLoop::apply_switcher_request(OperatorFrame &op) {
                 std::string{scene::schema::scene_id},
                 doc::PropertyValue{static_cast<std::int64_t>(
                     created_scene.value())});
+            // A scene's default camera starts locked so a stray drag cannot move it.
+            camera.properties.emplace(std::string{scene::schema::locked},
+                                      doc::PropertyValue{true});
             camera.properties.emplace(
                 std::string{scene::schema::position_z},
                 doc::PropertyValue{6.0});
@@ -1063,17 +1066,13 @@ PhaseExit DirectorShowLoop::apply_show_timing_requests(DirectorTick &tick,
     if (pending_seek) {
         // Scrubbing is a paused operation, like the keyboard step
         // and jump commands: pause, then seek to the dragged frame,
-        // clamped to the live show range. The new anchor replicates
+        // which may lie outside In/Out. The new anchor replicates
         // like any other transport change.
         if (transport.state() == show::TransportState::Playing) {
             static_cast<void>(transport.pause(frame));
         }
-        const auto target = std::min(
-            std::max(*pending_seek,
-                     transport.anchor().first_frame.value()),
-            transport.anchor().last_frame.value());
         static_cast<void>(
-            transport.seek(show::ShowFrame{target}, frame));
+            transport.seek(show::ShowFrame{*pending_seek}, frame));
         pending_seek.reset();
     }
     return std::nullopt;

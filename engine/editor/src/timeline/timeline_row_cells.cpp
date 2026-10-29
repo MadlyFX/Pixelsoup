@@ -1219,8 +1219,7 @@ void TimelinePanel::row_key_steps(RowContext &rc) {
     ctx.tooltip(bounds, tooltip);
     if (it.clicked && owner) {
       p.frame.seek_to_frame =
-          std::clamp(static_cast<core::u64>(std::max<core::i64>(*target, 0)),
-                     p.first, p.last);
+          static_cast<core::u64>(std::max<core::i64>(*target, 0));
     }
   };
   step(rc.controls.previous, "previous key", RowPart::PreviousKey, previous,
@@ -2461,8 +2460,6 @@ void TimelinePanel::lane_press(RowContext &rc) {
   const auto x_to_frame = [&](float x) noexcept {
     return time_axis_.frame(x, graph.x);
   };
-  auto &first = p.first;
-  auto &last = p.last;
   const Row &row = rc.row;
   const std::size_t index = rc.index;
   auto &interaction_y = rc.interaction_y;
@@ -2618,7 +2615,7 @@ void TimelinePanel::lane_press(RowContext &rc) {
                                channel, (*component_frames)[owned_item]});
       if (row.locked) {
         frame.seek_to_frame =
-            rounded_frame(x_to_frame(ctx.pointer_x()), first, last);
+            seekable_frame(x_to_frame(ctx.pointer_x()));
       }
     } else {
       press_lane_background(p, row.locked);
@@ -2725,8 +2722,7 @@ void TimelinePanel::press_lane_background(Pass &p, bool locked) {
           gui::UiPoint{keys_.marquee_start_x, keys_.marquee_start_y});
     }
   }
-  frame.seek_to_frame = rounded_frame(time_axis_.frame(ctx.pointer_x(), graph.x),
-                                      p.first, p.last);
+  frame.seek_to_frame = seekable_frame(time_axis_.frame(ctx.pointer_x(), graph.x));
 }
 
 // Holding a press on an empty lane or graph scrubs, unless a key, clip,
@@ -2739,8 +2735,7 @@ void TimelinePanel::scrub_held_lane(Pass &p, const gui::Interaction &lane) {
       clip_.drag == ClipDrag::None && !clip_.press_consumed &&
       reorder_.layer_node == doc::NodeId{} &&
       reorder_.lane_node == doc::NodeId{}) {
-    p.frame.seek_to_frame = rounded_frame(
-        time_axis_.frame(ctx.pointer_x(), graph.x), p.first, p.last);
+    p.frame.seek_to_frame = seekable_frame(time_axis_.frame(ctx.pointer_x(), graph.x));
   }
 }
 

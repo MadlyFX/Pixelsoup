@@ -376,6 +376,70 @@ struct SurfaceHarness final {
     }
 };
 
+// The media menu carries a bar along its foot while proxies are being made:
+// the whole project's, where the Director reports them (Stage), else those
+// the view's waiting clips need, under Proxy. It never lights a dot.
+void the_media_menu_shows_proxies_still_being_made() {
+    const gui::Rect menu{100.0F, 10.0F, 90.0F, 24.0F};
+    struct Drawn final {
+        bool caution{};
+        float filled_to{};
+    };
+    // A fresh panel each time, so the bar's easing starts from nothing.
+    const auto draw = [&](editor::ViewMediaCounts counts,
+                          editor::MediaRendition media) {
+        Harness h;
+        h.panel.set_media_counts(counts);
+        h.panel.set_media(media);
+        h.input.new_frame();
+        h.input.set_mouse_position(-50.0F, -50.0F);
+        h.ctx.new_frame(0.0);
+        h.panel.draw_media_control(h.ctx, menu);
+        const gui::Theme& theme = h.ctx.theme();
+        const auto is = [](const gui::UiVertex& vertex, gui::UiColor color) {
+            return std::abs(vertex.r - color.r) < 0.01F &&
+                   std::abs(vertex.g - color.g) < 0.01F &&
+                   std::abs(vertex.b - color.b) < 0.01F;
+        };
+        Drawn drawn{false, menu.x};
+        for (const gui::UiVertex& vertex : h.list.vertices()) {
+            drawn.caution = drawn.caution || is(vertex, theme.caution);
+            if (is(vertex, theme.accent) && vertex.y >= menu.bottom() - 2.5F) {
+                drawn.filled_to = std::max(drawn.filled_to, vertex.x);
+            }
+        }
+        return drawn;
+    };
+    // The bar runs 8 in from each side of the menu; its rounded fill ends at
+    // the fraction made, give or take its soft, pixel-snapped edge.
+    const auto ends_at = [&](const Drawn& drawn, float fraction) {
+        return std::abs(drawn.filled_to - (108.0F + 74.0F * fraction)) <=
+               1.0F;
+    };
+    using editor::MediaRendition;
+    // Two clips wait on proxies a quarter made.
+    const Drawn waiting =
+        draw(editor::ViewMediaCounts{1U, 2U, 250U, 1'000U},
+             MediaRendition::Proxy);
+    UI_CHECK(!waiting.caution);
+    UI_CHECK(ends_at(waiting, 0.25F));
+    // The project's proxies, 60% made, win over the waiting clips', and
+    // show under Full res too.
+    const Drawn project =
+        draw(editor::ViewMediaCounts{1U, 2U, 250U, 1'000U, 600U, 1'000U},
+             MediaRendition::Full);
+    UI_CHECK(!project.caution);
+    UI_CHECK(ends_at(project, 0.6F));
+    // Nothing waiting and every proxy made: no bar.
+    const Drawn made = draw(editor::ViewMediaCounts{3U, 0U, 0U, 0U, 900U, 900U},
+                            MediaRendition::Proxy);
+    UI_CHECK(made.filled_to == menu.x);
+    // Waiting clips under Full res, with no project totals: no bar.
+    const Drawn full = draw(editor::ViewMediaCounts{0U, 2U, 250U, 1'000U},
+                            MediaRendition::Full);
+    UI_CHECK(full.filled_to == menu.x);
+}
+
 void the_render_is_letterboxed_to_the_canvas_aspect() {
     Harness h;
     const editor::ViewportFrame frame = h.frame(0.0F, 0.0F, false);
@@ -2890,7 +2954,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 70U> cases{{
+constexpr std::array<Case, 71U> cases{{
     {"a full scatter group has one bounded selection outline",
      &a_full_scatter_group_has_one_bounded_selection_outline},
     {"stage orbit preserves authored exposure", &stage_orbit_preserves_authored_exposure},
@@ -2958,6 +3022,8 @@ constexpr std::array<Case, 70U> cases{{
      &the_image_is_recorded_against_its_own_texture},
     {"clicking a procedural object selects it",
      &clicking_a_procedural_object_selects_it},
+    {"the media menu shows proxies still being made",
+     &the_media_menu_shows_proxies_still_being_made},
     {"a selected object draws a cyan outline over the render",
      &a_selected_object_draws_a_cyan_outline_over_the_render},
     {"imported model bounds drive picking and the selected outline",

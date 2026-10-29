@@ -3294,13 +3294,44 @@ void ViewportPanel::draw_media_control(gui::UiContext& ctx,
         }
         if (media_counts_.waiting > 0U) {
             tip += " " + clips(media_counts_.waiting) +
-                   " on the source until " +
+                   " on the source, which plays more slowly, until " +
                    (media_counts_.waiting == 1U ? "its proxy is"
                                                 : "their proxies are") +
-                   " ready.";
+                   " made";
+            if (media_counts_.waiting_total_frames > 0U) {
+                const auto percent = std::min<core::u64>(
+                    99U, media_counts_.waiting_made_frames * 100U /
+                             media_counts_.waiting_total_frames);
+                tip += " (" + std::to_string(percent) + "% so far)";
+            }
+            tip += ". The part at the playhead is made first.";
         }
     }
+    // The project's editor proxies still being made, whatever this view
+    // plays: how soon Proxy will play every clip from a proxy.
+    const bool all_coming =
+        media_counts_.all_made_frames < media_counts_.all_total_frames;
+    if (all_coming) {
+        const auto percent = std::min<core::u64>(
+            99U, media_counts_.all_made_frames * 100U /
+                     media_counts_.all_total_frames);
+        tip += " The project's editor proxies are " +
+               std::to_string(percent) + "% made.";
+    }
     ctx.tooltip(bounds, tip);
+    if (all_coming) {
+        draw_proxy_progress(
+            ctx, mix(id_, 26U), bounds,
+            static_cast<float>(media_counts_.all_made_frames) /
+                static_cast<float>(media_counts_.all_total_frames));
+    } else if (drawn == MediaRendition::Proxy && media_counts_.waiting > 0U) {
+        draw_proxy_progress(
+            ctx, mix(id_, 26U), bounds,
+            media_counts_.waiting_total_frames == 0U
+                ? 0.0F
+                : static_cast<float>(media_counts_.waiting_made_frames) /
+                      static_cast<float>(media_counts_.waiting_total_frames));
+    }
     std::array<bool, 2U> current{};
     current[static_cast<std::size_t>(media_)] = true;
     if (const auto chosen = ctx.context_menu(menu, media_names, current)) {

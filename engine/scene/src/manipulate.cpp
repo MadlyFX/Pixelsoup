@@ -482,7 +482,12 @@ pick_all(const Scene& scene, float canvas_x, float canvas_y,
         if (clip.locked) {
             continue;
         }
-        consider(clip.source_node, translation_of(clip.world),
+        // A clip on a track is a picture playing on that track's screen: the
+        // screen is what stands there and what a drag moves, so it is what
+        // a press picks. The clip's own transform is never read there.
+        consider(clip.timeline_lane != doc::NodeId{} ? clip.timeline_lane
+                                                     : clip.source_node,
+                 translation_of(clip.world),
                  projected_mesh_hit(projector, clip.world,
                                     Primitive::Quad, canvas_x, canvas_y, near));
     }

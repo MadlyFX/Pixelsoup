@@ -17,6 +17,7 @@ namespace {
 namespace app = mediaserver::app;
 namespace assets = mediaserver::assets;
 namespace core = mediaserver::core;
+using Kind = assets::PlatesetMomentKind;
 
 void check(bool condition, const char *expression, int line) {
   if (!condition) {
@@ -77,7 +78,7 @@ void a_broken_stop_is_one_stop() {
       app::detect_motion_events(camera(world, 0U, 900U));
   MOTION_CHECK(std::count_if(events.begin(), events.end(),
                              [](const app::MotionEvent &event) {
-                               return event.name == "Stopped";
+                               return event.kind == Kind::Stopped;
                              }) == 1);
 }
 
@@ -160,11 +161,10 @@ void a_plate_that_shares_nothing_is_not_trusted() {
 }
 
 [[nodiscard]] bool has_event(const std::vector<app::MotionEvent> &events,
-                             const std::string &name, core::i64 from,
-                             core::i64 to) {
+                             Kind kind, core::i64 from, core::i64 to) {
   return std::any_of(events.begin(), events.end(),
                      [&](const app::MotionEvent &event) {
-                       return event.name == name && event.frame >= from &&
+                       return event.kind == kind && event.frame >= from &&
                               event.frame <= to;
                      });
 }
@@ -186,14 +186,15 @@ void the_front_plate_says_what_the_car_did() {
   }
   const std::vector<app::MotionEvent> events =
       app::detect_motion_events(camera(world, 0U, 900U));
-  MOTION_CHECK(has_event(events, "Stopped", 98, 106));
-  MOTION_CHECK(has_event(events, "Turning right", 195, 206));
-  MOTION_CHECK(has_event(events, "Turning left", 495, 506));
-  MOTION_CHECK(has_event(events, "Into shade", 298, 304));
-  MOTION_CHECK(has_event(events, "Bump", 36, 40));
+  MOTION_CHECK(has_event(events, Kind::Stopped, 98, 106));
+  MOTION_CHECK(has_event(events, Kind::TurningRight, 195, 206));
+  MOTION_CHECK(has_event(events, Kind::TurningLeft, 495, 506));
+  MOTION_CHECK(has_event(events, Kind::IntoShade, 298, 304));
+  MOTION_CHECK(has_event(events, Kind::Bump, 36, 40));
   // Bumps are at most one a second; nothing is reported twice in a row.
   for (std::size_t i = 1U; i < events.size(); ++i) {
-    MOTION_CHECK(!(events[i].name == "Bump" && events[i - 1U].name == "Bump" &&
+    MOTION_CHECK(!(events[i].kind == Kind::Bump &&
+                   events[i - 1U].kind == Kind::Bump &&
                    events[i].frame - events[i - 1U].frame <= 24));
   }
   MOTION_CHECK(std::is_sorted(events.begin(), events.end(),

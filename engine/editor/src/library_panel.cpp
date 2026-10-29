@@ -841,6 +841,36 @@ std::optional<LibraryImportAction> library_import_kind(std::string_view path) {
   return std::nullopt;
 }
 
+float library_editor_proxy_fraction(const LibraryEditorProxy &proxy) noexcept {
+  if (proxy.state == LibraryEditorProxyState::Ready) {
+    return 1.0F;
+  }
+  if (proxy.total_frames == 0U) {
+    return 0.0F;
+  }
+  return std::clamp(static_cast<float>(proxy.made_frames) /
+                        static_cast<float>(proxy.total_frames),
+                    0.0F, 1.0F);
+}
+
+std::string library_editor_proxy_status(const LibraryEditorProxy &proxy) {
+  switch (proxy.state) {
+  case LibraryEditorProxyState::Queued:
+    return "Editor proxy queued";
+  case LibraryEditorProxyState::Making: {
+    // Rounded down, so 100% means made.
+    const int percent = std::min(
+        99, static_cast<int>(library_editor_proxy_fraction(proxy) * 100.0F));
+    return "Editor proxy " + std::to_string(percent) + "%";
+  }
+  case LibraryEditorProxyState::Ready:
+    return "Editor proxy ready";
+  case LibraryEditorProxyState::Failed:
+    return "Editor proxy failed";
+  }
+  return {};
+}
+
 std::string library_proxy_runtime_status(
     const LibraryProxyRuntimeObservation &observation) {
   if (observation.transcode_progress.has_value()) {
@@ -1676,6 +1706,10 @@ LibraryFrame LibraryPanel::draw_impl(
     if (is_changed(assets::asset_id(asset))) {
       append("SOURCE CHANGED");
     }
+    // Ahead of the rest: it says when this clip will play faster.
+    if (runtime.proxy != nullptr && runtime.proxy->editor_proxy.has_value()) {
+      append(library_editor_proxy_status(*runtime.proxy->editor_proxy));
+    }
     if (thumbnails_enabled &&
         assets::asset_kind(asset) == assets::AssetKind::Media &&
         assets::asset_fingerprint(asset).has_value()) {
@@ -1704,7 +1738,16 @@ LibraryFrame LibraryPanel::draw_impl(
       return changed_color;
     }
     if (runtime.proxy != nullptr) {
-      return runtime.proxy->transcode_progress.has_value()
+      const auto &editor_proxy = runtime.proxy->editor_proxy;
+      if (editor_proxy.has_value() &&
+          editor_proxy->state == LibraryEditorProxyState::Failed) {
+        return theme.caution;
+      }
+      const bool making =
+          editor_proxy.has_value() &&
+          (editor_proxy->state == LibraryEditorProxyState::Queued ||
+           editor_proxy->state == LibraryEditorProxyState::Making);
+      return runtime.proxy->transcode_progress.has_value() || making
                  ? theme.accent
                  : library_proxy_runtime_color(ctx, runtime.proxy->state);
     }
@@ -2153,8 +2196,44 @@ LibraryFrame LibraryPanel::draw_impl(
                               row.height},
                     fit(ctx, status, cell.right() - status_x),
                     status_color(*entry.asset, thumbnail, runtime));
-          if (!status.empty()) {
+          const std::optional<LibraryEditorProxy> editor_proxy =
+              runtime.proxy != nullptr ? runtime.proxy->editor_proxy
+                                       : std::nullopt;
+          const bool editor_proxy_coming =
+              editor_proxy.has_value() &&
+              (editor_proxy->state == LibraryEditorProxyState::Queued ||
+               editor_proxy->state == LibraryEditorProxyState::Making);
+          if (editor_proxy_coming) {
+            ctx.tooltip(cell,
+                        status + "\nStage, Program and the Asset Viewer play "
+                                 "this clip's source, more slowly, until its "
+                                 "720p proxy is made. Each ten seconds of it "
+                                 "plays as soon as it is made, starting at "
+                                 "the playhead.");
+          } else if (editor_proxy.has_value() &&
+                     editor_proxy->state == LibraryEditorProxyState::Failed) {
+            ctx.tooltip(cell, status + "\nThe editor plays this clip's "
+                                       "source. The Director's console log "
+                                       "says why its proxy failed.");
+          } else if (!status.empty()) {
             ctx.tooltip(cell, status);
+          }
+          if (editor_proxy_coming &&
+              (runtime.proxy == nullptr ||
+               !runtime.proxy->transcode_progress.has_value())) {
+            // The editor proxy fills in as segments are made, eased so a
+            // finished segment glides rather than jumps.
+            const gui::Rect track{cell.x, row.bottom() - 4.0F, cell.width,
+                                  3.0F};
+            ctx.rounded(track, scale(theme.track, 0.78F), 1.5F);
+            const float filled =
+                ctx.ease(mix(row_id, "editor-proxy"),
+                         library_editor_proxy_fraction(*editor_proxy));
+            if (filled > 0.0F) {
+              ctx.rounded(gui::Rect{track.x, track.y, track.width * filled,
+                                    track.height},
+                          theme.accent, 1.5F);
+            }
           }
           if (runtime.proxy != nullptr &&
               runtime.proxy->transcode_progress.has_value()) {

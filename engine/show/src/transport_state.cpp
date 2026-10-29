@@ -139,8 +139,11 @@ bool valid_transport_anchor(const TransportAnchor& anchor) noexcept {
             == std::numeric_limits<core::u64>::max()) {
         return false;
     }
-    if (anchor.anchor_show_frame < anchor.first_frame
-        || anchor.last_frame < anchor.anchor_show_frame) {
+    // A playing show runs inside In/Out; a paused or stopped one may rest
+    // anywhere, so the operator can park the playhead past Out to move it.
+    if (anchor.state == TransportState::Playing
+        && (anchor.anchor_show_frame < anchor.first_frame
+            || anchor.last_frame < anchor.anchor_show_frame)) {
         return false;
     }
     // The frame a crossfade leaves has to exist for as long as it is shown.
@@ -157,7 +160,8 @@ bool valid_transport_anchor(const TransportAnchor& anchor) noexcept {
     // round trip is refused at the authoring boundary rather than read back
     // as a different position.
     return anchor.anchor_control_frame.value() <= max_document_integer
-        && anchor.last_frame.value() <= max_document_integer;
+        && anchor.last_frame.value() <= max_document_integer
+        && anchor.anchor_show_frame.value() <= max_document_integer;
 }
 
 std::optional<TransportAnchor> presented_anchor(

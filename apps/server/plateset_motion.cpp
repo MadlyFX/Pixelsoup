@@ -341,9 +341,9 @@ std::vector<MotionEvent> detect_motion_events(const MotionSignature &front) {
        })) {
     events.push_back(MotionEvent{
         static_cast<core::i64>(first),
-        turning[(first + last) / 2U] < 0.0F ? "Turning right"
-                                            : "Turning left",
-        4U});
+        turning[(first + last) / 2U] < 0.0F
+            ? assets::PlatesetMomentKind::TurningRight
+            : assets::PlatesetMomentKind::TurningLeft});
   }
 
   // Stops: a second or more of a picture that barely changes, against how
@@ -359,8 +359,8 @@ std::vector<MotionEvent> detect_motion_events(const MotionSignature &front) {
            return settled[i] < 0.35F * typical;
          })) {
       if (!stop_end.has_value() || first - *stop_end > pause) {
-        events.push_back(
-            MotionEvent{static_cast<core::i64>(first), "Stopped", 3U});
+        events.push_back(MotionEvent{static_cast<core::i64>(first),
+                                     assets::PlatesetMomentKind::Stopped});
       }
       stop_end = last;
     }
@@ -378,7 +378,8 @@ std::vector<MotionEvent> detect_motion_events(const MotionSignature &front) {
   for (std::size_t i = 1U; i < count; ++i) {
     if (std::fabs(jolt[i]) > bump_threshold &&
         (!last_bump.has_value() || i - *last_bump > second)) {
-      events.push_back(MotionEvent{static_cast<core::i64>(i), "Bump", 1U});
+      events.push_back(MotionEvent{static_cast<core::i64>(i),
+                                   assets::PlatesetMomentKind::Bump});
       last_bump = i;
     }
   }
@@ -393,8 +394,8 @@ std::vector<MotionEvent> detect_motion_events(const MotionSignature &front) {
            return light[i] < 0.7F * usual;
          })) {
       static_cast<void>(last);
-      events.push_back(
-          MotionEvent{static_cast<core::i64>(first), "Into shade", 5U});
+      events.push_back(MotionEvent{static_cast<core::i64>(first),
+                                   assets::PlatesetMomentKind::IntoShade});
     }
   }
 

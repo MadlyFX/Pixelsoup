@@ -94,6 +94,8 @@ struct AssetViewerDrawInput final {
   std::span<const LibraryThumbnailObservation> thumbnails;
   bool dragging_assets{};
   const PlatesetAnalysisView *plateset_analysis{};
+  // The open asset's editor proxy; empty when it plays from its source.
+  std::optional<LibraryEditorProxy> editor_proxy;
 };
 
 struct AssetViewerFrame final {
