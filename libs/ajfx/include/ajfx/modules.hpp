@@ -1,0 +1,386 @@
+#pragma once
+
+#include <ajfx/math.hpp>
+#include <ajfx/parameters.hpp>
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+// The built-in modules. An emitter runs three stacks of them every simulation
+// step: spawn modules decide how many particles are born, init modules set up
+// each newborn, and update modules act on every live particle.
+//
+// Every module describes its fields once, in `fields`, and the package format,
+// validation and parameter binding are all written against that list. Adding
+// a field to a module is one line there.
+//
+// `id` names the module instance within its emitter. Random streams are keyed
+// by it, so inserting or reordering modules leaves every other module's random
+// values where they were. The builder assigns ids; an editor keeps them stable.
+namespace ajfx {
+
+using ModuleId = std::uint32_t;
+
+// ---------------------------------------------------------------- spawn
+
+// Continuous emission. Births are spread across the step at their exact times,
+// so emission is smooth whatever the simulation rate.
+struct SpawnRate final {
+    static constexpr std::string_view kind = "spawn_rate";
+    ModuleId id{};
+    FloatInput rate{10.0F}; // particles per second
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("rate", self.rate);
+    }
+    friend bool operator==(const SpawnRate&, const SpawnRate&) = default;
+};
+
+// `count` particles at `time` seconds, repeated every `interval` seconds
+// `cycles` times. An interval of 0 is a single burst; 0 cycles with a
+// non-zero interval repeats for ever.
+struct SpawnBurst final {
+    static constexpr std::string_view kind = "spawn_burst";
+    ModuleId id{};
+    float time{0.0F};
+    std::uint32_t count{10U};
+    float interval{0.0F};
+    std::uint32_t cycles{1U};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("time", self.time);
+        visit("count", self.count);
+        visit("interval", self.interval);
+        visit("cycles", self.cycles);
+    }
+    friend bool operator==(const SpawnBurst&, const SpawnBurst&) = default;
+};
+
+using SpawnModule = std::variant<SpawnRate, SpawnBurst>;
+
+// ---------------------------------------------------------------- init
+
+// Seconds, uniformly between min and max. Required on any emitter that spawns.
+struct Lifetime final {
+    static constexpr std::string_view kind = "lifetime";
+    ModuleId id{};
+    FloatInput min{1.0F};
+    FloatInput max{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("min", self.min);
+        visit("max", self.max);
+    }
+    friend bool operator==(const Lifetime&, const Lifetime&) = default;
+};
+
+enum class Shape {
+    Point,
+    Sphere,
+    Box,
+    Disc, // in the XZ plane
+};
+
+struct ShapeLocation final {
+    static constexpr std::string_view kind = "shape_location";
+    ModuleId id{};
+    Shape shape{Shape::Sphere};
+    Vec3Input center{};
+    FloatInput radius{1.0F};        // sphere and disc
+    Vec3 size{1.0F, 1.0F, 1.0F};    // box
+    bool surface_only{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("shape", self.shape);
+        visit("center", self.center);
+        visit("radius", self.radius);
+        visit("size", self.size);
+        visit("surface_only", self.surface_only);
+    }
+    friend bool operator==(const ShapeLocation&, const ShapeLocation&) = default;
+};
+
+// Speed between min and max along a direction, scattered uniformly within a
+// cone of `spread` degrees half-angle (180 is every direction).
+struct Velocity final {
+    static constexpr std::string_view kind = "velocity";
+    ModuleId id{};
+    Vec3Input direction{Vec3{0.0F, 1.0F, 0.0F}};
+    FloatInput speed_min{1.0F};
+    FloatInput speed_max{1.0F};
+    FloatInput spread{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("direction", self.direction);
+        visit("speed_min", self.speed_min);
+        visit("speed_max", self.speed_max);
+        visit("spread", self.spread);
+    }
+    friend bool operator==(const Velocity&, const Velocity&) = default;
+};
+
+// A colour between a and b. Colour-over-life multiplies this.
+struct InitColor final {
+    static constexpr std::string_view kind = "color";
+    ModuleId id{};
+    ColorInput a{};
+    ColorInput b{};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("a", self.a);
+        visit("b", self.b);
+    }
+    friend bool operator==(const InitColor&, const InitColor&) = default;
+};
+
+// World-space sprite size. Size-over-life multiplies this.
+struct InitSize final {
+    static constexpr std::string_view kind = "size";
+    ModuleId id{};
+    FloatInput min{0.1F};
+    FloatInput max{0.1F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("min", self.min);
+        visit("max", self.max);
+    }
+    friend bool operator==(const InitSize&, const InitSize&) = default;
+};
+
+// Sprite rotation, degrees.
+struct InitRotation final {
+    static constexpr std::string_view kind = "rotation";
+    ModuleId id{};
+    FloatInput min{0.0F};
+    FloatInput max{360.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("min", self.min);
+        visit("max", self.max);
+    }
+    friend bool operator==(const InitRotation&, const InitRotation&) = default;
+};
+
+using InitModule = std::variant<Lifetime, ShapeLocation, Velocity, InitColor, InitSize, InitRotation>;
+
+// ---------------------------------------------------------------- update
+//
+// Forces (gravity, drag, curl noise, vortex, attractor) change velocity and
+// run first, in stack order. Position is then integrated. Constraints and
+// appearance (plane collision, colour and size over life) run after, in stack
+// order.
+
+struct Gravity final {
+    static constexpr std::string_view kind = "gravity";
+    ModuleId id{};
+    Vec3Input acceleration{Vec3{0.0F, -9.81F, 0.0F}};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("acceleration", self.acceleration);
+    }
+    friend bool operator==(const Gravity&, const Gravity&) = default;
+};
+
+// Velocity loses `coefficient` of itself per second (exactly: it is divided
+// by 1 + coefficient * dt each step, which is stable at any coefficient).
+struct Drag final {
+    static constexpr std::string_view kind = "drag";
+    ModuleId id{};
+    FloatInput coefficient{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("coefficient", self.coefficient);
+    }
+    friend bool operator==(const Drag&, const Drag&) = default;
+};
+
+// Divergence-free turbulence: swirls without bunching particles together.
+// `frequency` is in cycles per world unit; `evolution` scrolls the field
+// through time in units per second.
+struct CurlNoise final {
+    static constexpr std::string_view kind = "curl_noise";
+    ModuleId id{};
+    FloatInput strength{1.0F};
+    FloatInput frequency{1.0F};
+    FloatInput evolution{0.0F};
+    std::uint32_t seed{0U};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("strength", self.strength);
+        visit("frequency", self.frequency);
+        visit("evolution", self.evolution);
+        visit("seed", self.seed);
+    }
+    friend bool operator==(const CurlNoise&, const CurlNoise&) = default;
+};
+
+// Acceleration around an axis through `center`, counter-clockwise looking
+// down the axis for positive strength.
+struct Vortex final {
+    static constexpr std::string_view kind = "vortex";
+    ModuleId id{};
+    Vec3Input center{};
+    Vec3Input axis{Vec3{0.0F, 1.0F, 0.0F}};
+    FloatInput strength{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("center", self.center);
+        visit("axis", self.axis);
+        visit("strength", self.strength);
+    }
+    friend bool operator==(const Vortex&, const Vortex&) = default;
+};
+
+// Acceleration towards `position` (away from it for negative strength),
+// fading linearly to nothing at `radius`; a radius of 0 never fades.
+struct Attractor final {
+    static constexpr std::string_view kind = "attractor";
+    ModuleId id{};
+    Vec3Input position{};
+    FloatInput strength{1.0F};
+    FloatInput radius{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("position", self.position);
+        visit("strength", self.strength);
+        visit("radius", self.radius);
+    }
+    friend bool operator==(const Attractor&, const Attractor&) = default;
+};
+
+// The plane is every point p with dot(normal, p) == offset; particles are kept
+// on the side the normal points to. Restitution scales the bounce, friction
+// takes that fraction off the sliding velocity, and `kill` removes particles
+// that cross instead.
+struct PlaneCollision final {
+    static constexpr std::string_view kind = "plane_collision";
+    ModuleId id{};
+    Vec3 normal{0.0F, 1.0F, 0.0F};
+    float offset{0.0F};
+    FloatInput restitution{0.5F};
+    FloatInput friction{0.0F};
+    bool kill{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("normal", self.normal);
+        visit("offset", self.offset);
+        visit("restitution", self.restitution);
+        visit("friction", self.friction);
+        visit("kill", self.kill);
+    }
+    friend bool operator==(const PlaneCollision&, const PlaneCollision&) = default;
+};
+
+// A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
+// values are linear between keys and held beyond the ends.
+struct ColorKey final {
+    float t{};
+    Color value{};
+    friend bool operator==(const ColorKey&, const ColorKey&) = default;
+};
+
+struct CurveKey final {
+    float t{};
+    float value{};
+    friend bool operator==(const CurveKey&, const CurveKey&) = default;
+};
+
+struct ColorOverLife final {
+    static constexpr std::string_view kind = "color_over_life";
+    ModuleId id{};
+    std::vector<ColorKey> keys{{0.0F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("keys", self.keys);
+    }
+    friend bool operator==(const ColorOverLife&, const ColorOverLife&) = default;
+};
+
+struct SizeOverLife final {
+    static constexpr std::string_view kind = "size_over_life";
+    ModuleId id{};
+    std::vector<CurveKey> keys{{0.0F, 1.0F}, {1.0F, 1.0F}};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("keys", self.keys);
+    }
+    friend bool operator==(const SizeOverLife&, const SizeOverLife&) = default;
+};
+
+using UpdateModule =
+    std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, ColorOverLife, SizeOverLife>;
+
+// ---------------------------------------------------------------- render
+
+enum class BlendMode {
+    Alpha,
+    Additive,
+    Premultiplied,
+};
+
+enum class Facing {
+    Camera,
+    Velocity,
+};
+
+// How a host should draw the emitter's particles. The CPU reference only
+// carries this; drawing arrives with the GPU runtime.
+struct SpriteRenderer final {
+    static constexpr std::string_view kind = "sprite";
+    BlendMode blend{BlendMode::Alpha};
+    Facing facing{Facing::Camera};
+    // A texture entry in the effect package; empty draws a soft disc.
+    std::string texture;
+    std::uint32_t flipbook_columns{1U};
+    std::uint32_t flipbook_rows{1U};
+    bool sort{true};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("blend", self.blend);
+        visit("facing", self.facing);
+        visit("texture", self.texture);
+        visit("flipbook_columns", self.flipbook_columns);
+        visit("flipbook_rows", self.flipbook_rows);
+        visit("sort", self.sort);
+    }
+    friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
+};
+
+// Names for enum fields, as they appear in packages.
+template <class E>
+struct EnumNames;
+
+template <>
+struct EnumNames<Shape> {
+    static constexpr std::string_view names[] = {"point", "sphere", "box", "disc"};
+};
+template <>
+struct EnumNames<BlendMode> {
+    static constexpr std::string_view names[] = {"alpha", "additive", "premultiplied"};
+};
+template <>
+struct EnumNames<Facing> {
+    static constexpr std::string_view names[] = {"camera", "velocity"};
+};
+
+} // namespace ajfx

@@ -51,6 +51,12 @@ function(ajfx_set_options target)
 endfunction()
 
 add_library(ajfx STATIC
+    src/builder.cpp
+    src/effect.cpp
+    src/json.cpp
+    src/package.cpp
+    src/presets.cpp
+    src/simulation.cpp
     src/version.cpp
 )
 add_library(ajfx::ajfx ALIAS ajfx)
@@ -76,4 +82,12 @@ if(BUILD_TESTING)
         AJFX_SHADER_INCLUDE_DIR="${AJFX_SHADER_INCLUDE_DIR}")
     add_test(NAME ajfx.random COMMAND ajfx_random_tests)
     set_target_properties(ajfx_random_tests PROPERTIES FOLDER "tests")
+
+    foreach(suite IN ITEMS effect package simulation)
+        add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
+        target_link_libraries(ajfx_${suite}_tests PRIVATE ajfx::ajfx)
+        ajfx_set_options(ajfx_${suite}_tests)
+        add_test(NAME ajfx.${suite} COMMAND ajfx_${suite}_tests)
+        set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
+    endforeach()
 endif()

@@ -846,14 +846,35 @@ playback would have shown.
 
 ### Deliverable
 
-`libs/ajfx`, a GPU particle and volume library with no media server
-dependencies, so it can be published on its own once its API settles.
-Effects are stacks of typed modules authored with presets, a C++ builder API
-or an effect file. Custom modules are HLSL snippets fused into each emitter's
-kernel. The library defines a small GPU backend interface and can instead hand
-a host the passes to record into its own render graph; the media server
-adapts its RHI that way. D3D12 and Vulkan reference backends ship with the
-library.
+Three pieces with one file format between them. The media server plays
+effects; it does not author them.
+
+- **`libs/ajfx` runtime**: a GPU particle and volume library with no media
+  server dependencies, published on its own once its API settles. It loads
+  effect packages, simulates and renders them. Effects are stacks of typed
+  modules; custom modules are HLSL snippets fused into each emitter's kernel.
+  A C++ builder API builds the same model in code, for tests, presets and
+  engine programmers. The library defines a small GPU backend interface and
+  can instead hand a host the passes to record into its own render graph; the
+  media server adapts its RHI that way. D3D12 and Vulkan reference backends
+  ship with the library.
+- **`.ajfx` effect package**: a versioned, self-contained file holding the
+  emitters and module stacks, the textures and meshes they use, the effect's
+  published parameters (name, type, range, default) and kernels precompiled
+  with the pinned DXC for each backend, with HLSL source as the fallback.
+  Precompiled kernels keep shader compilation off the media server's load and
+  frame paths and give every node identical bytecode. A package is identified
+  by content hash, so it is an ordinary asset with a digest.
+- **ajfx Studio**: a separate authoring application built on the same runtime,
+  with no media server dependency: module stack and parameter editing, a
+  scrubbable preview that matches playback exactly because the simulation is
+  deterministic, budget and GPU cost readouts, and export to `.ajfx`. A
+  node-graph view can sit on the module model later.
+
+In the media server an effect is a library asset. Operators place instances,
+set and animate the effect's published parameters in the Inspector, and the
+Director adopts a changed package on a background worker, so an artist can
+iterate in Studio while the stage plays.
 
 Determinism rules: randomness is an integer hash of `(emitter seed, spawn
 index, stream)`; fixed simulation step; live lists compacted by prefix sum,
@@ -865,25 +886,36 @@ feedback forces evaluate any frame directly.
 
 0. Skeleton: standalone CMake project, `area-particles` test area,
    deterministic hash with an HLSL twin. Done.
-1. Effect model, attributes, about a dozen built-in modules, builder API,
-   effect file format and a CPU reference simulator. Tests: bit-identical
-   reruns, seek equivalence, budget refusal.
+1. Effect model, attributes, fifteen built-in modules, builder API, presets,
+   published parameters, the `.ajfx` package format (read and write, version
+   checked, refused with a reason when unsupported) and a CPU reference
+   simulator with checkpointed seeking. Tests: bit-identical reruns, seek
+   equivalence, budget refusal, package round trip. Done.
 2. GPU runtime on the D3D12 reference backend: kernel fusion, pools, prefix-sum
    compaction, indirect arguments, sprites and a sample app. Tests: CPU/GPU
    parity and bit-identical GPU reruns.
 3. RHI: writable storage buffers in compute and indirect dispatch/draw (shared
    with the GPU-driven culling item above).
-4. Integration: RHI adapter pass in `engine/render`, a `scene.particle_effect`
-   node that is normalized, replicated and digested, show-frame driving,
-   seeking and editor placement. The Basic renderer fails readiness with a
+4. Integration: `.ajfx` import as a library asset (content-hash identity,
+   parsed and its kernels created on a worker, never on the frame path), an
+   RHI adapter pass in `engine/render`, and a `scene.particle_effect` node
+   referencing the asset with its parameter values normalized, replicated and
+   digested. Show-frame driving and seeking, placement by dragging from the
+   Library, published parameters in the Inspector with keyframes, and
+   adoption of a changed package. The Basic renderer fails readiness with a
    specific reason. Two-node agreement on the cluster.
 5. GPU sort, ribbons, mesh particles, particle lights, soft particles, motion
    vectors, and depth and SDF collision.
 6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,
-   media), hot reload, debug statistics and profiling markers.
-7. Publication: Vulkan backend, documentation, examples, presets, a license
-   and versioned releases. A node-graph editor can sit on the module model
-   later.
+   media) that a host binds to an effect's named inputs, debug statistics and
+   profiling markers.
+7. ajfx Studio: a standalone application on the D3D12 reference backend with
+   module stack editing, preview with transport and scrubbing, published
+   parameter editing, cost and budget readouts, and `.ajfx` export. A first
+   usable version can start once phase 2 renders sprites; it grows with the
+   runtime.
+8. Publication: Vulkan backend, documentation, examples, presets, Studio
+   builds, a license and versioned releases.
 
 Volumes track (after phase 5), a companion module sharing the same backend,
 hashing, budgets and checkpoints:
@@ -902,9 +934,11 @@ document digest. They need true 3D textures in the RHI.
 
 ### Exit criteria
 
-Every effect is reproducible bit for bit on rerun and after a seek, matches
-across a two-node slice boundary, stays within its declared budget or reports
-why not, and has a measured GPU cost.
+An effect authored in ajfx Studio and exported as `.ajfx` plays in the media
+server exactly as it previewed, is reproducible bit for bit on rerun and after
+a seek, matches across a two-node slice boundary, stays within its declared
+budget or reports why not, and has a measured GPU cost. Loading or replacing a
+package never stalls the control or frame path.
 
 ## Vehicle process platesets
 
