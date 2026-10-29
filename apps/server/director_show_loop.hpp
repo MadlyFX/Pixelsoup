@@ -57,6 +57,9 @@
 #include "thumbnail_service.hpp"
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
+#if defined(MEDIASERVER_HAS_GUI)
+#include <mediaserver/devices/processor_monitor.hpp>
+#endif
 #include <mediaserver/render/blender_discovery.hpp>
 #include <mediaserver/render/linked_publication.hpp>
 #include <mediaserver/render/linked_scene_ingest.hpp>
@@ -224,6 +227,8 @@ struct DirectorShowLoop final {
     std::unique_ptr<ClusterLifecycleController> &lifecycle_controller;
     std::unique_ptr<net::ClusterDiscoveryBrowser> &discovery_browser;
     std::error_code &discovery_error;
+    // Polls the LED processors on the map and searches for more.
+    std::unique_ptr<devices::ProcessorMonitor> &processor_monitor;
     std::unique_ptr<server::ThumbnailService> &thumbnail_service;
     std::unique_ptr<server::PlatesetMotionService> &plateset_motion;
     std::vector<assets::DerivativeKey> &retained_thumbnail_keys;
@@ -311,6 +316,7 @@ struct DirectorShowLoop final {
     std::vector<editor::FeedMapDeleteRequest> &pending_feed_map_deletes;
     std::vector<editor::FeedProjectionEdit> &pending_feed_projection_edits;
     std::vector<editor::FeedOrganizeRequest> &pending_feed_organize;
+    std::optional<editor::FeedLayoutRequest> &pending_feed_layout;
     std::vector<editor::FeedSurfaceAddRequest> &pending_feed_surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> &pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> &pending_feed_surface_deletes;

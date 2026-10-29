@@ -5,6 +5,7 @@
 #include <mediaserver/topology/hardware_map.hpp>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Transient observations reported by configured hardware. These values are
@@ -87,6 +88,159 @@ struct HardwareRuntimeNode final {
   bool operator==(const HardwareRuntimeNode &) const = default;
 };
 
+// A rectangle in an LED processor's own pixel space: an input's picture or
+// its screen.
+struct HardwarePixelRect final {
+  core::u32 x{};
+  core::u32 y{};
+  core::u32 width{};
+  core::u32 height{};
+
+  bool operator==(const HardwarePixelRect &) const = default;
+};
+
+// One video input of an LED processor, as the processor itself reports it.
+struct HardwareProcessorInput final {
+  // The VIDEO IN number (1-based) the input is shown as on its card. Inputs
+  // are numbered in the order the processor lists them, internal test
+  // sources left out.
+  core::u8 number{};
+  // The processor's own id for the input, which addresses it in requests.
+  core::i64 vendor_id{};
+  std::string name;
+  std::string connector;
+  // A source is connected and locked.
+  bool signal{};
+  // What arrives, while there is a signal.
+  core::u32 width{};
+  core::u32 height{};
+  core::u32 refresh_millihertz{};
+  // The mode the input's EDID offers whatever drives it. Zero width when
+  // the processor does not say.
+  core::u32 edid_width{};
+  core::u32 edid_height{};
+  core::u32 edid_refresh_millihertz{};
+  // The processor accepts a new EDID for this input.
+  bool edid_writable{};
+
+  bool operator==(const HardwareProcessorInput &) const = default;
+};
+
+// Where part of one input's picture lands on a processor's screen.
+struct HardwareProcessorLayer final {
+  // The VIDEO IN number that feeds it; zero for a source that is not one of
+  // the inputs (an internal pattern).
+  core::u8 input{};
+  // The part of the input picture it shows, in input pixels.
+  HardwarePixelRect source;
+  // Where that lands, in screen pixels.
+  HardwarePixelRect screen;
+
+  bool operator==(const HardwareProcessorLayer &) const = default;
+};
+
+// One LED screen a processor drives: its whole raster, the cabinets it is
+// built from, and which input pixels fill it.
+struct HardwareProcessorScreen final {
+  std::string id;
+  std::string name;
+  core::u32 width{};
+  core::u32 height{};
+  core::u32 cabinets{};
+  core::u32 refresh_millihertz{};
+  std::vector<HardwareProcessorLayer> layers;
+
+  bool operator==(const HardwareProcessorScreen &) const = default;
+};
+
+// What a monitored LED processor reported. Like a render machine's
+// observation this is never document data.
+struct HardwareProcessorNode final {
+  doc::NodeId device{};
+  HardwareRuntimeReachability reachability{
+      HardwareRuntimeReachability::Unmonitored};
+  // The last good report, kept after contact was lost.
+  bool stale{};
+  std::string model;
+  // The processor's own name for itself.
+  std::string name;
+  // Why it is not online, or what it refused.
+  std::string detail;
+  // The outcome of the last action asked of it, such as an EDID write.
+  std::string notice;
+  bool notice_failed{};
+  // Its software version, and the preset it last applied, when it says.
+  std::string software;
+  std::string preset;
+  std::vector<HardwareProcessorInput> inputs;
+  // The processor lists every input it has. False when it reports only the
+  // one in use (Tessera), so an input it leaves out is not missing.
+  bool all_inputs{true};
+  std::vector<HardwareProcessorScreen> screens;
+  // The LED panels it drives: how many it controls, how many answer, and
+  // how many of those report a fault. Zero panels when it does not say.
+  core::u32 panels{};
+  core::u32 panels_online{};
+  core::u32 panels_faulted{};
+  // Overrides that put something other than the input on the wall.
+  bool blackout{};
+  bool frozen{};
+  bool test_pattern{};
+
+  // Something about the processor itself that an operator should see: an
+  // override on, or panels missing or faulted. Empty when all is well.
+  [[nodiscard]] std::string attention() const {
+    std::string text;
+    const auto add = [&](std::string_view part) {
+      if (!text.empty()) {
+        text += ", ";
+      }
+      text += part;
+    };
+    if (blackout) {
+      add("blacked out");
+    }
+    if (frozen) {
+      add("frozen");
+    }
+    if (test_pattern) {
+      add("test pattern on");
+    }
+    if (panels != 0U && panels_online < panels) {
+      add(std::to_string(panels - panels_online) + " of " +
+          std::to_string(panels) + " panels offline");
+    }
+    if (panels_faulted != 0U) {
+      add(std::to_string(panels_faulted) +
+          (panels_faulted == 1U ? " panel faulted" : " panels faulted"));
+    }
+    return text;
+  }
+
+  [[nodiscard]] const HardwareProcessorInput *
+  input(core::u8 number) const noexcept {
+    for (const HardwareProcessorInput &candidate : inputs) {
+      if (candidate.number == number) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  }
+
+  bool operator==(const HardwareProcessorNode &) const = default;
+};
+
+// An LED processor that answered a search of the local network.
+struct HardwareDiscoveredProcessor final {
+  HardwareProcessorProtocol protocol{HardwareProcessorProtocol::NovastarCoex};
+  std::string name;
+  std::string model;
+  // Where it answered: what a card's Address should hold.
+  std::string address;
+
+  bool operator==(const HardwareDiscoveredProcessor &) const = default;
+};
+
 // A render machine that answered discovery on the local network. Like every
 // value here it is an observation, never document data: placing one on the
 // map authors an ordinary Render Server card from these values.
@@ -124,17 +278,39 @@ struct HardwareDiscovery final {
   std::string detail;
   // Sorted by hostname, node index, then address, so cards stay put.
   std::vector<HardwareDiscoveredMachine> machines;
+  // LED processors are not asked every few seconds: a search sweeps the
+  // local subnets once, when the operator asks. These answered the last one,
+  // sorted by address.
+  std::vector<HardwareDiscoveredProcessor> processors;
+  // This editor can search for processors at all (a Director with its
+  // processor monitor running), whether or not render machine discovery is.
+  bool processor_search_available{};
+  // A processor search is under way, and how many have finished.
+  bool processor_search_running{};
+  core::u32 processor_searches{};
 
   bool operator==(const HardwareDiscovery &) const = default;
 };
 
 struct HardwareRuntimeSnapshot final {
   std::vector<HardwareRuntimeNode> nodes;
+  // One per monitored LED processor card.
+  std::vector<HardwareProcessorNode> processors;
   HardwareDiscovery discovery;
 
   [[nodiscard]] const HardwareRuntimeNode *
   node(doc::NodeId device) const noexcept {
     for (const HardwareRuntimeNode &candidate : nodes) {
+      if (candidate.device == device) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] const HardwareProcessorNode *
+  processor(doc::NodeId device) const noexcept {
+    for (const HardwareProcessorNode &candidate : processors) {
       if (candidate.device == device) {
         return &candidate;
       }

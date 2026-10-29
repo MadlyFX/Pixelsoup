@@ -1,4 +1,5 @@
 add_library(mediaserver_output STATIC
+    src/feed_layout.cpp
     src/feed_map.cpp
     src/feed_map_model.cpp
     src/perspective_mapping.cpp
@@ -14,8 +15,11 @@ target_include_directories(mediaserver_output
 # a feed map is expressed against the same geometry a scene slice is. It names
 # no graphics API, no window, and no transport, so a headless build gets it for
 # free just as the scene layer does.
+# Topology only for the automatic layout, which reads the cabling and what
+# processors report; the topology names nothing of the output stage back.
 target_link_libraries(mediaserver_output
     PUBLIC MediaServer::Core MediaServer::Doc MediaServer::Scene
+        MediaServer::Topology
 )
 
 mediaserver_set_project_options(mediaserver_output)
@@ -45,6 +49,21 @@ if(BUILD_TESTING)
         COMMAND mediaserver_output_feed_map_model_tests
     )
     set_target_properties(mediaserver_output_feed_map_model_tests
+        PROPERTIES FOLDER "tests"
+    )
+
+    add_executable(mediaserver_output_feed_layout_tests
+        tests/feed_layout_tests.cpp
+    )
+    target_link_libraries(mediaserver_output_feed_layout_tests
+        PRIVATE MediaServer::Output
+    )
+    mediaserver_set_project_options(mediaserver_output_feed_layout_tests)
+    add_test(
+        NAME mediaserver.output_feed_layout
+        COMMAND mediaserver_output_feed_layout_tests
+    )
+    set_target_properties(mediaserver_output_feed_layout_tests
         PROPERTIES FOLDER "tests"
     )
 

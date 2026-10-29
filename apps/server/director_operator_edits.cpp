@@ -1651,6 +1651,39 @@ PhaseExit DirectorShowLoop::apply_hardware_requests(OperatorFrame &op) {
 
 PhaseExit DirectorShowLoop::apply_feed_map_requests(OperatorFrame &op) {
     const auto &frame = op.frame;
+    if (pending_feed_layout.has_value()) {
+        // Build from hardware: the canvas, then every planned viewport, in
+        // the request's one transaction so one undo takes it all back.
+        const editor::FeedLayoutRequest request =
+            std::move(*pending_feed_layout);
+        pending_feed_layout.reset();
+        if (!request.plan.empty()) {
+            if (!schedule_hardware_canvas(
+                    scheduler,
+                    editor::HardwareCanvasEdit{request.plan.canvas,
+                                               request.gesture},
+                    frame)) {
+                std::cerr << "could not author the built canvas for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+            std::vector<doc::NodeId> ids;
+            ids.reserve(request.plan.viewports.size());
+            for (std::size_t index = 0U;
+                 index < request.plan.viewports.size(); ++index) {
+                while (scheduler.projected_document().contains(
+                    doc::NodeId{next_new_node})) {
+                    ++next_new_node;
+                }
+                ids.push_back(doc::NodeId{next_new_node++});
+            }
+            if (!schedule_feed_layout(scheduler, request, ids, frame)) {
+                std::cerr << "could not author the built feed map for frame "
+                          << frame.value() << '\n';
+                return 1;
+            }
+        }
+    }
     for (const auto &request : pending_feed_surface_adds) {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {

@@ -63,6 +63,9 @@ target_link_libraries(media-server
         MediaServer::Compositor
         MediaServer::Sync
         MediaServer::Topology
+        # LED processor protocols. Every request runs on the monitor's own
+        # thread; the Director only hands it the map and reads what it saw.
+        MediaServer::Devices
         # Camera tracking. The library has no I/O at all; this process supplies
         # the datagrams and is the only one that may sample a tracker.
         MediaServer::Track

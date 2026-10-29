@@ -16,6 +16,9 @@ namespace mediaserver::app {
 [[nodiscard]] std::string_view
 hardware_kind_property(topology::HardwareDeviceKind kind) noexcept;
 
+[[nodiscard]] std::string_view hardware_protocol_property(
+    topology::HardwareProcessorProtocol protocol) noexcept;
+
 [[nodiscard]] doc::Node
 make_hardware_device(doc::NodeId id,
                      const editor::HardwarePlaceRequest &request,

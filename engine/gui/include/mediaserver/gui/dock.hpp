@@ -198,6 +198,9 @@ public:
     void set_fraction(DockId split, float fraction) noexcept;
 
     [[nodiscard]] std::span<const Floating> floating() const noexcept;
+    // The floating frame an open panel's tree floats in, or no_dock while it
+    // is docked in the main area or closed.
+    [[nodiscard]] DockId floating_frame_of(PanelId panel) const noexcept;
     // The topmost floating frame containing the point, or no_dock.
     [[nodiscard]] DockId floating_at(float x, float y) const noexcept;
     void move_floating(DockId node, float dx, float dy) noexcept;

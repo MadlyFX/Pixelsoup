@@ -282,6 +282,25 @@ void detaching_lifts_a_panel_into_a_floating_frame() {
     UI_CHECK(near(dock.rect_of(floated).x, 300.0F));
 }
 
+void a_panel_knows_the_floating_frame_it_is_in() {
+    gui::DockLayout dock;
+    const gui::DockId left = dock.add(viewport, "Viewport");
+    dock.dock(inspector, "Inspector", left, gui::DockSide::Right);
+    // Docked and closed panels float in nothing.
+    UI_CHECK(dock.floating_frame_of(inspector) == gui::no_dock);
+    UI_CHECK(dock.floating_frame_of(gui::ui_id("never opened")) == gui::no_dock);
+
+    const gui::DockId floated =
+        dock.detach(inspector, gui::Rect{300.0F, 200.0F, 360.0F, 260.0F});
+    UI_CHECK(dock.floating_frame_of(inspector) == floated);
+    // A tab joined to the frame shares it; the docked panel still does not.
+    dock.dock(assets, "Assets", floated, gui::DockSide::Center);
+    UI_CHECK(dock.floating_frame_of(assets) == floated);
+    UI_CHECK(dock.floating_frame_of(viewport) == gui::no_dock);
+    dock.close(inspector);
+    UI_CHECK(dock.floating_frame_of(inspector) == gui::no_dock);
+}
+
 void a_floating_frame_can_be_moved_and_docked_again() {
     gui::DockLayout dock;
     const gui::DockId left = dock.add(viewport, "Viewport");
@@ -1059,7 +1078,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 45U> cases{{
+constexpr std::array<Case, 46U> cases{{
+    {"a panel knows the floating frame it is in",
+     &a_panel_knows_the_floating_frame_it_is_in},
     {"the first panel becomes the whole area",
      &the_first_panel_becomes_the_whole_area},
     {"docking to an edge splits the target",

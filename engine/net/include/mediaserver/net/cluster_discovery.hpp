@@ -81,6 +81,8 @@ struct LocalIpv4Interface final {
     asio::ip::address_v4 address;
     // The interface's directed broadcast address.
     asio::ip::address_v4 broadcast;
+    // Its subnet mask, so a search can walk the subnet's hosts.
+    asio::ip::address_v4 netmask{asio::ip::address_v4::broadcast()};
 
     bool operator==(const LocalIpv4Interface&) const = default;
 };

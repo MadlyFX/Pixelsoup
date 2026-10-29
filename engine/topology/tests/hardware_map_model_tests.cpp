@@ -2,6 +2,7 @@
 
 #include <mediaserver/topology/hardware_map_schema.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <array>
 #include <cstddef>
@@ -653,12 +654,202 @@ void the_main_node_is_one_active_render_server() {
   TOPOLOGY_CHECK(rejected.counters().rejected == 1U);
 }
 
+void processors_take_many_inputs_and_keep_their_old_ports() {
+  doc::Root root;
+  root = root.set(device(1U, schema::render_server_kind, "Render", 0, 0));
+  root = root.set(node(2U, schema::device_type,
+                       {text(schema::kind, schema::led_processor_kind),
+                        text(schema::name, "MX40"),
+                        text(schema::address, "10.0.0.40"),
+                        text(schema::protocol, schema::novastar_coex_protocol)}));
+  root = root.set(device(3U, schema::led_wall_kind, "Wall", 4, 0));
+  // Output one into input one (port 0), output two into input three (port
+  // 3), and LED OUT (port 1) to the wall: one cable per input.
+  root = root.set(link(10U, 1U, 1U, 2U, 0U));
+  root = root.set(link(11U, 1U, 2U, 2U, 3U));
+  root = root.set(link(12U, 2U, topology::processor_led_output_port, 3U, 0U));
+  // A seventeenth input does not exist.
+  root = root.set(link(13U, 1U, 3U, 2U, 17U));
+
+  topology::HardwareMapModel model;
+  model.reset(root);
+  const topology::HardwareMap map = model.evaluate();
+  TOPOLOGY_CHECK(map.link(doc::NodeId{10U}) != nullptr);
+  TOPOLOGY_CHECK(map.link(doc::NodeId{11U}) != nullptr);
+  TOPOLOGY_CHECK(map.link(doc::NodeId{12U}) != nullptr);
+  TOPOLOGY_CHECK(map.link(doc::NodeId{13U}) == nullptr);
+  TOPOLOGY_CHECK(model.counters().invalid_links == 1U);
+
+  const topology::HardwareDevice *const processor =
+      map.device(doc::NodeId{2U});
+  TOPOLOGY_CHECK(processor != nullptr);
+  TOPOLOGY_CHECK(processor->protocol ==
+                 topology::HardwareProcessorProtocol::NovastarCoex);
+  TOPOLOGY_CHECK(processor->address == "10.0.0.40");
+
+  TOPOLOGY_CHECK(topology::processor_input_number(0U) == 1U);
+  TOPOLOGY_CHECK(topology::processor_input_number(1U) == 0U);
+  TOPOLOGY_CHECK(topology::processor_input_number(3U) == 3U);
+  TOPOLOGY_CHECK(topology::processor_input_number(16U) == 16U);
+  TOPOLOGY_CHECK(topology::processor_input_number(17U) == 0U);
+  TOPOLOGY_CHECK(topology::processor_input_port(1U) == 0U);
+  TOPOLOGY_CHECK(topology::processor_input_port(9U) == 9U);
+  const topology::HardwarePort *const third = topology::find_port(
+      topology::HardwareDeviceKind::LedProcessor, 3U);
+  TOPOLOGY_CHECK(third != nullptr && third->name == "VIDEO IN 3" &&
+                 third->direction == topology::HardwarePortDirection::Input);
+  // Walls do not gain processor inputs.
+  TOPOLOGY_CHECK(topology::find_port(topology::HardwareDeviceKind::LedWall,
+                                     3U) == nullptr);
+}
+
+void a_protocol_is_a_processor_property_in_the_digest() {
+  const auto processor = [](std::string_view protocol) {
+    doc::Root root;
+    root = root.set(node(2U, schema::device_type,
+                         {text(schema::kind, schema::led_processor_kind),
+                          text(schema::name, "Processor"),
+                          text(schema::protocol, protocol)}));
+    topology::HardwareMapModel model;
+    model.reset(root);
+    return std::pair{model.evaluate(), model.counters().rejected};
+  };
+  const auto [generic, generic_rejected] =
+      processor(schema::generic_protocol);
+  const auto [coex, coex_rejected] =
+      processor(schema::novastar_coex_protocol);
+  const auto [brompton, brompton_rejected] =
+      processor(schema::brompton_tessera_protocol);
+  const auto [unknown, unknown_rejected] = processor("colorlight");
+  TOPOLOGY_CHECK(brompton_rejected == 0U &&
+                 brompton.devices.front().protocol ==
+                     topology::HardwareProcessorProtocol::BromptonTessera);
+  TOPOLOGY_CHECK(topology::digest(brompton) != topology::digest(coex));
+  TOPOLOGY_CHECK(generic_rejected == 0U && coex_rejected == 0U);
+  TOPOLOGY_CHECK(unknown_rejected == 1U && unknown.devices.empty());
+  TOPOLOGY_CHECK(generic.devices.front().protocol ==
+                 topology::HardwareProcessorProtocol::Generic);
+  TOPOLOGY_CHECK(coex.devices.front().protocol ==
+                 topology::HardwareProcessorProtocol::NovastarCoex);
+  TOPOLOGY_CHECK(topology::digest(generic) != topology::digest(coex));
+
+  // A map that never authored a protocol hashes as it always did.
+  doc::Root legacy;
+  legacy = legacy.set(node(2U, schema::device_type,
+                           {text(schema::kind, schema::led_processor_kind),
+                            text(schema::name, "Processor")}));
+  topology::HardwareMapModel legacy_model;
+  legacy_model.reset(legacy);
+  TOPOLOGY_CHECK(topology::digest(legacy_model.evaluate()) ==
+                 topology::digest(generic));
+
+  // Only a processor keeps a protocol.
+  doc::Root server;
+  server = server.set(node(1U, schema::device_type,
+                           {text(schema::kind, schema::render_server_kind),
+                            text(schema::name, "Render"),
+                            text(schema::protocol,
+                                 schema::novastar_coex_protocol)}));
+  topology::HardwareMapModel server_model;
+  server_model.reset(server);
+  TOPOLOGY_CHECK(server_model.evaluate().devices.front().protocol ==
+                 topology::HardwareProcessorProtocol::Generic);
+}
+
+void processor_signals_are_checked_against_the_output_mode() {
+  doc::Root root;
+  root = root.set(device(1U, schema::render_server_kind, "Render", 0, 0));
+  root = root.set(node(2U, schema::device_type,
+                       {text(schema::kind, schema::led_processor_kind),
+                        text(schema::name, "MX40"),
+                        text(schema::protocol, schema::novastar_coex_protocol)}));
+  root = root.set(node(3U, schema::device_type,
+                       {text(schema::kind, schema::led_processor_kind),
+                        text(schema::name, "Unmonitored")}));
+  // Four outputs: three into the COEX processor, one into a generic one.
+  root = root.set(output_binding(20U, 1U, 1U, 0U, 0x101U, 1U, 0U, 3840U,
+                                 2160U, 60000U, 1001U));
+  root = root.set(output_binding(21U, 1U, 2U, 1U, 0x101U, 2U, 0U, 3840U,
+                                 2160U, 60000U, 1001U));
+  root = root.set(output_binding(22U, 1U, 3U, 2U, 0x101U, 3U, 0U, 1920U,
+                                 1080U, 50U, 1U));
+  root = root.set(link(10U, 1U, 1U, 2U, 0U));
+  root = root.set(link(11U, 1U, 2U, 2U, 2U));
+  root = root.set(link(12U, 1U, 3U, 2U, 3U));
+  root = root.set(link(13U, 1U, 4U, 3U, 0U));
+  topology::HardwareMapModel model;
+  model.reset(root);
+  const topology::HardwareMap map = model.evaluate();
+
+  topology::HardwareRuntimeSnapshot runtime{};
+  // Nothing is said about a processor that has not answered.
+  TOPOLOGY_CHECK(topology::check_processor_signals(map, runtime).empty());
+
+  topology::HardwareProcessorNode observed{};
+  observed.device = doc::NodeId{2U};
+  observed.reachability = topology::HardwareRuntimeReachability::Online;
+  topology::HardwareProcessorInput matching{};
+  matching.number = 1U;
+  matching.signal = true;
+  matching.width = 3840U;
+  matching.height = 2160U;
+  matching.refresh_millihertz = 59'940U;
+  matching.edid_width = 3840U;
+  matching.edid_height = 2160U;
+  matching.edid_refresh_millihertz = 59'940U;
+  topology::HardwareProcessorInput edid = matching;
+  edid.number = 2U;
+  edid.edid_refresh_millihertz = 60'000U;
+  edid.refresh_millihertz = 60'000U;
+  edid.edid_writable = true;
+  topology::HardwareProcessorInput dark{};
+  dark.number = 3U;
+  observed.inputs = {matching, edid, dark};
+  runtime.processors.push_back(observed);
+
+  const auto checks = topology::check_processor_signals(map, runtime);
+  TOPOLOGY_CHECK(checks.size() == 3U);
+  TOPOLOGY_CHECK(checks[0].link == doc::NodeId{10U} &&
+                 checks[0].issue == topology::HardwareSignalIssue::None &&
+                 checks[0].refresh_millihertz == 59'940U);
+  TOPOLOGY_CHECK(checks[1].issue ==
+                     topology::HardwareSignalIssue::EdidMismatch &&
+                 checks[1].input == 2U && checks[1].edid_writable &&
+                 checks[1].seen_refresh_millihertz == 60'000U);
+  TOPOLOGY_CHECK(topology::signal_check_text(checks[1]) ==
+                 "EDID mismatch: processor input 2 offers 3840x2160 at 60, "
+                 "output sends 3840x2160 at 59.94");
+  TOPOLOGY_CHECK(checks[2].issue == topology::HardwareSignalIssue::NoSignal &&
+                 checks[2].width == 1920U);
+  TOPOLOGY_CHECK(topology::signal_check_text(checks[2]) ==
+                 "No signal at processor input 3");
+
+  // A signal in another mode, with the EDID agreeing, is a mode mismatch.
+  runtime.processors.front().inputs[0].width = 1920U;
+  runtime.processors.front().inputs[0].height = 1080U;
+  const auto moved = topology::check_processor_signals(map, runtime);
+  TOPOLOGY_CHECK(moved[0].issue ==
+                     topology::HardwareSignalIssue::ModeMismatch &&
+                 moved[0].seen_width == 1920U);
+
+  // A stale report is history, not a reason to warn.
+  runtime.processors.front().stale = true;
+  TOPOLOGY_CHECK(topology::check_processor_signals(map, runtime).empty());
+  TOPOLOGY_CHECK(topology::refresh_millihertz(24000U, 1001U) == 23'976U);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 17U> cases{{
+    {"processors take many inputs and keep their old ports",
+     &processors_take_many_inputs_and_keep_their_old_ports},
+    {"a protocol is a processor property in the digest",
+     &a_protocol_is_a_processor_property_in_the_digest},
+    {"processor signals are checked against the output mode",
+     &processor_signals_are_checked_against_the_output_mode},
     {"the main node is one active render server",
      &the_main_node_is_one_active_render_server},
     {"a document becomes the configured hardware chain",

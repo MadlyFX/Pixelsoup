@@ -10,6 +10,7 @@
 #include <mediaserver/editor/color_correction_panel.hpp>
 #include <mediaserver/editor/effects_panel.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
+#include <mediaserver/editor/hardware_sprites.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/selection.hpp>
@@ -2087,6 +2088,8 @@ struct EditorShell::Impl final {
   gui::UiDrawList draw_list;
   gui::UiContext ui;
   LibraryThumbnailTextureCache library_thumbnail_textures;
+  // The Hardware Map's pixel-art sheet, uploaded once when the editor opens.
+  std::optional<rhi::Texture> hardware_sprites;
   TimelineFilmstripTextureCache timeline_filmstrip_textures;
   // Program, transition-to, and Stage are recorded into one command list.
   // Their media inputs share immutable source textures while their render
@@ -2515,65 +2518,78 @@ struct EditorShell::Impl final {
                                                  : found->title;
   }
 
+  // Hardware Map and Feed Mapping are setup surfaces with a lot to show at
+  // once: a map, a palette and a details rail side by side. They open as one
+  // large floating frame over the workspace, most of the window, rather than
+  // as a tab squeezed into whichever dock comes first. A floating frame never
+  // blocks what lies outside it, so the rest of the editor stays usable.
   [[nodiscard]] gui::Rect setup_frame() const noexcept {
-    const float width =
-        std::clamp(static_cast<float>(window.width()) * 0.56F, 680.0F, 980.0F);
-    const float height =
-        std::clamp(static_cast<float>(window.height()) * 0.62F, 430.0F, 680.0F);
-    return gui::Rect{
-        std::max((static_cast<float>(window.width()) - width) * 0.5F, 18.0F),
-        std::max((static_cast<float>(window.height()) - height) * 0.5F,
-                 top_bar_height + 10.0F),
-        width, height};
+    const gui::Rect area =
+        editor_dock_area(static_cast<float>(window.width()),
+                         static_cast<float>(window.height()), !history_hidden);
+    const float margin_x = std::max(area.width * 0.03F, 12.0F);
+    const float margin_y = std::max(area.height * 0.03F, 10.0F);
+    const float width = std::max(area.width - 2.0F * margin_x, 220.0F);
+    const float height = std::max(area.height - 2.0F * margin_y, 140.0F);
+    return gui::Rect{area.x + margin_x, area.y + margin_y, width, height};
   }
 
+  // Opens a setup panel in its floating frame, and raises it. A panel found
+  // docked - restored from an older workspace, or dropped there by hand - is
+  // lifted back out. One already floating keeps the size the operator gave
+  // its frame. An open companion joins the same frame as a tab, so the two
+  // views of the wall never end up in different corners.
   void show_mapping_panel(gui::PanelId wanted) {
     const gui::PanelId companion = wanted == panel_hardware_mapping
                                        ? panel_feed_mapping
                                        : panel_hardware_mapping;
-    gui::DockId wanted_leaf = docks.leaf_of(wanted);
-    if (wanted_leaf != gui::no_dock) {
-      static_cast<void>(docks.show(wanted));
+    // The map opens framed on the devices it shows.
+    if (!docks.is_open(panel_hardware_mapping)) {
+      hardware_mapping_panel.frame_devices();
+    }
+    gui::DockId frame = docks.floating_frame_of(wanted);
+    if (frame == gui::no_dock) {
+      frame = docks.floating_frame_of(companion);
+    }
+    gui::DockId leaf = gui::no_dock;
+    if (frame != gui::no_dock) {
+      // Join the frame that is already floating.
+      const gui::PanelId anchor = docks.floating_frame_of(wanted) == frame
+                                      ? wanted
+                                      : companion;
+      leaf = docks.leaf_of(anchor);
+      if (anchor != wanted) {
+        leaf = docks.is_open(wanted)
+                   ? docks.move(wanted, leaf, gui::DockSide::Center)
+                   : docks.dock(wanted, panel_title(wanted), leaf,
+                                gui::DockSide::Center);
+      }
+    } else {
+      // Introduce the panel through the ordinary tree, then detach it as a
+      // real floating DockLayout root.
+      static_cast<void>(docks.add(wanted, panel_title(wanted)));
+      leaf = docks.detach(wanted, setup_frame());
+      frame = docks.floating_frame_of(wanted);
+    }
+    if (leaf == gui::no_dock) {
       return;
     }
-    if (docks.has_saved_placement(wanted)) {
-      static_cast<void>(docks.show(wanted));
-      return;
+    if (docks.is_open(companion) &&
+        docks.floating_frame_of(companion) != frame) {
+      static_cast<void>(
+          docks.move(companion, docks.leaf_of(wanted), gui::DockSide::Center));
     }
-    const gui::DockId companion_leaf = docks.leaf_of(companion);
-    if (companion_leaf != gui::no_dock) {
-      wanted_leaf = docks.dock(wanted, panel_title(wanted), companion_leaf,
-                               gui::DockSide::Center);
-      docks.set_active(wanted_leaf, wanted);
-      return;
-    }
-
-    // Introduce the panel through the ordinary tree, then detach it as a
-    // real floating DockLayout root. The companion can later join it as a
-    // tab without either setup surface occupying the everyday workspace.
-    wanted_leaf = docks.add(wanted, panel_title(wanted));
-    if (wanted_leaf != gui::no_dock) {
-      wanted_leaf = docks.detach(wanted, setup_frame());
-      docks.set_active(wanted_leaf, wanted);
+    docks.set_active(docks.leaf_of(wanted), wanted);
+    if (const gui::DockId owner = docks.floating_frame_of(wanted);
+        owner != gui::no_dock) {
+      docks.raise(owner);
     }
   }
 
   void show_setup() {
-    constexpr std::array mapping_panels{panel_hardware_mapping,
-                                        panel_feed_mapping};
-    const bool saved_group =
-        std::all_of(mapping_panels.begin(), mapping_panels.end(),
-                    [this](gui::PanelId panel) {
-                      return docks.is_open(panel) ||
-                             docks.has_saved_placement(panel);
-                    });
-    if (saved_group) {
-      docks.show_group(mapping_panels);
-    } else {
-      show_mapping_panel(panel_hardware_mapping);
-      show_mapping_panel(panel_feed_mapping);
-    }
-    static_cast<void>(docks.show(panel_hardware_mapping));
+    show_mapping_panel(panel_hardware_mapping);
+    show_mapping_panel(panel_feed_mapping);
+    show_mapping_panel(panel_hardware_mapping);
   }
 
   void show_panel(gui::PanelId panel) {
@@ -3005,6 +3021,18 @@ Result EditorShell::create(const EditorConfig &config) noexcept {
     return Result::failure(EditorError::AllocationFailed);
   }
   std::unique_ptr<Impl> impl{raw};
+  // The Hardware Map draws its devices from a sprite sheet on this device.
+  // Without it the map still works, with plain boxes for devices.
+  if (auto acquired = impl->window.device().acquire_commands()) {
+    rhi::CommandList commands = std::move(acquired).value();
+    std::optional<rhi::Texture> sheet =
+        create_hardware_sprite_texture(impl->window.device(), commands);
+    auto submitted = impl->window.device().submit(std::move(commands));
+    if (sheet.has_value() && submitted && std::move(submitted).value().wait()) {
+      impl->hardware_sprites = std::move(sheet);
+      impl->hardware_mapping_panel.set_sprites(&*impl->hardware_sprites);
+    }
+  }
   auto *shell = new (std::nothrow) EditorShell{std::move(impl)};
   if (shell == nullptr) {
     return Result::failure(EditorError::AllocationFailed);
@@ -3160,6 +3188,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.history_panel.reset();
     impl.history_hover.clear();
     impl.hardware_mapping_panel.reset_project_state();
+    // A different show stands on a different stage.
+    impl.hardware_mapping_panel.frame_devices();
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
     impl.library_panel.reset_project_state();
@@ -4598,6 +4628,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   case ApplicationMenuAction::TogglePanel:
     if (impl.docks.is_open(menu_result.panel)) {
       impl.docks.close(menu_result.panel);
+    } else if (menu_result.panel == panel_hardware_mapping ||
+               menu_result.panel == panel_feed_mapping) {
+      impl.show_panel(menu_result.panel);
     } else if (impl.docks.show(menu_result.panel) == gui::no_dock) {
       impl.show_panel(menu_result.panel);
     }
@@ -7347,6 +7380,11 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         mapping.remove->gesture = impl.next_edit_gesture++;
         result.hardware_deletes.push_back(mapping.remove.value());
       }
+      result.search_processors =
+          result.search_processors || mapping.search_processors;
+      if (mapping.processor_edid.has_value()) {
+        result.processor_edid_writes.push_back(*mapping.processor_edid);
+      }
       if (mapping.incompatible_link_attempted) {
         impl.hardware_warning_until = ui.time_seconds() + 1.5;
       }
@@ -7362,7 +7400,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     if (panel == panel_feed_mapping) {
       FeedMappingFrame mapping =
           impl.feed_mapping_panel.draw(ui, bounds, scene.canvas, feed_map,
-                                       timeline.program_frame, &hardware_map);
+                                       timeline.program_frame, &hardware_map,
+                                       &hardware_runtime);
       if (mapping.surface_selection.has_value()) {
         const output::ProjectionSurface *const selected_surface =
             feed_map.surface_for(*mapping.surface_selection);
@@ -7404,6 +7443,10 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (mapping.organize.has_value()) {
         mapping.organize->gesture = impl.next_edit_gesture++;
         result.feed_organize.push_back(std::move(*mapping.organize));
+      }
+      if (mapping.layout.has_value()) {
+        mapping.layout->gesture = impl.next_edit_gesture++;
+        result.feed_layout = std::move(mapping.layout);
       }
       if (mapping.surface_add.has_value()) {
         auto request = std::move(*mapping.surface_add);

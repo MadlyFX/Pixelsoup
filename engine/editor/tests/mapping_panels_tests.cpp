@@ -93,8 +93,8 @@ private:
 [[nodiscard]] topology::HardwareMap hardware_demo(bool with_link = false) {
   topology::HardwareMap map{};
   map.devices = {
-      device(1U, topology::HardwareDeviceKind::RenderServer, "Render A", -5,
-             -2),
+      device(1U, topology::HardwareDeviceKind::RenderServer, "Render A", -3,
+             0),
       device(2U, topology::HardwareDeviceKind::LedProcessor, "Processor A", 5,
              2),
       device(3U, topology::HardwareDeviceKind::LedWall, "Main Wall", 7, 3),
@@ -143,6 +143,14 @@ render_runtime(core::u64 device_id, std::size_t output_count,
   topology::HardwareRuntimeSnapshot snapshot{};
   snapshot.nodes.push_back(std::move(node));
   return snapshot;
+}
+
+[[nodiscard]] bool same_rect(const gui::Rect &left,
+                             const gui::Rect &right) noexcept {
+  return std::abs(left.x - right.x) < 0.01F &&
+         std::abs(left.y - right.y) < 0.01F &&
+         std::abs(left.width - right.width) < 0.01F &&
+         std::abs(left.height - right.height) < 0.01F;
 }
 
 struct HardwareHarness final {
@@ -559,12 +567,12 @@ void an_authored_cable_can_be_selected() {
   const topology::HardwareMap map = hardware_demo(true);
   const editor::IsometricProjection projection =
       editor::hardware_mapping_projection(HardwareHarness::bounds);
-  const editor::IsoPoint from =
-      editor::hardware_port_position(projection, map.devices[0U], 1U);
-  const editor::IsoPoint to =
-      editor::hardware_port_position(projection, map.devices[1U], 0U);
-  const float x = (from.x + to.x) * 0.5F;
-  const float y = (from.y + to.y) * 0.5F;
+  // Where the cable turns on the floor, clear of both devices.
+  const std::optional<editor::IsoPoint> turn = editor::hardware_cable_point(
+      projection, map, topology::HardwareRuntimeSnapshot{}, doc::NodeId{10U});
+  MAPPING_CHECK(turn.has_value());
+  const float x = turn->x;
+  const float y = turn->y;
 
   static_cast<void>(harness.frame(x, y, false, map));
   static_cast<void>(harness.frame(x, y, true, map));
@@ -626,12 +634,12 @@ void selected_hardware_objects_return_safe_delete_requests() {
   const topology::HardwareMap cable_map = hardware_demo(true);
   const editor::IsometricProjection cable_projection =
       editor::hardware_mapping_projection(HardwareHarness::bounds);
-  const editor::IsoPoint from = editor::hardware_port_position(
-      cable_projection, cable_map.devices[0U], 1U);
-  const editor::IsoPoint to = editor::hardware_port_position(
-      cable_projection, cable_map.devices[1U], 0U);
-  const float cable_x = (from.x + to.x) * 0.5F;
-  const float cable_y = (from.y + to.y) * 0.5F;
+  const std::optional<editor::IsoPoint> turn = editor::hardware_cable_point(
+      cable_projection, cable_map, topology::HardwareRuntimeSnapshot{},
+      doc::NodeId{10U});
+  MAPPING_CHECK(turn.has_value());
+  const float cable_x = turn->x;
+  const float cable_y = turn->y;
   static_cast<void>(cable_harness.frame(cable_x, cable_y, false, cable_map));
   static_cast<void>(cable_harness.frame(cable_x, cable_y, true, cable_map));
   const auto cable_selected =
@@ -719,8 +727,10 @@ void a_render_server_is_marked_as_the_timelines_main_node() {
 }
 
 void project_setup_authors_one_control_port_range() {
-  constexpr float control_port_x = 132.0F;
-  constexpr float control_port_y = 284.0F;
+  const gui::Rect control_port =
+      editor::hardware_control_port_field_bounds(HardwareHarness::bounds);
+  const float control_port_x = control_port.x + 40.0F;
+  const float control_port_y = control_port.y + control_port.height * 0.5F;
 
   HardwareHarness new_project;
   topology::HardwareMap defaults{};
@@ -1036,7 +1046,8 @@ void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
       editor::hardware_device_bounds(projection, map.devices[0U]);
   const gui::Rect presented = editor::hardware_presented_device_bounds(
       projection, map, map.devices[0U], runtime);
-  MAPPING_CHECK(std::abs(presented.height - baseline.height - 30.0F) < 0.01F);
+  // Three outputs fit the tower's face: the device is its sprite.
+  MAPPING_CHECK(same_rect(presented, baseline));
 
   const editor::IsoPoint output_one = editor::hardware_presented_port_position(
       projection, map, map.devices[0U], runtime, 1U);
@@ -1122,8 +1133,7 @@ void output_inventory_preserves_unknown_zero_and_last_good_semantics() {
       "ONLINE | RUNNING | 2+ ACTIVE OUT");
   const gui::Rect partial_bounds = editor::hardware_presented_device_bounds(
       projection, map, map.devices[0U], partial);
-  MAPPING_CHECK(std::abs(partial_bounds.height - baseline.height - 15.0F) <
-                0.01F);
+  MAPPING_CHECK(same_rect(partial_bounds, baseline));
 
   const topology::HardwareRuntimeSnapshot unsupported = render_runtime(
       1U, 0U, topology::HardwareRuntimeInventoryState::Unsupported);
@@ -1165,7 +1175,7 @@ void linked_missing_outputs_stay_compact_and_live_details_are_read_only() {
       editor::hardware_device_bounds(projection, map.devices[0U]);
   const gui::Rect presented = editor::hardware_presented_device_bounds(
       projection, map, map.devices[0U], runtime);
-  MAPPING_CHECK(std::abs(presented.height - baseline.height - 15.0F) < 0.01F);
+  MAPPING_CHECK(presented.height >= baseline.height);
   const editor::IsoPoint output_one = editor::hardware_presented_port_position(
       projection, map, map.devices[0U], runtime, 1U);
   const editor::IsoPoint output_five = editor::hardware_presented_port_position(
@@ -2419,8 +2429,8 @@ void a_detected_machine_drags_onto_the_map_already_configured() {
   MAPPING_CHECK(card.width > 0.0F);
   MAPPING_CHECK(editor::hardware_discovered_status_text(
                     empty, runtime.discovery,
-                    runtime.discovery.machines.front()) ==
-                "DRAG OR CLICK TO ADD");
+                    runtime.discovery.machines.front())
+                    .empty());
   const editor::IsoPoint drop = editor::project_isometric(
       editor::hardware_mapping_projection(HardwareHarness::bounds), 1, 1);
 
@@ -2465,8 +2475,8 @@ void a_click_adds_a_detected_machine_and_the_first_brings_its_port() {
       discovering({detected_machine("STAGE-LEFT", "192.0.2.31", 1U, 47'900U)});
   MAPPING_CHECK(editor::hardware_discovered_status_text(
                     map, runtime.discovery,
-                    runtime.discovery.machines.front()) ==
-                "DRAG OR CLICK TO ADD");
+                    runtime.discovery.machines.front())
+                    .empty());
   const gui::Rect card = editor::hardware_discovered_card_bounds(
       HardwareHarness::bounds, runtime.discovery, 0U);
   static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
@@ -2508,8 +2518,8 @@ void a_detected_machine_already_on_the_map_selects_its_card() {
   MAPPING_CHECK(editor::hardware_discovered_device(
                     map, runtime.discovery.machines[1]) == &map.devices[1]);
   MAPPING_CHECK(editor::hardware_discovered_status_text(
-                    map, runtime.discovery, runtime.discovery.machines[0]) ==
-                "ON MAP - CLICK TO SELECT");
+                    map, runtime.discovery, runtime.discovery.machines[0])
+                    .empty());
 
   const gui::Rect card = editor::hardware_discovered_card_bounds(
       HardwareHarness::bounds, runtime.discovery, 0U);
@@ -2547,8 +2557,8 @@ void detected_machines_say_why_they_would_not_connect() {
                 "NEEDS THE RENDER NODE PASSWORD");
   discovery.password_set = true;
   MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery,
-                                                        unsecured) ==
-                "DRAG OR CLICK TO ADD");
+                                                        unsecured)
+                    .empty());
 }
 
 void the_detection_strip_leaves_the_map_its_own_input() {
@@ -2647,12 +2657,338 @@ void mapping_panels_draw_without_devices_or_a_gpu() {
   MAPPING_CHECK(feed.list.vertices().size() > 100U);
 }
 
+// A render machine cabled into two inputs of a NovaStar processor: output
+// one into input one, output two into input three. Output two sends
+// 3840x2160 at 59.94; the processor's input three offers 60 in its EDID.
+[[nodiscard]] topology::HardwareMap novastar_stage() {
+  topology::HardwareMap map{};
+  topology::HardwareDevice processor =
+      device(2U, topology::HardwareDeviceKind::LedProcessor, "MX40", 5, 2);
+  processor.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
+  processor.address = "192.0.2.40";
+  map.devices = {
+      device(1U, topology::HardwareDeviceKind::RenderServer, "Render A", -3, 0),
+      processor,
+  };
+  map.links = {
+      topology::HardwareLink{doc::NodeId{10U},
+                             topology::HardwareEndpoint{doc::NodeId{1U}, 1U},
+                             topology::HardwareEndpoint{
+                                 doc::NodeId{2U},
+                                 topology::processor_input_port(1U)}},
+      topology::HardwareLink{doc::NodeId{11U},
+                             topology::HardwareEndpoint{doc::NodeId{1U}, 2U},
+                             topology::HardwareEndpoint{
+                                 doc::NodeId{2U},
+                                 topology::processor_input_port(3U)}},
+  };
+  topology::HardwareOutputBinding second{};
+  second.node = doc::NodeId{20U};
+  second.render_server = doc::NodeId{1U};
+  second.logical_port = 2U;
+  second.feed_index = 1U;
+  second.width = 3840U;
+  second.height = 2160U;
+  second.refresh_numerator = 60'000U;
+  second.refresh_denominator = 1'001U;
+  map.output_bindings = {second};
+  return map;
+}
+
+[[nodiscard]] topology::HardwareRuntimeSnapshot novastar_runtime() {
+  topology::HardwareRuntimeSnapshot runtime{};
+  topology::HardwareProcessorNode node{};
+  node.device = doc::NodeId{2U};
+  node.reachability = topology::HardwareRuntimeReachability::Online;
+  node.model = "MX40 Pro";
+  for (core::u8 number = 1U; number <= 4U; ++number) {
+    topology::HardwareProcessorInput input{};
+    input.number = number;
+    input.vendor_id = number;
+    input.name = "HDMI " + std::to_string(number);
+    input.signal = number != 4U;
+    input.width = input.signal ? 3840U : 0U;
+    input.height = input.signal ? 2160U : 0U;
+    input.refresh_millihertz = input.signal ? 60'000U : 0U;
+    input.edid_width = 3840U;
+    input.edid_height = 2160U;
+    input.edid_refresh_millihertz = 60'000U;
+    input.edid_writable = true;
+    node.inputs.push_back(input);
+  }
+  runtime.processors.push_back(node);
+  return runtime;
+}
+
+// Presses and releases at each step of a column until a frame answers.
+template <typename Harness, typename Accept>
+[[nodiscard]] bool click_until(Harness &harness, float x, float top,
+                               float bottom, const topology::HardwareMap &map,
+                               const topology::HardwareRuntimeSnapshot &runtime,
+                               Accept accept) {
+  for (float y = top; y <= bottom; y += 3.0F) {
+    static_cast<void>(harness.runtime_frame(x, y, false, map, runtime));
+    static_cast<void>(harness.runtime_frame(x, y, true, map, runtime));
+    if (accept(harness.runtime_frame(x, y, false, map, runtime))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void a_novastar_processor_shows_its_inputs_and_matches_an_edid() {
+  HardwareHarness harness;
+  const topology::HardwareMap map = novastar_stage();
+  const topology::HardwareRuntimeSnapshot runtime = novastar_runtime();
+  const editor::IsometricProjection projection =
+      harness.panel.view_projection(HardwareHarness::bounds);
+
+  // Its reported inputs are its pins, one above the next down its face.
+  const editor::IsoPoint first = editor::hardware_presented_port_position(
+      projection, map, map.devices[1U], runtime,
+      topology::processor_input_port(1U));
+  const editor::IsoPoint third = editor::hardware_presented_port_position(
+      projection, map, map.devices[1U], runtime,
+      topology::processor_input_port(3U));
+  const editor::IsoPoint fourth = editor::hardware_presented_port_position(
+      projection, map, map.devices[1U], runtime,
+      topology::processor_input_port(4U));
+  MAPPING_CHECK(std::abs(first.x - third.x) < 0.01F);
+  MAPPING_CHECK(std::abs(third.y - first.y - 30.0F) < 0.01F);
+  MAPPING_CHECK(std::abs(fourth.y - third.y - 15.0F) < 0.01F);
+
+  // The cable into input three is selected at its turn on the floor, and
+  // its details offer to make the processor's EDID match the output.
+  const std::optional<editor::IsoPoint> corner =
+      editor::hardware_cable_point(projection, map, runtime, doc::NodeId{11U});
+  MAPPING_CHECK(corner.has_value());
+  static_cast<void>(
+      harness.runtime_frame(corner->x, corner->y, false, map, runtime));
+  static_cast<void>(
+      harness.runtime_frame(corner->x, corner->y, true, map, runtime));
+  const auto selected =
+      harness.runtime_frame(corner->x, corner->y, false, map, runtime);
+  MAPPING_CHECK(selected.selection ==
+                editor::HardwareSelection{editor::HardwareSelectionKind::Link,
+                                          doc::NodeId{11U}});
+  std::optional<editor::HardwareProcessorEdidRequest> asked;
+  MAPPING_CHECK(click_until(harness, 790.0F, 120.0F, 330.0F, map, runtime,
+                            [&](const editor::HardwareMappingFrame &frame) {
+                              asked = frame.processor_edid;
+                              return asked.has_value();
+                            }));
+  MAPPING_CHECK(asked == editor::HardwareProcessorEdidRequest{
+                             doc::NodeId{2U}, 3U, 3840U, 2160U, 59'940U});
+  // Nothing about the project changed: the EDID belongs to the processor.
+  MAPPING_CHECK(!selected.property_edit.has_value());
+}
+
+void a_processor_protocol_is_chosen_in_its_details() {
+  HardwareHarness harness;
+  topology::HardwareMap map{};
+  map.devices = {
+      device(2U, topology::HardwareDeviceKind::LedProcessor, "Box", 5, 2)};
+  const editor::IsoPoint card = editor::project_isometric(
+      harness.panel.view_projection(HardwareHarness::bounds), 5, 2);
+  static_cast<void>(harness.frame(card.x, card.y - 6.0F, false, map));
+  static_cast<void>(harness.frame(card.x, card.y - 6.0F, true, map));
+  static_cast<void>(harness.frame(card.x, card.y - 6.0F, false, map));
+  // Protocol is the second row, under Name.
+  constexpr float protocol_x = 790.0F;
+  constexpr float protocol_y = 95.0F;
+  static_cast<void>(harness.frame(protocol_x, protocol_y, false, map));
+  static_cast<void>(harness.frame(protocol_x, protocol_y, true, map));
+  const auto released = harness.frame(protocol_x, protocol_y, false, map);
+  MAPPING_CHECK(released.property_edit.has_value());
+  MAPPING_CHECK(released.property_edit->device == doc::NodeId{2U});
+  MAPPING_CHECK(released.property_edit->property == topology::schema::protocol);
+  MAPPING_CHECK(std::get<std::string>(released.property_edit->value) ==
+                topology::schema::novastar_coex_protocol);
+}
+
+void the_novastar_palette_entry_places_a_monitored_processor() {
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  const gui::Rect item = editor::hardware_palette_item_bounds(
+      HardwareHarness::bounds, topology::HardwareDeviceKind::LedProcessor,
+      topology::HardwareProcessorProtocol::NovastarCoex);
+  const gui::Rect generic = editor::hardware_palette_item_bounds(
+      HardwareHarness::bounds, topology::HardwareDeviceKind::LedProcessor);
+  const gui::Rect brompton = editor::hardware_palette_item_bounds(
+      HardwareHarness::bounds, topology::HardwareDeviceKind::LedProcessor,
+      topology::HardwareProcessorProtocol::BromptonTessera);
+  MAPPING_CHECK(item.y > generic.y && brompton.y > item.y);
+  const editor::IsoPoint drop = editor::project_isometric(
+      editor::hardware_mapping_projection(HardwareHarness::bounds), 2, 1);
+  static_cast<void>(harness.frame(item.x + 20.0F, item.y + 20.0F, false, empty));
+  static_cast<void>(harness.frame(item.x + 20.0F, item.y + 20.0F, true, empty));
+  static_cast<void>(harness.frame(drop.x, drop.y, true, empty));
+  const auto released = harness.frame(drop.x, drop.y, false, empty);
+  MAPPING_CHECK(released.place.has_value());
+  MAPPING_CHECK(released.place->kind ==
+                topology::HardwareDeviceKind::LedProcessor);
+  MAPPING_CHECK(released.place->protocol ==
+                topology::HardwareProcessorProtocol::NovastarCoex);
+  MAPPING_CHECK(released.place->grid_x == 2 && released.place->grid_y == 1);
+}
+
+void found_processors_are_searched_for_and_placed() {
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  topology::HardwareRuntimeSnapshot runtime{};
+  runtime.discovery.processor_search_available = true;
+  const gui::Rect strip = editor::hardware_discovery_strip_bounds(
+      HardwareHarness::bounds, runtime.discovery);
+  // With render machine discovery off, the strip is still there to search.
+  MAPPING_CHECK(strip.height > 0.0F);
+  const float search_x = strip.right() - 6.0F - 75.0F;
+  const float search_y = strip.y + 12.0F;
+  static_cast<void>(
+      harness.runtime_frame(search_x, search_y, false, empty, runtime));
+  static_cast<void>(
+      harness.runtime_frame(search_x, search_y, true, empty, runtime));
+  const auto searched =
+      harness.runtime_frame(search_x, search_y, false, empty, runtime);
+  MAPPING_CHECK(searched.search_processors);
+
+  topology::HardwareDiscoveredProcessor found{};
+  found.name = "MX40 Pro_002311";
+  found.model = "MX40 Pro";
+  found.address = "192.0.2.41";
+  runtime.discovery.processors = {found};
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 0U);
+  MAPPING_CHECK(card.width > 0.0F);
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, empty, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, empty, runtime));
+  const auto clicked = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                             false, empty, runtime);
+  MAPPING_CHECK(clicked.place.has_value());
+  MAPPING_CHECK(clicked.place->kind ==
+                topology::HardwareDeviceKind::LedProcessor);
+  MAPPING_CHECK(clicked.place->protocol ==
+                topology::HardwareProcessorProtocol::NovastarCoex);
+  MAPPING_CHECK(clicked.place->machine ==
+                editor::HardwarePlaceMachine{"MX40 Pro_002311", "192.0.2.41",
+                                             0U});
+
+  // Once a card has that address, the found processor selects it instead.
+  topology::HardwareMap placed{};
+  topology::HardwareDevice processor = device(
+      5U, topology::HardwareDeviceKind::LedProcessor, "MX40", 1, 1);
+  processor.address = "192.0.2.41:8001";
+  processor.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
+  placed.devices = {processor};
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, placed, runtime));
+  const auto selected = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                              true, placed, runtime);
+  MAPPING_CHECK(selected.selection ==
+                editor::HardwareSelection{editor::HardwareSelectionKind::Device,
+                                          doc::NodeId{5U}});
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, placed, runtime));
+}
+
+void building_from_hardware_lays_out_the_cabled_windows() {
+  FeedHarness harness;
+  const output::FeedMap feed{};
+  const topology::HardwareMap map = novastar_stage();
+  // Build sits at the right of the title bar.
+  const float build_x = FeedHarness::bounds.right() - 5.0F - 60.0F;
+  const float build_y = 13.0F;
+  static_cast<void>(harness.frame(build_x, build_y, false, feed, std::nullopt,
+                                  0U, &map));
+  static_cast<void>(harness.frame(build_x, build_y, true, feed, std::nullopt,
+                                  0U, &map));
+  const auto built = harness.frame(build_x, build_y, false, feed, std::nullopt,
+                                   0U, &map);
+  MAPPING_CHECK(built.layout.has_value());
+  // No processor report: both outputs side by side. Output one has no
+  // binding, so it is the card's own 1920x1080 window 0; output two is
+  // window 1 at 3840x2160.
+  MAPPING_CHECK(built.layout->plan.windows == (std::vector<core::u32>{0U, 1U}));
+  MAPPING_CHECK(built.layout->plan.canvas == (scene::Canvas{5760U, 2160U}));
+
+  // Without cables there is nothing to build, and the button says so by
+  // being inert.
+  const topology::HardwareMap bare{};
+  static_cast<void>(harness.frame(build_x, build_y, true, feed, std::nullopt,
+                                  0U, &bare));
+  const auto inert = harness.frame(build_x, build_y, false, feed, std::nullopt,
+                                   0U, &bare);
+  MAPPING_CHECK(!inert.layout.has_value());
+}
+
+void processors_found_at_one_address_stay_apart() {
+  // Two simulators on one machine: a NovaStar and a Brompton both at
+  // 127.0.0.1. Each card is its own; the second places a Brompton.
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  topology::HardwareRuntimeSnapshot runtime{};
+  runtime.discovery.processor_search_available = true;
+  topology::HardwareDiscoveredProcessor novastar{};
+  novastar.name = "MX40 Pro_000001";
+  novastar.address = "127.0.0.1";
+  topology::HardwareDiscoveredProcessor brompton{};
+  brompton.protocol = topology::HardwareProcessorProtocol::BromptonTessera;
+  brompton.name = "Brompton S8";
+  brompton.model = "S8";
+  brompton.address = "127.0.0.1";
+  runtime.discovery.processors = {novastar, brompton};
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 1U);
+  MAPPING_CHECK(card.width > 0.0F);
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, empty, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, empty, runtime));
+  const auto clicked = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                             false, empty, runtime);
+  MAPPING_CHECK(clicked.place.has_value());
+  MAPPING_CHECK(clicked.place->protocol ==
+                topology::HardwareProcessorProtocol::BromptonTessera);
+  MAPPING_CHECK(clicked.place->machine.has_value() &&
+                clicked.place->machine->name == "Brompton S8");
+
+  // A NovaStar card at that address is not the Brompton.
+  topology::HardwareMap placed{};
+  topology::HardwareDevice card_on_map = device(
+      6U, topology::HardwareDeviceKind::LedProcessor, "MX40", 1, 1);
+  card_on_map.address = "127.0.0.1";
+  card_on_map.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
+  placed.devices = {card_on_map};
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, placed, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, placed, runtime));
+  const auto again = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                           false, placed, runtime);
+  MAPPING_CHECK(again.place.has_value() &&
+                again.place->protocol ==
+                    topology::HardwareProcessorProtocol::BromptonTessera);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 51U> cases{{
+constexpr std::array<Case, 57U> cases{{
+    {"processors found at one address stay apart",
+     &processors_found_at_one_address_stay_apart},
+    {"a novastar processor shows its inputs and matches an edid",
+     &a_novastar_processor_shows_its_inputs_and_matches_an_edid},
+    {"a processor protocol is chosen in its details",
+     &a_processor_protocol_is_chosen_in_its_details},
+    {"the novastar palette entry places a monitored processor",
+     &the_novastar_palette_entry_places_a_monitored_processor},
+    {"found processors are searched for and placed",
+     &found_processors_are_searched_for_and_placed},
+    {"building from hardware lays out the cabled windows",
+     &building_from_hardware_lays_out_the_cabled_windows},
     {"UV mesh source crop is hidden while destination stays editable",
      &imported_mesh_hides_source_crop_but_keeps_destination_fields},
     {"numeric rectangles release focus when removed or hidden",

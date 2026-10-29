@@ -1046,6 +1046,24 @@ void a_flying_camera_takes_movement_keys_from_shortcuts() {
     UI_CHECK(!ctx.move_key_down(gui::MoveKey::Q));
 }
 
+// Pixel art keeps hard texel edges: a sprite run samples nearest, and an
+// ordinary image of the same texture next to it is a separate, filtered run.
+void a_sprite_is_sampled_nearest_in_a_run_of_its_own() {
+    gui::UiDrawList list;
+    mediaserver::rhi::Texture sheet;
+    list.add_sprite(0.0F, 0.0F, 32.0F, 32.0F, sheet, 0.0F, 0.0F, 0.5F, 0.5F);
+    list.add_sprite(40.0F, 0.0F, 32.0F, 32.0F, sheet, 0.5F, 0.0F, 1.0F, 0.5F);
+    list.add_image(80.0F, 0.0F, 32.0F, 32.0F, sheet);
+    UI_CHECK(list.batches().size() == 2U);
+    UI_CHECK(list.batches()[0].texture == &sheet && list.batches()[0].nearest);
+    UI_CHECK(list.batches()[0].vertex_count == 12U);
+    UI_CHECK(list.batches()[1].texture == &sheet && !list.batches()[1].nearest);
+    // A solid fill never claims the sampler.
+    list.add_rect(0.0F, 40.0F, 8.0F, 8.0F, gui::UiColor{1.0F, 1.0F, 1.0F, 1.0F});
+    UI_CHECK(list.batches().back().texture == nullptr &&
+             !list.batches().back().nearest);
+}
+
 // A dense display draws the same logical layout with more pixels. The list
 // multiplies as it emits, so every vertex and clip edge lands at the physical
 // position, and rectangles stay on whole pixels.
@@ -1155,7 +1173,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 39U> cases{{
+constexpr std::array<Case, 40U> cases{{
+    {"a sprite is sampled nearest in a run of its own",
+     &a_sprite_is_sampled_nearest_in_a_run_of_its_own},
     {"motion after release does not change the click endpoint", &motion_after_release_does_not_change_the_click_endpoint},
     {"a prior release does not end a new capture", &a_prior_release_does_not_end_a_new_capture},
     {"input keeps each button's first press position", &input_keeps_each_buttons_first_press_position},

@@ -32,9 +32,30 @@ constexpr std::array<HardwarePort, 1U> operator_ports{{
 }};
 
 constexpr std::array<HardwarePort, 2U> processor_ports{{
-    {0U, "HDMI IN", HardwareSignal::Video, HardwarePortDirection::Input},
-    {1U, "LED OUT", HardwareSignal::Video, HardwarePortDirection::Output},
+    {0U, "VIDEO IN 1", HardwareSignal::Video, HardwarePortDirection::Input},
+    {processor_led_output_port, "LED OUT", HardwareSignal::Video,
+     HardwarePortDirection::Output},
 }};
+
+constexpr std::array<std::string_view,
+                     static_cast<std::size_t>(max_processor_video_inputs - 1U)>
+    processor_input_names{{
+        "VIDEO IN 2", "VIDEO IN 3", "VIDEO IN 4", "VIDEO IN 5",
+        "VIDEO IN 6", "VIDEO IN 7", "VIDEO IN 8", "VIDEO IN 9",
+        "VIDEO IN 10", "VIDEO IN 11", "VIDEO IN 12", "VIDEO IN 13",
+        "VIDEO IN 14", "VIDEO IN 15", "VIDEO IN 16",
+    }};
+
+constexpr auto additional_processor_ports = [] {
+  std::array<HardwarePort, processor_input_names.size()> ports{};
+  for (std::size_t index = 0U; index < ports.size(); ++index) {
+    ports[index] = HardwarePort{static_cast<core::u8>(index + 2U),
+                                processor_input_names[index],
+                                HardwareSignal::Video,
+                                HardwarePortDirection::Input};
+  }
+  return ports;
+}();
 
 constexpr std::array<HardwarePort, 1U> wall_ports{{
     {0U, "LED IN", HardwareSignal::Video, HardwarePortDirection::Input},
@@ -99,6 +120,10 @@ const HardwarePort *find_port(HardwareDeviceKind kind,
       index <= last_render_server_video_port) {
     return &additional_render_server_ports[static_cast<std::size_t>(index -
                                                                     2U)];
+  }
+  if (kind == HardwareDeviceKind::LedProcessor && index >= 2U &&
+      index <= max_processor_video_inputs) {
+    return &additional_processor_ports[static_cast<std::size_t>(index - 2U)];
   }
   return nullptr;
 }
@@ -311,6 +336,12 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_i32(hash, device.desktop_x);
     hash_i32(hash, device.desktop_y);
     hash_byte(hash, device.main_node ? 1U : 0U);
+    // Only a vendor protocol is hashed, so maps authored before protocols
+    // existed keep their digest.
+    if (device.protocol != HardwareProcessorProtocol::Generic) {
+      hash_u32(hash, 0x50524f54U);
+      hash_byte(hash, static_cast<core::u8>(device.protocol));
+    }
   }
   hash_u64(hash, static_cast<core::u64>(map.links.size()));
   for (const HardwareLink &link : map.links) {

@@ -1,6 +1,7 @@
 add_library(mediaserver_topology STATIC
     src/hardware_map.cpp
     src/hardware_map_model.cpp
+    src/hardware_signal.cpp
 )
 add_library(MediaServer::Topology ALIAS mediaserver_topology)
 

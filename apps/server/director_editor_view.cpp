@@ -972,6 +972,17 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
             lifecycle_controller) {
             lifecycle_controller->submit(*editor_frame.output_lifecycle);
         }
+        if (processor_monitor) {
+            if (editor_frame.search_processors) {
+                processor_monitor->search();
+            }
+            for (const editor::HardwareProcessorEdidRequest &write :
+                 editor_frame.processor_edid_writes) {
+                processor_monitor->write_edid(devices::ProcessorEdidWrite{
+                    write.processor, write.input, write.width, write.height,
+                    write.refresh_millihertz});
+            }
+        }
         if (editor_frame.status == editor::EditorStatus::Closed) {
             closed = true;
         }
@@ -1307,6 +1318,24 @@ PhaseExit DirectorShowLoop::project_output_monitor(DirectorTick &tick,
             } catch (const std::bad_alloc &) {
                 discovery.machines.clear();
             }
+        }
+    }
+    if (processor_monitor) {
+        // The monitor's thread does every request; this is a comparison and
+        // two copies under its lock.
+        try {
+            processor_monitor->watch(devices::processor_targets(hardware_map));
+            hardware_runtime.processors = processor_monitor->processors();
+            devices::ProcessorSearchState search =
+                processor_monitor->search_state();
+            topology::HardwareDiscovery &discovery =
+                hardware_runtime.discovery;
+            discovery.processor_search_available = true;
+            discovery.processors = std::move(search.found);
+            discovery.processor_search_running = search.running;
+            discovery.processor_searches = search.completed;
+        } catch (const std::bad_alloc &) {
+            hardware_runtime.processors.clear();
         }
     }
     configured_cluster_nodes = static_cast<core::u32>(

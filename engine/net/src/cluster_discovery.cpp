@@ -255,7 +255,8 @@ std::vector<LocalIpv4Interface> local_ipv4_interfaces() {
             return;
         }
         const LocalIpv4Interface entry{
-            host, asio::ip::address_v4{address | ~mask}};
+            host, asio::ip::address_v4{address | ~mask},
+            asio::ip::address_v4{mask}};
         if (std::find(interfaces.begin(), interfaces.end(), entry) ==
             interfaces.end()) {
             interfaces.push_back(entry);

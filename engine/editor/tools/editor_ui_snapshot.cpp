@@ -2,6 +2,7 @@
 #include <mediaserver/editor/element.hpp>
 #include <mediaserver/editor/history_panel.hpp>
 #include <mediaserver/editor/editor_shell.hpp>
+#include <mediaserver/editor/hardware_sprites.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
@@ -86,6 +87,7 @@ namespace rhi = mediaserver::rhi;
 namespace render = mediaserver::render;
 namespace output = mediaserver::output;
 namespace scene = mediaserver::scene;
+namespace sync = mediaserver::sync;
 namespace topology = mediaserver::topology;
 
 // An environment variable's text, empty when it is not set.
@@ -493,6 +495,186 @@ bool write_bmp(const std::string &path, core::u32 width, core::u32 height,
   return registry;
 }
 
+// A small stage for the Hardware Map views: an operator machine driving two
+// render machines; render A feeds a NovaStar processor on two inputs, one of
+// whose EDIDs offers 60 Hz to an output sending 59.94; render B feeds a
+// generic processor; each processor drives a wall. A search has found a
+// third render machine and another NovaStar.
+struct HardwareStage final {
+  topology::HardwareMap map;
+  topology::HardwareRuntimeSnapshot runtime;
+};
+
+HardwareStage hardware_stage() {
+  using Kind = topology::HardwareDeviceKind;
+  HardwareStage stage{};
+  const auto device = [](core::u64 id, Kind kind, std::string name,
+                         core::i32 x, core::i32 y) {
+    topology::HardwareDevice made{};
+    made.node = doc::NodeId{id};
+    made.kind = kind;
+    made.name = std::move(name);
+    made.grid_x = x;
+    made.grid_y = y;
+    return made;
+  };
+  topology::HardwareDevice render_a =
+      device(2U, Kind::RenderServer, "Render A", -3, -1);
+  render_a.address = "192.168.0.21";
+  render_a.main_node = true;
+  topology::HardwareDevice render_b =
+      device(3U, Kind::RenderServer, "Render B", 2, 5);
+  render_b.address = "192.168.0.22";
+  render_b.node_index = 1U;
+  topology::HardwareDevice novastar =
+      device(4U, Kind::LedProcessor, "MX40 Pro", 1, -4);
+  novastar.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
+  novastar.address = "192.168.0.40";
+  topology::HardwareDevice brompton =
+      device(5U, Kind::LedProcessor, "Brompton S8", 4, -1);
+  brompton.protocol = topology::HardwareProcessorProtocol::BromptonTessera;
+  brompton.address = "192.168.0.50";
+  stage.map.devices = {
+      device(1U, Kind::OperatorMachine, "Operator", -7, 1),
+      render_a,
+      render_b,
+      novastar,
+      brompton,
+      device(6U, Kind::LedWall, "Main wall", 5, -9),
+      device(7U, Kind::LedWall, "Side wall", 8, -5),
+  };
+  const auto link = [](core::u64 id, core::u64 from, core::u8 from_port,
+                       core::u64 to, core::u8 to_port) {
+    return topology::HardwareLink{doc::NodeId{id},
+                                  {doc::NodeId{from}, from_port},
+                                  {doc::NodeId{to}, to_port}};
+  };
+  stage.map.links = {
+      link(10U, 1U, 0U, 2U, 0U),
+      link(11U, 2U, 1U, 4U, topology::processor_input_port(1U)),
+      link(12U, 2U, 2U, 4U, topology::processor_input_port(2U)),
+      link(13U, 4U, topology::processor_led_output_port, 6U, 0U),
+      link(14U, 3U, 1U, 5U, topology::processor_input_port(1U)),
+      link(15U, 5U, topology::processor_led_output_port, 7U, 0U),
+  };
+  const auto binding = [](core::u64 id, core::u64 server, core::u8 port,
+                          core::u32 feed, core::u32 width, core::u32 height,
+                          core::u32 numerator, core::u32 denominator) {
+    topology::HardwareOutputBinding made{};
+    made.node = doc::NodeId{id};
+    made.render_server = doc::NodeId{server};
+    made.logical_port = port;
+    made.feed_index = feed;
+    made.target = topology::HardwareDisplayTargetKey{0x10U + server, port, 0U};
+    made.width = width;
+    made.height = height;
+    made.refresh_numerator = numerator;
+    made.refresh_denominator = denominator;
+    return made;
+  };
+  stage.map.output_bindings = {
+      binding(20U, 2U, 1U, 0U, 3840U, 2160U, 60'000U, 1'001U),
+      binding(21U, 2U, 2U, 1U, 3840U, 2160U, 60'000U, 1'001U),
+      binding(22U, 3U, 1U, 2U, 1920U, 1080U, 60U, 1U),
+  };
+
+  const auto machine = [](core::u64 id, core::u32 outputs) {
+    topology::HardwareRuntimeNode node{};
+    node.device = doc::NodeId{id};
+    node.reachability = topology::HardwareRuntimeReachability::Online;
+    node.process = topology::HardwareRuntimeProcessState::Running;
+    node.inventory = topology::HardwareRuntimeInventoryState::Available;
+    for (core::u32 index = 0U; index < outputs; ++index) {
+      topology::HardwareVideoOutput output{};
+      output.target = topology::HardwareDisplayTargetKey{
+          0x10U + id, static_cast<core::u32>(index + 1U), 0U};
+      output.connector = "DP-" + std::to_string(index + 1U);
+      output.width = 3840U;
+      output.height = 2160U;
+      output.refresh_numerator = 60'000U;
+      output.refresh_denominator = 1'001U;
+      node.video_outputs.push_back(output);
+    }
+    return node;
+  };
+  stage.runtime.nodes = {machine(2U, 2U), machine(3U, 1U)};
+
+  topology::HardwareProcessorNode mx40{};
+  mx40.device = doc::NodeId{4U};
+  mx40.reachability = topology::HardwareRuntimeReachability::Online;
+  mx40.model = "MX40 Pro";
+  mx40.name = "MX40 Pro_002198";
+  const auto input = [](core::u8 number, std::string name, bool signal,
+                        core::u32 refresh, core::u32 edid_refresh) {
+    topology::HardwareProcessorInput made{};
+    made.number = number;
+    made.vendor_id = number;
+    made.name = std::move(name);
+    made.signal = signal;
+    if (signal) {
+      made.width = 3840U;
+      made.height = 2160U;
+      made.refresh_millihertz = refresh;
+    }
+    made.edid_width = 3840U;
+    made.edid_height = 2160U;
+    made.edid_refresh_millihertz = edid_refresh;
+    made.edid_writable = true;
+    return made;
+  };
+  mx40.inputs = {input(1U, "HDMI 2.0-1", true, 59'940U, 59'940U),
+                 input(2U, "HDMI 2.0-2", true, 60'000U, 60'000U),
+                 input(3U, "DP 1.2", false, 0U, 60'000U),
+                 input(4U, "12G-SDI", false, 0U, 60'000U)};
+  topology::HardwareProcessorScreen screen{};
+  screen.name = "Main wall";
+  screen.width = 6912U;
+  screen.height = 1536U;
+  screen.cabinets = 108U;
+  mx40.screens = {screen};
+  // The Brompton reports only its active input, and two of its panels
+  // have dropped off.
+  topology::HardwareProcessorNode s8{};
+  s8.device = doc::NodeId{5U};
+  s8.reachability = topology::HardwareRuntimeReachability::Online;
+  s8.model = "S8";
+  s8.name = "Brompton S8";
+  s8.software = "3.1.0";
+  s8.preset = "Show";
+  s8.all_inputs = false;
+  topology::HardwareProcessorInput active{};
+  active.number = 1U;
+  active.name = "HDMI 1";
+  active.connector = "HDMI";
+  active.signal = true;
+  active.width = 1920U;
+  active.height = 1080U;
+  active.refresh_millihertz = 60'000U;
+  s8.inputs = {active};
+  s8.panels = 64U;
+  s8.panels_online = 62U;
+  stage.runtime.processors = {mx40, s8};
+
+  topology::HardwareDiscovery &discovery = stage.runtime.discovery;
+  discovery.state = topology::HardwareDiscoveryState::Searching;
+  discovery.port = 47'839U;
+  discovery.processor_search_available = true;
+  discovery.processor_searches = 1U;
+  topology::HardwareDiscoveredMachine found{};
+  found.hostname = "RENDER-C";
+  found.address = "192.168.0.23";
+  found.addresses = {found.address};
+  found.node_index = 2U;
+  found.control_port = 47'842U;
+  discovery.machines = {found};
+  topology::HardwareDiscoveredProcessor spare{};
+  spare.name = "MX40 Pro_002311";
+  spare.model = "MX40 Pro";
+  spare.address = "192.168.0.41";
+  discovery.processors = {spare};
+  return stage;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::puts("usage: mediaserver_editor_ui_snapshot <out.bmp> [scale] "
@@ -524,9 +706,13 @@ int main(int argc, char **argv) {
   // `library-grid` and `library-drag` (an asset carried out past the panel).
   const bool library_view = view.substr(0U, 7U) == "library";
   const bool viewer_view = view.substr(0U, 12U) == "asset-viewer";
+  // The Hardware Map: `hardware` selects the NovaStar processor,
+  // `hardware-brompton` the Brompton, `hardware-cable` the cable whose EDID
+  // offers the wrong rate.
+  const bool hardware_view = view.substr(0U, 8U) == "hardware";
   const std::string_view properties =
       curves || summaries || feed || tall || keys_sheet || tracks ||
-              graph_view ||
+              graph_view || hardware_view ||
               library_view || viewer_view
           ? std::string_view{}
           : view;
@@ -761,8 +947,26 @@ int main(int argc, char **argv) {
   }
   const float tall_list_width =
       std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
+  editor::HardwareMappingPanel hardware_panel{
+      gui::ui_id("snapshot.hardware")};
+  const HardwareStage stage = hardware_stage();
+  std::optional<rhi::Texture> sprite_sheet;
+  if (hardware_view) {
+    if (auto acquired = device.acquire_commands()) {
+      auto commands = std::move(acquired).value();
+      sprite_sheet = editor::create_hardware_sprite_texture(device, commands);
+      auto submitted = device.submit(std::move(commands));
+      if (!submitted || !std::move(submitted).value().wait()) {
+        sprite_sheet.reset();
+      }
+    }
+    hardware_panel.set_sprites(sprite_sheet.has_value() ? &*sprite_sheet
+                                                        : nullptr);
+    hardware_panel.frame_devices();
+  }
   const int passes =
       clicks || graph_view || library_view || view == "history-armed" ||
+              hardware_view ||
               view.substr(0U, 18U) == "asset-viewer-model"
           ? 8
           : 3;
@@ -904,6 +1108,39 @@ int main(int argc, char **argv) {
   };
   for (int pass = 0; pass < passes; ++pass) {
     input.new_frame();
+    if (hardware_view) {
+      // A click on what the view selects, then the pointer at the hover
+      // point.
+      const editor::IsometricProjection projection =
+          hardware_panel.view_projection(window);
+      editor::IsoPoint target{};
+      if (view == "hardware-cable") {
+        // On the floor run of Render A's second cable.
+        const editor::IsoPoint a = editor::hardware_presented_port_position(
+            projection, stage.map, stage.map.devices[1], stage.runtime, 2U);
+        // Out of the socket, down to the floor, then ten units along it.
+        const float ground =
+            editor::project_isometric(projection, -3, -1).y +
+            4.0F * projection.tile_width / 32.0F;
+        target = editor::IsoPoint{a.x + 6.0F + 20.0F, ground + 10.0F};
+      } else if (view == "hardware-brompton") {
+        target = editor::project_isometric(projection, 4, -1);
+        target.y -= 12.0F;
+      } else {
+        target = editor::project_isometric(projection, 1, -4);
+        target.y -= 20.0F;
+      }
+      input.set_mouse_position(pass < 3 ? target.x : hover_x,
+                               pass < 3 ? target.y : hover_y);
+      input.set_mouse_button(gui::MouseButton::Left, pass == 1);
+      ctx.new_frame(1.0);
+      ctx.panel(window, ctx.theme().background);
+      static_cast<void>(hardware_panel.draw(ctx, window, stage.map,
+                                            stage.runtime, sync::SyncPolicy{},
+                                            scene::Canvas{10'752U, 2'160U}));
+      ctx.draw_overlays(window);
+      continue;
+    }
     if (graph_view) {
       // Select the car with a click, then zoom about the graph's middle or
       // begin a wire from the blur, as the view asks.
