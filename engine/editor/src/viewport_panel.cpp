@@ -655,13 +655,18 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
                              std::span<const doc::NodeId> selection,
                              doc::NodeId primary,
                              const scene::ModelBoundsProvider& model_bounds,
-                             const ViewportProjection* projection = nullptr) {
+                             const ViewportProjection* projection = nullptr,
+                             std::optional<gui::UiColor> tint = std::nullopt) {
+    // One colour for every outline when tinted - the History strip's hover -
+    // otherwise the selection's primary and secondary.
+    const auto outline = [&](doc::NodeId id) {
+        return tint.value_or(id == primary ? outline_primary : outline_secondary);
+    };
     for (const auto& object : view.instances) {
         if (!selected(selection, object.source)) {
             continue;
         }
-        const gui::UiColor color =
-            object.source == primary ? outline_primary : outline_secondary;
+        const gui::UiColor color = outline(object.source);
         if (object.mesh.primitive == scene::Primitive::Quad ||
             object.mesh.primitive == scene::Primitive::Plane) {
             wire_quad(list, image, view, object.world,
@@ -675,8 +680,7 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
     for (const auto& clip : view.media) {
         if (selected(selection, clip.source_node)) {
             wire_quad(list, image, view, clip.world, false,
-                      clip.source_node == primary ? outline_primary
-                                                  : outline_secondary,
+                      outline(clip.source_node),
                       projection);
         }
     }
@@ -701,15 +705,14 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
                 continue;
             }
             wire_box(list, image, view, model.world,
-                     model.source_node == primary ? outline_primary
-                                                  : outline_secondary,
+                     outline(model.source_node),
                      bounds.value_or(scene::ModelLocalBounds{}), projection);
         }
     }
     // Picking and editing address the group. Thousands of per-tree outlines can
     // exhaust the UI vertex budget and prevent the Inspector from presenting.
     for (const auto& [id,bounds] : batches)
-        wire_box(list,image,view,scene::identity(),id==primary?outline_primary:outline_secondary,bounds,projection);
+        wire_box(list,image,view,scene::identity(),outline(id),bounds,projection);
 }
 
 constexpr std::size_t gizmo_ring_segments = 48U;
@@ -4376,6 +4379,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
     }
     draw_selection_outlines(list, frame.image, scene, selection, primary,
                             model_bounds, projection);
+    if (!highlight_.empty()) {
+        draw_selection_outlines(list, frame.image, scene, highlight_, {},
+                                model_bounds, projection,
+                                ctx.theme().caution);
+    }
     // The selection's size along the world axes, in metres.
     if (role_ == ViewportRole::Stage && show_overlays_ && projection == nullptr &&
         !selection.empty()) {

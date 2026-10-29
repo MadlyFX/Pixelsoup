@@ -52,6 +52,7 @@
 #include "blender_links.hpp"
 #include "cluster_lifecycle_controller.hpp"
 #include "director_live_data.hpp"
+#include "history_labels.hpp"
 #include "thumbnail_service.hpp"
 #include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
@@ -333,6 +334,10 @@ struct DirectorShowLoop final {
     EditCoalescingPolicy &editor_coalescing_policy;
     std::map<core::u64, EditCoalescingPlan> &pending_editor_coalescing;
     bool &pending_editor_coalescing_close;
+    // The scene and compositor history the editor draws, rebuilt only when a
+    // context's history revision moves.
+    HistoryDescriptions &history_descriptions;
+    editor::HistoryState &history_state;
     std::optional<doc::Root> &pending_preloaded_project;
     std::optional<std::filesystem::path> &recent_project_settings_file;
     std::vector<std::string> &recent_project_paths;
@@ -518,6 +523,7 @@ struct DirectorShowLoop final {
     [[nodiscard]] PhaseExit apply_show_timing_requests(DirectorTick &tick,
                                                        OperatorFrame &op);
     [[nodiscard]] PhaseExit apply_history_request(OperatorFrame &op);
+    void refresh_history_state();
     [[nodiscard]] PhaseExit apply_project_save(OperatorFrame &op);
 
     // director_linked_scenes.cpp: publication and Blender links.

@@ -10,6 +10,8 @@
 #include <mediaserver/core/types.hpp>
 #include <mediaserver/doc/ids.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/history.hpp>
+#include <mediaserver/editor/history_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/cues_panel.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
@@ -58,17 +60,33 @@ inline constexpr float editor_dock_gutter = 6.0F;
 // each menu opens from the top of the dock area under its entry.
 inline constexpr float editor_menu_bar_left = 214.0F;
 
-// The area the docked panels share in a window `width` by `height` units.
-[[nodiscard]] constexpr gui::Rect editor_dock_area(float width,
-                                                   float height) noexcept {
+// The History strip between the docked panels and the status bar while it is
+// shown: a gutter, then one row of steps on a card.
+inline constexpr float editor_history_strip_height = 44.0F;
+
+// The area the docked panels share in a window `width` by `height` units,
+// with the History strip shown or hidden below them.
+[[nodiscard]] constexpr gui::Rect editor_dock_area(
+    float width, float height, bool history_strip = true) noexcept {
+  const float below =
+      editor_status_bar_height +
+      (history_strip ? editor_history_strip_height : 0.0F);
   return gui::Rect{editor_dock_gutter, editor_top_bar_height,
                    width > 2.0F * editor_dock_gutter
                        ? width - 2.0F * editor_dock_gutter
                        : 0.0F,
-                   height > editor_top_bar_height + editor_status_bar_height
-                       ? height - editor_top_bar_height -
-                             editor_status_bar_height
+                   height > editor_top_bar_height + below
+                       ? height - editor_top_bar_height - below
                        : 0.0F};
+}
+
+// The History strip's card, under the dock area, when it is shown.
+[[nodiscard]] constexpr gui::Rect editor_history_strip(float width,
+                                                       float height) noexcept {
+  const gui::Rect dock = editor_dock_area(width, height, true);
+  return gui::Rect{dock.x, dock.y + dock.height + editor_dock_gutter,
+                   dock.width,
+                   editor_history_strip_height - editor_dock_gutter};
 }
 
 enum class EditorError : core::u8 {
@@ -312,6 +330,7 @@ struct TimelineLaneEditIntent final {
   std::string name;
   core::u64 gesture{};
   doc::NodeId destination{};
+  core::i64 frame{};
 
   bool operator==(const TimelineLaneEditIntent &) const = default;
 };
@@ -692,16 +711,6 @@ struct KeyMove final {
   bool operator==(const KeyMove &) const = default;
 };
 
-enum class HistoryAction : core::u8 {
-  Undo,
-  Redo,
-};
-
-enum class HistoryContext : core::u8 {
-  Scene,
-  Compositor,
-};
-
 // Director-local identity for a repeatable semantic editor action. It mirrors
 // the scheduler's opaque key without coupling the editor library to cmd.
 struct SemanticCoalescingKey final {
@@ -723,17 +732,6 @@ struct SemanticCoalescingRequest final {
   core::u64 gesture{};
 
   bool operator==(const SemanticCoalescingRequest &) const = default;
-};
-
-// One navigation step through the scene-edit history. The transaction is
-// freshly allocated from the same gesture counter as ordinary edits, so the
-// commands authored by undo or redo cannot collide with an existing gesture.
-struct HistoryRequest final {
-  HistoryAction action{HistoryAction::Undo};
-  HistoryContext context{HistoryContext::Scene};
-  core::u64 transaction{};
-
-  bool operator==(const HistoryRequest &) const = default;
 };
 
 // A local clip clipboard command. Copy carries document ids so the Director
@@ -1060,7 +1058,9 @@ public:
         const LiveDataState &live_data = {},
         std::span<const scene::TrackingSource> tracking_sources = {},
         std::span<const scene::TimelineMarker> timeline_markers = {},
-        const AssetViewerInput &asset_viewer = {}) noexcept;
+        const AssetViewerInput &asset_viewer = {},
+        // The scene and compositor edit history for the History strip.
+        const HistoryState &history_state = {}) noexcept;
 
   // Applies a Director-validated recall without authoring a command or
   // touching any non-Scene selection domain. Returns false if the scene is no

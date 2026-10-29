@@ -1,6 +1,7 @@
 #include <mediaserver/cmd/director_scheduler.hpp>
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -31,18 +32,23 @@ DirectorScheduler::DirectorScheduler(
       sealed_next_command_(next_command),
       limits_(limits) {}
 
+void DirectorScheduler::touch_history(UndoContextId context) noexcept {
+    history_revisions_[context] = ++history_revision_counter_;
+}
+
 void DirectorScheduler::retain_history(
     UndoContextId context,
     TransactionId transaction) {
     auto& order = history_order_[context];
-    order.push_back(transaction);
+    order.push_back(HistoryEntry{HistoryStepId{next_history_step_++}, transaction});
     if (limits_.max_undo_transactions == 0U) {
         return;
     }
 
     while (order.size() > limits_.max_undo_transactions) {
-        const auto retired = order.front();
+        const auto retired = order.front().transaction;
         order.erase(order.begin());
+        ++retired_steps_[context];
         history_.erase(HistoryKey{context, retired});
 
         // Undoability and redoability follow the commands. A transaction whose
@@ -207,8 +213,10 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit_impl(
             auto& order = history_order_[undo_context];
             for (const TransactionId discarded : redo->second) {
                 history_.erase(HistoryKey{undo_context, discarded});
-                const auto position =
-                    std::find(order.begin(), order.end(), discarded);
+                const auto position = std::find_if(
+                    order.begin(), order.end(), [&](const HistoryEntry& entry) {
+                        return entry.transaction == discarded;
+                    });
                 if (position != order.end()) {
                     order.erase(position);
                 }
@@ -218,6 +226,9 @@ core::Result<Command, ScheduleError> DirectorScheduler::schedule_edit_impl(
         undo_stacks_[undo_context].push_back(transaction);
         retain_history(undo_context, transaction);
     }
+    // A coalesced continuation changes an existing step's commands, so it
+    // advances the revision as well.
+    touch_history(undo_context);
     last_scheduled_frame_ = apply_at;
     if (!preserve_coalescing) {
         end_coalescing();
@@ -344,9 +355,11 @@ DirectorScheduler::schedule_history_inverse(
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::NoHistory);
     }
-    const auto order_position =
-        std::find(order->second.begin(), order->second.end(),
-                  original_key.transaction);
+    const auto order_position = std::find_if(
+        order->second.begin(), order->second.end(),
+        [&](const HistoryEntry& entry) {
+            return entry.transaction == original_key.transaction;
+        });
     if (order_position == order->second.end()) {
         return core::Result<std::vector<Command>, DirectorUndoError>::failure(
             DirectorUndoError::NoHistory);
@@ -415,9 +428,10 @@ DirectorScheduler::schedule_history_inverse(
     frame_commands.insert(frame_commands.end(), generated.begin(), generated.end());
     history_.emplace(generated_key, generated);
     history_.erase(original_key);
-    *order_position = generated_transaction;
+    order_position->transaction = generated_transaction;
     stack->second.pop_back();
     destination_stacks[undo_context].push_back(generated_transaction);
+    touch_history(undo_context);
     // Moving through history replaces the retained command payload for one
     // logical user transaction. It must not consume another retention slot or
     // evict an older edit merely because the operator navigated backward.
@@ -568,12 +582,107 @@ std::size_t DirectorScheduler::redo_depth(UndoContextId context) const noexcept 
     return stack == redo_stacks_.end() ? 0U : stack->second.size();
 }
 
+core::u64 DirectorScheduler::history_revision(UndoContextId context) const noexcept {
+    const auto revision = history_revisions_.find(context);
+    return revision == history_revisions_.end() ? 0U : revision->second;
+}
+
+HistoryView DirectorScheduler::history_view(UndoContextId context) const {
+    HistoryView view;
+    view.revision = history_revision(context);
+    if (const auto retired = retired_steps_.find(context);
+        retired != retired_steps_.end()) {
+        view.retired = retired->second;
+    }
+    const auto order = history_order_.find(context);
+    if (order == history_order_.end()) {
+        return view;
+    }
+    // Applied steps are always the oldest retained ones: undo pops the newest
+    // applied step and a new edit discards everything redoable.
+    const std::size_t applied = undo_depth(context);
+    view.steps.reserve(order->second.size());
+    for (std::size_t index = 0U; index < order->second.size(); ++index) {
+        const HistoryEntry& entry = order->second[index];
+        const auto commands = history_.find(HistoryKey{context, entry.transaction});
+        view.steps.push_back(HistoryStepView{
+            entry.step,
+            entry.transaction,
+            index < applied,
+            commands == history_.end() ? std::span<const Command>{}
+                                       : std::span<const Command>{commands->second},
+        });
+    }
+    return view;
+}
+
+core::Result<std::vector<Command>, DirectorUndoError>
+DirectorScheduler::schedule_history_jump(
+    UndoContextId undo_context,
+    HistoryStepId target,
+    std::span<const TransactionId> fresh,
+    FrameNumber apply_at,
+    std::span<const std::string_view> runtime_properties) {
+    using JumpResult = core::Result<std::vector<Command>, DirectorUndoError>;
+    if (prepared_seal_) {
+        return JumpResult::failure(DirectorUndoError::SealPrepared);
+    }
+    std::size_t target_applied = 0U;
+    if (target) {
+        const auto order = history_order_.find(undo_context);
+        if (order == history_order_.end()) {
+            return JumpResult::failure(DirectorUndoError::UnknownStep);
+        }
+        const auto position = std::find_if(
+            order->second.begin(), order->second.end(),
+            [&](const HistoryEntry& entry) { return entry.step == target; });
+        if (position == order->second.end()) {
+            return JumpResult::failure(DirectorUndoError::UnknownStep);
+        }
+        target_applied =
+            static_cast<std::size_t>(position - order->second.begin()) + 1U;
+    }
+    const std::size_t applied = undo_depth(undo_context);
+    const bool backward = target_applied < applied;
+    const std::size_t crossed =
+        backward ? applied - target_applied : target_applied - applied;
+    if (fresh.size() != crossed) {
+        return JumpResult::failure(DirectorUndoError::TransactionCountMismatch);
+    }
+    if (crossed == 0U) {
+        return JumpResult::success(std::vector<Command>{});
+    }
+
+    // Stage against a complete copy, as document replacement does, so a
+    // conflict part way through leaves nothing behind.
+    DirectorScheduler staged = *this;
+    std::vector<Command> generated;
+    for (const TransactionId transaction : fresh) {
+        auto navigated = backward
+            ? staged.schedule_undo(undo_context, transaction, apply_at, runtime_properties)
+            : staged.schedule_redo(undo_context, transaction, apply_at, runtime_properties);
+        if (!navigated) {
+            return JumpResult::failure(navigated.error());
+        }
+        auto commands = std::move(navigated).value();
+        generated.insert(generated.end(),
+                         std::make_move_iterator(commands.begin()),
+                         std::make_move_iterator(commands.end()));
+    }
+    *this = std::move(staged);
+    return JumpResult::success(std::move(generated));
+}
+
 void DirectorScheduler::clear_undo_history() noexcept {
     end_coalescing();
     history_.clear();
     undo_stacks_.clear();
     redo_stacks_.clear();
     history_order_.clear();
+    retired_steps_.clear();
+    for (auto& [context, revision] : history_revisions_) {
+        revision = ++history_revision_counter_;
+    }
 }
 
 DirectorAuthoringFootprint DirectorScheduler::authoring_footprint()

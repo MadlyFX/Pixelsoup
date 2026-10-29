@@ -1143,6 +1143,13 @@ PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
                           << frame.value() << '\n';
                 return 1;
             }
+            history_descriptions.name(
+                scene_undo_context, cmd::TransactionId{request.transaction},
+                request.mode == editor::SourceEditMode::Insert
+                    ? "Insert from Asset Viewer"
+                : request.mode == editor::SourceEditMode::Overwrite
+                    ? "Overwrite from Asset Viewer"
+                    : "Append from Asset Viewer");
         }
         next_new_node = planned.value().next_node;
         std::vector<doc::NodeId> placed;
@@ -1180,6 +1187,10 @@ PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
                     << frame.value() << '\n';
                 return 1;
             }
+            history_descriptions.name(
+                scene_undo_context,
+                cmd::TransactionId{pending_clip_paste->request.transaction},
+                "Paste clips");
             next_new_node = planned.value().next_node;
         } else if (planned.error() != ClipPasteError::Empty &&
                    planned.error() !=
@@ -1205,6 +1216,12 @@ PhaseExit DirectorShowLoop::apply_timeline_edits(OperatorFrame &op) {
                       << frame.value() << '\n';
             return 1;
         }
+        history_descriptions.name(
+            scene_undo_context, cmd::TransactionId{request.transaction},
+            request.selection.size() == 1U
+                ? std::string{"Duplicate 1 item"}
+                : "Duplicate " + std::to_string(request.selection.size()) +
+                      " items");
         next_new_node = planned->next_node;
     }
     pending_scene_duplicates.clear();
@@ -1780,6 +1797,15 @@ PhaseExit DirectorShowLoop::apply_compositor_and_delete_requests(OperatorFrame &
                 std::cerr << "could not paste compositor nodes for frame "
                           << frame.value() << '\n';
                 return 1;
+            }
+            if (planned) {
+                history_descriptions.name(
+                    compositor_undo_context,
+                    cmd::TransactionId{pending_compositor_gesture},
+                    request.action ==
+                            editor::CompositorClipboardAction::Duplicate
+                        ? "Duplicate nodes"
+                        : "Paste nodes");
             }
         }
     }

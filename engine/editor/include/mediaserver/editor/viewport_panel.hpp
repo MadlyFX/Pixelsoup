@@ -435,6 +435,11 @@ class ViewportPanel final {
     // Every element's bounding box outlined, selected or not.
     [[nodiscard]] bool bounds_visible() const noexcept { return show_bounds_; }
     void set_bounds_visible(bool visible) noexcept { show_bounds_ = visible; }
+    // Nodes outlined in the caution colour beside the selection, without
+    // selecting them: what a hovered History step touched. Empty for none.
+    void set_highlight(std::span<const doc::NodeId> nodes) {
+        highlight_.assign(nodes.begin(), nodes.end());
+    }
     // What the Stage view's menu, in the top-right corner of its image, shows
     // as this view's projection. The shell owns the view and sets it before
     // `draw`; a choice from the menu comes back in the frame.
@@ -725,6 +730,7 @@ class ViewportPanel final {
     // The pivot an operator moved for this selection, until it changes.
     std::optional<scene::Vec3> pivot_override_;
     std::vector<doc::NodeId> pivot_selection_;
+    std::vector<doc::NodeId> highlight_;
     bool pivot_dragging_{};
     bool pivot_moved_{};
     float pivot_press_x_{};

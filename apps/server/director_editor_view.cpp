@@ -865,6 +865,7 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
                                director_node_tracking);
         observe_timeline_playback(tick, inputs);
         next_editor_refresh = Clock::now() + editor_refresh_interval;
+        refresh_history_state();
         auto editor_frame = editor->frame(
             scene_frame, timeline, keyframes, elements, effects,
             hardware_map, feed_map, switcher_view, asset_registry,
@@ -874,7 +875,8 @@ PhaseExit DirectorShowLoop::refresh_editor(DirectorTick &tick) {
             stage_lanes, clip_clipboard.span_duration(),
             selection_set_summaries, key_scale_preview,
             filmstrip_observations, live_data_view,
-            authored_tracking_sources, stage_markers, inputs.asset_viewer);
+            authored_tracking_sources, stage_markers, inputs.asset_viewer,
+            history_state);
         ++editor_frame_calls;
         // Shown again next frame only while the panel keeps asking.
         asset_viewer_request = editor_frame.asset_viewer;
@@ -1967,10 +1969,7 @@ PhaseExit DirectorShowLoop::apply_editor_services(
         const editor::SemanticCoalescingRequest &request =
             *editor_frame.semantic_coalescing;
         const EditCoalescingIdentity identity{
-            cmd::UndoContextId{
-                request.context == editor::HistoryContext::Compositor
-                    ? 6U
-                    : 2U},
+            undo_context_for(request.context),
             cmd::CoalescingKey{request.key.focus, request.key.selection,
                                request.key.property,
                                request.key.direction,
@@ -2315,6 +2314,19 @@ PhaseExit DirectorShowLoop::apply_proxy_cache_clear(
         }
     }
     return std::nullopt;
+}
+
+void DirectorShowLoop::refresh_history_state() {
+    // Describing a context walks its retained steps, so it happens only
+    // when that context's history actually moved, never per frame.
+    const auto refresh = [&](cmd::UndoContextId context,
+                             editor::HistoryContextState &state) {
+        if (scheduler.history_revision(context) != state.revision) {
+            state = history_descriptions.describe(scheduler, context);
+        }
+    };
+    refresh(scene_undo_context, history_state.scene);
+    refresh(compositor_undo_context, history_state.compositor);
 }
 
 } // namespace mediaserver::app

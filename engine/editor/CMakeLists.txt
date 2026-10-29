@@ -38,6 +38,7 @@ add_library(mediaserver_editor STATIC
     src/timeline/timeline_keyboard.cpp
     src/timeline/timeline_feedback.cpp
     src/cues_panel.cpp
+    src/history_panel.cpp
     src/operator_widgets.cpp
     src/workspace_panels.cpp
     src/scene_settings_panel.cpp
@@ -492,6 +493,20 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_cues_tests
     )
     set_target_properties(mediaserver_editor_cues_tests PROPERTIES FOLDER "tests")
+
+    add_executable(mediaserver_editor_history_tests
+        tests/history_panel_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_history_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_history_tests)
+    add_test(
+        NAME mediaserver.editor_history
+        COMMAND mediaserver_editor_history_tests
+    )
+    set_target_properties(mediaserver_editor_history_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_workspace_tests
         tests/workspace_panels_tests.cpp

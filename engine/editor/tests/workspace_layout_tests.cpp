@@ -231,8 +231,18 @@ void compositor_minimap_round_trips() {
   LAYOUT_CHECK(!night.value().compositor_minimap);
   LAYOUT_CHECK(!older.value().night_dim);
 
+  // Bit 2 puts the History strip away; older records show it.
+  state.history_hidden = true;
+  const auto put_away = editor::decode_workspace_layout(
+      editor::encode_workspace_layout(state).value());
+  LAYOUT_CHECK(put_away);
+  LAYOUT_CHECK(put_away.value().history_hidden);
+  LAYOUT_CHECK(put_away.value().night_dim);
+  LAYOUT_CHECK(!night.value().history_hidden);
+  LAYOUT_CHECK(!older.value().history_hidden);
+
   auto unknown = encoded;
-  unknown[44U] = std::byte{0x05U};
+  unknown[44U] = std::byte{0x09U};
   LAYOUT_CHECK(!editor::decode_workspace_layout(unknown));
 }
 

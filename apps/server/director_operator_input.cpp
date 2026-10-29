@@ -1081,32 +1081,50 @@ PhaseExit DirectorShowLoop::apply_history_request(OperatorFrame &op) {
     const auto &frame = op.frame;
     if (pending_history.has_value()) {
         // Navigate the editor's most recently authored scene or
-        // compositor context one whole gesture at a time. Both
-        // actions author fresh commands; NoHistory only means that
-        // the requested direction has no next step.
-        const bool undo =
-            pending_history->action == editor::HistoryAction::Undo;
-        const cmd::UndoContextId history_context{
-            pending_history->context ==
-                    editor::HistoryContext::Compositor
-                ? 6U
-                : 2U};
+        // compositor context one whole gesture at a time, or jump to
+        // a listed step. Every action authors fresh commands;
+        // NoHistory only means that the requested direction has no
+        // next step.
+        const editor::HistoryRequest request = *pending_history;
+        pending_history.reset();
+        const cmd::UndoContextId history_context =
+            undo_context_for(request.context);
         // Asset activation advances after a bake/probe edit. It
         // must survive Undo without conflicting with authored fields.
         constexpr std::array runtime_properties{
             scene::schema::asset_commit_digest,
             scene::schema::asset_commit_control,
             scene::schema::asset_commit_show};
+        if (request.action == editor::HistoryAction::Jump) {
+            std::vector<cmd::TransactionId> fresh;
+            fresh.reserve(static_cast<std::size_t>(request.transaction_count));
+            for (core::u64 offset = 0U; offset < request.transaction_count;
+                 ++offset) {
+                fresh.emplace_back(request.transaction + offset);
+            }
+            auto jumped = scheduler.schedule_history_jump(
+                history_context, cmd::HistoryStepId{request.target_step},
+                fresh, frame, runtime_properties);
+            if (!jumped) {
+                // The editor drew a history this frame may have moved
+                // past (a retired step, a concurrent edit) or one that
+                // conflicts with another context. Nothing was authored,
+                // so the show carries on and the strip redraws.
+                std::cerr << "history jump to step " << request.target_step
+                          << " refused (code "
+                          << static_cast<unsigned>(jumped.error()) << ")\n";
+            }
+            return std::nullopt;
+        }
+        const bool undo = request.action == editor::HistoryAction::Undo;
         auto navigated =
             undo ? scheduler.schedule_undo(
                        history_context,
-                       cmd::TransactionId{
-                           pending_history->transaction},
+                       cmd::TransactionId{request.transaction},
                        frame, runtime_properties)
                  : scheduler.schedule_redo(
                        history_context,
-                       cmd::TransactionId{
-                           pending_history->transaction},
+                       cmd::TransactionId{request.transaction},
                        frame, runtime_properties);
         if (!navigated && navigated.error() !=
                               cmd::DirectorUndoError::NoHistory) {
@@ -1115,7 +1133,6 @@ PhaseExit DirectorShowLoop::apply_history_request(OperatorFrame &op) {
                       << frame.value() << '\n';
             return 1;
         }
-        pending_history.reset();
     }
     return std::nullopt;
 }

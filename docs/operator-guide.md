@@ -1436,8 +1436,29 @@ replication and undo/redo. The conventional **Edit** menu carries Undo, Redo,
 Copy, and Paste, with **Ctrl+Z** for undo and **Ctrl+Shift+Z** or **Ctrl+Y** for redo. A
 new edit after undo starts a new branch and clears redo only for that authoring
 context. Selecting a Scene/Stage item or a Compositor node/canvas chooses which
-of those two histories the global actions navigate. A clip dropped into a
-scene lands *placed* on the
+of those two histories the global actions navigate.
+
+The **History** strip along the bottom of the workspace shows that history as
+a row of steps, oldest first, each named for what it did ("Change position of
+2 objects", "Delete group "Lights"", "Paste clips"). A marker stands after
+the current step; steps after it are dimmed and are what Redo would bring
+back. Click a step to go to just after it, or **Start** to go back before
+every listed step: every step in between is undone or redone together, as one
+change. Hovering a step outlines the elements it touched on Stage in amber.
+The **Scene** and **Compositor** buttons choose which history it shows. It
+follows the one you last edited in; click a button to pin that history, and
+click it again to follow your edits again. When the scene you are editing is
+the one on air, a jump of more than one step asks for a second click (the step
+glows amber and reads "Click again"), because the wall changes all at once.
+When the steps run past the strip's ends, a thin bar along its bottom edge
+shows where you are; drag it, or click along it, to scroll, or use the mouse
+wheel over the steps. The strip keeps the latest 256 steps of each history; older ones show as
+"N earlier", and opening a project starts a new history. It is not a docked
+panel and does not move: the chevron at its left end puts it away, and the
+**History** chip at the left of the status bar brings it back. The editor
+remembers which you chose.
+
+A clip dropped into a scene lands *placed* on the
 timeline, with its own natural length in show frames, and is edited there - see
 [Editing clips on the timeline](#editing-clips-on-the-timeline).
 

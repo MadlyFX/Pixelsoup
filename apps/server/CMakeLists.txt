@@ -103,6 +103,7 @@ if(MEDIASERVER_ENABLE_GUI)
         director_operator_input.cpp
         director_project_load.cpp
         director_scene_authoring.cpp
+        history_labels.cpp
         render_machine_panel.cpp
         scene_duplicate.cpp
         render_machine_window.cpp
@@ -415,6 +416,14 @@ if(BUILD_TESTING)
         tests/edit_coalescing_policy_tests.cpp
     )
     if(MEDIASERVER_ENABLE_GUI)
+        add_executable(mediaserver_history_labels_tests
+            history_labels.cpp
+            tests/history_labels_tests.cpp)
+        target_include_directories(mediaserver_history_labels_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(mediaserver_history_labels_tests PRIVATE MediaServer::Editor MediaServer::Cmd)
+        mediaserver_set_project_options(mediaserver_history_labels_tests)
+        add_test(NAME mediaserver.server_history_labels COMMAND mediaserver_history_labels_tests)
+        set_target_properties(mediaserver_history_labels_tests PROPERTIES FOLDER "tests")
         add_executable(mediaserver_source_replacement_authoring_tests
             tests/source_replacement_authoring_tests.cpp)
         target_include_directories(mediaserver_source_replacement_authoring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -1,5 +1,7 @@
 #include <mediaserver/editor/asset_viewer_panel.hpp>
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/history_panel.hpp>
+#include <mediaserver/editor/editor_shell.hpp>
 #include <mediaserver/editor/inspector_panel.hpp>
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/editor/timeline_panel.hpp>
@@ -758,7 +760,8 @@ int main(int argc, char **argv) {
   const float tall_list_width =
       std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
   const int passes =
-      clicks || graph_view || library_view || view.substr(0U, 18U) == "asset-viewer-model"
+      clicks || graph_view || library_view || view == "history-armed" ||
+              view.substr(0U, 18U) == "asset-viewer-model"
           ? 8
           : 3;
   editor::AssetViewerPanel viewer_panel{gui::ui_id("snapshot.viewer")};
@@ -1012,6 +1015,49 @@ int main(int argc, char **argv) {
         render_model(*viewed.model_view, viewed.surface_width,
                      viewed.surface_height);
       }
+      continue;
+    }
+    if (view == "history" || view == "history-armed") {
+      // A rehearsal's worth of steps, the last two undone. history-armed
+      // clicks at the hover point on air, so a step there shows the confirm
+      // state.
+      static editor::HistoryPanel history_panel{gui::ui_id("snapshot.history")};
+      static const editor::HistoryState history = [] {
+        editor::HistoryState state{};
+        const std::array<std::pair<std::string_view, editor::HistoryStepKind>, 9U>
+            steps{{{"Add clip \"Driving_Plate_Front.mov\"", editor::HistoryStepKind::Add},
+                   {"Change position of clip", editor::HistoryStepKind::Change},
+                   {"Add blur effect", editor::HistoryStepKind::Add},
+                   {"Change blur radius of blur effect", editor::HistoryStepKind::Change},
+                   {"Paste clips", editor::HistoryStepKind::Mixed},
+                   {"Change position of 3 objects", editor::HistoryStepKind::Change},
+                   {"Delete group \"Lights\"", editor::HistoryStepKind::Delete},
+                   {"Change opacity of model \"stage.glb\"", editor::HistoryStepKind::Change},
+                   {"Add light", editor::HistoryStepKind::Add}}};
+        for (std::size_t index = 0U; index < steps.size(); ++index) {
+          editor::HistoryStep step{};
+          step.step = index + 1U;
+          step.label = std::string{steps[index].first};
+          step.kind = steps[index].second;
+          step.applied = index + 2U < steps.size();
+          state.scene.steps.push_back(std::move(step));
+        }
+        state.scene.retired = 12U;
+        state.scene.revision = 1U;
+        return state;
+      }();
+      const bool arm = view == "history-armed" && pass >= 1 && pass <= 3;
+      input.set_mouse_position(hover_x, hover_y);
+      input.set_mouse_button(gui::MouseButton::Left, arm && pass == 2);
+      ctx.new_frame(1.0);
+      ctx.panel(window, ctx.theme().background);
+      static_cast<void>(history_panel.draw(
+          ctx,
+          gui::Rect{6.0F, 6.0F, logical_width - 12.0F,
+                    editor::editor_history_strip_height - editor::editor_dock_gutter},
+          history,
+          editor::HistoryContext::Scene, true));
+      ctx.draw_overlays(window);
       continue;
     }
     if (viewer_view) {

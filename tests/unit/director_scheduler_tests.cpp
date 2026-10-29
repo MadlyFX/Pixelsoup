@@ -3,6 +3,7 @@
 
 #include <mediaserver/cmd/director_scheduler.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <array>
 #include <limits>
@@ -1181,6 +1182,298 @@ MS_TEST("Director can forget project undo and redo without dropping commands") {
     MS_CHECK(director.commands_for(command::FrameNumber{2U}).size() == 1U);
     MS_CHECK(director.seal_frame(command::FrameNumber{2U}).has_value());
     MS_CHECK(!director.sealed_document().contains(document::NodeId{1U}));
+}
+
+// Three scene steps: create node 1 at 10, change it to 20, create node 2 at 30.
+[[nodiscard]] command::DirectorScheduler three_step_history() {
+    command::DirectorScheduler director;
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), scene,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 20),
+                     command::PutNode{support::node(1U, 10)}, scene,
+                     command::TransactionId{2U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(2U, 30), support::erase(2U), scene,
+                     command::TransactionId{3U}, command::FrameNumber{1U})
+                 .has_value());
+    return director;
+}
+
+MS_TEST("history steps keep their identity through undo and redo") {
+    const command::UndoContextId scene{2U};
+    command::DirectorScheduler empty;
+    MS_CHECK(empty.history_revision(scene) == 0U);
+    MS_CHECK(empty.history_view(scene).steps.empty());
+
+    auto director = three_step_history();
+    const auto created = director.history_view(scene);
+    MS_CHECK(created.steps.size() == 3U);
+    MS_CHECK(created.retired == 0U);
+    MS_CHECK(created.revision != 0U);
+    MS_CHECK(created.revision == director.history_revision(scene));
+    MS_CHECK(created.steps[0].step < created.steps[1].step);
+    MS_CHECK(created.steps[1].step < created.steps[2].step);
+    for (std::size_t index = 0U; index < created.steps.size(); ++index) {
+        MS_CHECK(created.steps[index].applied);
+        MS_CHECK(created.steps[index].transaction ==
+                 command::TransactionId{index + 1U});
+        MS_CHECK(created.steps[index].commands.size() == 1U);
+    }
+    const auto third = created.steps[2].step;
+
+    MS_CHECK(director
+                 .schedule_undo(scene, command::TransactionId{10U},
+                                command::FrameNumber{2U})
+                 .has_value());
+    const auto undone = director.history_view(scene);
+    MS_CHECK(undone.revision > created.revision);
+    MS_CHECK(undone.steps.size() == 3U);
+    MS_CHECK(undone.steps[0].applied);
+    MS_CHECK(undone.steps[1].applied);
+    MS_CHECK(!undone.steps[2].applied);
+    MS_CHECK(undone.steps[2].step == third);
+    MS_CHECK(undone.steps[2].transaction == command::TransactionId{10U});
+    MS_CHECK(std::holds_alternative<command::EraseNode>(
+        undone.steps[2].commands.front().forward));
+
+    MS_CHECK(director
+                 .schedule_redo(scene, command::TransactionId{11U},
+                                command::FrameNumber{2U})
+                 .has_value());
+    const auto redone = director.history_view(scene);
+    MS_CHECK(redone.revision > undone.revision);
+    MS_CHECK(redone.steps[2].applied);
+    MS_CHECK(redone.steps[2].step == third);
+    MS_CHECK(redone.steps[2].transaction == command::TransactionId{11U});
+}
+
+MS_TEST("a history jump matches the same number of single steps") {
+    const command::UndoContextId scene{2U};
+    auto jumped = three_step_history();
+    auto stepped = three_step_history();
+    const auto first = jumped.history_view(scene).steps[0].step;
+
+    const std::array back{command::TransactionId{20U},
+                          command::TransactionId{21U}};
+    auto jump = jumped.schedule_history_jump(scene, first, back,
+                                             command::FrameNumber{2U});
+    MS_CHECK(jump.has_value());
+    MS_CHECK(jump.value().size() == 2U);
+    MS_CHECK(stepped
+                 .schedule_undo(scene, back[0], command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(stepped
+                 .schedule_undo(scene, back[1], command::FrameNumber{2U})
+                 .has_value());
+
+    MS_CHECK(document::diff(jumped.projected_document(),
+                            stepped.projected_document())
+                 .changes.empty());
+    MS_CHECK(jumped.projected_document().version() ==
+             document::Version{5U});
+    MS_CHECK(std::ranges::equal(jumped.commands_for(command::FrameNumber{2U}),
+                                stepped.commands_for(command::FrameNumber{2U})));
+    MS_CHECK(*jumped.projected_document().get(document::NodeId{1U}) ==
+             support::node(1U, 10));
+    MS_CHECK(!jumped.projected_document().contains(document::NodeId{2U}));
+    const auto view = jumped.history_view(scene);
+    MS_CHECK(view.steps[0].applied);
+    MS_CHECK(!view.steps[1].applied);
+    MS_CHECK(!view.steps[2].applied);
+    MS_CHECK(view.steps[2].transaction == back[0]);
+    MS_CHECK(view.steps[1].transaction == back[1]);
+    MS_CHECK(jumped.undo_depth(scene) == 1U);
+    MS_CHECK(jumped.redo_depth(scene) == 2U);
+
+    // Forward to the newest step, then back to before every step.
+    const std::array forward{command::TransactionId{22U},
+                             command::TransactionId{23U}};
+    MS_CHECK(jumped
+                 .schedule_history_jump(scene, view.steps[2].step, forward,
+                                        command::FrameNumber{3U})
+                 .has_value());
+    MS_CHECK(*jumped.projected_document().get(document::NodeId{1U}) ==
+             support::node(1U, 20));
+    MS_CHECK(*jumped.projected_document().get(document::NodeId{2U}) ==
+             support::node(2U, 30));
+    MS_CHECK(jumped.redo_depth(scene) == 0U);
+
+    const std::array all{command::TransactionId{24U},
+                         command::TransactionId{25U},
+                         command::TransactionId{26U}};
+    MS_CHECK(jumped
+                 .schedule_history_jump(scene, command::HistoryStepId{}, all,
+                                        command::FrameNumber{3U})
+                 .has_value());
+    MS_CHECK(jumped.projected_document().empty());
+    MS_CHECK(jumped.undo_depth(scene) == 0U);
+    MS_CHECK(jumped.redo_depth(scene) == 3U);
+}
+
+MS_TEST("a history jump refuses unknown steps and miscounted transactions") {
+    const command::UndoContextId scene{2U};
+    auto director = three_step_history();
+    const auto view = director.history_view(scene);
+    const auto version = director.projected_document().version();
+
+    const std::array one{command::TransactionId{30U}};
+    auto short_count = director.schedule_history_jump(
+        scene, view.steps[0].step, one, command::FrameNumber{2U});
+    MS_CHECK(!short_count.has_value());
+    MS_CHECK(short_count.error() ==
+             command::DirectorUndoError::TransactionCountMismatch);
+
+    auto unknown = director.schedule_history_jump(
+        scene, command::HistoryStepId{999U}, {}, command::FrameNumber{2U});
+    MS_CHECK(!unknown.has_value());
+    MS_CHECK(unknown.error() == command::DirectorUndoError::UnknownStep);
+
+    auto other_context = director.schedule_history_jump(
+        command::UndoContextId{6U}, view.steps[0].step, {},
+        command::FrameNumber{2U});
+    MS_CHECK(!other_context.has_value());
+    MS_CHECK(other_context.error() == command::DirectorUndoError::UnknownStep);
+
+    auto in_place = director.schedule_history_jump(
+        scene, view.steps[2].step, {}, command::FrameNumber{2U});
+    MS_CHECK(in_place.has_value());
+    MS_CHECK(in_place.value().empty());
+
+    MS_CHECK(director.projected_document().version() == version);
+    MS_CHECK(director.history_revision(scene) == view.revision);
+    MS_CHECK(director.commands_for(command::FrameNumber{2U}).empty());
+}
+
+MS_TEST("a conflict part way through a history jump changes nothing") {
+    command::DirectorScheduler director;
+    const command::UndoContextId compositor{1U};
+    const command::UndoContextId scene{2U};
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 10), support::erase(1U), compositor,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    // Another context changes node 1, so undoing its creation must conflict.
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(1U, 20),
+                     command::PutNode{support::node(1U, 10)}, scene,
+                     command::TransactionId{2U}, command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(3U, 40), support::erase(3U), compositor,
+                     command::TransactionId{3U}, command::FrameNumber{1U})
+                 .has_value());
+    const auto before = director.history_view(compositor);
+    const auto version = director.projected_document().version();
+
+    // Undoing node 3 succeeds on its own; the second step then conflicts.
+    const std::array fresh{command::TransactionId{4U},
+                           command::TransactionId{5U}};
+    auto jump = director.schedule_history_jump(
+        compositor, command::HistoryStepId{}, fresh,
+        command::FrameNumber{2U});
+    MS_CHECK(!jump.has_value());
+    MS_CHECK(jump.error() == command::DirectorUndoError::HistoryConflict);
+
+    MS_CHECK(director.projected_document().version() == version);
+    MS_CHECK(director.projected_document().contains(document::NodeId{3U}));
+    MS_CHECK(director.commands_for(command::FrameNumber{2U}).empty());
+    MS_CHECK(director.undo_depth(compositor) == 2U);
+    MS_CHECK(director.redo_depth(compositor) == 0U);
+    const auto after = director.history_view(compositor);
+    MS_CHECK(after.revision == before.revision);
+    MS_CHECK(after.steps[1].transaction == command::TransactionId{3U});
+    MS_CHECK(after.steps[1].applied);
+    // The refused transactions were not consumed.
+    MS_CHECK(director
+                 .schedule_undo(compositor, fresh[0], command::FrameNumber{2U})
+                 .has_value());
+}
+
+MS_TEST("history view drops discarded and retired steps and counts retirement") {
+    const command::UndoContextId scene{2U};
+    command::DirectorSchedulerLimits limits;
+    limits.max_undo_transactions = 2U;
+    command::DirectorScheduler director{
+        {}, command::FrameNumber{0U}, command::CommandId{1U}, limits};
+    for (std::uint64_t id = 1U; id <= 4U; ++id) {
+        MS_CHECK(director
+                     .schedule_edit(
+                         support::put(id, static_cast<std::int64_t>(id)),
+                         support::erase(id), scene,
+                         command::TransactionId{id}, command::FrameNumber{1U})
+                     .has_value());
+    }
+    const auto retained = director.history_view(scene);
+    MS_CHECK(retained.retired == 2U);
+    MS_CHECK(retained.steps.size() == 2U);
+    MS_CHECK(retained.steps[0].transaction == command::TransactionId{3U});
+    MS_CHECK(retained.steps[1].transaction == command::TransactionId{4U});
+
+    MS_CHECK(director
+                 .schedule_undo(scene, command::TransactionId{5U},
+                                command::FrameNumber{2U})
+                 .has_value());
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(9U, 90), support::erase(9U), scene,
+                     command::TransactionId{6U}, command::FrameNumber{2U})
+                 .has_value());
+    const auto branched = director.history_view(scene);
+    // The undone step is discarded, not retired.
+    MS_CHECK(branched.retired == 2U);
+    MS_CHECK(branched.steps.size() == 2U);
+    MS_CHECK(branched.steps[0].step == retained.steps[0].step);
+    MS_CHECK(branched.steps[1].step > retained.steps[1].step);
+    MS_CHECK(branched.steps[1].transaction == command::TransactionId{6U});
+    MS_CHECK(branched.steps[1].applied);
+
+    director.clear_undo_history();
+    const auto cleared = director.history_view(scene);
+    MS_CHECK(cleared.steps.empty());
+    MS_CHECK(cleared.retired == 0U);
+    MS_CHECK(cleared.revision > branched.revision);
+}
+
+MS_TEST("a coalesced continuation advances the revision within one step") {
+    const command::UndoContextId scene{2U};
+    const command::CoalescingKey key{1U, 2U, 3U, 4U, 5U};
+    command::DirectorScheduler director;
+    MS_CHECK(director
+                 .begin_coalesced_edit(
+                     support::put(1U, 10), support::erase(1U), scene, key,
+                     command::TransactionId{1U}, command::FrameNumber{1U})
+                 .has_value());
+    const auto begun = director.history_view(scene);
+    MS_CHECK(director
+                 .continue_coalesced_edit(
+                     support::put(1U, 20),
+                     command::PutNode{support::node(1U, 10)}, scene, key,
+                     command::FrameNumber{1U})
+                 .has_value());
+    const auto continued = director.history_view(scene);
+    MS_CHECK(continued.revision > begun.revision);
+    MS_CHECK(continued.steps.size() == 1U);
+    MS_CHECK(continued.steps[0].step == begun.steps[0].step);
+    MS_CHECK(continued.steps[0].commands.size() == 2U);
+    // Activity in another context leaves this one's revision alone.
+    MS_CHECK(director
+                 .schedule_edit(
+                     support::put(5U, 50), support::erase(5U),
+                     command::UndoContextId{6U}, command::TransactionId{2U},
+                     command::FrameNumber{1U})
+                 .has_value());
+    MS_CHECK(director.history_revision(scene) == continued.revision);
 }
 
 } // namespace

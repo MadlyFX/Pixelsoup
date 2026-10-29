@@ -1663,7 +1663,7 @@ void draw_application_menu_overlay(gui::UiContext &ui,
                                    const EditorProjectState &project,
                                    std::size_t pending_media_probes,
                                    std::string_view ingest_message,
-                                   core::u16 zoom_percent) {
+                                   core::u16 zoom_percent, float leading) {
   const gui::Rect status{0.0F, std::max(height - status_bar_height, 0.0F),
                          width, status_bar_height};
   ui.panel(status, ui.theme().background);
@@ -1671,7 +1671,9 @@ void draw_application_menu_overlay(gui::UiContext &ui,
   // Each reading is a soft chip: a quiet label and a value, with a dot where
   // the value is a state - the way a broadcast status line reads, rather than
   // a run of capitals the operator has to parse. Chips run in from the left.
-  gui::Rect readings = gui::inset(status, gui::Padding{8.0F, 0.0F, 0.0F, 0.0F});
+  // `leading` is kept clear at the left for the History strip's chip.
+  gui::Rect readings =
+      gui::inset(status, gui::Padding{8.0F + leading, 0.0F, 0.0F, 0.0F});
   const auto reading = [&](std::string_view label, std::string_view value,
                            std::optional<gui::UiColor> dot,
                            gui::UiColor value_color) {
@@ -2196,6 +2198,14 @@ struct EditorShell::Impl final {
   InspectorPanel inspector_panel{gui::ui_id("editor.inspector")};
   TimelinePanel timeline_panel{gui::ui_id("editor.timeline")};
   CuesPanel cues_panel{gui::ui_id("editor.cues")};
+  HistoryPanel history_panel{gui::ui_id("editor.history")};
+  // The strip is put away; the status bar offers it back. Saved with the
+  // workspace.
+  bool history_hidden{};
+  // What the hovered History step touched: set while the strip draws, and
+  // outlined on Stage the next frame, whichever panel draws first.
+  std::vector<doc::NodeId> history_hover;
+  std::vector<doc::NodeId> stage_history_highlight;
   ScenePanel scene_panel{gui::ui_id("editor.scene")};
   SelectionSetsPanel selection_sets_panel{
       gui::ui_id("editor.selection-sets")};
@@ -2440,6 +2450,7 @@ struct EditorShell::Impl final {
             decoded.value().compositor_parameter_width);
         compositor_panel.show_minimap(decoded.value().compositor_minimap);
         night = decoded.value().night_dim;
+        history_hidden = decoded.value().history_hidden;
       }
       if (decoded && docks.restore(decoded.value().docks)) {
         for (StageViewport &view : stage_views) {
@@ -3033,9 +3044,12 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                        tracking_sources,
                    std::span<const scene::TimelineMarker>
                        timeline_markers,
-                   const AssetViewerInput &asset_viewer) noexcept {
+                   const AssetViewerInput &asset_viewer,
+                   const HistoryState &history_state) noexcept {
   Impl &impl = *impl_;
   EditorFrame result{};
+  impl.stage_history_highlight.swap(impl.history_hover);
+  impl.history_hover.clear();
   // The plates the Director derived this frame, drawn over both viewports so
   // an operator can see the regions the physical cameras are looking at. A
   // camera drawing nothing contributes no entry, which is also when there is
@@ -3142,6 +3156,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.ui.clear_focus();
     impl.timeline_panel.reset_project_state();
     impl.cues_panel.reset();
+    impl.history_panel.reset();
+    impl.history_hover.clear();
     impl.hardware_mapping_panel.reset_project_state();
     impl.feed_mapping_panel.reset_project_state();
     impl.compositor_panel.reset_project_state();
@@ -5732,6 +5748,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           view.panel.set_stage_shading(view.shading);
           view.panel.set_stage_four_views(impl.stage_four);
           view.panel.set_toolbar_shown(toolbar);
+          view.panel.set_highlight(impl.stage_history_highlight);
           view.frame = view.panel.draw(
               ui, area, *view.texture, stage_interaction_scene,
               impl.scene_selection.members(), impl.anchor(), &scene.camera,
@@ -7882,7 +7899,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     }
   };
 
-  impl.dock_host.update(ui, editor_dock_area(width, height),
+  impl.dock_host.update(ui, editor_dock_area(width, height, !impl.history_hidden),
                         draw_panel, editor_dock_metrics);
   impl.dock_host.overlay(ui);
 
@@ -8662,6 +8679,29 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     delete_active_domain();
   }
 
+  // The History strip: fixed chrome under the docked panels rather than a
+  // panel of its own, put away by its chevron and brought back from the
+  // status bar.
+  constexpr float history_reveal_width = 96.0F;
+  if (!impl.history_hidden) {
+    // A jump or step edits whatever is on the scene being edited, so it is
+    // on air exactly when that scene is Program.
+    const bool on_air = authored_stage.id == switcher.program_scene;
+    HistoryPanelFrame history = impl.history_panel.draw(
+        ui, editor_history_strip(width, height), history_state,
+        impl.history_context, on_air);
+    impl.history_hover = std::move(history.hovered_nodes);
+    if (history.request.has_value() && !impl.manipulating &&
+        !result.history.has_value()) {
+      HistoryRequest request = *history.request;
+      request.transaction = impl.next_edit_gesture;
+      impl.next_edit_gesture += request.transaction_count;
+      result.history = request;
+    }
+    impl.history_hidden = history.hide;
+  }
+  const bool history_was_hidden = impl.history_hidden;
+
   if (draw_status_bar(
           ui, width, height, timeline, switcher, impl.scene_selection.size(),
           scene.canvas, project, impl.pending_media_probes.size(),
@@ -8670,8 +8710,17 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
               ? std::string_view{impl.ingest_message}
               : render::ModelIngestJob::label(
                     impl.pending_model_ingests.front().job->stage()),
-          impl.ui_zoom_percent)) {
+          impl.ui_zoom_percent,
+          history_was_hidden ? history_reveal_width + 6.0F : 0.0F)) {
     impl.open_menu = ApplicationMenu::View;
+  }
+  // Over the status bar, in the room it left at its left end.
+  if (history_was_hidden &&
+      history_toggle(ui, gui::ui_id("editor.status.history"),
+                     gui::Rect{8.0F, height - status_bar_height + 3.0F,
+                               history_reveal_width, status_bar_height - 6.0F},
+                     false, "History")) {
+    impl.history_hidden = false;
   }
   draw_application_menu_overlay(ui, impl.open_menu,
                                 impl.recent_projects_submenu_open, impl.docks,
@@ -8981,7 +9030,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         impl.program_panel.resolution(), impl.ui_zoom_percent,
         std::min(impl.compositor_panel.parameter_panel_width(),
                  max_compositor_parameter_width),
-        impl.compositor_panel.minimap_shown(), impl.night});
+        impl.compositor_panel.minimap_shown(), impl.night,
+        impl.history_hidden});
     if (encoded && encoded.value() != impl.saved_workspace_layout) {
       result.save_workspace_layout = std::move(encoded).value();
       impl.saved_workspace_layout = *result.save_workspace_layout;

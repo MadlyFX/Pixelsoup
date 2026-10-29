@@ -51,6 +51,9 @@ struct WorkspaceLayoutState final {
   // Whether the show bar's night dim is on. Machine-local: it suits the room
   // the desk is in, not the show.
   bool night_dim{};
+  // Whether the History strip is put away. Records older than the field read
+  // as shown.
+  bool history_hidden{};
 };
 
 // The zoom range the editor offers, in percent.

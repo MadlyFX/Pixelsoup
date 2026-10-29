@@ -2042,6 +2042,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     EditCoalescingPolicy editor_coalescing_policy;
     std::map<core::u64, EditCoalescingPlan> pending_editor_coalescing;
     bool pending_editor_coalescing_close{};
+    HistoryDescriptions history_descriptions;
+    editor::HistoryState history_state;
     // Startup validates the recent project before the frame loop, then hands
     // the already-decoded root to the ordinary frame-boundary staging path.
     // Manual Open requests leave this empty and continue to read at the
@@ -2493,6 +2495,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .editor_coalescing_policy = editor_coalescing_policy,
         .pending_editor_coalescing = pending_editor_coalescing,
         .pending_editor_coalescing_close = pending_editor_coalescing_close,
+        .history_descriptions = history_descriptions,
+        .history_state = history_state,
         .pending_preloaded_project = pending_preloaded_project,
         .recent_project_settings_file = recent_project_settings_file,
         .recent_project_paths = recent_project_paths,
