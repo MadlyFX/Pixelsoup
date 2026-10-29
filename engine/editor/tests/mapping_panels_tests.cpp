@@ -2429,8 +2429,8 @@ void a_detected_machine_drags_onto_the_map_already_configured() {
   MAPPING_CHECK(card.width > 0.0F);
   MAPPING_CHECK(editor::hardware_discovered_status_text(
                     empty, runtime.discovery,
-                    runtime.discovery.machines.front()) ==
-                "DRAG OR CLICK TO ADD");
+                    runtime.discovery.machines.front())
+                    .empty());
   const editor::IsoPoint drop = editor::project_isometric(
       editor::hardware_mapping_projection(HardwareHarness::bounds), 1, 1);
 
@@ -2475,8 +2475,8 @@ void a_click_adds_a_detected_machine_and_the_first_brings_its_port() {
       discovering({detected_machine("STAGE-LEFT", "192.0.2.31", 1U, 47'900U)});
   MAPPING_CHECK(editor::hardware_discovered_status_text(
                     map, runtime.discovery,
-                    runtime.discovery.machines.front()) ==
-                "DRAG OR CLICK TO ADD");
+                    runtime.discovery.machines.front())
+                    .empty());
   const gui::Rect card = editor::hardware_discovered_card_bounds(
       HardwareHarness::bounds, runtime.discovery, 0U);
   static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
@@ -2518,8 +2518,8 @@ void a_detected_machine_already_on_the_map_selects_its_card() {
   MAPPING_CHECK(editor::hardware_discovered_device(
                     map, runtime.discovery.machines[1]) == &map.devices[1]);
   MAPPING_CHECK(editor::hardware_discovered_status_text(
-                    map, runtime.discovery, runtime.discovery.machines[0]) ==
-                "ON MAP - CLICK TO SELECT");
+                    map, runtime.discovery, runtime.discovery.machines[0])
+                    .empty());
 
   const gui::Rect card = editor::hardware_discovered_card_bounds(
       HardwareHarness::bounds, runtime.discovery, 0U);
@@ -2557,8 +2557,8 @@ void detected_machines_say_why_they_would_not_connect() {
                 "NEEDS THE RENDER NODE PASSWORD");
   discovery.password_set = true;
   MAPPING_CHECK(editor::hardware_discovered_status_text(map, discovery,
-                                                        unsecured) ==
-                "DRAG OR CLICK TO ADD");
+                                                        unsecured)
+                    .empty());
 }
 
 void the_detection_strip_leaves_the_map_its_own_input() {
@@ -2814,7 +2814,10 @@ void the_novastar_palette_entry_places_a_monitored_processor() {
       topology::HardwareProcessorProtocol::NovastarCoex);
   const gui::Rect generic = editor::hardware_palette_item_bounds(
       HardwareHarness::bounds, topology::HardwareDeviceKind::LedProcessor);
-  MAPPING_CHECK(item.y > generic.y);
+  const gui::Rect brompton = editor::hardware_palette_item_bounds(
+      HardwareHarness::bounds, topology::HardwareDeviceKind::LedProcessor,
+      topology::HardwareProcessorProtocol::BromptonTessera);
+  MAPPING_CHECK(item.y > generic.y && brompton.y > item.y);
   const editor::IsoPoint drop = editor::project_isometric(
       editor::hardware_mapping_projection(HardwareHarness::bounds), 2, 1);
   static_cast<void>(harness.frame(item.x + 20.0F, item.y + 20.0F, false, empty));
@@ -2876,6 +2879,7 @@ void found_processors_are_searched_for_and_placed() {
   topology::HardwareDevice processor = device(
       5U, topology::HardwareDeviceKind::LedProcessor, "MX40", 1, 1);
   processor.address = "192.0.2.41:8001";
+  processor.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
   placed.devices = {processor};
   static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
                                           false, placed, runtime));
@@ -2918,12 +2922,63 @@ void building_from_hardware_lays_out_the_cabled_windows() {
   MAPPING_CHECK(!inert.layout.has_value());
 }
 
+void processors_found_at_one_address_stay_apart() {
+  // Two simulators on one machine: a NovaStar and a Brompton both at
+  // 127.0.0.1. Each card is its own; the second places a Brompton.
+  HardwareHarness harness;
+  const topology::HardwareMap empty;
+  topology::HardwareRuntimeSnapshot runtime{};
+  runtime.discovery.processor_search_available = true;
+  topology::HardwareDiscoveredProcessor novastar{};
+  novastar.name = "MX40 Pro_000001";
+  novastar.address = "127.0.0.1";
+  topology::HardwareDiscoveredProcessor brompton{};
+  brompton.protocol = topology::HardwareProcessorProtocol::BromptonTessera;
+  brompton.name = "Brompton S8";
+  brompton.model = "S8";
+  brompton.address = "127.0.0.1";
+  runtime.discovery.processors = {novastar, brompton};
+  const gui::Rect card = editor::hardware_discovered_card_bounds(
+      HardwareHarness::bounds, runtime.discovery, 1U);
+  MAPPING_CHECK(card.width > 0.0F);
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, empty, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, empty, runtime));
+  const auto clicked = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                             false, empty, runtime);
+  MAPPING_CHECK(clicked.place.has_value());
+  MAPPING_CHECK(clicked.place->protocol ==
+                topology::HardwareProcessorProtocol::BromptonTessera);
+  MAPPING_CHECK(clicked.place->machine.has_value() &&
+                clicked.place->machine->name == "Brompton S8");
+
+  // A NovaStar card at that address is not the Brompton.
+  topology::HardwareMap placed{};
+  topology::HardwareDevice card_on_map = device(
+      6U, topology::HardwareDeviceKind::LedProcessor, "MX40", 1, 1);
+  card_on_map.address = "127.0.0.1";
+  card_on_map.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
+  placed.devices = {card_on_map};
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          false, placed, runtime));
+  static_cast<void>(harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                          true, placed, runtime));
+  const auto again = harness.runtime_frame(card.x + 30.0F, card.y + 20.0F,
+                                           false, placed, runtime);
+  MAPPING_CHECK(again.place.has_value() &&
+                again.place->protocol ==
+                    topology::HardwareProcessorProtocol::BromptonTessera);
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 56U> cases{{
+constexpr std::array<Case, 57U> cases{{
+    {"processors found at one address stay apart",
+     &processors_found_at_one_address_stay_apart},
     {"a novastar processor shows its inputs and matches an edid",
      &a_novastar_processor_shows_its_inputs_and_matches_an_edid},
     {"a processor protocol is chosen in its details",

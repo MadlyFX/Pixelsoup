@@ -1483,9 +1483,9 @@ loopback - listing what answered under **DETECTED ON NETWORK** at the bottom of
 Hardware Map. Drag a machine onto the map, or click it to drop it at a free
 spot, and its Render Server card starts with the machine's name, address, and
 node index; the first one placed also moves the project's control port to
-where that machine listens. A machine already on the map reads `ON MAP` and
-selects its card. Otherwise a card says what would stop it working before it
-is placed: its node index already used by another card (a click selects that
+where that machine listens. A machine already on the map has a green outline
+and selects its card. Otherwise a card says, in amber, what would stop it
+working before it is placed: its node index already used by another card (a click selects that
 card, often the same machine at an old address), a control port the project's
 range does not reach, or a password mismatch. The answer carries the machine's
 name, node index, control port, and whether it has a password - never the
@@ -1564,8 +1564,9 @@ it is opened. Close it with its cross; the next Setup brings it back.
 
 The map is a small isometric stage. Each device stands on a floor tile as a
 pixel-art model - a tower for a Render Server, a desk for an Operator Machine,
-a rack box for an LED Processor (a NovaStar one has a front LCD) and a cabinet
-wall for an LED Wall - with its name tag above it. Its ports are sockets on its
+a rack box for an LED Processor (a NovaStar one has a front LCD and an orange
+key, a Brompton one is a slim box with a blue light bar) and a cabinet wall
+for an LED Wall - with its name tag above it. Its ports are sockets on its
 faces: inputs down its left face, outputs down its right. A cable runs out of
 its socket, down to the floor and along the grid to the input it plugs into,
 so the map reads like the stage it describes. Hover or select a device to see
@@ -1590,12 +1591,27 @@ processor names them. A processor that VMP has locked answers with a refusal,
 shown as `Refused:` and the controller's message; release it in VMP. A
 processor that stops answering keeps its last report, marked as such.
 
-COEX controllers do not announce themselves. **Find processors**, at the right
-of the DETECTED ON NETWORK strip, searches once: it tries port 8001 on this
-machine and every host of each local IPv4 subnet (the /22 around this machine
-on a larger one) and lists each controller that answers as a card. Drag it
-onto the map, or click it, and the processor card arrives with its name,
-address and protocol. A controller already on the map selects its card.
+A **Brompton processor** (Protocol **Brompton Tessera**) is read the same way
+through Tessera's IP control API on port 80, which software 3.1 and later
+offer once IP control is switched on in the processor's Live Control tile; a
+processor with it off answers `Refused:` and says so. Tessera reports less
+than COEX: the one input in use (its port, raster and rate) as VIDEO IN 1,
+the model and software, the active preset, how many panels it controls,
+answer and report faults, and whether blackout, freeze or a test pattern is
+on. It reports no EDID and no screen layout. A Brompton card's light turns
+amber, and its status says why, when an override is on or panels are offline
+or faulted; its details list the panels, preset and overrides. Cable the
+render output a Tessera takes into its input 1; cables into other inputs are
+not checked, since the processor does not say what they receive.
+
+Processors do not announce themselves. **Find processors**, at the right of
+the DETECTED ON NETWORK strip, searches once: it tries port 8001 (NovaStar)
+and port 80 (Brompton - many devices answer there, and only one that names a
+Tessera model counts) on this machine and every host of each local IPv4
+subnet (the /22 around this machine on a larger one), and lists each
+processor that answers as a card. Drag it onto the map, or click it, and the
+processor card arrives with its name, address and protocol. A processor
+already on the map selects its card.
 
 Every cable from a Render Server output into a monitored processor input is
 checked against the output's mode - its binding's raster and rate, or the card's
@@ -1614,18 +1630,22 @@ cabling and what the processors report. Each LED screen gets its place in the
 canvas, side by side in map order (a new row past 16384 pixels), and the canvas
 is sized to hold them; in every window a processor input shows, the viewport is
 the part of the window the processor takes, cropping the canvas pixels that
-land there on the wall. A processor that reports nothing - Generic, or not yet
-answering - gets its windows side by side, each shown whole. The build replaces
+land there on the wall. A processor that reports nothing - Generic, not yet
+answering, or a Brompton, whose IP control has no layout - gets its windows
+side by side, each shown whole. The build replaces
 every viewport of the windows it lays out (not other windows, nor surfaces),
 says what it did and anything it could not do, and one undo takes it back.
 
 To try all of this without a controller, run `python scripts/coex-simulator.py`
 (add `--edid-rate 59.94` or `--port 18001` as wanted). It answers as one
 All-In-One MX40 Pro with four inputs and one 6912x1536 screen, accepts EDID
-writes, and is found by Find processors.
+writes, and is found by Find processors. `python scripts/tessera-simulator.py`
+stands in for a Tessera S8 on port 80 (`--port 8080` if 80 is taken, then
+type `127.0.0.1:8080` as the card's address); a PUT of `{"data": true}` to
+`/api/override/blackout/enabled` shows an override on the map.
 
-Brompton and other processor brands, sync generators, storage, recorders and
-cameras are not on the map yet; see the roadmap.
+Other processor brands, sync generators, storage, recorders and cameras are
+not on the map yet; see the roadmap.
 
 ## Output synchronization
 

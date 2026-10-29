@@ -21,6 +21,7 @@ enum class HardwareSprite : core::u8 {
   Processor,
   ProcessorNovastar,
   LedWall,
+  ProcessorBrompton,
 };
 
 // A vertical run of sprite pixels: x, and where it starts and ends.

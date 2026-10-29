@@ -106,8 +106,8 @@ hardware_discovered_card_bounds(const gui::Rect &bounds,
 hardware_discovered_device(const topology::HardwareMap &map,
                            const topology::HardwareDiscoveredMachine &machine) noexcept;
 
-// What a detected machine's card says beneath its address: ON MAP, a reason
-// it would not work as placed, or how to add it.
+// The warning a detected machine's card shows beneath its address: why it
+// would not work as placed, or nothing when it is on the map or would.
 [[nodiscard]] std::string
 hardware_discovered_status_text(const topology::HardwareMap &map,
                                 const topology::HardwareDiscovery &discovery,

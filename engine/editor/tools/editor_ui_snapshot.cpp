@@ -530,12 +530,16 @@ HardwareStage hardware_stage() {
       device(4U, Kind::LedProcessor, "MX40 Pro", 1, -4);
   novastar.protocol = topology::HardwareProcessorProtocol::NovastarCoex;
   novastar.address = "192.168.0.40";
+  topology::HardwareDevice brompton =
+      device(5U, Kind::LedProcessor, "Brompton S8", 4, -1);
+  brompton.protocol = topology::HardwareProcessorProtocol::BromptonTessera;
+  brompton.address = "192.168.0.50";
   stage.map.devices = {
       device(1U, Kind::OperatorMachine, "Operator", -7, 1),
       render_a,
       render_b,
       novastar,
-      device(5U, Kind::LedProcessor, "Side processor", 4, -1),
+      brompton,
       device(6U, Kind::LedWall, "Main wall", 5, -9),
       device(7U, Kind::LedWall, "Side wall", 8, -5),
   };
@@ -628,7 +632,28 @@ HardwareStage hardware_stage() {
   screen.height = 1536U;
   screen.cabinets = 108U;
   mx40.screens = {screen};
-  stage.runtime.processors = {mx40};
+  // The Brompton reports only its active input, and two of its panels
+  // have dropped off.
+  topology::HardwareProcessorNode s8{};
+  s8.device = doc::NodeId{5U};
+  s8.reachability = topology::HardwareRuntimeReachability::Online;
+  s8.model = "S8";
+  s8.name = "Brompton S8";
+  s8.software = "3.1.0";
+  s8.preset = "Show";
+  s8.all_inputs = false;
+  topology::HardwareProcessorInput active{};
+  active.number = 1U;
+  active.name = "HDMI 1";
+  active.connector = "HDMI";
+  active.signal = true;
+  active.width = 1920U;
+  active.height = 1080U;
+  active.refresh_millihertz = 60'000U;
+  s8.inputs = {active};
+  s8.panels = 64U;
+  s8.panels_online = 62U;
+  stage.runtime.processors = {mx40, s8};
 
   topology::HardwareDiscovery &discovery = stage.runtime.discovery;
   discovery.state = topology::HardwareDiscoveryState::Searching;
@@ -682,7 +707,8 @@ int main(int argc, char **argv) {
   const bool library_view = view.substr(0U, 7U) == "library";
   const bool viewer_view = view.substr(0U, 12U) == "asset-viewer";
   // The Hardware Map: `hardware` selects the NovaStar processor,
-  // `hardware-cable` the cable whose EDID offers the wrong rate.
+  // `hardware-brompton` the Brompton, `hardware-cable` the cable whose EDID
+  // offers the wrong rate.
   const bool hardware_view = view.substr(0U, 8U) == "hardware";
   const std::string_view properties =
       curves || summaries || feed || tall || keys_sheet || tracks ||
@@ -1097,6 +1123,9 @@ int main(int argc, char **argv) {
             editor::project_isometric(projection, -3, -1).y +
             4.0F * projection.tile_width / 32.0F;
         target = editor::IsoPoint{a.x + 6.0F + 20.0F, ground + 10.0F};
+      } else if (view == "hardware-brompton") {
+        target = editor::project_isometric(projection, 4, -1);
+        target.y -= 12.0F;
       } else {
         target = editor::project_isometric(projection, 1, -4);
         target.y -= 20.0F;

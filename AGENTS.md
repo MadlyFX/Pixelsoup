@@ -15,7 +15,7 @@ document or scanning binary model assets to understand a small change.
 | Scene, animation, tracking and asset identity | `engine/scene`, `engine/track`, `engine/assets` |
 | Compositor graph and effect contracts | `engine/compositor`, `effect-rendering-requirements.md` |
 | Feed mapping, hardware topology and sync policy | `engine/output`, `engine/topology`, `engine/sync` |
-| Device protocols (NovaStar COEX), processor monitor and search | `engine/devices`, `scripts/coex-simulator.py` |
+| Device protocols (NovaStar COEX, Brompton Tessera), processor monitor and search | `engine/devices`, `scripts/coex-simulator.py`, `scripts/tessera-simulator.py` |
 | GPU abstraction, renderer and HLSL | `engine/rhi`, `engine/render`, `engine/shaders` |
 | Editor panels, widgets and SDL presentation | `engine/editor`, `engine/gui`, `engine/ui` |
 | Director/node entry points and Blender service | `apps/server` |

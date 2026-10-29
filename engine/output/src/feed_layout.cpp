@@ -262,7 +262,12 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
 
     // Nothing reported: the windows side by side, each shown whole.
     if (device.kind == topology::HardwareDeviceKind::LedProcessor &&
-        device.protocol != topology::HardwareProcessorProtocol::Generic) {
+        device.protocol == topology::HardwareProcessorProtocol::BromptonTessera) {
+      plan.notes.push_back(device.name +
+                           " reports no screen layout over IP control, so its "
+                           "inputs are laid side by side");
+    } else if (device.kind == topology::HardwareDeviceKind::LedProcessor &&
+               device.protocol != topology::HardwareProcessorProtocol::Generic) {
       plan.notes.push_back(device.name +
                            " has not reported its screens, so its inputs "
                            "are laid side by side");

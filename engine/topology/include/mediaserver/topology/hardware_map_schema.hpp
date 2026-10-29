@@ -30,6 +30,8 @@ inline constexpr std::string_view main_node = "main_node";
 inline constexpr std::string_view protocol = "protocol";
 inline constexpr std::string_view generic_protocol = "generic";
 inline constexpr std::string_view novastar_coex_protocol = "novastar_coex";
+inline constexpr std::string_view brompton_tessera_protocol =
+    "brompton_tessera";
 inline constexpr std::string_view render_server = "render_server";
 inline constexpr std::string_view logical_port = "logical_port";
 inline constexpr std::string_view feed_index = "feed_index";

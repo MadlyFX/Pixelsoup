@@ -47,6 +47,8 @@ hardware_kind_property(topology::HardwareDeviceKind kind) noexcept {
         return topology::schema::generic_protocol;
     case topology::HardwareProcessorProtocol::NovastarCoex:
         return topology::schema::novastar_coex_protocol;
+    case topology::HardwareProcessorProtocol::BromptonTessera:
+        return topology::schema::brompton_tessera_protocol;
     }
     return topology::schema::generic_protocol;
 }
@@ -255,7 +257,8 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
             *kind_text != topology::schema::led_processor_kind ||
             protocol == nullptr ||
             (*protocol != topology::schema::generic_protocol &&
-             *protocol != topology::schema::novastar_coex_protocol)) {
+             *protocol != topology::schema::novastar_coex_protocol &&
+             *protocol != topology::schema::brompton_tessera_protocol)) {
             return true;
         }
     }

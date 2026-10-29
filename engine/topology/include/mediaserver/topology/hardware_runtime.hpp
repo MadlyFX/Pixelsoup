@@ -5,6 +5,7 @@
 #include <mediaserver/topology/hardware_map.hpp>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Transient observations reported by configured hardware. These values are
@@ -168,8 +169,53 @@ struct HardwareProcessorNode final {
   // The outcome of the last action asked of it, such as an EDID write.
   std::string notice;
   bool notice_failed{};
+  // Its software version, and the preset it last applied, when it says.
+  std::string software;
+  std::string preset;
   std::vector<HardwareProcessorInput> inputs;
+  // The processor lists every input it has. False when it reports only the
+  // one in use (Tessera), so an input it leaves out is not missing.
+  bool all_inputs{true};
   std::vector<HardwareProcessorScreen> screens;
+  // The LED panels it drives: how many it controls, how many answer, and
+  // how many of those report a fault. Zero panels when it does not say.
+  core::u32 panels{};
+  core::u32 panels_online{};
+  core::u32 panels_faulted{};
+  // Overrides that put something other than the input on the wall.
+  bool blackout{};
+  bool frozen{};
+  bool test_pattern{};
+
+  // Something about the processor itself that an operator should see: an
+  // override on, or panels missing or faulted. Empty when all is well.
+  [[nodiscard]] std::string attention() const {
+    std::string text;
+    const auto add = [&](std::string_view part) {
+      if (!text.empty()) {
+        text += ", ";
+      }
+      text += part;
+    };
+    if (blackout) {
+      add("blacked out");
+    }
+    if (frozen) {
+      add("frozen");
+    }
+    if (test_pattern) {
+      add("test pattern on");
+    }
+    if (panels != 0U && panels_online < panels) {
+      add(std::to_string(panels - panels_online) + " of " +
+          std::to_string(panels) + " panels offline");
+    }
+    if (panels_faulted != 0U) {
+      add(std::to_string(panels_faulted) +
+          (panels_faulted == 1U ? " panel faulted" : " panels faulted"));
+    }
+    return text;
+  }
 
   [[nodiscard]] const HardwareProcessorInput *
   input(core::u8 number) const noexcept {

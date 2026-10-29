@@ -249,7 +249,7 @@ void a_protocol_is_only_ever_a_processors() {
     AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
     // A render server has none, and an unknown protocol is no protocol.
     AUTHOR_CHECK(edit(10U, std::string{schema::novastar_coex_protocol}, 41U));
-    AUTHOR_CHECK(edit(31U, "brompton_tessera", 42U));
+    AUTHOR_CHECK(edit(31U, "colorlight", 42U));
     AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
     AUTHOR_CHECK(hardware_of(scheduler.projected_document())
                      .device(doc::NodeId{31U})

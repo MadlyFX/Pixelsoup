@@ -718,7 +718,13 @@ void a_protocol_is_a_processor_property_in_the_digest() {
       processor(schema::generic_protocol);
   const auto [coex, coex_rejected] =
       processor(schema::novastar_coex_protocol);
-  const auto [unknown, unknown_rejected] = processor("brompton_tessera");
+  const auto [brompton, brompton_rejected] =
+      processor(schema::brompton_tessera_protocol);
+  const auto [unknown, unknown_rejected] = processor("colorlight");
+  TOPOLOGY_CHECK(brompton_rejected == 0U &&
+                 brompton.devices.front().protocol ==
+                     topology::HardwareProcessorProtocol::BromptonTessera);
+  TOPOLOGY_CHECK(topology::digest(brompton) != topology::digest(coex));
   TOPOLOGY_CHECK(generic_rejected == 0U && coex_rejected == 0U);
   TOPOLOGY_CHECK(unknown_rejected == 1U && unknown.devices.empty());
   TOPOLOGY_CHECK(generic.devices.front().protocol ==

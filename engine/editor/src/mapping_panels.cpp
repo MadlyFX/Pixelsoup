@@ -31,8 +31,8 @@ namespace topology = mediaserver::topology;
 
 constexpr float title_height = 26.0F;
 constexpr float palette_header_height = 28.0F;
-constexpr float palette_row_height = 46.0F;
-constexpr float palette_row_step = 50.0F;
+constexpr float palette_row_height = 42.0F;
+constexpr float palette_row_step = 46.0F;
 constexpr float device_width = 160.0F;
 constexpr float device_height = 56.0F;
 constexpr float details_label_width = 72.0F;
@@ -58,25 +58,26 @@ struct PaletteEntry final {
   topology::HardwareDeviceKind kind{};
   topology::HardwareProcessorProtocol protocol{};
   std::string_view name;
+  // The brand under the name; none for a kind without one.
   std::string_view blurb;
 };
 
-constexpr std::array<PaletteEntry, 5U> palette_entries{{
+constexpr std::array<PaletteEntry, 6U> palette_entries{{
     {topology::HardwareDeviceKind::RenderServer,
-     topology::HardwareProcessorProtocol::Generic, "Render server",
-     "Runs a render node"},
+     topology::HardwareProcessorProtocol::Generic, "Render server", {}},
     {topology::HardwareDeviceKind::OperatorMachine,
-     topology::HardwareProcessorProtocol::Generic, "Operator machine",
-     "Drives the show"},
+     topology::HardwareProcessorProtocol::Generic, "Operator machine", {}},
     {topology::HardwareDeviceKind::LedProcessor,
      topology::HardwareProcessorProtocol::Generic, "LED processor",
-     "Any brand, unmonitored"},
+     "Any brand"},
     {topology::HardwareDeviceKind::LedProcessor,
      topology::HardwareProcessorProtocol::NovastarCoex, "NovaStar processor",
-     "COEX, read over the network"},
+     "COEX"},
+    {topology::HardwareDeviceKind::LedProcessor,
+     topology::HardwareProcessorProtocol::BromptonTessera, "Brompton processor",
+     "Tessera"},
     {topology::HardwareDeviceKind::LedWall,
-     topology::HardwareProcessorProtocol::Generic, "LED wall",
-     "Fed by a processor"},
+     topology::HardwareProcessorProtocol::Generic, "LED wall", {}},
 }};
 
 [[nodiscard]] std::size_t
@@ -258,7 +259,8 @@ runtime_is_current(const topology::HardwareRuntimeNode *runtime) noexcept {
           reported != nullptr
               ? (reported->signal ? RuntimePortState::Active
                                   : RuntimePortState::Unknown)
-              : (reporting ? RuntimePortState::Missing
+              : (reporting && observed->all_inputs
+                     ? RuntimePortState::Missing
                            : RuntimePortState::Unknown);
       append(shown, nullptr, state);
       if (presentation.port_count != 0U) {
@@ -585,9 +587,15 @@ sprite_for(const topology::HardwareDevice &device) noexcept {
   case topology::HardwareDeviceKind::OperatorMachine:
     return HardwareSprite::OperatorMachine;
   case topology::HardwareDeviceKind::LedProcessor:
-    return device.protocol == topology::HardwareProcessorProtocol::NovastarCoex
-               ? HardwareSprite::ProcessorNovastar
-               : HardwareSprite::Processor;
+    switch (device.protocol) {
+    case topology::HardwareProcessorProtocol::NovastarCoex:
+      return HardwareSprite::ProcessorNovastar;
+    case topology::HardwareProcessorProtocol::BromptonTessera:
+      return HardwareSprite::ProcessorBrompton;
+    case topology::HardwareProcessorProtocol::Generic:
+      break;
+    }
+    return HardwareSprite::Processor;
   case topology::HardwareDeviceKind::LedWall:
     return HardwareSprite::LedWall;
   }
@@ -872,12 +880,17 @@ processor_status_text(const topology::HardwareDevice &device,
       observed->reachability == topology::HardwareRuntimeReachability::Probing) {
     return "Checking " + device.address;
   }
-  const std::string who = !observed->model.empty()
-                              ? observed->model
-                              : std::string{"NovaStar"};
+  const std::string who =
+      !observed->model.empty()
+          ? observed->model
+          : std::string{topology::processor_protocol_name(device.protocol)};
   switch (observed->reachability) {
-  case topology::HardwareRuntimeReachability::Online:
-    return "Online, " + who;
+  case topology::HardwareRuntimeReachability::Online: {
+    // What it is doing to the picture outranks that it is answering.
+    const std::string attention = observed->attention();
+    return attention.empty() ? "Online, " + who
+                             : "Online, " + who + ": " + attention;
+  }
   case topology::HardwareRuntimeReachability::ConfigurationError:
     return "Refused: " + observed->detail;
   case topology::HardwareRuntimeReachability::Offline:
@@ -901,9 +914,11 @@ processor_status_color(const gui::Theme &theme,
       observed->reachability == topology::HardwareRuntimeReachability::Probing) {
     return theme.caution;
   }
-  return observed->reachability == topology::HardwareRuntimeReachability::Online
-             ? theme.good
-             : theme.warning;
+  if (observed->reachability !=
+      topology::HardwareRuntimeReachability::Online) {
+    return theme.warning;
+  }
+  return observed->attention().empty() ? theme.good : theme.caution;
 }
 
 // A sprite fitted into `area`, or the kind's line icon without a sheet.
@@ -1743,7 +1758,7 @@ discovered_status(const topology::HardwareMap &map,
                   const topology::HardwareDiscoveredMachine &machine) {
   if (const topology::HardwareDevice *const placed =
           hardware_discovered_device(map, machine)) {
-    return {"ON MAP - CLICK TO SELECT", DiscoveredTone::OnMap, placed};
+    return {{}, DiscoveredTone::OnMap, placed};
   }
   for (const topology::HardwareDevice &device : map.devices) {
     if (device.kind == topology::HardwareDeviceKind::RenderServer &&
@@ -1768,7 +1783,7 @@ discovered_status(const topology::HardwareMap &map,
     return {"NEEDS THE RENDER NODE PASSWORD", DiscoveredTone::Warning,
             nullptr};
   }
-  return {"DRAG OR CLICK TO ADD", DiscoveredTone::Add, nullptr};
+  return {{}, DiscoveredTone::Add, nullptr};
 }
 
 // The processor card already at the address a search found it on.
@@ -1786,12 +1801,21 @@ discovered_processor_device(
   };
   for (const topology::HardwareDevice &device : map.devices) {
     if (device.kind == topology::HardwareDeviceKind::LedProcessor &&
-        !device.address.empty() &&
+        device.protocol == found.protocol && !device.address.empty() &&
         bare(device.address) == bare(found.address)) {
       return &device;
     }
   }
   return nullptr;
+}
+
+// A found processor's identity in the strip: its address and protocol, so a
+// card keeps hold of the pointer while the list around it changes.
+[[nodiscard]] gui::UiId
+discovered_processor_id(gui::UiId panel,
+                        const topology::HardwareDiscoveredProcessor &found) noexcept {
+  return mix(panel, found.address,
+             0x50524f00U + static_cast<core::u64>(found.protocol));
 }
 
 [[nodiscard]] core::u64
@@ -2407,14 +2431,18 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     thumbnails[thumbnail_count++] = {
         gui::Rect{item.x + 4.0F, item.y + 4.0F, 40.0F, item.height - 8.0F},
         sample};
-    // The kind's name over what it is, right of the picture.
+    // The kind's name, over its brand where it has one, right of the picture.
     const gui::Rect text =
         gui::inset(item, gui::Padding{50.0F, 0.0F, 5.0F, 0.0F});
     ctx.push_clip(text);
-    ctx.label(gui::inset(text, gui::Padding{0.0F, 4.0F, 0.0F, 23.0F}),
-              entry.name, ctx.theme().text);
-    ctx.label(gui::inset(text, gui::Padding{0.0F, 23.0F, 0.0F, 6.0F}),
-              entry.blurb, ctx.theme().text_muted);
+    if (entry.blurb.empty()) {
+      ctx.label(text, entry.name, ctx.theme().text);
+    } else {
+      ctx.label(gui::inset(text, gui::Padding{0.0F, 3.0F, 0.0F, 21.0F}),
+                entry.name, ctx.theme().text);
+      ctx.label(gui::inset(text, gui::Padding{0.0F, 21.0F, 0.0F, 2.0F}),
+                entry.blurb, ctx.theme().text_muted);
+    }
     ctx.pop_clip();
 
     if (interaction.pressed) {
@@ -3196,7 +3224,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   if (map.devices.empty()) {
     ctx.label(gui::Rect{canvas.x + 16.0F, canvas.y + 34.0F,
                         canvas.width - 32.0F, 22.0F},
-              "NO DEVICES CONFIGURED - DRAG ONE FROM THE PALETTE",
+              "NO DEVICES CONFIGURED",
               ctx.theme().text_muted);
   }
   ctx.pop_clip();
@@ -3251,8 +3279,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     std::to_string(discovery.port)
               : std::string{"NO RENDER MACHINE SEARCH IN THIS EDITOR"};
     } else {
-      const std::size_t found =
-          discovery.machines.size() + discovery.processors.size();
       summary = std::to_string(discovery.machines.size()) +
                 (discovery.machines.size() == 1U ? " MACHINE" : " MACHINES");
       if (!discovery.processors.empty()) {
@@ -3260,8 +3286,6 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                    (discovery.processors.size() == 1U ? " PROCESSOR"
                                                       : " PROCESSORS");
       }
-      summary += found == 1U ? " - DRAG IT ONTO THE MAP"
-                             : " - DRAG ONE ONTO THE MAP";
     }
     // LED processors do not announce themselves: a search, on request,
     // tries their API port on every host of the local subnets.
@@ -3275,9 +3299,9 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                       gui::Icon::Search,
                       discovery.processor_search_running ? "Searching..."
                                                          : "Find processors",
-                      "Search the local network for NovaStar processors: "
-                      "tries their API port (8001) on every host of this "
-                      "machine's subnets",
+                      "Search the local network for NovaStar and Brompton "
+                      "processors: tries their API ports (8001 and 80) on "
+                      "every host of this machine's subnets",
                       ButtonTone::Quiet,
                       !discovery.processor_search_running)) {
         frame.search_processors = true;
@@ -3377,9 +3401,11 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           on_map ? ctx.theme().text_muted
                  : device_color(ctx.theme(),
                                 topology::HardwareDeviceKind::RenderServer));
+      // Name and address, centred unless a warning takes a third line.
       const float text_x = card.x + 37.0F;
       const float text_width = std::max(card.width - 42.0F, 0.0F);
-      ctx.label(gui::Rect{text_x, card.y + 2.0F, text_width, 17.0F},
+      const float text_y = card.y + (status.text.empty() ? 10.0F : 2.0F);
+      ctx.label(gui::Rect{text_x, text_y, text_width, 17.0F},
                 machine.hostname.empty() ? machine.address : machine.hostname,
                 on_map ? ctx.theme().text_muted : ctx.theme().text);
       std::string where = machine.address + "  NODE " +
@@ -3387,15 +3413,12 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       if (machine.this_machine) {
         where += "  THIS PC";
       }
-      ctx.label(gui::Rect{text_x, card.y + 18.0F, text_width, 15.0F}, where,
+      ctx.label(gui::Rect{text_x, text_y + 16.0F, text_width, 15.0F}, where,
                 ctx.theme().text_muted);
-      ctx.label(gui::Rect{text_x, card.y + 33.0F, text_width, 15.0F},
-                status.text,
-                status.tone == DiscoveredTone::OnMap
-                    ? ctx.theme().good
-                    : (status.tone == DiscoveredTone::Warning
-                           ? ctx.theme().warning
-                           : ctx.theme().text_muted));
+      if (!status.text.empty()) {
+        ctx.label(gui::Rect{text_x, card.y + 33.0F, text_width, 15.0F},
+                  status.text, ctx.theme().warning);
+      }
     }
     // Processors the last search found, after the machines.
     for (std::size_t index = 0U; index < discovery.processors.size(); ++index) {
@@ -3404,8 +3427,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       gui::Rect card = hardware_discovered_card_bounds(
           bounds, discovery, discovery.machines.size() + index);
       card.x -= discovered_scroll_;
-      const gui::Interaction interaction = ctx.grab(
-          mix(id_, found.address, 0x50524fU), card);
+      const gui::Interaction interaction =
+          ctx.grab(discovered_processor_id(id_, found), card);
       const topology::HardwareDevice *const placed =
           discovered_processor_device(map, found);
       if (interaction.pressed) {
@@ -3420,7 +3443,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       }
       const bool dragging_this =
           drag_kind_ == DragKind::DiscoveredProcessor &&
-          discovered_processor_drag_.address == found.address;
+          discovered_processor_drag_.address == found.address &&
+          discovered_processor_drag_.protocol == found.protocol;
       if (dragging_this) {
         dragged = interaction;
       }
@@ -3447,16 +3471,13 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const float text_x = card.x + 41.0F;
       const float text_width = std::max(card.width - 46.0F, 0.0F);
       ctx.push_clip(card);
-      ctx.label(gui::Rect{text_x, card.y + 2.0F, text_width, 17.0F}, found.name,
+      ctx.label(gui::Rect{text_x, card.y + 10.0F, text_width, 17.0F},
+                found.name,
                 placed != nullptr ? ctx.theme().text_muted : ctx.theme().text);
-      ctx.label(gui::Rect{text_x, card.y + 18.0F, text_width, 15.0F},
+      ctx.label(gui::Rect{text_x, card.y + 26.0F, text_width, 15.0F},
                 found.address + "  " +
                     std::string{topology::processor_protocol_name(found.protocol)},
                 ctx.theme().text_muted);
-      ctx.label(gui::Rect{text_x, card.y + 33.0F, text_width, 15.0F},
-                placed != nullptr ? "ON MAP - CLICK TO SELECT"
-                                  : "DRAG ONTO THE MAP, OR CLICK TO ADD",
-                placed != nullptr ? ctx.theme().good : ctx.theme().text_muted);
       ctx.pop_clip();
     }
     const auto draw_arrow = [&](const gui::Rect &area,
@@ -3518,7 +3539,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
     // keeps the capture its card took.
     if (!dragged.has_value()) {
       dragged = ctx.grab(
-          mix(id_, discovered_processor_drag_.address, 0x50524fU),
+          discovered_processor_id(id_, discovered_processor_drag_),
           gui::Rect{});
     }
     const auto place_processor = [&](core::i32 grid_x, core::i32 grid_y) {
@@ -3609,18 +3630,25 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                        protocol_bounds,
                        topology::processor_protocol_name(
                            selected_device->protocol))) {
-          const bool generic = selected_device->protocol ==
-                               topology::HardwareProcessorProtocol::Generic;
+          // Generic, then NovaStar COEX, then Brompton Tessera.
+          std::string_view next = topology::schema::novastar_coex_protocol;
+          if (selected_device->protocol ==
+              topology::HardwareProcessorProtocol::NovastarCoex) {
+            next = topology::schema::brompton_tessera_protocol;
+          } else if (selected_device->protocol ==
+                     topology::HardwareProcessorProtocol::BromptonTessera) {
+            next = topology::schema::generic_protocol;
+          }
           frame.property_edit = HardwarePropertyEdit{
               details_node_, std::string{topology::schema::protocol},
-              doc::PropertyValue{std::string{
-                  generic ? topology::schema::novastar_coex_protocol
-                          : topology::schema::generic_protocol}}};
+              doc::PropertyValue{std::string{next}}};
         }
         ctx.tooltip(protocol_bounds,
                     "How the Director reaches this processor. NovaStar COEX "
-                    "reads its inputs, EDIDs and screens over HTTP (port "
-                    "8001); Generic is not monitored.");
+                    "reads its inputs, EDIDs and screens (HTTP port 8001); "
+                    "Brompton Tessera its input, panels and overrides (port "
+                    "80, IP control on in Live Control); Generic is not "
+                    "monitored.");
       }
       const gui::Rect address_bounds =
           labelled_bounds(render_server ? "Host IP" : "Address");
@@ -4083,6 +4111,10 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           if (!observed->name.empty()) {
             static_cast<void>(row("Name", observed->name, ctx.theme().text));
           }
+          if (!observed->software.empty()) {
+            static_cast<void>(
+                row("Software", observed->software, ctx.theme().text_muted));
+          }
           for (const topology::HardwareProcessorInput &input :
                observed->inputs) {
             std::string value = input.name;
@@ -4113,6 +4145,39 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             if (!row("Screen", value, ctx.theme().text_muted)) {
               break;
             }
+          }
+          if (observed->panels != 0U) {
+            std::string panels = std::to_string(observed->panels_online) +
+                                 " of " + std::to_string(observed->panels) +
+                                 " online";
+            if (observed->panels_faulted != 0U) {
+              panels += ", " + std::to_string(observed->panels_faulted) +
+                        " faulted";
+            }
+            static_cast<void>(row(
+                "Panels", panels,
+                observed->panels_online < observed->panels ||
+                        observed->panels_faulted != 0U
+                    ? ctx.theme().caution
+                    : ctx.theme().text_muted));
+          }
+          if (!observed->preset.empty()) {
+            static_cast<void>(
+                row("Preset", observed->preset, ctx.theme().text_muted));
+          }
+          // An override puts something other than the input on the wall.
+          std::string overrides;
+          for (const auto &[on, word] :
+               {std::pair{observed->blackout, "Blackout"},
+                std::pair{observed->frozen, "Freeze"},
+                std::pair{observed->test_pattern, "Test pattern"}}) {
+            if (on) {
+              overrides += overrides.empty() ? word : std::string{", "} + word;
+            }
+          }
+          if (!overrides.empty()) {
+            static_cast<void>(row("Override", overrides + " on",
+                                  ctx.theme().caution));
           }
           if (!observed->notice.empty()) {
             static_cast<void>(row("", observed->notice,

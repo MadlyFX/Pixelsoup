@@ -59,6 +59,15 @@ METAL = {
     'right': hex_color('454c5c'),
     'right_dark': hex_color('383e4b'),
 }
+GUNMETAL = {
+    'top': hex_color('565d6b'),
+    'top_edge': hex_color('8a93a5'),
+    'left': hex_color('353a45'),
+    'left_dark': hex_color('2a2e37'),
+    'right': hex_color('262a32'),
+    'right_dark': hex_color('1d2027'),
+}
+BLUE = hex_color('3d8bff')
 CYAN = hex_color('52e5ff')
 CYAN_DIM = hex_color('2b8ea6')
 GREEN = hex_color('5ce38f')
@@ -359,6 +368,51 @@ def processor(novastar: bool) -> Sprite:
                   (out_x, out_top, out_top + 8))
 
 
+def brompton_processor() -> Sprite:
+    """A Tessera-style 1U processor: a slim gunmetal chassis with a wide front
+    display, a column of keys, a rotary encoder and a blue light bar."""
+    c = Canvas(64, 58)
+    iso = Iso(32, 44)
+    a, b = 18, 12
+    x0, y0 = -a / 2, -b / 2
+    ground_shadow(c, iso, x0, y0, a, b)
+    # The same rack stand as the other processors, a 1U box on it.
+    for fx, fy in ((x0, y0), (x0 + a - 1, y0), (x0, y0 + b - 1),
+                   (x0 + a - 1, y0 + b - 1)):
+        box(c, iso, fx, fy, 0, 1, 1, 9, CHARCOAL, edges=False)
+    box(c, iso, x0, y0, 9, a, b, 1, METAL, edges=False)
+    top, front, side = box(c, iso, x0, y0, 10, a, b, 6, GUNMETAL)
+    # Rack ears.
+    face_quad(c, front, 0.0, 0.0, 0.05, 1.0, GUNMETAL['top'])
+    face_quad(c, front, 0.95, 0.0, 1.0, 1.0, GUNMETAL['top'])
+    # A wide display showing a picture and a status line.
+    face_quad(c, front, 0.08, 0.16, 0.50, 0.70, SCREEN_DARK)
+    face_quad(c, front, 0.10, 0.22, 0.30, 0.46, hex_color('2c6e9e'))
+    face_quad(c, front, 0.32, 0.22, 0.48, 0.34, WHITE)
+    face_quad(c, front, 0.10, 0.52, 0.46, 0.60, BLUE)
+    # Keys and the encoder.
+    for i in range(3):
+        face_quad(c, front, 0.56 + i * 0.07, 0.22, 0.60 + i * 0.07, 0.42,
+                  hex_color('c9d2e3'))
+    face_quad(c, front, 0.80, 0.18, 0.88, 0.62, METAL['left'])
+    face_pixel(c, front, 0.84, 0.36, WHITE)
+    # The blue light bar along the bottom of the front.
+    face_quad(c, front, 0.06, 0.80, 0.94, 0.92, BLUE)
+    # Outputs to the wall on the side: fibre and copper ports.
+    for col in range(4):
+        face_quad(c, side, 0.14 + col * 0.19, 0.24, 0.26 + col * 0.19, 0.66,
+                  PORT)
+        face_pixel(c, side, 0.20 + col * 0.19, 0.30, GREEN if col else BLUE)
+    c.outline()
+    in_x = int(round(face_point(front, 0.04, 0.0)[0]))
+    in_top = int(round(face_point(front, 0.04, 0.0)[1]))
+    in_bottom = int(round(face_point(front, 0.04, 1.0)[1])) + 14
+    out_x = int(round(face_point(side, 0.90, 0.0)[0]))
+    out_top = int(round(face_point(side, 0.90, 0.30)[1]))
+    return Sprite('processor_brompton', c, (iso.ox, iso.oy),
+                  (in_x, in_top, in_bottom), (out_x, out_top, out_top + 8))
+
+
 def led_wall() -> Sprite:
     c = Canvas(112, 112)
     iso = Iso(54, 92)
@@ -483,7 +537,7 @@ def main() -> None:
     args = parser.parse_args()
     # Order matches editor::HardwareSprite.
     sprites = [render_server(), operator_machine(), processor(False),
-               processor(True), led_wall()]
+               processor(True), led_wall(), brompton_processor()]
     atlas = pack(sprites)
     write_png(PNG_PATH, atlas)
     write_inc(INC_PATH, sprites, atlas)

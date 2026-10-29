@@ -1,5 +1,6 @@
 #include <mediaserver/devices/processor_monitor.hpp>
 
+#include <mediaserver/devices/brompton_tessera.hpp>
 #include <mediaserver/devices/http_client.hpp>
 #include <mediaserver/devices/novastar_coex.hpp>
 #include <mediaserver/net/cluster_discovery.hpp>
@@ -11,6 +12,7 @@
 #include <asio/steady_timer.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <map>
@@ -25,6 +27,30 @@ namespace mediaserver::devices {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// The port a processor's API answers on when its address names none.
+[[nodiscard]] std::uint16_t
+default_port(topology::HardwareProcessorProtocol protocol) noexcept {
+  return protocol == topology::HardwareProcessorProtocol::BromptonTessera
+             ? tessera::default_port
+             : coex::default_port;
+}
+
+// One read of a processor, whatever its protocol.
+struct Reading final {
+  topology::HardwareProcessorNode node;
+  std::vector<coex::Input> inputs;
+};
+
+[[nodiscard]] Reading read_processor(topology::HardwareProcessorProtocol protocol,
+                                     const HttpEndpoint &endpoint,
+                                     std::chrono::milliseconds timeout) {
+  if (protocol == topology::HardwareProcessorProtocol::BromptonTessera) {
+    return Reading{tessera::poll(endpoint, timeout).node, {}};
+  }
+  coex::Poll polled = coex::poll(endpoint, timeout);
+  return Reading{std::move(polled.node), std::move(polled.inputs)};
+}
 
 struct Watched final {
   ProcessorTarget target;
@@ -76,32 +102,32 @@ search_hosts(const ProcessorMonitorConfig &config) {
   return hosts;
 }
 
-// The hosts in `hosts` that accept a TCP connection on `port` within the
-// timeout, tried `parallel` at a time.
-[[nodiscard]] std::vector<asio::ip::address_v4>
-open_hosts(const std::vector<asio::ip::address_v4> &hosts, std::uint16_t port,
-           std::chrono::milliseconds timeout, std::size_t parallel,
-           const std::atomic_bool &stop) {
-  std::vector<asio::ip::address_v4> open;
+// The endpoints that accept a TCP connection within the timeout, tried
+// `parallel` at a time.
+[[nodiscard]] std::vector<asio::ip::tcp::endpoint>
+open_endpoints(const std::vector<asio::ip::tcp::endpoint> &endpoints,
+               std::chrono::milliseconds timeout, std::size_t parallel,
+               const std::atomic_bool &stop) {
+  std::vector<asio::ip::tcp::endpoint> open;
   asio::io_context io;
   struct Probe final {
     explicit Probe(asio::io_context &context) : socket(context), timer(context) {}
     asio::ip::tcp::socket socket;
     asio::steady_timer timer;
-    asio::ip::address_v4 host;
+    asio::ip::tcp::endpoint endpoint;
     bool connected{};
   };
   parallel = std::max<std::size_t>(parallel, 1U);
-  for (std::size_t first = 0U; first < hosts.size() && !stop;
+  for (std::size_t first = 0U; first < endpoints.size() && !stop;
        first += parallel) {
     std::vector<std::unique_ptr<Probe>> probes;
-    const std::size_t last = std::min(hosts.size(), first + parallel);
+    const std::size_t last = std::min(endpoints.size(), first + parallel);
     for (std::size_t index = first; index < last; ++index) {
       auto probe = std::make_unique<Probe>(io);
-      probe->host = hosts[index];
+      probe->endpoint = endpoints[index];
       Probe *const raw = probe.get();
       raw->socket.async_connect(
-          asio::ip::tcp::endpoint{raw->host, port},
+          raw->endpoint,
           [raw](const std::error_code &error) {
             raw->connected = !error;
             raw->timer.cancel();
@@ -119,7 +145,7 @@ open_hosts(const std::vector<asio::ip::address_v4> &hosts, std::uint16_t port,
     io.run();
     for (const auto &probe : probes) {
       if (probe->connected) {
-        open.push_back(probe->host);
+        open.push_back(probe->endpoint);
       }
       std::error_code ignored;
       probe->socket.close(ignored);
@@ -202,16 +228,17 @@ struct ProcessorMonitor::State final {
     const ProcessorTarget target = found->second.target;
     found->second.due = Clock::now() + config.poll_interval;
     lock.unlock();
-    std::optional<coex::Poll> result;
+    std::optional<Reading> result;
     std::string refused;
-    const std::optional<HttpEndpoint> endpoint =
-        parse_http_endpoint(target.address, coex::default_port);
+    const std::optional<HttpEndpoint> endpoint = parse_http_endpoint(
+        target.address, default_port(target.protocol));
     if (!endpoint.has_value()) {
       refused = target.address.empty() ? "no address"
                                        : "address is not a numeric IP";
     } else {
       try {
-        result = coex::poll(*endpoint, config.request_timeout);
+        result = read_processor(target.protocol, *endpoint,
+                                config.request_timeout);
       } catch (const std::exception &error) {
         refused = error.what();
       }
@@ -267,6 +294,11 @@ struct ProcessorMonitor::State final {
     }
     const core::i64 vendor_id = input->vendor_id;
     const ProcessorTarget target = watch.target;
+    if (target.protocol != topology::HardwareProcessorProtocol::NovastarCoex) {
+      watch.node.notice = "This processor's IP control sets no EDID";
+      watch.node.notice_failed = true;
+      return;
+    }
     lock.unlock();
     coex::WriteResult result{};
     if (const auto endpoint =
@@ -300,15 +332,32 @@ struct ProcessorMonitor::State final {
     std::vector<topology::HardwareDiscoveredProcessor> found;
     try {
       const std::vector<asio::ip::address_v4> hosts = search_hosts(config);
-      const std::vector<asio::ip::address_v4> open =
-          open_hosts(hosts, config.search_port, config.search_connect_timeout,
-                     config.search_parallel, stop);
-      for (const asio::ip::address_v4 &host : open) {
+      // COEX controllers on their API port and Tessera processors on HTTP,
+      // in one sweep. Plenty of hosts answer port 80; only a Tessera names
+      // its type there.
+      std::vector<asio::ip::tcp::endpoint> endpoints;
+      endpoints.reserve(hosts.size() * 2U);
+      for (const asio::ip::address_v4 &host : hosts) {
+        for (const std::uint16_t port :
+             {config.search_port, config.brompton_search_port}) {
+          if (port != 0U) {
+            endpoints.emplace_back(host, port);
+          }
+        }
+      }
+      const std::vector<asio::ip::tcp::endpoint> open =
+          open_endpoints(endpoints, config.search_connect_timeout,
+                         config.search_parallel, stop);
+      for (const asio::ip::tcp::endpoint &tcp : open) {
         if (stop) {
           break;
         }
-        const HttpEndpoint endpoint{host.to_string(), config.search_port};
-        if (auto processor = coex::identify(endpoint, config.request_timeout)) {
+        const HttpEndpoint endpoint{tcp.address().to_string(), tcp.port()};
+        auto processor =
+            tcp.port() == config.brompton_search_port
+                ? tessera::identify(endpoint, config.request_timeout)
+                : coex::identify(endpoint, config.request_timeout);
+        if (processor.has_value()) {
           found.push_back(std::move(*processor));
         }
       }

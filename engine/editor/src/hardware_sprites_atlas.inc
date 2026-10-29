@@ -5,10 +5,11 @@
 // sprite pixels.
 inline constexpr core::u32 hardware_sprite_atlas_width = 256U;
 inline constexpr core::u32 hardware_sprite_atlas_height = 256U;
-inline constexpr std::array<HardwareSpriteFrame, 5U> hardware_sprite_frames{{
+inline constexpr std::array<HardwareSpriteFrame, 6U> hardware_sprite_frames{{
     {0, 0, 52, 76, 26, 62, {5, 42, 50}, {32, 35, 66}}, // render_server
     {53, 0, 84, 64, 42, 50, {6, 51, 59}, {66, 47, 57}}, // operator_machine
     {138, 0, 64, 58, 32, 44, {3, 23, 46}, {40, 42, 50}}, // processor
     {0, 77, 64, 58, 32, 44, {3, 23, 46}, {40, 42, 50}}, // processor_novastar
     {65, 77, 112, 112, 54, 92, {5, 51, 59}, {94, 51, 59}}, // led_wall
+    {178, 77, 64, 58, 32, 44, {3, 26, 46}, {40, 44, 52}}, // processor_brompton
 }};

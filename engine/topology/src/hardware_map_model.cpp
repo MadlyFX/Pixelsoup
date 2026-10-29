@@ -133,6 +133,9 @@ parse_protocol(std::string_view value) noexcept {
     if (value == schema::novastar_coex_protocol) {
         return HardwareProcessorProtocol::NovastarCoex;
     }
+    if (value == schema::brompton_tessera_protocol) {
+        return HardwareProcessorProtocol::BromptonTessera;
+    }
     return std::nullopt;
 }
 

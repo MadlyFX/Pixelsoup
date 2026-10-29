@@ -810,6 +810,15 @@ mode and signal, an input's EDID can be set to the output's mode, and Feed
 Mapping builds a starting layout from what the processors report. See
 [the operator guide](docs/operator-guide.md#hardware-map-and-led-processors).
 
+Brompton Tessera is in too, through the IP control API of software 3.1
+(port 80): the active input, panels, overrides, preset and model, mode and
+signal checks, and search. Tessera's API has no EDID and no screen layout, so
+a Brompton card offers no EDID fix and Build from hardware lays its windows
+side by side. Its answers were built against the 3.1.0 beta 4 manual, whose
+examples print keys unquoted; both forms are read. Verify against a real
+processor, and map inputs other than the active one if a later API names
+them.
+
 Still to do for COEX: verify field meanings against real MX40 Pro firmware
 (layer positions are taken as screen coordinates, cabinet positions as
 canvas-relative, and an input without `sourceStatus` as live when it reports
@@ -818,8 +827,8 @@ the ARP table (NovaStar OUI `54:b5:6c`) as well as by subnet search.
 
 ### Candidates
 
-- Brompton Tessera, Megapixel and Colorlight LED processors (a protocol each,
-  beside `HardwareProcessorProtocol::NovastarCoex`)
+- Megapixel and Colorlight LED processors (a protocol each, beside
+  `HardwareProcessorProtocol::NovastarCoex` and `BromptonTessera`)
 - Blackmagic Hyperdeck and Aja Ki Pro recorders
 - Evertz and Brainstorm master clock generators
 - File storage servers and cameras on the map, each a device kind with its own

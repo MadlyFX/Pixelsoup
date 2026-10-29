@@ -20,9 +20,10 @@
 // on a device. A processor that stops answering keeps its last report,
 // marked stale, until it answers again or leaves the map.
 //
-// It also searches the local network for processors, once, when asked: the
-// controllers do not announce themselves, so a search tries the API port on
-// every host of each local IPv4 subnet.
+// It also searches the local network for processors, once, when asked:
+// processors do not announce themselves, so a search tries each protocol's
+// API port - 8001 for NovaStar COEX, 80 for Brompton Tessera - on every host
+// of each local IPv4 subnet.
 namespace mediaserver::devices {
 
 struct ProcessorTarget final {
@@ -53,9 +54,12 @@ struct ProcessorMonitorConfig final {
   // local IPv4 subnet, at most 1024 per subnet (the /22 around this
   // machine's address on a larger one).
   std::vector<std::string> search_hosts;
+  // Where a search looks for NovaStar COEX and for Brompton Tessera
+  // processors; zero skips that protocol.
   std::uint16_t search_port{8001U};
+  std::uint16_t brompton_search_port{80U};
   std::chrono::milliseconds search_connect_timeout{400};
-  std::size_t search_parallel{96U};
+  std::size_t search_parallel{192U};
 };
 
 struct ProcessorSearchState final {

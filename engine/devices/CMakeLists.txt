@@ -1,10 +1,12 @@
 # Device control protocols: talking to the hardware on the Hardware Map that
-# is not a render machine. Today that is NovaStar COEX LED processors over
-# their HTTP API. It is headless - sockets and JSON, no window, no GPU - and
-# keeps every device round trip on its own thread, never the control thread.
+# is not a render machine. Today that is LED processors over their HTTP APIs:
+# NovaStar COEX and Brompton Tessera. It is headless - sockets and JSON, no
+# window, no GPU - and keeps every device round trip on its own thread, never
+# the control thread.
 find_package(asio CONFIG REQUIRED)
 
 add_library(mediaserver_devices STATIC
+    src/brompton_tessera.cpp
     src/http_client.cpp
     src/json.cpp
     src/novastar_coex.cpp

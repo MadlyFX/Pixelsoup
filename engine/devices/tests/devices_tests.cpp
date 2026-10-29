@@ -1,3 +1,4 @@
+#include <mediaserver/devices/brompton_tessera.hpp>
 #include <mediaserver/devices/http_client.hpp>
 #include <mediaserver/devices/json.hpp>
 #include <mediaserver/devices/novastar_coex.hpp>
@@ -17,6 +18,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -30,6 +32,7 @@ namespace {
 namespace core = mediaserver::core;
 namespace devices = mediaserver::devices;
 namespace coex = mediaserver::devices::coex;
+namespace tessera = mediaserver::devices::tessera;
 namespace doc = mediaserver::doc;
 namespace topology = mediaserver::topology;
 
@@ -403,6 +406,7 @@ void a_controller_is_polled_written_and_found() {
   config.request_timeout = std::chrono::milliseconds{1'000};
   config.search_hosts = {"127.0.0.1"};
   config.search_port = controller.port();
+  config.brompton_search_port = 0U;
   devices::ProcessorMonitor monitor{config};
   monitor.start();
   const doc::NodeId card{7U};
@@ -480,12 +484,218 @@ void only_protocol_processors_are_watched() {
                 targets[0].address == "10.0.0.3");
 }
 
+void tessera_answers_are_read_as_documented() {
+  // Quoted, as a JSON encoder writes it; keys match whatever their case.
+  const auto rate =
+      tessera::endpoint_value(R"({"refresh-rate": 59.94})",
+                              "/api/input/active/refresh-rate");
+  DEVICES_CHECK(rate.has_value() && rate->as_number() == 59.94);
+  const auto type = tessera::endpoint_value(R"({"Processor-Type":"SX40"})",
+                                            "/api/system/processor-type");
+  DEVICES_CHECK(type.has_value() && type->as_string() == "SX40");
+  // Unquoted, as the manual prints it.
+  const auto printed = tessera::endpoint_value(
+      "{ refresh-rate: 60 }", "/api/input/active/refresh-rate");
+  DEVICES_CHECK(printed.has_value() && printed->as_number() == 60.0);
+  const auto port = tessera::endpoint_value(
+      "{ port-type: hdmi }", "/api/input/active/source/port-type");
+  DEVICES_CHECK(port.has_value() && port->as_string() == "hdmi");
+  // Another endpoint's answer is not this one's.
+  DEVICES_CHECK(!tessera::endpoint_value("{ width: 3840 }",
+                                         "/api/input/active/resolution/height")
+                     .has_value());
+  DEVICES_CHECK(!tessera::endpoint_value("<html></html>",
+                                         "/api/system/processor-type")
+                     .has_value());
+
+  DEVICES_CHECK(tessera::model_name("sx40") == "SX40");
+  DEVICES_CHECK(tessera::model_name(" S8 ") == "S8");
+  DEVICES_CHECK(tessera::model_name("router").empty());
+  DEVICES_CHECK(tessera::input_name("sdi", 2U) == "SDI 2");
+  DEVICES_CHECK(tessera::input_name("", 0U) == "Input");
+}
+
+// A Tessera S8 on loopback, answering its IP control tree, or - with no
+// paths - a web server that is not one.
+class FakeTessera final {
+public:
+  explicit FakeTessera(std::map<std::string, std::string> paths)
+      : paths_(std::move(paths)),
+        acceptor_(io_, {asio::ip::make_address("127.0.0.1"), 0}) {
+    port_ = acceptor_.local_endpoint().port();
+    thread_ = std::thread{[this] { serve(); }};
+  }
+
+  ~FakeTessera() {
+    stopping_ = true;
+    std::error_code ignored;
+    asio::io_context poke;
+    asio::ip::tcp::socket socket{poke};
+    socket.connect({asio::ip::make_address("127.0.0.1"), port_}, ignored);
+    thread_.join();
+  }
+
+  [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+  [[nodiscard]] int requests() const noexcept { return requests_; }
+
+private:
+  void serve() {
+    while (!stopping_) {
+      asio::ip::tcp::socket socket{io_};
+      std::error_code error;
+      acceptor_.accept(socket, error);
+      if (error || stopping_) {
+        continue;
+      }
+      try {
+        asio::streambuf buffer;
+        asio::read_until(socket, buffer, "\r\n\r\n");
+        const std::string head{asio::buffers_begin(buffer.data()),
+                               asio::buffers_end(buffer.data())};
+        const std::size_t first = head.find(' ');
+        const std::size_t second = head.find(' ', first + 1U);
+        const std::string path = head.substr(first + 1U, second - first - 1U);
+        ++requests_;
+        const auto found = paths_.find(path);
+        const std::string body =
+            found != paths_.end() ? found->second : std::string{"Not found"};
+        const std::string response =
+            std::string{found != paths_.end() ? "HTTP/1.1 200 OK\r\n"
+                                              : "HTTP/1.1 404 Not Found\r\n"} +
+            "Content-Type: application/json\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        asio::write(socket, asio::buffer(response));
+        std::error_code ignored;
+        socket.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
+      } catch (const std::exception &) {
+      }
+    }
+  }
+
+  std::map<std::string, std::string> paths_;
+  asio::io_context io_;
+  asio::ip::tcp::acceptor acceptor_;
+  std::uint16_t port_{};
+  std::thread thread_;
+  std::atomic_bool stopping_{};
+  std::atomic_int requests_{};
+};
+
+[[nodiscard]] std::map<std::string, std::string> tessera_tree() {
+  return {
+      {"/api/system/processor-type", R"({"processor-type":"s8"})"},
+      {"/api/system/software-version", R"({"software-version":"3.1.0"})"},
+      {"/api/input/active/source/port-type", R"({"port-type":"hdmi"})"},
+      {"/api/input/active/source/port-number", R"({"port-number":1})"},
+      {"/api/input/active/resolution/width", R"({"width":3840})"},
+      {"/api/input/active/resolution/height", R"({"height":2160})"},
+      // As the manual prints it: an unquoted key.
+      {"/api/input/active/refresh-rate", "{ refresh-rate: 59.94 }"},
+      {"/api/panels/statistics/associated-count", R"({"associated-count":120})"},
+      {"/api/panels/statistics/online-count", R"({"online-count":118})"},
+      {"/api/panels/statistics/error-count", R"({"error-count":1})"},
+      {"/api/override/blackout/enabled", R"({"enabled":true})"},
+      {"/api/override/freeze/enabled", R"({"enabled":false})"},
+      {"/api/override/test-pattern/enabled", R"({"enabled":false})"},
+      {"/api/presets/active/name", R"({"name":"Show"})"},
+  };
+}
+
+void a_tessera_processor_is_polled_and_found() {
+  FakeTessera processor{tessera_tree()};
+  const devices::HttpEndpoint endpoint{"127.0.0.1", processor.port()};
+
+  const tessera::Poll polled =
+      tessera::poll(endpoint, std::chrono::milliseconds{2'000});
+  DEVICES_CHECK(polled.reached);
+  const topology::HardwareProcessorNode &node = polled.node;
+  DEVICES_CHECK(node.reachability ==
+                topology::HardwareRuntimeReachability::Online);
+  DEVICES_CHECK(node.model == "S8" && node.name == "Brompton S8" &&
+                node.software == "3.1.0" && node.preset == "Show");
+  // Only the input in use is reported; others are not missing.
+  DEVICES_CHECK(!node.all_inputs && node.inputs.size() == 1U);
+  DEVICES_CHECK(node.inputs[0].number == 1U && node.inputs[0].name == "HDMI 1" &&
+                node.inputs[0].connector == "HDMI" && node.inputs[0].signal &&
+                node.inputs[0].width == 3840U &&
+                node.inputs[0].refresh_millihertz == 59'940U);
+  // Tessera's IP control has no EDID.
+  DEVICES_CHECK(node.inputs[0].edid_width == 0U && !node.inputs[0].edid_writable);
+  DEVICES_CHECK(node.screens.empty());
+  DEVICES_CHECK(node.panels == 120U && node.panels_online == 118U &&
+                node.panels_faulted == 1U);
+  DEVICES_CHECK(node.blackout && !node.frozen && !node.test_pattern);
+  DEVICES_CHECK(node.attention() ==
+                "blacked out, 2 of 120 panels offline, 1 panel faulted");
+
+  const auto found = tessera::identify(endpoint, std::chrono::milliseconds{2'000});
+  DEVICES_CHECK(found.has_value() &&
+                found->protocol ==
+                    topology::HardwareProcessorProtocol::BromptonTessera &&
+                found->name == "Brompton S8" &&
+                found->address ==
+                    "127.0.0.1:" + std::to_string(processor.port()));
+
+  // Something else on port 80 - IP control switched off - is refused with
+  // what to do about it, and is no processor to a search.
+  FakeTessera web{{}};
+  const devices::HttpEndpoint other{"127.0.0.1", web.port()};
+  const tessera::Poll refused =
+      tessera::poll(other, std::chrono::milliseconds{2'000});
+  DEVICES_CHECK(refused.reached &&
+                refused.node.reachability ==
+                    topology::HardwareRuntimeReachability::ConfigurationError);
+  DEVICES_CHECK(refused.node.detail.find("Live Control") != std::string::npos);
+  DEVICES_CHECK(!tessera::identify(other, std::chrono::milliseconds{2'000})
+                     .has_value());
+
+  devices::ProcessorMonitorConfig config{};
+  config.poll_interval = std::chrono::milliseconds{100};
+  config.request_timeout = std::chrono::milliseconds{1'000};
+  config.search_hosts = {"127.0.0.1"};
+  config.search_port = 0U;
+  config.brompton_search_port = processor.port();
+  devices::ProcessorMonitor monitor{config};
+  monitor.start();
+  const doc::NodeId card{9U};
+  monitor.watch({devices::ProcessorTarget{
+      card, topology::HardwareProcessorProtocol::BromptonTessera,
+      "127.0.0.1:" + std::to_string(processor.port())}});
+  DEVICES_CHECK(eventually([&] {
+    const auto nodes = monitor.processors();
+    return nodes.size() == 1U &&
+           nodes[0].reachability ==
+               topology::HardwareRuntimeReachability::Online;
+  }));
+  // An EDID write is refused without asking the processor.
+  const int before = processor.requests();
+  monitor.write_edid(devices::ProcessorEdidWrite{card, 1U, 3840U, 2160U,
+                                                 59'940U});
+  DEVICES_CHECK(eventually([&] {
+    const auto nodes = monitor.processors();
+    return !nodes.empty() && nodes[0].notice_failed;
+  }));
+  static_cast<void>(before);
+
+  monitor.search();
+  DEVICES_CHECK(eventually([&] { return monitor.search_state().completed == 1U; }));
+  const devices::ProcessorSearchState search = monitor.search_state();
+  DEVICES_CHECK(search.found.size() == 1U &&
+                search.found[0].protocol ==
+                    topology::HardwareProcessorProtocol::BromptonTessera);
+  monitor.stop();
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 7U> cases{{
+    {"tessera answers are read as documented",
+     &tessera_answers_are_read_as_documented},
+    {"a tessera processor is polled and found",
+     &a_tessera_processor_is_polled_and_found},
     {"json reads and writes what devices send",
      &json_reads_and_writes_what_devices_send},
     {"http framing and endpoints are strict",

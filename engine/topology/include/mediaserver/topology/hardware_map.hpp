@@ -51,6 +51,9 @@ enum class HardwareProcessorProtocol : core::u8 {
   // NovaStar COEX controllers (MX40 Pro, MX30, MX20, KU20, CX40 Pro...),
   // through their HTTP API on port 8001.
   NovastarCoex,
+  // Brompton Tessera processors (M2, S4, S8, T1, T8, SX40) running software
+  // 3.1 or later, through their IP control API on port 80.
+  BromptonTessera,
 };
 
 [[nodiscard]] constexpr std::string_view
@@ -60,6 +63,8 @@ processor_protocol_name(HardwareProcessorProtocol protocol) noexcept {
     return "Generic";
   case HardwareProcessorProtocol::NovastarCoex:
     return "NovaStar COEX";
+  case HardwareProcessorProtocol::BromptonTessera:
+    return "Brompton Tessera";
   }
   return "Generic";
 }

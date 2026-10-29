@@ -195,6 +195,17 @@ void layers_that_do_not_fit_are_cut_and_named() {
                                 "screen");
 }
 
+void a_brompton_says_it_reports_no_layout() {
+  topology::HardwareMap map = stage();
+  map.devices[2].protocol = topology::HardwareProcessorProtocol::BromptonTessera;
+  map.devices[2].name = "Brompton S8";
+  const output::FeedLayoutPlan plan =
+      output::plan_feed_layout(map, topology::HardwareRuntimeSnapshot{});
+  LAYOUT_CHECK(plan.notes.size() == 1U &&
+               plan.notes[0] == "Brompton S8 reports no screen layout over IP "
+                                "control, so its inputs are laid side by side");
+}
+
 void nothing_cabled_plans_nothing() {
   topology::HardwareMap map = stage();
   map.links.clear();
@@ -233,7 +244,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 5U> cases{{
+constexpr std::array<Case, 6U> cases{{
+    {"a brompton says it reports no layout",
+     &a_brompton_says_it_reports_no_layout},
     {"a reporting processor lays out its screen",
      &a_reporting_processor_lays_out_its_screen},
     {"a silent processor says how it was laid out",
