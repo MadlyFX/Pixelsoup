@@ -276,6 +276,57 @@ void ribbons_join_the_particles_in_birth_order() {
     AJFX_CHECK(!validate(turned).ok());
 }
 
+// One red unit cube at the origin, turned `degrees` about Y.
+Effect cube(float degrees) {
+    EffectBuilder builder{"cube"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(InitColor{.a = Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .init(InitRotation{.min = degrees, .max = degrees})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "cube"});
+    return builder.build().value();
+}
+
+void mesh_particles_draw_their_mesh() {
+    const MeshSet meshes{{"cube", cube_mesh()}};
+    const auto draw = [&](float degrees) {
+        const Effect effect = cube(degrees);
+        const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+        gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
+        gpu::ParticleRenderer renderer = gpu::ParticleRenderer::create(*g_device, effect, kernels, TextureSet{},
+                                                                       gpu::TextureFormat::Rgba8Unorm, meshes)
+                                             .value();
+        gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
+        const gpu::Texture target =
+            g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
+        simulation.advance_to(1U);
+        const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
+        renderer.render(simulation, sorter, ortho, target, &clear);
+        Frame frame{g_device->read_texture(target).value()};
+        g_device->destroy_texture(target);
+        return frame;
+    };
+    // Facing the camera: a solid square a unit (16 pixels) across, its front
+    // face lit full on, where a sprite would be a soft disc.
+    const Frame square = draw(0.0F);
+    AJFX_CHECK(square.at(32U, 32U).r >= 254 && square.at(32U, 32U).a >= 254);
+    AJFX_CHECK(square.at(39U, 32U).r >= 254 && square.at(39U, 39U).r >= 254);
+    AJFX_CHECK(square.at(41U, 32U).a == 0);
+    // Turned 45 degrees about Y: two faces, each lit 0.35 + 0.65 cos 45,
+    // about 0.81, half a diagonal (11 pixels) either side.
+    const Frame turned = draw(45.0F);
+    AJFX_CHECK(turned.at(36U, 32U).r >= 203 && turned.at(36U, 32U).r <= 210);
+    AJFX_CHECK(turned.at(42U, 32U).a >= 254 && turned.at(45U, 32U).a == 0);
+    // A mesh the effect draws but was not given is refused.
+    const gpu::KernelSet kernels = gpu::compile_kernels(cube(0.0F), *g_compiler).value();
+    const Result<gpu::ParticleRenderer> missing = gpu::ParticleRenderer::create(
+        *g_device, cube(0.0F), kernels, TextureSet{}, gpu::TextureFormat::Rgba8Unorm);
+    AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingMesh);
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -315,6 +366,7 @@ int main() {
         {"alpha_particles_draw_back_to_front", alpha_particles_draw_back_to_front},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
+        {"mesh_particles_draw_their_mesh", mesh_particles_draw_their_mesh},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

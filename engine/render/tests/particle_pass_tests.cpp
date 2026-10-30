@@ -93,7 +93,7 @@ std::unique_ptr<ajfx::d3d12::Device> g_reference;
                                                      core::u32 seed = 3U,
                                                      const ajfx::TextureSet& textures = ajfx::presets::textures()) {
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
-    auto instance = pass.create_instance(effect, kernels, textures, ajfx::FieldSet{}, seed);
+    auto instance = pass.create_instance(effect, kernels, textures, ajfx::FieldSet{}, ajfx::MeshSet{}, seed);
     if (!instance) {
         std::cout << instance.error().message << '\n';
     }
@@ -283,7 +283,7 @@ void flipbooks_play_their_cells_over_each_life() {
 
     // A texture the effect names but was not given is refused, by name.
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
-    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, 3U);
+    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, ajfx::MeshSet{}, 3U);
     PASS_CHECK(!missing && missing.error().code == render::ParticleErrorCode::InvalidEffect &&
                missing.error().message.find("texture 'cells'") != std::string::npos);
 }
@@ -479,7 +479,7 @@ void distance_fields_reach_the_simulation() {
     const ajfx::Effect effect = builder.build().value();
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
     render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 256U});
-    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, fields, 3U);
+    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, fields, ajfx::MeshSet{}, 3U);
     PASS_CHECK(created);
     render::ParticleInstance instance = std::move(created).value();
     static_cast<void>(render_frame(pass, instance, 36U, identity()));
@@ -489,8 +489,101 @@ void distance_fields_reach_the_simulation() {
         PASS_CHECK(p.y >= -0.5F - 1.0e-4F);
     }
     // Without the field the effect is refused, by name.
-    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, 3U);
+    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, ajfx::MeshSet{}, 3U);
     PASS_CHECK(!missing && missing.error().message.find("field 'floor'") != std::string::npos);
+}
+
+// A red unit cube at the origin, turned `degrees` about Y; with `behind`, a
+// green sprite emitter too, drawn after it, a fifth of a unit behind its
+// front face.
+[[nodiscard]] ajfx::Effect cube_effect(float degrees, bool behind) {
+    ajfx::EffectBuilder builder{"cube"};
+    builder.emitter("box")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .init(ajfx::InitRotation{.min = degrees, .max = degrees})
+        .renderer(ajfx::SpriteRenderer{.geometry = ajfx::Geometry::Mesh, .mesh = "cube"});
+    if (behind) {
+        builder.emitter("dot")
+            .spawn(ajfx::SpawnBurst{.count = 1U})
+            .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = ajfx::Vec3{0.0F, 0.0F, 0.3F}})
+            .init(ajfx::InitColor{.a = ajfx::Color{0.0F, 1.0F, 0.0F, 1.0F}, .b = ajfx::Color{0.0F, 1.0F, 0.0F, 1.0F}})
+            .init(ajfx::InitSize{.min = 0.5F, .max = 0.5F});
+    }
+    return builder.build().value();
+}
+
+// Draws `instance` at show frame 1 with the orthographic view given a depth
+// ramp (reversed depth 0.5 + 0.1 z), which solid meshes need to hide their
+// far side; the flat test projection puts everything at one depth.
+[[nodiscard]] Frame render_with_depth(render::ParticlePass& pass, render::ParticleInstance& instance) {
+    scene::ViewMatrices ramp = orthographic();
+    ramp.projection.set(2U, 2U, 0.1F);
+    ramp.view_projection = ramp.projection;
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && depth && readback);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, 1U, 24U, 1U));
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    PASS_CHECK(pass.draw(commands, instance, ramp, identity(), targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+void mesh_particles_draw_solid_meshes() {
+    render::ParticlePass pass = make_pass();
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
+    const auto instance_of = [&](const ajfx::Effect& effect) {
+        const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+        auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+        PASS_CHECK(created);
+        return std::move(created).value();
+    };
+    // A solid square a unit (16 pixels) across, its front face lit full on.
+    render::ParticleInstance square = instance_of(cube_effect(0.0F, false));
+    const Frame flat = render_with_depth(pass, square);
+    PASS_CHECK(flat.red(32U, 32U) >= 254U && flat.alpha(32U, 32U) >= 254U);
+    PASS_CHECK(flat.red(39U, 39U) >= 254U && flat.alpha(41U, 32U) == 0U);
+    // Turned 45 degrees: faces lit about 0.81, half a diagonal either side.
+    render::ParticleInstance turned = instance_of(cube_effect(45.0F, false));
+    const Frame corner = render_with_depth(pass, turned);
+    PASS_CHECK(corner.red(36U, 32U) >= 203U && corner.red(36U, 32U) <= 210U);
+    PASS_CHECK(corner.alpha(42U, 32U) >= 254U && corner.alpha(45U, 32U) == 0U);
+    // The cube writes depth: a sprite drawn after it but behind its front
+    // face stays hidden.
+    render::ParticleInstance pair = instance_of(cube_effect(0.0F, true));
+    const Frame hidden = render_with_depth(pass, pair);
+    PASS_CHECK(hidden.red(32U, 32U) >= 254U && hidden.green(32U, 32U) == 0U);
 }
 
 void ribbons_join_the_particles_in_birth_order() {
@@ -625,6 +718,7 @@ int main() {
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
+        {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

@@ -2610,7 +2610,9 @@ bool d3d12_upload_buffer_range(
 bool d3d12_copy_buffer(
     void* command_value,
     void* source_value,
+    core::u32 source_offset,
     void* destination_value,
+    core::u32 destination_offset,
     core::u32 bytes) noexcept {
     auto* commands = as_commands(command_value);
     auto* source = as_buffer(source_value);
@@ -2618,7 +2620,8 @@ bool d3d12_copy_buffer(
     if (commands == nullptr || source == nullptr || destination == nullptr
         || source == destination || !commands->recording
         || !source->device_local || !destination->device_local
-        || bytes > source->bytes || bytes > destination->bytes) {
+        || source_offset > source->bytes || bytes > source->bytes - source_offset
+        || destination_offset > destination->bytes || bytes > destination->bytes - destination_offset) {
         return false;
     }
     if (bytes == 0U) {
@@ -2629,7 +2632,7 @@ bool d3d12_copy_buffer(
         return false;
     }
     commands->list->CopyBufferRegion(
-        destination->resource.Get(), 0U, source->resource.Get(), 0U, bytes);
+        destination->resource.Get(), destination_offset, source->resource.Get(), source_offset, bytes);
     return true;
 }
 
@@ -3955,7 +3958,7 @@ core::Result<D3d12CreatedResource, RhiError> d3d12_create_geometry_buffer(
 }
 bool d3d12_buffer_safe_to_release(void*, void*) noexcept { return false; }
 bool d3d12_upload_buffer_range(void*, void*, core::u32, std::span<const core::u8>) noexcept { return false; }
-bool d3d12_copy_buffer(void*, void*, void*, core::u32) noexcept { return false; }
+bool d3d12_copy_buffer(void*, void*, core::u32, void*, core::u32, core::u32) noexcept { return false; }
 core::u64 d3d12_upload_space(void*) noexcept { return 0U; }
 core::u32 d3d12_texture_upload_row_capacity(void*, void*, core::u64) noexcept { return 0U; }
 core::Result<void*, RhiError> d3d12_create_sampler(void*, const SamplerDesc&) noexcept {

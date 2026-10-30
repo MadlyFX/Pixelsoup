@@ -52,6 +52,7 @@ constexpr core::u32 flag_srgb = 4U;
 constexpr core::u32 flag_sorted = 8U;
 constexpr core::u32 flag_soft = 16U;
 constexpr core::u32 flag_ribbon = 32U;
+constexpr core::u32 flag_mesh = 64U;
 
 core::u32 offset_or_absent(std::int32_t offset) {
     return offset >= 0 ? static_cast<core::u32>(offset) : absent;
@@ -91,6 +92,31 @@ struct ParticleInstance::State final {
     std::vector<std::optional<std::size_t>> emitter_texture;
     // Each emitter's drawing order from the last draw, for its motion.
     std::vector<ajfx::gpu::Buffer> orders;
+    // Each mesh emitter's mesh and draw arguments (the mesh's index count,
+    // then the live count copied from the simulation). The vertices and
+    // indices wait here until the first advance writes them.
+    struct Mesh final {
+        ajfx::gpu::Buffer vertices;
+        ajfx::gpu::Buffer indices;
+        ajfx::gpu::Buffer args;
+        core::u32 index_count{};
+        std::vector<float> unwritten_vertices;
+        std::vector<std::uint32_t> unwritten_indices;
+    };
+    std::vector<std::optional<Mesh>> meshes;
+    ParticleDevice* device{};
+
+    ~State() {
+        if (device != nullptr) {
+            for (const std::optional<Mesh>& mesh : meshes) {
+                if (mesh) {
+                    device->destroy_buffer(mesh->vertices);
+                    device->destroy_buffer(mesh->indices);
+                    device->destroy_buffer(mesh->args);
+                }
+            }
+        }
+    }
 
     [[nodiscard]] bool textures_landed() const noexcept {
         return std::all_of(textures.begin(), textures.end(), [](const Upload& upload) { return upload.landed; });
@@ -136,6 +162,8 @@ struct ParticlePass::State final {
     std::unique_ptr<ParticleDevice> particles;
     rhi::GraphicsPipeline blended;  // alpha and premultiplied emitters
     rhi::GraphicsPipeline additive;
+    // Blended meshes: as `blended`, writing depth.
+    rhi::GraphicsPipeline mesh;
     // Sprite motion into the scene's velocity target.
     rhi::GraphicsPipeline velocity;
     // Bound for emitters without a texture, which never sample it.
@@ -179,7 +207,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     vertex.format = rhi::ShaderFormat::Dxil;
     vertex.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_vert_dxil),
                                                 sizeof(mediaserver_particle_sprite_vert_dxil)};
-    vertex.storage_buffer_count = 3U;
+    vertex.storage_buffer_count = 5U;
     vertex.uniform_buffer_count = 1U;
     rhi::ShaderDesc fragment{};
     fragment.stage = rhi::ShaderStage::Fragment;
@@ -202,12 +230,16 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
         sizeof(mediaserver_particle_velocity_frag_dxil)};
     auto velocity = device.create_pipeline(vertex, motion, rhi::TextureFormat::Rgba32Float, rhi::ColorBlend::Disabled,
                                            depth);
-    if (!blended || !additive || !velocity) {
+    rhi::DepthState solid = depth;
+    solid.write = true;
+    auto mesh = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, solid);
+    if (!blended || !additive || !velocity || !mesh) {
         return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
     }
     state->blended = std::move(blended).value();
     state->additive = std::move(additive).value();
     state->velocity = std::move(velocity).value();
+    state->mesh = std::move(mesh).value();
     rhi::TextureDesc blank{};
     blank.width = 1U;
     blank.height = 1U;
@@ -232,6 +264,7 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
                                                                            const ajfx::gpu::KernelSet& kernels,
                                                                            const ajfx::TextureSet& textures,
                                                                            const ajfx::FieldSet& fields,
+                                                                           const ajfx::MeshSet& meshes,
                                                                            core::u32 seed) {
     using Result = core::Result<ParticleInstance, ParticleError>;
     State& s = *state_;
@@ -239,6 +272,9 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
     }
     if (ajfx::Result<bool> checked = ajfx::check_fields(effect, fields); !checked) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
+    }
+    if (ajfx::Result<bool> checked = ajfx::check_meshes(effect, meshes); !checked) {
         return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
     }
     ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
@@ -268,6 +304,31 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         return Result::failure(failure(ParticleErrorCode::DeviceFailure, sorter.error().message));
     }
     state->sorter.emplace(std::move(sorter).value());
+    state->device = s.particles.get();
+    for (const ajfx::Emitter& emitter : effect.emitters) {
+        std::optional<ParticleInstance::State::Mesh>& out = state->meshes.emplace_back();
+        if (emitter.renderer.geometry != ajfx::Geometry::Mesh) {
+            continue;
+        }
+        const ajfx::MeshData& data = meshes.find(emitter.renderer.mesh)->second;
+        ParticleInstance::State::Mesh mesh;
+        mesh.index_count = static_cast<core::u32>(data.indices.size());
+        for (const ajfx::MeshVertex& v : data.vertices) {
+            mesh.unwritten_vertices.insert(mesh.unwritten_vertices.end(), {v.position.x, v.position.y, v.position.z,
+                                                                           v.normal.x, v.normal.y, v.normal.z, v.u, v.v});
+        }
+        mesh.unwritten_indices = data.indices;
+        for (const auto& [bytes, target] : {std::pair{mesh.unwritten_vertices.size() * 4U, &mesh.vertices},
+                                            std::pair{mesh.unwritten_indices.size() * 4U, &mesh.indices},
+                                            std::pair{std::size_t{16U}, &mesh.args}}) {
+            ajfx::Result<ajfx::gpu::Buffer> created = s.particles->create_buffer(bytes, "particle mesh");
+            if (!created) {
+                return Result::failure(failure(ParticleErrorCode::DeviceFailure, created.error().message));
+            }
+            *target = created.value();
+        }
+        out = std::move(mesh);
+    }
     // Textures are made now and filled by later advances.
     for (const ajfx::Emitter& emitter : effect.emitters) {
         std::optional<std::size_t> index;
@@ -339,6 +400,18 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
     }
 
     s.particles->begin_recording(commands);
+    for (std::optional<ParticleInstance::State::Mesh>& mesh : i.meshes) {
+        if (mesh && !mesh->unwritten_vertices.empty()) {
+            s.particles->write_buffer(mesh->vertices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_vertices.data()),
+                                                mesh->unwritten_vertices.size() * 4U});
+            s.particles->write_buffer(mesh->indices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_indices.data()),
+                                                mesh->unwritten_indices.size() * 4U});
+            mesh->unwritten_vertices = {};
+            mesh->unwritten_indices = {};
+        }
+    }
     if (i.restart) {
         simulation.reset();
         i.restart = false;
@@ -423,6 +496,14 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
     s.particles->begin_recording(commands);
     for (std::size_t e = 0U; e < i.orders.size(); ++e) {
         i.orders[e] = i.sorter->sort(*i.simulation, e, axis);
+        // A mesh draws its index count of vertices for each live particle.
+        if (i.meshes[e]) {
+            const std::uint32_t args[4] = {i.meshes[e]->index_count, 0U, 0U, 0U};
+            s.particles->write_buffer(i.meshes[e]->args, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(args), sizeof(args)});
+            const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
+            s.particles->copy_buffer(i.meshes[e]->args, 4U, buffers.args, buffers.draw_args_offset + 4U, 4U);
+        }
     }
     s.particles->end_recording();
     if (std::optional<ajfx::Error> error = s.particles->take_error()) {
@@ -493,7 +574,8 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         const std::optional<std::size_t> texture = i.emitter_texture[e];
         constants.flags = (texture ? flag_textured : 0U) | (sprite.flipbook_blend ? flag_blend_cells : 0U) |
                           (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U) |
-                          (soft ? flag_soft : 0U) | (sprite.geometry == ajfx::Geometry::Ribbon ? flag_ribbon : 0U);
+                          (soft ? flag_soft : 0U) | (sprite.geometry == ajfx::Geometry::Ribbon ? flag_ribbon : 0U) |
+                          (sprite.geometry == ajfx::Geometry::Mesh ? flag_mesh : 0U);
         const rhi::StorageBuffer* order = i.orders[e].valid() ? s.particles->buffer(i.orders[e]) : records;
         if (order == nullptr) {
             s.note("an emitter's sort order is missing");
@@ -513,16 +595,28 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler},
             rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
 
-        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters};
+        const std::optional<ParticleInstance::State::Mesh>& mesh = i.meshes[e];
+        const rhi::StorageBuffer* mesh_vertices = mesh ? s.particles->buffer(mesh->vertices) : records;
+        const rhi::StorageBuffer* mesh_indices = mesh ? s.particles->buffer(mesh->indices) : records;
+        const rhi::StorageBuffer* mesh_args = mesh ? s.particles->buffer(mesh->args) : arguments;
+        if (mesh_vertices == nullptr || mesh_indices == nullptr || mesh_args == nullptr) {
+            s.note("an emitter's mesh buffers are missing");
+            return false;
+        }
+        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters, mesh_vertices, mesh_indices};
         // The counts come from the simulation; this batch only carries them.
         const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{6U, 1U}};
         rhi::PulledDraw draw{};
-        draw.pipeline = motion ? &s.velocity : sprite.blend == ajfx::BlendMode::Additive ? &s.additive : &s.blended;
+        draw.pipeline = motion ? &s.velocity
+            : sprite.blend == ajfx::BlendMode::Additive ? &s.additive
+            : mesh ? &s.mesh
+                   : &s.blended;
         draw.vertex_buffers = vertex_buffers;
         draw.vertex_uniform = emitter_uniform;
         draw.fragment_textures = sampled;
         draw.batches = batches;
-        draw.indirect = rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
+        draw.indirect = mesh ? rhi::IndirectArguments{mesh_args, 0U}
+                             : rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
         draw.load = motion || !first || targets.load;
         draw.store_depth = true;
         draw.viewport = targets.viewport;

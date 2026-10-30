@@ -27,6 +27,8 @@ enum class ErrorCode {
     MissingTexture,
     // An emitter collides with a distance field its package does not hold.
     MissingField,
+    // An emitter draws a mesh its package does not hold.
+    MissingMesh,
 };
 
 struct Error final {

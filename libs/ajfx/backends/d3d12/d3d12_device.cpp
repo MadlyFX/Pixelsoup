@@ -213,7 +213,10 @@ public:
         blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         desc.SampleMask = UINT_MAX;
         desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        // Meshes wind counter-clockwise outside as the camera sees them (y
+        // up), which is how D3D12 judges winding: that is the front face.
+        desc.RasterizerState.CullMode = g.cull_back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.FrontCounterClockwise = TRUE;
         desc.RasterizerState.DepthClipEnable = TRUE;
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         desc.NumRenderTargets = 1U;

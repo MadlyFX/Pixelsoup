@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <span>
 #include <tuple>
@@ -69,19 +70,42 @@ struct ParticleRenderer::State final {
     Device* device{nullptr};
     Pipeline blended;  // alpha and premultiplied emitters
     Pipeline additive;
+    // The same for meshes, culling the faces turned away: with no depth
+    // buffer here, a convex mesh would otherwise draw its far side over its
+    // near side.
+    Pipeline blended_mesh;
+    Pipeline additive_mesh;
     Buffer camera;
     // Each emitter's texture, invalid for an untextured one; one upload per
     // name.
     std::vector<Texture> emitter_textures;
     std::vector<Texture> uploaded;
+    // Each mesh emitter's mesh and its draw arguments (the mesh's index
+    // count, then the live count copied from the simulation).
+    struct MeshBuffers final {
+        Buffer vertices;
+        Buffer indices;
+        Buffer args;
+        std::uint32_t index_count{0U};
+    };
+    std::vector<std::optional<MeshBuffers>> meshes;
 
     ~State() {
         if (device != nullptr) {
             device->destroy_pipeline(blended);
             device->destroy_pipeline(additive);
+            device->destroy_pipeline(blended_mesh);
+            device->destroy_pipeline(additive_mesh);
             device->destroy_buffer(camera);
             for (const Texture texture : uploaded) {
                 device->destroy_texture(texture);
+            }
+            for (const std::optional<MeshBuffers>& mesh : meshes) {
+                if (mesh) {
+                    device->destroy_buffer(mesh->vertices);
+                    device->destroy_buffer(mesh->indices);
+                    device->destroy_buffer(mesh->args);
+                }
             }
         }
     }
@@ -93,15 +117,50 @@ ParticleRenderer& ParticleRenderer::operator=(ParticleRenderer&&) noexcept = def
 ParticleRenderer::~ParticleRenderer() = default;
 
 Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& effect, const KernelSet& kernels,
-                                                  const TextureSet& textures, TextureFormat format) {
+                                                  const TextureSet& textures, TextureFormat format,
+                                                  const MeshSet& meshes) {
     if (kernels.format != device.shader_format() || kernels.sprite_vertex.empty() || kernels.sprite_pixel.empty()) {
         return Error{ErrorCode::GpuUnavailable, "the kernel set has no sprite shaders for this device"};
     }
     if (Result<bool> checked = check_textures(effect, textures); !checked) {
         return checked.error();
     }
+    if (Result<bool> checked = check_meshes(effect, meshes); !checked) {
+        return checked.error();
+    }
     auto state = std::make_unique<State>();
     state->device = &device;
+    for (const Emitter& emitter : effect.emitters) {
+        std::optional<State::MeshBuffers>& out = state->meshes.emplace_back();
+        if (emitter.renderer.geometry != Geometry::Mesh) {
+            continue;
+        }
+        const MeshData& mesh = meshes.find(emitter.renderer.mesh)->second;
+        std::vector<float> vertices;
+        vertices.reserve(mesh.vertices.size() * 8U);
+        for (const MeshVertex& v : mesh.vertices) {
+            vertices.insert(vertices.end(),
+                            {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.u, v.v});
+        }
+        State::MeshBuffers buffers;
+        buffers.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+        for (const auto& [bytes, label, target] :
+             {std::tuple{vertices.size() * 4U, " mesh vertices", &buffers.vertices},
+              std::tuple{mesh.indices.size() * 4U, " mesh indices", &buffers.indices},
+              std::tuple{std::size_t{16U}, " mesh draw", &buffers.args}}) {
+            Result<Buffer> created = device.create_buffer(bytes, "ajfx " + emitter.name + label);
+            if (!created) {
+                return created.error();
+            }
+            *target = created.value();
+        }
+        device.write_buffer(buffers.vertices, 0U,
+                            std::span{reinterpret_cast<const std::uint8_t*>(vertices.data()), vertices.size() * 4U});
+        device.write_buffer(buffers.indices, 0U,
+                            std::span{reinterpret_cast<const std::uint8_t*>(mesh.indices.data()),
+                                      mesh.indices.size() * 4U});
+        out = buffers;
+    }
     std::map<std::string, Texture, std::less<>> by_name;
     for (const Emitter& emitter : effect.emitters) {
         Texture texture;
@@ -122,10 +181,13 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         }
         state->emitter_textures.push_back(texture);
     }
-    for (const auto& [blend, out, name] : {std::tuple{Blend::Premultiplied, &state->blended, "ajfx sprites (blended)"},
-                                           std::tuple{Blend::Additive, &state->additive, "ajfx sprites (additive)"}}) {
+    for (const auto& [blend, cull, out, name] :
+         {std::tuple{Blend::Premultiplied, false, &state->blended, "ajfx sprites (blended)"},
+          std::tuple{Blend::Additive, false, &state->additive, "ajfx sprites (additive)"},
+          std::tuple{Blend::Premultiplied, true, &state->blended_mesh, "ajfx meshes (blended)"},
+          std::tuple{Blend::Additive, true, &state->additive_mesh, "ajfx meshes (additive)"}}) {
         Result<Pipeline> pipeline = device.create_graphics_pipeline(
-            GraphicsPipelineDesc{kernels.sprite_vertex, kernels.sprite_pixel, blend, format}, name);
+            GraphicsPipelineDesc{kernels.sprite_vertex, kernels.sprite_pixel, blend, format, cull}, name);
         if (!pipeline) {
             return pipeline.error();
         }
@@ -152,11 +214,20 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
     device.write_buffer(state_->camera, 0U,
                         std::span{reinterpret_cast<const std::uint8_t*>(data), sizeof(data)});
 
-    // Sorting is compute work, recorded before the drawing begins.
+    // Sorting is compute work, recorded before the drawing begins; so is
+    // each mesh's draw arguments: its index count as the vertex count, the
+    // simulation's live count as the instance count.
     const Effect& effect = simulation.effect();
     std::vector<Buffer> orders(effect.emitters.size());
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         orders[i] = sorter.sort(simulation, i, camera.forward);
+        if (i < state_->meshes.size() && state_->meshes[i]) {
+            const State::MeshBuffers& mesh = *state_->meshes[i];
+            const std::uint32_t args[4] = {mesh.index_count, 0U, 0U, 0U};
+            device.write_buffer(mesh.args, 0U, std::span{reinterpret_cast<const std::uint8_t*>(args), sizeof(args)});
+            const EmitterBuffers buffers = simulation.emitter_buffers(i);
+            device.copy_buffer(mesh.args, 4U, buffers.args, buffers.draw_args_offset + 4U, 4U);
+        }
     }
 
     device.begin_rendering(target, clear_color);
@@ -164,7 +235,9 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         const SpriteRenderer& settings = effect.emitters[i].renderer;
         const EmitterBuffers buffers = simulation.emitter_buffers(i);
         Draw draw;
-        draw.pipeline = settings.blend == BlendMode::Additive ? state_->additive : state_->blended;
+        const bool mesh = settings.geometry == Geometry::Mesh;
+        draw.pipeline = settings.blend == BlendMode::Additive ? (mesh ? state_->additive_mesh : state_->additive)
+                                                              : (mesh ? state_->blended_mesh : state_->blended);
         draw.constants[0] = buffers.layout.stride;
         draw.constants[1] = offset_or_absent(buffers.layout.position);
         draw.constants[2] = offset_or_absent(buffers.layout.velocity);
@@ -180,7 +253,7 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.constants[12] = settings.flipbook_columns | (settings.flipbook_rows << 16U);
         const Texture texture = i < state_->emitter_textures.size() ? state_->emitter_textures[i] : Texture{};
         draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U);
-        draw.constants[14] = settings.geometry == Geometry::Ribbon ? 1U : 0U;
+        draw.constants[14] = static_cast<std::uint32_t>(settings.geometry);
         draw.textures[0] = texture;
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;
@@ -188,6 +261,12 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.buffers[3] = buffers.counters;
         draw.indirect = buffers.args;
         draw.indirect_offset = buffers.draw_args_offset;
+        if (i < state_->meshes.size() && state_->meshes[i]) {
+            draw.buffers[4] = state_->meshes[i]->vertices;
+            draw.buffers[5] = state_->meshes[i]->indices;
+            draw.indirect = state_->meshes[i]->args;
+            draw.indirect_offset = 0U;
+        }
         device.draw(draw);
     }
     device.end_rendering();

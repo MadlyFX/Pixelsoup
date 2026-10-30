@@ -45,11 +45,16 @@ Loaded load(const std::string& source, ajfx::gpu::ShaderFormat format) {
     if (!fields) {
         return {nullptr, fields.error().message};
     }
+    ajfx::Result<ajfx::MeshSet> meshes = ajfx::read_package_meshes(bytes, effect.value());
+    if (!meshes) {
+        return {nullptr, meshes.error().message};
+    }
     auto package = std::make_shared<ParticlePackage>();
     package->effect = std::move(effect).value();
     package->kernels = std::move(kernels).value();
     package->textures = std::move(textures).value();
     package->fields = std::move(fields).value();
+    package->meshes = std::move(meshes).value();
     package->identity = fnv1a(bytes);
     return {std::move(package), {}};
 }

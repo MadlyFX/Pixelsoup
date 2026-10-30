@@ -12,6 +12,7 @@
 #include <ajfx/gpu/simulation.hpp>
 #include <ajfx/gpu/sort.hpp>
 #include <ajfx/field.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/texture.hpp>
 #include <ajfx/simulation.hpp>
 
@@ -134,16 +135,19 @@ public:
     ~ParticlePass();
 
     // An instance of `effect` running `kernels`, drawing with `textures` and
-    // colliding with `fields` (all from its package), with the seed that
+    // `meshes` and colliding with `fields` (all from its package), with the
+    // seed that
     // makes it differ from other placements of the same effect. Allocates its
     // buffers, sort scratch, textures and checkpoints: call it when an effect
     // is adopted, not while recording a frame (the first advance uploads the
-    // fields). Fails with InvalidEffect, naming the emitter, when a texture or
-    // field the effect uses is missing.
+    // fields and meshes). Fails with InvalidEffect, naming the emitter, when a
+    // texture, field or mesh the effect uses is missing. Blended meshes write
+    // depth, so they hide their own far side as solid geometry does.
     [[nodiscard]] core::Result<ParticleInstance, ParticleError> create_instance(const ajfx::Effect& effect,
                                                                                const ajfx::gpu::KernelSet& kernels,
                                                                                const ajfx::TextureSet& textures,
                                                                                const ajfx::FieldSet& fields,
+                                                                               const ajfx::MeshSet& meshes,
                                                                                core::u32 seed);
 
     // Records simulating `instance` to the step for `show_frame` at

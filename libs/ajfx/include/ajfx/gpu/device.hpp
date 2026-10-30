@@ -87,6 +87,9 @@ struct GraphicsPipelineDesc final {
     std::span<const std::uint8_t> pixel;
     Blend blend{Blend::Premultiplied};
     TextureFormat format{TextureFormat::Rgba8Unorm};
+    // Skip triangles facing away: those winding clockwise in the effect's
+    // space as the camera sees them (meshes wind counter-clockwise outside).
+    bool cull_back{false};
 };
 
 // A triangle-list draw with no vertex buffers: vertex shaders read what they

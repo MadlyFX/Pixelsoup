@@ -5,6 +5,7 @@
 #include <ajfx/gpu/simulation.hpp>
 #include <ajfx/gpu/sort.hpp>
 #include <ajfx/math.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/result.hpp>
 
 #include <array>
@@ -40,12 +41,16 @@ struct Camera final {
 class ParticleRenderer final {
 public:
     // Pipelines for one render target format, from a kernel set's sprite
-    // shaders, and the textures `effect`'s emitters name, uploaded from
-    // `textures` (see read_package_textures); fails with MissingTexture when
-    // one is absent. The device must outlive the renderer.
+    // shaders, and the textures and meshes `effect`'s emitters name, uploaded
+    // from `textures` and `meshes` (see read_package_textures and
+    // read_package_meshes); fails with MissingTexture or MissingMesh when one
+    // is absent. The device must outlive the renderer.
+    //
+    // This renderer has no depth buffer, so a concave mesh may draw its far
+    // side over its near side; hosts with depth (the media server) do not.
     [[nodiscard]] static Result<ParticleRenderer> create(Device& device, const Effect& effect,
                                                          const KernelSet& kernels, const TextureSet& textures,
-                                                         TextureFormat format);
+                                                         TextureFormat format, const MeshSet& meshes = {});
 
     ParticleRenderer(ParticleRenderer&&) noexcept;
     ParticleRenderer& operator=(ParticleRenderer&&) noexcept;

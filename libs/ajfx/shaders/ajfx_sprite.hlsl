@@ -22,7 +22,7 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_lifetime;
     uint sprite_flipbook;      // columns in the low 16 bits, rows in the high
     uint sprite_flags;         // 1: textured, 2: cross-fade flipbook cells
-    uint sprite_ribbon;        // 1: one ribbon through the particles
+    uint sprite_geometry;      // 0 sprites, 1 one ribbon through the particles, 2 a mesh each
     uint sprite_reserved0;
 };
 
@@ -34,6 +34,10 @@ RWByteAddressBuffer sprite_camera : register(u1);
 RWByteAddressBuffer sprite_order : register(u2);
 // The live count first, for ribbons.
 RWByteAddressBuffer sprite_counters : register(u3);
+// The emitter's mesh: eight floats a vertex (position, normal, uv), then the
+// triangle list's indices.
+RWByteAddressBuffer sprite_mesh_vertices : register(u4);
+RWByteAddressBuffer sprite_mesh_indices : register(u5);
 Texture2D<float4> sprite_texture : register(t0);
 SamplerState sprite_sampler : register(s0);
 
@@ -120,9 +124,62 @@ SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
     return output;
 }
 
+// Vertex `vertex` of the mesh drawn for particle `instance`: turned so its +Z
+// runs along the particle's velocity (velocity facing) or spun about Y by its
+// rotation, scaled by its size, and lit by a light at the camera.
+SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
+    uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
+    uint base = record * sprite_stride;
+    float3 position = asfloat(sprite_particles.Load3(base + sprite_position));
+    float4 color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))
+                                                 : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float size = sprite_size != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_size)) : 0.1f;
+    uint index = sprite_mesh_indices.Load(vertex * 4u);
+    float3 local = asfloat(sprite_mesh_vertices.Load3(index * 32u));
+    float3 normal = asfloat(sprite_mesh_vertices.Load3(index * 32u + 12u));
+    float2 uv = asfloat(sprite_mesh_vertices.Load2(index * 32u + 24u));
+    float3 ax = float3(1.0f, 0.0f, 0.0f);
+    float3 ay = float3(0.0f, 1.0f, 0.0f);
+    float3 az = float3(0.0f, 0.0f, 1.0f);
+    bool aligned = false;
+    if (sprite_facing == 1u && sprite_velocity != sprite_absent) {
+        float3 velocity = asfloat(sprite_particles.Load3(base + sprite_velocity));
+        float len = length(velocity);
+        if (len > 1.0e-6f) {
+            az = velocity / len;
+            float3 reference = abs(az.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+            ax = normalize(cross(reference, az));
+            ay = cross(az, ax);
+            aligned = true;
+        }
+    }
+    if (!aligned && sprite_rotation != sprite_absent) {
+        float angle = asfloat(sprite_particles.Load(base + sprite_rotation));
+        float c = cos(angle);
+        float s = sin(angle);
+        ax = float3(c, 0.0f, -s);
+        az = float3(s, 0.0f, c);
+    }
+    float4 world = float4(position + (ax * local.x + ay * local.y + az * local.z) * size, 1.0f);
+    float3 n = normalize(ax * normal.x + ay * normal.y + az * normal.z);
+    float shade = 0.35f + 0.65f * saturate(dot(n, -sprite_camera_row(6u).xyz));
+    SpriteVertex output;
+    output.position = float4(dot(sprite_camera_row(0u), world), dot(sprite_camera_row(1u), world),
+                             dot(sprite_camera_row(2u), world), dot(sprite_camera_row(3u), world));
+    // Solid (no disc), textured by the mesh's own coordinates.
+    output.uv = float2(0.0f, 0.0f);
+    output.cells = uv.xyxy;
+    output.blend = 0.0f;
+    output.color = float4(color.rgb * shade, color.a);
+    return output;
+}
+
 SpriteVertex sprite_vertex(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
-    if (sprite_ribbon != 0u) {
+    if (sprite_geometry == 1u) {
         return sprite_ribbon_vertex(vertex, instance);
+    }
+    if (sprite_geometry == 2u) {
+        return sprite_mesh_vertex(vertex, instance);
     }
     uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
     uint base = record * sprite_stride;

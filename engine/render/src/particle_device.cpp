@@ -204,10 +204,11 @@ void ParticleDevice::copy_buffer(ajfx::gpu::Buffer destination, std::uint64_t de
     const auto to = buffers_.find(destination.id);
     const auto from = buffers_.find(source.id);
     rhi::CommandList* list = commands();
-    // The RHI copies whole prefixes; ajfx's checkpoints copy from offset zero.
-    if (to == buffers_.end() || from == buffers_.end() || list == nullptr || destination_offset != 0U ||
-        source_offset != 0U || bytes > std::numeric_limits<core::u32>::max() ||
-        !list->copy_buffer(from->second, to->second, static_cast<core::u32>(bytes))) {
+    constexpr std::uint64_t limit = std::numeric_limits<core::u32>::max();
+    if (to == buffers_.end() || from == buffers_.end() || list == nullptr || destination_offset > limit ||
+        source_offset > limit || bytes > limit ||
+        !list->copy_buffer(from->second, static_cast<core::u32>(source_offset), to->second,
+                           static_cast<core::u32>(destination_offset), static_cast<core::u32>(bytes))) {
         note("copying a particle buffer failed");
     }
 }

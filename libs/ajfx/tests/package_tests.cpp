@@ -2,6 +2,7 @@
 
 #include <ajfx/builder.hpp>
 #include <ajfx/field.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/simulation.hpp>
@@ -293,6 +294,44 @@ void distance_field_problems_are_named() {
     AJFX_CHECK(fails_with(write_package(unnamed), ErrorCode::InvalidEffect, "field 'field'"));
 }
 
+Effect boxes() {
+    EffectBuilder builder{"boxes"};
+    builder.emitter("e")
+        .spawn(SpawnRate{.rate = 10.0F})
+        .init(Lifetime{.min = 1.0F, .max = 1.0F})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "cube"});
+    return builder.build().value();
+}
+
+void meshes_round_trip_and_are_checked() {
+    const MeshData cube = cube_mesh();
+    AJFX_CHECK(cube.vertices.size() == 24U && cube.indices.size() == 36U);
+    AJFX_CHECK(make_mesh(cube.vertices, cube.indices).ok());
+    AJFX_CHECK(read_mesh(write_mesh(cube)).value() == cube);
+    const Effect effect = boxes();
+    const MeshSet meshes{{"cube", cube}};
+    const Result<std::vector<std::uint8_t>> package = write_package(effect, mesh_package_entries(meshes));
+    AJFX_CHECK(package.ok() && read_package_meshes(package.value(), effect).value() == meshes);
+
+    AJFX_CHECK(fails_with(read_package_meshes(write_package(effect).value(), effect), ErrorCode::MissingMesh,
+                          "emitter 'e' draws mesh 'cube'"));
+    AJFX_CHECK(fails_with(make_mesh(cube.vertices, {0U, 1U, 99U}), ErrorCode::InvalidEffect, "index past"));
+    AJFX_CHECK(fails_with(make_mesh(cube.vertices, {0U, 1U}), ErrorCode::InvalidEffect, "whole triangles"));
+    std::vector<std::uint8_t> short_mesh = write_mesh(cube);
+    short_mesh.pop_back();
+    AJFX_CHECK(fails_with(read_mesh(short_mesh), ErrorCode::MalformedPackage, "not as long"));
+    std::vector<std::uint8_t> newer = write_mesh(cube);
+    newer[4] = 2U;
+    AJFX_CHECK(fails_with(read_mesh(newer), ErrorCode::UnsupportedVersion, "mesh version 2"));
+    // A mesh emitter needs its mesh named, and only mesh emitters name one.
+    Effect unnamed = effect;
+    unnamed.emitters[0].renderer.mesh.clear();
+    AJFX_CHECK(fails_with(write_package(unnamed), ErrorCode::InvalidEffect, "field 'mesh'"));
+    Effect stray = presets::sparks();
+    stray.emitters[0].renderer.mesh = "cube";
+    AJFX_CHECK(fails_with(write_package(stray), ErrorCode::InvalidEffect, "only for mesh geometry"));
+}
+
 } // namespace
 
 int main() {
@@ -309,6 +348,7 @@ int main() {
         {"texture_problems_are_named", texture_problems_are_named},
         {"distance_fields_round_trip_and_sample", distance_fields_round_trip_and_sample},
         {"distance_field_problems_are_named", distance_field_problems_are_named},
+        {"meshes_round_trip_and_are_checked", meshes_round_trip_and_are_checked},
     };
     return ajfx::test::run(cases);
 }

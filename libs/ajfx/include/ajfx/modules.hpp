@@ -428,12 +428,15 @@ enum class Facing {
     Velocity,
 };
 
-// What a sprite renderer draws: a quad per particle, or one ribbon through
-// the emitter's live particles in birth order (oldest first), each end as
-// wide as its particle and turned to the camera across the trail.
+// What a sprite renderer draws: a quad per particle; one ribbon through the
+// emitter's live particles in birth order (oldest first), each end as wide as
+// its particle and turned to the camera across the trail; or the emitter's
+// mesh per particle (see mesh.hpp), scaled by its size, its +Z along its
+// velocity with velocity facing and otherwise spun about Y by its rotation.
 enum class Geometry {
     Sprites,
     Ribbon,
+    Mesh,
 };
 
 // How a host should draw the emitter's particles. The CPU reference only
@@ -460,8 +463,11 @@ struct SpriteRenderer final {
     // scene depth; with no scene there is nothing to fade against.
     float soft_distance{0.0F};
     // A ribbon faces the camera and is not depth-sorted (that would break
-    // the strip); a texture runs along it by each end's life.
+    // the strip); a texture runs along it by each end's life. A mesh
+    // ("meshes/<name>" in the package) takes its texture by its own
+    // coordinates and is shaded by a light at the camera.
     Geometry geometry{Geometry::Sprites};
+    std::string mesh;
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -475,6 +481,7 @@ struct SpriteRenderer final {
         visit("stretch", self.stretch);
         visit("soft_distance", self.soft_distance);
         visit("geometry", self.geometry);
+        visit("mesh", self.mesh);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };
@@ -497,7 +504,7 @@ struct EnumNames<Facing> {
 };
 template <>
 struct EnumNames<Geometry> {
-    static constexpr std::string_view names[] = {"sprites", "ribbon"};
+    static constexpr std::string_view names[] = {"sprites", "ribbon", "mesh"};
 };
 
 } // namespace ajfx

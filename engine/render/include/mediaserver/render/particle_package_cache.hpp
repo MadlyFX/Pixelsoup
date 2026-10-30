@@ -5,6 +5,7 @@
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/field.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/texture.hpp>
 
 #include <condition_variable>
@@ -29,10 +30,11 @@ namespace mediaserver::render {
 struct ParticlePackage final {
     ajfx::Effect effect;
     ajfx::gpu::KernelSet kernels;
-    // Every texture the effect's emitters name, and every distance field
-    // they collide with, checked.
+    // Every texture and mesh the effect's emitters draw, and every distance
+    // field they collide with, checked.
     ajfx::TextureSet textures;
     ajfx::FieldSet fields;
+    ajfx::MeshSet meshes;
     // FNV-1a of the file's bytes: a different package at the same path is a
     // different effect, and the renderer rebuilds its instances.
     core::u64 identity{};

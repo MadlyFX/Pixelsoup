@@ -17,6 +17,10 @@ ByteAddressBuffer particles : register(t0, space0);
 ByteAddressBuffer order : register(t1, space0);
 // The emitter's counters, the live count first, for ribbons.
 ByteAddressBuffer counters : register(t2, space0);
+// The emitter's mesh: eight floats a vertex (position, normal, uv), then the
+// triangle list's indices.
+ByteAddressBuffer mesh_vertices : register(t3, space0);
+ByteAddressBuffer mesh_indices : register(t4, space0);
 
 cbuffer ParticleView : register(b0, space1) {
     // This slice's projection. Rasterisation only.
@@ -50,7 +54,8 @@ cbuffer ParticleView : register(b0, space1) {
     // Columns in the low 16 bits, rows in the high.
     uint flipbook;
     // 1 textured, 2 cross-fade flipbook cells, 4 sRGB texture, 8 sorted,
-    // 16 soft, 32 one ribbon through the particles in birth order.
+    // 16 soft, 32 one ribbon through the particles in birth order, 64 a mesh
+    // each.
     uint flags;
     // The canvas-wide view-projection now and at the previous frame, without
     // jitter: the velocity product's two endpoints, as the scene's own.
@@ -116,8 +121,8 @@ float3 to_world_direction(float3 d) {
 
 // What every geometry's vertex carries for its particle (the record at
 // `base`, at world `position`): flags, depth terms, the motion product, and
-// the premultiplied colour.
-void finish_vertex(inout Output output, uint base, float3 position) {
+// the premultiplied colour, its light scaled by `shade`.
+void finish_vertex(inout Output output, uint base, float3 position, float shade) {
     output.flags = flags;
     output.depth_terms = depth_terms;
     output.soft_distance = motion.z;
@@ -129,8 +134,9 @@ void finish_vertex(inout Output output, uint base, float3 position) {
         : float3(0.0F, 0.0F, 0.0F);
     output.motion = motion_vector(mul(canvas_view_projection, float4(position, 1.0F)),
                                   mul(previous_view_projection, float4(position - moved, 1.0F)), motion.y);
-    const float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset))
-                                                : float4(1.0F, 1.0F, 1.0F, 1.0F);
+    float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset))
+                                          : float4(1.0F, 1.0F, 1.0F, 1.0F);
+    color.rgb *= shade;
     output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
     if (sprite_extra.y > 0.5F) {
         // Light covers as much as it brightens: later stages divide colour by
@@ -170,13 +176,61 @@ Output ribbon_vertex(float2 corner, uint instance) {
     const float life = lifetime > 0.0F ? saturate(age / lifetime) : 0.0F;
     output.cells = float2(life, 0.5F - corner.y * 0.5F).xyxy;
     output.blend = 0.0F;
-    finish_vertex(output, base, position);
+    finish_vertex(output, base, position, 1.0F);
+    return output;
+}
+
+// Vertex `vertex` of the mesh drawn for particle `instance`: turned so its +Z
+// runs along the particle's velocity (velocity facing) or spun about Y by its
+// rotation, in the effect's space; scaled by its size; lit by a light at the
+// camera.
+Output mesh_vertex(uint vertex, uint instance) {
+    Output output = (Output)0;
+    const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
+    const uint base = record * stride;
+    const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
+    const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
+    const uint index = mesh_indices.Load(vertex * 4U);
+    const float3 local = asfloat(mesh_vertices.Load3(index * 32U));
+    const float3 normal = asfloat(mesh_vertices.Load3(index * 32U + 12U));
+    const float2 uv = asfloat(mesh_vertices.Load2(index * 32U + 24U));
+    float3 ax = float3(1.0F, 0.0F, 0.0F);
+    float3 ay = float3(0.0F, 1.0F, 0.0F);
+    float3 az = float3(0.0F, 0.0F, 1.0F);
+    bool aligned = false;
+    if (facing_velocity != 0U && velocity_offset != absent) {
+        const float3 velocity = asfloat(particles.Load3(base + velocity_offset));
+        const float speed = length(velocity);
+        if (speed > 1.0e-6F) {
+            az = velocity / speed;
+            const float3 reference = abs(az.y) < 0.99F ? float3(0.0F, 1.0F, 0.0F) : float3(1.0F, 0.0F, 0.0F);
+            ax = normalize(cross(reference, az));
+            ay = cross(az, ax);
+            aligned = true;
+        }
+    }
+    if (!aligned && rotation_offset != absent) {
+        const float angle = asfloat(particles.Load(base + rotation_offset));
+        const float c = cos(angle);
+        const float s = sin(angle);
+        ax = float3(c, 0.0F, -s);
+        az = float3(s, 0.0F, c);
+    }
+    const float3 offset = to_world_direction((ax * local.x + ay * local.y + az * local.z) * size);
+    const float3 n = normalize(to_world_direction(ax * normal.x + ay * normal.y + az * normal.z));
+    output.position = mul(view_projection, float4(position + offset, 1.0F));
+    // Solid (no disc), textured by the mesh's own coordinates.
+    output.cells = uv.xyxy;
+    finish_vertex(output, base, position, 0.35F + 0.65F * saturate(dot(n, -camera_forward.xyz)));
     return output;
 }
 
 Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     if ((flags & 32U) != 0U) {
         return ribbon_vertex(corners[vertex], instance);
+    }
+    if ((flags & 64U) != 0U) {
+        return mesh_vertex(vertex, instance);
     }
     const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
     const uint base = record * stride;
@@ -214,6 +268,6 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.position = mul(view_projection, float4(world, 1.0F));
     output.uv = corner;
     flipbook_cells(base, corner, output.cells, output.blend);
-    finish_vertex(output, base, position);
+    finish_vertex(output, base, position, 1.0F);
     return output;
 }

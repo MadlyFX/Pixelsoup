@@ -940,24 +940,36 @@ bool CommandList::copy_buffer(
     const StorageBuffer& source,
     StorageBuffer& destination,
     core::u32 bytes) noexcept {
+    return copy_buffer(source, 0U, destination, 0U, bytes);
+}
+
+bool CommandList::copy_buffer(
+    const StorageBuffer& source,
+    core::u32 source_offset,
+    StorageBuffer& destination,
+    core::u32 destination_offset,
+    core::u32 bytes) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !source || !destination
         || !source.ranged_ || !destination.ranged_
-        || bytes > source.bytes_ || bytes > destination.bytes_) {
+        || source_offset % 4U != 0U || destination_offset % 4U != 0U
+        || source_offset > source.bytes_ || bytes > source.bytes_ - source_offset
+        || destination_offset > destination.bytes_ || bytes > destination.bytes_ - destination_offset) {
         return false;
     }
     if (bytes == 0U) {
         return true;
     }
     if (backend_ == BackendKind::D3d12) {
-        return detail::d3d12_copy_buffer(handle_, source.handle_, destination.handle_, bytes);
+        return detail::d3d12_copy_buffer(handle_, source.handle_, source_offset, destination.handle_,
+                                         destination_offset, bytes);
     }
     auto* const pass =
         SDL_BeginGPUCopyPass(static_cast<SDL_GPUCommandBuffer*>(handle_));
     if (pass == nullptr) {
         return false;
     }
-    const SDL_GPUBufferLocation from{static_cast<SDL_GPUBuffer*>(source.handle_), 0U};
-    const SDL_GPUBufferLocation to{static_cast<SDL_GPUBuffer*>(destination.handle_), 0U};
+    const SDL_GPUBufferLocation from{static_cast<SDL_GPUBuffer*>(source.handle_), source_offset};
+    const SDL_GPUBufferLocation to{static_cast<SDL_GPUBuffer*>(destination.handle_), destination_offset};
     SDL_CopyGPUBufferToBuffer(pass, &from, &to, bytes, false);
     SDL_EndGPUCopyPass(pass);
     return true;

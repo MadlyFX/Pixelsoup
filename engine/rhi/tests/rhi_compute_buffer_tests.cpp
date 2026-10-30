@@ -319,6 +319,33 @@ void an_indirect_draw_takes_its_instance_count_from_the_gpu() {
     RHI_CHECK(!refused.draw_pulled(color.value(), rhi::Color{}, depth.value(), 0.0F, draw));
 }
 
+void a_copy_moves_one_range_of_a_buffer_into_another() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    auto device = open_d3d12();
+    auto source = device.create_writable_buffer(16U);
+    auto destination = device.create_writable_buffer(16U);
+    auto readback = device.create_readback(16U);
+    RHI_CHECK(source && destination && readback);
+    auto acquired = device.acquire_commands();
+    RHI_CHECK(acquired);
+    auto commands = std::move(acquired).value();
+    const std::array<core::u32, 4U> from{10U, 20U, 30U, 40U};
+    const std::array<core::u32, 4U> into{1U, 2U, 3U, 4U};
+    RHI_CHECK(commands.upload_range(source.value(), 0U, bytes_of(from)));
+    RHI_CHECK(commands.upload_range(destination.value(), 0U, bytes_of(into)));
+    // The third word of one into the second of the other, the rest kept.
+    RHI_CHECK(commands.copy_buffer(source.value(), 8U, destination.value(), 4U, 4U));
+    // Past either end, or unaligned, is refused.
+    RHI_CHECK(!commands.copy_buffer(source.value(), 12U, destination.value(), 0U, 8U));
+    RHI_CHECK(!commands.copy_buffer(source.value(), 0U, destination.value(), 14U, 4U));
+    RHI_CHECK(!commands.copy_buffer(source.value(), 2U, destination.value(), 0U, 4U));
+    RHI_CHECK(commands.download(destination.value(), 0U, 16U, readback.value()));
+    submit_and_wait(device, std::move(commands));
+    RHI_CHECK((read_uints(readback.value(), 4U) == std::vector<core::u32>{1U, 30U, 3U, 4U}));
+}
+
 #endif
 
 } // namespace
@@ -339,6 +366,7 @@ int main() {
          a_dispatch_writes_buffers_and_the_next_runs_from_its_arguments},
         {"bad_bindings_are_refused_before_anything_is_recorded", bad_bindings_are_refused_before_anything_is_recorded},
         {"an_indirect_draw_takes_its_instance_count_from_the_gpu", an_indirect_draw_takes_its_instance_count_from_the_gpu},
+        {"a_copy_moves_one_range_of_a_buffer_into_another", a_copy_moves_one_range_of_a_buffer_into_another},
 #endif
     };
     int failures = 0;

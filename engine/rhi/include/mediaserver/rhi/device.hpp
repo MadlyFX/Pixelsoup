@@ -1178,6 +1178,16 @@ public:
         const StorageBuffer& source,
         StorageBuffer& destination,
         core::u32 bytes) noexcept;
+    // Copies `bytes` from `source_offset` of one ranged buffer to
+    // `destination_offset` of another, such as one count of GPU-written
+    // arguments into another draw's. Offsets are multiples of four; refused
+    // when either range runs past its buffer.
+    [[nodiscard]] bool copy_buffer(
+        const StorageBuffer& source,
+        core::u32 source_offset,
+        StorageBuffer& destination,
+        core::u32 destination_offset,
+        core::u32 bytes) noexcept;
     // Bytes upload_range can still accept in this recording.
     [[nodiscard]] core::u64 upload_space() const noexcept;
 
