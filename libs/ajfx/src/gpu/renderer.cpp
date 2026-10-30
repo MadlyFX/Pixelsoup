@@ -180,10 +180,12 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.constants[12] = settings.flipbook_columns | (settings.flipbook_rows << 16U);
         const Texture texture = i < state_->emitter_textures.size() ? state_->emitter_textures[i] : Texture{};
         draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U);
+        draw.constants[14] = settings.geometry == Geometry::Ribbon ? 1U : 0U;
         draw.textures[0] = texture;
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;
         draw.buffers[2] = orders[i];
+        draw.buffers[3] = buffers.counters;
         draw.indirect = buffers.args;
         draw.indirect_offset = buffers.draw_args_offset;
         device.draw(draw);

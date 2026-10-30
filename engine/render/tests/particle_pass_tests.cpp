@@ -463,6 +463,34 @@ void soft_particles_fade_as_they_near_the_scene() {
     PASS_CHECK(render_soft(pass, 2.0F, 0.0F).red(32U, 32U) == whole);
 }
 
+void ribbons_join_the_particles_in_birth_order() {
+    // Particles born every half second, drifting +X at a unit a second; at
+    // show frame 48 (two seconds) they are a quarter unit across at about
+    // x = 0, 0.5, 1 and 1.5. Half way between two (x = 0.75, pixel 44) only
+    // a ribbon draws.
+    const auto trail = [](ajfx::Geometry geometry) {
+        ajfx::EffectBuilder builder{"trail"};
+        builder.emitter("e")
+            .spawn(ajfx::SpawnRate{.rate = 2.0F})
+            .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+            .init(ajfx::Velocity{.direction = ajfx::Vec3{1.0F, 0.0F, 0.0F}})
+            .init(ajfx::InitSize{.min = 0.25F, .max = 0.25F})
+            .renderer(ajfx::SpriteRenderer{.geometry = geometry});
+        return builder.build().value();
+    };
+    render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 256U});
+    render::ParticleInstance sprites = make_instance(pass, trail(ajfx::Geometry::Sprites));
+    render::ParticleInstance ribbon = make_instance(pass, trail(ajfx::Geometry::Ribbon));
+    const Frame dots = render_frame(pass, sprites, 48U, identity());
+    const Frame strip = render_frame(pass, ribbon, 48U, identity());
+    PASS_CHECK(dots.alpha(44U, 32U) == 0U);
+    // A quarter unit (four pixels) wide and soft across: 15/16 a quarter of
+    // the way out, 7/16 at three quarters, nothing past the edge.
+    PASS_CHECK(strip.alpha(44U, 32U) >= 237U && strip.alpha(44U, 32U) <= 241U);
+    PASS_CHECK(strip.alpha(44U, 33U) >= 109U && strip.alpha(44U, 33U) <= 114U && strip.alpha(44U, 34U) == 0U);
+}
+
 [[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
     ajfx::gpu::GpuSimulation reference = ajfx::gpu::GpuSimulation::create(*g_reference, effect, kernels, 3U).value();
@@ -565,6 +593,7 @@ int main() {
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"moving_particles_write_their_motion", moving_particles_write_their_motion},
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
+        {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

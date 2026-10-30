@@ -342,6 +342,14 @@ enum class Facing {
     Velocity,
 };
 
+// What a sprite renderer draws: a quad per particle, or one ribbon through
+// the emitter's live particles in birth order (oldest first), each end as
+// wide as its particle and turned to the camera across the trail.
+enum class Geometry {
+    Sprites,
+    Ribbon,
+};
+
 // How a host should draw the emitter's particles. The CPU reference only
 // carries this; drawing arrives with the GPU runtime.
 struct SpriteRenderer final {
@@ -365,6 +373,9 @@ struct SpriteRenderer final {
     // meets a surface. Zero keeps hard edges. A host draws it against its own
     // scene depth; with no scene there is nothing to fade against.
     float soft_distance{0.0F};
+    // A ribbon faces the camera and is not depth-sorted (that would break
+    // the strip); a texture runs along it by each end's life.
+    Geometry geometry{Geometry::Sprites};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -377,6 +388,7 @@ struct SpriteRenderer final {
         visit("sort", self.sort);
         visit("stretch", self.stretch);
         visit("soft_distance", self.soft_distance);
+        visit("geometry", self.geometry);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };
@@ -396,6 +408,10 @@ struct EnumNames<BlendMode> {
 template <>
 struct EnumNames<Facing> {
     static constexpr std::string_view names[] = {"camera", "velocity"};
+};
+template <>
+struct EnumNames<Geometry> {
+    static constexpr std::string_view names[] = {"sprites", "ribbon"};
 };
 
 } // namespace ajfx

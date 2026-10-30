@@ -311,6 +311,13 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                      "needs at least one column and row");
     renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
     renderer.require(emitter.renderer.soft_distance >= 0.0F, "soft_distance", "must not be negative");
+    if (emitter.renderer.geometry == Geometry::Ribbon) {
+        renderer.require(emitter.renderer.facing == Facing::Camera && emitter.renderer.stretch == 0.0F, "geometry",
+                         "ribbon faces the camera: no velocity facing or stretch");
+        renderer.require(emitter.renderer.flipbook_columns == 1U && emitter.renderer.flipbook_rows == 1U &&
+                             !emitter.renderer.flipbook_blend,
+                         "geometry", "ribbon runs its texture along its length: no flipbook");
+    }
     renderer.require(emitter.renderer.texture.empty() || valid_texture_name(emitter.renderer.texture), "texture",
                      "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
     renderer.require(!emitter.renderer.texture.empty() ||

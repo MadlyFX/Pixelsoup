@@ -3,7 +3,9 @@
 // pulled from the particle records; the record layout arrives as offsets,
 // with 0xffffffff for an attribute the emitter does not store. A textured
 // sprite samples its texture, or the flipbook cell its life has reached;
-// an untextured one is a soft disc.
+// an untextured one is a soft disc. A ribbon emitter draws instead one strip
+// through its live particles in birth order: instance i is the segment from
+// particle i to particle i + 1.
 
 cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_stride;
@@ -20,7 +22,8 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_lifetime;
     uint sprite_flipbook;      // columns in the low 16 bits, rows in the high
     uint sprite_flags;         // 1: textured, 2: cross-fade flipbook cells
-    uint2 sprite_reserved0;
+    uint sprite_ribbon;        // 1: one ribbon through the particles
+    uint sprite_reserved0;
 };
 
 RWByteAddressBuffer sprite_particles : register(u0);
@@ -29,6 +32,8 @@ RWByteAddressBuffer sprite_particles : register(u0);
 RWByteAddressBuffer sprite_camera : register(u1);
 // Drawing order from the depth sort, when sprite_sorted is set.
 RWByteAddressBuffer sprite_order : register(u2);
+// The live count first, for ribbons.
+RWByteAddressBuffer sprite_counters : register(u3);
 Texture2D<float4> sprite_texture : register(t0);
 SamplerState sprite_sampler : register(s0);
 
@@ -71,7 +76,54 @@ float4 sprite_camera_row(uint row) {
     return asfloat(sprite_camera.Load4(row * 16u));
 }
 
+float3 sprite_particle_position(uint record) {
+    return asfloat(sprite_particles.Load3(record * sprite_stride + sprite_position));
+}
+
+// Segment `instance` of the ribbon: corner.x picks its end (that particle or
+// the next), corner.y its side. The side runs across the trail's direction
+// at that end, as the camera sees it; the last instance has no next particle
+// and draws nothing.
+SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
+    SpriteVertex output;
+    uint alive = sprite_counters.Load(0u);
+    float2 corner = sprite_corners[vertex];
+    if (instance + 1u >= alive) {
+        output.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        output.uv = float2(0.0f, 0.0f);
+        output.cells = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        output.blend = 0.0f;
+        output.color = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return output;
+    }
+    uint end = instance + (corner.x > 0.0f ? 1u : 0u);
+    uint base = end * sprite_stride;
+    float3 position = sprite_particle_position(end);
+    float3 tangent = sprite_particle_position(min(end + 1u, alive - 1u)) -
+                     sprite_particle_position(end > 0u ? end - 1u : 0u);
+    float3 side = cross(tangent, sprite_camera_row(6u).xyz);
+    float len = length(side);
+    side = len > 1.0e-6f ? side / len : sprite_camera_row(4u).xyz;
+    float size = sprite_size != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_size)) : 0.1f;
+    float4 world = float4(position + side * (corner.y * size * 0.5f), 1.0f);
+    output.position = float4(dot(sprite_camera_row(0u), world), dot(sprite_camera_row(1u), world),
+                             dot(sprite_camera_row(2u), world), dot(sprite_camera_row(3u), world));
+    // Soft across, like the disc; the texture along by life.
+    output.uv = float2(0.0f, corner.y);
+    float age = sprite_age != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_age)) : 0.0f;
+    float lifetime = sprite_lifetime != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_lifetime)) : 1.0f;
+    float life = lifetime > 0.0f ? saturate(age / lifetime) : 0.0f;
+    output.cells = float2(life, 0.5f - corner.y * 0.5f).xyxy;
+    output.blend = 0.0f;
+    output.color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))
+                                                 : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    return output;
+}
+
 SpriteVertex sprite_vertex(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
+    if (sprite_ribbon != 0u) {
+        return sprite_ribbon_vertex(vertex, instance);
+    }
     uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
     uint base = record * sprite_stride;
     float3 position = asfloat(sprite_particles.Load3(base + sprite_position));

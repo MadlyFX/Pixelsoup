@@ -23,7 +23,8 @@ Error device_error(const std::string& what, const Error& cause) {
 } // namespace
 
 bool sorts(const Emitter& emitter) noexcept {
-    return emitter.renderer.sort && emitter.renderer.blend != BlendMode::Additive;
+    return emitter.renderer.sort && emitter.renderer.blend != BlendMode::Additive &&
+           emitter.renderer.geometry == Geometry::Sprites;
 }
 
 struct ParticleSorter::State final {

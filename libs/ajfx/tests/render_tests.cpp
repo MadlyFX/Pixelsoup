@@ -242,6 +242,40 @@ void flipbooks_play_their_cells_over_each_life() {
     AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingTexture);
 }
 
+// Particles born every half second at the origin, drifting +X at a unit a
+// second: after two seconds, dots a quarter unit across at about x = 0, 0.5,
+// 1 and 1.5, eight pixels apart in the orthographic view.
+Effect trail(Geometry geometry) {
+    EffectBuilder builder{"trail"};
+    builder.emitter("e")
+        .spawn(SpawnRate{.rate = 2.0F})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}})
+        .init(InitSize{.min = 0.25F, .max = 0.25F})
+        .renderer(SpriteRenderer{.geometry = geometry});
+    return builder.build().value();
+}
+
+void ribbons_join_the_particles_in_birth_order() {
+    // Half way between two particles (x = 0.75, pixel 44): a gap between
+    // sprites, filled by the ribbon.
+    const Frame sprites = render(trail(Geometry::Sprites), 120U, ortho);
+    const Frame ribbon = render(trail(Geometry::Ribbon), 120U, ortho);
+    AJFX_CHECK(sprites.at(44U, 32U).a == 0);
+    // A quarter unit (four pixels) wide about the line between rows 31 and
+    // 32, soft across like the disc: 1 - side^2 at a quarter of the way out
+    // (rows 31, 32) is 15/16, at three quarters (rows 30, 33) 7/16, and row
+    // 34 is outside.
+    AJFX_CHECK(ribbon.at(44U, 32U).a >= 237 && ribbon.at(44U, 32U).a <= 241);
+    AJFX_CHECK(ribbon.at(44U, 33U).a >= 109 && ribbon.at(44U, 33U).a <= 114 && ribbon.at(44U, 34U).a == 0);
+    // Ribbons are never depth-sorted, and face the camera.
+    AJFX_CHECK(!gpu::sorts(trail(Geometry::Ribbon).emitters[0]));
+    Effect turned = trail(Geometry::Ribbon);
+    turned.emitters[0].renderer.facing = Facing::Velocity;
+    AJFX_CHECK(!validate(turned).ok());
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -280,6 +314,7 @@ int main() {
         {"velocity_aligned_sprites_stretch_along_their_motion", velocity_aligned_sprites_stretch_along_their_motion},
         {"alpha_particles_draw_back_to_front", alpha_particles_draw_back_to_front},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
+        {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

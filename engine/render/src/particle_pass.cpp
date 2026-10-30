@@ -51,6 +51,7 @@ constexpr core::u32 flag_blend_cells = 2U;
 constexpr core::u32 flag_srgb = 4U;
 constexpr core::u32 flag_sorted = 8U;
 constexpr core::u32 flag_soft = 16U;
+constexpr core::u32 flag_ribbon = 32U;
 
 core::u32 offset_or_absent(std::int32_t offset) {
     return offset >= 0 ? static_cast<core::u32>(offset) : absent;
@@ -178,7 +179,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     vertex.format = rhi::ShaderFormat::Dxil;
     vertex.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_vert_dxil),
                                                 sizeof(mediaserver_particle_sprite_vert_dxil)};
-    vertex.storage_buffer_count = 2U;
+    vertex.storage_buffer_count = 3U;
     vertex.uniform_buffer_count = 1U;
     rhi::ShaderDesc fragment{};
     fragment.stage = rhi::ShaderStage::Fragment;
@@ -488,7 +489,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         const std::optional<std::size_t> texture = i.emitter_texture[e];
         constants.flags = (texture ? flag_textured : 0U) | (sprite.flipbook_blend ? flag_blend_cells : 0U) |
                           (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U) |
-                          (soft ? flag_soft : 0U);
+                          (soft ? flag_soft : 0U) | (sprite.geometry == ajfx::Geometry::Ribbon ? flag_ribbon : 0U);
         const rhi::StorageBuffer* order = i.orders[e].valid() ? s.particles->buffer(i.orders[e]) : records;
         if (order == nullptr) {
             s.note("an emitter's sort order is missing");
@@ -497,13 +498,18 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         if (i.orders[e].valid()) {
             constants.flags |= flag_sorted;
         }
+        const rhi::StorageBuffer* counters = s.particles->buffer(buffers.counters);
+        if (counters == nullptr) {
+            s.note("an emitter's counters are missing");
+            return false;
+        }
         const std::span<const core::u8> emitter_uniform{reinterpret_cast<const core::u8*>(&constants),
                                                         sizeof(constants)};
         const std::array<rhi::SampledTexture, 2U> sampled{
             rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler},
             rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
 
-        const rhi::StorageBuffer* vertex_buffers[] = {records, order};
+        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters};
         // The counts come from the simulation; this batch only carries them.
         const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{6U, 1U}};
         rhi::PulledDraw draw{};

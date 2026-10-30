@@ -12,8 +12,8 @@
 
 // Depth sorting for alpha-blended emitters. Blending "over" depends on order,
 // so those emitters draw back to front; additive emitters, whose result does
-// not, and emitters that opt out with `SpriteRenderer::sort = false`, keep
-// birth order and cost nothing here.
+// not, ribbons, whose strip needs birth order, and emitters that opt out with
+// `SpriteRenderer::sort = false`, keep birth order and cost nothing here.
 //
 // The sort is a stable integer radix sort on the GPU (shaders/ajfx_sort.hlsl)
 // of depth to one part in 32768 of its distance; nearer than that, particles

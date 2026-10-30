@@ -15,6 +15,8 @@ ByteAddressBuffer particles : register(t0, space0);
 // Drawing order from the depth sort: instance i draws record order[i] when
 // the sorted flag is set (otherwise the records are bound here too).
 ByteAddressBuffer order : register(t1, space0);
+// The emitter's counters, the live count first, for ribbons.
+ByteAddressBuffer counters : register(t2, space0);
 
 cbuffer ParticleView : register(b0, space1) {
     // This slice's projection. Rasterisation only.
@@ -47,7 +49,8 @@ cbuffer ParticleView : register(b0, space1) {
     uint lifetime_offset;
     // Columns in the low 16 bits, rows in the high.
     uint flipbook;
-    // 1 textured, 2 cross-fade flipbook cells, 4 sRGB texture, 8 sorted.
+    // 1 textured, 2 cross-fade flipbook cells, 4 sRGB texture, 8 sorted,
+    // 16 soft, 32 one ribbon through the particles in birth order.
     uint flags;
     // The canvas-wide view-projection now and at the previous frame, without
     // jitter: the velocity product's two endpoints, as the scene's own.
@@ -111,11 +114,73 @@ float3 to_world_direction(float3 d) {
     return world0.xyz * d.x + world1.xyz * d.y + world2.xyz * d.z;
 }
 
+// What every geometry's vertex carries for its particle (the record at
+// `base`, at world `position`): flags, depth terms, the motion product, and
+// the premultiplied colour.
+void finish_vertex(inout Output output, uint base, float3 position) {
+    output.flags = flags;
+    output.depth_terms = depth_terms;
+    output.soft_distance = motion.z;
+    // Where the particle was a frame ago, by its own velocity: one value per
+    // particle, computed alike on every node from canvas-wide matrices, and
+    // flat across what it draws.
+    const float3 moved = velocity_offset != absent
+        ? to_world_direction(asfloat(particles.Load3(base + velocity_offset))) * motion.x
+        : float3(0.0F, 0.0F, 0.0F);
+    output.motion = motion_vector(mul(canvas_view_projection, float4(position, 1.0F)),
+                                  mul(previous_view_projection, float4(position - moved, 1.0F)), motion.y);
+    const float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset))
+                                                : float4(1.0F, 1.0F, 1.0F, 1.0F);
+    output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
+    if (sprite_extra.y > 0.5F) {
+        // Light covers as much as it brightens: later stages divide colour by
+        // alpha and composite over what lies below, so a faint spark barely
+        // hides it and a white-hot one replaces it, keeping its hue.
+        output.color.a = saturate(max(max(output.color.r, output.color.g), output.color.b));
+    }
+}
+
+float3 particle_position(uint record) {
+    return to_world_point(asfloat(particles.Load3(record * stride + position_offset)));
+}
+
+// Segment `instance` of the ribbon: corner.x picks its end (that particle or
+// the next), corner.y its side. The side runs across the trail's direction
+// at that end as the camera sees it; the last instance has no next particle
+// and draws nothing.
+Output ribbon_vertex(float2 corner, uint instance) {
+    Output output = (Output)0;
+    const uint alive = counters.Load(0U);
+    if (instance + 1U >= alive) {
+        return output;
+    }
+    const uint end = instance + (corner.x > 0.0F ? 1U : 0U);
+    const uint base = end * stride;
+    const float3 position = particle_position(end);
+    const float3 tangent = particle_position(min(end + 1U, alive - 1U)) - particle_position(end > 0U ? end - 1U : 0U);
+    float3 side = cross(tangent, camera_forward.xyz);
+    const float span = length(side);
+    side = span > 1.0e-6F ? side / span : camera_right.xyz;
+    const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
+    output.position = mul(view_projection, float4(position + side * (corner.y * size * 0.5F), 1.0F));
+    // Soft across, like the disc; the texture along it by life.
+    output.uv = float2(0.0F, corner.y);
+    const float age = age_offset != absent ? asfloat(particles.Load(base + age_offset)) : 0.0F;
+    const float lifetime = lifetime_offset != absent ? asfloat(particles.Load(base + lifetime_offset)) : 1.0F;
+    const float life = lifetime > 0.0F ? saturate(age / lifetime) : 0.0F;
+    output.cells = float2(life, 0.5F - corner.y * 0.5F).xyxy;
+    output.blend = 0.0F;
+    finish_vertex(output, base, position);
+    return output;
+}
+
 Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
+    if ((flags & 32U) != 0U) {
+        return ribbon_vertex(corners[vertex], instance);
+    }
     const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
     const uint base = record * stride;
     const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
-    float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset)) : float4(1.0F, 1.0F, 1.0F, 1.0F);
     const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
 
     float3 right = camera_right.xyz;
@@ -149,23 +214,6 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.position = mul(view_projection, float4(world, 1.0F));
     output.uv = corner;
     flipbook_cells(base, corner, output.cells, output.blend);
-    output.flags = flags;
-    output.depth_terms = depth_terms;
-    output.soft_distance = motion.z;
-    // Where the particle was a frame ago, by its own velocity: one value for
-    // the whole sprite, from its centre, so it needs no interpolation and
-    // every node computes the same bits.
-    const float3 moved = velocity_offset != absent
-        ? to_world_direction(asfloat(particles.Load3(base + velocity_offset))) * motion.x
-        : float3(0.0F, 0.0F, 0.0F);
-    output.motion = motion_vector(mul(canvas_view_projection, float4(position, 1.0F)),
-                                  mul(previous_view_projection, float4(position - moved, 1.0F)), motion.y);
-    output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
-    if (sprite_extra.y > 0.5F) {
-        // Light covers as much as it brightens: later stages divide colour by
-        // alpha and composite over what lies below, so a faint spark barely
-        // hides it and a white-hot one replaces it, keeping its hue.
-        output.color.a = saturate(max(max(output.color.r, output.color.g), output.color.b));
-    }
+    finish_vertex(output, base, position);
     return output;
 }
