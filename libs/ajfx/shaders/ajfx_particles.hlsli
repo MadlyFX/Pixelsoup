@@ -323,6 +323,72 @@ void ajfx_sphere_collision(inout Particle p, uint o, uint id) {
     }
 }
 
+// The update kernel's distance fields share u7 with the bookkeeping
+// kernel's indirect arguments, which the update kernel never touches.
+#define ajfx_fields ajfx_args
+
+float ajfx_field_at(uint base, uint nx, uint ny, uint x, uint y, uint z) {
+    return asfloat(ajfx_fields.Load((base + (z * ny + y) * nx + x) * 4u));
+}
+
+// [field offset, nx, ny, nz, origin.xyz, spacing, offset.xyz, restitution,
+//  1 - friction, inside, kill]. Trilinear distance and its exact gradient,
+// as sample_field (src/field.cpp) computes them; nothing outside the grid.
+void ajfx_sdf_collision(inout Particle p, uint o, uint id) {
+    uint base = ajfx_u32(o);
+    uint nx = ajfx_u32(o + 1u);
+    uint ny = ajfx_u32(o + 2u);
+    uint nz = ajfx_u32(o + 3u);
+    float3 origin = ajfx_f3(o + 4u);
+    float spacing = ajfx_f(o + 7u);
+    float3 q = p.position - ajfx_f3(o + 8u);
+    float gx = (q.x - origin.x) / spacing;
+    float gy = (q.y - origin.y) / spacing;
+    float gz = (q.z - origin.z) / spacing;
+    if (!(gx >= 0.0f && gy >= 0.0f && gz >= 0.0f && gx <= (float)(nx - 1u) && gy <= (float)(ny - 1u) &&
+          gz <= (float)(nz - 1u))) {
+        return;
+    }
+    uint ix = min((uint)floor(gx), nx - 2u);
+    uint iy = min((uint)floor(gy), ny - 2u);
+    uint iz = min((uint)floor(gz), nz - 2u);
+    float fx = gx - (float)ix;
+    float fy = gy - (float)iy;
+    float fz = gz - (float)iz;
+    float c000 = ajfx_field_at(base, nx, ny, ix, iy, iz);
+    float c100 = ajfx_field_at(base, nx, ny, ix + 1u, iy, iz);
+    float c010 = ajfx_field_at(base, nx, ny, ix, iy + 1u, iz);
+    float c110 = ajfx_field_at(base, nx, ny, ix + 1u, iy + 1u, iz);
+    float c001 = ajfx_field_at(base, nx, ny, ix, iy, iz + 1u);
+    float c101 = ajfx_field_at(base, nx, ny, ix + 1u, iy, iz + 1u);
+    float c011 = ajfx_field_at(base, nx, ny, ix, iy + 1u, iz + 1u);
+    float c111 = ajfx_field_at(base, nx, ny, ix + 1u, iy + 1u, iz + 1u);
+    float c00 = c000 + (c100 - c000) * fx;
+    float c10 = c010 + (c110 - c010) * fx;
+    float c01 = c001 + (c101 - c001) * fx;
+    float c11 = c011 + (c111 - c011) * fx;
+    float c0 = c00 + (c10 - c00) * fy;
+    float c1 = c01 + (c11 - c01) * fy;
+    float e00 = c100 - c000;
+    float e10 = c110 - c010;
+    float e01 = c101 - c001;
+    float e11 = c111 - c011;
+    float ex0 = e00 + (e10 - e00) * fy;
+    float ex1 = e01 + (e11 - e01) * fy;
+    float dy0 = c10 - c00;
+    float dy1 = c11 - c01;
+    float dist = c0 + (c1 - c0) * fz;
+    float3 g = float3((ex0 + (ex1 - ex0) * fz) / spacing, (dy0 + (dy1 - dy0) * fz) / spacing, (c1 - c0) / spacing);
+    float len = sqrt(ajfx_dot(g, g));
+    float3 out_dir = len > 1.0e-6f ? g * (1.0f / len) : float3(0.0f, 1.0f, 0.0f);
+    bool kill = ajfx_u32(o + 14u) != 0u;
+    if (ajfx_u32(o + 13u) != 0u) {
+        ajfx_respond(p, -dist, out_dir * -1.0f, ajfx_f(o + 11u), ajfx_f(o + 12u), kill);
+    } else {
+        ajfx_respond(p, dist, out_dir, ajfx_f(o + 11u), ajfx_f(o + 12u), kill);
+    }
+}
+
 // [center.xyz, half_size.xyz, restitution, 1 - friction, inside, kill]
 void ajfx_box_collision(inout Particle p, uint o, uint id) {
     float3 d = p.position - ajfx_f3(o);

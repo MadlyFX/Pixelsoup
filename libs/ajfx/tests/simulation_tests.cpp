@@ -241,6 +241,47 @@ void spheres_and_boxes_hold_particles_in_or_out() {
     AJFX_CHECK(!flat.build().ok());
 }
 
+// A sphere of radius 1 at (2, 0, 0), as a field 0.1 apart around it.
+FieldSet ball_field() {
+    return FieldSet{{"ball", make_distance_field(41U, 41U, 41U, Vec3{0.0F, -2.0F, -2.0F}, 0.1F, [](Vec3 p) {
+                                 const Vec3 d = p - Vec3{2.0F, 0.0F, 0.0F};
+                                 return std::sqrt(dot(d, d)) - 1.0F;
+                             }).value()}};
+}
+
+void distance_fields_hold_particles_out_or_in() {
+    const auto run = [](bool inside, Vec3 from) {
+        EffectBuilder builder{"field"};
+        builder.emitter("e")
+            .capacity(400U)
+            .spawn(SpawnRate{.rate = 120.0F})
+            .init(Lifetime{.min = 3.0F, .max = 3.0F})
+            .init(ShapeLocation{.shape = Shape::Point, .center = from})
+            .init(Velocity{.speed_min = 3.0F, .speed_max = 3.0F, .spread = 180.0F})
+            .update(SdfCollision{.field = "ball", .inside = inside, .restitution = 0.6F});
+        Simulation simulation = Simulation::create(builder.build().value(), 0U, ball_field()).value();
+        simulation.advance_to(180U);
+        return simulation;
+    };
+    const FieldSet ball = ball_field();
+    const DistanceField& field = ball.begin()->second;
+    // Thrown at the ball from beside it: none end up inside, to the field's
+    // own resolution.
+    const Simulation around = run(false, Vec3{0.5F, 0.0F, 0.0F});
+    for (const Vec3& p : around.emitter(0).position) {
+        if (const std::optional<FieldSample> sample = sample_field(field, p)) {
+            AJFX_CHECK(sample->distance >= -0.02F);
+        }
+    }
+    // Thrown from its centre, held in: none end up outside.
+    const Simulation held = run(true, Vec3{2.0F, 0.0F, 0.0F});
+    AJFX_CHECK(held.emitter(0).alive() > 300U);
+    for (const Vec3& p : held.emitter(0).position) {
+        const std::optional<FieldSample> sample = sample_field(field, p);
+        AJFX_CHECK(sample && sample->distance <= 0.02F);
+    }
+}
+
 void parameters_are_clamped_to_their_range() {
     EffectBuilder builder{"clamp"};
     builder.float_parameter("rate", 10.0F, 0.0F, 120.0F);
@@ -334,6 +375,7 @@ int main() {
         {"particles_die_in_order", particles_die_in_order},
         {"plane_collision_holds_or_kills", plane_collision_holds_or_kills},
         {"spheres_and_boxes_hold_particles_in_or_out", spheres_and_boxes_hold_particles_in_or_out},
+        {"distance_fields_hold_particles_out_or_in", distance_fields_hold_particles_out_or_in},
         {"parameters_are_clamped_to_their_range", parameters_are_clamped_to_their_range},
         {"colour_and_size_follow_normalized_age", colour_and_size_follow_normalized_age},
         {"velocity_cone_respects_its_spread", velocity_cone_respects_its_spread},

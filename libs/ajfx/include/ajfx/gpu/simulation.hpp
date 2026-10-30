@@ -58,10 +58,12 @@ private:
 
 class GpuSimulation final {
 public:
-    // Fails if the effect does not validate or a kernel or buffer cannot be
-    // created. The device must outlive the simulation.
+    // Fails if the effect does not validate, `fields` lacks a distance field
+    // it collides with (MissingField), or a kernel or buffer cannot be
+    // created. Creating records nothing: the fields are written by the first
+    // step. The device must outlive the simulation.
     [[nodiscard]] static Result<GpuSimulation> create(Device& device, Effect effect, const KernelSet& kernels,
-                                                      std::uint32_t instance_seed = 0U);
+                                                      std::uint32_t instance_seed = 0U, const FieldSet& fields = {});
 
     GpuSimulation(GpuSimulation&&) noexcept;
     GpuSimulation& operator=(GpuSimulation&&) noexcept;

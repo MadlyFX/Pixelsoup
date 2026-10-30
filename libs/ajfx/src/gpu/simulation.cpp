@@ -36,6 +36,11 @@ struct EmitterGpu final {
     Buffer args;
     Pipeline update;
     Pipeline spawn;
+    // The distance fields its colliders use, one after another, and where
+    // each starts; the floats wait here until the first step writes them.
+    Buffer fields;
+    detail::FieldLayout field_layout;
+    std::vector<float> unwritten_fields;
     ParticleLayout layout;
     std::uint32_t module_floats{0U};
     std::uint32_t seed{0U};
@@ -88,6 +93,7 @@ std::uint64_t GpuCheckpoint::tick() const noexcept {
 struct GpuSimulation::State final {
     Device* device{nullptr};
     Effect effect;
+    FieldSet fields;
     std::uint32_t instance_seed{0U};
     float dt{0.0F};
     std::uint64_t tick{0U};
@@ -109,7 +115,7 @@ struct GpuSimulation::State final {
         }
         for (const EmitterGpu& e : emitters) {
             for (const Buffer buffer : {e.particles[0], e.particles[1], e.counters, e.flags, e.offsets, e.blocks,
-                                        e.data, e.args}) {
+                                        e.data, e.args, e.fields}) {
                 device->destroy_buffer(buffer);
             }
             device->destroy_pipeline(e.update);
@@ -145,10 +151,13 @@ GpuSimulation& GpuSimulation::operator=(GpuSimulation&&) noexcept = default;
 GpuSimulation::~GpuSimulation() = default;
 
 Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const KernelSet& kernels,
-                                            std::uint32_t instance_seed) {
+                                            std::uint32_t instance_seed, const FieldSet& fields) {
     Result<bool> valid = validate(effect);
     if (!valid) {
         return valid.error();
+    }
+    if (Result<bool> held = check_fields(effect, fields); !held) {
+        return held.error();
     }
     if (kernels.format != device.shader_format() || kernels.emitters.size() != effect.emitters.size()) {
         return Error{ErrorCode::GpuUnavailable, "the kernel set was not compiled for this effect and device"};
@@ -158,6 +167,13 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     state->device = &device;
     state->instance_seed = instance_seed;
     state->dt = 1.0F / static_cast<float>(effect.simulation_rate);
+    for (const Emitter& emitter : effect.emitters) {
+        for (const UpdateModule& module : emitter.update) {
+            if (const auto* collision = std::get_if<SdfCollision>(&module)) {
+                state->fields.emplace(collision->field, fields.find(collision->field)->second);
+            }
+        }
+    }
 
     const auto pipeline = [&device](const std::vector<std::uint8_t>& code, const std::string& name,
                                     Pipeline& out) -> std::optional<Error> {
@@ -192,6 +208,23 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
         }
         if (std::optional<Error> error = pipeline(kernels.emitters[i].spawn, name + " spawn", e.spawn)) {
             return *std::move(error);
+        }
+
+        e.field_layout.fields = &state->fields;
+        for (const UpdateModule& module : emitter.update) {
+            const auto* collision = std::get_if<SdfCollision>(&module);
+            if (collision != nullptr && !e.field_layout.offsets.contains(collision->field)) {
+                e.field_layout.offsets.emplace(collision->field, static_cast<std::uint32_t>(e.unwritten_fields.size()));
+                const std::vector<float>& distances = state->fields.find(collision->field)->second.distances;
+                e.unwritten_fields.insert(e.unwritten_fields.end(), distances.begin(), distances.end());
+            }
+        }
+        if (!e.unwritten_fields.empty()) {
+            Result<Buffer> buffer = device.create_buffer(e.unwritten_fields.size() * 4U, name + " fields");
+            if (!buffer) {
+                return device_error("creating " + name + " fields", buffer.error());
+            }
+            e.fields = buffer.value();
         }
 
         const std::uint64_t capacity = emitter.capacity;
@@ -236,9 +269,14 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
 
+        if (!e.unwritten_fields.empty()) {
+            device.write_buffer(e.fields, 0U, bytes_of(std::span<const float>{e.unwritten_fields}));
+            e.unwritten_fields = {};
+        }
+
         // This step's module data, then one age per birth.
         s.scratch.clear();
-        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start}, s.scratch);
+        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout}, s.scratch);
         std::uint32_t births = 0U;
         detail::for_each_birth(emitter, in, e.rate_carry, start, end, rate, [&](double age) {
             // Births past capacity are refused by the kernels; they need no age.
@@ -252,6 +290,7 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         }
 
         Dispatch update = s.dispatch(e, e.update, births);
+        update.buffers[7] = e.fields;
         update.indirect = e.args;
         update.indirect_offset = particle_args;
         device.dispatch(update);

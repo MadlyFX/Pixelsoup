@@ -10,6 +10,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -107,6 +108,7 @@ struct Step final {
     double end;    // seconds at the end of the step
     std::size_t first;
     std::size_t last;
+    const FieldSet* fields{nullptr};
 };
 
 // ------------------------------------------------------------ init modules
@@ -328,6 +330,27 @@ void apply(const SphereCollision& m, Step& step) {
     }
 }
 
+void apply(const SdfCollision& m, Step& step) {
+    const DistanceField& field = step.fields->find(m.field)->second;
+    const Vec3 offset = step.in(m.offset);
+    const float restitution = step.in(m.restitution);
+    const float slide = 1.0F - step.in(m.friction);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::optional<FieldSample> sample = sample_field(field, step.s.position[i] - offset);
+        if (!sample) {
+            continue;
+        }
+        const Vec3 g = sample->gradient;
+        const float length = std::sqrt(dot(g, g));
+        const Vec3 out = length > 1.0e-6F ? g * (1.0F / length) : Vec3{0.0F, 1.0F, 0.0F};
+        if (m.inside) {
+            respond(step, i, -sample->distance, out * -1.0F, restitution, slide, m.kill);
+        } else {
+            respond(step, i, sample->distance, out, restitution, slide, m.kill);
+        }
+    }
+}
+
 void apply(const BoxCollision& m, Step& step) {
     const Vec3 center = step.in(m.center);
     const Vec3 h = m.half_size;
@@ -394,19 +417,23 @@ void append(EmitterState& s, float age) {
 
 } // namespace
 
-Simulation::Simulation(Effect effect, std::uint32_t instance_seed)
+Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fields)
     : effect_{std::move(effect)},
       instance_seed_{instance_seed},
-      step_seconds_{1.0F / static_cast<float>(effect_.simulation_rate)} {
+      step_seconds_{1.0F / static_cast<float>(effect_.simulation_rate)},
+      fields_{std::move(fields)} {
     reset();
 }
 
-Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed) {
+Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed, FieldSet fields) {
     Result<bool> valid = validate(effect);
     if (!valid) {
         return valid.error();
     }
-    return Simulation{std::move(effect), instance_seed};
+    if (Result<bool> held = check_fields(effect, fields); !held) {
+        return held.error();
+    }
+    return Simulation{std::move(effect), instance_seed, std::move(fields)};
 }
 
 void Simulation::reset() {
@@ -442,7 +469,8 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
               static_cast<double>(state_.tick) / rate,
               static_cast<double>(state_.tick + 1U) / rate,
               0U,
-              0U};
+              0U,
+              &fields_};
 
     // Age, and retire particles whose life is over.
     for (float& age : s.age) {

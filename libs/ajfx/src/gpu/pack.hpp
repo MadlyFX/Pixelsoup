@@ -3,12 +3,15 @@
 #include "../step_inputs.hpp"
 
 #include <ajfx/effect.hpp>
+#include <ajfx/field.hpp>
 #include <ajfx/math.hpp>
 
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <numbers>
+#include <string>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -20,10 +23,18 @@
 // shaders/ajfx_particles.hlsli reads them.
 namespace ajfx::detail {
 
+// Where an emitter's distance fields sit in its fields buffer (in floats).
+struct FieldLayout final {
+    std::map<std::string, std::uint32_t, std::less<>> offsets;
+    const FieldSet* fields{nullptr};
+};
+
 struct PackContext final {
     const Inputs& in;
     float dt;
     double start; // seconds at the start of the step
+    // None when only the data's size matters (kernel generation).
+    const FieldLayout* fields{nullptr};
 };
 
 class Packer final {
@@ -137,6 +148,30 @@ inline void pack(const PlaneCollision& m, const PackContext& c, Packer& p) {
 inline void pack(const SphereCollision& m, const PackContext& c, Packer& p) {
     p.v3(c.in(m.center));
     p.f(c.in(m.radius));
+    p.f(c.in(m.restitution));
+    p.f(1.0F - c.in(m.friction));
+    p.u(m.inside ? 1U : 0U);
+    p.u(m.kill ? 1U : 0U);
+}
+
+inline void pack(const SdfCollision& m, const PackContext& c, Packer& p) {
+    const DistanceField* field = nullptr;
+    std::uint32_t at = 0U;
+    if (c.fields != nullptr && c.fields->fields != nullptr) {
+        const auto found = c.fields->fields->find(m.field);
+        const auto offset = c.fields->offsets.find(m.field);
+        if (found != c.fields->fields->end() && offset != c.fields->offsets.end()) {
+            field = &found->second;
+            at = offset->second;
+        }
+    }
+    p.u(at);
+    p.u(field != nullptr ? field->nx : 2U);
+    p.u(field != nullptr ? field->ny : 2U);
+    p.u(field != nullptr ? field->nz : 2U);
+    p.v3(field != nullptr ? field->origin : Vec3{});
+    p.f(field != nullptr ? field->spacing : 1.0F);
+    p.v3(c.in(m.offset));
     p.f(c.in(m.restitution));
     p.f(1.0F - c.in(m.friction));
     p.u(m.inside ? 1U : 0U);

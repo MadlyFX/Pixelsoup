@@ -340,6 +340,33 @@ struct BoxCollision final {
     friend bool operator==(const BoxCollision&, const BoxCollision&) = default;
 };
 
+// Particles kept out of the surface a distance field describes (where its
+// distance is negative), or with `inside` within it. The field is named
+// (package entry "fields/<name>", see field.hpp) and placed at `offset` in
+// the effect's space; outside its grid nothing collides. Responds as
+// SphereCollision, pushing along the field's gradient.
+struct SdfCollision final {
+    static constexpr std::string_view kind = "sdf_collision";
+    ModuleId id{};
+    std::string field;
+    Vec3Input offset{};
+    bool inside{false};
+    FloatInput restitution{0.5F};
+    FloatInput friction{0.0F};
+    bool kill{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("field", self.field);
+        visit("offset", self.offset);
+        visit("inside", self.inside);
+        visit("restitution", self.restitution);
+        visit("friction", self.friction);
+        visit("kill", self.kill);
+    }
+    friend bool operator==(const SdfCollision&, const SdfCollision&) = default;
+};
+
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
 struct ColorKey final {
@@ -379,13 +406,13 @@ struct SizeOverLife final {
 };
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, SphereCollision,
-                                  BoxCollision, ColorOverLife, SizeOverLife>;
+                                  BoxCollision, SdfCollision, ColorOverLife, SizeOverLife>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
 [[nodiscard]] constexpr bool is_collision(const UpdateModule& module) noexcept {
     return std::holds_alternative<PlaneCollision>(module) || std::holds_alternative<SphereCollision>(module) ||
-           std::holds_alternative<BoxCollision>(module);
+           std::holds_alternative<BoxCollision>(module) || std::holds_alternative<SdfCollision>(module);
 }
 
 // ---------------------------------------------------------------- render

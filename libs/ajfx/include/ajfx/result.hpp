@@ -25,6 +25,8 @@ enum class ErrorCode {
     KernelsUnavailable,
     // An emitter names a texture its package (or texture set) does not hold.
     MissingTexture,
+    // An emitter collides with a distance field its package does not hold.
+    MissingField,
 };
 
 struct Error final {

@@ -88,6 +88,7 @@ endif()
 add_library(ajfx STATIC
     src/builder.cpp
     src/effect.cpp
+    src/field.cpp
     src/gpu/kernels.cpp
     src/gpu/renderer.cpp
     src/gpu/simulation.cpp

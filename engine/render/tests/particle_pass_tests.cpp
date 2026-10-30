@@ -93,7 +93,7 @@ std::unique_ptr<ajfx::d3d12::Device> g_reference;
                                                      core::u32 seed = 3U,
                                                      const ajfx::TextureSet& textures = ajfx::presets::textures()) {
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
-    auto instance = pass.create_instance(effect, kernels, textures, seed);
+    auto instance = pass.create_instance(effect, kernels, textures, ajfx::FieldSet{}, seed);
     if (!instance) {
         std::cout << instance.error().message << '\n';
     }
@@ -283,7 +283,7 @@ void flipbooks_play_their_cells_over_each_life() {
 
     // A texture the effect names but was not given is refused, by name.
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
-    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, 3U);
+    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, 3U);
     PASS_CHECK(!missing && missing.error().code == render::ParticleErrorCode::InvalidEffect &&
                missing.error().message.find("texture 'cells'") != std::string::npos);
 }
@@ -463,6 +463,36 @@ void soft_particles_fade_as_they_near_the_scene() {
     PASS_CHECK(render_soft(pass, 2.0F, 0.0F).red(32U, 32U) == whole);
 }
 
+void distance_fields_reach_the_simulation() {
+    // Particles thrown down onto a field floor at y = -0.5: once the first
+    // advance has uploaded it, none fall through.
+    const ajfx::FieldSet fields{{"floor", ajfx::make_distance_field(9U, 9U, 9U, ajfx::Vec3{-4.0F, -4.0F, -4.0F}, 1.0F,
+                                                                     [](ajfx::Vec3 p) { return p.y + 0.5F; })
+                                              .value()}};
+    ajfx::EffectBuilder builder{"floored"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnRate{.rate = 60.0F})
+        .init(ajfx::Lifetime{.min = 2.0F, .max = 2.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 2.0F, .speed_max = 2.0F})
+        .update(ajfx::SdfCollision{.field = "floor", .restitution = 0.0F});
+    const ajfx::Effect effect = builder.build().value();
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 256U});
+    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, fields, 3U);
+    PASS_CHECK(created);
+    render::ParticleInstance instance = std::move(created).value();
+    static_cast<void>(render_frame(pass, instance, 36U, identity()));
+    const ajfx::Result<ajfx::EmitterState> state = instance.simulation().read_emitter(0U);
+    PASS_CHECK(state && state.value().alive() > 60U);
+    for (const ajfx::Vec3& p : state.value().position) {
+        PASS_CHECK(p.y >= -0.5F - 1.0e-4F);
+    }
+    // Without the field the effect is refused, by name.
+    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, 3U);
+    PASS_CHECK(!missing && missing.error().message.find("field 'floor'") != std::string::npos);
+}
+
 void ribbons_join_the_particles_in_birth_order() {
     // Particles born every half second, drifting +X at a unit a second; at
     // show frame 48 (two seconds) they are a quarter unit across at about
@@ -594,6 +624,7 @@ int main() {
         {"moving_particles_write_their_motion", moving_particles_write_their_motion},
         {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
+        {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

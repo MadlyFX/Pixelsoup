@@ -231,14 +231,18 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
 core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(const ajfx::Effect& effect,
                                                                            const ajfx::gpu::KernelSet& kernels,
                                                                            const ajfx::TextureSet& textures,
+                                                                           const ajfx::FieldSet& fields,
                                                                            core::u32 seed) {
     using Result = core::Result<ParticleInstance, ParticleError>;
     State& s = *state_;
     if (ajfx::Result<bool> checked = ajfx::check_textures(effect, textures); !checked) {
         return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
     }
+    if (ajfx::Result<bool> checked = ajfx::check_fields(effect, fields); !checked) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
+    }
     ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
-        ajfx::gpu::GpuSimulation::create(*s.particles, effect, kernels, seed);
+        ajfx::gpu::GpuSimulation::create(*s.particles, effect, kernels, seed, fields);
     if (!simulation) {
         const ajfx::ErrorCode code = simulation.error().code;
         return Result::failure(failure(code == ajfx::ErrorCode::DeviceFailure ? ParticleErrorCode::DeviceFailure

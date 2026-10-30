@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ajfx/effect.hpp>
+#include <ajfx/field.hpp>
 #include <ajfx/math.hpp>
 #include <ajfx/parameters.hpp>
 #include <ajfx/result.hpp>
@@ -64,8 +65,10 @@ struct SimulationState final {
 
 class Simulation final {
 public:
-    // Fails if the effect does not validate.
-    [[nodiscard]] static Result<Simulation> create(Effect effect, std::uint32_t instance_seed = 0U);
+    // Fails if the effect does not validate, or with MissingField when
+    // `fields` lacks a distance field the effect collides with.
+    [[nodiscard]] static Result<Simulation> create(Effect effect, std::uint32_t instance_seed = 0U,
+                                                   FieldSet fields = {});
 
     [[nodiscard]] const Effect& effect() const noexcept { return effect_; }
     [[nodiscard]] std::uint64_t tick() const noexcept { return state_.tick; }
@@ -84,7 +87,7 @@ public:
     void restore(const SimulationState& state) { state_ = state; }
 
 private:
-    Simulation(Effect effect, std::uint32_t instance_seed);
+    Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fields);
 
     void step_emitter(std::size_t index, std::span<const ParameterValue> values);
 
@@ -93,6 +96,7 @@ private:
     float step_seconds_{0.0F};
     SimulationState state_;
     std::vector<ParameterValue> values_;
+    FieldSet fields_;
 };
 
 // Snapshots taken every `interval` steps, so a seek resimulates at most one

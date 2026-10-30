@@ -244,6 +244,11 @@ void check_module(const Effect& e, const SphereCollision& m, FieldChecker& check
     check_response(e, m, check);
 }
 
+void check_module(const Effect& e, const SdfCollision& m, FieldChecker& check) {
+    check.require(valid_texture_name(m.field), "field", "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+    check_response(e, m, check);
+}
+
 void check_module(const Effect& e, const BoxCollision& m, FieldChecker& check) {
     check.require(m.half_size.x > 0.0F && m.half_size.y > 0.0F && m.half_size.z > 0.0F, "half_size",
                   "must be positive on every axis");
@@ -456,7 +461,7 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                 } else if constexpr (std::is_same_v<M, SizeOverLife>) {
                     add(Attribute::Size);
                 } else if constexpr (std::is_same_v<M, PlaneCollision> || std::is_same_v<M, SphereCollision> ||
-                                     std::is_same_v<M, BoxCollision>) {
+                                     std::is_same_v<M, BoxCollision> || std::is_same_v<M, SdfCollision>) {
                     // Collision only reads velocity; it has none to bounce
                     // unless something else gave it one.
                 } else {

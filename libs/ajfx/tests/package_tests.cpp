@@ -1,8 +1,10 @@
 #include "check.hpp"
 
 #include <ajfx/builder.hpp>
+#include <ajfx/field.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/presets.hpp>
+#include <ajfx/simulation.hpp>
 #include <ajfx/texture.hpp>
 
 #include <cstdint>
@@ -243,6 +245,54 @@ void texture_problems_are_named() {
     AJFX_CHECK(fails_with(write_package(plain), ErrorCode::InvalidEffect, "needs a texture"));
 }
 
+// A field of distance to the plane y = 0 over a 4x4x4 grid a unit apart.
+DistanceField floor_field() {
+    return make_distance_field(4U, 4U, 4U, Vec3{-1.5F, -1.5F, -1.5F}, 1.0F, [](Vec3 p) { return p.y; }).value();
+}
+
+Effect floored() {
+    EffectBuilder builder{"floored"};
+    builder.emitter("e")
+        .spawn(SpawnRate{.rate = 10.0F})
+        .init(Lifetime{.min = 1.0F, .max = 1.0F})
+        .update(SdfCollision{.field = "floor"});
+    return builder.build().value();
+}
+
+void distance_fields_round_trip_and_sample() {
+    const DistanceField field = floor_field();
+    AJFX_CHECK(read_field(write_field(field)).value() == field);
+    // Between samples: the interpolated distance and its gradient.
+    const std::optional<FieldSample> sample = sample_field(field, Vec3{0.25F, -0.75F, 0.5F});
+    AJFX_CHECK(sample && sample->distance == -0.75F);
+    AJFX_CHECK(sample->gradient == (Vec3{0.0F, 1.0F, 0.0F}));
+    // Outside the grid there is nothing.
+    AJFX_CHECK(!sample_field(field, Vec3{0.0F, 2.0F, 0.0F}));
+    const Effect effect = floored();
+    const FieldSet fields{{"floor", field}};
+    const Result<std::vector<std::uint8_t>> package = write_package(effect, field_package_entries(fields));
+    AJFX_CHECK(package.ok());
+    AJFX_CHECK(read_package_fields(package.value(), effect).value() == fields);
+}
+
+void distance_field_problems_are_named() {
+    const Effect effect = floored();
+    AJFX_CHECK(fails_with(read_package_fields(write_package(effect).value(), effect), ErrorCode::MissingField,
+                          "emitter 'e' collides with field 'floor'"));
+    std::vector<std::uint8_t> short_field = write_field(floor_field());
+    short_field.pop_back();
+    AJFX_CHECK(fails_with(read_field(short_field), ErrorCode::MalformedPackage, "not as long as its grid"));
+    std::vector<std::uint8_t> newer = write_field(floor_field());
+    newer[4] = 2U;
+    AJFX_CHECK(fails_with(read_field(newer), ErrorCode::UnsupportedVersion, "distance field version 2"));
+    AJFX_CHECK(fails_with(make_distance_field(1U, 4U, 4U, Vec3{}, 1.0F, [](Vec3) { return 0.0F; }),
+                          ErrorCode::InvalidEffect, "2 to 256"));
+    AJFX_CHECK(fails_with(Simulation::create(effect), ErrorCode::MissingField, "field 'floor'"));
+    Effect unnamed = effect;
+    std::get<SdfCollision>(unnamed.emitters[0].update[0]).field = "Floor/1";
+    AJFX_CHECK(fails_with(write_package(unnamed), ErrorCode::InvalidEffect, "field 'field'"));
+}
+
 } // namespace
 
 int main() {
@@ -257,6 +307,8 @@ int main() {
         {"textures_carry_a_full_mip_chain", textures_carry_a_full_mip_chain},
         {"textures_round_trip_through_packages", textures_round_trip_through_packages},
         {"texture_problems_are_named", texture_problems_are_named},
+        {"distance_fields_round_trip_and_sample", distance_fields_round_trip_and_sample},
+        {"distance_field_problems_are_named", distance_field_problems_are_named},
     };
     return ajfx::test::run(cases);
 }

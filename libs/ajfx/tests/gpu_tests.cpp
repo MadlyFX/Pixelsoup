@@ -187,6 +187,47 @@ void presets_match_the_reference_within_tolerance() {
     }
 }
 
+void distance_fields_collide_as_the_reference_does() {
+    // Particles bouncing inside a ball described by a field offset from
+    // the effect's origin, and off a field floor.
+    const FieldSet fields{
+        {"ball", make_distance_field(17U, 17U, 17U, Vec3{-1.6F, -1.6F, -1.6F}, 0.2F,
+                                     [](Vec3 p) { return std::sqrt(dot(p, p)) - 1.2F; })
+                     .value()},
+        {"floor", make_distance_field(9U, 9U, 9U, Vec3{-4.0F, -4.0F, -4.0F}, 1.0F,
+                                      [](Vec3 p) { return p.y + 0.5F; })
+                      .value()}};
+    EffectBuilder builder{"fields"};
+    builder.emitter("e")
+        .capacity(800U)
+        .seed(9U)
+        .spawn(SpawnRate{.rate = 200.0F})
+        .init(Lifetime{.min = 2.0F, .max = 3.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.3F, 0.5F, 0.0F}})
+        .init(Velocity{.speed_min = 1.0F, .speed_max = 3.0F, .spread = 180.0F})
+        .update(Gravity{})
+        .update(SdfCollision{.field = "floor", .restitution = 0.4F, .friction = 0.3F})
+        .update(SdfCollision{.field = "ball", .offset = Vec3{0.3F, 0.5F, 0.0F}, .inside = true, .restitution = 0.7F});
+    const Effect effect = builder.build().value();
+    Simulation cpu = Simulation::create(effect, 2U, fields).value();
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation gpu = gpu::GpuSimulation::create(*g_device, effect, kernels, 2U, fields).value();
+    for (const std::uint64_t tick : {1U, 40U, 120U, 200U}) {
+        cpu.advance_to(tick);
+        gpu.advance_to(tick);
+        // Exactly alike until contacts pile up. Then a particle on the rim
+        // where the floor meets the ball can meet one collider a step before
+        // the other on one side of a last-bit difference (the random spread's
+        // sin and cos are not correctly rounded), as sparks on their floor do.
+        AJFX_CHECK(compare(cpu.emitter(0), read(gpu), 1.0e-3F) >= (tick <= 40U ? 1.0F : 0.98F));
+    }
+    AJFX_CHECK(cpu.emitter(0).alive() > 300U);
+    // A field the effect names but was not given is refused.
+    const Result<gpu::GpuSimulation> missing =
+        gpu::GpuSimulation::create(*g_device, effect, kernels, 2U, FieldSet{{"ball", fields.at("ball")}});
+    AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingField);
+}
+
 void reruns_are_bit_identical() {
     for (const Effect& effect : {presets::smoke(), presets::sparks()}) {
         gpu::GpuSimulation a = make_gpu(effect, 1U);
@@ -391,6 +432,7 @@ int main() {
 
     const ajfx::test::Case cases[] = {
         {"gpu_matches_the_cpu_reference", gpu_matches_the_cpu_reference},
+        {"distance_fields_collide_as_the_reference_does", distance_fields_collide_as_the_reference_does},
         {"presets_match_the_reference_within_tolerance", presets_match_the_reference_within_tolerance},
         {"reruns_are_bit_identical", reruns_are_bit_identical},
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},
