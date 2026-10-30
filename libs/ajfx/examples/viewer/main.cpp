@@ -302,8 +302,12 @@ int main(int argc, char** argv) {
     if (!options->export_path.empty()) {
         const Effect& e = player.value()->effect();
         std::vector<PackageEntry> extra = gpu::kernel_package_entries(e, player.value()->kernels());
-        for (PackageEntry& texture : texture_package_entries(player.value()->textures())) {
-            extra.push_back(std::move(texture));
+        for (std::vector<PackageEntry> assets : {texture_package_entries(player.value()->textures()),
+                                                 field_package_entries(player.value()->fields()),
+                                                 mesh_package_entries(player.value()->meshes())}) {
+            for (PackageEntry& entry : assets) {
+                extra.push_back(std::move(entry));
+            }
         }
         Result<std::vector<std::uint8_t>> bytes = write_package(e, std::move(extra));
         if (!bytes) {
@@ -311,8 +315,8 @@ int main(int argc, char** argv) {
         }
         std::ofstream out{options->export_path, std::ios::binary};
         out.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
-        std::printf("wrote %s (%zu bytes, kernels and textures included)\n", options->export_path.c_str(),
-                    bytes.value().size());
+        std::printf("wrote %s (%zu bytes, kernels, textures, meshes and fields included)\n",
+                    options->export_path.c_str(), bytes.value().size());
     }
 
     if (options->capture.empty()) {

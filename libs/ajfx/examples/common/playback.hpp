@@ -85,8 +85,19 @@ public:
             kernels = std::move(compiled).value();
             note = package != nullptr ? note + "; compiled them instead" : "compiled the kernels";
         }
+        // A package carries its meshes and distance fields; presets use none.
+        ajfx::Result<ajfx::FieldSet> fields =
+            package != nullptr ? ajfx::read_package_fields(*package, effect) : ajfx::FieldSet{};
+        if (!fields) {
+            return fields.error();
+        }
+        ajfx::Result<ajfx::MeshSet> meshes =
+            package != nullptr ? ajfx::read_package_meshes(*package, effect) : ajfx::MeshSet{};
+        if (!meshes) {
+            return meshes.error();
+        }
         ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
-            ajfx::gpu::GpuSimulation::create(device, effect, *kernels, 1U);
+            ajfx::gpu::GpuSimulation::create(device, effect, *kernels, 1U, fields.value());
         if (!simulation) {
             return simulation.error();
         }
@@ -103,7 +114,7 @@ public:
         });
         ajfx::Result<ajfx::gpu::ParticleRenderer> renderer =
             ajfx::gpu::ParticleRenderer::create(device, effect, *kernels, textures.value(),
-                                                ajfx::gpu::TextureFormat::Rgba8Unorm);
+                                                ajfx::gpu::TextureFormat::Rgba8Unorm, meshes.value());
         if (!renderer) {
             return renderer.error();
         }
@@ -116,6 +127,8 @@ public:
                                                          std::move(sorter).value()));
         player->kernel_note_ = std::move(note);
         player->textures_ = std::move(textures).value();
+        player->fields_ = std::move(fields).value();
+        player->meshes_ = std::move(meshes).value();
         return player;
     }
 
@@ -201,6 +214,8 @@ public:
     const ajfx::gpu::KernelSet& kernels() const { return kernels_; }
     // The textures the effect names, for writing into a package.
     const ajfx::TextureSet& textures() const { return textures_; }
+    const ajfx::FieldSet& fields() const { return fields_; }
+    const ajfx::MeshSet& meshes() const { return meshes_; }
     // Where the kernels came from, or why a package's could not be used.
     const std::string& kernel_note() const { return kernel_note_; }
     ajfx::gpu::GpuSimulation& simulation() { return simulation_; }
@@ -226,6 +241,8 @@ private:
     std::map<std::uint64_t, ajfx::gpu::GpuCheckpoint> checkpoints_;
     std::string kernel_note_;
     ajfx::TextureSet textures_;
+    ajfx::FieldSet fields_;
+    ajfx::MeshSet meshes_;
 };
 
 struct Orbit final {
