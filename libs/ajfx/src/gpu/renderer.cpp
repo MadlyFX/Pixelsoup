@@ -6,6 +6,7 @@
 #include <span>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace ajfx::gpu {
 namespace {
@@ -105,8 +106,8 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const KernelSe
     return ParticleRenderer{std::move(state)};
 }
 
-void ParticleRenderer::render(const GpuSimulation& simulation, const Camera& camera, Texture target,
-                              const std::array<float, 4>* clear_color) {
+void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& sorter, const Camera& camera,
+                              Texture target, const std::array<float, 4>* clear_color) {
     Device& device = *state_->device;
     float data[28]{};
     std::memcpy(data, camera.view_projection.data(), sizeof(float) * 16U);
@@ -118,8 +119,14 @@ void ParticleRenderer::render(const GpuSimulation& simulation, const Camera& cam
     device.write_buffer(state_->camera, 0U,
                         std::span{reinterpret_cast<const std::uint8_t*>(data), sizeof(data)});
 
-    device.begin_rendering(target, clear_color);
+    // Sorting is compute work, recorded before the drawing begins.
     const Effect& effect = simulation.effect();
+    std::vector<Buffer> orders(effect.emitters.size());
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        orders[i] = sorter.sort(simulation, i, camera.forward);
+    }
+
+    device.begin_rendering(target, clear_color);
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         const SpriteRenderer& settings = effect.emitters[i].renderer;
         const EmitterBuffers buffers = simulation.emitter_buffers(i);
@@ -134,8 +141,10 @@ void ParticleRenderer::render(const GpuSimulation& simulation, const Camera& cam
         draw.constants[6] = settings.facing == Facing::Velocity ? 1U : 0U;
         draw.constants[7] = settings.blend == BlendMode::Premultiplied ? 1U : 0U;
         draw.constants[8] = std::bit_cast<std::uint32_t>(settings.stretch);
+        draw.constants[9] = orders[i].valid() ? 1U : 0U;
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;
+        draw.buffers[2] = orders[i];
         draw.indirect = buffers.args;
         draw.indirect_offset = buffers.draw_args_offset;
         device.draw(draw);

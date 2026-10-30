@@ -13,7 +13,8 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_facing;        // 0 camera, 1 velocity
     uint sprite_premultiplied; // the particle colour is already premultiplied
     float sprite_stretch;      // seconds of motion a velocity-aligned sprite spans
-    uint3 sprite_reserved0;
+    uint sprite_sorted;        // 1: instance i draws the record sprite_order[i]
+    uint2 sprite_reserved0;
     uint4 sprite_reserved1;
 };
 
@@ -21,6 +22,8 @@ RWByteAddressBuffer sprite_particles : register(u0);
 // view_projection as four rows (clip = M * position), then the camera's
 // right, up and forward axes, each padded to four floats.
 RWByteAddressBuffer sprite_camera : register(u1);
+// Drawing order from the depth sort, when sprite_sorted is set.
+RWByteAddressBuffer sprite_order : register(u2);
 
 static const uint sprite_absent = 0xffffffffu;
 static const float2 sprite_corners[6] = {
@@ -39,7 +42,8 @@ float4 sprite_camera_row(uint row) {
 }
 
 SpriteVertex sprite_vertex(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
-    uint base = instance * sprite_stride;
+    uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
+    uint base = record * sprite_stride;
     float3 position = asfloat(sprite_particles.Load3(base + sprite_position));
     float4 color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))
                                                  : float4(1.0f, 1.0f, 1.0f, 1.0f);

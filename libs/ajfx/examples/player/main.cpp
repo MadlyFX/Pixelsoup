@@ -654,7 +654,7 @@ void tick() {
     const Clock::time_point start = Clock::now();
     if (g.player) {
         g.player->seek(current_step());
-        g.player->renderer().render(g.player->simulation(), g.orbit.camera(static_cast<float>(w) / static_cast<float>(h)),
+        g.player->render(g.orbit.camera(static_cast<float>(w) / static_cast<float>(h)),
                                     g.target, &samples::background);
     } else {
         g.device->begin_rendering(g.target, &samples::background);
@@ -731,7 +731,7 @@ int screenshot(const std::wstring& file, const std::wstring& png, double seconds
     player.value()->seek(static_cast<std::uint64_t>(seconds * player.value()->effect().simulation_rate));
     const ajfx::gpu::Texture target =
         g.device->create_render_target(960U, 540U, ajfx::gpu::TextureFormat::Rgba8Unorm, "screenshot").value();
-    player.value()->renderer().render(player.value()->simulation(), orbit.camera(960.0F / 540.0F), target,
+    player.value()->render(orbit.camera(960.0F / 540.0F), target,
                                       &samples::background);
     ajfx::Result<std::vector<std::uint8_t>> pixels = g.device->read_texture(target);
     if (!pixels) {

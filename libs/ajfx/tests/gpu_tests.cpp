@@ -6,10 +6,13 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/gpu/simulation.hpp>
+#include <ajfx/gpu/sort.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/simulation.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -239,6 +242,118 @@ void buffers_expose_the_live_particles() {
     AJFX_CHECK(alive == read(simulation).alive());
 }
 
+gpu::ParticleSorter make_sorter(const Effect& effect) {
+    Result<gpu::KernelSet> kernels = gpu::compile_kernels(effect, *g_compiler);
+    AJFX_CHECK(kernels.ok());
+    Result<gpu::ParticleSorter> sorter = gpu::ParticleSorter::create(*g_device, effect, kernels.value());
+    if (!sorter) {
+        std::cout << sorter.error().message << std::endl;
+    }
+    AJFX_CHECK(sorter.ok());
+    return std::move(sorter).value();
+}
+
+// The drawing order a sort produced, for `alive` particles.
+std::vector<std::uint32_t> order(gpu::Buffer buffer, std::size_t alive) {
+    AJFX_CHECK(buffer.valid());
+    if (alive == 0U) {
+        AJFX_CHECK(g_device->flush().ok());
+        return {};
+    }
+    Result<std::vector<std::uint8_t>> read = g_device->read_buffer(buffer, 0U, alive * 4U);
+    AJFX_CHECK(read.ok());
+    std::vector<std::uint32_t> out(alive);
+    std::memcpy(out.data(), read.value().data(), alive * 4U);
+    return out;
+}
+
+Effect burst(std::uint32_t count, Shape shape) {
+    EffectBuilder builder{"burst"};
+    builder.emitter("e")
+        .capacity(std::max(count, 1U))
+        .spawn(SpawnBurst{.count = count})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = shape, .radius = 5.0F});
+    return builder.build().value();
+}
+
+void depth_sort_orders_far_to_near_at_block_edges() {
+    // Counts either side of the 4096-particle block, and many blocks.
+    const Vec3 axis{0.3F, -0.5F, 0.8F};
+    for (const std::uint32_t count : {1U, 4095U, 4096U, 4097U, 20000U}) {
+        const Effect effect = burst(count, Shape::Sphere);
+        gpu::GpuSimulation simulation = make_gpu(effect);
+        gpu::ParticleSorter sorter = make_sorter(effect);
+        simulation.step();
+        const std::vector<std::uint32_t> drawn = order(sorter.sort(simulation, 0U, axis), count);
+        const EmitterState state = read(simulation);
+        AJFX_CHECK(state.alive() == count);
+
+        // Every record once.
+        std::vector<std::uint32_t> sorted = drawn;
+        std::sort(sorted.begin(), sorted.end());
+        std::vector<std::uint32_t> every(count);
+        std::iota(every.begin(), every.end(), 0U);
+        AJFX_CHECK(sorted == every);
+        // Farthest along the axis first.
+        const auto depth = [&](std::uint32_t i) { return dot(state.position[i], axis); };
+        for (std::size_t k = 1U; k < drawn.size(); ++k) {
+            AJFX_CHECK(depth(drawn[k - 1U]) >= depth(drawn[k]));
+        }
+    }
+}
+
+void equal_depths_keep_birth_order() {
+    // Every particle at the origin: one key, so a stable sort changes nothing,
+    // across two blocks.
+    const Effect effect = burst(5000U, Shape::Point);
+    gpu::GpuSimulation simulation = make_gpu(effect);
+    gpu::ParticleSorter sorter = make_sorter(effect);
+    simulation.step();
+    std::vector<std::uint32_t> birth(5000U);
+    std::iota(birth.begin(), birth.end(), 0U);
+    AJFX_CHECK(order(sorter.sort(simulation, 0U, Vec3{0.0F, 0.0F, 1.0F}), 5000U) == birth);
+}
+
+void sorting_is_reproducible_and_seek_invariant() {
+    const Effect effect = presets::smoke();
+    const Vec3 axis{0.0F, 0.6F, -0.8F};
+    gpu::GpuSimulation first = make_gpu(effect, 3U);
+    gpu::ParticleSorter first_sorter = make_sorter(effect);
+    first.advance_to(150U);
+    const std::size_t alive = read(first).alive();
+    AJFX_CHECK(alive > 10U);
+    const std::vector<std::uint32_t> straight = order(first_sorter.sort(first, 0U, axis), alive);
+
+    // Another simulation and sorter, reaching the same step by a checkpoint.
+    gpu::GpuSimulation second = make_gpu(effect, 3U);
+    gpu::ParticleSorter second_sorter = make_sorter(effect);
+    second.advance_to(100U);
+    Result<gpu::GpuCheckpoint> checkpoint = second.save();
+    AJFX_CHECK(checkpoint.ok());
+    second.advance_to(170U);
+    static_cast<void>(second_sorter.sort(second, 0U, axis));
+    second.restore(checkpoint.value());
+    second.advance_to(150U);
+    AJFX_CHECK(order(second_sorter.sort(second, 0U, axis), alive) == straight);
+}
+
+void only_order_dependent_emitters_sort() {
+    // Additive sparks opt out; an empty emitter sorts to nothing.
+    const Effect sparks = presets::sparks();
+    AJFX_CHECK(!gpu::sorts(sparks.emitters[0]));
+    gpu::GpuSimulation simulation = make_gpu(sparks);
+    gpu::ParticleSorter sorter = make_sorter(sparks);
+    simulation.advance_to(10U);
+    AJFX_CHECK(!sorter.sort(simulation, 0U, Vec3{0.0F, 0.0F, 1.0F}).valid());
+
+    const Effect smoke = presets::smoke();
+    AJFX_CHECK(gpu::sorts(smoke.emitters[0]));
+    gpu::GpuSimulation empty = make_gpu(smoke);
+    gpu::ParticleSorter empty_sorter = make_sorter(smoke);
+    AJFX_CHECK(order(empty_sorter.sort(empty, 0U, Vec3{0.0F, 0.0F, 1.0F}), 0U).empty());
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +382,10 @@ int main() {
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},
         {"compaction_spans_many_blocks", compaction_spans_many_blocks},
         {"buffers_expose_the_live_particles", buffers_expose_the_live_particles},
+        {"depth_sort_orders_far_to_near_at_block_edges", depth_sort_orders_far_to_near_at_block_edges},
+        {"equal_depths_keep_birth_order", equal_depths_keep_birth_order},
+        {"sorting_is_reproducible_and_seek_invariant", sorting_is_reproducible_and_seek_invariant},
+        {"only_order_dependent_emitters_sort", only_order_dependent_emitters_sort},
     };
     const int result = ajfx::test::run(cases);
     g_compiler.reset();

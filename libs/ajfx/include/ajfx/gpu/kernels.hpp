@@ -55,6 +55,9 @@ struct EmitterKernelSource final {
 [[nodiscard]] std::string runtime_kernel_source();
 // HLSL for the sprite renderer: entry points "sprite_vertex" and "sprite_pixel".
 [[nodiscard]] std::string sprite_shader_source();
+// HLSL for the depth sort: entry points "sort_keys", "sort_count", "sort_scan"
+// and "sort_scatter".
+[[nodiscard]] std::string sort_kernel_source();
 
 struct EmitterKernels final {
     std::vector<std::uint8_t> update;
@@ -67,6 +70,10 @@ struct KernelSet final {
     std::vector<std::uint8_t> scan_totals;
     std::vector<std::uint8_t> scatter;
     std::vector<std::uint8_t> finalize;
+    std::vector<std::uint8_t> sort_keys;
+    std::vector<std::uint8_t> sort_count;
+    std::vector<std::uint8_t> sort_scan;
+    std::vector<std::uint8_t> sort_scatter;
     std::vector<std::uint8_t> sprite_vertex;
     std::vector<std::uint8_t> sprite_pixel;
     std::vector<EmitterKernels> emitters;

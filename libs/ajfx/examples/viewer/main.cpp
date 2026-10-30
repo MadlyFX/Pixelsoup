@@ -188,7 +188,7 @@ int run_window(d3d12::Device& device, gpu::ShaderCompiler* compiler, std::unique
         const auto step_start = std::chrono::steady_clock::now();
         player->seek(static_cast<std::uint64_t>(time * rate));
         const gpu::Camera camera = window.orbit.camera(static_cast<float>(w) / static_cast<float>(h));
-        player->renderer().render(player->simulation(), camera, target, &background);
+        player->render(camera, target, &background);
         const Result<bool> shown = device.present(window.handle, target);
         if (!shown) {
             return fail(shown.error().message);
@@ -325,7 +325,7 @@ int main(int argc, char** argv) {
     p.seek(static_cast<std::uint64_t>(options->seconds * p.effect().simulation_rate));
     const gpu::Camera camera =
         Orbit{}.camera(static_cast<float>(options->width) / static_cast<float>(options->height));
-    p.renderer().render(p.simulation(), camera, target, &background);
+    p.render(camera, target, &background);
     Result<std::vector<std::uint8_t>> pixels = d.read_texture(target);
     if (!pixels) {
         return fail(pixels.error().message);

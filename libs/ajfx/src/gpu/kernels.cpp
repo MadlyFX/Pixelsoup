@@ -280,6 +280,10 @@ std::string sprite_shader_source() {
     return std::string{detail::hlsl_sprite};
 }
 
+std::string sort_kernel_source() {
+    return std::string{detail::hlsl_sort};
+}
+
 Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler) {
     Result<bool> valid = validate(effect);
     if (!valid) {
@@ -292,6 +296,17 @@ Result<KernelSet> compile_kernels(const Effect& effect, ShaderCompiler& compiler
                                      std::pair{"scatter", &set.scatter}, std::pair{"finalize", &set.finalize}}) {
         Result<std::vector<std::uint8_t>> code =
             compiler.compile(runtime, entry, ShaderStage::Compute, std::string{"ajfx "} + entry);
+        if (!code) {
+            return code.error();
+        }
+        *out = std::move(code).value();
+    }
+    const std::string sort = sort_kernel_source();
+    for (const auto& [entry, out] : {std::pair{"sort_keys", &set.sort_keys}, std::pair{"sort_count", &set.sort_count},
+                                     std::pair{"sort_scan", &set.sort_scan},
+                                     std::pair{"sort_scatter", &set.sort_scatter}}) {
+        Result<std::vector<std::uint8_t>> code =
+            compiler.compile(sort, entry, ShaderStage::Compute, std::string{"ajfx "} + entry);
         if (!code) {
             return code.error();
         }
@@ -349,6 +364,8 @@ std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named_kernels(Ke
     std::vector<std::pair<std::string, std::vector<std::uint8_t>*>> named{
         {"runtime/scan_blocks", &set.scan_blocks}, {"runtime/scan_totals", &set.scan_totals},
         {"runtime/scatter", &set.scatter},         {"runtime/finalize", &set.finalize},
+        {"sort/keys", &set.sort_keys},             {"sort/count", &set.sort_count},
+        {"sort/scan", &set.sort_scan},             {"sort/scatter", &set.sort_scatter},
         {"sprite/vertex", &set.sprite_vertex},     {"sprite/pixel", &set.sprite_pixel},
     };
     set.emitters.resize(emitters);
@@ -369,6 +386,7 @@ std::uint64_t kernel_source_hash(const Effect& effect) {
         hash_bytes(hash, text);
     };
     add(runtime_kernel_source());
+    add(sort_kernel_source());
     add(sprite_shader_source());
     for (const EmitterKernelSource& source : generate_kernel_sources(effect)) {
         add(source.source);

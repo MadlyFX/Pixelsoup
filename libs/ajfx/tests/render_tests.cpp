@@ -58,9 +58,10 @@ Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camer
         gpu::ParticleRenderer::create(*g_device, kernels, gpu::TextureFormat::Rgba8Unorm).value();
     const gpu::Texture target =
         g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
+    gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
     simulation.advance_to(steps);
     const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
-    renderer.render(simulation, camera, target, &clear);
+    renderer.render(simulation, sorter, camera, target, &clear);
     Result<std::vector<std::uint8_t>> pixels = g_device->read_texture(target);
     if (!pixels) {
         std::cout << pixels.error().message << '\n';
@@ -166,6 +167,29 @@ void velocity_aligned_sprites_stretch_along_their_motion() {
     AJFX_CHECK(frame.at(32U + 17U, 32U).a == 0 && frame.at(32U - 18U, 32U).a == 0);
 }
 
+void alpha_particles_draw_back_to_front() {
+    // Two particles drift towards the camera: the first, born earlier, is
+    // nearer and blue by then; the second, just born, is red. Birth order
+    // would draw the red one over; sorted, the nearer blue one is on top.
+    const auto pair = [](bool sort) {
+        EffectBuilder builder{"pair"};
+        builder.emitter("e")
+            .spawn(SpawnBurst{.count = 1U, .interval = 0.3F, .cycles = 2U})
+            .init(Lifetime{.min = 1.0F, .max = 1.0F})
+            .init(ShapeLocation{.shape = Shape::Point})
+            .init(Velocity{.direction = Vec3{0.0F, 0.0F, 1.0F}})
+            .init(InitSize{.min = 1.0F, .max = 1.0F})
+            .update(ColorOverLife{.keys = {{0.0F, Color{1.0F, 0.0F, 0.0F, 1.0F}}, {0.25F, Color{0.0F, 0.0F, 1.0F, 1.0F}}}})
+            .renderer(SpriteRenderer{.blend = BlendMode::Alpha, .sort = sort});
+        return builder.build().value();
+    };
+    // Twenty steps: the first is a third of a second old, the second 1/30.
+    const Pixel sorted = render(pair(true), 20U, ortho).at(32U, 32U);
+    AJFX_CHECK(sorted.b >= 240 && sorted.r <= 10);
+    const Pixel unsorted = render(pair(false), 20U, ortho).at(32U, 32U);
+    AJFX_CHECK(unsorted.r >= 200 && unsorted.b <= 40);
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -202,6 +226,7 @@ int main() {
         {"draws_follow_the_live_count", draws_follow_the_live_count},
         {"perspective_puts_particles_where_the_projection_says", perspective_puts_particles_where_the_projection_says},
         {"velocity_aligned_sprites_stretch_along_their_motion", velocity_aligned_sprites_stretch_along_their_motion},
+        {"alpha_particles_draw_back_to_front", alpha_particles_draw_back_to_front},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

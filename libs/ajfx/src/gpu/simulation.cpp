@@ -312,7 +312,7 @@ void GpuSimulation::reset() {
 
 EmitterBuffers GpuSimulation::emitter_buffers(std::size_t emitter) const {
     const EmitterGpu& e = state_->emitters[emitter];
-    return {e.particles[state_->current], e.counters, e.args, draw_args, e.layout,
+    return {e.particles[state_->current], e.counters, e.args, draw_args, block_args, e.layout,
             state_->effect.emitters[emitter].capacity};
 }
 

@@ -95,8 +95,13 @@ public:
         if (!renderer) {
             return renderer.error();
         }
+        ajfx::Result<ajfx::gpu::ParticleSorter> sorter = ajfx::gpu::ParticleSorter::create(device, effect, *kernels);
+        if (!sorter) {
+            return sorter.error();
+        }
         auto player = std::unique_ptr<Player>(new Player(std::move(effect), *std::move(kernels),
-                                                         std::move(simulation).value(), std::move(renderer).value()));
+                                                         std::move(simulation).value(), std::move(renderer).value(),
+                                                         std::move(sorter).value()));
         player->kernel_note_ = std::move(note);
         return player;
     }
@@ -184,20 +189,25 @@ public:
     // Where the kernels came from, or why a package's could not be used.
     const std::string& kernel_note() const { return kernel_note_; }
     ajfx::gpu::GpuSimulation& simulation() { return simulation_; }
-    ajfx::gpu::ParticleRenderer& renderer() { return renderer_; }
+    // Records drawing the current particles, sorted where the effect asks.
+    void render(const ajfx::gpu::Camera& camera, ajfx::gpu::Texture target, const std::array<float, 4>* clear) {
+        renderer_.render(simulation_, sorter_, camera, target, clear);
+    }
 
 private:
     Player(ajfx::Effect effect, ajfx::gpu::KernelSet kernels, ajfx::gpu::GpuSimulation simulation,
-           ajfx::gpu::ParticleRenderer renderer)
+           ajfx::gpu::ParticleRenderer renderer, ajfx::gpu::ParticleSorter sorter)
         : effect_{std::move(effect)},
           kernels_{std::move(kernels)},
           simulation_{std::move(simulation)},
-          renderer_{std::move(renderer)} {}
+          renderer_{std::move(renderer)},
+          sorter_{std::move(sorter)} {}
 
     ajfx::Effect effect_;
     ajfx::gpu::KernelSet kernels_;
     ajfx::gpu::GpuSimulation simulation_;
     ajfx::gpu::ParticleRenderer renderer_;
+    ajfx::gpu::ParticleSorter sorter_;
     std::map<std::uint64_t, ajfx::gpu::GpuCheckpoint> checkpoints_;
     std::string kernel_note_;
 };

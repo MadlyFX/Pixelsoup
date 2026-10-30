@@ -3,6 +3,7 @@
 #include <ajfx/gpu/device.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/gpu/simulation.hpp>
+#include <ajfx/gpu/sort.hpp>
 #include <ajfx/math.hpp>
 #include <ajfx/result.hpp>
 
@@ -13,9 +14,9 @@
 // The reference sprite renderer: draws every emitter of a GpuSimulation as
 // camera-facing (or velocity-aligned) soft discs, one indirect draw per
 // emitter with the instance count the simulation wrote, in emitter order.
-// Alpha-blended emitters draw in birth order, which is deterministic but not
-// depth-sorted; sorting arrives with the later rendering work. Hosts with
-// their own renderer read EmitterBuffers instead.
+// Emitters that sort (see sort.hpp) draw back to front along the camera's
+// forward axis; the rest in birth order. Hosts with their own renderer read
+// EmitterBuffers and sort with a ParticleSorter themselves.
 namespace ajfx::gpu {
 
 struct Camera final {
@@ -48,9 +49,10 @@ public:
     ~ParticleRenderer();
 
     // Records drawing the simulation's current particles into `target`,
-    // clearing it first when `clear_color` is given. Call after stepping;
-    // nothing runs until the device is flushed.
-    void render(const GpuSimulation& simulation, const Camera& camera, Texture target,
+    // clearing it first when `clear_color` is given. `sorter` was made for
+    // the simulation's effect and orders the emitters that sort. Call after
+    // stepping; nothing runs until the device is flushed.
+    void render(const GpuSimulation& simulation, ParticleSorter& sorter, const Camera& camera, Texture target,
                 const std::array<float, 4>* clear_color = nullptr);
 
 private:

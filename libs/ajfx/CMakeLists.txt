@@ -56,7 +56,7 @@ endfunction()
 set(_ajfx_embedded "// Generated from libs/ajfx/shaders by libs/ajfx/CMakeLists.txt; do not edit.\n")
 string(APPEND _ajfx_embedded "#include \"hlsl_sources.hpp\"\n\nnamespace ajfx::detail {\n")
 foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl
-                              sprite:ajfx_sprite.hlsl)
+                              sprite:ajfx_sprite.hlsl sort:ajfx_sort.hlsl)
     string(REPLACE ":" ";" _ajfx_pair "${_ajfx_shader}")
     list(GET _ajfx_pair 0 _ajfx_name)
     list(GET _ajfx_pair 1 _ajfx_file)
@@ -91,6 +91,7 @@ add_library(ajfx STATIC
     src/gpu/kernels.cpp
     src/gpu/renderer.cpp
     src/gpu/simulation.cpp
+    src/gpu/sort.cpp
     src/json.cpp
     src/package.cpp
     src/presets.cpp
