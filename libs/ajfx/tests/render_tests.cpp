@@ -51,11 +51,16 @@ private:
 
 // Steps an effect, draws it into a fresh 64x64 RGBA8 target cleared to
 // transparent black, and reads the pixels back.
-Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camera) {
+Frame render(const Effect& effect, std::uint64_t steps, const gpu::Camera& camera, const TextureSet& textures = {}) {
     const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
     gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
-    gpu::ParticleRenderer renderer =
-        gpu::ParticleRenderer::create(*g_device, kernels, gpu::TextureFormat::Rgba8Unorm).value();
+    Result<gpu::ParticleRenderer> created =
+        gpu::ParticleRenderer::create(*g_device, effect, kernels, textures, gpu::TextureFormat::Rgba8Unorm);
+    if (!created) {
+        std::cout << created.error().message << std::endl;
+    }
+    AJFX_CHECK(created.ok());
+    gpu::ParticleRenderer renderer = std::move(created).value();
     const gpu::Texture target =
         g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
     gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
@@ -190,6 +195,53 @@ void alpha_particles_draw_back_to_front() {
     AJFX_CHECK(unsorted.r >= 200 && unsorted.b <= 40);
 }
 
+// Four solid 8x8 cells in a 16x16 texture: red, green, blue, white.
+TextureSet cells() {
+    const std::uint8_t colours[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+    std::vector<std::uint8_t> pixels;
+    for (std::uint32_t y = 0U; y < 16U; ++y) {
+        for (std::uint32_t x = 0U; x < 16U; ++x) {
+            const std::uint8_t* c = colours[(y / 8U) * 2U + x / 8U];
+            pixels.insert(pixels.end(), {c[0], c[1], c[2], 255});
+        }
+    }
+    return TextureSet{{"cells", make_texture(16U, 16U, pixels).value()}};
+}
+
+Effect flipbook(bool blend) {
+    EffectBuilder builder{"flipbook"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 0.8F, .max = 0.8F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .renderer(SpriteRenderer{.texture = "cells", .flipbook_columns = 2U, .flipbook_rows = 2U,
+                                 .flipbook_blend = blend});
+    return builder.build().value();
+}
+
+void flipbooks_play_their_cells_over_each_life() {
+    // A 0.8 s life over four cells: 0.2 s each.
+    const auto colour = [](bool blend, std::uint64_t steps) {
+        return render(flipbook(blend), steps, ortho, cells()).at(32U, 32U);
+    };
+    const Pixel first = colour(false, 3U);   // 0.05 s: red
+    AJFX_CHECK(first.r >= 250 && first.g <= 5 && first.b <= 5 && first.a >= 250);
+    const Pixel second = colour(false, 18U); // 0.3 s: green
+    AJFX_CHECK(second.g >= 250 && second.r <= 5);
+    const Pixel third = colour(false, 30U);  // 0.5 s: blue
+    AJFX_CHECK(third.b >= 250 && third.r <= 5 && third.g <= 5);
+    // Cross-fading: at 0.1 s, half way through the first cell, half red and
+    // half green.
+    const Pixel fading = colour(true, 6U);
+    AJFX_CHECK(fading.r >= 100 && fading.r <= 155 && fading.g >= 100 && fading.g <= 155);
+    // An effect naming a texture it was not given is refused.
+    const gpu::KernelSet kernels = gpu::compile_kernels(flipbook(false), *g_compiler).value();
+    const Result<gpu::ParticleRenderer> missing = gpu::ParticleRenderer::create(
+        *g_device, flipbook(false), kernels, TextureSet{}, gpu::TextureFormat::Rgba8Unorm);
+    AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingTexture);
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -197,8 +249,8 @@ void frames_are_reproducible() {
     // Smoke's large puffs cover much of the frame; confetti's specks are
     // smaller than a pixel here, so only some of them land on pixel centres.
     for (const Effect& effect : {presets::smoke(), presets::confetti()}) {
-        const Frame a = render(effect, 120U, camera);
-        const Frame b = render(effect, 120U, camera);
+        const Frame a = render(effect, 120U, camera, presets::textures());
+        const Frame b = render(effect, 120U, camera, presets::textures());
         AJFX_CHECK(a.lit() > (effect.name == "smoke" ? 200U : 0U));
         AJFX_CHECK(a.bytes() == b.bytes());
     }
@@ -227,6 +279,7 @@ int main() {
         {"perspective_puts_particles_where_the_projection_says", perspective_puts_particles_where_the_projection_says},
         {"velocity_aligned_sprites_stretch_along_their_motion", velocity_aligned_sprites_stretch_along_their_motion},
         {"alpha_particles_draw_back_to_front", alpha_particles_draw_back_to_front},
+        {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

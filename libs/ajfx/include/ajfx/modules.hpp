@@ -348,10 +348,14 @@ struct SpriteRenderer final {
     static constexpr std::string_view kind = "sprite";
     BlendMode blend{BlendMode::Alpha};
     Facing facing{Facing::Camera};
-    // A texture entry in the effect package; empty draws a soft disc.
+    // A texture in the effect package ("textures/<name>"); empty draws a soft
+    // disc. With a flipbook, the texture is a grid of cells played left to
+    // right, top to bottom over each particle's life; `flipbook_blend`
+    // cross-fades each cell into the next.
     std::string texture;
     std::uint32_t flipbook_columns{1U};
     std::uint32_t flipbook_rows{1U};
+    bool flipbook_blend{false};
     bool sort{true};
     // With velocity facing, sprites lengthen by the distance travelled in
     // this many seconds: motion streaks for sparks and rain.
@@ -364,6 +368,7 @@ struct SpriteRenderer final {
         visit("texture", self.texture);
         visit("flipbook_columns", self.flipbook_columns);
         visit("flipbook_rows", self.flipbook_rows);
+        visit("flipbook_blend", self.flipbook_blend);
         visit("sort", self.sort);
         visit("stretch", self.stretch);
     }

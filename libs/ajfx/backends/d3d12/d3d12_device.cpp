@@ -76,6 +76,11 @@ std::size_t bytes_per_pixel(gpu::TextureFormat format) {
 
 constexpr std::uint64_t upload_page_bytes = 1U << 20U;
 constexpr std::uint32_t max_render_targets = 256U;
+// Shader-visible texture descriptors: max_bound_textures per draw, reused
+// after each flush.
+constexpr std::uint32_t max_texture_descriptors = 4096U;
+// Root parameters: constants, the buffers, then the texture table.
+constexpr std::uint32_t texture_table_parameter = 1U + gpu::max_bound_buffers;
 
 class DeviceImpl final : public Device {
 public:
@@ -274,13 +279,91 @@ public:
         return gpu::Texture{id};
     }
 
+    Result<gpu::Texture> create_texture(const TextureData& data, std::string_view name) override {
+        if (data.width == 0U || data.height == 0U || data.width > max_texture_size ||
+            data.height > max_texture_size || data.mips.empty()) {
+            return Error{ErrorCode::DeviceFailure, "texture '" + std::string{name} + "' has no texels"};
+        }
+        const auto levels = static_cast<UINT>(data.mips.size());
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = data.width;
+        desc.Height = data.height;
+        desc.DepthOrArraySize = 1U;
+        desc.MipLevels = static_cast<UINT16>(levels);
+        desc.Format = data.color_space == ColorSpace::Srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1U;
+        const D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        TextureRecord record;
+        HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+                                                      nullptr, IID_PPV_ARGS(&record.resource));
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating texture '" + std::string{name} + "'", hr);
+        }
+        record.resource->SetName(widen(name).c_str());
+        record.sampled = true;
+        record.view_format = desc.Format;
+        record.width = data.width;
+        record.height = data.height;
+
+        // Every level through one upload buffer, laid out as the copy wants.
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(levels);
+        std::vector<UINT> rows(levels);
+        std::vector<UINT64> row_bytes(levels);
+        UINT64 total = 0U;
+        device_->GetCopyableFootprints(&desc, 0U, levels, 0U, footprints.data(), rows.data(), row_bytes.data(),
+                                       &total);
+        const D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
+        const D3D12_RESOURCE_DESC upload_desc = buffer_desc(total, D3D12_RESOURCE_FLAG_NONE);
+        ComPtr<ID3D12Resource> upload;
+        void* mapped = nullptr;
+        hr = device_->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload));
+        if (SUCCEEDED(hr)) {
+            hr = upload->Map(0U, nullptr, &mapped);
+        }
+        if (FAILED(hr)) {
+            return failure(ErrorCode::DeviceFailure, "creating upload memory for texture '" + std::string{name} + "'",
+                           hr);
+        }
+        for (UINT level = 0U; level < levels; ++level) {
+            const std::size_t packed_row = std::size_t{mip_size(data.width, level)} * 4U;
+            for (UINT y = 0U; y < rows[level]; ++y) {
+                std::memcpy(static_cast<std::uint8_t*>(mapped) + footprints[level].Offset +
+                                std::size_t{y} * footprints[level].Footprint.RowPitch,
+                            data.mips[level].data() + std::size_t{y} * packed_row, packed_row);
+            }
+        }
+        upload->Unmap(0U, nullptr);
+        transition(record, D3D12_RESOURCE_STATE_COPY_DEST);
+        for (UINT level = 0U; level < levels; ++level) {
+            D3D12_TEXTURE_COPY_LOCATION to{};
+            to.pResource = record.resource.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.SubresourceIndex = level;
+            D3D12_TEXTURE_COPY_LOCATION from{};
+            from.pResource = upload.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            from.PlacedFootprint = footprints[level];
+            list_->CopyTextureRegion(&to, 0U, 0U, 0U, &from, nullptr);
+        }
+        // Released once the recorded copies have run.
+        retired_.push_back(std::move(upload));
+        const std::uint32_t id = next_id_++;
+        textures_.emplace(id, std::move(record));
+        return gpu::Texture{id};
+    }
+
     void destroy_texture(gpu::Texture texture) override {
         const auto found = textures_.find(texture.id);
         if (found == textures_.end()) {
             return;
         }
         retired_.push_back(std::move(found->second.resource));
-        retired_rtv_slots_.push_back(found->second.rtv_slot);
+        if (!found->second.sampled) {
+            retired_rtv_slots_.push_back(found->second.rtv_slot);
+        }
         textures_.erase(found);
     }
 
@@ -391,12 +474,19 @@ public:
         if (!prepare_buffers(d.buffers, indirect, addresses)) {
             return;
         }
+        std::optional<D3D12_GPU_DESCRIPTOR_HANDLE> table = texture_table(d.textures);
+        if (!table) {
+            return;
+        }
+        ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get()};
+        list_->SetDescriptorHeaps(1U, heaps);
         list_->SetGraphicsRootSignature(root_signature_.Get());
         list_->SetPipelineState(pipeline->second.Get());
         list_->SetGraphicsRoot32BitConstants(0U, gpu::root_constant_count, d.constants.data(), 0U);
         for (std::uint32_t slot = 0U; slot < gpu::max_bound_buffers; ++slot) {
             list_->SetGraphicsRootUnorderedAccessView(1U + slot, addresses[slot]);
         }
+        list_->SetGraphicsRootDescriptorTable(texture_table_parameter, *table);
         list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         if (indirect != nullptr) {
             transition(*indirect, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -458,6 +548,7 @@ public:
         }
         uploads_.clear();
         upload_used_ = upload_capacity_;
+        srv_used_ = 0U;
         retired_.clear();
         retired_pipelines_.clear();
         free_rtv_slots_.insert(free_rtv_slots_.end(), retired_rtv_slots_.begin(), retired_rtv_slots_.end());
@@ -522,6 +613,9 @@ private:
     struct TextureRecord final : Record {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
         std::uint32_t rtv_slot{0U};
+        // A sampled texture, made by create_texture: no render target view.
+        bool sampled{false};
+        DXGI_FORMAT view_format{DXGI_FORMAT_R8G8B8A8_UNORM};
         std::uint32_t width{0U};
         std::uint32_t height{0U};
         gpu::TextureFormat format{gpu::TextureFormat::Rgba8Unorm};
@@ -603,9 +697,10 @@ private:
             return Error{ErrorCode::GpuUnavailable, "creating a fence event failed"};
         }
 
-        // Sixteen root constants at b0 and eight root UAVs at u0..u7: no
-        // descriptor heaps, and every kernel and draw shares one signature.
-        D3D12_ROOT_PARAMETER parameters[1U + gpu::max_bound_buffers]{};
+        // Sixteen root constants at b0, eight root UAVs at u0..u7, and a
+        // table of four textures at t0..t3 with one static sampler: every
+        // kernel and draw shares one signature.
+        D3D12_ROOT_PARAMETER parameters[2U + gpu::max_bound_buffers]{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants = {0U, 1U, gpu::root_constant_count}; // b0, space 1
         parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -614,9 +709,27 @@ private:
             parameters[1U + slot].Descriptor = {slot, 0U};
             parameters[1U + slot].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         }
+        D3D12_DESCRIPTOR_RANGE textures{};
+        textures.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        textures.NumDescriptors = gpu::max_bound_textures;
+        textures.BaseShaderRegister = 0U;
+        textures.OffsetInDescriptorsFromTableStart = 0U;
+        parameters[texture_table_parameter].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[texture_table_parameter].DescriptorTable = {1U, &textures};
+        parameters[texture_table_parameter].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister = 0U;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_ROOT_SIGNATURE_DESC root{};
         root.NumParameters = static_cast<UINT>(std::size(parameters));
         root.pParameters = parameters;
+        root.NumStaticSamplers = 1U;
+        root.pStaticSamplers = &sampler;
         ComPtr<ID3DBlob> blob;
         ComPtr<ID3DBlob> errors;
         if (FAILED(hr = D3D12SerializeRootSignature(&root, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors)) ||
@@ -641,6 +754,14 @@ private:
             return failure(ErrorCode::GpuUnavailable, "creating the render target heap", hr);
         }
         rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        D3D12_DESCRIPTOR_HEAP_DESC srv_heap{};
+        srv_heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srv_heap.NumDescriptors = max_texture_descriptors;
+        srv_heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(hr = device_->CreateDescriptorHeap(&srv_heap, IID_PPV_ARGS(&srv_heap_)))) {
+            return failure(ErrorCode::GpuUnavailable, "creating the texture descriptor heap", hr);
+        }
+        srv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         for (std::uint32_t slot = max_render_targets; slot > 0U; --slot) {
             free_rtv_slots_.push_back(slot - 1U);
         }
@@ -719,6 +840,45 @@ private:
         if (!deferred_) {
             deferred_ = std::move(error);
         }
+    }
+
+    // Four descriptors for a draw's textures, empty slots as null views, in
+    // the shader-visible ring; nothing when the ring is full until a flush.
+    std::optional<D3D12_GPU_DESCRIPTOR_HANDLE> texture_table(
+        const std::array<gpu::Texture, gpu::max_bound_textures>& bound) {
+        if (srv_used_ + gpu::max_bound_textures > max_texture_descriptors) {
+            note(Error{ErrorCode::DeviceFailure, "too many textured draws before a flush"});
+            return std::nullopt;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu = srv_heap_->GetGPUDescriptorHandleForHeapStart();
+        cpu.ptr += static_cast<SIZE_T>(srv_used_) * srv_size_;
+        gpu.ptr += static_cast<UINT64>(srv_used_) * srv_size_;
+        for (std::uint32_t slot = 0U; slot < gpu::max_bound_textures; ++slot) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2D.MipLevels = UINT_MAX;
+            ID3D12Resource* resource = nullptr;
+            if (bound[slot].valid()) {
+                const auto found = textures_.find(bound[slot].id);
+                if (found == textures_.end() || !found->second.sampled) {
+                    note(Error{ErrorCode::DeviceFailure, "draw with an unknown or unsampled texture"});
+                    return std::nullopt;
+                }
+                transition(found->second, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                resource = found->second.resource.Get();
+                view.Format = found->second.view_format;
+            } else {
+                view.Texture2D.MipLevels = 1U;
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE at = cpu;
+            at.ptr += static_cast<SIZE_T>(slot) * srv_size_;
+            device_->CreateShaderResourceView(resource, &view, at);
+        }
+        srv_used_ += gpu::max_bound_textures;
+        return gpu;
     }
 
     void transition(Record& record, D3D12_RESOURCE_STATES state) {
@@ -885,6 +1045,9 @@ private:
     ComPtr<ID3D12CommandSignature> draw_signature_;
     ComPtr<ID3D12DescriptorHeap> rtv_heap_;
     std::uint32_t rtv_size_{0U};
+    ComPtr<ID3D12DescriptorHeap> srv_heap_;
+    std::uint32_t srv_size_{0U};
+    std::uint32_t srv_used_{0U};
     std::vector<std::uint32_t> free_rtv_slots_;
     HANDLE event_{nullptr};
     std::uint64_t fence_value_{0U};

@@ -40,8 +40,11 @@ struct Camera final {
 class ParticleRenderer final {
 public:
     // Pipelines for one render target format, from a kernel set's sprite
-    // shaders. The device must outlive the renderer.
-    [[nodiscard]] static Result<ParticleRenderer> create(Device& device, const KernelSet& kernels,
+    // shaders, and the textures `effect`'s emitters name, uploaded from
+    // `textures` (see read_package_textures); fails with MissingTexture when
+    // one is absent. The device must outlive the renderer.
+    [[nodiscard]] static Result<ParticleRenderer> create(Device& device, const Effect& effect,
+                                                         const KernelSet& kernels, const TextureSet& textures,
                                                          TextureFormat format);
 
     ParticleRenderer(ParticleRenderer&&) noexcept;
@@ -49,9 +52,9 @@ public:
     ~ParticleRenderer();
 
     // Records drawing the simulation's current particles into `target`,
-    // clearing it first when `clear_color` is given. `sorter` was made for
-    // the simulation's effect and orders the emitters that sort. Call after
-    // stepping; nothing runs until the device is flushed.
+    // clearing it first when `clear_color` is given. The simulation runs the
+    // effect the renderer was made for, and `sorter` was made for it too.
+    // Call after stepping; nothing runs until the device is flushed.
     void render(const GpuSimulation& simulation, ParticleSorter& sorter, const Camera& camera, Texture target,
                 const std::array<float, 4>* clear_color = nullptr);
 

@@ -3,6 +3,8 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <string>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -68,12 +70,19 @@ struct ParticleRenderer::State final {
     Pipeline blended;  // alpha and premultiplied emitters
     Pipeline additive;
     Buffer camera;
+    // Each emitter's texture, invalid for an untextured one; one upload per
+    // name.
+    std::vector<Texture> emitter_textures;
+    std::vector<Texture> uploaded;
 
     ~State() {
         if (device != nullptr) {
             device->destroy_pipeline(blended);
             device->destroy_pipeline(additive);
             device->destroy_buffer(camera);
+            for (const Texture texture : uploaded) {
+                device->destroy_texture(texture);
+            }
         }
     }
 };
@@ -83,12 +92,36 @@ ParticleRenderer::ParticleRenderer(ParticleRenderer&&) noexcept = default;
 ParticleRenderer& ParticleRenderer::operator=(ParticleRenderer&&) noexcept = default;
 ParticleRenderer::~ParticleRenderer() = default;
 
-Result<ParticleRenderer> ParticleRenderer::create(Device& device, const KernelSet& kernels, TextureFormat format) {
+Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& effect, const KernelSet& kernels,
+                                                  const TextureSet& textures, TextureFormat format) {
     if (kernels.format != device.shader_format() || kernels.sprite_vertex.empty() || kernels.sprite_pixel.empty()) {
         return Error{ErrorCode::GpuUnavailable, "the kernel set has no sprite shaders for this device"};
     }
+    if (Result<bool> checked = check_textures(effect, textures); !checked) {
+        return checked.error();
+    }
     auto state = std::make_unique<State>();
     state->device = &device;
+    std::map<std::string, Texture, std::less<>> by_name;
+    for (const Emitter& emitter : effect.emitters) {
+        Texture texture;
+        if (!emitter.renderer.texture.empty()) {
+            const auto found = by_name.find(emitter.renderer.texture);
+            if (found != by_name.end()) {
+                texture = found->second;
+            } else {
+                Result<Texture> created = device.create_texture(textures.find(emitter.renderer.texture)->second,
+                                                                "ajfx texture " + emitter.renderer.texture);
+                if (!created) {
+                    return created.error();
+                }
+                texture = created.value();
+                state->uploaded.push_back(texture);
+                by_name.emplace(emitter.renderer.texture, texture);
+            }
+        }
+        state->emitter_textures.push_back(texture);
+    }
     for (const auto& [blend, out, name] : {std::tuple{Blend::Premultiplied, &state->blended, "ajfx sprites (blended)"},
                                            std::tuple{Blend::Additive, &state->additive, "ajfx sprites (additive)"}}) {
         Result<Pipeline> pipeline = device.create_graphics_pipeline(
@@ -142,6 +175,12 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         draw.constants[7] = settings.blend == BlendMode::Premultiplied ? 1U : 0U;
         draw.constants[8] = std::bit_cast<std::uint32_t>(settings.stretch);
         draw.constants[9] = orders[i].valid() ? 1U : 0U;
+        draw.constants[10] = offset_or_absent(buffers.layout.age);
+        draw.constants[11] = offset_or_absent(buffers.layout.lifetime);
+        draw.constants[12] = settings.flipbook_columns | (settings.flipbook_rows << 16U);
+        const Texture texture = i < state_->emitter_textures.size() ? state_->emitter_textures[i] : Texture{};
+        draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U);
+        draw.textures[0] = texture;
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;
         draw.buffers[2] = orders[i];

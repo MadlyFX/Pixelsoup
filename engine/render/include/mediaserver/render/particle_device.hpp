@@ -63,6 +63,8 @@ public:
     [[nodiscard]] ajfx::Result<ajfx::gpu::Texture> create_render_target(std::uint32_t width, std::uint32_t height,
                                                                         ajfx::gpu::TextureFormat format,
                                                                         std::string_view name) override;
+    [[nodiscard]] ajfx::Result<ajfx::gpu::Texture> create_texture(const ajfx::TextureData& texture,
+                                                                  std::string_view name) override;
     void destroy_texture(ajfx::gpu::Texture texture) override;
 
     void write_buffer(ajfx::gpu::Buffer buffer, std::uint64_t offset, std::span<const std::uint8_t> bytes) override;

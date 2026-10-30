@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ajfx/effect.hpp>
+#include <ajfx/texture.hpp>
 
 // Ready-made effects: a starting point to tweak, and examples of the builder.
 // Each publishes its most useful knobs as parameters.
@@ -10,12 +11,16 @@ namespace ajfx::presets {
 // Parameters: rate (sparks per second), color.
 [[nodiscard]] Effect sparks();
 
-// Slow, swirling, fading smoke rising from a disc.
-// Parameters: rate, wind (vec3 acceleration).
+// Slow, swirling, fading smoke rising from a disc: soft puffs from the
+// "puff" flipbook, depth-sorted. Parameters: rate, wind (vec3 acceleration).
 [[nodiscard]] Effect smoke();
 
 // Repeating bursts of confetti in two colours, tumbling down.
 // Parameters: color_a, color_b.
 [[nodiscard]] Effect confetti();
+
+// The textures the presets name, generated (no image files): "puff", a 2x2
+// flipbook of soft, lumpy puffs that spread out cell by cell.
+[[nodiscard]] TextureSet textures();
 
 } // namespace ajfx::presets

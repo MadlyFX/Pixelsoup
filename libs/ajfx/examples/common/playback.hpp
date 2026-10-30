@@ -90,8 +90,15 @@ public:
         if (!simulation) {
             return simulation.error();
         }
+        // A package carries its textures; the presets generate theirs.
+        ajfx::Result<ajfx::TextureSet> textures =
+            package != nullptr ? ajfx::read_package_textures(*package, effect) : ajfx::presets::textures();
+        if (!textures) {
+            return textures.error();
+        }
         ajfx::Result<ajfx::gpu::ParticleRenderer> renderer =
-            ajfx::gpu::ParticleRenderer::create(device, *kernels, ajfx::gpu::TextureFormat::Rgba8Unorm);
+            ajfx::gpu::ParticleRenderer::create(device, effect, *kernels, textures.value(),
+                                                ajfx::gpu::TextureFormat::Rgba8Unorm);
         if (!renderer) {
             return renderer.error();
         }
@@ -103,6 +110,7 @@ public:
                                                          std::move(simulation).value(), std::move(renderer).value(),
                                                          std::move(sorter).value()));
         player->kernel_note_ = std::move(note);
+        player->textures_ = std::move(textures).value();
         return player;
     }
 
@@ -186,6 +194,8 @@ public:
 
     const ajfx::Effect& effect() const { return effect_; }
     const ajfx::gpu::KernelSet& kernels() const { return kernels_; }
+    // The textures the effect names, for writing into a package.
+    const ajfx::TextureSet& textures() const { return textures_; }
     // Where the kernels came from, or why a package's could not be used.
     const std::string& kernel_note() const { return kernel_note_; }
     ajfx::gpu::GpuSimulation& simulation() { return simulation_; }
@@ -210,6 +220,7 @@ private:
     ajfx::gpu::ParticleSorter sorter_;
     std::map<std::uint64_t, ajfx::gpu::GpuCheckpoint> checkpoints_;
     std::string kernel_note_;
+    ajfx::TextureSet textures_;
 };
 
 struct Orbit final {

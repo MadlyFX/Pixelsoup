@@ -15,6 +15,19 @@
 namespace ajfx {
 namespace {
 
+// Texture names become package entry names: short, lower case, no paths.
+bool valid_texture_name(std::string_view name) {
+    if (name.empty() || name.size() > 64U || name.front() == '.') {
+        return false;
+    }
+    for (const char c : name) {
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string quoted(std::string_view text) {
     return "'" + std::string{text} + "'";
 }
@@ -297,6 +310,12 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     renderer.require(emitter.renderer.flipbook_columns >= 1U && emitter.renderer.flipbook_rows >= 1U, "flipbook",
                      "needs at least one column and row");
     renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
+    renderer.require(emitter.renderer.texture.empty() || valid_texture_name(emitter.renderer.texture), "texture",
+                     "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+    renderer.require(!emitter.renderer.texture.empty() ||
+                         (emitter.renderer.flipbook_columns == 1U && emitter.renderer.flipbook_rows == 1U &&
+                          !emitter.renderer.flipbook_blend),
+                     "flipbook", "needs a texture");
     if (renderer.error()) {
         return renderer.error();
     }

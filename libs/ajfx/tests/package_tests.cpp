@@ -3,6 +3,7 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/presets.hpp>
+#include <ajfx/texture.hpp>
 
 #include <cstdint>
 #include <string>
@@ -31,7 +32,8 @@ void reseal(std::vector<std::uint8_t>& package) {
     }
 }
 
-bool fails_with(const Result<Effect>& result, ErrorCode code, const std::string& fragment) {
+template <class T>
+bool fails_with(const Result<T>& result, ErrorCode code, const std::string& fragment) {
     return !result.ok() && result.error().code == code && result.error().message.find(fragment) != std::string::npos;
 }
 
@@ -163,6 +165,81 @@ void invalid_effects_are_not_written() {
     AJFX_CHECK(!written.ok() && written.error().code == ErrorCode::BudgetExceeded);
 }
 
+// A 4x2 texture: a red left half, a blue right half.
+TextureData halves(ColorSpace space = ColorSpace::Srgb) {
+    std::vector<std::uint8_t> pixels;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const bool left = x < 2;
+            pixels.insert(pixels.end(), {static_cast<std::uint8_t>(left ? 255 : 0), 0,
+                                         static_cast<std::uint8_t>(left ? 0 : 255), 255});
+        }
+    }
+    return make_texture(4U, 2U, pixels, space).value();
+}
+
+void textures_carry_a_full_mip_chain() {
+    const TextureData texture = halves(ColorSpace::Linear);
+    // 4x2, 2x1, 1x1.
+    AJFX_CHECK(texture.mips.size() == 3U);
+    AJFX_CHECK(texture.mips[1].size() == 8U && texture.mips[2].size() == 4U);
+    // Level 1 keeps the halves apart; level 2 averages them.
+    AJFX_CHECK(texture.mips[1][0] == 255 && texture.mips[1][2] == 0 && texture.mips[1][4] == 0 &&
+               texture.mips[1][6] == 255);
+    AJFX_CHECK(texture.mips[2][0] == 128 && texture.mips[2][2] == 128 && texture.mips[2][3] == 255);
+    // sRGB averages in linear light: half of full red is about 188 encoded.
+    const TextureData srgb = halves();
+    AJFX_CHECK(srgb.mips[2][0] >= 186 && srgb.mips[2][0] <= 189);
+    // Clear texels do not darken the average.
+    const std::vector<std::uint8_t> edge{255, 255, 255, 255, 0, 0, 0, 0};
+    AJFX_CHECK(make_texture(2U, 1U, edge, ColorSpace::Linear).value().mips[1] ==
+               (std::vector<std::uint8_t>{255, 255, 255, 128}));
+    AJFX_CHECK(fails_with(make_texture(0U, 1U, {}), ErrorCode::InvalidEffect, "1 to 4096"));
+    AJFX_CHECK(fails_with(make_texture(2U, 2U, edge), ErrorCode::InvalidEffect, "do not match"));
+}
+
+void textures_round_trip_through_packages() {
+    Effect effect = presets::smoke();
+    const TextureSet textures = presets::textures();
+    std::vector<PackageEntry> extra = texture_package_entries(textures);
+    AJFX_CHECK(extra.size() == 1U && extra[0].name == "textures/puff");
+    const Result<std::vector<std::uint8_t>> package = write_package(effect, extra);
+    AJFX_CHECK(package.ok());
+    const Result<TextureSet> read = read_package_textures(package.value(), effect);
+    AJFX_CHECK(read.ok() && read.value() == textures);
+    // Written bytes are the same every time.
+    AJFX_CHECK(write_package(effect, texture_package_entries(presets::textures())).value() == package.value());
+}
+
+void texture_problems_are_named() {
+    const Effect smoke = presets::smoke();
+    // Missing from the package.
+    AJFX_CHECK(fails_with(read_package_textures(write_package(smoke).value(), smoke), ErrorCode::MissingTexture,
+                          "emitter 'smoke' uses texture 'puff'"));
+    // Damaged.
+    std::vector<std::uint8_t> bad = write_texture(halves());
+    bad.pop_back();
+    AJFX_CHECK(fails_with(read_texture(bad), ErrorCode::MalformedPackage, "shorter than its mips"));
+    AJFX_CHECK(fails_with(read_package_textures(write_package(smoke, {{"textures/puff", bad}}).value(), smoke),
+                          ErrorCode::MalformedPackage, "'textures/puff'"));
+    std::vector<std::uint8_t> newer = write_texture(halves());
+    newer[4] = 2U;
+    AJFX_CHECK(fails_with(read_texture(newer), ErrorCode::UnsupportedVersion, "texture version 2"));
+    // A flipbook with more cells than texels.
+    Effect crowded = smoke;
+    crowded.emitters[0].renderer.flipbook_columns = 5U;
+    AJFX_CHECK(fails_with(check_textures(crowded, TextureSet{{"puff", halves()}}), ErrorCode::InvalidEffect,
+                          "5x2 flipbook"));
+    // Names and flipbooks are checked with the effect.
+    Effect named = smoke;
+    named.emitters[0].renderer.texture = "../puff";
+    AJFX_CHECK(fails_with(write_package(named),
+                          ErrorCode::InvalidEffect, "field 'texture'"));
+    Effect plain = presets::sparks();
+    plain.emitters[0].renderer.flipbook_rows = 2U;
+    AJFX_CHECK(fails_with(write_package(plain), ErrorCode::InvalidEffect, "needs a texture"));
+}
+
 } // namespace
 
 int main() {
@@ -174,6 +251,9 @@ int main() {
         {"container_layout_is_fixed", container_layout_is_fixed},
         {"damaged_packages_are_refused", damaged_packages_are_refused},
         {"invalid_effects_are_not_written", invalid_effects_are_not_written},
+        {"textures_carry_a_full_mip_chain", textures_carry_a_full_mip_chain},
+        {"textures_round_trip_through_packages", textures_round_trip_through_packages},
+        {"texture_problems_are_named", texture_problems_are_named},
     };
     return ajfx::test::run(cases);
 }

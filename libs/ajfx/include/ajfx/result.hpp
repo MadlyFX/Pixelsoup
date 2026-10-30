@@ -23,6 +23,8 @@ enum class ErrorCode {
     // A package has no precompiled kernels for the device, or they were
     // compiled from source that no longer matches.
     KernelsUnavailable,
+    // An emitter names a texture its package (or texture set) does not hold.
+    MissingTexture,
 };
 
 struct Error final {

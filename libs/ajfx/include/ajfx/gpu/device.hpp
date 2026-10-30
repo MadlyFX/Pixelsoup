@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ajfx/result.hpp>
+#include <ajfx/texture.hpp>
 
 #include <array>
 #include <cstdint>
@@ -15,8 +16,10 @@
 // as a raw read-write buffer, a copy source or destination, and an indirect
 // argument buffer. Every kernel and draw sees the same binding layout: sixteen
 // 32-bit root constants (register b0, space 1) and up to eight raw read-write buffers
-// (registers u0 to u7), unbound slots left empty. Textures are render targets
-// only. A backend tracks each buffer's state and inserts the
+// (registers u0 to u7), unbound slots left empty. Draws may also sample up to
+// four textures (t0 to t3) through one linear, clamped, mipmapped sampler
+// (s0). Textures are either render targets or sampled textures made from
+// TextureData. A backend tracks each buffer's state and inserts the
 // transitions a use needs; `barrier` orders read-write access between
 // dispatches.
 namespace ajfx::gpu {
@@ -34,6 +37,7 @@ struct Pipeline final {
 };
 
 inline constexpr std::uint32_t max_bound_buffers = 8U;
+inline constexpr std::uint32_t max_bound_textures = 4U;
 inline constexpr std::uint32_t root_constant_count = 16U;
 
 enum class ShaderFormat {
@@ -92,6 +96,8 @@ struct Draw final {
     Pipeline pipeline;
     std::array<std::uint32_t, root_constant_count> constants{};
     std::array<Buffer, max_bound_buffers> buffers{};
+    // Sampled at t0 to t3; invalid entries leave the slot empty.
+    std::array<Texture, max_bound_textures> textures{};
     std::uint32_t vertex_count{0U};
     std::uint32_t instance_count{0U};
     // Four uint32s (vertex count, instance count, first vertex, first
@@ -118,6 +124,9 @@ public:
     virtual void destroy_pipeline(Pipeline pipeline) = 0;
     [[nodiscard]] virtual Result<Texture> create_render_target(std::uint32_t width, std::uint32_t height,
                                                                TextureFormat format, std::string_view name) = 0;
+    // A sampled texture holding `texture`'s mips (sRGB-decoded when sampled,
+    // for an sRGB texture). The upload is recorded work.
+    [[nodiscard]] virtual Result<Texture> create_texture(const TextureData& texture, std::string_view name) = 0;
     virtual void destroy_texture(Texture texture) = 0;
 
     // Recorded work, executed in order at the next flush.

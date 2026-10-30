@@ -182,6 +182,10 @@ ajfx::Result<ajfx::gpu::Texture> ParticleDevice::create_render_target(std::uint3
     return no_drawing();
 }
 
+ajfx::Result<ajfx::gpu::Texture> ParticleDevice::create_texture(const ajfx::TextureData&, std::string_view) {
+    return no_drawing();
+}
+
 void ParticleDevice::destroy_texture(ajfx::gpu::Texture) {}
 
 void ParticleDevice::write_buffer(ajfx::gpu::Buffer buffer, std::uint64_t offset,

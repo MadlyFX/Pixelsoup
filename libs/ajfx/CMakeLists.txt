@@ -96,6 +96,7 @@ add_library(ajfx STATIC
     src/package.cpp
     src/presets.cpp
     src/simulation.cpp
+    src/texture.cpp
     src/version.cpp
     "${_ajfx_embedded_path}"
 )
