@@ -1047,8 +1047,33 @@ feedback forces evaluate any frame directly.
      - A `debris` preset throws chips of a generated `chip` mesh.
      - **Not in tier 1:** collisions between particles, stacking, and
        contact by a mesh's own shape. Those need a deterministic CPU
-       rigid-body engine (Box3D or Jolt). A spike would compare their
-       cross-machine determinism and cost before choosing.
+       rigid-body engine (Box3D or Jolt).
+   - **Tier 2 spike (2026-10-30): Box3D vs Jolt, one machine so far.**
+     - **Scene:** 1000 and 4000 box chips flung from a lattice onto a
+       floor, pillars and a turned wall, stepped at 60 Hz for 10 s.
+       Each step hashes every chip's pose and velocities.
+     - **Both are reproducible on one machine.** Every per-second hash
+       matched across 1, 4 and 8 threads. Box3D also matched across its
+       4- and 8-wide SIMD paths, which it picks per CPU. Jolt's
+       cross-platform build gives other bits than its default build, but
+       each is consistent.
+     - **Both seek exactly.** A restore taken mid-explosion (step 60) and
+       stepped on to 600 matched the straight run at every step.
+       - **Jolt:** restores into the same world, or a freshly built one as
+         a late node would. 4000 chips snapshot to 610 KB in 1.8 ms and
+         restore in 1.6 ms, through the public `SaveState` and
+         `RestoreState`.
+       - **Box3D:** seeks only through its recording player. Its world
+         snapshot is internal, and each keyframe is about 9 MB for 4000
+         chips.
+     - **Cost on the Ryzen 5800X, 4000 chips, 8 threads:** Jolt 0.36 ms a
+       step (0.38 cross-platform), Box3D 0.59 ms (4 substeps).
+     - **Leaning: Jolt, in its cross-platform build.** It has a public,
+       compact snapshot, restores into a fresh world, runs faster, and is
+       mature. Box3D's determinism is just as good but it is at 0.x.
+     - **Still to do:** the same binaries on the laptop (Intel). That run
+       decides the leaning. The harness is `out/spike` in the ajfx
+       worktree: `run_matrix.ps1` writes `results-<computer>` to diff.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.
