@@ -622,6 +622,16 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
             return false;
         }
     }
+    // A particle effect is a source like any other drawable: without one,
+    // a scene holding only effects plans no layer and draws nothing. It has
+    // no layer style of its own, so it joins the ordinary shared pass.
+    for (const scene::ParticleEffect& effect : source.particle_effects) {
+        if (!add(effect.source_node, scene::LayerStyle{}, effect.world,
+                 source.camera.eye, forward, SourceOrderDomain::Sibling,
+                 effect.parent_group, effect.group_order, 0U)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -832,6 +842,11 @@ void assign_depth_only_nodes(const scene::Scene& adjusted,
     std::erase_if(result.effects,
                   [&pass](const scene::EffectInstance& effect) noexcept {
                       return !pass_contains(pass, effect.target);
+                  });
+    // A particle effect draws in the pass that holds it, once.
+    std::erase_if(result.particle_effects,
+                  [&pass](const scene::ParticleEffect& effect) noexcept {
+                      return !pass_contains(pass, effect.source_node);
                   });
 
     // The layer's authored blend is applied once, when its completed texture
@@ -1084,6 +1099,12 @@ using LayerPassResult =
     }
     for (const scene::ModelInstance& instance : adjusted.models) {
         if (!inspect(instance.source_node, instance.style)) {
+            return LayerPassResult::failure(
+                CompositorScenePlanError::InconsistentLayerStyle);
+        }
+    }
+    for (const scene::ParticleEffect& effect : adjusted.particle_effects) {
+        if (!inspect(effect.source_node, scene::LayerStyle{})) {
             return LayerPassResult::failure(
                 CompositorScenePlanError::InconsistentLayerStyle);
         }

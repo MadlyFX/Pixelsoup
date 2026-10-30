@@ -1,3 +1,4 @@
+#include <mediaserver/render/compositor_scene_executor.hpp>
 #include <mediaserver/render/scene_renderer.hpp>
 #include <mediaserver/scene/math.hpp>
 
@@ -310,6 +311,32 @@ void published_parameters_drive_the_simulation(ajfx::gpu::ShaderCompiler& compil
     g_device->wait_idle();
 }
 
+void effects_alone_reach_the_composited_picture(ajfx::gpu::ShaderCompiler& compiler) {
+    // The editor's Stage and every output render through the compositor. A
+    // scene holding only effects still has something to draw, and each
+    // effect draws once, in the pass that holds it.
+    const scene::Scene frame = scene_with(write_effect("composited.ajfx", compiler));
+    auto executor = render::CompositorSceneExecutor::create(*g_device, 128U, 64U, limits(), {},
+                                                            rhi::TextureFormat::Rgba16Float);
+    SCENE_CHECK(executor);
+    std::vector<core::u8> image;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        rhi::CommandList commands = acquire();
+        auto result = executor.value().execute(commands, frame, scene::whole(frame.canvas));
+        SCENE_CHECK(result);
+        image = download(std::move(commands), *result.value());
+        const render::RenderStats& stats = executor.value().renderer_passes().geometry;
+        if (stats.particles_pending == 0U && stats.particles_behind == 0U) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    SCENE_CHECK(executor.value().renderer_passes().geometry.particles_drawn == 1U);
+    SCENE_CHECK(lit(image, 128U, 63U, 32U) && lit(image, 128U, 64U, 32U));
+    SCENE_CHECK(!lit(image, 128U, 2U, 2U));
+    g_device->wait_idle();
+}
+
 } // namespace
 
 int main() {
@@ -339,6 +366,7 @@ int main() {
         {"a_reexported_package_is_adopted_at_the_next_asset_generation",
          a_reexported_package_is_adopted_at_the_next_asset_generation},
         {"published_parameters_drive_the_simulation", published_parameters_drive_the_simulation},
+        {"effects_alone_reach_the_composited_picture", effects_alone_reach_the_composited_picture},
     };
     int failures = 0;
     for (const Case& test : cases) {
