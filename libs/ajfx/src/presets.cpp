@@ -117,7 +117,7 @@ Effect smoke() {
                                        {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}}})
         .update(SizeOverLife{.keys = {{0.0F, 0.5F}, {1.0F, 2.5F}}})
         .renderer(SpriteRenderer{.texture = "puff", .flipbook_columns = 2U, .flipbook_rows = 2U,
-                                 .flipbook_blend = true});
+                                 .flipbook_blend = true, .soft_distance = 0.4F});
     return finish(builder);
 }
 

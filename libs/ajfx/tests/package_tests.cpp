@@ -163,6 +163,9 @@ void invalid_effects_are_not_written() {
     effect.emitters[0].capacity = 1U;
     const Result<std::vector<std::uint8_t>> written = write_package(effect);
     AJFX_CHECK(!written.ok() && written.error().code == ErrorCode::BudgetExceeded);
+    Effect soft = presets::sparks();
+    soft.emitters[0].renderer.soft_distance = -1.0F;
+    AJFX_CHECK(fails_with(write_package(soft), ErrorCode::InvalidEffect, "field 'soft_distance' must not be negative"));
 }
 
 // A 4x2 texture: a red left half, a blue right half.

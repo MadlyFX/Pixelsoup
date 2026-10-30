@@ -54,8 +54,11 @@ cbuffer ParticleView : register(b0, space1) {
     column_major float4x4 canvas_view_projection;
     column_major float4x4 previous_view_projection;
     // x: seconds back to the previous frame. y: 1 when there is a previous
-    // frame to move from.
+    // frame to move from. z: the soft-particle fade distance.
     float4 motion;
+    // The projection's (2,2), (2,3), (3,2) and (3,3): how reversed device
+    // depth maps back to view distance.
+    float4 depth_terms;
 };
 
 static const uint absent = 0xffffffffU;
@@ -73,6 +76,8 @@ struct Output {
     nointerpolation uint flags : TEXCOORD3;
     // The sprite's velocity product, the same for all its vertices.
     nointerpolation float4 motion : TEXCOORD4;
+    nointerpolation float4 depth_terms : TEXCOORD5;
+    nointerpolation float soft_distance : TEXCOORD6;
     // Premultiplied.
     float4 color : COLOR0;
 };
@@ -145,6 +150,8 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.uv = corner;
     flipbook_cells(base, corner, output.cells, output.blend);
     output.flags = flags;
+    output.depth_terms = depth_terms;
+    output.soft_distance = motion.z;
     // Where the particle was a frame ago, by its own velocity: one value for
     // the whole sprite, from its centre, so it needs no interpolation and
     // every node computes the same bits.

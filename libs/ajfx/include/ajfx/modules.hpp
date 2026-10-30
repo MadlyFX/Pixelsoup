@@ -360,6 +360,11 @@ struct SpriteRenderer final {
     // With velocity facing, sprites lengthen by the distance travelled in
     // this many seconds: motion streaks for sparks and rain.
     float stretch{0.0F};
+    // Soft particles: a sprite fades out over this distance (world units) as
+    // it nears the scene behind it, instead of cutting a hard line where it
+    // meets a surface. Zero keeps hard edges. A host draws it against its own
+    // scene depth; with no scene there is nothing to fade against.
+    float soft_distance{0.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -371,6 +376,7 @@ struct SpriteRenderer final {
         visit("flipbook_blend", self.flipbook_blend);
         visit("sort", self.sort);
         visit("stretch", self.stretch);
+        visit("soft_distance", self.soft_distance);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };

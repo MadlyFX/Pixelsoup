@@ -12,7 +12,8 @@ namespace ajfx::presets {
 [[nodiscard]] Effect sparks();
 
 // Slow, swirling, fading smoke rising from a disc: soft puffs from the
-// "puff" flipbook, depth-sorted. Parameters: rate, wind (vec3 acceleration).
+// "puff" flipbook, depth-sorted, fading where they meet the scene.
+// Parameters: rate, wind (vec3 acceleration).
 [[nodiscard]] Effect smoke();
 
 // Repeating bursts of confetti in two colours, tumbling down.

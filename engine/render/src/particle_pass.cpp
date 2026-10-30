@@ -40,15 +40,17 @@ struct ViewConstants final {
     core::u32 flags{};
     std::array<float, 16U> canvas_view_projection{};
     std::array<float, 16U> previous_view_projection{};
-    std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid
+    std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid, z: soft distance
+    std::array<float, 4U> depth_terms{}; // projection (2,2), (2,3), (3,2), (3,3)
 };
-static_assert(sizeof(ViewConstants) == 384U);
+static_assert(sizeof(ViewConstants) == 400U);
 
 // ViewConstants::flags.
 constexpr core::u32 flag_textured = 1U;
 constexpr core::u32 flag_blend_cells = 2U;
 constexpr core::u32 flag_srgb = 4U;
 constexpr core::u32 flag_sorted = 8U;
+constexpr core::u32 flag_soft = 16U;
 
 core::u32 offset_or_absent(std::int32_t offset) {
     return offset >= 0 ? static_cast<core::u32>(offset) : absent;
@@ -86,6 +88,8 @@ struct ParticleInstance::State final {
     std::vector<Upload> textures;
     // Each emitter's index in `textures`, if it has one.
     std::vector<std::optional<std::size_t>> emitter_texture;
+    // Each emitter's drawing order from the last draw, for its motion.
+    std::vector<ajfx::gpu::Buffer> orders;
 
     [[nodiscard]] bool textures_landed() const noexcept {
         return std::all_of(textures.begin(), textures.end(), [](const Upload& upload) { return upload.landed; });
@@ -181,7 +185,8 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     fragment.format = rhi::ShaderFormat::Dxil;
     fragment.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_frag_dxil),
                                                   sizeof(mediaserver_particle_sprite_frag_dxil)};
-    fragment.sampler_count = 1U;
+    // The texture, and the scene depth soft particles fade against.
+    fragment.sampler_count = 2U;
     // Tested against the scene, never written: a particle is not a surface
     // anything behind it should be hidden by.
     rhi::DepthState depth{};
@@ -409,17 +414,35 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
                             object_to_world.m[column * 4U + 1U] * forward[1] +
                             object_to_world.m[column * 4U + 2U] * forward[2];
     }
-    std::vector<ajfx::gpu::Buffer> orders(i.effect.emitters.size());
+    i.orders.assign(i.effect.emitters.size(), ajfx::gpu::Buffer{});
     s.particles->begin_recording(commands);
-    for (std::size_t e = 0U; e < orders.size(); ++e) {
-        orders[e] = i.sorter->sort(*i.simulation, e, axis);
+    for (std::size_t e = 0U; e < i.orders.size(); ++e) {
+        i.orders[e] = i.sorter->sort(*i.simulation, e, axis);
     }
     s.particles->end_recording();
     if (std::optional<ajfx::Error> error = s.particles->take_error()) {
         s.note(error->message);
         return false;
     }
+    return record_sprites(commands, instance, view, object_to_world, targets, false);
+}
 
+bool ParticlePass::draw_motion(rhi::CommandList& commands, ParticleInstance& instance,
+                               const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
+                               const ParticleTargets& targets) {
+    const ParticleInstance::State& i = *instance.state_;
+    if (!instance.caught_up() || targets.velocity == nullptr || targets.depth == nullptr ||
+        i.orders.size() != i.effect.emitters.size()) {
+        return false;
+    }
+    return record_sprites(commands, instance, view, object_to_world, targets, true);
+}
+
+bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& instance,
+                                  const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
+                                  const ParticleTargets& targets, bool motion) {
+    State& s = *state_;
+    const ParticleInstance::State& i = *instance.state_;
     ViewConstants constants;
     constants.view_projection = view.view_projection.m;
     constants.world = object_to_world.m;
@@ -432,8 +455,9 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
     }
     constants.canvas_view_projection = targets.canvas_view_projection.m;
     constants.previous_view_projection = targets.previous_view_projection.m;
-    constants.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F, targets.motion_valid ? 1.0F : 0.0F,
-                        0.0F, 0.0F};
+    // How reversed device depth maps back to distance, for soft particles.
+    constants.depth_terms = {view.projection.at(2U, 2U), view.projection.at(2U, 3U), view.projection.at(3U, 2U),
+                             view.projection.at(3U, 3U)};
 
     bool first = true;
     for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
@@ -458,52 +482,47 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
         constants.age_offset = offset_or_absent(buffers.layout.age);
         constants.lifetime_offset = offset_or_absent(buffers.layout.lifetime);
         constants.flipbook = sprite.flipbook_columns | (sprite.flipbook_rows << 16U);
+        const bool soft = !motion && targets.scene_depth != nullptr && sprite.soft_distance > 0.0F;
+        constants.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F, targets.motion_valid ? 1.0F : 0.0F,
+                            soft ? sprite.soft_distance : 0.0F, 0.0F};
         const std::optional<std::size_t> texture = i.emitter_texture[e];
         constants.flags = (texture ? flag_textured : 0U) | (sprite.flipbook_blend ? flag_blend_cells : 0U) |
-                          (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U);
-        const rhi::StorageBuffer* order = orders[e].valid() ? s.particles->buffer(orders[e]) : records;
+                          (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U) |
+                          (soft ? flag_soft : 0U);
+        const rhi::StorageBuffer* order = i.orders[e].valid() ? s.particles->buffer(i.orders[e]) : records;
         if (order == nullptr) {
             s.note("an emitter's sort order is missing");
             return false;
         }
-        if (orders[e].valid()) {
+        if (i.orders[e].valid()) {
             constants.flags |= flag_sorted;
         }
         const std::span<const core::u8> emitter_uniform{reinterpret_cast<const core::u8*>(&constants),
                                                         sizeof(constants)};
-        const std::array<rhi::SampledTexture, 1U> sampled{
-            rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler}};
+        const std::array<rhi::SampledTexture, 2U> sampled{
+            rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler},
+            rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
 
         const rhi::StorageBuffer* vertex_buffers[] = {records, order};
         // The counts come from the simulation; this batch only carries them.
         const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{6U, 1U}};
         rhi::PulledDraw draw{};
-        draw.pipeline = sprite.blend == ajfx::BlendMode::Additive ? &s.additive : &s.blended;
+        draw.pipeline = motion ? &s.velocity : sprite.blend == ajfx::BlendMode::Additive ? &s.additive : &s.blended;
         draw.vertex_buffers = vertex_buffers;
         draw.vertex_uniform = emitter_uniform;
         draw.fragment_textures = sampled;
         draw.batches = batches;
         draw.indirect = rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
-        draw.load = first ? targets.load : true;
+        draw.load = motion || !first || targets.load;
         draw.store_depth = true;
         draw.viewport = targets.viewport;
         draw.raster_viewport = targets.raster_viewport;
-        if (!commands.draw_pulled(*targets.color, targets.clear, *targets.depth, targets.depth_clear, draw)) {
-            s.note("a particle draw was refused");
+        rhi::Texture& target = motion ? *targets.velocity : *targets.color;
+        if (!commands.draw_pulled(target, targets.clear, *targets.depth, targets.depth_clear, draw)) {
+            s.note(motion ? "a particle motion draw was refused" : "a particle draw was refused");
             return false;
         }
         first = false;
-        // The same sprites into the velocity target, over what the scene
-        // wrote there, tested against the same depth.
-        if (targets.velocity != nullptr) {
-            rhi::PulledDraw motion = draw;
-            motion.pipeline = &s.velocity;
-            motion.load = true;
-            if (!commands.draw_pulled(*targets.velocity, rhi::Color{}, *targets.depth, targets.depth_clear, motion)) {
-                s.note("a particle motion draw was refused");
-                return false;
-            }
-        }
     }
     return true;
 }

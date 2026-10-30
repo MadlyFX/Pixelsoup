@@ -332,6 +332,7 @@ void flipbooks_play_their_cells_over_each_life() {
     targets.motion_seconds = 1.0F / 24.0F;
     targets.motion_valid = valid;
     PASS_CHECK(pass.draw(commands, instance, view, identity(), targets));
+    PASS_CHECK(pass.draw_motion(commands, instance, view, identity(), targets));
     PASS_CHECK(commands.download(velocity.value(), readback.value()));
     auto submitted = g_device->submit(std::move(commands));
     PASS_CHECK(submitted);
@@ -376,6 +377,90 @@ void moving_particles_write_their_motion() {
     render::ParticleInstance fresh = make_instance(pass, effect);
     const std::vector<float> still = render_motion(pass, fresh, 1U, false);
     PASS_CHECK(at(still, 32U, 32U, 0U) == 0.0F && at(still, 32U, 32U, 2U) == 0.5F);
+}
+
+// One still particle drawn over a scene whose depth (the velocity product's
+// z) is `scene_depth` everywhere, or with no scene depth at all. The view is
+// orthographic with a real depth ramp: reversed depth 0.5 + 0.1 z, so the
+// particle (z = 0) is at 0.5 and a scene depth of 0.4 is one unit behind it.
+[[nodiscard]] Frame render_soft(render::ParticlePass& pass, float soft_distance, std::optional<float> scene_depth) {
+    render::ParticleInstance instance = make_instance(
+        pass, [&] {
+            ajfx::EffectBuilder builder{"soft"};
+            builder.emitter("e")
+                .spawn(ajfx::SpawnBurst{.count = 1U})
+                .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+                .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+                .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+                .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+                .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha, .soft_distance = soft_distance});
+            return builder.build().value();
+        }());
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc scene_desc = color_desc;
+    scene_desc.format = rhi::TextureFormat::Rgba32Float;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto scene = g_device->create_texture(scene_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && scene && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, 1U, 24U, 1U));
+    std::vector<float> product(static_cast<std::size_t>(size) * size * 4U, 0.0F);
+    for (std::size_t at = 2U; at < product.size(); at += 4U) {
+        product[at] = scene_depth.value_or(0.0F);
+    }
+    PASS_CHECK(commands.upload(scene.value(),
+                               std::span<const core::u8>{reinterpret_cast<const core::u8*>(product.data()),
+                                                         product.size() * sizeof(float)}));
+    scene::ViewMatrices view = orthographic();
+    view.projection.set(2U, 2U, 0.1F);
+    view.view_projection = view.projection;
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.scene_depth = scene_depth ? &scene.value() : nullptr;
+    PASS_CHECK(pass.draw(commands, instance, view, identity(), targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+void soft_particles_fade_as_they_near_the_scene() {
+    render::ParticlePass pass = make_pass();
+    // Hard edges, or no scene to fade against: the whole sprite.
+    const core::u8 whole = render_soft(pass, 0.0F, 0.4F).red(32U, 32U);
+    PASS_CHECK(whole >= 251U);
+    PASS_CHECK(render_soft(pass, 2.0F, std::nullopt).red(32U, 32U) == whole);
+    // A surface one unit behind, fading over two: half.
+    const Frame half = render_soft(pass, 2.0F, 0.4F);
+    PASS_CHECK(half.red(32U, 32U) >= 124U && half.red(32U, 32U) <= 128U);
+    PASS_CHECK(half.alpha(32U, 32U) >= 124U && half.alpha(32U, 32U) <= 128U);
+    // Fading over half a unit, a unit away is past the fade: whole.
+    PASS_CHECK(render_soft(pass, 0.5F, 0.4F).red(32U, 32U) == whole);
+    // Where nothing was drawn behind (cleared depth), the sprite stays whole.
+    PASS_CHECK(render_soft(pass, 2.0F, 0.0F).red(32U, 32U) == whole);
 }
 
 [[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
@@ -479,6 +564,7 @@ int main() {
          alpha_particles_draw_back_to_front_in_the_placed_effect},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"moving_particles_write_their_motion", moving_particles_write_their_motion},
+        {"soft_particles_fade_as_they_near_the_scene", soft_particles_fade_as_they_near_the_scene},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

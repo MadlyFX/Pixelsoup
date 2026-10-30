@@ -27,6 +27,8 @@ struct SpriteInput {
     // The sprite's motion product (see scene_motion_vector.hlsli), one value
     // for the whole sprite.
     nointerpolation float4 motion : TEXCOORD4;
+    nointerpolation float4 depth_terms : TEXCOORD5;
+    nointerpolation float soft_distance : TEXCOORD6;
     float4 color : COLOR0;
 };
 

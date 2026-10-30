@@ -3780,11 +3780,20 @@ bool SceneRenderer::record_particles(rhi::CommandList& commands, const scene::Vi
     // none: sprites blend back to front where they sort.
     targets.color = &color_;
     targets.depth = &depth_;
+    // Every effect's colour first, while the velocity target still holds the
+    // scene alone for soft particles to fade against; then their motion.
     for (const auto& [instance, world] : particle_draws_) {
         if (!particle_pass_->draw(commands, *instance, view, world, targets)) {
             return false;
         }
         ++stats_.particles_drawn;
+    }
+    if (targets.velocity != nullptr) {
+        for (const auto& [instance, world] : particle_draws_) {
+            if (!particle_pass_->draw_motion(commands, *instance, view, world, targets)) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -6304,6 +6313,9 @@ bool SceneRenderer::render(
     // The velocity target holds this frame's motion only where the auxiliary
     // pass ran: Advanced, and not a reflection capture.
     const bool scene_motion = mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass;
+    if (scene_motion) {
+        particle_targets.scene_depth = &velocity_;
+    }
     if (scene_motion && scene::antialiasing_for(scene.renderer_settings) == scene::AntialiasingMode::Temporal) {
         // Sprite motion for the temporal resolve, between the same two
         // endpoints as the scene's own motion: the previous frame's canvas
