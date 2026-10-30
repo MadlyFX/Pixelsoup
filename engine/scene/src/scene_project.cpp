@@ -45,13 +45,15 @@ namespace {
         || type == schema::group_type
         || type == schema::timeline_lane_type
         || type == schema::timeline_marker_type || type == schema::media_type
-        || type == schema::model_type || type == link_schema::instance_type
+        || type == schema::model_type || type == schema::particle_effect_type
+        || type == link_schema::instance_type
         || type == schema::light_type || type == "publication.settings";
 }
 
 [[nodiscard]] bool is_drawable_type(std::string_view type) noexcept {
     return type == schema::object_type || type == schema::media_type
-        || type == schema::model_type;
+        || type == schema::model_type
+        || type == schema::particle_effect_type;
 }
 
 [[nodiscard]] bool belongs_to(
@@ -1178,6 +1180,7 @@ core::Result<GroupEditPlan, GroupEditError> plan_move_into_group(
             return node.type == schema::object_type
                 || node.type == schema::media_type
                 || node.type == schema::model_type
+                || node.type == schema::particle_effect_type
                 || node.type == schema::group_type
                 || node.type == schema::light_type;
         };
@@ -1422,6 +1425,7 @@ core::Result<LayerOrderPlan, LayerOrderError> plan_reorder_layer(
             return node.type == schema::object_type
                 || node.type == schema::media_type
                 || node.type == schema::model_type
+                || node.type == schema::particle_effect_type
                 || node.type == schema::group_type
                 || node.type == schema::light_type;
         };

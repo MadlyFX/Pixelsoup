@@ -1973,6 +1973,34 @@ struct ModelInstance final {
 [[nodiscard]] Material model_part_material(const ModelInstance& model,
                                            const Material& imported);
 
+// A placed ajfx particle effect, evaluated for one show frame.
+struct ParticleEffect final {
+    // Effect space to world.
+    Mat4 world{};
+    // The .ajfx package.
+    std::string source;
+    doc::NodeId source_node{};
+    // The authored seed; see `particle_instance_seed`.
+    core::u32 seed{};
+    // The show frame the effect's own time begins at.
+    core::u64 start_frame{};
+    bool locked{};
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
+
+    bool operator==(const ParticleEffect&) const = default;
+};
+
+// The seed a particle simulation runs with: the node identity mixed with the
+// authored seed, so two placements of one package differ even with equal
+// seeds, and every node derives the same value from replicated state.
+[[nodiscard]] core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept;
+
+// The frame of an effect's own time at a show frame, or nothing before it
+// starts.
+[[nodiscard]] std::optional<core::u64> particle_effect_frame(const ParticleEffect& effect,
+                                                             core::u64 show_frame) noexcept;
+
 enum class LightUnit : core::u8 {
     Unitless,
     Lumens,
@@ -2205,6 +2233,8 @@ inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 media_prewarm_seconds = 5U;
 inline constexpr core::u32 max_media_prewarm_clips = 8U;
 inline constexpr core::u32 max_scene_models = 4'096U;
+// Each one is a GPU simulation with its own buffers and checkpoints.
+inline constexpr core::u32 max_scene_particle_effects = 64U;
 inline constexpr core::u32 max_scene_effects = 512U;
 inline constexpr core::u32 max_scene_groups = 1'024U;
 inline constexpr core::u32 max_scene_lanes = 256U;
@@ -2468,6 +2498,9 @@ struct Scene final {
     std::vector<MediaPrewarm> media_prewarm;
     // Imported models, drawn in the lit pass with geometry the renderer loads.
     std::vector<ModelInstance> models;
+    // Particle effects, simulated and drawn over the lit scene. Bounded by
+    // `max_scene_particle_effects`.
+    std::vector<ParticleEffect> particle_effects;
     // Ordered by target, authored order, then effect node id.
     std::vector<EffectInstance> effects;
     std::vector<DirectionalLight> directional_lights;

@@ -41,7 +41,7 @@ if(BUILD_TESTING)
     # other way they would be testing a different computation.
     foreach(_scene_suite IN ITEMS
             math geometry slice icvfx lighting model mask manipulate raycast timeline_edit
-            key_edit selection_set spatial_effect keyer linked_scene)
+            key_edit selection_set spatial_effect keyer linked_scene particle_effect)
         add_executable(mediaserver_scene_${_scene_suite}_tests
             tests/scene_${_scene_suite}_tests.cpp
         )

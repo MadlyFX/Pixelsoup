@@ -63,6 +63,7 @@ struct SceneCounters final {
     core::u32 lanes{};
     core::u32 groups{};
     core::u32 models{};
+    core::u32 particle_effects{};
     core::u32 directional_lights{};
     core::u32 point_lights{};
     core::u32 slices{};
@@ -465,6 +466,22 @@ private:
         bool visible{true};
     };
 
+    struct ParticleEffectEntry final {
+        std::optional<SceneId> scene;
+        std::optional<doc::NodeId> parent_group;
+        core::i64 group_order{};
+        Vec3 position{};
+        Turns yaw{};
+        Turns pitch{};
+        Turns roll{};
+        Vec3 scale{1.0F, 1.0F, 1.0F};
+        std::string source;
+        core::u32 seed{};
+        core::u64 start_frame{};
+        bool locked{};
+        bool visible{true};
+    };
+
     struct SliceEntry final {
         SliceBinding binding{};
     };
@@ -550,6 +567,7 @@ private:
         GroupEntry,
         MediaEntry,
         ModelEntry,
+        ParticleEffectEntry,
         LightEntry,
         SliceEntry,
         EffectEntry,

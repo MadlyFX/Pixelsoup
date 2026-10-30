@@ -1102,6 +1102,26 @@ core::u64 digest(const Scene& scene) noexcept {
         }
     }
 
+    // Tagged and mixed only when present, so scenes without particles keep
+    // the digest they had before particles existed.
+    if (!scene.particle_effects.empty()) {
+        mix(state, core::u64{0x5041525449434c45ULL});
+        mix(state, static_cast<core::u64>(scene.particle_effects.size()));
+        for (const auto& effect : scene.particle_effects) {
+            mix(state, effect.world);
+            mix(state, effect.source);
+            mix(state, effect.source_node.value());
+            mix(state, static_cast<core::u64>(effect.seed));
+            mix(state, effect.start_frame);
+            mix(state, static_cast<core::u64>(effect.locked));
+            mix(state, static_cast<core::u64>(effect.parent_group.has_value()));
+            if (effect.parent_group.has_value()) {
+                mix(state, effect.parent_group->value());
+            }
+            mix(state, static_cast<core::u64>(effect.group_order));
+        }
+    }
+
     mix(state, static_cast<core::u64>(scene.effects.size()));
     for (const auto& effect : scene.effects) {
         mix(state, effect.source.value());
@@ -1560,6 +1580,7 @@ core::u64 asset_set_digest(const Scene& source) noexcept {
             &m.transmission_texture, &m.specular_texture, &m.specular_color_texture, &m.anisotropy_texture}) reference(*path, kind++);
     };
     for (const auto& model : source.models) { reference(model.source, 1); material(model.material); }
+    for (const auto& effect : source.particle_effects) reference(effect.source, 7);
     for (const auto& instance : source.instances) material(instance.material);
     const auto media_reference = [&](const auto& media) {
         // A local proxy changes its path while retaining the Library identity.
@@ -2252,6 +2273,24 @@ core::u64 digest(const ChannelKeyframes& channel) noexcept {
         }
     }
     return state;
+}
+
+
+core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept {
+    // SplitMix64 over the node identity and the authored seed: integer-only,
+    // so every node derives the same seed.
+    core::u64 x = effect.source_node.value() * 0x9e3779b97f4a7c15ULL + effect.seed;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    x ^= x >> 31U;
+    return static_cast<core::u32>(x ^ (x >> 32U));
+}
+
+std::optional<core::u64> particle_effect_frame(const ParticleEffect& effect, core::u64 show_frame) noexcept {
+    if (show_frame < effect.start_frame) {
+        return std::nullopt;
+    }
+    return show_frame - effect.start_frame;
 }
 
 } // namespace mediaserver::scene

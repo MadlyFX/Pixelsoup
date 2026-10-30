@@ -838,6 +838,7 @@ core::u32 SceneCounters::over_capacity() const noexcept {
         + over(lanes, max_scene_lanes)
         + over(groups, max_scene_groups)
         + over(models, max_scene_models)
+        + over(particle_effects, max_scene_particle_effects)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices)
@@ -872,6 +873,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.media);
     } else if (std::holds_alternative<ModelEntry>(entry)) {
         step(counters_.models);
+    } else if (std::holds_alternative<ParticleEffectEntry>(entry)) {
+        step(counters_.particle_effects);
     } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
         step(light->directional ? counters_.directional_lights
                                 : counters_.point_lights);
@@ -1834,6 +1837,36 @@ void SceneModel::put(const doc::Node& node) {
         if (linked != linked_.occurrences.end())
             model.visible = linked->second.visible && !linked->second.source.empty();
         parsed = Entry{std::move(model)};
+    } else if (node.type == schema::particle_effect_type) {
+        ParticleEffectEntry effect{};
+        effect.scene = read_scene_id(reader, node.properties);
+        effect.parent_group = read_parent_group(reader, node.properties);
+        effect.group_order = reader.integer(schema::group_order, 0);
+        effect.source = std::string{reader.text(schema::source, "")};
+        if (effect.source.empty()) {
+            // An effect with no package to load is unauthored, not empty.
+            reader.fail();
+        }
+        effect.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        effect.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        effect.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        effect.roll = reader.number(schema::rotation_roll, 0.0F);
+        effect.scale = reader.vector(
+            schema::scale_x, schema::scale_y, schema::scale_z, Vec3{1.0F, 1.0F, 1.0F});
+        const auto seed = reader.integer(schema::particle_seed, 0);
+        const auto start = reader.integer(schema::particle_start_frame, 0);
+        // Out of range is a damaged node, not something to clamp: two nodes
+        // must not quietly disagree about which particles they draw.
+        if (seed < 0 || seed > static_cast<core::i64>(std::numeric_limits<core::u32>::max()) || start < 0) {
+            reader.fail();
+        } else {
+            effect.seed = static_cast<core::u32>(seed);
+            effect.start_frame = static_cast<core::u64>(start);
+        }
+        effect.locked = reader.boolean(schema::locked, false);
+        effect.visible = reader.boolean(schema::visible, true);
+        parsed = Entry{std::move(effect)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
         light.scene = read_scene_id(reader, node.properties);
@@ -2568,6 +2601,9 @@ std::optional<SceneId> SceneModel::scope_of(
         if (const auto* value = std::get_if<ModelEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
+        if (const auto* value = std::get_if<ParticleEffectEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
         if (const auto* value = std::get_if<LightEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
@@ -2767,6 +2803,8 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
             diagnose_drawable(id, *media);
         } else if (const auto* model = std::get_if<ModelEntry>(&entry)) {
             diagnose_drawable(id, *model);
+        } else if (const auto* effect = std::get_if<ParticleEffectEntry>(&entry)) {
+            diagnose_drawable(id, *effect);
         }
     }
 
@@ -3055,6 +3093,9 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
         } else if (const auto* model =
                        std::get_if<ModelEntry>(&found->second)) {
             owner = model->scene;
+        } else if (const auto* effect =
+                       std::get_if<ParticleEffectEntry>(&found->second)) {
+            owner = effect->scene;
         } else if (const auto* group =
                        std::get_if<GroupEntry>(&found->second)) {
             owner = group->scene;
@@ -4593,6 +4634,8 @@ Scene SceneModel::evaluate(
         if (const auto* model=std::get_if<ModelEntry>(&entry); model && !model->batch.empty()) model_capacity+=model->batch.size()-1;
     }
     scene.models.reserve(std::min<std::size_t>(model_capacity,max_scene_models));
+    scene.particle_effects.reserve(
+        std::min<std::size_t>(counters_.particle_effects, max_scene_particle_effects));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
     // Resolve the editorial media order before evaluating drawables. A lane
@@ -5005,6 +5048,36 @@ Scene SceneModel::evaluate(
                 if (scene.models.size() >= max_scene_models) break;
                 append(multiply(world,local_instance),batch_motion_identity(id,local_instance));
             }
+            continue;
+        }
+
+        if (const auto* const effect = std::get_if<ParticleEffectEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id || !effect->visible ||
+                (solo != nullptr && !solo->shows(id)) ||
+                scene.particle_effects.size() >= max_scene_particle_effects) {
+                continue;
+            }
+            const GroupResolution* parent = nullptr;
+            if (effect->parent_group.has_value()) {
+                const auto found = group_projection.resolved.find(*effect->parent_group);
+                if (found == group_projection.resolved.end() || !found->second.visible) {
+                    continue;
+                }
+                parent = &found->second;
+            }
+            // Keyframed and dragged transforms apply exactly as to a model.
+            auto position = effect->position;
+            Turns yaw = effect->yaw;
+            Turns pitch = effect->pitch;
+            Turns roll = effect->roll;
+            Vec3 scale = effect->scale;
+            LayerStyle style{};
+            apply_override(id, position, yaw, pitch, roll, scale, style);
+            const auto local = multiply(translation(position), multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            scene.particle_effects.push_back(ParticleEffect{
+                parent == nullptr ? local : multiply(parent->world, local), effect->source, id, effect->seed,
+                effect->start_frame, effect->locked || (parent != nullptr && parent->locked), effect->parent_group,
+                effect->group_order});
             continue;
         }
 
