@@ -29,7 +29,7 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
 - **Sample applications.** A viewer and a player.
 - **The media server integration.**
 - **Phase 5 so far.** Deterministic depth sorting, textured sprites and
-  flipbooks.
+  flipbooks, soft particles, and ribbons.
 
 The roadmap is the "Particles and volumes" section of the media server's
 [`next-steps-plan.md`](../../next-steps-plan.md).
@@ -161,11 +161,11 @@ before any tuning.
 
 Planned additions:
 - a Vulkan backend;
-- ribbon, mesh and light rendering;
+- mesh and light rendering;
 - `volume/`, raymarched voxel volumes;
 - `studio/`, the authoring application.
 
-## Sorting and textures
+## Drawing
 
 **Sorting.** Alpha-blended emitters draw back to front: `ParticleRenderer`
 sorts them with a `gpu::ParticleSorter` before drawing.
@@ -196,6 +196,17 @@ disc.
   (`presets::textures()`).
 - **What is refused:** an effect naming a texture it was not given, with
   `MissingTexture`; and a flipbook with more cells than texels.
+
+**Soft particles.** With `soft_distance`, a sprite fades out over that
+distance as it nears the scene behind it, instead of cutting a hard line
+into a surface. It needs the host's scene depth. The reference renderer
+draws no scene, so there it has nothing to fade against.
+
+**Ribbons.** With `geometry` set to `ribbon`, an emitter draws one strip
+through its live particles in birth order (oldest first). Each end is as
+wide as its particle and faces the camera across the trail. A texture runs
+along the strip by each end's life. Ribbons are not depth-sorted, and they
+refuse velocity facing, stretch and flipbooks.
 
 ## Sample viewer
 

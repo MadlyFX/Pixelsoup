@@ -924,7 +924,7 @@ feedback forces evaluate any frame directly.
    render pass (`render::ParticlePass`, done: show-frame stepping within a
    step budget, a preallocated checkpoint ring for seeks, holding while behind,
    sprites drawn from the camera's axes with the slice's projection,
-   depth-tested without depth writes; no particle motion vectors yet), wiring
+   depth-tested without depth writes; motion vectors since 5b), wiring
    that pass into the scene renderer (done: packages read and checked on a
    `render::ParticlePackageCache` worker, at most one new instance a frame,
    readiness held while a package loads, fails or a seek catches up, the
@@ -978,11 +978,32 @@ feedback forces evaluate any frame directly.
      - **Texture decoding differs between renderers.** The media server
        decodes sRGB after filtering, as it does for model textures; the
        reference renderer decodes before.
-   - **5b:** motion vectors, soft particles and ribbons.
-     - Motion vectors: particles write the Advanced velocity target, so TAA
-       stops ghosting them.
-     - Soft particles: depth fade against a copy of scene depth.
-     - Ribbons: one per emitter, joining particles in birth order.
+   - **5b, done:** motion vectors, soft particles and ribbons.
+     - **Motion vectors.** With temporal antialiasing on, sprites write the
+       Advanced velocity target where they cover at least half a pixel.
+       - The resolve then reprojects a particle onto its own history, and
+         rejects history where one arrived or left, so particles stop
+         trailing.
+       - Each sprite writes one flat value, computed from its centre with
+         canvas-wide matrices, so slices write the same bits as the full
+         canvas (tested).
+       - Not yet: particles in object motion blur, and motion from an
+         effect's own placement moving.
+     - **Soft particles.** `soft_distance` fades a sprite as it nears the
+       scene behind it.
+       - Scene depth is the velocity product's z, so there is no extra
+         target or copy. Particles therefore draw every effect's colour
+         before any effect's motion.
+       - Depth maps back to distance through the projection, so
+         perspective and orthographic views both work.
+     - **Ribbons.** `geometry: ribbon` draws one strip per emitter through
+       its live particles in birth order.
+       - Each end faces the camera across the trail and is as wide as its
+         particle. The texture runs along the strip by life.
+       - Ribbons are not depth-sorted. Velocity facing, stretch and
+         flipbooks are refused for them.
+       - Not yet: several ribbons in one emitter, which would need a ribbon
+         id per particle.
    - **5c:** mesh particles, particle lights, and sphere, box and SDF
      collision.
      - Mesh particles come from package mesh entries.
