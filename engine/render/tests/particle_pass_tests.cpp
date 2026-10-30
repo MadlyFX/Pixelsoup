@@ -586,6 +586,71 @@ void mesh_particles_draw_solid_meshes() {
     PASS_CHECK(hidden.red(32U, 32U) >= 254U && hidden.green(32U, 32U) == 0U);
 }
 
+void particle_lights_are_written_for_the_lit_pass() {
+    // Ten particles flung out with four lights: particles 0, 2, 5 and 7 (k *
+    // 10 / 4). A second emitter with one particle and three lights fills two
+    // slots with nothing.
+    ajfx::EffectBuilder builder{"lamps"};
+    builder.emitter("many")
+        .spawn(ajfx::SpawnBurst{.count = 10U})
+        .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius = 2.0F})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.5F, 0.25F, 0.5F}, .b = ajfx::Color{1.0F, 0.5F, 0.25F, 0.5F}})
+        .renderer(ajfx::SpriteRenderer{.light_count = 4U, .light_intensity = 3.0F, .light_range = 2.5F});
+    builder.emitter("one")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .renderer(ajfx::SpriteRenderer{.light_count = 3U});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    PASS_CHECK(pass.light_count(instance) == 7U);
+
+    scene::Mat4 placed = identity();
+    placed.set(0U, 3U, 2.0F); // two units along X
+    auto lights = g_device->create_writable_buffer(render::max_particle_lights * 128U);
+    auto readback = g_device->create_readback(10U * 128U);
+    PASS_CHECK(lights && readback);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, 1U, 24U, 1U));
+    // From slot 3, as if an earlier effect held 0 to 2.
+    PASS_CHECK(pass.write_lights(commands, instance, placed, lights.value(), 3U));
+    PASS_CHECK(commands.download(lights.value(), 0U, 10U * 128U, readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    std::vector<float> words(10U * 32U);
+    {
+        const auto mapped = readback.value().map();
+        std::memcpy(words.data(), mapped.data(), words.size() * sizeof(float));
+        readback.value().unmap();
+    }
+    const ajfx::EmitterState many = instance.simulation().read_emitter(0U).value();
+    PASS_CHECK(many.alive() == 10U);
+    const auto slot = [&](core::u32 index) { return std::span<const float>{words.data() + index * 32U, 32U}; };
+    const core::u32 picked[4] = {0U, 2U, 5U, 7U};
+    for (core::u32 k = 0U; k < 4U; ++k) {
+        const std::span<const float> light = slot(3U + k);
+        const ajfx::Vec3 p = many.position[picked[k]];
+        PASS_CHECK(light[0] == p.x + 2.0F && light[1] == p.y && light[2] == p.z);
+        std::uint32_t kind = 0U;
+        std::memcpy(&kind, &light[3], 4U);
+        PASS_CHECK(kind == 1U); // a point light
+        // Colour by alpha, then the intensity; the range; no shadow row; no
+        // profile.
+        PASS_CHECK(light[4] == 0.5F && light[5] == 0.25F && light[6] == 0.125F && light[7] == 3.0F);
+        PASS_CHECK(light[8] == 2.5F && light[11] == -1.0F && light[19] == -1.0F);
+    }
+    // The second emitter: its one particle, then two slots of nothing.
+    PASS_CHECK(slot(7U)[7] == 1.0F && slot(8U)[7] == 0.0F && slot(9U)[7] == 0.0F);
+    // Slots before `first_slot` are left alone.
+    PASS_CHECK(slot(0U)[7] == 0.0F && slot(2U)[0] == 0.0F);
+}
+
 void ribbons_join_the_particles_in_birth_order() {
     // Particles born every half second, drifting +X at a unit a second; at
     // show frame 48 (two seconds) they are a quarter unit across at about
@@ -719,6 +784,7 @@ int main() {
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
         {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},
+        {"particle_lights_are_written_for_the_lit_pass", particle_lights_are_written_for_the_lit_pass},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

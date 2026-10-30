@@ -234,7 +234,8 @@ struct SceneConstants final {
     float reflection_extent[scene::max_reflection_probes][4U]{};
     float reflection_parameters[scene::max_reflection_probes][4U]{};
     float planar_parameters[4U]{};
-
+    // x: particle lights in the particle light buffer.
+    core::u32 particle_lights[4U]{};
 };
 
 // sky.frag.hlsl: cbuffer SkyConstants.
@@ -251,7 +252,7 @@ static_assert(sizeof(SkyConstants) == 240U);
 // The exact constant-buffer size, asserted so a field added here without one
 // added to the shader is a build error rather than a frame of misread
 // constants.
-static_assert(sizeof(SceneConstants) == 944U);
+static_assert(sizeof(SceneConstants) == 960U);
 
 // scene_rsm_flux.frag.hlsl: cbuffer RsmFluxConstants.
 struct RsmFluxConstants final {
@@ -1977,7 +1978,7 @@ Result SceneRenderer::create(
     fragment.sampler_count =
         advanced ? 16U : basic_fragment_textures;
     fragment.sampled_texture_count = advanced ? advanced_fragment_textures : basic_fragment_textures;
-    fragment.storage_buffer_count = advanced ? 6U : 4U;
+    fragment.storage_buffer_count = advanced ? 7U : 4U;
     fragment.uniform_buffer_count = 1U;
 
     rhi::DepthState depth_state{};
@@ -2533,6 +2534,11 @@ Result SceneRenderer::create(
         }
         renderer.shadow_atlas_depth_ = std::move(atlas_depth).value();
         renderer.light_shadow_buffer_ = std::move(shadows).value();
+        auto particle_lights = device.create_writable_buffer(max_particle_lights * 128U);
+        if (!particle_lights) {
+            return Result::failure(RenderError::AllocationFailed);
+        }
+        renderer.particle_light_buffer_ = std::move(particle_lights).value();
         try {
             renderer.light_shadow_scratch_.reserve(
                 static_cast<std::size_t>(scene::max_scene_point_lights)
@@ -3667,6 +3673,7 @@ private:
 void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
                                       const SceneRenderOptions& options) {
     particle_draws_.clear();
+    particle_lights_used_ = 0U;
     const auto refuse = [this](core::u32& count, std::string_view reason) {
         ++count;
         if (stats_.particle_issue.empty()) {
@@ -3759,6 +3766,20 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
                 scene.show_rate.numerator, scene.show_rate.denominator, &parameters)) {
             ++stats_.particles_behind;
             continue;
+        }
+        // Its lights, in the slots after the effects before it. One that
+        // would overrun the budget is refused rather than lit partly.
+        if (const core::u32 lights = particle_pass_->light_count(*slot.instance); lights != 0U) {
+            if (!particle_light_buffer_ || particle_lights_used_ + lights > max_particle_lights) {
+                refuse(stats_.particles_failed, "particle effects ask for more than " +
+                                                    std::to_string(max_particle_lights) + " lights");
+                continue;
+            }
+            if (!particle_pass_->write_lights(commands, *slot.instance, effect.world, particle_light_buffer_,
+                                              particle_lights_used_)) {
+                continue;
+            }
+            particle_lights_used_ += lights;
         }
         particle_draws_.emplace_back(&*slot.instance, effect.world);
     }
@@ -5425,6 +5446,7 @@ bool SceneRenderer::render(
     // authored maximum and only partly written, so a consumer needs telling
     // where the lights stop.
     uploaded_light_count_ = scene_constants.counts[0U];
+    scene_constants.particle_lights[0U] = particle_lights_used_;
     if (scene_linear() && renderer_settings.contact_shadow_length > 0.0F
         && renderer_settings.contact_shadow_thickness > 0.0F) {
         for (core::u32 i = 0U; i < uploaded_light_count_; ++i) {
@@ -5534,10 +5556,10 @@ bool SceneRenderer::render(
         &light_buffer_,
         &inline_effect_op_buffer_,
         &inline_effect_parameter_buffer_,
-        &ltc_asset_.buffer(), &light_shadow_buffer_, &probe_buffer_};
+        &ltc_asset_.buffer(), &light_shadow_buffer_, &probe_buffer_, &particle_light_buffer_};
     const std::span<const rhi::StorageBuffer* const> lit_fragment_bindings{
         lit_fragment_buffers,
-        mode_ == SceneRendererMode::AdvancedLinear ? 6U : 4U};
+        mode_ == SceneRendererMode::AdvancedLinear ? 7U : 4U};
     const rhi::StorageBuffer* const media_fragment_bindings[]{
         &inline_effect_op_buffer_, &inline_effect_parameter_buffer_};
 

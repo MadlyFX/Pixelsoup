@@ -335,6 +335,10 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                      "needs at least one column and row");
     renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
     renderer.require(emitter.renderer.soft_distance >= 0.0F, "soft_distance", "must not be negative");
+    renderer.require(emitter.renderer.light_count <= 64U, "light_count", "must be at most 64");
+    renderer.require(emitter.renderer.light_intensity >= 0.0F, "light_intensity", "must not be negative");
+    renderer.require(emitter.renderer.light_count == 0U || emitter.renderer.light_range > 0.0F, "light_range",
+                     "must be positive");
     if (emitter.renderer.geometry == Geometry::Mesh) {
         renderer.require(valid_texture_name(emitter.renderer.mesh), "mesh",
                          "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");

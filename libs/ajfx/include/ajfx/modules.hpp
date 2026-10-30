@@ -468,6 +468,14 @@ struct SpriteRenderer final {
     // coordinates and is shaded by a light at the camera.
     Geometry geometry{Geometry::Sprites};
     std::string mesh;
+    // Particle lights: up to `light_count` (at most 64) of the emitter's
+    // particles light the host's scene, each a point light of the particle's
+    // colour at `light_intensity`, reaching `light_range`; chosen evenly
+    // through the live particles in birth order, so every node picks the
+    // same ones. Zero gives none. A host without a lit scene ignores them.
+    std::uint32_t light_count{0U};
+    float light_intensity{1.0F};
+    float light_range{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -482,6 +490,9 @@ struct SpriteRenderer final {
         visit("soft_distance", self.soft_distance);
         visit("geometry", self.geometry);
         visit("mesh", self.mesh);
+        visit("light_count", self.light_count);
+        visit("light_intensity", self.light_intensity);
+        visit("light_range", self.light_range);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };

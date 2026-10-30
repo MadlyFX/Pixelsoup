@@ -1034,6 +1034,10 @@ private:
     std::unique_ptr<ParticlePackageCache> particle_packages_;
     std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
     std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
+    // Particle lights for the lit pass: max_particle_lights records, the
+    // first `particle_lights_used_` written this frame (Advanced only).
+    rhi::StorageBuffer particle_light_buffer_;
+    core::u32 particle_lights_used_{};
     std::optional<TemporalResolve> temporal_occlusion_;
     ShadowAtlasLimits shadow_atlas_limits_{};
     ShadowAtlasPlan shadow_atlas_plan_{};

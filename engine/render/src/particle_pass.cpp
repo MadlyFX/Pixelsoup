@@ -3,6 +3,7 @@
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/particle_sprite_frag_dxil.h>
 #include <mediaserver/shaders/particle_sprite_vert_dxil.h>
+#include <mediaserver/shaders/particle_lights_comp_dxil.h>
 #include <mediaserver/shaders/particle_velocity_frag_dxil.h>
 #endif
 
@@ -166,6 +167,8 @@ struct ParticlePass::State final {
     rhi::GraphicsPipeline mesh;
     // Sprite motion into the scene's velocity target.
     rhi::GraphicsPipeline velocity;
+    // Particle lights into the scene's particle light buffer.
+    rhi::ComputePipeline lights;
     // Bound for emitters without a texture, which never sample it.
     std::optional<rhi::Texture> blank;
     std::optional<rhi::Sampler> sampler;
@@ -233,13 +236,24 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     rhi::DepthState solid = depth;
     solid.write = true;
     auto mesh = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, solid);
-    if (!blended || !additive || !velocity || !mesh) {
+    rhi::ShaderDesc light_kernel{};
+    light_kernel.stage = rhi::ShaderStage::Compute;
+    light_kernel.format = rhi::ShaderFormat::Dxil;
+    light_kernel.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_lights_comp_dxil),
+        sizeof(mediaserver_particle_lights_comp_dxil)};
+    light_kernel.storage_buffer_count = 2U;
+    light_kernel.writable_buffer_count = 1U;
+    light_kernel.uniform_buffer_count = 1U;
+    auto lights = device.create_compute_pipeline(light_kernel);
+    if (!blended || !additive || !velocity || !mesh || !lights) {
         return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
     }
     state->blended = std::move(blended).value();
     state->additive = std::move(additive).value();
     state->velocity = std::move(velocity).value();
     state->mesh = std::move(mesh).value();
+    state->lights = std::move(lights).value();
     rhi::TextureDesc blank{};
     blank.width = 1U;
     blank.height = 1U;
@@ -627,6 +641,71 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             return false;
         }
         first = false;
+    }
+    return true;
+}
+
+core::u32 ParticlePass::light_count(const ParticleInstance& instance) const noexcept {
+    core::u32 count = 0U;
+    for (const ajfx::Emitter& emitter : instance.state_->effect.emitters) {
+        count += emitter.renderer.light_count;
+    }
+    return count;
+}
+
+bool ParticlePass::write_lights(rhi::CommandList& commands, const ParticleInstance& instance,
+                                const scene::Mat4& object_to_world, rhi::StorageBuffer& lights,
+                                core::u32 first_slot) {
+    State& s = *state_;
+    const ParticleInstance::State& i = *instance.state_;
+    // Matches ParticleLightParameters in particle_lights.comp.hlsl.
+    struct Parameters final {
+        std::array<float, 16U> world{};
+        core::u32 stride{};
+        core::u32 position_offset{};
+        core::u32 color_offset{};
+        core::u32 light_count{};
+        core::u32 first_slot{};
+        float intensity{};
+        float range{};
+        core::u32 padding{};
+    };
+    static_assert(sizeof(Parameters) == 96U);
+    core::u32 slot = first_slot;
+    for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+        const ajfx::SpriteRenderer& sprite = i.effect.emitters[e].renderer;
+        if (sprite.light_count == 0U) {
+            continue;
+        }
+        const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
+        const rhi::StorageBuffer* records = s.particles->buffer(buffers.particles);
+        const rhi::StorageBuffer* counters = s.particles->buffer(buffers.counters);
+        if (records == nullptr || counters == nullptr) {
+            s.note("an emitter's particle buffers are missing");
+            return false;
+        }
+        Parameters parameters;
+        parameters.world = object_to_world.m;
+        parameters.stride = buffers.layout.stride;
+        parameters.position_offset = static_cast<core::u32>(buffers.layout.position);
+        parameters.color_offset = offset_or_absent(buffers.layout.color);
+        parameters.light_count = sprite.light_count;
+        parameters.first_slot = slot;
+        parameters.intensity = sprite.light_intensity;
+        parameters.range = sprite.light_range;
+        const rhi::StorageBuffer* reads[] = {records, counters};
+        const rhi::StorageBuffer* writes[] = {&lights};
+        rhi::ComputeDispatch work{};
+        work.pipeline = &s.lights;
+        work.storage_buffers = reads;
+        work.writable_buffers = writes;
+        work.uniform = std::span<const core::u8>{reinterpret_cast<const core::u8*>(&parameters), sizeof(parameters)};
+        work.groups_x = (sprite.light_count + 63U) / 64U;
+        if (!commands.dispatch(work)) {
+            s.note("a particle light dispatch was refused");
+            return false;
+        }
+        slot += sprite.light_count;
     }
     return true;
 }

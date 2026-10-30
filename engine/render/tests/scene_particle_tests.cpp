@@ -135,6 +135,40 @@ std::string write_crowd(const std::string& name, ajfx::gpu::ShaderCompiler& comp
     return path.string();
 }
 
+// One tiny white particle a unit in front of the origin, lighting the scene
+// with `lights` lights (intensity 2, range 3).
+std::string write_lamp(const std::string& name, ajfx::gpu::ShaderCompiler& compiler, std::uint32_t lights) {
+    ajfx::EffectBuilder builder{"lamp"};
+    builder.emitter("e")
+        .capacity(64U)
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = ajfx::Vec3{0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 0.001F, .max = 0.001F})
+        .renderer(ajfx::SpriteRenderer{.light_count = lights, .light_intensity = 2.0F, .light_range = 3.0F});
+    const ajfx::Effect effect = builder.build().value();
+    const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
+    SCENE_CHECK(kernels);
+    const ajfx::Result<std::vector<std::uint8_t>> package =
+        ajfx::write_package(effect, ajfx::gpu::kernel_package_entries(effect, kernels.value()));
+    SCENE_CHECK(package);
+    const std::filesystem::path path = g_directory / name;
+    std::ofstream out{path, std::ios::binary};
+    out.write(reinterpret_cast<const char*>(package.value().data()),
+              static_cast<std::streamsize>(package.value().size()));
+    SCENE_CHECK(out.good());
+    return path.string();
+}
+
+// A half float's value.
+float half_value(const std::vector<core::u8>& image, core::u32 width, core::u32 x, core::u32 y) {
+    core::u16 bits = 0U;
+    std::memcpy(&bits, image.data() + (static_cast<std::size_t>(y) * width + x) * stride, 2U);
+    const int exponent = (bits >> 10) & 31;
+    const float mantissa = static_cast<float>(bits & 1023);
+    return exponent == 0 ? std::ldexp(mantissa, -24) : std::ldexp(1.0F + mantissa / 1024.0F, exponent - 15);
+}
+
 scene::Scene scene_with(const std::string& source) {
     scene::Scene frame;
     frame.canvas = {128U, 64U};
@@ -291,6 +325,65 @@ void sorted_textured_effects_draw_alike_on_slices(ajfx::gpu::ShaderCompiler& com
     }
     SCENE_CHECK(full.value().stats().particles_failed == 1U && full.value().stats().particles_drawn == 0U);
     SCENE_CHECK(full.value().stats().particle_issue.find("texture 'cells'") != std::string::npos);
+    g_device->wait_idle();
+}
+
+void particle_lights_light_the_scene(ajfx::gpu::ShaderCompiler& compiler) {
+    // A white wall at z = 0, with no other light and no ambient: black,
+    // until a particle a unit in front of it lights it, brightest nearest.
+    const auto lit_wall = [&](const std::string& source) {
+        scene::Scene frame = scene_with(source);
+        scene::MeshInstance wall;
+        wall.source = doc::NodeId{2U};
+        wall.mesh = {scene::Primitive::Quad, 1U};
+        wall.world = scene::scaling({12.0F, 6.0F, 1.0F});
+        wall.normal = scene::normal_basis(wall.world);
+        wall.material.base_color = {1.0F, 1.0F, 1.0F};
+        wall.material.specular = 0.0F;
+        wall.material.roughness = 0.6F;
+        frame.instances.push_back(wall);
+        return frame;
+    };
+    auto full = render::SceneRenderer::create(*g_device, 128U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    auto left = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    auto right = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(full && left && right);
+    const scene::Scene dark = lit_wall(write_lamp("unlit.ajfx", compiler, 0U));
+    const scene::Scene lamp = lit_wall(write_lamp("lamp.ajfx", compiler, 1U));
+    const std::vector<core::u8> unlit = settle(full.value(), dark, {0U, 0U, 128U, 64U});
+    const std::vector<core::u8> image = settle(full.value(), lamp, {0U, 0U, 128U, 64U});
+    SCENE_CHECK(full.value().stats().particle_issue.empty());
+    SCENE_CHECK(half_value(unlit, 128U, 70U, 32U) == 0.0F);
+    const float near = half_value(image, 128U, 70U, 32U);
+    const float far = half_value(image, 128U, 82U, 32U);
+    SCENE_CHECK(near > 0.0F && far > 0.0F && near > far);
+    // Every node lights its slice alike.
+    const std::vector<core::u8> a = settle(left.value(), lamp, {0U, 0U, 64U, 64U});
+    const std::vector<core::u8> b = settle(right.value(), lamp, {64U, 0U, 64U, 64U});
+    for (core::u32 y = 0U; y < 64U; ++y) {
+        const auto row = image.begin() + static_cast<std::ptrdiff_t>(y) * 128 * stride;
+        const auto half = static_cast<std::ptrdiff_t>(64U * stride);
+        SCENE_CHECK(std::equal(a.begin() + y * half, a.begin() + (y + 1U) * half, row));
+        SCENE_CHECK(std::equal(b.begin() + y * half, b.begin() + (y + 1U) * half, row + half));
+    }
+
+    // Two placements asking for forty lights each: the second would pass the
+    // budget, and is refused saying so.
+    scene::Scene crowded = scene_with(write_lamp("forty.ajfx", compiler, 40U));
+    scene::ParticleEffect second = crowded.particle_effects[0];
+    second.source_node = doc::NodeId{8U};
+    crowded.particle_effects.push_back(second);
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        rhi::CommandList commands = acquire();
+        static_cast<void>(full.value().render(commands, crowded, {0U, 0U, 128U, 64U}));
+        static_cast<void>(download(std::move(commands), full.value().target()));
+        if (full.value().stats().particles_failed != 0U) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    SCENE_CHECK(full.value().stats().particles_failed == 1U && full.value().stats().particles_drawn == 1U);
+    SCENE_CHECK(full.value().stats().particle_issue.find("more than 64 lights") != std::string::npos);
     g_device->wait_idle();
 }
 
@@ -474,6 +567,7 @@ int main() {
     const Case cases[] = {
         {"effects_draw_alike_on_the_full_canvas_and_its_slices", effects_draw_alike_on_the_full_canvas_and_its_slices},
         {"sorted_textured_effects_draw_alike_on_slices", sorted_textured_effects_draw_alike_on_slices},
+        {"particle_lights_light_the_scene", particle_lights_light_the_scene},
         {"unstarted_missing_and_unsupported_effects", unstarted_missing_and_unsupported_effects},
         {"a_reexported_package_is_adopted_at_the_next_asset_generation",
          a_reexported_package_is_adopted_at_the_next_asset_generation},

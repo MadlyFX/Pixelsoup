@@ -56,6 +56,9 @@ struct ParticleError final {
     std::string message;
 };
 
+// Particle light slots one scene render holds (see ParticlePass::write_lights).
+inline constexpr core::u32 max_particle_lights = 64U;
+
 struct ParticleSettings final {
     // Steps advance may take in one frame. Normal playback needs
     // ceil(simulation rate / show rate): three at 24 fps and 60 steps a second.
@@ -173,6 +176,18 @@ public:
     [[nodiscard]] bool draw_motion(rhi::CommandList& commands, ParticleInstance& instance,
                                    const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
                                    const ParticleTargets& targets);
+
+    // How many particle lights `instance` writes: the sum of its emitters'
+    // light counts.
+    [[nodiscard]] core::u32 light_count(const ParticleInstance& instance) const noexcept;
+
+    // Records writing `instance`'s particle lights, placed by
+    // `object_to_world`, into slots `first_slot` onwards of `lights` (a
+    // writable buffer of light.hlsli Light records, 128 bytes each), as
+    // light_count says. Call after advance has caught the instance up.
+    [[nodiscard]] bool write_lights(rhi::CommandList& commands, const ParticleInstance& instance,
+                                    const scene::Mat4& object_to_world, rhi::StorageBuffer& lights,
+                                    core::u32 first_slot);
 
     // Forgets `instance`'s history: its checkpoints are dropped, and the next
     // advance simulates again from the start. For when what the simulation

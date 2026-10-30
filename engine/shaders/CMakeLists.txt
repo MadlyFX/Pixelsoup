@@ -529,6 +529,9 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         particle_velocity.frag.hlsl ps_6_2
         mediaserver_particle_velocity_frag_dxil particle_velocity_frag_dxil.h)
+    mediaserver_compile_dxil(
+        particle_lights.comp.hlsl cs_6_2
+        mediaserver_particle_lights_comp_dxil particle_lights_comp_dxil.h)
     # Test probes for writable buffers and indirect dispatch and draw.
     mediaserver_compile_dxil(
         buffer_scale_probe.comp.hlsl cs_6_2
