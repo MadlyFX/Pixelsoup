@@ -15,12 +15,13 @@
 // not, and emitters that opt out with `SpriteRenderer::sort = false`, keep
 // birth order and cost nothing here.
 //
-// The sort is a stable integer radix sort on the GPU (shaders/ajfx_sort.hlsl):
-// the order depends only on the particles' positions and the axis, so every
-// node of a cluster and every seek that holds the same particles draws them in
-// the same order. It reads the simulation's live count and dispatch sizes on
-// the GPU; nothing is read back. Sorting is per view, not simulation state:
-// checkpoints neither hold nor need it.
+// The sort is a stable integer radix sort on the GPU (shaders/ajfx_sort.hlsl)
+// of depth to one part in 32768 of its distance; nearer than that, particles
+// keep birth order. The order depends only on the particles' positions and
+// the axis, so every node of a cluster and every seek that holds the same
+// particles draws them in the same order. It reads the simulation's live
+// count and dispatch sizes on the GPU; nothing is read back. Sorting is per
+// view, not simulation state: checkpoints neither hold nor need it.
 namespace ajfx::gpu {
 
 // Whether an emitter's particles are depth-sorted before drawing.

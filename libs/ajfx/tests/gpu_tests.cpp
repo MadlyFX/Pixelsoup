@@ -295,10 +295,13 @@ void depth_sort_orders_far_to_near_at_block_edges() {
         std::vector<std::uint32_t> every(count);
         std::iota(every.begin(), every.end(), 0U);
         AJFX_CHECK(sorted == every);
-        // Farthest along the axis first.
+        // Farthest along the axis first, to the sort's resolution of one
+        // part in 32768.
         const auto depth = [&](std::uint32_t i) { return dot(state.position[i], axis); };
         for (std::size_t k = 1U; k < drawn.size(); ++k) {
-            AJFX_CHECK(depth(drawn[k - 1U]) >= depth(drawn[k]));
+            const float before = depth(drawn[k - 1U]);
+            const float after = depth(drawn[k]);
+            AJFX_CHECK(before >= after - std::fabs(after) / 16384.0F);
         }
     }
 }

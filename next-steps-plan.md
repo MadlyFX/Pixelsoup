@@ -952,9 +952,10 @@ feedback forces evaluate any frame directly.
 5. Rendering depth, in three slices.
    - **5a, done:** deterministic depth sorting, and textured sprites with
      flipbooks.
-     - **Sorting.** A stable GPU radix sort of view depth: integer scans, no
-       atomics, birth order on ties. It applies to alpha-blended emitters;
-       additive emitters skip it.
+     - **Sorting.** A stable GPU radix sort of view depth, to one part in
+       32,768 of the distance: six coalesced passes, integer scans, atomics
+       only for counting, birth order on ties. It applies to alpha-blended
+       emitters; additive emitters skip it.
      - **Textures.** RGBA8 mip chains in `textures/<name>` package entries,
        built at authoring time. Flipbook cells are chosen from age, with
        optional cross-fade.
@@ -966,9 +967,13 @@ feedback forces evaluate any frame directly.
          until they land.
        - A package missing a texture its effect names fails readiness,
          naming the texture.
-     - **Cost on an RTX 3090.** About 0.3 ms at 65,000 particles and 1.9 ms
-       at a million; untuned.
-       - The next step is coalesced key loads through group-shared memory.
+     - **Cost on an RTX 3090.** About 0.2 ms up to 65,000 particles, 0.5 ms
+       at a million (1.9 ms before coalescing and the 24-bit key), 1.9 ms at
+       four million.
+       - The floor is the 19 dispatches and their barriers. Fusing each
+         pass's count into the previous scatter would lower it.
+       - Eight-bit digits were tried and were slower: two splits per block
+         cost more than the dispatches they saved.
        - It has not been measured on the RTX 2060 yet.
      - **Texture decoding differs between renderers.** The media server
        decodes sRGB after filtering, as it does for model textures; the

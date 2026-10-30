@@ -173,15 +173,18 @@ sorts them with a `gpu::ParticleSorter` before drawing.
   default) and a blend that depends on order. Additive emitters keep birth
   order and cost nothing.
 - **How it works:** a stable GPU radix sort of the view depth. It uses
-  integer scans with no atomics, and sizes itself from the simulation's own
-  live count, so nothing is read back.
-- **Determinism:** equal depths keep birth order. Every run, seek and node
+  integer scans, with atomics only for counting. It sorts the top 24 bits of
+  the depth (one part in 32,768 of the distance) in six passes, and sizes
+  itself from the simulation's own live count, so nothing is read back.
+- **Determinism:** equal depths, and depths closer than the sort resolves,
+  keep birth order. Every run, seek and node
   that holds the same particles draws them in the same order.
 - **Hosts with their own renderer** call `sort` themselves, with the axis in
   the effect's own space (`world` transposed times the camera's forward
   axis).
-- **Cost on an RTX 3090:** about 0.3 ms for 65,000 particles and 1.9 ms
-  for a million. The loads are not yet coalesced, so this is untuned.
+- **Cost on an RTX 3090:** about 0.2 ms up to 65,000 particles (mostly the
+  fixed cost of its 19 dispatches), 0.5 ms for a million and 1.9 ms for four
+  million.
 
 **Textures.** A sprite with a `texture` samples it instead of drawing a soft
 disc.

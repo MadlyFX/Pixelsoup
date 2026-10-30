@@ -12,7 +12,9 @@ namespace {
 
 constexpr std::uint32_t block_size = 4096U;
 constexpr std::uint32_t digit_count = 16U;
-constexpr std::uint32_t passes = 8U; // four bits each
+// Four bits each, over the key's top 24 bits.
+constexpr std::uint32_t passes = 6U;
+constexpr std::uint32_t first_bit = 8U;
 
 Error device_error(const std::string& what, const Error& cause) {
     return Error{cause.code, what + ": " + cause.message};
@@ -31,7 +33,7 @@ struct ParticleSorter::State final {
     Pipeline scan;
     Pipeline scatter;
     struct Scratch final {
-        // Keys and values ping-pong between the pairs; eight passes end in
+        // Keys and values ping-pong between the pairs; six passes end in
         // the first.
         Buffer keys[2];
         Buffer values[2];
@@ -143,14 +145,18 @@ Buffer ParticleSorter::sort(const GpuSimulation& simulation, std::size_t emitter
         return pass;
     };
 
-    // Keys into pair 0 (the "from 1" binding writes pair 0).
+    // Keys into pair 0 (the "from 1" binding writes pair 0), with the first
+    // pass's digit counts.
+    d.constants[2] = first_bit;
     device.dispatch(per_block(s.keys, 1U));
     device.barrier();
     for (std::uint32_t pass = 0U; pass < passes; ++pass) {
         const std::uint32_t from = pass % 2U;
-        d.constants[2] = pass * 4U;
-        device.dispatch(per_block(s.count, from));
-        device.barrier();
+        d.constants[2] = first_bit + pass * 4U;
+        if (pass > 0U) {
+            device.dispatch(per_block(s.count, from));
+            device.barrier();
+        }
         Dispatch scan = per_block(s.scan, from);
         scan.indirect = Buffer{};
         device.dispatch(scan);
