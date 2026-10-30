@@ -10,6 +10,9 @@
 // at (b[n], space1). Matrices are explicit columns, as in scene.vert.hlsl.
 
 ByteAddressBuffer particles : register(t0, space0);
+// Drawing order from the depth sort: instance i draws record order[i] when
+// the sorted flag is set (otherwise the records are bound here too).
+ByteAddressBuffer order : register(t1, space0);
 
 cbuffer ParticleView : register(b0, space1) {
     // This slice's projection. Rasterisation only.
@@ -38,6 +41,12 @@ cbuffer ParticleView : register(b0, space1) {
     // x: seconds of motion a velocity-aligned quad spans. y: 1 for additive
     // light.
     float4 sprite_extra;
+    uint age_offset;
+    uint lifetime_offset;
+    // Columns in the low 16 bits, rows in the high.
+    uint flipbook;
+    // 1 textured, 2 cross-fade flipbook cells, 4 sRGB texture, 8 sorted.
+    uint flags;
 };
 
 static const uint absent = 0xffffffffU;
@@ -49,9 +58,34 @@ static const float2 corners[6] = {
 struct Output {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
+    // This flipbook cell's texture coordinates, then the next's.
+    float4 cells : TEXCOORD1;
+    float blend : TEXCOORD2;
+    nointerpolation uint flags : TEXCOORD3;
     // Premultiplied.
     float4 color : COLOR0;
 };
+
+// The flipbook cells a particle shows: its life split evenly over the cells,
+// left to right, top to bottom. Age is simulation state, so every view and
+// node picks the same cell.
+void flipbook_cells(uint base, float2 corner, out float4 cells, out float blend) {
+    const uint columns = max(flipbook & 0xffffU, 1U);
+    const uint rows = max(flipbook >> 16U, 1U);
+    const uint frames = columns * rows;
+    const float age = age_offset != absent ? asfloat(particles.Load(base + age_offset)) : 0.0F;
+    const float lifetime = lifetime_offset != absent ? asfloat(particles.Load(base + lifetime_offset)) : 1.0F;
+    const float life = lifetime > 0.0F ? saturate(age / lifetime) : 0.0F;
+    const float at = life * (float)frames;
+    const float whole = floor(at);
+    const uint frame = min((uint)whole, frames - 1U);
+    const uint next = min(frame + 1U, frames - 1U);
+    const float2 local = float2(corner.x * 0.5F + 0.5F, 0.5F - corner.y * 0.5F);
+    const float2 scale = float2(1.0F / (float)columns, 1.0F / (float)rows);
+    cells.xy = (float2((float)(frame % columns), (float)(frame / columns)) + local) * scale;
+    cells.zw = (float2((float)(next % columns), (float)(next / columns)) + local) * scale;
+    blend = (flags & 2U) != 0U ? saturate(at - whole) : 0.0F;
+}
 
 float3 to_world_point(float3 p) {
     return world0.xyz * p.x + world1.xyz * p.y + world2.xyz * p.z + world3.xyz;
@@ -62,7 +96,8 @@ float3 to_world_direction(float3 d) {
 }
 
 Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
-    const uint base = instance * stride;
+    const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
+    const uint base = record * stride;
     const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
     float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset)) : float4(1.0F, 1.0F, 1.0F, 1.0F);
     const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
@@ -97,6 +132,8 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     Output output;
     output.position = mul(view_projection, float4(world, 1.0F));
     output.uv = corner;
+    flipbook_cells(base, corner, output.cells, output.blend);
+    output.flags = flags;
     output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
     if (sprite_extra.y > 0.5F) {
         // Light covers as much as it brightens: later stages divide colour by

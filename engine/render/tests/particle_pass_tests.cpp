@@ -90,9 +90,10 @@ std::unique_ptr<ajfx::d3d12::Device> g_reference;
 }
 
 [[nodiscard]] render::ParticleInstance make_instance(render::ParticlePass& pass, const ajfx::Effect& effect,
-                                                     core::u32 seed = 3U) {
+                                                     core::u32 seed = 3U,
+                                                     const ajfx::TextureSet& textures = ajfx::presets::textures()) {
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
-    auto instance = pass.create_instance(effect, kernels, seed);
+    auto instance = pass.create_instance(effect, kernels, textures, seed);
     if (!instance) {
         std::cout << instance.error().message << '\n';
     }
@@ -104,6 +105,12 @@ struct Frame final {
     std::vector<core::u8> pixels;
     [[nodiscard]] core::u8 red(core::u32 x, core::u32 y) const {
         return pixels[(static_cast<std::size_t>(y) * size + x) * 4U];
+    }
+    [[nodiscard]] core::u8 green(core::u32 x, core::u32 y) const {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + 1U];
+    }
+    [[nodiscard]] core::u8 blue(core::u32 x, core::u32 y) const {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + 2U];
     }
     [[nodiscard]] core::u8 alpha(core::u32 x, core::u32 y) const {
         return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + 3U];
@@ -199,6 +206,86 @@ void additive_particles_add_and_cover_as_they_brighten() {
     PASS_CHECK(frame.red(32U, 32U) >= 124U && frame.red(32U, 32U) <= 128U);
     PASS_CHECK(frame.alpha(32U, 32U) >= 108U && frame.alpha(32U, 32U) <= 112U);
     PASS_CHECK(frame.alpha(2U, 2U) == 0U);
+}
+
+// Two particles drifting along +Z: the first, born earlier, is further along
+// and blue by then; the second, just born, is red.
+[[nodiscard]] ajfx::Effect drifting_pair(bool sort) {
+    ajfx::EffectBuilder builder{"pair"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 1U, .interval = 0.3F, .cycles = 2U})
+        .init(ajfx::Lifetime{.min = 1.0F, .max = 1.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .update(ajfx::ColorOverLife{.keys = {{0.0F, ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}},
+                                             {0.25F, ajfx::Color{0.0F, 0.0F, 1.0F, 1.0F}}}})
+        .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha, .sort = sort});
+    return builder.build().value();
+}
+
+void alpha_particles_draw_back_to_front_in_the_placed_effect() {
+    // Show frame 8 is a third of a second: the first is at z = 1/3, the
+    // second at z = 1/30. The camera looks down -Z, so the first is nearer
+    // and, sorted, drawn last; birth order would draw the red one over it.
+    // Twenty steps: a budget that reaches them in one frame.
+    render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 64U});
+    render::ParticleInstance sorted = make_instance(pass, drifting_pair(true));
+    const Frame front = render_frame(pass, sorted, 8U, identity());
+    PASS_CHECK(front.blue(32U, 32U) >= 240U && front.red(32U, 32U) <= 10U);
+    render::ParticleInstance unsorted = make_instance(pass, drifting_pair(false));
+    const Frame birth = render_frame(pass, unsorted, 8U, identity());
+    PASS_CHECK(birth.red(32U, 32U) >= 200U && birth.blue(32U, 32U) <= 40U);
+    // Placed turned half way round, the effect's +Z points away from the
+    // camera: the first is now the further, and the red one is in front.
+    scene::Mat4 turned = identity();
+    turned.set(0U, 0U, -1.0F);
+    turned.set(2U, 2U, -1.0F);
+    render::ParticleInstance placed = make_instance(pass, drifting_pair(true));
+    const Frame behind = render_frame(pass, placed, 8U, turned);
+    PASS_CHECK(behind.red(32U, 32U) >= 200U && behind.blue(32U, 32U) <= 40U);
+}
+
+// Four solid 8x8 cells in a 16x16 texture: red, green, blue, white.
+[[nodiscard]] ajfx::TextureSet cells() {
+    const std::uint8_t colours[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+    std::vector<std::uint8_t> pixels;
+    for (std::uint32_t y = 0U; y < 16U; ++y) {
+        for (std::uint32_t x = 0U; x < 16U; ++x) {
+            const std::uint8_t* c = colours[(y / 8U) * 2U + x / 8U];
+            pixels.insert(pixels.end(), {c[0], c[1], c[2], 255});
+        }
+    }
+    return ajfx::TextureSet{{"cells", ajfx::make_texture(16U, 16U, pixels).value()}};
+}
+
+void flipbooks_play_their_cells_over_each_life() {
+    ajfx::EffectBuilder builder{"flipbook"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 0.8F, .max = 0.8F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .renderer(ajfx::SpriteRenderer{.texture = "cells", .flipbook_columns = 2U, .flipbook_rows = 2U});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 64U});
+    // 0.8 s over four cells; show frames 1, 7 and 12 are steps 2, 17 and 30.
+    const auto at = [&](core::u64 frame) {
+        render::ParticleInstance instance = make_instance(pass, effect, 3U, cells());
+        return render_frame(pass, instance, frame, identity());
+    };
+    const Frame red = at(1U);
+    PASS_CHECK(red.red(32U, 32U) >= 250U && red.green(32U, 32U) <= 5U && red.alpha(32U, 32U) >= 250U);
+    const Frame green = at(7U);
+    PASS_CHECK(green.green(32U, 32U) >= 250U && green.red(32U, 32U) <= 5U);
+    const Frame blue = at(12U);
+    PASS_CHECK(blue.blue(32U, 32U) >= 250U && blue.green(32U, 32U) <= 5U);
+
+    // A texture the effect names but was not given is refused, by name.
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    auto missing = pass.create_instance(effect, kernels, ajfx::TextureSet{}, 3U);
+    PASS_CHECK(!missing && missing.error().code == render::ParticleErrorCode::InvalidEffect &&
+               missing.error().message.find("texture 'cells'") != std::string::npos);
 }
 
 [[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
@@ -298,6 +385,9 @@ int main() {
         {"a_particle_draws_where_the_camera_sees_it", a_particle_draws_where_the_camera_sees_it},
         {"the_scene_depth_hides_particles_behind_it", the_scene_depth_hides_particles_behind_it},
         {"additive_particles_add_and_cover_as_they_brighten", additive_particles_add_and_cover_as_they_brighten},
+        {"alpha_particles_draw_back_to_front_in_the_placed_effect",
+         alpha_particles_draw_back_to_front_in_the_placed_effect},
+        {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

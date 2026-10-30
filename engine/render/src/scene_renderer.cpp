@@ -3718,7 +3718,8 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
                 continue;
             }
             instanced = true;
-            auto created = particle_pass_->create_instance(slot.package->effect, slot.package->kernels, seed);
+            auto created = particle_pass_->create_instance(slot.package->effect, slot.package->kernels,
+                                                           slot.package->textures, seed);
             if (!created) {
                 slot.error = std::move(created).error().message;
                 refuse(stats_.particles_failed, slot.error);

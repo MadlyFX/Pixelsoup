@@ -10,6 +10,8 @@
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/gpu/simulation.hpp>
+#include <ajfx/gpu/sort.hpp>
+#include <ajfx/texture.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <memory>
@@ -26,11 +28,17 @@
 // camera's own axes, so every node draws the same particles and only the
 // slice projection differs.
 //
-// Bounded frame work: an instance's buffers and its checkpoint ring are made
-// when it is created, never while recording. Advancing takes at most a step
-// budget per frame; a seek further than that from the nearest checkpoint
-// leaves the instance behind, reported by `advance` and refused by `draw`, so
-// a late node holds rather than drawing particles from the wrong moment.
+// Bounded frame work: an instance's buffers, sort scratch, textures and
+// checkpoint ring are made when it is created, never while recording.
+// Advancing takes at most a step budget per frame, and stages the instance's
+// textures within each recording's upload space; until both are done the
+// instance is behind, reported by `advance` and refused by `draw`, so a late
+// node holds rather than drawing particles from the wrong moment or with a
+// texture half uploaded.
+//
+// Alpha-blended emitters draw back to front: each draw sorts them along the
+// camera's forward axis (ajfx::gpu::ParticleSorter), which every node shares,
+// so slices agree on the order as they do on the particles.
 namespace mediaserver::render {
 
 enum class ParticleErrorCode : core::u8 {
@@ -71,7 +79,8 @@ public:
     // The step the simulation holds, and the one the last advance asked for.
     [[nodiscard]] core::u64 step() const noexcept;
     [[nodiscard]] core::u64 target_step() const noexcept;
-    [[nodiscard]] bool caught_up() const noexcept { return step() == target_step(); }
+    // At its target step with every texture uploaded: ready to draw.
+    [[nodiscard]] bool caught_up() const noexcept;
     // The simulation itself, for tools and tests. Reading it back submits
     // work of its own, so never on a frame path.
     [[nodiscard]] ajfx::gpu::GpuSimulation& simulation() noexcept;
@@ -108,12 +117,15 @@ public:
     ParticlePass& operator=(ParticlePass&&) noexcept;
     ~ParticlePass();
 
-    // An instance of `effect` running `kernels` (from its package), with the
-    // seed that makes it differ from other placements of the same effect.
-    // Allocates its buffers and checkpoints: call it when an effect is
-    // adopted, not while recording a frame.
+    // An instance of `effect` running `kernels` and drawing with `textures`
+    // (both from its package), with the seed that makes it differ from other
+    // placements of the same effect. Allocates its buffers, sort scratch,
+    // textures and checkpoints: call it when an effect is adopted, not while
+    // recording a frame. Fails with InvalidEffect, naming the emitter, when a
+    // texture the effect uses is missing.
     [[nodiscard]] core::Result<ParticleInstance, ParticleError> create_instance(const ajfx::Effect& effect,
                                                                                const ajfx::gpu::KernelSet& kernels,
+                                                                               const ajfx::TextureSet& textures,
                                                                                core::u32 seed);
 
     // Records simulating `instance` to the step for `show_frame` at
@@ -125,10 +137,11 @@ public:
                                const ajfx::ParameterProvider* parameters = nullptr);
 
     // Records drawing `instance` placed by `object_to_world`, seen through
-    // `view` (its view matrix gives the camera axes; its view-projection
-    // rasterises). Refused when the instance has not caught up with its
-    // target step.
-    [[nodiscard]] bool draw(rhi::CommandList& commands, const ParticleInstance& instance,
+    // `view` (its view matrix gives the camera axes and the sort axis; its
+    // view-projection rasterises). Refused when the instance has not caught
+    // up. Sorting reuses the instance's scratch, so draws of one instance
+    // record one after another.
+    [[nodiscard]] bool draw(rhi::CommandList& commands, ParticleInstance& instance,
                             const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
                             const ParticleTargets& targets);
 

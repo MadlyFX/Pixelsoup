@@ -1031,7 +1031,7 @@ private:
     std::string particles_unsupported_;
     std::unique_ptr<ParticlePackageCache> particle_packages_;
     std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
-    std::vector<std::pair<const ParticleInstance*, scene::Mat4>> particle_draws_;
+    std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
     std::optional<TemporalResolve> temporal_occlusion_;
     ShadowAtlasLimits shadow_atlas_limits_{};
     ShadowAtlasPlan shadow_atlas_plan_{};

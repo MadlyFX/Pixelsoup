@@ -4,6 +4,7 @@
 
 #include <ajfx/effect.hpp>
 #include <ajfx/gpu/kernels.hpp>
+#include <ajfx/texture.hpp>
 
 #include <condition_variable>
 #include <cstddef>
@@ -27,6 +28,8 @@ namespace mediaserver::render {
 struct ParticlePackage final {
     ajfx::Effect effect;
     ajfx::gpu::KernelSet kernels;
+    // Every texture the effect's emitters name, checked.
+    ajfx::TextureSet textures;
     // FNV-1a of the file's bytes: a different package at the same path is a
     // different effect, and the renderer rebuilds its instances.
     core::u64 identity{};

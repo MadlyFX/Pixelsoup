@@ -5,6 +5,7 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/package.hpp>
+#include <ajfx/texture.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -85,6 +86,44 @@ std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& com
     SCENE_CHECK(kernels);
     const ajfx::Result<std::vector<std::uint8_t>> package =
         ajfx::write_package(effect, ajfx::gpu::kernel_package_entries(effect, kernels.value()));
+    SCENE_CHECK(package);
+    const std::filesystem::path path = g_directory / name;
+    std::ofstream out{path, std::ios::binary};
+    out.write(reinterpret_cast<const char*>(package.value().data()),
+              static_cast<std::streamsize>(package.value().size()));
+    SCENE_CHECK(out.good());
+    return path.string();
+}
+
+// Three hundred puffs in a ball, each showing the "cells" flipbook cell its
+// life has reached, sorted back to front. `textured` false leaves the texture
+// out of the package.
+std::string write_crowd(const std::string& name, ajfx::gpu::ShaderCompiler& compiler, bool textured = true) {
+    const std::uint8_t colours[4][4] = {{255, 0, 0, 255}, {0, 255, 0, 160}, {0, 0, 255, 255}, {255, 255, 255, 96}};
+    std::vector<std::uint8_t> pixels;
+    for (std::uint32_t y = 0U; y < 16U; ++y) {
+        for (std::uint32_t x = 0U; x < 16U; ++x) {
+            const std::uint8_t* c = colours[(y / 8U) * 2U + x / 8U];
+            pixels.insert(pixels.end(), {c[0], c[1], c[2], c[3]});
+        }
+    }
+    ajfx::EffectBuilder builder{"crowd"};
+    builder.emitter("puffs")
+        .capacity(300U)
+        .spawn(ajfx::SpawnBurst{.count = 300U})
+        .init(ajfx::Lifetime{.min = 0.5F, .max = 3.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius = 1.2F})
+        .init(ajfx::InitSize{.min = 0.2F, .max = 0.5F})
+        .renderer(ajfx::SpriteRenderer{.texture = "cells", .flipbook_columns = 2U, .flipbook_rows = 2U,
+                                       .flipbook_blend = true});
+    const ajfx::Effect effect = builder.build().value();
+    const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
+    SCENE_CHECK(kernels);
+    std::vector<ajfx::PackageEntry> extra = ajfx::gpu::kernel_package_entries(effect, kernels.value());
+    if (textured) {
+        extra.push_back({"textures/cells", ajfx::write_texture(ajfx::make_texture(16U, 16U, pixels).value())});
+    }
+    const ajfx::Result<std::vector<std::uint8_t>> package = ajfx::write_package(effect, std::move(extra));
     SCENE_CHECK(package);
     const std::filesystem::path path = g_directory / name;
     std::ofstream out{path, std::ios::binary};
@@ -184,6 +223,39 @@ void effects_draw_alike_on_the_full_canvas_and_its_slices(ajfx::gpu::ShaderCompi
     rhi::CommandList commands = acquire();
     SCENE_CHECK(full.value().render(commands, frame, {0U, 0U, 128U, 64U}));
     SCENE_CHECK(download(std::move(commands), full.value().target()) == image);
+    g_device->wait_idle();
+}
+
+void sorted_textured_effects_draw_alike_on_slices(ajfx::gpu::ShaderCompiler& compiler) {
+    // The sort axis and flipbook cells come from the camera and particle
+    // state every node shares, so slices are pieces of the full canvas.
+    const scene::Scene frame = scene_with(write_crowd("crowd.ajfx", compiler));
+    auto full = render::SceneRenderer::create(*g_device, 128U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    auto left = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    auto right = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(full && left && right);
+    const std::vector<core::u8> image = settle(full.value(), frame, {0U, 0U, 128U, 64U});
+    SCENE_CHECK(full.value().stats().particles_drawn == 1U && full.value().stats().particle_issue.empty());
+    SCENE_CHECK(lit(image, 128U, 63U, 32U) && lit(image, 128U, 64U, 32U));
+    const std::vector<core::u8> a = settle(left.value(), frame, {0U, 0U, 64U, 64U});
+    const std::vector<core::u8> b = settle(right.value(), frame, {64U, 0U, 64U, 64U});
+    for (core::u32 y = 0U; y < 64U; ++y) {
+        const auto row = image.begin() + static_cast<std::ptrdiff_t>(y) * 128 * stride;
+        const auto half = static_cast<std::ptrdiff_t>(64U * stride);
+        SCENE_CHECK(std::equal(a.begin() + y * half, a.begin() + (y + 1U) * half, row));
+        SCENE_CHECK(std::equal(b.begin() + y * half, b.begin() + (y + 1U) * half, row + half));
+    }
+
+    // A package missing the texture its effect names fails, saying which.
+    const scene::Scene bare = scene_with(write_crowd("bare.ajfx", compiler, false));
+    for (int attempt = 0; attempt < 500 && full.value().stats().particles_failed == 0U; ++attempt) {
+        rhi::CommandList commands = acquire();
+        static_cast<void>(full.value().render(commands, bare, {0U, 0U, 128U, 64U}));
+        static_cast<void>(download(std::move(commands), full.value().target()));
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    SCENE_CHECK(full.value().stats().particles_failed == 1U && full.value().stats().particles_drawn == 0U);
+    SCENE_CHECK(full.value().stats().particle_issue.find("texture 'cells'") != std::string::npos);
     g_device->wait_idle();
 }
 
@@ -366,6 +438,7 @@ int main() {
     };
     const Case cases[] = {
         {"effects_draw_alike_on_the_full_canvas_and_its_slices", effects_draw_alike_on_the_full_canvas_and_its_slices},
+        {"sorted_textured_effects_draw_alike_on_slices", sorted_textured_effects_draw_alike_on_slices},
         {"unstarted_missing_and_unsupported_effects", unstarted_missing_and_unsupported_effects},
         {"a_reexported_package_is_adopted_at_the_next_asset_generation",
          a_reexported_package_is_adopted_at_the_next_asset_generation},
