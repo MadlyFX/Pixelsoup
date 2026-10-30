@@ -5,6 +5,7 @@
 #include <ajfx/presets.hpp>
 
 #include <array>
+#include <cmath>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -586,6 +587,50 @@ void mesh_particles_draw_solid_meshes() {
     PASS_CHECK(hidden.red(32U, 32U) >= 254U && hidden.green(32U, 32U) == 0U);
 }
 
+void tumbling_meshes_turn_by_their_orientation() {
+    // A red unit cube tumbling about a random axis, as debris does.
+    ajfx::EffectBuilder builder{"tumbling"};
+    builder.emitter("box")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .init(ajfx::InitTumble{.speed_min = 200.0F, .speed_max = 200.0F})
+        .update(ajfx::RigidBody{.angular_drag = 0.0F})
+        .renderer(ajfx::SpriteRenderer{.geometry = ajfx::Geometry::Mesh, .mesh = "cube"});
+    const ajfx::Effect effect = builder.build().value();
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    render::ParticlePass pass = make_pass();
+    std::vector<std::size_t> areas;
+    // Two placements, two orientations.
+    for (const core::u32 seed : {3U, 4U}) {
+        auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{},
+                                            ajfx::MeshSet{{"cube", ajfx::cube_mesh()}}, seed);
+        PASS_CHECK(created);
+        render::ParticleInstance instance = std::move(created).value();
+        const Frame frame = render_with_depth(pass, instance);
+        // Seen along Z, a unit cube covers |x.z| + |y.z| + |z.z| square
+        // units, where x, y and z are its turned axes: 256 pixels each.
+        const ajfx::Quat q = instance.simulation().read_emitter(0U).value().orientation[0];
+        const float xz = 2.0F * (q.x * q.z - q.w * q.y);
+        const float yz = 2.0F * (q.y * q.z + q.w * q.x);
+        const float zz = 1.0F - 2.0F * (q.x * q.x + q.y * q.y);
+        const float expected = 256.0F * (std::fabs(xz) + std::fabs(yz) + std::fabs(zz));
+        std::size_t lit = 0U;
+        for (core::u32 y = 0U; y < size; ++y) {
+            for (core::u32 x = 0U; x < size; ++x) {
+                lit += frame.alpha(x, y) != 0U ? 1U : 0U;
+            }
+        }
+        std::cout << "  seed " << seed << ": " << lit << " pixels, expected " << expected << '\n';
+        PASS_CHECK(std::fabs(static_cast<float>(lit) - expected) < 0.05F * expected);
+        PASS_CHECK(frame.red(32U, 32U) >= 80U);
+        areas.push_back(lit);
+    }
+    PASS_CHECK(areas[0] != areas[1]);
+}
+
 void particle_lights_are_written_for_the_lit_pass() {
     // Ten particles flung out with four lights: particles 0, 2, 5 and 7 (k *
     // 10 / 4). A second emitter with one particle and three lights fills two
@@ -784,6 +829,7 @@ int main() {
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"distance_fields_reach_the_simulation", distance_fields_reach_the_simulation},
         {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},
+        {"tumbling_meshes_turn_by_their_orientation", tumbling_meshes_turn_by_their_orientation},
         {"particle_lights_are_written_for_the_lit_pass", particle_lights_are_written_for_the_lit_pass},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},

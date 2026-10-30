@@ -406,6 +406,8 @@ Result<EmitterState> GpuSimulation::read_emitter(std::size_t emitter) {
         out.size.push_back(field(l.size, 0.1F));
         out.base_size.push_back(l.base_size >= 0 ? field(l.base_size, 0.0F) : out.size.back());
         out.rotation.push_back(field(l.rotation, 0.0F));
+        out.orientation.push_back(field(l.orientation, Quat{}));
+        out.angular_velocity.push_back(field(l.angular_velocity, Vec3{}));
     }
     out.spawned = e.spawned;
     out.refused = words[2];

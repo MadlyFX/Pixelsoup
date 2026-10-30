@@ -82,6 +82,8 @@ void compact(EmitterState& s, Dead dead) {
             s.base_size[kept] = s.base_size[i];
             s.size[kept] = s.size[i];
             s.rotation[kept] = s.rotation[i];
+            s.orientation[kept] = s.orientation[i];
+            s.angular_velocity[kept] = s.angular_velocity[i];
             s.spawn_index[kept] = s.spawn_index[i];
         }
         ++kept;
@@ -95,8 +97,16 @@ void compact(EmitterState& s, Dead dead) {
     s.base_size.resize(kept);
     s.size.resize(kept);
     s.rotation.resize(kept);
+    s.orientation.resize(kept);
+    s.angular_velocity.resize(kept);
     s.spawn_index.resize(kept);
 }
+
+// How colliders meet an emitter's particles when it has a RigidBody.
+struct RigidContact final {
+    float contact_scale;
+    float rest_speed;
+};
 
 // Per-step context shared by the module implementations.
 struct Step final {
@@ -109,6 +119,7 @@ struct Step final {
     std::size_t first;
     std::size_t last;
     const FieldSet* fields{nullptr};
+    std::optional<RigidContact> rigid{};
 };
 
 // ------------------------------------------------------------ init modules
@@ -223,12 +234,28 @@ void apply(const InitRotation& m, Step& step) {
     }
 }
 
-// ------------------------------------------------------------ forces
-
-constexpr bool is_force(const UpdateModule& module) {
-    return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
-           !std::holds_alternative<SizeOverLife>(module);
+void apply(const InitTumble& m, Step& step) {
+    const float lo = step.in(m.speed_min);
+    const float hi = step.in(m.speed_max);
+    constexpr float radians = std::numbers::pi_v<float> / 180.0F;
+    constexpr float two_pi = 2.0F * std::numbers::pi_v<float>;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::uint32_t index = step.s.spawn_index[i];
+        const auto u = [&](std::uint32_t draw) { return step.random(index, m.id, draw); };
+        if (m.random_orientation) {
+            // Shoemake's uniform rotation from three draws.
+            const float u1 = u(0U);
+            const float a = std::sqrt(1.0F - u1);
+            const float b = std::sqrt(u1);
+            const float t2 = two_pi * u(1U);
+            const float t3 = two_pi * u(2U);
+            step.s.orientation[i] = Quat{a * std::sin(t2), a * std::cos(t2), b * std::sin(t3), b * std::cos(t3)};
+        }
+        step.s.angular_velocity[i] = unit_sphere(u(3U), u(4U)) * (mix(lo, hi, u(5U)) * radians);
+    }
 }
+
+// ------------------------------------------------------------ forces
 
 void apply(const Gravity& m, Step& step) {
     const Vec3 dv = step.in(m.acceleration) * step.dt;
@@ -284,9 +311,49 @@ void apply(const Attractor& m, Step& step) {
 
 // ------------------------------------------------------------ constraints and appearance
 
+// Solid-ball impulse factors for a contact that grips fully: 2/7 of the slip
+// comes off the centre's velocity, and 5/7 of it, over the radius, turns the
+// ball. Written as decimals so the shaders parse the same floats.
+constexpr float slip_to_velocity = 0.2857142857F;
+constexpr float slip_to_spin = 0.7142857143F;
+
+// A rigid particle meets a collider as a solid ball (see RigidBody).
+void respond_rigid(Step& step, std::size_t i, float distance, Vec3 n, float restitution, float slide, bool kill) {
+    EmitterState& s = step.s;
+    const float radius = s.size[i] * step.rigid->contact_scale;
+    const float gap = distance - radius;
+    if (gap >= 0.0F) {
+        return;
+    }
+    if (kill) {
+        s.age[i] = std::numeric_limits<float>::infinity();
+        return;
+    }
+    s.position[i] -= n * gap;
+    const float into = dot(s.velocity[i], n);
+    if (!(into < 0.0F)) {
+        return;
+    }
+    const float bounce = -into < step.rigid->rest_speed ? 0.0F : restitution;
+    s.velocity[i] -= n * (into * (1.0F + bounce));
+    // How fast the ball's surface slips where it touches.
+    const Vec3 arm = n * -radius;
+    const Vec3 contact = s.velocity[i] + cross(s.angular_velocity[i], arm);
+    const Vec3 slip = contact - n * dot(contact, n);
+    const float grip = 1.0F - slide;
+    s.velocity[i] -= slip * (grip * slip_to_velocity);
+    if (radius > 1.0e-6F) {
+        s.angular_velocity[i] -= cross(arm, slip) * (grip * slip_to_spin / (radius * radius));
+    }
+}
+
 // Every collider's response, given particle i's signed distance (negative
 // where it is not allowed to be) and the unit direction back to where it is.
 void respond(Step& step, std::size_t i, float distance, Vec3 n, float restitution, float slide, bool kill) {
+    if (step.rigid) {
+        respond_rigid(step, i, distance, n, restitution, slide, kill);
+        return;
+    }
     if (distance >= 0.0F) {
         return;
     }
@@ -363,26 +430,47 @@ void apply(const BoxCollision& m, Step& step) {
         const Vec3 q{std::fabs(d.x) - h.x, std::fabs(d.y) - h.y, std::fabs(d.z) - h.z};
         const Vec3 over{std::max(q.x, 0.0F), std::max(q.y, 0.0F), std::max(q.z, 0.0F)};
         const float outside = std::sqrt(dot(over, over));
-        if (m.inside) {
-            // Back to the nearest point on the box.
-            if (outside > 0.0F) {
-                const Vec3 n{-sign.x * over.x / outside, -sign.y * over.y / outside, -sign.z * over.z / outside};
-                respond(step, i, -outside, n, restitution, slide, m.kill);
-            }
-        } else if (outside == 0.0F) {
-            // Out through the nearest face.
-            Vec3 n{sign.x, 0.0F, 0.0F};
-            float depth = q.x;
-            if (q.y > depth) {
+        // The signed distance from the box and the way out of it: from
+        // outside, from the nearest point on the box; from inside, through
+        // the nearest face.
+        Vec3 n{};
+        float distance = outside;
+        if (outside > 0.0F) {
+            n = Vec3{sign.x * over.x / outside, sign.y * over.y / outside, sign.z * over.z / outside};
+        } else {
+            n = Vec3{sign.x, 0.0F, 0.0F};
+            distance = q.x;
+            if (q.y > distance) {
                 n = Vec3{0.0F, sign.y, 0.0F};
-                depth = q.y;
+                distance = q.y;
             }
-            if (q.z > depth) {
+            if (q.z > distance) {
                 n = Vec3{0.0F, 0.0F, sign.z};
-                depth = q.z;
+                distance = q.z;
             }
-            respond(step, i, depth, n, restitution, slide, m.kill);
         }
+        if (m.inside) {
+            respond(step, i, -distance, n * -1.0F, restitution, slide, m.kill);
+        } else {
+            respond(step, i, distance, n, restitution, slide, m.kill);
+        }
+    }
+}
+
+void apply(const RigidBody& m, Step& step) {
+    const float keep = 1.0F / (1.0F + step.in(m.angular_drag) * step.dt);
+    const float half = 0.5F * step.dt;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const Vec3 w = step.s.angular_velocity[i] * keep;
+        step.s.angular_velocity[i] = w;
+        // q += dt/2 (w, 0) q, then back to unit length.
+        const Quat q = step.s.orientation[i];
+        const float x = q.x + half * (w.x * q.w + w.y * q.z - w.z * q.y);
+        const float y = q.y + half * (w.y * q.w + w.z * q.x - w.x * q.z);
+        const float z = q.z + half * (w.z * q.w + w.x * q.y - w.y * q.x);
+        const float qw = q.w - half * (w.x * q.x + w.y * q.y + w.z * q.z);
+        const float inverse = 1.0F / std::sqrt(x * x + y * y + z * z + qw * qw);
+        step.s.orientation[i] = Quat{x * inverse, y * inverse, z * inverse, qw * inverse};
     }
 }
 
@@ -412,6 +500,8 @@ void append(EmitterState& s, float age) {
     s.base_size.push_back(default_size);
     s.size.push_back(default_size);
     s.rotation.push_back(0.0F);
+    s.orientation.push_back({});
+    s.angular_velocity.push_back({});
     s.spawn_index.push_back(static_cast<std::uint32_t>(s.spawned));
 }
 
@@ -471,6 +561,11 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
               0U,
               0U,
               &fields_};
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* rigid = std::get_if<RigidBody>(&module)) {
+            step.rigid = RigidContact{rigid->contact_scale, step.in(rigid->rest_speed)};
+        }
+    }
 
     // Age, and retire particles whose life is over.
     for (float& age : s.age) {

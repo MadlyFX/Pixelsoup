@@ -61,6 +61,8 @@ enum class Attribute : std::uint32_t {
     Color = 1U << 4U,
     Size = 1U << 5U,
     Rotation = 1U << 6U,
+    Orientation = 1U << 7U,
+    AngularVelocity = 1U << 8U,
 };
 
 [[nodiscard]] std::uint32_t required_attributes(const Emitter& emitter);

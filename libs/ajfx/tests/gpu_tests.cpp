@@ -70,6 +70,11 @@ bool close(Vec3 a, Vec3 b, float tolerance) {
     return close(a.x, b.x, tolerance) && close(a.y, b.y, tolerance) && close(a.z, b.z, tolerance);
 }
 
+bool close(Quat a, Quat b, float tolerance) {
+    return close(a.x, b.x, tolerance) && close(a.y, b.y, tolerance) && close(a.z, b.z, tolerance) &&
+           close(a.w, b.w, tolerance);
+}
+
 bool close(Color a, Color b, float tolerance) {
     return close(a.r, b.r, tolerance) && close(a.g, b.g, tolerance) && close(a.b, b.b, tolerance) &&
            close(a.a, b.a, tolerance);
@@ -91,7 +96,9 @@ float compare(const EmitterState& cpu, const EmitterState& gpu, float tolerance)
         within += close(cpu.position[i], gpu.position[i], tolerance) &&
                           close(cpu.velocity[i], gpu.velocity[i], tolerance) &&
                           close(cpu.color[i], gpu.color[i], tolerance) && close(cpu.size[i], gpu.size[i], tolerance) &&
-                          close(cpu.rotation[i], gpu.rotation[i], tolerance)
+                          close(cpu.rotation[i], gpu.rotation[i], tolerance) &&
+                          close(cpu.orientation[i], gpu.orientation[i], tolerance) &&
+                          close(cpu.angular_velocity[i], gpu.angular_velocity[i], tolerance)
                       ? 1U
                       : 0U;
     }
@@ -226,6 +233,40 @@ void distance_fields_collide_as_the_reference_does() {
     const Result<gpu::GpuSimulation> missing =
         gpu::GpuSimulation::create(*g_device, effect, kernels, 2U, FieldSet{{"ball", fields.at("ball")}});
     AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingField);
+}
+
+void rigid_bodies_match_the_reference() {
+    // Tumbling chips thrown up inside a box, onto its floor and a ball.
+    EffectBuilder builder{"debris"};
+    builder.emitter("chips")
+        .capacity(700U)
+        .seed(11U)
+        .spawn(SpawnRate{.rate = 150.0F})
+        .init(Lifetime{.min = 3.0F, .max = 4.0F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius = 0.2F})
+        .init(Velocity{.speed_min = 2.0F, .speed_max = 4.0F, .spread = 70.0F})
+        .init(InitSize{.min = 0.05F, .max = 0.2F})
+        .init(InitTumble{.speed_min = 90.0F, .speed_max = 720.0F})
+        .update(Gravity{})
+        .update(RigidBody{.angular_drag = 1.0F})
+        .update(PlaneCollision{.restitution = 0.5F, .friction = 0.7F})
+        .update(BoxCollision{.half_size = Vec3{1.5F, 3.0F, 1.5F}, .inside = true, .restitution = 0.5F,
+                             .friction = 0.3F})
+        .update(SphereCollision{.center = Vec3{0.8F, 0.0F, 0.0F}, .radius = 0.5F, .restitution = 0.6F,
+                                .friction = 0.5F});
+    const Effect effect = builder.build().value();
+    Simulation cpu = make_cpu(effect, 4U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 4U);
+    for (const std::uint64_t tick : {1U, 30U, 90U, 180U}) {
+        cpu.advance_to(tick);
+        gpu.advance_to(tick);
+        const float within = compare(cpu.emitter(0), read(gpu), 1.0e-3F);
+        std::cout << "  tick " << tick << ": " << cpu.emitter(0).alive() << " chips, " << within * 100.0F
+                  << "% within tolerance\n";
+        // Alike until chips pile on the floor, where a last-bit difference
+        // can put a contact on either side of the rest speed.
+        AJFX_CHECK(within >= (tick <= 30U ? 1.0F : 0.98F));
+    }
 }
 
 void reruns_are_bit_identical() {
@@ -433,6 +474,7 @@ int main() {
     const ajfx::test::Case cases[] = {
         {"gpu_matches_the_cpu_reference", gpu_matches_the_cpu_reference},
         {"distance_fields_collide_as_the_reference_does", distance_fields_collide_as_the_reference_does},
+        {"rigid_bodies_match_the_reference", rigid_bodies_match_the_reference},
         {"presets_match_the_reference_within_tolerance", presets_match_the_reference_within_tolerance},
         {"reruns_are_bit_identical", reruns_are_bit_identical},
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},

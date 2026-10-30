@@ -282,6 +282,152 @@ void distance_fields_hold_particles_out_or_in() {
     }
 }
 
+// Forty chips, 0.1 to 0.3 units across, thrown up and tumbling onto a
+// floor that bounces and grips them.
+Simulation debris(float rest_speed) {
+    EffectBuilder builder{"debris"};
+    builder.emitter("e")
+        .capacity(64U)
+        .spawn(SpawnBurst{.count = 40U})
+        .init(Lifetime{.min = 20.0F, .max = 20.0F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius = 0.3F})
+        .init(Velocity{.speed_min = 2.0F, .speed_max = 5.0F, .spread = 60.0F})
+        .init(InitSize{.min = 0.1F, .max = 0.3F})
+        .init(InitTumble{.speed_min = 90.0F, .speed_max = 720.0F})
+        .update(Gravity{})
+        .update(RigidBody{.angular_drag = 5.0F, .rest_speed = rest_speed})
+        .update(PlaneCollision{.restitution = 0.4F, .friction = 0.8F});
+    return make(builder.build().value());
+}
+
+float length(Vec3 v) {
+    return std::sqrt(dot(v, v));
+}
+
+void debris_settles_on_the_floor() {
+    Simulation settled = debris(0.2F);
+    settled.advance_to(600U);
+    const EmitterState rest = settled.emitter(0);
+    AJFX_CHECK(rest.alive() == 40U);
+    for (std::size_t i = 0U; i < rest.alive(); ++i) {
+        // Resting on the floor as a ball half its size across: on it, not
+        // in it, and not bouncing.
+        AJFX_CHECK(rest.position[i].y == rest.size[i] * 0.5F);
+        AJFX_CHECK(rest.velocity[i].y == 0.0F);
+        // Its roll has died away.
+        AJFX_CHECK(length(rest.velocity[i]) < 1.0e-3F && length(rest.angular_velocity[i]) < 1.0e-2F);
+        const Quat q = rest.orientation[i];
+        AJFX_CHECK(near(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, 1.0F, 1.0e-5F));
+    }
+    // A step on, nothing has risen or sunk.
+    settled.step();
+    for (std::size_t i = 0U; i < rest.alive(); ++i) {
+        AJFX_CHECK(settled.emitter(0).position[i].y == rest.position[i].y);
+    }
+    // With no rest speed every contact bounces a little, for ever: each step
+    // ends with the chips rising.
+    Simulation buzzing = debris(0.0F);
+    buzzing.advance_to(600U);
+    for (const Vec3& v : buzzing.emitter(0).velocity) {
+        AJFX_CHECK(v.y > 0.0F);
+    }
+}
+
+// One ball 0.2 across on the floor, sliding along X at `speed` or dropped
+// spinning, under a floor that grips fully.
+Simulation ball(float speed, float spin) {
+    EffectBuilder builder{"ball"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, 0.1F, 0.0F}})
+        .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}, .speed_min = speed, .speed_max = speed})
+        .init(InitSize{.min = 0.2F, .max = 0.2F})
+        .init(InitTumble{.speed_min = spin, .speed_max = spin, .random_orientation = false})
+        .update(Gravity{})
+        .update(RigidBody{.angular_drag = 0.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    return make(builder.build().value());
+}
+
+// How fast the ball's surface moves where it touches the floor.
+Vec3 contact_velocity(const EmitterState& s) {
+    return s.velocity[0] + cross(s.angular_velocity[0], Vec3{0.0F, -s.size[0] * 0.5F, 0.0F});
+}
+
+void friction_turns_sliding_into_rolling() {
+    // Born at step 0, it first meets the floor in step 1. A solid ball
+    // gripped fully keeps 5/7 of its speed and rolls: its surface stops
+    // where it touches, so it spins at speed / radius about -Z.
+    Simulation sliding = ball(2.0F, 0.0F);
+    sliding.advance_to(2U);
+    const EmitterState& s = sliding.emitter(0);
+    AJFX_CHECK(near(s.velocity[0].x, 2.0F * 5.0F / 7.0F, 1.0e-5F));
+    AJFX_CHECK(near(s.angular_velocity[0].z, -2.0F * 5.0F / 7.0F / 0.1F, 1.0e-4F));
+    AJFX_CHECK(length(contact_velocity(s)) < 1.0e-5F);
+    // It turns that way, a step's worth at a time.
+    sliding.advance_to(3U);
+    const Quat q = sliding.emitter(0).orientation[0];
+    AJFX_CHECK(q.x == 0.0F && q.y == 0.0F && q.z < 0.0F);
+    const float turned = 2.0F * std::atan2(-q.z, q.w);
+    AJFX_CHECK(near(turned, 2.0F * 5.0F / 7.0F / 0.1F / 60.0F, 0.003F));
+    // Rolling, nothing slips, so nothing slows it.
+    sliding.advance_to(60U);
+    AJFX_CHECK(near(sliding.emitter(0).velocity[0].x, 2.0F * 5.0F / 7.0F, 1.0e-4F));
+
+    // Dropped spinning, the grip throws it along: it leaves rolling too.
+    Simulation spun = ball(0.0F, 720.0F);
+    spun.advance_to(2U);
+    const EmitterState& t = spun.emitter(0);
+    const Vec3 along{t.velocity[0].x, 0.0F, t.velocity[0].z};
+    AJFX_CHECK(length(along) > 0.1F);
+    AJFX_CHECK(length(contact_velocity(t)) < 1.0e-4F);
+}
+
+void tumbles_start_uniformly() {
+    const auto tumbling = [](bool random_orientation) {
+        EffectBuilder builder{"tumble"};
+        builder.emitter("e")
+            .capacity(4096U)
+            .spawn(SpawnBurst{.count = 4000U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(InitTumble{.speed_min = 90.0F, .speed_max = 180.0F, .random_orientation = random_orientation})
+            .update(RigidBody{});
+        Simulation simulation = make(builder.build().value());
+        simulation.advance_to(1U);
+        return simulation;
+    };
+    const Simulation random = tumbling(true);
+    const EmitterState& s = random.emitter(0);
+    AJFX_CHECK(s.alive() == 4000U);
+    double mean[4]{};
+    double square[4]{};
+    Vec3 axes{};
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Quat q = s.orientation[i];
+        AJFX_CHECK(near(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, 1.0F, 1.0e-5F));
+        const float c[4] = {q.x, q.y, q.z, q.w};
+        for (int k = 0; k < 4; ++k) {
+            mean[k] += c[k] / 4000.0;
+            square[k] += c[k] * c[k] / 4000.0;
+        }
+        // A quarter to a half turn a second, about any axis.
+        const float speed = length(s.angular_velocity[i]);
+        AJFX_CHECK(speed >= 1.5707F && speed <= 3.1416F);
+        axes += s.angular_velocity[i] * (1.0F / speed / 4000.0F);
+    }
+    // A uniform rotation's components average zero, and each squared a
+    // quarter.
+    for (int k = 0; k < 4; ++k) {
+        AJFX_CHECK(std::fabs(mean[k]) < 0.03 && std::fabs(square[k] - 0.25) < 0.02);
+    }
+    AJFX_CHECK(length(axes) < 0.05F);
+    // Without a random orientation, all start unturned.
+    for (const Quat& q : tumbling(false).emitter(0).orientation) {
+        AJFX_CHECK(q == Quat{});
+    }
+}
+
 void parameters_are_clamped_to_their_range() {
     EffectBuilder builder{"clamp"};
     builder.float_parameter("rate", 10.0F, 0.0F, 120.0F);
@@ -376,6 +522,9 @@ int main() {
         {"plane_collision_holds_or_kills", plane_collision_holds_or_kills},
         {"spheres_and_boxes_hold_particles_in_or_out", spheres_and_boxes_hold_particles_in_or_out},
         {"distance_fields_hold_particles_out_or_in", distance_fields_hold_particles_out_or_in},
+        {"debris_settles_on_the_floor", debris_settles_on_the_floor},
+        {"friction_turns_sliding_into_rolling", friction_turns_sliding_into_rolling},
+        {"tumbles_start_uniformly", tumbles_start_uniformly},
         {"parameters_are_clamped_to_their_range", parameters_are_clamped_to_their_range},
         {"colour_and_size_follow_normalized_age", colour_and_size_follow_normalized_age},
         {"velocity_cone_respects_its_spread", velocity_cone_respects_its_spread},

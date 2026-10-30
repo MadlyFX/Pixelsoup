@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <span>
@@ -34,7 +35,7 @@ struct ViewConstants final {
     core::u32 rotation_offset{absent};
     core::u32 facing_velocity{};
     core::u32 premultiplied{};
-    std::array<float, 4U> extra{}; // x: stretch, y: 1 for additive light
+    std::array<float, 4U> extra{}; // x: stretch, y: 1 for additive light, z: orientation offset bits
     core::u32 age_offset{absent};
     core::u32 lifetime_offset{absent};
     core::u32 flipbook{};
@@ -578,7 +579,8 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         constants.rotation_offset = offset_or_absent(buffers.layout.rotation);
         constants.facing_velocity = sprite.facing == ajfx::Facing::Velocity ? 1U : 0U;
         constants.premultiplied = sprite.blend == ajfx::BlendMode::Premultiplied ? 1U : 0U;
-        constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F, 0.0F, 0.0F};
+        constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F,
+                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), 0.0F};
         constants.age_offset = offset_or_absent(buffers.layout.age);
         constants.lifetime_offset = offset_or_absent(buffers.layout.lifetime);
         constants.flipbook = sprite.flipbook_columns | (sprite.flipbook_rows << 16U);

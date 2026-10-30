@@ -327,6 +327,51 @@ void mesh_particles_draw_their_mesh() {
     AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingMesh);
 }
 
+void tumbling_meshes_turn_by_their_orientation() {
+    // A red unit cube tumbling at 200 degrees a second about a random axis.
+    EffectBuilder builder{"tumbling"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(InitColor{.a = Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .init(InitTumble{.speed_min = 200.0F, .speed_max = 200.0F})
+        .update(RigidBody{.angular_drag = 0.0F})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "cube"});
+    const Effect effect = builder.build().value();
+    const MeshSet meshes{{"cube", cube_mesh()}};
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
+    gpu::ParticleRenderer renderer =
+        gpu::ParticleRenderer::create(*g_device, effect, kernels, TextureSet{}, gpu::TextureFormat::Rgba8Unorm, meshes)
+            .value();
+    gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
+    const gpu::Texture target =
+        g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
+    std::vector<std::size_t> areas;
+    for (const std::uint64_t tick : {1U, 20U, 40U}) {
+        simulation.advance_to(tick);
+        const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
+        renderer.render(simulation, sorter, ortho, target, &clear);
+        const Frame frame{g_device->read_texture(target).value()};
+        // Seen along Z, a unit cube covers |x.z| + |y.z| + |z.z| square
+        // units, where x, y and z are its turned axes: 256 pixels each.
+        const Quat q = simulation.read_emitter(0U).value().orientation[0];
+        const float xz = 2.0F * (q.x * q.z - q.w * q.y);
+        const float yz = 2.0F * (q.y * q.z + q.w * q.x);
+        const float zz = 1.0F - 2.0F * (q.x * q.x + q.y * q.y);
+        const float expected = 256.0F * (std::fabs(xz) + std::fabs(yz) + std::fabs(zz));
+        std::cout << "  tick " << tick << ": " << frame.lit() << " pixels, expected " << expected << '\n';
+        AJFX_CHECK(std::fabs(static_cast<float>(frame.lit()) - expected) < 0.05F * expected);
+        AJFX_CHECK(frame.at(32U, 32U).r >= 80);
+        areas.push_back(frame.lit());
+    }
+    // It is turning.
+    AJFX_CHECK(areas[0] != areas[1] && areas[1] != areas[2]);
+    g_device->destroy_texture(target);
+}
+
 void frames_are_reproducible() {
     const gpu::Camera camera =
         gpu::Camera::look_at(Vec3{0.0F, 1.5F, 6.0F}, Vec3{0.0F, 1.5F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F}, 1.0F, 1.0F,
@@ -367,6 +412,7 @@ int main() {
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"mesh_particles_draw_their_mesh", mesh_particles_draw_their_mesh},
+        {"tumbling_meshes_turn_by_their_orientation", tumbling_meshes_turn_by_their_orientation},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

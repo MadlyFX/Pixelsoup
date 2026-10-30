@@ -60,6 +60,8 @@ struct Particle {
     float size;
     float rotation;
     uint spawn_index;
+    float4 orientation; // x, y, z, w
+    float3 angular_velocity;
 };
 
 Particle ajfx_default_particle() {
@@ -74,6 +76,8 @@ Particle ajfx_default_particle() {
     p.size = 0.1f;
     p.rotation = 0.0f;
     p.spawn_index = 0u;
+    p.orientation = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    p.angular_velocity = float3(0.0f, 0.0f, 0.0f);
     return p;
 }
 
@@ -241,6 +245,21 @@ void ajfx_rotation(inout Particle p, uint o, uint id) {
     p.rotation = ajfx_mix(ajfx_f(o), ajfx_f(o + 1u), ajfx_random(p, id, 0u)) * ajfx_f(o + 2u);
 }
 
+// [speed_min, speed_max, radians per degree, random orientation]
+void ajfx_tumble(inout Particle p, uint o, uint id) {
+    if (ajfx_u32(o + 3u) != 0u) {
+        // Shoemake's uniform rotation from three draws.
+        float u1 = ajfx_random(p, id, 0u);
+        float a = sqrt(1.0f - u1);
+        float b = sqrt(u1);
+        float t2 = ajfx_two_pi * ajfx_random(p, id, 1u);
+        float t3 = ajfx_two_pi * ajfx_random(p, id, 2u);
+        p.orientation = float4(a * sin(t2), a * cos(t2), b * sin(t3), b * cos(t3));
+    }
+    p.angular_velocity = ajfx_unit_sphere(ajfx_random(p, id, 3u), ajfx_random(p, id, 4u)) *
+                         (ajfx_mix(ajfx_f(o), ajfx_f(o + 1u), ajfx_random(p, id, 5u)) * ajfx_f(o + 2u));
+}
+
 // ------------------------------------------------------------ forces
 
 // [acceleration * dt]
@@ -284,9 +303,44 @@ void ajfx_attractor(inout Particle p, uint o, uint id) {
 
 // ------------------------------------------------------------ constraints and appearance
 
+#ifdef AJFX_RIGID_DATA
+// An emitter with a RigidBody defines AJFX_RIGID_DATA as that module's data
+// offset, and its particles meet colliders as solid balls. The impulse
+// factors are the reference's decimals.
+void ajfx_respond_rigid(inout Particle p, float dist, float3 n, float restitution, float slide, bool kill) {
+    float radius = p.size * ajfx_f(AJFX_RIGID_DATA + 2u);
+    float gap = dist - radius;
+    if (gap >= 0.0f) {
+        return;
+    }
+    if (kill) {
+        p.age = ajfx_infinity;
+        return;
+    }
+    p.position = p.position - n * gap;
+    float into = ajfx_dot(p.velocity, n);
+    if (!(into < 0.0f)) {
+        return;
+    }
+    float bounce = -into < ajfx_f(AJFX_RIGID_DATA + 3u) ? 0.0f : restitution;
+    p.velocity = p.velocity - n * (into * (1.0f + bounce));
+    float3 arm = n * -radius;
+    float3 contact = p.velocity + ajfx_cross(p.angular_velocity, arm);
+    float3 slip = contact - n * ajfx_dot(contact, n);
+    float grip = 1.0f - slide;
+    p.velocity = p.velocity - slip * (grip * 0.2857142857f);
+    if (radius > 1.0e-6f) {
+        p.angular_velocity = p.angular_velocity - ajfx_cross(arm, slip) * (grip * 0.7142857143f / (radius * radius));
+    }
+}
+#endif
+
 // Every collider's response, given the particle's signed distance (negative
 // where it may not be) and the unit direction back to where it may.
 void ajfx_respond(inout Particle p, float dist, float3 n, float restitution, float slide, bool kill) {
+#ifdef AJFX_RIGID_DATA
+    ajfx_respond_rigid(p, dist, n, restitution, slide, kill);
+#else
     if (dist >= 0.0f) {
         return;
     }
@@ -300,6 +354,7 @@ void ajfx_respond(inout Particle p, float dist, float3 n, float restitution, flo
         float3 normal = n * into;
         p.velocity = (p.velocity - normal) * slide - normal * restitution;
     }
+#endif
 }
 
 // [normal.xyz, offset, restitution, 1 - friction, kill]
@@ -400,24 +455,41 @@ void ajfx_box_collision(inout Particle p, uint o, uint id) {
     float restitution = ajfx_f(o + 6u);
     float slide = ajfx_f(o + 7u);
     bool kill = ajfx_u32(o + 9u) != 0u;
-    if (ajfx_u32(o + 8u) != 0u) {
-        if (outside > 0.0f) {
-            float3 n = float3(-s.x * over.x / outside, -s.y * over.y / outside, -s.z * over.z / outside);
-            ajfx_respond(p, -outside, n, restitution, slide, kill);
-        }
-    } else if (outside == 0.0f) {
-        float3 n = float3(s.x, 0.0f, 0.0f);
-        float depth = q.x;
-        if (q.y > depth) {
+    float3 n;
+    float dist = outside;
+    if (outside > 0.0f) {
+        n = float3(s.x * over.x / outside, s.y * over.y / outside, s.z * over.z / outside);
+    } else {
+        n = float3(s.x, 0.0f, 0.0f);
+        dist = q.x;
+        if (q.y > dist) {
             n = float3(0.0f, s.y, 0.0f);
-            depth = q.y;
+            dist = q.y;
         }
-        if (q.z > depth) {
+        if (q.z > dist) {
             n = float3(0.0f, 0.0f, s.z);
-            depth = q.z;
+            dist = q.z;
         }
-        ajfx_respond(p, depth, n, restitution, slide, kill);
     }
+    if (ajfx_u32(o + 8u) != 0u) {
+        ajfx_respond(p, -dist, n * -1.0f, restitution, slide, kill);
+    } else {
+        ajfx_respond(p, dist, n, restitution, slide, kill);
+    }
+}
+
+// [1 / (1 + angular_drag * dt), dt / 2, contact_scale, rest_speed]
+void ajfx_rigid_body(inout Particle p, uint o, uint id) {
+    float3 w = p.angular_velocity * ajfx_f(o);
+    p.angular_velocity = w;
+    float h = ajfx_f(o + 1u);
+    float4 q = p.orientation;
+    float x = q.x + h * (w.x * q.w + w.y * q.z - w.z * q.y);
+    float y = q.y + h * (w.y * q.w + w.z * q.x - w.x * q.z);
+    float z = q.z + h * (w.z * q.w + w.x * q.y - w.y * q.x);
+    float qw = q.w - h * (w.x * q.x + w.y * q.y + w.z * q.z);
+    float inverse = 1.0f / sqrt(x * x + y * y + z * z + qw * qw);
+    p.orientation = float4(x * inverse, y * inverse, z * inverse, qw * inverse);
 }
 
 float ajfx_normalized_age(Particle p) {

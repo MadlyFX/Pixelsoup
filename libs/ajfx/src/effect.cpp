@@ -212,6 +212,12 @@ void check_module(const Effect& e, const InitSize& m, FieldChecker& check) {
     check.require(range(e, m.max).lo >= 0.0F, "max", "must not be negative");
 }
 
+void check_module(const Effect& e, const RigidBody& m, FieldChecker& check) {
+    check.require(range(e, m.angular_drag).lo >= 0.0F, "angular_drag", "must not be negative");
+    check.require(m.contact_scale >= 0.0F, "contact_scale", "must not be negative");
+    check.require(range(e, m.rest_speed).lo >= 0.0F, "rest_speed", "must not be negative");
+}
+
 void check_module(const Effect& e, const Drag& m, FieldChecker& check) {
     check.require(range(e, m.coefficient).lo >= 0.0F, "coefficient", "must not be negative");
 }
@@ -302,6 +308,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     std::set<ModuleId> ids;
     std::optional<Error> error;
     bool has_lifetime = false;
+    bool has_tumble = false;
+    std::size_t rigid_bodies = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
             return;
@@ -311,8 +319,13 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                                                         " needs an id that is non-zero and unique in its emitter"};
             return;
         }
-        if constexpr (std::is_same_v<std::decay_t<decltype(module)>, Lifetime>) {
+        using M = std::decay_t<decltype(module)>;
+        if constexpr (std::is_same_v<M, Lifetime>) {
             has_lifetime = true;
+        } else if constexpr (std::is_same_v<M, InitTumble>) {
+            has_tumble = true;
+        } else if constexpr (std::is_same_v<M, RigidBody>) {
+            ++rigid_bodies;
         }
         error = check_module_fields(effect, emitter, module);
     };
@@ -327,6 +340,12 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     }
     if (error) {
         return error;
+    }
+    if (rigid_bodies > 1U) {
+        return Error{ErrorCode::InvalidEffect, where + " has more than one 'rigid_body' module"};
+    }
+    if (has_tumble && rigid_bodies == 0U) {
+        return Error{ErrorCode::InvalidEffect, where + " has a 'tumble' module but no 'rigid_body' module to turn it"};
     }
 
     FieldChecker renderer{effect, where + " renderer"};
@@ -345,6 +364,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
         renderer.require(emitter.renderer.stretch == 0.0F && emitter.renderer.flipbook_columns == 1U &&
                              emitter.renderer.flipbook_rows == 1U && !emitter.renderer.flipbook_blend,
                          "geometry", "mesh takes its texture by its own coordinates: no stretch or flipbook");
+        renderer.require(rigid_bodies == 0U || emitter.renderer.facing == Facing::Camera, "facing",
+                         "rigid mesh particles turn by their orientation: no velocity facing");
     } else {
         renderer.require(emitter.renderer.mesh.empty(), "mesh", "is only for mesh geometry");
     }
@@ -461,6 +482,9 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                     add(Attribute::Size);
                 } else if constexpr (std::is_same_v<M, InitRotation>) {
                     add(Attribute::Rotation);
+                } else if constexpr (std::is_same_v<M, InitTumble>) {
+                    add(Attribute::Orientation);
+                    add(Attribute::AngularVelocity);
                 }
             },
             module);
@@ -477,6 +501,10 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                                      std::is_same_v<M, BoxCollision> || std::is_same_v<M, SdfCollision>) {
                     // Collision only reads velocity; it has none to bounce
                     // unless something else gave it one.
+                } else if constexpr (std::is_same_v<M, RigidBody>) {
+                    add(Attribute::Velocity);
+                    add(Attribute::Orientation);
+                    add(Attribute::AngularVelocity);
                 } else {
                     add(Attribute::Velocity);
                 }

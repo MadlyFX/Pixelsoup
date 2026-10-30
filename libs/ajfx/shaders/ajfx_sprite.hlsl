@@ -23,7 +23,7 @@ cbuffer AjfxSprite : register(b0, space1) {
     uint sprite_flipbook;      // columns in the low 16 bits, rows in the high
     uint sprite_flags;         // 1: textured, 2: cross-fade flipbook cells
     uint sprite_geometry;      // 0 sprites, 1 one ribbon through the particles, 2 a mesh each
-    uint sprite_reserved0;
+    uint sprite_orientation;   // a mesh particle's quaternion, when it has one
 };
 
 RWByteAddressBuffer sprite_particles : register(u0);
@@ -124,9 +124,10 @@ SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
     return output;
 }
 
-// Vertex `vertex` of the mesh drawn for particle `instance`: turned so its +Z
-// runs along the particle's velocity (velocity facing) or spun about Y by its
-// rotation, scaled by its size, and lit by a light at the camera.
+// Vertex `vertex` of the mesh drawn for particle `instance`: turned by the
+// particle's orientation, or else so its +Z runs along its velocity
+// (velocity facing) or spun about Y by its rotation; scaled by its size, and
+// lit by a light at the camera.
 SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
     uint base = record * sprite_stride;
@@ -142,7 +143,17 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     float3 ay = float3(0.0f, 1.0f, 0.0f);
     float3 az = float3(0.0f, 0.0f, 1.0f);
     bool aligned = false;
-    if (sprite_facing == 1u && sprite_velocity != sprite_absent) {
+    if (sprite_orientation != sprite_absent) {
+        // The quaternion's rotation matrix, column by column.
+        float4 q = asfloat(sprite_particles.Load4(base + sprite_orientation));
+        ax = float3(1.0f - 2.0f * (q.y * q.y + q.z * q.z), 2.0f * (q.x * q.y + q.w * q.z),
+                    2.0f * (q.x * q.z - q.w * q.y));
+        ay = float3(2.0f * (q.x * q.y - q.w * q.z), 1.0f - 2.0f * (q.x * q.x + q.z * q.z),
+                    2.0f * (q.y * q.z + q.w * q.x));
+        az = float3(2.0f * (q.x * q.z + q.w * q.y), 2.0f * (q.y * q.z - q.w * q.x),
+                    1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+        aligned = true;
+    } else if (sprite_facing == 1u && sprite_velocity != sprite_absent) {
         float3 velocity = asfloat(sprite_particles.Load3(base + sprite_velocity));
         float len = length(velocity);
         if (len > 1.0e-6f) {

@@ -254,6 +254,7 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         const Texture texture = i < state_->emitter_textures.size() ? state_->emitter_textures[i] : Texture{};
         draw.constants[13] = (texture.valid() ? 1U : 0U) | (settings.flipbook_blend ? 2U : 0U);
         draw.constants[14] = static_cast<std::uint32_t>(settings.geometry);
+        draw.constants[15] = offset_or_absent(buffers.layout.orientation);
         draw.textures[0] = texture;
         draw.buffers[0] = buffers.particles;
         draw.buffers[1] = state_->camera;

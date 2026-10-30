@@ -25,6 +25,17 @@ struct Vec3 final {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
+// A unit quaternion turning a particle's own axes into the effect's: the
+// vector part, then the scalar. The default turns nothing.
+struct Quat final {
+    float x{};
+    float y{};
+    float z{};
+    float w{1.0F};
+
+    friend constexpr bool operator==(const Quat&, const Quat&) = default;
+};
+
 // Linear, unpremultiplied RGBA. Values above 1 are allowed (HDR emission).
 struct Color final {
     float r{1.0F};

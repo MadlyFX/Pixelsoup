@@ -96,6 +96,24 @@ void structural_problems_are_refused_with_the_place_named() {
     EffectBuilder slow{"x"};
     slow.simulation_rate(0U);
     AJFX_CHECK(fails_with(slow.build(), ErrorCode::InvalidEffect, "simulation rate"));
+
+    EffectBuilder unturned = valid_builder();
+    unturned.emitter("chips").init(InitTumble{});
+    AJFX_CHECK(fails_with(unturned.build(), ErrorCode::InvalidEffect, "no 'rigid_body' module"));
+
+    EffectBuilder twice_rigid = valid_builder();
+    twice_rigid.emitter("chips").update(RigidBody{}).update(RigidBody{});
+    AJFX_CHECK(fails_with(twice_rigid.build(), ErrorCode::InvalidEffect, "more than one 'rigid_body'"));
+
+    EffectBuilder sinking = valid_builder();
+    sinking.emitter("chips").update(RigidBody{.rest_speed = -1.0F});
+    AJFX_CHECK(fails_with(sinking.build(), ErrorCode::InvalidEffect, "'rest_speed'"));
+
+    EffectBuilder aimed = valid_builder();
+    aimed.emitter("chips")
+        .update(RigidBody{})
+        .renderer(SpriteRenderer{.facing = Facing::Velocity, .geometry = Geometry::Mesh, .mesh = "chip"});
+    AJFX_CHECK(fails_with(aimed.build(), ErrorCode::InvalidEffect, "no velocity facing"));
 }
 
 void budget_uses_the_top_of_each_bound_range() {
@@ -139,6 +157,7 @@ void attributes_follow_the_modules() {
         .update(SizeOverLife{})
         .update(Drag{});
     builder.emitter("facing").renderer(SpriteRenderer{.facing = Facing::Velocity});
+    builder.emitter("rigid").update(RigidBody{});
     const Result<Effect> effect = builder.build();
     AJFX_CHECK(effect.ok());
 
@@ -153,6 +172,11 @@ void attributes_follow_the_modules() {
                has_attribute(rich, Attribute::Size) && has_attribute(rich, Attribute::Velocity));
 
     AJFX_CHECK(has_attribute(required_attributes(effect.value().emitters[2]), Attribute::Velocity));
+    AJFX_CHECK(!has_attribute(rich, Attribute::Orientation) && !has_attribute(rich, Attribute::AngularVelocity));
+
+    const std::uint32_t rigid = required_attributes(effect.value().emitters[3]);
+    AJFX_CHECK(has_attribute(rigid, Attribute::Orientation) && has_attribute(rigid, Attribute::AngularVelocity) &&
+               has_attribute(rigid, Attribute::Velocity));
 }
 
 void host_frames_map_onto_steps_exactly() {

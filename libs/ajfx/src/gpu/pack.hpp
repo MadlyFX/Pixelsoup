@@ -109,6 +109,13 @@ inline void pack(const InitRotation& m, const PackContext& c, Packer& p) {
     p.f(std::numbers::pi_v<float> / 180.0F);
 }
 
+inline void pack(const InitTumble& m, const PackContext& c, Packer& p) {
+    p.f(c.in(m.speed_min));
+    p.f(c.in(m.speed_max));
+    p.f(std::numbers::pi_v<float> / 180.0F);
+    p.u(m.random_orientation ? 1U : 0U);
+}
+
 inline void pack(const Gravity& m, const PackContext& c, Packer& p) {
     p.v3(c.in(m.acceleration) * c.dt);
 }
@@ -185,6 +192,13 @@ inline void pack(const BoxCollision& m, const PackContext& c, Packer& p) {
     p.f(1.0F - c.in(m.friction));
     p.u(m.inside ? 1U : 0U);
     p.u(m.kill ? 1U : 0U);
+}
+
+inline void pack(const RigidBody& m, const PackContext& c, Packer& p) {
+    p.f(1.0F / (1.0F + c.in(m.angular_drag) * c.dt));
+    p.f(0.5F * c.dt);
+    p.f(m.contact_scale);
+    p.f(c.in(m.rest_speed));
 }
 
 inline void pack(const ColorOverLife& m, const PackContext&, Packer& p) {

@@ -47,7 +47,8 @@ cbuffer ParticleView : register(b0, space1) {
     // 1 when the emitter's colours are already premultiplied.
     uint premultiplied;
     // x: seconds of motion a velocity-aligned quad spans. y: 1 for additive
-    // light.
+    // light. z: the bits of a mesh particle's orientation offset (asuint),
+    // absent when it has none.
     float4 sprite_extra;
     uint age_offset;
     uint lifetime_offset;
@@ -180,10 +181,10 @@ Output ribbon_vertex(float2 corner, uint instance) {
     return output;
 }
 
-// Vertex `vertex` of the mesh drawn for particle `instance`: turned so its +Z
-// runs along the particle's velocity (velocity facing) or spun about Y by its
-// rotation, in the effect's space; scaled by its size; lit by a light at the
-// camera.
+// Vertex `vertex` of the mesh drawn for particle `instance`: turned by the
+// particle's orientation, or else so its +Z runs along its velocity (velocity
+// facing) or spun about Y by its rotation, in the effect's space; scaled by
+// its size; lit by a light at the camera.
 Output mesh_vertex(uint vertex, uint instance) {
     Output output = (Output)0;
     const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
@@ -198,7 +199,18 @@ Output mesh_vertex(uint vertex, uint instance) {
     float3 ay = float3(0.0F, 1.0F, 0.0F);
     float3 az = float3(0.0F, 0.0F, 1.0F);
     bool aligned = false;
-    if (facing_velocity != 0U && velocity_offset != absent) {
+    const uint orientation_offset = asuint(sprite_extra.z);
+    if (orientation_offset != absent) {
+        // The quaternion's rotation matrix, column by column.
+        const float4 q = asfloat(particles.Load4(base + orientation_offset));
+        ax = float3(1.0F - 2.0F * (q.y * q.y + q.z * q.z), 2.0F * (q.x * q.y + q.w * q.z),
+                    2.0F * (q.x * q.z - q.w * q.y));
+        ay = float3(2.0F * (q.x * q.y - q.w * q.z), 1.0F - 2.0F * (q.x * q.x + q.z * q.z),
+                    2.0F * (q.y * q.z + q.w * q.x));
+        az = float3(2.0F * (q.x * q.z + q.w * q.y), 2.0F * (q.y * q.z - q.w * q.x),
+                    1.0F - 2.0F * (q.x * q.x + q.y * q.y));
+        aligned = true;
+    } else if (facing_velocity != 0U && velocity_offset != absent) {
         const float3 velocity = asfloat(particles.Load3(base + velocity_offset));
         const float speed = length(velocity);
         if (speed > 1.0e-6F) {

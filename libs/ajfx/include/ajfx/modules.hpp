@@ -172,14 +172,33 @@ struct InitRotation final {
     friend bool operator==(const InitRotation&, const InitRotation&) = default;
 };
 
-using InitModule = std::variant<Lifetime, ShapeLocation, Velocity, InitColor, InitSize, InitRotation>;
+// A rigid particle's starting turn: an orientation uniformly at random (or
+// none), and a spin of speed_min to speed_max degrees per second about an
+// axis uniformly at random. Needs a RigidBody module, which turns it.
+struct InitTumble final {
+    static constexpr std::string_view kind = "tumble";
+    ModuleId id{};
+    FloatInput speed_min{0.0F};
+    FloatInput speed_max{360.0F};
+    bool random_orientation{true};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("speed_min", self.speed_min);
+        visit("speed_max", self.speed_max);
+        visit("random_orientation", self.random_orientation);
+    }
+    friend bool operator==(const InitTumble&, const InitTumble&) = default;
+};
+
+using InitModule = std::variant<Lifetime, ShapeLocation, Velocity, InitColor, InitSize, InitRotation, InitTumble>;
 
 // ---------------------------------------------------------------- update
 //
 // Forces (gravity, drag, curl noise, vortex, attractor) change velocity and
-// run first, in stack order. Position is then integrated. Constraints and
-// appearance (plane collision, colour and size over life) run after, in stack
-// order.
+// run first, in stack order. Position is then integrated. Turning (rigid
+// body), constraints (the colliders) and appearance (colour and size over
+// life) run after, in stack order.
 
 struct Gravity final {
     static constexpr std::string_view kind = "gravity";
@@ -367,6 +386,32 @@ struct SdfCollision final {
     friend bool operator==(const SdfCollision&, const SdfCollision&) = default;
 };
 
+// Makes the emitter's particles small rigid bodies, for debris. Each turns
+// by its angular velocity, which loses `angular_drag` of itself per second as
+// Drag's velocity does. Every collider then meets a particle as a solid ball
+// `contact_scale` of its size in radius rather than as a point:
+// - one arriving slower than `rest_speed` (units per second) stops rather
+//   than bouncing, so a pile settles instead of buzzing;
+// - the collider's friction grips the ball's surface, so sliding becomes
+//   rolling and spin throws it along, as a solid ball's would. It takes that
+//   fraction of the slip each contact, whatever the push.
+// At most one per emitter.
+struct RigidBody final {
+    static constexpr std::string_view kind = "rigid_body";
+    ModuleId id{};
+    FloatInput angular_drag{0.5F};
+    float contact_scale{0.5F};
+    FloatInput rest_speed{0.2F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("angular_drag", self.angular_drag);
+        visit("contact_scale", self.contact_scale);
+        visit("rest_speed", self.rest_speed);
+    }
+    friend bool operator==(const RigidBody&, const RigidBody&) = default;
+};
+
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
 struct ColorKey final {
@@ -406,13 +451,19 @@ struct SizeOverLife final {
 };
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, SphereCollision,
-                                  BoxCollision, SdfCollision, ColorOverLife, SizeOverLife>;
+                                  BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
 [[nodiscard]] constexpr bool is_collision(const UpdateModule& module) noexcept {
     return std::holds_alternative<PlaneCollision>(module) || std::holds_alternative<SphereCollision>(module) ||
            std::holds_alternative<BoxCollision>(module) || std::holds_alternative<SdfCollision>(module);
+}
+
+// Forces run before integration; everything else after it.
+[[nodiscard]] constexpr bool is_force(const UpdateModule& module) noexcept {
+    return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
+           !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module);
 }
 
 // ---------------------------------------------------------------- render
@@ -431,8 +482,10 @@ enum class Facing {
 // What a sprite renderer draws: a quad per particle; one ribbon through the
 // emitter's live particles in birth order (oldest first), each end as wide as
 // its particle and turned to the camera across the trail; or the emitter's
-// mesh per particle (see mesh.hpp), scaled by its size, its +Z along its
-// velocity with velocity facing and otherwise spun about Y by its rotation.
+// mesh per particle (see mesh.hpp), scaled by its size and turned by its
+// orientation when it has one (InitTumble, RigidBody); otherwise its +Z
+// along its velocity with velocity facing, or spun about Y by its rotation.
+// Sprites and ribbons do not show an orientation.
 enum class Geometry {
     Sprites,
     Ribbon,
