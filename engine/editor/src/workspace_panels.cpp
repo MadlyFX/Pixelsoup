@@ -9596,8 +9596,12 @@ StageAssetStatus stage_asset_status(const render::RenderStats& geometry,
     return failed("Baked lighting could not load. Check its path or rebake the scene.");
   if (geometry.particles_unsupported != 0U)
     return failed("Particle effects play only in the Advanced renderer. Choose it in Renderer settings.");
+  // The package's own reason (a missing texture, kernels from another
+  // version) tells the operator what to fix.
   if (geometry.particles_failed != 0U)
-    return failed("A particle effect could not load. Check its source path, then Rescan in Library.");
+    return failed(geometry.particle_issue.empty()
+        ? "A particle effect could not load. Check its source path, then Rescan in Library."
+        : "A particle effect could not load: " + geometry.particle_issue + ". Fix it, then Rescan in Library.");
   if (display == render::DisplayLutState::Failed)
     return failed("The Stage display color transform could not load.");
   if (geometry.models_pending != 0U || geometry.models_stale != 0U)

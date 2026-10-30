@@ -1047,8 +1047,12 @@ for is a single Undo. Thumbnails and proxies are keyed by the fingerprint, so
 they regenerate for the new revision. A file that has gone missing is not
 offered; it is reported as missing instead.
 
-**Particle effects** are `.ajfx` packages: an effect and its precompiled GPU
-kernels, exported by ajfx Studio. Drag one onto Stage to place it, then
+**Particle effects** are `.ajfx` packages, exported by ajfx Studio. A
+package holds an effect, its precompiled GPU kernels, and any textures its
+sprites use. Smoke and other see-through effects draw back to front from
+every camera, so they layer correctly as you orbit. A package that is
+missing a texture its effect names does not play; the Stage status names
+the texture. Drag one onto Stage to place it, then
 select it to set its **Seed** and **Start frame** in the Inspector's
 PARTICLES section. **Start at the playhead** sets the start frame to the
 current show frame. Two placements of one package never draw the same

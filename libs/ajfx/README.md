@@ -20,12 +20,19 @@ dependency on it so it can move to its own repository once the API settles.
 
 ## Status
 
-Phase 2, the GPU runtime: per-emitter fused kernels generated from the module
-stacks, a D3D12 reference backend and runtime compiler, the simulation on the
-GPU with stable compaction and indirect dispatch, a sprite renderer, kernels
-carried precompiled in `.ajfx` packages, and a sample viewer. Integration with
-the media server is next. The roadmap is the "Particles and volumes" section
-of the media server's [`next-steps-plan.md`](../../next-steps-plan.md).
+Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
+- **The CPU reference and the GPU runtime.** Per-emitter fused kernels are
+  generated from the module stacks. The simulation runs on a D3D12 reference
+  backend with a runtime compiler, stable compaction and indirect dispatch.
+- **Packages.** Precompiled kernels and textures travel in `.ajfx`
+  packages.
+- **Sample applications.** A viewer and a player.
+- **The media server integration.**
+- **Phase 5 so far.** Deterministic depth sorting, textured sprites and
+  flipbooks.
+
+The roadmap is the "Particles and volumes" section of the media server's
+[`next-steps-plan.md`](../../next-steps-plan.md).
 
 ## Getting started
 
@@ -152,9 +159,40 @@ before any tuning.
 | `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
 
-Planned additions: a Vulkan backend, ribbon, mesh and light rendering,
-`volume/` (raymarched voxel volumes) and `studio/` (the authoring
-application).
+Planned additions:
+- a Vulkan backend;
+- ribbon, mesh and light rendering;
+- `volume/`, raymarched voxel volumes;
+- `studio/`, the authoring application.
+
+## Sorting and textures
+
+**Sorting.** Alpha-blended emitters draw back to front: `ParticleRenderer`
+sorts them with a `gpu::ParticleSorter` before drawing.
+- **Which emitters sort:** those with `SpriteRenderer::sort` set (the
+  default) and a blend that depends on order. Additive emitters keep birth
+  order and cost nothing.
+- **How it works:** a stable GPU radix sort of the view depth. It uses
+  integer scans with no atomics, and sizes itself from the simulation's own
+  live count, so nothing is read back.
+- **Determinism:** equal depths keep birth order. Every run, seek and node
+  that holds the same particles draws them in the same order.
+- **Hosts with their own renderer** call `sort` themselves, with the axis in
+  the effect's own space (`world` transposed times the camera's forward
+  axis).
+- **Cost on an RTX 3090:** about 0.3 ms for 65,000 particles and 1.9 ms
+  for a million. The loads are not yet coalesced, so this is untuned.
+
+**Textures.** A sprite with a `texture` samples it instead of drawing a soft
+disc.
+- **Flipbooks:** with `flipbook_columns` and `flipbook_rows`, a sprite plays
+  the grid's cells over each particle's life, left to right and top to
+  bottom. `flipbook_blend` cross-fades each cell into the next.
+- **Where textures come from:** a package carries them, and
+  `read_package_textures` reads and checks them. Presets generate theirs
+  (`presets::textures()`).
+- **What is refused:** an effect naming a texture it was not given, with
+  `MissingTexture`; and a flipbook with more cells than texels.
 
 ## Sample viewer
 
@@ -212,10 +250,19 @@ player.
 ## The .ajfx package
 
 A small container of named entries, sorted by name, with an FNV-1a checksum
-(layout in `include/ajfx/package.hpp`). `effect.json` holds the effect;
-textures, meshes and precompiled kernels join it as further entries. Writing is
-deterministic, so a package's content hash identifies the effect. Readers
-refuse unknown fields, newer format versions and damaged files with a reason.
+(layout in `include/ajfx/package.hpp`).
+- `effect.json` holds the effect.
+- `kernels/<format>/...` holds precompiled kernels, keyed to their generated
+  source.
+- `textures/<name>` holds sprite textures.
+  - Each is an RGBA8 mip chain built when the package is written, by
+    `make_texture`. Readers need no image decoder, and every node samples
+    the same texels.
+  - The layout is in `include/ajfx/texture.hpp`.
+
+Writing is deterministic, so a package's content hash identifies the
+effect. Readers refuse unknown fields, newer format versions and damaged
+files with a reason.
 
 ## Determinism rules
 
@@ -234,6 +281,9 @@ refuse unknown fields, newer format versions and damaged files with a reason.
   atomic append.
 - Capacity is fixed up front. An exceeded budget is refused and reported, not
   grown or silently thinned.
+- Drawing order and flipbook cells derive from particle state and the camera
+  alone: a stable sort with birth order as the tie-break, and cells chosen
+  from age.
 
 ## Building
 

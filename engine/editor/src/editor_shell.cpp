@@ -4329,7 +4329,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
   else if (program_geometry.particles_unsupported != 0U)
     loading_detail = "Particle effects play only in the Advanced renderer. Choose it in Renderer settings.";
   else if (program_geometry.particles_failed != 0U)
-    loading_detail = "A particle effect could not load. Check its source path, then Rescan in Library.";
+    loading_detail = program_geometry.particle_issue.empty()
+        ? "A particle effect could not load. Check its source path, then Rescan in Library."
+        : "A particle effect could not load: " + program_geometry.particle_issue + ". Fix it, then Rescan in Library.";
   else if (program_geometry.particles_pending != 0U)
     loading_detail = "Loading particle effects: " + std::to_string(program_geometry.particles_pending) + " pending.";
   else if (program_geometry.particles_behind != 0U)
@@ -8044,7 +8046,9 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                 inspector_elements.back().particle_parameters.push_back(std::move(info));
               }
             } else if (observed.state == render::ParticlePackageState::Failed) {
-              inspector_elements.back().particle_status = "The package could not be read; check its source file";
+              inspector_elements.back().particle_status = observed.error.empty()
+                  ? "The package could not be read; check its source file"
+                  : "The package could not be read: " + observed.error;
             }
           }
           if (element->kind == ElementKind::Model && !element->linked) {

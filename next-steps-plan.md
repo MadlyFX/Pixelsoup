@@ -907,8 +907,7 @@ feedback forces evaluate any frame directly.
      generated source so stale bytecode is refused; and `ajfx_viewer`, which
      plays, scrubs through GPU checkpoints, captures and exports. Rendering
      tests check pixels against hand-computed coverage.
-   - Open: depth sorting for alpha-blended emitters moves to phase 5 with the
-     other rendering work. Tuning candidates: structure-of-arrays records,
+   - Open: tuning. Depth sorting landed with phase 5a. Candidates: structure-of-arrays records,
      writing survivors straight to the compacted buffer, a single-pass scan,
      and batching barriers across emitters; measure with GPU timestamps
      first.
@@ -950,8 +949,43 @@ feedback forces evaluate any frame directly.
    dropped 2.5 minutes into a show holds for about 25 seconds. A larger
    budget while off air, or checkpoints kept across the whole show, would
    shorten it.
-5. GPU sort, ribbons, mesh particles, particle lights, soft particles, motion
-   vectors, and depth and SDF collision.
+5. Rendering depth, in three slices.
+   - **5a, done:** deterministic depth sorting, and textured sprites with
+     flipbooks.
+     - **Sorting.** A stable GPU radix sort of view depth: integer scans, no
+       atomics, birth order on ties. It applies to alpha-blended emitters;
+       additive emitters skip it.
+     - **Textures.** RGBA8 mip chains in `textures/<name>` package entries,
+       built at authoring time. Flipbook cells are chosen from age, with
+       optional cross-fade.
+     - **Both renderers.** The library's reference renderer and the media
+       server's `ParticlePass`.
+       - The media server sorts along the camera's forward axis taken into
+         the effect's space, so slices agree.
+       - It stages textures a recording's upload space at a time and holds
+         until they land.
+       - A package missing a texture its effect names fails readiness,
+         naming the texture.
+     - **Cost on an RTX 3090.** About 0.3 ms at 65,000 particles and 1.9 ms
+       at a million; untuned.
+       - The next step is coalesced key loads through group-shared memory.
+       - It has not been measured on the RTX 2060 yet.
+     - **Texture decoding differs between renderers.** The media server
+       decodes sRGB after filtering, as it does for model textures; the
+       reference renderer decodes before.
+   - **5b:** motion vectors, soft particles and ribbons.
+     - Motion vectors: particles write the Advanced velocity target, so TAA
+       stops ghosting them.
+     - Soft particles: depth fade against a copy of scene depth.
+     - Ribbons: one per emitter, joining particles in birth order.
+   - **5c:** mesh particles, particle lights, and sphere, box and SDF
+     collision.
+     - Mesh particles come from package mesh entries.
+     - Particle lights are budgeted and chosen deterministically, then fed
+       to the scene's point lights.
+   - **Excluded by design: depth-buffer collision.** It would make the
+     simulation depend on one view's rendered depth, so nodes rendering
+     different slices, or a seek, would disagree.
 6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,
    media) that a host binds to an effect's named inputs, debug statistics and
    profiling markers.

@@ -96,6 +96,11 @@ public:
         if (!textures) {
             return textures.error();
         }
+        // Only what the effect names, so an exported package carries no more.
+        std::erase_if(textures.value(), [&](const auto& entry) {
+            return std::none_of(effect.emitters.begin(), effect.emitters.end(),
+                                [&](const ajfx::Emitter& emitter) { return emitter.renderer.texture == entry.first; });
+        });
         ajfx::Result<ajfx::gpu::ParticleRenderer> renderer =
             ajfx::gpu::ParticleRenderer::create(device, effect, *kernels, textures.value(),
                                                 ajfx::gpu::TextureFormat::Rgba8Unorm);
