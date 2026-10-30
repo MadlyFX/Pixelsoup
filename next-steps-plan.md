@@ -1004,11 +1004,37 @@ feedback forces evaluate any frame directly.
          flipbooks are refused for them.
        - Not yet: several ribbons in one emitter, which would need a ribbon
          id per particle.
-   - **5c:** mesh particles, particle lights, and sphere, box and SDF
-     collision.
-     - Mesh particles come from package mesh entries.
-     - Particle lights are budgeted and chosen deterministically, then fed
-       to the scene's point lights.
+   - **5c, done:** colliders, mesh particles and particle lights.
+     - **Colliders.**
+       - Sphere and box colliders keep particles out, or with `inside` in,
+         responding as the plane does.
+       - Distance-field colliders do the same for any surface baked into a
+         package's `fields/<name>` grid.
+         - Distance is trilinear and the normal its exact gradient,
+           computed identically on the CPU and GPU.
+         - Each emitter's fields sit in one buffer, written by the first
+           step, because creating a simulation records nothing.
+       - The GPU matches the CPU reference particle for particle until
+         contacts pile up. Where two colliders meet, a last-bit difference
+         in the random spread can decide which a particle meets first, as
+         with sparks on their floor.
+     - **Mesh particles.** `geometry: mesh` draws a package mesh
+       (`meshes/<name>`) per particle.
+       - It is scaled by size, and turned along velocity or spun about Y.
+       - Shading is a light at the camera until particles take scene
+         lighting.
+       - Its draw count comes from the simulation on the GPU, using a new
+         ranged RHI buffer copy.
+       - In the media server blended meshes write depth. The reference
+         renderer has no depth buffer, so it culls back faces instead,
+         which suits convex meshes.
+     - **Particle lights.** `light_count` of an emitter's particles become
+       point lights of their colour, chosen evenly in birth order.
+       - A compute pass writes them into 64 reserved slots a render, so
+         positions never leave the GPU.
+       - An effect that would overrun the slots is refused with the reason.
+       - The Advanced lit pass adds them without shadows, cones or
+         profiles. Not yet in Basic, reflections or fog.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.

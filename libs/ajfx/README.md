@@ -28,8 +28,12 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
   packages.
 - **Sample applications.** A viewer and a player.
 - **The media server integration.**
-- **Phase 5 so far.** Deterministic depth sorting, textured sprites and
-  flipbooks, soft particles, and ribbons.
+- **Phase 5.** Done:
+  - deterministic depth sorting;
+  - textured sprites and flipbooks;
+  - soft particles and ribbons;
+  - mesh particles and particle lights;
+  - sphere, box and distance-field colliders.
 
 The roadmap is the "Particles and volumes" section of the media server's
 [`next-steps-plan.md`](../../next-steps-plan.md).
@@ -69,7 +73,7 @@ the emitter, module and field at fault.
 | Spawn | `SpawnRate`, `SpawnBurst` |
 | Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation` |
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor` |
-| Update: after integration | `PlaneCollision`, `ColorOverLife`, `SizeOverLife` |
+| Update: after integration | `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
 
 Each step ages and retires particles, applies forces in stack order,
 integrates position, applies the after-integration modules in stack order,
@@ -161,7 +165,6 @@ before any tuning.
 
 Planned additions:
 - a Vulkan backend;
-- mesh and light rendering;
 - `volume/`, raymarched voxel volumes;
 - `studio/`, the authoring application.
 
@@ -207,6 +210,28 @@ through its live particles in birth order (oldest first). Each end is as
 wide as its particle and faces the camera across the trail. A texture runs
 along the strip by each end's life. Ribbons are not depth-sorted, and they
 refuse velocity facing, stretch and flipbooks.
+
+**Meshes.** With `geometry` set to `mesh`, each particle draws the mesh
+named by `mesh`, a package entry.
+- **Placement:** the mesh is scaled by the particle's size. Its +Z points
+  along the velocity with velocity facing; otherwise it spins about Y by
+  the particle's rotation.
+- **Look:** a texture takes the mesh's own coordinates. Shading is a light
+  at the camera.
+- **Depth:** the reference renderer has no depth buffer, so it culls back
+  faces. Use convex meshes there.
+
+**Lights.** `light_count` of an emitter's particles become point lights in
+the host's lit scene: the particle's colour at `light_intensity`, reaching
+`light_range`. They are chosen evenly through the live particles in birth
+order.
+
+**Colliders.** `SphereCollision`, `BoxCollision` and `SdfCollision` keep
+particles out of a shape, or with `inside` within it. The response is the
+same as `PlaneCollision`'s: back onto the surface, with restitution,
+friction or `kill`. `SdfCollision` follows a distance field, a
+`fields/<name>` package entry that `make_distance_field` bakes. The CPU
+reference and the GPU kernels sample it identically.
 
 ## Sample viewer
 
@@ -273,6 +298,9 @@ A small container of named entries, sorted by name, with an FNV-1a checksum
     `make_texture`. Readers need no image decoder, and every node samples
     the same texels.
   - The layout is in `include/ajfx/texture.hpp`.
+- `meshes/<name>` holds particle meshes (layout in `include/ajfx/mesh.hpp`).
+- `fields/<name>` holds distance fields for collision (layout in
+  `include/ajfx/field.hpp`).
 
 Writing is deterministic, so a package's content hash identifies the
 effect. Readers refuse unknown fields, newer format versions and damaged
