@@ -233,6 +233,10 @@ enum class ColorBlend : core::u8 {
     Screen,
     PremultipliedNormal,
     PremultipliedAdd,
+    // Premultiplied light: colour adds, and the source's alpha (how much the
+    // light covers) accumulates like "over", so light on an empty target
+    // still has coverage for later stages that divide by alpha.
+    PremultipliedEmit,
 };
 
 // How a swapchain releases finished frames.

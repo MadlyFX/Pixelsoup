@@ -32,7 +32,7 @@ struct ViewConstants final {
     core::u32 rotation_offset{absent};
     core::u32 facing_velocity{};
     core::u32 premultiplied{};
-    std::array<float, 4U> extra{}; // x: stretch
+    std::array<float, 4U> extra{}; // x: stretch, y: 1 for additive light
 };
 static_assert(sizeof(ViewConstants) == 224U);
 
@@ -147,7 +147,7 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     depth.write = false;
     depth.greater = true;
     auto blended = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, depth);
-    auto additive = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedAdd, depth);
+    auto additive = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedEmit, depth);
     if (!blended || !additive) {
         return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
     }
@@ -301,7 +301,7 @@ bool ParticlePass::draw(rhi::CommandList& commands, const ParticleInstance& inst
         constants.rotation_offset = offset_or_absent(buffers.layout.rotation);
         constants.facing_velocity = sprite.facing == ajfx::Facing::Velocity ? 1U : 0U;
         constants.premultiplied = sprite.blend == ajfx::BlendMode::Premultiplied ? 1U : 0U;
-        constants.extra = {sprite.stretch, 0.0F, 0.0F, 0.0F};
+        constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F, 0.0F, 0.0F};
 
         const rhi::StorageBuffer* vertex_buffers[] = {records};
         // The counts come from the simulation; this batch only carries them.

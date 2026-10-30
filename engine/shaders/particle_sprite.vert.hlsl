@@ -35,7 +35,8 @@ cbuffer ParticleView : register(b0, space1) {
     uint facing_velocity;
     // 1 when the emitter's colours are already premultiplied.
     uint premultiplied;
-    // x: seconds of motion a velocity-aligned quad spans.
+    // x: seconds of motion a velocity-aligned quad spans. y: 1 for additive
+    // light.
     float4 sprite_extra;
 };
 
@@ -97,5 +98,11 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.position = mul(view_projection, float4(world, 1.0F));
     output.uv = corner;
     output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
+    if (sprite_extra.y > 0.5F) {
+        // Light covers as much as it brightens: later stages divide colour by
+        // alpha and composite over what lies below, so a faint spark barely
+        // hides it and a white-hot one replaces it, keeping its hue.
+        output.color.a = saturate(max(max(output.color.r, output.color.g), output.color.b));
+    }
     return output;
 }

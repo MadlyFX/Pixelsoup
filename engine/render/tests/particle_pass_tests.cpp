@@ -182,7 +182,7 @@ void the_scene_depth_hides_particles_behind_it() {
     PASS_CHECK(render_frame(pass, instance, 1U, identity(), 0.0F).alpha(32U, 32U) >= 251U);
 }
 
-void additive_particles_add_without_covering() {
+void additive_particles_add_and_cover_as_they_brighten() {
     render::ParticlePass pass = make_pass();
     ajfx::EffectBuilder builder{"pair"};
     builder.emitter("e")
@@ -194,10 +194,11 @@ void additive_particles_add_without_covering() {
         .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Additive});
     render::ParticleInstance instance = make_instance(pass, builder.build().value());
     const Frame frame = render_frame(pass, instance, 1U, identity());
-    // Two quarter-grey particles add to about half; additive leaves the
-    // scene's alpha (transparent here) alone.
+    // Two quarter-grey particles add to about half. Each covers a quarter, as
+    // bright as it is, accumulating like over: 1 - 0.75^2 = 0.4375.
     PASS_CHECK(frame.red(32U, 32U) >= 124U && frame.red(32U, 32U) <= 128U);
-    PASS_CHECK(frame.alpha(32U, 32U) == 0U);
+    PASS_CHECK(frame.alpha(32U, 32U) >= 108U && frame.alpha(32U, 32U) <= 112U);
+    PASS_CHECK(frame.alpha(2U, 2U) == 0U);
 }
 
 [[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
@@ -296,7 +297,7 @@ int main() {
     const Case cases[] = {
         {"a_particle_draws_where_the_camera_sees_it", a_particle_draws_where_the_camera_sees_it},
         {"the_scene_depth_hides_particles_behind_it", the_scene_depth_hides_particles_behind_it},
-        {"additive_particles_add_without_covering", additive_particles_add_without_covering},
+        {"additive_particles_add_and_cover_as_they_brighten", additive_particles_add_and_cover_as_they_brighten},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

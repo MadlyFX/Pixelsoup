@@ -153,6 +153,7 @@ std::atomic<core::u64> next_recording_identity{1U};
     case ColorBlend::Screen:
     case ColorBlend::PremultipliedNormal:
     case ColorBlend::PremultipliedAdd:
+    case ColorBlend::PremultipliedEmit:
         return true;
     }
     return false;
@@ -215,6 +216,13 @@ void configure_blend(
         state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
         state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        break;
+    case ColorBlend::PremultipliedEmit:
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_alpha_blendfactor =
+            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         break;
     case ColorBlend::Disabled:
         break;

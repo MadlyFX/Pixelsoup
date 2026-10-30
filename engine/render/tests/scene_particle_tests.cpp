@@ -66,7 +66,8 @@ std::vector<core::u8> download(rhi::CommandList commands, const rhi::Texture& ta
 // One still sprite, a world unit across, at the effect's origin. With
 // `published`, its size is the published "size" parameter instead.
 std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& compiler,
-                         ajfx::Color red = {1.0F, 0.0F, 0.0F, 1.0F}, bool published = false) {
+                         ajfx::Color red = {1.0F, 0.0F, 0.0F, 1.0F}, bool published = false,
+                         ajfx::BlendMode blend = ajfx::BlendMode::Alpha) {
     ajfx::EffectBuilder builder{"still"};
     if (published) {
         builder.float_parameter("size", 1.0F, 0.1F, 4.0F);
@@ -78,7 +79,7 @@ std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& com
         .init(ajfx::InitColor{.a = red, .b = red})
         .init(published ? ajfx::InitSize{.min = ajfx::bind("size"), .max = ajfx::bind("size")}
                         : ajfx::InitSize{.min = 1.0F, .max = 1.0F})
-        .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha});
+        .renderer(ajfx::SpriteRenderer{.blend = blend});
     const ajfx::Effect effect = builder.build().value();
     const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
     SCENE_CHECK(kernels);
@@ -314,8 +315,11 @@ void published_parameters_drive_the_simulation(ajfx::gpu::ShaderCompiler& compil
 void effects_alone_reach_the_composited_picture(ajfx::gpu::ShaderCompiler& compiler) {
     // The editor's Stage and every output render through the compositor. A
     // scene holding only effects still has something to draw, and each
-    // effect draws once, in the pass that holds it.
-    const scene::Scene frame = scene_with(write_effect("composited.ajfx", compiler));
+    // effect draws once, in the pass that holds it. An additive effect over
+    // nothing still reaches it: the layer composite divides colour by alpha,
+    // and light with no coverage would vanish there.
+    const scene::Scene frame = scene_with(
+        write_effect("composited.ajfx", compiler, {1.0F, 0.0F, 0.0F, 1.0F}, false, ajfx::BlendMode::Additive));
     auto executor = render::CompositorSceneExecutor::create(*g_device, 128U, 64U, limits(), {},
                                                             rhi::TextureFormat::Rgba16Float);
     SCENE_CHECK(executor);

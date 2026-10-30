@@ -1071,6 +1071,10 @@ void set_pipeline(CommandContext& commands, D3d12Pipeline& pipeline) noexcept {
         target.SrcBlendAlpha = D3D12_BLEND_ZERO;
         target.DestBlendAlpha = D3D12_BLEND_ONE;
         break;
+    case ColorBlend::PremultipliedEmit:
+        target.SrcBlend = D3D12_BLEND_ONE;
+        target.DestBlend = D3D12_BLEND_ONE;
+        break;
     }
     return result;
 }
