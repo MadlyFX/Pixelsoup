@@ -20,6 +20,8 @@
 #include <mediaserver/render/shadow_atlas.hpp>
 #include <mediaserver/render/environment_cache.hpp>
 #include <mediaserver/render/ies_profile.hpp>
+#include <mediaserver/render/particle_package_cache.hpp>
+#include <mediaserver/render/particle_pass.hpp>
 #include <mediaserver/render/ltc_asset.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <mediaserver/render/environment_prefilter.hpp>
@@ -36,6 +38,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // The renderer: a `scene::Scene` and a rectangle of its canvas in, one
@@ -257,6 +261,14 @@ struct RenderStats final {
     core::u64 ltc_generation{};
     core::u32 ies_ready{}, ies_pending{}, ies_failed{}, ies_refused{};
     IesError ies_error{IesError::None};
+    // Particle effects drawn this view, and the ones holding readiness back:
+    // a package still loading or a new instance waiting its turn, a package
+    // or instance that failed, a renderer that cannot run them, and a seek
+    // further than one frame's step budget still catching up. The reason for
+    // the first failure or refusal, if any.
+    core::u32 particles_drawn{}, particles_pending{}, particles_failed{};
+    core::u32 particles_unsupported{}, particles_behind{};
+    std::string particle_issue;
 
     bool operator==(const RenderStats&) const = default;
 };
@@ -899,6 +911,13 @@ private:
     // Releases retired models no outstanding recording uses: their arena
     // slots, textures and retirement slots.
     void reclaim_retired_models() noexcept;
+    // Brings every started effect's simulation to this show frame (within the
+    // step budget) and lists the ones to draw; counts the rest into stats_
+    // and readiness.
+    void prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
+                           const SceneRenderOptions& options);
+    [[nodiscard]] bool record_particles(rhi::CommandList& commands, const scene::ViewMatrices& view,
+                                        rhi::RasterViewport raster_viewport);
 
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -
@@ -984,6 +1003,21 @@ private:
     rhi::Texture object_id_;
     rhi::Texture normal_;
     std::optional<AmbientOcclusion> occlusion_;
+    // Particle effects, on an Advanced renderer whose device can run them.
+    // The pass is declared before the slots so it outlives their instances.
+    struct ParticleSlot final {
+        std::shared_ptr<const ParticlePackage> package;
+        core::u32 seed{};
+        std::optional<ParticleInstance> instance;
+        // Why this package and seed could not be instanced; sticky until
+        // either changes.
+        std::string error;
+    };
+    std::unique_ptr<ParticlePass> particle_pass_;
+    std::string particles_unsupported_;
+    std::unique_ptr<ParticlePackageCache> particle_packages_;
+    std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
+    std::vector<std::pair<const ParticleInstance*, scene::Mat4>> particle_draws_;
     std::optional<TemporalResolve> temporal_occlusion_;
     ShadowAtlasLimits shadow_atlas_limits_{};
     ShadowAtlasPlan shadow_atlas_plan_{};

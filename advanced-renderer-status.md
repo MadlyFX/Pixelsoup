@@ -51,8 +51,12 @@ draws (`writable_buffers`, `indirect_dispatch`, `indirect_draw`). ajfx particle
 effects run on them: `render::ParticlePass` simulates an instance to its show
 frame's step within a per-frame step budget (holding, and refusing to draw,
 while a seek catches up from its checkpoints) and draws its sprites over a
-view's colour, depth-tested against its depth. No scene node places effects
-yet, so nothing in a rendered scene draws particles. Requested unsupported
+view's colour, depth-tested against its depth. The scene renderer draws each
+started `scene.particle_effect` after its composited layers, reading the
+`.ajfx` package on a worker thread and holding readiness while a package
+loads or fails, or a seek is still catching up. The Basic renderer and devices
+without these capabilities refuse readiness for a started effect, with the
+reason. Reflection passes do not draw particles. Requested unsupported
 features fail capability/readiness checks. Offline baked GI and probe/planar
 reflections do not establish support for those features.
 

@@ -2489,6 +2489,20 @@ Result SceneRenderer::create(
             }
         }
     }
+    // Particles, where the device can simulate them. Like occlusion, a device
+    // that cannot keeps a working renderer; a scene that places an effect is
+    // then refused readiness with the reason.
+    if (mode == SceneRendererMode::AdvancedLinear) {
+        auto particles = ParticlePass::create(device, color_format);
+        if (particles) {
+            renderer.particle_pass_ = std::make_unique<ParticlePass>(std::move(particles).value());
+            renderer.particle_packages_ = std::make_unique<ParticlePackageCache>(ajfx::gpu::ShaderFormat::Dxil);
+        } else {
+            renderer.particles_unsupported_ = std::move(particles).error().message;
+        }
+    } else {
+        renderer.particles_unsupported_ = "particle effects need the Advanced renderer";
+    }
     // The local-light shadow atlas, and the light table that indexes it.
     // Allocated once at construction like the cascades: every node runs the
     // same build and therefore reserves the same bytes whatever a show
@@ -3586,6 +3600,104 @@ bool SceneRenderer::adopt_environment(
     stats_.upload_bytes += frame.pixels.size();
     return environment_->record(
         commands, environment_source_texture_, rotation);
+}
+
+void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
+                                      const SceneRenderOptions& options) {
+    particle_draws_.clear();
+    const auto refuse = [this](core::u32& count, std::string_view reason) {
+        ++count;
+        if (stats_.particle_issue.empty()) {
+            stats_.particle_issue = reason;
+        }
+    };
+    std::erase_if(particle_slots_, [&scene](const auto& slot) {
+        return std::none_of(scene.particle_effects.begin(), scene.particle_effects.end(),
+            [&slot](const scene::ParticleEffect& effect) { return effect.source_node == slot.first; });
+    });
+    // A reflection shows no particles; the view that reflects it draws them.
+    if (scene.particle_effects.empty() || options.reflection_pass) {
+        return;
+    }
+    // At most one new instance a frame: each allocates its buffers and
+    // checkpoint ring, which is bounded but not free.
+    bool instanced = false;
+    for (const scene::ParticleEffect& effect : scene.particle_effects) {
+        const std::optional<core::u64> frame = scene::particle_effect_frame(effect, scene.show_frame);
+        if (!frame) {
+            continue; // not started: nothing to draw, and nothing missing
+        }
+        if (particle_pass_ == nullptr) {
+            refuse(stats_.particles_unsupported, particles_unsupported_);
+            continue;
+        }
+        const ParticlePackageObservation observed = particle_packages_->observe(effect.source);
+        if (observed.package == nullptr) {
+            if (observed.state == ParticlePackageState::Failed) {
+                refuse(stats_.particles_failed, observed.error);
+            } else {
+                ++stats_.particles_pending;
+            }
+            continue;
+        }
+        ParticleSlot& slot = particle_slots_[effect.source_node];
+        const core::u32 seed = scene::particle_instance_seed(effect);
+        if (slot.package != observed.package || slot.seed != seed) {
+            slot = ParticleSlot{observed.package, seed, std::nullopt, {}};
+        }
+        if (!slot.instance) {
+            if (!slot.error.empty()) {
+                refuse(stats_.particles_failed, slot.error);
+                continue;
+            }
+            if (instanced) {
+                ++stats_.particles_pending;
+                continue;
+            }
+            instanced = true;
+            auto created = particle_pass_->create_instance(slot.package->effect, slot.package->kernels, seed);
+            if (!created) {
+                slot.error = std::move(created).error().message;
+                refuse(stats_.particles_failed, slot.error);
+                continue;
+            }
+            slot.instance.emplace(std::move(created).value());
+        }
+        if (!particle_pass_->advance(commands, *slot.instance, *frame,
+                scene.show_rate.numerator, scene.show_rate.denominator)) {
+            ++stats_.particles_behind;
+            continue;
+        }
+        particle_draws_.emplace_back(&*slot.instance, effect.world);
+    }
+    if (particle_pass_ != nullptr) {
+        if (std::optional<ParticleError> failed = particle_pass_->take_error()) {
+            // The frame's simulations are suspect: draw none of them.
+            refuse(stats_.particles_failed, failed->message);
+            particle_draws_.clear();
+        }
+    }
+    if (stats_.particles_pending + stats_.particles_failed + stats_.particles_unsupported
+            + stats_.particles_behind != 0U) {
+        stats_.assets.ready = false;
+    }
+}
+
+bool SceneRenderer::record_particles(rhi::CommandList& commands, const scene::ViewMatrices& view,
+                                     rhi::RasterViewport raster_viewport) {
+    // Over everything the scene drew, tested against its depth and writing
+    // none: sprites blend in the order ajfx keeps them.
+    ParticleTargets targets{};
+    targets.color = &color_;
+    targets.depth = &depth_;
+    targets.raster_viewport = raster_viewport;
+    for (const auto& [instance, world] : particle_draws_) {
+        if (!particle_pass_->draw(commands, *instance, view, world, targets)) {
+            return false;
+        }
+        ++stats_.particles_drawn;
+    }
+    return true;
 }
 
 bool SceneRenderer::render(
@@ -5143,6 +5255,7 @@ bool SceneRenderer::render(
     const bool directional_gi_enabled = directional_shadow_enabled
         && renderer_settings.gi_strength > 0.0F
         && !scene.environment.baked.enabled;
+    prepare_particles(commands, scene, options);
     stats_.assets.ready = stats_.assets.ready && stats_.planar_refusals == 0 && (options.shared_planar || !planar_active_ || planar_renderer_->stats().assets.ready) && stats_.baked_ready && stats_.models_pending == 0 && stats_.models_failed == 0 && stats_.models_stale == 0 && stats_.model_integration_refusals == 0 && stats_.texture_streaming.state == TextureStreamState::Ready;
     stats_.directional_shadow_rendered = directional_shadow_enabled;
     stats_.directional_shadow_cascades = cascade_count;
@@ -5687,7 +5800,7 @@ bool SceneRenderer::render(
         ? advanced_fragment_textures
         : basic_fragment_textures;
     draw.store_depth =
-        !composite_draws_.empty() || !depth_only_media_.empty();
+        !composite_draws_.empty() || !depth_only_media_.empty() || !particle_draws_.empty();
 
     if (mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass) {
         // Motion of a deforming triangle is solved from all three of its
@@ -5991,7 +6104,7 @@ bool SceneRenderer::render(
             std::span<const rhi::DrawBatch>{&occluder_batch, 1U};
         occluder_draw.load = true;
         occluder_draw.store_depth = index + 1U < depth_only_media_.size() ||
-            !composite_draws_.empty();
+            !composite_draws_.empty() || !particle_draws_.empty();
         if (!graph_.draw_pulled(commands, core::RenderPass::Media,
                 color_, clear, depth_, 0.0F, occluder_draw)) {
             return false;
@@ -6093,9 +6206,17 @@ bool SceneRenderer::render(
     }
     for (std::size_t index = 0U; index < composite_draws_.size(); ++index) {
         if (!record_composite(composite_draws_[index], false,
-                index + 1U < composite_draws_.size())) {
+                index + 1U < composite_draws_.size() || !particle_draws_.empty())) {
             return false;
         }
+    }
+    if (!record_particles(commands,
+            raster_viewport.empty()
+                ? render_view.matrices
+                : scene::ViewMatrices{render_view.matrices.view, render_view.matrices.projection,
+                                      render_view.canvas_view_projection},
+            raster_viewport)) {
+        return false;
     }
 
     if (mode_ == SceneRendererMode::AdvancedLinear) {

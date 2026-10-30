@@ -48,7 +48,29 @@ core::Result<std::unique_ptr<ParticleDevice>, rhi::RhiError> ParticleDevice::cre
 }
 
 void ParticleDevice::begin_recording(rhi::CommandList& commands) noexcept {
+    collect();
     borrowed_ = &commands;
+}
+
+bool ParticleDevice::witness_safe(std::uint32_t witness) const noexcept {
+    if (witness == 0U) {
+        return true;
+    }
+    if ((witness & placeholder_witness) != 0U) {
+        return placeholders_[witness & ~placeholder_witness].safe_to_release();
+    }
+    if (const auto live = buffers_.find(witness); live != buffers_.end()) {
+        return live->second.safe_to_release();
+    }
+    const auto retired = std::ranges::find(retired_buffers_, witness, &std::pair<std::uint32_t, rhi::StorageBuffer>::first);
+    // A witness already freed was safe, so its kernel is too.
+    return retired == retired_buffers_.end() || retired->second.safe_to_release();
+}
+
+void ParticleDevice::collect() noexcept {
+    // Kernels first: their witnesses may be among the buffers freed below.
+    std::erase_if(retired_pipelines_, [this](const RetiredPipeline& retired) { return witness_safe(retired.witness); });
+    std::erase_if(retired_buffers_, [](const auto& retired) { return retired.second.safe_to_release(); });
 }
 
 void ParticleDevice::end_recording() noexcept {
@@ -94,6 +116,7 @@ std::string_view ParticleDevice::adapter_name() const noexcept {
 }
 
 ajfx::Result<ajfx::gpu::Buffer> ParticleDevice::create_buffer(std::uint64_t bytes, std::string_view name) {
+    collect();
     // The RHI sizes buffers in 32 bits; a larger particle pool is refused
     // rather than truncated.
     if (bytes > std::numeric_limits<core::u32>::max()) {
@@ -109,8 +132,13 @@ ajfx::Result<ajfx::gpu::Buffer> ParticleDevice::create_buffer(std::uint64_t byte
 }
 
 void ParticleDevice::destroy_buffer(ajfx::gpu::Buffer buffer) {
-    // The RHI keeps a released buffer alive until work that used it completes.
-    buffers_.erase(buffer.id);
+    const auto found = buffers_.find(buffer.id);
+    if (found == buffers_.end()) {
+        return;
+    }
+    retired_buffers_.emplace_back(found->first, std::move(found->second));
+    buffers_.erase(found);
+    collect();
 }
 
 ajfx::Result<ajfx::gpu::Pipeline> ParticleDevice::create_compute_pipeline(std::span<const std::uint8_t> bytecode,
@@ -136,7 +164,17 @@ ajfx::Result<ajfx::gpu::Pipeline> ParticleDevice::create_graphics_pipeline(const
 }
 
 void ParticleDevice::destroy_pipeline(ajfx::gpu::Pipeline pipeline) {
-    pipelines_.erase(pipeline.id);
+    const auto found = pipelines_.find(pipeline.id);
+    if (found == pipelines_.end()) {
+        return;
+    }
+    const auto witness = witnesses_.find(pipeline.id);
+    retired_pipelines_.push_back({std::move(found->second), witness != witnesses_.end() ? witness->second : 0U});
+    if (witness != witnesses_.end()) {
+        witnesses_.erase(witness);
+    }
+    pipelines_.erase(found);
+    collect();
 }
 
 ajfx::Result<ajfx::gpu::Texture> ParticleDevice::create_render_target(std::uint32_t, std::uint32_t,
@@ -204,7 +242,9 @@ void ParticleDevice::dispatch(const ajfx::gpu::Dispatch& d) {
     }
     if (!list->dispatch(work)) {
         note("a particle dispatch was refused");
+        return;
     }
+    witnesses_[d.pipeline.id] = d.buffers[0].valid() ? d.buffers[0].id : (placeholder_witness | 0U);
 }
 
 void ParticleDevice::begin_rendering(ajfx::gpu::Texture, const std::array<float, 4>*) {

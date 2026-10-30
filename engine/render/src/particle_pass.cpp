@@ -177,17 +177,15 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
     state->effect = effect;
     state->simulation.emplace(std::move(simulation).value());
     // Every checkpoint is allocated now, so saving one while recording a
-    // frame copies into existing buffers.
+    // frame copies into existing buffers. Nothing is recorded or submitted
+    // here: creating an instance only allocates.
     for (core::u32 slot = 0U; slot < s.settings.checkpoint_count; ++slot) {
-        ajfx::Result<ajfx::gpu::GpuCheckpoint> checkpoint = state->simulation->save();
+        ajfx::Result<ajfx::gpu::GpuCheckpoint> checkpoint = state->simulation->allocate_checkpoint();
         if (!checkpoint) {
             return Result::failure(failure(ParticleErrorCode::DeviceFailure, checkpoint.error().message));
         }
         state->checkpoints.push_back(std::move(checkpoint).value());
         state->saved.emplace_back();
-    }
-    if (ajfx::Result<bool> flushed = s.particles->flush(); !flushed) {
-        return Result::failure(failure(ParticleErrorCode::DeviceFailure, flushed.error().message));
     }
     return Result::success(ParticleInstance{std::move(state)});
 }

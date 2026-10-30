@@ -926,12 +926,16 @@ feedback forces evaluate any frame directly.
    step budget, a preallocated checkpoint ring for seeks, holding while behind,
    sprites drawn from the camera's axes with the slice's projection,
    depth-tested without depth writes; no particle motion vectors yet), wiring
-   that pass into the scene renderer, and a `scene.particle_effect` node
-   referencing the asset with its parameter values normalized, replicated and
-   digested. Show-frame driving and seeking, placement by dragging from the
-   Library, published parameters in the Inspector with keyframes, and
-   adoption of a changed package. The Basic renderer fails readiness with a
-   specific reason. Two-node agreement on the cluster.
+   that pass into the scene renderer (done: packages read and checked on a
+   `render::ParticlePackageCache` worker, at most one new instance a frame,
+   readiness held while a package loads, fails or a seek catches up, the
+   Basic renderer refused with a reason, full canvas and slices drawing
+   byte-identical sprites), and a `scene.particle_effect` node (done: source,
+   seed and start frame, normalized, replicated and digested; published
+   parameter values still to come). Remaining: `.ajfx` import as a Library
+   asset, placement by dragging from the Library, published parameters in the
+   Inspector with keyframes, adoption of a re-exported package
+   (`ParticlePackageCache::refresh`), and two-node agreement on the cluster.
 5. GPU sort, ribbons, mesh particles, particle lights, soft particles, motion
    vectors, and depth and SDF collision.
 6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,

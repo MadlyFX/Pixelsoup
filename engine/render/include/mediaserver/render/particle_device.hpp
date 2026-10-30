@@ -10,6 +10,8 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 // ajfx's GPU interface on this RHI, so particle simulations record into the
 // renderer's own command lists and run the same precompiled kernels a package
@@ -42,6 +44,11 @@ public:
     // The first failure recorded since the last call, if any. Recording calls
     // cannot return one, so a renderer checks this once per frame.
     [[nodiscard]] std::optional<ajfx::Error> take_error() noexcept;
+    // Buffers and kernels ajfx has released that submitted work may still be
+    // using. They are freed as the RHI reports them safe; see collect.
+    [[nodiscard]] std::size_t retired() const noexcept {
+        return retired_buffers_.size() + retired_pipelines_.size();
+    }
 
     [[nodiscard]] ajfx::gpu::ShaderFormat shader_format() const noexcept override;
     [[nodiscard]] std::string_view adapter_name() const noexcept override;
@@ -79,12 +86,29 @@ private:
     // acquired on first use. Null (with an error noted) if none can be had.
     [[nodiscard]] rhi::CommandList* commands() noexcept;
     void note(std::string message) noexcept;
+    // Frees retired buffers the RHI reports safe, and retired kernels whose
+    // witness is: a buffer their last dispatch bound, so its last use is no
+    // earlier than theirs.
+    void collect() noexcept;
+    [[nodiscard]] bool witness_safe(std::uint32_t witness) const noexcept;
 
     rhi::Device* device_;
     rhi::CommandList* borrowed_{};
     std::optional<rhi::CommandList> own_;
     std::unordered_map<std::uint32_t, rhi::StorageBuffer> buffers_;
     std::unordered_map<std::uint32_t, rhi::ComputePipeline> pipelines_;
+    // The RHI frees a released buffer or pipeline at once, so ones submitted
+    // work may still read wait here. The RHI tracks buffer use but not
+    // pipeline use, so each kernel keeps a witness buffer (an ajfx buffer id,
+    // or a placeholder slot with placeholder_witness set; 0 if never used).
+    static constexpr std::uint32_t placeholder_witness = 0x80000000U;
+    struct RetiredPipeline final {
+        rhi::ComputePipeline pipeline;
+        std::uint32_t witness{};
+    };
+    std::vector<std::pair<std::uint32_t, rhi::StorageBuffer>> retired_buffers_;
+    std::vector<RetiredPipeline> retired_pipelines_;
+    std::unordered_map<std::uint32_t, std::uint32_t> witnesses_;
     // One per slot: a buffer may be bound once per dispatch, so unbound
     // slots each need their own placeholder.
     std::array<rhi::StorageBuffer, ajfx::gpu::max_bound_buffers> placeholders_;

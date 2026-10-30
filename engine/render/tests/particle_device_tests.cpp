@@ -126,6 +126,32 @@ void checkpoints_resume_exactly() {
     PARTICLE_CHECK(records(simulation) == straight);
 }
 
+void released_buffers_wait_for_the_gpu() {
+    auto device = particle_device();
+    auto acquired = g_rhi->acquire_commands();
+    PARTICLE_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    device->begin_recording(commands);
+    {
+        ajfx::gpu::GpuSimulation simulation = simulate_on(*device, ajfx::presets::smoke());
+        simulation.advance_to(30U);
+        // Released while a list that uses them is still open: held, not freed.
+    }
+    PARTICLE_CHECK(device->retired() > 0U);
+    device->end_recording();
+    auto submitted = g_rhi->submit(std::move(commands));
+    PARTICLE_CHECK(submitted);
+    PARTICLE_CHECK(std::move(submitted).value().wait());
+
+    // Once that work has completed, the next recording frees them.
+    auto next = g_rhi->acquire_commands();
+    PARTICLE_CHECK(next);
+    rhi::CommandList later = std::move(next).value();
+    device->begin_recording(later);
+    device->end_recording();
+    PARTICLE_CHECK(device->retired() == 0U);
+}
+
 void drawing_and_unsupported_devices_are_refused() {
     auto device = particle_device();
     PARTICLE_CHECK(!device->create_graphics_pipeline({}, "sprites"));
@@ -171,6 +197,7 @@ int main() {
         {"both_backends_leave_identical_particles", both_backends_leave_identical_particles},
         {"steps_record_into_the_renderers_list", steps_record_into_the_renderers_list},
         {"checkpoints_resume_exactly", checkpoints_resume_exactly},
+        {"released_buffers_wait_for_the_gpu", released_buffers_wait_for_the_gpu},
         {"drawing_and_unsupported_devices_are_refused", drawing_and_unsupported_devices_are_refused},
     };
     int failures = 0;

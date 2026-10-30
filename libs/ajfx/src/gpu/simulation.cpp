@@ -374,19 +374,15 @@ Result<EmitterState> GpuSimulation::read_emitter(std::size_t emitter) {
     return out;
 }
 
-Result<GpuCheckpoint> GpuSimulation::save() {
+Result<GpuCheckpoint> GpuSimulation::allocate_checkpoint() {
     State& s = *state_;
     auto data = std::make_unique<GpuCheckpoint::Data>();
     data->device = s.device;
-    data->tick = s.tick;
-    data->current = s.current;
     for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
         const EmitterGpu& e = s.emitters[i];
         const std::uint64_t record_bytes =
             static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
         GpuCheckpoint::Data::Emitter& saved = data->emitters.emplace_back();
-        saved.spawned = e.spawned;
-        saved.rate_carry = e.rate_carry;
         for (const auto& [bytes, out] : {std::pair{record_bytes, &saved.particles},
                                          std::pair{counters_bytes, &saved.counters},
                                          std::pair{args_bytes, &saved.args}}) {
@@ -396,11 +392,16 @@ Result<GpuCheckpoint> GpuSimulation::save() {
             }
             *out = buffer.value();
         }
-        s.device->copy_buffer(saved.particles, 0U, e.particles[s.current], 0U, record_bytes);
-        s.device->copy_buffer(saved.counters, 0U, e.counters, 0U, counters_bytes);
-        s.device->copy_buffer(saved.args, 0U, e.args, 0U, args_bytes);
     }
     return GpuCheckpoint{std::move(data)};
+}
+
+Result<GpuCheckpoint> GpuSimulation::save() {
+    Result<GpuCheckpoint> checkpoint = allocate_checkpoint();
+    if (checkpoint) {
+        save_into(checkpoint.value());
+    }
+    return checkpoint;
 }
 
 void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {

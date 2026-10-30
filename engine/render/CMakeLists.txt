@@ -70,6 +70,7 @@ add_library(mediaserver_render STATIC
     src/bloom_chain.cpp
     src/froxel_grid.cpp
     src/particle_device.cpp
+    src/particle_package_cache.cpp
     src/particle_pass.cpp
     src/volumetric_fog.cpp
     src/shadow_atlas.cpp
@@ -783,6 +784,28 @@ if(BUILD_TESTING)
             ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
         )
         set_target_properties(mediaserver_render_particle_pass_tests PROPERTIES
+            FOLDER "tests"
+        )
+
+        # Effects placed in a scene: loaded off the frame path, held from
+        # readiness until drawn at the exact frame, alike on every slice.
+        add_executable(mediaserver_render_scene_particle_tests
+            tests/scene_particle_tests.cpp
+        )
+        target_link_libraries(mediaserver_render_scene_particle_tests
+            PRIVATE MediaServer::Render ajfx::d3d12
+        )
+        mediaserver_set_project_options(mediaserver_render_scene_particle_tests)
+        ajfx_copy_dxc(mediaserver_render_scene_particle_tests)
+        add_test(
+            NAME mediaserver.render_scene_particles
+            COMMAND mediaserver_render_scene_particle_tests
+        )
+        set_tests_properties(mediaserver.render_scene_particles PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+        )
+        set_target_properties(mediaserver_render_scene_particle_tests PROPERTIES
             FOLDER "tests"
         )
     endif()

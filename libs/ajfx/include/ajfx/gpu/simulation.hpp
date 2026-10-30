@@ -85,6 +85,9 @@ public:
 
     // Records copies of every buffer; valid once the device is flushed.
     [[nodiscard]] Result<GpuCheckpoint> save();
+    // A checkpoint's buffers with nothing copied into them yet: allocation
+    // only, no recorded work. Fill it with save_into.
+    [[nodiscard]] Result<GpuCheckpoint> allocate_checkpoint();
     // Records the copies into a checkpoint this simulation made earlier,
     // reusing its buffers: no allocation, so a host can keep a ring of
     // checkpoints and save into it while recording a frame.
