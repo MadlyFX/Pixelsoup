@@ -182,7 +182,7 @@ void gpu_matches_the_cpu_reference() {
 }
 
 void presets_match_the_reference_within_tolerance() {
-    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti()}) {
+    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         Simulation cpu = make_cpu(effect, 8U);
         gpu::GpuSimulation gpu = make_gpu(effect, 8U);
         cpu.advance_to(120U);

@@ -41,7 +41,7 @@ bool fails_with(const Result<T>& result, ErrorCode code, const std::string& frag
 }
 
 void presets_round_trip_to_identical_effects_and_bytes() {
-    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti()}) {
+    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         const Result<std::vector<std::uint8_t>> first = write_package(effect);
         AJFX_CHECK(first.ok());
         const Result<Effect> read = read_package(first.value());

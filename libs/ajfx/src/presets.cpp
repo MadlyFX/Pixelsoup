@@ -73,6 +73,16 @@ TextureSet textures() {
     return set;
 }
 
+MeshSet meshes() {
+    MeshData chip = cube_mesh();
+    for (MeshVertex& vertex : chip.vertices) {
+        vertex.position = Vec3{vertex.position.x, vertex.position.y * 0.5F, vertex.position.z * 0.8F};
+    }
+    MeshSet set;
+    set.emplace("chip", std::move(chip));
+    return set;
+}
+
 Effect sparks() {
     EffectBuilder builder{"sparks"};
     builder.float_parameter("rate", 120.0F, 0.0F, 1000.0F);
@@ -139,6 +149,29 @@ Effect confetti() {
         .update(Drag{.coefficient = 1.5F})
         .update(CurlNoise{.strength = 3.0F, .frequency = 0.8F, .evolution = 0.5F, .seed = 11U})
         .update(ColorOverLife{.keys = {{0.0F, Color{}}, {0.8F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}}});
+    return finish(builder);
+}
+
+Effect debris() {
+    EffectBuilder builder{"debris"};
+    builder.float_parameter("force", 6.0F, 2.0F, 12.0F);
+    builder.emitter("chips")
+        .capacity(256U)
+        .seed(4U)
+        .spawn(SpawnBurst{.time = 0.0F, .count = 60U, .interval = 3.0F, .cycles = 0U})
+        .init(Lifetime{.min = 2.6F, .max = 3.0F})
+        .init(ShapeLocation{.shape = Shape::Disc, .radius = 0.15F})
+        .init(Velocity{.speed_min = 2.0F, .speed_max = bind("force"), .spread = 35.0F})
+        .init(InitColor{.a = Color{0.45F, 0.42F, 0.38F, 1.0F}, .b = Color{0.65F, 0.6F, 0.52F, 1.0F}})
+        .init(InitSize{.min = 0.08F, .max = 0.2F})
+        .init(InitTumble{.speed_min = 180.0F, .speed_max = 900.0F})
+        .update(Gravity{})
+        // The chip is half as tall as it is wide: it lands nearer its
+        // middle than its corners.
+        .update(RigidBody{.angular_drag = 1.5F, .contact_scale = 0.3F})
+        .update(PlaneCollision{.restitution = 0.35F, .friction = 0.6F})
+        .update(ColorOverLife{.keys = {{0.0F, Color{}}, {0.85F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}}})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "chip"});
     return finish(builder);
 }
 

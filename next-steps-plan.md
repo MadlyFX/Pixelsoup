@@ -1035,6 +1035,20 @@ feedback forces evaluate any frame directly.
        - An effect that would overrun the slots is refused with the reason.
        - The Advanced lit pass adds them without shadows, cones or
          profiles. Not yet in Basic, reflections or fog.
+   - **Rigid particles, done:** tumbling debris (`InitTumble`,
+     `RigidBody`).
+     - Each particle carries a unit quaternion and an angular velocity,
+       integrated each step in the same order on the CPU and GPU.
+     - Colliders meet a rigid particle as a solid ball of its size.
+       - A contact below `rest_speed` stops, so piles settle.
+       - Friction grips the surface, so sliding becomes rolling.
+     - The GPU matches the reference particle for particle through contact
+       and rest. Mesh particles turn by the orientation in both renderers.
+     - A `debris` preset throws chips of a generated `chip` mesh.
+     - **Not in tier 1:** collisions between particles, stacking, and
+       contact by a mesh's own shape. Those need a deterministic CPU
+       rigid-body engine (Box3D or Jolt). A spike would compare their
+       cross-machine determinism and cost before choosing.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.

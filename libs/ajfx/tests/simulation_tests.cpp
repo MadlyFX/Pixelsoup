@@ -45,7 +45,7 @@ public:
 };
 
 void reruns_are_identical_and_seeds_differ() {
-    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti()}) {
+    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         Simulation a = make(effect, 5U);
         Simulation b = make(effect, 5U);
         Simulation c = make(effect, 6U);

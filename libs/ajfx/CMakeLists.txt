@@ -231,6 +231,16 @@ if(BUILD_TESTING)
             COMMAND ajfx_viewer --package "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.ajfx" --seconds 3
                     --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-smoke.png")
         set_tests_properties(ajfx.viewer_export PROPERTIES FIXTURES_SETUP ajfx_viewer_package)
+        # A preset's generated mesh travels in the package it exports.
+        add_test(NAME ajfx.viewer_debris
+            COMMAND ajfx_viewer --preset debris --export "${CMAKE_CURRENT_BINARY_DIR}/viewer-debris.ajfx")
+        add_test(NAME ajfx.viewer_debris_capture
+            COMMAND ajfx_viewer --package "${CMAKE_CURRENT_BINARY_DIR}/viewer-debris.ajfx" --seconds 2
+                    --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-debris.png")
+        set_tests_properties(ajfx.viewer_debris PROPERTIES FIXTURES_SETUP ajfx_debris_package)
+        set_tests_properties(ajfx.viewer_debris_capture PROPERTIES
+            FIXTURES_REQUIRED ajfx_debris_package
+            PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")
         set_tests_properties(ajfx.viewer_capture PROPERTIES
             FIXTURES_REQUIRED ajfx_viewer_package
             PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")

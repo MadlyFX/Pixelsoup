@@ -33,7 +33,8 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
   - textured sprites and flipbooks;
   - soft particles and ribbons;
   - mesh particles and particle lights;
-  - sphere, box and distance-field colliders.
+  - sphere, box and distance-field colliders;
+  - rigid particles for debris.
 
 The roadmap is the "Particles and volumes" section of the media server's
 [`next-steps-plan.md`](../../next-steps-plan.md).
@@ -71,9 +72,9 @@ the emitter, module and field at fault.
 | Stage | Modules |
 | --- | --- |
 | Spawn | `SpawnRate`, `SpawnBurst` |
-| Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation` |
+| Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitTumble` |
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor` |
-| Update: after integration | `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
+| Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
 
 Each step ages and retires particles, applies forces in stack order,
 integrates position, applies the after-integration modules in stack order,
@@ -213,9 +214,10 @@ refuse velocity facing, stretch and flipbooks.
 
 **Meshes.** With `geometry` set to `mesh`, each particle draws the mesh
 named by `mesh`, a package entry.
-- **Placement:** the mesh is scaled by the particle's size. Its +Z points
-  along the velocity with velocity facing; otherwise it spins about Y by
-  the particle's rotation.
+- **Placement:** the mesh is scaled by the particle's size. A rigid
+  particle's mesh turns by its orientation. Otherwise its +Z points along
+  the velocity with velocity facing, or it spins about Y by the particle's
+  rotation.
 - **Look:** a texture takes the mesh's own coordinates. Shading is a light
   at the camera.
 - **Depth:** the reference renderer has no depth buffer, so it culls back
@@ -233,6 +235,28 @@ friction or `kill`. `SdfCollision` follows a distance field, a
 `fields/<name>` package entry that `make_distance_field` bakes. The CPU
 reference and the GPU kernels sample it identically.
 
+**Rigid particles.** For debris, `RigidBody` makes an emitter's particles
+small solid bodies, and `InitTumble` sets them spinning.
+- **Turning:** each particle has an orientation (a unit quaternion) and an
+  angular velocity. `InitTumble` gives a uniformly random orientation and a
+  spin of `speed_min` to `speed_max` degrees a second about a random axis.
+  `RigidBody` turns the particle every step, with `angular_drag` slowing
+  the spin as `Drag` slows velocity.
+- **Contacts:** every collider meets a rigid particle as a ball
+  `contact_scale` of its size in radius, not as a point.
+  - A contact slower than `rest_speed` stops rather than bouncing, so a
+    pile settles instead of buzzing.
+  - The collider's friction grips the ball's surface, as a solid ball's
+    would. Sliding becomes rolling, and spin throws the ball along. Friction
+    is the share of the slip taken off at each contact, not Coulomb
+    friction against the push.
+- **Limits:** particles do not collide with each other, and a mesh turns
+  by its orientation but collides as its ball. For stacking and resting
+  piles, a host needs a rigid-body engine.
+
+The `debris` preset throws chips of the `chip` mesh, which
+`presets::meshes()` generates.
+
 ## Sample viewer
 
 `ajfx_viewer` is built when ajfx is the top-level project
@@ -244,7 +268,8 @@ ajfx_viewer --preset smoke
 
 Drag to orbit, wheel to zoom, Space to pause, Left and Right to seek a second
 (backwards through GPU checkpoints, landing exactly where playing would have),
-Home to restart, 1 to 3 to switch preset.
+Home to restart, 1 to 4 to switch preset (sparks, smoke, confetti,
+debris).
 
 ```bash
 ajfx_viewer --preset sparks --export sparks.ajfx

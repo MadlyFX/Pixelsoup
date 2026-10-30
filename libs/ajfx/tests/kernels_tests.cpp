@@ -59,7 +59,7 @@ void module_calls_carry_their_data_offsets_and_ids() {
 }
 
 void generation_is_deterministic() {
-    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti()}) {
+    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         const auto a = gpu::generate_kernel_sources(effect);
         const auto b = gpu::generate_kernel_sources(effect);
         AJFX_CHECK(a.size() == b.size());

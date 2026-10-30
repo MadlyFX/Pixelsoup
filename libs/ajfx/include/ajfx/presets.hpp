@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ajfx/effect.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/texture.hpp>
 
 // Ready-made effects: a starting point to tweak, and examples of the builder.
@@ -20,8 +21,16 @@ namespace ajfx::presets {
 // Parameters: color_a, color_b.
 [[nodiscard]] Effect confetti();
 
+// Bursts of stone chips thrown up from the ground plane, tumbling, bouncing
+// and rolling to rest before they fade: rigid "chip" mesh particles.
+// Parameters: force (the fastest throw, units per second).
+[[nodiscard]] Effect debris();
+
 // The textures the presets name, generated (no image files): "puff", a 2x2
 // flipbook of soft, lumpy puffs that spread out cell by cell.
 [[nodiscard]] TextureSet textures();
+
+// The meshes the presets name: "chip", a box half as tall as it is wide.
+[[nodiscard]] MeshSet meshes();
 
 } // namespace ajfx::presets

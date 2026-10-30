@@ -191,7 +191,7 @@ void host_frames_map_onto_steps_exactly() {
 }
 
 void presets_are_valid() {
-    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti()}) {
+    for (const Effect& effect : {presets::sparks(), presets::smoke(), presets::confetti(), presets::debris()}) {
         AJFX_CHECK(!effect.name.empty());
         AJFX_CHECK(validate(effect).ok());
         AJFX_CHECK(!effect.parameters.empty());

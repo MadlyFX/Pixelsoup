@@ -36,6 +36,9 @@ inline std::optional<ajfx::Effect> preset(const std::string& name) {
     if (name == "confetti") {
         return ajfx::presets::confetti();
     }
+    if (name == "debris") {
+        return ajfx::presets::debris();
+    }
     return std::nullopt;
 }
 
@@ -85,17 +88,23 @@ public:
             kernels = std::move(compiled).value();
             note = package != nullptr ? note + "; compiled them instead" : "compiled the kernels";
         }
-        // A package carries its meshes and distance fields; presets use none.
+        // A package carries its meshes and distance fields; presets generate
+        // their meshes and use no fields.
         ajfx::Result<ajfx::FieldSet> fields =
             package != nullptr ? ajfx::read_package_fields(*package, effect) : ajfx::FieldSet{};
         if (!fields) {
             return fields.error();
         }
         ajfx::Result<ajfx::MeshSet> meshes =
-            package != nullptr ? ajfx::read_package_meshes(*package, effect) : ajfx::MeshSet{};
+            package != nullptr ? ajfx::read_package_meshes(*package, effect) : ajfx::presets::meshes();
         if (!meshes) {
             return meshes.error();
         }
+        // Only what the effect draws, so an exported package carries no more.
+        std::erase_if(meshes.value(), [&](const auto& entry) {
+            return std::none_of(effect.emitters.begin(), effect.emitters.end(),
+                                [&](const ajfx::Emitter& emitter) { return emitter.renderer.mesh == entry.first; });
+        });
         ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
             ajfx::gpu::GpuSimulation::create(device, effect, *kernels, 1U, fields.value());
         if (!simulation) {
