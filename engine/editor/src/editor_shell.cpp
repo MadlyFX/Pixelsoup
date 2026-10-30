@@ -7732,7 +7732,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const TimelineKeyEdit &key : timeline_frame.keys) {
           result.keys.push_back(KeyIntent{key.target, key.component, key.frame,
                                           key.value, key.clear, gesture,
-                                          key.erase});
+                                          key.erase, key.parameter});
         }
       }
       if (!timeline_frame.key_moves.empty()) {
@@ -7740,7 +7740,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const TimelineKeyMoveEdit &move : timeline_frame.key_moves) {
           result.key_moves.push_back(KeyMove{move.target, move.component,
                                              move.from_frame, move.to_frame,
-                                             gesture});
+                                             gesture, move.parameter});
         }
       }
       if (timeline_frame.key_duplicate.has_value()) {

@@ -941,9 +941,11 @@ feedback forces evaluate any frame directly.
    Published parameters (done): `particle_parameter.<name>.<component>`
    values on the node, and scene.channel keys under the same name, carried
    as curves the renderer samples at each simulation step; a changed value
-   or key restarts the simulation. Remaining: parameter keys on the Timeline
-   (rows, retiming, deleting, interpolation; today they are made and removed
-   from the Inspector only), and two-node agreement on the cluster. Catching up is slow for an effect
+   or key restarts the simulation. Parameter keys are on the Timeline too
+   (done: a row per keyed component under the effect, with retiming,
+   deleting, easing and tangents addressed by key). Not yet: copying and
+   pasting parameter keys (the key clipboard skips them). Remaining:
+   two-node agreement on the cluster. Catching up is slow for an effect
    placed or seeked far from its checkpoints: at 16 steps a frame, an effect
    dropped 2.5 minutes into a show holds for about 25 seconds. A larger
    budget while off air, or checkpoints kept across the whole show, would

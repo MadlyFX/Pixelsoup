@@ -86,7 +86,7 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         double highest = -std::numeric_limits<double>::infinity();
         for (const TimelineKeyAddress &key : keys) {
           const scene::ChannelKeyframes *const channel =
-              channel_for(keyframes, key.target, key.property);
+              channel_for(keyframes, key.target, key.property, key.parameter);
           if (channel == nullptr ||
               channel->values.size() != channel->frames.size()) {
             continue;
@@ -173,7 +173,8 @@ void TimelinePanel::draw_key_tools(Pass &p) {
         }
       }
       const scene::ChannelKeyframes *const active_keyframes = channel_for(
-          keyframes, graph_->active()->target, graph_->active()->property);
+          keyframes, graph_->active()->target, graph_->active()->property,
+          graph_->active()->parameter);
       const std::optional<double> sampled =
           sample_channel_at(active_keyframes, timeline.show_frame);
       if (sampled.has_value() && std::isfinite(*sampled)) {
@@ -184,7 +185,8 @@ void TimelinePanel::draw_key_tools(Pass &p) {
                 *sampled, speed, changed_value, 4)) {
           frame.keys.push_back(TimelineKeyEdit{
               graph_->active()->target, graph_->active()->property,
-              timeline.show_frame, changed_value, false, false});
+              timeline.show_frame, changed_value, false, false,
+              graph_->active()->parameter});
         }
       } else {
         ctx.label(channel_row, "NO VALUE", ctx.theme().text_muted);

@@ -589,7 +589,7 @@ void key_scale_replacement_is_one_scene_undo_transaction() {
   authored.properties["key1_interp"] = std::string{"cubic"};
   root = root.set(std::move(authored));
 
-  constexpr std::array selection{
+  const std::array selection{
       scene::KeyAddress{doc::NodeId{30U}, scene::PropertyChannel::Brightness,
                         10},
       scene::KeyAddress{doc::NodeId{30U}, scene::PropertyChannel::Brightness,

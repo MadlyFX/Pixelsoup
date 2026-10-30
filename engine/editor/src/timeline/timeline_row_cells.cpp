@@ -236,7 +236,7 @@ void TimelinePanel::layout_row(RowContext &rc) {
     for (core::u8 offset = 0U;
          offset < channels->count && offset < rc.values.size(); ++offset) {
       const scene::PropertyChannel channel = channels->at(offset);
-      rc.keys[offset] = channel_for(keyframes, channels->target, channel);
+      rc.keys[offset] = channel_for(keyframes, channels->target, channel, channels->parameter);
       const std::optional<double> sampled =
           sample_channel_at(rc.keys[offset], p.input.timeline.show_frame);
       if (sampled.has_value() && std::isfinite(*sampled)) {
@@ -264,7 +264,8 @@ void TimelinePanel::layout_row(RowContext &rc) {
         row.kind == Row::Kind::Property ? row.property_target : row.node,
         row.kind == Row::Kind::Property
             ? row.property
-            : group_channel(row.group, row.component)};
+            : group_channel(row.group, row.component),
+        row.parameter};
   }
 
   // A bar over the frames from `first` to `end`, 3 in from the row's top and
@@ -1018,7 +1019,8 @@ void TimelinePanel::channel_value_cell(RowContext &rc) {
       p.frame.keys.push_back(TimelineKeyEdit{identity.target,
                                              identity.property,
                                              p.input.timeline.show_frame,
-                                             edited, false, false});
+                                             edited, false, false,
+                                             identity.parameter});
     }
     return;
   }
@@ -1163,7 +1165,8 @@ void TimelinePanel::row_key_button(RowContext &rc) {
     for (core::u8 offset = 0U; offset < channels->count; ++offset) {
       frame.keys.push_back(TimelineKeyEdit{
           channels->target, channels->at(offset), timeline.show_frame,
-          rc.values[offset], false, keyed_here});
+          rc.values[offset], false, keyed_here,
+          std::string{channels->parameter}});
     }
   }
 }
@@ -2612,7 +2615,8 @@ void TimelinePanel::lane_press(RowContext &rc) {
       press_key(p, SelectedKey{row.kind == Row::Kind::Property
                                    ? row.property_target
                                    : row.node,
-                               channel, (*component_frames)[owned_item]});
+                               channel, (*component_frames)[owned_item],
+                               row.parameter});
       if (row.locked) {
         frame.seek_to_frame =
             seekable_frame(x_to_frame(ctx.pointer_x()));
@@ -2644,7 +2648,7 @@ void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
   gui::UiContext &ctx = p.ctx;
   const std::span<const scene::ChannelKeyframes> keyframes = p.input.keyframes;
 
-  graph_->set_active(ChannelIdentity{hit.target, hit.component});
+  graph_->set_active(ChannelIdentity{hit.target, hit.component, hit.parameter});
   bool begin_drag = true;
   const auto selected_it =
       std::find(keys_.selected.begin(), keys_.selected.end(), hit);
@@ -2668,7 +2672,8 @@ void TimelinePanel::press_key(Pass &p, const SelectedKey &hit) {
     keys_.drag_keys.clear();
     for (const SelectedKey &selected_key : keys_.selected) {
       const auto *const authored =
-          frames_for(keyframes, selected_key.target, selected_key.component);
+          frames_for(keyframes, selected_key.target, selected_key.component,
+                     selected_key.parameter);
       if (authored != nullptr &&
           std::find(authored->begin(), authored->end(), selected_key.frame) !=
               authored->end()) {
@@ -2774,10 +2779,11 @@ void TimelinePanel::collect_graph(Pass &p,
       return;
     }
     const scene::ChannelKeyframes *keys =
-        channel_for(keyframes, id.target, id.property);
+        channel_for(keyframes, id.target, id.property, id.parameter);
     if (keys != nullptr && handle_preview &&
         id == ChannelIdentity{handle_drag_.key.target,
-                              handle_drag_.key.component}) {
+                              handle_drag_.key.component,
+                              handle_drag_.key.parameter}) {
       keys = &handle_drag_.preview;
     }
     if (keys == nullptr || keys->frames.empty() ||
@@ -2794,7 +2800,8 @@ void TimelinePanel::collect_graph(Pass &p,
                                                           : row.node,
                           row.kind == Row::Kind::Property
                               ? row.property
-                              : group_channel(row.group, row.component)},
+                              : group_channel(row.group, row.component),
+                          row.parameter},
           row.locked);
     }
   }
@@ -2802,7 +2809,7 @@ void TimelinePanel::collect_graph(Pass &p,
     const ElementInfo *const element = find_element(elements, node);
     for (const scene::ChannelKeyframes &channel : keyframes) {
       if (channel.target == node) {
-        add(ChannelIdentity{channel.target, channel.component},
+        add(ChannelIdentity{channel.target, channel.component, channel.parameter},
             element != nullptr && element->locked);
       }
     }
@@ -2860,7 +2867,7 @@ void TimelinePanel::collect_graph(Pass &p,
     target.reach = key_hit_radius;
     p.hits.add(target);
     p.scratch.visible_keys.push_back(FrameScratch::VisibleKeyPoint{
-        SelectedKey{channel.id.target, channel.id.property, key.frame}, key.x,
+        SelectedKey{channel.id.target, channel.id.property, key.frame, channel.id.parameter}, key.x,
         key.y});
   }
 
@@ -2909,13 +2916,14 @@ void TimelinePanel::press_handle(Pass &p, std::size_t handle) {
   const GraphKey &key = p.graph_keys[pressed.key];
   const GraphChannel &channel = p.graph_channels[key.channel];
   const scene::ChannelKeyframes *const input = channel_for(
-      p.input.keyframes, channel.id.target, channel.id.property);
+      p.input.keyframes, channel.id.target, channel.id.property,
+      channel.id.parameter);
   if (input == nullptr) {
     return;
   }
   graph_->set_active(channel.id);
   handle_drag_ = HandleDrag{
-      true, SelectedKey{channel.id.target, channel.id.property, key.frame},
+      true, SelectedKey{channel.id.target, channel.id.property, key.frame, channel.id.parameter},
       pressed.incoming, *input, *input, 0};
 }
 
@@ -2927,7 +2935,7 @@ void TimelinePanel::track_handle_drag(Pass &p) {
     if (handle_drag_.hold_frames > 0) {
       const scene::ChannelKeyframes *const input =
           channel_for(p.input.keyframes, handle_drag_.key.target,
-                      handle_drag_.key.component);
+                      handle_drag_.key.component, handle_drag_.key.parameter);
       if (input == nullptr || *input != handle_drag_.base) {
         handle_drag_.hold_frames = 0;
       } else {
@@ -2963,7 +2971,8 @@ void TimelinePanel::track_handle_drag(Pass &p) {
     batch.action = TimelineKeyBatchAction::Tangent;
     batch.keys.push_back(TimelineKeyAddress{handle_drag_.key.target,
                                             handle_drag_.key.component,
-                                            handle_drag_.key.frame});
+                                            handle_drag_.key.frame,
+                                            handle_drag_.key.parameter});
     batch.tangent = *shown;
     p.frame.key_batch = std::move(batch);
     handle_drag_.hold_frames = 60;
@@ -2990,7 +2999,7 @@ void TimelinePanel::draw_graph(Pass &p) {
       const GraphKey &key = p.graph_keys[tag_item(p.press_owner->tag)];
       const GraphChannel &channel = p.graph_channels[key.channel];
       press_key(p, SelectedKey{channel.id.target, channel.id.property,
-                               key.frame});
+                               key.frame, channel.id.parameter});
     } else {
       press_lane_background(p, false);
     }

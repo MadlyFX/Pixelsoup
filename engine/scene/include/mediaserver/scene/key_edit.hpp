@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 // Pure, deterministic curve/dope-sheet key planning.
@@ -24,6 +25,8 @@ struct KeyAddress final {
     doc::NodeId target{};
     PropertyChannel property{};
     core::i64 frame{};
+    // For PropertyChannel::ParticleParameter, the parameter key ("rate.0").
+    std::string parameter;
 
     auto operator<=>(const KeyAddress&) const = default;
 };

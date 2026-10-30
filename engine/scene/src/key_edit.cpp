@@ -20,7 +20,8 @@
 namespace mediaserver::scene {
 namespace {
 
-using ChannelIdentity = std::pair<doc::NodeId, PropertyChannel>;
+// A channel: its target, property and, for a particle parameter, its key.
+using ChannelIdentity = std::tuple<doc::NodeId, PropertyChannel, std::string>;
 
 struct ParsedKey final {
     core::i64 frame{};
@@ -36,6 +37,7 @@ struct ParsedChannel final {
     doc::NodeId node{};
     doc::NodeId target{};
     PropertyChannel property{};
+    std::string parameter;
     std::vector<ParsedKey> keys;
     bool ambiguous{};
 };
@@ -48,6 +50,16 @@ struct ParsedChannel final {
 
 [[nodiscard]] std::optional<PropertyChannel> property_from_name(
     std::string_view name) noexcept {
+    // The tables below have no name for ParticleParameter; it is never the
+    // empty name.
+    if (name.empty()) {
+        return std::nullopt;
+    }
+    if (name.starts_with(schema::particle_parameter_prefix)) {
+        return parse_particle_parameter_key(name.substr(schema::particle_parameter_prefix.size()))
+            ? std::optional<PropertyChannel>{PropertyChannel::ParticleParameter}
+            : std::nullopt;
+    }
     constexpr std::array<std::string_view,
                          static_cast<std::size_t>(PropertyChannel::Count)>
         names{
@@ -98,6 +110,9 @@ struct ParsedChannel final {
 
 [[nodiscard]] std::optional<std::string_view> property_name(
     PropertyChannel property) noexcept {
+    if (property == PropertyChannel::ParticleParameter) {
+        return schema::particle_parameter_prefix;
+    }
     constexpr std::array<std::string_view,
                          static_cast<std::size_t>(PropertyChannel::Count)>
         names{
@@ -175,6 +190,9 @@ struct ParsedChannel final {
     parsed.node = node.id;
     parsed.target = doc::NodeId{static_cast<core::u64>(*target)};
     parsed.property = *property;
+    parsed.parameter = *property == PropertyChannel::ParticleParameter
+        ? component->substr(schema::particle_parameter_prefix.size())
+        : std::string{};
     parsed.keys.clear();
     parsed.ambiguous = false;
     constexpr double maximum =
@@ -272,7 +290,7 @@ public:
                 continue;
             }
             active_channels.try_emplace(
-                ChannelIdentity{parsed.target, parsed.property},
+                ChannelIdentity{parsed.target, parsed.property, parsed.parameter},
                 std::move(parsed));
         }
         for (const auto& [id, node] : nodes) {
@@ -366,6 +384,9 @@ public:
 
 [[nodiscard]] bool property_compatible(const doc::Node& target,
                                        PropertyChannel property) noexcept {
+    if (property == PropertyChannel::ParticleParameter) {
+        return target.type == schema::particle_effect_type;
+    }
     if (target.type == schema::stage_type) return is_environment_channel(property);
     if (target.type == schema::camera_type) {
         return (property >= PropertyChannel::PositionX
@@ -523,7 +544,7 @@ public:
                                     const ParsedKey& key) {
     return KeyRecord{
         channel.node,
-        KeyAddress{channel.target, channel.property, key.frame},
+        KeyAddress{channel.target, channel.property, key.frame, channel.parameter},
         key.carrier,
         key.value,
         key.carrier_authored,
@@ -558,7 +579,7 @@ public:
             continue;
         }
         const ParsedChannel* const channel =
-            index.channel(ChannelIdentity{address.target, address.property});
+            index.channel(ChannelIdentity{address.target, address.property, address.parameter});
         if (channel == nullptr) {
             result.skips.push_back(
                 KeyEditSkip{address, KeyEditSkipReason::ChannelMissing});
@@ -748,7 +769,7 @@ void sort_report(KeyEditPlan& plan) {
         if (!channel_candidates.empty()) {
             const KeyRecord& first = channel_candidates.front().record;
             channel = index.channel(
-                ChannelIdentity{first.address.target, first.address.property});
+                ChannelIdentity{first.address.target, first.address.property, first.address.parameter});
         }
         if (channel == nullptr) {
             continue;
@@ -879,7 +900,7 @@ void sort_report(KeyEditPlan& plan) {
             continue;
         }
         const ParsedChannel* const channel = index.channel(ChannelIdentity{
-            example->address.target, example->address.property});
+            example->address.target, example->address.property, example->address.parameter});
         if (channel == nullptr) {
             continue;
         }
@@ -1118,6 +1139,7 @@ constexpr std::size_t out_weight_slot = 4U;
     ChannelKeyframes view{};
     view.target = channel.target;
     view.component = channel.property;
+    view.parameter = channel.parameter;
     for (const ParsedKey& key : keys) {
         view.frames.push_back(key.frame);
         view.values.push_back(key.value);
@@ -1270,7 +1292,7 @@ template <typename Change>
     std::map<ChannelIdentity, std::set<core::i64>> by_channel;
     for (const KeyRecord& record : selection.records) {
         by_channel[ChannelIdentity{record.address.target,
-                                   record.address.property}]
+                                   record.address.property, record.address.parameter}]
             .insert(record.address.frame);
     }
     Mutations mutations;

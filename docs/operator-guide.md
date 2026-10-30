@@ -1057,7 +1057,10 @@ package publishes** (a spawn rate, a wind, a tint): one row each, with a
 colour well for a colour, a reset arrow back to the package's default, and a
 key diamond. Keys are kept under the parameter's name, so they stay on the
 right parameter after the package is exported again. Once a parameter is
-keyed, typing or dragging a value sets a key at the playhead. The effect
+keyed, typing or dragging a value sets a key at the playhead. Each keyed
+parameter also gets a row under the effect on the Timeline (`wind X` for one
+component of a vector), where its keys move, delete and ease like any
+other. Copy and paste of keys skips parameter keys for now. The effect
 reads keyed values at every simulation step, between show frames as well
 as on them. A parameter shapes everything the effect has done so far, so
 changing a value or a key runs the effect again from its start. It holds

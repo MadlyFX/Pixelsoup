@@ -741,6 +741,8 @@ struct KeyMove final {
   core::i64 from_frame{};
   core::i64 to_frame{};
   core::u64 gesture{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const KeyMove &) const = default;
 };

@@ -89,7 +89,7 @@ scene_key_addresses(std::span<const editor::TimelineKeyAddress> addresses) {
     converted.reserve(addresses.size());
     for (const editor::TimelineKeyAddress &address : addresses) {
         converted.push_back(
-            scene::KeyAddress{address.target, address.property, address.frame});
+            scene::KeyAddress{address.target, address.property, address.frame, address.parameter});
     }
     return converted;
 }
@@ -408,8 +408,16 @@ void upsert_channel_key(doc::Node &node, core::u64 frame, double value) {
 [[nodiscard]] bool schedule_key_move(cmd::DirectorScheduler &scheduler,
                                      const editor::KeyMove &move,
                                      cmd::FrameNumber apply_at) {
-    const auto id =
-        channel_node_id(move.target, static_cast<core::u64>(move.component));
+    const bool parameter = move.component == scene::PropertyChannel::ParticleParameter;
+    const std::optional<doc::NodeId> parameter_id = parameter
+        ? parameter_channel_node_id(scheduler.projected_document(), move.target, move.parameter)
+        : std::nullopt;
+    if (parameter && !parameter_id) {
+        return true;
+    }
+    const auto id = parameter
+        ? *parameter_id
+        : channel_node_id(move.target, static_cast<core::u64>(move.component));
     const auto *const existing = scheduler.projected_document().get(id);
     if (existing == nullptr) {
         return true;

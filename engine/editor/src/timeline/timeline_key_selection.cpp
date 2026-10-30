@@ -19,8 +19,10 @@ bool TimelinePanel::key_selected(const SelectedKey &key) const noexcept {
 void TimelinePanel::canonicalize_key_selection() noexcept {
   std::sort(keys_.selected.begin(), keys_.selected.end(),
             [](const SelectedKey &left, const SelectedKey &right) noexcept {
-              return std::tie(left.target, left.component, left.frame) <
-                     std::tie(right.target, right.component, right.frame);
+              return std::tie(left.target, left.component, left.parameter,
+                              left.frame) <
+                     std::tie(right.target, right.component, right.parameter,
+                              right.frame);
             });
   keys_.selected.erase(
       std::unique(keys_.selected.begin(), keys_.selected.end()),
@@ -33,7 +35,7 @@ void TimelinePanel::replace_key_selection(
   next.reserve(selection.size());
   for (const TimelineKeyAddress &address : selection) {
     next.push_back(
-        SelectedKey{address.target, address.property, address.frame});
+        SelectedKey{address.target, address.property, address.frame, address.parameter});
   }
   keys_.selected = std::move(next);
   canonicalize_key_selection();
@@ -55,7 +57,7 @@ std::optional<TimelineKeyClipboardEdit> TimelinePanel::key_clipboard_edit(
     edit.keys.reserve(keys_.selected.size());
     for (const SelectedKey &key : keys_.selected) {
       edit.keys.push_back(
-          TimelineKeyAddress{key.target, key.component, key.frame});
+          TimelineKeyAddress{key.target, key.component, key.frame, key.parameter});
     }
     std::sort(edit.keys.begin(), edit.keys.end());
     edit.keys.erase(std::unique(edit.keys.begin(), edit.keys.end()),
@@ -116,7 +118,7 @@ std::vector<TimelineKeyAddress> TimelinePanel::selected_addresses() const {
   addresses.reserve(keys_.selected.size());
   for (const SelectedKey &key : keys_.selected) {
     addresses.push_back(
-        TimelineKeyAddress{key.target, key.component, key.frame});
+        TimelineKeyAddress{key.target, key.component, key.frame, key.parameter});
   }
   std::sort(addresses.begin(), addresses.end());
   addresses.erase(std::unique(addresses.begin(), addresses.end()),
@@ -340,7 +342,7 @@ void TimelinePanel::commit_key_drag(Pass &p) {
       batch.keys.reserve(keys_.drag_keys.size());
       for (const SelectedKey &key : keys_.drag_keys) {
         batch.keys.push_back(
-            TimelineKeyAddress{key.target, key.component, key.frame});
+            TimelineKeyAddress{key.target, key.component, key.frame, key.parameter});
       }
       std::sort(batch.keys.begin(), batch.keys.end());
       batch.keys.erase(std::unique(batch.keys.begin(), batch.keys.end()),
