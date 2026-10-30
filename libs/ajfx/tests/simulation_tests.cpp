@@ -190,6 +190,57 @@ void plane_collision_holds_or_kills() {
     }
 }
 
+// Particles flung in every direction from the origin at 3 units a second,
+// under one collider.
+Simulation flung(UpdateModule collider) {
+    EffectBuilder builder{"flung"};
+    builder.emitter("e")
+        .capacity(400U)
+        .spawn(SpawnRate{.rate = 120.0F})
+        .init(Lifetime{.min = 3.0F, .max = 3.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(Velocity{.speed_min = 3.0F, .speed_max = 3.0F, .spread = 180.0F})
+        .update(std::move(collider));
+    Simulation simulation = make(builder.build().value());
+    simulation.advance_to(180U);
+    return simulation;
+}
+
+void spheres_and_boxes_hold_particles_in_or_out() {
+    const float slack = 1.0e-5F;
+    // Inside a sphere of radius 1: nothing escapes, though most have tried.
+    const Simulation ball = flung(SphereCollision{.radius = 1.0F, .inside = true, .restitution = 0.8F});
+    AJFX_CHECK(ball.emitter(0).alive() > 300U);
+    for (const Vec3& p : ball.emitter(0).position) {
+        AJFX_CHECK(dot(p, p) <= (1.0F + slack) * (1.0F + slack));
+    }
+    // Outside a sphere of radius 1 at (2, 0, 0): nothing inside it.
+    const Simulation rock = flung(SphereCollision{.center = Vec3{2.0F, 0.0F, 0.0F}, .radius = 1.0F});
+    for (const Vec3& p : rock.emitter(0).position) {
+        const Vec3 d = p - Vec3{2.0F, 0.0F, 0.0F};
+        AJFX_CHECK(dot(d, d) >= (1.0F - slack) * (1.0F - slack));
+    }
+    // Inside a box half a unit by one by two: every axis held.
+    const Simulation crate = flung(BoxCollision{.half_size = Vec3{0.5F, 1.0F, 2.0F}, .inside = true});
+    for (const Vec3& p : crate.emitter(0).position) {
+        AJFX_CHECK(std::fabs(p.x) <= 0.5F + slack && std::fabs(p.y) <= 1.0F + slack && std::fabs(p.z) <= 2.0F + slack);
+    }
+    // Outside a box beside the origin: none within it.
+    const Simulation wall = flung(BoxCollision{.center = Vec3{0.0F, 2.0F, 0.0F}, .half_size = Vec3{3.0F, 0.5F, 3.0F}});
+    for (const Vec3& p : wall.emitter(0).position) {
+        const bool within = std::fabs(p.x) < 3.0F - slack && std::fabs(p.y - 2.0F) < 0.5F - slack &&
+                            std::fabs(p.z) < 3.0F - slack;
+        AJFX_CHECK(!within);
+    }
+    // Killing instead: the escapees are gone, not held.
+    const Simulation culled = flung(SphereCollision{.radius = 1.0F, .inside = true, .kill = true});
+    AJFX_CHECK(culled.emitter(0).alive() < 60U);
+    // Shapes must have size.
+    EffectBuilder flat{"flat"};
+    flat.emitter("e").update(BoxCollision{.half_size = Vec3{1.0F, 0.0F, 1.0F}});
+    AJFX_CHECK(!flat.build().ok());
+}
+
 void parameters_are_clamped_to_their_range() {
     EffectBuilder builder{"clamp"};
     builder.float_parameter("rate", 10.0F, 0.0F, 120.0F);
@@ -282,6 +333,7 @@ int main() {
         {"gravity_integrates_semi_implicitly", gravity_integrates_semi_implicitly},
         {"particles_die_in_order", particles_die_in_order},
         {"plane_collision_holds_or_kills", plane_collision_holds_or_kills},
+        {"spheres_and_boxes_hold_particles_in_or_out", spheres_and_boxes_hold_particles_in_or_out},
         {"parameters_are_clamped_to_their_range", parameters_are_clamped_to_their_range},
         {"colour_and_size_follow_normalized_age", colour_and_size_follow_normalized_age},
         {"velocity_cone_respects_its_spread", velocity_cone_respects_its_spread},

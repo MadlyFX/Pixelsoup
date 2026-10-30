@@ -128,6 +128,17 @@ Effect smooth_effect() {
         .init(Lifetime{.min = 2.0F, .max = 2.0F})
         .init(ShapeLocation{.shape = Shape::Sphere, .radius = 0.5F})
         .init(Velocity{.spread = 180.0F});
+    // Colliders: particles bouncing inside a box, around a sphere.
+    builder.emitter("caged")
+        .capacity(1000U)
+        .seed(7U)
+        .spawn(SpawnRate{.rate = 120.0F})
+        .init(Lifetime{.min = 2.0F, .max = 2.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.2F, 0.3F, 0.1F}})
+        .init(Velocity{.speed_min = 2.0F, .speed_max = 3.0F, .spread = 180.0F})
+        .update(SphereCollision{.center = Vec3{0.9F, 0.0F, 0.0F}, .radius = 0.4F, .restitution = 0.7F})
+        .update(BoxCollision{.half_size = Vec3{1.5F, 1.0F, 1.2F}, .inside = true, .restitution = 0.6F,
+                             .friction = 0.2F});
     builder.emitter("disc")
         .capacity(1000U)
         .seed(6U)

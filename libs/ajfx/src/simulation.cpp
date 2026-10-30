@@ -224,7 +224,7 @@ void apply(const InitRotation& m, Step& step) {
 // ------------------------------------------------------------ forces
 
 constexpr bool is_force(const UpdateModule& module) {
-    return !std::holds_alternative<PlaneCollision>(module) && !std::holds_alternative<ColorOverLife>(module) &&
+    return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module);
 }
 
@@ -282,25 +282,83 @@ void apply(const Attractor& m, Step& step) {
 
 // ------------------------------------------------------------ constraints and appearance
 
+// Every collider's response, given particle i's signed distance (negative
+// where it is not allowed to be) and the unit direction back to where it is.
+void respond(Step& step, std::size_t i, float distance, Vec3 n, float restitution, float slide, bool kill) {
+    if (distance >= 0.0F) {
+        return;
+    }
+    if (kill) {
+        // Removed by the compaction that follows the update stack.
+        step.s.age[i] = std::numeric_limits<float>::infinity();
+        return;
+    }
+    step.s.position[i] -= n * distance;
+    const float into = dot(step.s.velocity[i], n);
+    if (into < 0.0F) {
+        const Vec3 normal = n * into;
+        step.s.velocity[i] = (step.s.velocity[i] - normal) * slide - normal * restitution;
+    }
+}
+
 void apply(const PlaneCollision& m, Step& step) {
     const Vec3 n = normalized(m.normal);
     const float restitution = step.in(m.restitution);
     const float slide = 1.0F - step.in(m.friction);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        const float distance = dot(n, step.s.position[i]) - m.offset;
-        if (distance >= 0.0F) {
-            continue;
+        respond(step, i, dot(n, step.s.position[i]) - m.offset, n, restitution, slide, m.kill);
+    }
+}
+
+void apply(const SphereCollision& m, Step& step) {
+    const Vec3 center = step.in(m.center);
+    const float radius = step.in(m.radius);
+    const float restitution = step.in(m.restitution);
+    const float slide = 1.0F - step.in(m.friction);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const Vec3 d = step.s.position[i] - center;
+        const float length = std::sqrt(dot(d, d));
+        // At the very centre, out is up.
+        const Vec3 out = length > 1.0e-6F ? d * (1.0F / length) : Vec3{0.0F, 1.0F, 0.0F};
+        if (m.inside) {
+            respond(step, i, radius - length, out * -1.0F, restitution, slide, m.kill);
+        } else {
+            respond(step, i, length - radius, out, restitution, slide, m.kill);
         }
-        if (m.kill) {
-            // Removed by the compaction that follows the update stack.
-            step.s.age[i] = std::numeric_limits<float>::infinity();
-            continue;
-        }
-        step.s.position[i] -= n * distance;
-        const float into = dot(step.s.velocity[i], n);
-        if (into < 0.0F) {
-            const Vec3 normal = n * into;
-            step.s.velocity[i] = (step.s.velocity[i] - normal) * slide - normal * restitution;
+    }
+}
+
+void apply(const BoxCollision& m, Step& step) {
+    const Vec3 center = step.in(m.center);
+    const Vec3 h = m.half_size;
+    const float restitution = step.in(m.restitution);
+    const float slide = 1.0F - step.in(m.friction);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const Vec3 d = step.s.position[i] - center;
+        const Vec3 sign{d.x < 0.0F ? -1.0F : 1.0F, d.y < 0.0F ? -1.0F : 1.0F, d.z < 0.0F ? -1.0F : 1.0F};
+        // How far past each face pair: positive outside it.
+        const Vec3 q{std::fabs(d.x) - h.x, std::fabs(d.y) - h.y, std::fabs(d.z) - h.z};
+        const Vec3 over{std::max(q.x, 0.0F), std::max(q.y, 0.0F), std::max(q.z, 0.0F)};
+        const float outside = std::sqrt(dot(over, over));
+        if (m.inside) {
+            // Back to the nearest point on the box.
+            if (outside > 0.0F) {
+                const Vec3 n{-sign.x * over.x / outside, -sign.y * over.y / outside, -sign.z * over.z / outside};
+                respond(step, i, -outside, n, restitution, slide, m.kill);
+            }
+        } else if (outside == 0.0F) {
+            // Out through the nearest face.
+            Vec3 n{sign.x, 0.0F, 0.0F};
+            float depth = q.x;
+            if (q.y > depth) {
+                n = Vec3{0.0F, sign.y, 0.0F};
+                depth = q.y;
+            }
+            if (q.z > depth) {
+                n = Vec3{0.0F, 0.0F, sign.z};
+                depth = q.z;
+            }
+            respond(step, i, depth, n, restitution, slide, m.kill);
         }
     }
 }

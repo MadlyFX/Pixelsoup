@@ -288,6 +288,58 @@ struct PlaneCollision final {
     friend bool operator==(const PlaneCollision&, const PlaneCollision&) = default;
 };
 
+// Particles kept outside a sphere, or with `inside` within it. The response
+// is the plane's: pushed back onto the surface, with restitution, friction
+// and `kill` as there.
+struct SphereCollision final {
+    static constexpr std::string_view kind = "sphere_collision";
+    ModuleId id{};
+    Vec3Input center{};
+    FloatInput radius{1.0F};
+    bool inside{false};
+    FloatInput restitution{0.5F};
+    FloatInput friction{0.0F};
+    bool kill{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("center", self.center);
+        visit("radius", self.radius);
+        visit("inside", self.inside);
+        visit("restitution", self.restitution);
+        visit("friction", self.friction);
+        visit("kill", self.kill);
+    }
+    friend bool operator==(const SphereCollision&, const SphereCollision&) = default;
+};
+
+// Particles kept outside an axis-aligned box (in the effect's own space), or
+// with `inside` within it; `half_size` is half its extent on each axis. A
+// particle that gets inside leaves through the nearest face (x before y
+// before z on a tie); one that gets out returns to the nearest point on the
+// box. Responds as SphereCollision.
+struct BoxCollision final {
+    static constexpr std::string_view kind = "box_collision";
+    ModuleId id{};
+    Vec3Input center{};
+    Vec3 half_size{0.5F, 0.5F, 0.5F};
+    bool inside{false};
+    FloatInput restitution{0.5F};
+    FloatInput friction{0.0F};
+    bool kill{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("center", self.center);
+        visit("half_size", self.half_size);
+        visit("inside", self.inside);
+        visit("restitution", self.restitution);
+        visit("friction", self.friction);
+        visit("kill", self.kill);
+    }
+    friend bool operator==(const BoxCollision&, const BoxCollision&) = default;
+};
+
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
 struct ColorKey final {
@@ -326,8 +378,15 @@ struct SizeOverLife final {
     friend bool operator==(const SizeOverLife&, const SizeOverLife&) = default;
 };
 
-using UpdateModule =
-    std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, ColorOverLife, SizeOverLife>;
+using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, SphereCollision,
+                                  BoxCollision, ColorOverLife, SizeOverLife>;
+
+// Collision modules constrain positions after integration rather than
+// accelerating particles.
+[[nodiscard]] constexpr bool is_collision(const UpdateModule& module) noexcept {
+    return std::holds_alternative<PlaneCollision>(module) || std::holds_alternative<SphereCollision>(module) ||
+           std::holds_alternative<BoxCollision>(module);
+}
 
 // ---------------------------------------------------------------- render
 

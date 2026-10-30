@@ -231,6 +231,25 @@ void check_module(const Effect& e, const PlaneCollision& m, FieldChecker& check)
     check.require(friction.lo >= 0.0F && friction.hi <= 1.0F, "friction", "must be between 0 and 1");
 }
 
+// Restitution and friction, as every collider takes them.
+template <class Module>
+void check_response(const Effect& e, const Module& m, FieldChecker& check) {
+    check.require(range(e, m.restitution).lo >= 0.0F, "restitution", "must not be negative");
+    const Range friction = range(e, m.friction);
+    check.require(friction.lo >= 0.0F && friction.hi <= 1.0F, "friction", "must be between 0 and 1");
+}
+
+void check_module(const Effect& e, const SphereCollision& m, FieldChecker& check) {
+    check.require(range(e, m.radius).lo > 0.0F, "radius", "must be positive");
+    check_response(e, m, check);
+}
+
+void check_module(const Effect& e, const BoxCollision& m, FieldChecker& check) {
+    check.require(m.half_size.x > 0.0F && m.half_size.y > 0.0F && m.half_size.z > 0.0F, "half_size",
+                  "must be positive on every axis");
+    check_response(e, m, check);
+}
+
 template <class Module>
 void check_module(const Effect&, const Module&, FieldChecker&) {}
 
@@ -436,7 +455,8 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                     add(Attribute::Color);
                 } else if constexpr (std::is_same_v<M, SizeOverLife>) {
                     add(Attribute::Size);
-                } else if constexpr (std::is_same_v<M, PlaneCollision>) {
+                } else if constexpr (std::is_same_v<M, PlaneCollision> || std::is_same_v<M, SphereCollision> ||
+                                     std::is_same_v<M, BoxCollision>) {
                     // Collision only reads velocity; it has none to bounce
                     // unless something else gave it one.
                 } else {

@@ -284,14 +284,13 @@ void ajfx_attractor(inout Particle p, uint o, uint id) {
 
 // ------------------------------------------------------------ constraints and appearance
 
-// [normal.xyz, offset, restitution, 1 - friction, kill]
-void ajfx_plane_collision(inout Particle p, uint o, uint id) {
-    float3 n = ajfx_f3(o);
-    float dist = ajfx_dot(n, p.position) - ajfx_f(o + 3u);
+// Every collider's response, given the particle's signed distance (negative
+// where it may not be) and the unit direction back to where it may.
+void ajfx_respond(inout Particle p, float dist, float3 n, float restitution, float slide, bool kill) {
     if (dist >= 0.0f) {
         return;
     }
-    if (ajfx_u32(o + 6u) != 0u) {
+    if (kill) {
         p.age = ajfx_infinity;
         return;
     }
@@ -299,7 +298,59 @@ void ajfx_plane_collision(inout Particle p, uint o, uint id) {
     float into = ajfx_dot(p.velocity, n);
     if (into < 0.0f) {
         float3 normal = n * into;
-        p.velocity = (p.velocity - normal) * ajfx_f(o + 5u) - normal * ajfx_f(o + 4u);
+        p.velocity = (p.velocity - normal) * slide - normal * restitution;
+    }
+}
+
+// [normal.xyz, offset, restitution, 1 - friction, kill]
+void ajfx_plane_collision(inout Particle p, uint o, uint id) {
+    float3 n = ajfx_f3(o);
+    ajfx_respond(p, ajfx_dot(n, p.position) - ajfx_f(o + 3u), n, ajfx_f(o + 4u), ajfx_f(o + 5u),
+                 ajfx_u32(o + 6u) != 0u);
+}
+
+// [center.xyz, radius, restitution, 1 - friction, inside, kill]
+void ajfx_sphere_collision(inout Particle p, uint o, uint id) {
+    float3 d = p.position - ajfx_f3(o);
+    float len = sqrt(ajfx_dot(d, d));
+    float3 out_dir = len > 1.0e-6f ? d * (1.0f / len) : float3(0.0f, 1.0f, 0.0f);
+    float radius = ajfx_f(o + 3u);
+    bool kill = ajfx_u32(o + 7u) != 0u;
+    if (ajfx_u32(o + 6u) != 0u) {
+        ajfx_respond(p, radius - len, out_dir * -1.0f, ajfx_f(o + 4u), ajfx_f(o + 5u), kill);
+    } else {
+        ajfx_respond(p, len - radius, out_dir, ajfx_f(o + 4u), ajfx_f(o + 5u), kill);
+    }
+}
+
+// [center.xyz, half_size.xyz, restitution, 1 - friction, inside, kill]
+void ajfx_box_collision(inout Particle p, uint o, uint id) {
+    float3 d = p.position - ajfx_f3(o);
+    float3 h = ajfx_f3(o + 3u);
+    float3 s = float3(d.x < 0.0f ? -1.0f : 1.0f, d.y < 0.0f ? -1.0f : 1.0f, d.z < 0.0f ? -1.0f : 1.0f);
+    float3 q = float3(abs(d.x) - h.x, abs(d.y) - h.y, abs(d.z) - h.z);
+    float3 over = float3(max(q.x, 0.0f), max(q.y, 0.0f), max(q.z, 0.0f));
+    float outside = sqrt(ajfx_dot(over, over));
+    float restitution = ajfx_f(o + 6u);
+    float slide = ajfx_f(o + 7u);
+    bool kill = ajfx_u32(o + 9u) != 0u;
+    if (ajfx_u32(o + 8u) != 0u) {
+        if (outside > 0.0f) {
+            float3 n = float3(-s.x * over.x / outside, -s.y * over.y / outside, -s.z * over.z / outside);
+            ajfx_respond(p, -outside, n, restitution, slide, kill);
+        }
+    } else if (outside == 0.0f) {
+        float3 n = float3(s.x, 0.0f, 0.0f);
+        float depth = q.x;
+        if (q.y > depth) {
+            n = float3(0.0f, s.y, 0.0f);
+            depth = q.y;
+        }
+        if (q.z > depth) {
+            n = float3(0.0f, 0.0f, s.z);
+            depth = q.z;
+        }
+        ajfx_respond(p, depth, n, restitution, slide, kill);
     }
 }
 

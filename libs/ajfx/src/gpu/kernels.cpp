@@ -125,7 +125,7 @@ std::string call(const Module& module, std::uint32_t offset) {
 }
 
 bool is_force(const UpdateModule& module) {
-    return !std::holds_alternative<PlaneCollision>(module) && !std::holds_alternative<ColorOverLife>(module) &&
+    return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module);
 }
 

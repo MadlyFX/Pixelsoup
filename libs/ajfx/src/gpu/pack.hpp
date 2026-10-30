@@ -134,6 +134,24 @@ inline void pack(const PlaneCollision& m, const PackContext& c, Packer& p) {
     p.u(m.kill ? 1U : 0U);
 }
 
+inline void pack(const SphereCollision& m, const PackContext& c, Packer& p) {
+    p.v3(c.in(m.center));
+    p.f(c.in(m.radius));
+    p.f(c.in(m.restitution));
+    p.f(1.0F - c.in(m.friction));
+    p.u(m.inside ? 1U : 0U);
+    p.u(m.kill ? 1U : 0U);
+}
+
+inline void pack(const BoxCollision& m, const PackContext& c, Packer& p) {
+    p.v3(c.in(m.center));
+    p.v3(m.half_size);
+    p.f(c.in(m.restitution));
+    p.f(1.0F - c.in(m.friction));
+    p.u(m.inside ? 1U : 0U);
+    p.u(m.kill ? 1U : 0U);
+}
+
 inline void pack(const ColorOverLife& m, const PackContext&, Packer& p) {
     p.u(static_cast<std::uint32_t>(m.keys.size()));
     for (const ColorKey& key : m.keys) {
