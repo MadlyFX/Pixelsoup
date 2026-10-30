@@ -503,6 +503,27 @@ void ies_sources_participate_in_the_project_manifest() {
     PROJECT_ASSET_CHECK(manifest_of(root.set(light)).digest != manifest.digest);
 }
 
+void particle_packages_participate_in_the_project_manifest() {
+    // A placed effect is a file every node opens, linked to its Library
+    // record by asset_id like any placement.
+    doc::Root root;
+    doc::Node record{doc::NodeId{50U}, std::string{assets::schema::particle_effect_type}, {}};
+    record.properties.emplace(std::string{assets::schema::display_name}, doc::PropertyValue{std::string{"Embers"}});
+    record.properties.emplace(std::string{assets::schema::source}, doc::PropertyValue{src("embers.ajfx")});
+    root = root.set(record);
+    doc::Node effect{doc::NodeId{51U}, std::string{scene::schema::particle_effect_type}, {}};
+    effect.properties.emplace(std::string{scene::schema::source}, doc::PropertyValue{src("embers.ajfx")});
+    effect.properties.emplace(std::string{scene::schema::asset_id}, doc::PropertyValue{std::int64_t{50}});
+    root = root.set(effect);
+    const auto manifest = manifest_of(root);
+    PROJECT_ASSET_CHECK(manifest.assets.size() == 1U);
+    PROJECT_ASSET_CHECK(manifest.assets[0].kind == assets::AssetKind::ParticleEffect);
+    PROJECT_ASSET_CHECK(manifest.assets[0].asset == doc::NodeId{50U});
+    PROJECT_ASSET_CHECK(requires_source(manifest, src("embers.ajfx")));
+    effect.properties[std::string{scene::schema::source}] = doc::PropertyValue{src("sparks.ajfx")};
+    PROJECT_ASSET_CHECK(manifest_of(root.set(effect)).digest != manifest.digest);
+}
+
 void colour_luts_participate_in_the_project_manifest() {
     doc::Node wall{doc::NodeId{41U}, "output.surface", {}};
     wall.properties["camera_inverse_lut"] = src("camera.cube");
@@ -548,6 +569,8 @@ constexpr Case cases[]{
      &colour_luts_participate_in_the_project_manifest},
     {"IES sources participate in the project manifest",
      &ies_sources_participate_in_the_project_manifest},
+    {"particle packages participate in the project manifest",
+     &particle_packages_participate_in_the_project_manifest},
     {"the manifest is what the document actually opens",
      &the_manifest_is_what_the_document_actually_opens},
     {"a placement with no Library record still has to be opened",

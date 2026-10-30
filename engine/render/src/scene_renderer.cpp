@@ -3631,7 +3631,8 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             refuse(stats_.particles_unsupported, particles_unsupported_);
             continue;
         }
-        const ParticlePackageObservation observed = particle_packages_->observe(effect.source);
+        const ParticlePackageObservation observed =
+            particle_packages_->observe(effect.source, authored_asset_generation_);
         if (observed.package == nullptr) {
             if (observed.state == ParticlePackageState::Failed) {
                 refuse(stats_.particles_failed, observed.error);

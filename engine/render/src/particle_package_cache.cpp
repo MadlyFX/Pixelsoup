@@ -67,32 +67,28 @@ void ParticlePackageCache::start_worker() {
     }
 }
 
-ParticlePackageObservation ParticlePackageCache::observe(const std::string& source) {
+ParticlePackageObservation ParticlePackageCache::observe(const std::string& source, core::u64 generation) {
     std::lock_guard lock{mutex_};
     auto found = entries_.find(source);
-    if (found == entries_.end()) {
-        if (entries_.size() >= config_.max_sources || queue_.size() + loading_ >= config_.max_pending) {
-            return {nullptr, ParticlePackageState::Busy, "the particle package queue is full"};
+    const bool unseen = found == entries_.end();
+    if (unseen || (found->second.generation != generation && !found->second.queued)) {
+        if ((unseen && entries_.size() >= config_.max_sources) || queue_.size() + loading_ >= config_.max_pending) {
+            if (unseen) {
+                return {nullptr, ParticlePackageState::Busy, "the particle package queue is full"};
+            }
+        } else {
+            if (unseen) {
+                found = entries_.emplace(source, Entry{}).first;
+            }
+            found->second.generation = generation;
+            found->second.queued = true;
+            queue_.push_back(source);
+            start_worker();
+            wake_.notify_one();
         }
-        found = entries_.emplace(source, Entry{}).first;
-        found->second.queued = true;
-        queue_.push_back(source);
-        start_worker();
-        wake_.notify_one();
     }
     const Entry& entry = found->second;
     return {entry.package, entry.package != nullptr ? ParticlePackageState::Ready : entry.state, entry.error};
-}
-
-void ParticlePackageCache::refresh(const std::string& source) {
-    std::lock_guard lock{mutex_};
-    Entry& entry = entries_[source];
-    if (!entry.queued) {
-        entry.queued = true;
-        queue_.push_back(source);
-        start_worker();
-        wake_.notify_one();
-    }
 }
 
 void ParticlePackageCache::wait_idle() {
@@ -117,11 +113,15 @@ void ParticlePackageCache::run() {
         Entry& entry = entries_[source];
         entry.queued = false;
         if (loaded.package != nullptr) {
-            entry.package = std::move(loaded.package);
+            // An unchanged file keeps the package (and every instance made
+            // from it) rather than swapping in an identical copy.
+            if (entry.package == nullptr || entry.package->identity != loaded.package->identity) {
+                entry.package = std::move(loaded.package);
+            }
             entry.state = ParticlePackageState::Ready;
             entry.error.clear();
         } else if (entry.package == nullptr) {
-            // A failed refresh keeps the package that was working.
+            // A failed reread keeps the package that was working.
             entry.state = ParticlePackageState::Failed;
             entry.error = std::move(loaded.error);
         }

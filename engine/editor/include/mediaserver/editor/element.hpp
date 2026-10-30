@@ -46,6 +46,9 @@ enum class ElementKind : core::u8 {
     // object in the scene.
     Camera,
     Environment,
+    // An ajfx particle effect placed from the Library: a package, a transform,
+    // a seed and the show frame its time starts at.
+    ParticleEffect,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
@@ -76,6 +79,8 @@ enum class ElementKind : core::u8 {
         return "camera";
     case ElementKind::Environment:
         return "environment";
+    case ElementKind::ParticleEffect:
+        return "particle effect";
     case ElementKind::Object:
         break;
     }
@@ -135,6 +140,10 @@ struct ElementInfo final {
     std::string model_material_status;
     scene::LayerStyle style{};
     std::string source;
+    // Particle effects: the authored seed, mixed with the node identity for
+    // the simulation, and the show frame the effect's own time starts at.
+    core::u32 particle_seed{};
+    core::i64 particle_start_frame{};
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
     // Clip-only: the size the decoded video is held at.

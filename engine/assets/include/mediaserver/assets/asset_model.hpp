@@ -15,6 +15,7 @@ struct AssetCounters final {
     core::u32 models{};
     core::u32 projection_meshes{};
     core::u32 platesets{};
+    core::u32 particle_effects{};
     // Currently valid nodes omitted because a lower NodeId owns their exact
     // source string within the same asset kind. The same source may coexist as
     // Media, Model, and ProjectionMesh because those are distinct manifest

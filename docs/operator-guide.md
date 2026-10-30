@@ -978,7 +978,7 @@ way a dropped asset is: an outline previews where it will rest. Lights and
 the camera are added where their defaults put them. Right-click an asset, folder or empty
 space for **Open in Asset Viewer** (Enter), **Rename** (F2), **New Folder**, **Move to Top
 Level**, **Remove from Library** (Delete), **Import Media...**, **Import
-Model...** and **Rescan Sources**.
+Model...**, **Import Particle Effect...** and **Rescan Sources**.
 
 **Folders** are organisation only. A folder is an `asset.folder` document
 node, and an asset names its folder in a `folder` field. Neither changes how
@@ -1007,7 +1007,9 @@ What happens on release depends on where it lands:
   **Ctrl** held while it is off), the landing point steps to the 1 m grid
   across a level or upright surface, and a screen's turn steps by 5
   degrees. An imported model is hit on its own triangles a moment after it
-  first appears. Until then, the Stage uses its bounding box.
+  first appears. Until then, the Stage uses its bounding box. A particle
+  effect has no size until it runs, so its origin lands on the point under
+  the pointer.
 - **An empty part of the Timeline:** each asset becomes a new layer.
 - **A compatible Timeline row or Compositor Scene Layer:** the asset replaces
   that source, as described below.
@@ -1016,8 +1018,9 @@ What happens on release depends on where it lands:
 **Files from the desktop** can be dragged straight into the window. Dropped on
 the Library, they are imported into the folder under the pointer. Dropped
 anywhere else, they are imported at the Library's top level. Video and images
-are probed. Models go through the model worker. Files that are neither are
-named in the status line rather than imported. Import also records the video
+are probed. Models go through the model worker. Particle effects (`.ajfx`
+packages exported by ajfx Studio) need no probe. Files that are none of these
+are named in the status line rather than imported. Import also records the video
 codec, the file's start timecode, and a model's vertex count, texture count
 and largest texture size. Assets imported before this was recorded show those
 columns blank until they are imported again, or until a changed file is
@@ -1043,6 +1046,17 @@ trims are not changed. Everything one Accept asked
 for is a single Undo. Thumbnails and proxies are keyed by the fingerprint, so
 they regenerate for the new revision. A file that has gone missing is not
 offered; it is reported as missing instead.
+
+**Particle effects** are `.ajfx` packages: an effect and its precompiled GPU
+kernels, exported by ajfx Studio. Drag one onto Stage to place it, then
+select it to set its **Seed** and **Start frame** in the Inspector's
+PARTICLES section. **Start at the playhead** sets the start frame to the
+current show frame. Two placements of one package never draw the same
+particles, even with equal seeds. Effects play only in the Advanced renderer.
+In Basic, the Stage and Program status say so, and Program is not ready
+while an effect is due to play. After you export a package again in place,
+**Rescan Sources** makes every renderer read it again. Each keeps drawing the
+old version until the new one is loaded, then switches to it.
 
 To replace an existing source, drag a Library asset onto its **Timeline layer
 row** or the layer's **Scene Layer node in Compositor**. A compatible target is

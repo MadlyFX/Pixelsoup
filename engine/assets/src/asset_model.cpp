@@ -222,7 +222,7 @@ read_fingerprint(Reader& reader) {
 
 core::u32 AssetCounters::over_capacity() const noexcept {
     const core::u64 valid = static_cast<core::u64>(media) + models +
-        projection_meshes + platesets;
+        projection_meshes + platesets + particle_effects;
     const core::u64 unique =
         valid > duplicate_sources ? valid - duplicate_sources : 0U;
     return unique > max_project_assets
@@ -335,7 +335,8 @@ void AssetModel::put(const doc::Node& node) {
         return;
     }
     if (node.type != schema::media_type && node.type != schema::model_type &&
-        node.type != schema::projection_mesh_type) {
+        node.type != schema::projection_mesh_type &&
+        node.type != schema::particle_effect_type) {
         return;
     }
 
@@ -343,6 +344,18 @@ void AssetModel::put(const doc::Node& node) {
     auto [display_name, source] = read_identity(reader);
     const auto fingerprint = read_fingerprint(reader);
     const doc::NodeId folder = read_folder(reader);
+
+    if (node.type == schema::particle_effect_type) {
+        if (!reader.ok()) {
+            ++counters_.rejected;
+            return;
+        }
+        entries_.insert_or_assign(
+            node.id, Asset{ParticleEffectAsset{node.id, std::move(display_name),
+                                               std::move(source), fingerprint,
+                                               folder}});
+        return;
+    }
 
     if (node.type == schema::media_type) {
         std::optional<PixelDimensions> dimensions;
@@ -464,6 +477,7 @@ void AssetModel::recount() noexcept {
     core::u32 models = 0U;
     core::u32 projection_meshes = 0U;
     core::u32 platesets = 0U;
+    core::u32 particle_effects = 0U;
     core::u32 duplicates = 0U;
     std::set<std::pair<AssetKind, std::string_view>> sources;
     for (const auto& [id, asset] : entries_) {
@@ -477,6 +491,8 @@ void AssetModel::recount() noexcept {
         }
         core::u32& count = std::holds_alternative<MediaAsset>(asset)
             ? media
+            : std::holds_alternative<ParticleEffectAsset>(asset)
+            ? particle_effects
             : (std::get<ModelAsset>(asset).projection_mesh
                    ? projection_meshes
                    : models);
@@ -492,6 +508,7 @@ void AssetModel::recount() noexcept {
     counters_.models = models;
     counters_.projection_meshes = projection_meshes;
     counters_.platesets = platesets;
+    counters_.particle_effects = particle_effects;
     counters_.duplicate_sources = duplicates;
 }
 
@@ -522,7 +539,8 @@ void AssetModel::apply(const doc::Delta& delta) {
 AssetRegistry AssetModel::evaluate() const {
     AssetRegistry registry{};
     const core::u64 valid = static_cast<core::u64>(counters_.media) +
-        counters_.models + counters_.projection_meshes + counters_.platesets;
+        counters_.models + counters_.projection_meshes + counters_.platesets +
+        counters_.particle_effects;
     const core::u64 unique = valid > counters_.duplicate_sources
                                  ? valid - counters_.duplicate_sources
                                  : 0U;

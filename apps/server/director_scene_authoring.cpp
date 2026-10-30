@@ -328,6 +328,14 @@ map_transport(editor::TransportRequest request) noexcept {
         const bool clip=edit.property==scene::schema::animation_clip;
         const auto value=static_cast<std::int64_t>(std::llround(std::clamp(edit.value,clip?0.0:2.0,clip?63.0:1000000.0)));
         updated.properties.insert_or_assign(edit.property,doc::PropertyValue{value});
+    } else if (edit.property == scene::schema::particle_seed ||
+               edit.property == scene::schema::particle_start_frame) {
+        // Whole numbers, as the scene reads them: a fractional or negative
+        // value would make the node unreadable.
+        if (existing->type != scene::schema::particle_effect_type || !std::isfinite(edit.value)) return true;
+        const double most = edit.property == scene::schema::particle_seed ? 4294967295.0 : 9007199254740992.0;
+        updated.properties.insert_or_assign(edit.property,
+            doc::PropertyValue{static_cast<std::int64_t>(std::llround(std::clamp(edit.value, 0.0, most)))});
     } else if (edit.property == scene::schema::source && edit.text.has_value()) {
         return schedule_model_source_edit(scheduler, edit.node, *edit.text,
             cmd::TransactionId{edit.gesture}, apply_at, coalescing);
@@ -1079,6 +1087,15 @@ placed_clip_duration(const editor::AddIntent &add,
         add_links();
         return node;
     }
+    if (kind == editor::AddKind::ParticleEffect) {
+        // Seed zero and starting at the head of the show: the node id already
+        // makes each placement's particles its own.
+        node.type = std::string{scene::schema::particle_effect_type};
+        node.properties.emplace(std::string{scene::schema::source},
+                                text(add.source));
+        add_links();
+        return node;
+    }
     if (kind == editor::AddKind::Media) {
         node.type = std::string{scene::schema::media_type};
         node.properties.emplace(std::string{scene::schema::source},
@@ -1361,7 +1378,8 @@ schedule_asset_delete(cmd::DirectorScheduler &scheduler,
     }
     if (existing->type != assets::schema::media_type &&
         existing->type != assets::schema::model_type &&
-        existing->type != assets::schema::projection_mesh_type) {
+        existing->type != assets::schema::projection_mesh_type &&
+        existing->type != assets::schema::particle_effect_type) {
         // A stale or malformed UI request must never erase a non-asset node.
         return true;
     }

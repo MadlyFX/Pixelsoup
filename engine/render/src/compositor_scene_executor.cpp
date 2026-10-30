@@ -2744,6 +2744,19 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             last_passes_.geometry.planar_passes = std::max(last_passes_.geometry.planar_passes, products.passes.geometry.planar_passes);
             last_passes_.geometry.planar_refusals = std::max(last_passes_.geometry.planar_refusals, products.passes.geometry.planar_refusals);
             if (!products.passes.geometry.reflection_reason.empty()) last_passes_.geometry.reflection_reason = products.passes.geometry.reflection_reason;
+            if (!seeds_frame) {
+                // Each layer draws its own effects; any one holding is the
+                // frame holding, for the reason the first one gave.
+                const RenderStats& drawn = products.passes.geometry;
+                last_passes_.geometry.particles_drawn += drawn.particles_drawn;
+                last_passes_.geometry.particles_pending += drawn.particles_pending;
+                last_passes_.geometry.particles_failed += drawn.particles_failed;
+                last_passes_.geometry.particles_unsupported += drawn.particles_unsupported;
+                last_passes_.geometry.particles_behind += drawn.particles_behind;
+                if (last_passes_.geometry.particle_issue.empty()) {
+                    last_passes_.geometry.particle_issue = drawn.particle_issue;
+                }
+            }
             if (products.passes.geometry.texture_streaming.state !=
                     TextureStreamState::Ready) {
                 last_passes_.geometry.texture_streaming.state =

@@ -85,6 +85,11 @@ void stage_drop() {
   model.display_name = "Dropped model";
   model.source = "T:/dropped.msmodel";
   registry.assets.emplace_back(model);
+  mediaserver::assets::ParticleEffectAsset embers;
+  embers.id = doc::NodeId{91U};
+  embers.display_name = "Dropped embers";
+  embers.source = "T:/dropped.ajfx";
+  registry.assets.emplace_back(embers);
   editor::EditorSwitcherState switcher;
 
   const auto frame = [&] {
@@ -166,8 +171,9 @@ void stage_drop() {
           "the Background faces the camera");
   }
 
-  // Filter the Library to the two assets. The List view sorts them by name:
-  // the model's row is 70..103, the video's 103..136.
+  // Filter the Library to the three assets. The List view sorts them by
+  // name: the particle effect's row is 70..103, the model's 103..136 and the
+  // video's 136..169.
   static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, true));
   static_cast<void>(pointer(library.x + 75.0F, library.y + 37.0F, false));
   SDL_Event text{};
@@ -177,8 +183,9 @@ void stage_drop() {
   check(SDL_PushEvent(&text), "filter Library");
   static_cast<void>(frame());
   const float asset_x = library.x + 80.0F;
-  const float media_y = library.y + 120.0F;
-  const float model_y = library.y + 86.0F;
+  const float media_y = library.y + 153.0F;
+  const float model_y = library.y + 120.0F;
+  const float embers_y = library.y + 86.0F;
 
   const auto video = drag(asset_x, media_y);
   check(video.adds.size() == 1U, "the video is added");
@@ -207,6 +214,17 @@ void stage_drop() {
         "the model's origin rests on the platform");
   check(!placed.rotation.has_value(), "the model keeps its orientation");
 
+  // A particle effect has no extent before it runs: its origin lands on the
+  // platform under the pointer, as a placement of its package.
+  const auto burst = drag(asset_x, embers_y);
+  check(burst.adds.size() == 1U, "the particle effect is added");
+  const editor::AddIntent &effect = burst.adds.front();
+  check(effect.kind == editor::AddKind::ParticleEffect &&
+            effect.asset == embers.id && effect.source == embers.source,
+        "the dropped particle effect, placed from its asset");
+  check(effect.position.has_value() && near(effect.position->y, 0.5F),
+        "the particle effect's origin rests on the platform");
+
   // Without the platform, the stage floor carries it.
   show.instances.clear();
   elements.clear();
@@ -222,7 +240,7 @@ void stage_drop() {
 int main() {
   try {
     stage_drop();
-    std::puts("[pass] a Library asset dropped on Stage rests on the surface under the pointer");
+    std::puts("[pass] a Library asset (video, model, particle effect) dropped on Stage rests on the surface under the pointer");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "[fail] %s\n", error.what());

@@ -47,6 +47,7 @@ enum class LibraryAddAction : core::u8 {
 enum class LibraryImportAction : core::u8 {
   Media,
   Model,
+  ParticleEffect,
 };
 
 // Runtime-only projection of the app/server thumbnail service. These values
@@ -349,6 +350,9 @@ void draw_plateset_icon(
     gui::UiContext &ctx, const gui::Rect &bounds,
     std::optional<assets::PlatesetSlot> highlight = std::nullopt);
 
+// The draw-only mark for a particle effect package, which has no thumbnail.
+void draw_particle_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds);
+
 // The project's Library, laid out the way editorial and engine asset
 // browsers are: a toolbar to search, import and make folders; a List view
 // whose columns carry timecode, resolution, length, codec, geometry and
@@ -483,6 +487,7 @@ private:
   const rhi::Texture *ghost_texture_{};
   bool ghost_model_{};
   bool ghost_plateset_{};
+  bool ghost_particles_{};
   // The generator a ghost stands for, drawn as its icon.
   std::optional<LibraryAddAction> ghost_generator_;
   std::size_t ghost_count_{};

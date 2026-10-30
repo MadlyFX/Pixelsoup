@@ -197,6 +197,8 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
     pristine.inner_cone = fresh.inner_cone;
     pristine.outer_cone = fresh.outer_cone;
     pristine.animation = fresh.animation;
+    pristine.particle_seed = fresh.particle_seed;
+    pristine.particle_start_frame = fresh.particle_start_frame;
     // A fill keeps its kind - Solid, Linear, Radial is a choice, not a value -
     // and starts its colours and placement over.
     std::optional<scene::Fill> fill;
@@ -505,6 +507,20 @@ InspectorPanel::editable_value(const ElementInfo& element,
                     element.node, feed_,
                     source.settings.fallback_focal_length_mm};
             }
+        }
+        return std::nullopt;
+    case FieldDomain::Particles:
+        if (element.kind != ElementKind::ParticleEffect) {
+            return std::nullopt;
+        }
+        if (binding.property == scene::schema::particle_seed) {
+            return EditableValue{element.node, element.node,
+                                 static_cast<double>(element.particle_seed)};
+        }
+        if (binding.property == scene::schema::particle_start_frame) {
+            return EditableValue{
+                element.node, element.node,
+                static_cast<double>(element.particle_start_frame)};
         }
         return std::nullopt;
     case FieldDomain::Plate:
@@ -965,6 +981,11 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
           return std::clamp(std::round(value), 0.0, 255.0);
         }
         return std::max(value, 0.0);
+      case FieldDomain::Particles:
+        return std::clamp(std::round(value), 0.0,
+                          binding.property == scene::schema::particle_seed
+                              ? 4294967295.0
+                              : 9007199254740992.0);
       case FieldDomain::Plate:
         // Every one of these is whole pixels or a whole ordinal. Rounding here
         // rather than at the document boundary means the field itself never
@@ -1119,6 +1140,7 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       case FieldDomain::Screen:
       case FieldDomain::Tracking:
       case FieldDomain::Plate:
+      case FieldDomain::Particles:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -2736,6 +2758,41 @@ void InspectorPanel::draw_camera(
     }
 }
 
+void InspectorPanel::draw_particles(gui::UiContext& ctx, Cursor& cursor,
+                                    const ElementInfo& element,
+                                    InspectorFrame& frame,
+                                    core::u64 show_frame) {
+    if (element.kind != ElementKind::ParticleEffect ||
+        !section(ctx, cursor, "PARTICLES", particles_open_)) {
+        return;
+    }
+    cursor.space(row_gap);
+    ctx.label(take_row(cursor, 20.0F), element.source, ctx.theme().text_muted);
+    constexpr std::array<std::string_view, 1U> number{{""}};
+    const std::array<float, 1U> seed{static_cast<float>(element.particle_seed)};
+    const std::array<FieldBinding, 1U> seed_binding{
+        {{FieldDomain::Particles, {}, scene::schema::particle_seed}}};
+    vector_row(ctx, cursor, "Seed", number, seed, 1.0F, seed_binding, frame,
+               nullptr, false, false, 0U, 0);
+    const std::array<float, 1U> start{
+        static_cast<float>(element.particle_start_frame)};
+    const std::array<FieldBinding, 1U> start_binding{
+        {{FieldDomain::Particles, {}, scene::schema::particle_start_frame}}};
+    vector_row(ctx, cursor, "Start frame", number, start, 1.0F, start_binding,
+               frame, nullptr, false, false, 0U, 0);
+    if (ctx.button(mix(id_, "particles.start", element.node.value()),
+                   take_row(cursor, row_height), "Start at the playhead")) {
+        for (const auto& item : selected_) {
+            if (!item.locked && item.kind == ElementKind::ParticleEffect) {
+                frame.named_edits.push_back(
+                    NamedEdit{item.node, std::string{scene::schema::particle_start_frame},
+                              static_cast<double>(show_frame)});
+            }
+        }
+    }
+    cursor.space(row_gap);
+}
+
 void InspectorPanel::draw_camera_tracking(
     gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element,
     InspectorFrame& frame, std::span<const scene::TrackingSource> sources) {
@@ -3098,6 +3155,9 @@ InspectorFrame InspectorPanel::draw_selection(
     } else if (displayed->kind == ElementKind::Camera) {
         draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
         draw_camera(ctx, cursor, *displayed, frame, keyframes, show_frame);
+    } else if (displayed->kind == ElementKind::ParticleEffect) {
+        draw_transform(ctx, cursor, *displayed, frame, keyframes, show_frame);
+        draw_particles(ctx, cursor, *displayed, frame, show_frame);
     } else if (displayed->on_screen()) {
         // A clip on a track is playing on that track's screen, so the screen
         // is what has a place in the scene. Showing the clip's own transform
@@ -3126,7 +3186,8 @@ InspectorFrame InspectorPanel::draw_selection(
         cursor.space(row_gap);
         draw_camera_tracking(ctx, cursor, *displayed, frame, sources);
     } else if (!is_light(displayed->kind) &&
-               displayed->kind != ElementKind::Group) {
+               displayed->kind != ElementKind::Group &&
+               displayed->kind != ElementKind::ParticleEffect) {
         cursor.space(row_gap);
         if (!displayed->linked) draw_content(ctx, cursor, *displayed, frame);
         draw_screen(ctx, cursor, *displayed, frame);

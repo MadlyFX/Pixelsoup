@@ -249,6 +249,30 @@ void projection_meshes_are_first_class_asset_records() {
                  2);
 }
 
+void particle_effect_packages_are_asset_records() {
+    TemporaryDirectory temporary;
+    const fs::path source = temporary.path() / "embers.ajfx";
+    write(source, "AJFX package");
+    assets::ParticleEffectAsset effect{};
+    effect.display_name = "Embers";
+    effect.source = assets::asset_source_from_path(source);
+    auto prepared = app::prepare_project_asset_import(assets::Asset{effect});
+    IMPORT_CHECK(static_cast<bool>(prepared));
+    IMPORT_CHECK(assets::asset_fingerprint(prepared.value())->byte_length == 12U);
+    const doc::Node node = app::make_project_asset_node(doc::NodeId{14U}, prepared.value());
+    IMPORT_CHECK(node.type == assets::schema::particle_effect_type);
+    // Read back, it is the same record.
+    assets::AssetModel model;
+    model.reset(doc::Root{}.set(node));
+    const assets::AssetRegistry registry = model.evaluate();
+    const auto* const held = registry.asset(doc::NodeId{14U});
+    IMPORT_CHECK(held != nullptr && assets::asset_kind(*held) == assets::AssetKind::ParticleEffect);
+    IMPORT_CHECK(assets::asset_source(*held) == effect.source);
+    IMPORT_CHECK(assets::asset_fingerprint(*held) == assets::asset_fingerprint(prepared.value()));
+    // And unplaced, it can be removed.
+    IMPORT_CHECK(static_cast<bool>(app::plan_project_asset_delete(doc::Root{}.set(node), doc::NodeId{14U})));
+}
+
 void one_obj_can_be_a_scene_model_and_a_projection_mesh() {
     assets::ModelAsset scene_model{};
     scene_model.display_name = "Scenic wall";
@@ -420,6 +444,8 @@ constexpr Case cases[]{
      &library_metadata_round_trips_and_reimport_keeps_the_folder},
     {"projection meshes are first-class asset records",
      &projection_meshes_are_first_class_asset_records},
+    {"particle effect packages are asset records",
+     &particle_effect_packages_are_asset_records},
     {"one OBJ can be a scene model and a projection mesh",
      &one_obj_can_be_a_scene_model_and_a_projection_mesh},
     {"referenced assets report every use and refuse deletion",

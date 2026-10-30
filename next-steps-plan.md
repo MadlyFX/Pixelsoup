@@ -932,10 +932,18 @@ feedback forces evaluate any frame directly.
    Basic renderer refused with a reason, full canvas and slices drawing
    byte-identical sprites), and a `scene.particle_effect` node (done: source,
    seed and start frame, normalized, replicated and digested; published
-   parameter values still to come). Remaining: `.ajfx` import as a Library
-   asset, placement by dragging from the Library, published parameters in the
-   Inspector with keyframes, adoption of a re-exported package
-   (`ParticlePackageCache::refresh`), and two-node agreement on the cluster.
+   parameter values still to come), `.ajfx` import as an
+   `asset.particle_effect` Library asset (done: menu, file dialog and desktop
+   drops; in the project manifest so nodes check the file), placement by
+   dragging from the Library (done), seed and start frame in the Inspector
+   (done), Stage and Program status naming why effects hold, and adoption of
+   a re-exported package at the next asset generation (done: Rescan Sources).
+   Remaining: published effect parameters in the Inspector with keyframes,
+   and two-node agreement on the cluster. Catching up is slow for an effect
+   placed or seeked far from its checkpoints: at 16 steps a frame, an effect
+   dropped 2.5 minutes into a show holds for about 25 seconds. A larger
+   budget while off air, or checkpoints kept across the whole show, would
+   shorten it.
 5. GPU sort, ribbons, mesh particles, particle lights, soft particles, motion
    vectors, and depth and SDF collision.
 6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,

@@ -1002,6 +1002,7 @@ inline constexpr float group_value_width = 132.0F;
   return element.kind == ElementKind::Object ||
          element.kind == ElementKind::Media ||
          element.kind == ElementKind::Model ||
+         element.kind == ElementKind::ParticleEffect ||
          element.kind == ElementKind::Group || is_light(element.kind);
 }
 

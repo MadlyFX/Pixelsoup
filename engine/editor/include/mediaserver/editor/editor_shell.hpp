@@ -153,6 +153,8 @@ enum class AddKind : core::u8 {
   SpotLight,
   Model,
   Media,
+  // An ajfx particle effect, placed from its Library asset.
+  ParticleEffect,
   // A camera on the stage. Adding one authors an ordinary scene.camera node;
   // assigning it a tracking source is what makes it the inner frustum's.
   Camera,

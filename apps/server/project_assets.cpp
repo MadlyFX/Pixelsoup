@@ -121,6 +121,11 @@ ProjectAssetManifest collect_project_asset_manifest(
             kind = assets::AssetKind::Model;
             source = text(node.properties, scene::schema::source);
             authored_asset = node_id(node.properties, scene::schema::asset_id);
+        } else if (node.type == scene::schema::particle_effect_type) {
+            relevant = true;
+            kind = assets::AssetKind::ParticleEffect;
+            source = text(node.properties, scene::schema::source);
+            authored_asset = node_id(node.properties, scene::schema::asset_id);
         } else if (node.type == scene::link_schema::prototype_type) {
             // Geometry Blender sent: the ingested package every linked
             // occurrence of this prototype draws.

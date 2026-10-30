@@ -66,6 +66,9 @@ doc::Node make_project_asset_node(doc::NodeId id,
             using Asset = std::decay_t<decltype(asset)>;
             if constexpr (std::is_same_v<Asset, assets::MediaAsset>) {
                 node.type = std::string{assets::schema::media_type};
+            } else if constexpr (std::is_same_v<Asset,
+                                                assets::ParticleEffectAsset>) {
+                node.type = std::string{assets::schema::particle_effect_type};
             } else {
                 node.type = std::string{
                     asset.projection_mesh
@@ -144,7 +147,7 @@ doc::Node make_project_asset_node(doc::NodeId id,
                             assets::proxy_playback_policy_name(
                                 asset.proxy_playback_policy)}});
                 }
-            } else {
+            } else if constexpr (std::is_same_v<Asset, assets::ModelAsset>) {
                 if (asset.triangle_count.has_value()) {
                     node.properties.emplace(
                         std::string{asset.projection_mesh
@@ -252,7 +255,8 @@ namespace {
     return node.type == assets::schema::media_type ||
            node.type == assets::schema::model_type ||
            node.type == assets::schema::projection_mesh_type ||
-           node.type == assets::schema::plateset_type;
+           node.type == assets::schema::plateset_type ||
+           node.type == assets::schema::particle_effect_type;
 }
 
 [[nodiscard]] ProjectAssetAuthoringError authoring_error(

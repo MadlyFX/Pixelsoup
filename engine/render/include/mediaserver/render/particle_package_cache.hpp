@@ -59,10 +59,11 @@ public:
     ~ParticlePackageCache();
 
     // Never blocks on the file: queues an unseen source and returns its state.
-    [[nodiscard]] ParticlePackageObservation observe(const std::string& source);
-    // Reads the source again, keeping the current package until the new one
-    // is ready (so a re-export in place swaps over without a gap).
-    void refresh(const std::string& source);
+    // A different `generation` (the scene's replicated asset generation, which
+    // a Library rescan advances) reads the source again, keeping the current
+    // package until the new one is ready, so a re-export in place swaps over
+    // without a gap and every node swaps at the same generation.
+    [[nodiscard]] ParticlePackageObservation observe(const std::string& source, core::u64 generation = 0U);
     // Blocks until nothing is queued or loading. For tests and tools.
     void wait_idle();
 
@@ -71,6 +72,7 @@ private:
         std::shared_ptr<const ParticlePackage> package;
         ParticlePackageState state{ParticlePackageState::Pending};
         std::string error;
+        core::u64 generation{};
         bool queued{};
     };
 

@@ -450,6 +450,16 @@ void columns_read_authored_metadata() {
   UI_CHECK(text(model, editor::LibraryColumn::TextureSize) == "4096 x 2048");
   UI_CHECK(text(model, editor::LibraryColumn::Resolution).empty());
   UI_CHECK(text(model, editor::LibraryColumn::Proxy).empty());
+
+  assets::ParticleEffectAsset embers{};
+  embers.id = doc::NodeId{4U};
+  embers.display_name = "Embers";
+  embers.source = "C:/show/embers.ajfx";
+  const assets::Asset effect{embers};
+  UI_CHECK(text(effect, editor::LibraryColumn::Type) == "Particle effect");
+  UI_CHECK(text(effect, editor::LibraryColumn::Name) == "Embers");
+  UI_CHECK(text(effect, editor::LibraryColumn::Triangles).empty());
+  UI_CHECK(text(effect, editor::LibraryColumn::Resolution).empty());
 }
 
 void drop_frame_timecode_counts_like_an_editor() {
@@ -478,6 +488,8 @@ void files_import_by_extension() {
            editor::LibraryImportAction::Media);
   UI_CHECK(editor::library_import_kind("C:/models/car.glb") ==
            editor::LibraryImportAction::Model);
+  UI_CHECK(editor::library_import_kind("C:/fx/Embers.AJFX") ==
+           editor::LibraryImportAction::ParticleEffect);
   UI_CHECK(!editor::library_import_kind("C:/notes.txt").has_value());
   UI_CHECK(!editor::library_import_kind("C:/takes.v2/readme").has_value());
 }

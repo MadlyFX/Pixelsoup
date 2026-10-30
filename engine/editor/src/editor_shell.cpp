@@ -4323,6 +4323,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         : "Loading baked lighting and uploading the probe field.";
   else if (program_geometry.texture_streaming.state != render::TextureStreamState::Ready)
     loading_detail = "Preparing material textures on the GPU.";
+  else if (program_geometry.particles_unsupported != 0U)
+    loading_detail = "Particle effects play only in the Advanced renderer. Choose it in Renderer settings.";
+  else if (program_geometry.particles_failed != 0U)
+    loading_detail = "A particle effect could not load. Check its source path, then Rescan in Library.";
+  else if (program_geometry.particles_pending != 0U)
+    loading_detail = "Loading particle effects: " + std::to_string(program_geometry.particles_pending) + " pending.";
+  else if (program_geometry.particles_behind != 0U)
+    loading_detail = "Particle effects are catching up with the playhead.";
   else if (impl.frame_media_cache.stats().pending_requests != 0)
     loading_detail = "Loading media: " + std::to_string(impl.frame_media_cache.stats().pending_requests) + " pending.";
   else if (program_geometry.assets.ready && !impl.assets.ready)
@@ -5392,29 +5400,48 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
       } else if (kind == LibraryImportAction::Model) {
         enqueue_model(source, {}, {}, {}, folder);
+      } else if (kind == LibraryImportAction::ParticleEffect) {
+        // A package carries everything it needs; there is nothing to probe.
+        // Each renderer reads and checks it off its frame path.
+        assets::ParticleEffectAsset asset{};
+        asset.display_name = std::filesystem::path{source}.stem().string();
+        asset.source = source;
+        asset.folder = folder;
+        result.asset_imports.push_back(
+            AssetImportIntent{assets::Asset{std::move(asset)}, gesture});
       } else {
         ++refused;
       }
     }
     if (refused > 0U) {
       impl.ingest_message =
-          refused == 1U ? "Not a media or model file; nothing imported"
-                        : std::to_string(refused) +
-                              " files are not media or models; skipped";
+          refused == 1U
+              ? "Not a media, model or particle file; nothing imported"
+              : std::to_string(refused) +
+                    " files are not media, models or particle effects; skipped";
     }
   };
 
   const auto import_asset = [&](LibraryImportAction action,
                                 doc::NodeId folder) {
     const bool media = action == LibraryImportAction::Media;
+    const bool particles = action == LibraryImportAction::ParticleEffect;
     const char *const media_filters[]{"*.mp4", "*.mov", "*.mkv", "*.webm",
                                       "*.avi", "*.mxf", "*.m4v", "*.mpg", "*.mpeg", "*.wmv",
                                       "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga", "*.exr", "*.hdr"};
     const char *const model_filters[]{"*.gltf", "*.glb", "*.obj", "*.msmodel"};
+    const char *const particle_filters[]{"*.ajfx"};
     const char *const path = tinyfd_openFileDialog(
-        media ? "Import Media Asset" : "Import 3D Model Asset", "",
-        media ? static_cast<int>(std::size(media_filters)) : 4, media ? media_filters : model_filters,
-        media ? "Video and images" : "3D models (glTF, OBJ)", 1);
+        media ? "Import Media Asset"
+        : particles ? "Import Particle Effect Asset"
+                    : "Import 3D Model Asset",
+        "",
+        media ? static_cast<int>(std::size(media_filters)) : particles ? 1 : 4,
+        media ? media_filters : particles ? particle_filters : model_filters,
+        media ? "Video and images"
+        : particles ? "ajfx particle effects"
+                    : "3D models (glTF, OBJ)",
+        1);
     if (path == nullptr) {
       return;
     }
@@ -5448,6 +5475,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                       media->frame_rate, graph_layer});
       result.adds.back().rotation = rotation;
       result.adds.back().timing = timing;
+      return;
+    }
+    if (const auto *const effect =
+            std::get_if<assets::ParticleEffectAsset>(found)) {
+      result.adds.push_back(AddIntent{AddKind::ParticleEffect, effect->source,
+                                      1U, impl.next_edit_gesture++,
+                                      16.0F / 9.0F, effect->id,
+                                      authored_stage.id, position});
+      result.adds.back().rotation = rotation;
       return;
     }
     const auto &model = std::get<assets::ModelAsset>(*found);
@@ -8284,10 +8320,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                    static_cast<float>(media->dimensions->height);
         }
         request.bounds = media_placement_bounds(aspect);
-      } else if (const auto bounds = impl.stage().panel.model_source_bounds(
-                     std::get<assets::ModelAsset>(*asset).source)) {
-        request.bounds = *bounds;
+      } else if (const auto *const model =
+                     std::get_if<assets::ModelAsset>(asset)) {
+        if (const auto bounds =
+                impl.stage().panel.model_source_bounds(model->source)) {
+          request.bounds = *bounds;
+        }
       }
+      // A particle effect has no extent before it runs: it lands at the
+      // point under the pointer.
       if (const auto placement = place_on_stage(request)) {
         placed.emplace_back(ids[index], *placement);
       }

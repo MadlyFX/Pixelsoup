@@ -63,8 +63,8 @@ std::vector<core::u8> download(rhi::CommandList commands, const rhi::Texture& ta
 }
 
 // One still sprite, a world unit across, at the effect's origin.
-std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& compiler) {
-    const ajfx::Color red{1.0F, 0.0F, 0.0F, 1.0F};
+std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& compiler,
+                         ajfx::Color red = {1.0F, 0.0F, 0.0F, 1.0F}) {
     ajfx::EffectBuilder builder{"still"};
     builder.emitter("e")
         .spawn(ajfx::SpawnBurst{.count = 1U})
@@ -216,6 +216,46 @@ void unstarted_missing_and_unsupported_effects(ajfx::gpu::ShaderCompiler& compil
     g_device->wait_idle();
 }
 
+void a_reexported_package_is_adopted_at_the_next_asset_generation(ajfx::gpu::ShaderCompiler& compiler) {
+    const std::string source = write_effect("swap.ajfx", compiler);
+    scene::Scene frame = scene_with(source);
+    frame.canvas = {64U, 64U};
+    frame.asset_refresh_generation = 1U;
+    auto renderer = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(renderer);
+    const std::vector<core::u8> red = settle(renderer.value(), frame, {0U, 0U, 64U, 64U});
+    SCENE_CHECK(renderer.value().stats().particles_drawn == 1U);
+
+    // Exported again in place, green. Until the asset generation moves on,
+    // every node keeps drawing the package it has.
+    static_cast<void>(write_effect("swap.ajfx", compiler, ajfx::Color{0.0F, 1.0F, 0.0F, 1.0F}));
+    for (int frames = 0; frames < 10; ++frames) {
+        rhi::CommandList commands = acquire();
+        SCENE_CHECK(renderer.value().render(commands, frame, {0U, 0U, 64U, 64U}));
+        SCENE_CHECK(download(std::move(commands), renderer.value().target()) == red);
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+
+    // A rescan advances it: the old package draws (and readiness holds) until
+    // the new one is read, then the new one does - as a fresh renderer sees it.
+    frame.asset_refresh_generation = 2U;
+    std::vector<core::u8> image = red;
+    for (int attempt = 0; attempt < 500 && image == red; ++attempt) {
+        rhi::CommandList commands = acquire();
+        SCENE_CHECK(renderer.value().render(commands, frame, {0U, 0U, 64U, 64U}));
+        image = download(std::move(commands), renderer.value().target());
+        SCENE_CHECK(renderer.value().stats().particles_drawn + renderer.value().stats().particles_behind
+                        + renderer.value().stats().particles_pending == 1U);
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    image = settle(renderer.value(), frame, {0U, 0U, 64U, 64U});
+    SCENE_CHECK(image != red);
+    auto fresh = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(fresh);
+    SCENE_CHECK(settle(fresh.value(), frame, {0U, 0U, 64U, 64U}) == image);
+    g_device->wait_idle();
+}
+
 } // namespace
 
 int main() {
@@ -242,6 +282,8 @@ int main() {
     const Case cases[] = {
         {"effects_draw_alike_on_the_full_canvas_and_its_slices", effects_draw_alike_on_the_full_canvas_and_its_slices},
         {"unstarted_missing_and_unsupported_effects", unstarted_missing_and_unsupported_effects},
+        {"a_reexported_package_is_adopted_at_the_next_asset_generation",
+         a_reexported_package_is_adopted_at_the_next_asset_generation},
     };
     int failures = 0;
     for (const Case& test : cases) {

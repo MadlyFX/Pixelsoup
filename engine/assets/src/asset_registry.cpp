@@ -68,6 +68,9 @@ AssetKind asset_kind(const Asset& asset) noexcept {
     if (std::holds_alternative<PlatesetAsset>(asset)) {
         return AssetKind::Plateset;
     }
+    if (std::holds_alternative<ParticleEffectAsset>(asset)) {
+        return AssetKind::ParticleEffect;
+    }
     return std::get<ModelAsset>(asset).projection_mesh
         ? AssetKind::ProjectionMesh
         : AssetKind::Model;
@@ -231,6 +234,9 @@ core::u64 digest(const AssetRegistry& registry) noexcept {
                                         held.proxy_playback_policy));
                     hash_text(hash, held.codec);
                     hash_text(hash, held.start_timecode);
+                } else if constexpr (std::is_same_v<Held,
+                                                    ParticleEffectAsset>) {
+                    hash_fingerprint(hash, held.fingerprint);
                 } else {
                     hash_byte(hash, held.projection_mesh ? 1U : 0U);
                     hash_byte(hash, held.vertex_count.has_value() ? 1U : 0U);
