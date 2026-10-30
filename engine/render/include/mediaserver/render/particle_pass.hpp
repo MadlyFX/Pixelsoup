@@ -132,6 +132,12 @@ public:
                             const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
                             const ParticleTargets& targets);
 
+    // Forgets `instance`'s history: its checkpoints are dropped, and the next
+    // advance simulates again from the start. For when what the simulation
+    // depends on (its parameters) changed, so the past it holds is no longer
+    // the past every node would compute.
+    void restart(ParticleInstance& instance) noexcept;
+
     // The first device failure since the last call, for frame diagnostics.
     [[nodiscard]] std::optional<ParticleError> take_error() noexcept;
 

@@ -3602,6 +3602,68 @@ bool SceneRenderer::adopt_environment(
         commands, environment_source_texture_, rotation);
 }
 
+namespace {
+
+// FNV-1a over a placement's parameter tracks, the input its whole history
+// depends on.
+core::u64 parameters_digest(const scene::ParticleEffect& effect) noexcept {
+    core::u64 hash = 0xcbf29ce484222325ULL;
+    const auto mix = [&hash](const void* data, std::size_t bytes) {
+        const auto* const at = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0U; i < bytes; ++i) {
+            hash = (hash ^ at[i]) * 0x100000001b3ULL;
+        }
+    };
+    for (const scene::ParticleParameter& parameter : effect.parameters) {
+        mix(parameter.key.data(), parameter.key.size() + 1U);
+        mix(&parameter.base, sizeof(parameter.base));
+        const scene::ChannelKeyframes& curve = parameter.curve;
+        mix(curve.frames.data(), curve.frames.size() * sizeof(core::i64));
+        mix(curve.values.data(), curve.values.size() * sizeof(double));
+        mix(curve.interpolations.data(), curve.interpolations.size() * sizeof(scene::KeyInterpolation));
+        for (const std::optional<scene::KeyTangent>& tangent : curve.tangents) {
+            const double handle[5] = {tangent ? static_cast<double>(tangent->mode) : -1.0,
+                                      tangent ? tangent->in_slope : 0.0, tangent ? tangent->out_slope : 0.0,
+                                      tangent ? tangent->in_weight.value_or(-1.0) : 0.0,
+                                      tangent ? tangent->out_weight.value_or(-1.0) : 0.0};
+            mix(handle, sizeof(handle));
+        }
+    }
+    return hash;
+}
+
+// A placement's parameters as the simulation asks for them: each bound
+// component at the step's own show time. Step `tick` of an effect starting at
+// show frame `start` is at start + tick * num / (rate * den) show frames,
+// worked in integers so every node splits it into the same frame and fraction.
+class PlacedParameters final : public ajfx::ParameterProvider {
+public:
+    PlacedParameters(std::span<const ParticleParameterBinding> bound, core::u64 start, core::u32 num,
+                     core::u32 den, core::u32 rate) noexcept
+        : bound_{bound}, start_{start}, num_{num}, scale_{static_cast<core::u64>(den) * rate} {}
+
+    void values_at(std::uint64_t tick, std::span<ajfx::ParameterValue> values) const override {
+        const core::u64 elapsed = tick * num_;
+        const core::u64 whole = elapsed / scale_;
+        const double fraction = static_cast<double>(elapsed % scale_) / static_cast<double>(scale_);
+        const auto frame = static_cast<core::i64>(start_ + whole);
+        for (const ParticleParameterBinding& one : bound_) {
+            if (one.index < values.size()) {
+                values[one.index][one.component] =
+                    static_cast<float>(scene::particle_parameter_at(*one.track, frame, fraction));
+            }
+        }
+    }
+
+private:
+    std::span<const ParticleParameterBinding> bound_;
+    core::u64 start_;
+    core::u64 num_;
+    core::u64 scale_;
+};
+
+} // namespace
+
 void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
                                       const SceneRenderOptions& options) {
     particle_draws_.clear();
@@ -3663,9 +3725,36 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
                 continue;
             }
             slot.instance.emplace(std::move(created).value());
+            slot.parameters = parameters_digest(effect);
         }
+        // A changed parameter changes the effect's whole past.
+        if (const core::u64 digest = parameters_digest(effect); digest != slot.parameters) {
+            particle_pass_->restart(*slot.instance);
+            slot.parameters = digest;
+        }
+        slot.bound.clear();
+        const ajfx::Effect& package = slot.package->effect;
+        for (const scene::ParticleParameter& track : effect.parameters) {
+            const std::optional<scene::ParticleParameterKey> key = scene::parse_particle_parameter_key(track.key);
+            if (!key) {
+                continue;
+            }
+            for (std::size_t index = 0U; index < package.parameters.size(); ++index) {
+                // A component the package does not publish is kept and ignored.
+                if (package.parameters[index].name == key->name) {
+                    const std::size_t components = package.parameters[index].type == ajfx::ParameterType::Float ? 1U
+                        : package.parameters[index].type == ajfx::ParameterType::Vec3 ? 3U : 4U;
+                    if (key->component < components) {
+                        slot.bound.push_back({index, key->component, &track});
+                    }
+                    break;
+                }
+            }
+        }
+        const PlacedParameters parameters{slot.bound, effect.start_frame, scene.show_rate.numerator,
+                                          scene.show_rate.denominator, package.simulation_rate};
         if (!particle_pass_->advance(commands, *slot.instance, *frame,
-                scene.show_rate.numerator, scene.show_rate.denominator)) {
+                scene.show_rate.numerator, scene.show_rate.denominator, &parameters)) {
             ++stats_.particles_behind;
             continue;
         }

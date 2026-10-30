@@ -30,6 +30,7 @@
 #include <mediaserver/render/compositor_scene_executor.hpp>
 #include <mediaserver/render/inspection_view.hpp>
 #include <mediaserver/render/mapped_scene.hpp>
+#include <mediaserver/render/particle_package_cache.hpp>
 #include <mediaserver/render/media_source.hpp>
 #include <mediaserver/render/model_loader.hpp>
 #include <mediaserver/render/output_transform.hpp>
@@ -2040,6 +2041,8 @@ struct EditorShell::Impl final {
   // one Accept asked for reaches the Director - and undoes - together.
   std::vector<AssetRevisionIntent> pending_revisions;
   render::ModelCache inspector_model_cache;
+  // What each selected particle package publishes, for the Inspector.
+  render::ParticlePackageCache inspector_particle_cache{ajfx::gpu::ShaderFormat::Dxil};
   core::AssetPublicationGate asset_gate;
   core::AssetSetReadiness assets{};
   std::optional<rhi::Texture> visible_program;
@@ -7978,7 +7981,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
           for (const InspectorKeyEdit &key : inspector.key_edits) {
             result.keys.push_back(KeyIntent{key.node, key.component,
                                             timeline.program_frame, key.value,
-                                            false, gesture, key.erase});
+                                            false, gesture, key.erase, key.parameter});
           }
         }
         return;
@@ -8024,6 +8027,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (const ElementInfo *const element = find_element(elements, selected);
             element != nullptr) {
           inspector_elements.push_back(*element);
+          if (element->kind == ElementKind::ParticleEffect) {
+            // Read on the cache's worker; the section fills in when it lands.
+            const render::ParticlePackageObservation observed =
+                impl.inspector_particle_cache.observe(element->source);
+            if (observed.package != nullptr) {
+              for (const ajfx::ParameterDesc &published : observed.package->effect.parameters) {
+                ParticleParameterInfo info{};
+                info.name = published.name;
+                info.components = published.type == ajfx::ParameterType::Float ? 1U
+                    : published.type == ajfx::ParameterType::Vec3 ? 3U : 4U;
+                info.color = published.type == ajfx::ParameterType::Color;
+                info.min = published.min;
+                info.max = published.max;
+                info.fallback = published.default_value;
+                inspector_elements.back().particle_parameters.push_back(std::move(info));
+              }
+            } else if (observed.state == render::ParticlePackageState::Failed) {
+              inspector_elements.back().particle_status = "The package could not be read; check its source file";
+            }
+          }
           if (element->kind == ElementKind::Model && !element->linked) {
             const auto observed = impl.inspector_model_cache.observe(element->source,
                 impl.inspector_model_cache.publication_epoch());
@@ -8156,7 +8179,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         for (const InspectorKeyEdit &key : inspector.key_edits) {
           result.keys.push_back(KeyIntent{key.node, key.component,
                                           timeline.show_frame, key.value, false,
-                                          gesture, key.erase});
+                                          gesture, key.erase, key.parameter});
         }
       }
       if (inspector.add_tracking_source) {

@@ -9,6 +9,9 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <array>
+#include <utility>
+#include <vector>
 
 // What a scene element looks like to the editor's panels.
 //
@@ -97,6 +100,19 @@ enum class ElementKind : core::u8 {
         || kind == ElementKind::PointLight;
 }
 
+// One parameter a particle package publishes, as the Inspector edits it.
+struct ParticleParameterInfo final {
+    std::string name;
+    // 1 for a Float, 3 for a Vec3, 4 for a Color.
+    core::u32 components{1U};
+    bool color{};
+    float min{};
+    float max{1.0F};
+    std::array<float, 4U> fallback{};
+
+    bool operator==(const ParticleParameterInfo&) const = default;
+};
+
 // A scene element the Inspector shows and edits, with its authored values (the
 // base, before channels) read from the document by the Director. Objects and
 // clips use the transform; lights use the light fields.
@@ -144,6 +160,12 @@ struct ElementInfo final {
     // the simulation, and the show frame the effect's own time starts at.
     core::u32 particle_seed{};
     core::i64 particle_start_frame{};
+    // The parameter values the node authors, by key ("rate.0"), sorted.
+    std::vector<std::pair<std::string, double>> particle_values;
+    // What the package publishes, supplied by the shell's nonblocking package
+    // view; empty until it is read, with a reason if it cannot be.
+    std::vector<ParticleParameterInfo> particle_parameters;
+    std::string particle_status;
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
     // Clip-only: the size the decoded video is held at.

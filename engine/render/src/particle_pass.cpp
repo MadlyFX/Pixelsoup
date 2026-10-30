@@ -56,6 +56,8 @@ struct ParticleInstance::State final {
     std::vector<ajfx::gpu::GpuCheckpoint> checkpoints;
     std::vector<std::optional<core::u64>> saved;
     core::u64 target{0U};
+    // Set by restart: the next advance resets the simulation first.
+    bool restart{};
 };
 
 ParticleInstance::ParticleInstance(std::unique_ptr<State> state) : state_{std::move(state)} {}
@@ -202,6 +204,10 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
     i.target = ajfx::tick_at(show_frame, rate_num, rate_den, i.effect.simulation_rate);
 
     s.particles->begin_recording(commands);
+    if (i.restart) {
+        simulation.reset();
+        i.restart = false;
+    }
     // Start from the latest checkpoint at or before the target when that is
     // closer than where the simulation is: always when going back, and when
     // a scrub forward passes a checkpoint already made.
@@ -248,6 +254,12 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
         return false;
     }
     return instance.caught_up();
+}
+
+void ParticlePass::restart(ParticleInstance& instance) noexcept {
+    ParticleInstance::State& i = *instance.state_;
+    std::fill(i.saved.begin(), i.saved.end(), std::nullopt);
+    i.restart = true;
 }
 
 bool ParticlePass::draw(rhi::CommandList& commands, const ParticleInstance& instance, const scene::ViewMatrices& view,

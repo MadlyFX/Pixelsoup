@@ -1052,7 +1052,16 @@ kernels, exported by ajfx Studio. Drag one onto Stage to place it, then
 select it to set its **Seed** and **Start frame** in the Inspector's
 PARTICLES section. **Start at the playhead** sets the start frame to the
 current show frame. Two placements of one package never draw the same
-particles, even with equal seeds. Effects play only in the Advanced renderer.
+particles, even with equal seeds. Below them are the **parameters the
+package publishes** (a spawn rate, a wind, a tint): one row each, with a
+colour well for a colour, a reset arrow back to the package's default, and a
+key diamond. Keys are kept under the parameter's name, so they stay on the
+right parameter after the package is exported again. Once a parameter is
+keyed, typing or dragging a value sets a key at the playhead. The effect
+reads keyed values at every simulation step, between show frames as well
+as on them. A parameter shapes everything the effect has done so far, so
+changing a value or a key runs the effect again from its start. It holds
+until it has caught up with the playhead. Effects play only in the Advanced renderer.
 In Basic, the Stage and Program status say so, and Program is not ready
 while an effect is due to play. After you export a package again in place,
 **Rescan Sources** makes every renderer read it again. Each keeps drawing the

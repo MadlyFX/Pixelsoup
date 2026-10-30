@@ -83,6 +83,40 @@ void columns(const gui::Rect& bounds, std::size_t count, float gap,
     return nullptr;
 }
 
+// The channel keying one particle parameter component, by its key.
+[[nodiscard]] const scene::ChannelKeyframes* parameter_channel(
+    std::span<const scene::ChannelKeyframes> keyframes, doc::NodeId node,
+    std::string_view key) noexcept {
+    for (const scene::ChannelKeyframes& channel : keyframes) {
+        if (channel.target == node && channel.component == scene::PropertyChannel::ParticleParameter
+            && channel.parameter == key) {
+            return &channel;
+        }
+    }
+    return nullptr;
+}
+
+// What a particle parameter component holds when it is not keyed: the
+// node's own value, else the package's default; nothing for a component the
+// package does not publish.
+[[nodiscard]] std::optional<double> parameter_base(const ElementInfo& element, std::string_view key) {
+    const std::optional<scene::ParticleParameterKey> parsed = scene::parse_particle_parameter_key(key);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    const auto published = std::find_if(element.particle_parameters.begin(), element.particle_parameters.end(),
+        [&](const ParticleParameterInfo& info) { return info.name == parsed->name; });
+    if (published == element.particle_parameters.end() || parsed->component >= published->components) {
+        return std::nullopt;
+    }
+    for (const auto& [authored, value] : element.particle_values) {
+        if (authored == key) {
+            return value;
+        }
+    }
+    return static_cast<double>(published->fallback[parsed->component]);
+}
+
 [[nodiscard]] bool keyed_at(const scene::ChannelKeyframes* channel,
                             core::u64 frame) noexcept {
     constexpr core::u64 maximum =
@@ -199,6 +233,7 @@ constexpr std::array<std::string_view, 3U> rgb{{"R", "G", "B"}};
     pristine.animation = fresh.animation;
     pristine.particle_seed = fresh.particle_seed;
     pristine.particle_start_frame = fresh.particle_start_frame;
+    pristine.particle_values = fresh.particle_values;
     // A fill keeps its kind - Solid, Linear, Radial is a choice, not a value -
     // and starts its colours and placement over.
     std::optional<scene::Fill> fill;
@@ -512,6 +547,18 @@ InspectorPanel::editable_value(const ElementInfo& element,
     case FieldDomain::Particles:
         if (element.kind != ElementKind::ParticleEffect) {
             return std::nullopt;
+        }
+        if (binding.property.starts_with(scene::schema::particle_parameter_prefix)) {
+            const std::string_view key = binding.property.substr(scene::schema::particle_parameter_prefix.size());
+            const std::optional<double> base = parameter_base(element, key);
+            if (!base) {
+                return std::nullopt;
+            }
+            if (const std::optional<double> keyed =
+                    sample_at(parameter_channel(keyframes_, element.node, key), show_frame_)) {
+                return EditableValue{element.node, element.node, *keyed};
+            }
+            return EditableValue{element.node, element.node, *base};
         }
         if (binding.property == scene::schema::particle_seed) {
             return EditableValue{element.node, element.node,
@@ -982,6 +1029,10 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
         }
         return std::max(value, 0.0);
       case FieldDomain::Particles:
+        if (binding.property.starts_with(scene::schema::particle_parameter_prefix)) {
+          constexpr double largest = static_cast<double>(std::numeric_limits<float>::max());
+          return std::clamp(value, -largest, largest);
+        }
         return std::clamp(std::round(value), 0.0,
                           binding.property == scene::schema::particle_seed
                               ? 4294967295.0
@@ -1139,8 +1190,19 @@ void InspectorPanel::emit_numeric(const FieldBinding& binding,
       case FieldDomain::Animation:
       case FieldDomain::Screen:
       case FieldDomain::Tracking:
-      case FieldDomain::Plate:
       case FieldDomain::Particles:
+        if (binding.property.starts_with(scene::schema::particle_parameter_prefix)) {
+          const std::string_view key = binding.property.substr(scene::schema::particle_parameter_prefix.size());
+          if (parameter_channel(keyframes_, target.author, key) != nullptr) {
+            frame.key_edits.push_back(InspectorKeyEdit{target.author, scene::PropertyChannel::ParticleParameter,
+                                                       value, false, std::string{key}});
+            break;
+          }
+        }
+        frame.named_edits.push_back(
+            NamedEdit{target.author, std::string{binding.property}, value});
+        break;
+      case FieldDomain::Plate:
         frame.named_edits.push_back(
             NamedEdit{target.author, std::string{binding.property}, value});
         break;
@@ -2791,6 +2853,58 @@ void InspectorPanel::draw_particles(gui::UiContext& ctx, Cursor& cursor,
         }
     }
     cursor.space(row_gap);
+    if (!element.particle_status.empty()) {
+        ctx.label(take_row(cursor, 20.0F), element.particle_status, ctx.theme().warning);
+        cursor.space(row_gap);
+    }
+    // What the package publishes, each with its key diamond. Changing one
+    // changes the effect's past too, so the effect simulates again from its
+    // start.
+    constexpr std::array<std::string_view, 1U> one{{""}};
+    constexpr std::array<std::string_view, 3U> xyz_axes{{"X", "Y", "Z"}};
+    constexpr std::array<std::string_view, 4U> rgba{{"R", "G", "B", "A"}};
+    for (const ParticleParameterInfo& info : element.particle_parameters) {
+        const std::size_t count = std::min<std::size_t>(info.components, 4U);
+        std::array<std::string, 4U> keys;
+        std::array<std::string, 4U> properties;
+        std::array<FieldBinding, 4U> bindings{};
+        std::array<float, 4U> values{};
+        bool animated = false;
+        bool keyed_here = count > 0U;
+        for (std::size_t c = 0U; c < count; ++c) {
+            keys[c] = info.name + "." + std::to_string(c);
+            properties[c] = std::string{scene::schema::particle_parameter_prefix} + keys[c];
+            bindings[c] = FieldBinding{FieldDomain::Particles, {}, properties[c]};
+            const scene::ChannelKeyframes* const channel = parameter_channel(keyframes_, element.node, keys[c]);
+            animated = animated || (channel != nullptr && !channel->frames.empty());
+            keyed_here = keyed_here && keyed_at(channel, show_frame);
+            const std::optional<double> keyed = sample_at(channel, show_frame);
+            values[c] = static_cast<float>(keyed.value_or(parameter_base(element, keys[c]).value_or(0.0)));
+        }
+        if (info.color) {
+            const gui::Rect swatch = take_row(cursor, 14.0F);
+            cursor.space(row_gap);
+            const float label_width = std::clamp(swatch.width * label_fraction, label_min, label_max);
+            colour_well(ctx, gui::Rect{swatch.x + label_width, swatch.y,
+                                       std::max(swatch.width - label_width, 1.0F), swatch.height},
+                        info.name, {values[0], values[1], values[2]},
+                        std::span<const FieldBinding>{bindings.data(), 3U}, frame, false, 0U);
+        }
+        const std::span<const std::string_view> axes = count == 1U ? std::span<const std::string_view>{one}
+            : count == 3U ? std::span<const std::string_view>{xyz_axes}
+                          : std::span<const std::string_view>{rgba.data(), count};
+        bool key_requested = false;
+        const float speed = std::max((info.max - info.min) / 200.0F, 0.001F);
+        vector_row(ctx, cursor, info.name, axes, std::span<const float>{values.data(), count}, speed,
+                   std::span<const FieldBinding>{bindings.data(), count}, frame, &key_requested, animated,
+                   keyed_here, 0U, 3);
+        if (key_requested) {
+            for (std::size_t c = 0U; c < count; ++c) {
+                frame.key_edits.push_back(InspectorKeyEdit{element.node, scene::PropertyChannel::ParticleParameter,
+                                                           values[c], keyed_here, keys[c]});
+            }
+        }
+    }
 }
 
 void InspectorPanel::draw_camera_tracking(

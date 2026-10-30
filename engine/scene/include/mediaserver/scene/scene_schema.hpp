@@ -952,6 +952,12 @@ inline constexpr std::string_view particle_seed = "particle_seed";
 // The show frame at which the effect's own time begins. Before it nothing is
 // drawn; from it, the effect is at (show frame - start) in its own time.
 inline constexpr std::string_view particle_start_frame = "particle_start_frame";
+// A published parameter component's base value: `particle_parameter.` then
+// the key, e.g. `particle_parameter.rate.0` or `particle_parameter.wind.2`.
+// A scene.channel whose channel_component is the same text keys it. Names
+// are the package's own, so a re-exported package keeps its keys; a key the
+// package no longer publishes is kept and ignored.
+inline constexpr std::string_view particle_parameter_prefix = "particle_parameter.";
 
 // ---------------------------------------------------------------------------
 // scene.slice

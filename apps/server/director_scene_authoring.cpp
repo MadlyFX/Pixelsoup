@@ -328,6 +328,14 @@ map_transport(editor::TransportRequest request) noexcept {
         const bool clip=edit.property==scene::schema::animation_clip;
         const auto value=static_cast<std::int64_t>(std::llround(std::clamp(edit.value,clip?0.0:2.0,clip?63.0:1000000.0)));
         updated.properties.insert_or_assign(edit.property,doc::PropertyValue{value});
+    } else if (std::string_view{edit.property}.starts_with(scene::schema::particle_parameter_prefix)) {
+        // A published parameter's base value: a key the scene can read and a
+        // finite number in float range, or the node would become unreadable.
+        const std::string_view key = std::string_view{edit.property}.substr(scene::schema::particle_parameter_prefix.size());
+        if (existing->type != scene::schema::particle_effect_type || !scene::parse_particle_parameter_key(key)
+            || !std::isfinite(edit.value) || std::abs(edit.value) > static_cast<double>(std::numeric_limits<float>::max()))
+            return true;
+        updated.properties.insert_or_assign(edit.property, doc::PropertyValue{edit.value});
     } else if (edit.property == scene::schema::particle_seed ||
                edit.property == scene::schema::particle_start_frame) {
         // Whole numbers, as the scene reads them: a fractional or negative

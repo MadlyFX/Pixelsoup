@@ -480,6 +480,8 @@ private:
         core::u64 start_frame{};
         bool locked{};
         bool visible{true};
+        // Base values by parameter key, sorted.
+        std::vector<std::pair<std::string, double>> parameters;
     };
 
     struct SliceEntry final {
@@ -553,6 +555,8 @@ private:
         // The transform component this channel drives; the public enum is what
         // the editor also uses to place the channel on a timeline row.
         PropertyChannel component{};
+        // The parameter key for PropertyChannel::ParticleParameter.
+        std::string parameter;
         // Sorted by frame ascending at parse time, so evaluation is a search
         // rather than a scan and two nodes agree on which keys bracket a frame.
         std::vector<ChannelKey> keys;
@@ -582,6 +586,12 @@ private:
     // must be non-empty and frame-sorted, as `put` leaves them.
     [[nodiscard]] static double sample_channel(
         std::span<const ChannelKey> channel, core::i64 frame) noexcept;
+    // At `frame + fraction`, fraction in [0, 1); zero is the call above.
+    [[nodiscard]] static double sample_channel(
+        std::span<const ChannelKey> channel, core::i64 frame, double fraction) noexcept;
+    // A channel as the editor and the particle renderer see it: one key per
+    // frame, with its evaluated tangent slopes.
+    [[nodiscard]] static ChannelKeyframes keyframes_of(const ChannelEntry& channel);
     [[nodiscard]] static double auto_tangent(
         std::span<const ChannelKey> channel, std::size_t key_index) noexcept;
     [[nodiscard]] static double tangent_slope(
@@ -598,6 +608,8 @@ private:
         std::array<ChannelKey, max_channel_keys>& storage) noexcept;
     friend std::optional<double> sample_keyframes(
         const ChannelKeyframes& channel, core::i64 frame) noexcept;
+    friend std::optional<double> sample_keyframes(
+        const ChannelKeyframes& channel, core::i64 frame, double fraction) noexcept;
 
     // Ordered by node id, which makes iteration deterministic without a sort
     // and makes "the lowest id wins" a matter of stopping at the first match.

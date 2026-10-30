@@ -294,6 +294,45 @@ void upsert_channel_key(doc::Node &node, core::u64 frame, double value) {
     }
 }
 
+// The node a particle parameter channel of `target` lives in. Derived from
+// (target, key) so keying finds-or-creates it without scanning the document,
+// in an id prefix no enum channel uses. Sixteen ids are tried, the matching
+// channel first, then the first free one, so a hash collision moves on rather
+// than overwriting another channel.
+[[nodiscard]] std::optional<doc::NodeId> parameter_channel_node_id(
+    const doc::Root &root, doc::NodeId target, std::string_view key) {
+    core::u64 hash = 0xcbf29ce484222325ULL;
+    for (core::u32 shift = 0U; shift < 64U; shift += 8U) {
+        hash = (hash ^ ((target.value() >> shift) & 0xffU)) * 0x100000001b3ULL;
+    }
+    for (const char c : key) {
+        hash = (hash ^ static_cast<unsigned char>(c)) * 0x100000001b3ULL;
+    }
+    constexpr core::u64 parameter_channel_id_base = 0x7E00'0000'0000'0000ULL;
+    const core::u64 base = parameter_channel_id_base | (hash & 0x00FF'FFFF'FFFF'FFF0ULL);
+    const std::string component = std::string{scene::schema::particle_parameter_prefix} + std::string{key};
+    std::optional<doc::NodeId> free;
+    for (core::u64 probe = 0U; probe < 16U; ++probe) {
+        const doc::NodeId id{base | probe};
+        const doc::Node *const node = root.get(id);
+        if (node == nullptr) {
+            if (!free) free = id;
+            continue;
+        }
+        const auto held_target = node->properties.find(scene::schema::channel_target);
+        const auto held_component = node->properties.find(scene::schema::channel_component);
+        if (node->type == scene::schema::channel_type && held_target != node->properties.end()
+            && held_component != node->properties.end()
+            && std::get_if<std::int64_t>(&held_target->second) != nullptr
+            && *std::get_if<std::int64_t>(&held_target->second) == static_cast<std::int64_t>(target.value())
+            && std::get_if<std::string>(&held_component->second) != nullptr
+            && *std::get_if<std::string>(&held_component->second) == component) {
+            return id;
+        }
+    }
+    return free;
+}
+
 // Authors one keyframe on a single transform component: create-or-update the
 // component's channel with a key at the frame, or clear the channel. On the
 // same scene undo context as moves; the gesture groups a multi-component key.
@@ -311,8 +350,19 @@ void upsert_channel_key(doc::Node &node, core::u64 frame, double value) {
             std::move(forward), std::move(inverse), cmd::UndoContextId{2U},
             cmd::TransactionId{key.gesture}, apply_at);
     };
-    const auto id =
-        channel_node_id(key.target, static_cast<core::u64>(key.component));
+    const bool parameter = key.component == scene::PropertyChannel::ParticleParameter;
+    if (parameter && !scene::parse_particle_parameter_key(key.parameter)) {
+        return true;
+    }
+    const std::optional<doc::NodeId> parameter_id = parameter
+        ? parameter_channel_node_id(scheduler.projected_document(), key.target, key.parameter)
+        : std::nullopt;
+    if (parameter && !parameter_id) {
+        return true;
+    }
+    const auto id = parameter
+        ? *parameter_id
+        : channel_node_id(key.target, static_cast<core::u64>(key.component));
     const auto *const existing = scheduler.projected_document().get(id);
     if (key.clear) {
         if (existing == nullptr) {
@@ -341,7 +391,9 @@ void upsert_channel_key(doc::Node &node, core::u64 frame, double value) {
     doc::Node node = existing != nullptr
                          ? *existing
                          : make_channel_node(id, key.target,
-                                             transform_property(key.component));
+                                             parameter
+                                                 ? std::string{scene::schema::particle_parameter_prefix} + key.parameter
+                                                 : std::string{transform_property(key.component)});
     upsert_channel_key(node, key.frame, key.value);
     cmd::Payload inverse = existing != nullptr
                                ? cmd::Payload{cmd::PutNode{*existing}}

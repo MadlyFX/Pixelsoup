@@ -51,6 +51,8 @@ struct InspectorKeyEdit final {
     scene::TransformChannel component{};
     double value{};
     bool erase{};
+    // For a particle parameter channel, its key ("rate.0").
+    std::string parameter;
 
     bool operator==(const InspectorKeyEdit&) const = default;
 };

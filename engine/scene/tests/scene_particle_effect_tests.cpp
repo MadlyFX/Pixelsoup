@@ -2,6 +2,7 @@
 #include <mediaserver/scene/scene_model.hpp>
 #include <mediaserver/scene/scene_schema.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
@@ -146,6 +147,74 @@ void keyframes_move_an_effect() {
     EFFECT_CHECK(evaluate(root, scene::SceneTime{60U, 60U, 1U}).particle_effects.front().world.at(0U, 3U) == 6.0F);
 }
 
+// A linear channel on a particle parameter component, from (0, from) to
+// (frames, to).
+[[nodiscard]] doc::Node parameter_channel(core::u64 id, core::u64 target, std::string_view key, std::int64_t frames,
+                                          double from, double to) {
+    doc::Node built = position_channel(id, target, frames, from, to);
+    built.properties.insert_or_assign(std::string{schema::channel_component},
+                                      doc::PropertyValue{std::string{schema::particle_parameter_prefix} + std::string{key}});
+    return built;
+}
+
+void parameters_are_named_valued_and_keyed() {
+    // Values by key, a channel on one of them, and one on an unrelated node.
+    const doc::Root root = doc::Root{}
+                               .set(sparks(1U, {real("particle_parameter.rate.0", 120.0),
+                                                real("particle_parameter.wind.2", -0.5)}))
+                               .set(parameter_channel(9U, 1U, "tint.3", 10, 0.0, 1.0))
+                               .set(parameter_channel(8U, 1U, "rate.0", 10, 20.0, 40.0));
+    const scene::Scene built = evaluate(root, scene::SceneTime{5U, 60U, 1U});
+    EFFECT_CHECK(built.particle_effects.size() == 1U);
+    const std::vector<scene::ParticleParameter>& parameters = built.particle_effects.front().parameters;
+    // Sorted by key; a keyed component carries its whole curve.
+    EFFECT_CHECK(parameters.size() == 3U);
+    EFFECT_CHECK(parameters[0].key == "rate.0" && parameters[0].base == 120.0);
+    EFFECT_CHECK(parameters[0].curve.frames == (std::vector<core::i64>{0, 10}));
+    EFFECT_CHECK(parameters[0].curve.parameter == "rate.0");
+    EFFECT_CHECK(parameters[1].key == "tint.3" && parameters[1].curve.values == (std::vector<double>{0.0, 1.0}));
+    EFFECT_CHECK(parameters[2].key == "wind.2" && parameters[2].base == -0.5 && parameters[2].curve.frames.empty());
+
+    // Sampled between show frames, as a simulation stepping faster than the
+    // show needs; a fraction of zero is the whole-frame value.
+    EFFECT_CHECK(scene::particle_parameter_at(parameters[0], 5, 0.0) == 30.0);
+    EFFECT_CHECK(scene::particle_parameter_at(parameters[0], 5, 0.5) == 31.0);
+    EFFECT_CHECK(scene::particle_parameter_at(parameters[0], 0, 0.25) == 20.5);
+    EFFECT_CHECK(scene::particle_parameter_at(parameters[0], 12, 0.5) == 40.0);
+    EFFECT_CHECK(scene::particle_parameter_at(parameters[2], 7, 0.5) == -0.5);
+
+    // The editor sees the channel under its key.
+    scene::SceneModel model;
+    model.reset(root);
+    const std::vector<scene::ChannelKeyframes> channels = model.channel_keyframes();
+    EFFECT_CHECK(std::count_if(channels.begin(), channels.end(), [](const scene::ChannelKeyframes& channel) {
+                     return channel.component == scene::PropertyChannel::ParticleParameter && channel.parameter == "tint.3";
+                 }) == 1);
+
+    // Keys parse as name.component, component 0 to 3.
+    EFFECT_CHECK(scene::parse_particle_parameter_key("spawn_rate.0")->name == "spawn_rate");
+    EFFECT_CHECK(scene::parse_particle_parameter_key("tint.3")->component == 3U);
+    for (const std::string_view bad : {"rate", "rate.4", ".0", "ra-te.0", "rate.0.1", "rate.x"}) {
+        EFFECT_CHECK(!scene::parse_particle_parameter_key(bad));
+    }
+
+    // Values and keys change the picture, so the digest.
+    const auto digest_of = [](const doc::Root& document) { return scene::digest(evaluate(document)); };
+    EFFECT_CHECK(digest_of(root) != digest_of(root.set(sparks(1U, {real("particle_parameter.rate.0", 121.0),
+                                                                   real("particle_parameter.wind.2", -0.5)}))));
+    EFFECT_CHECK(digest_of(root) != digest_of(root.set(parameter_channel(8U, 1U, "rate.0", 10, 20.0, 41.0))));
+
+    // A malformed key or value damages the node; a channel naming a bad key
+    // is refused.
+    for (const doc::Node& damaged : {sparks(1U, {real("particle_parameter.rate", 1.0)}),
+                                     sparks(1U, {text("particle_parameter.rate.0", "fast")}),
+                                     parameter_channel(2U, 1U, "rate.9", 10, 0.0, 1.0)}) {
+        scene::SceneModel refused;
+        refused.reset(doc::Root{}.set(damaged));
+        EFFECT_CHECK(refused.counters().rejected == 1U);
+    }
+}
+
 void the_digests_carry_every_field_that_changes_the_picture() {
     const auto digest_of = [](const doc::Node& effect) { return scene::digest(evaluate(doc::Root{}.set(effect))); };
     const core::u64 base = digest_of(sparks(1U));
@@ -216,6 +285,7 @@ int main() {
         {"damaged_effects_are_refused_not_clamped", damaged_effects_are_refused_not_clamped},
         {"groups_and_visibility_apply_as_to_a_model", groups_and_visibility_apply_as_to_a_model},
         {"keyframes_move_an_effect", keyframes_move_an_effect},
+        {"parameters_are_named_valued_and_keyed", parameters_are_named_valued_and_keyed},
         {"the_digests_carry_every_field_that_changes_the_picture",
          the_digests_carry_every_field_that_changes_the_picture},
         {"seeds_and_effect_time_are_derived_alike_everywhere", seeds_and_effect_time_are_derived_alike_everywhere},

@@ -424,6 +424,14 @@ struct SceneRenderOptions final {
     }
 };
 
+// One package parameter component (`index` in the effect's parameters,
+// `component` of its value) driven by a placement's track.
+struct ParticleParameterBinding final {
+    std::size_t index{};
+    core::u32 component{};
+    const scene::ParticleParameter* track{};
+};
+
 enum class SceneRendererMode : core::u8 {
     BasicDisplay,
     AdvancedLinear,
@@ -1012,6 +1020,12 @@ private:
         // Why this package and seed could not be instanced; sticky until
         // either changes.
         std::string error;
+        // The placement's parameters the instance's history was simulated
+        // with; a different digest restarts it.
+        core::u64 parameters{};
+        // Package parameter components bound to the placement's tracks,
+        // rebuilt each frame into this capacity.
+        std::vector<ParticleParameterBinding> bound;
     };
     std::unique_ptr<ParticlePass> particle_pass_;
     std::string particles_unsupported_;

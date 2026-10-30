@@ -310,6 +310,17 @@ namespace mediaserver::app {
         info.particle_seed = integer(scene::schema::particle_seed, 0U);
         info.particle_start_frame =
             signed_integer(scene::schema::particle_start_frame, 0);
+        if (kind == editor::ElementKind::ParticleEffect) {
+            for (const auto &[name, value] : doc_node->properties) {
+                if (!std::string_view{name}.starts_with(scene::schema::particle_parameter_prefix)) continue;
+                const auto *const real = std::get_if<double>(&value);
+                const auto *const whole = std::get_if<std::int64_t>(&value);
+                if (real == nullptr && whole == nullptr) continue;
+                info.particle_values.emplace_back(
+                    name.substr(scene::schema::particle_parameter_prefix.size()),
+                    real != nullptr ? *real : static_cast<double>(*whole));
+            }
+        }
         info.sequence_start = integer(scene::schema::sequence_start, 0U);
         info.sequence_count = integer(scene::schema::sequence_count, 1U);
         info.media_resolution =

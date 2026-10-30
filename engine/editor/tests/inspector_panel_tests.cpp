@@ -739,6 +739,85 @@ void a_particle_effect_edits_its_seed_and_start_frame() {
     UI_CHECK(!material);
 }
 
+// The point where control (`name`, `salt`) is hot, searched across the panel.
+[[nodiscard]] std::optional<std::pair<float, float>> find_control(Harness& h, std::string_view name, std::size_t salt) {
+    core::u64 id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
+    for (const char c : name) {
+        id ^= static_cast<core::u8>(c);
+        id *= 1099511628211ULL;
+    }
+    id ^= static_cast<core::u64>(salt) + 0x9E3779B9ULL;
+    id *= 1099511628211ULL;
+    for (float y = 10.0F; y < 880.0F; y += 4.0F) {
+        for (float x = 2.0F; x < 298.0F; x += 3.0F) {
+            static_cast<void>(h.frame(x, y, false));
+            if (h.ctx.hot() == id) {
+                return std::pair{x, y};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void a_particle_effect_edits_and_keys_its_published_parameters() {
+    Harness h;
+    h.element.kind = editor::ElementKind::ParticleEffect;
+    h.element.source = "C:/show/embers.ajfx";
+    editor::ParticleParameterInfo size{};
+    size.name = "size";
+    size.components = 1U;
+    size.min = 0.1F;
+    size.max = 4.0F;
+    size.fallback = {1.0F, 0.0F, 0.0F, 0.0F};
+    editor::ParticleParameterInfo tint{};
+    tint.name = "tint";
+    tint.components = 4U;
+    tint.color = true;
+    tint.fallback = {1.0F, 0.5F, 0.25F, 1.0F};
+    h.element.particle_parameters = {size, tint};
+
+    // A drag on the value authors the node's own value under its key.
+    const auto field = find_control(h, "size", 0U);
+    UI_CHECK(field.has_value());
+    static_cast<void>(h.frame(field->first, field->second, true));
+    const editor::InspectorFrame dragged = h.frame(field->first + 20.0F, field->second, true);
+    static_cast<void>(h.frame(field->first + 20.0F, field->second, false));
+    UI_CHECK(dragged.named_edits.size() == 1U);
+    UI_CHECK(dragged.named_edits.front().property == "particle_parameter.size.0");
+    UI_CHECK(dragged.named_edits.front().value > 1.0);
+    UI_CHECK(dragged.key_edits.empty());
+
+    // A colour has four components, R G B A, and a colour well.
+    UI_CHECK(find_control(h, "tint", 3U).has_value());
+    UI_CHECK(find_control(h, "tint", 11'000U).has_value());
+
+    // The diamond keys each component at the playhead, by key.
+    const auto diamond = find_control(h, "tint", 9'000U);
+    UI_CHECK(diamond.has_value());
+    static_cast<void>(h.frame(diamond->first, diamond->second, true));
+    const editor::InspectorFrame keyed = h.frame(diamond->first, diamond->second, false);
+    UI_CHECK(keyed.key_edits.size() == 4U);
+    UI_CHECK(keyed.key_edits[0].component == scene::PropertyChannel::ParticleParameter);
+    UI_CHECK(keyed.key_edits[0].parameter == "tint.0" && keyed.key_edits[3].parameter == "tint.3");
+    UI_CHECK(keyed.key_edits[1].value == 0.5 && !keyed.key_edits[1].erase);
+
+    // Once keyed, the field shows the curve and an edit becomes a key.
+    scene::ChannelKeyframes channel{h.element.node, scene::PropertyChannel::ParticleParameter,
+                                    {0, 100}, {2.0, 3.0}};
+    channel.parameter = "size.0";
+    h.keyframes = {channel};
+    const auto keyed_field = find_control(h, "size", 0U);
+    UI_CHECK(keyed_field.has_value());
+    static_cast<void>(h.frame(keyed_field->first, keyed_field->second, true));
+    const editor::InspectorFrame rekeyed = h.frame(keyed_field->first + 20.0F, keyed_field->second, true);
+    static_cast<void>(h.frame(keyed_field->first + 20.0F, keyed_field->second, false));
+    UI_CHECK(rekeyed.named_edits.empty());
+    UI_CHECK(rekeyed.key_edits.size() == 1U);
+    UI_CHECK(rekeyed.key_edits.front().parameter == "size.0");
+    // From the curve's value at the playhead (frame 50: 2.5), not the default.
+    UI_CHECK(rekeyed.key_edits.front().value > 2.5);
+}
+
 void a_collapsed_section_takes_its_fields_with_it() {
     Harness h;
     // Twirl the transform shut.
@@ -2056,7 +2135,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 58U> cases{{
+constexpr std::array<Case, 59U> cases{{
     {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
@@ -2161,6 +2240,8 @@ constexpr std::array<Case, 58U> cases{{
      &named_and_effect_fields_share_the_multi_edit_contract},
     {"a particle effect edits its seed and start frame",
      &a_particle_effect_edits_its_seed_and_start_frame},
+    {"a particle effect edits and keys its published parameters",
+     &a_particle_effect_edits_and_keys_its_published_parameters},
 }};
 
 } // namespace

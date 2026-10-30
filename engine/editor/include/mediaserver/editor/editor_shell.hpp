@@ -713,6 +713,8 @@ struct KeyIntent final {
   core::u64 gesture{};
   // Delete one key at `frame` while preserving the rest of the channel.
   bool erase{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const KeyIntent &) const = default;
 };

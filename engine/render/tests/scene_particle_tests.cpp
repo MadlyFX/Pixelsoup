@@ -62,16 +62,21 @@ std::vector<core::u8> download(rhi::CommandList commands, const rhi::Texture& ta
     return result;
 }
 
-// One still sprite, a world unit across, at the effect's origin.
+// One still sprite, a world unit across, at the effect's origin. With
+// `published`, its size is the published "size" parameter instead.
 std::string write_effect(const std::string& name, ajfx::gpu::ShaderCompiler& compiler,
-                         ajfx::Color red = {1.0F, 0.0F, 0.0F, 1.0F}) {
+                         ajfx::Color red = {1.0F, 0.0F, 0.0F, 1.0F}, bool published = false) {
     ajfx::EffectBuilder builder{"still"};
+    if (published) {
+        builder.float_parameter("size", 1.0F, 0.1F, 4.0F);
+    }
     builder.emitter("e")
         .spawn(ajfx::SpawnBurst{.count = 1U})
         .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
         .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
         .init(ajfx::InitColor{.a = red, .b = red})
-        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .init(published ? ajfx::InitSize{.min = ajfx::bind("size"), .max = ajfx::bind("size")}
+                        : ajfx::InitSize{.min = 1.0F, .max = 1.0F})
         .renderer(ajfx::SpriteRenderer{.blend = ajfx::BlendMode::Alpha});
     const ajfx::Effect effect = builder.build().value();
     const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
@@ -256,6 +261,55 @@ void a_reexported_package_is_adopted_at_the_next_asset_generation(ajfx::gpu::Sha
     g_device->wait_idle();
 }
 
+std::size_t lit_pixels(const std::vector<core::u8>& image, core::u32 width, core::u32 height) {
+    std::size_t count = 0U;
+    for (core::u32 y = 0U; y < height; ++y) {
+        for (core::u32 x = 0U; x < width; ++x) {
+            count += lit(image, width, x, y) ? 1U : 0U;
+        }
+    }
+    return count;
+}
+
+void published_parameters_drive_the_simulation(ajfx::gpu::ShaderCompiler& compiler) {
+    scene::Scene frame = scene_with(write_effect("sized.ajfx", compiler, {1.0F, 0.0F, 0.0F, 1.0F}, true));
+    frame.canvas = {64U, 64U};
+    const auto render = [&](const scene::Scene& shown) {
+        auto renderer = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+        SCENE_CHECK(renderer);
+        return settle(renderer.value(), shown, {0U, 0U, 64U, 64U});
+    };
+    const std::vector<core::u8> fallback = render(frame);
+
+    // A value the node authors is the size every particle is born with.
+    scene::Scene larger = frame;
+    larger.particle_effects[0].parameters = {scene::ParticleParameter{"size.0", 2.0, {}}};
+    const std::vector<core::u8> doubled = render(larger);
+    SCENE_CHECK(lit_pixels(doubled, 64U, 64U) > 3U * lit_pixels(fallback, 64U, 64U));
+
+    // A keyed component is the curve at each step's own time: flat at 2, it
+    // is the same picture as the value 2; a key the package does not publish
+    // is ignored.
+    scene::Scene keyed = frame;
+    scene::ParticleParameter curve{"size.0", 0.5, {}};
+    curve.curve.component = scene::PropertyChannel::ParticleParameter;
+    curve.curve.parameter = "size.0";
+    curve.curve.frames = {0, 20};
+    curve.curve.values = {2.0, 2.0};
+    curve.curve.interpolations = {scene::KeyInterpolation::Linear, scene::KeyInterpolation::Linear};
+    curve.curve.tangents = {std::nullopt, std::nullopt};
+    keyed.particle_effects[0].parameters = {curve, scene::ParticleParameter{"wind.1", 3.0, {}}};
+    SCENE_CHECK(render(keyed) == doubled);
+
+    // Changing a value changes the effect's past: the same renderer simulates
+    // again from the start and draws what a fresh one does.
+    auto renderer = render::SceneRenderer::create(*g_device, 64U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(renderer);
+    SCENE_CHECK(settle(renderer.value(), frame, {0U, 0U, 64U, 64U}) == fallback);
+    SCENE_CHECK(settle(renderer.value(), larger, {0U, 0U, 64U, 64U}) == doubled);
+    g_device->wait_idle();
+}
+
 } // namespace
 
 int main() {
@@ -284,6 +338,7 @@ int main() {
         {"unstarted_missing_and_unsupported_effects", unstarted_missing_and_unsupported_effects},
         {"a_reexported_package_is_adopted_at_the_next_asset_generation",
          a_reexported_package_is_adopted_at_the_next_asset_generation},
+        {"published_parameters_drive_the_simulation", published_parameters_drive_the_simulation},
     };
     int failures = 0;
     for (const Case& test : cases) {

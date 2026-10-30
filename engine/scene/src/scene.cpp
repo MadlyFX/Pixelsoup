@@ -1119,6 +1119,29 @@ core::u64 digest(const Scene& scene) noexcept {
                 mix(state, effect.parent_group->value());
             }
             mix(state, static_cast<core::u64>(effect.group_order));
+            mix(state, static_cast<core::u64>(effect.parameters.size()));
+            for (const ParticleParameter& parameter : effect.parameters) {
+                mix(state, parameter.key);
+                mix(state, parameter.base);
+                const ChannelKeyframes& curve = parameter.curve;
+                mix(state, static_cast<core::u64>(curve.frames.size()));
+                for (std::size_t key = 0U; key < curve.frames.size(); ++key) {
+                    mix(state, static_cast<core::u64>(curve.frames[key]));
+                    mix(state, key < curve.values.size() ? curve.values[key] : 0.0);
+                    mix(state, static_cast<core::u64>(
+                        key < curve.interpolations.size() ? curve.interpolations[key] : KeyInterpolation::Linear));
+                    const bool tangent = key < curve.tangents.size() && curve.tangents[key].has_value();
+                    mix(state, static_cast<core::u64>(tangent));
+                    if (tangent) {
+                        const KeyTangent& handle = *curve.tangents[key];
+                        mix(state, static_cast<core::u64>(handle.mode));
+                        mix(state, handle.in_slope);
+                        mix(state, handle.out_slope);
+                        mix(state, handle.in_weight.value_or(-1.0));
+                        mix(state, handle.out_weight.value_or(-1.0));
+                    }
+                }
+            }
         }
     }
 
@@ -2275,6 +2298,31 @@ core::u64 digest(const ChannelKeyframes& channel) noexcept {
     return state;
 }
 
+
+std::optional<ParticleParameterKey> parse_particle_parameter_key(std::string_view key) noexcept {
+    const std::size_t dot = key.rfind('.');
+    if (dot == std::string_view::npos || dot == 0U || dot + 2U != key.size()
+        || key[dot + 1U] < '0' || key[dot + 1U] > '3') {
+        return std::nullopt;
+    }
+    const std::string_view name = key.substr(0U, dot);
+    for (const char c : name) {
+        const bool word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        if (!word) {
+            return std::nullopt;
+        }
+    }
+    return ParticleParameterKey{name, static_cast<core::u32>(key[dot + 1U] - '0')};
+}
+
+double particle_parameter_at(const ParticleParameter& parameter, core::i64 frame, double fraction) noexcept {
+    if (!parameter.curve.frames.empty()) {
+        if (const std::optional<double> keyed = sample_keyframes(parameter.curve, frame, fraction)) {
+            return *keyed;
+        }
+    }
+    return parameter.base;
+}
 
 core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept {
     // SplitMix64 over the node identity and the authored seed: integer-only,
