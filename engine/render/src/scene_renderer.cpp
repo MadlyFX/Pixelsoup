@@ -3775,13 +3775,11 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
 }
 
 bool SceneRenderer::record_particles(rhi::CommandList& commands, const scene::ViewMatrices& view,
-                                     rhi::RasterViewport raster_viewport) {
+                                     ParticleTargets targets) {
     // Over everything the scene drew, tested against its depth and writing
-    // none: sprites blend in the order ajfx keeps them.
-    ParticleTargets targets{};
+    // none: sprites blend back to front where they sort.
     targets.color = &color_;
     targets.depth = &depth_;
-    targets.raster_viewport = raster_viewport;
     for (const auto& [instance, world] : particle_draws_) {
         if (!particle_pass_->draw(commands, *instance, view, world, targets)) {
             return false;
@@ -6301,12 +6299,33 @@ bool SceneRenderer::render(
             return false;
         }
     }
+    ParticleTargets particle_targets{};
+    particle_targets.raster_viewport = raster_viewport;
+    // The velocity target holds this frame's motion only where the auxiliary
+    // pass ran: Advanced, and not a reflection capture.
+    const bool scene_motion = mode_ == SceneRendererMode::AdvancedLinear && !options.reflection_pass;
+    if (scene_motion && scene::antialiasing_for(scene.renderer_settings) == scene::AntialiasingMode::Temporal) {
+        // Sprite motion for the temporal resolve, between the same two
+        // endpoints as the scene's own motion: the previous frame's canvas
+        // matrix, and where particles were then by their velocity.
+        particle_targets.velocity = &velocity_;
+        particle_targets.canvas_view_projection = render_view.canvas_view_projection;
+        particle_targets.previous_view_projection = motion_view_projection;
+        particle_targets.motion_valid = view_constants.temporal_parameters[0U] > 0.5F;
+        const core::u64 previous_frame = advance_history ? view_history.previous_show_frame
+                                                         : view_history.motion_transform_show_frame;
+        if (particle_targets.motion_valid && scene.show_frame > previous_frame && scene.show_rate.numerator != 0U) {
+            particle_targets.motion_seconds =
+                static_cast<float>(static_cast<double>(scene.show_frame - previous_frame) *
+                                   scene.show_rate.denominator / scene.show_rate.numerator);
+        }
+    }
     if (!record_particles(commands,
             raster_viewport.empty()
                 ? render_view.matrices
                 : scene::ViewMatrices{render_view.matrices.view, render_view.matrices.projection,
                                       render_view.canvas_view_projection},
-            raster_viewport)) {
+            particle_targets)) {
         return false;
     }
 

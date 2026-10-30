@@ -51,8 +51,9 @@ rhi::CommandList acquire() {
     return std::move(result).value();
 }
 
-std::vector<core::u8> download(rhi::CommandList commands, const rhi::Texture& target) {
-    auto readback = g_device->create_readback(target.width() * target.height() * stride);
+std::vector<core::u8> download(rhi::CommandList commands, const rhi::Texture& target,
+                               core::u32 pixel_bytes = stride) {
+    auto readback = g_device->create_readback(target.width() * target.height() * pixel_bytes);
     SCENE_CHECK(readback);
     SCENE_CHECK(commands.download(target, readback.value()));
     auto submitted = g_device->submit(std::move(commands));
@@ -113,6 +114,7 @@ std::string write_crowd(const std::string& name, ajfx::gpu::ShaderCompiler& comp
         .spawn(ajfx::SpawnBurst{.count = 300U})
         .init(ajfx::Lifetime{.min = 0.5F, .max = 3.0F})
         .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius = 1.2F})
+        .init(ajfx::Velocity{.speed_min = 0.2F, .speed_max = 0.6F, .spread = 180.0F})
         .init(ajfx::InitSize{.min = 0.2F, .max = 0.5F})
         .renderer(ajfx::SpriteRenderer{.texture = "cells", .flipbook_columns = 2U, .flipbook_rows = 2U,
                                        .flipbook_blend = true});
@@ -245,6 +247,39 @@ void sorted_textured_effects_draw_alike_on_slices(ajfx::gpu::ShaderCompiler& com
         SCENE_CHECK(std::equal(a.begin() + y * half, a.begin() + (y + 1U) * half, row));
         SCENE_CHECK(std::equal(b.begin() + y * half, b.begin() + (y + 1U) * half, row + half));
     }
+
+    // With temporal antialiasing on, the sprites' motion lands in the
+    // velocity target alike on the full canvas and its slices too: one flat
+    // product a sprite, from the canvas-wide matrices. A frame further on,
+    // so there is a previous frame to move from.
+    scene::Scene moving = frame;
+    moving.renderer_settings.taau = true;
+    const auto velocity_of = [&](render::SceneRenderer& renderer, scene::CanvasRect slice) {
+        for (const core::u64 show_frame : {10U, 11U}) {
+            moving.show_frame = show_frame;
+            static_cast<void>(settle(renderer, moving, slice));
+        }
+        rhi::CommandList commands = acquire();
+        SCENE_CHECK(renderer.render(commands, moving, slice));
+        return download(std::move(commands), renderer.velocity_target(), 16U);
+    };
+    const std::vector<core::u8> whole = velocity_of(full.value(), {0U, 0U, 128U, 64U});
+    const std::vector<core::u8> va = velocity_of(left.value(), {0U, 0U, 64U, 64U});
+    const std::vector<core::u8> vb = velocity_of(right.value(), {64U, 0U, 64U, 64U});
+    for (core::u32 y = 0U; y < 64U; ++y) {
+        const auto row = whole.begin() + static_cast<std::ptrdiff_t>(y) * 128 * 16;
+        const auto half = static_cast<std::ptrdiff_t>(64U * 16U);
+        SCENE_CHECK(std::equal(va.begin() + y * half, va.begin() + (y + 1U) * half, row));
+        SCENE_CHECK(std::equal(vb.begin() + y * half, vb.begin() + (y + 1U) * half, row + half));
+    }
+    // Some sprite moved: a pixel with motion where the scene, still, has none.
+    bool moved = false;
+    for (std::size_t at = 0U; at + 16U <= whole.size() && !moved; at += 16U) {
+        float motion[2]{};
+        std::memcpy(motion, whole.data() + at, sizeof(motion));
+        moved = motion[0] != 0.0F || motion[1] != 0.0F;
+    }
+    SCENE_CHECK(moved);
 
     // A package missing the texture its effect names fails, saying which.
     const scene::Scene bare = scene_with(write_crowd("bare.ajfx", compiler, false));

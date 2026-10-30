@@ -103,6 +103,17 @@ struct ParticleTargets final {
     float depth_clear{0.0F};
     rhi::ViewportRect viewport{};
     rhi::RasterViewport raster_viewport{};
+    // The scene's velocity target (RGBA32F, the colour's size), to write each
+    // sprite's motion where it covers at least half a pixel; none leaves the
+    // velocity alone. The two canvas-wide matrices are the motion's
+    // endpoints, without jitter; `motion_seconds` back is where particles
+    // were (by their velocity) at the previous frame, and with
+    // `motion_valid` false there is no previous frame to move from.
+    rhi::Texture* velocity{};
+    scene::Mat4 canvas_view_projection{};
+    scene::Mat4 previous_view_projection{};
+    float motion_seconds{};
+    bool motion_valid{};
 };
 
 class ParticlePass final {

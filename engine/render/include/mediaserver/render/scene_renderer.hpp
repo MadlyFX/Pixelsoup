@@ -924,8 +924,10 @@ private:
     // and readiness.
     void prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
                            const SceneRenderOptions& options);
+    // `targets` carries the raster viewport and the motion inputs; the
+    // colour and depth are this renderer's own.
     [[nodiscard]] bool record_particles(rhi::CommandList& commands, const scene::ViewMatrices& view,
-                                        rhi::RasterViewport raster_viewport);
+                                        ParticleTargets targets);
 
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -

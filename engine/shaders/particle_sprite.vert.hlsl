@@ -9,6 +9,8 @@
 // Register spaces follow the scene stage: storage at (t[n], space0), uniforms
 // at (b[n], space1). Matrices are explicit columns, as in scene.vert.hlsl.
 
+#include "scene_motion_vector.hlsli"
+
 ByteAddressBuffer particles : register(t0, space0);
 // Drawing order from the depth sort: instance i draws record order[i] when
 // the sorted flag is set (otherwise the records are bound here too).
@@ -47,6 +49,13 @@ cbuffer ParticleView : register(b0, space1) {
     uint flipbook;
     // 1 textured, 2 cross-fade flipbook cells, 4 sRGB texture, 8 sorted.
     uint flags;
+    // The canvas-wide view-projection now and at the previous frame, without
+    // jitter: the velocity product's two endpoints, as the scene's own.
+    column_major float4x4 canvas_view_projection;
+    column_major float4x4 previous_view_projection;
+    // x: seconds back to the previous frame. y: 1 when there is a previous
+    // frame to move from.
+    float4 motion;
 };
 
 static const uint absent = 0xffffffffU;
@@ -62,6 +71,8 @@ struct Output {
     float4 cells : TEXCOORD1;
     float blend : TEXCOORD2;
     nointerpolation uint flags : TEXCOORD3;
+    // The sprite's velocity product, the same for all its vertices.
+    nointerpolation float4 motion : TEXCOORD4;
     // Premultiplied.
     float4 color : COLOR0;
 };
@@ -134,6 +145,14 @@ Output main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
     output.uv = corner;
     flipbook_cells(base, corner, output.cells, output.blend);
     output.flags = flags;
+    // Where the particle was a frame ago, by its own velocity: one value for
+    // the whole sprite, from its centre, so it needs no interpolation and
+    // every node computes the same bits.
+    const float3 moved = velocity_offset != absent
+        ? to_world_direction(asfloat(particles.Load3(base + velocity_offset))) * motion.x
+        : float3(0.0F, 0.0F, 0.0F);
+    output.motion = motion_vector(mul(canvas_view_projection, float4(position, 1.0F)),
+                                  mul(previous_view_projection, float4(position - moved, 1.0F)), motion.y);
     output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
     if (sprite_extra.y > 0.5F) {
         // Light covers as much as it brightens: later stages divide colour by

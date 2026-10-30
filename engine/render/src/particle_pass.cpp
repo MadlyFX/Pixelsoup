@@ -3,6 +3,7 @@
 #if defined(MEDIASERVER_HAS_DXIL_SHADERS)
 #include <mediaserver/shaders/particle_sprite_frag_dxil.h>
 #include <mediaserver/shaders/particle_sprite_vert_dxil.h>
+#include <mediaserver/shaders/particle_velocity_frag_dxil.h>
 #endif
 
 #include <algorithm>
@@ -37,8 +38,11 @@ struct ViewConstants final {
     core::u32 lifetime_offset{absent};
     core::u32 flipbook{};
     core::u32 flags{};
+    std::array<float, 16U> canvas_view_projection{};
+    std::array<float, 16U> previous_view_projection{};
+    std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid
 };
-static_assert(sizeof(ViewConstants) == 240U);
+static_assert(sizeof(ViewConstants) == 384U);
 
 // ViewConstants::flags.
 constexpr core::u32 flag_textured = 1U;
@@ -127,6 +131,8 @@ struct ParticlePass::State final {
     std::unique_ptr<ParticleDevice> particles;
     rhi::GraphicsPipeline blended;  // alpha and premultiplied emitters
     rhi::GraphicsPipeline additive;
+    // Sprite motion into the scene's velocity target.
+    rhi::GraphicsPipeline velocity;
     // Bound for emitters without a texture, which never sample it.
     std::optional<rhi::Texture> blank;
     std::optional<rhi::Sampler> sampler;
@@ -184,11 +190,18 @@ core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& devi
     depth.greater = true;
     auto blended = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, depth);
     auto additive = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedEmit, depth);
-    if (!blended || !additive) {
+    rhi::ShaderDesc motion = fragment;
+    motion.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_velocity_frag_dxil),
+        sizeof(mediaserver_particle_velocity_frag_dxil)};
+    auto velocity = device.create_pipeline(vertex, motion, rhi::TextureFormat::Rgba32Float, rhi::ColorBlend::Disabled,
+                                           depth);
+    if (!blended || !additive || !velocity) {
         return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
     }
     state->blended = std::move(blended).value();
     state->additive = std::move(additive).value();
+    state->velocity = std::move(velocity).value();
     rhi::TextureDesc blank{};
     blank.width = 1U;
     blank.height = 1U;
@@ -417,6 +430,10 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
         constants.camera_up[column] = view.view.at(1U, column);
         constants.camera_forward[column] = -view.view.at(2U, column);
     }
+    constants.canvas_view_projection = targets.canvas_view_projection.m;
+    constants.previous_view_projection = targets.previous_view_projection.m;
+    constants.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F, targets.motion_valid ? 1.0F : 0.0F,
+                        0.0F, 0.0F};
 
     bool first = true;
     for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
@@ -476,6 +493,17 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
             return false;
         }
         first = false;
+        // The same sprites into the velocity target, over what the scene
+        // wrote there, tested against the same depth.
+        if (targets.velocity != nullptr) {
+            rhi::PulledDraw motion = draw;
+            motion.pipeline = &s.velocity;
+            motion.load = true;
+            if (!commands.draw_pulled(*targets.velocity, rhi::Color{}, *targets.depth, targets.depth_clear, motion)) {
+                s.note("a particle motion draw was refused");
+                return false;
+            }
+        }
     }
     return true;
 }

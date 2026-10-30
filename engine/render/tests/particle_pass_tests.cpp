@@ -288,6 +288,96 @@ void flipbooks_play_their_cells_over_each_life() {
                missing.error().message.find("texture 'cells'") != std::string::npos);
 }
 
+// Advances to `frame` and draws with a velocity target that starts at 7 in
+// every channel, returning its pixels as floats, four a pixel.
+[[nodiscard]] std::vector<float> render_motion(render::ParticlePass& pass, render::ParticleInstance& instance,
+                                               core::u64 frame, bool valid) {
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc velocity_desc = color_desc;
+    velocity_desc.format = rhi::TextureFormat::Rgba32Float;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto velocity = g_device->create_texture(velocity_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 16U);
+    PASS_CHECK(color && velocity && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U));
+    // The scene's motion, standing in: 7 everywhere.
+    std::vector<float> sevens(static_cast<std::size_t>(size) * size * 4U, 7.0F);
+    PASS_CHECK(commands.upload(velocity.value(),
+                               std::span<const core::u8>{reinterpret_cast<const core::u8*>(sevens.data()),
+                                                         sevens.size() * sizeof(float)}));
+    const auto view = orthographic();
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.velocity = &velocity.value();
+    targets.canvas_view_projection = view.view_projection;
+    targets.previous_view_projection = view.view_projection;
+    targets.motion_seconds = 1.0F / 24.0F;
+    targets.motion_valid = valid;
+    PASS_CHECK(pass.draw(commands, instance, view, identity(), targets));
+    PASS_CHECK(commands.download(velocity.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    std::vector<float> out(static_cast<std::size_t>(size) * size * 4U);
+    std::memcpy(out.data(), mapped.data(), out.size() * sizeof(float));
+    readback.value().unmap();
+    return out;
+}
+
+void moving_particles_write_their_motion() {
+    // One opaque particle a world unit across, moving +X at 1 unit a second.
+    // The orthographic camera maps a unit to half the clip range, so a 24th
+    // of a second is 0.5 / 24 in clip space and half that in UV.
+    ajfx::EffectBuilder builder{"mover"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{1.0F, 0.0F, 0.0F}})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F});
+    const ajfx::Effect effect = builder.build().value();
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    // Two steps in, the particle has moved a thirtieth of a unit: still over
+    // the centre pixel (32, 32).
+    const std::vector<float> moving = render_motion(pass, instance, 1U, true);
+    const auto at = [](const std::vector<float>& pixels, core::u32 x, core::u32 y, core::u32 channel) {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + channel];
+    };
+    PASS_CHECK(std::abs(at(moving, 32U, 32U, 0U) - 0.25F / 24.0F) < 1.0e-5F);
+    PASS_CHECK(at(moving, 32U, 32U, 1U) == 0.0F);
+    // Current and expected previous depth: the projection puts everything at
+    // 0.5.
+    PASS_CHECK(at(moving, 32U, 32U, 2U) == 0.5F && at(moving, 32U, 32U, 3U) == 0.5F);
+    // The disc's fringe, under half covered, and the space around it keep
+    // the scene's motion.
+    PASS_CHECK(at(moving, 39U, 32U, 0U) == 7.0F && at(moving, 2U, 2U, 0U) == 7.0F);
+    // With no previous frame there is no motion, only depth.
+    render::ParticleInstance fresh = make_instance(pass, effect);
+    const std::vector<float> still = render_motion(pass, fresh, 1U, false);
+    PASS_CHECK(at(still, 32U, 32U, 0U) == 0.0F && at(still, 32U, 32U, 2U) == 0.5F);
+}
+
 [[nodiscard]] std::vector<std::uint8_t> reference_records(const ajfx::Effect& effect, core::u64 step) {
     const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
     ajfx::gpu::GpuSimulation reference = ajfx::gpu::GpuSimulation::create(*g_reference, effect, kernels, 3U).value();
@@ -388,6 +478,7 @@ int main() {
         {"alpha_particles_draw_back_to_front_in_the_placed_effect",
          alpha_particles_draw_back_to_front_in_the_placed_effect},
         {"flipbooks_play_their_cells_over_each_life", flipbooks_play_their_cells_over_each_life},
+        {"moving_particles_write_their_motion", moving_particles_write_their_motion},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},
