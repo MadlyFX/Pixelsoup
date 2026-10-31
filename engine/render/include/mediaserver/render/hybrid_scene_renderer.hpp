@@ -235,6 +235,10 @@ struct RendererDiagnostics final {
     core::u64 history_advances{};
     core::u64 history_holds{};
     core::u64 history_resets{};
+    // Of the resets, holds whose recording drew something the held history
+    // never saw - a particle effect that finished loading or catching up, or
+    // was swapped, while the frame was held - and so began again from it.
+    core::u64 history_content_resets{};
     // A fixed-capacity slot was reused for a different output/view identity.
     // Selection is deterministic least-recently-used and performs no frame-
     // path allocation.
@@ -467,6 +471,10 @@ private:
     struct HistorySlot final {
         HistoryKey key{};
         TemporalHistory history{};
+        // What the last committed frame drew that the scene digest cannot
+        // see (`RenderStats::particle_digest`). A hold whose recording drew
+        // something else resolves afresh instead of repeating its history.
+        core::u64 drawn_digest{};
         core::u64 last_used{};
         bool occupied{};
     };

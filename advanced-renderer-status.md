@@ -54,7 +54,10 @@ while a seek catches up from its checkpoints) and draws its sprites over a
 view's colour, depth-tested against its depth. The scene renderer draws each
 started `scene.particle_effect` after its composited layers, reading the
 `.ajfx` package on a worker thread and holding readiness while a package
-loads or fails, or a seek is still catching up. The Basic renderer and devices
+loads or fails, or a seek is still catching up. With temporal antialiasing
+on, an effect that becomes drawable or is swapped while the show frame is
+held resets that held frame's history once, so it appears while paused.
+The Basic renderer and devices
 without these capabilities refuse readiness for a started effect, with the
 reason. Reflection passes do not draw particles. Requested unsupported
 features fail capability/readiness checks. Offline baked GI and probe/planar

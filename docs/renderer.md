@@ -321,6 +321,20 @@ so two nodes round the pixel they share identically. Basic input remains a
 straight sample. Applied last, after warp and after the switcher's dissolve;
 per-panel calibration stays on the LED processor.
 
+**Temporal antialiasing on a held frame.** A paused show renders the same
+show frame over and over. Each repeat is a hold: the temporal resolve returns
+its last image untouched and takes in no new sample, so a paused wall neither
+shimmers nor creeps toward an image playback never reaches. A hold is only
+right while the frame still draws what that image saw. A scene edit already
+resets history through the scene digest; what the digest cannot see is
+reported by the scene renderer as `RenderStats::particle_digest` - each drawn
+particle effect's placement, instance and simulated frame. When it differs
+from the one the held history was made with (a package finished loading, a
+seek finished catching up, or a re-exported package was adopted), the facade
+resolves that frame afresh, as a reset, and publishes `HistoryDisposition::Reset`
+(`RendererDiagnostics::history_content_resets` counts these). Later holds that
+draw nothing new repeat it exactly.
+
 **Orthographic views.** `scene::Camera::orthographic_height`, when positive,
 makes `view_for_slice` orthographic: the window is world-sized at every depth,
 clip w is one, and depth is linear but still reversed (near 1, far 0), so

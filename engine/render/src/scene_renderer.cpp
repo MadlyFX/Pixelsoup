@@ -3691,6 +3691,12 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
     // At most one new instance a frame: each allocates its buffers and
     // checkpoint ring, which is bounded but not free.
     bool instanced = false;
+    core::u64 drawn = 0xcbf29ce484222325ULL;
+    const auto mix = [&drawn](core::u64 value) noexcept {
+        for (core::u32 byte = 0U; byte < 8U; ++byte) {
+            drawn = (drawn ^ ((value >> (byte * 8U)) & 0xFFU)) * 0x100000001b3ULL;
+        }
+    };
     for (const scene::ParticleEffect& effect : scene.particle_effects) {
         const std::optional<core::u64> frame = scene::particle_effect_frame(effect, scene.show_frame);
         if (!frame) {
@@ -3735,11 +3741,13 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             }
             slot.instance.emplace(std::move(created).value());
             slot.parameters = parameters_digest(effect);
+            slot.generation = ++particle_generation_;
         }
         // A changed parameter changes the effect's whole past.
         if (const core::u64 digest = parameters_digest(effect); digest != slot.parameters) {
             particle_pass_->restart(*slot.instance);
             slot.parameters = digest;
+            slot.generation = ++particle_generation_;
         }
         slot.bound.clear();
         const ajfx::Effect& package = slot.package->effect;
@@ -3782,6 +3790,12 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             particle_lights_used_ += lights;
         }
         particle_draws_.emplace_back(&*slot.instance, effect.world);
+        mix(effect.source_node.value());
+        mix(slot.generation);
+        mix(*frame);
+        for (const float lane : effect.world.m) {
+            mix(std::bit_cast<core::u32>(lane));
+        }
     }
     if (particle_pass_ != nullptr) {
         if (std::optional<ParticleError> failed = particle_pass_->take_error()) {
@@ -3789,6 +3803,9 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             refuse(stats_.particles_failed, failed->message);
             particle_draws_.clear();
         }
+    }
+    if (!particle_draws_.empty()) {
+        stats_.particle_digest = drawn;
     }
     if (stats_.particles_pending + stats_.particles_failed + stats_.particles_unsupported
             + stats_.particles_behind != 0U) {

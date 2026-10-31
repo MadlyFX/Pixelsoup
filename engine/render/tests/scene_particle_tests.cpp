@@ -541,6 +541,49 @@ void effects_alone_reach_the_composited_picture(ajfx::gpu::ShaderCompiler& compi
     g_device->wait_idle();
 }
 
+void a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready(ajfx::gpu::ShaderCompiler& compiler) {
+    // A paused show renders the same show frame over and over. With temporal
+    // antialiasing on, a hold repeats the last resolve - but an effect whose
+    // package loads, or whose simulation catches up, while the frame is held
+    // is a new picture of that frame, and has to reach it without playback
+    // moving. Once it has, the held picture stays exactly still.
+    scene::Scene frame = scene_with(
+        write_effect("held-taa.ajfx", compiler, {1.0F, 0.0F, 0.0F, 1.0F}, false, ajfx::BlendMode::Additive));
+    frame.renderer_settings.taau = true;
+    auto executor = render::CompositorSceneExecutor::create(*g_device, 128U, 64U, limits(), {},
+                                                            rhi::TextureFormat::Rgba16Float);
+    SCENE_CHECK(executor);
+    const auto held = [&] {
+        rhi::CommandList commands = acquire();
+        auto result = executor.value().execute(commands, frame, scene::whole(frame.canvas));
+        SCENE_CHECK(result);
+        return download(std::move(commands), *result.value());
+    };
+    // The first frame cannot draw the effect yet: its package is still being
+    // read, and frame 10 is more than one frame's simulation budget away.
+    std::vector<core::u8> image = held();
+    SCENE_CHECK(executor.value().renderer_passes().geometry.particles_drawn == 0U);
+    SCENE_CHECK(!lit(image, 128U, 63U, 32U));
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        image = held();
+        const render::RenderStats& stats = executor.value().renderer_passes().geometry;
+        if (stats.particles_pending == 0U && stats.particles_behind == 0U) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    const render::RendererPassStatus& passes = executor.value().renderer_passes();
+    SCENE_CHECK(passes.temporal_antialiasing == render::PassState::Active);
+    SCENE_CHECK(passes.geometry.particles_drawn == 1U && passes.geometry.particle_issue.empty());
+    SCENE_CHECK(lit(image, 128U, 63U, 32U) && lit(image, 128U, 64U, 32U));
+    SCENE_CHECK(!lit(image, 128U, 2U, 2U));
+    // Nothing new is drawn after that: every further hold is the same image.
+    for (int frames = 0; frames < 4; ++frames) {
+        SCENE_CHECK(held() == image);
+    }
+    g_device->wait_idle();
+}
+
 } // namespace
 
 int main() {
@@ -573,6 +616,8 @@ int main() {
          a_reexported_package_is_adopted_at_the_next_asset_generation},
         {"published_parameters_drive_the_simulation", published_parameters_drive_the_simulation},
         {"effects_alone_reach_the_composited_picture", effects_alone_reach_the_composited_picture},
+        {"a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready",
+         a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready},
     };
     int failures = 0;
     for (const Case& test : cases) {

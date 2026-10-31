@@ -269,6 +269,11 @@ struct RenderStats final {
     core::u32 particles_drawn{}, particles_pending{}, particles_failed{};
     core::u32 particles_unsupported{}, particles_behind{};
     std::string particle_issue;
+    // What the effects drawn this view drew: each one's placement, the
+    // instance it drew and the simulation frame it drew at. It moves when an
+    // effect becomes drawable, is swapped or restarts, none of which the
+    // scene digest sees, so a held frame knows its last resolve is stale.
+    core::u64 particle_digest{};
 
     bool operator==(const RenderStats&) const = default;
 };
@@ -1025,6 +1030,9 @@ private:
         // The placement's parameters the instance's history was simulated
         // with; a different digest restarts it.
         core::u64 parameters{};
+        // A new value whenever the instance or its simulated past is
+        // replaced, so the particle digest can tell the two pictures apart.
+        core::u64 generation{};
         // Package parameter components bound to the placement's tracks,
         // rebuilt each frame into this capacity.
         std::vector<ParticleParameterBinding> bound;
@@ -1034,6 +1042,7 @@ private:
     std::unique_ptr<ParticlePackageCache> particle_packages_;
     std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
     std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
+    core::u64 particle_generation_{};
     // Particle lights for the lit pass: max_particle_lights records, the
     // first `particle_lights_used_` written this frame (Advanced only).
     rhi::StorageBuffer particle_light_buffer_;
