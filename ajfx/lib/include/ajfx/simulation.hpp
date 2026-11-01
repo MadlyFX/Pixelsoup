@@ -51,9 +51,11 @@ struct EmitterState final {
     std::vector<float> spin;            // a sprite's, radians per second
     std::vector<std::uint32_t> spawn_index;
     // Rigid physics emitters only: each particle's slot in the emitter's
-    // world, and the world's own state (see RigidWorld::save), which
-    // Simulation::state brings up to date.
+    // world, which kind of body it is (0 is the emitter's own, the rest are
+    // RigidPhysics::bodies in order), and the world's own state (see
+    // RigidWorld::save), which Simulation::state brings up to date.
     std::vector<std::uint32_t> body;
+    std::vector<std::uint32_t> body_kind;
     std::vector<std::uint8_t> solver_state;
     // Rigid physics emitters only: where each of the emitter's props stands,
     // in the order RigidPhysics lists them, so a host can draw them. A prop

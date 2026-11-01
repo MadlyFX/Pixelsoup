@@ -999,6 +999,181 @@ void contacts_name_the_prop_that_was_hit() {
     AJFX_CHECK(met_each_other);
 }
 
+// ------------------------------------------------------------ body kinds
+
+// A wall of nine crates with a ball dropped on it, in one world: the crates
+// are the emitter's own kind (boxes that hardly bounce) and the ball is a
+// kind of its own, a sphere whose bounce is `bounce`.
+Effect crates_and_a_ball(float bounce) {
+    EffectBuilder builder{"crates"};
+    builder.emitter("pieces")
+        .capacity(16U)
+        .spawn(SpawnPile{.count = 9U,
+                         .shape = PileShape::Box,
+                         .width = 1.5F,
+                         .depth = 1.5F,
+                         .spacing = 1.0F,
+                         .jitter = 0.0F,
+                         .release = 0.0F,
+                         .body = 0U})
+        .spawn(SpawnBurst{.time = 0.1F, .count = 1U, .body = 1U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, 2.0F, 0.0F}})
+        .init(Velocity{.speed_min = 0.0F, .speed_max = 0.0F})
+        .init(InitSize{.min = 0.25F, .max = 0.25F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .friction = 0.9F,
+                             .restitution = 0.05F,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Sphere,
+                                                      .friction = 0.2F,
+                                                      .restitution = bounce}}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.9F});
+    return builder.build().value();
+}
+
+// How low the ball got and how high it came back after that.
+struct Bounce final {
+    float lowest{0.0F};
+    float rebound{0.0F};
+};
+
+Bounce ball_rebound(float bounce) {
+    Simulation simulation = make(crates_and_a_ball(bounce));
+    float lowest = 1.0e9F;
+    float rebound = 0.0F;
+    for (std::uint64_t tick = 1U; tick <= 300U; ++tick) {
+        simulation.advance_to(tick);
+        const EmitterState& s = simulation.emitter(0);
+        // The pile's bodies are born first, so the ball is the tenth.
+        if (s.alive() < 10U) {
+            continue;
+        }
+        const float y = s.position[9].y;
+        if (y < lowest) {
+            lowest = y;
+            rebound = 0.0F;
+        }
+        rebound = std::max(rebound, y - lowest);
+    }
+    return Bounce{lowest, rebound};
+}
+
+void body_kinds_mix_shapes_and_materials() {
+    // One world, two kinds. The ball's own restitution decides its bounce,
+    // although every crate it lands among hardly bounces at all.
+    const Bounce bouncy = ball_rebound(0.9F);
+    const Bounce dull = ball_rebound(0.05F);
+    std::cout << "  a bouncy ball came back " << bouncy.rebound << " above its lowest point, a dull one " << dull.rebound
+              << '\n';
+    AJFX_CHECK(bouncy.rebound > 0.2F);
+    AJFX_CHECK(bouncy.rebound > dull.rebound * 2.0F);
+
+    // And the crates are still boxes: they lie flat on the floor, asleep,
+    // rather than rolling as spheres of the same size would.
+    Simulation simulation = make(crates_and_a_ball(0.9F));
+    simulation.advance_to(300U);
+    const EmitterState& s = simulation.emitter(0);
+    AJFX_CHECK(s.alive() == 10U);
+    AJFX_CHECK(s.body_kind.size() == 10U);
+    for (std::size_t i = 0U; i < 9U; ++i) {
+        AJFX_CHECK(s.body_kind[i] == 0U);
+    }
+    AJFX_CHECK(s.body_kind[9] == 1U);
+    std::size_t resting = 0U;
+    for (std::size_t i = 0U; i < 9U; ++i) {
+        if (length(s.velocity[i]) == 0.0F) {
+            ++resting;
+        }
+    }
+    std::cout << "  " << resting << " of the nine crates lie still\n";
+    AJFX_CHECK(resting >= 7U);
+}
+
+void body_kinds_rerun_and_seek_exactly() {
+    const Effect effect = crates_and_a_ball(0.9F);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t tick : {1U, 40U, 120U, 300U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    // A seek rebuilds the world, each body back as the kind it was.
+    Simulation stepped = make(effect);
+    stepped.advance_to(90U);
+    const SimulationState at_90 = stepped.state();
+    Simulation seeker = make(effect);
+    seeker.restore(at_90);
+    AJFX_CHECK(seeker.state() == at_90);
+    seeker.advance_to(300U);
+    Simulation straight = make(effect);
+    straight.advance_to(300U);
+    AJFX_CHECK(seeker.state() == straight.state());
+}
+
+void impossible_body_kinds_are_refused() {
+    const auto refused = [](const Result<Effect>& built, const std::string& fragment) {
+        if (built.ok() || built.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (built.ok() ? std::string{"accepted"} : built.error().message) << '\n';
+            return false;
+        }
+        return true;
+    };
+    // A spawn module may only name a kind the emitter has.
+    EffectBuilder missing{"x"};
+    missing.emitter("e")
+        .spawn(SpawnBurst{.count = 1U, .body = 2U})
+        .init(Lifetime{})
+        .update(RigidPhysics{.bodies = {RigidBodyKind{}}});
+    AJFX_CHECK(refused(missing.build(), "spawns body kind 2, and rigid physics has 2"));
+
+    // And naming one at all needs a physics world to make bodies in.
+    EffectBuilder no_physics{"x"};
+    no_physics.emitter("e").spawn(SpawnBurst{.count = 1U, .body = 1U}).init(Lifetime{});
+    AJFX_CHECK(refused(no_physics.build(), "no 'rigid_physics' module to make bodies"));
+
+    // A kind's material is held to what any other module's is.
+    EffectBuilder slippery{"x"};
+    slippery.emitter("e").init(Lifetime{}).update(RigidPhysics{.bodies = {RigidBodyKind{.friction = 1.5F}}});
+    AJFX_CHECK(refused(slippery.build(), "bodies[0].friction"));
+
+    // More kinds than an emitter may have.
+    EffectBuilder crowded{"x"};
+    std::vector<RigidBodyKind> many(max_rigid_body_kinds + 1U);
+    crowded.emitter("e").init(Lifetime{}).update(RigidPhysics{.bodies = many});
+    AJFX_CHECK(refused(crowded.build(), "more kinds of body than"));
+
+    // A kind that collides as a hull and names no model, where the renderer
+    // draws none either, has nothing to wrap.
+    EffectBuilder nothing_to_wrap{"x"};
+    nothing_to_wrap.emitter("e").init(Lifetime{}).update(
+        RigidPhysics{.bodies = {RigidBodyKind{.shape = RigidShape::Hull}}});
+    AJFX_CHECK(refused(nothing_to_wrap.build(), "collides as a hull and names no model"));
+
+    // Naming one it can wrap is fine, and the mesh is then asked for by name.
+    EffectBuilder named{"x"};
+    named.emitter("e")
+        .capacity(8U)
+        .spawn(SpawnBurst{.count = 1U, .body = 1U})
+        .init(Lifetime{})
+        .update(RigidPhysics{.bodies = {RigidBodyKind{.shape = RigidShape::Hull, .mesh = "chip"}}});
+    const Result<Effect> with_hull = named.build();
+    AJFX_CHECK(with_hull.ok());
+    const Result<Simulation> without_mesh =
+        Simulation::create(with_hull.value(), 1U, SimulationOptions{.rigid = g_solver.get()});
+    AJFX_CHECK(!without_mesh.ok() && without_mesh.error().code == ErrorCode::MissingMesh);
+    std::cout << "  " << without_mesh.error().message << '\n';
+    const Result<Simulation> with_mesh = Simulation::create(
+        with_hull.value(), 1U, SimulationOptions{.meshes = presets::meshes(), .rigid = g_solver.get()});
+    AJFX_CHECK(with_mesh.ok());
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -1024,6 +1199,9 @@ int main() {
         {"contacts_survive_a_seek", contacts_survive_a_seek},
         {"contacts_over_the_limit_are_counted", contacts_over_the_limit_are_counted},
         {"contacts_name_the_prop_that_was_hit", contacts_name_the_prop_that_was_hit},
+        {"body_kinds_mix_shapes_and_materials", body_kinds_mix_shapes_and_materials},
+        {"body_kinds_rerun_and_seek_exactly", body_kinds_rerun_and_seek_exactly},
+        {"impossible_body_kinds_are_refused", impossible_body_kinds_are_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

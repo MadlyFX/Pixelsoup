@@ -77,7 +77,24 @@ Json to_json(const std::vector<Key>& keys) {
     return array;
 }
 
-// A prop writes its own fields, the same list validation and reading use.
+// A body kind and a prop each write their own fields, the same list
+// validation and reading use.
+Json to_json(const RigidBodyKind& body) {
+    Json object = Json::object();
+    RigidBodyKind::fields(body, [&object](std::string_view name, const auto& field) {
+        object.add(std::string{name}, to_json(field));
+    });
+    return object;
+}
+
+Json to_json(const std::vector<RigidBodyKind>& bodies) {
+    Json array = Json::array();
+    for (const RigidBodyKind& body : bodies) {
+        array.items.push_back(to_json(body));
+    }
+    return array;
+}
+
 Json to_json(const RigidProp& prop) {
     Json object = Json::object();
     RigidProp::fields(prop, [&object](std::string_view name, const auto& field) {
@@ -301,6 +318,23 @@ public:
             out.push_back(key);
         }
         return true;
+    }
+
+    // A body kind is an object of RigidBodyKind's own fields, so a misspelt
+    // one is refused exactly as a module's is, as a prop's is below.
+    bool read(const std::string& path, const Json& json, std::vector<RigidBodyKind>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of body kinds");
+            return false;
+        }
+        out.clear();
+        out.reserve(json.items.size());
+        for (std::size_t i = 0U; i < json.items.size(); ++i) {
+            RigidBodyKind body;
+            read_fields(path + "[" + std::to_string(i) + "]", json.items[i], body, {});
+            out.push_back(std::move(body));
+        }
+        return !failed();
     }
 
     // Each prop is an object of RigidProp's own fields, so a misspelt one is

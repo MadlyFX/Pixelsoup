@@ -141,22 +141,31 @@ struct RigidPropDesc final {
     float restitution{0.2F};
 };
 
-// What every body of one emitter's world is made of.
+// What the bodies of one emitter's world are made of.
 struct RigidWorldDesc final {
     enum class Shape {
         Hull,
         Sphere,
         Box,
     };
+    // One kind of body the emitter's particles are, chosen per body by
+    // `add`, so that one world can hold crates, the pieces they break into
+    // and the ball that broke them. Damping and sleep are the world's; shape
+    // and material are a kind's.
+    struct Body final {
+        Shape shape{Shape::Sphere};
+        // For Hull: the points the hull wraps, at size 1.
+        std::vector<Vec3> hull_points;
+        float density{1000.0F};
+        float friction{0.5F};
+        float restitution{0.2F};
+    };
     // Bodies alive at once; slots run from 0 to capacity - 1.
     std::uint32_t capacity{0U};
     float step_seconds{0.0F};
-    Shape shape{Shape::Sphere};
-    // For Hull: the points the hull wraps, at size 1.
-    std::vector<Vec3> hull_points;
-    float density{1000.0F};
-    float friction{0.5F};
-    float restitution{0.2F};
+    // The kinds, by their index. Never empty: kind 0 is the emitter's own,
+    // and the kind every body is unless it was given another.
+    std::vector<Body> bodies{Body{}};
     float linear_damping{0.0F};
     float angular_damping{0.05F};
     bool allow_sleep{true};
@@ -190,10 +199,12 @@ class RigidWorld {
 public:
     virtual ~RigidWorld() = default;
 
-    // Adds a body of the world's shape at `size` in `slot`, which is free.
-    // An `asleep` body stays where it is, without falling, until it is woken
-    // or another body knocks into it.
-    virtual void add(std::uint32_t slot, float size, const RigidBodyState& state, bool asleep) = 0;
+    // Adds a body of `kind` (an index into the desc's bodies, clamped to
+    // what it holds) at `size` in `slot`, which is free. An `asleep` body
+    // stays where it is, without falling, until it is woken or another body
+    // knocks into it.
+    virtual void add(std::uint32_t slot, std::uint32_t kind, float size, const RigidBodyState& state,
+                     bool asleep) = 0;
     // Wakes the bodies in `slots`, given in ascending order.
     virtual void wake(std::span<const std::uint32_t> slots) = 0;
     // Removes the body in `slot`.

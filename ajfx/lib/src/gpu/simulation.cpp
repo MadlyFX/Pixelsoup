@@ -377,7 +377,8 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         s.scratch.clear();
         detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout}, s.scratch);
         std::uint32_t births = 0U;
-        detail::for_each_birth(emitter, in, e.rate_carry, start, end, rate, [&](double age) {
+        // A body kind is the CPU's business: these emitters have no bodies.
+        detail::for_each_birth(emitter, in, e.rate_carry, start, end, rate, [&](double age, std::uint32_t) {
             // Births past capacity are refused by the kernels; they need no age.
             if (births < emitter.capacity) {
                 s.scratch.push_back(static_cast<float>(age));

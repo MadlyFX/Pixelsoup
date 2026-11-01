@@ -32,10 +32,15 @@ struct SpawnRate final {
     static constexpr std::string_view kind = "spawn_rate";
     ModuleId id{};
     FloatInput rate{10.0F}; // particles per second
+    // Rigid physics emitters: which of the emitter's body kinds
+    // (RigidPhysics::bodies) these newborns are. 0 is the emitter's own shape
+    // and material, which is every body's unless it is given another.
+    std::uint32_t body{0U};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("rate", self.rate);
+        visit("body", self.body);
     }
     friend bool operator==(const SpawnRate&, const SpawnRate&) = default;
 };
@@ -50,6 +55,10 @@ struct SpawnBurst final {
     std::uint32_t count{10U};
     float interval{0.0F};
     std::uint32_t cycles{1U};
+    // Rigid physics emitters: which of the emitter's body kinds
+    // (RigidPhysics::bodies) these newborns are. 0 is the emitter's own shape
+    // and material, which is every body's unless it is given another.
+    std::uint32_t body{0U};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -57,6 +66,7 @@ struct SpawnBurst final {
         visit("count", self.count);
         visit("interval", self.interval);
         visit("cycles", self.cycles);
+        visit("body", self.body);
     }
     friend bool operator==(const SpawnBurst&, const SpawnBurst&) = default;
 };
@@ -101,6 +111,10 @@ struct SpawnPile final {
     float spacing{1.0F};
     float jitter{0.15F};
     float release{0.0F};
+    // Rigid physics emitters: which of the emitter's body kinds
+    // (RigidPhysics::bodies) these newborns are. 0 is the emitter's own shape
+    // and material, which is every body's unless it is given another.
+    std::uint32_t body{0U};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -113,6 +127,7 @@ struct SpawnPile final {
         visit("spacing", self.spacing);
         visit("jitter", self.jitter);
         visit("release", self.release);
+        visit("body", self.body);
     }
     friend bool operator==(const SpawnPile&, const SpawnPile&) = default;
 };
@@ -601,6 +616,36 @@ enum class RigidShape {
     Box,
 };
 
+// One kind of body a rigid physics emitter's particles can be. The emitter's
+// own shape and material are kind 0; every kind listed in
+// RigidPhysics::bodies is another, and a spawn module's `body` names the kind
+// its newborns are. So a wall of crates, the pieces a crate breaks into and
+// the ball that broke them are one world's bodies, each with its own shape
+// and how it answers a knock.
+// - **Its shape:** as the emitter's, scaled by each particle's size. `mesh`
+//   is the model a `hull` kind wraps ("meshes/<name>" in the package); empty
+//   wraps the renderer's own mesh, which is what the emitter's shape does.
+// - **What it does not change:** the renderer draws one mesh for the whole
+//   emitter, so a kind decides what a body collides as and not what it looks
+//   like. Damping and sleep are the emitter's.
+struct RigidBodyKind final {
+    RigidShape shape{RigidShape::Auto};
+    std::string mesh;
+    float density{1000.0F};
+    float friction{0.5F};
+    float restitution{0.2F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("shape", self.shape);
+        visit("mesh", self.mesh);
+        visit("density", self.density);
+        visit("friction", self.friction);
+        visit("restitution", self.restitution);
+    }
+    friend bool operator==(const RigidBodyKind&, const RigidBodyKind&) = default;
+};
+
 // How a prop moves. Fixed stands still for ever, and is the only kind that
 // may collide as its own model. Driven is moved by the effect along the one
 // move the prop describes, shoving whatever is in its way and never being
@@ -714,6 +759,10 @@ struct RigidProp final {
 //   them.
 // - **Rest:** with `allow_sleep`, bodies that have come to rest sleep until
 //   something knocks them, which costs nothing while they lie still.
+// - **More kinds:** `bodies` are the other kinds of body this emitter's
+//   particles can be (see RigidBodyKind), each with its own shape and
+//   material. A spawn module's `body` names the kind its newborns are, 0
+//   being the shape and material here.
 // - **Props:** `props` are the objects the artist placed in this world (see
 //   RigidProp). They stand in it from the first step and the particles meet
 //   them as they meet each other.
@@ -732,6 +781,7 @@ struct RigidPhysics final {
     float restitution{0.2F};
     float angular_damping{0.05F};
     bool allow_sleep{true};
+    std::vector<RigidBodyKind> bodies;
     std::vector<RigidProp> props;
 
     template <class Self, class Visitor>
@@ -742,12 +792,16 @@ struct RigidPhysics final {
         visit("restitution", self.restitution);
         visit("angular_damping", self.angular_damping);
         visit("allow_sleep", self.allow_sleep);
+        visit("bodies", self.bodies);
         visit("props", self.props);
     }
     friend bool operator==(const RigidPhysics&, const RigidPhysics&) = default;
 };
 
 inline constexpr std::uint32_t max_rigid_capacity = 65536U;
+// Kinds of body beyond the emitter's own. Each is a shape to build and
+// another material; a handful is a scene, and a world is not a shop.
+inline constexpr std::size_t max_rigid_body_kinds = 15U;
 // Props stand in the world for the whole effect, so a world full of them
 // costs every step. A few hundred is a stage; thousands are debris.
 inline constexpr std::size_t max_rigid_props = 256U;

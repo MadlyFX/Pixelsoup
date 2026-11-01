@@ -89,6 +89,13 @@ std::vector<MeshWant> wanted_meshes(const Effect& effect) {
         if (physics == nullptr) {
             continue;
         }
+        for (const RigidBodyKind& body : physics->bodies) {
+            // A kind that names a model collides as that model's hull; one
+            // that names none wraps the renderer's, which is wanted above.
+            if (!body.mesh.empty()) {
+                wants.push_back({body.mesh, who + " has a body kind shaped by mesh " + quoted(body.mesh)});
+            }
+        }
         for (const RigidProp& prop : physics->props) {
             // Whenever a prop names a model it is needed: to collide as, for
             // the mesh and hull shapes, and to draw by in every case.

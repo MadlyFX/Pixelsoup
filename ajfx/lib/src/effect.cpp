@@ -158,6 +158,16 @@ public:
         }
     }
 
+    // A body kind's own fields, held to what any other module's numbers are.
+    void operator()(std::string_view field, const std::vector<RigidBodyKind>& bodies) {
+        for (std::size_t i = 0U; i < bodies.size(); ++i) {
+            const std::string where = std::string{field} + "[" + std::to_string(i) + "]";
+            RigidBodyKind::fields(bodies[i], [&](std::string_view name, const auto& value) {
+                (*this)(where + "." + std::string{name}, value);
+            });
+        }
+    }
+
     // A prop's own fields, so every number in one is held to what any other
     // module's number is. What a prop may be is check_module's business.
     void operator()(std::string_view field, const std::vector<RigidProp>& props) {
@@ -249,6 +259,20 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
     check.require(m.friction >= 0.0F && m.friction <= 1.0F, "friction", "must be between 0 and 1");
     check.require(m.restitution >= 0.0F && m.restitution <= 1.0F, "restitution", "must be between 0 and 1");
     check.require(m.angular_damping >= 0.0F, "angular_damping", "must not be negative");
+    check.require(m.bodies.size() <= max_rigid_body_kinds, "bodies",
+                  "holds more kinds of body than the " + std::to_string(max_rigid_body_kinds) +
+                      " an emitter may have beyond its own");
+    for (std::size_t i = 0U; i < m.bodies.size(); ++i) {
+        const RigidBodyKind& body = m.bodies[i];
+        const std::string at = "bodies[" + std::to_string(i) + "]";
+        check.require(body.mesh.empty() || valid_texture_name(body.mesh), at + ".mesh",
+                      "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+        check.require(body.density > 0.0F, at + ".density", "must be positive");
+        check.require(body.friction >= 0.0F && body.friction <= 1.0F, at + ".friction",
+                      "must be between 0 and 1");
+        check.require(body.restitution >= 0.0F && body.restitution <= 1.0F, at + ".restitution",
+                      "must be between 0 and 1");
+    }
     check.require(m.props.size() <= max_rigid_props, "props",
                   "holds more props than the " + std::to_string(max_rigid_props) + " that may stand in one world");
     for (std::size_t i = 0U; i < m.props.size(); ++i) {
@@ -422,10 +446,32 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
     if (error) {
         return error;
     }
+    // A spawn module may only name a kind the emitter has: its own, or one
+    // of the kinds rigid physics lists.
+    const auto kinds = static_cast<std::uint32_t>(physics->bodies.size() + 1U);
+    for (const SpawnModule& module : emitter.spawn) {
+        const std::uint32_t named = std::visit([](const auto& m) { return m.body; }, module);
+        if (named >= kinds) {
+            return Error{ErrorCode::InvalidEffect,
+                         where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) + " spawns body kind " +
+                             std::to_string(named) + ", and rigid physics has " + std::to_string(kinds) +
+                             " (0 is the emitter's own)"};
+        }
+    }
     const RigidShape shape = physics->shape;
     if (shape == RigidShape::Hull && emitter.renderer.geometry != Geometry::Mesh) {
         return Error{ErrorCode::InvalidEffect,
                      where + " rigid physics shape 'hull' wraps the renderer's mesh, and the renderer draws none"};
+    }
+    for (std::size_t i = 0U; i < physics->bodies.size(); ++i) {
+        const RigidBodyKind& body = physics->bodies[i];
+        const bool hull = body.shape == RigidShape::Hull ||
+                          (body.shape == RigidShape::Auto && emitter.renderer.geometry == Geometry::Mesh);
+        if (hull && body.mesh.empty() && emitter.renderer.geometry != Geometry::Mesh) {
+            return Error{ErrorCode::InvalidEffect,
+                         where + " rigid physics body kind " + std::to_string(i + 1U) +
+                             " collides as a hull and names no model, and the renderer draws none"};
+        }
     }
     if (emitter.renderer.geometry == Geometry::Mesh && emitter.renderer.facing == Facing::Velocity) {
         return Error{ErrorCode::InvalidEffect,
@@ -525,6 +571,16 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     if (has_tumble && rigid_bodies == 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect,
                      where + " has a 'tumble' module but no 'rigid_body' or 'rigid_physics' module to turn it"};
+    }
+    if (rigid_physics == 0U) {
+        for (const SpawnModule& module : emitter.spawn) {
+            if (std::visit([](const auto& m) { return m.body; }, module) != 0U) {
+                return Error{ErrorCode::InvalidEffect,
+                             where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) +
+                                 " spawns a body kind, and the emitter has no 'rigid_physics' module to make "
+                                 "bodies"};
+            }
+        }
     }
     if (piled > 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect,

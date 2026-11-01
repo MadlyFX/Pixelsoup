@@ -232,13 +232,27 @@ feedback forces could evaluate any frame directly.
        - **Not yet:** the contact list stops at the CPU `Simulation`. A
          host reading contacts through `RigidRunner`, which is how the
          media server runs rigid physics, needs them on `RigidFrame`.
-     - **Shape and material per body.** Shape, density, friction and
-       restitution move off `RigidWorldDesc` onto the body, so one world can
-       hold crates, their shards and a bouncy ball. `add` takes them and the
-       world's values stay as the default. Studio reads them off the layer's
-       **Bodies** heading and onto whatever spawns the bodies (Pile, Burst,
-       Stream), which is also what lets a pile of crates stand in the same
-       layer as the ball that hits it.
+     - **Shape and material per body, done (2026-11-01).** Shape, density
+       and friction, restitution and the hull's points are a
+       `RigidWorldDesc::Body` rather than the world's, `add` names which kind
+       a body is, and `RigidPhysics::bodies` authors the kinds past the
+       emitter's own, which stays kind 0. A spawn module's `body` says what
+       its newborns are, so a pile of crates and the ball dropped on them are
+       one world's bodies: a bouncy kind came back 1.08 units above its
+       lowest point where a dull one came back nothing, among crates that
+       hardly bounce either way. A kind that collides as a hull wraps the
+       model it names or the renderer's own, and `check_meshes` asks for it
+       by the kind that wanted it. Refusals cover a spawn module naming a
+       kind that does not exist, a kind named with no physics to make bodies
+       in, a material out of range, too many kinds, and a hull with nothing
+       to wrap. Package round trip, reruns, thread counts and seek
+       equivalence are tested; damping and sleep stay the world's.
+       - **Not yet:** a kind decides what a body collides as, not what it
+         looks like, since the renderer draws one mesh for the whole
+         emitter. Pieces that look like pieces need a mesh per particle,
+         which is rendering work rather than physics. Size is the
+         particle's, so what spawns a body sets how big it is -- which is
+         what the Break module will do for the pieces it makes.
      - **The Break module.** A body whose impact passes `threshold` is
        removed and replaced, at its pose and velocity, by a named piece
        set's pieces: chunks authored as models in the package, or a box cut

@@ -326,19 +326,27 @@ public:
             contacts_.reserve(desc_.contact_limit);
             system_.SetContactListener(this);
         }
-        if (desc_.shape == RigidWorldDesc::Shape::Hull) {
+        // A hull is wrapped once per kind that is one, since every body of a
+        // kind scales the same hull.
+        hulls_.resize(desc_.bodies.size());
+        for (std::size_t k = 0U; k < desc_.bodies.size(); ++k) {
+            const RigidWorldDesc::Body& body = desc_.bodies[k];
+            if (body.shape != RigidWorldDesc::Shape::Hull) {
+                continue;
+            }
             JPH::Array<JPH::Vec3> points;
-            for (const Vec3& point : desc_.hull_points) {
+            for (const Vec3& point : body.hull_points) {
                 points.push_back(vec(point));
             }
             JPH::ConvexHullShapeSettings settings(points);
-            settings.SetDensity(desc_.density);
+            settings.SetDensity(body.density);
             JPH::ShapeSettings::ShapeResult hull = settings.Create();
             if (hull.HasError()) {
-                return Error{ErrorCode::RigidSolverFailure,
-                             std::string{"its mesh makes no convex hull: "} + hull.GetError().c_str()};
+                return Error{ErrorCode::RigidSolverFailure, "body kind " + std::to_string(k) +
+                                                                "'s mesh makes no convex hull: " +
+                                                                hull.GetError().c_str()};
             }
-            hull_ = hull.Get();
+            hulls_[k] = hull.Get();
         }
         JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
         for (JPH::uint k = 0U; k < statics; ++k) {
@@ -409,22 +417,25 @@ public:
         return true;
     }
 
-    void add(std::uint32_t slot, float size, const RigidBodyState& state, bool asleep) override {
+    void add(std::uint32_t slot, std::uint32_t kind, float size, const RigidBodyState& state,
+             bool asleep) override {
+        const std::size_t k = std::min<std::size_t>(kind, desc_.bodies.size() - 1U);
+        const RigidWorldDesc::Body& of_kind = desc_.bodies[k];
         const float s = std::max(size, smallest_size);
         JPH::RefConst<JPH::Shape> shape;
-        switch (desc_.shape) {
+        switch (of_kind.shape) {
         case RigidWorldDesc::Shape::Hull:
-            shape = new JPH::ScaledShape(hull_, JPH::Vec3::sReplicate(s));
+            shape = new JPH::ScaledShape(hulls_[k], JPH::Vec3::sReplicate(s));
             break;
         case RigidWorldDesc::Shape::Sphere: {
             auto* sphere = new JPH::SphereShape(0.5F * s);
-            sphere->SetDensity(desc_.density);
+            sphere->SetDensity(of_kind.density);
             shape = sphere;
             break;
         }
         case RigidWorldDesc::Shape::Box: {
             auto* box = new JPH::BoxShape(JPH::Vec3::sReplicate(0.5F * s), std::min(JPH::cDefaultConvexRadius, 0.25F * s));
-            box->SetDensity(desc_.density);
+            box->SetDensity(of_kind.density);
             shape = box;
             break;
         }
@@ -435,8 +446,8 @@ public:
                                            layers::moving);
         settings.mLinearVelocity = vec(state.velocity);
         settings.mAngularVelocity = vec(state.angular_velocity);
-        settings.mFriction = desc_.friction;
-        settings.mRestitution = desc_.restitution;
+        settings.mFriction = of_kind.friction;
+        settings.mRestitution = of_kind.restitution;
         settings.mLinearDamping = desc_.linear_damping;
         settings.mAngularDamping = desc_.angular_damping;
         settings.mAllowSleeping = desc_.allow_sleep;
@@ -632,7 +643,8 @@ private:
     LayerVsBroadPhase layer_vs_broad_;
     PairFilter pairs_;
     JPH::PhysicsSystem system_;
-    JPH::RefConst<JPH::Shape> hull_;
+    // One wrapped hull per body kind; empty for a kind that is not one.
+    std::vector<JPH::RefConst<JPH::Shape>> hulls_;
     // Contact callbacks arrive on the job threads that find the collisions.
     std::mutex collecting_;
     std::vector<RigidContact> contacts_;

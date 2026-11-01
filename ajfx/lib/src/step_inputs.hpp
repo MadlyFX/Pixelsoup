@@ -78,9 +78,10 @@ inline std::size_t rate_module_count(const Emitter& emitter) {
     }));
 }
 
-// Calls `birth(age)` for every particle the emitter's spawn stack produces in
-// the step [start, end), in stack order, with the age each has reached by the
-// end of the step. `rate_carry` holds one fractional count per SpawnRate.
+// Calls `birth(age, body_kind)` for every particle the emitter's spawn stack
+// produces in the step [start, end), in stack order, with the age each has
+// reached by the end of the step and the kind of body its spawn module asked
+// for. `rate_carry` holds one fractional count per SpawnRate.
 template <class Birth>
 void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double>& rate_carry, double start, double end,
                     double steps_per_second, Birth&& birth) {
@@ -97,7 +98,7 @@ void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double
             // The m-th birth happens when the running total crosses m + 1.
             for (double m = 0.0; m < count; m += 1.0) {
                 const double fraction = (m + 1.0 - carry) / births;
-                birth((1.0 - fraction) / steps_per_second);
+                birth((1.0 - fraction) / steps_per_second, spawn_rate->body);
             }
             carry = total - count;
         } else if (const SpawnBurst* burst = std::get_if<SpawnBurst>(&module)) {
@@ -125,7 +126,7 @@ void for_each_birth(const Emitter& emitter, const Inputs& in, std::vector<double
                 }
                 if (at >= start) {
                     for (std::uint32_t c = 0U; c < burst->count; ++c) {
-                        birth(end - at);
+                        birth(end - at, burst->body);
                     }
                 }
                 if (!repeats) {

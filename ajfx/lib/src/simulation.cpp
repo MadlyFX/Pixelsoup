@@ -70,6 +70,7 @@ template <class Dead>
 void compact(EmitterState& s, Dead dead) {
     const std::size_t count = s.alive();
     const bool bodies = s.body.size() == count && count > 0U;
+    const bool kinds = s.body_kind.size() == count && count > 0U;
     std::size_t kept = 0U;
     for (std::size_t i = 0U; i < count; ++i) {
         if (dead(i)) {
@@ -92,11 +93,17 @@ void compact(EmitterState& s, Dead dead) {
             if (bodies) {
                 s.body[kept] = s.body[i];
             }
+            if (kinds) {
+                s.body_kind[kept] = s.body_kind[i];
+            }
         }
         ++kept;
     }
     if (bodies) {
         s.body.resize(kept);
+    }
+    if (kinds) {
+        s.body_kind.resize(kept);
     }
     s.position.resize(kept);
     s.velocity.resize(kept);
@@ -642,6 +649,7 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
         used[s.body[i]] = true;
     }
     s.body.resize(s.alive());
+    s.body_kind.resize(s.alive());
     std::uint32_t next = 0U;
     for (std::size_t i = first; i < s.alive(); ++i) {
         while (used[next]) {
@@ -649,8 +657,8 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
         }
         used[next] = true;
         s.body[i] = next;
-        world.add(next, s.size[i], RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]},
-                  asleep);
+        world.add(next, s.body_kind[i], s.size[i],
+                  RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]}, asleep);
     }
 }
 
@@ -660,17 +668,18 @@ std::uint64_t release_tick(const SpawnPile& pile, std::uint32_t simulation_rate)
     return static_cast<std::uint64_t>(std::ceil(static_cast<double>(pile.release) * simulation_rate));
 }
 
-// How far a body of size 1 reaches across, however it is turned: the
-// diameter of the ball it turns within.
-float body_reach(const RigidWorldDesc& desc) {
-    switch (desc.shape) {
+// How far a body of one kind at size 1 reaches across, however it is turned:
+// the diameter of the ball it turns within.
+float body_reach(const RigidWorldDesc& desc, std::uint32_t kind) {
+    const RigidWorldDesc::Body& body = desc.bodies[std::min<std::size_t>(kind, desc.bodies.size() - 1U)];
+    switch (body.shape) {
     case RigidWorldDesc::Shape::Sphere:
         return 1.0F;
     case RigidWorldDesc::Shape::Box:
         return std::numbers::sqrt3_v<float>;
     case RigidWorldDesc::Shape::Hull: {
         float farthest = 0.0F;
-        for (const Vec3& point : desc.hull_points) {
+        for (const Vec3& point : body.hull_points) {
             farthest = std::max(farthest, dot(point, point));
         }
         return 2.0F * std::sqrt(farthest);
@@ -834,7 +843,46 @@ RigidPropDesc::Motion solver_motion(PropMotion motion) {
     return RigidPropDesc::Motion::Fixed;
 }
 
-// The world a rigid physics emitter's bodies live in: its shape, material and
+// One kind of body in the solver's terms: the emitter's own, or one of the
+// kinds rigid physics lists. An empty `mesh` wraps the renderer's own model,
+// as the emitter's shape does; a kind that names one wraps that.
+Result<RigidWorldDesc::Body> rigid_body_desc(const Emitter& emitter, RigidShape shape, const std::string& mesh,
+                                             float density, float friction, float restitution,
+                                             const MeshSet& meshes) {
+    RigidWorldDesc::Body body;
+    body.density = density;
+    body.friction = friction;
+    body.restitution = restitution;
+    if (shape == RigidShape::Auto) {
+        shape = emitter.renderer.geometry == Geometry::Mesh || !mesh.empty() ? RigidShape::Hull : RigidShape::Sphere;
+    }
+    switch (shape) {
+    case RigidShape::Auto:
+    case RigidShape::Hull: {
+        const std::string& name = mesh.empty() ? emitter.renderer.mesh : mesh;
+        const auto found = meshes.find(name);
+        if (found == meshes.end()) {
+            return Error{ErrorCode::MissingMesh, "emitter " + quoted(emitter.name) +
+                                                     " has rigid physics wrapping mesh " + quoted(name) +
+                                                     ", which was not given"};
+        }
+        body.shape = RigidWorldDesc::Shape::Hull;
+        for (const MeshVertex& vertex : found->second.vertices) {
+            body.hull_points.push_back(vertex.position);
+        }
+        break;
+    }
+    case RigidShape::Sphere:
+        body.shape = RigidWorldDesc::Shape::Sphere;
+        break;
+    case RigidShape::Box:
+        body.shape = RigidWorldDesc::Shape::Box;
+        break;
+    }
+    return body;
+}
+
+// The world a rigid physics emitter's bodies live in: its kinds of body, its
 // damping, its colliders as statics, and the artist's props.
 Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysics& physics, const MeshSet& meshes,
                                         float step_seconds, const std::optional<ContactOptions>& contacts) {
@@ -846,35 +894,24 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
         desc.contact_min_speed = contacts->min_speed;
         desc.contact_limit = contacts->limit;
     }
-    desc.density = physics.density;
-    desc.friction = physics.friction;
-    desc.restitution = physics.restitution;
     desc.angular_damping = physics.angular_damping;
     desc.allow_sleep = physics.allow_sleep;
-    RigidShape shape = physics.shape;
-    if (shape == RigidShape::Auto) {
-        shape = emitter.renderer.geometry == Geometry::Mesh ? RigidShape::Hull : RigidShape::Sphere;
+    // Kind 0 is the emitter's own shape and material, then the kinds it
+    // lists, in order, so a spawn module's `body` indexes straight into this.
+    desc.bodies.clear();
+    Result<RigidWorldDesc::Body> own = rigid_body_desc(emitter, physics.shape, {}, physics.density, physics.friction,
+                                                       physics.restitution, meshes);
+    if (!own) {
+        return own.error();
     }
-    switch (shape) {
-    case RigidShape::Auto:
-    case RigidShape::Hull: {
-        const auto mesh = meshes.find(emitter.renderer.mesh);
-        if (mesh == meshes.end()) {
-            return Error{ErrorCode::MissingMesh, "emitter " + quoted(emitter.name) + " has rigid physics wrapping mesh " +
-                                                     quoted(emitter.renderer.mesh) + ", which was not given"};
+    desc.bodies.push_back(std::move(own).value());
+    for (const RigidBodyKind& kind : physics.bodies) {
+        Result<RigidWorldDesc::Body> body = rigid_body_desc(emitter, kind.shape, kind.mesh, kind.density,
+                                                            kind.friction, kind.restitution, meshes);
+        if (!body) {
+            return body.error();
         }
-        desc.shape = RigidWorldDesc::Shape::Hull;
-        for (const MeshVertex& vertex : mesh->second.vertices) {
-            desc.hull_points.push_back(vertex.position);
-        }
-        break;
-    }
-    case RigidShape::Sphere:
-        desc.shape = RigidWorldDesc::Shape::Sphere;
-        break;
-    case RigidShape::Box:
-        desc.shape = RigidWorldDesc::Shape::Box;
-        break;
+        desc.bodies.push_back(std::move(body).value());
     }
     for (const UpdateModule& module : emitter.update) {
         // Validation refused bound inputs here, so the values are the inputs.
@@ -1080,7 +1117,6 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
     if (world == nullptr) {
         return;
     }
-    const float reach = body_reach(rigid_[index].desc);
     Step step{s, Inputs{effect_, values}, Random{hash_mix(instance_seed_, emitter.seed)}, step_seconds_, 0.0, 0.0,
               0U, 0U, &fields_};
     const auto run = [&step](const auto& module) { apply(module, step); };
@@ -1089,10 +1125,13 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
         if (pile == nullptr) {
             continue;
         }
+        // A pile is stacked on the reach of the kind it spawns.
+        const float reach = body_reach(rigid_[index].desc, pile->body);
         step.first = s.alive();
         for (std::uint32_t c = 0U; c < pile->count; ++c) {
             if (s.alive() < emitter.capacity) {
                 append(s, 0.0F);
+                s.body_kind.push_back(pile->body);
             } else {
                 ++s.refused;
             }
@@ -1150,7 +1189,7 @@ void Simulation::rebuild_worlds() {
         rigid.world = std::move(world).value();
         const EmitterState& s = state_.emitters[i];
         for (std::size_t p = 0U; p < s.alive() && p < s.body.size(); ++p) {
-            rigid.world->add(s.body[p], s.size[p],
+            rigid.world->add(s.body[p], p < s.body_kind.size() ? s.body_kind[p] : 0U, s.size[p],
                              RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]},
                              held(i, s.spawn_index[p]));
         }
@@ -1309,9 +1348,12 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
 
     // Births, each with the age it has reached by the end of the step.
     const std::size_t first_new = s.alive();
-    const auto birth = [&s, &emitter](double age) {
+    const auto birth = [&s, &emitter, world](double age, std::uint32_t kind) {
         if (s.alive() < emitter.capacity) {
             append(s, static_cast<float>(age));
+            if (world != nullptr) {
+                s.body_kind.push_back(kind);
+            }
         } else {
             ++s.refused;
         }

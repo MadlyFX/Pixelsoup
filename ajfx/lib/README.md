@@ -324,8 +324,20 @@ colliders, pile up, knock each other about and fall asleep at rest.
   - `sphere`, or `box` (a cube);
   - `auto`: the hull for mesh geometry, a sphere otherwise.
 
-  `density`, `friction`, `restitution`, `angular_damping` and
-  `allow_sleep` set the material.
+  `density`, `friction` and `restitution` set its material, and
+  `angular_damping` and `allow_sleep` the whole world's.
+- **More kinds of body:** `bodies` lists other kinds (`RigidBodyKind`), each
+  with its own shape and material, and a spawn module's `body` says which
+  kind its newborns are -- 0 being the emitter's own, which is every body's
+  unless it is given another. So a wall of crates, the pieces they break
+  into and the bouncy ball that broke them are bodies of one world, each
+  answering a knock in its own way. A kind that collides as a `hull` wraps
+  the model its `mesh` names, or the renderer's own when it names none. At
+  most `max_rigid_body_kinds` beyond the emitter's.
+
+  A kind decides what a body collides as, not what it looks like: the
+  renderer draws one mesh for the whole emitter. Size is the particle's, so
+  whatever spawns a body decides how big it is.
 - **What acts on them:**
   - `Gravity`, bound or not;
   - `Drag`, as linear damping;
@@ -338,7 +350,7 @@ colliders, pile up, knock each other about and fall asleep at rest.
   every emitter's.
 - **Determinism:** props enter the world first, in the order they are
   listed, then bodies enter and leave in birth order, in the lowest free
-  slots. `Simulation::state()` carries the engine's own state, so
+  slots, each as the kind its particle is (`EmitterState::body_kind`). `Simulation::state()` carries the engine's own state, so
   checkpoints and seeks land exactly. Results are identical across runs,
   thread counts, and Debug and Release builds.
 - **On the GPU:** `GpuSimulation` runs rigid physics emitters on the CPU

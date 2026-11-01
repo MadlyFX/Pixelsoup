@@ -367,6 +367,55 @@ void meshes_round_trip_and_are_checked() {
     AJFX_CHECK(fails_with(write_package(stray), ErrorCode::InvalidEffect, "only for mesh geometry"));
 }
 
+void body_kinds_round_trip_and_are_checked() {
+    // Two kinds beyond the emitter's own, each carrying a value in every
+    // field, and a spawn module that names one.
+    const RigidBodyKind shards{.shape = RigidShape::Box, .density = 700.0F, .friction = 0.65F, .restitution = 0.15F};
+    const RigidBodyKind ball{
+        .shape = RigidShape::Hull, .mesh = "ball", .density = 300.0F, .friction = 0.2F, .restitution = 0.85F};
+
+    EffectBuilder builder{"kinds"};
+    builder.emitter("pieces")
+        .capacity(64U)
+        .spawn(SpawnBurst{.count = 2U, .body = 2U})
+        .spawn(SpawnRate{.rate = 4.0F, .body = 1U})
+        .init(Lifetime{.min = 2.0F, .max = 2.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.bodies = {shards, ball}});
+    const Effect effect = builder.build().value();
+
+    const Result<std::vector<std::uint8_t>> first = write_package(effect);
+    AJFX_CHECK(first.ok());
+    const Result<Effect> read = read_package(first.value());
+    AJFX_CHECK(read.ok() && read.value() == effect);
+    const Result<std::vector<std::uint8_t>> second = write_package(read.value());
+    AJFX_CHECK(second.ok() && second.value() == first.value());
+    const RigidPhysics* physics = rigid_physics(read.value().emitters[0]);
+    AJFX_CHECK(physics != nullptr && physics->bodies.size() == 2U);
+    AJFX_CHECK(physics->bodies[0] == shards && physics->bodies[1] == ball);
+    // The kind each spawn module asks for survives with it.
+    AJFX_CHECK(std::get<SpawnBurst>(read.value().emitters[0].spawn[0]).body == 2U);
+    AJFX_CHECK(std::get<SpawnRate>(read.value().emitters[0].spawn[1]).body == 1U);
+
+    // A kind that names a model needs it, and says which kind wanted it.
+    AJFX_CHECK(fails_with(read_package_meshes(first.value(), effect), ErrorCode::MissingMesh,
+                          "has a body kind shaped by mesh 'ball'"));
+
+    // A misspelt field of a kind is reported with its path, as a prop's is.
+    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+        "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "bodies": )";
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "box", "frictoin": 0.5}]}]}]})"),
+                          ErrorCode::MalformedPackage,
+                          "emitters[0].update[0].bodies[0] has unknown field 'frictoin'"));
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "cylinder"}]}]}]})"), ErrorCode::MalformedPackage,
+                          "bodies[0].shape has an unknown value"));
+    AJFX_CHECK(fails_with(effect_from_json(head + R"({"shape": "box"}}]}]})"), ErrorCode::MalformedPackage,
+                          "bodies must be an array of body kinds"));
+    // Kinds left out of the JSON leave the module with none but its own.
+    const Result<Effect> none = effect_from_json(head + R"([]}]}]})");
+    AJFX_CHECK(none.ok() && rigid_physics(none.value().emitters[0])->bodies.empty());
+}
+
 void props_round_trip_and_are_checked() {
     // A mesh prop stands still: that is the only motion it may have. Its
     // fields still have to survive the trip, so it carries values in all of
@@ -444,6 +493,7 @@ int main() {
     const ajfx::test::Case cases[] = {
         {"presets_round_trip_to_identical_effects_and_bytes", presets_round_trip_to_identical_effects_and_bytes},
         {"props_round_trip_and_are_checked", props_round_trip_and_are_checked},
+        {"body_kinds_round_trip_and_are_checked", body_kinds_round_trip_and_are_checked},
         {"floats_survive_exactly", floats_survive_exactly},
         {"hand_written_json_fills_in_defaults", hand_written_json_fills_in_defaults},
         {"malformed_json_is_reported_with_its_path", malformed_json_is_reported_with_its_path},
