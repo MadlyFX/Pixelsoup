@@ -173,6 +173,9 @@ struct GpuSimulation::State final {
             put(base, l.orientation, particles.orientation[i]);
             put(base, l.angular_velocity, particles.angular_velocity[i]);
             put(base, l.spin, particles.spin[i]);
+            if (l.body_kind >= 0 && i < particles.body_kind.size()) {
+                put(base, l.body_kind, particles.body_kind[i]);
+            }
         }
         if (!records.empty()) {
             device->write_buffer(e.particles[buffer], 0U, records);

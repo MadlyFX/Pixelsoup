@@ -37,6 +37,10 @@ struct ParticleLayout final {
     std::int32_t orientation{-1};
     std::int32_t angular_velocity{-1};
     std::int32_t spin{-1};
+    // Which kind of body each particle is, for an emitter that draws a model
+    // per body kind (models_by_kind). Nothing else reads it, so nothing else
+    // stores it.
+    std::int32_t body_kind{-1};
     std::uint32_t stride{0U};
 
     friend bool operator==(const ParticleLayout&, const ParticleLayout&) = default;

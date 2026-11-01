@@ -298,6 +298,9 @@ ParticleLayout particle_layout(const Emitter& emitter) {
     if (has_attribute(mask, Attribute::Spin)) {
         place(layout.spin, 4U);
     }
+    if (models_by_kind(emitter)) {
+        place(layout.body_kind, 4U);
+    }
     layout.stride = next;
     return layout;
 }

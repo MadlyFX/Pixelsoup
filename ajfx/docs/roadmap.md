@@ -299,11 +299,18 @@ feedback forces could evaluate any frame directly.
        settles it. Measured against hand-computed coverage: a cube and a
        half-size cube in one emitter covered 64 and 16 pixels of the test
        view, the 4:1 their sides predict.
-       - **Not yet:** ajfx's own sample renderer still draws one model an
-         emitter. It has no depth buffer (it culls back faces and leans on
-         the depth sort), so grouping draws by model would composite them
-         out of order; it needs a depth buffer, or a mesh index in the
-         record and a draw per model that skips the rest.
+       The sample renderer draws them too, and keeps the sort while doing
+       it: every model an emitter draws goes into one pair of buffers with a
+       table of each kind's index range, so one draw covers them all. Its
+       vertex count is the largest model's and a particle drawn as a smaller
+       one folds away the vertices past its own, which costs a little vertex
+       work and buys the depth order -- grouping the draws by model would
+       have composited them out of order, since this renderer has no depth
+       buffer. The record carries each body's kind (`ParticleLayout`) only
+       for an emitter that draws by kind. Tested with the near body drawn as
+       one model and the far body as another, listed so that drawing model by
+       model would hide the near one: the middle of the frame is the near
+       body's colour, ringed by the far one's.
      - **Studio and the shot.** A **Break** block in a rigid layer
        (`Category::Physics`, beside Pile and Prop): how hard, into what, how
        many times, with the piece set drawn over the preview as the Prop

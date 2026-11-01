@@ -78,6 +78,12 @@ enum class Attribute : std::uint32_t {
 // The emitter's RigidPhysics module, if it has one: its particles are then
 // a rigid-body engine's bodies, simulated on the CPU (see rigid_solver.hpp).
 [[nodiscard]] const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept;
+
+// Whether the emitter draws a model per body kind: it draws meshes and at
+// least one of its body kinds names a model of its own (RigidBodyKind::draw).
+// Its records then carry each body's kind, and a renderer draws every body by
+// the model of the kind it is.
+[[nodiscard]] bool models_by_kind(const Emitter& emitter) noexcept;
 [[nodiscard]] bool has_rigid_physics(const Effect& effect) noexcept;
 // The effect's rigid physics emitters alone, in order. Each emitter's
 // randomness is its own, so they simulate there exactly as within the whole.

@@ -80,12 +80,17 @@ struct ParticleRenderer::State final {
     // name.
     std::vector<Texture> emitter_textures;
     std::vector<Texture> uploaded;
-    // Each mesh emitter's mesh and its draw arguments (the mesh's index
-    // count, then the live count copied from the simulation).
+    // Each mesh emitter's models and its draw arguments (the largest model's
+    // index count, then the live count copied from the simulation). An
+    // emitter that draws a model per body kind (models_by_kind) holds every
+    // model it draws in one pair of buffers, and `models` says which range
+    // of the indices each kind is drawn from; one draw then covers them all,
+    // so the order between models is still the sort's.
     struct MeshBuffers final {
         Buffer vertices;
         Buffer indices;
         Buffer args;
+        Buffer models;
         std::uint32_t index_count{0U};
     };
     std::vector<std::optional<MeshBuffers>> meshes;
@@ -105,6 +110,7 @@ struct ParticleRenderer::State final {
                     device->destroy_buffer(mesh->vertices);
                     device->destroy_buffer(mesh->indices);
                     device->destroy_buffer(mesh->args);
+                    device->destroy_buffer(mesh->models);
                 }
             }
         }
@@ -135,19 +141,50 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         if (emitter.renderer.geometry != Geometry::Mesh) {
             continue;
         }
-        const MeshData& mesh = meshes.find(emitter.renderer.mesh)->second;
-        std::vector<float> vertices;
-        vertices.reserve(mesh.vertices.size() * 8U);
-        for (const MeshVertex& v : mesh.vertices) {
-            vertices.insert(vertices.end(),
-                            {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.u, v.v});
+        // The model each body kind is drawn as: the emitter's own is kind 0,
+        // and a kind that names none is drawn with it. Without kinds there is
+        // one model and one entry.
+        const bool by_kind = models_by_kind(emitter);
+        std::vector<std::string> names{emitter.renderer.mesh};
+        if (by_kind) {
+            for (const RigidBodyKind& kind : rigid_physics(emitter)->bodies) {
+                names.push_back(kind.draw.empty() ? emitter.renderer.mesh : kind.draw);
+            }
         }
+        // One pair of buffers holds every model the emitter draws, each
+        // model's indices shifted to where its vertices landed. A kind drawn
+        // as a model another kind already placed shares its range.
+        std::vector<float> vertices;
+        std::vector<std::uint32_t> indices;
+        std::vector<std::uint32_t> table{by_kind ? offset_or_absent(particle_layout(emitter).body_kind) : absent,
+                                         static_cast<std::uint32_t>(names.size())};
+        std::map<std::string, std::pair<std::uint32_t, std::uint32_t>, std::less<>> placed;
         State::MeshBuffers buffers;
-        buffers.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+        for (const std::string& name : names) {
+            if (!placed.contains(name)) {
+                const MeshData& mesh = meshes.find(name)->second;
+                const auto base = static_cast<std::uint32_t>(vertices.size() / 8U);
+                const auto first = static_cast<std::uint32_t>(indices.size());
+                for (const MeshVertex& v : mesh.vertices) {
+                    vertices.insert(vertices.end(), {v.position.x, v.position.y, v.position.z, v.normal.x,
+                                                     v.normal.y, v.normal.z, v.u, v.v});
+                }
+                for (const std::uint32_t index : mesh.indices) {
+                    indices.push_back(base + index);
+                }
+                const auto count = static_cast<std::uint32_t>(mesh.indices.size());
+                placed.emplace(name, std::pair{first, count});
+                buffers.index_count = std::max(buffers.index_count, count);
+            }
+            const auto [first, count] = placed.find(name)->second;
+            table.push_back(first);
+            table.push_back(count);
+        }
         for (const auto& [bytes, label, target] :
              {std::tuple{vertices.size() * 4U, " mesh vertices", &buffers.vertices},
-              std::tuple{mesh.indices.size() * 4U, " mesh indices", &buffers.indices},
-              std::tuple{std::size_t{16U}, " mesh draw", &buffers.args}}) {
+              std::tuple{indices.size() * 4U, " mesh indices", &buffers.indices},
+              std::tuple{std::size_t{16U}, " mesh draw", &buffers.args},
+              std::tuple{table.size() * 4U, " mesh models", &buffers.models}}) {
             Result<Buffer> created = device.create_buffer(bytes, "ajfx " + emitter.name + label);
             if (!created) {
                 return created.error();
@@ -156,9 +193,11 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         }
         device.write_buffer(buffers.vertices, 0U,
                             std::span{reinterpret_cast<const std::uint8_t*>(vertices.data()), vertices.size() * 4U});
-        device.write_buffer(buffers.indices, 0U,
-                            std::span{reinterpret_cast<const std::uint8_t*>(mesh.indices.data()),
-                                      mesh.indices.size() * 4U});
+        device.write_buffer(
+            buffers.indices, 0U,
+            std::span{reinterpret_cast<const std::uint8_t*>(indices.data()), indices.size() * 4U});
+        device.write_buffer(buffers.models, 0U,
+                            std::span{reinterpret_cast<const std::uint8_t*>(table.data()), table.size() * 4U});
         out = buffers;
     }
     std::map<std::string, Texture, std::less<>> by_name;
@@ -265,6 +304,7 @@ void ParticleRenderer::render(const GpuSimulation& simulation, ParticleSorter& s
         if (i < state_->meshes.size() && state_->meshes[i]) {
             draw.buffers[4] = state_->meshes[i]->vertices;
             draw.buffers[5] = state_->meshes[i]->indices;
+            draw.buffers[6] = state_->meshes[i]->models;
             draw.indirect = state_->meshes[i]->args;
             draw.indirect_offset = 0U;
         }

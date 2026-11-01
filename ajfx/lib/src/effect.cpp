@@ -906,6 +906,15 @@ const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept {
     return nullptr;
 }
 
+bool models_by_kind(const Emitter& emitter) noexcept {
+    if (emitter.renderer.geometry != Geometry::Mesh) {
+        return false;
+    }
+    const RigidPhysics* physics = rigid_physics(emitter);
+    return physics != nullptr && std::any_of(physics->bodies.begin(), physics->bodies.end(),
+                                             [](const RigidBodyKind& kind) { return !kind.draw.empty(); });
+}
+
 bool has_rigid_physics(const Effect& effect) noexcept {
     return std::any_of(effect.emitters.begin(), effect.emitters.end(),
                        [](const Emitter& emitter) { return rigid_physics(emitter) != nullptr; });

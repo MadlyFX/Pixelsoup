@@ -34,7 +34,16 @@ RWByteAddressBuffer sprite_camera : register(u1);
 RWByteAddressBuffer sprite_order : register(u2);
 // The live count first, for ribbons.
 RWByteAddressBuffer sprite_counters : register(u3);
-// The emitter's mesh: eight floats a vertex (position, normal, uv), then the
+// The emitter's models, and which of them each body kind is drawn as:
+//   0: the byte offset of a record's body kind, or sprite_absent for an
+//      emitter whose bodies are all drawn alike;
+//   1: how many kinds the table holds, at least one;
+//   then two words a kind: where its model's indices start, and how many it
+//   has. Several kinds may share a model, and then share its range.
+// A particle's kind picks its model, so one draw covers every model the
+// emitter has and the order between them is still the sort's.
+RWByteAddressBuffer sprite_models : register(u6);
+// The emitter's models: eight floats a vertex (position, normal, uv), then the
 // triangle list's indices.
 RWByteAddressBuffer sprite_mesh_vertices : register(u4);
 RWByteAddressBuffer sprite_mesh_indices : register(u5);
@@ -131,11 +140,31 @@ SpriteVertex sprite_ribbon_vertex(uint vertex, uint instance) {
 SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     uint record = sprite_sorted != 0u ? sprite_order.Load(instance * 4u) : instance;
     uint base = record * sprite_stride;
+    // Which model this particle is drawn as. The draw's vertex count is the
+    // largest model's, so a particle drawn as a smaller one folds the
+    // vertices past its own away.
+    uint kinds = max(sprite_models.Load(4u), 1u);
+    uint kind_offset = sprite_models.Load(0u);
+    uint kind = 0u;
+    if (kind_offset != sprite_absent) {
+        kind = min(sprite_particles.Load(base + kind_offset), kinds - 1u);
+    }
+    uint first_index = sprite_models.Load(8u + kind * 8u);
+    uint index_count = sprite_models.Load(12u + kind * 8u);
+    if (vertex >= index_count) {
+        SpriteVertex folded;
+        folded.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        folded.uv = float2(0.0f, 0.0f);
+        folded.cells = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        folded.blend = 0.0f;
+        folded.color = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return folded;
+    }
     float3 position = asfloat(sprite_particles.Load3(base + sprite_position));
     float4 color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))
                                                  : float4(1.0f, 1.0f, 1.0f, 1.0f);
     float size = sprite_size != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_size)) : 0.1f;
-    uint index = sprite_mesh_indices.Load(vertex * 4u);
+    uint index = sprite_mesh_indices.Load((first_index + vertex) * 4u);
     float3 local = asfloat(sprite_mesh_vertices.Load3(index * 32u));
     float3 normal = asfloat(sprite_mesh_vertices.Load3(index * 32u + 12u));
     float2 uv = asfloat(sprite_mesh_vertices.Load2(index * 32u + 24u));

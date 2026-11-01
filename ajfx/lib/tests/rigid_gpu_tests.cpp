@@ -8,6 +8,7 @@
 #include <ajfx/gpu/renderer.hpp>
 #include <ajfx/gpu/simulation.hpp>
 #include <ajfx/gpu/sort.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/rigid.hpp>
 #include <ajfx/rigid_runner.hpp>
@@ -148,6 +149,87 @@ void rubble_draws_its_chips() {
     AJFX_CHECK(draw() == a);
 }
 
+// The cube model at half its size, so a body drawn as it covers a quarter of
+// the pixels a body drawn as the cube does.
+MeshData half_cube_mesh() {
+    const MeshData cube = cube_mesh();
+    std::vector<MeshVertex> vertices = cube.vertices;
+    for (MeshVertex& vertex : vertices) {
+        vertex.position = Vec3{vertex.position.x * 0.5F, vertex.position.y * 0.5F, vertex.position.z * 0.5F};
+    }
+    return make_mesh(std::move(vertices), cube.indices).value();
+}
+
+void body_kinds_draw_their_own_models_in_depth_order() {
+    // Two bodies of one emitter drawn as two models, one in front of the
+    // other. The first born is kind 0, drawn as the emitter's own half cube,
+    // and is nearer; the second is kind 1, drawn as the whole cube, and is
+    // behind it. Colour by age tells them apart: the older red, the younger
+    // green.
+    //
+    // Drawing model by model would paint kind 0's model first and kind 1's
+    // over it, hiding the nearer body behind the farther one. Every model of
+    // an emitter is in one pair of buffers, so one draw covers them all and
+    // the order is still the sort's: the near body stays on top.
+    EffectBuilder builder{"models"};
+    builder.emitter("pieces")
+        .capacity(8U)
+        .spawn(SpawnBurst{.time = 0.0F, .count = 1U, .body = 0U})
+        .spawn(SpawnBurst{.time = 0.5F, .count = 1U, .body = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(Velocity{.direction = Vec3{0.0F, 0.0F, 1.0F}, .speed_min = 1.0F, .speed_max = 1.0F})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .update(RigidPhysics{.shape = RigidShape::Sphere,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Sphere, .draw = "cube"}}})
+        .update(ColorOverLife{.keys = {{0.0F, Color{0.0F, 1.0F, 0.0F, 1.0F}},
+                                       {0.03F, Color{0.0F, 1.0F, 0.0F, 1.0F}},
+                                       {0.05F, Color{1.0F, 0.0F, 0.0F, 1.0F}},
+                                       {1.0F, Color{1.0F, 0.0F, 0.0F, 1.0F}}}})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "half"});
+    const Effect effect = builder.build().value();
+    AJFX_CHECK(models_by_kind(effect.emitters[0]));
+    const MeshSet meshes{{"half", half_cube_mesh()}, {"cube", cube_mesh()}};
+    // A model a body kind is drawn as has to be in the package.
+    AJFX_CHECK(!check_meshes(effect, MeshSet{{"half", half_cube_mesh()}}).ok());
+
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation simulation = make_gpu(effect, meshes);
+    gpu::ParticleRenderer renderer =
+        gpu::ParticleRenderer::create(*g_device, effect, kernels, TextureSet{}, gpu::TextureFormat::Rgba8Unorm,
+                                      meshes)
+            .value();
+    gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
+    const gpu::Texture target =
+        g_device->create_render_target(64U, 64U, gpu::TextureFormat::Rgba8Unorm, "models").value();
+    // 0.6 s: the first at z = 0.6, the second at z = 0.1, one behind the
+    // other, both still centred on the view's axis.
+    simulation.advance_to(36U);
+    const EmitterState state = simulation.read_emitter(0U).value();
+    AJFX_CHECK(state.alive() == 2U && state.position[0].z > state.position[1].z + 0.4F);
+    AJFX_CHECK(state.color[0].r == 1.0F && state.color[1].g == 1.0F);
+    const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
+    // Orthographic, 4 world units across 64 pixels: 16 pixels per unit.
+    renderer.render(simulation, sorter, gpu::Camera::orthographic(Vec3{}, 2.0F, 2.0F), target, &clear);
+    const std::vector<std::uint8_t> pixels = g_device->read_texture(target).value();
+    g_device->destroy_texture(target);
+    const auto at = [&pixels](std::uint32_t x, std::uint32_t y) {
+        const std::size_t i = (static_cast<std::size_t>(y) * 64U + x) * 4U;
+        return std::array<std::uint8_t, 4>{pixels[i], pixels[i + 1U], pixels[i + 2U], pixels[i + 3U]};
+    };
+    // The middle is the near body's: the half cube, half a unit across, so
+    // four pixels either side of the centre, and red for its age.
+    const auto middle = at(32U, 32U);
+    std::cout << "  the middle is (" << static_cast<int>(middle[0]) << ", " << static_cast<int>(middle[1]) << ")\n";
+    AJFX_CHECK(middle[0] >= 250U && middle[1] == 0U);
+    // Six pixels out is past the half cube and within the whole one, which
+    // is the farther body: green.
+    const auto ring = at(38U, 32U);
+    AJFX_CHECK(ring[1] >= 250U && ring[0] == 0U);
+    // Ten pixels out is past both.
+    AJFX_CHECK(at(42U, 32U)[3] == 0U);
+}
+
 bool same(const EmitterState& g, const EmitterState& c) {
     return g.alive() == c.alive() && g.spawned == c.spawned && g.position == c.position &&
            g.orientation == c.orientation && g.velocity == c.velocity && g.angular_velocity == c.angular_velocity &&
@@ -231,6 +313,7 @@ int main() {
         {"the_gpu_holds_what_the_reference_simulates", the_gpu_holds_what_the_reference_simulates},
         {"checkpoints_put_rigid_emitters_back_exactly", checkpoints_put_rigid_emitters_back_exactly},
         {"rubble_draws_its_chips", rubble_draws_its_chips},
+        {"body_kinds_draw_their_own_models_in_depth_order", body_kinds_draw_their_own_models_in_depth_order},
         {"piles_stand_on_the_gpu_from_the_start", piles_stand_on_the_gpu_from_the_start},
         {"hosts_write_the_rigid_emitters_they_step", hosts_write_the_rigid_emitters_they_step},
     };

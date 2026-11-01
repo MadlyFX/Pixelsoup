@@ -338,12 +338,22 @@ colliders, pile up, knock each other about and fall asleep at rest.
 
   A kind may also name the model its bodies are **drawn** as (`draw`),
   where the emitter draws meshes: a crate and the panels it breaks into are
-  then each drawn as themselves, without being emitters of their own. A
-  renderer that honours it draws the emitter model by model, over the
-  particles of each (the media server's particle pass does; ajfx's own
-  sample renderer draws one model an emitter, since it has no depth buffer
-  to settle the order between models). Size is the particle's, so whatever
-  spawns a body decides how big it is.
+  then each drawn as themselves, without being emitters of their own.
+  `models_by_kind` says an emitter does this, and its records then carry
+  each body's kind. Size is the particle's, so whatever spawns a body
+  decides how big it is.
+  - **In this renderer:** every model an emitter draws goes into one pair of
+    vertex and index buffers, with a table saying where each kind's model
+    begins and how many indices it has. One draw covers them all -- its
+    vertex count is the largest model's, and a particle drawn as a smaller
+    one folds the vertices past its own away -- so the drawing order is
+    still the depth sort's, which matters here because there is no depth
+    buffer.
+  - **In a host:** the media server's particle pass instead draws the
+    emitter model by model, over an order buffer of the particles drawn with
+    each. It has a depth buffer to settle the order between models, and its
+    rigid particles come from the CPU, which therefore knows each group's
+    count without asking the GPU.
 - **What acts on them:**
   - `Gravity`, bound or not;
   - `Drag`, as linear damping;
