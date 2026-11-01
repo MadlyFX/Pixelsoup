@@ -321,6 +321,26 @@ Layer breaking_crates(Document& d) {
                         {"density", number(600.0F)}});
 }
 
+// Snow falling on whatever the layer above it is made of. It is a particle
+// layer, so it sits after the crates on the page: the pieces it lands on
+// have to have moved before the flakes meet them, and reading down the page
+// is that order. Sticking is what makes it settle rather than skate off.
+Layer settling_snow(Document& d) {
+    return build_layer(d, LayerKind::Particles, "Snow", 7.0F, 9.0F,
+                       {{"stream", {{"rate", number(70.0F)}}},
+                        {"shape",
+                         {{"shape", choice("disc")}, {"size", range(1.6F, 1.6F)}, {"offset", vec3(0.0F, 4.0F, 0.0F)}}},
+                        {"launch", {{"direction", choice("down")}, {"speed", range(0.5F, 0.9F)}}},
+                        {"gravity", {{"strength", range(0.04F, 0.06F)}}},
+                        {"turbulence", {{"strength", range(0.25F, 0.25F)}, {"size", number(1.2F)}}},
+                        {"pieces", {{"response", choice("stick")}}},
+                        {"ground", {{"response", choice("stick")}}},
+                        {"appearance", {{"material", choice("solid")}, {"texture", choice("dot")}}},
+                        {"color", {{"color", color(0.95F, 0.96F, 1.0F)}, {"opacity", number(0.9F)}}},
+                        {"size", {{"size", range(0.03F, 0.06F)}}},
+                        {"fade", {{"in", number(10.0F)}, {"out", number(10.0F)}}}});
+}
+
 // One puff as a pile comes down, spreading low along the ground.
 Layer pile_dust(Document& d) {
     return build_layer(d, LayerKind::Particles, "Collapse dust", 2.0F, 3.5F,
@@ -445,6 +465,7 @@ const std::vector<PresetEntry>& preset_entries() {
         {{"snow", "Snow", "Flakes drifting down and settling."}, snow},
         {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands."},
          breaking_crates},
+        {{"settling_snow", "Settling snow", "Snow that lands on the pieces above it."}, settling_snow},
         {{"rain", "Rain", "Fast streaks of rain that vanish on the ground."}, rain},
         {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays.", LayerKind::Rigid},
          rock_pile},
@@ -476,8 +497,9 @@ const std::vector<RecipeEntry>& recipe_entries() {
          {"glow_core", "motes"}, 6.0F, Backdrop::Night, 1.0F},
         {{"smoke", "Smoke plume", "A soft column of rising smoke."}, {"plume"}, 10.0F, Backdrop::Studio, 0.3F},
         {{"snow", "Snowfall", "Flakes drifting down and settling."}, {"snow"}, 10.0F, Backdrop::Night, 0.4F},
-        {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands."},
-         {"breaking_crates"},
+        {{"breaking_crates", "Crates in the snow", "Crates breaking where a ball lands, with snow settling "
+                                                    "on them."},
+         {"breaking_crates", "settling_snow"},
          6.0F,
          Backdrop::Studio,
          0.0F},

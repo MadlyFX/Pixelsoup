@@ -531,6 +531,30 @@ std::vector<BlockDef> make_catalog() {
         .keywords = "floor collide collision plane bounce land",
     });
     blocks.push_back(BlockDef{
+        .kind = "pieces",
+        .title = "Lands on pieces",
+        .description = "Particles land on the solid pieces of the physics layer above, not through them.",
+        .category = Category::Contact,
+        .controls =
+            {choice_control("response", "On contact", "stick",
+                            {{"stick", "Stick"}, {"slide", "Slide"}, {"bounce", "Bounce"}, {"vanish", "Vanish"}},
+                            "What a particle does when it reaches a piece. Sticking is what makes snow settle "
+                            "on what it falls on."),
+             when(number_control("bounce", "Bounciness", 0.3F, 0.0F, 1.0F, "", 2,
+                                 "1 bounces back as fast as it arrived."),
+                  "response", {"bounce"}),
+             when(number_control("friction", "Friction", 0.4F, 0.0F, 1.0F, "", 2,
+                                 "How quickly sliding comes to a stop.", 0.0F, 1.0F),
+                  "response", {"bounce", "slide"})},
+        .keywords = "land settle on crates rocks debris pieces bodies physics snow dust rest lie collide",
+        .unique = true,
+        // Which pieces it lands on is the page's order, not a module field.
+        .detachable = false,
+        .layers = in_particles,
+        .only_in = "A rigid layer's pieces already meet each other, so landing on pieces is for a particle "
+                   "layer above them.",
+    });
+    blocks.push_back(BlockDef{
         .kind = "sphere",
         .title = "Sphere collider",
         .description = "Keeps particles out of a ball, or inside it.",

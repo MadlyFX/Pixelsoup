@@ -114,8 +114,13 @@ std::string emitter_name(const Layer& layer, std::set<std::string>& taken) {
 
 class LayerBuilder final {
 public:
-    LayerBuilder(const Layer& layer, float scale, std::vector<ParameterDesc>& parameters)
-        : layer_{layer}, s_{scale}, parameters_{parameters} {}
+    // `pieces_above` is the emitter of the nearest rigid layer before this
+    // one, which is what a Lands on pieces block lands on. Empty where
+    // there is none, and the block then compiles to nothing: the coach asks
+    // for a layer to land on rather than the layer refusing to play.
+    LayerBuilder(const Layer& layer, float scale, std::vector<ParameterDesc>& parameters,
+                 std::string pieces_above = {})
+        : layer_{layer}, s_{scale}, parameters_{parameters}, pieces_above_{std::move(pieces_above)} {}
 
     // The parameters this layer's blocks publish.
     [[nodiscard]] const std::vector<std::string>& published() const noexcept { return published_; }
@@ -446,6 +451,16 @@ private:
             plane.friction = response == "stick" ? FloatInput{1.0F} : input(block, "friction", number_of(block, "friction"), 1.0F);
             plane.kill = response == "vanish";
             place_after(SlotCollision, uid, plane);
+        } else if (kind == "pieces") {
+            if (!pieces_above_.empty()) {
+                const std::string response = choice_of(block, "response");
+                place_after(SlotCollision, uid,
+                            BodyCollision{.id = id(block, 1U),
+                                          .emitter = pieces_above_,
+                                          .restitution = response == "bounce" ? number_of(block, "bounce") : 0.0F,
+                                          .friction = response == "stick" ? 1.0F : number_of(block, "friction"),
+                                          .kill = response == "vanish"});
+            }
         } else if (kind == "sphere") {
             place_after(SlotCollision, uid,
                         SphereCollision{.id = id(block, 1U),
@@ -961,6 +976,7 @@ private:
     std::set<ModuleId> seeded_;
     bool physics_{false};
     // The props the layer's Prop blocks describe, in page order.
+    std::string pieces_above_;
     std::vector<RigidProp> props_;
     // The body kinds the layer's Part blocks make, and the parts that are
     // made of them, in the order the blocks are listed.
@@ -1044,6 +1060,10 @@ Compiled compile(const Document& document, Purpose purpose) {
     std::set<std::string> used;
 
     std::set<std::string> names;
+    // The emitter of the most recent rigid layer, which is what a later
+    // layer's Lands on pieces block lands on. The runtime needs the emitter
+    // it meets to come first, and reading down the page is the same order.
+    std::string pieces_above;
     for (const Layer& layer : document.layers) {
         LayerReport report;
         report.layer = layer.uid;
@@ -1051,7 +1071,10 @@ Compiled compile(const Document& document, Purpose purpose) {
         // A layer that will not play still compiles, against its own copy,
         // so what it publishes never widens what the playing layers see.
         std::vector<ParameterDesc> own = parameters;
-        LayerBuilder builder{layer, scale, wanted(layer) ? parameters : own};
+        LayerBuilder builder{layer, scale, wanted(layer) ? parameters : own, pieces_above};
+        if (layer.kind == LayerKind::Rigid && wanted(layer)) {
+            pieces_above = report.emitter;
+        }
         std::optional<Emitter> emitter = builder.build(report);
         report.parameters = builder.published();
         if (emitter) {
@@ -1059,10 +1082,15 @@ Compiled compile(const Document& document, Purpose purpose) {
             // The most particles it can have alive, with every published
             // parameter anywhere in its range; then its capacity is exactly
             // that, rounded up.
+            // This layer's emitter, after the layers already in: a block
+            // may name an earlier layer's emitter (landing on its pieces),
+            // and the runtime wants that one to come first. Those emitters
+            // have validated already, so any error here is this layer's.
             Effect alone;
             alone.name = effect.name;
             alone.simulation_rate = effect.simulation_rate;
             alone.parameters = wanted(layer) ? parameters : own;
+            alone.emitters = effect.emitters;
             const std::uint64_t bound = particle_bound(alone, *emitter);
             if (bound > max_emitter_capacity) {
                 report.error = "This layer could have more particles alive than any layer may (" +

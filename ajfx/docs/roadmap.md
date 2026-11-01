@@ -122,8 +122,18 @@ feedback forces could evaluate any frame directly.
      and none reach the floor beneath it, where without the collider 321
      lie on that floor; the GPU and the reference put every flake in the
      same place (0 of 480 more than a thousandth of a unit apart).
-     - **Not yet:** a Studio block, so this is authorable in code and not
-       on a page; and particles are not carried by the body they rest on,
+     Studio authors it with the **Lands on pieces** block in a particle
+     layer, which lands on the rigid layer above it on the page: the
+     runtime wants the emitter it meets to come first, and reading down the
+     page is that order, so no block names another layer and no page can
+     name one that is not there. Its responses are the Ground block's
+     (stick, slide, bounce, vanish), and sticking is what makes snow settle.
+     The coach asks for a layer above where there is none, and refuses one
+     holding more pieces than may be landed on. The **Crates in the snow**
+     recipe is the worked shot: the crates breaking, with snow settling on
+     what is left of them. Compiling a layer beside the layers already in,
+     rather than alone, is what lets a block name an earlier emitter at all.
+     - **Not yet:** particles are not carried by the body they rest on,
        which is accumulation below.
    - **Accumulation, not started.** Snow and dust that settle where they
      land and build up, while what they land on moves and breaks. Particles

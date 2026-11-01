@@ -94,6 +94,36 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             continue;
         }
 
+        // Landing on pieces lands on the rigid layer above, so there has to
+        // be one, and it has to be small enough to meet every particle.
+        if (const Block* lands = first(layer, "pieces")) {
+            const Layer* above = nullptr;
+            for (const Layer& other : document.layers) {
+                if (other.uid == layer.uid) {
+                    break;
+                }
+                if (other.enabled && other.kind == LayerKind::Rigid) {
+                    above = &other;
+                }
+            }
+            if (above == nullptr) {
+                notes.push_back({layer.uid, lands->uid, AdviceLevel::Warning,
+                                 "There is no physics layer above this one, so there are no pieces to land on "
+                                 "and these particles fall through. Move a rigid layer above it, or start one.",
+                                 {},
+                                 {}});
+            } else if (const LayerReport* theirs = compiled.layer(above->uid);
+                       theirs != nullptr && theirs->capacity > ajfx::max_body_colliders) {
+                notes.push_back({layer.uid, lands->uid, AdviceLevel::Error,
+                                 "The layer above holds up to " + std::to_string(theirs->capacity) +
+                                     " pieces, and landing on them means meeting every one: at most " +
+                                     std::to_string(ajfx::max_body_colliders) +
+                                     " can be landed on. Make that layer's pieces fewer.",
+                                 {},
+                                 {}});
+            }
+        }
+
         // Breaking is two halves: when a piece comes apart, and what it
         // comes apart into. Either alone does nothing, so say which is
         // missing on the block that is there.

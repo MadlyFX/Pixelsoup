@@ -120,6 +120,9 @@ void every_recipe_compiles_within_its_budget() {
     for (const Recipe& entry : recipes()) {
         const Document document = recipe(entry.id);
         const Compiled compiled = compile(document, Purpose::Export);
+        if (!compiled.error.empty()) {
+            std::cout << "  " << entry.id << ": " << compiled.error << '\n';
+        }
         CHECK(compiled.error.empty());
         CHECK(compiled.effect.has_value());
         CHECK(compiled.effect->emitters.size() == document.layers.size());
@@ -952,6 +955,87 @@ void crates_break_into_the_parts_beside_them() {
     }
 }
 
+void snow_lands_on_the_pieces_of_the_layer_above() {
+    Document document = recipe("breaking_crates");
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const Layer& crates = layer_named(document, "Crates and a dropped ball");
+    const Layer& snow = layer_named(document, "Snow");
+    const ajfx::Emitter& flakes = emitter_of(compiled, snow);
+    const auto* lands = find_module<ajfx::BodyCollision>(flakes);
+    CHECK(lands != nullptr);
+    // It lands on the crates: the rigid layer above it on the page, named by
+    // the emitter that layer compiled to.
+    CHECK(lands->emitter == emitter_of(compiled, crates).name);
+    // Sticking is friction 1 and no bounce, as the ground's Stick is.
+    CHECK(near(lands->friction.value, 1.0F) && near(lands->restitution.value, 0.0F));
+    CHECK(!lands->kill);
+    // And the crates come first in the effect, which is what the runtime
+    // needs: the bodies met have already moved this step.
+    std::size_t crates_at = 0U;
+    std::size_t snow_at = 0U;
+    for (std::size_t i = 0U; i < compiled.effect->emitters.size(); ++i) {
+        if (compiled.effect->emitters[i].name == lands->emitter) {
+            crates_at = i;
+        }
+        if (compiled.effect->emitters[i].name == flakes.name) {
+            snow_at = i;
+        }
+    }
+    CHECK(crates_at < snow_at);
+
+    // The flakes settle on the crates rather than passing through them: with
+    // nothing to land on they would all end on the floor.
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation simulation =
+        ajfx::Simulation::create(*compiled.effect, 1U,
+                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
+            .value();
+    // The flakes drift down slowly, so this is ten seconds in: long after
+    // the ball has landed and the crates have come apart.
+    simulation.advance_to(600U);
+    const ajfx::EmitterState& settled = simulation.emitter(snow_at);
+    std::size_t aloft = 0U;
+    for (std::size_t i = 0U; i < settled.alive(); ++i) {
+        if (settled.position[i].y > 0.2F && std::sqrt(ajfx::dot(settled.velocity[i], settled.velocity[i])) < 0.02F) {
+            ++aloft;
+        }
+    }
+    std::cout << "  " << aloft << " flakes rest above the floor, on what the crates left\n";
+    CHECK(aloft > 5U);
+}
+
+// Landing on pieces needs pieces above: the coach says so rather than the
+// flakes quietly falling through.
+void landing_on_pieces_needs_a_layer_above() {
+    Document document;
+    Layer snow = make_layer(document, LayerKind::Particles, "Snow");
+    insert_block(snow, 0U, *make_block(document, "stream"));
+    insert_block(snow, 1U, *make_block(document, "pieces"));
+    document.layers.push_back(std::move(snow));
+    Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    // Nothing to land on, so the block compiles to nothing and the layer
+    // still plays.
+    CHECK(find_module<ajfx::BodyCollision>(compiled.effect->emitters[0]) == nullptr);
+    CHECK(said(advise(document, compiled), "no physics layer above this one"));
+
+    // With a rigid layer above it, the block binds to that layer.
+    Document ordered;
+    Layer crates = make_layer(ordered, LayerKind::Rigid, "Crates");
+    insert_block(crates, 0U, *make_block(ordered, "burst"));
+    ordered.layers.push_back(std::move(crates));
+    Layer flakes = make_layer(ordered, LayerKind::Particles, "Snow");
+    insert_block(flakes, 0U, *make_block(ordered, "stream"));
+    insert_block(flakes, 1U, *make_block(ordered, "pieces"));
+    ordered.layers.push_back(std::move(flakes));
+    compiled = compile(ordered, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const auto* lands = find_module<ajfx::BodyCollision>(compiled.effect->emitters[1]);
+    CHECK(lands != nullptr && lands->emitter == compiled.effect->emitters[0].name);
+    CHECK(advise(ordered, compiled).empty() || !said(advise(ordered, compiled), "no physics layer above"));
+}
+
 // Breaking is two halves, and half of it alone does nothing: the coach says
 // which half is missing rather than the compiler guessing at the other.
 void half_a_break_is_refused_with_the_missing_half() {
@@ -1575,6 +1659,8 @@ int main() {
          props_stand_in_the_world_and_spill_what_they_hold},
         {"crates_break_into_the_parts_beside_them", crates_break_into_the_parts_beside_them},
         {"half_a_break_is_refused_with_the_missing_half", half_a_break_is_refused_with_the_missing_half},
+        {"snow_lands_on_the_pieces_of_the_layer_above", snow_lands_on_the_pieces_of_the_layer_above},
+        {"landing_on_pieces_needs_a_layer_above", landing_on_pieces_needs_a_layer_above},
         {"a_prop_takes_default_physics_and_names_what_it_cannot_be",
          a_prop_takes_default_physics_and_names_what_it_cannot_be},
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},
