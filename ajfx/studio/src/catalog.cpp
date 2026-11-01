@@ -687,6 +687,61 @@ std::vector<BlockDef> make_catalog() {
         .only_in = "A prop is an object in a physics world, so it needs a rigid physics layer.",
     });
     blocks.push_back(BlockDef{
+        .kind = "break",
+        .title = "Break",
+        .description = "The layer's pieces come apart when something hits them hard enough.",
+        .category = Category::Physics,
+        .controls =
+            {number_control("force", "Comes apart when hit at", 4.0F, 0.5F, 30.0F, "m/s", 1,
+                            "How fast something has to arrive to break a piece apart. A piece dropped from a "
+                            "metre lands at about four and a half.",
+                            0.1F),
+             number_control("scatter", "Throwing the parts", 1.0F, 0.0F, 10.0F, "m/s", 2,
+                            "How hard the parts are thrown outwards as they come loose.", 0.0F),
+             number_control("spin", "And tumbling them", 180.0F, 0.0F, 1440.0F, "deg/s", 0,
+                            "How fast the parts tumble as they come loose.", 0.0F)},
+        .keywords = "break shatter smash fracture crack apart destroy panels planks shards splinters debris",
+        .unique = true,
+        // What it breaks into is the Part blocks beside it.
+        .detachable = false,
+        .layers = in_rigid,
+        .only_in = "Only a piece in a physics world can come apart, so breaking needs a rigid physics layer.",
+    });
+    blocks.push_back(BlockDef{
+        .kind = "part",
+        .title = "Part",
+        .description = "One part a piece comes apart into: a panel, a plank or a shard.",
+        .category = Category::Physics,
+        .controls =
+            {choice_control("model", "Shape", "shard",
+                            {{"shard", "Shard"},
+                             {"chip", "Chip"},
+                             {"rock", "Rock"},
+                             {"cube", "Cube"},
+                             {"file", "From a file"}},
+                            "The model this part is. It both looks like this model and hits things as its "
+                            "shape, so a panel lands flat and a splinter lands thin. From a file uses a model "
+                            "of your own: a panel, a plank, a shard."),
+             when(file_control("model_file", "Model", FileKind::Model,
+                               "An OBJ, glTF or GLB. It is centred and scaled to fit a 1 m box, so Size sets "
+                               "how big the part is beside the piece."),
+                  "model", {"file"}),
+             number_control("size", "Size", 0.4F, 0.05F, 1.0F, "", 2,
+                            "How big the part is beside the whole piece. 0.4 is a part a little under half the "
+                            "piece across.",
+                            0.01F, 1.0F),
+             vec3_control("at", "Sat at", vec3(0.0F, 0.5F, 0.0F), "",
+                          "Where this part sat in the piece, from its middle, as a share of the piece's size: "
+                          "0.5 up is its lid, 0.5 out to one side is that wall. It is thrown out this way as "
+                          "it comes loose."),
+             angles_control("turn", "Turned", "How the part is turned where it sat.")},
+        .keywords = "part panel plank shard splinter chunk lid wall side piece fragment break into",
+        .detachable = false,
+        .layers = in_rigid,
+        .only_in = "A part is what a piece of a physics world comes apart into, so it needs a rigid physics "
+                   "layer.",
+    });
+    blocks.push_back(BlockDef{
         .kind = "pile",
         .title = "Pile",
         .description = "Solid pieces already stacked when the effect starts, that collapse when it plays.",

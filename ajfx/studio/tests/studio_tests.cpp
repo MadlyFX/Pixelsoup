@@ -892,6 +892,113 @@ void props_stand_in_the_world_and_spill_what_they_hold() {
     CHECK(simulation.emitter(index).alive() == 24U);
 }
 
+// Whether any note says this.
+bool said(const std::vector<Advice>& notes, std::string_view fragment) {
+    return std::any_of(notes.begin(), notes.end(), [&](const Advice& note) {
+        return note.message.find(fragment) != std::string::npos;
+    });
+}
+
+void crates_break_into_the_parts_beside_them() {
+    Document document = recipe("breaking_crates");
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const ajfx::Emitter& crates = emitter_of(compiled, layer_named(document, "Crates and a dropped ball"));
+    const auto* physics = find_module<ajfx::RigidPhysics>(crates);
+    const auto* breaking = find_module<ajfx::Break>(crates);
+    CHECK(physics != nullptr && breaking != nullptr);
+    // Four Part blocks, so four body kinds past the layer's own and four
+    // pieces that point at them in order.
+    CHECK(physics->bodies.size() == 4U);
+    CHECK(breaking->pieces.size() == 4U);
+    CHECK(breaking->body == 0U);
+    for (std::size_t i = 0U; i < 4U; ++i) {
+        CHECK(breaking->pieces[i].body == static_cast<std::uint32_t>(i + 1U));
+        // A part collides as its model's hull and is drawn as the same model.
+        CHECK(physics->bodies[i].shape == ajfx::RigidShape::Hull);
+        CHECK(!physics->bodies[i].mesh.empty() && physics->bodies[i].draw == physics->bodies[i].mesh);
+        // And it is made of what the layer's pieces are made of.
+        CHECK(near(physics->bodies[i].density, 600.0F) && near(physics->bodies[i].friction, 0.8F));
+        CHECK(near(physics->bodies[i].restitution, 0.05F));
+    }
+    // The lid sat at the top of the crate and the walls either side of it.
+    CHECK(near(breaking->pieces[0].offset.y, 0.5F));
+    CHECK(near(breaking->pieces[1].offset.x, 0.5F) && near(breaking->pieces[1].turn.z, 90.0F));
+    CHECK(near(breaking->pieces[2].offset.x, -0.5F));
+    CHECK(near(breaking->pieces[3].offset.y, -0.5F));
+    CHECK(near(breaking->threshold, 4.0F) && near(breaking->spin, 220.0F));
+    // Every model a part names is in the package the preview plays.
+    CHECK(ajfx::check_meshes(*compiled.effect, compiled.meshes).ok());
+
+    // And it breaks: the ball lands on the stack and the crates it hits come
+    // apart, leaving more bodies than the nine the pile stood up.
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation simulation =
+        ajfx::Simulation::create(*compiled.effect, 1U,
+                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
+            .value();
+    std::size_t index = 0U;
+    while (compiled.effect->emitters[index].name != crates.name) {
+        ++index;
+    }
+    CHECK(simulation.emitter(index).alive() == 9U);
+    simulation.advance_to(240U);
+    const std::size_t left = simulation.emitter(index).alive();
+    std::cout << "  nine crates became " << left << " bodies\n";
+    CHECK(left > 9U);
+    // What is left is crates and parts, nothing else.
+    for (const std::uint32_t kind : simulation.emitter(index).body_kind) {
+        CHECK(kind <= 4U);
+    }
+}
+
+// Breaking is two halves, and half of it alone does nothing: the coach says
+// which half is missing rather than the compiler guessing at the other.
+void half_a_break_is_refused_with_the_missing_half() {
+    const auto page = [&](bool with_break, bool with_part) {
+        Document document;
+        Layer layer = make_layer(document, LayerKind::Rigid, "Crate");
+        insert_block(layer, 0U, *make_block(document, "burst"));
+        insert_block(layer, layer.blocks.size(), *make_block(document, "appearance"));
+        if (with_break) {
+            insert_block(layer, layer.blocks.size(), *make_block(document, "break"));
+        }
+        if (with_part) {
+            insert_block(layer, layer.blocks.size(), *make_block(document, "part"));
+        }
+        document.layers.push_back(std::move(layer));
+        return document;
+    };
+    // A Break with nothing to break into leaves the pieces whole.
+    Document only_break = page(true, false);
+    Compiled compiled = compile(only_break, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(find_module<ajfx::Break>(compiled.effect->emitters[0]) == nullptr);
+    std::vector<Advice> notes = advise(only_break, compiled);
+    CHECK(said(notes, "Nothing is set to break off yet"));
+
+    // A Part with nothing that breaks is never made.
+    Document only_part = page(false, true);
+    compiled = compile(only_part, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(find_module<ajfx::Break>(compiled.effect->emitters[0]) == nullptr);
+    notes = advise(only_part, compiled);
+    CHECK(said(notes, "Nothing breaks, so this part is never made"));
+
+    // Both halves, and the layer breaks.
+    Document both = page(true, true);
+    compiled = compile(both, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const auto* breaking = find_module<ajfx::Break>(compiled.effect->emitters[0]);
+    CHECK(breaking != nullptr && breaking->pieces.size() == 1U);
+    // A layer that draws sprites cannot draw a part as its own model, so the
+    // part still collides as its shape and the coach offers the fix.
+    const auto* physics = find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0]);
+    CHECK(physics != nullptr && physics->bodies.size() == 1U);
+    CHECK(physics->bodies[0].draw.empty() && !physics->bodies[0].mesh.empty());
+    CHECK(said(advise(both, compiled), "Set Appearance to debris"));
+}
+
 // A prop needs no Physics block of its own, and what it cannot be is said on
 // the block at fault rather than silently approximated.
 void a_prop_takes_default_physics_and_names_what_it_cannot_be() {
@@ -1466,6 +1573,8 @@ int main() {
         {"piles_stand_until_the_effect_plays", piles_stand_until_the_effect_plays},
         {"props_stand_in_the_world_and_spill_what_they_hold",
          props_stand_in_the_world_and_spill_what_they_hold},
+        {"crates_break_into_the_parts_beside_them", crates_break_into_the_parts_beside_them},
+        {"half_a_break_is_refused_with_the_missing_half", half_a_break_is_refused_with_the_missing_half},
         {"a_prop_takes_default_physics_and_names_what_it_cannot_be",
          a_prop_takes_default_physics_and_names_what_it_cannot_be},
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},

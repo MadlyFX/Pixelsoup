@@ -271,6 +271,56 @@ Layer bucket_spill(Document& d) {
                        {{"shape", choice("ball")}, {"friction", number(0.5F)}, {"bounce", number(0.2F)}});
 }
 
+// A stack of crates with a ball dropped on them, the crates breaking into
+// panels where the ball lands. The crates are the layer's own bodies and the
+// ball is a loose prop, so one physics world holds them both. The parts sit
+// at the faces of the crate they came from: a lid, two walls and a base, each
+// a little under half the crate across, which is what a crate in pieces
+// looks like. The ball falls from two and a half metres and arrives at about
+// seven, well past the four the crates come apart at.
+Layer breaking_crates(Document& d) {
+    return build_layer(d, LayerKind::Rigid, "Crates and a dropped ball", 60.0F, 60.0F,
+                       {{"pile",
+                         {{"count", number(9.0F)},
+                          {"shape", choice("stack")},
+                          {"width", number(1.2F)},
+                          {"depth", number(1.2F)},
+                          {"jitter", number(0.0F)}}},
+                        {"prop",
+                         {{"motion", choice("loose")},
+                          {"shape", choice("ball")},
+                          {"at", vec3(0.0F, 2.5F, 0.0F)},
+                          {"radius", number(0.3F)},
+                          {"size", number(0.6F)},
+                          {"density", number(1200.0F)},
+                          {"friction", number(0.3F)},
+                          {"bounce", number(0.8F)}}},
+                        {"break", {{"force", number(4.0F)}, {"scatter", number(1.2F)}, {"spin", number(220.0F)}}},
+                        {"part", {{"model", choice("cube")}, {"size", number(0.45F)}, {"at", vec3(0.0F, 0.5F, 0.0F)}}},
+                        {"part",
+                         {{"model", choice("shard")},
+                          {"size", number(0.45F)},
+                          {"at", vec3(0.5F, 0.0F, 0.0F)},
+                          {"turn", vec3(0.0F, 0.0F, 90.0F)}}},
+                        {"part",
+                         {{"model", choice("shard")},
+                          {"size", number(0.45F)},
+                          {"at", vec3(-0.5F, 0.0F, 0.0F)},
+                          {"turn", vec3(0.0F, 0.0F, 90.0F)}}},
+                        {"part", {{"model", choice("cube")}, {"size", number(0.45F)}, {"at", vec3(0.0F, -0.5F, 0.0F)}}},
+                        {"gravity", {}},
+                        {"ground", {{"bounce", number(0.05F)}, {"friction", number(0.9F)}}},
+                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("cube")}}},
+                        {"color",
+                         {{"color", color(0.44F, 0.30F, 0.16F)}, {"mix", toggle(true)},
+                          {"second", color(0.56F, 0.40F, 0.23F)}}},
+                        {"size", {{"size", range(0.4F, 0.4F)}}}},
+                       {{"shape", choice("cube")},
+                        {"friction", number(0.8F)},
+                        {"bounce", number(0.05F)},
+                        {"density", number(600.0F)}});
+}
+
 // One puff as a pile comes down, spreading low along the ground.
 Layer pile_dust(Document& d) {
     return build_layer(d, LayerKind::Particles, "Collapse dust", 2.0F, 3.5F,
@@ -393,6 +443,8 @@ const std::vector<PresetEntry>& preset_entries() {
         {{"debris", "Debris", "Chunks thrown up that tumble, bounce and settle."}, debris},
         {{"dust", "Dust", "A puff of dust kicked up along the ground."}, dust},
         {{"snow", "Snow", "Flakes drifting down and settling."}, snow},
+        {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands."},
+         breaking_crates},
         {{"rain", "Rain", "Fast streaks of rain that vanish on the ground."}, rain},
         {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays.", LayerKind::Rigid},
          rock_pile},
@@ -424,6 +476,11 @@ const std::vector<RecipeEntry>& recipe_entries() {
          {"glow_core", "motes"}, 6.0F, Backdrop::Night, 1.0F},
         {{"smoke", "Smoke plume", "A soft column of rising smoke."}, {"plume"}, 10.0F, Backdrop::Studio, 0.3F},
         {{"snow", "Snowfall", "Flakes drifting down and settling."}, {"snow"}, 10.0F, Backdrop::Night, 0.4F},
+        {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands."},
+         {"breaking_crates"},
+         6.0F,
+         Backdrop::Studio,
+         0.0F},
         {{"rain", "Rain", "Streaks of rain."}, {"rain"}, 4.0F, Backdrop::Night, 0.3F},
         {{"rock_pile", "Rock pile", "A heap of rocks that collapses when the effect plays, with a puff of dust."},
          {"rock_pile", "pile_dust"}, 6.0F, Backdrop::Studio, 0.3F},

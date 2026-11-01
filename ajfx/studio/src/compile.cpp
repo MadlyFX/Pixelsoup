@@ -54,6 +54,7 @@ enum Slot : int {
     SlotDrag, // last: it slows what the forces gave
     // update: after integration
     SlotRigid = 0,
+    SlotBreak, // after the world it breaks bodies in
     SlotCollision,
     SlotRawCollision,
 };
@@ -157,17 +158,35 @@ public:
                    Lifetime{.id = module_id(layer_.uid, 1U), .min = life_min,
                             .max = std::max(layer_.life_max, life_min)});
         finish_over_life();
-        // The props go on the layer's RigidPhysics module, which any block
-        // may have placed, so they are attached once every block is in.
-        if (!props_.empty()) {
+        // The props and the parts' body kinds go on the layer's RigidPhysics
+        // module, which any block may have placed, so they are attached once
+        // every block is in. A part is drawn as its own model only where the
+        // layer draws models at all; otherwise it still hits things as its
+        // own shape and is drawn as the layer's pieces are.
+        if (!props_.empty() || !kinds_.empty()) {
+            // The layer's renderer, which reaches the emitter further down.
+            const bool draws_models = renderer_.geometry == Geometry::Mesh;
             for (Placed& placed : after_) {
                 auto* update = std::get_if<UpdateModule>(&placed.line.module);
                 auto* physics = update != nullptr ? std::get_if<RigidPhysics>(update) : nullptr;
                 if (physics != nullptr) {
                     physics->props = std::move(props_);
+                    if (!draws_models) {
+                        for (RigidBodyKind& of : kinds_) {
+                            of.draw.clear();
+                        }
+                    }
+                    physics->bodies = std::move(kinds_);
                     break;
                 }
             }
+        }
+        // Breaking needs both the Break block and something to break into:
+        // either alone is a half-written instruction, which the coach asks
+        // about rather than the compiler guessing at.
+        if (breaking_ && !parts_.empty()) {
+            breaking_->pieces = std::move(parts_);
+            place_after(SlotBreak, layer_.uid, *breaking_);
         }
 
         const auto by_slot = [](const Placed& a, const Placed& b) { return a.slot < b.slot; };
@@ -463,6 +482,15 @@ private:
                                   .contact_scale = number_of(block, "contact"),
                                   .rest_speed = input(block, "settle", number_of(block, "settle") * s, s),
                                   .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
+        } else if (kind == "break") {
+            // What it breaks into is the layer's Part blocks, so the module
+            // is placed in build() once they are all in.
+            breaking_ = Break{.id = id(block, 1U),
+                              .threshold = number_of(block, "force") * s_,
+                              .scatter = number_of(block, "scatter") * s_,
+                              .spin = number_of(block, "spin")};
+        } else if (kind == "part") {
+            part(block);
         } else if (kind == "prop") {
             prop(block);
         } else if (kind == "light") {
@@ -495,6 +523,32 @@ private:
                                  .restitution = number_of(block, "bounce"),
                                  .angular_damping = number_of(block, "damping"),
                                  .allow_sleep = toggle_of(block, "rest")});
+    }
+
+    // One part a piece comes apart into. Each is a body kind of its own,
+    // collided and drawn as its model, with the layer's own material: a part
+    // of a crate is made of what the crate is made of. Kind 0 is the layer's
+    // bodies, so the kinds these make run from 1.
+    void part(const Block& block) {
+        RigidBodyKind of;
+        of.shape = RigidShape::Hull;
+        of.mesh = choice_of(block, "model");
+        if (of.mesh == "file") {
+            const std::string path = file_of(block, "model_file");
+            // No model picked yet: shards, until there is one.
+            of.mesh = path.empty() ? std::string{"shard"} : request(AssetRequest::Kind::Mesh, block, path);
+        }
+        of.draw = of.mesh;
+        if (layer_.world) {
+            of.density = number_of(*layer_.world, "density");
+            of.friction = number_of(*layer_.world, "friction");
+            of.restitution = number_of(*layer_.world, "bounce");
+        }
+        kinds_.push_back(std::move(of));
+        parts_.push_back(BreakPiece{.body = static_cast<std::uint32_t>(kinds_.size()),
+                                    .offset = to_vec3(get(block, "at")),
+                                    .turn = to_vec3(get(block, "turn")),
+                                    .size = number_of(block, "size")});
     }
 
     // An object the artist placed in the layer's physics world. Props are
@@ -908,6 +962,11 @@ private:
     bool physics_{false};
     // The props the layer's Prop blocks describe, in page order.
     std::vector<RigidProp> props_;
+    // The body kinds the layer's Part blocks make, and the parts that are
+    // made of them, in the order the blocks are listed.
+    std::vector<RigidBodyKind> kinds_;
+    std::vector<BreakPiece> parts_;
+    std::optional<Break> breaking_;
     std::vector<Placed> spawn_;
     std::vector<Placed> init_;
     std::vector<Placed> forces_;
@@ -1045,9 +1104,22 @@ Compiled compile(const Document& document, Purpose purpose) {
                 compiled.textures.emplace(emitter.renderer.texture, *texture);
             }
         }
-        if (!emitter.renderer.mesh.empty() && !emitter.renderer.mesh.starts_with("user.")) {
-            if (const MeshData* mesh = library_mesh(emitter.renderer.mesh)) {
-                compiled.meshes.emplace(emitter.renderer.mesh, *mesh);
+        // The emitter's own model, then the models its body kinds collide
+        // and draw as: a part of a piece names one as readily as the layer
+        // does.
+        std::vector<std::string> models{emitter.renderer.mesh};
+        if (const RigidPhysics* physics = rigid_physics(emitter)) {
+            for (const RigidBodyKind& of : physics->bodies) {
+                models.push_back(of.mesh);
+                models.push_back(of.draw);
+            }
+        }
+        for (const std::string& name : models) {
+            if (name.empty() || name.starts_with("user.")) {
+                continue;
+            }
+            if (const MeshData* mesh = library_mesh(name)) {
+                compiled.meshes.emplace(name, *mesh);
             }
         }
     }

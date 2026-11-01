@@ -311,12 +311,29 @@ feedback forces could evaluate any frame directly.
        one model and the far body as another, listed so that drawing model by
        model would hide the near one: the middle of the frame is the near
        body's colour, ringed by the far one's.
-     - **Studio and the shot.** A **Break** block in a rigid layer
-       (`Category::Physics`, beside Pile and Prop): how hard, into what, how
-       many times, with the piece set drawn over the preview as the Prop
-       block draws a collision shape. The **Crates and a wrecking ball**
-       recipe is the worked shot, and the coach names a piece set that will
-       not fit the budget with the fix that makes it fit.
+     - **Studio, done (2026-11-01).** Two blocks in a rigid layer, beside
+       Pile and Prop. **Break** says when the layer's pieces come apart:
+       how hard a hit it takes, how far the parts are thrown and how fast
+       they tumble. **Part** is one of the parts a piece comes apart into:
+       a model (the built-in shard, chip, rock or cube, or one of the
+       artist's own), how big it is beside the whole piece, where it sat in
+       it and how it is turned. Several Part blocks make the set.
+       An artist never sees a body kind: the compiler makes one per Part,
+       collides and draws it as that part's model, and gives it the layer's
+       own material, since a part of a crate is made of what the crate is.
+       Where the layer draws sprites a part still hits things as its own
+       shape and the coach offers Appearance as the fix. Breaking is two
+       halves and either alone does nothing, so the coach says which half
+       is missing on the block that is there.
+       The **Crates and a dropped ball** recipe is the worked shot: nine
+       crates stacked, a loose bouncy ball dropped on them from two and a
+       half metres, and four parts (a lid, two walls and a base). Measured
+       in its test: nine crates become 33 bodies, so eight of the nine came
+       apart.
+       - **Not yet:** a Break block breaks the layer's own pieces, so a part
+         cannot break again from Studio, though the runtime allows it; and
+         a body kind of its own for a spawn block, so a bouncy ball among
+         the crates is a loose prop rather than one of the layer's bodies.
      - **Not yet after it:** snow settling on the pieces, which is
        accumulation, in phase 5 above.
    - **Cross-machine agreement is unverified.** Determinism is tested across

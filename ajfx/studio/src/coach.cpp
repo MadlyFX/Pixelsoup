@@ -94,6 +94,35 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             continue;
         }
 
+        // Breaking is two halves: when a piece comes apart, and what it
+        // comes apart into. Either alone does nothing, so say which is
+        // missing on the block that is there.
+        const Block* breaking = first(layer, "break");
+        const Block* part = first(layer, "part");
+        if (breaking != nullptr && part == nullptr) {
+            notes.push_back({layer.uid, breaking->uid, AdviceLevel::Warning,
+                             "Nothing is set to break off yet, so the pieces stay whole. Add a Part for each "
+                             "panel, plank or shard a piece comes apart into.",
+                             "Add a part", add_block(layer.uid, "part")});
+        }
+        if (part != nullptr && breaking == nullptr) {
+            notes.push_back({layer.uid, part->uid, AdviceLevel::Warning,
+                             "Nothing breaks, so this part is never made. Add a Break to say how hard a piece "
+                             "has to be hit to come apart.",
+                             "Add break", add_block(layer.uid, "break")});
+        }
+        // A part is drawn as its own model only where the layer draws models.
+        if (part != nullptr) {
+            const Block* appearance = first(layer, "appearance");
+            if (appearance != nullptr && choice_of(*appearance, "material") != "debris") {
+                notes.push_back({layer.uid, part->uid, AdviceLevel::Tip,
+                                 "The parts hit things as their own shapes, but the layer draws its pieces as "
+                                 "sprites, so they are not drawn as their models. Set Appearance to debris to "
+                                 "see them.",
+                                 "Draw debris", set_value(appearance->uid, "material", choice("debris"))});
+            }
+        }
+
         const bool piled = first(layer, "pile") != nullptr || has_raw(layer, "spawn_pile");
         const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr || piled ||
                           has_raw(layer, "spawn_rate") || has_raw(layer, "spawn_burst");

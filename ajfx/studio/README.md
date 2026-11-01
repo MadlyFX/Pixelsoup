@@ -262,7 +262,8 @@ pictures, meshes and fields, so the media server needs none of the files.
 ## Starting points
 
 **New** opens the recipes: Campfire, Spark fountain, Explosion, Magic orb,
-Smoke plume, Snowfall, Rain, Rock pile, Bucket of stones and a blank page.
+Smoke plume, Snowfall, Rain, Rock pile, Bucket of stones, Crates and a
+dropped ball, and a blank page.
 **Add layer** offers ready-made layers: Flames, Embers, Smoke, Sparks,
 Fireball, Debris, Dust, Motes, Rock pile, Bucket of stones and others. These
 are ordinary blocks with tuned values, so everything they do can be seen and
