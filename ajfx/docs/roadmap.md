@@ -165,7 +165,7 @@ feedback forces could evaluate any frame directly.
      beside Pile and Physics): a model, a pose, how it moves and what it
      collides as, with the model's outline and the collision shape drawn
      over the preview so the difference between them is visible. The
-     **Bucket of balls** recipe is the worked shot, and the coach names what
+     **Bucket of stones** recipe is the worked shot, and the coach names what
      a prop cannot be with the fix that makes it possible.
      The media server draws them in its particle pass, through the same path
      as mesh particles, so a prop and the debris around it are lit alike.
@@ -173,13 +173,12 @@ feedback forces could evaluate any frame directly.
        position across the floor and its radius, and the turn is typed);
        convex decomposition, so that a prop which moves could still collide
        as an arbitrary concave model rather than a generated shape.
-   - **Still to do before rigid effects go to a cluster:** a second machine
-     (the Intel laptop) must print the same `ajfx_rigid_bench` digest as the
-     Ryzen Director. This is also the spike's missing cross-machine run; the
-     spike harness's `run_matrix.ps1` writes `results-<computer>` to diff.
-     Props add three Jolt behaviours the solver had never used -- mesh
-     shapes, compound shapes and kinematic bodies -- and the first per-body
-     rotation, so this wants running again now.
+   - **Cross-machine agreement is unverified.** Determinism is tested across
+     reruns, thread counts, and Debug and Release on one machine; no second
+     machine has printed the same `ajfx_rigid_bench` digest. Props widened
+     what such a run would cover: mesh shapes, compound shapes, kinematic
+     bodies and the first per-body rotation. The spike harness's
+     `run_matrix.ps1` writes `results-<computer>` to diff.
    - **Later:** colliders that move with parameters; distance-field and mesh
      colliders as Jolt mesh shapes for particles too; convex decomposition,
      so a loose prop can be any concave model rather than a generated hollow
