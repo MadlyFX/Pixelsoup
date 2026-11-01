@@ -1392,6 +1392,152 @@ void impossible_breaks_are_refused() {
     AJFX_CHECK(twice_over.build().ok());
 }
 
+// ------------------------------------------------------- bodies as colliders
+
+// One crate standing still, with snow falling on it. The crate is a box that
+// nothing moves (its layer has no gravity and nothing hits it), so where the
+// snow may not be is known exactly. A pile of one stands its body half a
+// lattice step up, and a box of size 1 reaches sqrt(3) across however it is
+// turned, so the crate's middle is at 0.866 and its lid at 1.366.
+Effect snow_on_crates(bool collide) {
+    EffectBuilder builder{"snow"};
+    builder.emitter("crates")
+        .capacity(16U)
+        .spawn(SpawnPile{.count = 1U,
+                         .shape = PileShape::Box,
+                         .center = Vec3{0.0F, 0.0F, 0.0F},
+                         .width = 1.0F,
+                         .depth = 1.0F,
+                         .spacing = 1.0F,
+                         .jitter = 0.0F,
+                         .release = 0.0F,
+                         .body = 0U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.9F, .restitution = 0.0F});
+    EmitterBuilder& flakes = builder.emitter("snow");
+    flakes.capacity(1024U)
+        .seed(11U)
+        .spawn(SpawnRate{.rate = 90.0F})
+        .init(Lifetime{.min = 8.0F, .max = 8.0F})
+        .init(ShapeLocation{.shape = Shape::Disc, .center = Vec3{0.0F, 4.0F, 0.0F}, .radius_min = 0.0F,
+                            .radius_max = 1.2F})
+        .init(Velocity{.direction = Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 0.8F, .speed_max = 1.2F})
+        .init(InitSize{.min = 0.05F, .max = 0.05F})
+        .update(Gravity{.acceleration = Vec3{0.0F, -2.0F, 0.0F}});
+    if (collide) {
+        // Friction 1 holds a flake where it lands, as the Snowfall recipe's
+        // ground does: snow settles rather than skating off.
+        flakes.update(BodyCollision{.emitter = "crates", .restitution = 0.0F, .friction = 1.0F});
+    }
+    flakes.update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    Result<Effect> built = builder.build();
+    if (!built) {
+        std::cout << "  " << built.error().message << "\n";
+    }
+    AJFX_CHECK(built.ok());
+    return std::move(built).value();
+}
+
+void snow_lands_on_the_bodies_of_another_emitter() {
+    // Four crates a unit across, stacked two by two on the floor, so their
+    // lids are a unit up. Nothing moves them.
+    Simulation without = make(snow_on_crates(false));
+    Simulation with = make(snow_on_crates(true));
+    without.advance_to(600U);
+    with.advance_to(600U);
+    const EmitterState& fell = without.emitter(1U);
+    const EmitterState& landed = with.emitter(1U);
+    AJFX_CHECK(fell.alive() == landed.alive() && landed.alive() > 100U);
+    // Over the crate itself, well inside its lid, flakes lie on the lid
+    // rather than on the floor beneath it.
+    const auto over_the_crate = [](Vec3 p) { return std::fabs(p.x) < 0.35F && std::fabs(p.z) < 0.35F; };
+    const auto count = [&](const EmitterState& s, float low, float high) {
+        std::size_t n = 0U;
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            if (over_the_crate(s.position[i]) && s.position[i].y > low && s.position[i].y < high) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const std::size_t on_the_lid = count(landed, 1.3F, 1.45F);
+    const std::size_t under_it = count(landed, -1.0F, 0.05F);
+    std::cout << "  " << on_the_lid << " flakes rest on the crate's lid and " << under_it
+              << " reached the floor under it\n";
+    AJFX_CHECK(on_the_lid > 10U);
+    AJFX_CHECK(under_it == 0U);
+    // Without the collider they fall straight through to that floor.
+    const std::size_t through = count(fell, -1.0F, 0.05F);
+    std::cout << "  without it, " << through << " lie on the floor under the crate\n";
+    AJFX_CHECK(through > 10U);
+    // Flakes are in the lid's own height band either way, since without the
+    // collider they are falling through it, so the floor beneath the crate
+    // is what tells the two apart.
+}
+
+void bodies_as_colliders_rerun_and_seek_exactly() {
+    const Effect effect = snow_on_crates(true);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t tick : {1U, 90U, 300U, 600U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    CheckpointRing ring{60U, 8U};
+    for (const std::uint64_t target : {200U, 95U, 400U, 61U, 600U}) {
+        Simulation seeker = make(effect);
+        ring.seek(seeker, target);
+        Simulation straight = make(effect);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.tick() == target);
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+}
+
+void impossible_body_colliders_are_refused() {
+    const auto refused = [](const Result<Effect>& built, const std::string& fragment) {
+        if (built.ok() || built.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (built.ok() ? std::string{"accepted"} : built.error().message) << '\n';
+            return false;
+        }
+        return true;
+    };
+    // An emitter this effect has none of.
+    EffectBuilder absent{"x"};
+    absent.emitter("snow").init(Lifetime{}).update(BodyCollision{.emitter = "crates"});
+    AJFX_CHECK(refused(absent.build(), "which this effect has none of"));
+
+    // One that holds no bodies.
+    EffectBuilder no_bodies{"x"};
+    no_bodies.emitter("crates").init(Lifetime{});
+    no_bodies.emitter("snow").init(Lifetime{}).update(BodyCollision{.emitter = "crates"});
+    AJFX_CHECK(refused(no_bodies.build(), "holds no bodies to hit"));
+
+    // Its own.
+    EffectBuilder itself{"x"};
+    itself.emitter("crates").init(Lifetime{}).update(RigidPhysics{}).update(BodyCollision{.emitter = "crates"});
+    AJFX_CHECK(refused(itself.build(), "names its own emitter"));
+
+    // One that comes after, whose bodies would be last step's.
+    EffectBuilder later{"x"};
+    later.emitter("snow").init(Lifetime{}).update(BodyCollision{.emitter = "crates"});
+    later.emitter("crates").init(Lifetime{}).update(RigidPhysics{});
+    AJFX_CHECK(refused(later.build(), "comes after this one"));
+
+    // And one holding more bodies than every particle may be tested against.
+    EffectBuilder crowded{"x"};
+    crowded.emitter("crates").capacity(max_body_colliders + 1U).init(Lifetime{}).update(RigidPhysics{});
+    crowded.emitter("snow").init(Lifetime{}).update(BodyCollision{.emitter = "crates"});
+    AJFX_CHECK(refused(crowded.build(), "may be collided with"));
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -1424,6 +1570,9 @@ int main() {
         {"breaking_reruns_and_seeks_exactly", breaking_reruns_and_seeks_exactly},
         {"a_break_with_no_room_is_refused_whole", a_break_with_no_room_is_refused_whole},
         {"impossible_breaks_are_refused", impossible_breaks_are_refused},
+        {"snow_lands_on_the_bodies_of_another_emitter", snow_lands_on_the_bodies_of_another_emitter},
+        {"bodies_as_colliders_rerun_and_seek_exactly", bodies_as_colliders_rerun_and_seek_exactly},
+        {"impossible_body_colliders_are_refused", impossible_body_colliders_are_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

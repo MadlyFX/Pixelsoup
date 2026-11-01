@@ -264,6 +264,38 @@ void check_module(const Effect& e, const RigidBody& m, FieldChecker& check) {
     check.require(roundness.lo >= 0.0F && roundness.hi <= 1.0F, "roundness", "must be between 0 and 1");
 }
 
+// The emitter whose bodies these particles meet has to exist, hold bodies,
+// and come first, so that what they meet is this step's.
+void check_body_collision(const Effect& effect, std::size_t index, const BodyCollision& m, FieldChecker& check) {
+    std::optional<std::size_t> at;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (effect.emitters[i].name == m.emitter) {
+            at = i;
+            break;
+        }
+    }
+    if (!at) {
+        check.require(false, "emitter", "names emitter " + quoted(m.emitter) + ", which this effect has none of");
+        return;
+    }
+    const Emitter& other = effect.emitters[*at];
+    const RigidPhysics* physics = rigid_physics(other);
+    check.require(physics != nullptr, "emitter",
+                  "names emitter " + quoted(m.emitter) +
+                      ", which has no 'rigid_physics' module, so it holds no bodies to hit");
+    check.require(*at != index, "emitter", "names its own emitter; particles meet the bodies of another");
+    if (*at > index) {
+        check.require(false, "emitter",
+                      "names emitter " + quoted(m.emitter) +
+                          ", which comes after this one; the bodies met must already have moved this step, so "
+                          "move that emitter first");
+    }
+    check.require(other.capacity <= max_body_colliders, "emitter",
+                  "names emitter " + quoted(m.emitter) + ", which holds up to " + std::to_string(other.capacity) +
+                      " bodies; every particle meets every body, so at most " +
+                      std::to_string(max_body_colliders) + " may be collided with");
+}
+
 void check_module(const Effect&, const Break& m, FieldChecker& check) {
     check.require(m.threshold > 0.0F, "threshold", "must be positive: a body cannot break on no impact at all");
     check.require(m.scatter >= 0.0F, "scatter", "must not be negative");
@@ -594,7 +626,7 @@ std::optional<Error> check_parameters(const Effect& effect) {
     return std::nullopt;
 }
 
-std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter) {
+std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter, std::size_t index) {
     const std::string where = "emitter " + quoted(emitter.name);
     if (emitter.capacity == 0U || emitter.capacity > max_emitter_capacity) {
         return Error{ErrorCode::InvalidEffect,
@@ -673,6 +705,16 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                              where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) +
                                  " spawns a body kind, and the emitter has no 'rigid_physics' module to make "
                                  "bodies"};
+            }
+        }
+    }
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* meets = std::get_if<BodyCollision>(&module)) {
+            FieldChecker checker{effect, "emitter " + quoted(emitter.name) + " module 'body_collision' #" +
+                                             std::to_string(meets->id)};
+            check_body_collision(effect, index, *meets, checker);
+            if (checker.error()) {
+                return checker.error();
             }
         }
     }
@@ -828,7 +870,8 @@ Result<bool> validate(const Effect& effect) {
         if (!names.insert(emitter.name).second) {
             return Error{ErrorCode::InvalidEffect, "emitter " + quoted(emitter.name) + " is declared twice"};
         }
-        if (std::optional<Error> error = check_emitter(effect, emitter)) {
+        if (std::optional<Error> error =
+                check_emitter(effect, emitter, static_cast<std::size_t>(&emitter - effect.emitters.data()))) {
             return *std::move(error);
         }
     }

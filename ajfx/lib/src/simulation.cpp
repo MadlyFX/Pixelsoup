@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -144,6 +145,10 @@ struct Step final {
     std::size_t first;
     std::size_t last;
     const FieldSet* fields{nullptr};
+    // The bodies this emitter's BodyCollision modules meet, by the emitter
+    // they name. Gathered before the step's forces, so every collider is
+    // where the other emitter's physics put it this step.
+    const std::map<std::string, std::vector<BodyCollider>, std::less<>>* bodies{nullptr};
     std::optional<BodyResponse> rigid{};
 };
 
@@ -482,6 +487,64 @@ void apply(const SphereCollision& m, Step& step) {
             respond(step, i, radius - length, out * -1.0F, restitution, slide, m.kill);
         } else {
             respond(step, i, length - radius, out, restitution, slide, m.kill);
+        }
+    }
+}
+
+// A particle kept out of each body in turn, the nearest surface winning
+// where two overlap, because each response pushes it out of the one it is
+// in and the next sees where it ended up.
+void apply(const BodyCollision& m, Step& step) {
+    if (step.bodies == nullptr) {
+        return;
+    }
+    const auto found = step.bodies->find(m.emitter);
+    if (found == step.bodies->end()) {
+        return;
+    }
+    const float restitution = step.in(m.restitution);
+    const float slide = 1.0F - step.in(m.friction);
+    for (const BodyCollider& body : found->second) {
+        for (std::size_t i = step.first; i < step.last; ++i) {
+            const Vec3 d = step.s.position[i] - body.position;
+            if (body.box) {
+                // In the body's own frame, where the box is axis aligned.
+                const Quat back{-body.orientation.x, -body.orientation.y, -body.orientation.z,
+                                body.orientation.w};
+                const Vec3 local = rotate(back, d);
+                const Vec3 over{std::fabs(local.x) - body.half, std::fabs(local.y) - body.half,
+                                std::fabs(local.z) - body.half};
+                if (over.x >= 0.0F || over.y >= 0.0F || over.z >= 0.0F) {
+                    // Outside: the nearest point on the box is the way out.
+                    const Vec3 clamped{std::clamp(local.x, -body.half, body.half),
+                                       std::clamp(local.y, -body.half, body.half),
+                                       std::clamp(local.z, -body.half, body.half)};
+                    const Vec3 away = local - clamped;
+                    const float length = std::sqrt(dot(away, away));
+                    if (length > 1.0e-6F) {
+                        respond(step, i, length, rotate(body.orientation, away * (1.0F / length)), restitution,
+                                slide, m.kill);
+                    }
+                    continue;
+                }
+                // Inside: out through the face it is nearest, x before y
+                // before z on a tie, as BoxCollision does.
+                Vec3 out{over.x >= over.y && over.x >= over.z ? (local.x < 0.0F ? -1.0F : 1.0F) : 0.0F, 0.0F,
+                         0.0F};
+                float distance = over.x;
+                if (over.y > over.x && over.y >= over.z) {
+                    out = Vec3{0.0F, local.y < 0.0F ? -1.0F : 1.0F, 0.0F};
+                    distance = over.y;
+                } else if (over.z > over.x && over.z > over.y) {
+                    out = Vec3{0.0F, 0.0F, local.z < 0.0F ? -1.0F : 1.0F};
+                    distance = over.z;
+                }
+                respond(step, i, distance, rotate(body.orientation, out), restitution, slide, m.kill);
+            } else {
+                const float length = std::sqrt(dot(d, d));
+                const Vec3 out = length > 1.0e-6F ? d * (1.0F / length) : Vec3{0.0F, 1.0F, 0.0F};
+                respond(step, i, length - body.half, out, restitution, slide, m.kill);
+            }
         }
     }
 }
@@ -1332,6 +1395,27 @@ const SimulationState& Simulation::state() const {
     return state_;
 }
 
+std::vector<BodyCollider> body_colliders(const RigidPhysics& physics, const EmitterState& state,
+                                         Geometry geometry) {
+    std::vector<BodyCollider> out;
+    out.reserve(state.alive());
+    for (std::size_t i = 0U; i < state.alive(); ++i) {
+        const std::size_t kind = i < state.body_kind.size() ? state.body_kind[i] : 0U;
+        RigidShape shape = physics.shape;
+        if (kind > 0U && kind <= physics.bodies.size()) {
+            shape = physics.bodies[kind - 1U].shape;
+        }
+        if (shape == RigidShape::Auto) {
+            shape = geometry == Geometry::Mesh ? RigidShape::Hull : RigidShape::Sphere;
+        }
+        // A hull is met as the ball its size describes: its model's own
+        // shape is the engine's business, not a particle's.
+        out.push_back(BodyCollider{state.position[i], state.orientation[i], 0.5F * state.size[i],
+                                   shape == RigidShape::Box});
+    }
+    return out;
+}
+
 std::span<const RigidContact> Simulation::contacts(std::size_t index) const {
     if (index >= rigid_.size() || !rigid_[index].world) {
         return {};
@@ -1420,6 +1504,29 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
 
     step.last = s.alive();
+    // The bodies this emitter's colliders name, as they stand now. The
+    // emitters they name come first (validation refuses a later one), so
+    // their physics has already moved this step.
+    std::map<std::string, std::vector<BodyCollider>, std::less<>> bodies;
+    for (const UpdateModule& module : emitter.update) {
+        const auto* meets = std::get_if<BodyCollision>(&module);
+        if (meets == nullptr || bodies.contains(meets->emitter)) {
+            continue;
+        }
+        for (std::size_t other = 0U; other < effect_.emitters.size(); ++other) {
+            const RigidPhysics* physics = rigid_physics(effect_.emitters[other]);
+            if (physics == nullptr || effect_.emitters[other].name != meets->emitter) {
+                continue;
+            }
+            bodies.emplace(meets->emitter,
+                           body_colliders(*physics, state_.emitters[other],
+                                          effect_.emitters[other].renderer.geometry));
+            break;
+        }
+    }
+    if (!bodies.empty()) {
+        step.bodies = &bodies;
+    }
     const auto run = [&step](const auto& module) { apply(module, step); };
     if (world != nullptr) {
         // Piles let go this step wake, in slot order.

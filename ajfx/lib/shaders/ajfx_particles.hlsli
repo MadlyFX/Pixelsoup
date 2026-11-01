@@ -445,6 +445,65 @@ void ajfx_sphere_collision(inout Particle p, uint o, uint id) {
     }
 }
 
+// `v` turned by the unit quaternion `q`, in the order rotate (math.hpp)
+// multiplies it, so the GPU and the reference agree to the bit.
+float3 ajfx_turn(float4 q, float3 v) {
+    float3 u = float3(q.x, q.y, q.z);
+    float3 t = ajfx_cross(u, v) * 2.0f;
+    return v + t * q.w + ajfx_cross(u, t);
+}
+
+// [restitution, 1 - friction, kill, count, then nine floats a body:
+// position, orientation, half size, 1 for a box]. Each body is met in turn,
+// so a particle pushed out of one is where the next finds it, as the
+// reference does it.
+void ajfx_body_collision(inout Particle p, uint o, uint id) {
+    float restitution = ajfx_f(o);
+    float slide = ajfx_f(o + 1u);
+    bool kill = ajfx_u32(o + 2u) != 0u;
+    uint count = ajfx_u32(o + 3u);
+    for (uint b = 0u; b < count; ++b) {
+        uint at = o + 4u + b * 9u;
+        float3 centre = ajfx_f3(at);
+        float4 q = float4(ajfx_f(at + 3u), ajfx_f(at + 4u), ajfx_f(at + 5u), ajfx_f(at + 6u));
+        float half_size = ajfx_f(at + 7u);
+        bool box = ajfx_f(at + 8u) != 0.0f;
+        float3 d = p.position - centre;
+        if (!box) {
+            float len = sqrt(ajfx_dot(d, d));
+            float3 out_dir = len > 1.0e-6f ? d * (1.0f / len) : float3(0.0f, 1.0f, 0.0f);
+            ajfx_respond(p, len - half_size, out_dir, restitution, slide, kill);
+            continue;
+        }
+        // The box is axis aligned in the body's own frame: turn the offset
+        // back by the conjugate, decide there, and turn the way out forward.
+        float4 back = float4(-q.x, -q.y, -q.z, q.w);
+        float3 local = ajfx_turn(back, d);
+        float3 over = abs(local) - float3(half_size, half_size, half_size);
+        if (over.x >= 0.0f || over.y >= 0.0f || over.z >= 0.0f) {
+            float3 clamped = clamp(local, -half_size, half_size);
+            float3 away = local - clamped;
+            float len = sqrt(ajfx_dot(away, away));
+            if (len > 1.0e-6f) {
+                ajfx_respond(p, len, ajfx_turn(q, away * (1.0f / len)), restitution, slide, kill);
+            }
+            continue;
+        }
+        // Inside: out through the nearest face, x before y before z on a
+        // tie, as the box collider does.
+        float3 out_dir = float3(local.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
+        float dist = over.x;
+        if (over.y > over.x && over.y >= over.z) {
+            out_dir = float3(0.0f, local.y < 0.0f ? -1.0f : 1.0f, 0.0f);
+            dist = over.y;
+        } else if (over.z > over.x && over.z > over.y) {
+            out_dir = float3(0.0f, 0.0f, local.z < 0.0f ? -1.0f : 1.0f);
+            dist = over.z;
+        }
+        ajfx_respond(p, dist, ajfx_turn(q, out_dir), restitution, slide, kill);
+    }
+}
+
 // The update kernel's distance fields share u7 with the bookkeeping
 // kernel's indirect arguments, which the update kernel never touches.
 #define ajfx_fields ajfx_args

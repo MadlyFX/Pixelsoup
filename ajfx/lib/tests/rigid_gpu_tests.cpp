@@ -15,6 +15,7 @@
 #include <ajfx/simulation.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -147,6 +148,71 @@ void rubble_draws_its_chips() {
     std::cout << "  " << lit << " of 16384 pixels covered\n";
     AJFX_CHECK(lit > 1000U);
     AJFX_CHECK(draw() == a);
+}
+
+// Snow falling on one crate: the crate is a body the CPU steps, and the snow
+// is an emitter the GPU simulates, meeting that body through its own kernel.
+Effect snow_on_a_crate() {
+    EffectBuilder builder{"snow"};
+    builder.emitter("crates")
+        .capacity(8U)
+        .spawn(SpawnPile{.count = 1U, .shape = PileShape::Box, .jitter = 0.0F, .release = 0.0F})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.9F, .restitution = 0.0F});
+    EmitterBuilder& flakes = builder.emitter("snow");
+    flakes.capacity(512U)
+        .seed(11U)
+        .spawn(SpawnRate{.rate = 60.0F})
+        .init(Lifetime{.min = 8.0F, .max = 8.0F})
+        .init(ShapeLocation{.shape = Shape::Disc, .center = Vec3{0.0F, 4.0F, 0.0F}, .radius_min = 0.0F,
+                            .radius_max = 1.0F})
+        .init(Velocity{.direction = Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 0.8F, .speed_max = 1.2F})
+        .init(InitSize{.min = 0.05F, .max = 0.05F})
+        .update(Gravity{.acceleration = Vec3{0.0F, -2.0F, 0.0F}})
+        .update(BodyCollision{.emitter = "crates", .restitution = 0.0F, .friction = 1.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    return builder.build().value();
+}
+
+void the_gpu_meets_the_same_bodies_as_the_reference() {
+    const Effect effect = snow_on_a_crate();
+    gpu::GpuSimulation gpu = make_gpu(effect);
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    for (const std::uint64_t tick : {60U, 240U, 600U}) {
+        gpu.advance_to(tick);
+        cpu.advance_to(tick);
+        const EmitterState read = gpu.read_emitter(1U).value();
+        const EmitterState& reference = cpu.emitter(1U);
+        AJFX_CHECK(read.alive() == reference.alive());
+        AJFX_CHECK(read.spawned == reference.spawned);
+        std::size_t apart = 0U;
+        for (std::size_t i = 0U; i < read.alive(); ++i) {
+            // The kernel and the reference do the same arithmetic in the same
+            // order, so a flake resting on the crate agrees closely; a flake
+            // still falling can differ by a step's worth of rounding.
+            const Vec3 d{read.position[i].x - reference.position[i].x, read.position[i].y - reference.position[i].y,
+                         read.position[i].z - reference.position[i].z};
+            if (std::sqrt(dot(d, d)) > 1.0e-3F) {
+                ++apart;
+            }
+        }
+        // And they land on the crate's lid, which is what there is to agree
+        // about: a flake that fell through would be a metre out.
+        std::size_t on_the_lid = 0U;
+        for (std::size_t i = 0U; i < read.alive(); ++i) {
+            if (std::fabs(read.position[i].x) < 0.35F && std::fabs(read.position[i].z) < 0.35F &&
+                read.position[i].y > 1.3F && read.position[i].y < 1.45F) {
+                ++on_the_lid;
+            }
+        }
+        std::cout << "  step " << tick << ": " << read.alive() << " flakes, " << apart << " apart from the reference, "
+                  << on_the_lid << " resting on the crate\n";
+        AJFX_CHECK(apart == 0U);
+        if (tick >= 240U) {
+            AJFX_CHECK(on_the_lid > 10U);
+        }
+    }
 }
 
 // The cube model at half its size, so a body drawn as it covers a quarter of
@@ -313,6 +379,7 @@ int main() {
         {"the_gpu_holds_what_the_reference_simulates", the_gpu_holds_what_the_reference_simulates},
         {"checkpoints_put_rigid_emitters_back_exactly", checkpoints_put_rigid_emitters_back_exactly},
         {"rubble_draws_its_chips", rubble_draws_its_chips},
+        {"the_gpu_meets_the_same_bodies_as_the_reference", the_gpu_meets_the_same_bodies_as_the_reference},
         {"body_kinds_draw_their_own_models_in_depth_order", body_kinds_draw_their_own_models_in_depth_order},
         {"piles_stand_on_the_gpu_from_the_start", piles_stand_on_the_gpu_from_the_start},
         {"hosts_write_the_rigid_emitters_they_step", hosts_write_the_rigid_emitters_they_step},

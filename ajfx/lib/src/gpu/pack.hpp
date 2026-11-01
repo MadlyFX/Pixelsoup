@@ -37,6 +37,10 @@ struct PackContext final {
     double start; // seconds at the start of the step
     // None when only the data's size matters (kernel generation).
     const FieldLayout* fields{nullptr};
+    // The bodies this step's BodyCollision modules meet, by the emitter they
+    // name. None leaves every collider empty, which is what kernel
+    // generation wants: the data's size is the same either way.
+    const std::map<std::string, std::vector<BodyCollider>, std::less<>>* bodies{nullptr};
 };
 
 class Packer final {
@@ -209,6 +213,45 @@ inline void pack(const SphereCollision& m, const PackContext& c, Packer& p) {
     p.f(1.0F - c.in(m.friction));
     p.u(m.inside ? 1U : 0U);
     p.u(m.kill ? 1U : 0U);
+}
+
+// [restitution, 1 - friction, kill, count, then nine floats a body:
+//  position, orientation, half size, 1 for a box]. The bodies travel in the
+//  module data, which is written every step, so they are where the emitter
+//  they belong to has just put them.
+inline void pack(const BodyCollision& m, const PackContext& c, Packer& p) {
+    p.f(c.in(m.restitution));
+    p.f(1.0F - c.in(m.friction));
+    p.u(m.kill ? 1U : 0U);
+    const std::vector<BodyCollider>* bodies = nullptr;
+    if (c.bodies != nullptr) {
+        const auto found = c.bodies->find(m.emitter);
+        if (found != c.bodies->end()) {
+            bodies = &found->second;
+        }
+    }
+    const std::size_t count = bodies != nullptr ? bodies->size() : 0U;
+    p.u(static_cast<std::uint32_t>(count));
+    // Room for every body the named emitter may hold, so the data is the
+    // same size every step whatever is alive, and the same size the kernel
+    // was generated for; the count says how much of it to read.
+    std::uint32_t room = 0U;
+    for (const Emitter& other : c.in.effect.emitters) {
+        if (other.name == m.emitter) {
+            room = std::min(other.capacity, max_body_colliders);
+            break;
+        }
+    }
+    for (std::size_t i = 0U; i < room; ++i) {
+        const BodyCollider body = i < count ? (*bodies)[i] : BodyCollider{};
+        p.v3(body.position);
+        p.f(body.orientation.x);
+        p.f(body.orientation.y);
+        p.f(body.orientation.z);
+        p.f(body.orientation.w);
+        p.f(body.half);
+        p.f(body.box ? 1.0F : 0.0F);
+    }
 }
 
 inline void pack(const SdfCollision& m, const PackContext& c, Packer& p) {

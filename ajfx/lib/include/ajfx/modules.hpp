@@ -573,6 +573,47 @@ struct SdfCollision final {
     friend bool operator==(const SdfCollision&, const SdfCollision&) = default;
 };
 
+// Particles kept out of the bodies of another emitter's rigid physics world:
+// snow that lands on the crates rather than falling through them. The named
+// emitter's bodies move and come and go as its own physics decides, and these
+// particles meet wherever they are this step.
+// - **What a body is met as:** the ball or the box its size describes, turned
+//   as the body is -- a box for a body kind that is a box, a ball for one
+//   that is a ball or a model's hull. It is the body's own size, not its
+//   model, so a thin panel is met as the box its size spans.
+// - **Which bodies:** every live body of that emitter, in its own order, up
+//   to its capacity, which is why that capacity is held to
+//   `max_body_colliders`: every particle is tested against every body, so
+//   the cost is declared up front rather than discovered.
+// - **Order:** the named emitter must come before this one, so the bodies
+//   this step meets are this step's. Validation refuses a later one rather
+//   than letting the answer depend on the order emitters happen to be in.
+// - The response is the plane's: pushed back out, with restitution, friction
+//   and `kill` as there. Particles are not carried along by a body they rest
+//   on: a body that moves out from under its snow leaves it behind.
+struct BodyCollision final {
+    static constexpr std::string_view kind = "body_collision";
+    ModuleId id{};
+    // The emitter whose bodies these particles hit.
+    std::string emitter;
+    FloatInput restitution{0.0F};
+    FloatInput friction{0.0F};
+    bool kill{false};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("emitter", self.emitter);
+        visit("restitution", self.restitution);
+        visit("friction", self.friction);
+        visit("kill", self.kill);
+    }
+    friend bool operator==(const BodyCollision&, const BodyCollision&) = default;
+};
+
+// Bodies one emitter may hold while another collides with them. Every
+// particle meets every body, so this is the bound on that.
+inline constexpr std::uint32_t max_body_colliders = 256U;
+
 // Makes the emitter's particles small rigid bodies, for debris. Each turns
 // by its angular velocity, which loses `angular_drag` of itself per second as
 // Drag's velocity does. Every collider then meets a particle as a solid ball
@@ -903,14 +944,15 @@ struct SizeOverLife final {
 };
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
-                                  SphereCollision, BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody,
-                                  RigidPhysics, Break>;
+                                  SphereCollision, BoxCollision, SdfCollision, BodyCollision, ColorOverLife,
+                                  SizeOverLife, RigidBody, RigidPhysics, Break>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
 [[nodiscard]] constexpr bool is_collision(const UpdateModule& module) noexcept {
     return std::holds_alternative<PlaneCollision>(module) || std::holds_alternative<SphereCollision>(module) ||
-           std::holds_alternative<BoxCollision>(module) || std::holds_alternative<SdfCollision>(module);
+           std::holds_alternative<BoxCollision>(module) || std::holds_alternative<SdfCollision>(module) ||
+           std::holds_alternative<BodyCollision>(module);
 }
 
 // Forces run before integration; everything else after it.

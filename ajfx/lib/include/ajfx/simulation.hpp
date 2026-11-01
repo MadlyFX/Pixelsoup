@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -94,6 +95,25 @@ struct ContactOptions final {
     // (Simulation::contacts_dropped) rather than quietly left out.
     std::uint32_t limit{256U};
 };
+
+// One body of a rigid physics emitter, as another emitter's particles meet
+// it: the ball or box its size describes, turned as the body is. Gathered
+// once a step, in body order, by `body_colliders`.
+struct BodyCollider final {
+    Vec3 position{};
+    Quat orientation{};
+    // Half the body's size: a box's half extent on every axis, a ball's
+    // radius.
+    float half{0.5F};
+    bool box{false};
+
+    friend bool operator==(const BodyCollider&, const BodyCollider&) = default;
+};
+
+// The live bodies of `state`, shaped as `physics` describes their kinds, for
+// an emitter whose particles collide with them (BodyCollision).
+[[nodiscard]] std::vector<BodyCollider> body_colliders(const RigidPhysics& physics, const EmitterState& state,
+                                                       Geometry geometry);
 
 // What a simulation needs beyond the effect, from its package and its host.
 struct SimulationOptions final {

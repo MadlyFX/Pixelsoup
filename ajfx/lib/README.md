@@ -84,6 +84,7 @@ the emitter, module and field at fault.
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
 | Update: instead of all motion | `RigidPhysics` (needs a rigid solver, see below) |
 | Update: coming apart | `Break` (rigid physics only) |
+| Update: hitting another emitter's bodies | `BodyCollision` |
 
 Each step ages and retires particles, applies forces in stack order,
 integrates position (and turns sprites by their `InitSpin` spin), applies the
@@ -285,6 +286,26 @@ friction or `kill`. `SdfCollision` follows a distance field, a
 `fields/<name>` package entry that `make_distance_field` bakes. The CPU
 reference and the GPU kernels sample it identically.
 
+**Another emitter's bodies.** `BodyCollision` keeps an emitter's particles
+out of the bodies of a rigid physics emitter it names: snow that lands on
+the crates rather than falling through them. A body is met as the ball or
+box its size describes, turned as the body is -- a box for a body kind that
+is a box, a ball for one that is a ball or a model's hull -- and the
+response is the plane's, with restitution, friction and `kill`.
+- **Order:** the named emitter must come before this one, so the bodies
+  met are this step's. A later one is refused rather than leaving the
+  answer to the order emitters happen to be in.
+- **How many:** every particle is tested against every live body, so the
+  named emitter's capacity is held to `max_body_colliders`. The cost is
+  declared up front rather than discovered.
+- **On the GPU:** the bodies travel in the module data the kernels already
+  read each step, so a host binds nothing new. The kernel and the
+  reference do the same arithmetic in the same order; snow on a crate
+  agrees between them to within a thousandth of a unit.
+- Particles are not carried along by a body they rest on: a body that
+  moves out from under its snow leaves it behind. Snow that stays with what
+  it settles on is accumulation, which the roadmap has.
+
 **Rigid particles.** For debris, `RigidBody` makes an emitter's particles
 small solid bodies, and `InitTumble` sets them spinning.
 - **Turning:** each particle has an orientation (a unit quaternion) and an
@@ -416,7 +437,7 @@ colliders, pile up, knock each other about and fall asleep at rest.
   - **Its order** is ajfx's own (`contact_before`): the engine's internal
     order, and the thread count it ran on, do not reach it. A seek that
     lands on a step reports what stepping through it would have.
-  - **How many:** `min_speed` is the bound. Only pairs closing at least that
+- **How many:** `min_speed` is the bound. Only pairs closing at least that
     fast are reported, so a settled pile reports none however large it is,
     and `limit` caps what one step reports and counts the rest. A
     simulation that asks for nothing collects nothing: the engine is not

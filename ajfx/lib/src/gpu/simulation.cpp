@@ -358,6 +358,30 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         s.rigid->step(parameters);
     }
 
+    // The bodies this step's colliders meet, from the rigid emitters the CPU
+    // simulation has just stepped. Gathered once: several emitters may hit
+    // the same bodies, and they must all see the same step's.
+    std::map<std::string, std::vector<BodyCollider>, std::less<>> bodies;
+    for (const Emitter& emitter : s.effect.emitters) {
+        for (const UpdateModule& module : emitter.update) {
+            const auto* meets = std::get_if<BodyCollision>(&module);
+            if (meets == nullptr || bodies.contains(meets->emitter)) {
+                continue;
+            }
+            for (std::size_t other = 0U; other < s.effect.emitters.size(); ++other) {
+                const RigidPhysics* physics = rigid_physics(s.effect.emitters[other]);
+                const std::optional<std::size_t> cpu = s.rigid_index[other];
+                if (physics == nullptr || !cpu || !s.rigid ||
+                    s.effect.emitters[other].name != meets->emitter) {
+                    continue;
+                }
+                bodies.emplace(meets->emitter,
+                               body_colliders(*physics, s.rigid->emitter(*cpu),
+                                              s.effect.emitters[other].renderer.geometry));
+                break;
+            }
+        }
+    }
     for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
@@ -378,7 +402,7 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
 
         // This step's module data, then one age per birth.
         s.scratch.clear();
-        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout}, s.scratch);
+        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout, &bodies}, s.scratch);
         std::uint32_t births = 0U;
         // A body kind is the CPU's business: these emitters have no bodies.
         detail::for_each_birth(emitter, in, e.rate_carry, start, end, rate, [&](double age, std::uint32_t) {

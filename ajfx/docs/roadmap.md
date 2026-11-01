@@ -110,17 +110,32 @@ feedback forces could evaluate any frame directly.
      The GPU matches the reference particle for particle through contact and
      rest. Collisions between particles, stacking and contact by a mesh's
      own shape are left to rigid physics.
+      - **Bodies as colliders, done (2026-11-01).** `BodyCollision` keeps an
+     emitter's particles out of the bodies of a rigid physics emitter it
+     names, so snow lands on the crates instead of falling through them. A
+     body is met as the ball or box its size describes, turned as the body
+     is. The emitter named must come first, so the bodies met are this
+     step's, and its capacity is held to `max_body_colliders`, since every
+     particle meets every body. The bodies travel in the module data the
+     kernels already read each step, so the GPU needs no new binding and a
+     host needs no new call. Measured: 340 flakes rest on one crate's lid
+     and none reach the floor beneath it, where without the collider 321
+     lie on that floor; the GPU and the reference put every flake in the
+     same place (0 of 480 more than a thousandth of a unit apart).
+     - **Not yet:** a Studio block, so this is authorable in code and not
+       on a page; and particles are not carried by the body they rest on,
+       which is accumulation below.
    - **Accumulation, not started.** Snow and dust that settle where they
      land and build up, while what they land on moves and breaks. Particles
      that stick deposit into a coverage buffer belonging to the body they
      hit, which drives a shell drawn over that body, so a crate's lid
-     whitens and keeps its snow as it topples. It needs one layer's bodies
-     as another layer's colliders (phase 6's Later, without which snow falls
-     straight through), a deposit target that follows a body, and a decision
-     on how a host draws the shell. Doing it in the volume grid (V3 below)
-     instead costs the detail of a thin layer on a lid. Today's nearest
-     thing is a Ground block set to stick, which is friction 1 on one plane:
-     flakes slide to a halt on the floor and nothing builds up.
+     whitens and keeps its snow as it topples. Bodies as colliders are the
+     half of it that lands the snow; what remains is a deposit target that
+     follows a body, and a decision on how a host draws the shell. Doing it
+     in the volume grid (V3 below) instead costs the detail of a thin layer
+     on a lid. Today's nearest thing is a Ground block set to stick, which
+     is friction 1 on one plane: flakes slide to a halt on the floor and
+     nothing builds up.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.
@@ -344,13 +359,12 @@ feedback forces could evaluate any frame directly.
      `run_matrix.ps1` writes `results-<computer>` to diff.
    - **Later:** a loose prop that enters at a time of its own, or with a
      starting velocity, so a dropped object can be timed rather than aimed
-     by the height it starts at; colliders that move with parameters; one
-     layer's bodies and props as another layer's colliders, so particles can
-     hit what the physics moves (a dependency between layers, which needs a
-     fixed evaluation order between them); distance-field and mesh
-     colliders as Jolt mesh shapes for particles too; convex decomposition,
-     so a loose prop can be any concave model rather than a generated hollow
-     shape; an AVX2 build once every node is known to have it.
+     by the height it starts at; colliders that move with parameters; an
+     emitter's props as another layer's colliders, as its bodies already are
+     (phase 5's BodyCollision); distance-field and mesh colliders as Jolt
+     mesh shapes for particles too; convex decomposition, so a loose prop
+     can be any concave model rather than a generated hollow shape; an AVX2
+     build once every node is known to have it.
 7. **Custom HLSL modules and data interfaces.** Depth, distance fields,
    meshes, textures, curves and media that a host binds to an effect's named
    inputs; debug statistics and profiling markers.
