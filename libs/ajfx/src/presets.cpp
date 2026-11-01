@@ -175,4 +175,29 @@ Effect debris() {
     return finish(builder);
 }
 
+Effect rubble() {
+    EffectBuilder builder{"rubble"};
+    builder.float_parameter("force", 5.0F, 1.0F, 10.0F);
+    builder.emitter("rubble")
+        .capacity(512U)
+        .seed(6U)
+        .spawn(SpawnBurst{.time = 0.0F, .count = 400U, .interval = 8.0F, .cycles = 0U})
+        .init(Lifetime{.min = 7.5F, .max = 7.9F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.1F, 0.0F}, .radius_min = 1.0F, .radius_max = 1.0F})
+        .init(Velocity{.speed_min = 1.0F, .speed_max = bind("force"), .spread = 70.0F})
+        .init(InitColor{.a = Color{0.42F, 0.4F, 0.37F, 1.0F}, .b = Color{0.62F, 0.57F, 0.5F, 1.0F}})
+        .init(InitSize{.min = 0.12F, .max = 0.3F})
+        .init(InitTumble{.speed_min = 90.0F, .speed_max = 540.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.density = 2400.0F, .friction = 0.7F, .restitution = 0.15F})
+        .update(PlaneCollision{.restitution = 0.1F, .friction = 0.8F})
+        .update(BoxCollision{.center = Vec3{1.6F, 0.35F, 0.2F}, .half_size = Vec3{0.35F, 0.35F, 0.6F},
+                             .restitution = 0.1F, .friction = 0.7F})
+        .update(BoxCollision{.center = Vec3{-1.4F, 0.5F, -0.6F}, .half_size = Vec3{0.4F, 0.5F, 0.4F},
+                             .restitution = 0.1F, .friction = 0.7F})
+        .update(ColorOverLife{.keys = {{0.0F, Color{}}, {0.92F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}}})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "chip"});
+    return finish(builder);
+}
+
 } // namespace ajfx::presets

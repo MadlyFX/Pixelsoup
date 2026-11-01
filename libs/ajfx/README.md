@@ -34,7 +34,9 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
   - soft particles and ribbons;
   - mesh particles and particle lights;
   - sphere, box and distance-field colliders;
-  - rigid particles for debris.
+  - rigid particles for debris;
+  - rigid physics emitters run by Jolt (`ajfx::rigid`), whose particles
+    collide with each other and pile up.
 
 The roadmap is the "Particles and volumes" section of the media server's
 [`next-steps-plan.md`](../../next-steps-plan.md).
@@ -75,6 +77,7 @@ the emitter, module and field at fault.
 | Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitSpin`, `InitTumble` |
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge` |
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
+| Update: instead of all motion | `RigidPhysics` (needs a rigid solver, see below) |
 
 Each step ages and retires particles, applies forces in stack order,
 integrates position (and turns sprites by their `InitSpin` spin), applies the
@@ -185,6 +188,7 @@ before any tuning.
 | `include/ajfx/` | Public C++ API; `gpu/` for the GPU runtime, `d3d12.hpp` for the backend |
 | `src/` | Library implementation; `gpu/` holds kernel generation and the GPU simulation |
 | `backends/d3d12/` | The D3D12 device and the DXC compiler (target `ajfx::d3d12`, Windows) |
+| `src/rigid/`, `third_party/jolt/` | The Jolt rigid solver (target `ajfx::rigid`) and Jolt Physics v5.6.0, MIT licensed |
 | `examples/viewer/` | `ajfx_viewer`: plays, scrubs, captures and exports effects |
 | `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
@@ -293,10 +297,54 @@ small solid bodies, and `InitTumble` sets them spinning.
     is a flat chip that only slides, and each contact takes its spin away.
 - **Limits:** particles do not collide with each other, and a mesh turns
   by its orientation but collides as its ball. For stacking and resting
-  piles, a host needs a rigid-body engine.
+  piles, use rigid physics.
 
 The `debris` preset throws chips of the `chip` mesh, which
 `presets::meshes()` generates.
+
+**Rigid physics.** `RigidPhysics` hands an emitter's particles to a
+rigid-body engine. They collide with each other and with the emitter's
+colliders, pile up, knock each other about and fall asleep at rest.
+- **The engine:** core ajfx depends on none. It drives a `RigidSolver`
+  (`include/ajfx/rigid_solver.hpp`) that the host passes in
+  `SimulationOptions::rigid`. `ajfx::rigid::make_jolt_solver()`
+  (`include/ajfx/rigid.hpp`, target `ajfx::rigid`, option `AJFX_RIGID`)
+  provides one, built on Jolt Physics in its cross-platform deterministic
+  build (`third_party/jolt`). Without a solver, an effect with rigid physics
+  is refused with `RigidSolverMissing`.
+- **Bodies:** each particle is a body of `shape` at its size from birth:
+  - `hull`: the convex hull of the renderer's mesh;
+  - `sphere`, or `box` (a cube);
+  - `auto`: the hull for mesh geometry, a sphere otherwise.
+
+  `density`, `friction`, `restitution`, `angular_damping` and
+  `allow_sleep` set the material.
+- **What acts on them:**
+  - `Gravity`, bound or not;
+  - `Drag`, as linear damping;
+  - plane, sphere and box colliders, which become unmoving bodies with
+    their own restitution and friction.
+
+  Every other force is refused with the reason, and so are `SizeOverLife`,
+  distance fields, `kill`, colliders bound to parameters, and keeping
+  particles inside a sphere. Births, lifetimes and colour over life are
+  every emitter's.
+- **Determinism:** bodies enter and leave the world in birth order, in the
+  lowest free slots. `Simulation::state()` carries the engine's own state,
+  so checkpoints and seeks land exactly. Results are identical across runs,
+  thread counts, and Debug and Release builds.
+- **On the GPU:** `GpuSimulation` runs rigid physics emitters on the CPU
+  with the same code, and writes their particles into the emitter's
+  buffers every step. Sorting, meshes, lights and drawing are unchanged.
+- **Cost on a Ryzen 5800X:**
+  - `rubble`, 400 hulls: 0.75 ms a step on one thread, 0.32 ms on four.
+  - 4,000 hulls in a dense heap: 9.7 ms on one thread, 3.4 ms on four.
+  - A checkpoint is about 135 bytes a body.
+
+  `ajfx_rigid_bench` measures it and prints a state digest for comparing
+  builds and machines.
+
+The `rubble` preset throws 400 chips that pile against two blocks.
 
 ## Sample viewer
 
@@ -309,8 +357,8 @@ ajfx_viewer --preset smoke
 
 Drag to orbit, wheel to zoom, Space to pause, Left and Right to seek a second
 (backwards through GPU checkpoints, landing exactly where playing would have),
-Home to restart, 1 to 4 to switch preset (sparks, smoke, confetti,
-debris).
+Home to restart, 1 to 5 to switch preset (sparks, smoke, confetti,
+debris, rubble).
 
 ```bash
 ajfx_viewer --preset sparks --export sparks.ajfx
@@ -393,6 +441,10 @@ files with a reason.
 - Drawing order and flipbook cells derive from particle state and the camera
   alone: a stable sort with birth order as the tie-break, and cells chosen
   from age.
+- A rigid solver is driven in a fixed order: removals oldest first, one
+  step, additions in birth order into the lowest free slots. Every node must
+  build the same Jolt source with the same defines (`third_party/jolt`), and
+  update together.
 
 ## Building
 

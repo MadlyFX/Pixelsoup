@@ -6,6 +6,7 @@
 #include "pack.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <optional>
@@ -71,6 +72,8 @@ struct GpuCheckpoint::Data final {
         std::vector<double> rate_carry;
     };
     std::vector<Emitter> emitters;
+    // The rigid physics emitters' CPU simulation, solver state included.
+    std::optional<SimulationState> rigid;
 
     ~Data() {
         for (const Emitter& emitter : emitters) {
@@ -105,6 +108,11 @@ struct GpuSimulation::State final {
     std::vector<EmitterGpu> emitters;
     std::vector<ParameterValue> values;
     std::vector<float> scratch;
+    // The rigid physics emitters, simulated on the CPU, and each emitter's
+    // index among them (none for the rest).
+    std::optional<Simulation> rigid;
+    std::vector<std::optional<std::size_t>> rigid_index;
+    std::vector<std::uint8_t> records;
 
     ~State() {
         if (device == nullptr) {
@@ -138,6 +146,54 @@ struct GpuSimulation::State final {
         return d;
     }
 
+    // Writes a CPU-simulated emitter's particles into particle buffer
+    // `buffer`, with the counters and dispatch and draw sizes `finalize`
+    // would have written for them.
+    void upload(const EmitterGpu& e, const EmitterState& particles, std::uint32_t buffer) {
+        const ParticleLayout& l = e.layout;
+        const std::uint32_t alive = static_cast<std::uint32_t>(particles.alive());
+        records.assign(static_cast<std::size_t>(alive) * l.stride, 0U);
+        const auto put = [&](std::size_t base, std::int32_t offset, const auto& value) {
+            if (offset >= 0) {
+                std::memcpy(records.data() + base + static_cast<std::size_t>(offset), &value, sizeof(value));
+            }
+        };
+        for (std::size_t i = 0U; i < alive; ++i) {
+            const std::size_t base = i * l.stride;
+            put(base, l.position, particles.position[i]);
+            put(base, l.velocity, particles.velocity[i]);
+            put(base, l.age, particles.age[i]);
+            put(base, l.lifetime, particles.lifetime[i]);
+            put(base, l.spawn_index, particles.spawn_index[i]);
+            put(base, l.color, particles.color[i]);
+            put(base, l.base_color, particles.base_color[i]);
+            put(base, l.size, particles.size[i]);
+            put(base, l.base_size, particles.base_size[i]);
+            put(base, l.rotation, particles.rotation[i]);
+            put(base, l.orientation, particles.orientation[i]);
+            put(base, l.angular_velocity, particles.angular_velocity[i]);
+            put(base, l.spin, particles.spin[i]);
+        }
+        if (!records.empty()) {
+            device->write_buffer(e.particles[buffer], 0U, records);
+        }
+        const auto groups = [](std::uint32_t threads, std::uint32_t per_group) {
+            const std::uint32_t count = (threads + per_group - 1U) / per_group;
+            return std::array<std::uint32_t, 3>{std::min(count, max_groups_x),
+                                                count == 0U ? 1U : (count + max_groups_x - 1U) / max_groups_x, 1U};
+        };
+        const std::uint32_t counters[4] = {alive, alive, static_cast<std::uint32_t>(particles.refused), 0U};
+        const std::array<std::uint32_t, 3> particle_groups = groups(alive, group_size);
+        const std::array<std::uint32_t, 3> block_groups = groups(alive, block_size);
+        const std::uint32_t args[10] = {particle_groups[0], particle_groups[1], particle_groups[2],
+                                        block_groups[0],    block_groups[1],    block_groups[2],
+                                        6U,                 alive,              0U,
+                                        0U};
+        device->write_buffer(e.counters, 0U, std::span{reinterpret_cast<const std::uint8_t*>(counters), sizeof(counters)});
+        device->write_buffer(e.args, 0U, std::span{reinterpret_cast<const std::uint8_t*>(args), sizeof(args)});
+        device->barrier();
+    }
+
     void zero_counters(const EmitterGpu& e) const {
         const std::uint8_t zeros[args_bytes]{};
         device->write_buffer(e.counters, 0U, std::span{zeros, counters_bytes});
@@ -152,12 +208,38 @@ GpuSimulation::~GpuSimulation() = default;
 
 Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const KernelSet& kernels,
                                             std::uint32_t instance_seed, const FieldSet& fields) {
+    return create(device, std::move(effect), kernels, instance_seed, SimulationOptions{.fields = fields});
+}
+
+Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const KernelSet& kernels,
+                                            std::uint32_t instance_seed, SimulationOptions options) {
+    const FieldSet& fields = options.fields;
     Result<bool> valid = validate(effect);
     if (!valid) {
         return valid.error();
     }
     if (Result<bool> held = check_fields(effect, fields); !held) {
         return held.error();
+    }
+    // The rigid physics emitters as an effect of their own: each emitter's
+    // randomness is its own, so they simulate exactly as within the whole.
+    std::optional<Simulation> rigid;
+    std::vector<std::optional<std::size_t>> rigid_index(effect.emitters.size());
+    if (has_rigid_physics(effect)) {
+        Effect cpu = effect;
+        cpu.emitters.clear();
+        for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+            if (rigid_physics(effect.emitters[i]) != nullptr) {
+                rigid_index[i] = cpu.emitters.size();
+                cpu.emitters.push_back(effect.emitters[i]);
+            }
+        }
+        Result<Simulation> created = Simulation::create(
+            std::move(cpu), instance_seed, SimulationOptions{.meshes = options.meshes, .rigid = options.rigid});
+        if (!created) {
+            return created.error();
+        }
+        rigid.emplace(std::move(created).value());
     }
     if (kernels.format != device.shader_format() || kernels.emitters.size() != effect.emitters.size()) {
         return Error{ErrorCode::GpuUnavailable, "the kernel set was not compiled for this effect and device"};
@@ -245,6 +327,8 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
         }
     }
     state->effect = std::move(effect);
+    state->rigid = std::move(rigid);
+    state->rigid_index = std::move(rigid_index);
     return GpuSimulation{std::move(state)};
 }
 
@@ -264,10 +348,20 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
     const double rate = static_cast<double>(s.effect.simulation_rate);
     const double start = static_cast<double>(s.tick) / rate;
     const double end = static_cast<double>(s.tick + 1U) / rate;
+    if (s.rigid) {
+        s.rigid->step(parameters);
+    }
 
     for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
+        if (const std::optional<std::size_t> cpu = s.rigid_index[i]) {
+            const EmitterState& particles = s.rigid->emitter(*cpu);
+            s.upload(e, particles, 1U - s.current);
+            e.spawned = particles.spawned;
+            e.rate_carry = particles.rate_carry;
+            continue;
+        }
 
         if (!e.unwritten_fields.empty()) {
             device.write_buffer(e.fields, 0U, bytes_of(std::span<const float>{e.unwritten_fields}));
@@ -341,6 +435,9 @@ void GpuSimulation::reset() {
     State& s = *state_;
     s.tick = 0U;
     s.current = 0U;
+    if (s.rigid) {
+        s.rigid->reset();
+    }
     for (EmitterGpu& e : s.emitters) {
         e.spawned = 0U;
         std::fill(e.rate_carry.begin(), e.rate_carry.end(), 0.0);
@@ -451,6 +548,9 @@ void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {
     GpuCheckpoint::Data& data = *checkpoint.data_;
     data.tick = s.tick;
     data.current = s.current;
+    if (s.rigid) {
+        data.rigid = s.rigid->state();
+    }
     for (std::size_t i = 0U; i < s.emitters.size() && i < data.emitters.size(); ++i) {
         const EmitterGpu& e = s.emitters[i];
         GpuCheckpoint::Data::Emitter& saved = data.emitters[i];
@@ -469,6 +569,9 @@ void GpuSimulation::restore(const GpuCheckpoint& checkpoint) {
     const GpuCheckpoint::Data& data = *checkpoint.data_;
     s.tick = data.tick;
     s.current = data.current;
+    if (s.rigid && data.rigid) {
+        s.rigid->restore(*data.rigid);
+    }
     for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
         EmitterGpu& e = s.emitters[i];
         const GpuCheckpoint::Data::Emitter& saved = data.emitters[i];

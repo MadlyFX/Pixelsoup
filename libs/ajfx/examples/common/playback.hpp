@@ -8,6 +8,9 @@
 #include <ajfx/gpu/renderer.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/presets.hpp>
+#if defined(AJFX_HAS_RIGID)
+#include <ajfx/rigid.hpp>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -38,6 +41,9 @@ inline std::optional<ajfx::Effect> preset(const std::string& name) {
     }
     if (name == "debris") {
         return ajfx::presets::debris();
+    }
+    if (name == "rubble") {
+        return ajfx::presets::rubble();
     }
     return std::nullopt;
 }
@@ -105,8 +111,17 @@ public:
             return std::none_of(effect.emitters.begin(), effect.emitters.end(),
                                 [&](const ajfx::Emitter& emitter) { return emitter.renderer.mesh == entry.first; });
         });
-        ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
-            ajfx::gpu::GpuSimulation::create(device, effect, *kernels, 1U, fields.value());
+        // Rigid physics emitters need a physics engine; without ajfx::rigid
+        // the simulation says so.
+        std::unique_ptr<ajfx::RigidSolver> solver;
+#if defined(AJFX_HAS_RIGID)
+        if (ajfx::has_rigid_physics(effect)) {
+            solver = ajfx::rigid::make_jolt_solver();
+        }
+#endif
+        ajfx::Result<ajfx::gpu::GpuSimulation> simulation = ajfx::gpu::GpuSimulation::create(
+            device, effect, *kernels, 1U,
+            ajfx::SimulationOptions{.fields = fields.value(), .meshes = meshes.value(), .rigid = solver.get()});
         if (!simulation) {
             return simulation.error();
         }
@@ -131,7 +146,7 @@ public:
         if (!sorter) {
             return sorter.error();
         }
-        auto player = std::unique_ptr<Player>(new Player(std::move(effect), *std::move(kernels),
+        auto player = std::unique_ptr<Player>(new Player(std::move(solver), std::move(effect), *std::move(kernels),
                                                          std::move(simulation).value(), std::move(renderer).value(),
                                                          std::move(sorter).value()));
         player->kernel_note_ = std::move(note);
@@ -234,14 +249,17 @@ public:
     }
 
 private:
-    Player(ajfx::Effect effect, ajfx::gpu::KernelSet kernels, ajfx::gpu::GpuSimulation simulation,
-           ajfx::gpu::ParticleRenderer renderer, ajfx::gpu::ParticleSorter sorter)
-        : effect_{std::move(effect)},
+    Player(std::unique_ptr<ajfx::RigidSolver> solver, ajfx::Effect effect, ajfx::gpu::KernelSet kernels,
+           ajfx::gpu::GpuSimulation simulation, ajfx::gpu::ParticleRenderer renderer, ajfx::gpu::ParticleSorter sorter)
+        : solver_{std::move(solver)},
+          effect_{std::move(effect)},
           kernels_{std::move(kernels)},
           simulation_{std::move(simulation)},
           renderer_{std::move(renderer)},
           sorter_{std::move(sorter)} {}
 
+    // Declared first so the simulation's worlds go before it does.
+    std::unique_ptr<ajfx::RigidSolver> solver_;
     ajfx::Effect effect_;
     ajfx::gpu::KernelSet kernels_;
     ajfx::gpu::GpuSimulation simulation_;

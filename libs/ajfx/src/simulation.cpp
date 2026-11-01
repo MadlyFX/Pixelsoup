@@ -11,6 +11,8 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -67,6 +69,7 @@ struct Random final {
 template <class Dead>
 void compact(EmitterState& s, Dead dead) {
     const std::size_t count = s.alive();
+    const bool bodies = s.body.size() == count && count > 0U;
     std::size_t kept = 0U;
     for (std::size_t i = 0U; i < count; ++i) {
         if (dead(i)) {
@@ -86,8 +89,14 @@ void compact(EmitterState& s, Dead dead) {
             s.angular_velocity[kept] = s.angular_velocity[i];
             s.spin[kept] = s.spin[i];
             s.spawn_index[kept] = s.spawn_index[i];
+            if (bodies) {
+                s.body[kept] = s.body[i];
+            }
         }
         ++kept;
+    }
+    if (bodies) {
+        s.body.resize(kept);
     }
     s.position.resize(kept);
     s.velocity.resize(kept);
@@ -557,6 +566,55 @@ void apply(const SizeOverLife& m, Step& step) {
     }
 }
 
+// The engine moves rigid physics particles (see step_rigid).
+void apply(const RigidPhysics&, Step&) {}
+
+// A rigid physics emitter's motion for one step, between retiring the dead
+// and giving birth: the dead leave the world oldest first, the world steps
+// under the step's gravity, and every particle takes its body's pose; then
+// colour over life, as for any emitter.
+void move_rigid(Step& step, const Emitter& emitter, RigidWorld& world) {
+    EmitterState& s = step.s;
+    Vec3 gravity{};
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* g = std::get_if<Gravity>(&module)) {
+            gravity += step.in(g->acceleration);
+        }
+    }
+    world.step(gravity);
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const RigidBodyState body = world.body(s.body[i]);
+        s.position[i] = body.position;
+        s.orientation[i] = body.orientation;
+        s.velocity[i] = body.velocity;
+        s.angular_velocity[i] = body.angular_velocity;
+    }
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* color = std::get_if<ColorOverLife>(&module)) {
+            apply(*color, step);
+        }
+    }
+}
+
+// Bodies for the newborns [first, alive), in birth order, each in the lowest
+// slot no older particle holds.
+void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, RigidWorld& world) {
+    std::vector<bool> used(capacity, false);
+    for (std::size_t i = 0U; i < first; ++i) {
+        used[s.body[i]] = true;
+    }
+    s.body.resize(s.alive());
+    std::uint32_t next = 0U;
+    for (std::size_t i = first; i < s.alive(); ++i) {
+        while (used[next]) {
+            ++next;
+        }
+        used[next] = true;
+        s.body[i] = next;
+        world.add(next, s.size[i], RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]});
+    }
+}
+
 void append(EmitterState& s, float age) {
     s.position.push_back({});
     s.velocity.push_back({});
@@ -573,6 +631,90 @@ void append(EmitterState& s, float age) {
     s.spawn_index.push_back(static_cast<std::uint32_t>(s.spawned));
 }
 
+std::string quoted(std::string_view text) {
+    return "'" + std::string{text} + "'";
+}
+
+// The world a rigid physics emitter's bodies live in: its shape, material and
+// damping, and its colliders as statics.
+Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysics& physics, const MeshSet& meshes,
+                                        float step_seconds) {
+    RigidWorldDesc desc;
+    desc.capacity = emitter.capacity;
+    desc.step_seconds = step_seconds;
+    desc.density = physics.density;
+    desc.friction = physics.friction;
+    desc.restitution = physics.restitution;
+    desc.angular_damping = physics.angular_damping;
+    desc.allow_sleep = physics.allow_sleep;
+    RigidShape shape = physics.shape;
+    if (shape == RigidShape::Auto) {
+        shape = emitter.renderer.geometry == Geometry::Mesh ? RigidShape::Hull : RigidShape::Sphere;
+    }
+    switch (shape) {
+    case RigidShape::Auto:
+    case RigidShape::Hull: {
+        const auto mesh = meshes.find(emitter.renderer.mesh);
+        if (mesh == meshes.end()) {
+            return Error{ErrorCode::MissingMesh, "emitter " + quoted(emitter.name) + " has rigid physics wrapping mesh " +
+                                                     quoted(emitter.renderer.mesh) + ", which was not given"};
+        }
+        desc.shape = RigidWorldDesc::Shape::Hull;
+        for (const MeshVertex& vertex : mesh->second.vertices) {
+            desc.hull_points.push_back(vertex.position);
+        }
+        break;
+    }
+    case RigidShape::Sphere:
+        desc.shape = RigidWorldDesc::Shape::Sphere;
+        break;
+    case RigidShape::Box:
+        desc.shape = RigidWorldDesc::Shape::Box;
+        break;
+    }
+    for (const UpdateModule& module : emitter.update) {
+        // Validation refused bound inputs here, so the values are the inputs.
+        if (const auto* drag = std::get_if<Drag>(&module)) {
+            desc.linear_damping += drag->coefficient.value;
+        } else if (const auto* plane = std::get_if<PlaneCollision>(&module)) {
+            const Vec3 n = detail::normalized(plane->normal);
+            desc.statics.push_back(RigidStatic{.kind = RigidStatic::Kind::Plane,
+                                               .center = n * plane->offset,
+                                               .normal = n,
+                                               .friction = plane->friction.value,
+                                               .restitution = plane->restitution.value});
+        } else if (const auto* sphere = std::get_if<SphereCollision>(&module)) {
+            desc.statics.push_back(RigidStatic{.kind = RigidStatic::Kind::Sphere,
+                                               .center = sphere->center.value,
+                                               .radius = sphere->radius.value,
+                                               .friction = sphere->friction.value,
+                                               .restitution = sphere->restitution.value});
+        } else if (const auto* box = std::get_if<BoxCollision>(&module)) {
+            const Vec3 c = box->center.value;
+            const Vec3 h = box->half_size;
+            const auto add = [&](Vec3 center, Vec3 half) {
+                desc.statics.push_back(RigidStatic{.kind = RigidStatic::Kind::Box,
+                                                   .center = center,
+                                                   .half_size = half,
+                                                   .friction = box->friction.value,
+                                                   .restitution = box->restitution.value});
+            };
+            if (!box->inside) {
+                add(c, h);
+            } else {
+                // Six walls around the inside, as thick as the box is large.
+                const float t = std::max({h.x, h.y, h.z});
+                for (const float side : {-1.0F, 1.0F}) {
+                    add(c + Vec3{side * (h.x + t), 0.0F, 0.0F}, Vec3{t, h.y + 2.0F * t, h.z + 2.0F * t});
+                    add(c + Vec3{0.0F, side * (h.y + t), 0.0F}, Vec3{h.x + 2.0F * t, t, h.z + 2.0F * t});
+                    add(c + Vec3{0.0F, 0.0F, side * (h.z + t)}, Vec3{h.x + 2.0F * t, h.y + 2.0F * t, t});
+                }
+            }
+        }
+    }
+    return desc;
+}
+
 } // namespace
 
 Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fields)
@@ -580,18 +722,54 @@ Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fiel
       instance_seed_{instance_seed},
       step_seconds_{1.0F / static_cast<float>(effect_.simulation_rate)},
       fields_{std::move(fields)} {
+    rigid_.resize(effect_.emitters.size());
     reset();
 }
 
+Simulation::Simulation(Simulation&&) noexcept = default;
+Simulation& Simulation::operator=(Simulation&&) noexcept = default;
+Simulation::~Simulation() = default;
+
 Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed, FieldSet fields) {
+    return create(std::move(effect), instance_seed, SimulationOptions{.fields = std::move(fields)});
+}
+
+Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed, SimulationOptions options) {
     Result<bool> valid = validate(effect);
     if (!valid) {
         return valid.error();
     }
-    if (Result<bool> held = check_fields(effect, fields); !held) {
+    if (Result<bool> held = check_fields(effect, options.fields); !held) {
         return held.error();
     }
-    return Simulation{std::move(effect), instance_seed, std::move(fields)};
+    std::vector<RigidEmitter> rigid(effect.emitters.size());
+    const float step_seconds = 1.0F / static_cast<float>(effect.simulation_rate);
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        const Emitter& emitter = effect.emitters[i];
+        const RigidPhysics* physics = rigid_physics(emitter);
+        if (physics == nullptr) {
+            continue;
+        }
+        if (options.rigid == nullptr) {
+            return Error{ErrorCode::RigidSolverMissing,
+                         "emitter " + quoted(emitter.name) +
+                             " has rigid physics, and no rigid solver was given to run it (ajfx::rigid has one)"};
+        }
+        Result<RigidWorldDesc> desc = rigid_world_desc(emitter, *physics, options.meshes, step_seconds);
+        if (!desc) {
+            return desc.error();
+        }
+        Result<std::unique_ptr<RigidWorld>> world = options.rigid->create_world(desc.value());
+        if (!world) {
+            return Error{ErrorCode::RigidSolverFailure,
+                         "emitter " + quoted(emitter.name) + "'s rigid physics world: " + world.error().message};
+        }
+        rigid[i] = RigidEmitter{std::move(desc).value(), std::move(world).value()};
+    }
+    Simulation simulation{std::move(effect), instance_seed, std::move(options.fields)};
+    simulation.solver_ = options.rigid;
+    simulation.rigid_ = std::move(rigid);
+    return simulation;
 }
 
 void Simulation::reset() {
@@ -600,6 +778,58 @@ void Simulation::reset() {
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
         state_.emitters[i].rate_carry.assign(detail::rate_module_count(effect_.emitters[i]), 0.0);
     }
+    rebuild_worlds();
+    solver_state_stale_ = false;
+}
+
+void Simulation::rebuild_worlds() {
+    for (std::size_t i = 0U; i < rigid_.size(); ++i) {
+        RigidEmitter& rigid = rigid_[i];
+        if (solver_ == nullptr || !rigid.world) {
+            continue;
+        }
+        // The solver made this world once from the same description.
+        Result<std::unique_ptr<RigidWorld>> world = solver_->create_world(rigid.desc);
+        if (!world) {
+            continue;
+        }
+        rigid.world = std::move(world).value();
+        const EmitterState& s = state_.emitters[i];
+        for (std::size_t p = 0U; p < s.alive() && p < s.body.size(); ++p) {
+            rigid.world->add(s.body[p], s.size[p],
+                             RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]});
+        }
+    }
+}
+
+const SimulationState& Simulation::state() const {
+    if (solver_state_stale_) {
+        for (std::size_t i = 0U; i < rigid_.size(); ++i) {
+            if (rigid_[i].world) {
+                state_.emitters[i].solver_state = rigid_[i].world->save();
+            }
+        }
+        solver_state_stale_ = false;
+    }
+    return state_;
+}
+
+void Simulation::restore(const SimulationState& state) {
+    state_ = state;
+    rebuild_worlds();
+    bool stale = false;
+    for (std::size_t i = 0U; i < rigid_.size(); ++i) {
+        if (!rigid_[i].world) {
+            continue;
+        }
+        const std::vector<std::uint8_t>& bytes = state_.emitters[i].solver_state;
+        if (bytes.empty() || !rigid_[i].world->restore(bytes)) {
+            // Only bodies' poses to go on: what state() returns next will say
+            // so, rather than repeat bytes this world does not hold.
+            stale = true;
+        }
+    }
+    solver_state_stale_ = stale;
 }
 
 void Simulation::step(const ParameterProvider* parameters) {
@@ -608,6 +838,9 @@ void Simulation::step(const ParameterProvider* parameters) {
         step_emitter(i, values_);
     }
     ++state_.tick;
+    solver_state_stale_ = solver_state_stale_ || std::any_of(rigid_.begin(), rigid_.end(), [](const RigidEmitter& r) {
+                                                     return r.world != nullptr;
+                                                 });
 }
 
 void Simulation::advance_to(std::uint64_t target, const ParameterProvider* parameters) {
@@ -636,38 +869,51 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         }
     }
 
-    // Age, and retire particles whose life is over.
+    // Age, and retire particles whose life is over. A rigid physics body
+    // leaves its world with its particle, oldest first.
     for (float& age : s.age) {
         age += step.dt;
     }
+    RigidWorld* world = rigid_[index].world.get();
+    if (world != nullptr) {
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            if (!(s.age[i] < s.lifetime[i])) {
+                world->remove(s.body[i]);
+            }
+        }
+    }
     compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
 
-    // Forces, integration, then constraints and appearance.
     step.last = s.alive();
     const auto run = [&step](const auto& module) { apply(module, step); };
-    for (const UpdateModule& module : emitter.update) {
-        if (is_force(module)) {
-            std::visit(run, module);
+    if (world != nullptr) {
+        move_rigid(step, emitter, *world);
+    } else {
+        // Forces, integration, then constraints and appearance.
+        for (const UpdateModule& module : emitter.update) {
+            if (is_force(module)) {
+                std::visit(run, module);
+            }
         }
-    }
-    for (std::size_t i = 0U; i < s.alive(); ++i) {
-        s.position[i] += s.velocity[i] * step.dt;
-    }
-    const InitSpin* spin = nullptr;
-    for (const InitModule& module : emitter.init) {
-        if (const auto* found = std::get_if<InitSpin>(&module)) {
-            spin = found;
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            s.position[i] += s.velocity[i] * step.dt;
         }
-    }
-    if (spin != nullptr) {
-        turn(*spin, step);
-    }
-    for (const UpdateModule& module : emitter.update) {
-        if (!is_force(module)) {
-            std::visit(run, module);
+        const InitSpin* spin = nullptr;
+        for (const InitModule& module : emitter.init) {
+            if (const auto* found = std::get_if<InitSpin>(&module)) {
+                spin = found;
+            }
         }
+        if (spin != nullptr) {
+            turn(*spin, step);
+        }
+        for (const UpdateModule& module : emitter.update) {
+            if (!is_force(module)) {
+                std::visit(run, module);
+            }
+        }
+        compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
     }
-    compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
 
     // Births, each with the age it has reached by the end of the step.
     const std::size_t first_new = s.alive();
@@ -701,6 +947,9 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         if (std::holds_alternative<ColorOverLife>(module) || std::holds_alternative<SizeOverLife>(module)) {
             std::visit(run, module);
         }
+    }
+    if (world != nullptr) {
+        add_bodies(s, step.first, emitter.capacity, *world);
     }
 }
 

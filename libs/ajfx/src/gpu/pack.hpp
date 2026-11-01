@@ -264,6 +264,9 @@ inline void pack(const SizeOverLife& m, const PackContext&, Packer& p) {
     pack_curve(m.keys, p);
 }
 
+// Rigid physics emitters run on the CPU; their kernels read no module data.
+inline void pack(const RigidPhysics&, const PackContext&, Packer&) {}
+
 // One module: its id, then its data.
 template <class Module>
 void pack_module(const Module& module, const PackContext& context, Packer& p) {

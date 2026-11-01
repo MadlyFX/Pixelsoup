@@ -75,6 +75,11 @@ enum class Attribute : std::uint32_t {
 
 [[nodiscard]] std::uint32_t required_attributes(const Emitter& emitter);
 
+// The emitter's RigidPhysics module, if it has one: its particles are then
+// a rigid-body engine's bodies, simulated on the CPU (see rigid_solver.hpp).
+[[nodiscard]] const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept;
+[[nodiscard]] bool has_rigid_physics(const Effect& effect) noexcept;
+
 [[nodiscard]] constexpr bool has_attribute(std::uint32_t mask, Attribute attribute) noexcept {
     return (mask & static_cast<std::uint32_t>(attribute)) != 0U;
 }

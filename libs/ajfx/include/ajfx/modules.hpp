@@ -535,6 +535,60 @@ struct RigidBody final {
     friend bool operator==(const RigidBody&, const RigidBody&) = default;
 };
 
+// The body a rigid physics particle is: the convex hull of the renderer's
+// mesh, a sphere or a cube, each scaled by the particle's size. Auto takes
+// the hull for mesh geometry and a sphere otherwise.
+enum class RigidShape {
+    Auto,
+    Hull,
+    Sphere,
+    Box,
+};
+
+// Makes the emitter's particles bodies in a rigid-body physics engine on the
+// CPU (the host's RigidSolver, see rigid_solver.hpp; ajfx::rigid provides
+// Jolt's). Unlike RigidBody, they collide with each other: debris piles up,
+// knocks other debris about and comes to rest.
+// - **Bodies:** each is `shape` at the particle's size from birth, of
+//   `density`, with this `friction` and `restitution`. A sphere is `size`
+//   across; a cube is `size` on a side; a hull is the mesh scaled by `size`.
+// - **What acts on them:** Gravity (bound or not); Drag, unbound, as linear
+//   damping; and the emitter's plane, sphere and box colliders, which become
+//   unmoving bodies with their own restitution and friction. Bound collider
+//   inputs, `kill`, keeping particles inside a sphere, distance fields,
+//   other forces and SizeOverLife are refused: an engine body cannot follow
+//   them.
+// - **Rest:** with `allow_sleep`, bodies that have come to rest sleep until
+//   something knocks them, which costs nothing while they lie still.
+// - **Determinism:** bodies are created and removed in birth order in fixed
+//   slots, and the engine's state travels in checkpoints, so every node and
+//   every seek computes the same bits (for the same build of the solver).
+// At most one per emitter, and the emitter holds at most max_rigid_capacity
+// particles.
+struct RigidPhysics final {
+    static constexpr std::string_view kind = "rigid_physics";
+    ModuleId id{};
+    RigidShape shape{RigidShape::Auto};
+    float density{1000.0F};
+    float friction{0.5F};
+    float restitution{0.2F};
+    float angular_damping{0.05F};
+    bool allow_sleep{true};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("shape", self.shape);
+        visit("density", self.density);
+        visit("friction", self.friction);
+        visit("restitution", self.restitution);
+        visit("angular_damping", self.angular_damping);
+        visit("allow_sleep", self.allow_sleep);
+    }
+    friend bool operator==(const RigidPhysics&, const RigidPhysics&) = default;
+};
+
+inline constexpr std::uint32_t max_rigid_capacity = 65536U;
+
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
 struct ColorOverLife final {
@@ -562,7 +616,8 @@ struct SizeOverLife final {
 };
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
-                                  SphereCollision, BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody>;
+                                  SphereCollision, BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody,
+                                  RigidPhysics>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -574,7 +629,8 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
 // Forces run before integration; everything else after it.
 [[nodiscard]] constexpr bool is_force(const UpdateModule& module) noexcept {
     return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
-           !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module);
+           !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
+           !std::holds_alternative<RigidPhysics>(module);
 }
 
 // ---------------------------------------------------------------- render
@@ -695,6 +751,10 @@ struct EnumNames<Facing> {
 template <>
 struct EnumNames<Geometry> {
     static constexpr std::string_view names[] = {"sprites", "ribbon", "mesh"};
+};
+template <>
+struct EnumNames<RigidShape> {
+    static constexpr std::string_view names[] = {"auto", "hull", "sphere", "box"};
 };
 
 } // namespace ajfx

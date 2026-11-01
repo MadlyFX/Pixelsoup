@@ -1082,6 +1082,39 @@ feedback forces evaluate any frame directly.
      - **Still to do:** the same binaries on the laptop (Intel). That run
        decides the leaning. The harness is `out/spike` in the ajfx
        worktree: `run_matrix.ps1` writes `results-<computer>` to diff.
+   - **Rigid physics, round 1, done (2026-11-01): Jolt in the library.**
+     - **What exists:**
+       - `RigidPhysics` emitters run by a host-supplied `RigidSolver`.
+       - `ajfx::rigid` provides one on Jolt v5.6.0, vendored in
+         `libs/ajfx/third_party/jolt`. It is built cross-platform
+         deterministic and SSE4.2-only, so one binary runs on every node.
+       - Hull, sphere and box bodies.
+       - Gravity, damping, and plane, sphere and box colliders as statics.
+     - **Proven:**
+       - Identical results across reruns, thread counts, and Debug and
+         Release builds.
+       - Exact seeks and restores into a fresh simulation, across births
+         and deaths.
+       - The GPU runtime holds the reference's bits.
+       - The viewer and player play the `rubble` preset.
+     - **Cost on the 5800X:** `rubble` (400 hulls) 0.75 ms a step on one
+       thread. 4,000 hulls in a dense heap take 9.7 ms on one thread and
+       3.4 ms on four, so heaps that size need threads.
+     - **Round 2, the media server:**
+       - Step rigid emitters on a worker, off the frame path. Seeks
+         resimulate there, and the node holds until it is caught up. Today
+         `advance` steps them inline.
+       - Give the solver a thread budget.
+       - Save checkpoints off the frame path: `save_into` copies the
+         engine state on the CPU.
+       - Run the cluster check: the laptop must print the same
+         `ajfx_rigid_bench` digest as the Director. This doubles as the
+         spike's missing cross-machine run.
+       - Then a Studio block.
+     - **Later:**
+       - Colliders that move with parameters.
+       - SDF and mesh colliders, as Jolt mesh shapes.
+       - An AVX2 build once every node is known to have it.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.

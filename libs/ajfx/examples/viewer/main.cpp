@@ -1,6 +1,6 @@
 // ajfx_viewer: plays an ajfx effect on the D3D12 reference backend.
 //
-//   ajfx_viewer [--preset sparks|smoke|confetti|debris] [--package file.ajfx]
+//   ajfx_viewer [--preset sparks|smoke|confetti|debris|rubble] [--package file.ajfx]
 //               [--capture out.png --seconds 2.5 --size 960x540]
 //               [--export file.ajfx]
 //
@@ -10,7 +10,7 @@
 // compiling anything, as a host such as the media server does.
 //
 // Window controls: drag to orbit, wheel to zoom, Space pause, Left/Right
-// seek a second, Home restart, 1-4 switch preset, Esc quit.
+// seek a second, Home restart, 1-5 switch preset, Esc quit.
 
 // sscanf and atof are fine for parsing a handful of arguments.
 #define _CRT_SECURE_NO_WARNINGS
@@ -159,8 +159,8 @@ int run_window(d3d12::Device& device, gpu::ShaderCompiler* compiler, std::unique
                 time += 1.0;
             } else if (key == VK_HOME) {
                 time = 0.0;
-            } else if (key >= '1' && key <= '4') {
-                const char* names[] = {"sparks", "smoke", "confetti", "debris"};
+            } else if (key >= '1' && key <= '5') {
+                const char* names[] = {"sparks", "smoke", "confetti", "debris", "rubble"};
                 Result<std::unique_ptr<Player>> next =
                     Player::create(device, compiler, *preset(names[key - '1']), nullptr);
                 if (next) {
@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
     const std::optional<Options> options = parse(argc, argv);
     if (!options) {
         std::fprintf(stderr,
-                     "usage: ajfx_viewer [--preset sparks|smoke|confetti|debris] [--package file.ajfx]\n"
+                     "usage: ajfx_viewer [--preset sparks|smoke|confetti|debris|rubble] [--package file.ajfx]\n"
                      "                   [--capture out.png] [--seconds 2] [--size 960x540] [--export file.ajfx] [--warp]\n");
         return 2;
     }

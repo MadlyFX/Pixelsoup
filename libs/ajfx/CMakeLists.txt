@@ -114,6 +114,21 @@ target_include_directories(ajfx
 ajfx_set_options(ajfx)
 set_target_properties(ajfx PROPERTIES FOLDER "libs")
 
+# ajfx::rigid: rigid physics emitters run by Jolt Physics (third_party/jolt),
+# built for cross-platform determinism. Core ajfx never depends on it; a host
+# links it and hands its solver to the simulations.
+option(AJFX_RIGID "Build ajfx::rigid, rigid physics emitters run by Jolt" ON)
+if(AJFX_RIGID)
+    add_subdirectory(third_party/jolt)
+    # Jolt's headers are held to Jolt's warnings, not ours.
+    set_target_properties(Jolt PROPERTIES SYSTEM ON)
+    add_library(ajfx_rigid STATIC src/rigid/jolt_solver.cpp)
+    add_library(ajfx::rigid ALIAS ajfx_rigid)
+    target_link_libraries(ajfx_rigid PUBLIC ajfx::ajfx PRIVATE Jolt)
+    ajfx_set_options(ajfx_rigid)
+    set_target_properties(ajfx_rigid PROPERTIES FOLDER "libs")
+endif()
+
 # HLSL that a host compiles into its own kernels; exposed as a directory so
 # the host's shader compiler can add it to its include path.
 set(AJFX_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
@@ -188,6 +203,14 @@ if(AJFX_BUILD_D3D12 AND AJFX_BUILD_EXAMPLES)
     ajfx_set_options(ajfx_player)
     ajfx_copy_dxc(ajfx_player)
     set_target_properties(ajfx_player PROPERTIES FOLDER "examples")
+
+    # Both play rigid physics effects when ajfx::rigid is built.
+    if(AJFX_RIGID)
+        foreach(example IN ITEMS ajfx_viewer ajfx_player)
+            target_link_libraries(${example} PRIVATE ajfx::rigid)
+            target_compile_definitions(${example} PRIVATE AJFX_HAS_RIGID=1)
+        endforeach()
+    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -223,6 +246,28 @@ if(BUILD_TESTING)
         endforeach()
     endif()
 
+    if(AJFX_RIGID)
+        add_executable(ajfx_rigid_tests tests/rigid_tests.cpp)
+        target_link_libraries(ajfx_rigid_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_rigid_tests)
+        add_test(NAME ajfx.rigid COMMAND ajfx_rigid_tests)
+        set_target_properties(ajfx_rigid_tests PROPERTIES FOLDER "tests")
+        # Step cost, checkpoint size and a state digest; run by hand.
+        add_executable(ajfx_rigid_bench tests/rigid_bench.cpp)
+        target_link_libraries(ajfx_rigid_bench PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_rigid_bench)
+        set_target_properties(ajfx_rigid_bench PROPERTIES FOLDER "tests")
+        if(AJFX_BUILD_D3D12)
+            add_executable(ajfx_rigid_gpu_tests tests/rigid_gpu_tests.cpp)
+            target_link_libraries(ajfx_rigid_gpu_tests PRIVATE ajfx::rigid ajfx::d3d12)
+            ajfx_set_options(ajfx_rigid_gpu_tests)
+            ajfx_copy_dxc(ajfx_rigid_gpu_tests)
+            add_test(NAME ajfx.rigid_gpu COMMAND ajfx_rigid_gpu_tests)
+            set_tests_properties(ajfx.rigid_gpu PROPERTIES SKIP_RETURN_CODE 77)
+            set_target_properties(ajfx_rigid_gpu_tests PROPERTIES FOLDER "tests")
+        endif()
+    endif()
+
     if(TARGET ajfx_viewer)
         # End to end: export a package with kernels, then play it from the
         # package alone and capture a frame.
@@ -239,6 +284,19 @@ if(BUILD_TESTING)
             COMMAND ajfx_viewer --package "${CMAKE_CURRENT_BINARY_DIR}/viewer-debris.ajfx" --seconds 2
                     --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-debris.png")
         set_tests_properties(ajfx.viewer_debris PROPERTIES FIXTURES_SETUP ajfx_debris_package)
+        if(AJFX_RIGID)
+            # Rigid physics through the viewer: the package carries the chip
+            # mesh its hulls wrap, and plays from the package alone.
+            add_test(NAME ajfx.viewer_rubble
+                COMMAND ajfx_viewer --preset rubble --export "${CMAKE_CURRENT_BINARY_DIR}/viewer-rubble.ajfx")
+            add_test(NAME ajfx.viewer_rubble_capture
+                COMMAND ajfx_viewer --package "${CMAKE_CURRENT_BINARY_DIR}/viewer-rubble.ajfx" --seconds 4
+                        --capture "${CMAKE_CURRENT_BINARY_DIR}/viewer-rubble.png")
+            set_tests_properties(ajfx.viewer_rubble PROPERTIES FIXTURES_SETUP ajfx_rubble_package)
+            set_tests_properties(ajfx.viewer_rubble_capture PROPERTIES
+                FIXTURES_REQUIRED ajfx_rubble_package
+                PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")
+        endif()
         set_tests_properties(ajfx.viewer_debris_capture PROPERTIES
             FIXTURES_REQUIRED ajfx_debris_package
             PASS_REGULAR_EXPRESSION "using the package's precompiled kernels")

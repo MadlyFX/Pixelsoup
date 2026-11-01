@@ -64,6 +64,13 @@ public:
     // step. The device must outlive the simulation.
     [[nodiscard]] static Result<GpuSimulation> create(Device& device, Effect effect, const KernelSet& kernels,
                                                       std::uint32_t instance_seed = 0U, const FieldSet& fields = {});
+    // As above, with the meshes rigid physics hulls wrap and the solver that
+    // runs rigid physics emitters (failing as Simulation::create does). Those
+    // emitters are simulated on the CPU by that solver, exactly as the CPU
+    // reference simulates them, and each step writes their particles into
+    // their buffers; everything that draws reads them as any emitter's.
+    [[nodiscard]] static Result<GpuSimulation> create(Device& device, Effect effect, const KernelSet& kernels,
+                                                      std::uint32_t instance_seed, SimulationOptions options);
 
     GpuSimulation(GpuSimulation&&) noexcept;
     GpuSimulation& operator=(GpuSimulation&&) noexcept;
@@ -87,7 +94,8 @@ public:
     // The raw particle records, for exact comparisons between runs.
     [[nodiscard]] Result<std::vector<std::uint8_t>> read_particle_bytes(std::size_t emitter);
 
-    // Records copies of every buffer; valid once the device is flushed.
+    // Records copies of every buffer; valid once the device is flushed. A
+    // rigid physics emitter's solver state is saved on the CPU at once.
     [[nodiscard]] Result<GpuCheckpoint> save();
     // A checkpoint's buffers with nothing copied into them yet: allocation
     // only, no recorded work. Fill it with save_into.

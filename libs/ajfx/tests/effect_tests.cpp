@@ -99,7 +99,7 @@ void structural_problems_are_refused_with_the_place_named() {
 
     EffectBuilder unturned = valid_builder();
     unturned.emitter("chips").init(InitTumble{});
-    AJFX_CHECK(fails_with(unturned.build(), ErrorCode::InvalidEffect, "no 'rigid_body' module"));
+    AJFX_CHECK(fails_with(unturned.build(), ErrorCode::InvalidEffect, "no 'rigid_body' or 'rigid_physics' module"));
 
     EffectBuilder twice_rigid = valid_builder();
     twice_rigid.emitter("chips").update(RigidBody{}).update(RigidBody{});

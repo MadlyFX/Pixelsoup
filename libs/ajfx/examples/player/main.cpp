@@ -51,6 +51,7 @@ enum Command : int {
     preset_smoke,
     preset_confetti,
     preset_debris,
+    preset_rubble,
     associate,
     unassociate,
     exit_app,
@@ -331,6 +332,9 @@ void command(int id) {
     case preset_debris:
         open_preset("debris");
         break;
+    case preset_rubble:
+        open_preset("rubble");
+        break;
     case associate:
         if (MessageBoxW(g.window,
                         (L"Open .ajfx files with this player when they are double-clicked?\n\n" + executable_path() +
@@ -531,6 +535,7 @@ HMENU build_menu() {
     AppendMenuW(presets, MF_STRING, preset_smoke, L"S&moke");
     AppendMenuW(presets, MF_STRING, preset_confetti, L"&Confetti");
     AppendMenuW(presets, MF_STRING, preset_debris, L"&Debris");
+    AppendMenuW(presets, MF_STRING, preset_rubble, L"&Rubble");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), L"&Presets");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, associate, L"&Associate .ajfx files with this player...");

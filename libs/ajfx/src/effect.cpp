@@ -223,6 +223,13 @@ void check_module(const Effect& e, const RigidBody& m, FieldChecker& check) {
     check.require(roundness.lo >= 0.0F && roundness.hi <= 1.0F, "roundness", "must be between 0 and 1");
 }
 
+void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
+    check.require(m.density > 0.0F, "density", "must be positive");
+    check.require(m.friction >= 0.0F && m.friction <= 1.0F, "friction", "must be between 0 and 1");
+    check.require(m.restitution >= 0.0F && m.restitution <= 1.0F, "restitution", "must be between 0 and 1");
+    check.require(m.angular_damping >= 0.0F, "angular_damping", "must not be negative");
+}
+
 void check_module(const Effect& e, const Drag& m, FieldChecker& check) {
     check.require(range(e, m.coefficient).lo >= 0.0F, "coefficient", "must not be negative");
 }
@@ -288,6 +295,79 @@ std::optional<Error> check_module_fields(const Effect& effect, const Emitter& em
     return checker.error();
 }
 
+// What a rigid physics emitter may hold: the engine owns its particles'
+// motion, so only what can become a body, a force on every body or an
+// unmoving collider is allowed.
+std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::string& where) {
+    if (emitter.capacity > max_rigid_capacity) {
+        return Error{ErrorCode::InvalidEffect, where + " has rigid physics, which holds at most " +
+                                                    std::to_string(max_rigid_capacity) + " particles"};
+    }
+    std::optional<Error> error;
+    const auto refuse = [&](const auto& module, const std::string& why) {
+        if (!error) {
+            error = Error{ErrorCode::InvalidEffect, where + " module " + quoted(kind_of(module)) + " #" +
+                                                         std::to_string(module.id) + " " + why};
+        }
+    };
+    for (const InitModule& module : emitter.init) {
+        std::visit(
+            [&](const auto& m) {
+                using M = std::decay_t<decltype(m)>;
+                if constexpr (std::is_same_v<M, InitRotation> || std::is_same_v<M, InitSpin>) {
+                    refuse(m, "turns sprites; a rigid physics body turns by its orientation (use 'tumble')");
+                }
+            },
+            module);
+    }
+    const RigidPhysics* physics = nullptr;
+    for (const UpdateModule& module : emitter.update) {
+        std::visit(
+            [&](const auto& m) {
+                using M = std::decay_t<decltype(m)>;
+                const auto unmoving = [&](const auto& collider, bool bound) {
+                    if (bound) {
+                        refuse(collider, "is bound to a parameter; rigid physics colliders do not move or change yet");
+                    } else if (collider.kill) {
+                        refuse(collider, "kills; rigid physics bodies are only removed when their life ends");
+                    }
+                };
+                if constexpr (std::is_same_v<M, RigidPhysics>) {
+                    physics = &m;
+                } else if constexpr (std::is_same_v<M, Drag>) {
+                    if (m.coefficient.bound()) {
+                        refuse(m, "is bound to a parameter; rigid physics takes drag as a fixed damping");
+                    }
+                } else if constexpr (std::is_same_v<M, PlaneCollision>) {
+                    unmoving(m, m.restitution.bound() || m.friction.bound());
+                } else if constexpr (std::is_same_v<M, SphereCollision>) {
+                    if (m.inside) {
+                        refuse(m, "keeps particles inside; rigid physics colliders keep them out");
+                    }
+                    unmoving(m, m.center.bound() || m.radius.bound() || m.restitution.bound() || m.friction.bound());
+                } else if constexpr (std::is_same_v<M, BoxCollision>) {
+                    unmoving(m, m.center.bound() || m.restitution.bound() || m.friction.bound());
+                } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife>) {
+                    refuse(m, "cannot act on rigid physics particles; the physics engine moves them");
+                }
+            },
+            module);
+    }
+    if (error) {
+        return error;
+    }
+    const RigidShape shape = physics->shape;
+    if (shape == RigidShape::Hull && emitter.renderer.geometry != Geometry::Mesh) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " rigid physics shape 'hull' wraps the renderer's mesh, and the renderer draws none"};
+    }
+    if (emitter.renderer.geometry == Geometry::Mesh && emitter.renderer.facing == Facing::Velocity) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " renderer field 'facing' rigid mesh particles turn by their orientation: no velocity facing"};
+    }
+    return std::nullopt;
+}
+
 std::optional<Error> check_parameters(const Effect& effect) {
     std::set<std::string_view> names;
     for (const ParameterDesc& parameter : effect.parameters) {
@@ -323,6 +403,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     bool has_lifetime = false;
     bool has_tumble = false;
     std::size_t rigid_bodies = 0U;
+    std::size_t rigid_physics = 0U;
     std::size_t spins = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
@@ -340,6 +421,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
             has_tumble = true;
         } else if constexpr (std::is_same_v<M, RigidBody>) {
             ++rigid_bodies;
+        } else if constexpr (std::is_same_v<M, RigidPhysics>) {
+            ++rigid_physics;
         } else if constexpr (std::is_same_v<M, InitSpin>) {
             ++spins;
         }
@@ -363,8 +446,21 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     if (spins > 1U) {
         return Error{ErrorCode::InvalidEffect, where + " has more than one 'spin' module"};
     }
-    if (has_tumble && rigid_bodies == 0U) {
-        return Error{ErrorCode::InvalidEffect, where + " has a 'tumble' module but no 'rigid_body' module to turn it"};
+    if (rigid_physics > 1U) {
+        return Error{ErrorCode::InvalidEffect, where + " has more than one 'rigid_physics' module"};
+    }
+    if (rigid_physics == 1U && rigid_bodies > 0U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has both 'rigid_body' and 'rigid_physics'; choose the GPU tumble or the physics engine"};
+    }
+    if (has_tumble && rigid_bodies == 0U && rigid_physics == 0U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has a 'tumble' module but no 'rigid_body' or 'rigid_physics' module to turn it"};
+    }
+    if (rigid_physics == 1U) {
+        if (std::optional<Error> rigid = check_rigid_physics(emitter, where)) {
+            return rigid;
+        }
     }
 
     FieldChecker renderer{effect, where + " renderer"};
@@ -542,7 +638,7 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                                      std::is_same_v<M, BoxCollision> || std::is_same_v<M, SdfCollision>) {
                     // Collision only reads velocity; it has none to bounce
                     // unless something else gave it one.
-                } else if constexpr (std::is_same_v<M, RigidBody>) {
+                } else if constexpr (std::is_same_v<M, RigidBody> || std::is_same_v<M, RigidPhysics>) {
                     add(Attribute::Velocity);
                     add(Attribute::Orientation);
                     add(Attribute::AngularVelocity);
@@ -556,6 +652,20 @@ std::uint32_t required_attributes(const Emitter& emitter) {
         add(Attribute::Velocity);
     }
     return mask;
+}
+
+const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept {
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* physics = std::get_if<RigidPhysics>(&module)) {
+            return physics;
+        }
+    }
+    return nullptr;
+}
+
+bool has_rigid_physics(const Effect& effect) noexcept {
+    return std::any_of(effect.emitters.begin(), effect.emitters.end(),
+                       [](const Emitter& emitter) { return rigid_physics(emitter) != nullptr; });
 }
 
 } // namespace ajfx

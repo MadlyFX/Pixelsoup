@@ -29,6 +29,11 @@ enum class ErrorCode {
     MissingField,
     // An emitter draws a mesh its package does not hold.
     MissingMesh,
+    // An effect has rigid physics emitters, and the host gave no RigidSolver
+    // to run them (see rigid_solver.hpp).
+    RigidSolverMissing,
+    // The rigid solver could not build or restore an emitter's world.
+    RigidSolverFailure,
 };
 
 struct Error final {

@@ -3,11 +3,14 @@
 #include <ajfx/effect.hpp>
 #include <ajfx/field.hpp>
 #include <ajfx/math.hpp>
+#include <ajfx/mesh.hpp>
 #include <ajfx/parameters.hpp>
 #include <ajfx/result.hpp>
+#include <ajfx/rigid_solver.hpp>
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -46,6 +49,11 @@ struct EmitterState final {
     std::vector<Vec3> angular_velocity; // radians per second, in the effect's space
     std::vector<float> spin;            // a sprite's, radians per second
     std::vector<std::uint32_t> spawn_index;
+    // Rigid physics emitters only: each particle's slot in the emitter's
+    // world, and the world's own state (see RigidWorld::save), which
+    // Simulation::state brings up to date.
+    std::vector<std::uint32_t> body;
+    std::vector<std::uint8_t> solver_state;
 
     // Births so far, including refused ones; the low 32 bits of the count at
     // birth are a particle's spawn index.
@@ -66,12 +74,33 @@ struct SimulationState final {
     friend bool operator==(const SimulationState&, const SimulationState&) = default;
 };
 
+// What a simulation needs beyond the effect, from its package and its host.
+struct SimulationOptions final {
+    // The distance fields its colliders use.
+    FieldSet fields;
+    // The meshes its rigid physics hulls wrap.
+    MeshSet meshes;
+    // Runs its rigid physics emitters (ajfx::rigid::make_jolt_solver); must
+    // outlive the simulation. Effects without them need none.
+    const RigidSolver* rigid{nullptr};
+};
+
 class Simulation final {
 public:
     // Fails if the effect does not validate, or with MissingField when
     // `fields` lacks a distance field the effect collides with.
     [[nodiscard]] static Result<Simulation> create(Effect effect, std::uint32_t instance_seed = 0U,
                                                    FieldSet fields = {});
+    // As above; also fails with MissingMesh when a rigid physics hull's mesh
+    // is missing, RigidSolverMissing when the effect has rigid physics and no
+    // solver was given, and RigidSolverFailure when the solver refuses a
+    // world.
+    [[nodiscard]] static Result<Simulation> create(Effect effect, std::uint32_t instance_seed,
+                                                   SimulationOptions options);
+
+    Simulation(Simulation&&) noexcept;
+    Simulation& operator=(Simulation&&) noexcept;
+    ~Simulation();
 
     [[nodiscard]] const Effect& effect() const noexcept { return effect_; }
     [[nodiscard]] std::uint64_t tick() const noexcept { return state_.tick; }
@@ -84,22 +113,38 @@ public:
     // Back to step 0 with no particles.
     void reset();
 
-    [[nodiscard]] const SimulationState& state() const noexcept { return state_; }
+    // The whole state, rigid physics solver state included: saving that
+    // costs a little, so call it for checkpoints rather than every step.
+    [[nodiscard]] const SimulationState& state() const;
+    // One emitter's particles. A rigid physics emitter's `solver_state` may
+    // be out of date here; state() brings it up to date.
     [[nodiscard]] const EmitterState& emitter(std::size_t index) const { return state_.emitters[index]; }
-    // Replaces the state, e.g. with a checkpoint taken from this simulation.
-    void restore(const SimulationState& state) { state_ = state; }
+    // Replaces the state with one this simulation's state() returned (a
+    // checkpoint), rebuilding rigid physics worlds from it.
+    void restore(const SimulationState& state);
 
 private:
+    struct RigidEmitter final {
+        RigidWorldDesc desc;
+        std::unique_ptr<RigidWorld> world;
+    };
+
     Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fields);
 
     void step_emitter(std::size_t index, std::span<const ParameterValue> values);
+    // A fresh world for each rigid physics emitter, holding the bodies its
+    // particles in state_ have (none after a reset).
+    void rebuild_worlds();
 
     Effect effect_;
     std::uint32_t instance_seed_{0U};
     float step_seconds_{0.0F};
-    SimulationState state_;
+    mutable SimulationState state_;
     std::vector<ParameterValue> values_;
     FieldSet fields_;
+    const RigidSolver* solver_{nullptr};
+    std::vector<RigidEmitter> rigid_;
+    mutable bool solver_state_stale_{false};
 };
 
 // Snapshots taken every `interval` steps, so a seek resimulates at most one

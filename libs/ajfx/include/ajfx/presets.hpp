@@ -26,6 +26,12 @@ namespace ajfx::presets {
 // Parameters: force (the fastest throw, units per second).
 [[nodiscard]] Effect debris();
 
+// A burst of stone chips (the "chip" mesh) thrown up from the floor that
+// land, pile against two blocks and against each other, and come to rest:
+// rigid physics, so it needs ajfx::rigid to run. Parameters: force (the
+// fastest throw, units per second).
+[[nodiscard]] Effect rubble();
+
 // The textures the presets name, generated (no image files): "puff", a 2x2
 // flipbook of soft, lumpy puffs that spread out cell by cell.
 [[nodiscard]] TextureSet textures();
