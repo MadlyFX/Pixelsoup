@@ -247,22 +247,35 @@ feedback forces could evaluate any frame directly.
        in, a material out of range, too many kinds, and a hull with nothing
        to wrap. Package round trip, reruns, thread counts and seek
        equivalence are tested; damping and sleep stay the world's.
-       - **Not yet:** a kind decides what a body collides as, not what it
-         looks like, since the renderer draws one mesh for the whole
-         emitter. Pieces that look like pieces need a mesh per particle,
-         which is rendering work rather than physics. Size is the
-         particle's, so what spawns a body sets how big it is -- which is
-         what the Break module will do for the pieces it makes.
+       - **Not yet, and what breaking needs on top:** a body is a sphere, a
+         cube or a hull, scaled by one number, so a panel, a slab or a
+         splinter cannot be a box at all. A box kind needs its own half
+         extents, as a prop already has. And a kind decides what a body
+         collides as, not what it looks like, since the renderer draws one
+         mesh for the whole emitter. Pieces shaped like pieces therefore
+         want both: extents on a box kind, or a shard model per kind, and a
+         mesh per particle to draw them by, which is rendering work rather
+         than physics. Fifteen kinds is also few for a shard library, so a
+         piece set may need to carry its shapes rather than name kinds.
      - **The Break module.** A body whose impact passes `threshold` is
-       removed and replaced, at its pose and velocity, by a named piece
-       set's pieces: chunks authored as models in the package, or a box cut
-       `splits` ways along each axis, which is what a crate is. Breaks are
-       taken in slot order, each piece's offset and spin come from
+       removed and replaced by the pieces of a named piece set, each at its
+       own offset and turn within the parent's pose, inheriting the parent's
+       velocity and a scatter of its own. A piece set is authored: the
+       panels, splinters and chunks a thing actually comes apart into, each
+       a shape and a place. A crate breaks into flat panels and slivers, not
+       into smaller crates, so a grid of cubes is not a piece set; cutting a
+       box `splits` ways is for a solid lump, a stone or a brick, and even
+       there each piece is a slab rather than a cube. Breaks are taken in
+       slot order, each piece's scatter and spin come from
        `particle_hash(seed, the parent's spawn index, stream)`, and
        `generations` bounds how often a piece may break again. Budgets are
        fixed up front, so a break the emitter's capacity cannot hold is
        refused when the effect is built rather than thinned at playback:
        capacity must cover `count * pieces^generations`.
+       - The body that breaks is itself solid: only a prop can be hollow (a
+         compound of convex pieces), and a prop never dies, so a crate
+         standing as a body is a closed lump until the moment it comes
+         apart. A lid that caves in before it breaks is not this feature.
      - **Studio and the shot.** A **Break** block in a rigid layer
        (`Category::Physics`, beside Pile and Prop): how hard, into what, how
        many times, with the piece set drawn over the preview as the Prop
