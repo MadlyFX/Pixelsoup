@@ -41,6 +41,7 @@ void destroy_d3d12_device(void* state) noexcept;
 [[nodiscard]] core::RenderAdapterIdentity d3d12_adapter_identity(void* state) noexcept;
 [[nodiscard]] std::string_view d3d12_driver_name(void* state) noexcept;
 [[nodiscard]] core::u64 d3d12_dedicated_video_memory(void* state) noexcept;
+[[nodiscard]] std::string_view d3d12_lost_reason(void* state) noexcept;
 [[nodiscard]] bool d3d12_supports_shader(ShaderFormat format) noexcept;
 [[nodiscard]] bool d3d12_supports_texture(
     void* state, TextureFormat format) noexcept;
@@ -72,7 +73,7 @@ void d3d12_release_texture(void* state, void* texture) noexcept;
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
 d3d12_create_storage_buffer(void* state, core::u32 bytes) noexcept;
 [[nodiscard]] core::Result<D3d12CreatedResource, RhiError>
-d3d12_create_geometry_buffer(void* state, core::u32 bytes) noexcept;
+d3d12_create_geometry_buffer(void* state, core::u32 bytes, bool writable = false) noexcept;
 void d3d12_release_storage_buffer(void* state, void* buffer) noexcept;
 [[nodiscard]] bool d3d12_buffer_safe_to_release(void* state, void* buffer) noexcept;
 
@@ -111,7 +112,8 @@ void d3d12_release_commands(void* state, void* commands) noexcept;
 [[nodiscard]] bool d3d12_upload_buffer_range(
     void* commands, void* buffer, core::u32 offset, std::span<const core::u8> data) noexcept;
 [[nodiscard]] bool d3d12_copy_buffer(
-    void* commands, void* source, void* destination, core::u32 bytes) noexcept;
+    void* commands, void* source, core::u32 source_offset, void* destination, core::u32 destination_offset,
+    core::u32 bytes) noexcept;
 [[nodiscard]] core::u64 d3d12_upload_space(void* commands) noexcept;
 [[nodiscard]] core::u32 d3d12_texture_upload_row_capacity(
     void* commands, void* texture, core::u64 reserve_bytes) noexcept;
@@ -154,6 +156,8 @@ void d3d12_release_commands(void* state, void* commands) noexcept;
     void* destination) noexcept;
 [[nodiscard]] bool d3d12_download(
     void* commands, void* source, void* readback, core::u32 mip = 0U, core::u32 layer = 0U) noexcept;
+[[nodiscard]] bool d3d12_download_buffer(
+    void* commands, void* source, core::u32 offset, core::u32 bytes, void* readback) noexcept;
 
 [[nodiscard]] core::Result<void*, RhiError>
 d3d12_submit(void* state, void* commands) noexcept;

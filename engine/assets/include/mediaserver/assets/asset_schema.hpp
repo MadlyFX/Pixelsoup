@@ -15,6 +15,11 @@ inline constexpr std::string_view model_type = "asset.model";
 inline constexpr std::string_view projection_mesh_type =
     "asset.projection_mesh";
 
+// An ajfx particle effect package (.ajfx), exported by ajfx Studio. It
+// carries its own precompiled kernels, so it needs nothing probed at import.
+inline constexpr std::string_view particle_effect_type =
+    "asset.particle_effect";
+
 // A Library folder. It carries a display_name and an optional `folder`
 // naming its parent folder, exactly as an asset names the folder it is in.
 inline constexpr std::string_view folder_type = "asset.folder";

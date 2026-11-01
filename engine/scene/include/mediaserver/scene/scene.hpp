@@ -2205,6 +2205,8 @@ inline constexpr core::u32 max_scene_media = 64U;
 inline constexpr core::u32 media_prewarm_seconds = 5U;
 inline constexpr core::u32 max_media_prewarm_clips = 8U;
 inline constexpr core::u32 max_scene_models = 4'096U;
+// Each one is a GPU simulation with its own buffers and checkpoints.
+inline constexpr core::u32 max_scene_particle_effects = 64U;
 inline constexpr core::u32 max_scene_effects = 512U;
 inline constexpr core::u32 max_scene_groups = 1'024U;
 inline constexpr core::u32 max_scene_lanes = 256U;
@@ -2265,6 +2267,9 @@ enum class PropertyChannel : core::u8 {
     CameraShutter,
     CameraFocusDistance,
     CameraAperture,
+    // A published parameter component of a particle effect. Unlike the
+    // others it is one of many: ChannelKeyframes::parameter names which.
+    ParticleParameter,
     Count,
 };
 
@@ -2336,6 +2341,10 @@ struct ChannelKeyframes final {
     // dormant tangent state. Every Cubic entry has one canonical projection,
     // including legacy Cubic keys which project as Auto.
     std::vector<std::optional<KeyTangent>> tangents;
+    // For PropertyChannel::ParticleParameter, the parameter key ("rate.0");
+    // empty for every other component. Last, so positional initializers of
+    // the other channels need not name it.
+    std::string parameter;
 
     bool operator==(const ChannelKeyframes&) const = default;
 };
@@ -2358,6 +2367,72 @@ struct KeySlopes final {
 
 [[nodiscard]] std::optional<double> sample_keyframes(
     const ChannelKeyframes& channel, core::i64 frame) noexcept;
+// The same curve between show frames: at `frame + fraction`, fraction in
+// [0, 1). A fraction of zero is exactly the whole-frame sample.
+[[nodiscard]] std::optional<double> sample_keyframes(
+    const ChannelKeyframes& channel, core::i64 frame, double fraction) noexcept;
+
+// One published parameter component of a placed particle effect: its key
+// ("rate.0" is a Float's value, "wind.2" a Vec3's z, "tint.3" a Color's
+// alpha), the authored base value, and the curve that replaces it where the
+// component is keyframed. A simulation steps faster than the show, so the
+// renderer samples the curve at each step's own time, between show frames.
+struct ParticleParameter final {
+    std::string key;
+    double base{};
+    // No frames: not animated. Its target and component are unused.
+    ChannelKeyframes curve;
+
+    bool operator==(const ParticleParameter&) const = default;
+};
+
+inline constexpr core::u32 max_particle_parameters = 64U;
+
+// The key's parameter name and component, or nothing when the key is not a
+// name of letters, digits and underscores followed by `.0` to `.3`.
+struct ParticleParameterKey final {
+    std::string_view name;
+    core::u32 component{};
+};
+[[nodiscard]] std::optional<ParticleParameterKey> parse_particle_parameter_key(
+    std::string_view key) noexcept;
+
+// The parameter's value at `frame + fraction` show frames (fraction in
+// [0, 1)): the curve where it is keyed, the base value otherwise.
+[[nodiscard]] double particle_parameter_at(const ParticleParameter& parameter,
+                                           core::i64 frame, double fraction) noexcept;
+
+// A placed ajfx particle effect, evaluated for one show frame.
+struct ParticleEffect final {
+    // Effect space to world.
+    Mat4 world{};
+    // The .ajfx package.
+    std::string source;
+    doc::NodeId source_node{};
+    // The authored seed; see `particle_instance_seed`.
+    core::u32 seed{};
+    // The show frame the effect's own time begins at.
+    core::u64 start_frame{};
+    bool locked{};
+    std::optional<doc::NodeId> parent_group;
+    core::i64 group_order{};
+    // The published parameter components the node sets or keys, sorted by
+    // key. Components a package publishes and the node leaves alone take the
+    // package's defaults.
+    std::vector<ParticleParameter> parameters;
+
+    bool operator==(const ParticleEffect&) const = default;
+};
+
+// The seed a particle simulation runs with: the node identity mixed with the
+// authored seed, so two placements of one package differ even with equal
+// seeds, and every node derives the same value from replicated state.
+[[nodiscard]] core::u32 particle_instance_seed(const ParticleEffect& effect) noexcept;
+
+// The frame of an effect's own time at a show frame, or nothing before it
+// starts.
+[[nodiscard]] std::optional<core::u64> particle_effect_frame(const ParticleEffect& effect,
+                                                             core::u64 show_frame) noexcept;
 
 [[nodiscard]] core::u64 asset_set_digest(const struct Scene& scene) noexcept;
 [[nodiscard]] core::u64 asset_generation_key(const struct Scene& scene) noexcept;
@@ -2468,6 +2543,9 @@ struct Scene final {
     std::vector<MediaPrewarm> media_prewarm;
     // Imported models, drawn in the lit pass with geometry the renderer loads.
     std::vector<ModelInstance> models;
+    // Particle effects, simulated and drawn over the lit scene. Bounded by
+    // `max_scene_particle_effects`.
+    std::vector<ParticleEffect> particle_effects;
     // Ordered by target, authored order, then effect node id.
     std::vector<EffectInstance> effects;
     std::vector<DirectionalLight> directional_lights;

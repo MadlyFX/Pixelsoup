@@ -1661,6 +1661,7 @@ namespace {
   return element.kind == ElementKind::Object ||
          element.kind == ElementKind::Media ||
          element.kind == ElementKind::Model ||
+         element.kind == ElementKind::ParticleEffect ||
          element.kind == ElementKind::Group || is_light(element.kind);
 }
 
@@ -1669,6 +1670,7 @@ namespace {
          (element.kind == ElementKind::Object ||
           element.kind == ElementKind::Media ||
           element.kind == ElementKind::Model ||
+          element.kind == ElementKind::ParticleEffect ||
           element.kind == ElementKind::Group);
 }
 
@@ -9592,6 +9594,14 @@ StageAssetStatus stage_asset_status(const render::RenderStats& geometry,
   }
   if (!geometry.baked_ready && geometry.baked_state == render::ProbeCacheState::Failed)
     return failed("Baked lighting could not load. Check its path or rebake the scene.");
+  if (geometry.particles_unsupported != 0U)
+    return failed("Particle effects play only in the Advanced renderer. Choose it in Renderer settings.");
+  // The package's own reason (a missing texture, kernels from another
+  // version) tells the operator what to fix.
+  if (geometry.particles_failed != 0U)
+    return failed(geometry.particle_issue.empty()
+        ? "A particle effect could not load. Check its source path, then Rescan in Library."
+        : "A particle effect could not load: " + geometry.particle_issue + ". Fix it, then Rescan in Library.");
   if (display == render::DisplayLutState::Failed)
     return failed("The Stage display color transform could not load.");
   if (geometry.models_pending != 0U || geometry.models_stale != 0U)
@@ -9603,6 +9613,10 @@ StageAssetStatus stage_asset_status(const render::RenderStats& geometry,
     return loading("Loading baked lighting.");
   if (pending_media != 0U)
     return loading("Loading media: " + std::to_string(pending_media) + " pending.");
+  if (geometry.particles_pending != 0U)
+    return loading("Loading particle effects: " + std::to_string(geometry.particles_pending) + " pending.");
+  if (geometry.particles_behind != 0U)
+    return loading("Particle effects are catching up with the playhead.");
   if (display != render::DisplayLutState::Ready)
     return loading("Preparing the Stage display color transform.");
   if (!geometry.assets.ready)

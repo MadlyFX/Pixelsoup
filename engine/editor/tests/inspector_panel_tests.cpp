@@ -667,6 +667,157 @@ void a_light_edits_its_own_named_properties() {
     UI_CHECK(brighter.named_edits.front().property == scene::schema::intensity);
 }
 
+void a_particle_effect_edits_its_seed_and_start_frame() {
+    // An object offers no particle fields.
+    Harness plain;
+    bool reachable = true;
+    try {
+        static_cast<void>(plain.control_y("particles.start", subject.value()));
+    } catch (const std::runtime_error&) {
+        reachable = false;
+    }
+    UI_CHECK(!reachable);
+
+    Harness h;
+    h.element.kind = editor::ElementKind::ParticleEffect;
+    h.element.source = "C:/show/embers.ajfx";
+    h.element.particle_seed = 3U;
+    h.element.particle_start_frame = 12;
+    const float seed_y = h.control_y("Seed", 0U, field_x0);
+    static_cast<void>(h.frame(field_x0, seed_y, false));
+    static_cast<void>(h.frame(field_x0, seed_y, true));
+    const editor::InspectorFrame scrubbed = h.frame(field_x0 + 20.0F, seed_y, true);
+    static_cast<void>(h.frame(field_x0 + 20.0F, seed_y, false));
+    UI_CHECK(scrubbed.named_edits.size() == 1U);
+    UI_CHECK(scrubbed.named_edits.front().node == subject);
+    UI_CHECK(scrubbed.named_edits.front().property == scene::schema::particle_seed);
+    // Whole numbers only: the seed decides which particles every node draws.
+    UI_CHECK(scrubbed.named_edits.front().value > 3.0);
+    UI_CHECK(scrubbed.named_edits.front().value == std::round(scrubbed.named_edits.front().value));
+
+    // The button starts the effect's own time at the playhead.
+    const float start_y = h.control_y("particles.start", subject.value());
+    static_cast<void>(h.frame(40.0F, start_y, false));
+    static_cast<void>(h.frame(40.0F, start_y, true));
+    const editor::InspectorFrame started = h.frame(40.0F, start_y, false);
+    UI_CHECK(started.named_edits.size() == 1U);
+    UI_CHECK(started.named_edits.front().property == scene::schema::particle_start_frame);
+    UI_CHECK(started.named_edits.front().value == static_cast<double>(h.show_frame));
+
+    // A changed start frame offers the reset arrow, which returns it to zero.
+    h.element.particle_start_frame = 50;
+    core::u64 reset_id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
+    for (const char c : std::string_view{"Start frame"}) {
+        reset_id ^= static_cast<core::u8>(c);
+        reset_id *= 1099511628211ULL;
+    }
+    reset_id ^= static_cast<core::u64>(10'000U) + 0x9E3779B9ULL;
+    reset_id *= 1099511628211ULL;
+    std::optional<std::pair<float, float>> arrow;
+    for (float y = 10.0F; y < 600.0F && !arrow; y += 4.0F) {
+        for (float x = 2.0F; x < 200.0F && !arrow; x += 3.0F) {
+            static_cast<void>(h.frame(x, y, false));
+            if (h.ctx.hot() == reset_id) {
+                arrow = std::pair{x, y};
+            }
+        }
+    }
+    UI_CHECK(arrow.has_value());
+    static_cast<void>(h.frame(arrow->first, arrow->second, true));
+    const editor::InspectorFrame reset = h.frame(arrow->first, arrow->second, false);
+    UI_CHECK(reset.named_edits.size() == 1U);
+    UI_CHECK(reset.named_edits.front().property == scene::schema::particle_start_frame);
+    UI_CHECK(reset.named_edits.front().value == 0.0);
+
+    // Particles have no material or compositing to edit.
+    bool material = true;
+    try {
+        static_cast<void>(h.control_y("fill mode", subject.value()));
+    } catch (const std::runtime_error&) {
+        material = false;
+    }
+    UI_CHECK(!material);
+}
+
+// The point where control (`name`, `salt`) is hot, searched across the panel.
+[[nodiscard]] std::optional<std::pair<float, float>> find_control(Harness& h, std::string_view name, std::size_t salt) {
+    core::u64 id = gui::ui_id("inspector") ^ 0x9E3779B97F4A7C15ULL;
+    for (const char c : name) {
+        id ^= static_cast<core::u8>(c);
+        id *= 1099511628211ULL;
+    }
+    id ^= static_cast<core::u64>(salt) + 0x9E3779B9ULL;
+    id *= 1099511628211ULL;
+    for (float y = 10.0F; y < 880.0F; y += 4.0F) {
+        for (float x = 2.0F; x < 298.0F; x += 3.0F) {
+            static_cast<void>(h.frame(x, y, false));
+            if (h.ctx.hot() == id) {
+                return std::pair{x, y};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void a_particle_effect_edits_and_keys_its_published_parameters() {
+    Harness h;
+    h.element.kind = editor::ElementKind::ParticleEffect;
+    h.element.source = "C:/show/embers.ajfx";
+    editor::ParticleParameterInfo size{};
+    size.name = "size";
+    size.components = 1U;
+    size.min = 0.1F;
+    size.max = 4.0F;
+    size.fallback = {1.0F, 0.0F, 0.0F, 0.0F};
+    editor::ParticleParameterInfo tint{};
+    tint.name = "tint";
+    tint.components = 4U;
+    tint.color = true;
+    tint.fallback = {1.0F, 0.5F, 0.25F, 1.0F};
+    h.element.particle_parameters = {size, tint};
+
+    // A drag on the value authors the node's own value under its key.
+    const auto field = find_control(h, "size", 0U);
+    UI_CHECK(field.has_value());
+    static_cast<void>(h.frame(field->first, field->second, true));
+    const editor::InspectorFrame dragged = h.frame(field->first + 20.0F, field->second, true);
+    static_cast<void>(h.frame(field->first + 20.0F, field->second, false));
+    UI_CHECK(dragged.named_edits.size() == 1U);
+    UI_CHECK(dragged.named_edits.front().property == "particle_parameter.size.0");
+    UI_CHECK(dragged.named_edits.front().value > 1.0);
+    UI_CHECK(dragged.key_edits.empty());
+
+    // A colour has four components, R G B A, and a colour well.
+    UI_CHECK(find_control(h, "tint", 3U).has_value());
+    UI_CHECK(find_control(h, "tint", 11'000U).has_value());
+
+    // The diamond keys each component at the playhead, by key.
+    const auto diamond = find_control(h, "tint", 9'000U);
+    UI_CHECK(diamond.has_value());
+    static_cast<void>(h.frame(diamond->first, diamond->second, true));
+    const editor::InspectorFrame keyed = h.frame(diamond->first, diamond->second, false);
+    UI_CHECK(keyed.key_edits.size() == 4U);
+    UI_CHECK(keyed.key_edits[0].component == scene::PropertyChannel::ParticleParameter);
+    UI_CHECK(keyed.key_edits[0].parameter == "tint.0" && keyed.key_edits[3].parameter == "tint.3");
+    UI_CHECK(keyed.key_edits[1].value == 0.5 && !keyed.key_edits[1].erase);
+
+    // Once keyed, the field shows the curve and an edit becomes a key.
+    scene::ChannelKeyframes channel{h.element.node, scene::PropertyChannel::ParticleParameter,
+                                    {0, 100}, {2.0, 3.0}};
+    channel.parameter = "size.0";
+    h.keyframes = {channel};
+    const auto keyed_field = find_control(h, "size", 0U);
+    UI_CHECK(keyed_field.has_value());
+    static_cast<void>(h.frame(keyed_field->first, keyed_field->second, true));
+    const editor::InspectorFrame rekeyed = h.frame(keyed_field->first + 20.0F, keyed_field->second, true);
+    static_cast<void>(h.frame(keyed_field->first + 20.0F, keyed_field->second, false));
+    UI_CHECK(rekeyed.named_edits.empty());
+    UI_CHECK(rekeyed.key_edits.size() == 1U);
+    UI_CHECK(rekeyed.key_edits.front().parameter == "size.0");
+    // From the curve's value at the playhead (frame 50: 2.5), not the default.
+    UI_CHECK(rekeyed.key_edits.front().value > 2.5);
+}
+
 void a_collapsed_section_takes_its_fields_with_it() {
     Harness h;
     // Twirl the transform shut.
@@ -2000,7 +2151,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 58U> cases{{
+constexpr std::array<Case, 60U> cases{{
     {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
@@ -2105,6 +2256,10 @@ constexpr std::array<Case, 58U> cases{{
      &locked_and_incompatible_targets_are_listed_and_skipped},
     {"named and effect fields share the multi-edit contract",
      &named_and_effect_fields_share_the_multi_edit_contract},
+    {"a particle effect edits its seed and start frame",
+     &a_particle_effect_edits_its_seed_and_start_frame},
+    {"a particle effect edits and keys its published parameters",
+     &a_particle_effect_edits_and_keys_its_published_parameters},
 }};
 
 } // namespace

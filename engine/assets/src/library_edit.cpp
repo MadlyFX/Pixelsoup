@@ -15,7 +15,8 @@ namespace {
     return node.type == schema::media_type ||
         node.type == schema::model_type ||
         node.type == schema::projection_mesh_type ||
-        node.type == schema::plateset_type;
+        node.type == schema::plateset_type ||
+        node.type == schema::particle_effect_type;
 }
 
 [[nodiscard]] bool is_plateset(const doc::Node& node) noexcept {

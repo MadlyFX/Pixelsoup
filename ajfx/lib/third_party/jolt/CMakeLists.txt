@@ -1,0 +1,46 @@
+# Jolt Physics for ajfx's rigid emitters, built for determinism (see
+# README.md). This replaces Jolt's own Build/CMakeLists.txt; Jolt.cmake reads
+# the variables below.
+
+set(PHYSICS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+
+set(CROSS_PLATFORM_DETERMINISTIC ON)
+set(DOUBLE_PRECISION OFF)
+set(OBJECT_LAYER_BITS 16)
+set(JPH_BUILD_SHARED_LIBS OFF)
+set(USE_ASSERTS OFF)
+set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF)
+set(DISABLE_CUSTOM_ALLOCATOR OFF)
+set(USE_STD_VECTOR OFF)
+set(ENABLE_OBJECT_STREAM OFF)
+set(TRACK_BROADPHASE_STATS OFF)
+set(TRACK_NARROWPHASE_STATS OFF)
+set(JPH_TRACK_SIMULATION_STATS OFF)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF)
+set(DEBUG_RENDERER_IN_DISTRIBUTION OFF)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF)
+set(PROFILER_IN_DISTRIBUTION OFF)
+set(JPH_USE_EXTERNAL_PROFILE OFF)
+set(JPH_USE_DX12 OFF)
+set(JPH_USE_VK OFF)
+set(JPH_USE_MTL OFF)
+set(JPH_USE_CPU_COMPUTE OFF)
+# The baseline every node's CPU has.
+set(USE_SSE4_1 ON)
+set(USE_SSE4_2 ON)
+set(USE_AVX OFF)
+set(USE_AVX2 OFF)
+set(USE_AVX512 OFF)
+set(USE_LZCNT OFF)
+set(USE_TZCNT OFF)
+set(USE_F16C OFF)
+set(USE_FMADD OFF)
+
+include("${PHYSICS_REPO_ROOT}/Jolt/Jolt.cmake")
+
+if(MSVC)
+    target_compile_options(Jolt PRIVATE /fp:precise /fp:except- /W0)
+else()
+    target_compile_options(Jolt PRIVATE -ffp-contract=off -fno-fast-math -w)
+endif()
+set_target_properties(Jolt PROPERTIES FOLDER "libs/third_party" COMPILE_WARNING_AS_ERROR OFF)

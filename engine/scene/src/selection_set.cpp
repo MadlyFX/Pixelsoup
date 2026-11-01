@@ -189,7 +189,8 @@ public:
 
 [[nodiscard]] bool is_drawable(std::string_view type) noexcept {
     return type == schema::object_type || type == schema::media_type
-        || type == schema::model_type;
+        || type == schema::model_type
+        || type == schema::particle_effect_type;
 }
 
 [[nodiscard]] bool is_selectable(std::string_view type) noexcept {

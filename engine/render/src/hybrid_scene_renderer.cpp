@@ -643,6 +643,22 @@ RenderProductsResult HybridSceneRenderer::render_frame(
         return RenderProductsResult::failure(RenderError::BackendFailure);
     }
 
+    // A hold repeats the last resolve, which is right only while the frame
+    // still draws what that resolve saw. Something the scene digest cannot
+    // see - a particle package that loaded, an effect that caught up, a swap
+    // at the asset generation - is a new picture of the same frame: begin
+    // again from it, once, as a same-frame edit does. A hold that draws
+    // nothing new still repeats its history untouched, so a paused wall
+    // neither shimmers nor re-accumulates.
+    HistoryDecision published_history = history_decision;
+    const core::u64 drawn_digest = selected.stats().particle_digest;
+    const bool content_reset = history_decision.disposition == HistoryDisposition::Hold
+        && drawn_digest != pending_history.drawn_digest;
+    if (content_reset) {
+        published_history.disposition = HistoryDisposition::Reset;
+    }
+    pending_history.drawn_digest = drawn_digest;
+
     if (request.conformance) {
         const auto& tap = *request.conformance;
         using P = core::ConformancePass;
@@ -753,7 +769,7 @@ RenderProductsResult HybridSceneRenderer::render_frame(
                 : 0.0F};
         auto resolved = temporal_->apply(
             *device_, commands, record_options.history_slot,
-            history_decision.disposition, sources);
+            published_history.disposition, sources);
         if (!resolved) {
             ++diagnostics_.temporal_refusals;
             last_products_ = RenderProducts{};
@@ -906,7 +922,10 @@ RenderProductsResult HybridSceneRenderer::render_frame(
     if (evicting) {
         ++diagnostics_.history_slot_evictions;
     }
-    last_products_.history = history_decision;
+    last_products_.history = published_history;
+    if (content_reset) {
+        ++diagnostics_.history_content_resets;
+    }
     last_products_.readiness = readiness;
 
     // What actually ran, as opposed to what was asked for.

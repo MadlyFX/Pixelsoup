@@ -838,6 +838,7 @@ core::u32 SceneCounters::over_capacity() const noexcept {
         + over(lanes, max_scene_lanes)
         + over(groups, max_scene_groups)
         + over(models, max_scene_models)
+        + over(particle_effects, max_scene_particle_effects)
         + over(directional_lights, max_scene_directional_lights)
         + over(point_lights, max_scene_point_lights)
         + over(slices, max_scene_slices)
@@ -872,6 +873,8 @@ void SceneModel::note(const Entry& entry, bool added) noexcept {
         step(counters_.media);
     } else if (std::holds_alternative<ModelEntry>(entry)) {
         step(counters_.models);
+    } else if (std::holds_alternative<ParticleEffectEntry>(entry)) {
+        step(counters_.particle_effects);
     } else if (const auto* const light = std::get_if<LightEntry>(&entry)) {
         step(light->directional ? counters_.directional_lights
                                 : counters_.point_lights);
@@ -1834,6 +1837,58 @@ void SceneModel::put(const doc::Node& node) {
         if (linked != linked_.occurrences.end())
             model.visible = linked->second.visible && !linked->second.source.empty();
         parsed = Entry{std::move(model)};
+    } else if (node.type == schema::particle_effect_type) {
+        ParticleEffectEntry effect{};
+        effect.scene = read_scene_id(reader, node.properties);
+        effect.parent_group = read_parent_group(reader, node.properties);
+        effect.group_order = reader.integer(schema::group_order, 0);
+        effect.source = std::string{reader.text(schema::source, "")};
+        if (effect.source.empty()) {
+            // An effect with no package to load is unauthored, not empty.
+            reader.fail();
+        }
+        effect.position = reader.vector(
+            schema::position_x, schema::position_y, schema::position_z, Vec3{});
+        effect.yaw = reader.number(schema::rotation_yaw, 0.0F);
+        effect.pitch = reader.number(schema::rotation_pitch, 0.0F);
+        effect.roll = reader.number(schema::rotation_roll, 0.0F);
+        effect.scale = reader.vector(
+            schema::scale_x, schema::scale_y, schema::scale_z, Vec3{1.0F, 1.0F, 1.0F});
+        const auto seed = reader.integer(schema::particle_seed, 0);
+        const auto start = reader.integer(schema::particle_start_frame, 0);
+        // Out of range is a damaged node, not something to clamp: two nodes
+        // must not quietly disagree about which particles they draw.
+        if (seed < 0 || seed > static_cast<core::i64>(std::numeric_limits<core::u32>::max()) || start < 0) {
+            reader.fail();
+        } else {
+            effect.seed = static_cast<core::u32>(seed);
+            effect.start_frame = static_cast<core::u64>(start);
+        }
+        effect.locked = reader.boolean(schema::locked, false);
+        effect.visible = reader.boolean(schema::visible, true);
+        // Published parameter values. A malformed one damages the node like
+        // any typed property: two nodes must not disagree about it.
+        for (const auto& [name, value] : node.properties) {
+            if (!std::string_view{name}.starts_with(schema::particle_parameter_prefix)) {
+                continue;
+            }
+            const std::string_view key =
+                std::string_view{name}.substr(schema::particle_parameter_prefix.size());
+            const auto* const real = std::get_if<double>(&value);
+            const auto* const whole = std::get_if<std::int64_t>(&value);
+            const double number = real != nullptr ? *real
+                : whole != nullptr ? static_cast<double>(*whole)
+                : std::numeric_limits<double>::quiet_NaN();
+            if (!parse_particle_parameter_key(key) || !std::isfinite(number)
+                || std::abs(number) > static_cast<double>(std::numeric_limits<float>::max())
+                || effect.parameters.size() >= max_particle_parameters) {
+                reader.fail();
+                break;
+            }
+            effect.parameters.emplace_back(std::string{key}, number);
+        }
+        std::sort(effect.parameters.begin(), effect.parameters.end());
+        parsed = Entry{std::move(effect)};
     } else if (node.type == schema::light_type) {
         LightEntry light{};
         light.scene = read_scene_id(reader, node.properties);
@@ -2235,6 +2290,12 @@ void SceneModel::put(const doc::Node& node) {
             channel.component = PropertyChannel::CameraFocusDistance;
         } else if (component == schema::aperture_f_number) {
             channel.component = PropertyChannel::CameraAperture;
+        } else if (std::string_view{component}.starts_with(schema::particle_parameter_prefix)
+                   && parse_particle_parameter_key(std::string_view{component}.substr(
+                          schema::particle_parameter_prefix.size()))) {
+            channel.component = PropertyChannel::ParticleParameter;
+            channel.parameter = std::string{
+                std::string_view{component}.substr(schema::particle_parameter_prefix.size())};
         } else {
             reader.fail();
         }
@@ -2568,6 +2629,9 @@ std::optional<SceneId> SceneModel::scope_of(
         if (const auto* value = std::get_if<ModelEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
+        if (const auto* value = std::get_if<ParticleEffectEntry>(&entry)) {
+            return value->scene.value_or(default_scene);
+        }
         if (const auto* value = std::get_if<LightEntry>(&entry)) {
             return value->scene.value_or(default_scene);
         }
@@ -2767,6 +2831,8 @@ SceneModel::GroupProjection SceneModel::resolve_groups(
             diagnose_drawable(id, *media);
         } else if (const auto* model = std::get_if<ModelEntry>(&entry)) {
             diagnose_drawable(id, *model);
+        } else if (const auto* effect = std::get_if<ParticleEffectEntry>(&entry)) {
+            diagnose_drawable(id, *effect);
         }
     }
 
@@ -3055,6 +3121,9 @@ SceneModel::MaskProjection SceneModel::resolve_masks(
         } else if (const auto* model =
                        std::get_if<ModelEntry>(&found->second)) {
             owner = model->scene;
+        } else if (const auto* effect =
+                       std::get_if<ParticleEffectEntry>(&found->second)) {
+            owner = effect->scene;
         } else if (const auto* group =
                        std::get_if<GroupEntry>(&found->second)) {
             owner = group->scene;
@@ -3312,9 +3381,16 @@ bool SceneModel::valid_channel(std::span<const ChannelKey> channel) noexcept {
 
 double SceneModel::sample_channel(
     std::span<const ChannelKey> channel, core::i64 frame) noexcept {
+    return sample_channel(channel, frame, 0.0);
+}
+
+double SceneModel::sample_channel(
+    std::span<const ChannelKey> channel, core::i64 frame, double fraction) noexcept {
     const auto keys = channel;
     // Held flat outside the authored range, so a channel never extrapolates.
-    if (frame <= keys.front().frame) {
+    // Keys sit on whole frames, so `frame + fraction` lies in the interval
+    // that starts at or before `frame`.
+    if (frame < keys.front().frame || (frame == keys.front().frame && fraction <= 0.0)) {
         return keys.front().value;
     }
     if (frame >= keys.back().frame) {
@@ -3331,7 +3407,7 @@ double SceneModel::sample_channel(
         });
     const auto& lo = *(after - 1);
     const auto& hi = *after;
-    if (frame == lo.frame) {
+    if (frame == lo.frame && fraction <= 0.0) {
         return lo.value;
     }
     if (lo.interp == ChannelInterp::Hold) {
@@ -3342,7 +3418,7 @@ double SceneModel::sample_channel(
     const double span = static_cast<double>(
         frame_distance(lo.frame, hi.frame));
     const double offset = static_cast<double>(
-        frame_distance(lo.frame, frame));
+        frame_distance(lo.frame, frame)) + fraction;
     if (lo.interp == ChannelInterp::Linear) {
         const double t = offset / span;
         return lo.value + (hi.value - lo.value) * t;
@@ -3400,6 +3476,37 @@ double SceneModel::sample_channel(
     return result;
 }
 
+ChannelKeyframes SceneModel::keyframes_of(const ChannelEntry& channel) {
+    ChannelKeyframes curve{};
+    curve.target = channel.target;
+    curve.component = channel.component;
+    curve.parameter = channel.parameter;
+    for (std::size_t index = 0U; index < channel.keys.size(); ++index) {
+        const ChannelKey& key = channel.keys[index];
+        // Keys are frame-sorted; a repeated frame keeps its first key, as the
+        // editor projection does.
+        if (!curve.frames.empty() && curve.frames.back() == key.frame) {
+            continue;
+        }
+        KeyInterpolation interpolation = KeyInterpolation::Linear;
+        std::optional<KeyTangent> tangent;
+        switch (key.interp) {
+        case ChannelInterp::Hold: interpolation = KeyInterpolation::Hold; break;
+        case ChannelInterp::Linear: interpolation = KeyInterpolation::Linear; break;
+        case ChannelInterp::Cubic:
+            interpolation = KeyInterpolation::Cubic;
+            tangent = KeyTangent{key.tangent_mode, tangent_slope(channel.keys, index, true),
+                                 tangent_slope(channel.keys, index, false), key.in_weight, key.out_weight};
+            break;
+        }
+        curve.frames.push_back(key.frame);
+        curve.values.push_back(key.value);
+        curve.interpolations.push_back(interpolation);
+        curve.tangents.push_back(tangent);
+    }
+    return curve;
+}
+
 std::size_t SceneModel::load_keyframes(
     const ChannelKeyframes& channel,
     std::array<ChannelKey, max_channel_keys>& storage) noexcept {
@@ -3452,10 +3559,15 @@ std::optional<KeySlopes> evaluated_key_slopes(
 
 std::optional<double> sample_keyframes(
     const ChannelKeyframes& channel, core::i64 frame) noexcept {
+    return sample_keyframes(channel, frame, 0.0);
+}
+
+std::optional<double> sample_keyframes(
+    const ChannelKeyframes& channel, core::i64 frame, double fraction) noexcept {
     std::array<SceneModel::ChannelKey, max_channel_keys> storage{};
     const std::size_t count = SceneModel::load_keyframes(channel, storage);
-    if (count == 0U) return std::nullopt;
-    return SceneModel::sample_channel({storage.data(), count}, frame);
+    if (count == 0U || !(fraction >= 0.0 && fraction < 1.0)) return std::nullopt;
+    return SceneModel::sample_channel({storage.data(), count}, frame, fraction);
 }
 
 std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
@@ -3468,7 +3580,7 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
         KeyInterpolation interpolation{KeyInterpolation::Linear};
         std::optional<KeyTangent> tangent;
     };
-    std::map<std::pair<doc::NodeId, PropertyChannel>, std::vector<VisibleKey>>
+    std::map<std::tuple<doc::NodeId, PropertyChannel, std::string>, std::vector<VisibleKey>>
         by_channel;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
@@ -3480,7 +3592,7 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
         // that same curve rather than merge otherwise-inert keys from a
         // duplicate channel into it.
         const auto [position, inserted] = by_channel.try_emplace(
-            std::pair{channel->target, channel->component});
+            std::tuple{channel->target, channel->component, channel->parameter});
         if (!inserted) {
             continue;
         }
@@ -3531,8 +3643,9 @@ std::vector<ChannelKeyframes> SceneModel::channel_keyframes() const {
                 }),
             keys.end());
         ChannelKeyframes visible{};
-        visible.target = identity.first;
-        visible.component = identity.second;
+        visible.target = std::get<0>(identity);
+        visible.component = std::get<1>(identity);
+        visible.parameter = std::get<2>(identity);
         visible.frames.reserve(keys.size());
         visible.values.reserve(keys.size());
         visible.interpolations.reserve(keys.size());
@@ -3949,6 +4062,8 @@ Scene SceneModel::evaluate(
     using Override =
         std::array<std::optional<float>, static_cast<std::size_t>(PropertyChannel::Count)>;
     std::map<doc::NodeId, Override> overrides;
+    // Keyed particle parameters by effect and key; lowest id wins as above.
+    std::map<doc::NodeId, std::map<std::string, const ChannelEntry*>> parameter_channels;
     core::u32 channels_seen = 0U;
     for (const auto& [id, entry] : entries_) {
         const auto* const channel = std::get_if<ChannelEntry>(&entry);
@@ -3959,6 +4074,10 @@ Scene SceneModel::evaluate(
             break;
         }
         ++channels_seen;
+        if (channel->component == PropertyChannel::ParticleParameter) {
+            parameter_channels[channel->target].try_emplace(channel->parameter, channel);
+            continue;
+        }
         auto& slot =
             overrides[channel->target][static_cast<std::size_t>(channel->component)];
         if (!slot.has_value()) {
@@ -4593,6 +4712,8 @@ Scene SceneModel::evaluate(
         if (const auto* model=std::get_if<ModelEntry>(&entry); model && !model->batch.empty()) model_capacity+=model->batch.size()-1;
     }
     scene.models.reserve(std::min<std::size_t>(model_capacity,max_scene_models));
+    scene.particle_effects.reserve(
+        std::min<std::size_t>(counters_.particle_effects, max_scene_particle_effects));
     scene.slices.reserve(std::min(counters_.slices, max_scene_slices));
 
     // Resolve the editorial media order before evaluating drawables. A lane
@@ -5005,6 +5126,56 @@ Scene SceneModel::evaluate(
                 if (scene.models.size() >= max_scene_models) break;
                 append(multiply(world,local_instance),batch_motion_identity(id,local_instance));
             }
+            continue;
+        }
+
+        if (const auto* const effect = std::get_if<ParticleEffectEntry>(&entry)) {
+            if (scope_of(id, default_scene) != scene_id || !effect->visible ||
+                (solo != nullptr && !solo->shows(id)) ||
+                scene.particle_effects.size() >= max_scene_particle_effects) {
+                continue;
+            }
+            const GroupResolution* parent = nullptr;
+            if (effect->parent_group.has_value()) {
+                const auto found = group_projection.resolved.find(*effect->parent_group);
+                if (found == group_projection.resolved.end() || !found->second.visible) {
+                    continue;
+                }
+                parent = &found->second;
+            }
+            // Keyframed and dragged transforms apply exactly as to a model.
+            auto position = effect->position;
+            Turns yaw = effect->yaw;
+            Turns pitch = effect->pitch;
+            Turns roll = effect->roll;
+            Vec3 scale = effect->scale;
+            LayerStyle style{};
+            apply_override(id, position, yaw, pitch, roll, scale, style);
+            const auto local = multiply(translation(position), multiply(rotation(yaw, pitch, roll), scaling(scale)));
+            ParticleEffect placed{
+                parent == nullptr ? local : multiply(parent->world, local), effect->source, id, effect->seed,
+                effect->start_frame, effect->locked || (parent != nullptr && parent->locked), effect->parent_group,
+                effect->group_order, {}};
+            // Every authored or keyed component, by key. The renderer samples
+            // a keyed one at each simulation step, so the curve travels whole.
+            const auto keyed = parameter_channels.find(id);
+            std::map<std::string_view, ParticleParameter> merged;
+            for (const auto& [key, base] : effect->parameters) {
+                merged[key].base = base;
+            }
+            if (keyed != parameter_channels.end()) {
+                for (const auto& [key, channel] : keyed->second) {
+                    merged[key].curve = keyframes_of(*channel);
+                }
+            }
+            for (auto& [key, parameter] : merged) {
+                if (placed.parameters.size() >= max_particle_parameters) {
+                    break;
+                }
+                parameter.key = std::string{key};
+                placed.parameters.push_back(std::move(parameter));
+            }
+            scene.particle_effects.push_back(std::move(placed));
             continue;
         }
 

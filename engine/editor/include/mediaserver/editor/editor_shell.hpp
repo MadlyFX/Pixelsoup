@@ -153,6 +153,8 @@ enum class AddKind : core::u8 {
   SpotLight,
   Model,
   Media,
+  // An ajfx particle effect, placed from its Library asset.
+  ParticleEffect,
   // A camera on the stage. Adding one authors an ordinary scene.camera node;
   // assigning it a tracking source is what makes it the inner frustum's.
   Camera,
@@ -711,6 +713,8 @@ struct KeyIntent final {
   core::u64 gesture{};
   // Delete one key at `frame` while preserving the rest of the channel.
   bool erase{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const KeyIntent &) const = default;
 };
@@ -737,6 +741,8 @@ struct KeyMove final {
   core::i64 from_frame{};
   core::i64 to_frame{};
   core::u64 gesture{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const KeyMove &) const = default;
 };

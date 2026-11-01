@@ -352,8 +352,11 @@ start_frame(const assets::MediaAsset &media) {
       return true;
     }
   }
-  return matches(assets::asset_kind(asset) == assets::AssetKind::Media
+  const assets::AssetKind kind = assets::asset_kind(asset);
+  return matches(kind == assets::AssetKind::Media
                      ? std::string_view{"media video image"}
+                     : kind == assets::AssetKind::ParticleEffect
+                     ? std::string_view{"particle effect ajfx fx"}
                      : std::string_view{"model 3d gltf obj"},
                  query);
 }
@@ -408,6 +411,7 @@ enum class MenuCommand : core::u8 {
   AcceptAllChanged,
   ImportMedia,
   ImportModel,
+  ImportParticleEffect,
   Rescan,
   ShowList,
   ShowGrid,
@@ -641,6 +645,28 @@ void draw_library_icon(gui::UiContext &ctx, LibraryAddAction action,
 
 } // namespace
 
+void draw_particle_effect_icon(gui::UiContext &ctx, const gui::Rect &bounds) {
+  // A burst: sparks thrown out from a point, larger as they travel. Particle
+  // packages have no thumbnail; this stands in for one.
+  const gui::UiColor color = ctx.theme().accent;
+  const float size = std::min(bounds.width, bounds.height);
+  const float cx = bounds.x + bounds.width * 0.5F;
+  const float cy = bounds.y + bounds.height * 0.5F;
+  const auto dot = [&ctx](float x, float y, float radius, gui::UiColor fill) {
+    ctx.rounded(gui::Rect{x - radius, y - radius, radius * 2.0F, radius * 2.0F},
+                fill, radius);
+  };
+  dot(cx, cy, std::max(1.5F, size * 0.07F), color);
+  for (int spark = 0; spark < 9; ++spark) {
+    const float turn = static_cast<float>(spark) / 9.0F * 6.2831853F;
+    const bool far = spark % 2 == 0;
+    const float reach = size * (far ? 0.4F : 0.26F);
+    dot(cx + std::sin(turn) * reach, cy - std::cos(turn) * reach,
+        std::max(1.0F, size * (far ? 0.06F : 0.04F)),
+        far ? color : with_alpha(color, 0.6F));
+  }
+}
+
 void draw_plateset_icon(gui::UiContext &ctx, const gui::Rect &bounds,
                         std::optional<assets::PlatesetSlot> highlight) {
   const gui::UiColor color = ctx.theme().accent;
@@ -736,6 +762,9 @@ std::string library_column_text(const assets::Asset &asset,
         return "Still";
       }
       return media->frame_rate.has_value() ? "Video" : "Sequence";
+    }
+    if (model == nullptr) {
+      return "Particle effect";
     }
     return model->projection_mesh ? "Mesh" : "3D Model";
   case LibraryColumn::Resolution:
@@ -837,6 +866,9 @@ std::optional<LibraryImportAction> library_import_kind(std::string_view path) {
   }
   if (std::find(models.begin(), models.end(), extension) != models.end()) {
     return LibraryImportAction::Model;
+  }
+  if (extension == "ajfx") {
+    return LibraryImportAction::ParticleEffect;
   }
   return std::nullopt;
 }
@@ -1030,6 +1062,10 @@ void LibraryPanel::draw_drag_ghost(gui::UiContext &ctx) {
       draw_plateset_icon(ctx, gui::Rect{image.x + (image.width - icon) * 0.5F,
                                         image.y + (image.height - icon) * 0.5F,
                                         icon, icon});
+    } else if (ghost_particles_ && !ghost_generator_.has_value()) {
+      draw_particle_effect_icon(
+          ctx, gui::Rect{image.x + (image.width - icon) * 0.5F,
+                         image.y + (image.height - icon) * 0.5F, icon, icon});
     } else
     draw_library_icon(
         ctx, ghost_generator_.has_value()
@@ -1799,6 +1835,8 @@ LibraryFrame LibraryPanel::draw_impl(
                                   icon, icon};
       if (std::holds_alternative<assets::PlatesetAsset>(asset)) {
         draw_plateset_icon(ctx, icon_bounds);
+      } else if (std::holds_alternative<assets::ParticleEffectAsset>(asset)) {
+        draw_particle_effect_icon(ctx, icon_bounds);
       } else {
         draw_library_icon(
             ctx, media ? LibraryAddAction::Media : LibraryAddAction::Model,
@@ -2599,10 +2637,13 @@ LibraryFrame LibraryPanel::draw_impl(
       ghost_count_ = drag_items_.size();
       ghost_model_ = false;
       ghost_plateset_ = false;
+      ghost_particles_ = false;
       if (const assets::Asset *const asset = registry.asset(lead)) {
         ghost_label_ = std::string{assets::asset_display_name(*asset)};
         ghost_plateset_ =
             std::holds_alternative<assets::PlatesetAsset>(*asset);
+        ghost_particles_ =
+            std::holds_alternative<assets::ParticleEffectAsset>(*asset);
         ghost_model_ =
             assets::asset_kind(*asset) != assets::AssetKind::Media;
         if (thumbnails_enabled && !ghost_model_) {
@@ -2670,6 +2711,7 @@ LibraryFrame LibraryPanel::draw_impl(
       ghost_live_ = !released;
       ghost_count_ = 1U;
       ghost_model_ = false;
+      ghost_particles_ = false;
       ghost_generator_ = generator_drag_;
       ghost_label_ = item != library_items.end() ? std::string{item->name}
                                                  : std::string{};
@@ -2907,6 +2949,7 @@ LibraryFrame LibraryPanel::draw_impl(
     }
     add("Import Media...", MenuCommand::ImportMedia);
     add("Import Model...", MenuCommand::ImportModel);
+    add("Import Particle Effect...", MenuCommand::ImportParticleEffect);
     if (!open_import_menu) {
       add("Rescan Sources", MenuCommand::Rescan);
       if (!changed_shown.empty()) {
@@ -3108,10 +3151,13 @@ LibraryFrame LibraryPanel::draw_impl(
         }
         case MenuCommand::ImportMedia:
         case MenuCommand::ImportModel:
-          frame.import_asset = static_cast<MenuCommand>(raw) ==
-                                       MenuCommand::ImportMedia
-                                   ? LibraryImportAction::Media
-                                   : LibraryImportAction::Model;
+        case MenuCommand::ImportParticleEffect:
+          frame.import_asset =
+              static_cast<MenuCommand>(raw) == MenuCommand::ImportMedia
+                  ? LibraryImportAction::Media
+              : static_cast<MenuCommand>(raw) == MenuCommand::ImportModel
+                  ? LibraryImportAction::Model
+                  : LibraryImportAction::ParticleEffect;
           frame.import_folder = list ? new_folder_parent
                                      : (generators_open_ ? doc::NodeId{}
                                                          : folder_);

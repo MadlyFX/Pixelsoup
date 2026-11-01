@@ -73,6 +73,22 @@ if(BUILD_TESTING)
         )
     endif()
 
+    # Writable buffers and indirect dispatch and draw, kept apart from the
+    # long device suite so the particle work can run it on its own.
+    add_executable(mediaserver_rhi_compute_buffer_tests tests/rhi_compute_buffer_tests.cpp)
+    target_link_libraries(mediaserver_rhi_compute_buffer_tests
+        PRIVATE
+            MediaServer::Rhi
+            MediaServer::Shaders
+            SDL3::SDL3
+    )
+    mediaserver_set_project_options(mediaserver_rhi_compute_buffer_tests)
+    add_test(NAME mediaserver.rhi_compute_buffers COMMAND mediaserver_rhi_compute_buffer_tests)
+    set_tests_properties(mediaserver.rhi_compute_buffers PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy"
+    )
+    set_target_properties(mediaserver_rhi_compute_buffer_tests PROPERTIES FOLDER "tests")
+
     # The present-barrier seam is pure registry/plumbing, so it runs on a
     # build machine with no GPU at all.
     add_executable(mediaserver_rhi_present_barrier_tests

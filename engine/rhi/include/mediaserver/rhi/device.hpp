@@ -195,6 +195,14 @@ struct DeviceCapabilities final {
     bool wireframe_fill{};
     bool explicit_barriers{};
     bool async_compute{};
+    // Device::create_writable_buffer works and a dispatch can write the
+    // buffers it makes (ComputeDispatch::writable_buffers).
+    bool writable_buffers{};
+    // A dispatch can take its group counts from a buffer
+    // (ComputeDispatch::indirect).
+    bool indirect_dispatch{};
+    // A single-batch pulled draw can take its vertex and instance counts from
+    // a buffer (PulledDraw::indirect).
     bool indirect_draw{};
     bool acceleration_structures{};
     bool ray_queries{};
@@ -225,6 +233,10 @@ enum class ColorBlend : core::u8 {
     Screen,
     PremultipliedNormal,
     PremultipliedAdd,
+    // Premultiplied light: colour adds, and the source's alpha (how much the
+    // light covers) accumulates like "over", so light on an empty target
+    // still has coverage for later stages that divide by alpha.
+    PremultipliedEmit,
 };
 
 // How a swapchain releases finished frames.
@@ -501,6 +513,10 @@ struct ShaderDesc final {
     // dispatch is recorded, and guessing wrong is a validation error rather
     // than a bind of nothing. Zero for every graphics stage today.
     core::u32 storage_texture_count{};
+    // Read-write buffers (raw or structured), compute only. They take the
+    // UAV registers after the storage textures: u[storage_texture_count + i]
+    // in space 0. See Device::create_writable_buffer.
+    core::u32 writable_buffer_count{};
 };
 
 // The most colour targets one pipeline writes.
@@ -656,6 +672,8 @@ public:
     [[nodiscard]] core::u32 capacity_bytes() const noexcept { return bytes_; }
     // A device-local buffer written by range (Device::create_geometry_buffer).
     [[nodiscard]] bool ranged() const noexcept { return ranged_; }
+    // Also writable from compute (Device::create_writable_buffer).
+    [[nodiscard]] bool writable() const noexcept { return writable_; }
     // Nonblocking lifetime query, as for Texture: SDL defers release
     // internally; native D3D12 reports recording and submitted fence use.
     [[nodiscard]] bool safe_to_release() const noexcept;
@@ -669,9 +687,10 @@ private:
     friend class CommandList;
 
     StorageBuffer(Device& device, void* handle, void* native, void* staging,
-                  BackendKind backend, core::u32 bytes, bool ranged = false) noexcept
+                  BackendKind backend, core::u32 bytes, bool ranged = false,
+                  bool writable = false) noexcept
         : device_(&device), handle_(handle), native_(native), staging_(staging),
-          backend_(backend), bytes_(bytes), ranged_(ranged) {}
+          backend_(backend), bytes_(bytes), ranged_(ranged), writable_(writable) {}
 
     void release() noexcept;
 
@@ -684,6 +703,19 @@ private:
     BackendKind backend_{BackendKind::SdlGpu};
     core::u32 bytes_{};
     bool ranged_{};
+    bool writable_{};
+};
+
+// Counts a draw or dispatch reads from a buffer the GPU wrote, so work sized
+// on the GPU needs no readback. The buffer is a writable (or other
+// device-local) buffer; `offset` is in bytes and must leave room for the
+// arguments: three uint32 group counts for a dispatch, and for a draw four
+// (vertex count, instance count, first vertex, first instance) or, with an
+// index buffer, five (index count, instance count, first index, base vertex,
+// first instance).
+struct IndirectArguments final {
+    const StorageBuffer* buffer{};
+    core::u32 offset{};
 };
 
 class Sampler final {
@@ -1017,6 +1049,11 @@ struct PulledDraw final {
     // The clear is not scoped to it - see ViewportRect.
     ViewportRect viewport{};
     RasterViewport raster_viewport{};
+    // Optional, where `DeviceCapabilities::indirect_draw` holds: the draw's
+    // counts come from this buffer instead of `batches`, which must then hold
+    // exactly one batch (its uniform and textures still apply; its counts are
+    // ignored).
+    IndirectArguments indirect{};
 };
 
 // One read-write texture binding, naming an exact subresource.
@@ -1048,6 +1085,12 @@ struct ComputeDispatch final {
     std::span<const StorageBuffer* const> storage_buffers;
     std::span<const SampledTexture> sampled_textures;
     std::span<const StorageTexture> storage_textures;
+    // Bound read-write after the storage textures, exactly as many as the
+    // shader declared; each must come from create_writable_buffer. A buffer
+    // an earlier dispatch in the same recording bound here is separated from
+    // this one by a UAV barrier, so a dependent dispatch sees what the first
+    // wrote. One buffer may not be bound twice, nor be the indirect buffer.
+    std::span<const StorageBuffer* const> writable_buffers;
     std::span<const core::u8> uniform;
     // Thread groups, not threads. The shader owns its group size and this is
     // the count of groups, so a caller that changes `numthreads` must change
@@ -1056,6 +1099,9 @@ struct ComputeDispatch final {
     core::u32 groups_x{1U};
     core::u32 groups_y{1U};
     core::u32 groups_z{1U};
+    // Optional, where `DeviceCapabilities::indirect_dispatch` holds: the
+    // group counts come from this buffer instead, and may be zero.
+    IndirectArguments indirect{};
 };
 
 // One recorded batch of GPU work. Recording is not thread-safe and a list is
@@ -1131,6 +1177,16 @@ public:
     [[nodiscard]] bool copy_buffer(
         const StorageBuffer& source,
         StorageBuffer& destination,
+        core::u32 bytes) noexcept;
+    // Copies `bytes` from `source_offset` of one ranged buffer to
+    // `destination_offset` of another, such as one count of GPU-written
+    // arguments into another draw's. Offsets are multiples of four; refused
+    // when either range runs past its buffer.
+    [[nodiscard]] bool copy_buffer(
+        const StorageBuffer& source,
+        core::u32 source_offset,
+        StorageBuffer& destination,
+        core::u32 destination_offset,
         core::u32 bytes) noexcept;
     // Bytes upload_range can still accept in this recording.
     [[nodiscard]] core::u64 upload_space() const noexcept;
@@ -1284,6 +1340,10 @@ public:
         Texture& destination) noexcept;
 
     [[nodiscard]] bool download(const Texture& source, Readback& into, core::u32 mip = 0U, core::u32 layer = 0U) noexcept;
+    // Copies `bytes` of a device-local buffer from `offset` into `into`, which
+    // must hold them. A diagnostic and self-check path, like texture download.
+    [[nodiscard]] bool download(const StorageBuffer& source, core::u32 offset, core::u32 bytes,
+                                Readback& into) noexcept;
 
 private:
     friend class Device;
@@ -1447,6 +1507,12 @@ public:
     // size a GPU-resident budget need this rather than a fixed number: a
     // laptop node and a workstation differ by an order of magnitude.
     [[nodiscard]] core::u64 dedicated_video_memory_bytes() const noexcept;
+    // Why the GPU device stopped working - a fault, a hang, a driver reset or
+    // update - or empty while it works. A lost device runs nothing recorded on
+    // it again and refuses every present, so a window only keeps its last
+    // picture: a caller whose present fails asks here before carrying on.
+    // Backends that cannot tell report empty. Cheap, but not for every frame.
+    [[nodiscard]] std::string_view lost_reason() const noexcept;
     [[nodiscard]] bool supports(ShaderFormat format) const noexcept;
     [[nodiscard]] bool supports(TextureFormat format) const noexcept;
     [[nodiscard]] const DeviceCapabilities& capabilities() const noexcept {
@@ -1461,6 +1527,13 @@ public:
     // mesh arenas: written with CommandList::upload_range and grown with
     // CommandList::copy_buffer, never re-uploaded whole.
     [[nodiscard]] core::Result<StorageBuffer, RhiError> create_geometry_buffer(
+        core::u32 bytes) noexcept;
+    // A device-local buffer a dispatch can write (ComputeDispatch::
+    // writable_buffers) and later work can read: as a storage buffer, as
+    // indirect arguments, or by copy. Written from the CPU like a geometry
+    // buffer, with CommandList::upload_range. Zero-filled when created.
+    // OperationUnsupported where `capabilities().writable_buffers` is false.
+    [[nodiscard]] core::Result<StorageBuffer, RhiError> create_writable_buffer(
         core::u32 bytes) noexcept;
     [[nodiscard]] core::Result<Sampler, RhiError> create_sampler(
         const SamplerDesc& desc) noexcept;

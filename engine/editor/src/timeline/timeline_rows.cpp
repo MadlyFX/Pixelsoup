@@ -291,6 +291,46 @@ RowList build_rows(RowsState &state, const RowsInput &input,
                       "Aperture", element.aperture_f_number);
       return;
     }
+    if (element.kind == ElementKind::ParticleEffect) {
+      // Placed like anything else, then each keyed published parameter under
+      // its own name; a parameter keyed on more than one component gets a
+      // row per component.
+      for (core::u8 group = 0U; group < 3U; ++group) {
+        append_group(group);
+      }
+      for (const scene::ChannelKeyframes &channel : keyframes) {
+        if (channel.target != element.node ||
+            channel.component != scene::PropertyChannel::ParticleParameter) {
+          continue;
+        }
+        const auto key = scene::parse_particle_parameter_key(channel.parameter);
+        if (!key) {
+          continue;
+        }
+        const bool several = std::any_of(
+            keyframes.begin(), keyframes.end(),
+            [&](const scene::ChannelKeyframes &other) {
+              const auto sibling = scene::parse_particle_parameter_key(other.parameter);
+              return other.target == element.node && &other != &channel &&
+                     other.component == scene::PropertyChannel::ParticleParameter &&
+                     sibling && sibling->name == key->name;
+            });
+        std::string label{key->name};
+        if (several || key->component > 0U) {
+          label += ' ';
+          label += "XYZW"[key->component];
+        }
+        const auto sampled = sample_channel_at(&channel, show_frame);
+        Row row{Row::Kind::Property, element.node, 0U, 0U,
+                std::move(label), theme.text_muted, element.kind,
+                base_indent + 1U, false,
+                scene::PropertyChannel::ParticleParameter, element.node,
+                sampled.has_value() && std::isfinite(*sampled) ? *sampled : 0.0};
+        row.parameter = channel.parameter;
+        rows.push_back(std::move(row));
+      }
+      return;
+    }
     for (core::u8 group = 0U; group < 3U; ++group) {
       append_group(group);
     }

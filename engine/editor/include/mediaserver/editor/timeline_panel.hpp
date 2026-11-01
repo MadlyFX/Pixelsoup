@@ -71,6 +71,8 @@ inline constexpr float clip_row_height_maximum = 200.0F;
 struct ChannelId final {
   doc::NodeId target{};
   scene::PropertyChannel property{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   auto operator<=>(const ChannelId &) const = default;
 };
@@ -224,6 +226,8 @@ struct TimelineKeyEdit final {
   // Removes only the key at `frame`; unlike clear, the channel and its other
   // keys survive. Used by Delete on a diamond selection.
   bool erase{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const TimelineKeyEdit &) const = default;
 };
@@ -236,6 +240,8 @@ struct TimelineKeyMoveEdit final {
   scene::TransformChannel component{};
   core::i64 from_frame{};
   core::i64 to_frame{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   bool operator==(const TimelineKeyMoveEdit &) const = default;
 };
@@ -248,6 +254,8 @@ struct TimelineKeyAddress final {
   doc::NodeId target{};
   scene::PropertyChannel property{};
   core::i64 frame{};
+  // For a particle parameter channel, its key ("rate.0").
+  std::string parameter;
 
   auto operator<=>(const TimelineKeyAddress &) const = default;
 };
@@ -1144,6 +1152,8 @@ private:
     doc::NodeId target{};
     scene::PropertyChannel component{};
     core::i64 frame{};
+    // For a particle parameter channel, its key ("rate.0").
+    std::string parameter;
 
     bool operator==(const SelectedKey &) const = default;
   };

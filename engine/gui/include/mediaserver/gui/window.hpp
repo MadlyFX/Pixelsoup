@@ -54,6 +54,10 @@ struct WindowConfig final {
     // an idle editor should not spin the GPU. So it waits for the display,
     // which is the opposite of what an output node asks for.
     bool vsync{true};
+    // Turns on the graphics API's validation layer, which reports a bad call
+    // or a GPU fault (to the debugger) where otherwise the device is just
+    // lost. Slow: for chasing a fault, never for a show.
+    bool debug{};
 };
 
 // Applies one SDL event to `input`. `sdl_event` is an SDL_Event*, declared as

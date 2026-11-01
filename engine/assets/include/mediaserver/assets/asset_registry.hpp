@@ -178,7 +178,20 @@ struct PlatesetAsset final {
     bool operator==(const PlatesetAsset&) const = default;
 };
 
-using Asset = std::variant<MediaAsset, ModelAsset, PlatesetAsset>;
+// An .ajfx particle effect package. Placements are scene.particle_effect
+// nodes; the package itself is read by each renderer off its frame path.
+struct ParticleEffectAsset final {
+    doc::NodeId id{};
+    std::string display_name;
+    std::string source;
+    std::optional<ContentFingerprint> fingerprint;
+    doc::NodeId folder{};
+
+    bool operator==(const ParticleEffectAsset&) const = default;
+};
+
+using Asset =
+    std::variant<MediaAsset, ModelAsset, PlatesetAsset, ParticleEffectAsset>;
 
 enum class AssetKind : core::u8 {
     Media,
@@ -187,6 +200,7 @@ enum class AssetKind : core::u8 {
     IesProfile,
     ColorLut,
     Plateset,
+    ParticleEffect,
 };
 
 [[nodiscard]] AssetKind asset_kind(const Asset& asset) noexcept;

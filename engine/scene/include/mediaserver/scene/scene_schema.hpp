@@ -65,6 +65,11 @@ inline constexpr std::string_view timeline_marker_type =
 // document carries only the reference and the transform. Distribution of the
 // file to nodes is external (a node without it draws nothing).
 inline constexpr std::string_view model_type = "scene.model";
+// A placed ajfx particle effect: an .ajfx package simulated on the GPU from the
+// exact show frame and drawn in the scene, placed and transformed like a
+// model. The package carries the effect and its precompiled kernels; the
+// document carries the reference, the placement, a seed and when it starts.
+inline constexpr std::string_view particle_effect_type = "scene.particle_effect";
 // The binding from a node index to its rectangle of the canvas.
 inline constexpr std::string_view slice_type = "scene.slice";
 // A keyframe channel: it drives one transform component of a target node over
@@ -934,6 +939,25 @@ inline constexpr std::string_view color_temperature_kelvin =
     "color_temperature_kelvin";
 inline constexpr std::string_view use_color_temperature =
     "use_color_temperature";
+
+// ---------------------------------------------------------------------------
+// scene.particle_effect
+//
+// Also `source` (the .ajfx package), the drawable transform, `visible`,
+// `locked`, `parent_group` and `group_order`.
+
+// Separates placements of one effect: two instances with different seeds
+// differ, and every node draws the same particles for the same seed.
+inline constexpr std::string_view particle_seed = "particle_seed";
+// The show frame at which the effect's own time begins. Before it nothing is
+// drawn; from it, the effect is at (show frame - start) in its own time.
+inline constexpr std::string_view particle_start_frame = "particle_start_frame";
+// A published parameter component's base value: `particle_parameter.` then
+// the key, e.g. `particle_parameter.rate.0` or `particle_parameter.wind.2`.
+// A scene.channel whose channel_component is the same text keys it. Names
+// are the package's own, so a re-exported package keeps its keys; a key the
+// package no longer publishes is kept and ignored.
+inline constexpr std::string_view particle_parameter_prefix = "particle_parameter.";
 
 // ---------------------------------------------------------------------------
 // scene.slice

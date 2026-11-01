@@ -20,6 +20,8 @@
 #include <mediaserver/render/shadow_atlas.hpp>
 #include <mediaserver/render/environment_cache.hpp>
 #include <mediaserver/render/ies_profile.hpp>
+#include <mediaserver/render/particle_package_cache.hpp>
+#include <mediaserver/render/particle_pass.hpp>
 #include <mediaserver/render/ltc_asset.hpp>
 #include <mediaserver/render/baked_lighting.hpp>
 #include <mediaserver/render/environment_prefilter.hpp>
@@ -36,6 +38,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // The renderer: a `scene::Scene` and a rectangle of its canvas in, one
@@ -85,6 +89,10 @@ struct RendererLimits final {
     // Builds the wireframe pipelines an editor view's ViewShading::Wireframe
     // draws with. Off for every output node, which only ever renders Lit.
     bool view_shading{};
+    // Particle stepping and checkpoints. Output nodes keep the defaults; an
+    // authoring preview raises the step budget so an edited effect catches
+    // up with the playhead in a frame instead of holding for seconds.
+    ParticleSettings particles{};
     core::u32 max_instances{scene::max_scene_instances};
     // One tiny CPU history slot per independently mapped output/view. The
     // default covers the replicated feed-map ceiling without duplicating GPU
@@ -257,6 +265,19 @@ struct RenderStats final {
     core::u64 ltc_generation{};
     core::u32 ies_ready{}, ies_pending{}, ies_failed{}, ies_refused{};
     IesError ies_error{IesError::None};
+    // Particle effects drawn this view, and the ones holding readiness back:
+    // a package still loading or a new instance waiting its turn, a package
+    // or instance that failed, a renderer that cannot run them, and a seek
+    // further than one frame's step budget still catching up. The reason for
+    // the first failure or refusal, if any.
+    core::u32 particles_drawn{}, particles_pending{}, particles_failed{};
+    core::u32 particles_unsupported{}, particles_behind{};
+    std::string particle_issue;
+    // What the effects drawn this view drew: each one's placement, the
+    // instance it drew and the simulation frame it drew at. It moves when an
+    // effect becomes drawable, is swapped or restarts, none of which the
+    // scene digest sees, so a held frame knows its last resolve is stale.
+    core::u64 particle_digest{};
 
     bool operator==(const RenderStats&) const = default;
 };
@@ -410,6 +431,15 @@ struct SceneRenderOptions final {
                        other.depth_only_sources.begin(),
                        other.depth_only_sources.end());
     }
+};
+
+// One package parameter component (`index` in the effect's parameters,
+// `component` of its value) driven by a placement's track, held as a copy so
+// the rigid physics thread can read it while scenes change.
+struct ParticleParameterBinding final {
+    std::size_t index{};
+    core::u32 component{};
+    scene::ParticleParameter track;
 };
 
 enum class SceneRendererMode : core::u8 {
@@ -899,6 +929,15 @@ private:
     // Releases retired models no outstanding recording uses: their arena
     // slots, textures and retirement slots.
     void reclaim_retired_models() noexcept;
+    // Brings every started effect's simulation to this show frame (within the
+    // step budget) and lists the ones to draw; counts the rest into stats_
+    // and readiness.
+    void prepare_particles(rhi::CommandList& commands, const scene::Scene& scene,
+                           const SceneRenderOptions& options);
+    // `targets` carries the raster viewport and the motion inputs; the
+    // colour and depth are this renderer's own.
+    [[nodiscard]] bool record_particles(rhi::CommandList& commands, const scene::ViewMatrices& view,
+                                        ParticleTargets targets);
 
     // Borrowed. The device this renderer was created from, needed on the frame
     // path to create clip textures. It outlives the renderer by construction -
@@ -984,6 +1023,42 @@ private:
     rhi::Texture object_id_;
     rhi::Texture normal_;
     std::optional<AmbientOcclusion> occlusion_;
+    // Particle effects, on an Advanced renderer whose device can run them.
+    // The pass is declared before the slots so it outlives their instances.
+    struct ParticleSlot final {
+        std::shared_ptr<const ParticlePackage> package;
+        core::u32 seed{};
+        std::optional<ParticleInstance> instance;
+        // Why this package and seed could not be instanced; sticky until
+        // either changes.
+        std::string error;
+        // The placement's parameters the instance's history was simulated
+        // with; a different digest restarts it.
+        core::u64 parameters{};
+        // A new value whenever the instance or its simulated past is
+        // replaced, so the particle digest can tell the two pictures apart.
+        core::u64 generation{};
+        // The placement's parameters as the simulation asks for them, made
+        // when the digest changes and shared with the rigid physics thread.
+        std::shared_ptr<const ajfx::ParameterProvider> provider;
+    };
+    std::unique_ptr<ParticlePass> particle_pass_;
+    std::string particles_unsupported_;
+    std::unique_ptr<ParticlePackageCache> particle_packages_;
+    std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
+    // Instances replaced (a new package or seed) or removed while submitted
+    // frames may still sample their textures. Each is destroyed once it
+    // reports safe_to_release; destroying it sooner frees textures the GPU
+    // is still reading, and the device is lost. Reserved up front: when it
+    // is full, the old instance keeps drawing until a place frees.
+    static constexpr std::size_t max_retired_particles = 16U;
+    std::vector<ParticleInstance> retired_particles_;
+    std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
+    core::u64 particle_generation_{};
+    // Particle lights for the lit pass: max_particle_lights records, the
+    // first `particle_lights_used_` written this frame (Advanced only).
+    rhi::StorageBuffer particle_light_buffer_;
+    core::u32 particle_lights_used_{};
     std::optional<TemporalResolve> temporal_occlusion_;
     ShadowAtlasLimits shadow_atlas_limits_{};
     ShadowAtlasPlan shadow_atlas_plan_{};

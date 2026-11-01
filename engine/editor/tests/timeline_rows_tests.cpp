@@ -308,6 +308,42 @@ void clip_rows_take_their_own_height_or_every_clip_rows() {
 
 // Minor ticks are whole frames, as many as fit, and a label drops its hour
 // only while the view stays inside the first one.
+void a_particle_effect_lists_its_keyed_parameters_by_name() {
+  constexpr doc::NodeId embers{300U};
+  Fixture f;
+  f.elements.push_back(element(embers, editor::ElementKind::ParticleEffect, "Embers", std::nullopt));
+  const auto parameter = [&](std::string key, std::vector<mediaserver::core::i64> frames, std::vector<double> values) {
+    scene::ChannelKeyframes channel{embers, scene::PropertyChannel::ParticleParameter,
+                                    std::move(frames), std::move(values)};
+    channel.parameter = std::move(key);
+    return channel;
+  };
+  // A Float keyed alone, and two components of a Vec3, in key order.
+  f.keys.push_back(parameter("rate.0", {0, 10}, {100.0, 200.0}));
+  f.keys.push_back(parameter("wind.0", {5}, {0.5}));
+  f.keys.push_back(parameter("wind.2", {5}, {-1.0}));
+  f.state.expanded_layers.insert(embers.value());
+  const RowList list = f.build();
+  std::vector<const Row *> parameters;
+  std::size_t groups = 0U;
+  for (const Row &row : list.rows) {
+    if (row.node != embers) continue;
+    groups += row.kind == Row::Kind::Group ? 1U : 0U;
+    if (row.kind == Row::Kind::Property) parameters.push_back(&row);
+  }
+  // Placed like anything else, with no Opacity row it cannot use.
+  ROWS_CHECK(groups == 3U);
+  ROWS_CHECK(parameters.size() == 3U);
+  ROWS_CHECK(parameters[0]->label == "rate" && parameters[0]->parameter == "rate.0");
+  ROWS_CHECK(parameters[0]->property == scene::PropertyChannel::ParticleParameter);
+  ROWS_CHECK(parameters[0]->property_target == embers && parameters[0]->property_value == 100.0);
+  ROWS_CHECK(parameters[1]->label == "wind X" && parameters[1]->parameter == "wind.0");
+  ROWS_CHECK(parameters[2]->label == "wind Z" && parameters[2]->parameter == "wind.2");
+  // A row names its one channel by key.
+  const auto channels = timeline::row_channels(*parameters[2]);
+  ROWS_CHECK(channels.has_value() && channels->parameter == "wind.2" && channels->count == 1U);
+}
+
 void ruler_ticks_divide_whole_frames_and_labels_drop_a_zero_hour() {
   // A second of 30 frames at 3 px a frame: two-frame ticks would be 6 px
   // apart, so it divides in tenths of three frames.
@@ -551,7 +587,9 @@ struct Case final {
   void (*function)();
 };
 
-constexpr std::array<Case, 9U> cases{{
+constexpr std::array<Case, 10U> cases{{
+    {"a particle effect lists its keyed parameters by name",
+     &a_particle_effect_lists_its_keyed_parameters_by_name},
     {"a take row parts around a track between its own",
      &a_take_row_parts_around_a_track_between_its_own},
     {"a placed plateset's tracks fold into one take row",

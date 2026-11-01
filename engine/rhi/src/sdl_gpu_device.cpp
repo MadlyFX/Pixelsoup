@@ -153,6 +153,7 @@ std::atomic<core::u64> next_recording_identity{1U};
     case ColorBlend::Screen:
     case ColorBlend::PremultipliedNormal:
     case ColorBlend::PremultipliedAdd:
+    case ColorBlend::PremultipliedEmit:
         return true;
     }
     return false;
@@ -215,6 +216,13 @@ void configure_blend(
         state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
         state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        break;
+    case ColorBlend::PremultipliedEmit:
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_alpha_blendfactor =
+            SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         break;
     case ColorBlend::Disabled:
         break;
@@ -386,7 +394,8 @@ StorageBuffer::StorageBuffer(StorageBuffer&& other) noexcept
       staging_(std::exchange(other.staging_, nullptr)),
       backend_(std::exchange(other.backend_, BackendKind::SdlGpu)),
       bytes_(std::exchange(other.bytes_, 0U)),
-      ranged_(std::exchange(other.ranged_, false)) {}
+      ranged_(std::exchange(other.ranged_, false)),
+      writable_(std::exchange(other.writable_, false)) {}
 
 StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
     if (this != &other) {
@@ -398,6 +407,7 @@ StorageBuffer& StorageBuffer::operator=(StorageBuffer&& other) noexcept {
         backend_ = std::exchange(other.backend_, BackendKind::SdlGpu);
         bytes_ = std::exchange(other.bytes_, 0U);
         ranged_ = std::exchange(other.ranged_, false);
+        writable_ = std::exchange(other.writable_, false);
     }
     return *this;
 }
@@ -930,24 +940,36 @@ bool CommandList::copy_buffer(
     const StorageBuffer& source,
     StorageBuffer& destination,
     core::u32 bytes) noexcept {
+    return copy_buffer(source, 0U, destination, 0U, bytes);
+}
+
+bool CommandList::copy_buffer(
+    const StorageBuffer& source,
+    core::u32 source_offset,
+    StorageBuffer& destination,
+    core::u32 destination_offset,
+    core::u32 bytes) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !source || !destination
         || !source.ranged_ || !destination.ranged_
-        || bytes > source.bytes_ || bytes > destination.bytes_) {
+        || source_offset % 4U != 0U || destination_offset % 4U != 0U
+        || source_offset > source.bytes_ || bytes > source.bytes_ - source_offset
+        || destination_offset > destination.bytes_ || bytes > destination.bytes_ - destination_offset) {
         return false;
     }
     if (bytes == 0U) {
         return true;
     }
     if (backend_ == BackendKind::D3d12) {
-        return detail::d3d12_copy_buffer(handle_, source.handle_, destination.handle_, bytes);
+        return detail::d3d12_copy_buffer(handle_, source.handle_, source_offset, destination.handle_,
+                                         destination_offset, bytes);
     }
     auto* const pass =
         SDL_BeginGPUCopyPass(static_cast<SDL_GPUCommandBuffer*>(handle_));
     if (pass == nullptr) {
         return false;
     }
-    const SDL_GPUBufferLocation from{static_cast<SDL_GPUBuffer*>(source.handle_), 0U};
-    const SDL_GPUBufferLocation to{static_cast<SDL_GPUBuffer*>(destination.handle_), 0U};
+    const SDL_GPUBufferLocation from{static_cast<SDL_GPUBuffer*>(source.handle_), source_offset};
+    const SDL_GPUBufferLocation to{static_cast<SDL_GPUBuffer*>(destination.handle_), destination_offset};
     SDL_CopyGPUBufferToBuffer(pass, &from, &to, bytes, false);
     SDL_EndGPUCopyPass(pass);
     return true;
@@ -1180,6 +1202,12 @@ bool CommandList::draw_pulled(
             && draw.batch_uniforms.size() < draw.batches.size() * stride) {
             return false;
         }
+    }
+    // Indirect counts replace exactly one batch's, and only where the
+    // capability says a backend reads them.
+    if (draw.indirect.buffer != nullptr
+        && (!device_->capabilities().indirect_draw || draw.batches.size() != 1U)) {
+        return false;
     }
 
     if (backend_ == BackendKind::D3d12) {
@@ -1588,6 +1616,19 @@ bool CommandList::blit(
     return true;
 }
 
+bool CommandList::download(const StorageBuffer& source, core::u32 offset, core::u32 bytes,
+                           Readback& into) noexcept {
+    if (device_ == nullptr || handle_ == nullptr || !source || !into || !source.ranged_ ||
+        bytes > into.bytes_) {
+        return false;
+    }
+    // Only the native backend reads device-local buffers back.
+    if (backend_ != BackendKind::D3d12) {
+        return false;
+    }
+    return detail::d3d12_download_buffer(handle_, source.handle_, offset, bytes, into.handle_);
+}
+
 bool CommandList::download(const Texture& source, Readback& into, core::u32 mip, core::u32 layer) noexcept {
     if (device_ == nullptr || handle_ == nullptr || !source || !into) {
         return false;
@@ -1975,6 +2016,13 @@ core::u64 Device::dedicated_video_memory_bytes() const noexcept {
     return detail::d3d12_dedicated_video_memory(handle_);
 }
 
+std::string_view Device::lost_reason() const noexcept {
+    if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
+        return {};
+    }
+    return detail::d3d12_lost_reason(handle_);
+}
+
 bool Device::supports(ShaderFormat format) const noexcept {
     if (handle_ == nullptr) {
         return false;
@@ -2157,6 +2205,27 @@ core::Result<StorageBuffer, RhiError> Device::create_storage_buffer(
     }
     return Result::success(StorageBuffer{
         *this, buffer, buffer, staging, BackendKind::SdlGpu, bytes});
+}
+
+core::Result<StorageBuffer, RhiError> Device::create_writable_buffer(
+    core::u32 bytes) noexcept {
+    using Result = core::Result<StorageBuffer, RhiError>;
+    if (handle_ == nullptr) {
+        return Result::failure(RhiError::Unavailable);
+    }
+    if (!capabilities_.writable_buffers) {
+        return Result::failure(RhiError::OperationUnsupported);
+    }
+    if (bytes == 0U) {
+        return Result::failure(RhiError::InvalidConfiguration);
+    }
+    auto created = detail::d3d12_create_geometry_buffer(handle_, bytes, true);
+    if (!created) {
+        return Result::failure(created.error());
+    }
+    return Result::success(StorageBuffer{
+        *this, created.value().state, created.value().native, nullptr,
+        BackendKind::D3d12, bytes, true, true});
 }
 
 core::Result<StorageBuffer, RhiError> Device::create_geometry_buffer(

@@ -94,9 +94,13 @@ add_subdirectory(engine/assets)
 # deterministic radial transforms) without depending on the GPU renderer.
 add_subdirectory(engine/compositor)
 
-# Particles and volumes, kept free of media server dependencies so it can be
-# published on its own; see libs/ajfx/README.md.
-add_subdirectory(libs/ajfx)
+# ajfx, the particles and volumes project beside the media server in this
+# repository (see ajfx/README.md). Its runtime comes first because the
+# renderer plays its effects; ajfx Studio, its editor, previews through that
+# renderer, so it is built when the GUI is.
+set(AJFX_WARNINGS_AS_ERRORS ${MEDIASERVER_WARNINGS_AS_ERRORS})
+set(AJFX_BUILD_STUDIO_APP ${MEDIASERVER_ENABLE_GUI})
+add_subdirectory(ajfx)
 
 # SDL3 carries both the window shell and the first RHI backend, so the option
 # now means "this build has SDL3" rather than "this build opens windows": a
@@ -133,7 +137,7 @@ if(BUILD_TESTING)
     mediaserver_test_area(persist engine/persist)
     mediaserver_test_area(scene engine/scene engine/track engine/assets)
     mediaserver_test_area(compositor engine/compositor)
-    mediaserver_test_area(particles libs/ajfx)
+    mediaserver_test_area(particles ajfx)
     mediaserver_test_area(output engine/output engine/topology engine/sync
         engine/devices)
     mediaserver_test_area(render engine/shaders engine/rhi engine/render)

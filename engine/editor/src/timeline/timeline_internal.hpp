@@ -274,6 +274,8 @@ channel_label(scene::PropertyChannel property) noexcept {
     return "Focus distance";
   case scene::PropertyChannel::CameraAperture:
     return "Aperture";
+  case scene::PropertyChannel::ParticleParameter:
+    return "Particle parameter";
   case scene::PropertyChannel::Count:
     break;
   }
@@ -718,11 +720,15 @@ inline void nearer_key(std::optional<core::i64> &best,
          lowercase(name).find(lowercase(query)) != std::string::npos;
 }
 
+// `parameter` names a particle parameter channel; every other channel has
+// none, so a lookup without one never finds a parameter's keys.
 [[nodiscard]] inline const scene::ChannelKeyframes *
 channel_for(std::span<const scene::ChannelKeyframes> keyframes,
-            doc::NodeId node, scene::TransformChannel component) noexcept {
+            doc::NodeId node, scene::TransformChannel component,
+            std::string_view parameter = {}) noexcept {
   for (const scene::ChannelKeyframes &entry : keyframes) {
-    if (entry.target == node && entry.component == component) {
+    if (entry.target == node && entry.component == component &&
+        entry.parameter == parameter) {
       return &entry;
     }
   }
@@ -740,9 +746,10 @@ sample_channel_at(const scene::ChannelKeyframes *channel,
 
 [[nodiscard]] inline const std::vector<core::i64> *
 frames_for(std::span<const scene::ChannelKeyframes> keyframes, doc::NodeId node,
-           scene::TransformChannel component) noexcept {
+           scene::TransformChannel component,
+           std::string_view parameter = {}) noexcept {
   const scene::ChannelKeyframes *const channel =
-      channel_for(keyframes, node, component);
+      channel_for(keyframes, node, component, parameter);
   return channel != nullptr ? &channel->frames : nullptr;
 }
 
@@ -869,6 +876,8 @@ struct Row final {
   // What it shows instead when even that does not fit: the slot's tag, as
   // the rig diagram marks it - "TOP" for "CEILING REFLECTION".
   std::string short_label;
+  // A Property row for a particle parameter: its key ("rate.0").
+  std::string parameter;
 };
 
 // How round a clip's corners are: soft at any height, but never so round a
@@ -892,6 +901,8 @@ struct RowChannels final {
   doc::NodeId target{};
   core::u8 first{};
   core::u8 count{};
+  // A particle parameter row's key; it names the one channel.
+  std::string_view parameter;
 
   [[nodiscard]] scene::PropertyChannel at(core::u8 offset) const noexcept {
     return static_cast<scene::PropertyChannel>(first + offset);
@@ -911,7 +922,7 @@ row_channels(const Row &row) noexcept {
         static_cast<core::u8>(group_channel(row.group, row.component)), 1U};
   case Row::Kind::Property:
     return RowChannels{row.property_target,
-                       static_cast<core::u8>(row.property), 1U};
+                       static_cast<core::u8>(row.property), 1U, row.parameter};
   case Row::Kind::LaneHeader:
   case Row::Kind::Layer:
   case Row::Kind::PropertiesHeader:
@@ -1002,6 +1013,7 @@ inline constexpr float group_value_width = 132.0F;
   return element.kind == ElementKind::Object ||
          element.kind == ElementKind::Media ||
          element.kind == ElementKind::Model ||
+         element.kind == ElementKind::ParticleEffect ||
          element.kind == ElementKind::Group || is_light(element.kind);
 }
 

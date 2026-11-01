@@ -4340,6 +4340,26 @@ void the_environment_status_names_each_reason() {
   }
 }
 
+void stage_status_names_what_particle_effects_are_waiting_for() {
+  const auto status = [](auto set) {
+    mediaserver::render::RenderStats geometry{};
+    geometry.assets.ready = false;
+    set(geometry);
+    return editor::stage_asset_status(geometry, 0U, mediaserver::render::DisplayLutState::Ready);
+  };
+  // Refusals are failures with what to do about them.
+  auto shown = status([](auto& g) { g.particles_unsupported = 1U; });
+  UI_CHECK(!shown.loading && shown.headline == "STAGE ASSET LOAD FAILED");
+  UI_CHECK(shown.detail.find("Advanced renderer") != std::string::npos);
+  shown = status([](auto& g) { g.particles_failed = 2U; });
+  UI_CHECK(!shown.loading && shown.detail.find("Rescan in Library") != std::string::npos);
+  // Loading and catching up are waits.
+  shown = status([](auto& g) { g.particles_pending = 3U; });
+  UI_CHECK(shown.loading && shown.detail == "Loading particle effects: 3 pending.");
+  shown = status([](auto& g) { g.particles_behind = 1U; });
+  UI_CHECK(shown.loading && shown.detail.find("catching up") != std::string::npos);
+}
+
 void program_publication_status_reports_the_actual_wait() {
   editor::OutputMonitorState::Cluster cluster{};
   core::AssetSetReadiness local{19, false, 0};
@@ -4410,7 +4430,7 @@ void linked_tree_preserves_hierarchy_collapse_and_range() {
   selected=h.frame(80,scene_row(0),false); UI_CHECK(selected && selected->node==collection.node);
 }
 
-constexpr std::array<Case, 135U> cases{{
+constexpr std::array<Case, 136U> cases{{
     {"a scene row renames in place", &a_scene_row_renames_in_place},
     {"a scene eye hides and shows", &a_scene_eye_hides_and_shows},
     {"scene rows drag into groups and between siblings",
@@ -4423,6 +4443,7 @@ constexpr std::array<Case, 135U> cases{{
     {"shadow stability controls apply and reopen", &shadow_stability_controls_apply_and_reopen},
     {"photometric scale accepts precise numeric input", &photometric_scale_accepts_precise_numeric_input},
     {"program publication reports the actual wait", &program_publication_status_reports_the_actual_wait},
+    {"Stage status names what particle effects are waiting for", &stage_status_names_what_particle_effects_are_waiting_for},
     {"baked lighting page actions and authored field", &baked_lighting_page_starts_cancels_and_preserves_the_authored_field},
     {"the environment status names each reason",
      &the_environment_status_names_each_reason},

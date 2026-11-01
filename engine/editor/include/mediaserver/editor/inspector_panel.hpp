@@ -51,6 +51,8 @@ struct InspectorKeyEdit final {
     scene::TransformChannel component{};
     double value{};
     bool erase{};
+    // For a particle parameter channel, its key ("rate.0").
+    std::string parameter;
 
     bool operator==(const InspectorKeyEdit&) const = default;
 };
@@ -214,6 +216,9 @@ class InspectorPanel final {
         // it sits in the stack. Its own domain because it is render policy
         // rather than anything about where the camera is.
         Plate,
+        // A particle effect's seed and start frame: whole numbers that decide
+        // which particles every node draws.
+        Particles,
     };
 
     // Semantic identity of one numeric field. Named properties need a domain
@@ -288,6 +293,10 @@ class InspectorPanel final {
                      const ElementInfo& element, InspectorFrame& frame,
                      std::span<const scene::ChannelKeyframes> keyframes,
                      core::u64 show_frame);
+    // A particle effect's package, seed and start frame.
+    void draw_particles(gui::UiContext& ctx, Cursor& cursor,
+                        const ElementInfo& element, InspectorFrame& frame,
+                        core::u64 show_frame);
     // A camera's section: which authored tracker feed drives it. Choosing one
     // is the whole act of making a camera the tracked camera, so this is the
     // only place the two kinds meet.
@@ -383,6 +392,7 @@ class InspectorPanel final {
     bool material_extensions_open_{};
     bool linked_open_{};
     bool animation_open_{};
+    bool particles_open_{true};
     bool baking_open_{};
     void draw_material_extensions(gui::UiContext& ctx, Cursor& cursor, const ElementInfo& element, InspectorFrame& frame);
     bool content_open_{true};

@@ -1,0 +1,814 @@
+#include <mediaserver/render/particle_pass.hpp>
+
+#if defined(MEDIASERVER_HAS_DXIL_SHADERS)
+#include <mediaserver/shaders/particle_sprite_frag_dxil.h>
+#include <mediaserver/shaders/particle_sprite_vert_dxil.h>
+#include <mediaserver/shaders/particle_lights_comp_dxil.h>
+#include <mediaserver/shaders/particle_velocity_frag_dxil.h>
+#endif
+
+#include <ajfx/rigid.hpp>
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <utility>
+
+namespace mediaserver::render {
+namespace {
+
+constexpr core::u32 absent = 0xffffffffU;
+
+// Matches the ParticleView constant buffer in particle_sprite.vert.hlsl.
+struct ViewConstants final {
+    std::array<float, 16U> view_projection{}; // column-major, as scene::Mat4
+    std::array<float, 16U> world{};           // object to world, four columns
+    std::array<float, 4U> camera_right{};
+    std::array<float, 4U> camera_up{};
+    std::array<float, 4U> camera_forward{};
+    core::u32 stride{};
+    core::u32 position_offset{absent};
+    core::u32 velocity_offset{absent};
+    core::u32 color_offset{absent};
+    core::u32 size_offset{absent};
+    core::u32 rotation_offset{absent};
+    core::u32 facing_velocity{};
+    core::u32 premultiplied{};
+    std::array<float, 4U> extra{}; // x: stretch, y: 1 for additive light, z: orientation offset bits
+    core::u32 age_offset{absent};
+    core::u32 lifetime_offset{absent};
+    core::u32 flipbook{};
+    core::u32 flags{};
+    std::array<float, 16U> canvas_view_projection{};
+    std::array<float, 16U> previous_view_projection{};
+    std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid, z: soft distance
+    std::array<float, 4U> depth_terms{}; // projection (2,2), (2,3), (3,2), (3,3)
+};
+static_assert(sizeof(ViewConstants) == 400U);
+
+// ViewConstants::flags.
+constexpr core::u32 flag_textured = 1U;
+constexpr core::u32 flag_blend_cells = 2U;
+constexpr core::u32 flag_srgb = 4U;
+constexpr core::u32 flag_sorted = 8U;
+constexpr core::u32 flag_soft = 16U;
+constexpr core::u32 flag_ribbon = 32U;
+constexpr core::u32 flag_mesh = 64U;
+
+core::u32 offset_or_absent(std::int32_t offset) {
+    return offset >= 0 ? static_cast<core::u32>(offset) : absent;
+}
+
+ParticleError failure(ParticleErrorCode code, std::string message) {
+    return ParticleError{code, std::move(message)};
+}
+
+} // namespace
+
+// ------------------------------------------------------------ instance
+
+struct ParticleInstance::State final {
+    ajfx::Effect effect;
+    std::optional<ajfx::gpu::GpuSimulation> simulation;
+    // Checkpoint slots, made at creation and reused; `saved` holds the step
+    // each one has, if any.
+    std::vector<ajfx::gpu::GpuCheckpoint> checkpoints;
+    std::vector<std::optional<core::u64>> saved;
+    core::u64 target{0U};
+    // Set by restart: the next advance resets the simulation first.
+    bool restart{};
+    std::optional<ajfx::gpu::ParticleSorter> sorter;
+    // One per texture name, staged a recording's upload space at a time;
+    // the texels (not the size or colour space) are dropped once they have
+    // all been recorded.
+    struct Upload final {
+        rhi::Texture texture;
+        ajfx::TextureData data;
+        core::u32 mip{0U};
+        core::u32 row{0U};
+        bool landed{};
+    };
+    std::vector<Upload> textures;
+    // Each emitter's index in `textures`, if it has one.
+    std::vector<std::optional<std::size_t>> emitter_texture;
+    // Each emitter's drawing order from the last draw, for its motion.
+    std::vector<ajfx::gpu::Buffer> orders;
+    // Each mesh emitter's mesh and draw arguments (the mesh's index count,
+    // then the live count copied from the simulation). The vertices and
+    // indices wait here until the first advance writes them.
+    struct Mesh final {
+        ajfx::gpu::Buffer vertices;
+        ajfx::gpu::Buffer indices;
+        ajfx::gpu::Buffer args;
+        core::u32 index_count{};
+        std::vector<float> unwritten_vertices;
+        std::vector<std::uint32_t> unwritten_indices;
+    };
+    std::vector<std::optional<Mesh>> meshes;
+    // Its rigid physics on the pass's runner, if it has any, and the step
+    // whose particles the buffers hold (none since the simulation last moved).
+    std::unique_ptr<ajfx::RigidTrack> rigid;
+    std::optional<core::u64> rigid_written;
+    ParticleDevice* device{};
+
+    ~State() {
+        if (device != nullptr) {
+            for (const std::optional<Mesh>& mesh : meshes) {
+                if (mesh) {
+                    device->destroy_buffer(mesh->vertices);
+                    device->destroy_buffer(mesh->indices);
+                    device->destroy_buffer(mesh->args);
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] bool textures_landed() const noexcept {
+        return std::all_of(textures.begin(), textures.end(), [](const Upload& upload) { return upload.landed; });
+    }
+};
+
+ParticleInstance::ParticleInstance(std::unique_ptr<State> state) : state_{std::move(state)} {}
+ParticleInstance::ParticleInstance(ParticleInstance&&) noexcept = default;
+ParticleInstance& ParticleInstance::operator=(ParticleInstance&&) noexcept = default;
+ParticleInstance::~ParticleInstance() {
+    // Checkpoints hold device buffers the simulation's device must release
+    // first-in, last-out: drop them before the simulation.
+    if (state_) {
+        state_->checkpoints.clear();
+        state_->simulation.reset();
+    }
+}
+
+const ajfx::Effect& ParticleInstance::effect() const noexcept {
+    return state_->effect;
+}
+
+core::u64 ParticleInstance::step() const noexcept {
+    return state_->simulation->tick();
+}
+
+core::u64 ParticleInstance::target_step() const noexcept {
+    return state_->target;
+}
+
+bool ParticleInstance::caught_up() const noexcept {
+    return step() == target_step() && state_->textures_landed() &&
+           (!state_->rigid || state_->rigid_written == target_step());
+}
+
+std::optional<std::string> ParticleInstance::failure() const {
+    if (state_->rigid) {
+        if (std::optional<ajfx::Error> failed = state_->rigid->error()) {
+            return "rigid physics in '" + state_->effect.name + "': " + failed->message;
+        }
+    }
+    return std::nullopt;
+}
+
+bool ParticleInstance::safe_to_release() const noexcept {
+    return !state_ || std::all_of(state_->textures.begin(), state_->textures.end(),
+                                  [](const State::Upload& upload) { return upload.texture.safe_to_release(); });
+}
+
+ajfx::gpu::GpuSimulation& ParticleInstance::simulation() noexcept {
+    return *state_->simulation;
+}
+
+// ------------------------------------------------------------ pass
+
+struct ParticlePass::State final {
+    rhi::Device* device{};
+    std::unique_ptr<ParticleDevice> particles;
+    rhi::GraphicsPipeline blended;  // alpha and premultiplied emitters
+    rhi::GraphicsPipeline additive;
+    // Blended meshes: as `blended`, writing depth.
+    rhi::GraphicsPipeline mesh;
+    // Sprite motion into the scene's velocity target.
+    rhi::GraphicsPipeline velocity;
+    // Particle lights into the scene's particle light buffer.
+    rhi::ComputePipeline lights;
+    // Bound for emitters without a texture, which never sample it.
+    std::optional<rhi::Texture> blank;
+    std::optional<rhi::Sampler> sampler;
+    ParticleSettings settings;
+    // Made with the first rigid physics instance; the runner goes first.
+    std::unique_ptr<ajfx::RigidSolver> rigid_solver;
+    std::unique_ptr<ajfx::RigidRunner> rigid_runner;
+    std::optional<ParticleError> error;
+
+    void note(std::string message) {
+        if (!error) {
+            error = failure(ParticleErrorCode::DeviceFailure, std::move(message));
+        }
+    }
+};
+
+ParticlePass::ParticlePass(std::unique_ptr<State> state) : state_{std::move(state)} {}
+ParticlePass::ParticlePass(ParticlePass&&) noexcept = default;
+ParticlePass& ParticlePass::operator=(ParticlePass&&) noexcept = default;
+ParticlePass::~ParticlePass() = default;
+
+core::Result<ParticlePass, ParticleError> ParticlePass::create(rhi::Device& device, rhi::TextureFormat color_format,
+                                                               ParticleSettings settings) {
+    using Result = core::Result<ParticlePass, ParticleError>;
+#if defined(MEDIASERVER_HAS_DXIL_SHADERS)
+    if (settings.step_budget == 0U || settings.checkpoint_interval == 0U) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, "particle step budget and checkpoint interval must be positive"));
+    }
+    auto particles = ParticleDevice::create(device);
+    if (!particles) {
+        return Result::failure(failure(ParticleErrorCode::Unsupported,
+                                       "this renderer cannot simulate particles: it needs compute with writable "
+                                       "buffers and indirect dispatch"));
+    }
+    auto state = std::make_unique<State>();
+    state->device = &device;
+    state->particles = std::move(particles).value();
+    state->settings = settings;
+
+    rhi::ShaderDesc vertex{};
+    vertex.stage = rhi::ShaderStage::Vertex;
+    vertex.format = rhi::ShaderFormat::Dxil;
+    vertex.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_vert_dxil),
+                                                sizeof(mediaserver_particle_sprite_vert_dxil)};
+    vertex.storage_buffer_count = 5U;
+    vertex.uniform_buffer_count = 1U;
+    rhi::ShaderDesc fragment{};
+    fragment.stage = rhi::ShaderStage::Fragment;
+    fragment.format = rhi::ShaderFormat::Dxil;
+    fragment.bytecode = std::span<const core::u8>{reinterpret_cast<const core::u8*>(mediaserver_particle_sprite_frag_dxil),
+                                                  sizeof(mediaserver_particle_sprite_frag_dxil)};
+    // The texture, and the scene depth soft particles fade against.
+    fragment.sampler_count = 2U;
+    // Tested against the scene, never written: a particle is not a surface
+    // anything behind it should be hidden by.
+    rhi::DepthState depth{};
+    depth.enabled = true;
+    depth.write = false;
+    depth.greater = true;
+    auto blended = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, depth);
+    auto additive = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedEmit, depth);
+    rhi::ShaderDesc motion = fragment;
+    motion.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_velocity_frag_dxil),
+        sizeof(mediaserver_particle_velocity_frag_dxil)};
+    auto velocity = device.create_pipeline(vertex, motion, rhi::TextureFormat::Rgba32Float, rhi::ColorBlend::Disabled,
+                                           depth);
+    rhi::DepthState solid = depth;
+    solid.write = true;
+    auto mesh = device.create_pipeline(vertex, fragment, color_format, rhi::ColorBlend::PremultipliedNormal, solid);
+    rhi::ShaderDesc light_kernel{};
+    light_kernel.stage = rhi::ShaderStage::Compute;
+    light_kernel.format = rhi::ShaderFormat::Dxil;
+    light_kernel.bytecode = std::span<const core::u8>{
+        reinterpret_cast<const core::u8*>(mediaserver_particle_lights_comp_dxil),
+        sizeof(mediaserver_particle_lights_comp_dxil)};
+    light_kernel.storage_buffer_count = 2U;
+    light_kernel.writable_buffer_count = 1U;
+    light_kernel.uniform_buffer_count = 1U;
+    auto lights = device.create_compute_pipeline(light_kernel);
+    if (!blended || !additive || !velocity || !mesh || !lights) {
+        return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle sprite pipelines could not be made"));
+    }
+    state->blended = std::move(blended).value();
+    state->additive = std::move(additive).value();
+    state->velocity = std::move(velocity).value();
+    state->mesh = std::move(mesh).value();
+    state->lights = std::move(lights).value();
+    rhi::TextureDesc blank{};
+    blank.width = 1U;
+    blank.height = 1U;
+    blank.sampled = true;
+    auto blank_texture = device.create_texture(blank);
+    auto sampler = device.create_sampler(rhi::SamplerDesc{});
+    if (!blank_texture || !sampler) {
+        return Result::failure(failure(ParticleErrorCode::Unsupported, "the particle texture sampler could not be made"));
+    }
+    state->blank.emplace(std::move(blank_texture).value());
+    state->sampler.emplace(std::move(sampler).value());
+    return Result::success(ParticlePass{std::move(state)});
+#else
+    (void)device;
+    (void)color_format;
+    (void)settings;
+    return Result::failure(failure(ParticleErrorCode::Unsupported, "this build has no particle sprite shaders"));
+#endif
+}
+
+core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(const ajfx::Effect& effect,
+                                                                           const ajfx::gpu::KernelSet& kernels,
+                                                                           const ajfx::TextureSet& textures,
+                                                                           const ajfx::FieldSet& fields,
+                                                                           const ajfx::MeshSet& meshes,
+                                                                           core::u32 seed) {
+    using Result = core::Result<ParticleInstance, ParticleError>;
+    State& s = *state_;
+    if (ajfx::Result<bool> checked = ajfx::check_textures(effect, textures); !checked) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
+    }
+    if (ajfx::Result<bool> checked = ajfx::check_fields(effect, fields); !checked) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
+    }
+    if (ajfx::Result<bool> checked = ajfx::check_meshes(effect, meshes); !checked) {
+        return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
+    }
+    // Rigid physics emitters are stepped by the pass's runner, not inline.
+    const bool rigid = ajfx::has_rigid_physics(effect);
+    ajfx::Result<ajfx::gpu::GpuSimulation> simulation = ajfx::gpu::GpuSimulation::create(
+        *s.particles, effect, kernels, seed, ajfx::SimulationOptions{.fields = fields},
+        rigid ? ajfx::gpu::RigidHosting::Host : ajfx::gpu::RigidHosting::Inline);
+    if (!simulation) {
+        const ajfx::ErrorCode code = simulation.error().code;
+        return Result::failure(failure(code == ajfx::ErrorCode::DeviceFailure ? ParticleErrorCode::DeviceFailure
+                                                                                : ParticleErrorCode::InvalidEffect,
+                                       simulation.error().message));
+    }
+    auto state = std::make_unique<ParticleInstance::State>();
+    state->effect = effect;
+    state->simulation.emplace(std::move(simulation).value());
+    // Every checkpoint is allocated now, so saving one while recording a
+    // frame copies into existing buffers. Nothing is recorded or submitted
+    // here: creating an instance only allocates.
+    for (core::u32 slot = 0U; slot < s.settings.checkpoint_count; ++slot) {
+        ajfx::Result<ajfx::gpu::GpuCheckpoint> checkpoint = state->simulation->allocate_checkpoint();
+        if (!checkpoint) {
+            return Result::failure(failure(ParticleErrorCode::DeviceFailure, checkpoint.error().message));
+        }
+        state->checkpoints.push_back(std::move(checkpoint).value());
+        state->saved.emplace_back();
+    }
+    ajfx::Result<ajfx::gpu::ParticleSorter> sorter = ajfx::gpu::ParticleSorter::create(*s.particles, effect, kernels);
+    if (!sorter) {
+        return Result::failure(failure(ParticleErrorCode::DeviceFailure, sorter.error().message));
+    }
+    state->sorter.emplace(std::move(sorter).value());
+    state->device = s.particles.get();
+    if (rigid) {
+        if (!s.rigid_runner) {
+            s.rigid_solver = ajfx::rigid::make_jolt_solver(ajfx::rigid::JoltOptions{.threads = s.settings.rigid_threads});
+            s.rigid_runner = std::make_unique<ajfx::RigidRunner>(
+                *s.rigid_solver, ajfx::RigidRunnerOptions{.lead = s.settings.rigid_lead,
+                                                          .checkpoint_interval = s.settings.checkpoint_interval,
+                                                          .checkpoint_count = s.settings.checkpoint_count});
+        }
+        state->rigid = s.rigid_runner->track(effect, seed, meshes);
+    }
+    for (const ajfx::Emitter& emitter : effect.emitters) {
+        std::optional<ParticleInstance::State::Mesh>& out = state->meshes.emplace_back();
+        if (emitter.renderer.geometry != ajfx::Geometry::Mesh) {
+            continue;
+        }
+        const ajfx::MeshData& data = meshes.find(emitter.renderer.mesh)->second;
+        ParticleInstance::State::Mesh mesh;
+        mesh.index_count = static_cast<core::u32>(data.indices.size());
+        for (const ajfx::MeshVertex& v : data.vertices) {
+            mesh.unwritten_vertices.insert(mesh.unwritten_vertices.end(), {v.position.x, v.position.y, v.position.z,
+                                                                           v.normal.x, v.normal.y, v.normal.z, v.u, v.v});
+        }
+        mesh.unwritten_indices = data.indices;
+        for (const auto& [bytes, target] : {std::pair{mesh.unwritten_vertices.size() * 4U, &mesh.vertices},
+                                            std::pair{mesh.unwritten_indices.size() * 4U, &mesh.indices},
+                                            std::pair{std::size_t{16U}, &mesh.args}}) {
+            ajfx::Result<ajfx::gpu::Buffer> created = s.particles->create_buffer(bytes, "particle mesh");
+            if (!created) {
+                return Result::failure(failure(ParticleErrorCode::DeviceFailure, created.error().message));
+            }
+            *target = created.value();
+        }
+        out = std::move(mesh);
+    }
+    // Textures are made now and filled by later advances.
+    for (const ajfx::Emitter& emitter : effect.emitters) {
+        std::optional<std::size_t> index;
+        if (!emitter.renderer.texture.empty()) {
+            const ajfx::TextureData& data = textures.find(emitter.renderer.texture)->second;
+            for (std::size_t e = 0U; e < effect.emitters.size() && !index; ++e) {
+                if (state->emitter_texture.size() > e && state->emitter_texture[e] &&
+                    effect.emitters[e].renderer.texture == emitter.renderer.texture) {
+                    index = state->emitter_texture[e];
+                }
+            }
+            if (!index) {
+                rhi::TextureDesc desc{};
+                desc.width = data.width;
+                desc.height = data.height;
+                desc.sampled = true;
+                desc.mip_levels = static_cast<core::u32>(data.mips.size());
+                auto texture = s.device->create_texture(desc);
+                if (!texture) {
+                    return Result::failure(failure(ParticleErrorCode::DeviceFailure,
+                                                   "texture '" + emitter.renderer.texture + "' could not be made"));
+                }
+                index = state->textures.size();
+                state->textures.push_back({std::move(texture).value(), data});
+            }
+        }
+        state->emitter_texture.push_back(index);
+    }
+    return Result::success(ParticleInstance{std::move(state)});
+}
+
+bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instance, core::u64 show_frame,
+                           core::u32 rate_num, core::u32 rate_den, const ajfx::ParameterProvider* parameters) {
+    State& s = *state_;
+    ParticleInstance::State& i = *instance.state_;
+    ajfx::gpu::GpuSimulation& simulation = *i.simulation;
+    if (rate_num == 0U || rate_den == 0U) {
+        s.note("advance needs a positive show rate");
+        return false;
+    }
+    i.target = ajfx::tick_at(show_frame, rate_num, rate_den, i.effect.simulation_rate);
+
+    // Textures first, as much as this recording's upload space holds.
+    for (ParticleInstance::State::Upload& upload : i.textures) {
+        while (!upload.landed) {
+            const core::u32 width = ajfx::mip_size(upload.data.width, upload.mip);
+            const core::u32 height = ajfx::mip_size(upload.data.height, upload.mip);
+            const core::u32 room = commands.texture_upload_row_capacity(upload.texture);
+            if (room == 0U) {
+                break;
+            }
+            const core::u32 rows = std::min(height - upload.row, room);
+            const std::size_t row_bytes = std::size_t{width} * 4U;
+            const std::span<const core::u8> texels{upload.data.mips[upload.mip].data() + upload.row * row_bytes,
+                                                   rows * row_bytes};
+            if (!commands.upload_texture_rows(upload.texture, upload.mip, 0U, upload.row, rows, texels)) {
+                s.note("a particle texture upload was refused");
+                return false;
+            }
+            upload.row += rows;
+            if (upload.row == height) {
+                upload.row = 0U;
+                if (++upload.mip == upload.data.mips.size()) {
+                    upload.landed = true;
+                    upload.data.mips = {};
+                }
+            }
+        }
+    }
+
+    s.particles->begin_recording(commands);
+    for (std::optional<ParticleInstance::State::Mesh>& mesh : i.meshes) {
+        if (mesh && !mesh->unwritten_vertices.empty()) {
+            s.particles->write_buffer(mesh->vertices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_vertices.data()),
+                                                mesh->unwritten_vertices.size() * 4U});
+            s.particles->write_buffer(mesh->indices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_indices.data()),
+                                                mesh->unwritten_indices.size() * 4U});
+            mesh->unwritten_vertices = {};
+            mesh->unwritten_indices = {};
+        }
+    }
+    const core::u64 held_step = simulation.tick();
+    if (i.restart) {
+        simulation.reset();
+        i.restart = false;
+        i.rigid_written.reset();
+    }
+    // Start from the latest checkpoint at or before the target when that is
+    // closer than where the simulation is: always when going back, and when
+    // a scrub forward passes a checkpoint already made.
+    std::optional<std::size_t> best;
+    for (std::size_t slot = 0U; slot < i.saved.size(); ++slot) {
+        if (i.saved[slot] && *i.saved[slot] <= i.target && (!best || *i.saved[slot] > *i.saved[*best])) {
+            best = slot;
+        }
+    }
+    if (i.target < simulation.tick()) {
+        if (best) {
+            simulation.restore(i.checkpoints[*best]);
+        } else {
+            simulation.reset();
+        }
+        i.rigid_written.reset();
+    } else if (best && *i.saved[*best] > simulation.tick()) {
+        simulation.restore(i.checkpoints[*best]);
+        i.rigid_written.reset();
+    }
+
+    for (core::u32 steps = 0U; simulation.tick() < i.target && steps < s.settings.step_budget; ++steps) {
+        const core::u64 tick = simulation.tick();
+        const bool held = std::any_of(i.saved.begin(), i.saved.end(),
+                                      [tick](const std::optional<core::u64>& saved) { return saved == tick; });
+        if (!i.checkpoints.empty() && tick % s.settings.checkpoint_interval == 0U && !held) {
+            // An empty slot, else the one holding the earliest step.
+            std::size_t slot = 0U;
+            for (std::size_t candidate = 0U; candidate < i.saved.size(); ++candidate) {
+                if (!i.saved[candidate]) {
+                    slot = candidate;
+                    break;
+                }
+                if (i.saved[slot] && *i.saved[candidate] < *i.saved[slot]) {
+                    slot = candidate;
+                }
+            }
+            simulation.save_into(i.checkpoints[slot]);
+            i.saved[slot] = tick;
+        }
+        simulation.step(parameters);
+    }
+    if (simulation.tick() != held_step) {
+        i.rigid_written.reset();
+    }
+    // The rigid physics emitters' particles at the target step, once the
+    // runner has them. Asking also tells it where to work ahead from.
+    if (i.rigid) {
+        const std::shared_ptr<const ajfx::RigidFrame> frame = i.rigid->frame(i.target);
+        if (frame && simulation.tick() == i.target && i.rigid_written != i.target) {
+            for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+                if (ajfx::rigid_physics(i.effect.emitters[e]) != nullptr) {
+                    simulation.write_rigid(e, frame->emitters[e]);
+                }
+            }
+            i.rigid_written = i.target;
+        }
+    }
+    s.particles->end_recording();
+    if (std::optional<ajfx::Error> error = s.particles->take_error()) {
+        s.note(error->message);
+        return false;
+    }
+    return instance.caught_up();
+}
+
+void ParticlePass::restart(ParticleInstance& instance,
+                           std::shared_ptr<const ajfx::ParameterProvider> parameters) noexcept {
+    ParticleInstance::State& i = *instance.state_;
+    std::fill(i.saved.begin(), i.saved.end(), std::nullopt);
+    i.restart = true;
+    if (i.rigid) {
+        i.rigid->set_parameters(std::move(parameters));
+    }
+}
+
+bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, const scene::ViewMatrices& view,
+                        const scene::Mat4& object_to_world, const ParticleTargets& targets) {
+    State& s = *state_;
+    if (!instance.caught_up() || targets.color == nullptr || targets.depth == nullptr) {
+        return false;
+    }
+    ParticleInstance::State& i = *instance.state_;
+
+    // Back to front along the camera's forward axis, in the effect's own
+    // space: depth = dot(world(p), forward) is dot(p, W^T forward) plus a
+    // constant, for W the 3x3 part of object_to_world (column-major).
+    std::array<float, 3U> forward{};
+    for (core::u32 column = 0U; column < 3U; ++column) {
+        forward[column] = -view.view.at(2U, column);
+    }
+    ajfx::Vec3 axis{};
+    float* const axis_out[3] = {&axis.x, &axis.y, &axis.z};
+    for (core::u32 column = 0U; column < 3U; ++column) {
+        *axis_out[column] = object_to_world.m[column * 4U + 0U] * forward[0] +
+                            object_to_world.m[column * 4U + 1U] * forward[1] +
+                            object_to_world.m[column * 4U + 2U] * forward[2];
+    }
+    i.orders.assign(i.effect.emitters.size(), ajfx::gpu::Buffer{});
+    s.particles->begin_recording(commands);
+    for (std::size_t e = 0U; e < i.orders.size(); ++e) {
+        i.orders[e] = i.sorter->sort(*i.simulation, e, axis);
+        // A mesh draws its index count of vertices for each live particle.
+        if (i.meshes[e]) {
+            const std::uint32_t args[4] = {i.meshes[e]->index_count, 0U, 0U, 0U};
+            s.particles->write_buffer(i.meshes[e]->args, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(args), sizeof(args)});
+            const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
+            s.particles->copy_buffer(i.meshes[e]->args, 4U, buffers.args, buffers.draw_args_offset + 4U, 4U);
+        }
+    }
+    s.particles->end_recording();
+    if (std::optional<ajfx::Error> error = s.particles->take_error()) {
+        s.note(error->message);
+        return false;
+    }
+    return record_sprites(commands, instance, view, object_to_world, targets, false);
+}
+
+bool ParticlePass::draw_motion(rhi::CommandList& commands, ParticleInstance& instance,
+                               const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
+                               const ParticleTargets& targets) {
+    const ParticleInstance::State& i = *instance.state_;
+    if (!instance.caught_up() || targets.velocity == nullptr || targets.depth == nullptr ||
+        i.orders.size() != i.effect.emitters.size()) {
+        return false;
+    }
+    return record_sprites(commands, instance, view, object_to_world, targets, true);
+}
+
+bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& instance,
+                                  const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
+                                  const ParticleTargets& targets, bool motion) {
+    State& s = *state_;
+    const ParticleInstance::State& i = *instance.state_;
+    ViewConstants constants;
+    constants.view_projection = view.view_projection.m;
+    constants.world = object_to_world.m;
+    // The view matrix's rows are the camera's axes in world space; it looks
+    // down its own -Z.
+    for (core::u32 column = 0U; column < 3U; ++column) {
+        constants.camera_right[column] = view.view.at(0U, column);
+        constants.camera_up[column] = view.view.at(1U, column);
+        constants.camera_forward[column] = -view.view.at(2U, column);
+    }
+    constants.canvas_view_projection = targets.canvas_view_projection.m;
+    constants.previous_view_projection = targets.previous_view_projection.m;
+    // How reversed device depth maps back to distance, for soft particles.
+    constants.depth_terms = {view.projection.at(2U, 2U), view.projection.at(2U, 3U), view.projection.at(3U, 2U),
+                             view.projection.at(3U, 3U)};
+
+    bool first = true;
+    for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+        const ajfx::SpriteRenderer& sprite = i.effect.emitters[e].renderer;
+        const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
+        const rhi::StorageBuffer* records = s.particles->buffer(buffers.particles);
+        const rhi::StorageBuffer* arguments = s.particles->buffer(buffers.args);
+        if (records == nullptr || arguments == nullptr ||
+            buffers.draw_args_offset > std::numeric_limits<core::u32>::max()) {
+            s.note("an emitter's particle buffers are missing");
+            return false;
+        }
+        constants.stride = buffers.layout.stride;
+        constants.position_offset = offset_or_absent(buffers.layout.position);
+        constants.velocity_offset = offset_or_absent(buffers.layout.velocity);
+        constants.color_offset = offset_or_absent(buffers.layout.color);
+        constants.size_offset = offset_or_absent(buffers.layout.size);
+        constants.rotation_offset = offset_or_absent(buffers.layout.rotation);
+        constants.facing_velocity = sprite.facing == ajfx::Facing::Velocity ? 1U : 0U;
+        constants.premultiplied = sprite.blend == ajfx::BlendMode::Premultiplied ? 1U : 0U;
+        constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F,
+                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), 0.0F};
+        constants.age_offset = offset_or_absent(buffers.layout.age);
+        constants.lifetime_offset = offset_or_absent(buffers.layout.lifetime);
+        constants.flipbook = sprite.flipbook_columns | (sprite.flipbook_rows << 16U);
+        const bool soft = !motion && targets.scene_depth != nullptr && sprite.soft_distance > 0.0F;
+        constants.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F, targets.motion_valid ? 1.0F : 0.0F,
+                            soft ? sprite.soft_distance : 0.0F, 0.0F};
+        const std::optional<std::size_t> texture = i.emitter_texture[e];
+        constants.flags = (texture ? flag_textured : 0U) | (sprite.flipbook_blend ? flag_blend_cells : 0U) |
+                          (texture && i.textures[*texture].data.color_space == ajfx::ColorSpace::Srgb ? flag_srgb : 0U) |
+                          (soft ? flag_soft : 0U) | (sprite.geometry == ajfx::Geometry::Ribbon ? flag_ribbon : 0U) |
+                          (sprite.geometry == ajfx::Geometry::Mesh ? flag_mesh : 0U);
+        const rhi::StorageBuffer* order = i.orders[e].valid() ? s.particles->buffer(i.orders[e]) : records;
+        if (order == nullptr) {
+            s.note("an emitter's sort order is missing");
+            return false;
+        }
+        if (i.orders[e].valid()) {
+            constants.flags |= flag_sorted;
+        }
+        const rhi::StorageBuffer* counters = s.particles->buffer(buffers.counters);
+        if (counters == nullptr) {
+            s.note("an emitter's counters are missing");
+            return false;
+        }
+        const std::span<const core::u8> emitter_uniform{reinterpret_cast<const core::u8*>(&constants),
+                                                        sizeof(constants)};
+        const std::array<rhi::SampledTexture, 2U> sampled{
+            rhi::SampledTexture{texture ? &i.textures[*texture].texture : &*s.blank, &*s.sampler},
+            rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
+
+        const std::optional<ParticleInstance::State::Mesh>& mesh = i.meshes[e];
+        const rhi::StorageBuffer* mesh_vertices = mesh ? s.particles->buffer(mesh->vertices) : records;
+        const rhi::StorageBuffer* mesh_indices = mesh ? s.particles->buffer(mesh->indices) : records;
+        const rhi::StorageBuffer* mesh_args = mesh ? s.particles->buffer(mesh->args) : arguments;
+        if (mesh_vertices == nullptr || mesh_indices == nullptr || mesh_args == nullptr) {
+            s.note("an emitter's mesh buffers are missing");
+            return false;
+        }
+        const rhi::StorageBuffer* vertex_buffers[] = {records, order, counters, mesh_vertices, mesh_indices};
+        // The counts come from the simulation; this batch only carries them.
+        const std::array<rhi::DrawBatch, 1U> batches{rhi::DrawBatch{6U, 1U}};
+        rhi::PulledDraw draw{};
+        draw.pipeline = motion ? &s.velocity
+            : sprite.blend == ajfx::BlendMode::Additive ? &s.additive
+            : mesh ? &s.mesh
+                   : &s.blended;
+        draw.vertex_buffers = vertex_buffers;
+        draw.vertex_uniform = emitter_uniform;
+        draw.fragment_textures = sampled;
+        draw.batches = batches;
+        draw.indirect = mesh ? rhi::IndirectArguments{mesh_args, 0U}
+                             : rhi::IndirectArguments{arguments, static_cast<core::u32>(buffers.draw_args_offset)};
+        draw.load = motion || !first || targets.load;
+        draw.store_depth = true;
+        draw.viewport = targets.viewport;
+        draw.raster_viewport = targets.raster_viewport;
+        rhi::Texture& target = motion ? *targets.velocity : *targets.color;
+        if (!commands.draw_pulled(target, targets.clear, *targets.depth, targets.depth_clear, draw)) {
+            s.note(motion ? "a particle motion draw was refused" : "a particle draw was refused");
+            return false;
+        }
+        first = false;
+    }
+    return true;
+}
+
+core::u32 ParticlePass::light_count(const ParticleInstance& instance) const noexcept {
+    core::u32 count = 0U;
+    for (const ajfx::Emitter& emitter : instance.state_->effect.emitters) {
+        count += emitter.renderer.light_count;
+    }
+    return count;
+}
+
+bool ParticlePass::write_lights(rhi::CommandList& commands, const ParticleInstance& instance,
+                                const scene::Mat4& object_to_world, rhi::StorageBuffer& lights,
+                                core::u32 first_slot) {
+    State& s = *state_;
+    const ParticleInstance::State& i = *instance.state_;
+    // Matches ParticleLightParameters in particle_lights.comp.hlsl.
+    struct Parameters final {
+        std::array<float, 16U> world{};
+        core::u32 stride{};
+        core::u32 position_offset{};
+        core::u32 color_offset{};
+        core::u32 light_count{};
+        core::u32 first_slot{};
+        core::u32 spacing{};
+        core::u32 age_offset{};
+        core::u32 lifetime_offset{};
+        core::u32 spawn_offset{};
+        core::u32 salt{};
+        core::u32 color_keys{};
+        core::u32 curve_keys{};
+        float intensity_min{};
+        float intensity_max{};
+        float range_min{};
+        float range_max{};
+        std::array<float, 8U> color_times{};
+        std::array<std::array<float, 4U>, 8U> color_values{};
+        std::array<float, 8U> curve_times{};
+        std::array<float, 8U> curve_values{};
+    };
+    static_assert(sizeof(Parameters) == 352U);
+    static_assert(ajfx::SpriteRenderer::max_light_keys == 8U);
+    core::u32 slot = first_slot;
+    for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+        const ajfx::Emitter& emitter = i.effect.emitters[e];
+        const ajfx::SpriteRenderer& sprite = emitter.renderer;
+        if (sprite.light_count == 0U) {
+            continue;
+        }
+        const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
+        const rhi::StorageBuffer* records = s.particles->buffer(buffers.particles);
+        const rhi::StorageBuffer* counters = s.particles->buffer(buffers.counters);
+        if (records == nullptr || counters == nullptr) {
+            s.note("an emitter's particle buffers are missing");
+            return false;
+        }
+        Parameters parameters;
+        parameters.world = object_to_world.m;
+        parameters.stride = buffers.layout.stride;
+        parameters.position_offset = static_cast<core::u32>(buffers.layout.position);
+        parameters.color_offset = offset_or_absent(buffers.layout.color);
+        parameters.light_count = sprite.light_count;
+        parameters.first_slot = slot;
+        parameters.spacing = ajfx::light_spacing(i.effect, emitter);
+        parameters.age_offset = static_cast<core::u32>(buffers.layout.age);
+        parameters.lifetime_offset = static_cast<core::u32>(buffers.layout.lifetime);
+        parameters.spawn_offset = static_cast<core::u32>(buffers.layout.spawn_index);
+        parameters.salt = static_cast<core::u32>(e) * 0x9E37'79B9U;
+        parameters.intensity_min = sprite.light_intensity_min;
+        parameters.intensity_max = sprite.light_intensity_max;
+        parameters.range_min = sprite.light_range_min;
+        parameters.range_max = sprite.light_range_max;
+        if (sprite.light_own_color) {
+            parameters.color_keys = static_cast<core::u32>(sprite.light_colors.size());
+            for (std::size_t k = 0U; k < sprite.light_colors.size(); ++k) {
+                const ajfx::ColorKey& key = sprite.light_colors[k];
+                parameters.color_times[k] = key.t;
+                parameters.color_values[k] = {key.value.r, key.value.g, key.value.b, key.value.a};
+            }
+        }
+        parameters.curve_keys = static_cast<core::u32>(sprite.light_curve.size());
+        for (std::size_t k = 0U; k < sprite.light_curve.size(); ++k) {
+            parameters.curve_times[k] = sprite.light_curve[k].t;
+            parameters.curve_values[k] = sprite.light_curve[k].value;
+        }
+        const rhi::StorageBuffer* reads[] = {records, counters};
+        const rhi::StorageBuffer* writes[] = {&lights};
+        rhi::ComputeDispatch work{};
+        work.pipeline = &s.lights;
+        work.storage_buffers = reads;
+        work.writable_buffers = writes;
+        work.uniform = std::span<const core::u8>{reinterpret_cast<const core::u8*>(&parameters), sizeof(parameters)};
+        work.groups_x = (sprite.light_count + 63U) / 64U;
+        if (!commands.dispatch(work)) {
+            s.note("a particle light dispatch was refused");
+            return false;
+        }
+        slot += sprite.light_count;
+    }
+    return true;
+}
+
+std::optional<ParticleError> ParticlePass::take_error() noexcept {
+    return std::exchange(state_->error, std::nullopt);
+}
+
+} // namespace mediaserver::render

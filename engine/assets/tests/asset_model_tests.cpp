@@ -787,12 +787,68 @@ void library_edits_plan_folders_filing_and_names() {
     ASSET_CHECK(!assets::plan_library_edit(root, remove));
 }
 
+void particle_effect_packages_are_their_own_asset_kind() {
+    // One file may be a model and a particle package by name alone; the kind
+    // keeps them apart, and a package's fingerprint and folder are digested.
+    const std::string package = src("fx/embers.ajfx");
+    doc::Node effect = node(31U, schema::particle_effect_type,
+                            {text(schema::display_name, "Embers"),
+                             text(schema::source, package),
+                             whole(schema::folder, 40)});
+    const doc::Node same_source = node(32U, schema::model_type,
+                                       {text(schema::display_name, "Embers mesh"),
+                                        text(schema::source, package)});
+    const doc::Node duplicate = node(33U, schema::particle_effect_type,
+                                     {text(schema::display_name, "Embers again"),
+                                      text(schema::source, package)});
+    assets::AssetModel model_view;
+    model_view.reset(root_of({effect, same_source, duplicate}));
+    ASSET_CHECK(model_view.counters().particle_effects == 2U);
+    ASSET_CHECK(model_view.counters().models == 1U);
+    ASSET_CHECK(model_view.counters().duplicate_sources == 1U);
+    const assets::AssetRegistry registry = model_view.evaluate();
+    ASSET_CHECK(registry.assets.size() == 2U);
+    const assets::Asset* const held = registry.asset(doc::NodeId{31U});
+    ASSET_CHECK(held != nullptr && registry.asset(doc::NodeId{33U}) == nullptr);
+    ASSET_CHECK(assets::asset_kind(*held) == assets::AssetKind::ParticleEffect);
+    const auto* const value = std::get_if<assets::ParticleEffectAsset>(held);
+    ASSET_CHECK(value != nullptr && value->display_name == "Embers" &&
+                value->source == package && value->folder == doc::NodeId{40U} &&
+                !value->fingerprint.has_value());
+    ASSET_CHECK(registry.asset_for_source(package, assets::AssetKind::ParticleEffect) == held);
+    ASSET_CHECK(assets::asset_kind(*registry.asset_for_source(package, assets::AssetKind::Model)) ==
+                assets::AssetKind::Model);
+
+    const core::u64 before = assets::digest(registry);
+    effect.properties.insert_or_assign(std::string{schema::expected_byte_length},
+                                       doc::PropertyValue{std::int64_t{2048}});
+    effect.properties.insert_or_assign(
+        std::string{schema::expected_sha256},
+        doc::PropertyValue{std::string(64U, 'a')});
+    assets::AssetModel fingerprinted;
+    fingerprinted.reset(root_of({effect, same_source}));
+    const assets::AssetRegistry measured = fingerprinted.evaluate();
+    const auto* const sealed =
+        std::get_if<assets::ParticleEffectAsset>(measured.asset(doc::NodeId{31U}));
+    ASSET_CHECK(sealed != nullptr && sealed->fingerprint.has_value() &&
+                sealed->fingerprint->byte_length == 2048U);
+    ASSET_CHECK(assets::digest(measured) != before);
+
+    // A package with no source is malformed, not an empty effect.
+    assets::AssetModel broken;
+    broken.reset(root_of({node(34U, schema::particle_effect_type,
+                               {text(schema::display_name, "Nothing")})}));
+    ASSET_CHECK(broken.counters().rejected == 1U && broken.counters().particle_effects == 0U);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 15U> cases{{
+    {"particle effect packages are their own asset kind",
+     &particle_effect_packages_are_their_own_asset_kind},
     {"library metadata and folders are parsed and digested",
      &library_metadata_and_folders_are_parsed_and_digested},
     {"a dangling or cyclic folder lists at the top level",

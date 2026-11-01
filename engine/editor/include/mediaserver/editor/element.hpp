@@ -9,6 +9,9 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <array>
+#include <utility>
+#include <vector>
 
 // What a scene element looks like to the editor's panels.
 //
@@ -46,6 +49,9 @@ enum class ElementKind : core::u8 {
     // object in the scene.
     Camera,
     Environment,
+    // An ajfx particle effect placed from the Library: a package, a transform,
+    // a seed and the show frame its time starts at.
+    ParticleEffect,
 };
 
 // The word an operator sees for a kind - what the Inspector titles a selection
@@ -76,6 +82,8 @@ enum class ElementKind : core::u8 {
         return "camera";
     case ElementKind::Environment:
         return "environment";
+    case ElementKind::ParticleEffect:
+        return "particle effect";
     case ElementKind::Object:
         break;
     }
@@ -91,6 +99,19 @@ enum class ElementKind : core::u8 {
     return kind == ElementKind::DirectionalLight
         || kind == ElementKind::PointLight;
 }
+
+// One parameter a particle package publishes, as the Inspector edits it.
+struct ParticleParameterInfo final {
+    std::string name;
+    // 1 for a Float, 3 for a Vec3, 4 for a Color.
+    core::u32 components{1U};
+    bool color{};
+    float min{};
+    float max{1.0F};
+    std::array<float, 4U> fallback{};
+
+    bool operator==(const ParticleParameterInfo&) const = default;
+};
 
 // A scene element the Inspector shows and edits, with its authored values (the
 // base, before channels) read from the document by the Director. Objects and
@@ -135,6 +156,16 @@ struct ElementInfo final {
     std::string model_material_status;
     scene::LayerStyle style{};
     std::string source;
+    // Particle effects: the authored seed, mixed with the node identity for
+    // the simulation, and the show frame the effect's own time starts at.
+    core::u32 particle_seed{};
+    core::i64 particle_start_frame{};
+    // The parameter values the node authors, by key ("rate.0"), sorted.
+    std::vector<std::pair<std::string, double>> particle_values;
+    // What the package publishes, supplied by the shell's nonblocking package
+    // view; empty until it is read, with a reason if it cannot be.
+    std::vector<ParticleParameterInfo> particle_parameters;
+    std::string particle_status;
     core::u32 sequence_start{};
     core::u32 sequence_count{1U};
     // Clip-only: the size the decoded video is held at.

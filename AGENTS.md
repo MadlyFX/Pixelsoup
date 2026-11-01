@@ -21,7 +21,8 @@ document or scanning binary model assets to understand a small change.
 | Director/node entry points and Blender service | `apps/server` |
 | Director frame-loop phases and editor command authoring | `apps/server/director_show_loop.hpp`, `apps/server/director_*.cpp` |
 | Offline lighting bake | `apps/bake` |
-| Particles and volumes library (no media server dependencies) | `libs/ajfx` |
+| Particle effects in the scene renderer (ajfx host side) | `engine/render/particle_*`, `engine/scene` (`scene.particle_effect`) |
+| ajfx: particles runtime and ajfx Studio, a separate project with its own guide | `ajfx/` (see `ajfx/AGENTS.md`) |
 | Blender publisher | `integrations/blender`, `tests/blender`, `scripts/test-blender-livelink.py` |
 
 Modules have colocated `tests/`; the headless spine also uses `tests/unit/`.

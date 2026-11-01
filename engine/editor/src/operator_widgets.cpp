@@ -209,6 +209,19 @@ void draw_kind_icon(gui::UiContext &ctx, ElementKind kind,
     }
     return;
   }
+  case ElementKind::ParticleEffect: {
+    // A burst: sparks thrown out from a point, larger as they travel.
+    draw_filled_circle(ctx, cx, cy, 1.6F, color);
+    for (std::size_t spark = 0U; spark < 7U; ++spark) {
+      const float angle = tau * static_cast<float>(spark) / 7.0F - tau / 4.0F;
+      const float reach = spark % 2U == 0U ? 6.0F : 4.2F;
+      draw_filled_circle(ctx, cx + std::cos(angle) * reach,
+                         cy + std::sin(angle) * reach,
+                         spark % 2U == 0U ? 1.3F : 1.0F,
+                         spark % 2U == 0U ? color : with_alpha(color, 0.7F));
+    }
+    return;
+  }
   case ElementKind::Object:
     break;
   }

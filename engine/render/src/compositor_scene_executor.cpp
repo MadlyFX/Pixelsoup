@@ -622,6 +622,16 @@ using MaskPrograms = std::map<doc::NodeId, const scene::MaskProgram*>;
             return false;
         }
     }
+    // A particle effect is a source like any other drawable: without one,
+    // a scene holding only effects plans no layer and draws nothing. It has
+    // no layer style of its own, so it joins the ordinary shared pass.
+    for (const scene::ParticleEffect& effect : source.particle_effects) {
+        if (!add(effect.source_node, scene::LayerStyle{}, effect.world,
+                 source.camera.eye, forward, SourceOrderDomain::Sibling,
+                 effect.parent_group, effect.group_order, 0U)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -832,6 +842,11 @@ void assign_depth_only_nodes(const scene::Scene& adjusted,
     std::erase_if(result.effects,
                   [&pass](const scene::EffectInstance& effect) noexcept {
                       return !pass_contains(pass, effect.target);
+                  });
+    // A particle effect draws in the pass that holds it, once.
+    std::erase_if(result.particle_effects,
+                  [&pass](const scene::ParticleEffect& effect) noexcept {
+                      return !pass_contains(pass, effect.source_node);
                   });
 
     // The layer's authored blend is applied once, when its completed texture
@@ -1084,6 +1099,12 @@ using LayerPassResult =
     }
     for (const scene::ModelInstance& instance : adjusted.models) {
         if (!inspect(instance.source_node, instance.style)) {
+            return LayerPassResult::failure(
+                CompositorScenePlanError::InconsistentLayerStyle);
+        }
+    }
+    for (const scene::ParticleEffect& effect : adjusted.particle_effects) {
+        if (!inspect(effect.source_node, scene::LayerStyle{})) {
             return LayerPassResult::failure(
                 CompositorScenePlanError::InconsistentLayerStyle);
         }
@@ -2744,6 +2765,19 @@ CompositorSceneResult CompositorSceneExecutor::execute_plan(
             last_passes_.geometry.planar_passes = std::max(last_passes_.geometry.planar_passes, products.passes.geometry.planar_passes);
             last_passes_.geometry.planar_refusals = std::max(last_passes_.geometry.planar_refusals, products.passes.geometry.planar_refusals);
             if (!products.passes.geometry.reflection_reason.empty()) last_passes_.geometry.reflection_reason = products.passes.geometry.reflection_reason;
+            if (!seeds_frame) {
+                // Each layer draws its own effects; any one holding is the
+                // frame holding, for the reason the first one gave.
+                const RenderStats& drawn = products.passes.geometry;
+                last_passes_.geometry.particles_drawn += drawn.particles_drawn;
+                last_passes_.geometry.particles_pending += drawn.particles_pending;
+                last_passes_.geometry.particles_failed += drawn.particles_failed;
+                last_passes_.geometry.particles_unsupported += drawn.particles_unsupported;
+                last_passes_.geometry.particles_behind += drawn.particles_behind;
+                if (last_passes_.geometry.particle_issue.empty()) {
+                    last_passes_.geometry.particle_issue = drawn.particle_issue;
+                }
+            }
             if (products.passes.geometry.texture_streaming.state !=
                     TextureStreamState::Ready) {
                 last_passes_.geometry.texture_streaming.state =

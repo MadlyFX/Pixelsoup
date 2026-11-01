@@ -240,6 +240,29 @@ void capabilities_and_native_handles_are_typed_and_immutable() {
 
 }
 
+// A device the driver removes says so, and why; a working one says nothing.
+void native_d3d12_reports_a_lost_device() {
+    if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
+        return;
+    }
+    rhi::DeviceConfig config{};
+    config.backend = rhi::BackendKind::D3d12;
+    auto created = rhi::Device::create(config);
+    RHI_CHECK(created);
+    auto device = std::move(created).value();
+    RHI_CHECK(device.lost_reason().empty());
+#if defined(_WIN32)
+    // D3D12's own way to make a device lost, as a hang or a fault would.
+    auto* native = static_cast<ID3D12Device*>(device.native_handle().value);
+    Microsoft::WRL::ComPtr<ID3D12Device5> removable;
+    if (native == nullptr || FAILED(native->QueryInterface(IID_PPV_ARGS(&removable)))) {
+        return;
+    }
+    removable->RemoveDevice();
+    RHI_CHECK(!device.lost_reason().empty());
+#endif
+}
+
 void native_d3d12_is_nonblocking_and_preserves_linear_float_pixels() {
     if (!rhi::Device::available(rhi::BackendKind::D3d12)) {
         return;
@@ -265,7 +288,11 @@ void native_d3d12_is_nonblocking_and_preserves_linear_float_pixels() {
     // Explicit barriers are callable now; async compute still is not.
     RHI_CHECK(capabilities.explicit_barriers);
     RHI_CHECK(!capabilities.async_compute);
-    RHI_CHECK(!capabilities.indirect_draw);
+    // Writable buffers and indirect dispatch and draw are callable; see
+    // rhi_compute_buffer_tests.cpp.
+    RHI_CHECK(capabilities.writable_buffers);
+    RHI_CHECK(capabilities.indirect_dispatch);
+    RHI_CHECK(capabilities.indirect_draw);
     RHI_CHECK(!capabilities.acceleration_structures);
     RHI_CHECK(!capabilities.ray_queries);
     RHI_CHECK(!capabilities.advanced_ray_tracing());
@@ -1967,7 +1994,7 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 27U> cases{{
+constexpr std::array<Case, 28U> cases{{
     {"an explicit transition is journalled and rolls back",
      &native_d3d12_an_explicit_transition_is_journalled_and_rolls_back},
     {"a redundant transition is a no-op",
@@ -2008,6 +2035,7 @@ constexpr std::array<Case, 27U> cases{{
      &capabilities_and_native_handles_are_typed_and_immutable},
     {"native D3D12 is nonblocking and preserves linear float pixels",
      &native_d3d12_is_nonblocking_and_preserves_linear_float_pixels},
+    {"native D3D12 reports a lost device", &native_d3d12_reports_a_lost_device},
     {"native D3D12 upload pages span multiple 4K plates and reuse",
      &native_d3d12_upload_pages_span_multiple_4k_plates_and_reuse},
     {"native D3D12 cancelled lists restore texture state",

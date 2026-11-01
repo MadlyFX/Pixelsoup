@@ -307,6 +307,20 @@ namespace mediaserver::app {
             return std::optional<doc::NodeId>{};
         };
         info.source = text(scene::schema::source);
+        info.particle_seed = integer(scene::schema::particle_seed, 0U);
+        info.particle_start_frame =
+            signed_integer(scene::schema::particle_start_frame, 0);
+        if (kind == editor::ElementKind::ParticleEffect) {
+            for (const auto &[name, value] : doc_node->properties) {
+                if (!std::string_view{name}.starts_with(scene::schema::particle_parameter_prefix)) continue;
+                const auto *const real = std::get_if<double>(&value);
+                const auto *const whole = std::get_if<std::int64_t>(&value);
+                if (real == nullptr && whole == nullptr) continue;
+                info.particle_values.emplace_back(
+                    name.substr(scene::schema::particle_parameter_prefix.size()),
+                    real != nullptr ? *real : static_cast<double>(*whole));
+            }
+        }
         info.sequence_start = integer(scene::schema::sequence_start, 0U);
         info.sequence_count = integer(scene::schema::sequence_count, 1U);
         info.media_resolution =
@@ -315,7 +329,8 @@ namespace mediaserver::app {
         info.display_name = text(scene::schema::group_name);
         if (info.display_name.empty() && !info.source.empty() &&
             (kind == editor::ElementKind::Media ||
-             kind == editor::ElementKind::Model)) {
+             kind == editor::ElementKind::Model ||
+             kind == editor::ElementKind::ParticleEffect)) {
             info.display_name = native_path_to_utf8(
                 native_path_from_utf8(info.source).filename());
         }
@@ -458,6 +473,14 @@ namespace mediaserver::app {
         apply_parent_state(info);
         elements.push_back(std::move(info));
     }
+    for (const auto &effect : scene.particle_effects) {
+        auto info = read(effect.source_node, editor::ElementKind::ParticleEffect);
+        info.locked = info.locked || effect.locked;
+        info.parent_group = effect.parent_group;
+        info.group_order = effect.group_order;
+        apply_parent_state(info);
+        elements.push_back(std::move(info));
+    }
     // The evaluated Scene holds only what draws, so a model or generator that
     // is hidden - itself or by a group above it - is listed from the document.
     // Otherwise hiding one would take its row, and with it the way to show it
@@ -473,21 +496,26 @@ namespace mediaserver::app {
         for (const auto &change : contents.changes) {
             const doc::Node &node = *change.after;
             const bool model = node.type == scene::schema::model_type;
-            if ((!model && node.type != scene::schema::object_type) || listed.contains(change.id)
+            const bool particles = node.type == scene::schema::particle_effect_type;
+            if ((!model && !particles && node.type != scene::schema::object_type) || listed.contains(change.id)
                 || scene::is_linked_occurrence(node)) continue;
             const auto owner = static_cast<core::u64>(read_transform(node, scene::schema::scene_id, 0));
             if ((owner != 0U ? doc::NodeId{owner} : default_scene) != scene.id) continue;
-            auto info = read(change.id, model ? editor::ElementKind::Model : editor::ElementKind::Object);
+            auto info = read(change.id, model ? editor::ElementKind::Model
+                : particles ? editor::ElementKind::ParticleEffect : editor::ElementKind::Object);
             apply_parent_state(info);
             elements.push_back(std::move(info));
         }
-        // In the evaluated order - generators, then models, each by node - so
-        // hiding one leaves its row where it was.
+        // In the evaluated order - generators, then models, then particle
+        // effects, each by node - so hiding one leaves its row where it was.
+        const auto rank = [](editor::ElementKind kind) {
+            return kind == editor::ElementKind::Model ? 1
+                : kind == editor::ElementKind::ParticleEffect ? 2 : 0;
+        };
         std::stable_sort(elements.begin() + static_cast<std::ptrdiff_t>(drawables_begin), elements.end(),
-            [](const editor::ElementInfo &a, const editor::ElementInfo &b) {
-                const bool a_model = a.kind == editor::ElementKind::Model;
-                const bool b_model = b.kind == editor::ElementKind::Model;
-                return a_model != b_model ? b_model : a.node.value() < b.node.value();
+            [&rank](const editor::ElementInfo &a, const editor::ElementInfo &b) {
+                return rank(a.kind) != rank(b.kind) ? rank(a.kind) < rank(b.kind)
+                                                    : a.node.value() < b.node.value();
             });
     }
     // Include hidden occurrences, so showing one never depends on whether it

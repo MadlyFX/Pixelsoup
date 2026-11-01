@@ -969,7 +969,7 @@ void TimelinePanel::handle_actions(Pass &p) {
     batch.keys.reserve(keys_.selected.size());
     for (const SelectedKey &key : keys_.selected) {
       batch.keys.push_back(
-          TimelineKeyAddress{key.target, key.component, key.frame});
+          TimelineKeyAddress{key.target, key.component, key.frame, key.parameter});
     }
     std::sort(batch.keys.begin(), batch.keys.end());
     batch.keys.erase(std::unique(batch.keys.begin(), batch.keys.end()),
@@ -1015,7 +1015,8 @@ TimelinePanel::key_under_pointer(Pass &p) const {
 bool TimelinePanel::selection_has_cubic(const Pass &p) const {
   for (const SelectedKey &key : keys_.selected) {
     for (const scene::ChannelKeyframes &channel : p.input.keyframes) {
-      if (channel.target != key.target || channel.component != key.component) {
+      if (channel.target != key.target || channel.component != key.component ||
+          channel.parameter != key.parameter) {
         continue;
       }
       const auto found = std::lower_bound(channel.frames.begin(),

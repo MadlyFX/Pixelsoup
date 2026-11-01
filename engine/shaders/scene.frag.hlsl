@@ -91,6 +91,8 @@ StructuredBuffer<float4> inline_effect_parameters : register(t35, space2);
 StructuredBuffer<float4> ltc_tables : register(t36, space2);
 StructuredBuffer<LightShadow> light_shadows : register(t37, space2);
 StructuredBuffer<float4> baked_probes : register(t38, space2);
+// ajfx particle lights: plain point lights, the first particle_lights.x valid.
+StructuredBuffer<Light> particle_light_records : register(t39, space2);
 #else
 Texture2D<float4> transmission_background : register(t14, space2);
 Texture2D<float> ies_atlas : register(t15, space2);
@@ -155,6 +157,8 @@ cbuffer SceneConstants : register(b0, space3) {
     float4 reflection_extent[4];
     float4 reflection_parameters[4];
     float4 planar_parameters;
+    // x: particle lights in particle_light_records (Advanced).
+    uint4 particle_lights;
 
 };
 
@@ -878,6 +882,26 @@ float4 main(Varyings input, bool front_face : SV_IsFrontFace) : SV_Target0 {
         if (m.coat > 0.0 && !diffuse_only) coat_light += clearcoat_response(view, to_light, m) * radiance * visibility;
     }
 #if defined(MEDIASERVER_SCENE_LINEAR)
+    // Particle lights: windowed inverse-square point lights like the scene's,
+    // without shadows, cones or profiles. Slots with no particle carry zero
+    // intensity.
+    for (uint particle = 0; particle < particle_lights.x; ++particle) {
+        const Light light = particle_light_records[particle];
+        const float3 offset = light.vector - world_position;
+        const float distance = length(offset);
+        const float range = max(light.params.x, 1e-3);
+        if (light.color_intensity.a <= 0.0 || distance >= range) {
+            continue;
+        }
+        const float3 to_light = offset / max(distance, 1e-5);
+        const float falloff = saturate(1.0 - (distance / range));
+        const float3 radiance = light.color_intensity.rgb * light.color_intensity.a
+            * (falloff * falloff / max(distance * distance, 1e-4));
+        accumulated += (extended_lighting
+            ? extended_surface_response(normal, view, to_light, albedo, roughness, metallic, m, false)
+            : surface_response(normal, view, to_light, albedo, roughness, metallic, false)) * radiance;
+        if (m.coat > 0.0) coat_light += clearcoat_response(view, to_light, m) * radiance;
+    }
     if (counts.z != 0u && gi_parameters.y > 0.0) {
         accumulated += directional_rsm_indirect(
             input.world_position, normal)

@@ -519,6 +519,29 @@ if(MEDIASERVER_DXC)
     mediaserver_compile_dxil(
         compute_gather.comp.hlsl cs_6_2
         mediaserver_compute_gather_comp_dxil compute_gather_comp_dxil.h)
+    # ajfx particle sprites, drawn over the scene from the simulation's records.
+    mediaserver_compile_dxil(
+        particle_sprite.vert.hlsl vs_6_2
+        mediaserver_particle_sprite_vert_dxil particle_sprite_vert_dxil.h)
+    mediaserver_compile_dxil(
+        particle_sprite.frag.hlsl ps_6_2
+        mediaserver_particle_sprite_frag_dxil particle_sprite_frag_dxil.h)
+    mediaserver_compile_dxil(
+        particle_velocity.frag.hlsl ps_6_2
+        mediaserver_particle_velocity_frag_dxil particle_velocity_frag_dxil.h)
+    mediaserver_compile_dxil(
+        particle_lights.comp.hlsl cs_6_2
+        mediaserver_particle_lights_comp_dxil particle_lights_comp_dxil.h)
+    # Test probes for writable buffers and indirect dispatch and draw.
+    mediaserver_compile_dxil(
+        buffer_scale_probe.comp.hlsl cs_6_2
+        mediaserver_buffer_scale_probe_comp_dxil buffer_scale_probe_comp_dxil.h)
+    mediaserver_compile_dxil(
+        buffer_add_probe.comp.hlsl cs_6_2
+        mediaserver_buffer_add_probe_comp_dxil buffer_add_probe_comp_dxil.h)
+    mediaserver_compile_dxil(
+        points_probe.vert.hlsl vs_6_2
+        mediaserver_points_probe_vert_dxil points_probe_vert_dxil.h)
     # The bespoke 2D UI: pulled quads, one atlas for text and solid fills, clip
     # rect carried per batch. The operator UI is built on this.
     mediaserver_compile_dxil(

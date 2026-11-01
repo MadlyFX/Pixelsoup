@@ -299,6 +299,43 @@ void camera_light_and_surface_keys_support_batch_edits() {
     check_locked(scene::plan_key_delete(default_locked, wall_selection));
 }
 
+void particle_parameter_keys_are_addressed_by_their_key() {
+    doc::Root root = basic_root();
+    root = root.set(node(14U, schema::particle_effect_type,
+                         {text(schema::source, "fx/sparks.ajfx")}));
+    root = root.set(channel(31U, 14U, "particle_parameter.rate.0",
+                           {key(5, 10.0, schema::interp_linear)}));
+    root = root.set(channel(32U, 14U, "particle_parameter.wind.1",
+                           {key(5, 2.0, schema::interp_linear)}));
+    // On another kind of target a parameter channel is not editable.
+    root = root.set(channel(33U, 10U, "particle_parameter.rate.0",
+                           {key(5, 1.0, schema::interp_linear)}));
+    scene::KeyAddress rate = address(14U, scene::PropertyChannel::ParticleParameter, 5);
+    rate.parameter = "rate.0";
+    scene::KeyAddress object_rate = address(10U, scene::PropertyChannel::ParticleParameter, 5);
+    object_rate.parameter = "rate.0";
+    const std::array selection{rate, object_rate};
+    const auto planned = scene::plan_key_move(root, selection, 7);
+    KEY_CHECK(planned.has_value());
+    KEY_CHECK(planned.value().report.applied == 1U);
+    KEY_CHECK(planned.value().report.skips.size() == 1U);
+    KEY_CHECK(planned.value().report.skips.front().reason == scene::KeyEditSkipReason::InvalidTarget);
+    // Only the named parameter's channel moved; its sibling stayed.
+    KEY_CHECK(frames(*planned.value().after.get(doc::NodeId{31U})) == std::vector<core::i64>{12});
+    KEY_CHECK(frames(*planned.value().after.get(doc::NodeId{32U})) == std::vector<core::i64>{5});
+    KEY_CHECK(planned.value().selection_after.size() == 1U
+              && planned.value().selection_after.front().address.parameter == "rate.0");
+
+    // Deleting the only key erases that channel and nothing else.
+    scene::KeyAddress wind = address(14U, scene::PropertyChannel::ParticleParameter, 5);
+    wind.parameter = "wind.1";
+    const std::array deleting{wind};
+    const auto deleted = scene::plan_key_delete(root, deleting);
+    KEY_CHECK(deleted.has_value());
+    KEY_CHECK(deleted.value().after.get(doc::NodeId{32U}) == nullptr);
+    KEY_CHECK(deleted.value().after.get(doc::NodeId{31U}) != nullptr);
+}
+
 void move_is_atomic_sorted_and_replaces_stationary_destinations() {
     doc::Root root = basic_root();
     root = root.set(channel(
@@ -1058,7 +1095,9 @@ struct Case final {
     void (*function)();
 };
 
-constexpr std::array<Case, 14U> cases{{
+constexpr std::array<Case, 15U> cases{{
+    {"particle parameter keys are addressed by their key",
+     &particle_parameter_keys_are_addressed_by_their_key},
     {"camera light and surface keys support batch edits", &camera_light_and_surface_keys_support_batch_edits},
     {"selection is typed unique exact and lock aware",
      &selection_is_typed_unique_exact_and_lock_aware},
