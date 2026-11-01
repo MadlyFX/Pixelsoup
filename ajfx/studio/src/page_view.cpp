@@ -351,17 +351,16 @@ bool PageView::number(gui::UiContext& ctx, gui::UiId id, const gui::Rect& field,
 
 // ------------------------------------------------------------------ page
 
+bool PageView::popover_covers(float x, float y) const noexcept {
+    return picker_.covers(x, y);
+}
+
 void PageView::draw(gui::UiContext& ctx, const gui::Rect& bounds, Document& document, const PageInputs& inputs) {
     const gui::Theme& theme = ctx.theme();
     page_ = bounds;
     deferred_.clear();
     ctx.rounded(bounds, theme.panel, theme.radius_large);
 
-    // What floats above the page owns the pointer where it is.
-    const bool covered = picker_.is_open() && picker_.bounds().contains(ctx.pointer_x(), ctx.pointer_y());
-    if (covered) {
-        ctx.push_pointer_block();
-    }
     slots_.clear();
     layer_areas_.clear();
     layer_tops_.clear();
@@ -408,9 +407,6 @@ void PageView::draw(gui::UiContext& ctx, const gui::Rect& bounds, Document& docu
     y += 80.0F;
 
     scroll_.end(ctx, y + offset - view.y);
-    if (covered) {
-        ctx.pop_pointer_block();
-    }
     resolve_drag(ctx);
     resolve_incoming(ctx, document);
     for (auto& action : deferred_) {

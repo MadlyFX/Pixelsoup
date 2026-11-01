@@ -55,6 +55,9 @@ public:
     // Floating parts - the picker, menus, the block being dragged - drawn
     // after every panel.
     void draw_overlays(gui::UiContext& ctx, const gui::Rect& window, Document& document, const PageInputs& inputs);
+    // The picker is open and over this point: the host blocks the pointer for
+    // everything it draws under the card, which is drawn last.
+    [[nodiscard]] bool popover_covers(float x, float y) const noexcept;
 
     // A drag, scrub or rename is under way: hold off recording an undo step.
     [[nodiscard]] bool gesture_live() const noexcept;

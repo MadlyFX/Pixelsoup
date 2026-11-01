@@ -209,6 +209,11 @@ public:
         const gui::Theme& theme = ctx_.theme();
         ctx_.panel(window, theme.background);
 
+        // An open popover owns the pointer where its card is. The gallery is
+        // drawn after the page's own picker, so it covers that too.
+        const bool under_gallery = gallery_.covers(ctx_.pointer_x(), ctx_.pointer_y());
+        PopoverShield shield{ctx_, under_gallery || page_.popover_covers(ctx_.pointer_x(), ctx_.pointer_y())};
+
         draw_top_bar(gui::Rect{0.0F, 0.0F, width, top_bar_height});
         const gui::Rect body{10.0F, top_bar_height, std::max(width - 20.0F, 10.0F), std::max(height - top_bar_height - 10.0F, 10.0F)};
         // The palette down the left, then the page and the preview.
@@ -228,9 +233,13 @@ public:
             page_.add(document_, *clicked);
         }
         draw_preview(split.second, now);
-        page_.draw_overlays(ctx_, window, document_, inputs);
-        palette_.end_frame(ctx_);
-        page_.set_incoming(nullptr);
+        shield.release();
+        {
+            const PopoverShield over_page{ctx_, under_gallery};
+            page_.draw_overlays(ctx_, window, document_, inputs);
+            palette_.end_frame(ctx_);
+            page_.set_incoming(nullptr);
+        }
         draw_gallery(window);
         draw_toast(window, now);
         ctx_.draw_overlays(window);

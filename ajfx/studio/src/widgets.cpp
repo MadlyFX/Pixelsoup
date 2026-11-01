@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
 
 namespace ajfx::studio {
 
@@ -327,6 +328,20 @@ std::optional<std::size_t> PopoverList::draw(gui::UiContext& ctx, const gui::Rec
         ctx.clear_focus();
     }
     return picked;
+}
+
+PopoverShield::PopoverShield(gui::UiContext& ctx, bool covered) {
+    if (covered) {
+        ctx_ = std::addressof(ctx);
+        ctx_->push_pointer_block();
+    }
+}
+
+void PopoverShield::release() noexcept {
+    if (ctx_ != nullptr) {
+        ctx_->pop_pointer_block();
+        ctx_ = nullptr;
+    }
 }
 
 } // namespace ajfx::studio

@@ -66,6 +66,8 @@ public:
     [[nodiscard]] bool is_open() const noexcept { return open_; }
     // The card's rectangle last frame, for blocking what lies under it.
     [[nodiscard]] const gui::Rect& bounds() const noexcept { return bounds_; }
+    // Open and over this point, so the card owns the pointer here.
+    [[nodiscard]] bool covers(float x, float y) const noexcept { return open_ && bounds_.contains(x, y); }
 
     // Draws it; returns the chosen entry's index (into the entries it was
     // opened with) on the frame one is picked. Escape or a click outside
@@ -84,6 +86,27 @@ private:
     std::size_t highlight_{0U};
     gui::Rect bounds_{};
     gui::ScrollRegion scroll_;
+};
+
+// Holds the pointer for a popover card drawn over the window. The card is
+// drawn last, so every control under it has to be told to ignore the pointer
+// before it is drawn, or a press on an entry lands on the control instead and
+// the entry the artist aimed at never sees the click. Only where the card is:
+// the rest of the window still hovers, and a press outside still closes the
+// popover. Released just before the card itself is drawn.
+class PopoverShield final {
+public:
+    PopoverShield(gui::UiContext& ctx, bool covered);
+    PopoverShield(const PopoverShield&) = delete;
+    PopoverShield& operator=(const PopoverShield&) = delete;
+    PopoverShield(PopoverShield&&) = delete;
+    PopoverShield& operator=(PopoverShield&&) = delete;
+    ~PopoverShield() { release(); }
+
+    void release() noexcept;
+
+private:
+    gui::UiContext* ctx_{nullptr};
 };
 
 } // namespace ajfx::studio

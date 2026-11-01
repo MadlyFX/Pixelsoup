@@ -58,6 +58,20 @@ if(AJFX_BUILD_STUDIO_APP)
     # Kernels are compiled as an artist edits, so DXC travels with Studio.
     ajfx_copy_dxc(ajfx-studio)
     set_target_properties(ajfx-studio PROPERTIES FOLDER "ajfx")
+
+    if(BUILD_TESTING)
+        # Studio's own controls against synthetic input: they need the media
+        # server's UI toolkit, so they are built with the application.
+        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp src/widgets.cpp)
+        target_link_libraries(ajfx_studio_ui_tests PRIVATE
+            ajfx_studio_core
+            MediaServer::Gui
+            MediaServer::Editor
+        )
+        ajfx_set_options(ajfx_studio_ui_tests)
+        add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)
+        set_target_properties(ajfx_studio_ui_tests PROPERTIES FOLDER "ajfx/tests")
+    endif()
 endif()
 
 if(BUILD_TESTING)
