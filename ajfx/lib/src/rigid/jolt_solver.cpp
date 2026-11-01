@@ -11,15 +11,21 @@
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorderImpl.h>
 #include <Jolt/RegisterTypes.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -85,6 +91,210 @@ constexpr float smallest_size = 1.0e-3F;
 constexpr float plane_extent = 1000.0F;
 // How far beyond a removed body's bounds a body counts as touching it.
 constexpr float touch_margin = 0.05F;
+// Sides a generated round prop is built from. Three is the fewest that
+// encloses anything; past this the pieces cost more than the roundness.
+constexpr std::uint32_t fewest_segments = 3U;
+constexpr std::uint32_t most_segments = 64U;
+
+constexpr float pi = 3.14159265358979323846F;
+
+JPH::Vec3 at_least(JPH::Vec3Arg half) {
+    return JPH::Vec3(std::max(half.GetX(), smallest_size), std::max(half.GetY(), smallest_size),
+                     std::max(half.GetZ(), smallest_size));
+}
+
+// A box whose convex radius fits it. Jolt refuses a radius larger than the
+// smallest half extent, and a hollow prop's wall is often very thin.
+JPH::RefConst<JPH::Shape> box_shape(JPH::Vec3Arg half_in, float density) {
+    const JPH::Vec3 half = at_least(half_in);
+    const float smallest = std::min(half.GetX(), std::min(half.GetY(), half.GetZ()));
+    auto* box = new JPH::BoxShape(half, std::min(JPH::cDefaultConvexRadius, 0.25F * smallest));
+    box->SetDensity(density);
+    return box;
+}
+
+// A cylinder whose convex radius fits it, for the same reason: a bucket's
+// bottom is a disc far thinner than Jolt's default rounding.
+JPH::RefConst<JPH::Shape> cylinder_shape(float half_height, float radius, float density) {
+    const float h = std::max(half_height, smallest_size);
+    const float r = std::max(radius, smallest_size);
+    auto* cylinder = new JPH::CylinderShape(h, r, std::min(JPH::cDefaultConvexRadius, 0.25F * std::min(h, r)));
+    cylinder->SetDensity(density);
+    return cylinder;
+}
+
+// One convex piece of a generated prop, in the prop's own space.
+struct Piece final {
+    JPH::RefConst<JPH::Shape> shape;
+    JPH::Vec3 at{JPH::Vec3::sZero()};
+    JPH::Quat turn{JPH::Quat::sIdentity()};
+};
+
+// A ring of upright staves whose faces meet, enclosing `radius` with walls
+// `wall` thick and `height` tall, centred on the prop's origin. This is what
+// makes a bucket's side: a wall a body can be inside, out of convex pieces,
+// since no engine can make one hollow shape move under forces.
+void add_staves(std::vector<Piece>& out, float radius, float wall, float height, std::uint32_t segments,
+                float centre_y, float density) {
+    const float middle = std::max(radius - wall * 0.5F, smallest_size);
+    // Half the chord each stave spans, so neighbours touch at their corners.
+    const float half_chord = middle * std::tan(pi / static_cast<float>(segments));
+    for (std::uint32_t i = 0U; i < segments; ++i) {
+        const float angle = 2.0F * pi * static_cast<float>(i) / static_cast<float>(segments);
+        out.push_back(Piece{box_shape(JPH::Vec3(half_chord, height * 0.5F, wall * 0.5F), density),
+                            JPH::Vec3(std::sin(angle) * middle, centre_y, std::cos(angle) * middle),
+                            JPH::Quat::sRotation(JPH::Vec3::sAxisY(), angle)});
+    }
+}
+
+// The pieces a generated prop is made of, in a fixed order so every node
+// builds the same compound. The hollow shapes are open at the top, which is
+// what a bucket, a crate or a barrel is.
+std::vector<Piece> prop_pieces(const RigidPropDesc& p) {
+    const std::uint32_t segments = std::clamp(p.segments, fewest_segments, most_segments);
+    const float wall = std::max(p.wall, smallest_size);
+    const float radius = std::max(p.radius, smallest_size);
+    const float height = std::max(p.height, smallest_size);
+    const JPH::Vec3 half = at_least(vec(p.half_size));
+    std::vector<Piece> pieces;
+    switch (p.shape) {
+    case RigidPropDesc::Shape::HollowBox: {
+        const float floor = std::min(wall, half.GetY() * 2.0F);
+        pieces.push_back(Piece{box_shape(JPH::Vec3(half.GetX(), floor * 0.5F, half.GetZ()), p.density),
+                               JPH::Vec3(0.0F, -half.GetY() + floor * 0.5F, 0.0F)});
+        const float side = std::max(half.GetY() - floor * 0.5F, smallest_size);
+        const float mid = -half.GetY() + floor + side;
+        const float inner_x = std::max(half.GetX() - wall, smallest_size);
+        for (const float sx : {-1.0F, 1.0F}) {
+            pieces.push_back(Piece{box_shape(JPH::Vec3(wall * 0.5F, side, half.GetZ()), p.density),
+                                   JPH::Vec3(sx * (half.GetX() - wall * 0.5F), mid, 0.0F)});
+        }
+        for (const float sz : {-1.0F, 1.0F}) {
+            pieces.push_back(Piece{box_shape(JPH::Vec3(inner_x, side, wall * 0.5F), p.density),
+                                   JPH::Vec3(0.0F, mid, sz * (half.GetZ() - wall * 0.5F))});
+        }
+        break;
+    }
+    case RigidPropDesc::Shape::HollowCylinder: {
+        const float floor = std::min(wall, height);
+        pieces.push_back(Piece{cylinder_shape(floor * 0.5F, radius, p.density),
+                               JPH::Vec3(0.0F, -height * 0.5F + floor * 0.5F, 0.0F)});
+        const float side = std::max(height - floor, smallest_size);
+        add_staves(pieces, radius, wall, side, segments, -height * 0.5F + floor + side * 0.5F, p.density);
+        break;
+    }
+    case RigidPropDesc::Shape::Pipe:
+        add_staves(pieces, radius, wall, height, segments, 0.0F, p.density);
+        break;
+    default:
+        break;
+    }
+    return pieces;
+}
+
+// The shape a prop collides as, at size 1; `size` scales it afterwards.
+std::optional<Error> prop_shape(const RigidPropDesc& p, JPH::RefConst<JPH::Shape>& out) {
+    const std::uint32_t segments = std::clamp(p.segments, fewest_segments, most_segments);
+    if (p.shape == RigidPropDesc::Shape::Mesh && p.motion != RigidPropDesc::Motion::Fixed) {
+        // Validation refuses this before the solver sees it. A host driving
+        // the seam itself gets the same answer rather than Jolt's: a mesh
+        // shape reports no mass, and with assertions off that would become an
+        // infinite inverse mass rather than a complaint.
+        return Error{ErrorCode::RigidSolverFailure,
+                     "collides as its own model and moves; a collision mesh can only stand still"};
+    }
+    switch (p.shape) {
+    case RigidPropDesc::Shape::Mesh: {
+        JPH::VertexList vertices;
+        vertices.reserve(p.points.size());
+        for (const Vec3& point : p.points) {
+            vertices.push_back(JPH::Float3(point.x, point.y, point.z));
+        }
+        JPH::IndexedTriangleList triangles;
+        triangles.reserve(p.indices.size() / 3U);
+        for (std::size_t i = 0U; i + 2U < p.indices.size(); i += 3U) {
+            triangles.push_back(JPH::IndexedTriangle(p.indices[i], p.indices[i + 1U], p.indices[i + 2U]));
+        }
+        JPH::MeshShapeSettings settings(vertices, triangles);
+        const JPH::ShapeSettings::ShapeResult made = settings.Create();
+        if (made.HasError()) {
+            return Error{ErrorCode::RigidSolverFailure,
+                         std::string{"its model makes no collision mesh: "} + made.GetError().c_str()};
+        }
+        out = made.Get();
+        return std::nullopt;
+    }
+    case RigidPropDesc::Shape::Hull: {
+        JPH::Array<JPH::Vec3> points;
+        points.reserve(p.points.size());
+        for (const Vec3& point : p.points) {
+            points.push_back(vec(point));
+        }
+        JPH::ConvexHullShapeSettings settings(points);
+        settings.SetDensity(p.density);
+        const JPH::ShapeSettings::ShapeResult made = settings.Create();
+        if (made.HasError()) {
+            return Error{ErrorCode::RigidSolverFailure,
+                         std::string{"its model makes no convex hull: "} + made.GetError().c_str()};
+        }
+        out = made.Get();
+        return std::nullopt;
+    }
+    case RigidPropDesc::Shape::Sphere: {
+        auto* sphere = new JPH::SphereShape(std::max(p.radius, smallest_size));
+        sphere->SetDensity(p.density);
+        out = sphere;
+        return std::nullopt;
+    }
+    case RigidPropDesc::Shape::Box:
+        out = box_shape(vec(p.half_size), p.density);
+        return std::nullopt;
+    case RigidPropDesc::Shape::Cylinder:
+        out = cylinder_shape(p.height * 0.5F, p.radius, p.density);
+        return std::nullopt;
+    case RigidPropDesc::Shape::Cone: {
+        // Jolt has no cone: the hull of an apex over a ring of base points is
+        // one, to the roundness `segments` buys.
+        const float radius = std::max(p.radius, smallest_size);
+        const float half_height = std::max(p.height * 0.5F, smallest_size);
+        JPH::Array<JPH::Vec3> points;
+        points.push_back(JPH::Vec3(0.0F, half_height, 0.0F));
+        for (std::uint32_t i = 0U; i < segments; ++i) {
+            const float angle = 2.0F * pi * static_cast<float>(i) / static_cast<float>(segments);
+            points.push_back(JPH::Vec3(std::sin(angle) * radius, -half_height, std::cos(angle) * radius));
+        }
+        JPH::ConvexHullShapeSettings settings(points);
+        settings.SetDensity(p.density);
+        const JPH::ShapeSettings::ShapeResult made = settings.Create();
+        if (made.HasError()) {
+            return Error{ErrorCode::RigidSolverFailure,
+                         std::string{"its cone makes no shape: "} + made.GetError().c_str()};
+        }
+        out = made.Get();
+        return std::nullopt;
+    }
+    case RigidPropDesc::Shape::HollowBox:
+    case RigidPropDesc::Shape::HollowCylinder:
+    case RigidPropDesc::Shape::Pipe: {
+        const std::vector<Piece> pieces = prop_pieces(p);
+        if (pieces.empty()) {
+            return Error{ErrorCode::RigidSolverFailure, "its measurements make no shape"};
+        }
+        JPH::StaticCompoundShapeSettings settings;
+        for (const Piece& piece : pieces) {
+            settings.AddShape(piece.at, piece.turn, piece.shape.GetPtr());
+        }
+        const JPH::ShapeSettings::ShapeResult made = settings.Create();
+        if (made.HasError()) {
+            return Error{ErrorCode::RigidSolverFailure,
+                         std::string{"its hollow shape could not be made: "} + made.GetError().c_str()};
+        }
+        out = made.Get();
+        return std::nullopt;
+    }
+    }
+    return Error{ErrorCode::RigidSolverFailure, "has a shape this solver does not know"};
+}
 
 class JoltWorld final : public RigidWorld {
 public:
@@ -95,8 +305,9 @@ public:
 
     Result<bool> init() {
         const auto statics = static_cast<JPH::uint>(desc_.statics.size());
+        const auto props = static_cast<JPH::uint>(desc_.props.size());
         const JPH::uint pairs = std::max<JPH::uint>(4096U, desc_.capacity * 8U);
-        system_.Init(desc_.capacity + statics, 0U, pairs, pairs, broad_phase_, layer_vs_broad_, pairs_);
+        system_.Init(desc_.capacity + statics + props, 0U, pairs, pairs, broad_phase_, layer_vs_broad_, pairs_);
         if (desc_.shape == RigidWorldDesc::Shape::Hull) {
             JPH::Array<JPH::Vec3> points;
             for (const Vec3& point : desc_.hull_points) {
@@ -139,6 +350,43 @@ public:
                 return Error{ErrorCode::RigidSolverFailure, "a collider could not be made"};
             }
             bodies.AddBody(body->GetID(), JPH::EActivation::DontActivate);
+        }
+        // Then the props, in order, so their ids are a pure function of the
+        // desc and every node builds the same world.
+        for (std::size_t k = 0U; k < desc_.props.size(); ++k) {
+            const RigidPropDesc& p = desc_.props[k];
+            const std::string where = "prop " + std::to_string(k) + " ";
+            JPH::RefConst<JPH::Shape> shape;
+            if (const std::optional<Error> failed = prop_shape(p, shape)) {
+                return Error{failed->code, where + failed->message};
+            }
+            const float size = std::max(p.size, smallest_size);
+            if (size != 1.0F) {
+                shape = new JPH::ScaledShape(shape, JPH::Vec3::sReplicate(size));
+            }
+            const bool fixed = p.motion == RigidPropDesc::Motion::Fixed;
+            JPH::EMotionType motion = JPH::EMotionType::Static;
+            if (p.motion == RigidPropDesc::Motion::Driven) {
+                motion = JPH::EMotionType::Kinematic;
+            } else if (p.motion == RigidPropDesc::Motion::Loose) {
+                motion = JPH::EMotionType::Dynamic;
+            }
+            const Quat q = p.orientation;
+            JPH::BodyCreationSettings settings(shape, JPH::RVec3(p.position.x, p.position.y, p.position.z),
+                                               JPH::Quat(q.x, q.y, q.z, q.w).Normalized(), motion,
+                                               fixed ? layers::still : layers::moving);
+            settings.mFriction = p.friction;
+            settings.mRestitution = p.restitution;
+            settings.mLinearDamping = desc_.linear_damping;
+            settings.mAngularDamping = desc_.angular_damping;
+            // A driven prop must not sleep, or it would stop following its
+            // move; a loose one rests as the emitter's bodies do.
+            settings.mAllowSleeping = p.motion == RigidPropDesc::Motion::Loose && desc_.allow_sleep;
+            JPH::Body* body = bodies.CreateBodyWithID(JPH::BodyID(prop_id(k)), settings);
+            if (body == nullptr) {
+                return Error{ErrorCode::RigidSolverFailure, where + "could not be made"};
+            }
+            bodies.AddBody(body->GetID(), fixed ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
         }
         return true;
     }
@@ -218,21 +466,30 @@ public:
         }
     }
 
+    // A driven prop is told where to be, and Jolt gives it the velocity that
+    // takes it there over the step, so it shoves what is in its way instead
+    // of passing through it.
+    void set_prop_pose(std::size_t index, Vec3 position, Quat orientation) override {
+        if (index >= desc_.props.size() || desc_.props[index].motion != RigidPropDesc::Motion::Driven) {
+            return;
+        }
+        system_.GetBodyInterfaceNoLock().MoveKinematic(
+            JPH::BodyID(prop_id(index)), JPH::RVec3(position.x, position.y, position.z),
+            JPH::Quat(orientation.x, orientation.y, orientation.z, orientation.w).Normalized(), desc_.step_seconds);
+    }
+
     void step(Vec3 gravity) override {
         system_.SetGravity(vec(gravity));
         system_.Update(desc_.step_seconds, 1, &temp_, &jobs_);
     }
 
-    RigidBodyState body(std::uint32_t slot) const override {
-        const JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
-        const JPH::BodyID id(slot);
-        JPH::RVec3 p;
-        JPH::Quat q;
-        bodies.GetPositionAndRotation(id, p, q);
-        return RigidBodyState{Vec3{static_cast<float>(p.GetX()), static_cast<float>(p.GetY()),
-                                   static_cast<float>(p.GetZ())},
-                              Quat{q.GetX(), q.GetY(), q.GetZ(), q.GetW()}, vec(bodies.GetLinearVelocity(id)),
-                              vec(bodies.GetAngularVelocity(id))};
+    RigidBodyState body(std::uint32_t slot) const override { return state_of(JPH::BodyID(slot)); }
+
+    RigidBodyState prop(std::size_t index) const override {
+        if (index >= desc_.props.size()) {
+            return RigidBodyState{};
+        }
+        return state_of(JPH::BodyID(prop_id(index)));
     }
 
     std::vector<std::uint8_t> save() const override {
@@ -249,6 +506,24 @@ public:
     }
 
 private:
+    // Particles hold the slots below capacity, then the statics, then the
+    // props in the order the desc lists them.
+    [[nodiscard]] std::uint32_t prop_id(std::size_t index) const {
+        return desc_.capacity + static_cast<std::uint32_t>(desc_.statics.size()) +
+               static_cast<std::uint32_t>(index);
+    }
+
+    [[nodiscard]] RigidBodyState state_of(JPH::BodyID id) const {
+        const JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
+        JPH::RVec3 p;
+        JPH::Quat q;
+        bodies.GetPositionAndRotation(id, p, q);
+        return RigidBodyState{Vec3{static_cast<float>(p.GetX()), static_cast<float>(p.GetY()),
+                                   static_cast<float>(p.GetZ())},
+                              Quat{q.GetX(), q.GetY(), q.GetZ(), q.GetW()}, vec(bodies.GetLinearVelocity(id)),
+                              vec(bodies.GetAngularVelocity(id))};
+    }
+
     RigidWorldDesc desc_;
     JPH::JobSystem& jobs_;
     JPH::TempAllocatorImplWithMallocFallback temp_;

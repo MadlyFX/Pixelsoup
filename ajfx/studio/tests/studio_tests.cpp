@@ -838,6 +838,125 @@ void the_loop_is_as_long_as_the_effect_plays() {
     }
 }
 
+// A Prop block becomes an object standing in the layer's physics world, and
+// the Bucket of stones recipe plays the whole shot: the balls start inside the
+// bucket, it tips over, and they end on the floor.
+void props_stand_in_the_world_and_spill_what_they_hold() {
+    Document document = recipe("bucket_spill");
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const ajfx::Emitter& balls = emitter_of(compiled, layer_named(document, "Bucket of stones"));
+    const auto* physics = find_module<ajfx::RigidPhysics>(balls);
+    CHECK(physics != nullptr && physics->props.size() == 1U);
+    const ajfx::RigidProp& bucket = physics->props[0];
+    // A bucket is hollow, so it is built of convex pieces rather than wrapped,
+    // and it is moved rather than knocked about so the tip-over is authored.
+    CHECK(bucket.shape == ajfx::PropShape::HollowCylinder);
+    CHECK(bucket.motion == ajfx::PropMotion::Driven);
+    CHECK(near(bucket.radius, 0.5F) && near(bucket.height, 0.8F) && near(bucket.wall, 0.05F));
+    CHECK(near(bucket.position.y, 0.4F));
+    CHECK(near(bucket.to_turn.z, 115.0F));
+    // An untouched "moves to" leaves the prop where it stands.
+    CHECK(bucket.to_position == bucket.position);
+
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation simulation =
+        ajfx::Simulation::create(*compiled.effect, 1U,
+                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
+            .value();
+    std::size_t index = 0U;
+    while (compiled.effect->emitters[index].name != balls.name) {
+        ++index;
+    }
+    const auto highest = [&] {
+        float top = 0.0F;
+        for (const ajfx::Vec3 p : simulation.emitter(index).position) {
+            top = std::max(top, p.y);
+        }
+        return top;
+    };
+    // The prop stands in the world before the first step, and the balls are
+    // inside it: above its floor at 0.05, within its 0.45 inside radius.
+    CHECK(simulation.emitter(index).props.size() == 1U);
+    CHECK(near(simulation.emitter(index).props[0].position.y, 0.4F));
+    CHECK(simulation.emitter(index).alive() == 24U);
+    for (const ajfx::Vec3 p : simulation.emitter(index).position) {
+        CHECK(p.y > 0.05F && std::sqrt(p.x * p.x + p.z * p.z) < 0.45F);
+    }
+    const float held = highest();
+    simulation.advance_to(300U);
+    const float spilled = highest();
+    std::cout << "  the bucket holds its balls at " << held << " m and spills them to " << spilled << " m\n";
+    // Everything ends on the floor, a ball's radius up, not still cradled.
+    CHECK(spilled < 0.2F && held > 0.05F);
+    CHECK(simulation.emitter(index).alive() == 24U);
+}
+
+// A prop needs no Physics block of its own, and what it cannot be is said on
+// the block at fault rather than silently approximated.
+void a_prop_takes_default_physics_and_names_what_it_cannot_be() {
+    Document document;
+    Layer layer;
+    layer.uid = document.allocate();
+    layer.name = "Crate";
+    insert_block(layer, 0U, *make_block(document, "prop"));
+    document.layers.push_back(layer);
+    const Uid prop = document.layers[0].blocks[0].uid;
+
+    // No Physics block: a prop stands in a world, so the layer takes the
+    // default physics, exactly as a pile does.
+    const Compiled bare = compile(document, Purpose::Preview);
+    CHECK(bare.error.empty() && bare.effect.has_value());
+    const auto* physics = find_module<ajfx::RigidPhysics>(bare.effect->emitters[0]);
+    CHECK(physics != nullptr && physics->props.size() == 1U);
+    // With no model picked it stands in as a plain block, so the layer still
+    // plays, and the coach asks for one.
+    CHECK(physics->props[0].shape == ajfx::PropShape::Box);
+    const std::vector<Advice> notes = advise(document, bare);
+    CHECK(std::any_of(notes.begin(), notes.end(), [&](const Advice& a) {
+        return a.block == prop && a.message.find("Pick a model") != std::string::npos;
+    }));
+
+    // A prop that moves cannot collide as its own shape, whichever way it
+    // moves: a collision mesh can only stand still. The coach says so on the
+    // block and its fix is a shape that can move.
+    document.layers[0].blocks[0].set("model", choice("bucket.glb"));
+    for (const char* motion : {"loose", "driven"}) {
+        document.layers[0].blocks[0].set("motion", choice(motion));
+        const Compiled moving = compile(document, Purpose::Preview);
+        const std::vector<Advice> notes_for = advise(document, moving);
+        CHECK(std::any_of(notes_for.begin(), notes_for.end(), [&](const Advice& a) {
+            return a.block == prop && a.level == AdviceLevel::Error && a.fix &&
+                   a.message.find("cannot collide as its own shape") != std::string::npos;
+        }));
+    }
+    // Standing still it is fine, which is what a model-shaped prop is for.
+    document.layers[0].blocks[0].set("motion", choice("fixed"));
+    const Compiled standing = compile(document, Purpose::Preview);
+    CHECK(standing.error.empty());
+    CHECK(find_module<ajfx::RigidPhysics>(standing.effect->emitters[0])->props[0].shape ==
+          ajfx::PropShape::Mesh);
+
+    document.layers[0].blocks[0].set("motion", choice("loose"));
+    const Compiled loose = compile(document, Purpose::Preview);
+    std::vector<Advice> refused = advise(document, loose);
+    const auto hollow = std::find_if(refused.begin(), refused.end(), [&](const Advice& a) {
+        return a.block == prop && a.level == AdviceLevel::Error && a.fix;
+    });
+    CHECK(hollow != refused.end());
+    hollow->fix(document);
+    const Compiled fixed = compile(document, Purpose::Preview);
+    CHECK(fixed.error.empty());
+    const auto* mended = find_module<ajfx::RigidPhysics>(fixed.effect->emitters[0]);
+    CHECK(mended != nullptr && mended->props[0].shape == ajfx::PropShape::HollowCylinder);
+    CHECK(mended->props[0].motion == ajfx::PropMotion::Loose);
+    // The model it names travels in the package, for the host to draw by.
+    CHECK(!mended->props[0].mesh.empty());
+    CHECK(std::any_of(fixed.requests.begin(), fixed.requests.end(), [&](const AssetRequest& r) {
+        return r.block == prop && r.kind == AssetRequest::Kind::Mesh && r.path == "bucket.glb";
+    }));
+}
+
 void piles_stand_until_the_effect_plays() {
     Document document = recipe("rock_pile");
     const Compiled compiled = compile(document, Purpose::Preview);
@@ -1104,6 +1223,10 @@ int main() {
         {"detached_modules_recombine_into_their_block", detached_modules_recombine_into_their_block},
         {"the_loop_is_as_long_as_the_effect_plays", the_loop_is_as_long_as_the_effect_plays},
         {"piles_stand_until_the_effect_plays", piles_stand_until_the_effect_plays},
+        {"props_stand_in_the_world_and_spill_what_they_hold",
+         props_stand_in_the_world_and_spill_what_they_hold},
+        {"a_prop_takes_default_physics_and_names_what_it_cannot_be",
+         a_prop_takes_default_physics_and_names_what_it_cannot_be},
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},
         {"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields},
         {"studio_comes_back_as_it_was_left", studio_comes_back_as_it_was_left},

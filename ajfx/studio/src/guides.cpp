@@ -75,6 +75,37 @@ void box(Guide& guide, Vec3 centre, Vec3 half) {
     }
 }
 
+// A box standing as `turn` leaves it, for a prop that is turned where it
+// stands. Drawn faint: it is the shape the pieces hit, over the model.
+void turned_box(Guide& guide, Vec3 centre, Vec3 half, Quat turn) {
+    const auto corner = [&](int i) {
+        return centre + rotate(turn, Vec3{(i & 1) != 0 ? half.x : -half.x, (i & 2) != 0 ? half.y : -half.y,
+                                          (i & 4) != 0 ? half.z : -half.z});
+    };
+    for (int i = 0; i < 8; ++i) {
+        for (const int bit : {1, 2, 4}) {
+            if ((i & bit) == 0) {
+                guide.strokes.push_back(line(corner(i), corner(i | bit), true));
+            }
+        }
+    }
+}
+
+// An upright round shape's outline: a circle at each end and four lines down
+// the side, turned as the prop is.
+void turned_tube(Guide& guide, Vec3 centre, float radius, float height, Quat turn) {
+    const Vec3 axis = rotate(turn, Vec3{0.0F, 1.0F, 0.0F});
+    const Vec3 x = rotate(turn, Vec3{1.0F, 0.0F, 0.0F});
+    const Vec3 z = rotate(turn, Vec3{0.0F, 0.0F, 1.0F});
+    const Vec3 top = centre + axis * (height * 0.5F);
+    const Vec3 bottom = centre - axis * (height * 0.5F);
+    guide.strokes.push_back(circle(top, x, z, radius, true));
+    guide.strokes.push_back(circle(bottom, x, z, radius, true));
+    for (const Vec3& out : {x, z, x * -1.0F, z * -1.0F}) {
+        guide.strokes.push_back(line(bottom + out * radius, top + out * radius, true));
+    }
+}
+
 // A drop line from a point in the air to the floor beneath it, so its
 // height reads in a perspective view.
 void drop(Guide& guide, Vec3 point) {
@@ -135,8 +166,10 @@ public:
 private:
     static bool always_shown(const Block& block) {
         const std::string_view kind = block.kind;
+        // A prop is scenery: it reads as part of the stage whether or not it
+        // is the block being worked on.
         return kind == "shape" || kind == "sphere" || kind == "box" || kind == "mesh_collider" ||
-               (kind == "ground" && number_of(block, "height") != 0.0F);
+               kind == "prop" || (kind == "ground" && number_of(block, "height") != 0.0F);
     }
 
     void handle(const Block& block, std::string control, HandleMotion motion, Vec3 at, Vec3 origin, std::string label,
@@ -371,6 +404,56 @@ private:
             }
             drop(guide, at);
             handle(block, "position", HandleMotion::Floor, at, at, "Position");
+        } else if (kind == "prop") {
+            guide.kind = GuideKind::Collider;
+            const Vec3 at = to_vec3(get(block, "at")) * s_;
+            const Quat turn = prop_orientation(to_vec3(get(block, "turn")));
+            const float size = std::max(number_of(block, "size"), 0.001F) * s_;
+            // The model, where one is picked: what the audience will see,
+            // placed and turned exactly as the prop is.
+            const std::string path = file_of(block, "model");
+            const std::vector<Vec3>* outline = nullptr;
+            if (options_.outlines != nullptr) {
+                if (const auto found = options_.outlines->find(path); found != options_.outlines->end()) {
+                    outline = &found->second;
+                }
+            }
+            if (outline != nullptr && !outline->empty()) {
+                for (std::size_t i = 0U; i + 1U < outline->size(); i += 2U) {
+                    guide.strokes.push_back(line(at + rotate(turn, (*outline)[i] * size),
+                                                 at + rotate(turn, (*outline)[i + 1U] * size)));
+                }
+            } else {
+                const float r = 0.08F * s_;
+                guide.strokes.push_back(line(at - Vec3{r, 0.0F, 0.0F}, at + Vec3{r, 0.0F, 0.0F}));
+                guide.strokes.push_back(line(at - Vec3{0.0F, 0.0F, r}, at + Vec3{0.0F, 0.0F, r}));
+                guide.strokes.push_back(line(at, at + up * (r * 2.0F)));
+            }
+            // And, when the prop does not collide as its model, the shape it
+            // does collide as, faintly over the top: that difference is the
+            // one thing about a prop an artist cannot otherwise see.
+            const std::string shape = choice_of(block, "shape");
+            if (shape == "bucket" || shape == "tube") {
+                turned_tube(guide, at, number_of(block, "radius") * s_, number_of(block, "height") * s_, turn);
+            } else if (shape == "ball") {
+                ball(guide, at, number_of(block, "radius") * s_, true);
+            } else if (shape == "crate" || shape == "block") {
+                turned_box(guide, at, to_vec3(get(block, "extent")) * (0.5F * s_), turn);
+            }
+            // Where a driven prop is headed, so its move reads at a glance.
+            if (choice_of(block, "motion") == "driven") {
+                const Value* to = block.find("move_to");
+                const Vec3 ends = to != nullptr ? to_vec3(*to) * s_ : at;
+                if (length(ends - at) > 0.01F) {
+                    guide.strokes.push_back(line(at, ends, true, true));
+                }
+            }
+            drop(guide, at);
+            handle(block, "at", HandleMotion::Floor, at, at, "Position");
+            if (shape == "bucket" || shape == "tube" || shape == "ball") {
+                const float radius = number_of(block, "radius") * s_;
+                handle(block, "radius", HandleMotion::Radius, at + Vec3{radius, 0.0F, 0.0F}, at, "Radius");
+            }
         }
     }
 

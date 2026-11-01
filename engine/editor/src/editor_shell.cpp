@@ -611,6 +611,10 @@ struct HeaderActions final {
   theme.text = dim(theme.text, 0.82F);
   theme.text_muted = dim(theme.text_muted, 0.85F);
   theme.glow *= 0.45F;
+  // The gizmo keeps its daylight values. Like the playhead and the state
+  // colours it is an instrument drawn over the picture, not a surface behind
+  // it, and the axis an operator has to grab at three in the morning is the
+  // last thing to dim.
   return theme;
 }
 

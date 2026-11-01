@@ -566,20 +566,52 @@ void apply(const SizeOverLife& m, Step& step) {
     }
 }
 
-// The engine moves rigid physics particles (see step_rigid).
+// The engine moves rigid physics particles (see move_rigid).
 void apply(const RigidPhysics&, Step&) {}
 
+// Where a prop stands at `seconds`: a driven prop moves from its pose to the
+// one it is given, over its window; every other prop stands where it was put.
+void prop_pose_at(const RigidProp& prop, float seconds, Vec3& position, Quat& orientation) {
+    position = prop.position;
+    orientation = prop_orientation(prop.turn);
+    if (prop.motion != PropMotion::Driven) {
+        return;
+    }
+    float t = 1.0F;
+    if (prop.move_over > 0.0F) {
+        t = std::clamp((seconds - prop.move_from) / prop.move_over, 0.0F, 1.0F);
+    } else if (seconds < prop.move_from) {
+        t = 0.0F;
+    }
+    // Smooth at both ends, so a tip-over starts and stops without a jolt.
+    const float e = t * t * (3.0F - 2.0F * t);
+    position = prop.position + (prop.to_position - prop.position) * e;
+    orientation = prop_orientation(prop.turn + (prop.to_turn - prop.turn) * e);
+}
+
 // A rigid physics emitter's motion for one step, between retiring the dead
-// and giving birth: the dead leave the world oldest first, the world steps
-// under the step's gravity, and every particle takes its body's pose; then
+// and giving birth: the dead leave the world oldest first, each driven prop
+// is told where to stand at the end of the step, the world steps under the
+// step's gravity, and every particle and prop takes its body's pose; then
 // colour over life, as for any emitter.
-void move_rigid(Step& step, const Emitter& emitter, RigidWorld& world) {
+void move_rigid(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world) {
     EmitterState& s = step.s;
     Vec3 gravity{};
     for (const UpdateModule& module : emitter.update) {
         if (const auto* g = std::get_if<Gravity>(&module)) {
             gravity += step.in(g->acceleration);
         }
+    }
+    // Where the move has reached by the end of the step, so the prop shoves
+    // what is in its way over the step rather than jumping through it.
+    for (std::size_t i = 0U; i < physics.props.size(); ++i) {
+        if (physics.props[i].motion != PropMotion::Driven) {
+            continue;
+        }
+        Vec3 position{};
+        Quat orientation{};
+        prop_pose_at(physics.props[i], static_cast<float>(step.end), position, orientation);
+        world.set_prop_pose(i, position, orientation);
     }
     world.step(gravity);
     for (std::size_t i = 0U; i < s.alive(); ++i) {
@@ -588,6 +620,10 @@ void move_rigid(Step& step, const Emitter& emitter, RigidWorld& world) {
         s.orientation[i] = body.orientation;
         s.velocity[i] = body.velocity;
         s.angular_velocity[i] = body.angular_velocity;
+    }
+    s.props.resize(physics.props.size());
+    for (std::size_t i = 0U; i < physics.props.size(); ++i) {
+        s.props[i] = world.prop(i);
     }
     for (const UpdateModule& module : emitter.update) {
         if (const auto* color = std::get_if<ColorOverLife>(&module)) {
@@ -760,8 +796,44 @@ std::string quoted(std::string_view text) {
     return "'" + std::string{text} + "'";
 }
 
+RigidPropDesc::Shape solver_shape(PropShape shape) {
+    switch (shape) {
+    case PropShape::Mesh:
+        return RigidPropDesc::Shape::Mesh;
+    case PropShape::Hull:
+        return RigidPropDesc::Shape::Hull;
+    case PropShape::Sphere:
+        return RigidPropDesc::Shape::Sphere;
+    case PropShape::Box:
+        return RigidPropDesc::Shape::Box;
+    case PropShape::Cylinder:
+        return RigidPropDesc::Shape::Cylinder;
+    case PropShape::HollowBox:
+        return RigidPropDesc::Shape::HollowBox;
+    case PropShape::HollowCylinder:
+        return RigidPropDesc::Shape::HollowCylinder;
+    case PropShape::Cone:
+        return RigidPropDesc::Shape::Cone;
+    case PropShape::Pipe:
+        return RigidPropDesc::Shape::Pipe;
+    }
+    return RigidPropDesc::Shape::Hull;
+}
+
+RigidPropDesc::Motion solver_motion(PropMotion motion) {
+    switch (motion) {
+    case PropMotion::Fixed:
+        return RigidPropDesc::Motion::Fixed;
+    case PropMotion::Driven:
+        return RigidPropDesc::Motion::Driven;
+    case PropMotion::Loose:
+        return RigidPropDesc::Motion::Loose;
+    }
+    return RigidPropDesc::Motion::Fixed;
+}
+
 // The world a rigid physics emitter's bodies live in: its shape, material and
-// damping, and its colliders as statics.
+// damping, its colliders as statics, and the artist's props.
 Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysics& physics, const MeshSet& meshes,
                                         float step_seconds) {
     RigidWorldDesc desc;
@@ -837,6 +909,37 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
             }
         }
     }
+    // The props, in the order the module lists them: the solver creates them
+    // in that order, so their bodies are a pure function of the effect.
+    for (const RigidProp& prop : physics.props) {
+        RigidPropDesc out;
+        out.shape = solver_shape(prop.shape);
+        out.motion = solver_motion(prop.motion);
+        out.half_size = prop.half_size;
+        out.radius = prop.radius;
+        out.height = prop.height;
+        out.wall = prop.wall;
+        out.segments = prop.segments;
+        out.size = prop.size;
+        out.density = prop.density;
+        out.friction = prop.friction;
+        out.restitution = prop.restitution;
+        prop_pose_at(prop, 0.0F, out.position, out.orientation);
+        if (prop.shape == PropShape::Mesh || prop.shape == PropShape::Hull) {
+            const auto mesh = meshes.find(prop.mesh);
+            if (mesh == meshes.end()) {
+                return Error{ErrorCode::MissingMesh, "emitter " + quoted(emitter.name) + " has a prop shaped by mesh " +
+                                                         quoted(prop.mesh) + ", which was not given"};
+            }
+            for (const MeshVertex& vertex : mesh->second.vertices) {
+                out.points.push_back(vertex.position);
+            }
+            if (prop.shape == PropShape::Mesh) {
+                out.indices = mesh->second.indices;
+            }
+        }
+        desc.props.push_back(std::move(out));
+    }
     return desc;
 }
 
@@ -851,6 +954,10 @@ Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fiel
     has_piles_ = std::any_of(effect_.emitters.begin(), effect_.emitters.end(), [](const Emitter& emitter) {
         return std::any_of(emitter.spawn.begin(), emitter.spawn.end(),
                            [](const SpawnModule& m) { return std::holds_alternative<SpawnPile>(m); });
+    });
+    has_props_ = std::any_of(effect_.emitters.begin(), effect_.emitters.end(), [](const Emitter& emitter) {
+        const RigidPhysics* physics = rigid_physics(emitter);
+        return physics != nullptr && !physics->props.empty();
     });
     reset();
 }
@@ -898,8 +1005,9 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
     Simulation simulation{std::move(effect), instance_seed, std::move(options.fields)};
     simulation.solver_ = options.rigid;
     simulation.rigid_ = std::move(rigid);
-    // The piles need their worlds, which the constructor did not have yet.
-    if (simulation.has_piles_) {
+    // The piles and props need their worlds, which the constructor did not
+    // have yet.
+    if (simulation.has_piles_ || simulation.has_props_) {
         simulation.reset();
     }
     return simulation;
@@ -930,6 +1038,20 @@ void Simulation::start(std::span<const ParameterValue> values) {
     }
     rebuild_worlds();
     solver_state_stale_ = false;
+    // The props stand in their worlds from before the first step, whatever
+    // else the emitter does, so a paused effect at the start shows them.
+    // Reading a pose changes nothing, so the solver state stays fresh.
+    for (std::size_t i = 0U; i < rigid_.size(); ++i) {
+        const RigidWorld* world = rigid_[i].world.get();
+        if (world == nullptr) {
+            continue;
+        }
+        EmitterState& s = state_.emitters[i];
+        s.props.resize(rigid_[i].desc.props.size());
+        for (std::size_t p = 0U; p < s.props.size(); ++p) {
+            s.props[p] = world->prop(p);
+        }
+    }
     pile_values_.assign(values.begin(), values.end());
     if (has_piles_) {
         for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
@@ -1135,7 +1257,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             std::sort(waking.begin(), waking.end());
             world->wake(waking);
         }
-        move_rigid(step, emitter, *world);
+        move_rigid(step, emitter, *rigid_physics(emitter), *world);
     } else {
         // Forces, integration, then constraints and appearance.
         for (const UpdateModule& module : emitter.update) {

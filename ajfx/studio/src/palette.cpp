@@ -42,7 +42,8 @@ void Palette::build() {
                                        std::string{preset.description}, "ready-made layer", false});
     }
     sections_.push_back(std::move(layers));
-    for (const Category category : {Category::Birth, Category::Motion, Category::Look, Category::Contact, Category::Light}) {
+    for (const Category category : {Category::Birth, Category::Motion, Category::Look, Category::Contact,
+                                    Category::Physics, Category::Light}) {
         Section section{std::string{category_name(category)}, {}};
         for (const BlockDef& def : block_catalog()) {
             if (def.category == category && def.kind != raw_block_kind) {
@@ -83,7 +84,7 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
         }
         float y = show.bottom() + 16.0F;
         for (const Category category : {Category::Birth, Category::Motion, Category::Look, Category::Contact,
-                                        Category::Light}) {
+                                        Category::Physics, Category::Light}) {
             draw_category_icon(ctx, category, bounds.center_x(), y + 10.0F, gui::fade(theme.text_muted, 0.6F));
             y += 26.0F;
         }

@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // The particle pass draws a simulated effect where the camera says, tests it
@@ -963,6 +964,277 @@ void rigid_physics_holds_until_its_thread_has_the_step() {
               << " going back\n";
 }
 
+// A rigid physics emitter holding one cube prop that collides as `shape` and
+// moves as `motion`, with its single particle parked ten units below the
+// camera's view so only the prop's own pixels land in the frame. The prop
+// stands a unit left of the effect's origin; a Driven one is moved a unit to
+// its right over the first second. Either shape draws the model itself, so
+// the pixels are the same whichever the artist collides as.
+[[nodiscard]] ajfx::Effect cube_prop(ajfx::PropMotion motion, ajfx::PropShape shape) {
+    ajfx::RigidProp cube{};
+    cube.mesh = "cube";
+    cube.shape = shape;
+    cube.motion = motion;
+    cube.position = ajfx::Vec3{-1.0F, 0.0F, 0.0F};
+    cube.size = 1.0F;
+    cube.to_position = ajfx::Vec3{1.0F, 0.0F, 0.0F};
+    cube.move_from = 0.0F;
+    cube.move_over = 1.0F;
+
+    ajfx::EffectBuilder builder{"prop"};
+    builder.emitter("debris")
+        .capacity(8U)
+        .spawn(ajfx::SpawnBurst{.count = 1U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = ajfx::Vec3{0.0F, -10.0F, 0.0F}})
+        .init(ajfx::InitSize{.min = 0.1F, .max = 0.1F})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Sphere, .props = {cube}});
+    return builder.build().value();
+}
+
+// One recording that only advances `instance` towards `frame`, submitted on
+// its own: whether the pass reached it.
+[[nodiscard]] bool advance_once(render::ParticlePass& pass, render::ParticleInstance& instance, core::u64 frame) {
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    return reached;
+}
+
+// Advances to `frame` of a 24 fps show, waiting for the rigid physics thread
+// to reach it, then draws with the depth ramp solid meshes need.
+[[nodiscard]] Frame render_prop_frame(render::ParticlePass& pass, render::ParticleInstance& instance,
+                                      core::u64 frame) {
+    scene::ViewMatrices ramp = orthographic();
+    ramp.projection.set(2U, 2U, 0.1F);
+    ramp.view_projection = ramp.projection;
+    // Each attempt is its own recording, as a frame path's would be: the pass
+    // refuses to draw until the tick's props have landed.
+    for (int held = 0; !advance_once(pass, instance, frame); ++held) {
+        PASS_CHECK(held < 5000);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 4U);
+    PASS_CHECK(color && depth && readback);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U));
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    PASS_CHECK(pass.draw(commands, instance, ramp, identity(), targets));
+    PASS_CHECK(commands.download(color.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    Frame out{std::vector<core::u8>(mapped.begin(), mapped.begin() + size * size * 4U)};
+    readback.value().unmap();
+    return out;
+}
+
+// The leftmost and rightmost columns of row 32 the prop covered.
+[[nodiscard]] std::pair<int, int> lit_columns(const Frame& frame) {
+    int from = -1;
+    int to = -1;
+    for (core::u32 x = 0U; x < size; ++x) {
+        if (frame.alpha(x, 32U) != 0U) {
+            from = from < 0 ? static_cast<int>(x) : from;
+            to = static_cast<int>(x);
+        }
+    }
+    return {from, to};
+}
+
+void props_draw_where_they_stand() {
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
+    const auto instance_of = [&](render::ParticlePass& pass, const ajfx::Effect& effect) {
+        const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+        auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+        if (!created) {
+            std::cout << created.error().message << '\n';
+        }
+        PASS_CHECK(created);
+        return std::move(created).value();
+    };
+
+    // A fixed cube prop, a unit (16 pixels) across, standing a unit left of
+    // the effect's origin: 16 pixels left of the middle, so columns 8 to 23
+    // and rows 24 to 39. It carries no colour of its own, and its front face
+    // squarely faces the camera's light, so it is solid white.
+    render::ParticlePass pass = make_pass();
+    render::ParticleInstance fixed =
+        instance_of(pass, cube_prop(ajfx::PropMotion::Fixed, ajfx::PropShape::Mesh));
+    const Frame standing = render_prop_frame(pass, fixed, 1U);
+    PASS_CHECK(standing.red(16U, 32U) >= 254U && standing.green(16U, 32U) >= 254U &&
+               standing.blue(16U, 32U) >= 254U && standing.alpha(16U, 32U) >= 254U);
+    PASS_CHECK(standing.alpha(8U, 24U) >= 254U && standing.alpha(23U, 39U) >= 254U);
+    PASS_CHECK(standing.alpha(7U, 32U) == 0U && standing.alpha(24U, 32U) == 0U);
+    PASS_CHECK(standing.alpha(16U, 23U) == 0U && standing.alpha(16U, 40U) == 0U);
+    // The emitter's one particle is ten units below: nothing else drew.
+    PASS_CHECK(lit_columns(standing) == std::pair{8, 23});
+    PASS_CHECK(standing.alpha(32U, 32U) == 0U && standing.alpha(48U, 32U) == 0U);
+
+    // Drawing the same show frame again gives the same bytes: the pose comes
+    // from the rigid frame for that tick and nothing else.
+    const Frame again = render_prop_frame(pass, fixed, 1U);
+    PASS_CHECK(again.pixels == standing.pixels);
+
+    // A driven prop is moved a unit right over the first second. Held at one
+    // show frame it does not budge, by the byte; a later frame finds it
+    // further right, and coming back to the first frame finds it exactly
+    // where it was.
+    render::ParticleInstance driven =
+        instance_of(pass, cube_prop(ajfx::PropMotion::Driven, ajfx::PropShape::Hull));
+    const Frame start = render_prop_frame(pass, driven, 0U);
+    PASS_CHECK(lit_columns(start) == std::pair{8, 23});
+    PASS_CHECK(render_prop_frame(pass, driven, 0U).pixels == start.pixels);
+    const Frame moved = render_prop_frame(pass, driven, 12U);
+    const auto [from, to] = lit_columns(moved);
+    PASS_CHECK(from > 8 && to > 23 && to - from == 15);
+    PASS_CHECK(render_prop_frame(pass, driven, 12U).pixels == moved.pixels);
+    PASS_CHECK(render_prop_frame(pass, driven, 0U).pixels == start.pixels);
+}
+
+// Advances to `frame`, waiting for the rigid physics thread, then draws the
+// colour and the motion into a velocity target that starts at 7 in every
+// channel, as render_motion does for particles.
+[[nodiscard]] std::vector<float> render_prop_motion(render::ParticlePass& pass, render::ParticleInstance& instance,
+                                                    core::u64 frame, bool valid) {
+    for (int held = 0; !advance_once(pass, instance, frame); ++held) {
+        PASS_CHECK(held < 5000);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    rhi::TextureDesc color_desc{};
+    color_desc.width = size;
+    color_desc.height = size;
+    color_desc.format = rhi::TextureFormat::Rgba8Unorm;
+    color_desc.color_target = true;
+    color_desc.sampled = true;
+    rhi::TextureDesc velocity_desc = color_desc;
+    velocity_desc.format = rhi::TextureFormat::Rgba32Float;
+    rhi::TextureDesc depth_desc{};
+    depth_desc.width = size;
+    depth_desc.height = size;
+    depth_desc.format = rhi::TextureFormat::Depth32Float;
+    depth_desc.depth_target = true;
+    auto color = g_device->create_texture(color_desc);
+    auto velocity = g_device->create_texture(velocity_desc);
+    auto depth = g_device->create_texture(depth_desc);
+    auto readback = g_device->create_readback(size * size * 16U);
+    PASS_CHECK(color && velocity && depth && readback);
+
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, frame, 24U, 1U));
+    std::vector<float> sevens(static_cast<std::size_t>(size) * size * 4U, 7.0F);
+    PASS_CHECK(commands.upload(velocity.value(),
+                               std::span<const core::u8>{reinterpret_cast<const core::u8*>(sevens.data()),
+                                                         sevens.size() * sizeof(float)}));
+    const auto view = orthographic();
+    render::ParticleTargets targets{};
+    targets.color = &color.value();
+    targets.depth = &depth.value();
+    targets.load = false;
+    targets.clear = rhi::Color{0.0F, 0.0F, 0.0F, 0.0F};
+    targets.velocity = &velocity.value();
+    targets.canvas_view_projection = view.view_projection;
+    targets.previous_view_projection = view.view_projection;
+    targets.motion_seconds = 1.0F / 24.0F;
+    targets.motion_valid = valid;
+    PASS_CHECK(pass.draw(commands, instance, view, identity(), targets));
+    PASS_CHECK(pass.draw_motion(commands, instance, view, identity(), targets));
+    PASS_CHECK(commands.download(velocity.value(), readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    const auto mapped = readback.value().map();
+    std::vector<float> out(static_cast<std::size_t>(size) * size * 4U);
+    std::memcpy(out.data(), mapped.data(), out.size() * sizeof(float));
+    readback.value().unmap();
+    return out;
+}
+
+void props_write_their_motion() {
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
+    const auto instance_of = [&](render::ParticlePass& pass, const ajfx::Effect& effect) {
+        const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+        auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+        PASS_CHECK(created);
+        return std::move(created).value();
+    };
+    const auto at = [](const std::vector<float>& pixels, core::u32 x, core::u32 y, core::u32 channel) {
+        return pixels[(static_cast<std::size_t>(y) * size + x) * 4U + channel];
+    };
+    render::ParticlePass pass = make_pass();
+
+    // A fixed prop never moves, so it writes no motion at all, only the
+    // depth the flat test projection puts everything at. Its pixels still
+    // replace the scene's motion where it covers them, as a sprite's do.
+    render::ParticleInstance fixed =
+        instance_of(pass, cube_prop(ajfx::PropMotion::Fixed, ajfx::PropShape::Mesh));
+    const std::vector<float> standing = render_prop_motion(pass, fixed, 1U, true);
+    PASS_CHECK(at(standing, 16U, 32U, 0U) == 0.0F && at(standing, 16U, 32U, 1U) == 0.0F);
+    PASS_CHECK(at(standing, 16U, 32U, 2U) == 0.5F && at(standing, 16U, 32U, 3U) == 0.5F);
+    PASS_CHECK(at(standing, 40U, 32U, 0U) == 7.0F && at(standing, 2U, 2U, 0U) == 7.0F);
+
+    // A driven prop moves by the velocity its pose reports, exactly as a
+    // particle moves by its own. It travels two units over the first second,
+    // smoothed at both ends (t*t*(3-2t)), so at show frame 12 -- half a
+    // second, step 30 of 60 -- it is at its fastest: 2 * 6t(1-t) = 3 units a
+    // second. The camera maps a unit to half the clip range, and a 24th of a
+    // second of that is half again in UV: 0.25 * 3 / 24. The solver reports
+    // the step's own difference rather than that instant's derivative, which
+    // is the whole of the tolerance.
+    render::ParticleInstance driven =
+        instance_of(pass, cube_prop(ajfx::PropMotion::Driven, ajfx::PropShape::Hull));
+    const std::vector<float> moving = render_prop_motion(pass, driven, 12U, true);
+    float covered = 0.0F;
+    core::u32 column = size;
+    for (core::u32 x = 0U; x < size; ++x) {
+        if (at(moving, x, 32U, 0U) != 7.0F) {
+            column = column == size ? x : column;
+            covered += 1.0F;
+        }
+    }
+    PASS_CHECK(covered == 16.0F && column > 8U);
+    std::cout << "  driven prop motion x " << at(moving, column + 8U, 32U, 0U) << ", expected "
+              << 0.25F * 3.0F / 24.0F << '\n';
+    PASS_CHECK(std::abs(at(moving, column + 8U, 32U, 0U) - 0.25F * 3.0F / 24.0F) < 1.0e-4F);
+    PASS_CHECK(at(moving, column + 8U, 32U, 1U) == 0.0F);
+    PASS_CHECK(at(moving, column + 8U, 32U, 2U) == 0.5F);
+
+    // With no previous frame there is nothing to move from: depth only.
+    render::ParticleInstance fresh =
+        instance_of(pass, cube_prop(ajfx::PropMotion::Driven, ajfx::PropShape::Hull));
+    const std::vector<float> first = render_prop_motion(pass, fresh, 12U, false);
+    PASS_CHECK(at(first, column + 8U, 32U, 0U) == 0.0F && at(first, column + 8U, 32U, 2U) == 0.5F);
+}
+
 void devices_without_particles_are_refused() {
     rhi::DeviceConfig config{};
     config.backend = rhi::BackendKind::SdlGpu;
@@ -1018,6 +1290,8 @@ int main() {
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
+        {"props_draw_where_they_stand", props_draw_where_they_stand},
+        {"props_write_their_motion", props_write_their_motion},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},
     };
     int failures = 0;

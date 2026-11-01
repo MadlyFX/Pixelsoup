@@ -58,6 +58,27 @@ constexpr core::u32 flag_soft = 16U;
 constexpr core::u32 flag_ribbon = 32U;
 constexpr core::u32 flag_mesh = 64U;
 
+// A prop's record, laid out for the sprite vertex stage to pull exactly as it
+// pulls a particle's: a prop is drawn through the mesh-particle path, so a
+// prop and the debris around it are lit alike. The pose comes from the rigid
+// frame, the size from what the artist authored, the colour is plain white
+// (a prop carries none), and `velocity` is the pose's own, which gives the
+// motion vector the same way a particle's does.
+struct PropRecord final {
+    std::array<float, 3U> position{};
+    float size{};
+    std::array<float, 3U> velocity{};
+    float unused{};
+    std::array<float, 4U> orientation{}; // x, y, z, w, as the simulation stores one
+    std::array<float, 4U> color{};
+};
+static_assert(sizeof(PropRecord) == 64U);
+constexpr core::u32 prop_position_at = 0U;
+constexpr core::u32 prop_size_at = 12U;
+constexpr core::u32 prop_velocity_at = 16U;
+constexpr core::u32 prop_orientation_at = 32U;
+constexpr core::u32 prop_color_at = 48U;
+
 core::u32 offset_or_absent(std::int32_t offset) {
     return offset >= 0 ? static_cast<core::u32>(offset) : absent;
 }
@@ -96,18 +117,41 @@ struct ParticleInstance::State final {
     std::vector<std::optional<std::size_t>> emitter_texture;
     // Each emitter's drawing order from the last draw, for its motion.
     std::vector<ajfx::gpu::Buffer> orders;
-    // Each mesh emitter's mesh and draw arguments (the mesh's index count,
-    // then the live count copied from the simulation). The vertices and
-    // indices wait here until the first advance writes them.
-    struct Mesh final {
+    // One package mesh on the GPU: its vertices interleaved as the sprite
+    // stage pulls them (position, normal, uv) and its triangle list. Keyed by
+    // mesh name rather than by emitter, because several emitters and props may
+    // name one mesh and a prop's mesh need not be its emitter's. The vertices
+    // and indices wait here until the first advance writes them.
+    struct MeshUpload final {
+        std::string name;
         ajfx::gpu::Buffer vertices;
         ajfx::gpu::Buffer indices;
-        ajfx::gpu::Buffer args;
         core::u32 index_count{};
         std::vector<float> unwritten_vertices;
         std::vector<std::uint32_t> unwritten_indices;
     };
+    std::vector<MeshUpload> mesh_uploads;
+    // Each mesh emitter's mesh and draw arguments (the mesh's index count,
+    // then the live count copied from the simulation).
+    struct Mesh final {
+        std::size_t upload{};
+        ajfx::gpu::Buffer args;
+    };
     std::vector<std::optional<Mesh>> meshes;
+    // The props drawn with one mesh, in the order the effect lists them, and
+    // a record each, written whenever the rigid frame moves. A prop that
+    // collides as a generated shape names no model, so it is not here: it is
+    // a volume the artist gave no geometry to draw.
+    struct PropGroup final {
+        std::size_t upload{};
+        ajfx::gpu::Buffer records;
+        // Which prop each record is: its emitter, then its index in that
+        // emitter's props.
+        std::vector<std::pair<std::size_t, std::size_t>> props;
+        // Written each time, allocated once: never on the frame path.
+        std::vector<PropRecord> scratch;
+    };
+    std::vector<PropGroup> props;
     // Its rigid physics on the pass's runner, if it has any, and the step
     // whose particles the buffers hold (none since the simulation last moved).
     std::unique_ptr<ajfx::RigidTrack> rigid;
@@ -116,12 +160,17 @@ struct ParticleInstance::State final {
 
     ~State() {
         if (device != nullptr) {
+            for (const MeshUpload& upload : mesh_uploads) {
+                device->destroy_buffer(upload.vertices);
+                device->destroy_buffer(upload.indices);
+            }
             for (const std::optional<Mesh>& mesh : meshes) {
                 if (mesh) {
-                    device->destroy_buffer(mesh->vertices);
-                    device->destroy_buffer(mesh->indices);
                     device->destroy_buffer(mesh->args);
                 }
+            }
+            for (const PropGroup& group : props) {
+                device->destroy_buffer(group.records);
             }
         }
     }
@@ -357,29 +406,101 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         }
         state->rigid = s.rigid_runner->track(effect, seed, meshes);
     }
+    // Buffers for one package mesh, shared by everything that names it: the
+    // emitters that draw it and the props shaped by it. check_meshes above
+    // has already refused an effect naming a mesh the package does not hold.
+    std::string mesh_error;
+    const auto mesh_upload = [&](const std::string& name) -> std::optional<std::size_t> {
+        for (std::size_t u = 0U; u < state->mesh_uploads.size(); ++u) {
+            if (state->mesh_uploads[u].name == name) {
+                return u;
+            }
+        }
+        const auto found = meshes.find(name);
+        if (found == meshes.end()) {
+            mesh_error = "mesh '" + name + "' is missing";
+            return std::nullopt;
+        }
+        const ajfx::MeshData& data = found->second;
+        ParticleInstance::State::MeshUpload upload;
+        upload.name = name;
+        upload.index_count = static_cast<core::u32>(data.indices.size());
+        for (const ajfx::MeshVertex& v : data.vertices) {
+            upload.unwritten_vertices.insert(upload.unwritten_vertices.end(),
+                                             {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y,
+                                              v.normal.z, v.u, v.v});
+        }
+        upload.unwritten_indices = data.indices;
+        for (const auto& [bytes, target] : {std::pair{upload.unwritten_vertices.size() * 4U, &upload.vertices},
+                                            std::pair{upload.unwritten_indices.size() * 4U, &upload.indices}}) {
+            ajfx::Result<ajfx::gpu::Buffer> created = s.particles->create_buffer(bytes, "particle mesh");
+            if (!created) {
+                mesh_error = created.error().message;
+                return std::nullopt;
+            }
+            *target = created.value();
+        }
+        state->mesh_uploads.push_back(std::move(upload));
+        return state->mesh_uploads.size() - 1U;
+    };
     for (const ajfx::Emitter& emitter : effect.emitters) {
         std::optional<ParticleInstance::State::Mesh>& out = state->meshes.emplace_back();
         if (emitter.renderer.geometry != ajfx::Geometry::Mesh) {
             continue;
         }
-        const ajfx::MeshData& data = meshes.find(emitter.renderer.mesh)->second;
+        const std::optional<std::size_t> upload = mesh_upload(emitter.renderer.mesh);
+        if (!upload) {
+            return Result::failure(failure(ParticleErrorCode::DeviceFailure, mesh_error));
+        }
         ParticleInstance::State::Mesh mesh;
-        mesh.index_count = static_cast<core::u32>(data.indices.size());
-        for (const ajfx::MeshVertex& v : data.vertices) {
-            mesh.unwritten_vertices.insert(mesh.unwritten_vertices.end(), {v.position.x, v.position.y, v.position.z,
-                                                                           v.normal.x, v.normal.y, v.normal.z, v.u, v.v});
+        mesh.upload = *upload;
+        ajfx::Result<ajfx::gpu::Buffer> args = s.particles->create_buffer(16U, "particle mesh");
+        if (!args) {
+            return Result::failure(failure(ParticleErrorCode::DeviceFailure, args.error().message));
         }
-        mesh.unwritten_indices = data.indices;
-        for (const auto& [bytes, target] : {std::pair{mesh.unwritten_vertices.size() * 4U, &mesh.vertices},
-                                            std::pair{mesh.unwritten_indices.size() * 4U, &mesh.indices},
-                                            std::pair{std::size_t{16U}, &mesh.args}}) {
-            ajfx::Result<ajfx::gpu::Buffer> created = s.particles->create_buffer(bytes, "particle mesh");
-            if (!created) {
-                return Result::failure(failure(ParticleErrorCode::DeviceFailure, created.error().message));
-            }
-            *target = created.value();
-        }
+        mesh.args = args.value();
         out = std::move(mesh);
+    }
+    // The props an artist stood in a rigid physics emitter's world. A prop
+    // draws the model it names, whatever it collides as: a bucket collides as
+    // a generated hollow cylinder (a collision mesh cannot move) and is still
+    // drawn as the model the artist picked. Naming a model is what asks the
+    // package for one, so check_meshes above has already refused an effect
+    // whose package did not answer. Props sharing a mesh share its buffers
+    // and draw together, gathered emitter by emitter and prop by prop so
+    // every node draws them in the order the effect lists them.
+    for (std::size_t e = 0U; e < effect.emitters.size(); ++e) {
+        const ajfx::RigidPhysics* physics = ajfx::rigid_physics(effect.emitters[e]);
+        if (physics == nullptr) {
+            continue;
+        }
+        for (std::size_t p = 0U; p < physics->props.size(); ++p) {
+            const ajfx::RigidProp& prop = physics->props[p];
+            if (prop.mesh.empty()) {
+                continue;
+            }
+            const std::optional<std::size_t> upload = mesh_upload(prop.mesh);
+            if (!upload) {
+                return Result::failure(failure(ParticleErrorCode::DeviceFailure, mesh_error));
+            }
+            auto group = std::find_if(state->props.begin(), state->props.end(),
+                                      [&](const ParticleInstance::State::PropGroup& candidate) {
+                                          return candidate.upload == *upload;
+                                      });
+            if (group == state->props.end()) {
+                group = state->props.insert(state->props.end(), ParticleInstance::State::PropGroup{*upload});
+            }
+            group->props.push_back({e, p});
+        }
+    }
+    for (ParticleInstance::State::PropGroup& group : state->props) {
+        group.scratch.resize(group.props.size());
+        ajfx::Result<ajfx::gpu::Buffer> created =
+            s.particles->create_buffer(group.props.size() * sizeof(PropRecord), "particle props");
+        if (!created) {
+            return Result::failure(failure(ParticleErrorCode::DeviceFailure, created.error().message));
+        }
+        group.records = created.value();
     }
     // Textures are made now and filled by later advances.
     for (const ajfx::Emitter& emitter : effect.emitters) {
@@ -452,16 +573,16 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
     }
 
     s.particles->begin_recording(commands);
-    for (std::optional<ParticleInstance::State::Mesh>& mesh : i.meshes) {
-        if (mesh && !mesh->unwritten_vertices.empty()) {
-            s.particles->write_buffer(mesh->vertices, 0U,
-                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_vertices.data()),
-                                                mesh->unwritten_vertices.size() * 4U});
-            s.particles->write_buffer(mesh->indices, 0U,
-                                      std::span{reinterpret_cast<const std::uint8_t*>(mesh->unwritten_indices.data()),
-                                                mesh->unwritten_indices.size() * 4U});
-            mesh->unwritten_vertices = {};
-            mesh->unwritten_indices = {};
+    for (ParticleInstance::State::MeshUpload& upload : i.mesh_uploads) {
+        if (!upload.unwritten_vertices.empty()) {
+            s.particles->write_buffer(upload.vertices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(upload.unwritten_vertices.data()),
+                                                upload.unwritten_vertices.size() * 4U});
+            s.particles->write_buffer(upload.indices, 0U,
+                                      std::span{reinterpret_cast<const std::uint8_t*>(upload.unwritten_indices.data()),
+                                                upload.unwritten_indices.size() * 4U});
+            upload.unwritten_vertices = {};
+            upload.unwritten_indices = {};
         }
     }
     const core::u64 held_step = simulation.tick();
@@ -525,7 +646,44 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
                     simulation.write_rigid(e, frame->emitters[e]);
                 }
             }
-            i.rigid_written = i.target;
+            // The props of the same tick, so what is drawn is one moment of
+            // one world: each pose is written as the particles' are, and the
+            // placement turns it into world space in the vertex stage.
+            // Nothing is written, and the instance stays behind, if a frame
+            // somehow holds fewer props than the effect lists: a prop a frame
+            // late is better than a prop snapped to the origin.
+            bool poses = true;
+            for (const ParticleInstance::State::PropGroup& group : i.props) {
+                for (const auto& [e, p] : group.props) {
+                    poses = poses && p < frame->emitters[e].props.size();
+                }
+            }
+            if (!poses) {
+                s.note("a rigid frame holds fewer props than the effect lists");
+            } else {
+                for (ParticleInstance::State::PropGroup& group : i.props) {
+                    for (std::size_t r = 0U; r < group.props.size(); ++r) {
+                        const auto [e, p] = group.props[r];
+                        const ajfx::RigidBodyState& pose = frame->emitters[e].props[p];
+                        PropRecord& record = group.scratch[r];
+                        record.position = {pose.position.x, pose.position.y, pose.position.z};
+                        // The model is held with its longest side one unit
+                        // long, so the authored size is that side's length.
+                        record.size = ajfx::rigid_physics(i.effect.emitters[e])->props[p].size;
+                        record.velocity = {pose.velocity.x, pose.velocity.y, pose.velocity.z};
+                        record.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z,
+                                              pose.orientation.w};
+                        // A prop carries no colour of its own: its model is
+                        // drawn as it is, lit like the debris around it.
+                        record.color = {1.0F, 1.0F, 1.0F, 1.0F};
+                    }
+                    s.particles->write_buffer(
+                        group.records, 0U,
+                        std::span{reinterpret_cast<const std::uint8_t*>(group.scratch.data()),
+                                  group.scratch.size() * sizeof(PropRecord)});
+                }
+                i.rigid_written = i.target;
+            }
         }
     }
     s.particles->end_recording();
@@ -574,7 +732,7 @@ bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, 
         i.orders[e] = i.sorter->sort(*i.simulation, e, axis);
         // A mesh draws its index count of vertices for each live particle.
         if (i.meshes[e]) {
-            const std::uint32_t args[4] = {i.meshes[e]->index_count, 0U, 0U, 0U};
+            const std::uint32_t args[4] = {i.mesh_uploads[i.meshes[e]->upload].index_count, 0U, 0U, 0U};
             s.particles->write_buffer(i.meshes[e]->args, 0U,
                                       std::span{reinterpret_cast<const std::uint8_t*>(args), sizeof(args)});
             const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
@@ -622,6 +780,57 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                              view.projection.at(3U, 3U)};
 
     bool first = true;
+    // The props first. A prop is authored, solid, lit geometry that stands in
+    // the world from before the first step, so it belongs with the scene's
+    // models rather than among the particles: it draws and writes depth ahead
+    // of them, which leaves the emitters' own draws and their sort untouched.
+    if (!i.props.empty()) {
+        ViewConstants prop = constants;
+        prop.stride = static_cast<core::u32>(sizeof(PropRecord));
+        prop.position_offset = prop_position_at;
+        prop.velocity_offset = prop_velocity_at;
+        prop.color_offset = prop_color_at;
+        prop.size_offset = prop_size_at;
+        // A mesh each, turned by the pose's own orientation: the mesh
+        // particles' path exactly, so a prop and the debris around it are lit
+        // alike. Untextured, unsorted (a record's index is its instance) and
+        // with no life, so no flipbook.
+        prop.extra = {0.0F, 0.0F, std::bit_cast<float>(prop_orientation_at), 0.0F};
+        prop.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F,
+                       targets.motion_valid ? 1.0F : 0.0F, 0.0F, 0.0F};
+        prop.flags = flag_mesh;
+        const std::array<rhi::SampledTexture, 2U> untextured{rhi::SampledTexture{&*s.blank, &*s.sampler},
+                                                             rhi::SampledTexture{&*s.blank, &*s.sampler}};
+        for (const ParticleInstance::State::PropGroup& group : i.props) {
+            const ParticleInstance::State::MeshUpload& uploaded = i.mesh_uploads[group.upload];
+            const rhi::StorageBuffer* poses = s.particles->buffer(group.records);
+            const rhi::StorageBuffer* vertices = s.particles->buffer(uploaded.vertices);
+            const rhi::StorageBuffer* indices = s.particles->buffer(uploaded.indices);
+            if (poses == nullptr || vertices == nullptr || indices == nullptr) {
+                s.note("a prop's buffers are missing");
+                return false;
+            }
+            const rhi::StorageBuffer* vertex_buffers[] = {poses, poses, poses, vertices, indices};
+            const std::array<rhi::DrawBatch, 1U> batches{
+                rhi::DrawBatch{uploaded.index_count, static_cast<core::u32>(group.props.size())}};
+            rhi::PulledDraw draw{};
+            draw.pipeline = motion ? &s.velocity : &s.mesh;
+            draw.vertex_buffers = vertex_buffers;
+            draw.vertex_uniform = std::span<const core::u8>{reinterpret_cast<const core::u8*>(&prop), sizeof(prop)};
+            draw.fragment_textures = untextured;
+            draw.batches = batches;
+            draw.load = motion || !first || targets.load;
+            draw.store_depth = true;
+            draw.viewport = targets.viewport;
+            draw.raster_viewport = targets.raster_viewport;
+            rhi::Texture& target = motion ? *targets.velocity : *targets.color;
+            if (!commands.draw_pulled(target, targets.clear, *targets.depth, targets.depth_clear, draw)) {
+                s.note(motion ? "a prop motion draw was refused" : "a prop draw was refused");
+                return false;
+            }
+            first = false;
+        }
+    }
     for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
         const ajfx::SpriteRenderer& sprite = i.effect.emitters[e].renderer;
         const ajfx::gpu::EmitterBuffers buffers = i.simulation->emitter_buffers(e);
@@ -673,8 +882,9 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
 
         const std::optional<ParticleInstance::State::Mesh>& mesh = i.meshes[e];
-        const rhi::StorageBuffer* mesh_vertices = mesh ? s.particles->buffer(mesh->vertices) : records;
-        const rhi::StorageBuffer* mesh_indices = mesh ? s.particles->buffer(mesh->indices) : records;
+        const ParticleInstance::State::MeshUpload* uploaded = mesh ? &i.mesh_uploads[mesh->upload] : nullptr;
+        const rhi::StorageBuffer* mesh_vertices = uploaded ? s.particles->buffer(uploaded->vertices) : records;
+        const rhi::StorageBuffer* mesh_indices = uploaded ? s.particles->buffer(uploaded->indices) : records;
         const rhi::StorageBuffer* mesh_args = mesh ? s.particles->buffer(mesh->args) : arguments;
         if (mesh_vertices == nullptr || mesh_indices == nullptr || mesh_args == nullptr) {
             s.note("an emitter's mesh buffers are missing");

@@ -20,8 +20,8 @@ to bottom. Open a block to see its controls.
 
 Down the left, the **palette** shows everything a page is built from:
 ready-made layers, every block by what it is for (Birth, Motion, Look,
-Contact, Light), and the raw modules under the hood. Seeing what there is
-gives ideas.
+Contact, Rigid physics, Light), and the raw modules under the hood. Seeing
+what there is gives ideas.
 - **Drag** an entry onto the page: a line shows where it will land, between
   blocks of a layer or between layers. A block a layer may have once
   (Appearance, Tumble...) only lands in a layer without one.
@@ -138,8 +138,10 @@ CPU reference (over 200,000 particles) show no paths.
 
 ## Solid pieces and piles
 
-**Physics** (Contact) makes a layer's particles solid bodies in a physics
-engine: they knock into each other, stack, tumble off and come to rest.
+Both blocks are under **Rigid physics** in the palette.
+
+**Physics** makes a layer's particles solid bodies in a physics engine: they
+knock into each other, stack, tumble off and come to rest.
 - *Body* is what each piece collides as: *Its own shape* wraps a debris
   chunk tightly, *Ball* rolls, *Cube* stacks.
 - *Friction* and *Bounciness* set the material; *Density*, *Spin damping*
@@ -150,9 +152,9 @@ engine: they knock into each other, stack, tumble off and come to rest.
 - With Physics, Tumble only sets each piece's spin and how it lies; the
   engine does the rest.
 
-**Pile** (Birth) puts pieces in place before the effect starts: a heap of
-rocks that collapses when the effect plays, or a stack that stands until
-something knocks it down.
+**Pile** puts pieces in place before the effect starts: a heap of rocks that
+collapses when the effect plays, or a stack that stands until something
+knocks it down.
 - *Stacked as* a Heap (a cone whose sides slope at *Slope*) or a Stack
   (filling *Width* by *Depth*, layer by layer).
 - *Let go at* holds the pile still until then; 0 lets it fall as soon as
@@ -163,9 +165,45 @@ something knocks it down.
 - A pile's pieces live on after they fall, so the automatic loop covers
   the fall and a few seconds of settling, not their whole life.
 
-The **Rock pile** recipe is the starting point: 220 rocks heaped steeper
-than they can stand, which slump as the effect plays, and a low puff of
-dust as they come down.
+**Prop** puts an object of your own in the layer's physics world: a bucket
+for the pieces to spill out of, a wall to pile against, a crate to knock
+over. A prop is not a particle. It stands there from the first frame, never
+dies, and takes no part of the layer's budget, so the layer heading counts
+props rather than particles when a layer places them and nothing is born.
+- *Model* is an OBJ, glTF or GLB, fitted so its longest side is *Size*. One
+  model serves at any size.
+- *Position* and *Turn* place it. *Turn* is three whole degrees: round the
+  upright axis, then tipped, then rolled.
+- *It can* is how it moves:
+  - *Stay put* for a floor, a wall, or a bucket that only has to hold.
+  - *Be moved* to tip or swing it yourself, from where it stands to *Moves
+    to* and *Turns to*, starting at *Starts moving at* and *Taking* that
+    long. It shoves whatever is in its way and nothing pushes it back, so a
+    tip-over lands the same every time. Past 90 degrees a bucket is upside
+    down and empties.
+  - *Be knocked about* lets the pieces move it, as one of them.
+- *Collides as* is what the pieces actually hit, and the one thing about a
+  prop worth understanding:
+  - *Its own shape* follows the model exactly, hollows and all, and is the
+    best choice for anything that only has to hold. Only a prop that stays
+    put can use it: a collision mesh cannot move.
+  - *A bucket*, *a crate* and *a tube* are **hollow**, built from a few
+    simple pieces, so things sit inside them. Measured by *Radius*,
+    *Height*, *Size across* and *Wall thickness* rather than taken from the
+    model.
+  - *A ball* and *a block* are simple solids.
+  - A prop that **moves at all** — moved or knocked about — cannot collide
+    as its own shape. The layer says so on the block, and the fix offers a
+    bucket. So a bucket that tips is a *bucket*, not its own shape.
+- The preview draws the model where the prop stands, and, when it collides
+  as something else, that shape faintly over the top: the difference between
+  what is seen and what is hit is otherwise invisible.
+
+The **Rock pile** recipe is the starting point for piles: 220 rocks heaped
+steeper than they can stand, which slump as the effect plays, and a low puff
+of dust as they come down. **Bucket of stones** is the starting point for
+props: a bucket standing full of stones that tips over a second in and spills
+them across the floor.
 
 ## Your own pictures and models
 
@@ -193,10 +231,11 @@ pictures, meshes and fields, so the media server needs none of the files.
 ## Starting points
 
 **New** opens the recipes: Campfire, Spark fountain, Explosion, Magic orb,
-Smoke plume, Snowfall, Rain, Rock pile and a blank page. **Add layer** offers
-ready-made layers: Flames, Embers, Smoke, Sparks, Fireball, Debris, Dust,
-Motes, Rock pile and others. These are ordinary blocks with tuned values, so everything
-they do can be seen and changed.
+Smoke plume, Snowfall, Rain, Rock pile, Bucket of stones and a blank page.
+**Add layer** offers ready-made layers: Flames, Embers, Smoke, Sparks,
+Fireball, Debris, Dust, Motes, Rock pile, Bucket of stones and others. These
+are ordinary blocks with tuned values, so everything they do can be seen and
+changed.
 
 ## Under the hood
 

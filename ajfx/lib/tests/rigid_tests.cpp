@@ -297,6 +297,288 @@ void unsupported_combinations_are_refused() {
     AJFX_CHECK(!no_mesh.ok() && no_mesh.error().message.find("draws none") != std::string::npos);
 }
 
+// A bucket standing on the floor with balls resting on its inside bottom.
+// The bucket is a hollow prop: a compound of a disc and a ring of staves, so
+// the balls are *inside* it. The convex hull of the same bucket would be a
+// solid tub they could only sit on top of, which is the whole reason the
+// hollow shapes are generated rather than wrapped.
+//
+// Measurements, all hand-computed and asserted against below: the bucket is
+// 0.5 in radius and 0.8 tall with 0.05 walls, centred at y = 0.4, so its
+// outside bottom sits on the floor, the top of its floor is at y = 0.05 and
+// its inside radius is 0.45. The balls are 0.1 across.
+constexpr float bucket_radius = 0.5F;
+constexpr float bucket_height = 0.8F;
+constexpr float bucket_wall = 0.05F;
+constexpr float ball_size = 0.1F;
+constexpr float bucket_floor_top = bucket_wall;
+constexpr float bucket_inside = bucket_radius - bucket_wall;
+
+Effect bucket_of_balls(PropMotion motion, float tip_degrees) {
+    RigidProp bucket{};
+    bucket.shape = PropShape::HollowCylinder;
+    bucket.motion = motion;
+    bucket.position = Vec3{0.0F, bucket_height * 0.5F, 0.0F};
+    bucket.radius = bucket_radius;
+    bucket.height = bucket_height;
+    bucket.wall = bucket_wall;
+    bucket.segments = 16U;
+    bucket.density = 600.0F;
+    bucket.friction = 0.7F;
+    bucket.restitution = 0.05F;
+    bucket.to_position = Vec3{0.0F, bucket_height * 0.5F, 0.0F};
+    bucket.to_turn = Vec3{0.0F, 0.0F, tip_degrees};
+    bucket.move_from = 0.5F;
+    bucket.move_over = 0.5F;
+
+    EffectBuilder builder{"bucket"};
+    builder.emitter("balls")
+        .capacity(64U)
+        .spawn(SpawnPile{.count = 24U,
+                         .shape = PileShape::Box,
+                         .center = Vec3{0.0F, bucket_floor_top, 0.0F},
+                         .width = 0.5F,
+                         .depth = 0.5F,
+                         .spacing = 1.0F,
+                         .jitter = 0.0F,
+                         .release = 0.0F})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = ball_size, .max = ball_size})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Sphere,
+                             .friction = 0.5F,
+                             .restitution = 0.1F,
+                             .props = {bucket}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    return builder.build().value();
+}
+
+// How far a ball's centre is from the bucket's upright axis.
+float from_axis(Vec3 position) {
+    return std::sqrt(position.x * position.x + position.z * position.z);
+}
+
+void balls_rest_inside_a_hollow_prop() {
+    Simulation simulation = make(bucket_of_balls(PropMotion::Fixed, 0.0F));
+    const EmitterState& s = simulation.emitter(0U);
+    AJFX_CHECK(s.alive() == 24U);
+    AJFX_CHECK(s.props.size() == 1U);
+    // The props stand in the world before the first step, so a paused effect
+    // at the start already shows the bucket where it was put.
+    AJFX_CHECK(std::fabs(s.props[0].position.y - bucket_height * 0.5F) < 1.0e-4F);
+
+    for (std::uint64_t step = 0U; step < 300U; ++step) {
+        simulation.step();
+    }
+    const float ball_radius = ball_size * 0.5F;
+    std::size_t resting = 0U;
+    float highest = 0.0F;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        // Inside the staves: a ball's centre cannot reach past the inside
+        // wall less its own radius. 0.02 is Jolt's penetration slop.
+        AJFX_CHECK(from_axis(s.position[i]) < bucket_inside - ball_radius + 0.02F);
+        // On the bucket's floor, not through it and not under the bucket.
+        AJFX_CHECK(s.position[i].y > bucket_floor_top + ball_radius - 0.02F);
+        highest = std::max(highest, s.position[i].y);
+        if (length(s.velocity[i]) < 0.01F) {
+            ++resting;
+        }
+    }
+    // They came to rest, and in a bucket 0.8 tall they cannot be stacked
+    // higher than its rim.
+    AJFX_CHECK(resting == s.alive());
+    AJFX_CHECK(highest < bucket_height);
+    // A fixed prop never moves, however much lands on it.
+    AJFX_CHECK(std::fabs(s.props[0].position.y - bucket_height * 0.5F) < 1.0e-4F);
+    AJFX_CHECK(length(s.props[0].velocity) == 0.0F);
+}
+
+void a_driven_prop_tips_what_it_holds() {
+    // The same bucket, tipped past horizontal between 0.5 s and 1 s.
+    Simulation simulation = make(bucket_of_balls(PropMotion::Driven, 115.0F));
+    const EmitterState& s = simulation.emitter(0U);
+    const Quat upright = s.props[0].orientation;
+    for (std::uint64_t step = 0U; step < 360U; ++step) {
+        simulation.step();
+    }
+    // The bucket turned, and a driven prop is moved by the effect alone: it
+    // ends exactly where its move put it, whatever it shoved on the way.
+    AJFX_CHECK(!(s.props[0].orientation == upright));
+    AJFX_CHECK(std::fabs(s.props[0].position.y - bucket_height * 0.5F) < 1.0e-3F);
+
+    const float ball_radius = ball_size * 0.5F;
+    std::size_t spilled = 0U;
+    std::size_t rolling = 0U;
+    float highest = 0.0F;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        // Everything is on the floor, and nothing fell through it.
+        AJFX_CHECK(s.position[i].y > ball_radius - 0.03F);
+        highest = std::max(highest, s.position[i].y);
+        if (from_axis(s.position[i]) > bucket_radius) {
+            ++spilled;
+        }
+        if (length(s.velocity[i]) >= 0.02F) {
+            ++rolling;
+        }
+    }
+    std::cout << "  spilled " << spilled << " of " << s.alive() << " clear of the bucket, highest " << highest
+              << ", " << rolling << " still rolling slowly\n";
+    // Every one is down on the floor, none still cradled: the bucket's inside
+    // bottom was carried up to about its own centre, 0.4, while a ball lying
+    // on the floor sits at 0.05 and one on top of another at 0.15. Balls are
+    // not asserted to stop: a sphere on a plane keeps rolling, since rolling
+    // resistance is not modelled (the pile tests use boxes, which do stop).
+    AJFX_CHECK(highest < 0.2F);
+    // Some made it clear of where the bucket stood.
+    AJFX_CHECK(spilled > 0U);
+}
+
+void loose_props_fall_and_settle() {
+    RigidProp crate{};
+    crate.shape = PropShape::HollowBox;
+    crate.motion = PropMotion::Loose;
+    crate.position = Vec3{0.0F, 1.5F, 0.0F};
+    crate.half_size = Vec3{0.3F, 0.3F, 0.3F};
+    crate.wall = 0.04F;
+    crate.density = 500.0F;
+    crate.friction = 0.6F;
+    crate.restitution = 0.05F;
+
+    EffectBuilder builder{"crate"};
+    builder.emitter("bits")
+        .capacity(8U)
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Sphere, .props = {crate}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    Simulation simulation = make(builder.build().value());
+    const EmitterState& s = simulation.emitter(0U);
+    AJFX_CHECK(std::fabs(s.props[0].position.y - 1.5F) < 1.0e-4F);
+    for (std::uint64_t step = 0U; step < 300U; ++step) {
+        simulation.step();
+    }
+    // A loose prop is an ordinary body: it fell and came to rest on the
+    // floor, half its height up, and stopped.
+    AJFX_CHECK(s.props[0].position.y < 1.5F);
+    AJFX_CHECK(std::fabs(s.props[0].position.y - 0.3F) < 0.03F);
+    AJFX_CHECK(length(s.props[0].velocity) < 0.01F);
+}
+
+void props_rerun_and_seek_exactly() {
+    const Effect effect = bucket_of_balls(PropMotion::Driven, 115.0F);
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t until : {1U, 45U, 90U, 200U}) {
+        while (a.tick() < until) {
+            a.step();
+            b.step();
+            c.step();
+        }
+        // The props' poses travel in the state, so this compares them too.
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+        AJFX_CHECK(!a.state().emitters[0].props.empty());
+    }
+
+    // A seek through the tip-over lands on the bits stepping there gives.
+    Simulation seeker = make(effect);
+    CheckpointRing ring{30U, 8U};
+    for (const std::uint64_t target : {150U, 60U, 220U, 20U}) {
+        ring.seek(seeker, target, nullptr);
+        Simulation stepped = make(effect);
+        while (stepped.tick() < target) {
+            stepped.step();
+        }
+        AJFX_CHECK(seeker.state() == stepped.state());
+    }
+}
+
+void impossible_props_are_refused() {
+    const auto refused = [](const RigidProp& prop, const std::string& fragment) {
+        EffectBuilder builder{"x"};
+        builder.emitter("rocks").init(Lifetime{}).update(RigidPhysics{.props = {prop}});
+        const Result<Effect> effect = builder.build();
+        if (effect.ok() || effect.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (effect.ok() ? std::string{"accepted"} : effect.error().message) << '\n';
+            return false;
+        }
+        return true;
+    };
+    // A collision mesh can only stand still: it reports no mass, so with
+    // assertions off a moving one would take an infinite inverse mass rather
+    // than complain. Both ways of moving are refused, not just the obvious
+    // one -- a driven mesh prop is the trap, since it looks harmless.
+    for (const PropMotion motion : {PropMotion::Loose, PropMotion::Driven}) {
+        RigidProp moving_mesh{};
+        moving_mesh.mesh = "bucket";
+        moving_mesh.shape = PropShape::Mesh;
+        moving_mesh.motion = motion;
+        AJFX_CHECK(refused(moving_mesh, "must be 'fixed'"));
+    }
+    // Standing still, the same prop is exactly what a mesh shape is for.
+    RigidProp fixed_mesh{};
+    fixed_mesh.mesh = "chip";
+    fixed_mesh.shape = PropShape::Mesh;
+    fixed_mesh.motion = PropMotion::Fixed;
+    EffectBuilder standing{"x"};
+    standing.emitter("rocks").init(Lifetime{}).update(RigidPhysics{.props = {fixed_mesh}});
+    AJFX_CHECK(standing.build().ok());
+
+    RigidProp no_mesh{};
+    no_mesh.shape = PropShape::Hull;
+    AJFX_CHECK(refused(no_mesh, "props[0].mesh"));
+
+    RigidProp thick{};
+    thick.shape = PropShape::HollowCylinder;
+    thick.radius = 0.2F;
+    thick.height = 0.5F;
+    thick.wall = 0.3F;
+    AJFX_CHECK(refused(thick, "thinner than the prop's radius"));
+
+    RigidProp flat{};
+    flat.shape = PropShape::Cylinder;
+    flat.radius = 0.2F;
+    flat.height = 0.0F;
+    AJFX_CHECK(refused(flat, "props[0].height"));
+
+    RigidProp tiny{};
+    tiny.shape = PropShape::Box;
+    tiny.size = 0.0F;
+    AJFX_CHECK(refused(tiny, "props[0].size"));
+
+    RigidProp coarse{};
+    coarse.shape = PropShape::Pipe;
+    coarse.radius = 0.3F;
+    coarse.height = 1.0F;
+    coarse.wall = 0.05F;
+    coarse.segments = 2U;
+    AJFX_CHECK(refused(coarse, "props[0].segments"));
+
+    // A crowd of props is a budget, like a crowd of particles.
+    EffectBuilder many{"x"};
+    RigidProp one{};
+    one.shape = PropShape::Sphere;
+    one.radius = 0.1F;
+    std::vector<RigidProp> crowd(max_rigid_props + 1U, one);
+    many.emitter("rocks").init(Lifetime{}).update(RigidPhysics{.props = std::move(crowd)});
+    const Result<Effect> crowded = many.build();
+    AJFX_CHECK(!crowded.ok() && crowded.error().message.find("more props than") != std::string::npos);
+
+    // A prop shaped by a mesh the package does not hold names that mesh.
+    EffectBuilder missing{"x"};
+    RigidProp hull{};
+    hull.mesh = "bucket";
+    hull.shape = PropShape::Hull;
+    missing.emitter("rocks").init(Lifetime{}).update(RigidPhysics{.props = {hull}});
+    const Result<Simulation> no_mesh_given =
+        Simulation::create(missing.build().value(), 3U, SimulationOptions{.rigid = g_solver.get()});
+    AJFX_CHECK(!no_mesh_given.ok() && no_mesh_given.error().code == ErrorCode::MissingMesh);
+    AJFX_CHECK(no_mesh_given.error().message.find("prop shaped by mesh 'bucket'") != std::string::npos);
+}
+
 } // namespace
 
 bool same_particles(const EmitterState& a, const EmitterState& b) {
@@ -583,6 +865,11 @@ int main() {
         {"piles_need_rigid_physics_and_room", piles_need_rigid_physics_and_room},
         {"runner_matches_the_simulation", runner_matches_the_simulation},
         {"runner_keeps_serving_beside_a_failed_track", runner_keeps_serving_beside_a_failed_track},
+        {"balls_rest_inside_a_hollow_prop", balls_rest_inside_a_hollow_prop},
+        {"a_driven_prop_tips_what_it_holds", a_driven_prop_tips_what_it_holds},
+        {"loose_props_fall_and_settle", loose_props_fall_and_settle},
+        {"props_rerun_and_seek_exactly", props_rerun_and_seek_exactly},
+        {"impossible_props_are_refused", impossible_props_are_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

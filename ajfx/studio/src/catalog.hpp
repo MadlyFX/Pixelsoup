@@ -22,6 +22,7 @@ enum class Category : std::uint8_t {
     Motion,  // the forces on them
     Look,    // how they are drawn
     Contact, // what they hit
+    Physics, // solid pieces that collide with each other
     Light,   // light they give the scene
     Expert,  // raw modules
 };

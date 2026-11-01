@@ -77,6 +77,23 @@ Json to_json(const std::vector<Key>& keys) {
     return array;
 }
 
+// A prop writes its own fields, the same list validation and reading use.
+Json to_json(const RigidProp& prop) {
+    Json object = Json::object();
+    RigidProp::fields(prop, [&object](std::string_view name, const auto& field) {
+        object.add(std::string{name}, to_json(field));
+    });
+    return object;
+}
+
+Json to_json(const std::vector<RigidProp>& props) {
+    Json array = Json::array();
+    for (const RigidProp& prop : props) {
+        array.items.push_back(to_json(prop));
+    }
+    return array;
+}
+
 template <class Module>
 Json module_to_json(const Module& module) {
     Json object = Json::object();
@@ -284,6 +301,23 @@ public:
             out.push_back(key);
         }
         return true;
+    }
+
+    // Each prop is an object of RigidProp's own fields, so a misspelt one is
+    // refused exactly as a module's is.
+    bool read(const std::string& path, const Json& json, std::vector<RigidProp>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of props");
+            return false;
+        }
+        out.clear();
+        out.reserve(json.items.size());
+        for (std::size_t i = 0U; i < json.items.size(); ++i) {
+            RigidProp prop;
+            read_fields(path + "[" + std::to_string(i) + "]", json.items[i], prop, {});
+            out.push_back(std::move(prop));
+        }
+        return !failed();
     }
 
     // Reads the named fields of a described object. Missing fields keep their

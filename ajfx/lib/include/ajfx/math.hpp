@@ -36,6 +36,19 @@ struct Quat final {
     friend constexpr bool operator==(const Quat&, const Quat&) = default;
 };
 
+// One turn after another: `a` applied to whatever `b` already turned.
+[[nodiscard]] constexpr Quat times(Quat a, Quat b) noexcept {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// `v` turned by `q`, which is taken to be unit length.
+[[nodiscard]] constexpr Vec3 rotate(Quat q, Vec3 v) noexcept {
+    const Vec3 u{q.x, q.y, q.z};
+    const Vec3 t = cross(u, v) * 2.0F;
+    return v + t * q.w + cross(u, t);
+}
+
 // Linear, unpremultiplied RGBA. Values above 1 are allowed (HDR emission).
 struct Color final {
     float r{1.0F};

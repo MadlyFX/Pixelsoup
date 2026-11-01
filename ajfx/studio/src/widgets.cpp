@@ -23,6 +23,17 @@ void draw_category_icon(gui::UiContext& ctx, Category category, float cx, float 
     case Category::Motion: icon = gui::Icon::MoveTool; break;
     case Category::Look: icon = gui::Icon::Droplet; break;
     case Category::Contact: icon = gui::Icon::Surface; break;
+    case Category::Physics: {
+        // Three solid pieces come to rest on each other: a pile of bodies.
+        constexpr float piece = 5.0F;
+        constexpr float gap = 1.4F;
+        constexpr float radius = 1.2F;
+        constexpr float half = piece + gap * 0.5F;
+        ctx.rounded(gui::Rect{cx - piece * 0.5F, cy - half, piece, piece}, color, radius);
+        ctx.rounded(gui::Rect{cx - half, cy + gap * 0.5F, piece, piece}, color, radius);
+        ctx.rounded(gui::Rect{cx + gap * 0.5F, cy + gap * 0.5F, piece, piece}, color, radius);
+        return;
+    }
     case Category::Light: icon = gui::Icon::Shading; break;
     case Category::Expert: icon = gui::Icon::Details; break;
     }

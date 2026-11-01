@@ -63,6 +63,30 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         if (!layer.enabled) {
             continue;
         }
+        // A prop asked to be something it cannot stops the whole layer
+        // compiling, and the reason reads better here, on the block at fault
+        // and with the fix, than passed through in the runtime's own words.
+        bool impossible_prop = false;
+        for (const Block& block : layer.blocks) {
+            if (!block.enabled || block.kind != "prop") {
+                continue;
+            }
+            // A collision mesh cannot move at all: it has no volume to take
+            // mass from and no inside, so contact against a moving one is
+            // unreliable. The simple shapes are solid pieces, and those move.
+            if (choice_of(block, "shape") == "model" && choice_of(block, "motion") != "fixed") {
+                notes.push_back({layer.uid, block.uid, AdviceLevel::Error,
+                                 "A prop that moves cannot collide as its own shape: only a prop that stays put "
+                                 "can. Collide as a bucket, crate, tube, ball or block instead, or set it to "
+                                 "stay put.",
+                                 "Collide as a bucket", set_value(block.uid, "shape", choice("bucket"))});
+                impossible_prop = true;
+            }
+        }
+        if (impossible_prop) {
+            continue;
+        }
+
         const LayerReport* report = compiled.layer(layer.uid);
         if (report != nullptr && !report->error.empty()) {
             notes.push_back({layer.uid, report->error_block, AdviceLevel::Error,
@@ -73,7 +97,10 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         const bool piled = first(layer, "pile") != nullptr || has_raw(layer, "spawn_pile");
         const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr || piled ||
                           has_raw(layer, "spawn_rate") || has_raw(layer, "spawn_burst");
-        if (!born) {
+        // A layer of props alone is a stage piece, not an empty layer: it has
+        // something to show without anything being born in it.
+        const bool propped = first(layer, "prop") != nullptr;
+        if (!born && !propped) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Warning, "Nothing is born in this layer yet.",
                              "Add a stream", add_block(layer.uid, "stream", true)});
             continue;
@@ -81,14 +108,14 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
 
         const Block* appearance = first(layer, "appearance");
         const std::string material = appearance != nullptr ? choice_of(*appearance, "material") : "";
-        if (appearance == nullptr) {
+        if (appearance == nullptr && born) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Tip,
                              "Particles draw as plain soft dots. Appearance gives them a look: glow, smoke, debris.",
                              "Add appearance", add_block(layer.uid, "appearance")});
         }
 
         // A pile's pieces lie on long after the loop, so their end is not seen.
-        if (first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life") && !piled) {
+        if (born && first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life") && !piled) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Tip,
                              "Particles vanish suddenly at the end of their life. A fade hides the pop.", "Add fade",
                              add_block(layer.uid, "fade")});
@@ -132,7 +159,7 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         }
 
         // An automatic loop always covers the effect; a loop set by hand may not.
-        if (!document.loop_auto && layer.life_max > document.loop_seconds) {
+        if (born && !document.loop_auto && layer.life_max > document.loop_seconds) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Tip,
                              "Particles live longer than the preview loop, so it cuts them off.", "Loop automatically",
                              [](Document& d) { d.loop_auto = true; }});
@@ -146,6 +173,13 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             if (block.kind == "mesh_collider" && file_of(block, "file").empty()) {
                 notes.push_back({layer.uid, block.uid, AdviceLevel::Warning,
                                  "Pick a model for particles to bounce off. Until then nothing collides.", {}, {}});
+            }
+            if (block.kind == "prop" && file_of(block, "model").empty()) {
+                notes.push_back({layer.uid, block.uid, AdviceLevel::Warning,
+                                 "Pick a model for this prop. Until then it stands in as a plain block and "
+                                 "nothing is drawn.",
+                                 {},
+                                 {}});
             }
             if (block.kind == "appearance") {
                 const bool debris = choice_of(block, "material") == "debris";

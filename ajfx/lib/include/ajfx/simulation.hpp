@@ -54,6 +54,10 @@ struct EmitterState final {
     // Simulation::state brings up to date.
     std::vector<std::uint32_t> body;
     std::vector<std::uint8_t> solver_state;
+    // Rigid physics emitters only: where each of the emitter's props stands,
+    // in the order RigidPhysics lists them, so a host can draw them. A prop
+    // is not a particle: it is here from the first step and never dies.
+    std::vector<RigidBodyState> props;
 
     // Births so far, including refused ones; the low 32 bits of the count at
     // birth are a particle's spawn index.
@@ -159,6 +163,9 @@ private:
     std::vector<RigidEmitter> rigid_;
     mutable bool solver_state_stale_{false};
     bool has_piles_{false};
+    // Props, like piles, stand in their worlds before step 0, so creating
+    // the simulation has to start it once the worlds exist.
+    bool has_props_{false};
     // The values step 0's piles were set up with.
     std::vector<ParameterValue> pile_values_;
 };

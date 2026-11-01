@@ -3,6 +3,7 @@
 #include <mediaserver/editor/preview_resolution.hpp>
 
 #include <mediaserver/editor/element.hpp>
+#include <mediaserver/editor/gizmo.hpp>
 #include <mediaserver/editor/masks_panel.hpp>
 #include <mediaserver/editor/measurement.hpp>
 #include <mediaserver/editor/model_surface_cache.hpp>
@@ -68,22 +69,6 @@ struct CanvasPoint final {
 enum class ViewportRole : core::u8 {
     Program,
     Stage,
-};
-
-// Which handle owns the current drag. Screen is the direct-on-object drag;
-// X/Y/Z are the gizmo's axis arrows, rings or scale handles for the active
-// tool; View is the outer screen-space ring that rotates about the view axis
-// or scales uniformly.
-enum class GizmoAxis : core::u8 {
-    None,
-    Screen,
-    X,
-    Y,
-    Z,
-    // Surface calibration has a dedicated, screen-space ring for rotation
-    // about stage-up.
-    Yaw,
-    View,
 };
 
 // Optional final-output projection for an interactive Program viewport. The

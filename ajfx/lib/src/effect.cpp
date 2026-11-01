@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <iterator>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <set>
 #include <string>
@@ -157,6 +158,17 @@ public:
         }
     }
 
+    // A prop's own fields, so every number in one is held to what any other
+    // module's number is. What a prop may be is check_module's business.
+    void operator()(std::string_view field, const std::vector<RigidProp>& props) {
+        for (std::size_t i = 0U; i < props.size(); ++i) {
+            const std::string where = std::string{field} + "[" + std::to_string(i) + "]";
+            RigidProp::fields(props[i], [&](std::string_view name, const auto& value) {
+                (*this)(where + "." + std::string{name}, value);
+            });
+        }
+    }
+
     void operator()(std::string_view, const std::uint32_t&) {}
     void operator()(std::string_view, const bool&) {}
     void operator()(std::string_view, const std::string&) {}
@@ -237,6 +249,51 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
     check.require(m.friction >= 0.0F && m.friction <= 1.0F, "friction", "must be between 0 and 1");
     check.require(m.restitution >= 0.0F && m.restitution <= 1.0F, "restitution", "must be between 0 and 1");
     check.require(m.angular_damping >= 0.0F, "angular_damping", "must not be negative");
+    check.require(m.props.size() <= max_rigid_props, "props",
+                  "holds more props than the " + std::to_string(max_rigid_props) + " that may stand in one world");
+    for (std::size_t i = 0U; i < m.props.size(); ++i) {
+        const RigidProp& p = m.props[i];
+        const std::string at = "props[" + std::to_string(i) + "]";
+        const bool from_model = p.shape == PropShape::Mesh || p.shape == PropShape::Hull;
+        const bool round = p.shape == PropShape::Sphere || p.shape == PropShape::Cylinder ||
+                           p.shape == PropShape::Cone || p.shape == PropShape::HollowCylinder ||
+                           p.shape == PropShape::Pipe;
+        const bool tall = p.shape == PropShape::Cylinder || p.shape == PropShape::Cone ||
+                          p.shape == PropShape::HollowCylinder || p.shape == PropShape::Pipe;
+        const bool boxy = p.shape == PropShape::Box || p.shape == PropShape::HollowBox;
+        const bool hollow = p.shape == PropShape::HollowBox || p.shape == PropShape::HollowCylinder ||
+                            p.shape == PropShape::Pipe;
+        check.require(!from_model || valid_texture_name(p.mesh), at + ".mesh",
+                      "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+        // A collision mesh cannot move at all: it has no volume to take mass
+        // from, and no inside, so contact against a moving one is unreliable
+        // (Jolt's Shape::MustBeStatic). The generated hollow shapes are
+        // compounds of convex pieces, and those move properly.
+        check.require(p.shape != PropShape::Mesh || p.motion == PropMotion::Fixed, at + ".motion",
+                      "must be 'fixed' while the prop collides as its own model: a collision mesh cannot move "
+                      "(collide as 'hollow_box', 'hollow_cylinder' or 'pipe' instead)");
+        check.require(p.size > 0.0F, at + ".size", "must be positive");
+        check.require(p.density > 0.0F, at + ".density", "must be positive");
+        check.require(p.friction >= 0.0F && p.friction <= 1.0F, at + ".friction", "must be between 0 and 1");
+        check.require(p.restitution >= 0.0F && p.restitution <= 1.0F, at + ".restitution",
+                      "must be between 0 and 1");
+        check.require(p.move_from >= 0.0F, at + ".move_from", "must not be negative");
+        check.require(p.move_over >= 0.0F, at + ".move_over", "must not be negative");
+        check.require(!round || p.radius > 0.0F, at + ".radius", "must be positive for this shape");
+        check.require(!tall || p.height > 0.0F, at + ".height", "must be positive for this shape");
+        check.require(!boxy || (p.half_size.x > 0.0F && p.half_size.y > 0.0F && p.half_size.z > 0.0F),
+                      at + ".half_size", "must be positive on every axis for this shape");
+        check.require(!round || (p.segments >= 3U && p.segments <= 64U), at + ".segments",
+                      "must be between 3 and 64 for this shape");
+        check.require(!hollow || p.wall > 0.0F, at + ".wall", "must be positive for a hollow shape");
+        // A wall thicker than the room inside leaves nothing hollow.
+        if (p.shape == PropShape::HollowCylinder || p.shape == PropShape::Pipe) {
+            check.require(p.wall < p.radius, at + ".wall", "must be thinner than the prop's radius");
+        } else if (p.shape == PropShape::HollowBox) {
+            check.require(p.wall < std::min(p.half_size.x, p.half_size.z), at + ".wall",
+                          "must be thinner than half the prop's width and depth");
+        }
+    }
 }
 
 void check_module(const Effect& e, const Drag& m, FieldChecker& check) {
@@ -675,6 +732,14 @@ std::uint32_t required_attributes(const Emitter& emitter) {
         add(Attribute::Velocity);
     }
     return mask;
+}
+
+Quat prop_orientation(Vec3 degrees) noexcept {
+    constexpr float half_degree = std::numbers::pi_v<float> / 360.0F;
+    const Quat yaw{0.0F, std::sin(degrees.y * half_degree), 0.0F, std::cos(degrees.y * half_degree)};
+    const Quat pitch{std::sin(degrees.x * half_degree), 0.0F, 0.0F, std::cos(degrees.x * half_degree)};
+    const Quat roll{0.0F, 0.0F, std::sin(degrees.z * half_degree), std::cos(degrees.z * half_degree)};
+    return times(roll, times(pitch, yaw));
 }
 
 const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept {

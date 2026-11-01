@@ -49,6 +49,13 @@
 // (ajfx::RigidRunner), ahead of the show frame, and each advance only writes
 // the target step's particles once that thread has them. Until then the
 // instance is behind, and a seek holds until its physics has caught up.
+//
+// Those emitters' props (a bucket to spill out of, a wall to pile against)
+// come from the same rigid frame: each advance writes the poses of the tick it
+// adopted, and a draw puts each prop's model through the mesh-particle path,
+// before the particles, so a prop and the debris around it are lit alike. A
+// prop draws the model it names whatever it collides as; one that names no
+// model draws nothing.
 namespace mediaserver::render {
 
 enum class ParticleErrorCode : core::u8 {
@@ -167,7 +174,9 @@ public:
     // is adopted, not while recording a frame (the first advance uploads the
     // fields and meshes). Fails with InvalidEffect, naming the emitter, when a
     // texture, field or mesh the effect uses is missing. Blended meshes write
-    // depth, so they hide their own far side as solid geometry does.
+    // depth, so they hide their own far side as solid geometry does. Meshes
+    // are uploaded once per name, so emitters and props that draw the same
+    // model share one pair of buffers.
     [[nodiscard]] core::Result<ParticleInstance, ParticleError> create_instance(const ajfx::Effect& effect,
                                                                                const ajfx::gpu::KernelSet& kernels,
                                                                                const ajfx::TextureSet& textures,
@@ -187,15 +196,17 @@ public:
     // Records drawing `instance` placed by `object_to_world`, seen through
     // `view` (its view matrix gives the camera axes and the sort axis; its
     // view-projection rasterises; its projection maps depth back to distance
-    // for soft particles). Refused when the instance has not caught up.
+    // for soft particles). Refused when the instance has not caught up, props
+    // included: nothing is drawn from a tick whose rigid frame has not landed.
     // Sorting reuses the instance's scratch, so draws of one instance record
     // one after another.
     [[nodiscard]] bool draw(rhi::CommandList& commands, ParticleInstance& instance,
                             const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
                             const ParticleTargets& targets);
-    // Records the sprites' motion into `targets.velocity`, in the order the
-    // last `draw` of this instance used, so where sprites overlap the one
-    // drawn on top gives the motion.
+    // Records the sprites' and props' motion into `targets.velocity`, in the
+    // order the last `draw` of this instance used, so where they overlap the
+    // one drawn on top gives the motion. A prop moves by the velocity its
+    // pose reports, as a particle moves by its own.
     [[nodiscard]] bool draw_motion(rhi::CommandList& commands, ParticleInstance& instance,
                                    const scene::ViewMatrices& view, const scene::Mat4& object_to_world,
                                    const ParticleTargets& targets);

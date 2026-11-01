@@ -133,7 +133,11 @@ public:
         });
         const bool piled = std::any_of(layer_.blocks.begin(), layer_.blocks.end(),
                                        [](const Block& b) { return b.enabled && b.kind == "pile"; });
-        if (piled && !physics_) {
+        // A prop stands in a physics world, so a layer with one and no
+        // Physics block takes the default physics, as a pile does.
+        const bool propped = std::any_of(layer_.blocks.begin(), layer_.blocks.end(),
+                                         [](const Block& b) { return b.enabled && b.kind == "prop"; });
+        if ((piled || propped) && !physics_) {
             physics_ = true;
             place_after(SlotRigid, layer_.uid, RigidPhysics{.id = module_id(layer_.uid, 4U), .density = 2400.0F,
                                                             .friction = 0.6F, .restitution = 0.15F});
@@ -157,6 +161,18 @@ public:
                    Lifetime{.id = module_id(layer_.uid, 1U), .min = life_min,
                             .max = std::max(layer_.life_max, life_min)});
         finish_over_life();
+        // The props go on the layer's RigidPhysics module, which any block
+        // may have placed, so they are attached once every block is in.
+        if (!props_.empty()) {
+            for (Placed& placed : after_) {
+                auto* update = std::get_if<UpdateModule>(&placed.line.module);
+                auto* physics = update != nullptr ? std::get_if<RigidPhysics>(update) : nullptr;
+                if (physics != nullptr) {
+                    physics->props = std::move(props_);
+                    break;
+                }
+            }
+        }
 
         const auto by_slot = [](const Placed& a, const Placed& b) { return a.slot < b.slot; };
         std::stable_sort(init_.begin(), init_.end(), by_slot);
@@ -429,11 +445,68 @@ private:
                                      .restitution = number_of(block, "bounce"),
                                      .angular_damping = number_of(block, "damping"),
                                      .allow_sleep = toggle_of(block, "rest")});
+        } else if (kind == "prop") {
+            prop(block);
         } else if (kind == "light") {
             light(block);
         } else if (kind == raw_block_kind) {
             raw(block);
         }
+    }
+
+    // An object the artist placed in the layer's physics world. Props are
+    // collected here and attached to the RigidPhysics module in build(),
+    // since that module may be placed by a block that comes after this one.
+    void prop(const Block& block) {
+        RigidProp out;
+        const std::string motion = choice_of(block, "motion");
+        out.motion = motion == "driven" ? PropMotion::Driven
+                     : motion == "loose" ? PropMotion::Loose
+                                         : PropMotion::Fixed;
+        const std::string shape = choice_of(block, "shape");
+        if (shape == "bucket") {
+            out.shape = PropShape::HollowCylinder;
+        } else if (shape == "crate") {
+            out.shape = PropShape::HollowBox;
+        } else if (shape == "tube") {
+            out.shape = PropShape::Pipe;
+        } else if (shape == "ball") {
+            out.shape = PropShape::Sphere;
+        } else if (shape == "block") {
+            out.shape = PropShape::Box;
+        } else {
+            out.shape = PropShape::Mesh;
+        }
+        // The model is what a host draws, whatever the prop collides as, so
+        // it is named whenever one is picked.
+        const std::string path = file_of(block, "model");
+        if (!path.empty()) {
+            out.mesh = request(AssetRequest::Kind::Mesh, block, path);
+        } else if (out.shape == PropShape::Mesh) {
+            // Nothing picked yet: stand in as a block of its size, so the
+            // layer still plays while the coach asks for a model.
+            out.shape = PropShape::Box;
+        }
+        out.position = to_vec3(get(block, "at")) * s_;
+        out.turn = to_vec3(get(block, "turn"));
+        out.size = number_of(block, "size") * s_;
+        out.half_size = to_vec3(get(block, "extent")) * (0.5F * s_);
+        out.radius = number_of(block, "radius") * s_;
+        out.height = number_of(block, "height") * s_;
+        out.wall = number_of(block, "wall") * s_;
+        out.segments = static_cast<std::uint32_t>(std::lround(number_of(block, "sides")));
+        out.density = number_of(block, "density");
+        out.friction = number_of(block, "friction");
+        out.restitution = number_of(block, "bounce");
+        // A move the artist has not touched leaves the prop where it stands,
+        // rather than carrying it to the origin.
+        const Value* to_position = block.find("move_to");
+        const Value* to_turn = block.find("turn_to");
+        out.to_position = to_position != nullptr ? to_vec3(*to_position) * s_ : out.position;
+        out.to_turn = to_turn != nullptr ? to_vec3(*to_turn) : out.turn;
+        out.move_from = number_of(block, "move_at");
+        out.move_over = number_of(block, "move_over");
+        props_.push_back(std::move(out));
     }
 
     // The control's value as a runtime input: bound to its published
@@ -790,6 +863,8 @@ private:
     std::set<std::string> unique_;
     std::set<ModuleId> seeded_;
     bool physics_{false};
+    // The props the layer's Prop blocks describe, in page order.
+    std::vector<RigidProp> props_;
     std::vector<Placed> spawn_;
     std::vector<Placed> init_;
     std::vector<Placed> forces_;

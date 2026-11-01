@@ -44,6 +44,15 @@ ControlDef vec3_control(std::string_view id, std::string_view label, Value fallb
     return control;
 }
 
+// Three turns in degrees, round the upright axis, then tipped, then rolled.
+// Whole degrees: a tenth of one is not a thing an artist means.
+ControlDef angles_control(std::string_view id, std::string_view label, std::string_view help) {
+    ControlDef control = number_control(id, label, 0.0F, -180.0F, 180.0F, "deg", 0, help, -3600.0F, 3600.0F);
+    control.type = ControlType::Vec3;
+    control.fallback = vec3(0.0F, 0.0F, 0.0F);
+    return control;
+}
+
 ControlDef color_control(std::string_view id, std::string_view label, Value fallback, std::string_view help) {
     ControlDef control;
     control.id = id;
@@ -160,43 +169,6 @@ std::vector<BlockDef> make_catalog() {
              detail(number_control("repeats", "Bursts", 0.0F, 0.0F, 20.0F, "", 0,
                                    "How many bursts when repeating; 0 keeps going for ever.", 0.0F, 1.0e6F))},
         .keywords = "emit spawn explosion pop once",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "pile",
-        .title = "Pile",
-        .description = "Solid pieces already stacked when the effect starts, that collapse when it plays.",
-        .category = Category::Birth,
-        .controls =
-            {number_control("count", "Pieces", 150.0F, 1.0F, 1000.0F, "", 0, "How many pieces the pile holds.", 1.0F,
-                            20000.0F),
-             choice_control("shape", "Stacked as", "heap", {{"heap", "Heap"}, {"stack", "Stack"}},
-                            "A heap is a cone of pieces, as rocks or rubble lie. A stack fills a footprint layer "
-                            "by layer, as a wall of bricks or a pile of crates."),
-             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
-                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it slumps "
-                                 "when let go.",
-                                 5.0F, 85.0F),
-                  "shape", {"heap"}),
-             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.", 0.01F),
-                  "shape", {"stack"}),
-             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2, "The stack's footprint front to back.",
-                                 0.01F),
-                  "shape", {"stack"}),
-             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
-                            "When the pile is let go. Until then it stands still, unless something knocks into "
-                            "it; 0 lets it fall as soon as the effect plays."),
-             detail(vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
-                                 "Where the middle of the pile's base sits.")),
-             detail(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
-                                   "How far apart the pieces start, as a share of the largest piece's reach. Below "
-                                   "1 they start packed closer, and may overlap until they fall.",
-                                   0.5F, 4.0F)),
-             detail(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
-                                   "How far each piece is nudged off its place, so the pile is not a perfect "
-                                   "stack.",
-                                   0.0F, 1.0F)),
-             seed_control()},
-        .keywords = "prespawn pre-spawn stack heap rubble rocks wall bricks collapse topple preplaced",
     });
     blocks.push_back(BlockDef{
         .kind = "shape",
@@ -606,11 +578,122 @@ std::vector<BlockDef> make_catalog() {
         .keywords = "rigid body debris physics rotate rolling",
         .unique = true,
     });
+    // --------------------------------------------------- rigid physics
+    blocks.push_back(BlockDef{
+        .kind = "prop",
+        .title = "Prop",
+        .description = "An object you place in the scene for the pieces to land on, fall out of or knock over.",
+        .category = Category::Physics,
+        .controls =
+            {file_control("model", "Model", FileKind::Model,
+                          "The model to place. Its longest side becomes its size, so a bucket and a crate are "
+                          "set up the same way."),
+             choice_control("motion", "It can", "fixed",
+                            {{"fixed", "Stay put"}, {"driven", "Be moved"}, {"loose", "Be knocked about"}},
+                            "Stay put for a floor, a wall or a bucket that only holds; only a prop that stays "
+                            "put can collide as its own shape. Be moved to tip or swing it yourself, shoving "
+                            "whatever is in the way. Be knocked about to let the pieces move it."),
+             vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m", "Where the middle of the prop sits."),
+             angles_control("turn", "Turn", "How the prop is turned where it stands."),
+             number_control("size", "Size", 1.0F, 0.1F, 5.0F, "m", 2,
+                            "The prop's longest side. The model is fitted to it, so one model serves at any "
+                            "size.",
+                            0.01F),
+             choice_control("shape", "Collides as", "model",
+                            {{"model", "Its own shape"},
+                             {"bucket", "A bucket"},
+                             {"crate", "A crate"},
+                             {"tube", "A tube"},
+                             {"ball", "A ball"},
+                             {"block", "A block"}},
+                            "What the pieces actually hit. Its own shape follows the model exactly, hollows and "
+                            "all, but only a prop that stays put can use it. The rest are worked out from their "
+                            "measurements and can move, and a bucket, crate or tube is hollow, so pieces sit "
+                            "inside it."),
+             when(number_control("wall", "Wall thickness", 0.05F, 0.01F, 0.3F, "m", 2,
+                                 "How thick the sides and bottom are. Thinner holds more; thicker survives a "
+                                 "harder knock.",
+                                 0.001F),
+                  "shape", {"bucket", "crate", "tube"}),
+             when(number_control("radius", "Radius", 0.5F, 0.05F, 2.0F, "m", 2, "How wide across it is.", 0.01F),
+                  "shape", {"bucket", "tube", "ball"}),
+             when(number_control("height", "Height", 0.8F, 0.05F, 3.0F, "m", 2, "How tall it is.", 0.01F),
+                  "shape", {"bucket", "tube"}),
+             when(vec3_control("extent", "Size across", vec3(0.6F, 0.6F, 0.6F), "m",
+                               "How wide, tall and deep it is."),
+                  "shape", {"crate", "block"}),
+             when(vec3_control("move_to", "Moves to", vec3(0.0F, 0.0F, 0.0F), "m",
+                               "Where it ends up. The same position leaves it where it is, and only the turn "
+                               "changes."),
+                  "motion", {"driven"}),
+             when(angles_control("turn_to", "Turns to", "How it is turned when the move is done. Past 90 degrees "
+                                                        "a bucket is upside down and whatever it held falls out."),
+                  "motion", {"driven"}),
+             when(number_control("move_at", "Starts moving at", 0.5F, 0.0F, 10.0F, "s", 2,
+                                 "When the move begins."),
+                  "motion", {"driven"}),
+             when(number_control("move_over", "Taking", 0.5F, 0.0F, 10.0F, "s", 2,
+                                 "How long the move takes. 0 puts it there at once."),
+                  "motion", {"driven"}),
+             detail(number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
+                                   "How much the pieces grip it.", 0.0F, 1.0F)),
+             detail(number_control("bounce", "Bounciness", 0.1F, 0.0F, 1.0F, "", 2,
+                                   "How hard the pieces bounce off it.", 0.0F, 1.0F)),
+             detail(when(number_control("density", "Density", 600.0F, 100.0F, 8000.0F, "kg/m^3", 0,
+                                        "How heavy it is for its size. Wood is about 600, stone 2400.", 1.0F),
+                         "motion", {"loose"})),
+             detail(when(number_control("sides", "Sides", 12.0F, 3.0F, 48.0F, "", 0,
+                                        "How many flat sides a round shape is built from. More is rounder and "
+                                        "costs a little more.",
+                                        3.0F, 64.0F),
+                         "shape", {"bucket", "tube"}))},
+        .keywords = "prop object bucket crate wall barrel pipe model import obj gltf glb place static kinematic "
+                    "knock over tip spill scenery",
+        // Its shape and pose are the physics world's, not a module's.
+        .detachable = false,
+    });
+    blocks.push_back(BlockDef{
+        .kind = "pile",
+        .title = "Pile",
+        .description = "Solid pieces already stacked when the effect starts, that collapse when it plays.",
+        .category = Category::Physics,
+        .controls =
+            {number_control("count", "Pieces", 150.0F, 1.0F, 1000.0F, "", 0, "How many pieces the pile holds.", 1.0F,
+                            20000.0F),
+             choice_control("shape", "Stacked as", "heap", {{"heap", "Heap"}, {"stack", "Stack"}},
+                            "A heap is a cone of pieces, as rocks or rubble lie. A stack fills a footprint layer "
+                            "by layer, as a wall of bricks or a pile of crates."),
+             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
+                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it slumps "
+                                 "when let go.",
+                                 5.0F, 85.0F),
+                  "shape", {"heap"}),
+             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.", 0.01F),
+                  "shape", {"stack"}),
+             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2, "The stack's footprint front to back.",
+                                 0.01F),
+                  "shape", {"stack"}),
+             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
+                            "When the pile is let go. Until then it stands still, unless something knocks into "
+                            "it; 0 lets it fall as soon as the effect plays."),
+             detail(vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
+                                 "Where the middle of the pile's base sits.")),
+             detail(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
+                                   "How far apart the pieces start, as a share of the largest piece's reach. Below "
+                                   "1 they start packed closer, and may overlap until they fall.",
+                                   0.5F, 4.0F)),
+             detail(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
+                                   "How far each piece is nudged off its place, so the pile is not a perfect "
+                                   "stack.",
+                                   0.0F, 1.0F)),
+             seed_control()},
+        .keywords = "prespawn pre-spawn stack heap rubble rocks wall bricks collapse topple preplaced",
+    });
     blocks.push_back(BlockDef{
         .kind = "physics",
         .title = "Physics",
         .description = "Particles become solid bodies that knock into each other, pile up and come to rest.",
-        .category = Category::Contact,
+        .category = Category::Physics,
         .controls = {choice_control("shape", "Body", "auto",
                                     {{"auto", "Its own shape"}, {"ball", "Ball"}, {"cube", "Cube"}},
                                     "What each piece collides as. Its own shape wraps a debris chunk tightly; a "
@@ -686,6 +769,7 @@ std::string_view category_name(Category category) noexcept {
     case Category::Motion: return "Motion";
     case Category::Look: return "Look";
     case Category::Contact: return "Contact";
+    case Category::Physics: return "Rigid physics";
     case Category::Light: return "Light";
     case Category::Expert: return "Under the hood";
     }
@@ -878,6 +962,29 @@ std::string block_summary(const Block& block) {
     const std::string_view kind = block.kind;
     if (kind == "stream") {
         return format_number(number_of(block, "rate"), 0) + " a second";
+    }
+    if (kind == "prop") {
+        const std::string model = file_label(file_of(block, "model"));
+        std::string text = model.empty() ? "no model yet" : model;
+        const std::string shape = choice_of(block, "shape");
+        if (shape == "bucket") {
+            text += ", a bucket";
+        } else if (shape == "crate") {
+            text += ", a crate";
+        } else if (shape == "tube") {
+            text += ", a tube";
+        } else if (shape == "ball") {
+            text += ", a ball";
+        } else if (shape == "block") {
+            text += ", a block";
+        }
+        const std::string motion = choice_of(block, "motion");
+        if (motion == "driven") {
+            text += ", moved";
+        } else if (motion == "loose") {
+            text += ", loose";
+        }
+        return text;
     }
     if (kind == "burst") {
         const std::string count = format_number(number_of(block, "count"), 0);

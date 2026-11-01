@@ -70,6 +70,36 @@ float get_f32(std::span<const std::uint8_t> bytes, std::size_t at) {
     return value;
 }
 
+// A mesh the effect needs, and who needs it, ready for the message when the
+// package does not hold it. Two things name a mesh: a renderer that draws
+// one, and a prop shaped by one.
+struct MeshWant final {
+    std::string name;
+    std::string wanted_by;
+};
+
+std::vector<MeshWant> wanted_meshes(const Effect& effect) {
+    std::vector<MeshWant> wants;
+    for (const Emitter& emitter : effect.emitters) {
+        const std::string who = "emitter " + quoted(emitter.name);
+        if (emitter.renderer.geometry == Geometry::Mesh) {
+            wants.push_back({emitter.renderer.mesh, who + " draws mesh " + quoted(emitter.renderer.mesh)});
+        }
+        const RigidPhysics* physics = rigid_physics(emitter);
+        if (physics == nullptr) {
+            continue;
+        }
+        for (const RigidProp& prop : physics->props) {
+            // Whenever a prop names a model it is needed: to collide as, for
+            // the mesh and hull shapes, and to draw by in every case.
+            if (!prop.mesh.empty()) {
+                wants.push_back({prop.mesh, who + " has a prop shaped by mesh " + quoted(prop.mesh)});
+            }
+        }
+    }
+    return wants;
+}
+
 } // namespace
 
 Result<MeshData> make_mesh(std::vector<MeshVertex> vertices, std::vector<std::uint32_t> indices) {
@@ -172,11 +202,9 @@ std::vector<PackageEntry> mesh_package_entries(const MeshSet& meshes) {
 }
 
 Result<bool> check_meshes(const Effect& effect, const MeshSet& meshes) {
-    for (const Emitter& emitter : effect.emitters) {
-        if (emitter.renderer.geometry == Geometry::Mesh && !meshes.contains(emitter.renderer.mesh)) {
-            return Error{ErrorCode::MissingMesh, "emitter " + quoted(emitter.name) + " draws mesh " +
-                                                     quoted(emitter.renderer.mesh) +
-                                                     ", which the package does not hold"};
+    for (const MeshWant& want : wanted_meshes(effect)) {
+        if (!meshes.contains(want.name)) {
+            return Error{ErrorCode::MissingMesh, want.wanted_by + ", which the package does not hold"};
         }
     }
     return true;
@@ -188,9 +216,9 @@ Result<MeshSet> read_package_meshes(std::span<const std::uint8_t> package, const
         return entries.error();
     }
     MeshSet meshes;
-    for (const Emitter& emitter : effect.emitters) {
-        const std::string& name = emitter.renderer.mesh;
-        if (emitter.renderer.geometry != Geometry::Mesh || meshes.contains(name)) {
+    for (const MeshWant& want : wanted_meshes(effect)) {
+        const std::string& name = want.name;
+        if (meshes.contains(name)) {
             continue;
         }
         const std::string entry_name = std::string{mesh_prefix} + name;

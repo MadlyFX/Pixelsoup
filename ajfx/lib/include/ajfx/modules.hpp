@@ -601,6 +601,104 @@ enum class RigidShape {
     Box,
 };
 
+// How a prop moves. Fixed stands still for ever, and is the only kind that
+// may collide as its own model. Driven is moved by the effect along the one
+// move the prop describes, shoving whatever is in its way and never being
+// pushed back, so it can tip a pile over. Loose is an ordinary body: gravity
+// and other bodies move it.
+enum class PropMotion {
+    Fixed,
+    Driven,
+    Loose,
+};
+
+// What a prop collides as.
+// - `Mesh` is the model's own triangles, exactly, hollows and all. Only a
+//   Fixed prop may be one: a collision mesh has no volume to take mass from
+//   and no inside, so an engine cannot move one (Jolt says as much through
+//   Shape::MustBeStatic). A Mesh prop that moves is refused rather than
+//   quietly approximated, or worse, given an infinite inverse mass.
+// - `Hull` is the convex wrapping of the model, tight on a solid lump and
+//   wrong on anything hollow (a bucket becomes a tub).
+// - The rest are generated from their measurements and need no model: a
+//   Loose prop that must be hollow is built from a few convex pieces, which
+//   is what a bucket, a crate, a barrel or a pipe nearly is.
+enum class PropShape {
+    Mesh,
+    Hull,
+    Sphere,
+    Box,
+    Cylinder,
+    HollowBox,
+    HollowCylinder,
+    Cone,
+    Pipe,
+};
+
+// An object an artist placed in a rigid physics emitter's world: a bucket for
+// debris to spill out of, a wall to pile against, a crate to knock over.
+// Unlike a particle, a prop is authored rather than born. It stands in the
+// world from the first step, in the pose given here, and never dies.
+// - **Its body:** `shape` at `size`, of `density`, with this `friction` and
+//   `restitution`. A model is held in the package with its longest side one
+//   unit long, so `size` is that side's length.
+// - **Its shape:** `mesh` names the model for `Mesh` and `Hull`. The
+//   generated shapes read `half_size`, `radius`, `height`, `wall` and
+//   `segments` instead, and name no model at all.
+// - **Driven:** the prop stands at `position` and `turn` until `move_from`
+//   seconds, moves to `to_position` and `to_turn` over the next `move_over`,
+//   and stays there. A `move_over` of 0 puts it there at once.
+// - **Determinism:** props enter the world before any particle, in the order
+//   they are listed here, and never change slot.
+struct RigidProp final {
+    std::string mesh;
+    PropShape shape{PropShape::Mesh};
+    PropMotion motion{PropMotion::Fixed};
+    Vec3 position{};
+    Vec3 turn{};  // degrees, turning about Y, then X, then Z
+    float size{1.0F};
+    Vec3 half_size{0.5F, 0.5F, 0.5F};
+    float radius{0.5F};
+    float height{1.0F};
+    float wall{0.05F};
+    std::uint32_t segments{12U};
+    float density{1000.0F};
+    float friction{0.5F};
+    float restitution{0.2F};
+    Vec3 to_position{};
+    Vec3 to_turn{};
+    float move_from{0.0F};
+    float move_over{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("mesh", self.mesh);
+        visit("shape", self.shape);
+        visit("motion", self.motion);
+        visit("position", self.position);
+        visit("turn", self.turn);
+        visit("size", self.size);
+        visit("half_size", self.half_size);
+        visit("radius", self.radius);
+        visit("height", self.height);
+        visit("wall", self.wall);
+        visit("segments", self.segments);
+        visit("density", self.density);
+        visit("friction", self.friction);
+        visit("restitution", self.restitution);
+        visit("to_position", self.to_position);
+        visit("to_turn", self.to_turn);
+        visit("move_from", self.move_from);
+        visit("move_over", self.move_over);
+    }
+    friend bool operator==(const RigidProp&, const RigidProp&) = default;
+};
+
+// A prop's `turn` as a quaternion: degrees about Y, then X, then Z, so the
+// three read as yaw, pitch and roll. One definition, so what an engine does
+// and what an editor draws over the picture cannot disagree.
+[[nodiscard]] Quat prop_orientation(Vec3 degrees) noexcept;
+
 // Makes the emitter's particles bodies in a rigid-body physics engine on the
 // CPU (the host's RigidSolver, see rigid_solver.hpp; ajfx::rigid provides
 // Jolt's). Unlike RigidBody, they collide with each other: debris piles up,
@@ -616,11 +714,15 @@ enum class RigidShape {
 //   them.
 // - **Rest:** with `allow_sleep`, bodies that have come to rest sleep until
 //   something knocks them, which costs nothing while they lie still.
-// - **Determinism:** bodies are created and removed in birth order in fixed
-//   slots, and the engine's state travels in checkpoints, so every node and
-//   every seek computes the same bits (for the same build of the solver).
+// - **Props:** `props` are the objects the artist placed in this world (see
+//   RigidProp). They stand in it from the first step and the particles meet
+//   them as they meet each other.
+// - **Determinism:** props enter the world first, in order, then bodies are
+//   created and removed in birth order in fixed slots, and the engine's
+//   state travels in checkpoints, so every node and every seek computes the
+//   same bits (for the same build of the solver).
 // At most one per emitter, and the emitter holds at most max_rigid_capacity
-// particles.
+// particles and max_rigid_props props.
 struct RigidPhysics final {
     static constexpr std::string_view kind = "rigid_physics";
     ModuleId id{};
@@ -630,6 +732,7 @@ struct RigidPhysics final {
     float restitution{0.2F};
     float angular_damping{0.05F};
     bool allow_sleep{true};
+    std::vector<RigidProp> props;
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -639,11 +742,15 @@ struct RigidPhysics final {
         visit("restitution", self.restitution);
         visit("angular_damping", self.angular_damping);
         visit("allow_sleep", self.allow_sleep);
+        visit("props", self.props);
     }
     friend bool operator==(const RigidPhysics&, const RigidPhysics&) = default;
 };
 
 inline constexpr std::uint32_t max_rigid_capacity = 65536U;
+// Props stand in the world for the whole effect, so a world full of them
+// costs every step. A few hundred is a stage; thousands are debris.
+inline constexpr std::size_t max_rigid_props = 256U;
 
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
@@ -815,6 +922,15 @@ struct EnumNames<RigidShape> {
 template <>
 struct EnumNames<PileShape> {
     static constexpr std::string_view names[] = {"heap", "box"};
+};
+template <>
+struct EnumNames<PropMotion> {
+    static constexpr std::string_view names[] = {"fixed", "driven", "loose"};
+};
+template <>
+struct EnumNames<PropShape> {
+    static constexpr std::string_view names[] = {"mesh",     "hull",            "sphere", "box", "cylinder",
+                                                 "hollow_box", "hollow_cylinder", "cone",   "pipe"};
 };
 
 } // namespace ajfx

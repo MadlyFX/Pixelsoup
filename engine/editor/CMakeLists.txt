@@ -8,6 +8,7 @@ add_library(mediaserver_editor STATIC
     src/model_facts_worker.cpp
     src/workspace_layout.cpp
     src/viewport_panel.cpp
+    src/gizmo.cpp
     src/model_surface_cache.cpp
     src/stage_placement.cpp
     src/measurement.cpp
@@ -322,6 +323,23 @@ if(BUILD_TESTING)
         COMMAND mediaserver_editor_measurement_tests
     )
     set_target_properties(mediaserver_editor_measurement_tests PROPERTIES FOLDER "tests")
+
+    # The transform gizmo's own geometry: where its axes project, which
+    # handle a pointer is on, and which half of a ring faces the camera.
+    # Shared with ajfx Studio, so it is proven without a panel.
+    add_executable(mediaserver_editor_gizmo_tests
+        tests/gizmo_tests.cpp
+    )
+    target_link_libraries(mediaserver_editor_gizmo_tests
+        PRIVATE
+            MediaServer::Editor
+    )
+    mediaserver_set_project_options(mediaserver_editor_gizmo_tests)
+    add_test(
+        NAME mediaserver.editor_gizmo
+        COMMAND mediaserver_editor_gizmo_tests
+    )
+    set_target_properties(mediaserver_editor_gizmo_tests PROPERTIES FOLDER "tests")
 
     add_executable(mediaserver_editor_viewport_tests
         tests/viewport_panel_tests.cpp

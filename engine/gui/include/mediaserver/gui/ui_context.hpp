@@ -104,6 +104,23 @@ struct Theme final {
     // The cue stack and the next thing to press.
     UiColor cue{1.0F, 0.388F, 0.812F, 1.0F};
 
+    // The transform gizmo over a 3D view, and the constraint lines the G/R/S
+    // keys draw: one hue per world axis, in the order every 3D tool uses them,
+    // so an operator who models already knows which arrow is which.
+    UiColor gizmo_axis_x{0.96F, 0.24F, 0.25F, 1.0F};
+    UiColor gizmo_axis_y{0.42F, 0.92F, 0.28F, 1.0F};
+    UiColor gizmo_axis_z{0.20F, 0.52F, 1.0F, 1.0F};
+    // The one handle under the pointer or being dragged. A warm highlight
+    // rather than a brighter axis hue, so which axis is in play reads at a
+    // glance and never looks like a fourth axis.
+    UiColor gizmo_hot{1.0F, 0.94F, 0.56F, 1.0F};
+    // The square every gizmo draws at its pivot.
+    UiColor gizmo_hub{0.90F, 0.92F, 0.96F, 1.0F};
+    // The outer screen-space ring - rotation about the view axis, or uniform
+    // scale - and the line from a pivot to the pointer during a drag. Off
+    // white, because it belongs to no world axis.
+    UiColor gizmo_view{0.90F, 0.92F, 0.96F, 0.85F};
+
     float padding{6.0F};
 
     // Corner radii. Small for fields and chips, the default for rows, cards

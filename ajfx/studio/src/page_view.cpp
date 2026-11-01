@@ -531,12 +531,24 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
     const gui::Rect menu{x + w - 26.0F, y + 6.0F, 24.0F, 24.0F};
     const gui::Rect solo{menu.x - 28.0F, menu.y, 24.0F, 24.0F};
     const gui::Rect eye{solo.x - 28.0F, menu.y, 24.0F, 24.0F};
+    // A layer of props alone has no particles to budget: it says what it
+    // holds instead, since "0 of 64 max" would only puzzle.
+    const std::size_t props = std::count_if(layer.blocks.begin(), layer.blocks.end(),
+                                            [](const Block& b) { return b.enabled && b.kind == "prop"; });
+    const bool births = std::any_of(layer.blocks.begin(), layer.blocks.end(), [](const Block& b) {
+        return b.enabled && (b.kind == "stream" || b.kind == "burst" || b.kind == "pile");
+    });
     std::string budget;
     if (report != nullptr && report->error.empty()) {
-        budget = thousands(report->capacity) + " max";
-        if (inputs.analysis != nullptr) {
-            if (const auto peak = inputs.analysis->peak_alive.find(uid); peak != inputs.analysis->peak_alive.end()) {
-                budget = thousands(peak->second) + " of " + budget;
+        if (props > 0U && !births) {
+            budget = std::to_string(props) + (props == 1U ? " prop" : " props");
+        } else {
+            budget = thousands(report->capacity) + " max";
+            if (inputs.analysis != nullptr) {
+                if (const auto peak = inputs.analysis->peak_alive.find(uid);
+                    peak != inputs.analysis->peak_alive.end()) {
+                    budget = thousands(peak->second) + " of " + budget;
+                }
             }
         }
     }
@@ -568,8 +580,11 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         const gui::Rect budget_rect{eye.x - budget_w - 4.0F, y, budget_w, layer_header};
         ctx.label(budget_rect, budget, gui::fade(theme.text_muted, layer.enabled ? 1.0F : hidden_dim));
         ctx.tooltip(budget_rect,
-                    "Most particles alive at once in the preview loop, of the most this layer can ever hold. The "
-                    "budget is worked out from its blocks; nobody sets it by hand.");
+                    props > 0U && !births
+                        ? "The objects this layer places. Props are not particles: they stand in the physics "
+                          "world for the whole effect and take no part of a budget."
+                        : "Most particles alive at once in the preview loop, of the most this layer can ever "
+                          "hold. The budget is worked out from its blocks; nobody sets it by hand.");
     }
     if (editor::row_flag_toggle(ctx, part_id(uid, "layer.eye"), eye, editor::RowFlag::Visible, layer.enabled, hovered)) {
         layer.enabled = !layer.enabled;
@@ -950,10 +965,13 @@ bool PageView::draw_control(gui::UiContext& ctx, Block& block, const ControlDef&
         float parts[3] = {value.x, value.y, value.z};
         bool changed = false;
         constexpr std::string_view axes[3] = {"X", "Y", "Z"};
+        // A drag moves the smallest digit the control shows: hundredths of a
+        // metre, or whole degrees.
+        const float step = control.decimals >= 2 ? 0.01F : (control.decimals == 1 ? 0.1F : 1.0F);
         for (std::uint32_t i = 0U; i < 3U; ++i) {
             changed = number(ctx, part_id(block.uid, control.id, i),
                              gui::Rect{field.x + static_cast<float>(i) * (box_w + 4.0F), field.y, box_w, field.height},
-                             parts[i], 0.01F, 2, axes[i]) ||
+                             parts[i], step, control.decimals, axes[i]) ||
                       changed;
         }
         unit_label(field.x + box_w * 3.0F + 8.0F);

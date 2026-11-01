@@ -221,6 +221,46 @@ Layer rock_pile(Document& d) {
                         {"size", {{"size", range(0.12F, 0.22F)}}}});
 }
 
+// A bucket of stones that tips over and spills them. The bucket collides as a
+// bucket rather than as its own shape, so it can be a solid object the balls
+// sit inside; it is moved rather than knocked, so the tip-over is authored
+// and lands the same way every time. Measurements agree with the prop's: the
+// balls start inside the bucket's floor, 0.05 up, in its 0.45 inside radius.
+Layer bucket_spill(Document& d) {
+    return build_layer(d, "Bucket of stones", 60.0F, 60.0F,
+                       {{"prop",
+                         {{"motion", choice("driven")},
+                          {"shape", choice("bucket")},
+                          {"at", vec3(0.0F, 0.4F, 0.0F)},
+                          {"radius", number(0.5F)},
+                          {"height", number(0.8F)},
+                          {"wall", number(0.05F)},
+                          {"sides", number(16.0F)},
+                          // Past 90 degrees it is upside down and empties.
+                          {"turn_to", vec3(0.0F, 0.0F, 115.0F)},
+                          {"move_at", number(1.0F)},
+                          {"move_over", number(0.6F)},
+                          {"friction", number(0.7F)},
+                          {"bounce", number(0.05F)}}},
+                        {"pile",
+                         {{"count", number(24.0F)},
+                          {"shape", choice("stack")},
+                          {"width", number(0.5F)},
+                          {"depth", number(0.5F)},
+                          {"at", vec3(0.0F, 0.05F, 0.0F)},
+                          {"jitter", number(0.0F)}}},
+                        {"gravity", {}},
+                        {"physics", {{"shape", choice("ball")}, {"friction", number(0.5F)}, {"bounce", number(0.2F)}}},
+                        {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
+                        // Drawn as rocks; they collide as balls, so they roll
+                        // out of the bucket rather than catching on a corner.
+                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("rock")}}},
+                        {"color",
+                         {{"color", color(0.42F, 0.36F, 0.30F)}, {"mix", toggle(true)},
+                          {"second", color(0.58F, 0.50F, 0.42F)}}},
+                        {"size", {{"size", range(0.1F, 0.1F)}}}});
+}
+
 // One puff as a pile comes down, spreading low along the ground.
 Layer pile_dust(Document& d) {
     return build_layer(d, "Collapse dust", 2.0F, 3.5F,
@@ -347,6 +387,9 @@ const std::vector<PresetEntry>& preset_entries() {
         {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays."},
          rock_pile},
         {{"pile_dust", "Collapse dust", "One low puff of dust as a pile comes down."}, pile_dust},
+        {{"bucket_spill", "Bucket of stones",
+          "A bucket standing full of stones, which tips over and spills them across the floor."},
+         bucket_spill},
     };
     return entries;
 }
@@ -374,6 +417,9 @@ const std::vector<RecipeEntry>& recipe_entries() {
         {{"rain", "Rain", "Streaks of rain."}, {"rain"}, 4.0F, Backdrop::Night, 0.3F},
         {{"rock_pile", "Rock pile", "A heap of rocks that collapses when the effect plays, with a puff of dust."},
          {"rock_pile", "pile_dust"}, 6.0F, Backdrop::Studio, 0.3F},
+        {{"bucket_spill", "Bucket of stones",
+          "A bucket of stones that tips over a second in and spills them across the floor."},
+         {"bucket_spill"}, 6.0F, Backdrop::Studio, 0.3F},
     };
     return entries;
 }

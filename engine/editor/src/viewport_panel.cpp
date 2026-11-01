@@ -1,4 +1,5 @@
 #include <mediaserver/editor/viewport_panel.hpp>
+#include <mediaserver/editor/gizmo.hpp>
 #include <mediaserver/editor/light_guides.hpp>
 #include <mediaserver/editor/operator_widgets.hpp>
 #include <mediaserver/gui/rect_cut.hpp>
@@ -24,25 +25,17 @@ namespace mediaserver::editor {
 namespace {
 
 constexpr float stage_toolbar_height = 29.0F;
-constexpr float gizmo_length_pixels = 72.0F;
-constexpr float gizmo_hit_pixels = 9.0F;
 constexpr float surface_hit_pixels = 8.0F;
 constexpr float surface_yaw_radius_pixels = 49.0F;
 constexpr float surface_yaw_hit_pixels = 7.0F;
-constexpr float view_ring_radius_pixels = 86.0F;
-constexpr float view_ring_hit_pixels = 6.0F;
 constexpr std::size_t maximum_imported_wire_triangles = 4096U;
 constexpr std::size_t maximum_cached_model_bounds = 128U;
 constexpr std::size_t maximum_cached_projection_surfaces = 256U;
 constexpr double deep_select_hold_seconds = 0.45;
 constexpr float deep_select_motion_pixels = 4.0F;
 
-constexpr gui::UiColor outline_shadow{0.0F, 0.02F, 0.03F, 0.88F};
 constexpr gui::UiColor outline_secondary{0.18F, 0.72F, 0.92F, 0.92F};
 constexpr gui::UiColor outline_primary{0.20F, 0.92F, 1.0F, 1.0F};
-constexpr gui::UiColor axis_x{0.96F, 0.24F, 0.25F, 1.0F};
-constexpr gui::UiColor axis_y{0.42F, 0.92F, 0.28F, 1.0F};
-constexpr gui::UiColor axis_z{0.20F, 0.52F, 1.0F, 1.0F};
 constexpr gui::UiColor light_color{1.0F, 0.78F, 0.24F, 0.92F};
 constexpr gui::UiColor surface_color{0.16F, 0.68F, 0.88F, 0.68F};
 constexpr gui::UiColor surface_selected{0.20F, 0.92F, 1.0F, 1.0F};
@@ -52,33 +45,12 @@ constexpr gui::UiColor screen_color{0.906F, 0.596F, 0.400F, 0.55F};
 constexpr gui::UiColor screen_selected{0.980F, 0.706F, 0.470F, 1.0F};
 constexpr gui::UiColor screen_muted{0.549F, 0.529F, 0.510F, 0.45F};
 constexpr gui::UiColor surface_yaw{1.0F, 0.74F, 0.22F, 1.0F};
-constexpr gui::UiColor gizmo_hot{1.0F, 0.94F, 0.56F, 1.0F};
-constexpr gui::UiColor gizmo_view_color{0.90F, 0.92F, 0.96F, 0.85F};
-// The square every gizmo draws at its pivot.
-constexpr gui::UiColor gizmo_hub{0.90F, 0.92F, 0.96F, 1.0F};
-constexpr float gizmo_hub_size = 6.0F;
 
 [[nodiscard]] gui::UiId mix(gui::UiId base, core::u64 value) noexcept {
     core::u64 hash = base ^ 0x9E3779B97F4A7C15ULL;
     hash ^= value;
     hash *= 1099511628211ULL;
     return hash;
-}
-
-// Where a point in the authored canvas's pixels is drawn in `image`, the
-// rectangle the canvas is shown in.
-[[nodiscard]] gui::UiPoint canvas_to_image(const gui::Rect& image,
-                                           scene::Canvas canvas, float x,
-                                           float y) noexcept {
-    return gui::UiPoint{
-        image.x + x * image.width / static_cast<float>(canvas.width),
-        image.y + y * image.height / static_cast<float>(canvas.height)};
-}
-
-[[nodiscard]] gui::UiPoint
-to_ui(const gui::Rect& image, scene::Canvas canvas,
-      const scene::CanvasProjection& point) noexcept {
-    return canvas_to_image(image, canvas, point.x, point.y);
 }
 
 [[nodiscard]] bool selected(std::span<const doc::NodeId> selection,
@@ -156,66 +128,6 @@ void line(gui::UiDrawList& list, gui::UiPoint a, gui::UiPoint b,
     list.add_line(a.x, a.y, b.x, b.y, thickness, color);
 }
 
-// A stroke over a wider dark halo, so it reads over any picture.
-void haloed_line(gui::UiDrawList& list, gui::UiPoint a, gui::UiPoint b,
-                 float halo, float thickness, gui::UiColor color) {
-    line(list, a, b, halo, outline_shadow);
-    line(list, a, b, thickness, color);
-}
-
-// A `size` square centred on a point: a handle, a pivot, a measured point.
-void square(gui::UiDrawList& list, gui::UiPoint centre, float size,
-            gui::UiColor color) {
-    const gui::Rect box = gui::around(centre.x, centre.y, size, size);
-    list.add_rect(box.x, box.y, box.width, box.height, color);
-}
-
-// The same over a dark square `border` wider on every side.
-void haloed_square(gui::UiDrawList& list, gui::UiPoint centre, float size,
-                   float border, gui::UiColor color) {
-    square(list, centre, size + border * 2.0F, outline_shadow);
-    square(list, centre, size, color);
-}
-
-// A circle of `segments` straight strokes round `centre`, each over its
-// halo. Fixed in pixels, so a gizmo's rings stay one size at any distance.
-void haloed_ring(gui::UiDrawList& list, gui::UiPoint centre, float radius,
-                 std::size_t segments, float halo, float thickness,
-                 gui::UiColor color) {
-    gui::UiPoint previous{centre.x + radius, centre.y};
-    for (std::size_t index = 1U; index <= segments; ++index) {
-        const float turns =
-            static_cast<float>(index) / static_cast<float>(segments);
-        const gui::UiPoint next{
-            centre.x + scene::deterministic::cos_turns(turns) * radius,
-            centre.y + scene::deterministic::sin_turns(turns) * radius};
-        haloed_line(list, previous, next, halo, thickness, color);
-        previous = next;
-    }
-}
-
-void projected_line(gui::UiDrawList& list, const gui::Rect& image,
-                    const scene::Scene& view, scene::Vec3 a, scene::Vec3 b,
-                    float thickness, gui::UiColor color) {
-    const auto projected_a =
-        scene::project_to_canvas(view.camera, view.canvas, a);
-    const auto projected_b =
-        scene::project_to_canvas(view.camera, view.canvas, b);
-    if (!projected_a.visible || !projected_b.visible) {
-        return;
-    }
-    line(list, to_ui(image, view.canvas, projected_a),
-         to_ui(image, view.canvas, projected_b), thickness, color);
-}
-
-void haloed_projected_line(gui::UiDrawList& list, const gui::Rect& image,
-                           const scene::Scene& view, scene::Vec3 a,
-                           scene::Vec3 b, float halo, float thickness,
-                           gui::UiColor color) {
-    projected_line(list, image, view, a, b, halo, outline_shadow);
-    projected_line(list, image, view, a, b, thickness, color);
-}
-
 template <std::size_t PointCount, std::size_t EdgeCount>
 void wire_shape(gui::UiDrawList& list, const gui::Rect& image,
                 const scene::Scene& view, const scene::Mat4& world,
@@ -235,7 +147,7 @@ void wire_shape(gui::UiDrawList& list, const gui::Rect& image,
     }
     for (const auto& edge : edges) {
         line(list, projected[edge[0U]], projected[edge[1U]], 5.0F,
-             outline_shadow);
+             overlay_halo);
     }
     for (const auto& edge : edges) {
         line(list, projected[edge[0U]], projected[edge[1U]], 1.8F, color);
@@ -570,7 +482,7 @@ void draw_light_guide(gui::UiDrawList& list, const gui::Rect& image,
         case LightGuideStyle::Direction: break;
         }
         if (edge.style != LightGuideStyle::Range) {
-            line(list, a, b, thickness + 2.0F, outline_shadow);
+            line(list, a, b, thickness + 2.0F, overlay_halo);
         }
         line(list, a, b, thickness, ink);
     }
@@ -713,153 +625,6 @@ void draw_selection_outlines(gui::UiDrawList& list, const gui::Rect& image,
     // exhaust the UI vertex budget and prevent the Inspector from presenting.
     for (const auto& [id,bounds] : batches)
         wire_box(list,image,view,scene::identity(),outline(id),bounds,projection);
-}
-
-constexpr std::size_t gizmo_ring_segments = 48U;
-
-struct GizmoGeometry final {
-    bool visible{};
-    gui::UiPoint origin{};
-    scene::Vec3 world_origin{};
-    std::array<gui::UiPoint, 3U> ends{};
-    std::array<float, 3U> canvas_dx{};
-    std::array<float, 3U> canvas_dy{};
-    std::array<scene::Vec3, 3U> world_axes{};
-    float world_length{};
-    // Rotate rings: one circle per axis in the plane it is normal to, and
-    // whether each point faces the camera. Only the near half is a handle,
-    // as in Blender - the far half sits behind the element.
-    bool rings{};
-    std::array<std::array<gui::UiPoint, gizmo_ring_segments + 1U>, 3U>
-        ring_points{};
-    std::array<std::array<bool, gizmo_ring_segments + 1U>, 3U> ring_front{};
-};
-
-[[nodiscard]] std::array<scene::Vec3, 3U> world_axes_of(
-    const scene::Mat4& world) noexcept {
-    static constexpr std::array<scene::Vec3, 3U> fallback_axes{
-        scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
-        scene::Vec3{0.0F, 0.0F, 1.0F}};
-    std::array<scene::Vec3, 3U> axes{};
-    for (std::size_t index = 0U; index < axes.size(); ++index) {
-        axes[index] = scene::normalize(
-            scene::Vec3{world.at(0U, static_cast<core::u32>(index)),
-                        world.at(1U, static_cast<core::u32>(index)),
-                        world.at(2U, static_cast<core::u32>(index))},
-            fallback_axes[index]);
-    }
-    return axes;
-}
-
-constexpr std::array<scene::Vec3, 3U> world_basis{
-    scene::Vec3{1.0F, 0.0F, 0.0F}, scene::Vec3{0.0F, 1.0F, 0.0F},
-    scene::Vec3{0.0F, 0.0F, 1.0F}};
-
-[[nodiscard]] GizmoGeometry gizmo_geometry(
-    const gui::Rect& image, const scene::Scene& view,
-    scene::Vec3 origin_world, const std::array<scene::Vec3, 3U>& axes,
-    bool rings = false) noexcept {
-    GizmoGeometry result{};
-    if (view.canvas.height == 0U || image.height <= 0.0F) {
-        return result;
-    }
-    const scene::Vec3 forward =
-        scene::normalize(view.camera.target - view.camera.eye);
-    result.world_origin = origin_world;
-    const float depth = scene::dot(origin_world - view.camera.eye, forward);
-    if (!(depth > 0.0F)) {
-        return result;
-    }
-    const float canvas_pixels = gizmo_length_pixels *
-                                static_cast<float>(view.canvas.height) /
-                                image.height;
-    const float units_per_pixel = scene::units_per_canvas_pixel(
-        view.camera, depth, static_cast<float>(view.canvas.height));
-    result.world_length = units_per_pixel * canvas_pixels;
-
-    const auto origin =
-        scene::project_to_canvas(view.camera, view.canvas, origin_world);
-    if (!origin.visible) {
-        return result;
-    }
-    result.origin = to_ui(image, view.canvas, origin);
-    result.world_axes = axes;
-    for (std::size_t index = 0U; index < result.world_axes.size(); ++index) {
-        const auto endpoint =
-            scene::project_to_canvas(view.camera, view.canvas,
-                                     origin_world + result.world_axes[index] *
-                                                        result.world_length);
-        if (!endpoint.visible) {
-            return GizmoGeometry{};
-        }
-        result.canvas_dx[index] = endpoint.x - origin.x;
-        result.canvas_dy[index] = endpoint.y - origin.y;
-        result.ends[index] = to_ui(image, view.canvas, endpoint);
-    }
-    if (rings) {
-        const float radius = result.world_length * 0.92F;
-        for (std::size_t index = 0U; index < 3U; ++index) {
-            const scene::Vec3 u = result.world_axes[(index + 1U) % 3U];
-            const scene::Vec3 v = result.world_axes[(index + 2U) % 3U];
-            for (std::size_t step = 0U; step <= gizmo_ring_segments; ++step) {
-                const float turns = static_cast<float>(step) /
-                                    static_cast<float>(gizmo_ring_segments);
-                const scene::Vec3 offset =
-                    (u * scene::deterministic::cos_turns(turns) +
-                     v * scene::deterministic::sin_turns(turns)) *
-                    radius;
-                const auto point = scene::project_to_canvas(
-                    view.camera, view.canvas, origin_world + offset);
-                if (!point.visible) {
-                    return GizmoGeometry{};
-                }
-                result.ring_points[index][step] =
-                    to_ui(image, view.canvas, point);
-                result.ring_front[index][step] =
-                    scene::dot(offset, forward) <= radius * 0.02F;
-            }
-        }
-        result.rings = true;
-    }
-    result.visible = true;
-    return result;
-}
-
-[[nodiscard]] GizmoGeometry gizmo_geometry(const gui::Rect& image,
-                                           const scene::Scene& view,
-                                           scene::Vec3 world) noexcept {
-    return gizmo_geometry(image, view, world, world_basis);
-}
-
-[[nodiscard]] float distance_to_segment(float px, float py, gui::UiPoint a,
-                                        gui::UiPoint b) noexcept {
-    const float vx = b.x - a.x;
-    const float vy = b.y - a.y;
-    const float length_squared = vx * vx + vy * vy;
-    if (!(length_squared > 0.0F)) {
-        return std::numeric_limits<float>::infinity();
-    }
-    const float t = std::clamp(
-        ((px - a.x) * vx + (py - a.y) * vy) / length_squared, 0.18F, 1.12F);
-    const float dx = px - (a.x + vx * t);
-    const float dy = py - (a.y + vy * t);
-    return std::sqrt(dx * dx + dy * dy);
-}
-
-[[nodiscard]] float distance_to_full_segment(float px, float py,
-                                             gui::UiPoint a,
-                                             gui::UiPoint b) noexcept {
-    const float vx = b.x - a.x;
-    const float vy = b.y - a.y;
-    const float length_squared = vx * vx + vy * vy;
-    if (!(length_squared > 0.0F)) {
-        return std::numeric_limits<float>::infinity();
-    }
-    const float t = std::clamp(
-        ((px - a.x) * vx + (py - a.y) * vy) / length_squared, 0.0F, 1.0F);
-    const float dx = px - (a.x + vx * t);
-    const float dy = py - (a.y + vy * t);
-    return std::sqrt(dx * dx + dy * dy);
 }
 
 struct SurfaceVisual final {
@@ -1102,12 +867,13 @@ void draw_screen(gui::UiDrawList& list, const gui::Rect& image,
            surface_yaw_hit_pixels;
 }
 
-void draw_yaw_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
-                   bool hovered, bool active) {
+void draw_yaw_ring(gui::UiDrawList& list, const gui::Theme& theme,
+                   const GizmoGeometry& gizmo, bool hovered, bool active) {
     if (!gizmo.visible) {
         return;
     }
-    const gui::UiColor color = hovered || active ? gizmo_hot : surface_yaw;
+    const gui::UiColor color =
+        hovered || active ? theme.gizmo_hot : surface_yaw;
     haloed_ring(list, gizmo.origin, surface_yaw_radius_pixels, 48U, 4.5F,
                 active ? 2.8F : 1.8F, color);
     // An arrowhead astride the ring at its right, pointing out.
@@ -1116,178 +882,6 @@ void draw_yaw_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
                                         6.0F,
                                     gizmo.origin.y},
                        gui::UiPoint{1.0F, 0.0F}, 9.0F, 4.5F, color);
-}
-
-[[nodiscard]] GizmoAxis hit_gizmo(const GizmoGeometry& gizmo, float pointer_x,
-                                  float pointer_y) noexcept {
-    if (!gizmo.visible) {
-        return GizmoAxis::None;
-    }
-    GizmoAxis best = GizmoAxis::None;
-    float best_distance = gizmo_hit_pixels;
-    for (std::size_t index = 0U; index < gizmo.ends.size(); ++index) {
-        const float screen_dx = gizmo.ends[index].x - gizmo.origin.x;
-        const float screen_dy = gizmo.ends[index].y - gizmo.origin.y;
-        if (screen_dx * screen_dx + screen_dy * screen_dy < 18.0F * 18.0F) {
-            continue;
-        }
-        const float distance = distance_to_segment(
-            pointer_x, pointer_y, gizmo.origin, gizmo.ends[index]);
-        if (distance < best_distance) {
-            best_distance = distance;
-            best = static_cast<GizmoAxis>(static_cast<core::u8>(GizmoAxis::X) +
-                                          static_cast<core::u8>(index));
-        }
-    }
-    return best;
-}
-
-[[nodiscard]] std::size_t axis_index(GizmoAxis axis) noexcept {
-    return static_cast<std::size_t>(static_cast<core::u8>(axis) -
-                                    static_cast<core::u8>(GizmoAxis::X));
-}
-
-void draw_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
-                GizmoAxis hovered, GizmoAxis active) {
-    if (!gizmo.visible) {
-        return;
-    }
-    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
-                                                         axis_z};
-    for (std::size_t index = 0U; index < gizmo.ends.size(); ++index) {
-        const GizmoAxis axis = static_cast<GizmoAxis>(
-            static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
-        const bool emphasized = hovered == axis || active == axis;
-        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
-        const gui::UiPoint end = gizmo.ends[index];
-        haloed_line(list, gizmo.origin, end, 5.0F, emphasized ? 3.2F : 2.2F,
-                    color);
-        // An axis seen end-on has no direction to point along.
-        const gui::UiPoint along{end.x - gizmo.origin.x, end.y - gizmo.origin.y};
-        if (std::hypot(along.x, along.y) > 1.0F) {
-            gui::add_arrowhead(list, end, along, 10.0F, 4.5F, color);
-        }
-    }
-    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
-}
-
-// The outer white ring Blender's rotate and scale gizmos share: rotation about
-// the view axis, or uniform scale. Fixed in pixels, outside the axis handles.
-[[nodiscard]] bool hit_view_ring(const GizmoGeometry& gizmo, float pointer_x,
-                                 float pointer_y) noexcept {
-    if (!gizmo.visible) {
-        return false;
-    }
-    const float dx = pointer_x - gizmo.origin.x;
-    const float dy = pointer_y - gizmo.origin.y;
-    return std::abs(std::sqrt(dx * dx + dy * dy) - view_ring_radius_pixels) <=
-           view_ring_hit_pixels;
-}
-
-[[nodiscard]] GizmoAxis hit_rotate_gizmo(const GizmoGeometry& gizmo,
-                                         float pointer_x,
-                                         float pointer_y) noexcept {
-    if (!gizmo.visible || !gizmo.rings) {
-        return GizmoAxis::None;
-    }
-    GizmoAxis best = GizmoAxis::None;
-    float best_distance = gizmo_hit_pixels;
-    for (std::size_t index = 0U; index < 3U; ++index) {
-        for (std::size_t step = 0U; step < gizmo_ring_segments; ++step) {
-            if (!gizmo.ring_front[index][step] ||
-                !gizmo.ring_front[index][step + 1U]) {
-                continue;
-            }
-            const float distance = distance_to_full_segment(
-                pointer_x, pointer_y, gizmo.ring_points[index][step],
-                gizmo.ring_points[index][step + 1U]);
-            if (distance < best_distance) {
-                best_distance = distance;
-                best = static_cast<GizmoAxis>(
-                    static_cast<core::u8>(GizmoAxis::X) +
-                    static_cast<core::u8>(index));
-            }
-        }
-    }
-    if (best == GizmoAxis::None && hit_view_ring(gizmo, pointer_x, pointer_y)) {
-        best = GizmoAxis::View;
-    }
-    return best;
-}
-
-[[nodiscard]] GizmoAxis hit_scale_gizmo(const GizmoGeometry& gizmo,
-                                        float pointer_x,
-                                        float pointer_y) noexcept {
-    const GizmoAxis axis = hit_gizmo(gizmo, pointer_x, pointer_y);
-    if (axis != GizmoAxis::None) {
-        return axis;
-    }
-    return hit_view_ring(gizmo, pointer_x, pointer_y) ? GizmoAxis::View
-                                                      : GizmoAxis::None;
-}
-
-void draw_view_ring(gui::UiDrawList& list, const GizmoGeometry& gizmo,
-                    bool emphasized) {
-    haloed_ring(list, gizmo.origin, view_ring_radius_pixels,
-                gizmo_ring_segments, 4.0F, emphasized ? 2.6F : 1.6F,
-                emphasized ? gizmo_hot : gizmo_view_color);
-}
-
-void draw_rotate_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
-                       GizmoAxis hovered, GizmoAxis active) {
-    if (!gizmo.visible || !gizmo.rings) {
-        return;
-    }
-    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
-                                                         axis_z};
-    for (std::size_t index = 0U; index < 3U; ++index) {
-        const GizmoAxis axis = static_cast<GizmoAxis>(
-            static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
-        // A drag on one ring hides the others, so the one being turned reads.
-        if (active != GizmoAxis::None && active != axis) {
-            continue;
-        }
-        const bool emphasized = hovered == axis || active == axis;
-        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
-        const gui::UiColor faded{color.r, color.g, color.b, 0.28F};
-        for (std::size_t step = 0U; step < gizmo_ring_segments; ++step) {
-            const gui::UiPoint a = gizmo.ring_points[index][step];
-            const gui::UiPoint b = gizmo.ring_points[index][step + 1U];
-            if (gizmo.ring_front[index][step] &&
-                gizmo.ring_front[index][step + 1U]) {
-                haloed_line(list, a, b, 4.6F, emphasized ? 3.0F : 2.1F, color);
-            } else if (active == GizmoAxis::None) {
-                line(list, a, b, 1.2F, faded);
-            }
-        }
-    }
-    if (active == GizmoAxis::None || active == GizmoAxis::View) {
-        draw_view_ring(list, gizmo,
-                       hovered == GizmoAxis::View || active == GizmoAxis::View);
-    }
-    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
-}
-
-void draw_scale_gizmo(gui::UiDrawList& list, const GizmoGeometry& gizmo,
-                      GizmoAxis hovered, GizmoAxis active) {
-    if (!gizmo.visible) {
-        return;
-    }
-    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
-                                                         axis_z};
-    for (std::size_t index = 0U; index < gizmo.ends.size(); ++index) {
-        const GizmoAxis axis = static_cast<GizmoAxis>(
-            static_cast<core::u8>(GizmoAxis::X) + static_cast<core::u8>(index));
-        const bool emphasized = hovered == axis || active == axis;
-        const gui::UiColor color = emphasized ? gizmo_hot : colors[index];
-        haloed_line(list, gizmo.origin, gizmo.ends[index], 5.0F,
-                    emphasized ? 3.2F : 2.2F, color);
-        // A box at the end, as every scale gizmo marks its axes.
-        haloed_square(list, gizmo.ends[index], 8.0F, 1.5F, color);
-    }
-    draw_view_ring(list, gizmo,
-                   hovered == GizmoAxis::View || active == GizmoAxis::View);
-    square(list, gizmo.origin, gizmo_hub_size, gizmo_hub);
 }
 
 [[nodiscard]] bool is_xyz(GizmoAxis axis) noexcept {
@@ -2664,8 +2258,9 @@ void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
                                             const scene::Scene& scene,
                                             gui::UiPoint centre,
                                             std::optional<float> reading) const {
-    static constexpr std::array<gui::UiColor, 3U> colors{axis_x, axis_y,
-                                                         axis_z};
+    const std::array<gui::UiColor, 3U> colors{ctx.theme().gizmo_axis_x,
+                                              ctx.theme().gizmo_axis_y,
+                                              ctx.theme().gizmo_axis_z};
     const std::array<scene::Vec3, 3U>& axes =
         keyboard_.orientation == TransformOrientation::Global
             ? world_basis
@@ -2695,8 +2290,8 @@ void ViewportPanel::draw_keyboard_transform(gui::UiContext& ctx,
     }
     if (keyboard_.tool != TransformTool::Move) {
         line(list, centre, gui::UiPoint{keyboard_.pointer_x, keyboard_.pointer_y},
-             1.0F, gizmo_view_color);
-        square(list, centre, gizmo_hub_size, gizmo_view_color);
+             1.0F, ctx.theme().gizmo_view);
+        square(list, centre, gizmo_hub_size, ctx.theme().gizmo_view);
     }
 
     const char* tool = keyboard_.tool == TransformTool::Move
@@ -4536,9 +4131,10 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 surface_dragging_ && drag_axis_ != GizmoAxis::Yaw
                     ? drag_axis_
                     : GizmoAxis::None;
-            draw_gizmo(list, surface_gizmo, translation_hover,
+            draw_gizmo(list, ctx.theme(), surface_gizmo, translation_hover,
                        translation_active);
-            draw_yaw_ring(list, surface_gizmo, hovered_surface_yaw,
+            draw_yaw_ring(list, ctx.theme(), surface_gizmo,
+                          hovered_surface_yaw,
                           surface_dragging_ && drag_axis_ == GizmoAxis::Yaw);
             if (surface_gizmo.visible) {
                 ctx.label(gui::Rect{surface_gizmo.origin.x + 54.0F,
@@ -4554,20 +4150,22 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                 dragging_ ? GizmoAxis::None : hovered_scene_axis;
             switch (gizmo_tool) {
             case TransformTool::Move:
-                draw_gizmo(list, scene_gizmo, hovered, active);
+                draw_gizmo(list, ctx.theme(), scene_gizmo, hovered, active);
                 break;
             case TransformTool::Rotate:
-                draw_rotate_gizmo(list, scene_gizmo, hovered, active);
+                draw_rotate_gizmo(list, ctx.theme(), scene_gizmo, hovered,
+                                  active);
                 break;
             case TransformTool::Scale:
-                draw_scale_gizmo(list, scene_gizmo, hovered, active);
+                draw_scale_gizmo(list, ctx.theme(), scene_gizmo, hovered,
+                                 active);
                 break;
             }
             if (scene_gizmo.visible && active != GizmoAxis::None &&
                 drag_tool_ != TransformTool::Move) {
                 line(list, gui::UiPoint{drag_centre_x_, drag_centre_y_},
                      gui::UiPoint{ctx.pointer_x(), ctx.pointer_y()}, 1.0F,
-                     gizmo_view_color);
+                     ctx.theme().gizmo_view);
             }
         }
     }
@@ -5149,7 +4747,7 @@ MaskViewportFrame ViewportPanel::draw_masks(
         if (display->expansion_canvas_px != 0.0F) {
             draw_mask_path(list, path, expansion, mask_expansion);
         }
-        draw_mask_path(list, path, 4.5F, outline_shadow);
+        draw_mask_path(list, path, 4.5F, overlay_halo);
         const bool selected = display->source == frame.selection.mask;
         draw_mask_path(list, path, selected ? 2.2F : 1.4F,
                        selected ? mask_outline : mask_secondary);

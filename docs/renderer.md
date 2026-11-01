@@ -359,6 +359,20 @@ Basic refuses a started effect with the reason.
   `ajfx::RigidRunner` (`ParticleSettings::rigid_threads` threads, default 2),
   and an instance whose step the runner has not reached holds. No physics
   step or checkpoint runs while a frame records.
+- **Props** (a bucket to spill out of, a wall to pile against) are drawn from
+  the same rigid frame as the particles, so what is on screen is one tick of
+  one world. A prop's model is drawn through the mesh-particle path, scaled by
+  the authored `size` and turned by the pose's own orientation, before the
+  emitters so it depth-writes like a scene model and lights like the debris
+  around it; a prop takes no particle capacity and does not change where
+  particles sort. Its motion vector comes from the velocity its pose reports,
+  as a particle's does from its own. Meshes are uploaded once per name, so
+  emitters and props drawing the same model share buffers. A prop draws the
+  model it names whatever it collides as, so a bucket collides as a generated
+  hollow cylinder (a collision mesh cannot move) and is still drawn as its
+  model; a prop that names no model draws nothing, and one naming a model its
+  package does not hold fails readiness as any missing mesh does. Props carry
+  no colour or texture of their own, so a drawn one is white.
 - **Limits.** One D3D12 recording may touch 1024 device buffers; a sorted
   emitter uses a dozen or more. From a 512-pixel shorter side, bloom's slice
   apron is 256 pixels and, with temporal antialiasing and occlusion, passes

@@ -367,11 +367,83 @@ void meshes_round_trip_and_are_checked() {
     AJFX_CHECK(fails_with(write_package(stray), ErrorCode::InvalidEffect, "only for mesh geometry"));
 }
 
+void props_round_trip_and_are_checked() {
+    // A mesh prop stands still: that is the only motion it may have. Its
+    // fields still have to survive the trip, so it carries values in all of
+    // them, move window included.
+    RigidProp bucket{};
+    bucket.mesh = "bucket";
+    bucket.shape = PropShape::Mesh;
+    bucket.motion = PropMotion::Fixed;
+    bucket.position = Vec3{0.25F, 0.5F, -0.75F};
+    bucket.turn = Vec3{10.0F, 0.0F, 5.0F};
+    bucket.size = 1.25F;
+    bucket.segments = 24U;
+    bucket.density = 650.0F;
+    bucket.friction = 0.7F;
+    bucket.restitution = 0.05F;
+    bucket.to_turn = Vec3{0.0F, 0.0F, 115.0F};
+    bucket.move_from = 0.5F;
+    bucket.move_over = 0.4F;
+    // The one that does move collides as a generated shape, as it must.
+    RigidProp tube{};
+    tube.shape = PropShape::Pipe;
+    tube.motion = PropMotion::Driven;
+    tube.radius = 0.3F;
+    tube.height = 0.9F;
+    tube.wall = 0.04F;
+    tube.to_position = Vec3{0.0F, 1.0F, 0.0F};
+    tube.move_from = 0.25F;
+    tube.move_over = 0.75F;
+
+    EffectBuilder builder{"props"};
+    builder.emitter("rocks")
+        .capacity(64U)
+        .init(Lifetime{.min = 2.0F, .max = 2.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.props = {bucket, tube}});
+    const Effect effect = builder.build().value();
+
+    // Every field survives, and writing what was read gives the same bytes.
+    const Result<std::vector<std::uint8_t>> first = write_package(effect);
+    AJFX_CHECK(first.ok());
+    const Result<Effect> read = read_package(first.value());
+    AJFX_CHECK(read.ok() && read.value() == effect);
+    const Result<std::vector<std::uint8_t>> second = write_package(read.value());
+    AJFX_CHECK(second.ok() && second.value() == first.value());
+    const RigidPhysics* physics = rigid_physics(read.value().emitters[0]);
+    AJFX_CHECK(physics != nullptr && physics->props.size() == 2U);
+    AJFX_CHECK(physics->props[0] == bucket && physics->props[1] == tube);
+
+    // A prop names a mesh, so check_meshes asks for it by the prop.
+    AJFX_CHECK(fails_with(read_package_meshes(first.value(), effect), ErrorCode::MissingMesh,
+                          "has a prop shaped by mesh 'bucket'"));
+    const MeshSet meshes{{"bucket", cube_mesh()}};
+    const Result<std::vector<std::uint8_t>> with_mesh = write_package(effect, mesh_package_entries(meshes));
+    AJFX_CHECK(with_mesh.ok() && read_package_meshes(with_mesh.value(), effect).value() == meshes);
+
+    // A misspelt field of a prop is reported with its path, as a module's is,
+    // rather than being ignored.
+    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+        "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "props": )";
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "sphere", "radius": 0.5, "radus": 1}]}]}]})"),
+                          ErrorCode::MalformedPackage,
+                          "emitters[0].update[0].props[0] has unknown field 'radus'"));
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "trapezoid"}]}]}]})"),
+                          ErrorCode::MalformedPackage, "props[0].shape has an unknown value"));
+    AJFX_CHECK(fails_with(effect_from_json(head + R"({"shape": "sphere"}}]}]})"), ErrorCode::MalformedPackage,
+                          "props must be an array of props"));
+    // Props left out of the JSON leave the module with none.
+    const Result<Effect> none = effect_from_json(head + R"([]}]}]})");
+    AJFX_CHECK(none.ok() && rigid_physics(none.value().emitters[0])->props.empty());
+}
+
 } // namespace
 
 int main() {
     const ajfx::test::Case cases[] = {
         {"presets_round_trip_to_identical_effects_and_bytes", presets_round_trip_to_identical_effects_and_bytes},
+        {"props_round_trip_and_are_checked", props_round_trip_and_are_checked},
         {"floats_survive_exactly", floats_survive_exactly},
         {"hand_written_json_fills_in_defaults", hand_written_json_fills_in_defaults},
         {"malformed_json_is_reported_with_its_path", malformed_json_is_reported_with_its_path},

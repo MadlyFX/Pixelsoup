@@ -334,13 +334,58 @@ colliders, pile up, knock each other about and fall asleep at rest.
   distance fields, `kill`, colliders bound to parameters, and keeping
   particles inside a sphere. Births, lifetimes and colour over life are
   every emitter's.
-- **Determinism:** bodies enter and leave the world in birth order, in the
-  lowest free slots. `Simulation::state()` carries the engine's own state,
-  so checkpoints and seeks land exactly. Results are identical across runs,
+- **Determinism:** props enter the world first, in the order they are
+  listed, then bodies enter and leave in birth order, in the lowest free
+  slots. `Simulation::state()` carries the engine's own state, so
+  checkpoints and seeks land exactly. Results are identical across runs,
   thread counts, and Debug and Release builds.
 - **On the GPU:** `GpuSimulation` runs rigid physics emitters on the CPU
   with the same code, and writes their particles into the emitter's
   buffers every step. Sorting, meshes, lights and drawing are unchanged.
+
+**Props.** `RigidPhysics::props` are the objects an artist placed in the
+emitter's world: a bucket for debris to spill out of, a wall to pile
+against, a crate to knock over. A prop is authored rather than born. It
+stands in the world from before the first step, in the pose given, and never
+dies.
+- **How it moves:** `fixed` stands still for ever; `driven` is moved by the
+  effect, from its pose to `to_position`/`to_turn` between `move_from` and
+  `move_from + move_over` seconds, shoving whatever is in its way and never
+  pushed back, so it can tip a pile over; `loose` is an ordinary body that
+  gravity and other bodies move.
+- **What it collides as:**
+
+  | `shape` | What it is |
+  | --- | --- |
+  | `mesh` | the model's own triangles, exactly, hollows and all; `fixed` only |
+  | `hull` | the convex wrapping of the model |
+  | `sphere`, `box`, `cylinder`, `cone` | generated from the measurements below |
+  | `hollow_box`, `hollow_cylinder`, `pipe` | generated, open at the top, as a few convex pieces |
+
+  `mesh` and `hull` read `mesh`, the name of a package mesh as a renderer's
+  is; the generated shapes read `half_size`, `radius`, `height`, `wall` and
+  `segments` and name no model. A model is held in the package with its
+  longest side one unit long, so `size` is that side's length.
+- **A collision mesh cannot move.** It has no volume to take mass from and
+  no inside, so contact against a moving one is unreliable; Jolt says so
+  through `Shape::MustBeStatic`, and with assertions off a moving mesh body
+  would silently take an infinite inverse mass. So `shape = mesh` is
+  `fixed` only, and a `mesh` prop that moves is refused, naming the
+  generated hollow shapes instead.
+- **Hollow props:** those generated shapes are compounds of convex pieces --
+  a disc and a ring of staves, or a floor and four walls -- worked out from
+  their measurements rather than decomposed from geometry, so every node
+  builds the same pieces, and they move properly. A bucket that stands still
+  and only has to hold is better `fixed` with `shape = mesh`, which is
+  exact; one that tips has to be a `hollow_cylinder`.
+- **Where they are:** `EmitterState::props` holds each prop's pose after
+  every step, in the order `props` lists them, and `RigidFrame` carries them
+  too, so a host can draw them. A prop is not a particle and takes none of
+  the emitter's capacity; at most `max_rigid_props` stand in one world.
+- **What is refused:** a `mesh` prop that is not `fixed`; a `mesh` or `hull`
+  prop whose mesh the package does not hold (`MissingMesh`, naming the
+  prop); and measurements that make no shape, such as a wall thicker than
+  the radius it walls.
 - **Cost on a Ryzen 5800X:**
   - `rubble`, 400 hulls: 0.75 ms a step on one thread, 0.32 ms on four.
   - 4,000 hulls in a dense heap: 9.7 ms on one thread, 3.4 ms on four.
@@ -491,11 +536,12 @@ files with a reason.
 - Drawing order and flipbook cells derive from particle state and the camera
   alone: a stable sort with birth order as the tie-break, and cells chosen
   from age.
-- A rigid solver is driven in a fixed order: removals oldest first, wakes
-  in slot order, one step, additions in birth order into the lowest free
-  slots. Every node must
-  build the same Jolt source with the same defines (`third_party/jolt`), and
-  update together.
+- A rigid solver's world is built with its statics and then its props, in
+  the order the desc lists them and before any body exists. It is then
+  driven in a fixed order: removals oldest first, wakes in slot order, the
+  driven props' new poses, one step, additions in birth order into the
+  lowest free slots. Every node must build the same Jolt source with the
+  same defines (`third_party/jolt`), and update together.
 
 ## Building
 

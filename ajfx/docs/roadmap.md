@@ -148,13 +148,42 @@ feedback forces could evaluate any frame directly.
      rigid emitters off a host's frame path, and `SpawnPile` stacks bodies
      before step 0. Studio has Physics and Pile blocks and the Rock pile
      recipe. The media server hosts the runner in its particle pass.
+   - **Round 3, in progress (2026-11-01): props.** `RigidPhysics::props`
+     places authored objects in an emitter's world -- fixed, driven along one
+     move, or loose. They collide as the model's own triangles (Jolt's
+     `MeshShape`, exact and concave, and `fixed` only), its convex hull, or
+     one of the generated shapes, of which `hollow_box`, `hollow_cylinder`
+     and `pipe` are compounds of convex pieces so that a hollow prop can
+     move. A `mesh` prop that moves is refused: a collision mesh has no
+     volume to take mass from and no inside, and with assertions off Jolt
+     would hand it an infinite inverse mass rather than complain. Prop poses
+     travel in `EmitterState::props` and `RigidFrame`. Tests cover balls resting inside
+     a hollow prop, a driven prop tipping what it holds, a loose prop
+     settling, bit-identical reruns and thread counts, seek equivalence
+     through a topple, and every refusal.
+     Studio authors them with the **Prop** block (`Category::Physics`,
+     beside Pile and Physics): a model, a pose, how it moves and what it
+     collides as, with the model's outline and the collision shape drawn
+     over the preview so the difference between them is visible. The
+     **Bucket of balls** recipe is the worked shot, and the coach names what
+     a prop cannot be with the fix that makes it possible.
+     The media server draws them in its particle pass, through the same path
+     as mesh particles, so a prop and the debris around it are lit alike.
+     - **Not yet:** 3D gizmos for placing one (today's handles move its
+       position across the floor and its radius, and the turn is typed);
+       convex decomposition, so that a prop which moves could still collide
+       as an arbitrary concave model rather than a generated shape.
    - **Still to do before rigid effects go to a cluster:** a second machine
      (the Intel laptop) must print the same `ajfx_rigid_bench` digest as the
      Ryzen Director. This is also the spike's missing cross-machine run; the
      spike harness's `run_matrix.ps1` writes `results-<computer>` to diff.
+     Props add three Jolt behaviours the solver had never used -- mesh
+     shapes, compound shapes and kinematic bodies -- and the first per-body
+     rotation, so this wants running again now.
    - **Later:** colliders that move with parameters; distance-field and mesh
-     colliders as Jolt mesh shapes; an AVX2 build once every node is known to
-     have it.
+     colliders as Jolt mesh shapes for particles too; convex decomposition,
+     so a loose prop can be any concave model rather than a generated hollow
+     shape; an AVX2 build once every node is known to have it.
 7. **Custom HLSL modules and data interfaces.** Depth, distance fields,
    meshes, textures, curves and media that a host binds to an effect's named
    inputs; debug statistics and profiling markers.
