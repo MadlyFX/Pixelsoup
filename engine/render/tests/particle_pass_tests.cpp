@@ -1068,6 +1068,99 @@ void rigid_physics_holds_until_its_thread_has_the_step() {
     return {from, to};
 }
 
+// The cube model at half its size, so a body drawn as it covers a quarter of
+// the pixels a body drawn as the cube does.
+[[nodiscard]] ajfx::MeshData half_cube_mesh() {
+    const ajfx::MeshData cube = ajfx::cube_mesh();
+    std::vector<ajfx::MeshVertex> vertices = cube.vertices;
+    for (ajfx::MeshVertex& vertex : vertices) {
+        vertex.position = ajfx::Vec3{vertex.position.x * 0.5F, vertex.position.y * 0.5F, vertex.position.z * 0.5F};
+    }
+    return ajfx::make_mesh(std::move(vertices), cube.indices).value();
+}
+
+// A rigid physics emitter whose two body kinds are drawn as two different
+// models: the emitter's own cube for kind 0, the half cube for kind 1. One
+// body of each stands still, a little either side of the origin, so each
+// model's pixels land on its own half of the frame. Nothing pulls on them and
+// the two spheres do not touch, so they stay where the piles put them.
+[[nodiscard]] ajfx::Effect two_models_in_one_emitter() {
+    ajfx::EffectBuilder builder{"models"};
+    builder.emitter("pieces")
+        .capacity(4U)
+        .spawn(ajfx::SpawnPile{.count = 1U,
+                               .shape = ajfx::PileShape::Box,
+                               .center = ajfx::Vec3{-0.5F, -0.25F, 0.0F},
+                               .jitter = 0.0F,
+                               .release = 0.0F,
+                               .body = 0U})
+        .spawn(ajfx::SpawnPile{.count = 1U,
+                               .shape = ajfx::PileShape::Box,
+                               .center = ajfx::Vec3{0.5F, -0.25F, 0.0F},
+                               .jitter = 0.0F,
+                               .release = 0.0F,
+                               .body = 1U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 0.5F, .max = 0.5F})
+        .update(ajfx::RigidPhysics{
+            .shape = ajfx::RigidShape::Sphere,
+            .bodies = {ajfx::RigidBodyKind{.shape = ajfx::RigidShape::Sphere, .draw = "half"}}})
+        .renderer(ajfx::SpriteRenderer{.geometry = ajfx::Geometry::Mesh, .mesh = "cube"});
+    return builder.build().value();
+}
+
+void body_kinds_draw_as_their_own_models() {
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}, {"half", half_cube_mesh()}};
+    const ajfx::Effect effect = two_models_in_one_emitter();
+    // A kind that names a model is what asks the package for it.
+    PASS_CHECK(!ajfx::check_meshes(effect, ajfx::MeshSet{{"cube", ajfx::cube_mesh()}}).ok());
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    render::ParticlePass pass = make_pass();
+    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+    PASS_CHECK(created);
+    render::ParticleInstance instance = std::move(created).value();
+    const Frame frame = render_prop_frame(pass, instance, 12U);
+
+    // Both bodies stand where their piles put them, one either side.
+    const auto read = instance.simulation().read_emitter(0U);
+    PASS_CHECK(read.ok());
+    const ajfx::EmitterState& particles = read.value();
+    // Read back from the records the GPU holds, which carry no body kind:
+    // which kind each particle is is the simulation's, and tested there.
+    PASS_CHECK(particles.alive() == 2U);
+    PASS_CHECK(particles.position[0].x < -0.2F && particles.position[1].x > 0.2F);
+    for (std::size_t b = 0U; b < 2U; ++b) {
+        PASS_CHECK(std::fabs(particles.position[b].y) < 0.5F);
+    }
+
+    // The orthographic test view spans four world units across a frame of
+    // `size`, so a world unit is size/4 pixels (a unit cube covers 256 of
+    // them, as the cube tests above count). A cube of side 0.5 seen face on
+    // covers that squared; the half cube is half the side, a quarter of the
+    // pixels. Each lands on its own side of the middle.
+    const auto side = static_cast<core::u32>(0.5F * static_cast<float>(size) / 4.0F);
+    const std::size_t whole = static_cast<std::size_t>(side) * side;
+    std::size_t left = 0U;
+    std::size_t right = 0U;
+    for (core::u32 y = 0U; y < size; ++y) {
+        for (core::u32 x = 0U; x < size; ++x) {
+            if (frame.alpha(x, y) == 0U) {
+                continue;
+            }
+            if (x < size / 2U) {
+                ++left;
+            } else {
+                ++right;
+            }
+        }
+    }
+    std::cout << "  the cube covered " << left << " pixels (expected " << whole << "), the half cube " << right
+              << " (expected " << whole / 4U << ")\n";
+    PASS_CHECK(left >= whole - side && left <= whole + side);
+    PASS_CHECK(right >= whole / 4U - side && right <= whole / 4U + side);
+}
+
 void props_draw_where_they_stand() {
     const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
     const auto instance_of = [&](render::ParticlePass& pass, const ajfx::Effect& effect) {
@@ -1290,6 +1383,7 @@ int main() {
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
+        {"body_kinds_draw_as_their_own_models", body_kinds_draw_as_their_own_models},
         {"props_draw_where_they_stand", props_draw_where_they_stand},
         {"props_write_their_motion", props_write_their_motion},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

@@ -136,6 +136,25 @@ struct ParticleInstance::State final {
     struct Mesh final {
         std::size_t upload{};
         ajfx::gpu::Buffer args;
+        // A rigid physics emitter whose body kinds name models of their own
+        // draws a group per model rather than one draw for the whole
+        // emitter, so a crate's panels draw as panels. A group's order
+        // buffer lists which of the emitter's particles are drawn with its
+        // model, and the count is this frame's: these particles come from
+        // the CPU, which therefore knows it without asking the GPU. Empty
+        // for an emitter drawn with one model, which keeps its indirect
+        // draw.
+        struct Group final {
+            std::size_t upload{};
+            ajfx::gpu::Buffer order;
+            // Written each time, allocated once: never on the frame path.
+            std::vector<std::uint32_t> scratch;
+            core::u32 count{0U};
+        };
+        std::vector<Group> groups;
+        // The group each body kind draws with, by kind. Empty when the
+        // emitter draws everything with one model.
+        std::vector<std::size_t> kind_group;
     };
     std::vector<std::optional<Mesh>> meshes;
     // The props drawn with one mesh, in the order the effect lists them, and
@@ -459,6 +478,44 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
             return Result::failure(failure(ParticleErrorCode::DeviceFailure, args.error().message));
         }
         mesh.args = args.value();
+        // A body kind may name the model its bodies are drawn as. Where any
+        // of them does, the emitter draws a group per model instead of one
+        // draw, so a crate and the panels it breaks into are each drawn as
+        // themselves. The emitter's own model is group 0, and the kind that
+        // names nothing is drawn with it.
+        const ajfx::RigidPhysics* physics = ajfx::rigid_physics(emitter);
+        const bool per_kind = physics != nullptr &&
+                              std::any_of(physics->bodies.begin(), physics->bodies.end(),
+                                          [](const ajfx::RigidBodyKind& kind) { return !kind.draw.empty(); });
+        if (per_kind) {
+            std::vector<std::string> models{emitter.renderer.mesh};
+            mesh.kind_group.assign(physics->bodies.size() + 1U, 0U);
+            for (std::size_t k = 0U; k < physics->bodies.size(); ++k) {
+                const std::string& model =
+                    physics->bodies[k].draw.empty() ? emitter.renderer.mesh : physics->bodies[k].draw;
+                const auto at = std::find(models.begin(), models.end(), model);
+                mesh.kind_group[k + 1U] = static_cast<std::size_t>(at - models.begin());
+                if (at == models.end()) {
+                    models.push_back(model);
+                }
+            }
+            for (const std::string& model : models) {
+                const std::optional<std::size_t> group_upload = mesh_upload(model);
+                if (!group_upload) {
+                    return Result::failure(failure(ParticleErrorCode::DeviceFailure, mesh_error));
+                }
+                ajfx::Result<ajfx::gpu::Buffer> order = s.particles->create_buffer(
+                    static_cast<std::size_t>(emitter.capacity) * 4U, "particle mesh group");
+                if (!order) {
+                    return Result::failure(failure(ParticleErrorCode::DeviceFailure, order.error().message));
+                }
+                ParticleInstance::State::Mesh::Group group;
+                group.upload = *group_upload;
+                group.order = order.value();
+                group.scratch.reserve(emitter.capacity);
+                mesh.groups.push_back(std::move(group));
+            }
+        }
         out = std::move(mesh);
     }
     // The props an artist stood in a rigid physics emitter's world. A prop
@@ -682,6 +739,34 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
                         std::span{reinterpret_cast<const std::uint8_t*>(group.scratch.data()),
                                   group.scratch.size() * sizeof(PropRecord)});
                 }
+                // Which of an emitter's particles each model draws, where its
+                // body kinds name models of their own. The particles were
+                // written above in this frame's order, so a particle's record
+                // is at its place in the frame.
+                for (std::size_t e = 0U; e < i.meshes.size(); ++e) {
+                    if (!i.meshes[e] || i.meshes[e]->groups.empty()) {
+                        continue;
+                    }
+                    ParticleInstance::State::Mesh& mesh = *i.meshes[e];
+                    const ajfx::EmitterState& particles = frame->emitters[e];
+                    for (ParticleInstance::State::Mesh::Group& group : mesh.groups) {
+                        group.scratch.clear();
+                    }
+                    for (std::size_t p = 0U; p < particles.alive(); ++p) {
+                        const std::size_t kind = p < particles.body_kind.size() ? particles.body_kind[p] : 0U;
+                        const std::size_t group = kind < mesh.kind_group.size() ? mesh.kind_group[kind] : 0U;
+                        mesh.groups[group].scratch.push_back(static_cast<std::uint32_t>(p));
+                    }
+                    for (ParticleInstance::State::Mesh::Group& group : mesh.groups) {
+                        group.count = static_cast<core::u32>(group.scratch.size());
+                        if (group.count > 0U) {
+                            s.particles->write_buffer(
+                                group.order, 0U,
+                                std::span{reinterpret_cast<const std::uint8_t*>(group.scratch.data()),
+                                          group.scratch.size() * sizeof(std::uint32_t)});
+                        }
+                    }
+                }
                 i.rigid_written = i.target;
             }
         }
@@ -882,6 +967,50 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
             rhi::SampledTexture{soft ? targets.scene_depth : &*s.blank, &*s.sampler}};
 
         const std::optional<ParticleInstance::State::Mesh>& mesh = i.meshes[e];
+        // An emitter whose body kinds name models of their own draws a group
+        // per model, each over the particles drawn with it, so a crate and
+        // its panels are each drawn as themselves. The group's order buffer
+        // stands in for the sort's, and its count is this frame's rather
+        // than the simulation's, so these draws are not indirect. Drawing
+        // model by model gives up the depth order between models; the mesh
+        // pipeline writes depth, which is what settles it.
+        if (mesh && !mesh->groups.empty()) {
+            constants.flags |= flag_sorted;
+            for (const ParticleInstance::State::Mesh::Group& group : mesh->groups) {
+                if (group.count == 0U) {
+                    continue;
+                }
+                const ParticleInstance::State::MeshUpload& model = i.mesh_uploads[group.upload];
+                const rhi::StorageBuffer* ordered = s.particles->buffer(group.order);
+                const rhi::StorageBuffer* vertices = s.particles->buffer(model.vertices);
+                const rhi::StorageBuffer* indices = s.particles->buffer(model.indices);
+                if (ordered == nullptr || vertices == nullptr || indices == nullptr) {
+                    s.note("a mesh group's buffers are missing");
+                    return false;
+                }
+                const rhi::StorageBuffer* group_buffers[] = {records, ordered, counters, vertices, indices};
+                const std::array<rhi::DrawBatch, 1U> group_batches{rhi::DrawBatch{model.index_count, group.count}};
+                rhi::PulledDraw group_draw{};
+                group_draw.pipeline =
+                    motion ? &s.velocity : sprite.blend == ajfx::BlendMode::Additive ? &s.additive : &s.mesh;
+                group_draw.vertex_buffers = group_buffers;
+                group_draw.vertex_uniform = emitter_uniform;
+                group_draw.fragment_textures = sampled;
+                group_draw.batches = group_batches;
+                group_draw.load = motion || !first || targets.load;
+                group_draw.store_depth = true;
+                group_draw.viewport = targets.viewport;
+                group_draw.raster_viewport = targets.raster_viewport;
+                rhi::Texture& group_target = motion ? *targets.velocity : *targets.color;
+                if (!commands.draw_pulled(group_target, targets.clear, *targets.depth, targets.depth_clear,
+                                          group_draw)) {
+                    s.note(motion ? "a mesh group motion draw was refused" : "a mesh group draw was refused");
+                    return false;
+                }
+                first = false;
+            }
+            continue;
+        }
         const ParticleInstance::State::MeshUpload* uploaded = mesh ? &i.mesh_uploads[mesh->upload] : nullptr;
         const rhi::StorageBuffer* mesh_vertices = uploaded ? s.particles->buffer(uploaded->vertices) : records;
         const rhi::StorageBuffer* mesh_indices = uploaded ? s.particles->buffer(uploaded->indices) : records;

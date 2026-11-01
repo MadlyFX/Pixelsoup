@@ -99,6 +99,8 @@ EmitterState particles_of(const EmitterState& s) {
     out.spin = s.spin;
     out.spawn_index = s.spawn_index;
     out.body = s.body;
+    // Which kind each body is: a host draws a kind by its own model.
+    out.body_kind = s.body_kind;
     // The props' poses: a host draws them, so they travel with the particles.
     out.props = s.props;
     out.spawned = s.spawned;

@@ -287,10 +287,23 @@ feedback forces could evaluate any frame directly.
          compound of convex pieces), and a prop never dies, so a crate
          standing as a body is a closed lump until the moment it comes
          apart. A lid that caves in before it breaks is not this feature.
-       - **Not yet:** every piece draws as the emitter's one mesh, so a
-         break is right in physics and wrong in the picture until there is
-         a mesh per particle. That is the next thing this shot needs, and
-         it is rendering work.
+     - **A model per body kind, done (2026-11-01).** `RigidBodyKind::draw`
+       names the model a kind's bodies are drawn as, so a crate and the
+       panels it breaks into are each drawn as themselves. The media
+       server's particle pass draws such an emitter model by model: one
+       draw per model over an order buffer of the particles drawn with it,
+       built on the CPU from `EmitterState::body_kind`, which the rigid
+       frame now carries. The counts are the CPU's, so these draws are not
+       indirect, and drawing model by model gives up the depth order
+       between models -- the mesh pipeline writes depth, which is what
+       settles it. Measured against hand-computed coverage: a cube and a
+       half-size cube in one emitter covered 64 and 16 pixels of the test
+       view, the 4:1 their sides predict.
+       - **Not yet:** ajfx's own sample renderer still draws one model an
+         emitter. It has no depth buffer (it culls back faces and leans on
+         the depth sort), so grouping draws by model would composite them
+         out of order; it needs a depth buffer, or a mesh index in the
+         record and a draw per model that skips the rest.
      - **Studio and the shot.** A **Break** block in a rigid layer
        (`Category::Physics`, beside Pile and Prop): how hard, into what, how
        many times, with the piece set drawn over the preview as the Prop

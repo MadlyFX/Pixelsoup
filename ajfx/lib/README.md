@@ -336,9 +336,14 @@ colliders, pile up, knock each other about and fall asleep at rest.
   the model its `mesh` names, or the renderer's own when it names none. At
   most `max_rigid_body_kinds` beyond the emitter's.
 
-  A kind decides what a body collides as, not what it looks like: the
-  renderer draws one mesh for the whole emitter. Size is the particle's, so
-  whatever spawns a body decides how big it is.
+  A kind may also name the model its bodies are **drawn** as (`draw`),
+  where the emitter draws meshes: a crate and the panels it breaks into are
+  then each drawn as themselves, without being emitters of their own. A
+  renderer that honours it draws the emitter model by model, over the
+  particles of each (the media server's particle pass does; ajfx's own
+  sample renderer draws one model an emitter, since it has no depth buffer
+  to settle the order between models). Size is the particle's, so whatever
+  spawns a body decides how big it is.
 - **What acts on them:**
   - `Gravity`, bound or not;
   - `Drag`, as linear damping;

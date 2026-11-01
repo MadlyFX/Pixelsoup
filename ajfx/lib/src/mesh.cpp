@@ -95,6 +95,9 @@ std::vector<MeshWant> wanted_meshes(const Effect& effect) {
             if (!body.mesh.empty()) {
                 wants.push_back({body.mesh, who + " has a body kind shaped by mesh " + quoted(body.mesh)});
             }
+            if (!body.draw.empty()) {
+                wants.push_back({body.draw, who + " has a body kind drawn as mesh " + quoted(body.draw)});
+            }
         }
         for (const RigidProp& prop : physics->props) {
             // Whenever a prop names a model it is needed: to collide as, for

@@ -625,12 +625,15 @@ enum class RigidShape {
 // - **Its shape:** as the emitter's, scaled by each particle's size. `mesh`
 //   is the model a `hull` kind wraps ("meshes/<name>" in the package); empty
 //   wraps the renderer's own mesh, which is what the emitter's shape does.
-// - **What it does not change:** the renderer draws one mesh for the whole
-//   emitter, so a kind decides what a body collides as and not what it looks
-//   like. Damping and sleep are the emitter's.
+// - **What it looks like:** `draw` is the model its bodies are drawn as, for
+//   a renderer that draws a mesh per particle; empty draws the emitter's own
+//   model, as every other body is drawn. A crate's panels collide and draw
+//   as panels this way, without being an emitter of their own.
+// - **What it does not change:** damping and sleep are the emitter's.
 struct RigidBodyKind final {
     RigidShape shape{RigidShape::Auto};
     std::string mesh;
+    std::string draw;
     float density{1000.0F};
     float friction{0.5F};
     float restitution{0.2F};
@@ -639,6 +642,7 @@ struct RigidBodyKind final {
     static void fields(Self& self, Visitor&& visit) {
         visit("shape", self.shape);
         visit("mesh", self.mesh);
+        visit("draw", self.draw);
         visit("density", self.density);
         visit("friction", self.friction);
         visit("restitution", self.restitution);

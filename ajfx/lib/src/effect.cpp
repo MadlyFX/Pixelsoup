@@ -289,6 +289,8 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
         const std::string at = "bodies[" + std::to_string(i) + "]";
         check.require(body.mesh.empty() || valid_texture_name(body.mesh), at + ".mesh",
                       "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+        check.require(body.draw.empty() || valid_texture_name(body.draw), at + ".draw",
+                      "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
         check.require(body.density > 0.0F, at + ".density", "must be positive");
         check.require(body.friction >= 0.0F && body.friction <= 1.0F, at + ".friction",
                       "must be between 0 and 1");
@@ -544,6 +546,13 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
     if (shape == RigidShape::Hull && emitter.renderer.geometry != Geometry::Mesh) {
         return Error{ErrorCode::InvalidEffect,
                      where + " rigid physics shape 'hull' wraps the renderer's mesh, and the renderer draws none"};
+    }
+    for (std::size_t i = 0U; i < physics->bodies.size(); ++i) {
+        if (!physics->bodies[i].draw.empty() && emitter.renderer.geometry != Geometry::Mesh) {
+            return Error{ErrorCode::InvalidEffect,
+                         where + " rigid physics body kind " + std::to_string(i + 1U) + " is drawn as model " +
+                             quoted(physics->bodies[i].draw) + ", and the renderer draws sprites, not meshes"};
+        }
     }
     for (std::size_t i = 0U; i < physics->bodies.size(); ++i) {
         const RigidBodyKind& body = physics->bodies[i];
