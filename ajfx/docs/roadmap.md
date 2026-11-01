@@ -361,6 +361,38 @@ feedback forces could evaluate any frame directly.
          the crates is a loose prop rather than one of the layer's bodies.
      - **Not yet after it:** snow settling on the pieces, which is
        accumulation, in phase 5 above.
+   - **What breaking is, and what it is not (2026-11-01).** Round 5 is
+     pre-fractured chunk substitution: a body is swapped for an authored set
+     of pieces when it is hit hard enough. That is the realtime technique,
+     and it is not what a fracture sim does. Measured against two references
+     (a Blender Fracturing Tools wall, a concrete pipe struck by a metal
+     one), what is missing is:
+     - **Pieces that tile the thing they came from.** A fracture sim cuts
+       the model into cells that fill its volume exactly, so the break keeps
+       the silhouette and the torn edges match. A Part names a model of its
+       own at an offset, so the pieces are near the shape rather than of it.
+       Voronoi cells baked from the model, each a convex hull, would fit
+       everything already here: body kinds, hull collision, a model per
+       kind, and the Break module's list of pieces. Baking is off the frame
+       path, so it may take as long as it needs.
+     - **Cracks that run, rather than a threshold a whole body passes.** In
+       the wall, the middle blows out and both ends stay standing. That is a
+       network of breakable constraints between neighbouring cells, with the
+       pieces still joined moving as one island; ajfx has one threshold a
+       body and replaces all of it at once, so nothing can half break.
+       Jolt has the constraints; the work is the island bookkeeping and
+       keeping constraint breaks in a fixed order for determinism.
+     - **Debris at several scales.** The references carry big chunks, rubble
+       and a carpet of gravel thrown metres out. `max_break_pieces` is 32
+       and each piece is one authored model.
+     - **An inside.** A broken face shows raw material, not the surface's.
+       A body kind has one material and no notion of an interior.
+     - **Dust the break drives.** Both references are mostly volumetric dust
+       by the second after impact. That is the volumes work, below. Spawning
+       particles where contacts are reported would be the cheap half of it,
+       and the contacts are already there.
+     - **Metal that dents.** The second reference deforms rather than
+       breaking. Nothing in a rigid-body runtime does that.
    - **Cross-machine agreement is unverified.** Determinism is tested across
      reruns, thread counts, and Debug and Release on one machine; no second
      machine has printed the same `ajfx_rigid_bench` digest. Props widened
