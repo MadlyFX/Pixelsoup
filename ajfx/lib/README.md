@@ -9,26 +9,28 @@ simulation frame. Every machine in a render cluster sees the same particles,
 a timeline seek lands on exactly what playing through would have shown, and
 replays and lockstep simulations stay in agreement.
 
-Effects are authored in ajfx Studio, a block editor built on this library
-(`apps/ajfx-studio`), and exported as `.ajfx` packages: the emitters and module stacks,
-their textures and meshes, the parameters the effect publishes to a host, and
-precompiled kernels. A host such as the media server loads packages and plays
-them; it does not author them.
+Effects are authored in [ajfx Studio](../studio/README.md), a block editor
+built on this library, and exported as `.ajfx` packages: the emitters and
+module stacks, their textures, meshes and fields, the parameters the effect
+publishes to a host, and precompiled kernels. A host such as the media server
+loads packages and plays them; it does not author them.
 
-It is developed inside the media server that first needs it, and has no
-dependency on it so it can move to its own repository once the API settles.
+The library depends on no host. This page is its reference; the
+[ajfx README](../README.md) gives the whole project.
 
 ## Status
 
-Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
+The runtime, its first host and rendering depth are done; tuning, custom
+modules, a Vulkan backend and volumes are next.
 - **The CPU reference and the GPU runtime.** Per-emitter fused kernels are
   generated from the module stacks. The simulation runs on a D3D12 reference
   backend with a runtime compiler, stable compaction and indirect dispatch.
 - **Packages.** Precompiled kernels and textures travel in `.ajfx`
   packages.
 - **Sample applications.** A viewer and a player.
-- **The media server integration.**
-- **Phase 5.** Done:
+- **A first host.** The media server runs the kernels on its own RHI and
+  draws effects in its scene renderer.
+- **Rendering depth and physics.** Done:
   - deterministic depth sorting;
   - textured sprites and flipbooks;
   - soft particles and ribbons;
@@ -40,8 +42,7 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
   - piles that stand when an effect starts and collapse as it plays;
   - `RigidRunner`, which steps rigid physics off a host's frame path.
 
-The roadmap is the "Particles and volumes" section of the media server's
-[`next-steps-plan.md`](../../next-steps-plan.md).
+The [roadmap](../docs/roadmap.md) has what remains.
 
 ## Getting started
 
@@ -192,6 +193,7 @@ before any tuning.
 | `backends/d3d12/` | The D3D12 device and the DXC compiler (target `ajfx::d3d12`, Windows) |
 | `src/rigid/`, `third_party/jolt/` | The Jolt rigid solver (target `ajfx::rigid`) and Jolt Physics v5.6.0, MIT licensed |
 | `examples/viewer/` | `ajfx_viewer`: plays, scrubs, captures and exports effects |
+| `examples/player/` | `ajfx_player`: a small media player for `.ajfx` files |
 | `shaders/` | Module functions and shared kernels in HLSL, embedded in the library at configure time |
 | `tests/` | Unit tests, registered with CTest as `ajfx.*` |
 
@@ -199,10 +201,8 @@ Planned additions:
 - a Vulkan backend;
 - `volume/`, raymarched voxel volumes.
 
-ajfx Studio, the authoring application, is in the media server tree at
-[`apps/ajfx-studio`](../../apps/ajfx-studio/README.md). Its preview is drawn
-by the media server's renderer, so an effect looks in Studio as it will on
-the wall. Its page model and compiler use ajfx alone.
+ajfx Studio, the authoring application, is beside the library in
+[`../studio`](../studio/README.md).
 
 ## Drawing
 
@@ -258,8 +258,8 @@ named by `mesh`, a package entry.
 - **Depth:** the reference renderer has no depth buffer. It culls back
   faces, so use convex meshes there, and it draws meshes back to front by
   their centres. Meshes that touch or interpenetrate can still overlap
-  wrongly where their centres' order differs from their surfaces'. The media
-  server draws meshes with depth.
+  wrongly where their centres' order differs from their surfaces'. A host
+  with a depth buffer, such as the media server, draws meshes with depth.
 
 **Lights.** Some of an emitter's particles become point lights in the
 host's lit scene, at most `light_count` at once.
@@ -399,7 +399,7 @@ solver's threads as its budget:
 ## Sample viewer
 
 `ajfx_viewer` is built when ajfx is the top-level project
-(`AJFX_BUILD_EXAMPLES`).
+(`AJFX_BUILD_EXAMPLES`), as the standalone presets configure it.
 
 ```bash
 ajfx_viewer --preset smoke
@@ -499,22 +499,8 @@ files with a reason.
 
 ## Building
 
-Standalone:
-
-```bash
-cmake -S libs/ajfx -B out/ajfx
-```
-
-```bash
-cmake --build out/ajfx
-```
-
-```bash
-ctest --test-dir out/ajfx
-```
-
-Inside the media server it is part of every configuration; `area-particles`
-builds and runs just its tests.
+The library builds with the rest of ajfx; see
+[Building](../README.md#building) in the ajfx README.
 
 The GPU suites need a D3D12 device with shader model 6.2 (hardware, or WARP
 with `AJFX_TEST_WARP=1`) and `dxcompiler.dll` with `dxil.dll`. CMake copies

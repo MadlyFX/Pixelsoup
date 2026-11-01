@@ -6,6 +6,11 @@ The Director commits document edits and show frames; nodes render the same
 authored state locally. Windows offers an Advanced D3D12 renderer and an SDL
 GPU Basic fallback. Core document and cluster modules also build headless.
 
+The repository also holds [ajfx](ajfx/README.md), a separate project for
+deterministic GPU particles and ajfx Studio, its effect editor. The media
+server plays the `.ajfx` packages Studio exports; ajfx has its own guide,
+presets and roadmap in `ajfx/`.
+
 This is an unreleased prototype. Project and wire schemas may change;
 breaking changes are acceptable without migration support.
 
@@ -60,13 +65,15 @@ with its address and shared secret. Detailed setup is in the
 | Blender workflow and verification | [Add-on README](integrations/blender/README.md) |
 | Blender protocol and native data contracts | [Scene-link reference](blender%20live%20scene%20link/README.md) |
 | Unfinished work | [Roadmap](next-steps-plan.md) |
+| Particle effects: the ajfx runtime and ajfx Studio | [ajfx README](ajfx/README.md) and [ajfx guide](ajfx/AGENTS.md) |
 | Physical genlock / wall color validation | [Renderer runbooks](advanced%20icvfx%20renderer/README.md) |
 
 ## Layout
 
 `engine/` contains the modules and their colocated tests; `apps/server/`
 contains the Director, node and lifecycle process. `apps/bake/` provides the
-offline lighting baker. `tests/unit/` covers the core command/document/wire
+offline lighting baker. `ajfx/` is the ajfx project (runtime and Studio),
+which the root build includes. `tests/unit/` covers the core command/document/wire
 spine, `tests/blender/` the publisher, and `tests/fixtures/` the pinned
 scene-link fixtures. `scripts/` contains supported launchers, packagers,
 fixture generators and Blender integration checks. `third_party/` retains

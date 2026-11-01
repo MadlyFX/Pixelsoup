@@ -1,59 +1,11 @@
-cmake_minimum_required(VERSION 3.21)
-
-# ajfx: deterministic, seekable GPU particles and volumes.
-#
-# Built two ways: standalone (this file is the top-level project, the shape it
-# will have once it moves to its own repository) or as a subdirectory of the
-# media server. Nothing here may name a media server target, header or option;
-# the host adapts to ajfx, never the reverse.
-project(
-    ajfx
-    VERSION 0.1.0
-    DESCRIPTION "Deterministic, seekable GPU particles and volumes"
-    LANGUAGES CXX
-)
-
-if(PROJECT_IS_TOP_LEVEL)
-    include(CTest)
-    set(CMAKE_CXX_STANDARD 20)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
-endif()
-
-# A host's warnings policy is inherited when it has one, so the library is
-# held to the same bar in-tree as the code around it.
-if(DEFINED MEDIASERVER_WARNINGS_AS_ERRORS)
-    set(_ajfx_werror_default ${MEDIASERVER_WARNINGS_AS_ERRORS})
-else()
-    set(_ajfx_werror_default OFF)
-endif()
-option(AJFX_WARNINGS_AS_ERRORS "Treat ajfx warnings as errors" ${_ajfx_werror_default})
-
-# Warnings plus the floating-point settings determinism depends on: no
-# contraction into fused multiply-adds and no reassociation, so the CPU
-# reference produces the same bits on every compiler and node.
-function(ajfx_set_options target)
-    target_compile_features(${target} PUBLIC cxx_std_20)
-    if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        target_compile_options(${target} PRIVATE
-            /W4 /permissive- /Zc:__cplusplus /fp:precise /fp:except-)
-        if(AJFX_WARNINGS_AS_ERRORS)
-            target_compile_options(${target} PRIVATE /WX)
-        endif()
-    else()
-        target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
-            -ffp-contract=off -fno-fast-math)
-        if(AJFX_WARNINGS_AS_ERRORS)
-            target_compile_options(${target} PRIVATE -Werror)
-        endif()
-    endif()
-endfunction()
+# The ajfx runtime: the effect model, CPU reference, packages, GPU runtime,
+# the D3D12 reference backend and the rigid physics solver. Configured from
+# ../CMakeLists.txt, which sets the warnings policy and ajfx_set_options.
 
 # The HLSL in shaders/ is embedded in the library, so generating kernels at
 # runtime needs no files beside the executable. Rewritten only when it
 # changes, and editing a shader re-runs this configure step.
-set(_ajfx_embedded "// Generated from libs/ajfx/shaders by libs/ajfx/CMakeLists.txt; do not edit.\n")
+set(_ajfx_embedded "// Generated from ajfx/lib/shaders by ajfx/lib/CMakeLists.txt; do not edit.\n")
 string(APPEND _ajfx_embedded "#include \"hlsl_sources.hpp\"\n\nnamespace ajfx::detail {\n")
 foreach(_ajfx_shader IN ITEMS random:ajfx_random.hlsli particles:ajfx_particles.hlsli runtime:ajfx_runtime.hlsl
                               sprite:ajfx_sprite.hlsl sort:ajfx_sort.hlsl)
@@ -116,7 +68,7 @@ target_include_directories(ajfx
 find_package(Threads REQUIRED)
 target_link_libraries(ajfx PUBLIC Threads::Threads)
 ajfx_set_options(ajfx)
-set_target_properties(ajfx PROPERTIES FOLDER "libs")
+set_target_properties(ajfx PROPERTIES FOLDER "ajfx")
 
 # ajfx::rigid: rigid physics emitters run by Jolt Physics (third_party/jolt),
 # built for cross-platform determinism. Core ajfx never depends on it; a host
@@ -130,7 +82,7 @@ if(AJFX_RIGID)
     add_library(ajfx::rigid ALIAS ajfx_rigid)
     target_link_libraries(ajfx_rigid PUBLIC ajfx::ajfx PRIVATE Jolt)
     ajfx_set_options(ajfx_rigid)
-    set_target_properties(ajfx_rigid PROPERTIES FOLDER "libs")
+    set_target_properties(ajfx_rigid PROPERTIES FOLDER "ajfx")
 endif()
 
 # HLSL that a host compiles into its own kernels; exposed as a directory so
@@ -153,7 +105,7 @@ if(AJFX_BUILD_D3D12)
     add_library(ajfx::d3d12 ALIAS ajfx_d3d12)
     target_link_libraries(ajfx_d3d12 PUBLIC ajfx::ajfx PRIVATE d3d12 dxgi)
     ajfx_set_options(ajfx_d3d12)
-    set_target_properties(ajfx_d3d12 PROPERTIES FOLDER "libs")
+    set_target_properties(ajfx_d3d12 PROPERTIES FOLDER "ajfx")
 
     # dxcompiler.dll and dxil.dll are loaded at runtime; executables that
     # compile kernels get a copy beside them. Defaults to the newest Windows
@@ -199,14 +151,14 @@ if(AJFX_BUILD_D3D12 AND AJFX_BUILD_EXAMPLES)
     target_link_libraries(ajfx_viewer PRIVATE ajfx::d3d12)
     ajfx_set_options(ajfx_viewer)
     ajfx_copy_dxc(ajfx_viewer)
-    set_target_properties(ajfx_viewer PROPERTIES FOLDER "examples")
+    set_target_properties(ajfx_viewer PROPERTIES FOLDER "ajfx/examples")
 
     # A windowed media player for .ajfx files (no console).
     add_executable(ajfx_player WIN32 examples/player/main.cpp)
     target_link_libraries(ajfx_player PRIVATE ajfx::d3d12 comctl32 comdlg32 shell32 advapi32)
     ajfx_set_options(ajfx_player)
     ajfx_copy_dxc(ajfx_player)
-    set_target_properties(ajfx_player PROPERTIES FOLDER "examples")
+    set_target_properties(ajfx_player PROPERTIES FOLDER "ajfx/examples")
 
     # Both play rigid physics effects when ajfx::rigid is built.
     if(AJFX_RIGID)
@@ -225,14 +177,14 @@ if(BUILD_TESTING)
     target_compile_definitions(ajfx_random_tests PRIVATE
         AJFX_SHADER_INCLUDE_DIR="${AJFX_SHADER_INCLUDE_DIR}")
     add_test(NAME ajfx.random COMMAND ajfx_random_tests)
-    set_target_properties(ajfx_random_tests PROPERTIES FOLDER "tests")
+    set_target_properties(ajfx_random_tests PROPERTIES FOLDER "ajfx/tests")
 
     foreach(suite IN ITEMS effect package simulation)
         add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
         target_link_libraries(ajfx_${suite}_tests PRIVATE ajfx::ajfx)
         ajfx_set_options(ajfx_${suite}_tests)
         add_test(NAME ajfx.${suite} COMMAND ajfx_${suite}_tests)
-        set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
+        set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "ajfx/tests")
     endforeach()
 
     if(AJFX_BUILD_D3D12)
@@ -246,7 +198,7 @@ if(BUILD_TESTING)
             ajfx_copy_dxc(ajfx_${suite}_tests)
             add_test(NAME ajfx.${suite} COMMAND ajfx_${suite}_tests)
             set_tests_properties(ajfx.${suite} PROPERTIES SKIP_RETURN_CODE 77)
-            set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "tests")
+            set_target_properties(ajfx_${suite}_tests PROPERTIES FOLDER "ajfx/tests")
         endforeach()
     endif()
 
@@ -255,12 +207,12 @@ if(BUILD_TESTING)
         target_link_libraries(ajfx_rigid_tests PRIVATE ajfx::rigid)
         ajfx_set_options(ajfx_rigid_tests)
         add_test(NAME ajfx.rigid COMMAND ajfx_rigid_tests)
-        set_target_properties(ajfx_rigid_tests PROPERTIES FOLDER "tests")
+        set_target_properties(ajfx_rigid_tests PROPERTIES FOLDER "ajfx/tests")
         # Step cost, checkpoint size and a state digest; run by hand.
         add_executable(ajfx_rigid_bench tests/rigid_bench.cpp)
         target_link_libraries(ajfx_rigid_bench PRIVATE ajfx::rigid)
         ajfx_set_options(ajfx_rigid_bench)
-        set_target_properties(ajfx_rigid_bench PROPERTIES FOLDER "tests")
+        set_target_properties(ajfx_rigid_bench PROPERTIES FOLDER "ajfx/tests")
         if(AJFX_BUILD_D3D12)
             add_executable(ajfx_rigid_gpu_tests tests/rigid_gpu_tests.cpp)
             target_link_libraries(ajfx_rigid_gpu_tests PRIVATE ajfx::rigid ajfx::d3d12)
@@ -268,7 +220,7 @@ if(BUILD_TESTING)
             ajfx_copy_dxc(ajfx_rigid_gpu_tests)
             add_test(NAME ajfx.rigid_gpu COMMAND ajfx_rigid_gpu_tests)
             set_tests_properties(ajfx.rigid_gpu PROPERTIES SKIP_RETURN_CODE 77)
-            set_target_properties(ajfx_rigid_gpu_tests PROPERTIES FOLDER "tests")
+            set_target_properties(ajfx_rigid_gpu_tests PROPERTIES FOLDER "ajfx/tests")
         endif()
     endif()
 

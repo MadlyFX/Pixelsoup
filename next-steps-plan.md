@@ -13,7 +13,7 @@ contracts; check current code before treating an individual item as missing.
   markers; verify feathering and placement across output-node seams.
 - Bindless descriptors before GPU-driven culling or BLAS/TLAS/ray-query
   effects; writable buffers and indirect dispatch and draw now exist in the
-  D3D12 RHI (see the particles section). Preserve deterministic
+  D3D12 RHI (see the particle effects section). Preserve deterministic
   instance ordering, honest capability gates and cohort conformance.
 - Physical two-node genlock/present-barrier and camera latency qualification,
   recorded capture procedures and a pinned driver matrix; an editor-as-remote
@@ -835,373 +835,116 @@ the ARP table (NovaStar OUI `54:b5:6c`) as well as by subnet search.
 - File storage servers and cameras on the map, each a device kind with its own
   sprite
 
-## Particles and volumes (`libs/ajfx`)
+## Particle effects (ajfx)
 
 ### Problem
 
-The renderer has no particle or volumetric effects beyond the froxel fog, and
-there is no off-the-shelf GPU particle library whose simulation is
-deterministic. Here that matters more than usual: every node must draw the same
-particles at a given show frame, and a timeline seek must land on exactly what
-playback would have shown.
+The renderer had no particle or volumetric effects beyond the froxel fog.
+Effects come from ajfx, the separate project beside the media server in this
+repository (`ajfx/`, roadmap in [`ajfx/docs/roadmap.md`](ajfx/docs/roadmap.md)).
+The media server plays `.ajfx` packages; it does not author them. What is
+tracked here is the host side: every node must draw the same particles at a
+given show frame, a seek must land on what playback would have shown, and
+loading or replacing a package must never stall the control or frame path.
 
-### Deliverable
+### Status
 
-Three pieces with one file format between them. The media server plays
-effects; it does not author them.
+- **RHI, done.** Writable buffers in compute, indirect dispatch,
+  single-batch indirect pulled draws and buffer readback, on D3D12 (the SDL
+  backend reports them unsupported). `render::ParticleDevice` implements
+  ajfx's GPU interface on the RHI and records into the renderer's command
+  lists; on one GPU it leaves particle records byte-identical to ajfx's own
+  D3D12 device.
+- **Render pass, done.** `render::ParticlePass`: show-frame stepping within
+  a step budget, a preallocated checkpoint ring for seeks, holding while
+  behind, sprites drawn from the camera's axes with the slice's projection,
+  depth-tested without depth writes.
+- **Scene renderer, done.** Packages are read and checked on a
+  `render::ParticlePackageCache` worker, at most one new instance a frame;
+  readiness holds while a package loads, fails or a seek catches up; the
+  Basic renderer is refused with a reason; full canvas and slices draw
+  byte-identical sprites.
+- **Document and workflow, done.** `scene.particle_effect` (source, seed and
+  start frame, normalized, replicated and digested); `.ajfx` import as an
+  `asset.particle_effect` Library asset (menu, file dialog and desktop drops;
+  in the project manifest so nodes check the file); placement by dragging
+  from the Library; seed and start frame in the Inspector; Stage and Program
+  status naming why effects hold; adoption of a re-exported package at the
+  next asset generation (Rescan Sources).
+- **Published parameters, done.** `particle_parameter.<name>.<component>`
+  values on the node, and scene.channel keys under the same name, carried as
+  curves the renderer samples at each simulation step; a changed value or
+  key restarts the simulation. Parameter keys are on the Timeline (a row per
+  keyed component, with retiming, deleting, easing and tangents addressed by
+  key).
+- **Rendering depth in the renderer, done.**
+  - Sorting along the camera's forward axis taken into the effect's space,
+    so slices agree.
+  - Textures staged a recording's upload space at a time, holding until
+    they land; a package missing a texture its effect names fails readiness,
+    naming it. sRGB is decoded after filtering, as for model textures (the
+    ajfx reference renderer decodes before).
+  - Motion vectors: with temporal antialiasing on, sprites write the
+    Advanced velocity target where they cover at least half a pixel, one
+    flat value per sprite from canvas-wide matrices, so slices write the
+    same bits as the full canvas (tested). Not yet: particles in object
+    motion blur, and motion from an effect's own placement moving.
+  - Soft particles read scene depth from the velocity product's z, so there
+    is no extra target or copy; particles therefore draw every effect's
+    colour before any effect's motion. Perspective and orthographic views
+    both work.
+  - Blended mesh particles write depth.
+  - Particle lights: a compute pass writes them into 64 reserved slots a
+    render, so positions never leave the GPU; an effect that would overrun
+    them is refused with the reason. The Advanced lit pass adds them
+    without shadows, cones or profiles. Not yet in Basic, reflections or fog.
+- **Rigid physics, done (2026-11-01).** `ParticlePass` creates instances
+  with `RigidHosting::Host` and one `ajfx::RigidRunner` per pass. Each
+  advance writes the target step's rigid particles once the runner has
+  them; until then the instance is behind and the node holds. No engine
+  step or engine checkpoint runs while a frame records. Thread budget:
+  `ParticleSettings::rigid_threads` (default 2), made with the first rigid
+  instance. The runner's parameter provider owns copies of the placement's
+  tracks, and its digest includes the start frame and show rate, which
+  shift keyed parameters.
+- **What ajfx Studio needed, done.** `RendererLimits::particles` lets a
+  renderer's owner set the particle step budget and checkpoints.
 
-- **`libs/ajfx` runtime**: a GPU particle and volume library with no media
-  server dependencies, published on its own once its API settles. It loads
-  effect packages, simulates and renders them. Effects are stacks of typed
-  modules; custom modules are HLSL snippets fused into each emitter's kernel.
-  A C++ builder API builds the same model in code, for tests, presets and
-  engine programmers. The library defines a small GPU backend interface and
-  can instead hand a host the passes to record into its own render graph; the
-  media server adapts its RHI that way. D3D12 and Vulkan reference backends
-  ship with the library.
-- **`.ajfx` effect package**: a versioned, self-contained file holding the
-  emitters and module stacks, the textures and meshes they use, the effect's
-  published parameters (name, type, range, default) and kernels precompiled
-  with the pinned DXC for each backend, with HLSL source as the fallback.
-  Precompiled kernels keep shader compilation off the media server's load and
-  frame paths and give every node identical bytecode. A package is identified
-  by content hash, so it is an ordinary asset with a digest.
-- **ajfx Studio** (`apps/ajfx-studio`): a block editor built on the same
-  runtime. Effects are pages of layers and plain-language blocks, which a
-  compiler turns into module stacks, merged curves and worked-out budgets.
-  It has a scrubbable preview, budget and GPU cost readouts, raw modules for
-  experts and export to `.ajfx`. The preview is drawn by the media server's
-  own renderer, so effects look as they will on the wall. Its page model and
-  compiler depend on ajfx alone.
+Found while building Studio:
 
-In the media server an effect is a library asset. Operators place instances,
-set and animate the effect's published parameters in the Inspector, and the
-Director adopts a changed package on a background worker, so an artist can
-iterate in Studio while the stage plays.
+- **Fixed:** with temporal antialiasing on, a held (paused) show frame kept
+  its last image, so a package that loaded or changed while paused stayed
+  invisible until playback moved. A held frame now resets its history once
+  when the particles it draws change (`RenderStats::particle_digest`; see
+  `docs/renderer.md`).
+- **Fixed:** a D3D12 recording could touch only 64 device buffers. A sorted
+  emitter records with a dozen or more, so an effect's sixth layer had its
+  dispatches refused and the whole effect stopped drawing. The journal now
+  holds 1024 (`an_effect_with_many_sorted_emitters_draws_every_one`). That
+  is still a fixed bound, the refusal does not name it as the cause, and a
+  scene of many large effects should be measured against it.
+- **Open:** from a 512-pixel shorter side, bloom's slice apron alone is 256
+  pixels. Temporal antialiasing and occlusion add theirs, so the total
+  passes the default `slice_apron_limit` (256) and the frame is refused with
+  `InvalidConfiguration`. Studio's single-canvas preview raises the limit; a
+  project with bloom on a large canvas has to raise it as well.
 
-Determinism rules: randomness is an integer hash of `(emitter seed, spawn
-index, stream)`; fixed simulation step; live lists compacted by prefix sum,
-never atomic append; budgets fixed up front and refused when exceeded. Seeks
-restore from a checkpoint ring and resimulate forward; emitters with no
-feedback forces evaluate any frame directly.
+### Remaining
 
-### Phases
-
-0. Skeleton: standalone CMake project, `area-particles` test area,
-   deterministic hash with an HLSL twin. Done.
-1. Effect model, attributes, fifteen built-in modules, builder API, presets,
-   published parameters, the `.ajfx` package format (read and write, version
-   checked, refused with a reason when unsupported) and a CPU reference
-   simulator with checkpointed seeking. Tests: bit-identical reruns, seek
-   equivalence, budget refusal, package round trip. Done.
-2. GPU runtime on the D3D12 reference backend.
-   - 2a, done: per-emitter fused update and spawn kernels generated from the
-     module stacks, records holding only the attributes in use, a two-level
-     prefix-sum compaction, indirect dispatch, checkpoints, a headless D3D12
-     device and a DXC compiler loaded at runtime. Spawning, deaths, ages and
-     lifetimes match the CPU reference exactly and the rest within
-     tolerance; reruns are bit-identical; clean under the D3D12 debug layer.
-     About a million particles take 1.9 ms a step on an RTX 3090, untuned.
-   - 2b, done: graphics pipelines, render targets, indirect draws and window
-     presentation in the backend; a sprite renderer (camera-facing or
-     velocity-aligned with motion stretch; alpha, additive and premultiplied);
-     kernels precompiled into `.ajfx` packages, keyed by a hash of their
-     generated source so stale bytecode is refused; and `ajfx_viewer`, which
-     plays, scrubs through GPU checkpoints, captures and exports. Rendering
-     tests check pixels against hand-computed coverage.
-   - Open: tuning. Depth sorting landed with phase 5a. Candidates: structure-of-arrays records,
-     writing survivors straight to the compacted buffer, a single-pass scan,
-     and batching barriers across emitters; measure with GPU timestamps
-     first.
-3. RHI: writable buffers in compute, indirect dispatch and single-batch
-   indirect pulled draws, and buffer readback, on D3D12 (the SDL backend
-   reports them unsupported). Done.
-   ajfx kernels take their constants at b0 in space 1 and buffers at u0..u7,
-   the RHI's own layout, so packaged kernels run unchanged on either backend.
-   `render::ParticleDevice` implements ajfx's GPU interface on the RHI and
-   records into the renderer's command lists; on one GPU it leaves particle
-   records byte-identical to ajfx's own D3D12 device.
-4. Integration: `.ajfx` import as a library asset (content-hash identity,
-   parsed and its kernels created on a worker, never on the frame path), the
-   render pass (`render::ParticlePass`, done: show-frame stepping within a
-   step budget, a preallocated checkpoint ring for seeks, holding while behind,
-   sprites drawn from the camera's axes with the slice's projection,
-   depth-tested without depth writes; motion vectors since 5b), wiring
-   that pass into the scene renderer (done: packages read and checked on a
-   `render::ParticlePackageCache` worker, at most one new instance a frame,
-   readiness held while a package loads, fails or a seek catches up, the
-   Basic renderer refused with a reason, full canvas and slices drawing
-   byte-identical sprites), and a `scene.particle_effect` node (done: source,
-   seed and start frame, normalized, replicated and digested; published
-   parameter values still to come), `.ajfx` import as an
-   `asset.particle_effect` Library asset (done: menu, file dialog and desktop
-   drops; in the project manifest so nodes check the file), placement by
-   dragging from the Library (done), seed and start frame in the Inspector
-   (done), Stage and Program status naming why effects hold, and adoption of
-   a re-exported package at the next asset generation (done: Rescan Sources).
-   Published parameters (done): `particle_parameter.<name>.<component>`
-   values on the node, and scene.channel keys under the same name, carried
-   as curves the renderer samples at each simulation step; a changed value
-   or key restarts the simulation. Parameter keys are on the Timeline too
-   (done: a row per keyed component under the effect, with retiming,
-   deleting, easing and tangents addressed by key). Not yet: copying and
-   pasting parameter keys (the key clipboard skips them). Remaining:
-   two-node agreement on the cluster. Catching up is slow for an effect
-   placed or seeked far from its checkpoints: at 16 steps a frame, an effect
-   dropped 2.5 minutes into a show holds for about 25 seconds. A larger
-   budget while off air, or checkpoints kept across the whole show, would
-   shorten it.
-5. Rendering depth, in three slices.
-   - **5a, done:** deterministic depth sorting, and textured sprites with
-     flipbooks.
-     - **Sorting.** A stable GPU radix sort of view depth, to one part in
-       32,768 of the distance: six coalesced passes, integer scans, atomics
-       only for counting, birth order on ties. It applies to alpha-blended
-       emitters; additive emitters skip it.
-     - **Textures.** RGBA8 mip chains in `textures/<name>` package entries,
-       built at authoring time. Flipbook cells are chosen from age, with
-       optional cross-fade.
-     - **Both renderers.** The library's reference renderer and the media
-       server's `ParticlePass`.
-       - The media server sorts along the camera's forward axis taken into
-         the effect's space, so slices agree.
-       - It stages textures a recording's upload space at a time and holds
-         until they land.
-       - A package missing a texture its effect names fails readiness,
-         naming the texture.
-     - **Cost on an RTX 3090.** About 0.2 ms up to 65,000 particles, 0.5 ms
-       at a million (1.9 ms before coalescing and the 24-bit key), 1.9 ms at
-       four million.
-       - The floor is the 19 dispatches and their barriers. Fusing each
-         pass's count into the previous scatter would lower it.
-       - Eight-bit digits were tried and were slower: two splits per block
-         cost more than the dispatches they saved.
-       - It has not been measured on the RTX 2060 yet.
-     - **Texture decoding differs between renderers.** The media server
-       decodes sRGB after filtering, as it does for model textures; the
-       reference renderer decodes before.
-   - **5b, done:** motion vectors, soft particles and ribbons.
-     - **Motion vectors.** With temporal antialiasing on, sprites write the
-       Advanced velocity target where they cover at least half a pixel.
-       - The resolve then reprojects a particle onto its own history, and
-         rejects history where one arrived or left, so particles stop
-         trailing.
-       - Each sprite writes one flat value, computed from its centre with
-         canvas-wide matrices, so slices write the same bits as the full
-         canvas (tested).
-       - Not yet: particles in object motion blur, and motion from an
-         effect's own placement moving.
-     - **Soft particles.** `soft_distance` fades a sprite as it nears the
-       scene behind it.
-       - Scene depth is the velocity product's z, so there is no extra
-         target or copy. Particles therefore draw every effect's colour
-         before any effect's motion.
-       - Depth maps back to distance through the projection, so
-         perspective and orthographic views both work.
-     - **Ribbons.** `geometry: ribbon` draws one strip per emitter through
-       its live particles in birth order.
-       - Each end faces the camera across the trail and is as wide as its
-         particle. The texture runs along the strip by life.
-       - Ribbons are not depth-sorted. Velocity facing, stretch and
-         flipbooks are refused for them.
-       - Not yet: several ribbons in one emitter, which would need a ribbon
-         id per particle.
-   - **5c, done:** colliders, mesh particles and particle lights.
-     - **Colliders.**
-       - Sphere and box colliders keep particles out, or with `inside` in,
-         responding as the plane does.
-       - Distance-field colliders do the same for any surface baked into a
-         package's `fields/<name>` grid.
-         - Distance is trilinear and the normal its exact gradient,
-           computed identically on the CPU and GPU.
-         - Each emitter's fields sit in one buffer, written by the first
-           step, because creating a simulation records nothing.
-       - The GPU matches the CPU reference particle for particle until
-         contacts pile up. Where two colliders meet, a last-bit difference
-         in the random spread can decide which a particle meets first, as
-         with sparks on their floor.
-     - **Mesh particles.** `geometry: mesh` draws a package mesh
-       (`meshes/<name>`) per particle.
-       - It is scaled by size, and turned along velocity or spun about Y.
-       - Shading is a light at the camera until particles take scene
-         lighting.
-       - Its draw count comes from the simulation on the GPU, using a new
-         ranged RHI buffer copy.
-       - In the media server blended meshes write depth. The reference
-         renderer has no depth buffer, so it culls back faces instead,
-         which suits convex meshes.
-     - **Particle lights.** Up to `light_count` of an emitter's particles
-       become point lights. Each keeps its light for life (every
-       `light_spacing()`-th particle by spawn index), with intensity and
-       reach picked per particle and colour and intensity curves over its
-       life.
-       - A compute pass writes them into 64 reserved slots a render, so
-         positions never leave the GPU.
-       - An effect that would overrun the slots is refused with the reason.
-       - The Advanced lit pass adds them without shadows, cones or
-         profiles. Not yet in Basic, reflections or fog.
-   - **Rigid particles, done:** tumbling debris (`InitTumble`,
-     `RigidBody`).
-     - Each particle carries a unit quaternion and an angular velocity,
-       integrated each step in the same order on the CPU and GPU.
-     - Colliders meet a rigid particle as a solid ball of its size.
-       - A contact below `rest_speed` stops, so piles settle.
-       - Friction grips the surface, limited by the push as Coulomb
-         friction is, so a resting piece slides to a stop.
-       - `roundness` picks between a ball that rolls and a flat chip
-         that only slides and loses its spin at each contact.
-     - The GPU matches the reference particle for particle through contact
-       and rest. Mesh particles turn by the orientation in both renderers.
-     - A `debris` preset throws chips of a generated `chip` mesh.
-     - **Not in tier 1:** collisions between particles, stacking, and
-       contact by a mesh's own shape. Those need a deterministic CPU
-       rigid-body engine (Box3D or Jolt).
-   - **Tier 2 spike (2026-10-30): Box3D vs Jolt, one machine so far.**
-     - **Scene:** 1000 and 4000 box chips flung from a lattice onto a
-       floor, pillars and a turned wall, stepped at 60 Hz for 10 s.
-       Each step hashes every chip's pose and velocities.
-     - **Both are reproducible on one machine.** Every per-second hash
-       matched across 1, 4 and 8 threads. Box3D also matched across its
-       4- and 8-wide SIMD paths, which it picks per CPU. Jolt's
-       cross-platform build gives other bits than its default build, but
-       each is consistent.
-     - **Both seek exactly.** A restore taken mid-explosion (step 60) and
-       stepped on to 600 matched the straight run at every step.
-       - **Jolt:** restores into the same world, or a freshly built one as
-         a late node would. 4000 chips snapshot to 610 KB in 1.8 ms and
-         restore in 1.6 ms, through the public `SaveState` and
-         `RestoreState`.
-       - **Box3D:** seeks only through its recording player. Its world
-         snapshot is internal, and each keyframe is about 9 MB for 4000
-         chips.
-     - **Cost on the Ryzen 5800X, 4000 chips, 8 threads:** Jolt 0.36 ms a
-       step (0.38 cross-platform), Box3D 0.59 ms (4 substeps).
-     - **Leaning: Jolt, in its cross-platform build.** It has a public,
-       compact snapshot, restores into a fresh world, runs faster, and is
-       mature. Box3D's determinism is just as good but it is at 0.x.
-     - **Still to do:** the same binaries on the laptop (Intel). That run
-       decides the leaning. The harness is `out/spike` in the ajfx
-       worktree: `run_matrix.ps1` writes `results-<computer>` to diff.
-   - **Rigid physics, round 1, done (2026-11-01): Jolt in the library.**
-     - **What exists:**
-       - `RigidPhysics` emitters run by a host-supplied `RigidSolver`.
-       - `ajfx::rigid` provides one on Jolt v5.6.0, vendored in
-         `libs/ajfx/third_party/jolt`. It is built cross-platform
-         deterministic and SSE4.2-only, so one binary runs on every node.
-       - Hull, sphere and box bodies.
-       - Gravity, damping, and plane, sphere and box colliders as statics.
-     - **Proven:**
-       - Identical results across reruns, thread counts, and Debug and
-         Release builds.
-       - Exact seeks and restores into a fresh simulation, across births
-         and deaths.
-       - The GPU runtime holds the reference's bits.
-       - The viewer and player play the `rubble` preset.
-     - **Cost on the 5800X:** `rubble` (400 hulls) 0.75 ms a step on one
-       thread. 4,000 hulls in a dense heap take 9.7 ms on one thread and
-       3.4 ms on four, so heaps that size need threads.
-     - **Round 2, the media server, done (2026-11-01):**
-       - `ajfx::RigidRunner` steps every instance's rigid emitters on one
-         thread per particle pass, up to `rigid_lead` steps ahead of the
-         show frame, with its own checkpoints. A tick the frame path waits
-         on comes first; instances take turns.
-       - `ParticlePass` creates instances with `RigidHosting::Host`. Each
-         advance writes the target step's rigid particles once the runner
-         has them; until then the instance is behind and the node holds.
-         No engine step or engine checkpoint runs while a frame records.
-       - Thread budget: `ParticleSettings::rigid_threads` (the runner's
-         thread and Jolt's workers, default 2), made with the first rigid
-         instance.
-       - The scene renderer hands the runner a parameter provider that owns
-         copies of the placement's tracks. Its digest now includes the
-         start frame and show rate, which shift keyed parameters.
-       - Studio: Physics and Pile blocks, and the Rock pile recipe.
-     - **Piles, done (2026-11-01):** `SpawnPile` stacks bodies before step
-       0 (a heap or a box), held asleep until `release`. Step 0 holds them,
-       so a paused effect shows the pile and seeks to the start find it.
-     - **Still to do before rigid effects go to the cluster:** the laptop
-       must print the same `ajfx_rigid_bench` digest as the Director. This
-       doubles as the spike's missing cross-machine run.
-     - **Later:**
-       - Colliders that move with parameters.
-       - SDF and mesh colliders, as Jolt mesh shapes.
-       - An AVX2 build once every node is known to have it.
-   - **Excluded by design: depth-buffer collision.** It would make the
-     simulation depend on one view's rendered depth, so nodes rendering
-     different slices, or a seek, would disagree.
-6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,
-   media) that a host binds to an effect's named inputs, debug statistics and
-   profiling markers.
-7. ajfx Studio (`apps/ajfx-studio`, see its README).
-   - **First version, done:**
-     - A block editor: pages, layers and blocks, a searchable picker ("/"),
-       drag to reorder, undo and saved `.ajfxstudio` pages.
-     - A compiler that places modules by stage, merges colour and size
-       curves, derives capacities, keeps module ids stable and scales the
-       whole effect.
-     - Recipes and ready-made layers.
-     - A coach whose notes come with one-click fixes.
-     - Raw Module blocks and "Detach into modules" for experts.
-     - A preview through the media server's renderer, with transport,
-       framing, peak counts and GPU time.
-     - `.ajfx` export with kernels.
-     - `ajfx.studio` covers the page model and compiler headless.
-   - **The renderer change it needed:** `RendererLimits::particles` lets a
-     renderer's owner set the particle step budget and checkpoints. Studio
-     raises the budget so an edited effect catches up in one frame.
-   - **Published parameters, done:** a control's link button publishes it
-     with a name and range. Its budget is sized for the whole range, two
-     controls may share one parameter, and values can be tried in the
-     preview through the placement's parameters.
-   - **Not yet:**
-     - textures and meshes from files;
-     - distance-field colliders;
-     - a timeline of parameter keys.
-   - **Found while building it, fixed.** With temporal antialiasing on, a
-     held (paused) show frame used to keep its last image. A particle
-     package that loaded or changed while a show was paused stayed
-     invisible until playback moved. A held frame now resets its history
-     once when the particles it draws change (`RenderStats::particle_digest`;
-     see `docs/renderer.md`).
-   - **Also found.** From a 512-pixel shorter side, bloom's slice apron
-     alone is 256 pixels. Temporal antialiasing and occlusion add theirs
-     to it, so the total passes the default `slice_apron_limit` (256) and
-     the frame is refused with `InvalidConfiguration`. Studio's
-     single-canvas preview raises the limit; a project with bloom on a
-     large canvas has to raise it as well.
-   - **Found while testing, fixed.** A D3D12 recording could touch only 64
-     device buffers. A sorted emitter records with a dozen or more, so the
-     sixth layer of an effect had its dispatches refused ("a particle
-     dispatch was refused") and the whole effect stopped drawing. The
-     journal now holds 1024
-     (`an_effect_with_many_sorted_emitters_draws_every_one`). That is still
-     a fixed bound, and the refusal does not say that the bound was the
-     cause; a scene of many large effects should be measured against it.
-8. Publication: Vulkan backend, documentation, examples, presets, Studio
-   builds, a license and versioned releases.
-
-Volumes track (after phase 5), a companion module sharing the same backend,
-hashing, budgets and checkpoints:
-
-- V1: procedural volumes (noise and SDF shapes) injected into the froxel fog.
-- V2: per-volume raymarching with self-shadowing, composited with sorted
-  particles.
-- V3: cellular flood-fill volumes through a voxelized scene (CS2-style smoke).
-- V4: sparse smoke and fire simulation, with particles depositing into the grid
-  and advecting in its velocity.
-
-Volumes are simulated once in world space and raymarched per node against the
-full-canvas camera, like the froxel grid. Ray jitter is hashed from the show
-frame and canvas coordinates; any temporal history resets with the temporal
-document digest. They need true 3D textures in the RHI.
+- Two-node agreement on the cluster, for sprites, meshes and lights.
+- Rigid effects on the cluster: the laptop must print the same
+  `ajfx_rigid_bench` digest as the Director first.
+- Copying and pasting parameter keys (the key clipboard skips them).
+- Catching up is slow for an effect placed or seeked far from its
+  checkpoints: at 16 steps a frame, an effect dropped 2.5 minutes into a show
+  holds for about 25 seconds. A larger budget while off air, or checkpoints
+  kept across the whole show, would shorten it.
 
 ### Exit criteria
 
-An effect authored in ajfx Studio and exported as `.ajfx` plays in the media
-server exactly as it previewed, is reproducible bit for bit on rerun and after
-a seek, matches across a two-node slice boundary, stays within its declared
-budget or reports why not, and has a measured GPU cost. Loading or replacing a
-package never stalls the control or frame path.
+An effect exported from ajfx Studio plays in the media server exactly as it
+previewed, matches across a two-node slice boundary, and loading or
+replacing its package never stalls the control or frame path.
 
 ## Vehicle process platesets
 

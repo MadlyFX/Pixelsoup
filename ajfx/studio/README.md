@@ -1,7 +1,7 @@
 # ajfx Studio
 
-The editor for ajfx particle effects. It exports `.ajfx` packages that the
-media server places, plays and animates.
+The editor for [ajfx](../README.md) particle effects. It exports `.ajfx`
+packages that a host, today the media server, places, plays and animates.
 
 Studio is a block editor, like a page in Notion, rather than a node graph or a
 stack of modules. Each part of an effect is a **layer**: Flames, Embers or
@@ -383,13 +383,26 @@ Changes discarded when closing are not kept. A page given at start, or
 | `tests/studio_tests.cpp` | Headless tests of the page model and compiler (`ajfx.studio`) |
 
 `ajfx_studio_core` (the page model, compiler, recipes and coach) depends on
-ajfx alone. The application adds the media server's renderer and UI
-toolkit, and lives in the media server tree for that reason.
+the ajfx runtime alone. The application adds the media server's renderer and
+UI toolkit (`MediaServer::Render`, `Gui` and `Editor`), so it builds from the
+repository root, beside the media server.
 
 ## Building and testing
 
-`ajfx-studio` is built by the GUI presets on Windows. Its tests are in the
-`particles` area:
+The headless core and `ajfx.studio` build with ajfx's own presets (see
+[Building](../README.md#building)):
+
+```powershell
+ctest --preset windows-msvc-debug -R studio
+```
+
+The application needs the media server's renderer, so it is built from the
+repository root by the GUI presets on Windows, which turn on
+`AJFX_BUILD_STUDIO_APP`. From the root:
+
+```powershell
+cmake --build --preset windows-msvc-debug-gui --target ajfx-studio
+```
 
 ```powershell
 cmake --build --preset area-particles
@@ -403,3 +416,5 @@ ctest --preset area-particles -R studio
 
 - Textures on imported debris models.
 - Per-block thumbnails and a timeline of parameter keys.
+
+The [roadmap](../docs/roadmap.md) has the rest.

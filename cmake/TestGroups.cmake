@@ -48,6 +48,17 @@ function(_mediaserver_directory_property out dir property)
     set(${out} ${values} PARENT_SCOPE)
 endfunction()
 
+# A directory and all of its subdirectories.
+function(_mediaserver_directory_tree out dir)
+    set(dirs "${dir}")
+    get_property(children DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    foreach(child IN LISTS children)
+        _mediaserver_directory_tree(child_dirs "${child}")
+        list(APPEND dirs ${child_dirs})
+    endforeach()
+    set(${out} ${dirs} PARENT_SCOPE)
+endfunction()
+
 # Labels the tests registered under the given source directories with <area>
 # and adds a tests-<area> target over their test executables. Directories that
 # this configuration does not build (the GUI stack on a headless preset) are
@@ -61,16 +72,21 @@ function(mediaserver_test_area area)
             continue()
         endif()
 
-        _mediaserver_directory_property(tests "${dir}" TESTS)
-        foreach(test IN LISTS tests)
-            set(labels ${area})
-            if(test IN_LIST MEDIASERVER_SLOW_TESTS)
-                list(APPEND labels slow)
-            endif()
-            if(test MATCHES "${MEDIASERVER_BLENDER_TEST_REGEX}")
-                list(APPEND labels blender)
-            endif()
-            set_property(TEST "${test}" DIRECTORY "${dir}" APPEND PROPERTY LABELS ${labels})
+        # A test's properties are set through the directory that registered
+        # it, which may be below the area's own (ajfx/lib, ajfx/studio).
+        _mediaserver_directory_tree(tree "${dir}")
+        foreach(test_dir IN LISTS tree)
+            get_property(tests DIRECTORY "${test_dir}" PROPERTY TESTS)
+            foreach(test IN LISTS tests)
+                set(labels ${area})
+                if(test IN_LIST MEDIASERVER_SLOW_TESTS)
+                    list(APPEND labels slow)
+                endif()
+                if(test MATCHES "${MEDIASERVER_BLENDER_TEST_REGEX}")
+                    list(APPEND labels blender)
+                endif()
+                set_property(TEST "${test}" DIRECTORY "${test_dir}" APPEND PROPERTY LABELS ${labels})
+            endforeach()
         endforeach()
 
         _mediaserver_directory_property(targets "${dir}" BUILDSYSTEM_TARGETS)
