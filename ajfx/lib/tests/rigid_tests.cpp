@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -850,6 +851,154 @@ void runner_keeps_serving_beside_a_failed_track() {
     AJFX_CHECK(good->frame(30U) != nullptr && !good->error());
 }
 
+// ------------------------------------------------------------ contacts
+
+Simulation with_contacts(const Effect& effect, ContactOptions contacts,
+                         const RigidSolver* solver = g_solver.get()) {
+    Result<Simulation> simulation =
+        Simulation::create(effect, 3U, SimulationOptions{.rigid = solver, .contacts = contacts});
+    if (!simulation) {
+        std::cout << simulation.error().message << '\n';
+    }
+    AJFX_CHECK(simulation.ok());
+    return std::move(simulation).value();
+}
+
+// One block half a unit across dropped on the floor, with nothing else in
+// the world for it to hit.
+Effect one_block(float from_height) {
+    EffectBuilder builder{"drop"};
+    builder.emitter("block")
+        .capacity(2U)
+        .spawn(SpawnBurst{.time = 0.0F, .count = 1U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, from_height, 0.0F}})
+        .init(InitSize{.min = 0.5F, .max = 0.5F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.8F, .restitution = 0.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    return builder.build().value();
+}
+
+void contacts_report_the_hit_and_not_the_rest() {
+    // From 1.5 up the block's underside falls 1.25 to the floor, arriving at
+    // about 4.95 units a second.
+    Simulation simulation = with_contacts(one_block(1.5F), ContactOptions{.min_speed = 0.5F});
+    std::optional<RigidContact> hit;
+    std::uint64_t hit_tick = 0U;
+    std::uint64_t reporting = 0U;
+    for (std::uint64_t tick = 1U; tick <= 180U; ++tick) {
+        simulation.advance_to(tick);
+        const std::span<const RigidContact> found = simulation.contacts(0U);
+        if (found.empty()) {
+            continue;
+        }
+        ++reporting;
+        if (!hit) {
+            hit = found.front();
+            hit_tick = tick;
+        }
+    }
+    AJFX_CHECK(hit.has_value());
+    std::cout << "  it met the floor at step " << hit_tick << " at " << hit->speed
+              << " units a second, reported in " << reporting << " step(s)\n";
+    // The block is body 0 and the floor is the emitter's only static. The
+    // body is the lower side, so the normal points from it to the floor.
+    AJFX_CHECK(hit->a_is == RigidSide::Body && hit->a == 0U);
+    AJFX_CHECK(hit->b_is == RigidSide::Static && hit->b == 0U);
+    AJFX_CHECK(hit->began);
+    AJFX_CHECK(hit->normal.y < -0.99F);
+    AJFX_CHECK(std::fabs(hit->point.y) < 0.05F);
+    AJFX_CHECK(hit->speed > 4.0F && hit->speed < 5.5F);
+    // The hit is over in a few steps: the block then lies on the floor for
+    // another two seconds, closing at nothing, and nothing is reported.
+    AJFX_CHECK(reporting < 20U);
+    AJFX_CHECK(simulation.contacts(0U).empty());
+    // A simulation that did not ask collects nothing at all.
+    Simulation quiet = make(one_block(1.5F));
+    quiet.advance_to(180U);
+    AJFX_CHECK(quiet.contacts(0U).empty());
+}
+
+void contacts_are_the_same_on_any_thread_count() {
+    const Effect effect = pile();
+    const ContactOptions options{.min_speed = 0.5F, .limit = 512U};
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation one_thread = with_contacts(effect, options);
+    Simulation four_threads = with_contacts(effect, options, four.get());
+    std::size_t total = 0U;
+    for (std::uint64_t tick = 1U; tick <= 150U; ++tick) {
+        one_thread.advance_to(tick);
+        four_threads.advance_to(tick);
+        const std::span<const RigidContact> a = one_thread.contacts(0U);
+        const std::span<const RigidContact> b = four_threads.contacts(0U);
+        AJFX_CHECK(std::is_sorted(a.begin(), a.end(), contact_before));
+        AJFX_CHECK(a.size() == b.size());
+        AJFX_CHECK(std::equal(a.begin(), a.end(), b.begin()));
+        AJFX_CHECK(one_thread.contacts_dropped(0U) == 0U);
+        total += a.size();
+    }
+    std::cout << "  " << total << " contacts over 150 steps, ordered, and the same on 1 and 4 threads\n";
+    AJFX_CHECK(total > 50U);
+}
+
+void contacts_survive_a_seek() {
+    const Effect effect = pile();
+    const ContactOptions options{.min_speed = 0.5F, .limit = 512U};
+    Simulation stepped = with_contacts(effect, options);
+    stepped.advance_to(60U);
+    const SimulationState at_60 = stepped.state();
+    Simulation seeker = with_contacts(effect, options);
+    seeker.restore(at_60);
+    // A restore has taken no step, so it has nothing to report yet.
+    AJFX_CHECK(seeker.contacts(0U).empty());
+    std::size_t total = 0U;
+    for (std::uint64_t tick = 61U; tick <= 150U; ++tick) {
+        stepped.advance_to(tick);
+        seeker.advance_to(tick);
+        const std::span<const RigidContact> a = stepped.contacts(0U);
+        const std::span<const RigidContact> b = seeker.contacts(0U);
+        AJFX_CHECK(a.size() == b.size());
+        AJFX_CHECK(std::equal(a.begin(), a.end(), b.begin()));
+        total += a.size();
+    }
+    std::cout << "  " << total << " contacts matched step for step after a seek to 60\n";
+    AJFX_CHECK(total > 30U);
+}
+
+void contacts_over_the_limit_are_counted() {
+    // Every touch, resting ones included, from a pile still settling: far
+    // more at a time than a limit of four.
+    Simulation simulation = with_contacts(pile(), ContactOptions{.min_speed = 0.0F, .limit = 4U});
+    std::uint32_t most_dropped = 0U;
+    for (std::uint64_t tick = 1U; tick <= 150U; ++tick) {
+        simulation.advance_to(tick);
+        AJFX_CHECK(simulation.contacts(0U).size() <= 4U);
+        most_dropped = std::max(most_dropped, simulation.contacts_dropped(0U));
+    }
+    std::cout << "  at its busiest the step had " << most_dropped << " contacts beyond the four reported\n";
+    AJFX_CHECK(most_dropped > 0U);
+    AJFX_CHECK(simulation.contacts(0U).size() == 4U);
+}
+
+void contacts_name_the_prop_that_was_hit() {
+    // Balls stacked inside a fixed bucket and let go: they settle against
+    // its floor, its staves and each other.
+    Simulation simulation =
+        with_contacts(bucket_of_balls(PropMotion::Fixed, 0.0F), ContactOptions{.min_speed = 0.0F, .limit = 512U});
+    bool met_the_bucket = false;
+    bool met_each_other = false;
+    for (std::uint64_t tick = 1U; tick <= 120U; ++tick) {
+        simulation.advance_to(tick);
+        for (const RigidContact& contact : simulation.contacts(0U)) {
+            met_the_bucket = met_the_bucket || (contact.b_is == RigidSide::Prop && contact.b == 0U);
+            met_each_other = met_each_other || (contact.a_is == RigidSide::Body && contact.b_is == RigidSide::Body);
+        }
+    }
+    AJFX_CHECK(met_the_bucket);
+    AJFX_CHECK(met_each_other);
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -870,6 +1019,11 @@ int main() {
         {"loose_props_fall_and_settle", loose_props_fall_and_settle},
         {"props_rerun_and_seek_exactly", props_rerun_and_seek_exactly},
         {"impossible_props_are_refused", impossible_props_are_refused},
+        {"contacts_report_the_hit_and_not_the_rest", contacts_report_the_hit_and_not_the_rest},
+        {"contacts_are_the_same_on_any_thread_count", contacts_are_the_same_on_any_thread_count},
+        {"contacts_survive_a_seek", contacts_survive_a_seek},
+        {"contacts_over_the_limit_are_counted", contacts_over_the_limit_are_counted},
+        {"contacts_name_the_prop_that_was_hit", contacts_name_the_prop_that_was_hit},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

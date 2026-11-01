@@ -9,6 +9,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
@@ -24,9 +25,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -83,6 +86,12 @@ JPH::Vec3 vec(Vec3 v) {
 
 Vec3 vec(JPH::Vec3Arg v) {
     return Vec3{v.GetX(), v.GetY(), v.GetZ()};
+}
+
+// A world-space point, which is wider than a Vec3 in a double-precision
+// build of Jolt and the same thing in this one.
+Vec3 vec_of(JPH::RVec3Arg v) {
+    return Vec3{static_cast<float>(v.GetX()), static_cast<float>(v.GetY()), static_cast<float>(v.GetZ())};
 }
 
 // A body smaller than this is made this size: a shape of no size is not one.
@@ -296,7 +305,12 @@ std::optional<Error> prop_shape(const RigidPropDesc& p, JPH::RefConst<JPH::Shape
     return Error{ErrorCode::RigidSolverFailure, "has a shape this solver does not know"};
 }
 
-class JoltWorld final : public RigidWorld {
+// A world is also its own contact listener, where the desc asked for
+// contacts. Jolt calls it from the job threads that find the collisions, so
+// what they find is collected under a lock and ordered afterwards: the order
+// contacts arrive in is the engine's and the thread count's, and neither may
+// reach what a host does with them.
+class JoltWorld final : public RigidWorld, private JPH::ContactListener {
 public:
     JoltWorld(const RigidWorldDesc& desc, JPH::JobSystem& jobs)
         : desc_{desc},
@@ -308,6 +322,10 @@ public:
         const auto props = static_cast<JPH::uint>(desc_.props.size());
         const JPH::uint pairs = std::max<JPH::uint>(4096U, desc_.capacity * 8U);
         system_.Init(desc_.capacity + statics + props, 0U, pairs, pairs, broad_phase_, layer_vs_broad_, pairs_);
+        if (desc_.report_contacts) {
+            contacts_.reserve(desc_.contact_limit);
+            system_.SetContactListener(this);
+        }
         if (desc_.shape == RigidWorldDesc::Shape::Hull) {
             JPH::Array<JPH::Vec3> points;
             for (const Vec3& point : desc_.hull_points) {
@@ -479,8 +497,15 @@ public:
     }
 
     void step(Vec3 gravity) override {
+        contacts_.clear();
+        dropped_ = 0U;
         system_.SetGravity(vec(gravity));
         system_.Update(desc_.step_seconds, 1, &temp_, &jobs_);
+        std::sort(contacts_.begin(), contacts_.end(), contact_before);
+        if (contacts_.size() > desc_.contact_limit) {
+            dropped_ = static_cast<std::uint32_t>(contacts_.size() - desc_.contact_limit);
+            contacts_.resize(desc_.contact_limit);
+        }
     }
 
     RigidBodyState body(std::uint32_t slot) const override { return state_of(JPH::BodyID(slot)); }
@@ -491,6 +516,10 @@ public:
         }
         return state_of(JPH::BodyID(prop_id(index)));
     }
+
+    std::span<const RigidContact> contacts() const override { return contacts_; }
+
+    std::uint32_t contacts_dropped() const override { return dropped_; }
 
     std::vector<std::uint8_t> save() const override {
         JPH::StateRecorderImpl recorder;
@@ -506,6 +535,78 @@ public:
     }
 
 private:
+    void OnContactAdded(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold,
+                        JPH::ContactSettings&) override {
+        found(body1, body2, manifold, true);
+    }
+
+    void OnContactPersisted(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold,
+                            JPH::ContactSettings&) override {
+        found(body1, body2, manifold, false);
+    }
+
+    // One manifold, as collision detection found it and before the step
+    // resolved it, which is the only moment the speed the pair arrived at is
+    // known. Jolt also finds a fast pair on its way in, a step before it
+    // strictly touches, so that it cannot pass through: that is the contact
+    // carrying the arrival speed, and it is reported as any other.
+    void found(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold, bool began) {
+        const auto points = static_cast<std::uint32_t>(manifold.mRelativeContactPointsOn1.size());
+        if (points == 0U) {
+            return;
+        }
+        // The middle of the manifold, so a face resting on a face gives one
+        // point between them rather than a corner of itself.
+        JPH::RVec3 sum = JPH::RVec3::sZero();
+        for (std::uint32_t i = 0U; i < points; ++i) {
+            sum += manifold.GetWorldSpaceContactPointOn1(i);
+        }
+        const JPH::RVec3 point = sum / static_cast<float>(points);
+        // Jolt's normal is the way body 2 leaves the collision, so it points
+        // from body 1 towards body 2; it is turned round below with the
+        // sides, if they are.
+        const JPH::Vec3 normal = manifold.mWorldSpaceNormal;
+        const JPH::Vec3 closing = body2.GetPointVelocity(point) - body1.GetPointVelocity(point);
+        const float speed = std::max(-closing.Dot(normal), 0.0F);
+        if (speed < desc_.contact_min_speed) {
+            return;
+        }
+        auto [a_is, a] = side_of(body1.GetID());
+        auto [b_is, b] = side_of(body2.GetID());
+        RigidContact contact{.a_is = a_is,
+                             .a = a,
+                             .b_is = b_is,
+                             .b = b,
+                             .point = vec_of(point),
+                             .normal = vec(normal),
+                             .speed = speed,
+                             .began = began};
+        if (std::tie(b_is, b) < std::tie(a_is, a)) {
+            contact.a_is = b_is;
+            contact.a = b;
+            contact.b_is = a_is;
+            contact.b = a;
+            contact.normal = vec(-normal);
+        }
+        const std::lock_guard<std::mutex> held{collecting_};
+        contacts_.push_back(contact);
+    }
+
+    // Which of the world's three kinds of body an id is, and its index among
+    // them. Particles hold the slots below capacity, then the statics, then
+    // the props, as prop_id lays them out.
+    [[nodiscard]] std::pair<RigidSide, std::uint32_t> side_of(JPH::BodyID id) const {
+        const std::uint32_t index = id.GetIndex();
+        if (index < desc_.capacity) {
+            return {RigidSide::Body, index};
+        }
+        const auto statics = static_cast<std::uint32_t>(desc_.statics.size());
+        if (index < desc_.capacity + statics) {
+            return {RigidSide::Static, index - desc_.capacity};
+        }
+        return {RigidSide::Prop, index - desc_.capacity - statics};
+    }
+
     // Particles hold the slots below capacity, then the statics, then the
     // props in the order the desc lists them.
     [[nodiscard]] std::uint32_t prop_id(std::size_t index) const {
@@ -532,6 +633,10 @@ private:
     PairFilter pairs_;
     JPH::PhysicsSystem system_;
     JPH::RefConst<JPH::Shape> hull_;
+    // Contact callbacks arrive on the job threads that find the collisions.
+    std::mutex collecting_;
+    std::vector<RigidContact> contacts_;
+    std::uint32_t dropped_{0U};
 };
 
 class JoltSolver final : public RigidSolver {

@@ -40,6 +40,8 @@ modules, a Vulkan backend and volumes are next.
   - rigid physics emitters run by Jolt (`ajfx::rigid`), whose particles
     collide with each other and pile up;
   - piles that stand when an effect starts and collapse as it plays;
+  - props an artist places in a rigid physics world, and the contacts its
+    bodies report;
   - `RigidRunner`, which steps rigid physics off a host's frame path.
 
 The [roadmap](../docs/roadmap.md) has what remains.
@@ -342,6 +344,29 @@ colliders, pile up, knock each other about and fall asleep at rest.
 - **On the GPU:** `GpuSimulation` runs rigid physics emitters on the CPU
   with the same code, and writes their particles into the emitter's
   buffers every step. Sorting, meshes, lights and drawing are unchanged.
+- **What they hit:** with `SimulationOptions::contacts`, every step reports
+  the pairs it found touching: `Simulation::contacts(emitter)` gives them,
+  and `contacts_dropped(emitter)` how many would not fit. Each
+  `RigidContact` names its two sides -- one of the emitter's bodies by its
+  slot, one of its props, or one of its colliders -- where and which way
+  they met, how fast they were closing when collision detection found them,
+  and whether they met this step or have lain together since an earlier
+  one.
+  - **Its sides** are in a fixed order, the lower of the two by (what it is,
+    its index) first, and the normal points from that one to the other, so a
+    pair reads the same however the engine happened to order it.
+  - **Its order** is ajfx's own (`contact_before`): the engine's internal
+    order, and the thread count it ran on, do not reach it. A seek that
+    lands on a step reports what stepping through it would have.
+  - **How many:** `min_speed` is the bound. Only pairs closing at least that
+    fast are reported, so a settled pile reports none however large it is,
+    and `limit` caps what one step reports and counts the rest. A
+    simulation that asks for nothing collects nothing: the engine is not
+    even listened to.
+  - **The speed is the arrival speed**, taken before the step resolved the
+    contact, which is the only moment a hit's force is known. A fast pair is
+    found a step before it strictly touches, so that it cannot pass through,
+    and that is the contact carrying the speed.
 
 **Props.** `RigidPhysics::props` are the objects an artist placed in the
 emitter's world: a bucket for debris to spill out of, a wall to pile
@@ -542,6 +567,10 @@ files with a reason.
   driven props' new poses, one step, additions in birth order into the
   lowest free slots. Every node must build the same Jolt source with the
   same defines (`third_party/jolt`), and update together.
+- The contacts a step reports are put in ajfx's own order
+  (`contact_before`), with each pair's sides in a fixed order of their own.
+  An engine finds them on whichever thread reaches them first, so neither
+  that order nor the thread count may decide what a host does with them.
 
 ## Building
 

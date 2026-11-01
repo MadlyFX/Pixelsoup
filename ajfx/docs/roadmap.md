@@ -206,17 +206,32 @@ feedback forces could evaluate any frame directly.
      the engine reads neither a force's per-particle scale (so every slider
      was ignored, leaving exactly 1 g, 1 m/s^2 and a damping of 1) nor its
      curve over life.
-   - **Round 5, to do: breaking.** A crate that is hit hard enough comes
-     apart into pieces. Four pieces in order; the first two are worth
+   - **Round 5, in progress: breaking.** A crate that is hit hard enough
+     comes apart into pieces. Four pieces in order; the first two are worth
      having on their own.
-     - **Contacts out of the solver.** `RigidWorld` reports the step's
-       impacts -- the slot or prop index on each side, the world point, the
-       normal and the relative normal speed -- in an order of ajfx's own,
-       since that list decides what breaks and Jolt's internal order and
-       thread count must not reach it. Jolt's `ContactListener` collects
-       them; sorting by (lower slot, higher slot, quantized point) fixes the
-       order. A checkpoint must restore the list a step would have seen, so
-       contacts travel in `RigidWorld::save` beside the poses.
+     - **Contacts out of the solver, done (2026-11-01).** `RigidWorld`
+       reports the step's contacts and `Simulation::contacts` passes them
+       on, a host asking for them through `SimulationOptions::contacts`.
+       A `RigidContact` names its two sides (a body by its slot, a prop or a
+       static by its index), where and which way they met, how fast they
+       were closing when collision detection found them, and whether they
+       met this step. The sides are put in a fixed order with the normal
+       pointing from the first to the second, and the step's contacts are
+       sorted by `contact_before`, so neither Jolt's internal order nor the
+       thread count reaches them. `min_speed` is the bound rather than a
+       filter after the fact -- a settled pile closes at nothing and reports
+       nothing -- and `limit` caps a step with the rest counted, not quietly
+       dropped. Jolt's own `SaveState` already carries the contact cache, so
+       nothing new was needed for seeking: the list a step reports is a pure
+       function of that step. Tests cover a block's one reported hit on the
+       floor against its hand-computed arrival speed (5.07 units a second
+       from 1.25 up) and its silence at rest, a settling pile's 1551
+       contacts ordered and identical on 1 and 4 threads, 1297 of them
+       matching step for step after a seek, the count beyond a limit of
+       four, and a prop and another body each naming themselves as a side.
+       - **Not yet:** the contact list stops at the CPU `Simulation`. A
+         host reading contacts through `RigidRunner`, which is how the
+         media server runs rigid physics, needs them on `RigidFrame`.
      - **Shape and material per body.** Shape, density, friction and
        restitution move off `RigidWorldDesc` onto the body, so one world can
        hold crates, their shards and a bouncy ball. `add` takes them and the

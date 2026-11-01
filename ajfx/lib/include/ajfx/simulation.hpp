@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -78,6 +79,20 @@ struct SimulationState final {
     friend bool operator==(const SimulationState&, const SimulationState&) = default;
 };
 
+// Contacts a host wants its rigid physics emitters to report, step by step
+// (Simulation::contacts). Finding them costs, so without this nothing is
+// collected and nothing is reported.
+struct ContactOptions final {
+    // Only pairs closing at least this fast (units per second) are reported.
+    // This is what bounds how many there are: bodies at rest close at
+    // nothing, so a settled pile reports none however large it is. Leaving
+    // it at zero asks for every touch, resting ones included.
+    float min_speed{0.0F};
+    // At most this many per emitter per step; the rest are counted
+    // (Simulation::contacts_dropped) rather than quietly left out.
+    std::uint32_t limit{256U};
+};
+
 // What a simulation needs beyond the effect, from its package and its host.
 struct SimulationOptions final {
     // The distance fields its colliders use.
@@ -87,6 +102,8 @@ struct SimulationOptions final {
     // Runs its rigid physics emitters (ajfx::rigid::make_jolt_solver); must
     // outlive the simulation. Effects without them need none.
     const RigidSolver* rigid{nullptr};
+    // Asks its rigid physics emitters to report what their bodies hit.
+    std::optional<ContactOptions> contacts;
 };
 
 class Simulation final {
@@ -130,6 +147,18 @@ public:
     // One emitter's particles. A rigid physics emitter's `solver_state` may
     // be out of date here; state() brings it up to date.
     [[nodiscard]] const EmitterState& emitter(std::size_t index) const { return state_.emitters[index]; }
+
+    // What emitter `index`'s bodies hit in the last step, in
+    // `contact_before`'s order, which is a pure function of the step: a
+    // seek that lands on a step reports what stepping through it would
+    // have. Empty for an emitter without rigid physics, when
+    // SimulationOptions asked for no contacts, and for a step that has not
+    // run yet (a reset or a restore reports none until the next step). Good
+    // until the next step.
+    [[nodiscard]] std::span<const RigidContact> contacts(std::size_t index) const;
+    // How many more that step found and did not report, the limit having
+    // been full.
+    [[nodiscard]] std::uint32_t contacts_dropped(std::size_t index) const;
     // Replaces the state with one this simulation's state() returned (a
     // checkpoint), rebuilding rigid physics worlds from it.
     void restore(const SimulationState& state);

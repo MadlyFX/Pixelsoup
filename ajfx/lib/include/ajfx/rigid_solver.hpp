@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <tuple>
 #include <vector>
 
 // The seam between ajfx and a rigid-body engine. ajfx itself depends on none:
@@ -41,6 +42,57 @@ struct RigidStatic final {
     float friction{0.0F};
     float restitution{0.0F};
 };
+
+// What one side of a contact is: one of the emitter's bodies, one of the
+// artist's props, or one of the statics its collision modules became. The
+// index is that body's slot, or the prop's or static's place in the desc.
+enum class RigidSide {
+    Body,
+    Prop,
+    Static,
+};
+
+// A pair the step found touching, as collision detection saw them before the
+// step resolved them, so `speed` is how hard they arrived rather than what is
+// left of it afterwards.
+// - **Its sides:** `a` is the lower of the two by (what it is, its index),
+//   always, so a pair reads the same however the engine happened to order
+//   it, and `normal` points from a towards b.
+// - **Its order:** a step's contacts are sorted by `contact_before`. The
+//   order is ajfx's own: an engine's internal order, and the thread count it
+//   ran on, must not reach what is done with them.
+// - **How many:** only pairs closing at `RigidWorldDesc::contact_min_speed`
+//   or faster are reported, which is what keeps a pile at rest from
+//   reporting at all.
+struct RigidContact final {
+    RigidSide a_is{RigidSide::Body};
+    std::uint32_t a{0U};
+    RigidSide b_is{RigidSide::Body};
+    std::uint32_t b{0U};
+    // Where they met, in the world, and the direction from a towards b.
+    Vec3 point{};
+    Vec3 normal{};
+    // How fast they were closing along the normal when they were found: the
+    // force of a hit, as far as ajfx reports one. Never below zero, since a
+    // pair drifting apart is not closing.
+    float speed{0.0F};
+    // Whether this pair met this step, rather than having lain together
+    // since an earlier one. A pile at rest keeps its contacts.
+    bool began{false};
+
+    friend bool operator==(const RigidContact&, const RigidContact&) = default;
+};
+
+// The order a step's contacts are reported in: by their sides, then where
+// and which way they met, then how hard. Total, so sorting by it gives one
+// answer whatever order the contacts were found in.
+[[nodiscard]] inline bool contact_before(const RigidContact& l, const RigidContact& r) noexcept {
+    const auto key = [](const RigidContact& c) {
+        return std::tuple{c.a_is,    c.a,        c.b_is,     c.b,        c.point.x, c.point.y,
+                          c.point.z, c.normal.x, c.normal.y, c.normal.z, c.speed};
+    };
+    return key(l) < key(r);
+}
 
 // An object the artist placed, resolved from the emitter's RigidProp list:
 // the shape is chosen and measured, and the model, where one is used, is
@@ -111,6 +163,17 @@ struct RigidWorldDesc final {
     std::vector<RigidStatic> statics;
     // The artist's props, which enter the world before any body, in order.
     std::vector<RigidPropDesc> props;
+    // Whether each step reports the contacts it found (RigidWorld::contacts).
+    // Finding them out of an engine costs, so a world reports none unless it
+    // is asked to.
+    bool report_contacts{false};
+    // Only pairs closing at least this fast (units per second) are reported.
+    // This is what bounds how many there are: bodies at rest close at
+    // nothing, so a settled pile reports none however large it is.
+    float contact_min_speed{0.0F};
+    // At most this many are reported. What will not fit is counted
+    // (RigidWorld::contacts_dropped) rather than quietly left out.
+    std::uint32_t contact_limit{256U};
 };
 
 // A body as a particle is born, and as the solver reports it after a step.
@@ -144,6 +207,13 @@ public:
     [[nodiscard]] virtual RigidBodyState body(std::uint32_t slot) const = 0;
     // Where the prop in `index` stands, for a host to draw it by.
     [[nodiscard]] virtual RigidBodyState prop(std::size_t index) const = 0;
+    // The contacts the last step found, in `contact_before`'s order. Empty
+    // until a step has run, and for any world whose desc did not ask for
+    // them. What it returns is good until the next step.
+    [[nodiscard]] virtual std::span<const RigidContact> contacts() const = 0;
+    // How many more the last step found and did not report, the desc's
+    // contact_limit being full.
+    [[nodiscard]] virtual std::uint32_t contacts_dropped() const = 0;
     // Everything the step depends on beyond the bodies' existence: poses,
     // velocities, sleep, contacts. Allocates; for checkpoints, not every step.
     [[nodiscard]] virtual std::vector<std::uint8_t> save() const = 0;

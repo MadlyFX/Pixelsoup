@@ -117,8 +117,10 @@ float normalized_age(const EmitterState& s, std::size_t i) {
     return std::clamp(s.age[i] / s.lifetime[i], 0.0F, 1.0F);
 }
 
-// How colliders meet an emitter's particles when it has a RigidBody.
-struct RigidContact final {
+// How colliders meet an emitter's particles when it has a RigidBody. Not a
+// RigidContact (rigid_solver.hpp), which is what a physics engine's bodies
+// were found hitting: these are the settings a collider responds by.
+struct BodyResponse final {
     float contact_scale;
     float rest_speed;
     float roundness;
@@ -135,7 +137,7 @@ struct Step final {
     std::size_t first;
     std::size_t last;
     const FieldSet* fields{nullptr};
-    std::optional<RigidContact> rigid{};
+    std::optional<BodyResponse> rigid{};
 };
 
 // ------------------------------------------------------------ init modules
@@ -835,10 +837,15 @@ RigidPropDesc::Motion solver_motion(PropMotion motion) {
 // The world a rigid physics emitter's bodies live in: its shape, material and
 // damping, its colliders as statics, and the artist's props.
 Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysics& physics, const MeshSet& meshes,
-                                        float step_seconds) {
+                                        float step_seconds, const std::optional<ContactOptions>& contacts) {
     RigidWorldDesc desc;
     desc.capacity = emitter.capacity;
     desc.step_seconds = step_seconds;
+    if (contacts) {
+        desc.report_contacts = true;
+        desc.contact_min_speed = contacts->min_speed;
+        desc.contact_limit = contacts->limit;
+    }
     desc.density = physics.density;
     desc.friction = physics.friction;
     desc.restitution = physics.restitution;
@@ -991,7 +998,8 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
                          "emitter " + quoted(emitter.name) +
                              " has rigid physics, and no rigid solver was given to run it (ajfx::rigid has one)"};
         }
-        Result<RigidWorldDesc> desc = rigid_world_desc(emitter, *physics, options.meshes, step_seconds);
+        Result<RigidWorldDesc> desc =
+            rigid_world_desc(emitter, *physics, options.meshes, step_seconds, options.contacts);
         if (!desc) {
             return desc.error();
         }
@@ -1161,6 +1169,20 @@ const SimulationState& Simulation::state() const {
     return state_;
 }
 
+std::span<const RigidContact> Simulation::contacts(std::size_t index) const {
+    if (index >= rigid_.size() || !rigid_[index].world) {
+        return {};
+    }
+    return rigid_[index].world->contacts();
+}
+
+std::uint32_t Simulation::contacts_dropped(std::size_t index) const {
+    if (index >= rigid_.size() || !rigid_[index].world) {
+        return 0U;
+    }
+    return rigid_[index].world->contacts_dropped();
+}
+
 void Simulation::restore(const SimulationState& state) {
     state_ = state;
     rebuild_worlds();
@@ -1215,7 +1237,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     for (const UpdateModule& module : emitter.update) {
         if (const auto* rigid = std::get_if<RigidBody>(&module)) {
             step.rigid =
-                RigidContact{rigid->contact_scale, step.in(rigid->rest_speed), step.in(rigid->roundness)};
+                BodyResponse{rigid->contact_scale, step.in(rigid->rest_speed), step.in(rigid->roundness)};
         }
     }
 
