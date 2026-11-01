@@ -159,7 +159,7 @@ ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // or draw it yourse
   instance count the simulation wrote: camera-facing soft discs, or quads
   aligned to velocity and stretched by `SpriteRenderer::stretch` seconds of
   motion, blended alpha, additive or premultiplied. Alpha-blended emitters draw
-  in birth order, which is deterministic but not depth-sorted yet.
+  back to front (see Drawing).
 - A host implements `gpu::Device` (buffers, compute and graphics pipelines,
   dispatch and draw, direct and indirect, copies, barriers, render targets) to
   run ajfx on its own renderer, or reads `EmitterBuffers` and draws itself.
@@ -206,9 +206,9 @@ the wall. Its page model and compiler use ajfx alone.
 
 **Sorting.** Alpha-blended emitters draw back to front: `ParticleRenderer`
 sorts them with a `gpu::ParticleSorter` before drawing.
-- **Which emitters sort:** those with `SpriteRenderer::sort` set (the
-  default) and a blend that depends on order. Additive emitters keep birth
-  order and cost nothing.
+- **Which emitters sort:** sprites and meshes with `SpriteRenderer::sort`
+  set (the default) and a blend that depends on order. Additive emitters
+  and ribbons keep birth order and cost nothing.
 - **How it works:** a stable GPU radix sort of the view depth. It uses
   integer scans, with atomics only for counting. It sorts the top 24 bits of
   the depth (one part in 32,768 of the distance) in six passes, and sizes
@@ -253,8 +253,11 @@ named by `mesh`, a package entry.
   rotation.
 - **Look:** a texture takes the mesh's own coordinates. Shading is a light
   at the camera.
-- **Depth:** the reference renderer has no depth buffer, so it culls back
-  faces. Use convex meshes there.
+- **Depth:** the reference renderer has no depth buffer. It culls back
+  faces, so use convex meshes there, and it draws meshes back to front by
+  their centres. Meshes that touch or interpenetrate can still overlap
+  wrongly where their centres' order differs from their surfaces'. The media
+  server draws meshes with depth.
 
 **Lights.** Some of an emitter's particles become point lights in the
 host's lit scene, at most `light_count` at once.

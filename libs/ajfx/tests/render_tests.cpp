@@ -327,6 +327,57 @@ void mesh_particles_draw_their_mesh() {
     AJFX_CHECK(!missing.ok() && missing.error().code == ErrorCode::MissingMesh);
 }
 
+void mesh_particles_draw_back_to_front() {
+    // Two cubes 0.4 across, the second born half a second after the first,
+    // both moving toward the camera: the older is nearer, yet drawn first by
+    // birth order. Colour by age tells them apart: the older red, the younger
+    // green. Without a depth buffer, only a sort keeps the near one on top.
+    EffectBuilder builder{"pair"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.time = 0.0F, .count = 1U})
+        .spawn(SpawnBurst{.time = 0.5F, .count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(Velocity{.direction = Vec3{0.0F, 0.0F, 1.0F}, .speed_min = 1.0F, .speed_max = 1.0F})
+        .init(InitSize{.min = 0.4F, .max = 0.4F})
+        .update(ColorOverLife{.keys = {{0.0F, Color{0.0F, 1.0F, 0.0F, 1.0F}},
+                                       {0.03F, Color{0.0F, 1.0F, 0.0F, 1.0F}},
+                                       {0.05F, Color{1.0F, 0.0F, 0.0F, 1.0F}},
+                                       {1.0F, Color{1.0F, 0.0F, 0.0F, 1.0F}}}})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "cube"});
+    const Effect sorted = builder.build().value();
+    const MeshSet meshes{{"cube", cube_mesh()}};
+    const auto draw = [&](const Effect& effect) {
+        const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+        gpu::GpuSimulation simulation = gpu::GpuSimulation::create(*g_device, effect, kernels).value();
+        gpu::ParticleRenderer renderer = gpu::ParticleRenderer::create(*g_device, effect, kernels, TextureSet{},
+                                                                       gpu::TextureFormat::Rgba8Unorm, meshes)
+                                             .value();
+        gpu::ParticleSorter sorter = gpu::ParticleSorter::create(*g_device, effect, kernels).value();
+        const gpu::Texture target =
+            g_device->create_render_target(size, size, gpu::TextureFormat::Rgba8Unorm, "test target").value();
+        // 0.6 s: the first at z = 0.6, the second at z = 0.1, one behind the
+        // other.
+        simulation.advance_to(36U);
+        const EmitterState state = simulation.read_emitter(0U).value();
+        AJFX_CHECK(state.alive() == 2U && state.position[0].z > state.position[1].z + 0.4F);
+        AJFX_CHECK(state.color[0].r == 1.0F && state.color[1].g == 1.0F);
+        const std::array<float, 4> clear{0.0F, 0.0F, 0.0F, 0.0F};
+        renderer.render(simulation, sorter, ortho, target, &clear);
+        const Pixel centre = Frame{g_device->read_texture(target).value()}.at(32U, 32U);
+        g_device->destroy_texture(target);
+        return centre;
+    };
+    AJFX_CHECK(gpu::sorts(sorted.emitters[0]));
+    const Pixel near = draw(sorted);
+    AJFX_CHECK(near.r >= 250 && near.g == 0);
+    // Opting out of the sort draws them in birth order: the far one on top.
+    Effect unsorted = sorted;
+    unsorted.emitters[0].renderer.sort = false;
+    const Pixel far = draw(unsorted);
+    AJFX_CHECK(far.g >= 250 && far.r == 0);
+}
+
 void tumbling_meshes_turn_by_their_orientation() {
     // A red unit cube tumbling at 200 degrees a second about a random axis.
     EffectBuilder builder{"tumbling"};
@@ -413,6 +464,7 @@ int main() {
         {"ribbons_join_the_particles_in_birth_order", ribbons_join_the_particles_in_birth_order},
         {"mesh_particles_draw_their_mesh", mesh_particles_draw_their_mesh},
         {"tumbling_meshes_turn_by_their_orientation", tumbling_meshes_turn_by_their_orientation},
+        {"mesh_particles_draw_back_to_front", mesh_particles_draw_back_to_front},
         {"frames_are_reproducible", frames_are_reproducible},
     };
     const int result = ajfx::test::run(cases);

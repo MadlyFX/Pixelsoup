@@ -11,8 +11,10 @@
 #include <memory>
 
 // Depth sorting for alpha-blended emitters. Blending "over" depends on order,
-// so those emitters draw back to front; additive emitters, whose result does
-// not, ribbons, whose strip needs birth order, and emitters that opt out with
+// so those emitters draw back to front, sprites and meshes alike (a renderer
+// without a depth buffer relies on the order to hide far meshes behind near
+// ones); additive emitters, whose result does not depend on order, ribbons,
+// whose strip needs birth order, and emitters that opt out with
 // `SpriteRenderer::sort = false`, keep birth order and cost nothing here.
 //
 // The sort is a stable integer radix sort on the GPU (shaders/ajfx_sort.hlsl)
