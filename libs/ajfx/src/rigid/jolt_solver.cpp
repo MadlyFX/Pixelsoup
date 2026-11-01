@@ -7,6 +7,8 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
@@ -20,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ajfx::rigid {
 namespace {
@@ -80,6 +83,8 @@ Vec3 vec(JPH::Vec3Arg v) {
 constexpr float smallest_size = 1.0e-3F;
 // How far out a plane collider reaches from its centre.
 constexpr float plane_extent = 1000.0F;
+// How far beyond a removed body's bounds a body counts as touching it.
+constexpr float touch_margin = 0.05F;
 
 class JoltWorld final : public RigidWorld {
 public:
@@ -175,11 +180,31 @@ public:
         }
     }
 
+    // Jolt leaves a sleeping body asleep when what it rests on goes, so it
+    // would hang in the air: everything touching the removed body wakes.
+    // The broad phase's bounds depend on its history, which a restored world
+    // does not share, so its candidates are kept by their exact bounds and
+    // woken in body order, as Jolt's determinism notes ask.
     void remove(std::uint32_t slot) override {
         JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
         const JPH::BodyID id(slot);
+        JPH::AABox reach = bodies.GetTransformedShape(id).GetWorldSpaceBounds();
+        reach.ExpandBy(JPH::Vec3::sReplicate(touch_margin));
+        JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> near;
+        system_.GetBroadPhaseQuery().CollideAABox(reach, near);
+        std::vector<JPH::BodyID> touching;
+        for (const JPH::BodyID other : near.mHits) {
+            if (other != id && bodies.GetObjectLayer(other) == layers::moving &&
+                bodies.GetTransformedShape(other).GetWorldSpaceBounds().Overlaps(reach)) {
+                touching.push_back(other);
+            }
+        }
+        std::sort(touching.begin(), touching.end());
         bodies.RemoveBody(id);
         bodies.DestroyBody(id);
+        if (!touching.empty()) {
+            bodies.ActivateBodies(touching.data(), static_cast<int>(touching.size()));
+        }
     }
 
     void step(Vec3 gravity) override {

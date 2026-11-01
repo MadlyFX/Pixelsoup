@@ -103,6 +103,35 @@ void piles_rest_on_the_floor_and_each_other() {
     AJFX_CHECK(still == s.alive());
 }
 
+void bodies_fall_when_what_held_them_up_goes() {
+    // Two blocks half a unit across, dropped one a second after the other,
+    // so the second comes to rest asleep on the first. Each lives three
+    // seconds: when the first goes, the second must fall to the floor
+    // rather than hang where it slept.
+    EffectBuilder builder{"stack"};
+    builder.emitter("blocks")
+        .capacity(4U)
+        .spawn(SpawnBurst{.time = 0.0F, .count = 1U})
+        .spawn(SpawnBurst{.time = 1.0F, .count = 1U})
+        .init(Lifetime{.min = 3.0F, .max = 3.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, 1.5F, 0.0F}})
+        .init(InitSize{.min = 0.5F, .max = 0.5F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.8F, .restitution = 0.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    Simulation simulation = make(builder.build().value());
+    // At 2.9 s the second sleeps on the first, a block's height up.
+    simulation.advance_to(174U);
+    const EmitterState& s = simulation.emitter(0);
+    AJFX_CHECK(s.alive() == 2U);
+    AJFX_CHECK(length(s.velocity[1]) == 0.0F && std::fabs(s.position[1].y - 0.75F) < 0.03F);
+    // At 3.6 s the first has gone and the second lies on the floor.
+    simulation.advance_to(216U);
+    AJFX_CHECK(s.alive() == 1U);
+    std::cout << "  the second block came down to " << s.position[0].y << '\n';
+    AJFX_CHECK(std::fabs(s.position[0].y - 0.25F) < 0.03F);
+}
+
 void reruns_and_thread_counts_agree() {
     const Effect effect = churn();
     const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
@@ -183,9 +212,20 @@ void births_deaths_and_colour_follow_the_reference() {
     }
 }
 
+// The height of a rubble chip's lowest corner: the chip mesh's half extents
+// are 0.5, 0.25 and 0.4 of its size.
+float lowest_corner(const EmitterState& s, std::size_t i) {
+    const Quat q = s.orientation[i];
+    const float h[3] = {0.5F * s.size[i], 0.25F * s.size[i], 0.4F * s.size[i]};
+    // How far up each of the chip's own axes points.
+    const float up[3] = {2.0F * (q.x * q.y + q.w * q.z), 1.0F - 2.0F * (q.x * q.x + q.z * q.z),
+                         2.0F * (q.y * q.z - q.w * q.x)};
+    return s.position[i].y - (std::fabs(up[0]) * h[0] + std::fabs(up[1]) * h[1] + std::fabs(up[2]) * h[2]);
+}
+
 void hulls_wrap_the_renderers_mesh() {
-    // The rubble preset's chips: hulls of the chip mesh, piling against two
-    // blocks. Without the mesh, or without a solver, it is refused.
+    // The rubble preset's chips: hulls of the chip mesh, piling on the floor
+    // and each other. Without the mesh, or without a solver, it is refused.
     const Effect effect = presets::rubble();
     AJFX_CHECK(validate(effect).ok());
     const Result<Simulation> no_mesh = Simulation::create(effect, 0U, SimulationOptions{.rigid = g_solver.get()});
@@ -198,15 +238,23 @@ void hulls_wrap_the_renderers_mesh() {
     rubble.advance_to(360U);
     const EmitterState& s = rubble.emitter(0);
     AJFX_CHECK(s.alive() == 400U);
-    std::size_t on_blocks = 0U;
+    std::size_t on_floor = 0U;
+    std::size_t piled = 0U;
     for (std::size_t i = 0U; i < s.alive(); ++i) {
-        // A chip at size s is at most s/2 from its centre to any corner of
-        // the mesh's 0.5 x 0.25 x 0.4 half extents: never below the floor.
-        AJFX_CHECK(s.position[i].y > -0.03F);
-        on_blocks += std::fabs(s.position[i].x - 1.6F) < 0.35F && s.position[i].y > 0.7F ? 1U : 0U;
+        // At rest, and touching the floor with the mesh as drawn: the hull
+        // is the mesh, so no chip hovers above it or sinks in further than
+        // the engine lets contacts overlap (its penetration slop, 0.02).
+        AJFX_CHECK(length(s.velocity[i]) == 0.0F);
+        const float low = lowest_corner(s, i);
+        AJFX_CHECK(low > -0.025F);
+        if (low < 0.02F) {
+            ++on_floor;
+        } else {
+            ++piled;
+        }
     }
-    std::cout << "  " << on_blocks << " chips rest on the low block\n";
-    AJFX_CHECK(on_blocks > 0U);
+    std::cout << "  " << on_floor << " chips lie on the floor, " << piled << " on other chips\n";
+    AJFX_CHECK(on_floor > 100U && piled > 100U);
 }
 
 void unsupported_combinations_are_refused() {
@@ -252,6 +300,7 @@ int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
         {"piles_rest_on_the_floor_and_each_other", piles_rest_on_the_floor_and_each_other},
+        {"bodies_fall_when_what_held_them_up_goes", bodies_fall_when_what_held_them_up_goes},
         {"reruns_and_thread_counts_agree", reruns_and_thread_counts_agree},
         {"seeking_lands_on_the_stepped_state", seeking_lands_on_the_stepped_state},
         {"births_deaths_and_colour_follow_the_reference", births_deaths_and_colour_follow_the_reference},

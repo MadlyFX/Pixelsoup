@@ -191,10 +191,6 @@ Effect rubble() {
         .update(Gravity{})
         .update(RigidPhysics{.density = 2400.0F, .friction = 0.7F, .restitution = 0.15F})
         .update(PlaneCollision{.restitution = 0.1F, .friction = 0.8F})
-        .update(BoxCollision{.center = Vec3{1.6F, 0.35F, 0.2F}, .half_size = Vec3{0.35F, 0.35F, 0.6F},
-                             .restitution = 0.1F, .friction = 0.7F})
-        .update(BoxCollision{.center = Vec3{-1.4F, 0.5F, -0.6F}, .half_size = Vec3{0.4F, 0.5F, 0.4F},
-                             .restitution = 0.1F, .friction = 0.7F})
         .update(ColorOverLife{.keys = {{0.0F, Color{}}, {0.92F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}}})
         .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "chip"});
     return finish(builder);

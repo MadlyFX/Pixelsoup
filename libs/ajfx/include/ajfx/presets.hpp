@@ -27,7 +27,8 @@ namespace ajfx::presets {
 [[nodiscard]] Effect debris();
 
 // A burst of stone chips (the "chip" mesh) thrown up from the floor that
-// land, pile against two blocks and against each other, and come to rest:
+// land, pile on the floor and each other, and come to rest (every collider
+// is something a viewer can see):
 // rigid physics, so it needs ajfx::rigid to run. Parameters: force (the
 // fastest throw, units per second).
 [[nodiscard]] Effect rubble();

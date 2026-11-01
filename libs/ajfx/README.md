@@ -347,7 +347,9 @@ colliders, pile up, knock each other about and fall asleep at rest.
   `ajfx_rigid_bench` measures it and prints a state digest for comparing
   builds and machines.
 
-The `rubble` preset throws 400 chips that pile against two blocks.
+The `rubble` preset throws 400 chips that pile on the floor and each other.
+When a body's life ends, everything touching it wakes, so nothing stays
+asleep in the air where it rested.
 
 ## Sample viewer
 
