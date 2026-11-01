@@ -1100,17 +1100,28 @@ feedback forces evaluate any frame directly.
      - **Cost on the 5800X:** `rubble` (400 hulls) 0.75 ms a step on one
        thread. 4,000 hulls in a dense heap take 9.7 ms on one thread and
        3.4 ms on four, so heaps that size need threads.
-     - **Round 2, the media server:**
-       - Step rigid emitters on a worker, off the frame path. Seeks
-         resimulate there, and the node holds until it is caught up. Today
-         `advance` steps them inline.
-       - Give the solver a thread budget.
-       - Save checkpoints off the frame path: `save_into` copies the
-         engine state on the CPU.
-       - Run the cluster check: the laptop must print the same
-         `ajfx_rigid_bench` digest as the Director. This doubles as the
-         spike's missing cross-machine run.
-       - Then a Studio block.
+     - **Round 2, the media server, done (2026-11-01):**
+       - `ajfx::RigidRunner` steps every instance's rigid emitters on one
+         thread per particle pass, up to `rigid_lead` steps ahead of the
+         show frame, with its own checkpoints. A tick the frame path waits
+         on comes first; instances take turns.
+       - `ParticlePass` creates instances with `RigidHosting::Host`. Each
+         advance writes the target step's rigid particles once the runner
+         has them; until then the instance is behind and the node holds.
+         No engine step or engine checkpoint runs while a frame records.
+       - Thread budget: `ParticleSettings::rigid_threads` (the runner's
+         thread and Jolt's workers, default 2), made with the first rigid
+         instance.
+       - The scene renderer hands the runner a parameter provider that owns
+         copies of the placement's tracks. Its digest now includes the
+         start frame and show rate, which shift keyed parameters.
+       - Studio: Physics and Pile blocks, and the Rock pile recipe.
+     - **Piles, done (2026-11-01):** `SpawnPile` stacks bodies before step
+       0 (a heap or a box), held asleep until `release`. Step 0 holds them,
+       so a paused effect shows the pile and seeks to the start find it.
+     - **Still to do before rigid effects go to the cluster:** the laptop
+       must print the same `ajfx_rigid_bench` digest as the Director. This
+       doubles as the spike's missing cross-machine run.
      - **Later:**
        - Colliders that move with parameters.
        - SDF and mesh colliders, as Jolt mesh shapes.

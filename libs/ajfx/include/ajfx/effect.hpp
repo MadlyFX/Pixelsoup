@@ -79,6 +79,9 @@ enum class Attribute : std::uint32_t {
 // a rigid-body engine's bodies, simulated on the CPU (see rigid_solver.hpp).
 [[nodiscard]] const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept;
 [[nodiscard]] bool has_rigid_physics(const Effect& effect) noexcept;
+// The effect's rigid physics emitters alone, in order. Each emitter's
+// randomness is its own, so they simulate there exactly as within the whole.
+[[nodiscard]] Effect rigid_physics_part(const Effect& effect);
 
 [[nodiscard]] constexpr bool has_attribute(std::uint32_t mask, Attribute attribute) noexcept {
     return (mask & static_cast<std::uint32_t>(attribute)) != 0U;

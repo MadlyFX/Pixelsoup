@@ -597,8 +597,8 @@ void move_rigid(Step& step, const Emitter& emitter, RigidWorld& world) {
 }
 
 // Bodies for the newborns [first, alive), in birth order, each in the lowest
-// slot no older particle holds.
-void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, RigidWorld& world) {
+// slot no older particle holds; asleep if `asleep`.
+void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, RigidWorld& world, bool asleep = false) {
     std::vector<bool> used(capacity, false);
     for (std::size_t i = 0U; i < first; ++i) {
         used[s.body[i]] = true;
@@ -611,7 +611,132 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
         }
         used[next] = true;
         s.body[i] = next;
-        world.add(next, s.size[i], RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]});
+        world.add(next, s.size[i], RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]},
+                  asleep);
+    }
+}
+
+// The step a pile is let go at: the first that starts at or after its
+// release. 0 lets it go at once.
+std::uint64_t release_tick(const SpawnPile& pile, std::uint32_t simulation_rate) {
+    return static_cast<std::uint64_t>(std::ceil(static_cast<double>(pile.release) * simulation_rate));
+}
+
+// How far a body of size 1 reaches across, however it is turned: the
+// diameter of the ball it turns within.
+float body_reach(const RigidWorldDesc& desc) {
+    switch (desc.shape) {
+    case RigidWorldDesc::Shape::Sphere:
+        return 1.0F;
+    case RigidWorldDesc::Shape::Box:
+        return std::numbers::sqrt3_v<float>;
+    case RigidWorldDesc::Shape::Hull: {
+        float farthest = 0.0F;
+        for (const Vec3& point : desc.hull_points) {
+            farthest = std::max(farthest, dot(point, point));
+        }
+        return 2.0F * std::sqrt(farthest);
+    }
+    }
+    return 1.0F;
+}
+
+// Where `count` bodies spaced `d` apart stack, bottom first, relative to the
+// middle of the pile's base.
+std::vector<Vec3> pile_lattice(const SpawnPile& m, std::size_t count, float d) {
+    std::vector<Vec3> points;
+    if (count == 0U) {
+        return points;
+    }
+    if (m.shape == PileShape::Box) {
+        const auto across = [d](float extent) {
+            return std::max<std::size_t>(1U, static_cast<std::size_t>(std::floor(extent / d + 1.0e-4F)));
+        };
+        const std::size_t nx = across(m.width);
+        const std::size_t nz = across(m.depth);
+        const float x0 = -0.5F * static_cast<float>(nx - 1U) * d;
+        const float z0 = -0.5F * static_cast<float>(nz - 1U) * d;
+        for (std::size_t n = 0U; n < count; ++n) {
+            const std::size_t layer = n / (nx * nz);
+            const std::size_t row = (n / nx) % nz;
+            const std::size_t column = n % nx;
+            points.push_back(Vec3{x0 + static_cast<float>(column) * d,
+                                  0.5F * d + static_cast<float>(layer) * d,
+                                  z0 + static_cast<float>(row) * d});
+        }
+        return points;
+    }
+    // A heap: staggered layers, each body over a gap in the layer below,
+    // taken in the order nested cones of the heap's slope reach them, so the
+    // heap keeps its slope at every count.
+    const float h = d * std::numbers::sqrt2_v<float> * 0.5F;
+    const float rise = std::tan(m.slope * (std::numbers::pi_v<float> / 180.0F));
+    struct Candidate final {
+        float key;
+        std::int32_t layer;
+        std::int32_t row;
+        std::int32_t column;
+        Vec3 at;
+    };
+    // A cone holding `count` lattice cells, from which the heap is taken.
+    const double cells = static_cast<double>(count) * d * d * h;
+    double height = std::cbrt(3.0 * cells * rise * rise / std::numbers::pi);
+    std::vector<Candidate> candidates;
+    while (candidates.size() < count) {
+        height *= 1.5;
+        candidates.clear();
+        const auto layers = static_cast<std::int32_t>(std::ceil((height + d) / h));
+        const auto reach = static_cast<std::int32_t>(std::ceil((height / rise + d) / d)) + 1;
+        for (std::int32_t layer = 0; layer < layers; ++layer) {
+            const float offset = (layer % 2 == 0) ? 0.0F : 0.5F * d;
+            const float y = 0.5F * d + static_cast<float>(layer) * h;
+            for (std::int32_t row = -reach; row <= reach; ++row) {
+                for (std::int32_t column = -reach; column <= reach; ++column) {
+                    const float x = static_cast<float>(column) * d + offset;
+                    const float z = static_cast<float>(row) * d + offset;
+                    const float key = y + std::sqrt(x * x + z * z) * rise;
+                    if (key <= static_cast<float>(height) + 0.5F * d) {
+                        candidates.push_back(Candidate{key, layer, row, column, Vec3{x, y, z}});
+                    }
+                }
+            }
+        }
+    }
+    const auto before = [](const Candidate& a, const Candidate& b) {
+        if (a.key != b.key) {
+            return a.key < b.key;
+        }
+        if (a.layer != b.layer) {
+            return a.layer < b.layer;
+        }
+        return a.row != b.row ? a.row < b.row : a.column < b.column;
+    };
+    std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(count), candidates.end(),
+                      before);
+    for (std::size_t n = 0U; n < count; ++n) {
+        points.push_back(candidates[n].at);
+    }
+    return points;
+}
+
+// Puts the pile's newborns [first, last) on its lattice, still: the largest
+// of them sets the spacing, so none overlaps however it is turned.
+void place_pile(const SpawnPile& m, Step& step, float reach) {
+    EmitterState& s = step.s;
+    float largest = 0.0F;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        largest = std::max(largest, s.size[i]);
+    }
+    const float d = std::max(reach * largest * m.spacing, 1.0e-3F);
+    const std::vector<Vec3> lattice = pile_lattice(m, step.last - step.first, d);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::uint32_t index = s.spawn_index[i];
+        const float jx = (step.random(index, m.id, 0U) - 0.5F) * m.jitter * d;
+        const float jz = (step.random(index, m.id, 1U) - 0.5F) * m.jitter * d;
+        s.position[i] = m.center + lattice[i - step.first] + Vec3{jx, 0.0F, jz};
+        s.velocity[i] = Vec3{};
+        s.angular_velocity[i] = Vec3{};
+        s.spin[i] = 0.0F;
     }
 }
 
@@ -723,6 +848,10 @@ Simulation::Simulation(Effect effect, std::uint32_t instance_seed, FieldSet fiel
       step_seconds_{1.0F / static_cast<float>(effect_.simulation_rate)},
       fields_{std::move(fields)} {
     rigid_.resize(effect_.emitters.size());
+    has_piles_ = std::any_of(effect_.emitters.begin(), effect_.emitters.end(), [](const Emitter& emitter) {
+        return std::any_of(emitter.spawn.begin(), emitter.spawn.end(),
+                           [](const SpawnModule& m) { return std::holds_alternative<SpawnPile>(m); });
+    });
     reset();
 }
 
@@ -769,10 +898,31 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
     Simulation simulation{std::move(effect), instance_seed, std::move(options.fields)};
     simulation.solver_ = options.rigid;
     simulation.rigid_ = std::move(rigid);
+    // The piles need their worlds, which the constructor did not have yet.
+    if (simulation.has_piles_) {
+        simulation.reset();
+    }
     return simulation;
 }
 
-void Simulation::reset() {
+void Simulation::reset(const ParameterProvider* parameters) {
+    std::vector<ParameterValue> values;
+    detail::resolve_values(effect_, parameters, 0U, values);
+    start(values);
+}
+
+void Simulation::prepare(const ParameterProvider* parameters) {
+    if (!has_piles_ || state_.tick != 0U) {
+        return;
+    }
+    std::vector<ParameterValue> values;
+    detail::resolve_values(effect_, parameters, 0U, values);
+    if (values != pile_values_) {
+        start(values);
+    }
+}
+
+void Simulation::start(std::span<const ParameterValue> values) {
     state_ = SimulationState{};
     state_.emitters.resize(effect_.emitters.size());
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
@@ -780,6 +930,80 @@ void Simulation::reset() {
     }
     rebuild_worlds();
     solver_state_stale_ = false;
+    pile_values_.assign(values.begin(), values.end());
+    if (has_piles_) {
+        for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
+            prespawn(i, values);
+        }
+        solver_state_stale_ = std::any_of(rigid_.begin(), rigid_.end(),
+                                          [](const RigidEmitter& r) { return r.world != nullptr; });
+    }
+}
+
+// Each pile's bodies, born at age 0 before step 0 and set up by the init
+// modules as any newborn, then put on the pile still and, until released,
+// asleep.
+void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> values) {
+    const Emitter& emitter = effect_.emitters[index];
+    EmitterState& s = state_.emitters[index];
+    RigidWorld* world = rigid_[index].world.get();
+    if (world == nullptr) {
+        return;
+    }
+    const float reach = body_reach(rigid_[index].desc);
+    Step step{s, Inputs{effect_, values}, Random{hash_mix(instance_seed_, emitter.seed)}, step_seconds_, 0.0, 0.0,
+              0U, 0U, &fields_};
+    const auto run = [&step](const auto& module) { apply(module, step); };
+    for (const SpawnModule& spawn : emitter.spawn) {
+        const auto* pile = std::get_if<SpawnPile>(&spawn);
+        if (pile == nullptr) {
+            continue;
+        }
+        step.first = s.alive();
+        for (std::uint32_t c = 0U; c < pile->count; ++c) {
+            if (s.alive() < emitter.capacity) {
+                append(s, 0.0F);
+            } else {
+                ++s.refused;
+            }
+            ++s.spawned;
+        }
+        step.last = s.alive();
+        for (const InitModule& module : emitter.init) {
+            std::visit(run, module);
+        }
+        for (std::size_t i = step.first; i < step.last; ++i) {
+            s.color[i] = s.base_color[i];
+            s.size[i] = s.base_size[i];
+        }
+        for (const UpdateModule& module : emitter.update) {
+            if (std::holds_alternative<ColorOverLife>(module)) {
+                std::visit(run, module);
+            }
+        }
+        place_pile(*pile, step, reach);
+        add_bodies(s, step.first, emitter.capacity, *world, release_tick(*pile, effect_.simulation_rate) > 0U);
+        // Step 0 shows the poses the engine holds (it keeps its own
+        // normalized turn), so a held body never moves by a bit.
+        for (std::size_t i = step.first; i < step.last; ++i) {
+            const RigidBodyState body = world->body(s.body[i]);
+            s.position[i] = body.position;
+            s.orientation[i] = body.orientation;
+        }
+    }
+}
+
+bool Simulation::held(std::size_t index, std::uint32_t spawn_index) const {
+    std::uint64_t first = 0U;
+    for (const SpawnModule& spawn : effect_.emitters[index].spawn) {
+        if (const auto* pile = std::get_if<SpawnPile>(&spawn)) {
+            if (spawn_index >= first && spawn_index < first + pile->count) {
+                return state_.tick < release_tick(*pile, effect_.simulation_rate);
+            }
+            first += pile->count;
+        }
+    }
+    return false;
 }
 
 void Simulation::rebuild_worlds() {
@@ -797,7 +1021,8 @@ void Simulation::rebuild_worlds() {
         const EmitterState& s = state_.emitters[i];
         for (std::size_t p = 0U; p < s.alive() && p < s.body.size(); ++p) {
             rigid.world->add(s.body[p], s.size[p],
-                             RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]});
+                             RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]},
+                             held(i, s.spawn_index[p]));
         }
     }
 }
@@ -834,6 +1059,9 @@ void Simulation::restore(const SimulationState& state) {
 
 void Simulation::step(const ParameterProvider* parameters) {
     detail::resolve_values(effect_, parameters, state_.tick, values_);
+    if (has_piles_ && state_.tick == 0U && values_ != pile_values_) {
+        start(values_);
+    }
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
         step_emitter(i, values_);
     }
@@ -887,6 +1115,26 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     step.last = s.alive();
     const auto run = [&step](const auto& module) { apply(module, step); };
     if (world != nullptr) {
+        // Piles let go this step wake, in slot order.
+        std::uint64_t first = 0U;
+        std::vector<std::uint32_t> waking;
+        for (const SpawnModule& spawn : emitter.spawn) {
+            if (const auto* pile = std::get_if<SpawnPile>(&spawn)) {
+                const std::uint64_t release = release_tick(*pile, effect_.simulation_rate);
+                if (release > 0U && release == state_.tick) {
+                    for (std::size_t i = 0U; i < s.alive(); ++i) {
+                        if (s.spawn_index[i] >= first && s.spawn_index[i] < first + pile->count) {
+                            waking.push_back(s.body[i]);
+                        }
+                    }
+                }
+                first += pile->count;
+            }
+        }
+        if (!waking.empty()) {
+            std::sort(waking.begin(), waking.end());
+            world->wake(waking);
+        }
         move_rigid(step, emitter, *world);
     } else {
         // Forces, integration, then constraints and appearance.
@@ -981,9 +1229,10 @@ void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const Pa
         if (best != nullptr) {
             simulation.restore(*best);
         } else {
-            simulation.reset();
+            simulation.reset(parameters);
         }
     }
+    simulation.prepare(parameters);
     while (true) {
         if (simulation.tick() % interval_ == 0U) {
             record(simulation);

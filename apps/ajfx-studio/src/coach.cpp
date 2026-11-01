@@ -70,7 +70,8 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             continue;
         }
 
-        const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr ||
+        const bool piled = first(layer, "pile") != nullptr || has_raw(layer, "spawn_pile");
+        const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr || piled ||
                           has_raw(layer, "spawn_rate") || has_raw(layer, "spawn_burst");
         if (!born) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Warning, "Nothing is born in this layer yet.",
@@ -86,7 +87,8 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
                              "Add appearance", add_block(layer.uid, "appearance")});
         }
 
-        if (first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life")) {
+        // A pile's pieces lie on long after the loop, so their end is not seen.
+        if (first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life") && !piled) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Tip,
                              "Particles vanish suddenly at the end of their life. A fade hides the pop.", "Add fade",
                              add_block(layer.uid, "fade")});

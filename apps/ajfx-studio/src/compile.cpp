@@ -123,6 +123,21 @@ public:
 
     // Builds the emitter; on failure sets `error` and `error_block`.
     std::optional<Emitter> build(LayerReport& report) {
+        // With Physics the engine turns the pieces: Tumble then only sets
+        // their spin, and a pile takes default physics without it.
+        physics_ = std::any_of(layer_.blocks.begin(), layer_.blocks.end(), [](const Block& b) {
+            const auto* update = b.raw ? std::get_if<UpdateModule>(&*b.raw) : nullptr;
+            return b.enabled && (b.kind == "physics" ||
+                                 (b.kind == raw_block_kind && update != nullptr &&
+                                  std::holds_alternative<RigidPhysics>(*update)));
+        });
+        const bool piled = std::any_of(layer_.blocks.begin(), layer_.blocks.end(),
+                                       [](const Block& b) { return b.enabled && b.kind == "pile"; });
+        if (piled && !physics_) {
+            physics_ = true;
+            place_after(SlotRigid, layer_.uid, RigidPhysics{.id = module_id(layer_.uid, 4U), .density = 2400.0F,
+                                                            .friction = 0.6F, .restitution = 0.15F});
+        }
         for (const Block& block : layer_.blocks) {
             if (block.enabled) {
                 add(block);
@@ -227,6 +242,17 @@ private:
 
         if (kind == "stream") {
             place_spawn(uid, SpawnRate{.id = id(block, 1U), .rate = input(block, "rate", number_of(block, "rate"), 1.0F)});
+        } else if (kind == "pile") {
+            place_spawn(uid, SpawnPile{.id = id(block, 1U),
+                                       .count = static_cast<std::uint32_t>(std::lround(number_of(block, "count"))),
+                                       .shape = choice_of(block, "shape") == "stack" ? PileShape::Box : PileShape::Heap,
+                                       .center = to_vec3(get(block, "at")) * s,
+                                       .slope = number_of(block, "slope"),
+                                       .width = number_of(block, "width") * s,
+                                       .depth = number_of(block, "depth") * s,
+                                       .spacing = number_of(block, "spacing"),
+                                       .jitter = number_of(block, "jitter"),
+                                       .release = number_of(block, "release")});
         } else if (kind == "burst") {
             place_spawn(uid, SpawnBurst{.id = id(block, 1U),
                                         .time = number_of(block, "time"),
@@ -382,12 +408,27 @@ private:
             InitTumble tumble{.id = id(block, 1U)};
             std::tie(tumble.speed_min, tumble.speed_max) = range_input(block, "spin", spin.x, spin.y, 1.0F);
             place_init(SlotTumble, uid, tumble);
+            if (physics_) {
+                return;
+            }
             place_after(SlotRigid, uid,
                         RigidBody{.id = id(block, 2U),
                                   .angular_drag = input(block, "damping", number_of(block, "damping"), 1.0F),
                                   .contact_scale = number_of(block, "contact"),
                                   .rest_speed = input(block, "settle", number_of(block, "settle") * s, s),
                                   .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
+        } else if (kind == "physics") {
+            const std::string shape = choice_of(block, "shape");
+            place_after(SlotRigid, uid,
+                        RigidPhysics{.id = id(block, 1U),
+                                     .shape = shape == "ball"   ? RigidShape::Sphere
+                                              : shape == "cube" ? RigidShape::Box
+                                                                : RigidShape::Auto,
+                                     .density = number_of(block, "density"),
+                                     .friction = number_of(block, "friction"),
+                                     .restitution = number_of(block, "bounce"),
+                                     .angular_damping = number_of(block, "damping"),
+                                     .allow_sleep = toggle_of(block, "rest")});
         } else if (kind == "light") {
             light(block);
         } else if (kind == raw_block_kind) {
@@ -698,7 +739,7 @@ private:
                 raw_size_life_ = ModuleLine{block.uid, module};
             } else if (is_force(update)) {
                 forces_.push_back(Placed{SlotRawForce, ModuleLine{block.uid, module}});
-            } else if (std::holds_alternative<RigidBody>(update)) {
+            } else if (std::holds_alternative<RigidBody>(update) || std::holds_alternative<RigidPhysics>(update)) {
                 after_.push_back(Placed{SlotRigid, ModuleLine{block.uid, module}});
             } else {
                 after_.push_back(Placed{SlotRawCollision, ModuleLine{block.uid, module}});
@@ -748,6 +789,7 @@ private:
     std::string error_;
     std::set<std::string> unique_;
     std::set<ModuleId> seeded_;
+    bool physics_{false};
     std::vector<Placed> spawn_;
     std::vector<Placed> init_;
     std::vector<Placed> forces_;
@@ -946,6 +988,9 @@ float natural_loop_seconds(const Compiled& compiled) {
                 if (std::holds_alternative<SpawnRate>(module)) {
                     // Building up, then a whole generation at its full.
                     end = std::max(end, life * 2.0F);
+                } else if (const auto* pile = std::get_if<SpawnPile>(&module)) {
+                    // Let go, then a few seconds to fall and settle.
+                    end = std::max(end, std::min(life, std::max(pile->release, 0.0F) + 5.0F));
                 } else if (const auto* burst = std::get_if<SpawnBurst>(&module)) {
                     const float start = std::max(burst->time, 0.0F);
                     if (burst->interval > 0.0F && burst->cycles == 0U) {

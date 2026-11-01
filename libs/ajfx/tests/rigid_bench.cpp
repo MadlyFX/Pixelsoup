@@ -1,5 +1,6 @@
 // Cost of rigid physics emitters: step time and checkpoint size for the
-// rubble preset and for thousands of chips, plus a digest of the final state
+// rubble preset, for thousands of chips, and for a pile let go after half a
+// second (bodies held asleep, then woken), plus a digest of the final state
 // so two builds or two machines can be compared bit for bit. Not a test:
 //   ajfx_rigid_bench [threads]
 
@@ -55,6 +56,22 @@ Effect heap(std::uint32_t count) {
     return builder.build().value();
 }
 
+// `count` chips heaped before the start and let go at half a second.
+Effect pile(std::uint32_t count) {
+    EffectBuilder builder{"pile"};
+    builder.emitter("chips")
+        .capacity(count)
+        .spawn(SpawnPile{.count = count, .slope = 60.0F, .spacing = 0.8F, .jitter = 0.3F, .release = 0.5F})
+        .init(Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(InitSize{.min = 0.08F, .max = 0.2F})
+        .init(InitTumble{})
+        .update(Gravity{})
+        .update(RigidPhysics{.density = 2400.0F, .friction = 0.7F, .restitution = 0.15F})
+        .update(PlaneCollision{.restitution = 0.1F, .friction = 0.8F})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "chip"});
+    return builder.build().value();
+}
+
 void run(const char* name, const Effect& effect, const RigidSolver& solver, std::uint64_t steps) {
     Simulation simulation =
         Simulation::create(effect, 1U, SimulationOptions{.meshes = presets::meshes(), .rigid = &solver}).value();
@@ -88,5 +105,6 @@ int main(int argc, char** argv) {
     std::printf("threads %u\n", threads);
     run("rubble", presets::rubble(), *solver, 360U);
     run("heap", heap(4000U), *solver, 360U);
+    run("pile", pile(1500U), *solver, 360U);
     return 0;
 }

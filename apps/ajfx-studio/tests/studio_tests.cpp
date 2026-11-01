@@ -10,6 +10,7 @@
 #include "user_assets.hpp"
 
 #include <ajfx/package.hpp>
+#include <ajfx/rigid.hpp>
 #include <ajfx/simulation.hpp>
 
 #if AJFX_STUDIO_TEST_KERNELS
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -84,7 +86,13 @@ struct in_variant<T, std::variant<Ts...>> : std::bool_constant<(std::is_same_v<T
 
 template <class M>
 const M* find_module(const ajfx::Emitter& emitter) {
-    if constexpr (in_variant<M, ajfx::InitModule>::value) {
+    if constexpr (in_variant<M, ajfx::SpawnModule>::value) {
+        for (const ajfx::SpawnModule& module : emitter.spawn) {
+            if (const M* found = std::get_if<M>(&module)) {
+                return found;
+            }
+        }
+    } else if constexpr (in_variant<M, ajfx::InitModule>::value) {
         for (const ajfx::InitModule& module : emitter.init) {
             if (const M* found = std::get_if<M>(&module)) {
                 return found;
@@ -349,9 +357,13 @@ std::multiset<std::string> described(const Compiled& compiled, Uid layer) {
 }
 
 void detaching_a_block_keeps_the_picture() {
-    for (const char* kind : {"launch", "turbulence", "color", "fade", "size", "tumble"}) {
-        Document document = recipe(std::string_view{kind} == "tumble" ? "explosion" : "campfire");
-        Layer& layer = std::string_view{kind} == "tumble" ? layer_named(document, "Debris") : layer_named(document, "Flames");
+    for (const char* kind : {"launch", "turbulence", "color", "fade", "size", "tumble", "pile", "physics"}) {
+        const std::string_view k{kind};
+        const bool rocks = k == "pile" || k == "physics";
+        Document document = recipe(k == "tumble" ? "explosion" : rocks ? "rock_pile" : "campfire");
+        Layer& layer = k == "tumble" ? layer_named(document, "Debris")
+                       : rocks       ? layer_named(document, "Rock pile")
+                                     : layer_named(document, "Flames");
         const Compiled before = compile(document, Purpose::Export);
         const Uid uid = block_of(layer, kind).uid;
         std::vector<Block> raw = detach_block(document, before, uid);
@@ -811,17 +823,66 @@ void the_loop_is_as_long_as_the_effect_plays() {
     CHECK(loop_seconds(document, compile(document, Purpose::Preview)) == 9.0F);
     // An effect with nothing born still loops.
     CHECK(natural_loop_seconds(Compiled{}) == 2.0F);
-    // Every recipe gets a loop that covers its longest life.
+    // Every recipe gets a loop that covers its longest life. A pile lives
+    // on after it falls; its loop covers the fall and settling.
     for (const Recipe& entry : recipes()) {
         const Document page = recipe(entry.id);
         const Compiled built = compile(page, Purpose::Preview);
         float longest = 0.0F;
         for (const Layer& l : page.layers) {
-            longest = std::max(longest, l.enabled ? l.life_max : 0.0F);
+            const bool piled = std::any_of(l.blocks.begin(), l.blocks.end(), [](const Block& b) { return b.kind == "pile"; });
+            longest = std::max(longest, l.enabled ? (piled ? 5.0F : l.life_max) : 0.0F);
         }
         const float loop = loop_seconds(page, built);
         CHECK(loop >= 1.0F && loop <= 120.0F && (built.effect.has_value() ? loop >= longest : true));
     }
+}
+
+void piles_stand_until_the_effect_plays() {
+    Document document = recipe("rock_pile");
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const ajfx::Emitter& rocks = emitter_of(compiled, layer_named(document, "Rock pile"));
+    const auto* pile = find_module<ajfx::SpawnPile>(rocks);
+    CHECK(pile != nullptr && pile->count == 220U && pile->release == 0.0F);
+    CHECK(rocks.capacity == 256U);
+    // Physics turns them; Tumble only sets how each rock lies.
+    CHECK(find_module<ajfx::RigidPhysics>(rocks) != nullptr);
+    CHECK(find_module<ajfx::RigidBody>(rocks) == nullptr);
+    CHECK(find_module<ajfx::InitTumble>(rocks) != nullptr);
+    CHECK(near(natural_loop_seconds(compiled), 5.2F));
+
+    // Standing at the start, collapsing as it plays.
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation simulation =
+        ajfx::Simulation::create(*compiled.effect, 1U,
+                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
+            .value();
+    std::size_t index = 0U;
+    while (compiled.effect->emitters[index].name != rocks.name) {
+        ++index;
+    }
+    const auto top = [&] {
+        float highest = 0.0F;
+        for (const ajfx::Vec3 p : simulation.emitter(index).position) {
+            highest = std::max(highest, p.y);
+        }
+        return highest;
+    };
+    CHECK(simulation.emitter(index).alive() == 220U);
+    const float standing = top();
+    simulation.advance_to(180U);
+    std::cout << "  the rock pile stands " << standing << " m and comes down to " << top() << " m\n";
+    CHECK(standing > 0.8F && top() < standing - 0.2F);
+
+    // A pile without Physics takes the default; one with a raw physics
+    // module takes that instead.
+    Layer& layer = layer_named(document, "Rock pile");
+    remove_block(document, block_of(layer, "physics").uid);
+    const Compiled plain = compile(document, Purpose::Export);
+    CHECK(plain.error.empty());
+    CHECK(find_module<ajfx::RigidPhysics>(emitter_of(plain, layer)) != nullptr);
+    CHECK(find_module<ajfx::RigidBody>(emitter_of(plain, layer)) == nullptr);
 }
 
 ImportedMesh unit_cube() {
@@ -1042,6 +1103,7 @@ int main() {
         {"the_turbulence_guide_follows_its_field", the_turbulence_guide_follows_its_field},
         {"detached_modules_recombine_into_their_block", detached_modules_recombine_into_their_block},
         {"the_loop_is_as_long_as_the_effect_plays", the_loop_is_as_long_as_the_effect_plays},
+        {"piles_stand_until_the_effect_plays", piles_stand_until_the_effect_plays},
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},
         {"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields},
         {"studio_comes_back_as_it_was_left", studio_comes_back_as_it_was_left},

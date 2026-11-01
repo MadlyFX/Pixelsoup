@@ -128,6 +128,8 @@ target_link_libraries(mediaserver_render
         MediaServer::Assets
         MediaServer::Net
         MediaServer::Shaders
+        # Rigid physics emitters, stepped off the frame path by ParticlePass.
+        ajfx::rigid
         Threads::Threads
         mikktspace::mikktspace
         mediaserver_bc7enc
@@ -771,7 +773,7 @@ if(BUILD_TESTING)
             tests/particle_pass_tests.cpp
         )
         target_link_libraries(mediaserver_render_particle_pass_tests
-            PRIVATE MediaServer::Render ajfx::d3d12
+            PRIVATE MediaServer::Render ajfx::d3d12 ajfx::rigid
         )
         mediaserver_set_project_options(mediaserver_render_particle_pass_tests)
         ajfx_copy_dxc(mediaserver_render_particle_pass_tests)

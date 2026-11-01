@@ -3,6 +3,7 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/presets.hpp>
+#include <ajfx/rigid.hpp>
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 // The particle pass draws a simulated effect where the camera says, tests it
@@ -883,6 +885,84 @@ void seeks_hold_until_caught_up_then_match_playing_through() {
     PASS_CHECK(instance.simulation().read_particle_bytes(0U).value() == reference_records(effect, 490U));
 }
 
+// 120 balls heaped on a floor and held for a quarter of a second.
+[[nodiscard]] ajfx::Effect rigid_heap() {
+    ajfx::EffectBuilder builder{"heap"};
+    builder.emitter("stones")
+        .capacity(160U)
+        .seed(7U)
+        .spawn(ajfx::SpawnPile{.count = 120U, .jitter = 0.25F, .release = 0.25F})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitSize{.min = 0.1F, .max = 0.2F})
+        .init(ajfx::InitColor{.a = ajfx::Color{0.4F, 0.4F, 0.4F, 1.0F}, .b = ajfx::Color{0.7F, 0.6F, 0.5F, 1.0F}})
+        .update(ajfx::Gravity{})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Sphere, .friction = 0.7F})
+        .update(ajfx::PlaneCollision{.friction = 0.8F});
+    return builder.build().value();
+}
+
+void rigid_physics_holds_until_its_thread_has_the_step() {
+    render::ParticleSettings settings;
+    settings.rigid_lead = 12U;
+    render::ParticlePass pass = make_pass(settings);
+    const ajfx::Effect effect = rigid_heap();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+
+    const auto advance = [&](core::u64 frame) {
+        auto acquired = g_device->acquire_commands();
+        PASS_CHECK(acquired);
+        rhi::CommandList commands = std::move(acquired).value();
+        const bool reached = pass.advance(commands, instance, frame, 24U, 1U);
+        if (!reached) {
+            rhi::Texture* none = nullptr;
+            PASS_CHECK(!pass.draw(commands, instance, orthographic(), identity(), render::ParticleTargets{none, none}));
+        }
+        auto submitted = g_device->submit(std::move(commands));
+        PASS_CHECK(submitted);
+        PASS_CHECK(std::move(submitted).value().wait());
+        PASS_CHECK(!pass.take_error());
+        return reached;
+    };
+    // Frames held before `frame` is drawn.
+    const auto reach = [&](core::u64 frame) {
+        int held = 0;
+        while (!advance(frame)) {
+            ++held;
+            PASS_CHECK(held < 5000);
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return held;
+    };
+    const auto matches = [&](core::u64 step) {
+        ajfx::Simulation reference =
+            ajfx::Simulation::create(effect, 3U, ajfx::SimulationOptions{.rigid = solver.get()}).value();
+        reference.advance_to(step);
+        const ajfx::EmitterState drawn = instance.simulation().read_emitter(0U).value();
+        const ajfx::EmitterState& expected = reference.emitter(0U);
+        return drawn.alive() == expected.alive() && drawn.position == expected.position &&
+               drawn.orientation == expected.orientation && drawn.velocity == expected.velocity &&
+               drawn.color == expected.color && drawn.size == expected.size;
+    };
+
+    // The first frame waits for the thread to build the pile, which stands
+    // at the start.
+    const int first = reach(0U);
+    PASS_CHECK(instance.step() == 0U && matches(0U));
+    PASS_CHECK(instance.simulation().read_emitter(0U).value().alive() == 120U);
+    // Playing two seconds, the thread works ahead of the frames.
+    int playing = 0;
+    for (core::u64 frame = 1U; frame <= 48U; ++frame) {
+        playing += reach(frame);
+    }
+    PASS_CHECK(instance.step() == 120U && matches(120U));
+    // Back to the start: the pile stands again, exactly.
+    const int back = reach(0U);
+    PASS_CHECK(matches(0U));
+    std::cout << "  held " << first << " frames to start, " << playing << " while playing, " << back
+              << " going back\n";
+}
+
 void devices_without_particles_are_refused() {
     rhi::DeviceConfig config{};
     config.backend = rhi::BackendKind::SdlGpu;
@@ -937,6 +1017,7 @@ int main() {
         {"particle_lights_stay_with_their_particles", particle_lights_stay_with_their_particles},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
+        {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},
     };
     int failures = 0;

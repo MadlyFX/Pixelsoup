@@ -188,6 +188,15 @@ void check_module(const Effect&, const SpawnBurst& m, FieldChecker& check) {
     check.require(m.interval >= 0.0F, "interval", "must not be negative");
 }
 
+void check_module(const Effect&, const SpawnPile& m, FieldChecker& check) {
+    check.require(m.slope >= 5.0F && m.slope <= 85.0F, "slope", "must be between 5 and 85 degrees");
+    check.require(m.width > 0.0F, "width", "must be positive");
+    check.require(m.depth > 0.0F, "depth", "must be positive");
+    check.require(m.spacing >= 0.5F && m.spacing <= 4.0F, "spacing", "must be between 0.5 and 4");
+    check.require(m.jitter >= 0.0F && m.jitter <= 1.0F, "jitter", "must be between 0 and 1");
+    check.require(m.release >= 0.0F, "release", "must not be negative");
+}
+
 void check_module(const Effect& e, const SpawnRate& m, FieldChecker& check) {
     check.require(range(e, m.rate).lo >= 0.0F, "rate", "must not be negative");
 }
@@ -405,6 +414,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     std::size_t rigid_bodies = 0U;
     std::size_t rigid_physics = 0U;
     std::size_t spins = 0U;
+    std::uint64_t piled = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
             return;
@@ -425,6 +435,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
             ++rigid_physics;
         } else if constexpr (std::is_same_v<M, InitSpin>) {
             ++spins;
+        } else if constexpr (std::is_same_v<M, SpawnPile>) {
+            piled += module.count;
         }
         error = check_module_fields(effect, emitter, module);
     };
@@ -456,6 +468,15 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     if (has_tumble && rigid_bodies == 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect,
                      where + " has a 'tumble' module but no 'rigid_body' or 'rigid_physics' module to turn it"};
+    }
+    if (piled > 0U && rigid_physics == 0U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has a 'spawn_pile' module but no 'rigid_physics' module: a pile stands on its bodies"};
+    }
+    if (piled > emitter.capacity) {
+        return Error{ErrorCode::InvalidEffect, where + " piles " + std::to_string(piled) +
+                                                    " bodies, more than its capacity of " +
+                                                    std::to_string(emitter.capacity)};
     }
     if (rigid_physics == 1U) {
         if (std::optional<Error> rigid = check_rigid_physics(emitter, where)) {
@@ -557,6 +578,8 @@ std::uint64_t particle_bound(const Effect& effect, const Emitter& emitter) {
                 }
             }
             bound += occurrences * static_cast<double>(burst->count);
+        } else if (const SpawnPile* pile = std::get_if<SpawnPile>(&module)) {
+            bound += static_cast<double>(pile->count);
         }
     }
     if (!(bound < 1.8e19)) {
@@ -666,6 +689,17 @@ const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept {
 bool has_rigid_physics(const Effect& effect) noexcept {
     return std::any_of(effect.emitters.begin(), effect.emitters.end(),
                        [](const Emitter& emitter) { return rigid_physics(emitter) != nullptr; });
+}
+
+Effect rigid_physics_part(const Effect& effect) {
+    Effect part = effect;
+    part.emitters.clear();
+    for (const Emitter& emitter : effect.emitters) {
+        if (rigid_physics(emitter) != nullptr) {
+            part.emitters.push_back(emitter);
+        }
+    }
+    return part;
 }
 
 } // namespace ajfx

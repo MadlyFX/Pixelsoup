@@ -212,7 +212,8 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
 }
 
 Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const KernelSet& kernels,
-                                            std::uint32_t instance_seed, SimulationOptions options) {
+                                            std::uint32_t instance_seed, SimulationOptions options,
+                                            RigidHosting hosting) {
     const FieldSet& fields = options.fields;
     Result<bool> valid = validate(effect);
     if (!valid) {
@@ -225,15 +226,14 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     // randomness is its own, so they simulate exactly as within the whole.
     std::optional<Simulation> rigid;
     std::vector<std::optional<std::size_t>> rigid_index(effect.emitters.size());
-    if (has_rigid_physics(effect)) {
-        Effect cpu = effect;
-        cpu.emitters.clear();
-        for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
-            if (rigid_physics(effect.emitters[i]) != nullptr) {
-                rigid_index[i] = cpu.emitters.size();
-                cpu.emitters.push_back(effect.emitters[i]);
-            }
+    std::size_t rigid_count = 0U;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (rigid_physics(effect.emitters[i]) != nullptr) {
+            rigid_index[i] = rigid_count++;
         }
+    }
+    if (rigid_count != 0U && hosting == RigidHosting::Inline) {
+        Effect cpu = rigid_physics_part(effect);
         Result<Simulation> created = Simulation::create(
             std::move(cpu), instance_seed, SimulationOptions{.meshes = options.meshes, .rigid = options.rigid});
         if (!created) {
@@ -329,7 +329,10 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     state->effect = std::move(effect);
     state->rigid = std::move(rigid);
     state->rigid_index = std::move(rigid_index);
-    return GpuSimulation{std::move(state)};
+    GpuSimulation simulation{std::move(state)};
+    // Inline piles stand from step 0; the buffers need them before any step.
+    simulation.write_inline_rigid();
+    return simulation;
 }
 
 const Effect& GpuSimulation::effect() const noexcept {
@@ -356,10 +359,12 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
         if (const std::optional<std::size_t> cpu = s.rigid_index[i]) {
-            const EmitterState& particles = s.rigid->emitter(*cpu);
-            s.upload(e, particles, 1U - s.current);
-            e.spawned = particles.spawned;
-            e.rate_carry = particles.rate_carry;
+            if (s.rigid) {
+                const EmitterState& particles = s.rigid->emitter(*cpu);
+                s.upload(e, particles, 1U - s.current);
+                e.spawned = particles.spawned;
+                e.rate_carry = particles.rate_carry;
+            }
             continue;
         }
 
@@ -431,12 +436,12 @@ void GpuSimulation::advance_to(std::uint64_t target, const ParameterProvider* pa
     }
 }
 
-void GpuSimulation::reset() {
+void GpuSimulation::reset(const ParameterProvider* parameters) {
     State& s = *state_;
     s.tick = 0U;
     s.current = 0U;
     if (s.rigid) {
-        s.rigid->reset();
+        s.rigid->reset(parameters);
     }
     for (EmitterGpu& e : s.emitters) {
         e.spawned = 0U;
@@ -444,6 +449,34 @@ void GpuSimulation::reset() {
         s.zero_counters(e);
     }
     s.device->barrier();
+    write_inline_rigid();
+}
+
+void GpuSimulation::write_inline_rigid() {
+    State& s = *state_;
+    if (!s.rigid) {
+        return;
+    }
+    for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
+        if (const std::optional<std::size_t> cpu = s.rigid_index[i]) {
+            const EmitterState& particles = s.rigid->emitter(*cpu);
+            if (particles.alive() != 0U) {
+                s.upload(s.emitters[i], particles, s.current);
+                s.emitters[i].spawned = particles.spawned;
+            }
+        }
+    }
+}
+
+void GpuSimulation::write_rigid(std::size_t emitter, const EmitterState& particles) {
+    State& s = *state_;
+    if (s.rigid || emitter >= s.emitters.size() || !s.rigid_index[emitter]) {
+        return;
+    }
+    EmitterGpu& e = s.emitters[emitter];
+    s.upload(e, particles, s.current);
+    e.spawned = particles.spawned;
+    e.rate_carry = particles.rate_carry;
 }
 
 EmitterBuffers GpuSimulation::emitter_buffers(std::size_t emitter) const {

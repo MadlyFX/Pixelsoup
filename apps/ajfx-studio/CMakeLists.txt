@@ -43,6 +43,7 @@ if(TARGET ajfx::d3d12)
     target_link_libraries(ajfx-studio PRIVATE
         ajfx_studio_core
         ajfx::d3d12
+        ajfx::rigid
         MediaServer::Render
         MediaServer::Gui
         MediaServer::Editor
@@ -56,7 +57,8 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(ajfx_studio_tests tests/studio_tests.cpp)
-    target_link_libraries(ajfx_studio_tests PRIVATE ajfx_studio_core)
+    # The rock pile recipe is run through the physics engine.
+    target_link_libraries(ajfx_studio_tests PRIVATE ajfx_studio_core ajfx::rigid)
     if(TARGET ajfx::d3d12)
         # Kernels for every recipe compile, where DXC is present.
         target_link_libraries(ajfx_studio_tests PRIVATE ajfx::d3d12)

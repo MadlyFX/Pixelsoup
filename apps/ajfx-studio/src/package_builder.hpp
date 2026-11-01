@@ -5,6 +5,7 @@
 
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/math.hpp>
+#include <ajfx/rigid_solver.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -152,6 +153,8 @@ private:
     std::filesystem::path preview_path_;
     std::uint32_t instance_seed_{0U};
     std::unique_ptr<gpu::ShaderCompiler> compiler_;
+    // Runs rigid physics layers for the CPU analysis; made with the first.
+    std::unique_ptr<RigidSolver> rigid_;
     std::string compiler_error_;
     std::map<std::uint64_t, gpu::KernelSet> kernel_cache_;
     std::vector<std::uint64_t> kernel_order_;

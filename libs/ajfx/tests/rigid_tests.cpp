@@ -3,6 +3,7 @@
 #include <ajfx/builder.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/rigid.hpp>
+#include <ajfx/rigid_runner.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <algorithm>
@@ -10,7 +11,9 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -296,6 +299,275 @@ void unsupported_combinations_are_refused() {
 
 } // namespace
 
+bool same_particles(const EmitterState& a, const EmitterState& b) {
+    return a.position == b.position && a.orientation == b.orientation && a.velocity == b.velocity &&
+           a.angular_velocity == b.angular_velocity && a.age == b.age && a.spawn_index == b.spawn_index &&
+           a.size == b.size && a.color == b.color && a.spawned == b.spawned;
+}
+
+// 150 blocks 0.15 to `grain` across heaped on the floor, held until
+// `release`. Their launch is ignored: a pile body starts still.
+Effect heap(float release, float jitter) {
+    EffectBuilder builder{"heap"};
+    builder.float_parameter("grain", 0.2F, 0.15F, 0.4F);
+    builder.emitter("stones")
+        .capacity(256U)
+        .seed(5U)
+        .spawn(SpawnPile{.count = 150U,
+                         .center = Vec3{0.5F, 0.0F, -0.25F},
+                         .slope = 60.0F,
+                         .jitter = jitter,
+                         .release = release})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(Velocity{.speed_min = 3.0F, .speed_max = 3.0F})
+        .init(InitSize{.min = 0.15F, .max = bind("grain")})
+        .init(InitTumble{.speed_min = 90.0F, .speed_max = 180.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.6F, .restitution = 0.1F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    return builder.build().value();
+}
+
+class Grain final : public ParameterProvider {
+public:
+    explicit Grain(float value) : value_{value} {}
+    void values_at(std::uint64_t, std::span<ParameterValue> values) const override { values[0][0] = value_; }
+
+private:
+    float value_;
+};
+
+struct Spread final {
+    float top{0.0F};
+    float widest{0.0F};
+};
+
+Spread spread(const EmitterState& s, Vec3 center) {
+    Spread out;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Vec3 d = s.position[i] - center;
+        out.top = std::max(out.top, d.y);
+        out.widest = std::max(out.widest, std::sqrt(d.x * d.x + d.z * d.z));
+    }
+    return out;
+}
+
+void piles_stand_from_the_start_until_released() {
+    const Vec3 center{0.5F, 0.0F, -0.25F};
+    {
+        // Without jitter the lattice is exact: no two bodies closer than the
+        // spacing, which is the largest body's diagonal.
+        Simulation simulation = make(heap(0.5F, 0.0F));
+        const EmitterState& s = simulation.emitter(0);
+        AJFX_CHECK(simulation.tick() == 0U);
+        AJFX_CHECK(s.alive() == 150U && s.spawned == 150U);
+        float largest = 0.0F;
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            largest = std::max(largest, s.size[i]);
+            AJFX_CHECK(s.age[i] == 0.0F);
+            AJFX_CHECK(length(s.velocity[i]) == 0.0F && length(s.angular_velocity[i]) == 0.0F);
+        }
+        const float d = largest * std::sqrt(3.0F);
+        float closest = 1.0e9F;
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            for (std::size_t j = 0U; j < i; ++j) {
+                closest = std::min(closest, length(s.position[i] - s.position[j]));
+            }
+            // A cone of 60 degrees: everything under the top, by its slope.
+            AJFX_CHECK(s.position[i].y >= 0.5F * d - 1.0e-4F);
+        }
+        const Spread start = spread(s, center);
+        std::cout << "  spacing " << d << ", closest " << closest << ", heap " << start.top << " high and "
+                  << start.widest << " out\n";
+        AJFX_CHECK(closest >= d * 0.9999F);
+        AJFX_CHECK(start.top > 3.0F * d);
+        AJFX_CHECK(start.widest < start.top);
+    }
+
+    Simulation simulation = make(heap(0.5F, 0.2F));
+    const EmitterState& s = simulation.emitter(0);
+    const std::vector<Vec3> at_start = s.position;
+    const std::vector<Quat> turned = s.orientation;
+    const Spread start = spread(s, center);
+    // Held for 0.5 s: 30 steps leave every body exactly where it was.
+    simulation.advance_to(30U);
+    AJFX_CHECK(s.position == at_start && s.orientation == turned);
+    // Let go, the heap slumps: lower, and no narrower.
+    simulation.advance_to(150U);
+    const Spread after = spread(s, center);
+    std::cout << "  released: top " << start.top << " -> " << after.top << ", out " << start.widest << " -> "
+              << after.widest << '\n';
+    AJFX_CHECK(after.top < start.top - 0.2F);
+    AJFX_CHECK(after.widest >= start.widest);
+    AJFX_CHECK(s.alive() == 150U);
+}
+
+void piles_seek_and_follow_their_parameters() {
+    const Effect effect = heap(0.25F, 0.2F);
+    const Grain grain{0.3F};
+    // Stepped from creation: the first step sets the pile up again with
+    // the provider's value.
+    Simulation stepped = make(effect);
+    stepped.advance_to(200U, &grain);
+
+    // Reset with the provider: the pile at step 0 already uses it.
+    Simulation reset = make(effect);
+    reset.reset(&grain);
+    float largest = 0.0F;
+    for (const float size : reset.emitter(0).size) {
+        largest = std::max(largest, size);
+    }
+    AJFX_CHECK(largest > 0.2F && largest <= 0.3F);
+    // Saved while held, restored into a fresh simulation, it carries on
+    // through the release exactly.
+    reset.advance_to(10U, &grain);
+    const SimulationState held = reset.state();
+    Simulation restored = make(effect);
+    restored.restore(held);
+    restored.advance_to(200U, &grain);
+    AJFX_CHECK(same_particles(restored.emitter(0), stepped.emitter(0)));
+
+    // Seeks back and forth across the release land on the same bits.
+    Simulation seeking = make(effect);
+    CheckpointRing ring{40U, 8U};
+    ring.seek(seeking, 200U, &grain);
+    ring.seek(seeking, 5U, &grain);
+    ring.seek(seeking, 0U, &grain);
+    // Back at the start, the pile is the provider's, not the defaults'.
+    AJFX_CHECK(seeking.emitter(0).position != make(effect).emitter(0).position);
+    ring.seek(seeking, 200U, &grain);
+    AJFX_CHECK(same_particles(seeking.emitter(0), stepped.emitter(0)));
+}
+
+void piles_need_rigid_physics_and_room() {
+    {
+        EffectBuilder builder{"loose"};
+        builder.emitter("stones")
+            .capacity(64U)
+            .spawn(SpawnPile{.count = 10U})
+            .init(Lifetime{.min = 5.0F, .max = 5.0F})
+            .update(Gravity{});
+        const Result<Effect> built = builder.build();
+        AJFX_CHECK(!built.ok());
+        std::cout << "  " << built.error().message << '\n';
+    }
+    {
+        EffectBuilder builder{"crowded"};
+        builder.emitter("stones")
+            .capacity(64U)
+            .spawn(SpawnPile{.count = 100U})
+            .init(Lifetime{.min = 5.0F, .max = 5.0F})
+            .update(RigidPhysics{.shape = RigidShape::Sphere});
+        const Result<Effect> built = builder.build();
+        AJFX_CHECK(!built.ok());
+        std::cout << "  " << built.error().message << '\n';
+    }
+    {
+        // A box pile of 4 by 2 by however high, aligned when it has no
+        // jitter.
+        EffectBuilder builder{"wall"};
+        builder.emitter("bricks")
+            .capacity(64U)
+            .spawn(SpawnPile{.count = 20U, .shape = PileShape::Box, .width = 2.0F, .depth = 1.0F, .jitter = 0.0F})
+            .init(Lifetime{.min = 5.0F, .max = 5.0F})
+            .init(InitSize{.min = 0.5F, .max = 0.5F})
+            .update(RigidPhysics{.shape = RigidShape::Sphere});
+        Simulation simulation = make(builder.build().value());
+        const EmitterState& s = simulation.emitter(0);
+        AJFX_CHECK(s.alive() == 20U);
+        // Spheres reach their own size: 4 across, 2 deep, layers 0.5 apart.
+        AJFX_CHECK(s.position[0] == (Vec3{-0.75F, 0.25F, -0.25F}));
+        AJFX_CHECK(s.position[3] == (Vec3{0.75F, 0.25F, -0.25F}));
+        AJFX_CHECK(s.position[4] == (Vec3{-0.75F, 0.25F, 0.25F}));
+        AJFX_CHECK(s.position[8] == (Vec3{-0.75F, 0.75F, -0.25F}));
+        AJFX_CHECK(s.position[19] == (Vec3{0.75F, 1.25F, -0.25F}));
+    }
+}
+
+// Two emitters, the first not rigid: a track's frames keep the effect's
+// emitter order and leave it empty.
+Effect mixed() {
+    Effect effect = heap(0.25F, 0.2F);
+    Emitter sparks;
+    sparks.name = "sparks";
+    sparks.capacity = 16U;
+    sparks.spawn.push_back(SpawnBurst{.id = 1U, .count = 4U});
+    sparks.init.push_back(Lifetime{.id = 2U, .min = 1.0F, .max = 1.0F});
+    effect.emitters.insert(effect.emitters.begin(), sparks);
+    AJFX_CHECK(validate(effect).ok());
+    return effect;
+}
+
+void runner_matches_the_simulation() {
+    const Effect effect = mixed();
+    RigidRunner runner{*g_solver, RigidRunnerOptions{.lead = 20U, .checkpoint_interval = 30U, .checkpoint_count = 3U,
+                                                     .turn = 5U}};
+    auto grain = std::make_shared<Grain>(0.3F);
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 3U, {}, grain);
+
+    const auto reference = [&](std::uint64_t tick, const ParameterProvider* parameters) {
+        Simulation simulation = make(effect);
+        simulation.reset(parameters);
+        simulation.advance_to(tick, parameters);
+        return simulation.emitter(1);
+    };
+    const auto check_at = [&](std::uint64_t tick, const ParameterProvider* parameters) {
+        std::shared_ptr<const RigidFrame> frame = track->frame(tick);
+        if (!frame) {
+            runner.wait_idle();
+            frame = track->frame(tick);
+        }
+        AJFX_CHECK(frame != nullptr && frame->tick == tick);
+        AJFX_CHECK(frame->emitters.size() == 2U && frame->emitters[0].alive() == 0U);
+        AJFX_CHECK(same_particles(frame->emitters[1], reference(tick, parameters)));
+    };
+
+    // Nothing is worked out before it is asked for.
+    AJFX_CHECK(track->frame(0U) == nullptr || track->frame(0U)->tick == 0U);
+    check_at(0U, grain.get());
+    check_at(45U, grain.get());
+    // The lead: the next ticks are ready without waiting.
+    runner.wait_idle();
+    AJFX_CHECK(track->frame(46U) != nullptr);
+    AJFX_CHECK(track->frame(65U) != nullptr);
+    check_at(66U, grain.get());
+    check_at(140U, grain.get());
+    // Back, from a checkpoint, and forward again.
+    check_at(20U, grain.get());
+    check_at(140U, grain.get());
+    AJFX_CHECK(!track->error());
+
+    // New parameters drop the old past.
+    auto fine = std::make_shared<Grain>(0.16F);
+    track->set_parameters(fine);
+    check_at(100U, fine.get());
+}
+
+void runner_keeps_serving_beside_a_failed_track() {
+    RigidRunner runner{*g_solver};
+    // A hull needs its mesh, and none was given.
+    EffectBuilder builder{"chips"};
+    builder.emitter("chips")
+        .capacity(16U)
+        .spawn(SpawnBurst{.count = 4U})
+        .init(Lifetime{.min = 2.0F, .max = 2.0F})
+        .update(RigidPhysics{})
+        .renderer(SpriteRenderer{.geometry = Geometry::Mesh, .mesh = "chip"});
+    std::unique_ptr<RigidTrack> broken = runner.track(builder.build().value(), 1U, {});
+    std::unique_ptr<RigidTrack> good = runner.track(heap(0.0F, 0.2F), 1U, {});
+    // One dropped while it works must not stall the runner.
+    std::unique_ptr<RigidTrack> dropped = runner.track(heap(0.0F, 0.2F), 2U, {});
+    AJFX_CHECK(broken->frame(10U) == nullptr);
+    (void)good->frame(30U);
+    (void)dropped->frame(600U);
+    dropped.reset();
+    runner.wait_idle();
+    AJFX_CHECK(broken->frame(10U) == nullptr);
+    AJFX_CHECK(broken->error().has_value() && broken->error()->code == ErrorCode::MissingMesh);
+    std::cout << "  " << broken->error()->message << '\n';
+    AJFX_CHECK(good->frame(30U) != nullptr && !good->error());
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -306,6 +578,11 @@ int main() {
         {"births_deaths_and_colour_follow_the_reference", births_deaths_and_colour_follow_the_reference},
         {"hulls_wrap_the_renderers_mesh", hulls_wrap_the_renderers_mesh},
         {"unsupported_combinations_are_refused", unsupported_combinations_are_refused},
+        {"piles_stand_from_the_start_until_released", piles_stand_from_the_start_until_released},
+        {"piles_seek_and_follow_their_parameters", piles_seek_and_follow_their_parameters},
+        {"piles_need_rigid_physics_and_room", piles_need_rigid_physics_and_room},
+        {"runner_matches_the_simulation", runner_matches_the_simulation},
+        {"runner_keeps_serving_beside_a_failed_track", runner_keeps_serving_beside_a_failed_track},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

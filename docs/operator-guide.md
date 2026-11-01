@@ -1068,7 +1068,11 @@ other. Copy and paste of keys skips parameter keys for now. The effect
 reads keyed values at every simulation step, between show frames as well
 as on them. A parameter shapes everything the effect has done so far, so
 changing a value or a key runs the effect again from its start. It holds
-until it has caught up with the playhead. Effects play only in the Advanced renderer.
+until it has caught up with the playhead. Effects with solid pieces that
+knock into each other and pile up (debris, a heap of rocks that collapses)
+work their physics out on a thread of their own, a moment ahead of the
+playhead. After a jump the effect holds until that thread has caught up, as
+any effect does. Effects play only in the Advanced renderer.
 In Basic, the Stage and Program status say so, and Program is not ready
 while an effect is due to play. After you export a package again in place,
 **Rescan Sources** makes every renderer read it again. Each keeps drawing the

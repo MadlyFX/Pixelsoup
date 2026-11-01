@@ -10,6 +10,7 @@
 #include <ajfx/gpu/sort.hpp>
 #include <ajfx/presets.hpp>
 #include <ajfx/rigid.hpp>
+#include <ajfx/rigid_runner.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <array>
@@ -147,6 +148,68 @@ void rubble_draws_its_chips() {
     AJFX_CHECK(draw() == a);
 }
 
+bool same(const EmitterState& g, const EmitterState& c) {
+    return g.alive() == c.alive() && g.spawned == c.spawned && g.position == c.position &&
+           g.orientation == c.orientation && g.velocity == c.velocity && g.angular_velocity == c.angular_velocity &&
+           g.age == c.age && g.spawn_index == c.spawn_index && g.color == c.color && g.size == c.size;
+}
+
+void piles_stand_on_the_gpu_from_the_start() {
+    EffectBuilder builder{"heap"};
+    builder.emitter("stones")
+        .capacity(128U)
+        .spawn(SpawnPile{.count = 80U, .jitter = 0.3F, .release = 0.34F})
+        .init(Lifetime{.min = 20.0F, .max = 20.0F})
+        .init(InitSize{.min = 0.1F, .max = 0.2F})
+        .init(InitColor{.a = Color{0.4F, 0.4F, 0.4F, 1.0F}, .b = Color{0.6F, 0.5F, 0.4F, 1.0F}})
+        .init(InitTumble{})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box})
+        .update(PlaneCollision{});
+    const Effect effect = builder.build().value();
+    gpu::GpuSimulation gpu = make_gpu(effect);
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    // Before any step the buffers hold the pile.
+    const EmitterState start = gpu.read_emitter(0U).value();
+    AJFX_CHECK(start.alive() == 80U && same(start, cpu.emitter(0U)));
+    gpu.advance_to(90U);
+    cpu.advance_to(90U);
+    AJFX_CHECK(same(gpu.read_emitter(0U).value(), cpu.emitter(0U)));
+    AJFX_CHECK(cpu.emitter(0U).position != start.position);
+    gpu.reset();
+    AJFX_CHECK(same(gpu.read_emitter(0U).value(), start));
+}
+
+void hosts_write_the_rigid_emitters_they_step() {
+    const Effect effect = mixed();
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    // Hosted: no solver, and stepping leaves the blocks to the host.
+    gpu::GpuSimulation gpu =
+        gpu::GpuSimulation::create(*g_device, effect, kernels, 5U, SimulationOptions{}, gpu::RigidHosting::Host)
+            .value();
+    auto ramp = std::make_shared<Ramp>();
+    RigidRunner runner{*g_solver};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 5U, {}, ramp);
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    for (const std::uint64_t tick : {90U, 30U}) {
+        if (tick < gpu.tick()) {
+            gpu.reset(ramp.get());
+            cpu.reset(ramp.get());
+        }
+        gpu.advance_to(tick, ramp.get());
+        cpu.advance_to(tick, ramp.get());
+        std::shared_ptr<const RigidFrame> frame = track->frame(tick);
+        if (!frame) {
+            runner.wait_idle();
+            frame = track->frame(tick);
+        }
+        AJFX_CHECK(frame != nullptr);
+        gpu.write_rigid(1U, frame->emitters[1]);
+        AJFX_CHECK(same(gpu.read_emitter(1U).value(), cpu.emitter(1U)));
+        AJFX_CHECK(gpu.read_emitter(0U).value().alive() == cpu.emitter(0U).alive());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -168,6 +231,8 @@ int main() {
         {"the_gpu_holds_what_the_reference_simulates", the_gpu_holds_what_the_reference_simulates},
         {"checkpoints_put_rigid_emitters_back_exactly", checkpoints_put_rigid_emitters_back_exactly},
         {"rubble_draws_its_chips", rubble_draws_its_chips},
+        {"piles_stand_on_the_gpu_from_the_start", piles_stand_on_the_gpu_from_the_start},
+        {"hosts_write_the_rigid_emitters_they_step", hosts_write_the_rigid_emitters_they_step},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

@@ -110,8 +110,15 @@ public:
     void step(const ParameterProvider* parameters = nullptr);
     // Steps until tick() == target; does nothing if target is behind.
     void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr);
-    // Back to step 0 with no particles.
-    void reset();
+    // Back to step 0, holding only the bodies of its piles (SpawnPile), set
+    // up with the parameters' values at step 0. Creating a simulation resets
+    // it with the defaults; if a provider gives other values at step 0, the
+    // first step sets the piles up again with those, so stepping from
+    // creation and seeking agree.
+    void reset(const ParameterProvider* parameters = nullptr);
+    // At step 0, sets the piles up again if `parameters` give other values
+    // there than they were set up with; elsewhere does nothing.
+    void prepare(const ParameterProvider* parameters);
 
     // The whole state, rigid physics solver state included: saving that
     // costs a little, so call it for checkpoints rather than every step.
@@ -135,6 +142,12 @@ private:
     // A fresh world for each rigid physics emitter, holding the bodies its
     // particles in state_ have (none after a reset).
     void rebuild_worlds();
+    // Step 0 with `values`: no particles but the piles'.
+    void start(std::span<const ParameterValue> values);
+    void prespawn(std::size_t index, std::span<const ParameterValue> values);
+    // Whether the particle with `spawn_index` in emitter `index` is a pile
+    // body still held at the current tick.
+    [[nodiscard]] bool held(std::size_t index, std::uint32_t spawn_index) const;
 
     Effect effect_;
     std::uint32_t instance_seed_{0U};
@@ -145,6 +158,9 @@ private:
     const RigidSolver* solver_{nullptr};
     std::vector<RigidEmitter> rigid_;
     mutable bool solver_state_stale_{false};
+    bool has_piles_{false};
+    // The values step 0's piles were set up with.
+    std::vector<ParameterValue> pile_values_;
 };
 
 // Snapshots taken every `interval` steps, so a seek resimulates at most one

@@ -203,6 +203,41 @@ Layer debris(Document& d) {
                         {"fade", {{"in", number(0.0F)}, {"out", number(12.0F)}}}});
 }
 
+// Already standing when the effect starts; let go at once, so it collapses
+// as the effect plays. Physics makes each rock a body the others rest on.
+Layer rock_pile(Document& d) {
+    return build_layer(d, "Rock pile", 60.0F, 60.0F,
+                       {{"pile",
+                         {{"count", number(220.0F)}, {"slope", number(62.0F)}, {"spacing", number(0.75F)},
+                          {"jitter", number(0.25F)}}},
+                        {"gravity", {}},
+                        // A pile starts still: Tumble only turns each rock to lie its own way.
+                        {"tumble", {{"spin", range(0.0F, 0.0F)}}},
+                        {"physics", {{"friction", number(0.8F)}, {"bounce", number(0.1F)}, {"density", number(2600.0F)}}},
+                        {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
+                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("rock")}}},
+                        {"color",
+                         {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.36F, 0.33F, 0.29F)}}},
+                        {"size", {{"size", range(0.12F, 0.22F)}}}});
+}
+
+// One puff as a pile comes down, spreading low along the ground.
+Layer pile_dust(Document& d) {
+    return build_layer(d, "Collapse dust", 2.0F, 3.5F,
+                       {{"burst", {{"count", number(40.0F)}, {"time", number(0.25F)}}},
+                        {"shape", {{"shape", choice("disc")}, {"size", range(0.3F, 0.9F)}, {"offset", vec3(0.0F, 0.15F, 0.0F)}}},
+                        {"launch", {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
+                        {"gravity", {{"strength", range(0.03F, 0.03F)}}},
+                        {"turbulence", {{"strength", range(0.4F, 0.4F)}, {"size", number(0.7F)}}},
+                        {"drag", {{"amount", range(2.0F, 2.0F)}}},
+                        {"appearance",
+                         {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
+                          {"soft", number(0.3F)}}},
+                        {"color", {{"color", color(0.56F, 0.52F, 0.46F)}, {"opacity", number(0.4F)}}},
+                        {"size", {{"size", range(0.4F, 0.7F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
+                        {"fade", {{"in", number(10.0F)}, {"out", number(60.0F)}}}});
+}
+
 Layer dust(Document& d) {
     return build_layer(d, "Dust", 1.5F, 2.5F,
                        {{"burst", {{"count", number(30.0F)}, {"every", number(3.0F)}}},
@@ -309,6 +344,9 @@ const std::vector<PresetEntry>& preset_entries() {
         {{"dust", "Dust", "A puff of dust kicked up along the ground."}, dust},
         {{"snow", "Snow", "Flakes drifting down and settling."}, snow},
         {{"rain", "Rain", "Fast streaks of rain that vanish on the ground."}, rain},
+        {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays."},
+         rock_pile},
+        {{"pile_dust", "Collapse dust", "One low puff of dust as a pile comes down."}, pile_dust},
     };
     return entries;
 }
@@ -334,6 +372,8 @@ const std::vector<RecipeEntry>& recipe_entries() {
         {{"smoke", "Smoke plume", "A soft column of rising smoke."}, {"plume"}, 10.0F, Backdrop::Studio, 0.3F},
         {{"snow", "Snowfall", "Flakes drifting down and settling."}, {"snow"}, 10.0F, Backdrop::Night, 0.4F},
         {{"rain", "Rain", "Streaks of rain."}, {"rain"}, 4.0F, Backdrop::Night, 0.3F},
+        {{"rock_pile", "Rock pile", "A heap of rocks that collapses when the effect plays, with a puff of dust."},
+         {"rock_pile", "pile_dust"}, 6.0F, Backdrop::Studio, 0.3F},
     };
     return entries;
 }

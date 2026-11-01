@@ -143,7 +143,7 @@ public:
         return true;
     }
 
-    void add(std::uint32_t slot, float size, const RigidBodyState& state) override {
+    void add(std::uint32_t slot, float size, const RigidBodyState& state, bool asleep) override {
         const float s = std::max(size, smallest_size);
         JPH::RefConst<JPH::Shape> shape;
         switch (desc_.shape) {
@@ -176,7 +176,18 @@ public:
         settings.mAllowSleeping = desc_.allow_sleep;
         JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
         if (JPH::Body* body = bodies.CreateBodyWithID(JPH::BodyID(slot), settings)) {
-            bodies.AddBody(body->GetID(), JPH::EActivation::Activate);
+            bodies.AddBody(body->GetID(), asleep ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
+        }
+    }
+
+    void wake(std::span<const std::uint32_t> slots) override {
+        std::vector<JPH::BodyID> ids;
+        ids.reserve(slots.size());
+        for (const std::uint32_t slot : slots) {
+            ids.emplace_back(slot);
+        }
+        if (!ids.empty()) {
+            system_.GetBodyInterfaceNoLock().ActivateBodies(ids.data(), static_cast<int>(ids.size()));
         }
     }
 

@@ -10,6 +10,7 @@
 
 #include <ajfx/d3d12.hpp>
 #include <ajfx/package.hpp>
+#include <ajfx/rigid.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <algorithm>
@@ -428,7 +429,12 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
         analysed_ = std::move(untraced);
         return;
     }
-    Result<Simulation> created = Simulation::create(*compiled.effect, instance_seed_, compiled.fields);
+    if (has_rigid_physics(*compiled.effect) && !rigid_) {
+        rigid_ = rigid::make_jolt_solver();
+    }
+    Result<Simulation> created = Simulation::create(
+        *compiled.effect, instance_seed_,
+        SimulationOptions{.fields = compiled.fields, .meshes = compiled.meshes, .rigid = rigid_.get()});
     if (!created) {
         return;
     }

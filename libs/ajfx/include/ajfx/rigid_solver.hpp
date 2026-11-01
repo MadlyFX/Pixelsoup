@@ -13,7 +13,7 @@
 // a RigidSolver, such as ajfx::rigid::make_jolt_solver (ajfx/rigid.hpp).
 //
 // ajfx drives a world in a fixed order every step: removals oldest first,
-// one step, then additions in birth order into the lowest free slots. A
+// wakes, one step, then additions in birth order into the lowest free slots. A
 // solver must compute the same bits for the same calls on every machine
 // that runs the same build, and `restore` into a world rebuilt with the same
 // bodies must continue exactly as the saved world would have.
@@ -74,7 +74,11 @@ public:
     virtual ~RigidWorld() = default;
 
     // Adds a body of the world's shape at `size` in `slot`, which is free.
-    virtual void add(std::uint32_t slot, float size, const RigidBodyState& state) = 0;
+    // An `asleep` body stays where it is, without falling, until it is woken
+    // or another body knocks into it.
+    virtual void add(std::uint32_t slot, float size, const RigidBodyState& state, bool asleep) = 0;
+    // Wakes the bodies in `slots`, given in ascending order.
+    virtual void wake(std::span<const std::uint32_t> slots) = 0;
     // Removes the body in `slot`.
     virtual void remove(std::uint32_t slot) = 0;
     // Advances by the world's step under `gravity`.

@@ -434,11 +434,12 @@ struct SceneRenderOptions final {
 };
 
 // One package parameter component (`index` in the effect's parameters,
-// `component` of its value) driven by a placement's track.
+// `component` of its value) driven by a placement's track, held as a copy so
+// the rigid physics thread can read it while scenes change.
 struct ParticleParameterBinding final {
     std::size_t index{};
     core::u32 component{};
-    const scene::ParticleParameter* track{};
+    scene::ParticleParameter track;
 };
 
 enum class SceneRendererMode : core::u8 {
@@ -1037,9 +1038,9 @@ private:
         // A new value whenever the instance or its simulated past is
         // replaced, so the particle digest can tell the two pictures apart.
         core::u64 generation{};
-        // Package parameter components bound to the placement's tracks,
-        // rebuilt each frame into this capacity.
-        std::vector<ParticleParameterBinding> bound;
+        // The placement's parameters as the simulation asks for them, made
+        // when the digest changes and shared with the rigid physics thread.
+        std::shared_ptr<const ajfx::ParameterProvider> provider;
     };
     std::unique_ptr<ParticlePass> particle_pass_;
     std::string particles_unsupported_;

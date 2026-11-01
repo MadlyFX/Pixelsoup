@@ -98,6 +98,7 @@ add_library(ajfx STATIC
     src/json.cpp
     src/package.cpp
     src/presets.cpp
+    src/rigid_runner.cpp
     src/simulation.cpp
     src/texture.cpp
     src/version.cpp
@@ -111,6 +112,9 @@ target_include_directories(ajfx
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu"
 )
+# RigidRunner steps rigid physics on a thread of its own.
+find_package(Threads REQUIRED)
+target_link_libraries(ajfx PUBLIC Threads::Threads)
 ajfx_set_options(ajfx)
 set_target_properties(ajfx PROPERTIES FOLDER "libs")
 

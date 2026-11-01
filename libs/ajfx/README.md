@@ -36,7 +36,9 @@ Phases 1 to 4 are done and phase 5 (rendering depth) is under way.
   - sphere, box and distance-field colliders;
   - rigid particles for debris;
   - rigid physics emitters run by Jolt (`ajfx::rigid`), whose particles
-    collide with each other and pile up.
+    collide with each other and pile up;
+  - piles that stand when an effect starts and collapse as it plays;
+  - `RigidRunner`, which steps rigid physics off a host's frame path.
 
 The roadmap is the "Particles and volumes" section of the media server's
 [`next-steps-plan.md`](../../next-steps-plan.md).
@@ -73,7 +75,7 @@ the emitter, module and field at fault.
 
 | Stage | Modules |
 | --- | --- |
-| Spawn | `SpawnRate`, `SpawnBurst` |
+| Spawn | `SpawnRate`, `SpawnBurst`, `SpawnPile` (rigid physics only) |
 | Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitSpin`, `InitTumble` |
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge` |
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
@@ -351,6 +353,49 @@ The `rubble` preset throws 400 chips that pile on the floor and each other.
 When a body's life ends, everything touching it wakes, so nothing stays
 asleep in the air where it rested.
 
+**Piles.** `SpawnPile` places `count` bodies before anything moves: a pile
+of rocks that collapses when the effect plays, or a wall that stands until
+something knocks it down.
+- **When:** the pile is part of step 0's state, so a paused effect shows it
+  and every seek to the start finds it. Its bodies come first in birth
+  order. `Simulation::reset(parameters)` sets it up with the parameters'
+  values at step 0; if the first step is given other values, it sets the
+  pile up again with those, so stepping and seeking always agree.
+- **Where:** on a lattice spaced by the largest pile body's reach (the ball
+  its shape turns within) times `spacing`, filled from the bottom up and
+  resting on `center`:
+  - `heap`: staggered layers, each body over a gap below, taken as nested
+    cones of `slope` degrees reach them, so the heap keeps its slope at any
+    count;
+  - `box`: aligned rows filling `width` by `depth`, as high as it needs.
+
+  `jitter` moves each body across by up to that share of the spacing.
+- **How:** init modules set each body up as any newborn (life, colour,
+  size, orientation from `InitTumble`), but position, velocity and spin are
+  the pile's: it starts still.
+- **Held:** until `release` seconds the bodies sleep in the engine
+  (`RigidWorld::add` with `asleep`), so nothing moves them unless another
+  body knocks into them. At `release` they wake together, in slot order.
+- An emitter with a pile needs `RigidPhysics` and room for every body.
+
+**Off the frame path.** A host recording frames cannot step a seek's worth
+of engine steps, or save the engine's state for a checkpoint, while it
+records. `RigidRunner` (`include/ajfx/rigid_runner.hpp`) steps the rigid
+physics emitters of every `RigidTrack` on a thread of its own, with the
+solver's threads as its budget:
+- `RigidTrack::frame(tick)` returns that tick's particles if the runner has
+  them; otherwise it returns none, and the runner works towards the tick.
+  It works up to `lead` steps ahead of the latest tick asked, so playback
+  finds each tick ready, and keeps its own checkpoints for seeks back.
+- A tick the frame path waits on comes before filling any track's lead,
+  and tracks take turns of `turn` steps.
+- `set_parameters` drops what the runner holds and works it out again.
+- `GpuSimulation::create(..., RigidHosting::Host)` leaves rigid physics
+  emitters to the host: stepping skips them, and `write_rigid` writes a
+  frame's particles into the buffers drawing reads.
+- The runner computes exactly what `Simulation` does, whatever order ticks
+  are asked in.
+
 ## Sample viewer
 
 `ajfx_viewer` is built when ajfx is the top-level project
@@ -446,8 +491,9 @@ files with a reason.
 - Drawing order and flipbook cells derive from particle state and the camera
   alone: a stable sort with birth order as the tie-break, and cells chosen
   from age.
-- A rigid solver is driven in a fixed order: removals oldest first, one
-  step, additions in birth order into the lowest free slots. Every node must
+- A rigid solver is driven in a fixed order: removals oldest first, wakes
+  in slot order, one step, additions in birth order into the lowest free
+  slots. Every node must
   build the same Jolt source with the same defines (`third_party/jolt`), and
   update together.
 

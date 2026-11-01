@@ -56,6 +56,17 @@ private:
     std::unique_ptr<Data> data_;
 };
 
+// Who steps a GpuSimulation's rigid physics emitters.
+enum class RigidHosting {
+    // The simulation itself, on the CPU, within each step: simple, but a
+    // seek resimulates them on the calling thread.
+    Inline,
+    // The host, off the frame path (ajfx::RigidRunner): stepping leaves
+    // those emitters alone, and the host writes each one's particles with
+    // write_rigid before drawing. Needs no solver or meshes.
+    Host,
+};
+
 class GpuSimulation final {
 public:
     // Fails if the effect does not validate, `fields` lacks a distance field
@@ -70,7 +81,8 @@ public:
     // reference simulates them, and each step writes their particles into
     // their buffers; everything that draws reads them as any emitter's.
     [[nodiscard]] static Result<GpuSimulation> create(Device& device, Effect effect, const KernelSet& kernels,
-                                                      std::uint32_t instance_seed, SimulationOptions options);
+                                                      std::uint32_t instance_seed, SimulationOptions options,
+                                                      RigidHosting hosting = RigidHosting::Inline);
 
     GpuSimulation(GpuSimulation&&) noexcept;
     GpuSimulation& operator=(GpuSimulation&&) noexcept;
@@ -82,8 +94,15 @@ public:
     // Records one step; nothing runs until the device is flushed.
     void step(const ParameterProvider* parameters = nullptr);
     void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr);
-    // Back to step 0 with no particles.
-    void reset();
+    // Back to step 0, holding only the rigid physics emitters' piles when
+    // they are inline (see Simulation::reset).
+    void reset(const ParameterProvider* parameters = nullptr);
+
+    // Hosted rigid physics only: records writing a rigid physics emitter's
+    // particles, as the host's simulation of it has them at this tick, into
+    // the buffers drawing reads. Steps and restores leave those buffers
+    // stale, so write each such emitter after them and before drawing.
+    void write_rigid(std::size_t emitter, const EmitterState& particles);
 
     // Buffers for drawing. They swap every step; ask again after stepping.
     [[nodiscard]] EmitterBuffers emitter_buffers(std::size_t emitter) const;
@@ -110,6 +129,9 @@ public:
 private:
     struct State;
     explicit GpuSimulation(std::unique_ptr<State> state);
+    // Writes inline rigid physics emitters that hold particles at this tick
+    // (their piles) into the live buffers.
+    void write_inline_rigid();
     std::unique_ptr<State> state_;
 };
 

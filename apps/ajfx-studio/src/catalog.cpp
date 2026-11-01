@@ -162,6 +162,43 @@ std::vector<BlockDef> make_catalog() {
         .keywords = "emit spawn explosion pop once",
     });
     blocks.push_back(BlockDef{
+        .kind = "pile",
+        .title = "Pile",
+        .description = "Solid pieces already stacked when the effect starts, that collapse when it plays.",
+        .category = Category::Birth,
+        .controls =
+            {number_control("count", "Pieces", 150.0F, 1.0F, 1000.0F, "", 0, "How many pieces the pile holds.", 1.0F,
+                            20000.0F),
+             choice_control("shape", "Stacked as", "heap", {{"heap", "Heap"}, {"stack", "Stack"}},
+                            "A heap is a cone of pieces, as rocks or rubble lie. A stack fills a footprint layer "
+                            "by layer, as a wall of bricks or a pile of crates."),
+             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
+                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it slumps "
+                                 "when let go.",
+                                 5.0F, 85.0F),
+                  "shape", {"heap"}),
+             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.", 0.01F),
+                  "shape", {"stack"}),
+             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2, "The stack's footprint front to back.",
+                                 0.01F),
+                  "shape", {"stack"}),
+             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
+                            "When the pile is let go. Until then it stands still, unless something knocks into "
+                            "it; 0 lets it fall as soon as the effect plays."),
+             detail(vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
+                                 "Where the middle of the pile's base sits.")),
+             detail(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
+                                   "How far apart the pieces start, as a share of the largest piece's reach. Below "
+                                   "1 they start packed closer, and may overlap until they fall.",
+                                   0.5F, 4.0F)),
+             detail(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
+                                   "How far each piece is nudged off its place, so the pile is not a perfect "
+                                   "stack.",
+                                   0.0F, 1.0F)),
+             seed_control()},
+        .keywords = "prespawn pre-spawn stack heap rubble rocks wall bricks collapse topple preplaced",
+    });
+    blocks.push_back(BlockDef{
         .kind = "shape",
         .title = "Spawn shape",
         .description = "Where particles are born: a point, inside a ball, on a ring...",
@@ -569,6 +606,29 @@ std::vector<BlockDef> make_catalog() {
         .keywords = "rigid body debris physics rotate rolling",
         .unique = true,
     });
+    blocks.push_back(BlockDef{
+        .kind = "physics",
+        .title = "Physics",
+        .description = "Particles become solid bodies that knock into each other, pile up and come to rest.",
+        .category = Category::Contact,
+        .controls = {choice_control("shape", "Body", "auto",
+                                    {{"auto", "Its own shape"}, {"ball", "Ball"}, {"cube", "Cube"}},
+                                    "What each piece collides as. Its own shape wraps a debris chunk tightly; a "
+                                    "ball rolls."),
+                     number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
+                                    "How much pieces grip each other and the ground.", 0.0F, 1.0F),
+                     number_control("bounce", "Bounciness", 0.15F, 0.0F, 1.0F, "", 2,
+                                    "1 bounces back as fast as it arrived.", 0.0F, 1.0F),
+                     detail(number_control("density", "Density", 2400.0F, 100.0F, 8000.0F, "kg/m^3", 0,
+                                           "How heavy each piece is for its size. Stone is about 2400.", 1.0F)),
+                     detail(number_control("damping", "Spin damping", 0.05F, 0.0F, 2.0F, "", 2,
+                                           "How quickly spinning slows in the air.")),
+                     detail(toggle_control("rest", "Rest when still", true,
+                                           "Pieces that come to rest sleep until something knocks them, which "
+                                           "costs nothing while they lie still."))},
+        .keywords = "rigid body physics collide stack pile topple jolt solid",
+        .unique = true,
+    });
 
     // ---------------------------------------------------------- light
     blocks.push_back(BlockDef{
@@ -928,7 +988,18 @@ std::string block_summary(const Block& block) {
     }
     if (kind == "tumble") {
         const Value spin = get(block, "spin");
+        if (spin.y <= 0.0F) {
+            return "Turned every way, no spin";
+        }
         return format_number(spin.x, 0) + " to " + with_unit(spin.y, 0, "deg/s");
+    }
+    if (kind == "physics") {
+        return choice_label(block, "shape") + ", friction " + format_number(number_of(block, "friction"), 2);
+    }
+    if (kind == "pile") {
+        std::string text = choice_label(block, "shape") + " of " + format_number(number_of(block, "count"), 0);
+        const float release = number_of(block, "release");
+        return text + (release > 0.0F ? ", let go at " + with_unit(release, 2, "s") : ", falls at once");
     }
     if (kind == "light") {
         const Value reach = get(block, "reach");

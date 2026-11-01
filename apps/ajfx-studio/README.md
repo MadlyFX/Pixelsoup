@@ -136,6 +136,37 @@ shows the shape of a burst of sparks or a throw of debris in one picture,
 for dialling in speed, spread, gravity and drag. Effects too large for the
 CPU reference (over 200,000 particles) show no paths.
 
+## Solid pieces and piles
+
+**Physics** (Contact) makes a layer's particles solid bodies in a physics
+engine: they knock into each other, stack, tumble off and come to rest.
+- *Body* is what each piece collides as: *Its own shape* wraps a debris
+  chunk tightly, *Ball* rolls, *Cube* stacks.
+- *Friction* and *Bounciness* set the material; *Density*, *Spin damping*
+  and *Rest when still* are under More settings.
+- Gravity, Air resistance and Ground, sphere and box colliders act on them.
+  Other forces, mesh colliders and Vanish on contact cannot move an engine
+  body, and the layer says so on the block at fault.
+- With Physics, Tumble only sets each piece's spin and how it lies; the
+  engine does the rest.
+
+**Pile** (Birth) puts pieces in place before the effect starts: a heap of
+rocks that collapses when the effect plays, or a stack that stands until
+something knocks it down.
+- *Stacked as* a Heap (a cone whose sides slope at *Slope*) or a Stack
+  (filling *Width* by *Depth*, layer by layer).
+- *Let go at* holds the pile still until then; 0 lets it fall as soon as
+  the effect plays. A paused preview at the start shows it standing.
+- Under More settings: *Position*, *Spacing* (how far apart pieces start,
+  as a share of the largest piece's reach) and *Untidiness*.
+- A Pile without a Physics block uses the default physics.
+- A pile's pieces live on after they fall, so the automatic loop covers
+  the fall and a few seconds of settling, not their whole life.
+
+The **Rock pile** recipe is the starting point: 220 rocks heaped steeper
+than they can stand, which slump as the effect plays, and a low puff of
+dust as they come down.
+
 ## Your own pictures and models
 
 - **Sprites.** Appearance's Texture offers *From a file*: a PNG, JPEG, TGA or
@@ -162,9 +193,9 @@ pictures, meshes and fields, so the media server needs none of the files.
 ## Starting points
 
 **New** opens the recipes: Campfire, Spark fountain, Explosion, Magic orb,
-Smoke plume, Snowfall, Rain and a blank page. **Add layer** offers
+Smoke plume, Snowfall, Rain, Rock pile and a blank page. **Add layer** offers
 ready-made layers: Flames, Embers, Smoke, Sparks, Fireball, Debris, Dust,
-Motes and others. These are ordinary blocks with tuned values, so everything
+Motes, Rock pile and others. These are ordinary blocks with tuned values, so everything
 they do can be seen and changed.
 
 ## Under the hood

@@ -7,6 +7,8 @@
 #include <mediaserver/shaders/particle_velocity_frag_dxil.h>
 #endif
 
+#include <ajfx/rigid.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -106,6 +108,10 @@ struct ParticleInstance::State final {
         std::vector<std::uint32_t> unwritten_indices;
     };
     std::vector<std::optional<Mesh>> meshes;
+    // Its rigid physics on the pass's runner, if it has any, and the step
+    // whose particles the buffers hold (none since the simulation last moved).
+    std::unique_ptr<ajfx::RigidTrack> rigid;
+    std::optional<core::u64> rigid_written;
     ParticleDevice* device{};
 
     ~State() {
@@ -150,7 +156,17 @@ core::u64 ParticleInstance::target_step() const noexcept {
 }
 
 bool ParticleInstance::caught_up() const noexcept {
-    return step() == target_step() && state_->textures_landed();
+    return step() == target_step() && state_->textures_landed() &&
+           (!state_->rigid || state_->rigid_written == target_step());
+}
+
+std::optional<std::string> ParticleInstance::failure() const {
+    if (state_->rigid) {
+        if (std::optional<ajfx::Error> failed = state_->rigid->error()) {
+            return "rigid physics in '" + state_->effect.name + "': " + failed->message;
+        }
+    }
+    return std::nullopt;
 }
 
 bool ParticleInstance::safe_to_release() const noexcept {
@@ -179,6 +195,9 @@ struct ParticlePass::State final {
     std::optional<rhi::Texture> blank;
     std::optional<rhi::Sampler> sampler;
     ParticleSettings settings;
+    // Made with the first rigid physics instance; the runner goes first.
+    std::unique_ptr<ajfx::RigidSolver> rigid_solver;
+    std::unique_ptr<ajfx::RigidRunner> rigid_runner;
     std::optional<ParticleError> error;
 
     void note(std::string message) {
@@ -297,8 +316,11 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
     if (ajfx::Result<bool> checked = ajfx::check_meshes(effect, meshes); !checked) {
         return Result::failure(failure(ParticleErrorCode::InvalidEffect, checked.error().message));
     }
-    ajfx::Result<ajfx::gpu::GpuSimulation> simulation =
-        ajfx::gpu::GpuSimulation::create(*s.particles, effect, kernels, seed, fields);
+    // Rigid physics emitters are stepped by the pass's runner, not inline.
+    const bool rigid = ajfx::has_rigid_physics(effect);
+    ajfx::Result<ajfx::gpu::GpuSimulation> simulation = ajfx::gpu::GpuSimulation::create(
+        *s.particles, effect, kernels, seed, ajfx::SimulationOptions{.fields = fields},
+        rigid ? ajfx::gpu::RigidHosting::Host : ajfx::gpu::RigidHosting::Inline);
     if (!simulation) {
         const ajfx::ErrorCode code = simulation.error().code;
         return Result::failure(failure(code == ajfx::ErrorCode::DeviceFailure ? ParticleErrorCode::DeviceFailure
@@ -325,6 +347,16 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
     }
     state->sorter.emplace(std::move(sorter).value());
     state->device = s.particles.get();
+    if (rigid) {
+        if (!s.rigid_runner) {
+            s.rigid_solver = ajfx::rigid::make_jolt_solver(ajfx::rigid::JoltOptions{.threads = s.settings.rigid_threads});
+            s.rigid_runner = std::make_unique<ajfx::RigidRunner>(
+                *s.rigid_solver, ajfx::RigidRunnerOptions{.lead = s.settings.rigid_lead,
+                                                          .checkpoint_interval = s.settings.checkpoint_interval,
+                                                          .checkpoint_count = s.settings.checkpoint_count});
+        }
+        state->rigid = s.rigid_runner->track(effect, seed, meshes);
+    }
     for (const ajfx::Emitter& emitter : effect.emitters) {
         std::optional<ParticleInstance::State::Mesh>& out = state->meshes.emplace_back();
         if (emitter.renderer.geometry != ajfx::Geometry::Mesh) {
@@ -432,9 +464,11 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             mesh->unwritten_indices = {};
         }
     }
+    const core::u64 held_step = simulation.tick();
     if (i.restart) {
         simulation.reset();
         i.restart = false;
+        i.rigid_written.reset();
     }
     // Start from the latest checkpoint at or before the target when that is
     // closer than where the simulation is: always when going back, and when
@@ -451,8 +485,10 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
         } else {
             simulation.reset();
         }
+        i.rigid_written.reset();
     } else if (best && *i.saved[*best] > simulation.tick()) {
         simulation.restore(i.checkpoints[*best]);
+        i.rigid_written.reset();
     }
 
     for (core::u32 steps = 0U; simulation.tick() < i.target && steps < s.settings.step_budget; ++steps) {
@@ -476,6 +512,22 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
         }
         simulation.step(parameters);
     }
+    if (simulation.tick() != held_step) {
+        i.rigid_written.reset();
+    }
+    // The rigid physics emitters' particles at the target step, once the
+    // runner has them. Asking also tells it where to work ahead from.
+    if (i.rigid) {
+        const std::shared_ptr<const ajfx::RigidFrame> frame = i.rigid->frame(i.target);
+        if (frame && simulation.tick() == i.target && i.rigid_written != i.target) {
+            for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+                if (ajfx::rigid_physics(i.effect.emitters[e]) != nullptr) {
+                    simulation.write_rigid(e, frame->emitters[e]);
+                }
+            }
+            i.rigid_written = i.target;
+        }
+    }
     s.particles->end_recording();
     if (std::optional<ajfx::Error> error = s.particles->take_error()) {
         s.note(error->message);
@@ -484,10 +536,14 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
     return instance.caught_up();
 }
 
-void ParticlePass::restart(ParticleInstance& instance) noexcept {
+void ParticlePass::restart(ParticleInstance& instance,
+                           std::shared_ptr<const ajfx::ParameterProvider> parameters) noexcept {
     ParticleInstance::State& i = *instance.state_;
     std::fill(i.saved.begin(), i.saved.end(), std::nullopt);
     i.restart = true;
+    if (i.rigid) {
+        i.rigid->set_parameters(std::move(parameters));
+    }
 }
 
 bool ParticlePass::draw(rhi::CommandList& commands, ParticleInstance& instance, const scene::ViewMatrices& view,

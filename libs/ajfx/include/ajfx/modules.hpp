@@ -61,7 +61,63 @@ struct SpawnBurst final {
     friend bool operator==(const SpawnBurst&, const SpawnBurst&) = default;
 };
 
-using SpawnModule = std::variant<SpawnRate, SpawnBurst>;
+// How a pile's bodies are stacked.
+enum class PileShape {
+    // A cone whose sides slope at `slope` degrees, as rocks or rubble lie.
+    Heap,
+    // Rows filling a `width` by `depth` footprint, a layer at a time, as a
+    // wall of bricks or a stack of crates.
+    Box,
+};
+
+// `count` bodies already there when the effect starts, stacked on `center`
+// and held still until `release` seconds: a pile of rocks that collapses when
+// the effect plays, or a wall that stands until something knocks it down.
+// - **When:** the pile is part of step 0's state, so a paused effect shows
+//   it, and every seek to the start finds it. Its particles come first in
+//   birth order, before any other spawn module's.
+// - **Where:** bodies sit on a lattice spaced by the largest pile body's
+//   reach (the ball its shape turns within) times `spacing`, filled from the
+//   bottom up. A heap's layers are staggered, each body over a gap below, and
+//   it grows as tall as `count` needs; a box is built as high as it needs.
+//   `jitter` moves each body across by up to that share of the spacing, so a
+//   heap is not a perfect stack.
+// - **How:** init modules set each body up as any newborn (life, colour,
+//   size, orientation), but a pile body starts still where the pile puts it:
+//   position, velocity and spin are the pile's.
+// - **Held:** until `release` the bodies sleep, so nothing moves them unless
+//   another body of the emitter knocks into them. At `release` they all wake
+//   and fall as they will. A release of 0 lets them go from the first step.
+// Rigid physics emitters only: a pile stands on its bodies.
+struct SpawnPile final {
+    static constexpr std::string_view kind = "spawn_pile";
+    ModuleId id{};
+    std::uint32_t count{100U};
+    PileShape shape{PileShape::Heap};
+    Vec3 center{};
+    float slope{55.0F};  // heap, degrees from the ground
+    float width{1.0F};   // box, along x
+    float depth{1.0F};   // box, along z
+    float spacing{1.0F};
+    float jitter{0.15F};
+    float release{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("count", self.count);
+        visit("shape", self.shape);
+        visit("center", self.center);
+        visit("slope", self.slope);
+        visit("width", self.width);
+        visit("depth", self.depth);
+        visit("spacing", self.spacing);
+        visit("jitter", self.jitter);
+        visit("release", self.release);
+    }
+    friend bool operator==(const SpawnPile&, const SpawnPile&) = default;
+};
+
+using SpawnModule = std::variant<SpawnRate, SpawnBurst, SpawnPile>;
 
 // ---------------------------------------------------------------- init
 
@@ -755,6 +811,10 @@ struct EnumNames<Geometry> {
 template <>
 struct EnumNames<RigidShape> {
     static constexpr std::string_view names[] = {"auto", "hull", "sphere", "box"};
+};
+template <>
+struct EnumNames<PileShape> {
+    static constexpr std::string_view names[] = {"heap", "box"};
 };
 
 } // namespace ajfx

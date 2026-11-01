@@ -14,6 +14,7 @@
 #include <ajfx/field.hpp>
 #include <ajfx/mesh.hpp>
 #include <ajfx/texture.hpp>
+#include <ajfx/rigid_runner.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <memory>
@@ -41,6 +42,13 @@
 // Alpha-blended emitters draw back to front: each draw sorts them along the
 // camera's forward axis (ajfx::gpu::ParticleSorter), which every node shares,
 // so slices agree on the order as they do on the particles.
+//
+// Rigid physics emitters (debris that piles, a heap that collapses) run in a
+// physics engine on the CPU, which costs too much to step or checkpoint while
+// a frame records. The pass steps them on a thread of its own instead
+// (ajfx::RigidRunner), ahead of the show frame, and each advance only writes
+// the target step's particles once that thread has them. Until then the
+// instance is behind, and a seek holds until its physics has caught up.
 namespace mediaserver::render {
 
 enum class ParticleErrorCode : core::u8 {
@@ -67,6 +75,12 @@ struct ParticleSettings final {
     // kept. A seek back lands on the nearest one at or before its target.
     core::u32 checkpoint_interval{120U};
     core::u32 checkpoint_count{4U};
+    // Threads stepping rigid physics, its own thread included. Made when the
+    // first effect with rigid physics is instanced.
+    core::u32 rigid_threads{2U};
+    // Steps the rigid physics thread works ahead of the show frame, so
+    // playback finds each step ready.
+    core::u32 rigid_lead{30U};
 };
 
 class ParticlePass;
@@ -84,8 +98,12 @@ public:
     // The step the simulation holds, and the one the last advance asked for.
     [[nodiscard]] core::u64 step() const noexcept;
     [[nodiscard]] core::u64 target_step() const noexcept;
-    // At its target step with every texture uploaded: ready to draw.
+    // At its target step with every texture uploaded and its rigid physics
+    // written: ready to draw.
     [[nodiscard]] bool caught_up() const noexcept;
+    // Why it will never catch up: its rigid physics could not be built (a
+    // mesh that wraps no hull). Other instances are unaffected.
+    [[nodiscard]] std::optional<std::string> failure() const;
     // No submitted work still uses the textures it owns, so it may be
     // destroyed. Its simulation's buffers and kernels need no wait: the
     // particle device retires those itself.
@@ -160,7 +178,8 @@ public:
     // Records simulating `instance` to the step for `show_frame` at
     // rate_num / rate_den frames a second, within the step budget, and returns
     // whether it got there. Parameter values come from `parameters` (a pure
-    // function of the step) or the effect's defaults.
+    // function of the step) or the effect's defaults; the rigid physics
+    // thread uses the ones `restart` gave it, which must be the same.
     [[nodiscard]] bool advance(rhi::CommandList& commands, ParticleInstance& instance, core::u64 show_frame,
                                core::u32 rate_num, core::u32 rate_den,
                                const ajfx::ParameterProvider* parameters = nullptr);
@@ -196,8 +215,11 @@ public:
     // Forgets `instance`'s history: its checkpoints are dropped, and the next
     // advance simulates again from the start. For when what the simulation
     // depends on (its parameters) changed, so the past it holds is no longer
-    // the past every node would compute.
-    void restart(ParticleInstance& instance) noexcept;
+    // the past every node would compute. Its rigid physics follows
+    // `parameters` from now on (none for the defaults), called from the
+    // rigid physics thread: pass what advance will be given.
+    void restart(ParticleInstance& instance,
+                 std::shared_ptr<const ajfx::ParameterProvider> parameters = nullptr) noexcept;
 
     // The first device failure since the last call, for frame diagnostics.
     [[nodiscard]] std::optional<ParticleError> take_error() noexcept;
