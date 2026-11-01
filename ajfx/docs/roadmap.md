@@ -257,25 +257,40 @@ feedback forces could evaluate any frame directly.
          mesh per particle to draw them by, which is rendering work rather
          than physics. Fifteen kinds is also few for a shard library, so a
          piece set may need to carry its shapes rather than name kinds.
-     - **The Break module.** A body whose impact passes `threshold` is
-       removed and replaced by the pieces of a named piece set, each at its
-       own offset and turn within the parent's pose, inheriting the parent's
-       velocity and a scatter of its own. A piece set is authored: the
-       panels, splinters and chunks a thing actually comes apart into, each
-       a shape and a place. A crate breaks into flat panels and slivers, not
-       into smaller crates, so a grid of cubes is not a piece set; cutting a
-       box `splits` ways is for a solid lump, a stone or a brick, and even
-       there each piece is a slab rather than a cube. Breaks are taken in
-       slot order, each piece's scatter and spin come from
-       `particle_hash(seed, the parent's spawn index, stream)`, and
-       `generations` bounds how often a piece may break again. Budgets are
-       fixed up front, so a break the emitter's capacity cannot hold is
-       refused when the effect is built rather than thinned at playback:
-       capacity must cover `count * pieces^generations`.
+     - **The Break module, done (2026-11-01).** A `Break` module makes one
+       body kind breakable: a body of that kind whose hardest contact in a
+       step closed at `threshold` or faster comes apart at the end of it,
+       into the `pieces` it lists, before the step's births. A piece is a
+       body of its own kind at a share of the parent's size, at an offset
+       and turn within the parent's pose, and it takes the parent's
+       velocity, colour, age and lifetime with up to `scatter` outward and
+       `spin` about an axis hashed from the parent and which piece it is.
+       The emitter's init modules do not run on a piece: it is a piece of
+       that crate, not a newborn. The pieces are authored rather than
+       generated, so they are the panels and slivers a thing comes apart
+       into; a crate's six panels are hulls of a shard model.
+       Which kind breaks into what makes recursion the author's: a piece
+       breaks again if its own kind has a `Break`, and a cycle of kinds is
+       refused rather than counted by generations. A body breaks only if
+       every piece fits the capacity; one that does not stays whole and its
+       pieces are counted in `refused`, so nothing is half broken and no
+       budget grows. Breaks are taken in birth order, pieces in listed
+       order, and the world collects the contacts a break needs whether the
+       host asked for contacts or not, down to the gentlest threshold.
+       Measured: a crate hit by a dropped ball came apart at step 69 into
+       six panels, which settled on the floor and lay still. Tests cover
+       the break and its silence under a threshold nothing reaches, reruns
+       and thread counts, six seeks across the break, the refusal with no
+       room (and that one more place is all it needs), the package round
+       trip, and every validation refusal including the cycle.
        - The body that breaks is itself solid: only a prop can be hollow (a
          compound of convex pieces), and a prop never dies, so a crate
          standing as a body is a closed lump until the moment it comes
          apart. A lid that caves in before it breaks is not this feature.
+       - **Not yet:** every piece draws as the emitter's one mesh, so a
+         break is right in physics and wrong in the picture until there is
+         a mesh per particle. That is the next thing this shot needs, and
+         it is rendering work.
      - **Studio and the shot.** A **Break** block in a rigid layer
        (`Category::Physics`, beside Pile and Prop): how hard, into what, how
        many times, with the piece set drawn over the preview as the Prop

@@ -578,6 +578,9 @@ void apply(const SizeOverLife& m, Step& step) {
 // The engine moves rigid physics particles (see move_rigid).
 void apply(const RigidPhysics&, Step&) {}
 
+// A body comes apart after the world has stepped (see break_bodies).
+void apply(const Break&, Step&) {}
+
 // Where a prop stands at `seconds`: a driven prop moves from its pose to the
 // one it is given, over its window; every other prop stands where it was put.
 void prop_pose_at(const RigidProp& prop, float seconds, Vec3& position, Quat& orientation) {
@@ -803,6 +806,116 @@ void append(EmitterState& s, float age) {
     s.spawn_index.push_back(static_cast<std::uint32_t>(s.spawned));
 }
 
+// A body that was hit hard enough comes apart. Called after the world has
+// stepped, so the contacts it reports are this step's, and before the step's
+// births, so every piece takes its slot in birth order.
+// - Breaks are taken in birth order, the order the emitter does everything
+//   else in, and each body's pieces in the order they are listed.
+// - A body breaks only if every one of its pieces fits the emitter's
+//   capacity. One that does not stays whole and its pieces are counted as
+//   refused, so a body is never half broken.
+void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world) {
+    EmitterState& s = step.s;
+    const std::size_t kinds = physics.bodies.size() + 1U;
+    std::vector<const Break*> breaks(kinds, nullptr);
+    bool any = false;
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* breaking = std::get_if<Break>(&module); breaking != nullptr && breaking->body < kinds) {
+            breaks[breaking->body] = breaking;
+            any = true;
+        }
+    }
+    if (!any || s.alive() == 0U) {
+        return;
+    }
+    // The hardest this step hit each body, by its slot. Only contacts over
+    // the lowest threshold were collected at all, so this is a short list.
+    std::vector<float> hit(emitter.capacity, 0.0F);
+    for (const RigidContact& contact : world.contacts()) {
+        if (contact.a_is == RigidSide::Body && contact.a < hit.size()) {
+            hit[contact.a] = std::max(hit[contact.a], contact.speed);
+        }
+        if (contact.b_is == RigidSide::Body && contact.b < hit.size()) {
+            hit[contact.b] = std::max(hit[contact.b], contact.speed);
+        }
+    }
+    // What the parent leaves its pieces, kept before compaction moves it.
+    struct Broken final {
+        Vec3 position;
+        Quat orientation;
+        Vec3 velocity;
+        float size;
+        float age;
+        float lifetime;
+        Color base_color;
+        Color color;
+        std::uint32_t spawn_index;
+        const Break* by;
+    };
+    std::vector<Broken> broken;
+    std::vector<bool> gone(s.alive(), false);
+    std::size_t spare = emitter.capacity - s.alive();
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Break* by = breaks[std::min<std::size_t>(s.body_kind[i], kinds - 1U)];
+        if (by == nullptr || hit[s.body[i]] < by->threshold) {
+            continue;
+        }
+        // The body's own place comes free, so its pieces have one more than
+        // the emitter has spare.
+        if (by->pieces.size() > spare + 1U) {
+            s.refused += by->pieces.size();
+            continue;
+        }
+        spare = spare + 1U - by->pieces.size();
+        gone[i] = true;
+        broken.push_back(Broken{s.position[i], s.orientation[i], s.velocity[i], s.size[i], s.age[i], s.lifetime[i],
+                                s.base_color[i], s.color[i], s.spawn_index[i], by});
+    }
+    if (broken.empty()) {
+        return;
+    }
+    // The broken leave their world oldest first, as the dead do.
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        if (gone[i]) {
+            world.remove(s.body[i]);
+        }
+    }
+    compact(s, [&gone](std::size_t i) { return gone[i]; });
+    constexpr float radians = std::numbers::pi_v<float> / 180.0F;
+    const std::size_t first_piece = s.alive();
+    for (const Broken& parent : broken) {
+        for (std::size_t k = 0U; k < parent.by->pieces.size(); ++k) {
+            const BreakPiece& piece = parent.by->pieces[k];
+            // Hashed from the parent and which piece this is, so a seek finds
+            // the same break however it got here.
+            const auto u = [&](std::uint32_t draw) {
+                return step.random(parent.spawn_index, parent.by->id,
+                                   static_cast<std::uint32_t>(k) * 8U + draw);
+            };
+            append(s, parent.age);
+            const std::size_t i = s.alive() - 1U;
+            s.body_kind.push_back(piece.body);
+            // Where the piece sat in the thing that broke, and the way out
+            // from its middle, which is the way the piece is thrown.
+            const Vec3 out = rotate(parent.orientation, piece.offset * parent.size);
+            const float reach = std::sqrt(dot(out, out));
+            const Vec3 away = reach > 1.0e-6F ? out * (1.0F / reach) : unit_sphere(u(0U), u(1U));
+            s.position[i] = parent.position + out;
+            s.orientation[i] = times(parent.orientation, prop_orientation(piece.turn));
+            s.velocity[i] = parent.velocity + away * (parent.by->scatter * mix(0.5F, 1.0F, u(2U)));
+            s.angular_velocity[i] =
+                unit_sphere(u(3U), u(4U)) * (parent.by->spin * mix(0.5F, 1.0F, u(5U)) * radians);
+            s.base_size[i] = parent.size * piece.size;
+            s.size[i] = s.base_size[i];
+            s.lifetime[i] = parent.lifetime;
+            s.base_color[i] = parent.base_color;
+            s.color[i] = parent.color;
+            ++s.spawned;
+        }
+    }
+    add_bodies(s, first_piece, emitter.capacity, world);
+}
+
 std::string quoted(std::string_view text) {
     return "'" + std::string{text} + "'";
 }
@@ -893,6 +1006,17 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
         desc.report_contacts = true;
         desc.contact_min_speed = contacts->min_speed;
         desc.contact_limit = contacts->limit;
+    }
+    // A Break module needs the contacts to decide what broke, so the world
+    // reports them whether the host asked or not, down to the gentlest
+    // threshold that breaks anything.
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* breaking = std::get_if<Break>(&module)) {
+            desc.contact_min_speed =
+                desc.report_contacts ? std::min(desc.contact_min_speed, breaking->threshold) : breaking->threshold;
+            desc.contact_limit = std::max(desc.contact_limit, emitter.capacity);
+            desc.report_contacts = true;
+        }
     }
     desc.angular_damping = physics.angular_damping;
     desc.allow_sleep = physics.allow_sleep;
@@ -1318,7 +1442,9 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             std::sort(waking.begin(), waking.end());
             world->wake(waking);
         }
-        move_rigid(step, emitter, *rigid_physics(emitter), *world);
+        const RigidPhysics& physics = *rigid_physics(emitter);
+        move_rigid(step, emitter, physics, *world);
+        break_bodies(step, emitter, physics, *world);
     } else {
         // Forces, integration, then constraints and appearance.
         for (const UpdateModule& module : emitter.update) {

@@ -416,6 +416,53 @@ void body_kinds_round_trip_and_are_checked() {
     AJFX_CHECK(none.ok() && rigid_physics(none.value().emitters[0])->bodies.empty());
 }
 
+void breaks_round_trip_and_are_checked() {
+    // Two pieces carrying a value in every field, so none is quietly lost.
+    const BreakPiece lid{
+        .body = 1U, .offset = Vec3{0.0F, 0.5F, 0.0F}, .turn = Vec3{0.0F, 0.0F, 15.0F}, .size = 0.45F};
+    const BreakPiece side{
+        .body = 1U, .offset = Vec3{-0.5F, 0.0F, 0.25F}, .turn = Vec3{90.0F, 5.0F, 0.0F}, .size = 0.3F};
+
+    EffectBuilder builder{"breaking"};
+    builder.emitter("pieces")
+        .capacity(64U)
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 4.0F, .max = 4.0F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box, .bodies = {RigidBodyKind{.shape = RigidShape::Box}}})
+        .update(Break{.body = 0U, .threshold = 2.5F, .scatter = 1.5F, .spin = 240.0F, .pieces = {lid, side}});
+    const Effect effect = builder.build().value();
+
+    const Result<std::vector<std::uint8_t>> first = write_package(effect);
+    AJFX_CHECK(first.ok());
+    const Result<Effect> read = read_package(first.value());
+    AJFX_CHECK(read.ok() && read.value() == effect);
+    const Result<std::vector<std::uint8_t>> second = write_package(read.value());
+    AJFX_CHECK(second.ok() && second.value() == first.value());
+    const Break* breaking = nullptr;
+    for (const UpdateModule& module : read.value().emitters[0].update) {
+        if (const auto* found = std::get_if<Break>(&module)) {
+            breaking = found;
+        }
+    }
+    AJFX_CHECK(breaking != nullptr && breaking->pieces.size() == 2U);
+    AJFX_CHECK(breaking->pieces[0] == lid && breaking->pieces[1] == side);
+    AJFX_CHECK(breaking->threshold == 2.5F && breaking->scatter == 1.5F && breaking->spin == 240.0F);
+
+    // A misspelt field of a piece is reported with its path, as a prop's is.
+    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+        "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2},
+        {"type": "break", "id": 3, "pieces": )";
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([{"size": 0.5, "ofset": [0, 1, 0]}]}]}]})"),
+                          ErrorCode::MalformedPackage,
+                          "emitters[0].update[1].pieces[0] has unknown field 'ofset'"));
+    AJFX_CHECK(fails_with(effect_from_json(head + R"({"size": 0.5}}]}]})"), ErrorCode::MalformedPackage,
+                          "pieces must be an array of pieces"));
+    // A break with no pieces in the JSON is a break into nothing, refused.
+    AJFX_CHECK(fails_with(effect_from_json(head + R"([]}]}]})"), ErrorCode::InvalidEffect,
+                          "needs at least one piece"));
+}
+
 void props_round_trip_and_are_checked() {
     // A mesh prop stands still: that is the only motion it may have. Its
     // fields still have to survive the trip, so it carries values in all of
@@ -494,6 +541,7 @@ int main() {
         {"presets_round_trip_to_identical_effects_and_bytes", presets_round_trip_to_identical_effects_and_bytes},
         {"props_round_trip_and_are_checked", props_round_trip_and_are_checked},
         {"body_kinds_round_trip_and_are_checked", body_kinds_round_trip_and_are_checked},
+        {"breaks_round_trip_and_are_checked", breaks_round_trip_and_are_checked},
         {"floats_survive_exactly", floats_survive_exactly},
         {"hand_written_json_fills_in_defaults", hand_written_json_fills_in_defaults},
         {"malformed_json_is_reported_with_its_path", malformed_json_is_reported_with_its_path},

@@ -158,6 +158,16 @@ public:
         }
     }
 
+    // A break piece's own fields, held to what any other module's are.
+    void operator()(std::string_view field, const std::vector<BreakPiece>& pieces) {
+        for (std::size_t i = 0U; i < pieces.size(); ++i) {
+            const std::string where = std::string{field} + "[" + std::to_string(i) + "]";
+            BreakPiece::fields(pieces[i], [&](std::string_view name, const auto& value) {
+                (*this)(where + "." + std::string{name}, value);
+            });
+        }
+    }
+
     // A body kind's own fields, held to what any other module's numbers are.
     void operator()(std::string_view field, const std::vector<RigidBodyKind>& bodies) {
         for (std::size_t i = 0U; i < bodies.size(); ++i) {
@@ -252,6 +262,18 @@ void check_module(const Effect& e, const RigidBody& m, FieldChecker& check) {
     check.require(range(e, m.rest_speed).lo >= 0.0F, "rest_speed", "must not be negative");
     const Range roundness = range(e, m.roundness);
     check.require(roundness.lo >= 0.0F && roundness.hi <= 1.0F, "roundness", "must be between 0 and 1");
+}
+
+void check_module(const Effect&, const Break& m, FieldChecker& check) {
+    check.require(m.threshold > 0.0F, "threshold", "must be positive: a body cannot break on no impact at all");
+    check.require(m.scatter >= 0.0F, "scatter", "must not be negative");
+    check.require(!m.pieces.empty(), "pieces", "needs at least one piece: a body cannot break into nothing");
+    check.require(m.pieces.size() <= max_break_pieces, "pieces",
+                  "breaks into more than the " + std::to_string(max_break_pieces) + " pieces one body may make");
+    for (std::size_t i = 0U; i < m.pieces.size(); ++i) {
+        const std::string at = "pieces[" + std::to_string(i) + "]";
+        check.require(m.pieces[i].size > 0.0F, at + ".size", "must be positive");
+    }
 }
 
 void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
@@ -437,7 +459,8 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                     unmoving(m, m.center.bound() || m.radius.bound() || m.restitution.bound() || m.friction.bound());
                 } else if constexpr (std::is_same_v<M, BoxCollision>) {
                     unmoving(m, m.center.bound() || m.restitution.bound() || m.friction.bound());
-                } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife>) {
+                } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife> &&
+                                     !std::is_same_v<M, Break>) {
                     refuse(m, "cannot act on rigid physics particles; the physics engine moves them");
                 }
             },
@@ -456,6 +479,65 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                          where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) + " spawns body kind " +
                              std::to_string(named) + ", and rigid physics has " + std::to_string(kinds) +
                              " (0 is the emitter's own)"};
+        }
+    }
+    // Every kind a break names must exist, no kind may break two ways, and
+    // the pieces must stop breaking: a cycle would come apart for ever.
+    std::vector<const Break*> breaks;
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* breaking = std::get_if<Break>(&module)) {
+            breaks.push_back(breaking);
+        }
+    }
+    std::vector<const Break*> breaks_kind(kinds, nullptr);
+    for (const Break* breaking : breaks) {
+        const std::string which = " module 'break' #" + std::to_string(breaking->id);
+        if (breaking->body >= kinds) {
+            return Error{ErrorCode::InvalidEffect, where + which + " breaks body kind " +
+                                                       std::to_string(breaking->body) + ", and rigid physics has " +
+                                                       std::to_string(kinds) + " (0 is the emitter's own)"};
+        }
+        if (breaks_kind[breaking->body] != nullptr) {
+            return Error{ErrorCode::InvalidEffect, where + which + " breaks body kind " +
+                                                       std::to_string(breaking->body) +
+                                                       ", which another 'break' module already breaks"};
+        }
+        breaks_kind[breaking->body] = breaking;
+        for (std::size_t i = 0U; i < breaking->pieces.size(); ++i) {
+            if (breaking->pieces[i].body >= kinds) {
+                return Error{ErrorCode::InvalidEffect,
+                             where + which + " piece " + std::to_string(i) + " is body kind " +
+                                 std::to_string(breaking->pieces[i].body) + ", and rigid physics has " +
+                                 std::to_string(kinds) + " (0 is the emitter's own)"};
+            }
+        }
+    }
+    // A kind breaks into kinds that break into kinds: walk it and refuse a
+    // loop, naming the kind the trail came back to.
+    for (std::uint32_t start = 0U; start < kinds; ++start) {
+        if (breaks_kind[start] == nullptr) {
+            continue;
+        }
+        std::vector<bool> seen(kinds, false);
+        std::vector<std::uint32_t> trail{start};
+        while (!trail.empty()) {
+            const std::uint32_t kind = trail.back();
+            trail.pop_back();
+            if (seen[kind]) {
+                continue;
+            }
+            seen[kind] = true;
+            if (breaks_kind[kind] == nullptr) {
+                continue;
+            }
+            for (const BreakPiece& piece : breaks_kind[kind]->pieces) {
+                if (piece.body == start) {
+                    return Error{ErrorCode::InvalidEffect,
+                                 where + " body kind " + std::to_string(start) +
+                                     " breaks into pieces that break back into it; breaking has to end"};
+                }
+                trail.push_back(piece.body);
+            }
         }
     }
     const RigidShape shape = physics->shape;
@@ -517,6 +599,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     std::size_t rigid_bodies = 0U;
     std::size_t rigid_physics = 0U;
     std::size_t spins = 0U;
+    std::size_t breaks = 0U;
     std::uint64_t piled = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
@@ -536,6 +619,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
             ++rigid_bodies;
         } else if constexpr (std::is_same_v<M, RigidPhysics>) {
             ++rigid_physics;
+        } else if constexpr (std::is_same_v<M, Break>) {
+            ++breaks;
         } else if constexpr (std::is_same_v<M, InitSpin>) {
             ++spins;
         } else if constexpr (std::is_same_v<M, SpawnPile>) {
@@ -581,6 +666,11 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                                  "bodies"};
             }
         }
+    }
+    if (breaks > 0U && rigid_physics == 0U) {
+        return Error{ErrorCode::InvalidEffect, where +
+                                                   " has a 'break' module but no 'rigid_physics' module: only a "
+                                                   "body in a physics world can come apart"};
     }
     if (piled > 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect,

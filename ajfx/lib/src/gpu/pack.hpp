@@ -267,6 +267,10 @@ inline void pack(const SizeOverLife& m, const PackContext&, Packer& p) {
 // Rigid physics emitters run on the CPU; their kernels read no module data.
 inline void pack(const RigidPhysics&, const PackContext&, Packer&) {}
 
+// Breaking happens in the rigid physics world, on the CPU, so it too leaves
+// nothing for a kernel to read.
+inline void pack(const Break&, const PackContext&, Packer&) {}
+
 // One module: its id, then its data.
 template <class Module>
 void pack_module(const Module& module, const PackContext& context, Packer& p) {

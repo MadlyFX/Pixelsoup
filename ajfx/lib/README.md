@@ -83,6 +83,7 @@ the emitter, module and field at fault.
 | Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge` |
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
 | Update: instead of all motion | `RigidPhysics` (needs a rigid solver, see below) |
+| Update: coming apart | `Break` (rigid physics only) |
 
 Each step ages and retires particles, applies forces in stack order,
 integrates position (and turns sprites by their `InitSpin` spin), applies the
@@ -356,6 +357,36 @@ colliders, pile up, knock each other about and fall asleep at rest.
 - **On the GPU:** `GpuSimulation` runs rigid physics emitters on the CPU
   with the same code, and writes their particles into the emitter's
   buffers every step. Sorting, meshes, lights and drawing are unchanged.
+- **Breaking:** a `Break` module makes one kind of the emitter's bodies
+  breakable. A body of that kind whose hardest contact in a step closed at
+  `threshold` or faster comes apart at the end of that step, into the
+  pieces the module lists, before the step's births. The world reports the
+  contacts a break needs whether the host asked for any or not.
+  - **A piece** is a body of its own kind at a share of the parent's size,
+    placed at an `offset` (a share of the parent's size, turned by the
+    parent's turn) and a `turn` of its own. Pieces shaped like pieces are
+    kinds that collide as shard models' hulls: a crate comes apart into
+    panels and slivers, not into smaller crates.
+  - **What a piece takes from its parent:** its pose, its velocity plus up
+    to `scatter` units a second outward along where the piece sat, up to
+    `spin` degrees a second about an axis of its own, and the parent's
+    colour, age and lifetime -- so the pieces of a crate are pieces of that
+    crate rather than newborns. The emitter's init modules do not run on
+    them. The scatter and spin are hashed from the parent's spawn index and
+    which piece it is, so a seek over a break finds the same pieces going
+    the same way.
+  - **Again:** a piece breaks in its turn if its own kind has a `Break`. A
+    cycle of kinds is refused, since breaking has to end.
+  - **Room:** a body breaks only if every piece fits the emitter's
+    capacity. One that does not stays whole and its pieces are counted in
+    `EmitterState::refused`: a budget is refused and reported, and a body is
+    never half broken.
+  - **Order:** breaks are taken in birth order and each body's pieces in the
+    order they are listed, so the slots they take are a pure function of the
+    step.
+  - A kind decides what a body collides as, not what it looks like, so every
+    piece still draws as the emitter's one mesh. Pieces that look like
+    pieces need a mesh per particle, which the roadmap has.
 - **What they hit:** with `SimulationOptions::contacts`, every step reports
   the pairs it found touching: `Simulation::contacts(emitter)` gives them,
   and `contacts_dropped(emitter)` how many would not fit. Each

@@ -77,8 +77,24 @@ Json to_json(const std::vector<Key>& keys) {
     return array;
 }
 
-// A body kind and a prop each write their own fields, the same list
-// validation and reading use.
+// A break piece, a body kind and a prop each write their own fields, the
+// same list validation and reading use.
+Json to_json(const BreakPiece& piece) {
+    Json object = Json::object();
+    BreakPiece::fields(piece, [&object](std::string_view name, const auto& field) {
+        object.add(std::string{name}, to_json(field));
+    });
+    return object;
+}
+
+Json to_json(const std::vector<BreakPiece>& pieces) {
+    Json array = Json::array();
+    for (const BreakPiece& piece : pieces) {
+        array.items.push_back(to_json(piece));
+    }
+    return array;
+}
+
 Json to_json(const RigidBodyKind& body) {
     Json object = Json::object();
     RigidBodyKind::fields(body, [&object](std::string_view name, const auto& field) {
@@ -318,6 +334,21 @@ public:
             out.push_back(key);
         }
         return true;
+    }
+
+    bool read(const std::string& path, const Json& json, std::vector<BreakPiece>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of pieces");
+            return false;
+        }
+        out.clear();
+        out.reserve(json.items.size());
+        for (std::size_t i = 0U; i < json.items.size(); ++i) {
+            BreakPiece piece;
+            read_fields(path + "[" + std::to_string(i) + "]", json.items[i], piece, {});
+            out.push_back(piece);
+        }
+        return !failed();
     }
 
     // A body kind is an object of RigidBodyKind's own fields, so a misspelt

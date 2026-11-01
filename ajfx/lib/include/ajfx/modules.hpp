@@ -744,6 +744,69 @@ struct RigidProp final {
 // and what an editor draws over the picture cannot disagree.
 [[nodiscard]] Quat prop_orientation(Vec3 degrees) noexcept;
 
+// One piece a body comes apart into, placed in the parent's own frame.
+// - **What it is:** a body of kind `body` (RigidPhysics::bodies, 0 being the
+//   emitter's own), at `size` of the parent's size. A piece shaped like a
+//   piece is a kind that collides as a shard model's hull.
+// - **Where it is:** `offset` is a share of the parent's size, turned by the
+//   parent's own turn, so a panel sits where it sat in the crate; `turn` is
+//   the piece's own, in degrees about Y, then X, then Z, as a prop's is.
+struct BreakPiece final {
+    std::uint32_t body{0U};
+    Vec3 offset{};
+    Vec3 turn{};
+    float size{0.5F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("body", self.body);
+        visit("offset", self.offset);
+        visit("turn", self.turn);
+        visit("size", self.size);
+    }
+    friend bool operator==(const BreakPiece&, const BreakPiece&) = default;
+};
+
+// Makes one kind of the emitter's bodies breakable: a body of kind `body`
+// that is hit at `threshold` or harder comes apart into `pieces`.
+// - **When:** every step reports what its bodies hit and how hard (see
+//   RigidContact). A body whose hardest contact that step closed at
+//   `threshold` or more breaks at the end of it, before the step's births.
+//   The threshold is fixed, not bound to a parameter: it is also what the
+//   world filters contacts by, which is decided when the world is built.
+// - **What the pieces take:** the parent's pose, with each piece's offset and
+//   turn within it; the parent's velocity, and `scatter` units a second more,
+//   outward along where the piece sat, with `spin` degrees a second about an
+//   axis of the piece's own; and the parent's colour, age and lifetime, so
+//   the pieces of a crate are pieces of that crate and not newborns. The
+//   emitter's init modules do not run on them.
+// - **Again:** a piece breaks in its turn if its own kind has a Break module
+//   of its own. A cycle of kinds is refused: breaking has to end.
+// - **Room:** a body breaks only if every one of its pieces fits the
+//   emitter's capacity. One that does not stays whole, and the pieces it
+//   could not bear are counted in EmitterState::refused rather than half of
+//   it breaking.
+// - Rigid physics emitters only, and at most one Break for a kind.
+struct Break final {
+    static constexpr std::string_view kind = "break";
+    ModuleId id{};
+    std::uint32_t body{0U};
+    float threshold{3.0F};
+    float scatter{0.5F};
+    float spin{90.0F};
+    std::vector<BreakPiece> pieces;
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("body", self.body);
+        visit("threshold", self.threshold);
+        visit("scatter", self.scatter);
+        visit("spin", self.spin);
+        visit("pieces", self.pieces);
+    }
+    friend bool operator==(const Break&, const Break&) = default;
+};
+
 // Makes the emitter's particles bodies in a rigid-body physics engine on the
 // CPU (the host's RigidSolver, see rigid_solver.hpp; ajfx::rigid provides
 // Jolt's). Unlike RigidBody, they collide with each other: debris piles up,
@@ -799,6 +862,9 @@ struct RigidPhysics final {
 };
 
 inline constexpr std::uint32_t max_rigid_capacity = 65536U;
+// Pieces one body may come apart into. A crate is a few panels and slivers;
+// a hundred of them is a simulation of its own.
+inline constexpr std::size_t max_break_pieces = 32U;
 // Kinds of body beyond the emitter's own. Each is a shape to build and
 // another material; a handful is a scene, and a world is not a shop.
 inline constexpr std::size_t max_rigid_body_kinds = 15U;
@@ -834,7 +900,7 @@ struct SizeOverLife final {
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
                                   SphereCollision, BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody,
-                                  RigidPhysics>;
+                                  RigidPhysics, Break>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -847,7 +913,7 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
 [[nodiscard]] constexpr bool is_force(const UpdateModule& module) noexcept {
     return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
-           !std::holds_alternative<RigidPhysics>(module);
+           !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module);
 }
 
 // ---------------------------------------------------------------- render

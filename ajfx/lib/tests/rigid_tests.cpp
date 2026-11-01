@@ -1174,6 +1174,224 @@ void impossible_body_kinds_are_refused() {
     AJFX_CHECK(with_mesh.ok());
 }
 
+// ---------------------------------------------------------------- breaking
+
+// The six panels a crate comes apart into, each a shard model's hull at a
+// face of the parent, a little smaller than the face it was.
+std::vector<BreakPiece> crate_panels(std::uint32_t shard_kind) {
+    std::vector<BreakPiece> pieces;
+    const Vec3 faces[6] = {{0.5F, 0.0F, 0.0F},  {-0.5F, 0.0F, 0.0F}, {0.0F, 0.5F, 0.0F},
+                           {0.0F, -0.5F, 0.0F}, {0.0F, 0.0F, 0.5F},  {0.0F, 0.0F, -0.5F}};
+    const Vec3 turns[6] = {{0.0F, 0.0F, 90.0F}, {0.0F, 0.0F, 90.0F}, {0.0F, 0.0F, 0.0F},
+                           {0.0F, 0.0F, 0.0F},  {90.0F, 0.0F, 0.0F}, {90.0F, 0.0F, 0.0F}};
+    for (std::size_t i = 0U; i < 6U; ++i) {
+        pieces.push_back(BreakPiece{.body = shard_kind, .offset = faces[i], .turn = turns[i], .size = 0.4F});
+    }
+    return pieces;
+}
+
+// A crate standing on the floor with a ball dropped on it from `height`. The
+// crate is the emitter's own kind, the ball is a bouncy sphere, and the
+// panels the crate breaks into are hulls of the chip model.
+Effect crate_and_a_dropped_ball(float height, float threshold, std::uint32_t capacity) {
+    EffectBuilder builder{"break"};
+    builder.emitter("pieces")
+        .capacity(capacity)
+        .spawn(SpawnPile{.count = 1U, .shape = PileShape::Box, .jitter = 0.0F, .release = 0.0F, .body = 0U})
+        .spawn(SpawnBurst{.time = 0.3F, .count = 1U, .body = 1U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, height, 0.0F}})
+        .init(Velocity{.speed_min = 0.0F, .speed_max = 0.0F})
+        .init(InitSize{.min = 0.5F, .max = 0.5F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .friction = 0.7F,
+                             .restitution = 0.05F,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Sphere, .restitution = 0.8F},
+                                        RigidBodyKind{.shape = RigidShape::Hull, .mesh = "chip"}}})
+        .update(Break{.body = 0U,
+                      .threshold = threshold,
+                      .scatter = 1.0F,
+                      .spin = 180.0F,
+                      .pieces = crate_panels(2U)})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    return builder.build().value();
+}
+
+Simulation breaking(const Effect& effect, const RigidSolver* solver = g_solver.get()) {
+    Result<Simulation> simulation =
+        Simulation::create(effect, 3U, SimulationOptions{.meshes = presets::meshes(), .rigid = solver});
+    if (!simulation) {
+        std::cout << simulation.error().message << '\n';
+    }
+    AJFX_CHECK(simulation.ok());
+    return std::move(simulation).value();
+}
+
+void a_hit_crate_comes_apart_into_its_pieces() {
+    Simulation simulation = breaking(crate_and_a_dropped_ball(4.0F, 4.0F, 32U));
+    // The crate stands and the ball is on its way: two bodies, no pieces.
+    simulation.advance_to(30U);
+    const EmitterState& s = simulation.emitter(0);
+    AJFX_CHECK(s.alive() == 2U);
+    AJFX_CHECK(s.body_kind[0] == 0U && s.body_kind[1] == 1U);
+    const Vec3 crate = s.position[0];
+
+    // It breaks when the ball reaches it, into six panels and no more.
+    std::uint64_t broke_at = 0U;
+    for (std::uint64_t tick = 31U; tick <= 240U && broke_at == 0U; ++tick) {
+        simulation.advance_to(tick);
+        if (s.alive() != 2U) {
+            broke_at = tick;
+        }
+    }
+    AJFX_CHECK(broke_at > 0U);
+    std::cout << "  the crate came apart at step " << broke_at << " into " << s.alive() - 1U << " pieces\n";
+    AJFX_CHECK(s.alive() == 7U);
+    // The ball is the oldest left, then the panels, every one a shard.
+    AJFX_CHECK(s.body_kind[0] == 1U);
+    for (std::size_t i = 1U; i < s.alive(); ++i) {
+        AJFX_CHECK(s.body_kind[i] == 2U);
+        // A panel starts where its face of the crate was, a quarter of a
+        // unit out at most, and is smaller than the crate.
+        const Vec3 from{s.position[i].x - crate.x, s.position[i].y - crate.y, s.position[i].z - crate.z};
+        AJFX_CHECK(length(from) < 0.5F);
+        AJFX_CHECK(s.size[i] < 0.5F);
+    }
+    // The pieces are new particles, and nothing was refused.
+    AJFX_CHECK(s.spawned == 8U && s.refused == 0U);
+
+    // They settle on the floor rather than sinking through it or buzzing.
+    simulation.advance_to(600U);
+    AJFX_CHECK(s.alive() == 7U);
+    float lowest = 1.0e9F;
+    std::size_t still = 0U;
+    for (std::size_t i = 1U; i < s.alive(); ++i) {
+        lowest = std::min(lowest, s.position[i].y);
+        if (length(s.velocity[i]) == 0.0F) {
+            ++still;
+        }
+    }
+    std::cout << "  the lowest panel rests at " << lowest << ", " << still << " of six lie still\n";
+    AJFX_CHECK(lowest > -0.05F);
+    AJFX_CHECK(still >= 4U);
+
+    // A gentler landing leaves it whole: the same shot with a threshold no
+    // impact reaches breaks nothing at all.
+    Simulation unbroken = breaking(crate_and_a_dropped_ball(4.0F, 40.0F, 32U));
+    unbroken.advance_to(600U);
+    AJFX_CHECK(unbroken.emitter(0).alive() == 2U);
+    AJFX_CHECK(unbroken.emitter(0).refused == 0U);
+}
+
+void breaking_reruns_and_seeks_exactly() {
+    const Effect effect = crate_and_a_dropped_ball(4.0F, 4.0F, 32U);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = breaking(effect);
+    Simulation b = breaking(effect);
+    Simulation c = breaking(effect, four.get());
+    for (const std::uint64_t tick : {1U, 60U, 120U, 400U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    AJFX_CHECK(a.emitter(0).alive() == 7U);
+
+    // A seek over the break lands on what stepping through it gave: the
+    // pieces' poses, and the hashed scatter and spin they left with.
+    CheckpointRing ring{30U, 8U};
+    for (const std::uint64_t target : {90U, 45U, 300U, 61U, 400U, 120U}) {
+        Simulation seeker = breaking(effect);
+        ring.seek(seeker, target);
+        Simulation straight = breaking(effect);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.tick() == target);
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+}
+
+void a_break_with_no_room_is_refused_whole() {
+    // Six panels need six places. With the crate and the ball holding two of
+    // six, five come free at most, so the crate cannot break and says so.
+    Simulation simulation = breaking(crate_and_a_dropped_ball(4.0F, 4.0F, 6U));
+    simulation.advance_to(600U);
+    const EmitterState& s = simulation.emitter(0);
+    std::cout << "  " << s.alive() << " bodies left, " << s.refused << " pieces refused\n";
+    AJFX_CHECK(s.alive() == 2U);
+    AJFX_CHECK(s.body_kind[0] == 0U);
+    AJFX_CHECK(s.refused >= 6U && s.refused % 6U == 0U);
+    // One more place is all it needs: with seven the same shot breaks.
+    Simulation roomier = breaking(crate_and_a_dropped_ball(4.0F, 4.0F, 7U));
+    roomier.advance_to(600U);
+    AJFX_CHECK(roomier.emitter(0).alive() == 7U);
+    AJFX_CHECK(roomier.emitter(0).refused == 0U);
+}
+
+void impossible_breaks_are_refused() {
+    const auto refused = [](const Result<Effect>& built, const std::string& fragment) {
+        if (built.ok() || built.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (built.ok() ? std::string{"accepted"} : built.error().message) << '\n';
+            return false;
+        }
+        return true;
+    };
+    const auto with = [](const Break& breaking, std::vector<RigidBodyKind> kinds = {RigidBodyKind{}}) {
+        EffectBuilder builder{"x"};
+        builder.emitter("e")
+            .capacity(64U)
+            .init(Lifetime{})
+            .update(RigidPhysics{.bodies = std::move(kinds)})
+            .update(breaking);
+        return builder.build();
+    };
+    // Only a body in a physics world can come apart.
+    EffectBuilder alone{"x"};
+    alone.emitter("e").init(Lifetime{}).update(Break{.pieces = {BreakPiece{}}});
+    AJFX_CHECK(refused(alone.build(), "no 'rigid_physics' module"));
+
+    AJFX_CHECK(refused(with(Break{.pieces = {}}), "needs at least one piece"));
+    AJFX_CHECK(refused(with(Break{.threshold = 0.0F, .pieces = {BreakPiece{}}}), "threshold"));
+    AJFX_CHECK(refused(with(Break{.pieces = {BreakPiece{.size = 0.0F}}}), "pieces[0].size"));
+    AJFX_CHECK(refused(with(Break{.body = 4U, .pieces = {BreakPiece{}}}), "breaks body kind 4"));
+    AJFX_CHECK(refused(with(Break{.pieces = {BreakPiece{.body = 7U}}}), "piece 0 is body kind 7"));
+    std::vector<BreakPiece> crowd(max_break_pieces + 1U);
+    AJFX_CHECK(refused(with(Break{.pieces = crowd}), "more than the"));
+
+    // One kind cannot break two ways.
+    EffectBuilder twice{"x"};
+    twice.emitter("e")
+        .capacity(64U)
+        .init(Lifetime{})
+        .update(RigidPhysics{})
+        .update(Break{.pieces = {BreakPiece{}}})
+        .update(Break{.pieces = {BreakPiece{}}});
+    AJFX_CHECK(refused(twice.build(), "which another 'break' module already breaks"));
+
+    // And breaking has to end: a kind whose pieces break back into it would
+    // come apart for ever.
+    EffectBuilder loop{"x"};
+    loop.emitter("e")
+        .capacity(64U)
+        .init(Lifetime{})
+        .update(RigidPhysics{.bodies = {RigidBodyKind{}}})
+        .update(Break{.body = 0U, .pieces = {BreakPiece{.body = 1U}}})
+        .update(Break{.body = 1U, .pieces = {BreakPiece{.body = 0U}}});
+    AJFX_CHECK(refused(loop.build(), "breaking has to end"));
+
+    // A piece that breaks into a kind that stops is fine.
+    EffectBuilder twice_over{"x"};
+    twice_over.emitter("e")
+        .capacity(64U)
+        .init(Lifetime{})
+        .update(RigidPhysics{.bodies = {RigidBodyKind{}, RigidBodyKind{}}})
+        .update(Break{.body = 0U, .pieces = {BreakPiece{.body = 1U}}})
+        .update(Break{.body = 1U, .pieces = {BreakPiece{.body = 2U}}});
+    AJFX_CHECK(twice_over.build().ok());
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -1202,6 +1420,10 @@ int main() {
         {"body_kinds_mix_shapes_and_materials", body_kinds_mix_shapes_and_materials},
         {"body_kinds_rerun_and_seek_exactly", body_kinds_rerun_and_seek_exactly},
         {"impossible_body_kinds_are_refused", impossible_body_kinds_are_refused},
+        {"a_hit_crate_comes_apart_into_its_pieces", a_hit_crate_comes_apart_into_its_pieces},
+        {"breaking_reruns_and_seeks_exactly", breaking_reruns_and_seeks_exactly},
+        {"a_break_with_no_room_is_refused_whole", a_break_with_no_room_is_refused_whole},
+        {"impossible_breaks_are_refused", impossible_breaks_are_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();
