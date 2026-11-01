@@ -110,6 +110,17 @@ feedback forces could evaluate any frame directly.
      The GPU matches the reference particle for particle through contact and
      rest. Collisions between particles, stacking and contact by a mesh's
      own shape are left to rigid physics.
+   - **Accumulation, not started.** Snow and dust that settle where they
+     land and build up, while what they land on moves and breaks. Particles
+     that stick deposit into a coverage buffer belonging to the body they
+     hit, which drives a shell drawn over that body, so a crate's lid
+     whitens and keeps its snow as it topples. It needs one layer's bodies
+     as another layer's colliders (phase 6's Later, without which snow falls
+     straight through), a deposit target that follows a body, and a decision
+     on how a host draws the shell. Doing it in the volume grid (V3 below)
+     instead costs the detail of a thin layer on a lid. Today's nearest
+     thing is a Ground block set to stick, which is friction 1 on one plane:
+     flakes slide to a halt on the floor and nothing builds up.
    - **Excluded by design: depth-buffer collision.** It would make the
      simulation depend on one view's rendered depth, so nodes rendering
      different slices, or a seek, would disagree.
@@ -195,13 +206,54 @@ feedback forces could evaluate any frame directly.
      the engine reads neither a force's per-particle scale (so every slider
      was ignored, leaving exactly 1 g, 1 m/s^2 and a damping of 1) nor its
      curve over life.
+   - **Round 5, to do: breaking.** A crate that is hit hard enough comes
+     apart into pieces. Four pieces in order; the first two are worth
+     having on their own.
+     - **Contacts out of the solver.** `RigidWorld` reports the step's
+       impacts -- the slot or prop index on each side, the world point, the
+       normal and the relative normal speed -- in an order of ajfx's own,
+       since that list decides what breaks and Jolt's internal order and
+       thread count must not reach it. Jolt's `ContactListener` collects
+       them; sorting by (lower slot, higher slot, quantized point) fixes the
+       order. A checkpoint must restore the list a step would have seen, so
+       contacts travel in `RigidWorld::save` beside the poses.
+     - **Shape and material per body.** Shape, density, friction and
+       restitution move off `RigidWorldDesc` onto the body, so one world can
+       hold crates, their shards and a bouncy ball. `add` takes them and the
+       world's values stay as the default. Studio reads them off the layer's
+       **Bodies** heading and onto whatever spawns the bodies (Pile, Burst,
+       Stream), which is also what lets a pile of crates stand in the same
+       layer as the ball that hits it.
+     - **The Break module.** A body whose impact passes `threshold` is
+       removed and replaced, at its pose and velocity, by a named piece
+       set's pieces: chunks authored as models in the package, or a box cut
+       `splits` ways along each axis, which is what a crate is. Breaks are
+       taken in slot order, each piece's offset and spin come from
+       `particle_hash(seed, the parent's spawn index, stream)`, and
+       `generations` bounds how often a piece may break again. Budgets are
+       fixed up front, so a break the emitter's capacity cannot hold is
+       refused when the effect is built rather than thinned at playback:
+       capacity must cover `count * pieces^generations`.
+     - **Studio and the shot.** A **Break** block in a rigid layer
+       (`Category::Physics`, beside Pile and Prop): how hard, into what, how
+       many times, with the piece set drawn over the preview as the Prop
+       block draws a collision shape. The **Crates and a wrecking ball**
+       recipe is the worked shot, and the coach names a piece set that will
+       not fit the budget with the fix that makes it fit.
+     - **Not yet after it:** snow settling on the pieces, which is
+       accumulation, in phase 5 above.
    - **Cross-machine agreement is unverified.** Determinism is tested across
      reruns, thread counts, and Debug and Release on one machine; no second
      machine has printed the same `ajfx_rigid_bench` digest. Props widened
      what such a run would cover: mesh shapes, compound shapes, kinematic
      bodies and the first per-body rotation. The spike harness's
      `run_matrix.ps1` writes `results-<computer>` to diff.
-   - **Later:** colliders that move with parameters; distance-field and mesh
+   - **Later:** a loose prop that enters at a time of its own, or with a
+     starting velocity, so a dropped object can be timed rather than aimed
+     by the height it starts at; colliders that move with parameters; one
+     layer's bodies and props as another layer's colliders, so particles can
+     hit what the physics moves (a dependency between layers, which needs a
+     fixed evaluation order between them); distance-field and mesh
      colliders as Jolt mesh shapes for particles too; convex decomposition,
      so a loose prop can be any concave model rather than a generated hollow
      shape; an AVX2 build once every node is known to have it.
