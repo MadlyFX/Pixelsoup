@@ -53,8 +53,11 @@ constexpr core::u32 upload_page_count = 5U;
 constexpr core::u64 command_upload_capacity =
     upload_page_capacity * upload_page_count;
 // Device-local buffers one recording may touch; submission stamps each one's
-// fence so it can be released safely.
-constexpr core::u32 buffer_use_capacity = 64U;
+// fence so it can be released safely. A particle emitter alone records with a
+// dozen or more (particles, counters, sort keys, draw arguments), and a frame
+// may play several effects of many emitters each, so this is sized for scenes
+// rather than for the handful of buffers the rest of the renderer uses.
+constexpr core::u32 buffer_use_capacity = 1024U;
 constexpr core::u32 invalid_descriptor = std::numeric_limits<core::u32>::max();
 // D3D12 allows sixteen sampler slots per shader stage. A fragment stage that
 // asks for more is refused at pipeline creation rather than at draw time.
@@ -1461,6 +1464,21 @@ std::string_view d3d12_driver_name(void* value) noexcept {
 core::u64 d3d12_dedicated_video_memory(void* value) noexcept {
     const auto* state = as_device(value);
     return state == nullptr ? 0U : state->dedicated_video_memory;
+}
+
+std::string_view d3d12_lost_reason(void* value) noexcept {
+    const auto* state = as_device(value);
+    if (state == nullptr || !state->device) {
+        return {};
+    }
+    switch (state->device->GetDeviceRemovedReason()) {
+    case S_OK: return {};
+    case DXGI_ERROR_DEVICE_HUNG: return "the GPU stopped responding to work it was given";
+    case DXGI_ERROR_DEVICE_RESET: return "the GPU was reset after a fault";
+    case DXGI_ERROR_DRIVER_INTERNAL_ERROR: return "the graphics driver failed";
+    case DXGI_ERROR_INVALID_CALL: return "the GPU was given work it could not run";
+    default: return "the GPU device was removed (a driver reset, update or fault)";
+    }
 }
 
 bool d3d12_supports_shader(ShaderFormat format) noexcept {
@@ -2891,15 +2909,19 @@ bool d3d12_draw_instanced_quads(
 
 // The command signature for one kind of indirect argument, made the first
 // time it is needed. Null if the device refuses it.
+//
+// std::addressof, never &: ComPtr's operator& releases what it holds, so
+// `&state.dispatch_signature` would free the cached signature on every call
+// while submitted lists still use it, and the device is lost.
 [[nodiscard]] ID3D12CommandSignature* indirect_signature(
     D3d12Device& state, D3D12_INDIRECT_ARGUMENT_TYPE type) noexcept {
-    ComPtr<ID3D12CommandSignature>* slot = &state.dispatch_signature;
+    ComPtr<ID3D12CommandSignature>* slot = std::addressof(state.dispatch_signature);
     UINT stride = sizeof(D3D12_DISPATCH_ARGUMENTS);
     if (type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW) {
-        slot = &state.draw_signature;
+        slot = std::addressof(state.draw_signature);
         stride = sizeof(D3D12_DRAW_ARGUMENTS);
     } else if (type == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED) {
-        slot = &state.draw_indexed_signature;
+        slot = std::addressof(state.draw_indexed_signature);
         stride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
     }
     if (!*slot) {
@@ -3913,6 +3935,7 @@ void destroy_d3d12_device(void*) noexcept {}
 core::RenderAdapterIdentity d3d12_adapter_identity(void*) noexcept { return {}; }
 std::string_view d3d12_driver_name(void*) noexcept { return {}; }
 core::u64 d3d12_dedicated_video_memory(void*) noexcept { return 0U; }
+std::string_view d3d12_lost_reason(void*) noexcept { return {}; }
 bool d3d12_supports_shader(ShaderFormat) noexcept { return false; }
 bool d3d12_supports_texture(void*, TextureFormat) noexcept { return false; }
 void d3d12_wait_idle(void*) noexcept {}

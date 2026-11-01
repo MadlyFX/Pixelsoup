@@ -89,6 +89,10 @@ struct RendererLimits final {
     // Builds the wireframe pipelines an editor view's ViewShading::Wireframe
     // draws with. Off for every output node, which only ever renders Lit.
     bool view_shading{};
+    // Particle stepping and checkpoints. Output nodes keep the defaults; an
+    // authoring preview raises the step budget so an edited effect catches
+    // up with the playhead in a frame instead of holding for seconds.
+    ParticleSettings particles{};
     core::u32 max_instances{scene::max_scene_instances};
     // One tiny CPU history slot per independently mapped output/view. The
     // default covers the replicated feed-map ceiling without duplicating GPU
@@ -1041,6 +1045,13 @@ private:
     std::string particles_unsupported_;
     std::unique_ptr<ParticlePackageCache> particle_packages_;
     std::unordered_map<doc::NodeId, ParticleSlot> particle_slots_;
+    // Instances replaced (a new package or seed) or removed while submitted
+    // frames may still sample their textures. Each is destroyed once it
+    // reports safe_to_release; destroying it sooner frees textures the GPU
+    // is still reading, and the device is lost. Reserved up front: when it
+    // is full, the old instance keeps drawing until a place frees.
+    static constexpr std::size_t max_retired_particles = 16U;
+    std::vector<ParticleInstance> retired_particles_;
     std::vector<std::pair<ParticleInstance*, scene::Mat4>> particle_draws_;
     core::u64 particle_generation_{};
     // Particle lights for the lit pass: max_particle_lights records, the

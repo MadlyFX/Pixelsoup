@@ -98,7 +98,8 @@ float compare(const EmitterState& cpu, const EmitterState& gpu, float tolerance)
                           close(cpu.color[i], gpu.color[i], tolerance) && close(cpu.size[i], gpu.size[i], tolerance) &&
                           close(cpu.rotation[i], gpu.rotation[i], tolerance) &&
                           close(cpu.orientation[i], gpu.orientation[i], tolerance) &&
-                          close(cpu.angular_velocity[i], gpu.angular_velocity[i], tolerance)
+                          close(cpu.angular_velocity[i], gpu.angular_velocity[i], tolerance) &&
+                          close(cpu.spin[i], gpu.spin[i], tolerance)
                       ? 1U
                       : 0U;
     }
@@ -118,14 +119,20 @@ Effect smooth_effect() {
         .init(Lifetime{.min = 0.5F, .max = 1.5F})
         .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{1.0F, 2.0F, 3.0F}, .size = Vec3{2.0F, 1.0F, 0.5F},
                             .surface_only = true})
-        .init(Velocity{.direction = Vec3{0.3F, 1.0F, 0.2F}, .speed_min = 1.0F, .speed_max = 2.0F, .spread = 40.0F})
-        .init(InitColor{.a = Color{1.0F, 0.5F, 0.25F, 1.0F}, .b = Color{0.0F, 0.5F, 1.0F, 0.5F}})
+        .init(Velocity{.direction = Vec3{0.3F, 1.0F, 0.2F}, .speed_min = 1.0F, .speed_max = 2.0F, .spread = 40.0F,
+                       .spread_min = 15.0F})
+        .init(InitColor{.a = Color{1.0F, 0.5F, 0.25F, 1.0F},
+                        .b = Color{0.0F, 0.5F, 1.0F, 0.5F},
+                        .brightness_min = 0.5F,
+                        .brightness_max = 3.0F})
         .init(InitSize{.min = 0.1F, .max = 0.3F})
         .init(InitRotation{})
-        .update(Gravity{})
-        .update(Drag{.coefficient = 0.5F})
-        .update(Vortex{.center = Vec3{1.0F, 0.0F, 3.0F}, .strength = 2.0F})
-        .update(Attractor{.position = Vec3{1.0F, 4.0F, 3.0F}, .strength = 3.0F, .radius = 5.0F})
+        .init(InitSpin{.speed_min = 20.0F, .speed_max = 200.0F, .drag = 0.7F})
+        .update(Gravity{.over_life = {{0.0F, 1.5F}, {0.4F, 0.5F}, {1.0F, 0.0F}}, .scale_min = 0.5F, .scale_max = 1.5F})
+        .update(Drag{.coefficient = 0.5F, .scale_min = 0.2F, .scale_max = 3.0F})
+        .update(Converge{.center = Vec3{1.0F, 0.0F, 3.0F}, .strength = 4.0F, .height = 3.0F, .scale_min = 0.0F})
+        .update(Vortex{.center = Vec3{1.0F, 0.0F, 3.0F}, .strength = 2.0F, .scale_min = -1.0F, .scale_max = 2.0F})
+        .update(Attractor{.position = Vec3{1.0F, 4.0F, 3.0F}, .strength = 3.0F, .radius = 5.0F, .scale_max = 2.0F})
         .update(ColorOverLife{})
         .update(SizeOverLife{.keys = {{0.0F, 0.5F}, {0.3F, 1.5F}, {1.0F, 0.0F}}});
     builder.emitter("sphere")
@@ -133,8 +140,9 @@ Effect smooth_effect() {
         .seed(5U)
         .spawn(SpawnRate{.rate = 60.0F})
         .init(Lifetime{.min = 2.0F, .max = 2.0F})
-        .init(ShapeLocation{.shape = Shape::Sphere, .radius = 0.5F})
-        .init(Velocity{.spread = 180.0F});
+        .init(ShapeLocation{.shape = Shape::Sphere, .radius_min = 0.2F, .radius_max = 0.5F})
+        .init(Velocity{.spread = 180.0F})
+        .update(Drag{.coefficient = 0.8F});
     // Colliders: particles bouncing inside a box, around a sphere.
     builder.emitter("caged")
         .capacity(1000U)
@@ -151,7 +159,7 @@ Effect smooth_effect() {
         .seed(6U)
         .spawn(SpawnRate{.rate = 30.0F})
         .init(Lifetime{.min = 1.0F, .max = 3.0F})
-        .init(ShapeLocation{.shape = Shape::Disc, .radius = 2.0F});
+        .init(ShapeLocation{.shape = Shape::Disc, .radius_min = 1.0F, .radius_max = 2.0F, .surface_only = true});
     Result<Effect> effect = builder.build();
     AJFX_CHECK(effect.ok());
     return std::move(effect).value();
@@ -179,6 +187,40 @@ void gpu_matches_the_cpu_reference() {
             AJFX_CHECK(compare(cpu.emitter(e), read(gpu, e), 1.0e-3F) == 1.0F);
         }
     }
+}
+
+void rolling_turbulence_matches_the_reference_within_tolerance() {
+    // Flames: curl noise that drifts up with the plume and grows with age,
+    // buoyancy that cools, air drawn in at the base, sprites that spin.
+    EffectBuilder builder{"flames"};
+    builder.emitter("e")
+        .capacity(256U)
+        .seed(9U)
+        .spawn(SpawnRate{.rate = 90.0F})
+        .init(Lifetime{.min = 0.6F, .max = 1.1F})
+        .init(ShapeLocation{.shape = Shape::Disc, .radius_min = 0.22F, .radius_max = 0.22F})
+        .init(Velocity{.speed_min = 0.2F, .speed_max = 0.5F, .spread = 15.0F})
+        .init(InitRotation{})
+        .init(InitSpin{.speed_min = 40.0F, .speed_max = 160.0F, .drag = 0.6F})
+        .update(Gravity{.acceleration = Vec3{0.0F, 5.0F, 0.0F}, .over_life = {{0.0F, 1.6F}, {1.0F, 0.2F}}})
+        .update(Converge{.strength = 8.0F, .height = 0.7F})
+        .update(CurlNoise{.strength = 1.6F,
+                          .frequency = 1.0F / 0.3F,
+                          .evolution = 0.6F,
+                          .seed = 11U,
+                          .drift = Vec3{0.0F, 1.6F, 0.0F},
+                          .over_life = {{0.0F, 0.15F}, {0.5F, 1.0F}, {1.0F, 1.4F}}})
+        .update(Drag{.coefficient = 1.2F});
+    const Effect effect = builder.build().value();
+    Simulation cpu = make_cpu(effect, 8U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 8U);
+    cpu.advance_to(150U);
+    gpu.advance_to(150U);
+    AJFX_CHECK(cpu.emitter(0).alive() > 40U);
+    const float within = compare(cpu.emitter(0), read(gpu), 1.0e-2F);
+    std::cout << "  flames: " << cpu.emitter(0).alive() << " particles, " << within * 100.0F
+              << "% within tolerance\n";
+    AJFX_CHECK(within >= 0.98F);
 }
 
 void presets_match_the_reference_within_tolerance() {
@@ -243,12 +285,12 @@ void rigid_bodies_match_the_reference() {
         .seed(11U)
         .spawn(SpawnRate{.rate = 150.0F})
         .init(Lifetime{.min = 3.0F, .max = 4.0F})
-        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius = 0.2F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius_min = 0.2F, .radius_max = 0.2F})
         .init(Velocity{.speed_min = 2.0F, .speed_max = 4.0F, .spread = 70.0F})
         .init(InitSize{.min = 0.05F, .max = 0.2F})
         .init(InitTumble{.speed_min = 90.0F, .speed_max = 720.0F})
         .update(Gravity{})
-        .update(RigidBody{.angular_drag = 1.0F})
+        .update(RigidBody{.angular_drag = 1.0F, .roundness = 0.4F})
         .update(PlaneCollision{.restitution = 0.5F, .friction = 0.7F})
         .update(BoxCollision{.half_size = Vec3{1.5F, 3.0F, 1.5F}, .inside = true, .restitution = 0.5F,
                              .friction = 0.3F})
@@ -366,7 +408,7 @@ Effect burst(std::uint32_t count, Shape shape) {
         .capacity(std::max(count, 1U))
         .spawn(SpawnBurst{.count = count})
         .init(Lifetime{.min = 10.0F, .max = 10.0F})
-        .init(ShapeLocation{.shape = shape, .radius = 5.0F});
+        .init(ShapeLocation{.shape = shape, .radius_min = 5.0F, .radius_max = 5.0F});
     return builder.build().value();
 }
 
@@ -476,6 +518,8 @@ int main() {
         {"distance_fields_collide_as_the_reference_does", distance_fields_collide_as_the_reference_does},
         {"rigid_bodies_match_the_reference", rigid_bodies_match_the_reference},
         {"presets_match_the_reference_within_tolerance", presets_match_the_reference_within_tolerance},
+        {"rolling_turbulence_matches_the_reference_within_tolerance",
+         rolling_turbulence_matches_the_reference_within_tolerance},
         {"reruns_are_bit_identical", reruns_are_bit_identical},
         {"checkpoints_and_reset_reproduce_the_timeline", checkpoints_and_reset_reproduce_the_timeline},
         {"compaction_spans_many_blocks", compaction_spans_many_blocks},

@@ -84,6 +84,7 @@ void compact(EmitterState& s, Dead dead) {
             s.rotation[kept] = s.rotation[i];
             s.orientation[kept] = s.orientation[i];
             s.angular_velocity[kept] = s.angular_velocity[i];
+            s.spin[kept] = s.spin[i];
             s.spawn_index[kept] = s.spawn_index[i];
         }
         ++kept;
@@ -99,13 +100,19 @@ void compact(EmitterState& s, Dead dead) {
     s.rotation.resize(kept);
     s.orientation.resize(kept);
     s.angular_velocity.resize(kept);
+    s.spin.resize(kept);
     s.spawn_index.resize(kept);
+}
+
+float normalized_age(const EmitterState& s, std::size_t i) {
+    return std::clamp(s.age[i] / s.lifetime[i], 0.0F, 1.0F);
 }
 
 // How colliders meet an emitter's particles when it has a RigidBody.
 struct RigidContact final {
     float contact_scale;
     float rest_speed;
+    float roundness;
 };
 
 // Per-step context shared by the module implementations.
@@ -141,11 +148,14 @@ Vec3 unit_sphere(float u, float v) {
 
 void apply(const ShapeLocation& m, Step& step) {
     const Vec3 center = step.in(m.center);
-    const float radius = step.in(m.radius);
+    const float radius_min = step.in(m.radius_min);
+    const float radius_max = step.in(m.radius_max);
     const Vec3 size = m.size;
     for (std::size_t i = step.first; i < step.last; ++i) {
         const std::uint32_t index = step.s.spawn_index[i];
         const auto u = [&](std::uint32_t draw) { return step.random(index, m.id, draw); };
+        // Equal ends give exactly that radius, whatever the draw.
+        const float radius = mix(radius_min, radius_max, u(5U));
         Vec3 offset{};
         switch (m.shape) {
         case Shape::Point:
@@ -195,11 +205,12 @@ void apply(const Velocity& m, Step& step) {
     const Vec3 t1 = normalized(cross(helper, axis));
     const Vec3 t2 = cross(axis, t1);
     const float cos_spread = std::cos(step.in(m.spread) * (std::numbers::pi_v<float> / 180.0F));
+    const float cos_inner = std::cos(step.in(m.spread_min) * (std::numbers::pi_v<float> / 180.0F));
     const float lo = step.in(m.speed_min);
     const float hi = step.in(m.speed_max);
     for (std::size_t i = step.first; i < step.last; ++i) {
         const std::uint32_t index = step.s.spawn_index[i];
-        const float cos_theta = 1.0F - step.random(index, m.id, 0U) * (1.0F - cos_spread);
+        const float cos_theta = cos_inner - step.random(index, m.id, 0U) * (cos_inner - cos_spread);
         const float sin_theta = std::sqrt(std::max(0.0F, 1.0F - cos_theta * cos_theta));
         const float phi = 2.0F * std::numbers::pi_v<float> * step.random(index, m.id, 1U);
         const Vec3 direction =
@@ -211,9 +222,13 @@ void apply(const Velocity& m, Step& step) {
 void apply(const InitColor& m, Step& step) {
     const Color a = step.in(m.a);
     const Color b = step.in(m.b);
+    const float lo = step.in(m.brightness_min);
+    const float hi = step.in(m.brightness_max);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        const float t = step.random(step.s.spawn_index[i], m.id, 0U);
-        step.s.base_color[i] = {mix(a.r, b.r, t), mix(a.g, b.g, t), mix(a.b, b.b, t), mix(a.a, b.a, t)};
+        const std::uint32_t index = step.s.spawn_index[i];
+        const float t = step.random(index, m.id, 0U);
+        const float k = mix(lo, hi, step.random(index, m.id, 1U));
+        step.s.base_color[i] = {mix(a.r, b.r, t) * k, mix(a.g, b.g, t) * k, mix(a.b, b.b, t) * k, mix(a.a, b.a, t)};
     }
 }
 
@@ -255,19 +270,48 @@ void apply(const InitTumble& m, Step& step) {
     }
 }
 
+void apply(const InitSpin& m, Step& step) {
+    const float lo = step.in(m.speed_min);
+    const float hi = step.in(m.speed_max);
+    constexpr float radians = std::numbers::pi_v<float> / 180.0F;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const std::uint32_t index = step.s.spawn_index[i];
+        const float speed = mix(lo, hi, step.random(index, m.id, 0U)) * radians;
+        step.s.spin[i] = m.both_ways && step.random(index, m.id, 1U) < 0.5F ? -speed : speed;
+    }
+}
+
+// Turns sprites by their spin where position is integrated.
+void turn(const InitSpin& m, Step& step) {
+    const float keep = 1.0F / (1.0F + step.in(m.drag) * step.dt);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        step.s.spin[i] = step.s.spin[i] * keep;
+        step.s.rotation[i] += step.s.spin[i] * step.dt;
+    }
+}
+
 // ------------------------------------------------------------ forces
+
+// A force module's factor for particle i (see the forces in modules.hpp).
+template <class Force>
+float force_scale(const Force& m, const Step& step, std::size_t i) {
+    return mix(step.in(m.scale_min), step.in(m.scale_max), step.random(step.s.spawn_index[i], m.id, 0U));
+}
 
 void apply(const Gravity& m, Step& step) {
     const Vec3 dv = step.in(m.acceleration) * step.dt;
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.velocity[i] += dv;
+        step.s.velocity[i] += dv * (sample(m.over_life, normalized_age(step.s, i)) * force_scale(m, step, i));
     }
 }
 
 void apply(const Drag& m, Step& step) {
-    const float keep = 1.0F / (1.0F + step.in(m.coefficient) * step.dt);
+    const float rate = step.in(m.coefficient) * step.dt;
+    const float keep = 1.0F / (1.0F + rate);
+    // Without a spread every particle keeps the same share, worked out once.
+    const bool varied = !(step.in(m.scale_min) == 1.0F && step.in(m.scale_max) == 1.0F);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.velocity[i] = step.s.velocity[i] * keep;
+        step.s.velocity[i] = step.s.velocity[i] * (varied ? 1.0F / (1.0F + rate * force_scale(m, step, i)) : keep);
     }
 }
 
@@ -275,8 +319,11 @@ void apply(const CurlNoise& m, Step& step) {
     const float frequency = step.in(m.frequency);
     const float scale = step.in(m.strength) * step.dt;
     const Vec3 scroll{0.0F, 0.0F, static_cast<float>(step.start) * step.in(m.evolution)};
+    const Vec3 travelled = step.in(m.drift) * static_cast<float>(step.start);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.velocity[i] += detail::curl_noise(step.s.position[i] * frequency + scroll, m.seed) * scale;
+        const Vec3 q = (step.s.position[i] - travelled) * frequency + scroll;
+        step.s.velocity[i] += detail::curl_noise(q, m.seed) *
+                              (scale * sample(m.over_life, normalized_age(step.s, i)) * force_scale(m, step, i));
     }
 }
 
@@ -289,7 +336,7 @@ void apply(const Vortex& m, Step& step) {
         const Vec3 radial = r - axis * dot(r, axis);
         const float length = std::sqrt(dot(radial, radial));
         if (length > 1.0e-6F) {
-            step.s.velocity[i] += cross(axis, radial) * (scale / length);
+            step.s.velocity[i] += cross(axis, radial) * (scale * force_scale(m, step, i) / length);
         }
     }
 }
@@ -305,21 +352,30 @@ void apply(const Attractor& m, Step& step) {
             continue;
         }
         const float falloff = radius > 0.0F ? std::max(0.0F, 1.0F - distance / radius) : 1.0F;
-        step.s.velocity[i] += d * (strength * falloff * step.dt / distance);
+        step.s.velocity[i] += d * (strength * force_scale(m, step, i) * falloff * step.dt / distance);
+    }
+}
+
+void apply(const Converge& m, Step& step) {
+    const Vec3 axis = normalized(step.in(m.axis));
+    const Vec3 center = step.in(m.center);
+    const float scale = step.in(m.strength) * step.dt;
+    const float height = step.in(m.height);
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const Vec3 r = step.s.position[i] - center;
+        const float along = dot(r, axis);
+        const Vec3 radial = r - axis * along;
+        const float falloff = height > 0.0F ? std::clamp(1.0F - along / height, 0.0F, 1.0F) : 1.0F;
+        step.s.velocity[i] -= radial * (scale * force_scale(m, step, i) * falloff);
     }
 }
 
 // ------------------------------------------------------------ constraints and appearance
 
-// Solid-ball impulse factors for a contact that grips fully: 2/7 of the slip
-// comes off the centre's velocity, and 5/7 of it, over the radius, turns the
-// ball. Written as decimals so the shaders parse the same floats.
-constexpr float slip_to_velocity = 0.2857142857F;
-constexpr float slip_to_spin = 0.7142857143F;
-
-// A rigid particle meets a collider as a solid ball (see RigidBody).
+// A rigid particle meets a collider as a ball (see RigidBody).
 void respond_rigid(Step& step, std::size_t i, float distance, Vec3 n, float restitution, float slide, bool kill) {
     EmitterState& s = step.s;
+    const float round = step.rigid->roundness;
     const float radius = s.size[i] * step.rigid->contact_scale;
     const float gap = distance - radius;
     if (gap >= 0.0F) {
@@ -335,15 +391,30 @@ void respond_rigid(Step& step, std::size_t i, float distance, Vec3 n, float rest
         return;
     }
     const float bounce = -into < step.rigid->rest_speed ? 0.0F : restitution;
-    s.velocity[i] -= n * (into * (1.0F + bounce));
+    const float push = -into * (1.0F + bounce);
+    s.velocity[i] += n * push;
+    // A piece that is not round cannot keep rolling or twisting on the
+    // collider.
+    s.angular_velocity[i] = s.angular_velocity[i] * round;
     // How fast the ball's surface slips where it touches.
     const Vec3 arm = n * -radius;
     const Vec3 contact = s.velocity[i] + cross(s.angular_velocity[i], arm);
     const Vec3 slip = contact - n * dot(contact, n);
-    const float grip = 1.0F - slide;
-    s.velocity[i] -= slip * (grip * slip_to_velocity);
+    // Stopping the slip takes `share` of it off the centre's velocity and
+    // turns the ball by the rest: 2/7 and 5/7 for a solid ball, all of it
+    // off the velocity for a flat chip. Friction takes at most
+    // friction / (1 - friction) of the push, so full friction grips however
+    // lightly the piece touches.
+    const float turn = 2.5F * round;
+    float share = 1.0F / (1.0F + turn);
+    const float speed = std::sqrt(dot(slip, slip));
+    const float grip = push * (1.0F - slide);
+    if (share * speed * slide > grip) {
+        share = grip / (speed * slide);
+    }
+    s.velocity[i] -= slip * share;
     if (radius > 1.0e-6F) {
-        s.angular_velocity[i] -= cross(arm, slip) * (grip * slip_to_spin / (radius * radius));
+        s.angular_velocity[i] -= cross(arm, slip) * (share * turn / (radius * radius));
     }
 }
 
@@ -474,10 +545,6 @@ void apply(const RigidBody& m, Step& step) {
     }
 }
 
-float normalized_age(const EmitterState& s, std::size_t i) {
-    return std::clamp(s.age[i] / s.lifetime[i], 0.0F, 1.0F);
-}
-
 void apply(const ColorOverLife& m, Step& step) {
     for (std::size_t i = step.first; i < step.last; ++i) {
         step.s.color[i] = times(step.s.base_color[i], sample(m.keys, normalized_age(step.s, i)));
@@ -502,6 +569,7 @@ void append(EmitterState& s, float age) {
     s.rotation.push_back(0.0F);
     s.orientation.push_back({});
     s.angular_velocity.push_back({});
+    s.spin.push_back(0.0F);
     s.spawn_index.push_back(static_cast<std::uint32_t>(s.spawned));
 }
 
@@ -563,7 +631,8 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
               &fields_};
     for (const UpdateModule& module : emitter.update) {
         if (const auto* rigid = std::get_if<RigidBody>(&module)) {
-            step.rigid = RigidContact{rigid->contact_scale, step.in(rigid->rest_speed)};
+            step.rigid =
+                RigidContact{rigid->contact_scale, step.in(rigid->rest_speed), step.in(rigid->roundness)};
         }
     }
 
@@ -583,6 +652,15 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     }
     for (std::size_t i = 0U; i < s.alive(); ++i) {
         s.position[i] += s.velocity[i] * step.dt;
+    }
+    const InitSpin* spin = nullptr;
+    for (const InitModule& module : emitter.init) {
+        if (const auto* found = std::get_if<InitSpin>(&module)) {
+            spin = found;
+        }
+    }
+    if (spin != nullptr) {
+        turn(*spin, step);
     }
     for (const UpdateModule& module : emitter.update) {
         if (!is_force(module)) {
@@ -617,6 +695,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
         s.color[i] = s.base_color[i];
         s.size[i] = s.base_size[i];
         s.position[i] += s.velocity[i] * s.age[i];
+        s.rotation[i] += s.spin[i] * s.age[i];
     }
     for (const UpdateModule& module : emitter.update) {
         if (std::holds_alternative<ColorOverLife>(module) || std::holds_alternative<SizeOverLife>(module)) {

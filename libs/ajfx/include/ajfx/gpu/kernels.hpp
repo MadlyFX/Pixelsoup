@@ -36,6 +36,7 @@ struct ParticleLayout final {
     std::int32_t rotation{-1};
     std::int32_t orientation{-1};
     std::int32_t angular_velocity{-1};
+    std::int32_t spin{-1};
     std::uint32_t stride{0U};
 
     friend bool operator==(const ParticleLayout&, const ParticleLayout&) = default;

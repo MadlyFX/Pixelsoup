@@ -328,6 +328,9 @@ enum class Icon : core::u8 {
     Reset,
     // A play mark between two brackets: play the marked range.
     PlayRange,
+    // Two curves thrown from one point, a particle at the end of one: the
+    // paths particles take.
+    Paths,
 };
 void draw_icon(
     UiDrawList& list,

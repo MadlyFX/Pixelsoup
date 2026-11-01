@@ -87,12 +87,17 @@ enum class Shape {
     Disc, // in the XZ plane
 };
 
+// Where each particle is born. A sphere or disc gives each particle its own
+// radius, uniformly between radius_min and radius_max, and places it within
+// that radius (on it with `surface_only`): equal ends give a crisp edge, a
+// spread a soft one, or a thick shell.
 struct ShapeLocation final {
     static constexpr std::string_view kind = "shape_location";
     ModuleId id{};
     Shape shape{Shape::Sphere};
     Vec3Input center{};
-    FloatInput radius{1.0F};        // sphere and disc
+    FloatInput radius_min{1.0F};    // sphere and disc
+    FloatInput radius_max{1.0F};
     Vec3 size{1.0F, 1.0F, 1.0F};    // box
     bool surface_only{false};
 
@@ -100,7 +105,8 @@ struct ShapeLocation final {
     static void fields(Self& self, Visitor&& visit) {
         visit("shape", self.shape);
         visit("center", self.center);
-        visit("radius", self.radius);
+        visit("radius_min", self.radius_min);
+        visit("radius_max", self.radius_max);
         visit("size", self.size);
         visit("surface_only", self.surface_only);
     }
@@ -108,7 +114,9 @@ struct ShapeLocation final {
 };
 
 // Speed between min and max along a direction, scattered uniformly within a
-// cone of `spread` degrees half-angle (180 is every direction).
+// cone of `spread` degrees half-angle (180 is every direction). A
+// `spread_min` above zero hollows the cone: no particle leaves closer to the
+// direction than that, as water from a fountain's crown.
 struct Velocity final {
     static constexpr std::string_view kind = "velocity";
     ModuleId id{};
@@ -116,6 +124,7 @@ struct Velocity final {
     FloatInput speed_min{1.0F};
     FloatInput speed_max{1.0F};
     FloatInput spread{0.0F};
+    FloatInput spread_min{0.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -123,21 +132,28 @@ struct Velocity final {
         visit("speed_min", self.speed_min);
         visit("speed_max", self.speed_max);
         visit("spread", self.spread);
+        visit("spread_min", self.spread_min);
     }
     friend bool operator==(const Velocity&, const Velocity&) = default;
 };
 
-// A colour between a and b. Colour-over-life multiplies this.
+// A colour between a and b, its red, green and blue then multiplied by a
+// brightness between brightness_min and brightness_max, picked apart from
+// the colour. Colour-over-life multiplies this.
 struct InitColor final {
     static constexpr std::string_view kind = "color";
     ModuleId id{};
     ColorInput a{};
     ColorInput b{};
+    FloatInput brightness_min{1.0F};
+    FloatInput brightness_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("a", self.a);
         visit("b", self.b);
+        visit("brightness_min", self.brightness_min);
+        visit("brightness_max", self.brightness_max);
     }
     friend bool operator==(const InitColor&, const InitColor&) = default;
 };
@@ -191,23 +207,74 @@ struct InitTumble final {
     friend bool operator==(const InitTumble&, const InitTumble&) = default;
 };
 
-using InitModule = std::variant<Lifetime, ShapeLocation, Velocity, InitColor, InitSize, InitRotation, InitTumble>;
+// A sprite's spin: speed_min to speed_max degrees per second, either way
+// round when `both_ways`, slowing by `drag` of itself per second (as Drag
+// slows velocity). The update turns `rotation` by it, where it integrates
+// position; at most one per emitter.
+struct InitSpin final {
+    static constexpr std::string_view kind = "spin";
+    ModuleId id{};
+    FloatInput speed_min{0.0F};
+    FloatInput speed_max{90.0F};
+    bool both_ways{true};
+    FloatInput drag{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("speed_min", self.speed_min);
+        visit("speed_max", self.speed_max);
+        visit("both_ways", self.both_ways);
+        visit("drag", self.drag);
+    }
+    friend bool operator==(const InitSpin&, const InitSpin&) = default;
+};
+
+using InitModule =
+    std::variant<Lifetime, ShapeLocation, Velocity, InitColor, InitSize, InitRotation, InitTumble, InitSpin>;
+
+// Keys of a curve or a gradient over a particle's life (t from 0 at birth to
+// 1 at death), sampled linearly between keys and held beyond the ends.
+struct ColorKey final {
+    float t{};
+    Color value{};
+    friend bool operator==(const ColorKey&, const ColorKey&) = default;
+};
+
+struct CurveKey final {
+    float t{};
+    float value{};
+    friend bool operator==(const CurveKey&, const CurveKey&) = default;
+};
+
 
 // ---------------------------------------------------------------- update
 //
-// Forces (gravity, drag, curl noise, vortex, attractor) change velocity and
-// run first, in stack order. Position is then integrated. Turning (rigid
+// Forces (gravity, drag, curl noise, vortex, attractor, converge) change
+// velocity and run first, in stack order. Position is then integrated. Turning (rigid
 // body), constraints (the colliders) and appearance (colour and size over
 // life) run after, in stack order.
+//
+// Every force acts on each particle times a factor picked for that particle
+// between `scale_min` and `scale_max`, once, so it keeps it for life: some
+// sparks fall heavier, some smoke drags more. The default 1 to 1 is the force
+// as given.
 
+// A constant acceleration, scaled over each particle's life by `over_life`:
+// buoyancy that is strongest while a flame is hot, say.
 struct Gravity final {
     static constexpr std::string_view kind = "gravity";
     ModuleId id{};
     Vec3Input acceleration{Vec3{0.0F, -9.81F, 0.0F}};
+    std::vector<CurveKey> over_life{{0.0F, 1.0F}, {1.0F, 1.0F}};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("acceleration", self.acceleration);
+        visit("over_life", self.over_life);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
     }
     friend bool operator==(const Gravity&, const Gravity&) = default;
 };
@@ -218,17 +285,24 @@ struct Drag final {
     static constexpr std::string_view kind = "drag";
     ModuleId id{};
     FloatInput coefficient{1.0F};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("coefficient", self.coefficient);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
     }
     friend bool operator==(const Drag&, const Drag&) = default;
 };
 
 // Divergence-free turbulence: swirls without bunching particles together.
 // `frequency` is in cycles per world unit; `evolution` scrolls the field
-// through time in units per second.
+// through time in units per second. The field travels at `drift` (world
+// units per second), so eddies roll along with a plume moving at about that
+// speed instead of standing still. `over_life` scales the strength over each
+// particle's life: calm at a flame's base, breaking up towards its tip.
 struct CurlNoise final {
     static constexpr std::string_view kind = "curl_noise";
     ModuleId id{};
@@ -236,6 +310,10 @@ struct CurlNoise final {
     FloatInput frequency{1.0F};
     FloatInput evolution{0.0F};
     std::uint32_t seed{0U};
+    Vec3Input drift{};
+    std::vector<CurveKey> over_life{{0.0F, 1.0F}, {1.0F, 1.0F}};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -243,6 +321,10 @@ struct CurlNoise final {
         visit("frequency", self.frequency);
         visit("evolution", self.evolution);
         visit("seed", self.seed);
+        visit("drift", self.drift);
+        visit("over_life", self.over_life);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
     }
     friend bool operator==(const CurlNoise&, const CurlNoise&) = default;
 };
@@ -255,12 +337,16 @@ struct Vortex final {
     Vec3Input center{};
     Vec3Input axis{Vec3{0.0F, 1.0F, 0.0F}};
     FloatInput strength{1.0F};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("center", self.center);
         visit("axis", self.axis);
         visit("strength", self.strength);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
     }
     friend bool operator==(const Vortex&, const Vortex&) = default;
 };
@@ -273,14 +359,44 @@ struct Attractor final {
     Vec3Input position{};
     FloatInput strength{1.0F};
     FloatInput radius{0.0F};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("position", self.position);
         visit("strength", self.strength);
         visit("radius", self.radius);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
     }
     friend bool operator==(const Attractor&, const Attractor&) = default;
+};
+
+// Acceleration towards the line through `center` along `axis`, `strength`
+// per second squared for each unit away from it: the air a fire draws in at
+// its base, gathering flames into tongues. It fades linearly to nothing at
+// `height` above the centre (along the axis); a height of 0 never fades.
+struct Converge final {
+    static constexpr std::string_view kind = "converge";
+    ModuleId id{};
+    Vec3Input center{};
+    Vec3Input axis{Vec3{0.0F, 1.0F, 0.0F}};
+    FloatInput strength{1.0F};
+    FloatInput height{0.0F};
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("center", self.center);
+        visit("axis", self.axis);
+        visit("strength", self.strength);
+        visit("height", self.height);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
+    }
+    friend bool operator==(const Converge&, const Converge&) = default;
 };
 
 // The plane is every point p with dot(normal, p) == offset; particles are kept
@@ -392,9 +508,14 @@ struct SdfCollision final {
 // `contact_scale` of its size in radius rather than as a point:
 // - one arriving slower than `rest_speed` (units per second) stops rather
 //   than bouncing, so a pile settles instead of buzzing;
-// - the collider's friction grips the ball's surface, so sliding becomes
-//   rolling and spin throws it along, as a solid ball's would. It takes that
-//   fraction of the slip each contact, whatever the push.
+// - the collider's friction grips the ball's surface. Its grip is limited
+//   by the push, as Coulomb friction's is: friction f takes at most
+//   f / (1 - f) of the speed the contact pushes back with off the slip, so
+//   a resting piece slides to a stop and full friction grips at once;
+// - `roundness` (0 to 1) is how readily a gripped piece rolls. At 1 it is a
+//   solid ball: sliding becomes rolling and spin throws it along. At 0 it is
+//   a flat chip: grip only slows its sliding, and each contact takes its
+//   spin away. Between, a contact keeps that share of the spin.
 // At most one per emitter.
 struct RigidBody final {
     static constexpr std::string_view kind = "rigid_body";
@@ -402,30 +523,20 @@ struct RigidBody final {
     FloatInput angular_drag{0.5F};
     float contact_scale{0.5F};
     FloatInput rest_speed{0.2F};
+    FloatInput roundness{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("angular_drag", self.angular_drag);
         visit("contact_scale", self.contact_scale);
         visit("rest_speed", self.rest_speed);
+        visit("roundness", self.roundness);
     }
     friend bool operator==(const RigidBody&, const RigidBody&) = default;
 };
 
 // A key at normalized age `t` (0 at birth, 1 at death). Keys are sorted by t;
 // values are linear between keys and held beyond the ends.
-struct ColorKey final {
-    float t{};
-    Color value{};
-    friend bool operator==(const ColorKey&, const ColorKey&) = default;
-};
-
-struct CurveKey final {
-    float t{};
-    float value{};
-    friend bool operator==(const CurveKey&, const CurveKey&) = default;
-};
-
 struct ColorOverLife final {
     static constexpr std::string_view kind = "color_over_life";
     ModuleId id{};
@@ -450,8 +561,8 @@ struct SizeOverLife final {
     friend bool operator==(const SizeOverLife&, const SizeOverLife&) = default;
 };
 
-using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, PlaneCollision, SphereCollision,
-                                  BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody>;
+using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
+                                  SphereCollision, BoxCollision, SdfCollision, ColorOverLife, SizeOverLife, RigidBody>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -521,14 +632,24 @@ struct SpriteRenderer final {
     // coordinates and is shaded by a light at the camera.
     Geometry geometry{Geometry::Sprites};
     std::string mesh;
-    // Particle lights: up to `light_count` (at most 64) of the emitter's
-    // particles light the host's scene, each a point light of the particle's
-    // colour at `light_intensity`, reaching `light_range`; chosen evenly
-    // through the live particles in birth order, so every node picks the
-    // same ones. Zero gives none. A host without a lit scene ignores them.
+    // Particle lights: point lights in the host's lit scene, carried by some
+    // of the emitter's particles. A particle carries one for its whole life
+    // or not at all: every light_spacing()-th particle by birth does, so that
+    // at most `light_count` (up to 64) do at once and every node picks the
+    // same ones. Each light's intensity and reach are picked between their
+    // min and max for its particle. Its colour is the particle's, or with
+    // `light_own_color` the `light_colors` keys over the particle's life (by
+    // their alpha), and `light_curve` scales its intensity over that life.
+    // Zero gives none. A host without a lit scene ignores them.
+    static constexpr std::size_t max_light_keys = 8U;
     std::uint32_t light_count{0U};
-    float light_intensity{1.0F};
-    float light_range{1.0F};
+    float light_intensity_min{1.0F};
+    float light_intensity_max{1.0F};
+    float light_range_min{1.0F};
+    float light_range_max{1.0F};
+    bool light_own_color{false};
+    std::vector<ColorKey> light_colors{{0.0F, Color{}}, {1.0F, Color{}}};
+    std::vector<CurveKey> light_curve{{0.0F, 1.0F}, {1.0F, 1.0F}};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -544,8 +665,13 @@ struct SpriteRenderer final {
         visit("geometry", self.geometry);
         visit("mesh", self.mesh);
         visit("light_count", self.light_count);
-        visit("light_intensity", self.light_intensity);
-        visit("light_range", self.light_range);
+        visit("light_intensity_min", self.light_intensity_min);
+        visit("light_intensity_max", self.light_intensity_max);
+        visit("light_range_min", self.light_range_min);
+        visit("light_range_max", self.light_range_max);
+        visit("light_own_color", self.light_own_color);
+        visit("light_colors", self.light_colors);
+        visit("light_curve", self.light_curve);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };

@@ -32,25 +32,57 @@ void layouts_store_only_what_modules_use() {
     const gpu::ParticleLayout minimal = gpu::particle_layout(bare);
     AJFX_CHECK(minimal.velocity == -1 && minimal.color == -1 && minimal.size == -1);
     AJFX_CHECK(minimal.stride == 24U);
+
+    // A spinning sprite stores its turn and its spin.
+    Emitter spinning = bare;
+    spinning.init.push_back(InitSpin{.id = 2U});
+    const gpu::ParticleLayout turning = gpu::particle_layout(spinning);
+    AJFX_CHECK(turning.rotation == 24 && turning.spin == 28 && turning.stride == 32U);
+}
+
+void spin_turns_where_position_integrates() {
+    Effect effect;
+    effect.name = "spin";
+    Emitter& emitter = effect.emitters.emplace_back();
+    emitter.name = "e";
+    emitter.init = {Lifetime{.id = 1U}, InitSpin{.id = 2U}};
+    emitter.update = {Gravity{.id = 3U}, PlaneCollision{.id = 4U}};
+    const std::string s = gpu::generate_kernel_sources(effect)[0].source;
+    // Lifetime's id and 2 floats, then the spin's id and data.
+    AJFX_CHECK(contains(s, "ajfx_spin(p, 4u, ajfx_u32(3u));"));
+    AJFX_CHECK(contains(s, "ajfx_spin_turn(p, 4u);"));
+    AJFX_CHECK(s.find("p.position += p.velocity * ajfx_dt;") < s.find("ajfx_spin_turn(p"));
+    AJFX_CHECK(s.find("ajfx_spin_turn(p") < s.find("ajfx_plane_collision(p"));
+    // Newborns turn through the part of the step they lived.
+    AJFX_CHECK(contains(s, "p.rotation += p.spin * p.age;"));
 }
 
 void module_calls_carry_their_data_offsets_and_ids() {
     const std::vector<gpu::EmitterKernelSource> sources = gpu::generate_kernel_sources(presets::sparks());
     AJFX_CHECK(sources.size() == 1U);
     const std::string& s = sources[0].source;
-    // Offsets are the running total of each module's packed floats:
-    // lifetime 2, shape 9, velocity 12, colour 8, size 2, gravity 3, drag 1,
-    // plane 7, colour-over-life 1 + 5 per key.
-    AJFX_CHECK(contains(s, "ajfx_lifetime(p, 0u, 2u);"));
-    AJFX_CHECK(contains(s, "ajfx_shape_location(p, 2u, 3u);"));
-    AJFX_CHECK(contains(s, "ajfx_velocity(p, 11u, 4u);"));
-    AJFX_CHECK(contains(s, "ajfx_color(p, 23u, 5u);"));
-    AJFX_CHECK(contains(s, "ajfx_size(p, 31u, 6u);"));
-    AJFX_CHECK(contains(s, "ajfx_gravity(p, 33u, 7u);"));
-    AJFX_CHECK(contains(s, "ajfx_drag(p, 36u, 8u);"));
-    AJFX_CHECK(contains(s, "ajfx_plane_collision(p, 37u, 9u);"));
-    AJFX_CHECK(contains(s, "ajfx_color_over_life(p, 44u, 10u);"));
-    AJFX_CHECK(sources[0].module_floats == 55U);
+    // Each module's data is its id, then its packed floats, and offsets are
+    // the running total: lifetime 2, shape 10, velocity 13, colour 10, size
+    // 2, gravity 5 and its curve (1 + 2 per key), drag 5, plane 7,
+    // colour-over-life 1 + 5 per key. A call reads its id from the data.
+    AJFX_CHECK(contains(s, "ajfx_lifetime(p, 1u, ajfx_u32(0u));"));
+    AJFX_CHECK(contains(s, "ajfx_shape_location(p, 4u, ajfx_u32(3u));"));
+    AJFX_CHECK(contains(s, "ajfx_velocity(p, 15u, ajfx_u32(14u));"));
+    AJFX_CHECK(contains(s, "ajfx_color(p, 29u, ajfx_u32(28u));"));
+    AJFX_CHECK(contains(s, "ajfx_size(p, 40u, ajfx_u32(39u));"));
+    AJFX_CHECK(contains(s, "ajfx_gravity(p, 43u, ajfx_u32(42u));"));
+    AJFX_CHECK(contains(s, "ajfx_drag(p, 54u, ajfx_u32(53u));"));
+    AJFX_CHECK(contains(s, "ajfx_plane_collision(p, 60u, ajfx_u32(59u));"));
+    AJFX_CHECK(contains(s, "ajfx_color_over_life(p, 68u, ajfx_u32(67u));"));
+    AJFX_CHECK(sources[0].module_floats == 79U);
+    // Ids are data, not source: new ids (a seed, a copied block) keep the
+    // same kernels.
+    Effect renumbered = presets::sparks();
+    for (InitModule& module : renumbered.emitters[0].init) {
+        std::visit([](auto& m) { m.id += 1000U; }, module);
+    }
+    AJFX_CHECK(gpu::generate_kernel_sources(renumbered)[0].source == s);
+    AJFX_CHECK(gpu::kernel_source_hash(renumbered) == gpu::kernel_source_hash(presets::sparks()));
     // Forces run before integration, constraints after.
     AJFX_CHECK(s.find("ajfx_drag(p") < s.find("p.position += p.velocity * ajfx_dt;"));
     AJFX_CHECK(s.find("p.position += p.velocity * ajfx_dt;") < s.find("ajfx_plane_collision(p"));
@@ -151,6 +183,7 @@ int main() {
     const ajfx::test::Case cases[] = {
         {"layouts_store_only_what_modules_use", layouts_store_only_what_modules_use},
         {"module_calls_carry_their_data_offsets_and_ids", module_calls_carry_their_data_offsets_and_ids},
+        {"spin_turns_where_position_integrates", spin_turns_where_position_integrates},
         {"generation_is_deterministic", generation_is_deterministic},
         {"compiled_bytecode_is_reproducible", compiled_bytecode_is_reproducible},
         {"kernels_travel_in_packages_and_go_stale_with_their_source",

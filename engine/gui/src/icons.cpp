@@ -690,6 +690,11 @@ void draw_icon(
         pen.stroke({{3.5F, -5.5F}, {6.0F, -5.5F}, {6.0F, 5.5F}, {3.5F, 5.5F}}, 1.5F);
         pen.fill({{-2.0F, -3.5F}, {3.5F, 0.0F}, {-2.0F, 3.5F}});
         return;
+    case Icon::Paths:
+        pen.stroke({{-6.0F, 6.0F}, {-4.6F, 0.8F}, {-2.2F, -2.8F}, {1.2F, -4.9F}, {4.4F, -4.6F}}, 1.4F);
+        pen.stroke({{-6.0F, 6.0F}, {-2.6F, 3.0F}, {1.4F, 1.6F}, {5.5F, 2.4F}}, 1.4F);
+        add_disc(list, UiPoint{center_x + 4.6F, center_y - 4.6F}, 2.0F, color, 10U);
+        return;
     case Icon::Reset: {
         // Most of a ring turning back anticlockwise into its arrowhead, the
         // way Unreal marks a value that differs from its default.

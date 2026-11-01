@@ -86,6 +86,10 @@ public:
     [[nodiscard]] core::u64 target_step() const noexcept;
     // At its target step with every texture uploaded: ready to draw.
     [[nodiscard]] bool caught_up() const noexcept;
+    // No submitted work still uses the textures it owns, so it may be
+    // destroyed. Its simulation's buffers and kernels need no wait: the
+    // particle device retires those itself.
+    [[nodiscard]] bool safe_to_release() const noexcept;
     // The simulation itself, for tools and tests. Reading it back submits
     // work of its own, so never on a frame path.
     [[nodiscard]] ajfx::gpu::GpuSimulation& simulation() noexcept;

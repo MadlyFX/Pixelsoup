@@ -44,6 +44,7 @@ struct EmitterState final {
     std::vector<float> rotation; // radians
     std::vector<Quat> orientation;
     std::vector<Vec3> angular_velocity; // radians per second, in the effect's space
+    std::vector<float> spin;            // a sprite's, radians per second
     std::vector<std::uint32_t> spawn_index;
 
     // Births so far, including refused ones; the low 32 bits of the count at

@@ -62,6 +62,7 @@ struct Particle {
     uint spawn_index;
     float4 orientation; // x, y, z, w
     float3 angular_velocity;
+    float spin;
 };
 
 Particle ajfx_default_particle() {
@@ -78,6 +79,7 @@ Particle ajfx_default_particle() {
     p.spawn_index = 0u;
     p.orientation = float4(0.0f, 0.0f, 0.0f, 1.0f);
     p.angular_velocity = float3(0.0f, 0.0f, 0.0f);
+    p.spin = 0.0f;
     return p;
 }
 
@@ -164,6 +166,30 @@ float3 ajfx_curl_field(float3 q, uint seed) {
     return float3(d3_dy - d2_dz, d1_dz - d3_dx, d2_dx - d1_dy);
 }
 
+float ajfx_normalized_age(Particle p) {
+    return min(max(p.age / p.lifetime, 0.0f), 1.0f);
+}
+
+// A curve at t, from [count, (t, value) per key], as the reference samples it.
+float ajfx_curve(uint o, float t) {
+    uint count = ajfx_u32(o);
+    uint next = 0u;
+    while (next < count && ajfx_f(o + 1u + next * 2u) < t) {
+        ++next;
+    }
+    if (next == 0u) {
+        return ajfx_f(o + 2u);
+    }
+    if (next == count) {
+        return ajfx_f(o + 2u + (count - 1u) * 2u);
+    }
+    uint a = o + 1u + (next - 1u) * 2u;
+    uint b = a + 2u;
+    float span = ajfx_f(b) - ajfx_f(a);
+    float f = span > 0.0f ? (t - ajfx_f(a)) / span : 1.0f;
+    return ajfx_mix(ajfx_f(a + 1u), ajfx_f(b + 1u), f);
+}
+
 // ------------------------------------------------------------ init modules
 
 // [min, max]
@@ -178,13 +204,13 @@ float3 ajfx_unit_sphere(float u, float v) {
     return float3(r * cos(phi), r * sin(phi), z);
 }
 
-// [shape, center.xyz, radius, size.xyz, surface_only]
+// [shape, center.xyz, radius_min, radius_max, size.xyz, surface_only]
 void ajfx_shape_location(inout Particle p, uint o, uint id) {
     uint shape = ajfx_u32(o);
     float3 center = ajfx_f3(o + 1u);
-    float radius = ajfx_f(o + 4u);
-    float3 size = ajfx_f3(o + 5u);
-    bool surface = ajfx_u32(o + 8u) != 0u;
+    float radius = ajfx_mix(ajfx_f(o + 4u), ajfx_f(o + 5u), ajfx_random(p, id, 5u));
+    float3 size = ajfx_f3(o + 6u);
+    bool surface = ajfx_u32(o + 9u) != 0u;
     float3 offset = float3(0.0f, 0.0f, 0.0f);
     if (shape == 1u) { // sphere
         float r = surface ? radius : radius * pow(ajfx_random(p, id, 2u), 1.0f / 3.0f);
@@ -214,25 +240,28 @@ void ajfx_shape_location(inout Particle p, uint o, uint id) {
     p.position = center + offset;
 }
 
-// [axis.xyz, t1.xyz, t2.xyz, cos_spread, speed_min, speed_max]
+// [axis.xyz, t1.xyz, t2.xyz, cos_spread, speed_min, speed_max, cos_inner]
 void ajfx_velocity(inout Particle p, uint o, uint id) {
     float3 axis = ajfx_f3(o);
     float3 t1 = ajfx_f3(o + 3u);
     float3 t2 = ajfx_f3(o + 6u);
     float cos_spread = ajfx_f(o + 9u);
-    float cos_theta = 1.0f - ajfx_random(p, id, 0u) * (1.0f - cos_spread);
+    float cos_inner = ajfx_f(o + 12u);
+    float cos_theta = cos_inner - ajfx_random(p, id, 0u) * (cos_inner - cos_spread);
     float sin_theta = sqrt(max(0.0f, 1.0f - cos_theta * cos_theta));
     float phi = ajfx_two_pi * ajfx_random(p, id, 1u);
     float3 direction = t1 * (sin_theta * cos(phi)) + t2 * (sin_theta * sin(phi)) + axis * cos_theta;
     p.velocity = direction * ajfx_mix(ajfx_f(o + 10u), ajfx_f(o + 11u), ajfx_random(p, id, 2u));
 }
 
-// [a.rgba, b.rgba]
+// [a.rgba, b.rgba, brightness_min, brightness_max]
 void ajfx_color(inout Particle p, uint o, uint id) {
     float4 a = ajfx_f4(o);
     float4 b = ajfx_f4(o + 4u);
     float t = ajfx_random(p, id, 0u);
-    p.base_color = float4(ajfx_mix(a.x, b.x, t), ajfx_mix(a.y, b.y, t), ajfx_mix(a.z, b.z, t), ajfx_mix(a.w, b.w, t));
+    float k = ajfx_mix(ajfx_f(o + 8u), ajfx_f(o + 9u), ajfx_random(p, id, 1u));
+    p.base_color = float4(ajfx_mix(a.x, b.x, t) * k, ajfx_mix(a.y, b.y, t) * k, ajfx_mix(a.z, b.z, t) * k,
+                          ajfx_mix(a.w, b.w, t));
 }
 
 // [min, max]
@@ -260,36 +289,55 @@ void ajfx_tumble(inout Particle p, uint o, uint id) {
                          (ajfx_mix(ajfx_f(o), ajfx_f(o + 1u), ajfx_random(p, id, 5u)) * ajfx_f(o + 2u));
 }
 
+// [speed_min, speed_max, radians per degree, both ways, 1 / (1 + drag * dt)]
+void ajfx_spin(inout Particle p, uint o, uint id) {
+    float speed = ajfx_mix(ajfx_f(o), ajfx_f(o + 1u), ajfx_random(p, id, 0u)) * ajfx_f(o + 2u);
+    p.spin = ajfx_u32(o + 3u) != 0u && ajfx_random(p, id, 1u) < 0.5f ? -speed : speed;
+}
+
+// The update's turn by a spin module's data, where position is integrated.
+void ajfx_spin_turn(inout Particle p, uint o) {
+    p.spin = p.spin * ajfx_f(o + 4u);
+    p.rotation += p.spin * ajfx_dt;
+}
+
 // ------------------------------------------------------------ forces
 
-// [acceleration * dt]
+// A force's factor for this particle, from [scale_min, scale_max] at o.
+float ajfx_force_scale(Particle p, uint o, uint id) {
+    return ajfx_mix(ajfx_f(o), ajfx_f(o + 1u), ajfx_random(p, id, 0u));
+}
+
+// [acceleration * dt, scale_min, scale_max, curve]
 void ajfx_gravity(inout Particle p, uint o, uint id) {
-    p.velocity += ajfx_f3(o);
+    p.velocity += ajfx_f3(o) * (ajfx_curve(o + 5u, ajfx_normalized_age(p)) * ajfx_force_scale(p, o + 3u, id));
 }
 
-// [1 / (1 + coefficient * dt)]
+// [1 / (1 + coefficient * dt), coefficient * dt, varied, scale_min, scale_max]
 void ajfx_drag(inout Particle p, uint o, uint id) {
-    p.velocity = p.velocity * ajfx_f(o);
+    float keep = ajfx_u32(o + 2u) != 0u ? 1.0f / (1.0f + ajfx_f(o + 1u) * ajfx_force_scale(p, o + 3u, id)) : ajfx_f(o);
+    p.velocity = p.velocity * keep;
 }
 
-// [frequency, strength * dt, scroll, seed]
+// [frequency, strength * dt, scroll, seed, drift * time.xyz, scale_min, scale_max, curve]
 void ajfx_curl_noise(inout Particle p, uint o, uint id) {
-    float3 q = p.position * ajfx_f(o) + float3(0.0f, 0.0f, ajfx_f(o + 2u));
-    p.velocity += ajfx_curl_field(q, ajfx_u32(o + 3u)) * ajfx_f(o + 1u);
+    float3 q = (p.position - ajfx_f3(o + 4u)) * ajfx_f(o) + float3(0.0f, 0.0f, ajfx_f(o + 2u));
+    p.velocity += ajfx_curl_field(q, ajfx_u32(o + 3u)) *
+                  (ajfx_f(o + 1u) * ajfx_curve(o + 9u, ajfx_normalized_age(p)) * ajfx_force_scale(p, o + 7u, id));
 }
 
-// [axis.xyz, center.xyz, strength * dt]
+// [axis.xyz, center.xyz, strength * dt, scale_min, scale_max]
 void ajfx_vortex(inout Particle p, uint o, uint id) {
     float3 axis = ajfx_f3(o);
     float3 r = p.position - ajfx_f3(o + 3u);
     float3 radial = r - axis * ajfx_dot(r, axis);
     float len = sqrt(ajfx_dot(radial, radial));
     if (len > 1.0e-6f) {
-        p.velocity += ajfx_cross(axis, radial) * (ajfx_f(o + 6u) / len);
+        p.velocity += ajfx_cross(axis, radial) * (ajfx_f(o + 6u) * ajfx_force_scale(p, o + 7u, id) / len);
     }
 }
 
-// [position.xyz, strength, radius, dt]
+// [position.xyz, strength, radius, dt, scale_min, scale_max]
 void ajfx_attractor(inout Particle p, uint o, uint id) {
     float3 d = ajfx_f3(o) - p.position;
     float dist = sqrt(ajfx_dot(d, d));
@@ -298,16 +346,27 @@ void ajfx_attractor(inout Particle p, uint o, uint id) {
     }
     float radius = ajfx_f(o + 4u);
     float falloff = radius > 0.0f ? max(0.0f, 1.0f - dist / radius) : 1.0f;
-    p.velocity += d * (ajfx_f(o + 3u) * falloff * ajfx_f(o + 5u) / dist);
+    p.velocity += d * (ajfx_f(o + 3u) * ajfx_force_scale(p, o + 6u, id) * falloff * ajfx_f(o + 5u) / dist);
+}
+
+// [axis.xyz, center.xyz, strength * dt, height, scale_min, scale_max]
+void ajfx_converge(inout Particle p, uint o, uint id) {
+    float3 axis = ajfx_f3(o);
+    float3 r = p.position - ajfx_f3(o + 3u);
+    float along = ajfx_dot(r, axis);
+    float3 radial = r - axis * along;
+    float height = ajfx_f(o + 7u);
+    float falloff = height > 0.0f ? min(max(1.0f - along / height, 0.0f), 1.0f) : 1.0f;
+    p.velocity = p.velocity - radial * (ajfx_f(o + 6u) * ajfx_force_scale(p, o + 8u, id) * falloff);
 }
 
 // ------------------------------------------------------------ constraints and appearance
 
 #ifdef AJFX_RIGID_DATA
 // An emitter with a RigidBody defines AJFX_RIGID_DATA as that module's data
-// offset, and its particles meet colliders as solid balls. The impulse
-// factors are the reference's decimals.
+// offset, and its particles meet colliders as balls, as in the reference.
 void ajfx_respond_rigid(inout Particle p, float dist, float3 n, float restitution, float slide, bool kill) {
+    float round = ajfx_f(AJFX_RIGID_DATA + 4u);
     float radius = p.size * ajfx_f(AJFX_RIGID_DATA + 2u);
     float gap = dist - radius;
     if (gap >= 0.0f) {
@@ -323,14 +382,22 @@ void ajfx_respond_rigid(inout Particle p, float dist, float3 n, float restitutio
         return;
     }
     float bounce = -into < ajfx_f(AJFX_RIGID_DATA + 3u) ? 0.0f : restitution;
-    p.velocity = p.velocity - n * (into * (1.0f + bounce));
+    float push = -into * (1.0f + bounce);
+    p.velocity = p.velocity + n * push;
+    p.angular_velocity = p.angular_velocity * round;
     float3 arm = n * -radius;
     float3 contact = p.velocity + ajfx_cross(p.angular_velocity, arm);
     float3 slip = contact - n * ajfx_dot(contact, n);
-    float grip = 1.0f - slide;
-    p.velocity = p.velocity - slip * (grip * 0.2857142857f);
+    float turn = 2.5f * round;
+    float share = 1.0f / (1.0f + turn);
+    float speed = sqrt(ajfx_dot(slip, slip));
+    float grip = push * (1.0f - slide);
+    if (share * speed * slide > grip) {
+        share = grip / (speed * slide);
+    }
+    p.velocity = p.velocity - slip * share;
     if (radius > 1.0e-6f) {
-        p.angular_velocity = p.angular_velocity - ajfx_cross(arm, slip) * (grip * 0.7142857143f / (radius * radius));
+        p.angular_velocity = p.angular_velocity - ajfx_cross(arm, slip) * (share * turn / (radius * radius));
     }
 }
 #endif
@@ -478,7 +545,7 @@ void ajfx_box_collision(inout Particle p, uint o, uint id) {
     }
 }
 
-// [1 / (1 + angular_drag * dt), dt / 2, contact_scale, rest_speed]
+// [1 / (1 + angular_drag * dt), dt / 2, contact_scale, rest_speed, roundness]
 void ajfx_rigid_body(inout Particle p, uint o, uint id) {
     float3 w = p.angular_velocity * ajfx_f(o);
     p.angular_velocity = w;
@@ -490,10 +557,6 @@ void ajfx_rigid_body(inout Particle p, uint o, uint id) {
     float qw = q.w - h * (w.x * q.x + w.y * q.y + w.z * q.z);
     float inverse = 1.0f / sqrt(x * x + y * y + z * z + qw * qw);
     p.orientation = float4(x * inverse, y * inverse, z * inverse, qw * inverse);
-}
-
-float ajfx_normalized_age(Particle p) {
-    return min(max(p.age / p.lifetime, 0.0f), 1.0f);
 }
 
 // [count, (t, r, g, b, a) per key]
@@ -524,25 +587,7 @@ void ajfx_color_over_life(inout Particle p, uint o, uint id) {
 
 // [count, (t, value) per key]
 void ajfx_size_over_life(inout Particle p, uint o, uint id) {
-    uint count = ajfx_u32(o);
-    float t = ajfx_normalized_age(p);
-    uint next = 0u;
-    while (next < count && ajfx_f(o + 1u + next * 2u) < t) {
-        ++next;
-    }
-    float value;
-    if (next == 0u) {
-        value = ajfx_f(o + 2u);
-    } else if (next == count) {
-        value = ajfx_f(o + 2u + (count - 1u) * 2u);
-    } else {
-        uint a = o + 1u + (next - 1u) * 2u;
-        uint b = a + 2u;
-        float span = ajfx_f(b) - ajfx_f(a);
-        float f = span > 0.0f ? (t - ajfx_f(a)) / span : 1.0f;
-        value = ajfx_mix(ajfx_f(a + 1u), ajfx_f(b + 1u), f);
-    }
-    p.size = p.base_size * value;
+    p.size = p.base_size * ajfx_curve(o, ajfx_normalized_age(p));
 }
 
 #endif

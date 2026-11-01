@@ -1507,6 +1507,12 @@ public:
     // size a GPU-resident budget need this rather than a fixed number: a
     // laptop node and a workstation differ by an order of magnitude.
     [[nodiscard]] core::u64 dedicated_video_memory_bytes() const noexcept;
+    // Why the GPU device stopped working - a fault, a hang, a driver reset or
+    // update - or empty while it works. A lost device runs nothing recorded on
+    // it again and refuses every present, so a window only keeps its last
+    // picture: a caller whose present fails asks here before carrying on.
+    // Backends that cannot tell report empty. Cheap, but not for every frame.
+    [[nodiscard]] std::string_view lost_reason() const noexcept;
     [[nodiscard]] bool supports(ShaderFormat format) const noexcept;
     [[nodiscard]] bool supports(TextureFormat format) const noexcept;
     [[nodiscard]] const DeviceCapabilities& capabilities() const noexcept {

@@ -116,6 +116,9 @@ if(MEDIASERVER_ENABLE_GUI)
     # The bespoke operator editor: engine viewports composed into a docked
     # layer/timeline/Inspector surface on the shared RHI device.
     add_subdirectory(engine/editor)
+    # ajfx Studio, the particle effect editor. It previews through the
+    # renderer above, so effects look as they will on the wall.
+    add_subdirectory(apps/ajfx-studio)
 endif()
 
 if(MEDIASERVER_BUILD_SERVER)
@@ -133,7 +136,7 @@ if(BUILD_TESTING)
     mediaserver_test_area(persist engine/persist)
     mediaserver_test_area(scene engine/scene engine/track engine/assets)
     mediaserver_test_area(compositor engine/compositor)
-    mediaserver_test_area(particles libs/ajfx)
+    mediaserver_test_area(particles libs/ajfx apps/ajfx-studio)
     mediaserver_test_area(output engine/output engine/topology engine/sync
         engine/devices)
     mediaserver_test_area(render engine/shaders engine/rhi engine/render)

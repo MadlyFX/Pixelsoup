@@ -16,11 +16,13 @@
 #include <variant>
 #include <vector>
 
-// Per-step module data for the GPU kernels: each module's inputs resolved
-// for the step, plus anything the CPU reference derives once per step (unit
-// axes, dt products, drag factors), computed here exactly as the reference
-// computes it. The order of the floats is the order the module's function in
-// shaders/ajfx_particles.hlsli reads them.
+// Per-step module data for the GPU kernels: each module's id, then its inputs
+// resolved for the step, plus anything the CPU reference derives once per
+// step (unit axes, dt products, drag factors), computed here exactly as the
+// reference computes it. The order of the floats is the order the module's
+// function in shaders/ajfx_particles.hlsli reads them. Ids are data rather
+// than kernel source, so giving a module a new id (and so new random draws)
+// never needs the kernels compiled again.
 namespace ajfx::detail {
 
 // Where an emitter's distance fields sit in its fields buffer (in floats).
@@ -72,7 +74,8 @@ inline void pack(const Lifetime& m, const PackContext& c, Packer& p) {
 inline void pack(const ShapeLocation& m, const PackContext& c, Packer& p) {
     p.u(static_cast<std::uint32_t>(m.shape));
     p.v3(c.in(m.center));
-    p.f(c.in(m.radius));
+    p.f(c.in(m.radius_min));
+    p.f(c.in(m.radius_max));
     p.v3(m.size);
     p.u(m.surface_only ? 1U : 0U);
 }
@@ -91,11 +94,14 @@ inline void pack(const Velocity& m, const PackContext& c, Packer& p) {
     p.f(std::cos(c.in(m.spread) * (std::numbers::pi_v<float> / 180.0F)));
     p.f(c.in(m.speed_min));
     p.f(c.in(m.speed_max));
+    p.f(std::cos(c.in(m.spread_min) * (std::numbers::pi_v<float> / 180.0F)));
 }
 
 inline void pack(const InitColor& m, const PackContext& c, Packer& p) {
     p.c4(c.in(m.a));
     p.c4(c.in(m.b));
+    p.f(c.in(m.brightness_min));
+    p.f(c.in(m.brightness_max));
 }
 
 inline void pack(const InitSize& m, const PackContext& c, Packer& p) {
@@ -116,12 +122,43 @@ inline void pack(const InitTumble& m, const PackContext& c, Packer& p) {
     p.u(m.random_orientation ? 1U : 0U);
 }
 
+// A curve's keys as the shaders' ajfx_curve reads them: the count, then
+// (t, value) per key.
+inline void pack_curve(const std::vector<CurveKey>& keys, Packer& p) {
+    p.u(static_cast<std::uint32_t>(keys.size()));
+    for (const CurveKey& key : keys) {
+        p.f(key.t);
+        p.f(key.value);
+    }
+}
+
+inline void pack(const InitSpin& m, const PackContext& c, Packer& p) {
+    p.f(c.in(m.speed_min));
+    p.f(c.in(m.speed_max));
+    p.f(std::numbers::pi_v<float> / 180.0F);
+    p.u(m.both_ways ? 1U : 0U);
+    p.f(1.0F / (1.0F + c.in(m.drag) * c.dt));
+}
+
+// A force's per-particle factor range, as ajfx_force_scale reads it.
+template <class Force>
+void pack_scale(const Force& m, const PackContext& c, Packer& p) {
+    p.f(c.in(m.scale_min));
+    p.f(c.in(m.scale_max));
+}
+
 inline void pack(const Gravity& m, const PackContext& c, Packer& p) {
     p.v3(c.in(m.acceleration) * c.dt);
+    pack_scale(m, c, p);
+    pack_curve(m.over_life, p);
 }
 
 inline void pack(const Drag& m, const PackContext& c, Packer& p) {
-    p.f(1.0F / (1.0F + c.in(m.coefficient) * c.dt));
+    const float rate = c.in(m.coefficient) * c.dt;
+    p.f(1.0F / (1.0F + rate));
+    p.f(rate);
+    p.u(c.in(m.scale_min) == 1.0F && c.in(m.scale_max) == 1.0F ? 0U : 1U);
+    pack_scale(m, c, p);
 }
 
 inline void pack(const CurlNoise& m, const PackContext& c, Packer& p) {
@@ -129,12 +166,16 @@ inline void pack(const CurlNoise& m, const PackContext& c, Packer& p) {
     p.f(c.in(m.strength) * c.dt);
     p.f(static_cast<float>(c.start) * c.in(m.evolution));
     p.u(m.seed);
+    p.v3(c.in(m.drift) * static_cast<float>(c.start));
+    pack_scale(m, c, p);
+    pack_curve(m.over_life, p);
 }
 
 inline void pack(const Vortex& m, const PackContext& c, Packer& p) {
     p.v3(normalized(c.in(m.axis)));
     p.v3(c.in(m.center));
     p.f(c.in(m.strength) * c.dt);
+    pack_scale(m, c, p);
 }
 
 inline void pack(const Attractor& m, const PackContext& c, Packer& p) {
@@ -142,6 +183,15 @@ inline void pack(const Attractor& m, const PackContext& c, Packer& p) {
     p.f(c.in(m.strength));
     p.f(c.in(m.radius));
     p.f(c.dt);
+    pack_scale(m, c, p);
+}
+
+inline void pack(const Converge& m, const PackContext& c, Packer& p) {
+    p.v3(normalized(c.in(m.axis)));
+    p.v3(c.in(m.center));
+    p.f(c.in(m.strength) * c.dt);
+    p.f(c.in(m.height));
+    pack_scale(m, c, p);
 }
 
 inline void pack(const PlaneCollision& m, const PackContext& c, Packer& p) {
@@ -199,6 +249,7 @@ inline void pack(const RigidBody& m, const PackContext& c, Packer& p) {
     p.f(0.5F * c.dt);
     p.f(m.contact_scale);
     p.f(c.in(m.rest_speed));
+    p.f(c.in(m.roundness));
 }
 
 inline void pack(const ColorOverLife& m, const PackContext&, Packer& p) {
@@ -210,17 +261,20 @@ inline void pack(const ColorOverLife& m, const PackContext&, Packer& p) {
 }
 
 inline void pack(const SizeOverLife& m, const PackContext&, Packer& p) {
-    p.u(static_cast<std::uint32_t>(m.keys.size()));
-    for (const CurveKey& key : m.keys) {
-        p.f(key.t);
-        p.f(key.value);
-    }
+    pack_curve(m.keys, p);
+}
+
+// One module: its id, then its data.
+template <class Module>
+void pack_module(const Module& module, const PackContext& context, Packer& p) {
+    p.u(module.id);
+    pack(module, context, p);
 }
 
 // The init stack, then the update stack, in order.
 inline void pack_emitter(const Emitter& emitter, const PackContext& context, std::vector<float>& out) {
     Packer packer{out};
-    const auto visit = [&](const auto& module) { pack(module, context, packer); };
+    const auto visit = [&](const auto& module) { pack_module(module, context, packer); };
     for (const InitModule& module : emitter.init) {
         std::visit(visit, module);
     }

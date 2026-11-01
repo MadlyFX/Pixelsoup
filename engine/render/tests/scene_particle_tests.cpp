@@ -4,6 +4,7 @@
 
 #include <ajfx/builder.hpp>
 #include <ajfx/d3d12.hpp>
+#include <ajfx/gpu/sort.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/texture.hpp>
 
@@ -113,7 +114,7 @@ std::string write_crowd(const std::string& name, ajfx::gpu::ShaderCompiler& comp
         .capacity(300U)
         .spawn(ajfx::SpawnBurst{.count = 300U})
         .init(ajfx::Lifetime{.min = 0.5F, .max = 3.0F})
-        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius = 1.2F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius_min = 1.2F, .radius_max = 1.2F})
         .init(ajfx::Velocity{.speed_min = 0.2F, .speed_max = 0.6F, .spread = 180.0F})
         .init(ajfx::InitSize{.min = 0.2F, .max = 0.5F})
         .renderer(ajfx::SpriteRenderer{.texture = "cells", .flipbook_columns = 2U, .flipbook_rows = 2U,
@@ -145,7 +146,7 @@ std::string write_lamp(const std::string& name, ajfx::gpu::ShaderCompiler& compi
         .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
         .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point, .center = ajfx::Vec3{0.0F, 0.0F, 1.0F}})
         .init(ajfx::InitSize{.min = 0.001F, .max = 0.001F})
-        .renderer(ajfx::SpriteRenderer{.light_count = lights, .light_intensity = 2.0F, .light_range = 3.0F});
+        .renderer(ajfx::SpriteRenderer{.light_count = lights, .light_intensity_min = 2.0F, .light_intensity_max = 2.0F, .light_range_min = 3.0F, .light_range_max = 3.0F});
     const ajfx::Effect effect = builder.build().value();
     const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
     SCENE_CHECK(kernels);
@@ -584,6 +585,58 @@ void a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready(ajfx::g
     g_device->wait_idle();
 }
 
+void an_effect_with_many_sorted_emitters_draws_every_one(ajfx::gpu::ShaderCompiler& compiler) {
+    // Each sorted emitter records with about a dozen buffers of its own -
+    // particles, counters, sort keys - so a recording that journals too few
+    // refuses the dispatches of the later ones. Ten emitters, each a small
+    // sprite at its own place along the canvas, all simulate and draw.
+    constexpr std::uint32_t emitters = 10U;
+    ajfx::EffectBuilder builder{"row"};
+    for (std::uint32_t i = 0U; i < emitters; ++i) {
+        const ajfx::Color red{1.0F, 0.0F, 0.0F, 1.0F};
+        builder.emitter("e" + std::to_string(i))
+            .capacity(64U)
+            .spawn(ajfx::SpawnBurst{.count = 2U})
+            .init(ajfx::Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point,
+                                      .center = ajfx::Vec3{-3.6F + 0.8F * static_cast<float>(i), 0.0F, 0.0F}})
+            .init(ajfx::InitColor{.a = red, .b = red})
+            .init(ajfx::InitSize{.min = 0.3F, .max = 0.3F})
+            .renderer(ajfx::SpriteRenderer{});
+    }
+    const ajfx::Effect effect = builder.build().value();
+    for (const ajfx::Emitter& emitter : effect.emitters) {
+        SCENE_CHECK(ajfx::gpu::sorts(emitter));
+    }
+    const ajfx::Result<ajfx::gpu::KernelSet> kernels = ajfx::gpu::compile_kernels(effect, compiler);
+    SCENE_CHECK(kernels);
+    const ajfx::Result<std::vector<std::uint8_t>> package =
+        ajfx::write_package(effect, ajfx::gpu::kernel_package_entries(effect, kernels.value()));
+    SCENE_CHECK(package);
+    const std::filesystem::path path = g_directory / "row.ajfx";
+    {
+        std::ofstream out{path, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(package.value().data()),
+                  static_cast<std::streamsize>(package.value().size()));
+        SCENE_CHECK(out.good());
+    }
+
+    const scene::Scene frame = scene_with(path.string());
+    auto renderer = render::SceneRenderer::create(*g_device, 128U, 64U, limits(), render::SceneRendererMode::AdvancedLinear);
+    SCENE_CHECK(renderer);
+    const std::vector<core::u8> image = settle(renderer.value(), frame, {0U, 0U, 128U, 64U});
+    const render::RenderStats& stats = renderer.value().stats();
+    SCENE_CHECK(stats.particles_failed == 0U && stats.particle_issue.empty());
+    SCENE_CHECK(stats.particles_drawn == 1U);
+    // A world unit at the origin's depth is eight pixels across this canvas.
+    for (std::uint32_t i = 0U; i < emitters; ++i) {
+        const float x = -3.6F + 0.8F * static_cast<float>(i);
+        SCENE_CHECK(lit(image, 128U, static_cast<core::u32>(64.0F + x * 8.0F), 32U));
+    }
+    SCENE_CHECK(!lit(image, 128U, 2U, 2U));
+    g_device->wait_idle();
+}
+
 } // namespace
 
 int main() {
@@ -618,6 +671,7 @@ int main() {
         {"effects_alone_reach_the_composited_picture", effects_alone_reach_the_composited_picture},
         {"a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready",
          a_held_frame_with_temporal_antialiasing_shows_the_effect_once_ready},
+        {"an_effect_with_many_sorted_emitters_draws_every_one", an_effect_with_many_sorted_emitters_draws_every_one},
     };
     int failures = 0;
     for (const Case& test : cases) {

@@ -2494,7 +2494,7 @@ Result SceneRenderer::create(
     // that cannot keeps a working renderer; a scene that places an effect is
     // then refused readiness with the reason.
     if (mode == SceneRendererMode::AdvancedLinear) {
-        auto particles = ParticlePass::create(device, color_format);
+        auto particles = ParticlePass::create(device, color_format, limits.particles);
         if (particles) {
             renderer.particle_pass_ = std::make_unique<ParticlePass>(std::move(particles).value());
             renderer.particle_packages_ = std::make_unique<ParticlePackageCache>(ajfx::gpu::ShaderFormat::Dxil);
@@ -2674,6 +2674,7 @@ Result SceneRenderer::create(
     renderer.depth_only_media_.reserve(scene::max_scene_media);
     renderer.retired_models_.reserve(
         limits.max_model_refresh_generations);
+    renderer.retired_particles_.reserve(max_retired_particles);
     renderer.pending_model_integrations_.reserve(
         limits.max_model_refresh_generations);
     renderer.object_velocity_ = std::move(object_velocity);
@@ -3680,9 +3681,24 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
             stats_.particle_issue = reason;
         }
     };
-    std::erase_if(particle_slots_, [&scene](const auto& slot) {
-        return std::none_of(scene.particle_effects.begin(), scene.particle_effects.end(),
+    // Retired instances go once nothing submitted uses them.
+    std::erase_if(retired_particles_, [](const ParticleInstance& instance) { return instance.safe_to_release(); });
+    // Moves a slot's instance to retirement, or says there is no room yet.
+    const auto retire = [this](ParticleSlot& slot) {
+        if (!slot.instance) {
+            return true;
+        }
+        if (retired_particles_.size() == max_retired_particles) {
+            return false;
+        }
+        retired_particles_.push_back(std::move(*slot.instance));
+        slot.instance.reset();
+        return true;
+    };
+    std::erase_if(particle_slots_, [&scene, &retire](auto& slot) {
+        const bool gone = std::none_of(scene.particle_effects.begin(), scene.particle_effects.end(),
             [&slot](const scene::ParticleEffect& effect) { return effect.source_node == slot.first; });
+        return gone && retire(slot.second);
     });
     // A reflection shows no particles; the view that reflects it draws them.
     if (scene.particle_effects.empty() || options.reflection_pass) {
@@ -3718,7 +3734,9 @@ void SceneRenderer::prepare_particles(rhi::CommandList& commands, const scene::S
         }
         ParticleSlot& slot = particle_slots_[effect.source_node];
         const core::u32 seed = scene::particle_instance_seed(effect);
-        if (slot.package != observed.package || slot.seed != seed) {
+        // A new package or seed starts a new instance; the old one keeps
+        // drawing until retirement has room for it.
+        if ((slot.package != observed.package || slot.seed != seed) && retire(slot)) {
             slot = ParticleSlot{observed.package, seed, std::nullopt, {}};
         }
         if (!slot.instance) {

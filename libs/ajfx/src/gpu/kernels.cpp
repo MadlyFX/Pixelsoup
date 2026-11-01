@@ -70,6 +70,7 @@ std::vector<Field> stored_fields(const ParticleLayout& l) {
         {"rotation", l.rotation, FieldType::Float},
         {"orientation", l.orientation, FieldType::Float4},
         {"angular_velocity", l.angular_velocity, FieldType::Float3},
+        {"spin", l.spin, FieldType::Float},
     };
     std::erase_if(fields, [](const Field& field) { return field.offset < 0; });
     return fields;
@@ -121,10 +122,12 @@ void generate_access(std::string& out, const ParticleLayout& layout) {
     }
 }
 
+// A module's data starts with its id (see pack_module), so the kernel reads
+// the id rather than baking it in.
 template <class Module>
-std::string call(const Module& module, std::uint32_t offset) {
-    return "        ajfx_" + std::string{Module::kind} + "(p, " + std::to_string(offset) + "u, " +
-           std::to_string(module.id) + "u);\n";
+std::string call(const Module&, std::uint32_t offset) {
+    return "        ajfx_" + std::string{Module::kind} + "(p, " + std::to_string(offset + 1U) + "u, ajfx_u32(" +
+           std::to_string(offset) + "u));\n";
 }
 
 bool is_appearance(const UpdateModule& module) {
@@ -144,13 +147,22 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
     detail::Packer packer{scratch};
     const auto offset_of = [&](const auto& module) {
         const auto offset = static_cast<std::uint32_t>(scratch.size());
-        detail::pack(module, context, packer);
+        detail::pack_module(module, context, packer);
         return offset;
     };
 
     std::string init_calls;
+    std::string turn_call;
     for (const InitModule& module : emitter.init) {
-        std::visit([&](const auto& m) { init_calls += call(m, offset_of(m)); }, module);
+        std::visit(
+            [&](const auto& m) {
+                const std::uint32_t offset = offset_of(m);
+                if constexpr (std::is_same_v<std::decay_t<decltype(m)>, InitSpin>) {
+                    turn_call = "        ajfx_spin_turn(p, " + std::to_string(offset + 1U) + "u);\n";
+                }
+                init_calls += call(m, offset);
+            },
+            module);
     }
     std::string force_calls;
     std::string after_calls;
@@ -161,7 +173,7 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
             [&](const auto& m) {
                 const std::uint32_t offset = offset_of(m);
                 if constexpr (std::is_same_v<std::decay_t<decltype(m)>, RigidBody>) {
-                    defines += "#define AJFX_RIGID_DATA " + std::to_string(offset) + "u\n";
+                    defines += "#define AJFX_RIGID_DATA " + std::to_string(offset + 1U) + "u\n";
                 }
                 const std::string line = call(m, offset);
                 (is_force(module) ? force_calls : after_calls) += line;
@@ -193,6 +205,7 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
            "    if (live) {\n";
     out += force_calls;
     out += "        p.position += p.velocity * ajfx_dt;\n";
+    out += turn_call;
     out += after_calls;
     out += "        live = p.age < p.lifetime;\n"
            "    }\n"
@@ -216,6 +229,7 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
            "    p.color = p.base_color;\n"
            "    p.size = p.base_size;\n"
            "    p.position += p.velocity * p.age;\n"
+           "    p.rotation += p.spin * p.age;\n"
            "    {\n";
     out += appearance_calls;
     out += "    }\n"
@@ -268,6 +282,9 @@ ParticleLayout particle_layout(const Emitter& emitter) {
     }
     if (has_attribute(mask, Attribute::AngularVelocity)) {
         place(layout.angular_velocity, 12U);
+    }
+    if (has_attribute(mask, Attribute::Spin)) {
+        place(layout.spin, 4U);
     }
     layout.stride = next;
     return layout;

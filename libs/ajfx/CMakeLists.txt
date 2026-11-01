@@ -90,6 +90,7 @@ add_library(ajfx STATIC
     src/effect.cpp
     src/field.cpp
     src/mesh.cpp
+    src/noise.cpp
     src/gpu/kernels.cpp
     src/gpu/renderer.cpp
     src/gpu/simulation.cpp

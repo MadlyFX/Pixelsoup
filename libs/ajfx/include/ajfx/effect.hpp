@@ -50,6 +50,13 @@ struct Effect final {
 // exceeds its capacity. Returns UINT64_MAX when an input is unbounded.
 [[nodiscard]] std::uint64_t particle_bound(const Effect& effect, const Emitter& emitter);
 
+// Which particles carry the emitter's lights: those whose spawn index is a
+// multiple of this. It spreads `light_count` lights over the most particles
+// the emitter can have alive (particle_bound, else its capacity), so a light
+// stays with its particle for life and at most `light_count` are lit at once.
+// One when the emitter has no lights.
+[[nodiscard]] std::uint32_t light_spacing(const Effect& effect, const Emitter& emitter);
+
 // Per-particle attributes an emitter's modules read or write. Position, age
 // and lifetime are always present; the GPU runtime allocates only the rest
 // that appear here.
@@ -63,6 +70,7 @@ enum class Attribute : std::uint32_t {
     Rotation = 1U << 6U,
     Orientation = 1U << 7U,
     AngularVelocity = 1U << 8U,
+    Spin = 1U << 9U,
 };
 
 [[nodiscard]] std::uint32_t required_attributes(const Emitter& emitter);

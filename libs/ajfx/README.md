@@ -9,8 +9,8 @@ simulation frame. Every machine in a render cluster sees the same particles,
 a timeline seek lands on exactly what playing through would have shown, and
 replays and lockstep simulations stay in agreement.
 
-Effects are authored in ajfx Studio, a separate application built on this
-library, and exported as `.ajfx` packages: the emitters and module stacks,
+Effects are authored in ajfx Studio, a block editor built on this library
+(`apps/ajfx-studio`), and exported as `.ajfx` packages: the emitters and module stacks,
 their textures and meshes, the parameters the effect publishes to a host, and
 precompiled kernels. A host such as the media server loads packages and plays
 them; it does not author them.
@@ -72,15 +72,38 @@ the emitter, module and field at fault.
 | Stage | Modules |
 | --- | --- |
 | Spawn | `SpawnRate`, `SpawnBurst` |
-| Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitTumble` |
-| Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor` |
+| Init | `Lifetime` (required), `ShapeLocation` (point, sphere, box, disc), `Velocity` (cone), `InitColor`, `InitSize`, `InitRotation`, `InitSpin`, `InitTumble` |
+| Update: forces | `Gravity`, `Drag`, `CurlNoise`, `Vortex`, `Attractor`, `Converge` |
 | Update: after integration | `RigidBody`, `PlaneCollision`, `SphereCollision`, `BoxCollision`, `SdfCollision`, `ColorOverLife`, `SizeOverLife` |
 
 Each step ages and retires particles, applies forces in stack order,
-integrates position, applies the after-integration modules in stack order,
-then spawns. Newborns are placed at their exact birth time within the step, so
+integrates position (and turns sprites by their `InitSpin` spin), applies the
+after-integration modules in stack order, then spawns. Newborns are placed at their exact birth time within the step, so
 emission is smooth at any simulation rate. Any float, vector or colour input
 can be bound to a published parameter with `ajfx::bind`.
+
+**Ranges.** Most values are picked for each particle between two ends:
+- `ShapeLocation` gives each particle a radius between `radius_min` and
+  `radius_max`: equal ends are a crisp edge, apart a soft one or a thick
+  shell.
+- `Velocity::spread_min` hollows the launch cone, as a fountain's crown.
+- `InitColor` picks a brightness between `brightness_min` and
+  `brightness_max`, apart from the colour it picks between `a` and `b`.
+- Every force takes each particle by its own factor between `scale_min` and
+  `scale_max`, kept for life: some sparks fall heavier, some smoke drags
+  more. The default 1 to 1 is the force as given.
+
+**Fire motion.** Four pieces give flames the way real fire moves:
+- **`CurlNoise::drift`** moves the turbulence field at that velocity. Eddies
+  then roll up with a plume rising about as fast, and the particles riding
+  them curl, instead of passing through still swirls.
+- **`over_life` curves** on `Gravity` and `CurlNoise` scale them over each
+  particle's life. Buoyancy can be strongest while a flame is hot, and
+  turbulence can be calm at the base and break up towards the tip.
+- **`Converge`** pulls particles towards an axis, fading with height, as a
+  fire draws in air at its base and gathers flames into tongues.
+- **`InitSpin`** gives sprites a spin, either way round, that slows by its
+  `drag`. Flame and smoke cells twist as they rise.
 
 ### Parameters, budgets and seeking
 
@@ -147,7 +170,9 @@ ajfx::gpu::EmitterBuffers buffers = gpu.emitter_buffers(0); // or draw it yourse
   hash of the generated source; a package from another ajfx version, or with
   an edited module stack, is refused with a reason rather than run with
   mismatched bytecode. Changing only values (a speed, a colour) keeps the
-  kernels valid.
+  kernels valid, and so does changing module ids: each module's data starts
+  with its id, so an editor can give a module a new id (a seed) without a
+  compile.
 
 About a million live particles take 1.9 ms a step on an RTX 3090 (2.2 ms
 with curl noise), measured as wall-clock time for recording and execution
@@ -166,8 +191,12 @@ before any tuning.
 
 Planned additions:
 - a Vulkan backend;
-- `volume/`, raymarched voxel volumes;
-- `studio/`, the authoring application.
+- `volume/`, raymarched voxel volumes.
+
+ajfx Studio, the authoring application, is in the media server tree at
+[`apps/ajfx-studio`](../../apps/ajfx-studio/README.md). Its preview is drawn
+by the media server's renderer, so an effect looks in Studio as it will on
+the wall. Its page model and compiler use ajfx alone.
 
 ## Drawing
 
@@ -223,10 +252,19 @@ named by `mesh`, a package entry.
 - **Depth:** the reference renderer has no depth buffer, so it culls back
   faces. Use convex meshes there.
 
-**Lights.** `light_count` of an emitter's particles become point lights in
-the host's lit scene: the particle's colour at `light_intensity`, reaching
-`light_range`. They are chosen evenly through the live particles in birth
-order.
+**Lights.** Some of an emitter's particles become point lights in the
+host's lit scene, at most `light_count` at once.
+- **Which particles.** A particle carries a light for its whole life or not
+  at all: those whose spawn index is a multiple of `light_spacing()`. That
+  spacing shares the emitter's particle bound out over its lights, so a
+  light never jumps from one particle to another as others are born and
+  die.
+- **Per particle.** Each light's intensity and reach are picked between
+  `light_intensity_min`/`max` and `light_range_min`/`max` for its particle.
+- **Over its life.** The colour is the particle's, or with
+  `light_own_color` the `light_colors` keys (by their alpha). `light_curve`
+  scales the intensity. Both follow the particle's life, with up to eight
+  keys each, so a light can fade in and out instead of popping.
 
 **Colliders.** `SphereCollision`, `BoxCollision` and `SdfCollision` keep
 particles out of a shape, or with `inside` within it. The response is the
@@ -246,10 +284,13 @@ small solid bodies, and `InitTumble` sets them spinning.
   `contact_scale` of its size in radius, not as a point.
   - A contact slower than `rest_speed` stops rather than bouncing, so a
     pile settles instead of buzzing.
-  - The collider's friction grips the ball's surface, as a solid ball's
-    would. Sliding becomes rolling, and spin throws the ball along. Friction
-    is the share of the slip taken off at each contact, not Coulomb
-    friction against the push.
+  - The collider's friction grips the ball's surface, limited by the push
+    as Coulomb friction is: friction `f` takes at most `f / (1 - f)` of the
+    contact's push off the slip. A resting piece slides to a stop at that
+    share of gravity, and friction 1 grips at once.
+  - `roundness` says how readily a gripped piece rolls. At 1 it is a solid
+    ball: sliding becomes rolling, and spin throws the ball along. At 0 it
+    is a flat chip that only slides, and each contact takes its spin away.
 - **Limits:** particles do not collide with each other, and a mesh turns
   by its orientation but collides as its ball. For stacking and resting
   piles, a host needs a rigid-body engine.
@@ -337,7 +378,8 @@ files with a reason.
   (`include/ajfx/random.hpp`, HLSL twin `shaders/ajfx_random.hlsli`). Never seed
   from a thread index, frame counter or clock. The stream comes from the
   module's id, so adding or reordering modules leaves the others' random
-  values unchanged.
+  values unchanged, and a new id for one module (an editor's seed) deals
+  that module alone new values.
 - A fixed simulation step; hosts map their time onto steps with `tick_at`.
 - The CPU reference is bit-identical between runs of the same build. Across
   compilers and against the GPU it agrees within tolerance, since standard

@@ -153,6 +153,11 @@ bool ParticleInstance::caught_up() const noexcept {
     return step() == target_step() && state_->textures_landed();
 }
 
+bool ParticleInstance::safe_to_release() const noexcept {
+    return !state_ || std::all_of(state_->textures.begin(), state_->textures.end(),
+                                  [](const State::Upload& upload) { return upload.texture.safe_to_release(); });
+}
+
 ajfx::gpu::GpuSimulation& ParticleInstance::simulation() noexcept {
     return *state_->simulation;
 }
@@ -668,14 +673,28 @@ bool ParticlePass::write_lights(rhi::CommandList& commands, const ParticleInstan
         core::u32 color_offset{};
         core::u32 light_count{};
         core::u32 first_slot{};
-        float intensity{};
-        float range{};
-        core::u32 padding{};
+        core::u32 spacing{};
+        core::u32 age_offset{};
+        core::u32 lifetime_offset{};
+        core::u32 spawn_offset{};
+        core::u32 salt{};
+        core::u32 color_keys{};
+        core::u32 curve_keys{};
+        float intensity_min{};
+        float intensity_max{};
+        float range_min{};
+        float range_max{};
+        std::array<float, 8U> color_times{};
+        std::array<std::array<float, 4U>, 8U> color_values{};
+        std::array<float, 8U> curve_times{};
+        std::array<float, 8U> curve_values{};
     };
-    static_assert(sizeof(Parameters) == 96U);
+    static_assert(sizeof(Parameters) == 352U);
+    static_assert(ajfx::SpriteRenderer::max_light_keys == 8U);
     core::u32 slot = first_slot;
     for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
-        const ajfx::SpriteRenderer& sprite = i.effect.emitters[e].renderer;
+        const ajfx::Emitter& emitter = i.effect.emitters[e];
+        const ajfx::SpriteRenderer& sprite = emitter.renderer;
         if (sprite.light_count == 0U) {
             continue;
         }
@@ -693,8 +712,28 @@ bool ParticlePass::write_lights(rhi::CommandList& commands, const ParticleInstan
         parameters.color_offset = offset_or_absent(buffers.layout.color);
         parameters.light_count = sprite.light_count;
         parameters.first_slot = slot;
-        parameters.intensity = sprite.light_intensity;
-        parameters.range = sprite.light_range;
+        parameters.spacing = ajfx::light_spacing(i.effect, emitter);
+        parameters.age_offset = static_cast<core::u32>(buffers.layout.age);
+        parameters.lifetime_offset = static_cast<core::u32>(buffers.layout.lifetime);
+        parameters.spawn_offset = static_cast<core::u32>(buffers.layout.spawn_index);
+        parameters.salt = static_cast<core::u32>(e) * 0x9E37'79B9U;
+        parameters.intensity_min = sprite.light_intensity_min;
+        parameters.intensity_max = sprite.light_intensity_max;
+        parameters.range_min = sprite.light_range_min;
+        parameters.range_max = sprite.light_range_max;
+        if (sprite.light_own_color) {
+            parameters.color_keys = static_cast<core::u32>(sprite.light_colors.size());
+            for (std::size_t k = 0U; k < sprite.light_colors.size(); ++k) {
+                const ajfx::ColorKey& key = sprite.light_colors[k];
+                parameters.color_times[k] = key.t;
+                parameters.color_values[k] = {key.value.r, key.value.g, key.value.b, key.value.a};
+            }
+        }
+        parameters.curve_keys = static_cast<core::u32>(sprite.light_curve.size());
+        for (std::size_t k = 0U; k < sprite.light_curve.size(); ++k) {
+            parameters.curve_times[k] = sprite.light_curve[k].t;
+            parameters.curve_values[k] = sprite.light_curve[k].value;
+        }
         const rhi::StorageBuffer* reads[] = {records, counters};
         const rhi::StorageBuffer* writes[] = {&lights};
         rhi::ComputeDispatch work{};

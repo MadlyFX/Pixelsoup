@@ -145,6 +145,110 @@ void gravity_integrates_semi_implicitly() {
     AJFX_CHECK(s.position[0].x == 0.0F && s.position[0].z == 0.0F);
 }
 
+void forces_follow_their_curves_over_life() {
+    // Twice the acceleration all life long: twice the speed.
+    Simulation doubled = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .update(Gravity{.acceleration = Vec3{0.0F, -10.0F, 0.0F}, .over_life = {{0.0F, 2.0F}, {1.0F, 2.0F}}});
+    }));
+    doubled.advance_to(60U);
+    AJFX_CHECK(near(doubled.emitter(0).velocity[0].y, static_cast<float>(-20.0 * 59.0 / 60.0), 1.0e-4F));
+    // A curve at zero from the start: no push at all.
+    Simulation still = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .update(Gravity{.over_life = {{0.0F, 0.0F}, {0.5F, 0.0F}, {1.0F, 1.0F}}})
+            .update(CurlNoise{.strength = 5.0F, .over_life = {{0.0F, 0.0F}, {0.5F, 0.0F}, {1.0F, 1.0F}}});
+    }));
+    still.advance_to(60U);
+    AJFX_CHECK(still.emitter(0).velocity[0].y == 0.0F && still.emitter(0).velocity[0].x == 0.0F);
+}
+
+void drifting_turbulence_moves_its_field() {
+    // Three particles born in step 0, at rest, swirled by step 1 (which
+    // starts at 1/60 s): one in a field drifting up, one in a still field at
+    // the same place, and one in the still field where the drifting field
+    // has carried the same swirl. The last pair feel the same push.
+    const Vec3 at{0.3F, 0.2F, -0.1F};
+    const Vec3 drift{0.0F, 1.5F, 0.0F};
+    const Vec3 carried = at - drift * static_cast<float>(1.0 / 60.0);
+    const auto swirled = [](Vec3 position, Vec3 field_drift) {
+        EffectBuilder builder{"swirl"};
+        builder.emitter("e")
+            .capacity(1U)
+            .spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(ShapeLocation{.shape = Shape::Point, .center = position})
+            .update(CurlNoise{.strength = 4.0F, .frequency = 2.0F, .seed = 3U, .drift = field_drift});
+        Simulation simulation = make(builder.build().value());
+        simulation.advance_to(2U);
+        return simulation.emitter(0).velocity[0];
+    };
+    const Vec3 drifting = swirled(at, drift);
+    const Vec3 still = swirled(carried, Vec3{});
+    AJFX_CHECK(drifting.x == still.x && drifting.y == still.y && drifting.z == still.z);
+    AJFX_CHECK(dot(drifting, drifting) > 0.0F);
+    const Vec3 unmoved = swirled(at, Vec3{});
+    AJFX_CHECK(unmoved.x != drifting.x || unmoved.y != drifting.y || unmoved.z != drifting.z);
+}
+
+void converge_pulls_towards_its_axis_below_its_height() {
+    // One particle a metre out at the base, one a metre out above the
+    // height where the pull has faded.
+    EffectBuilder builder{"converge"};
+    for (const float y : {0.0F, 3.0F}) {
+        builder.emitter(y == 0.0F ? "low" : "high")
+            .capacity(1U)
+            .spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{1.0F, y, 0.0F}})
+            .update(Converge{.strength = 6.0F, .height = 2.0F});
+    }
+    Simulation simulation = make(builder.build().value());
+    simulation.advance_to(20U);
+    const Vec3 low = simulation.emitter(0).position[0];
+    const Vec3 high = simulation.emitter(1).position[0];
+    AJFX_CHECK(low.x < 0.9F && low.x > 0.0F && low.y == 0.0F && low.z == 0.0F);
+    AJFX_CHECK(high.x == 1.0F && high.y == 3.0F);
+}
+
+void spin_turns_sprites_and_slows() {
+    // A quarter turn a second, one way only: the turn is the spin times the
+    // age, newborn's part step included.
+    Simulation steady = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(InitSpin{.speed_min = 90.0F, .speed_max = 90.0F, .both_ways = false});
+    }));
+    steady.advance_to(60U);
+    const EmitterState& s = steady.emitter(0);
+    const float quarter = 3.14159265F / 2.0F;
+    AJFX_CHECK(near(s.spin[0], quarter, 1.0e-6F));
+    AJFX_CHECK(near(s.rotation[0], quarter * s.age[0], 1.0e-4F));
+    // With drag, it loses that share of itself each second, as Drag does.
+    Simulation slowing = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 1U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(InitSpin{.speed_min = 90.0F, .speed_max = 90.0F, .both_ways = false, .drag = 1.0F});
+    }));
+    slowing.advance_to(60U);
+    AJFX_CHECK(near(slowing.emitter(0).spin[0], quarter * static_cast<float>(std::pow(1.0 / (1.0 + 1.0 / 60.0), 59.0)),
+                    1.0e-5F));
+    // Both ways round: some turn each way.
+    Simulation both = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 64U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .init(InitSpin{.speed_min = 30.0F, .speed_max = 60.0F});
+    }));
+    both.advance_to(2U);
+    std::size_t backwards = 0U;
+    for (const float spin : both.emitter(0).spin) {
+        backwards += spin < 0.0F ? 1U : 0U;
+    }
+    AJFX_CHECK(backwards > 16U && backwards < 48U);
+}
+
 void particles_die_in_order() {
     Simulation steady = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
         return e.spawn(SpawnRate{.rate = 60.0F}).init(Lifetime{.min = 0.25F, .max = 0.5F});
@@ -290,7 +394,7 @@ Simulation debris(float rest_speed) {
         .capacity(64U)
         .spawn(SpawnBurst{.count = 40U})
         .init(Lifetime{.min = 20.0F, .max = 20.0F})
-        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius = 0.3F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.0F, 1.0F, 0.0F}, .radius_min = 0.3F, .radius_max = 0.3F})
         .init(Velocity{.speed_min = 2.0F, .speed_max = 5.0F, .spread = 60.0F})
         .init(InitSize{.min = 0.1F, .max = 0.3F})
         .init(InitTumble{.speed_min = 90.0F, .speed_max = 720.0F})
@@ -348,6 +452,52 @@ Simulation ball(float speed, float spin) {
         .update(RigidBody{.angular_drag = 0.0F})
         .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
     return make(builder.build().value());
+}
+
+// One flat chip like the ball above, on a floor of the given friction.
+Simulation chip(float speed, float spin, float friction) {
+    EffectBuilder builder{"chip"};
+    builder.emitter("e")
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.0F, 0.1F, 0.0F}})
+        .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}, .speed_min = speed, .speed_max = speed})
+        .init(InitSize{.min = 0.2F, .max = 0.2F})
+        .init(InitTumble{.speed_min = spin, .speed_max = spin})
+        .update(Gravity{})
+        .update(RigidBody{.angular_drag = 0.0F, .roundness = 0.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = friction});
+    return make(builder.build().value());
+}
+
+void friction_slows_a_chip_by_its_weight() {
+    // Resting on the floor, each step's contact pushes back gravity's
+    // 9.81 / 60, and friction f takes f / (1 - f) of that off the slide.
+    for (const float friction : {0.25F, 0.5F}) {
+        Simulation sliding = chip(5.0F, 0.0F, friction);
+        sliding.advance_to(10U);
+        const float before = sliding.emitter(0).velocity[0].x;
+        sliding.advance_to(20U);
+        const EmitterState& s = sliding.emitter(0);
+        const float lost = 10.0F * 9.81F / 60.0F * friction / (1.0F - friction);
+        AJFX_CHECK(near(before - s.velocity[0].x, lost, 1.0e-3F));
+        // Flat, it slides without rolling.
+        AJFX_CHECK(length(s.angular_velocity[0]) == 0.0F);
+        // And comes to a stop.
+        sliding.advance_to(120U);
+        AJFX_CHECK(sliding.emitter(0).velocity[0].x == 0.0F);
+    }
+    // Full friction grips at its first touch, however light.
+    Simulation stuck = chip(3.0F, 0.0F, 1.0F);
+    stuck.advance_to(2U);
+    AJFX_CHECK(stuck.emitter(0).velocity[0].x == 0.0F);
+
+    // A spinning chip lands and stops tumbling, even on ice.
+    Simulation spun = chip(0.0F, 720.0F, 0.0F);
+    spun.advance_to(1U);
+    AJFX_CHECK(length(spun.emitter(0).angular_velocity[0]) > 12.0F);
+    spun.advance_to(2U);
+    AJFX_CHECK(length(spun.emitter(0).angular_velocity[0]) == 0.0F);
 }
 
 // How fast the ball's surface moves where it touches the floor.
@@ -485,6 +635,123 @@ void velocity_cone_respects_its_spread() {
         downward += v.y < 0.0F ? 1U : 0U;
     }
     AJFX_CHECK(downward > 200U && downward < 300U);
+
+    // A hollow cone: between 30 and 40 degrees off +X, filling that band.
+    Simulation crown = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 500U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}, .spread = 40.0F, .spread_min = 30.0F});
+    }));
+    crown.step();
+    const float cos_outer = std::cos(40.0F * 3.14159265F / 180.0F);
+    const float cos_inner = std::cos(30.0F * 3.14159265F / 180.0F);
+    const float cos_middle = std::cos(35.0F * 3.14159265F / 180.0F);
+    std::size_t outer_half = 0U;
+    for (const Vec3& v : crown.emitter(0).velocity) {
+        const float c = v.x / std::sqrt(dot(v, v));
+        AJFX_CHECK(c <= cos_inner + 1.0e-5F && c >= cos_outer - 1.0e-5F);
+        outer_half += c < cos_middle ? 1U : 0U;
+    }
+    AJFX_CHECK(outer_half > 200U && outer_half < 300U);
+}
+
+void shapes_give_each_particle_its_own_radius() {
+    // A shell whose radius is picked between 1 and 2: every particle on its
+    // own sphere in that band, the band filled.
+    Simulation shell = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 600U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ShapeLocation{.shape = Shape::Sphere, .radius_min = 1.0F, .radius_max = 2.0F, .surface_only = true});
+    }));
+    shell.step();
+    std::size_t outer = 0U;
+    for (const Vec3& p : shell.emitter(0).position) {
+        const float r = std::sqrt(dot(p, p));
+        AJFX_CHECK(r >= 1.0F - 1.0e-5F && r <= 2.0F + 1.0e-5F);
+        outer += r > 1.5F ? 1U : 0U;
+    }
+    AJFX_CHECK(outer > 240U && outer < 360U);
+
+    // Equal ends are a crisp disc's edge, exactly as one radius was.
+    Simulation ring = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 100U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(ShapeLocation{.shape = Shape::Disc, .radius_min = 0.75F, .radius_max = 0.75F, .surface_only = true});
+    }));
+    ring.step();
+    for (const Vec3& p : ring.emitter(0).position) {
+        AJFX_CHECK(near(std::sqrt(p.x * p.x + p.z * p.z), 0.75F, 1.0e-5F) && p.y == 0.0F);
+    }
+}
+
+void brightness_is_picked_apart_from_the_colour() {
+    Simulation simulation = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 400U})
+            .init(Lifetime{.min = 10.0F, .max = 10.0F})
+            .init(InitColor{.a = Color{1.0F, 0.5F, 0.0F, 0.8F},
+                            .b = Color{1.0F, 0.5F, 0.0F, 0.8F},
+                            .brightness_min = 2.0F,
+                            .brightness_max = 6.0F});
+    }));
+    simulation.step();
+    std::size_t bright = 0U;
+    for (const Color& c : simulation.emitter(0).color) {
+        // Brightness scales red, green and blue together, never opacity.
+        AJFX_CHECK(c.r >= 2.0F - 1.0e-5F && c.r <= 6.0F + 1.0e-5F);
+        AJFX_CHECK(near(c.g, c.r * 0.5F, 1.0e-5F) && c.b == 0.0F && c.a == 0.8F);
+        bright += c.r > 4.0F ? 1U : 0U;
+    }
+    AJFX_CHECK(bright > 150U && bright < 250U);
+}
+
+void forces_scale_each_particle_by_its_own_factor() {
+    // Each particle falls at its own share of gravity, picked once.
+    Simulation varied = make(one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+        return e.spawn(SpawnBurst{.count = 300U})
+            .init(Lifetime{.min = 100.0F, .max = 100.0F})
+            .update(Gravity{.acceleration = Vec3{0.0F, -10.0F, 0.0F}, .scale_min = 0.5F, .scale_max = 1.5F});
+    }));
+    varied.advance_to(60U);
+    const EmitterState& s = varied.emitter(0);
+    const float full = static_cast<float>(-10.0 * 59.0 / 60.0);
+    std::size_t heavy = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const float share = s.velocity[i].y / full;
+        AJFX_CHECK(share >= 0.5F - 1.0e-4F && share <= 1.5F + 1.0e-4F);
+        heavy += share > 1.0F ? 1U : 0U;
+    }
+    AJFX_CHECK(heavy > 100U && heavy < 200U);
+    // Kept for life: a second later each particle still falls at its share.
+    const float share = s.velocity[7].y / full;
+    varied.advance_to(120U);
+    const float later = static_cast<float>(-10.0 * 119.0 / 60.0);
+    AJFX_CHECK(near(varied.emitter(0).velocity[7].y / later, share, 1.0e-4F));
+
+    // Drag slows each particle by its own coefficient; equal ends are the
+    // module's own.
+    const auto dragged = [](float scale_min, float scale_max) {
+        Effect effect = one_emitter([](EmitterBuilder& e) -> EmitterBuilder& {
+            return e.spawn(SpawnBurst{.count = 200U})
+                .init(Lifetime{.min = 100.0F, .max = 100.0F})
+                .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}, .speed_min = 4.0F, .speed_max = 4.0F})
+                .update(Drag{.coefficient = 2.0F});
+        });
+        std::get<Drag>(effect.emitters[0].update[0]).scale_min = scale_min;
+        std::get<Drag>(effect.emitters[0].update[0]).scale_max = scale_max;
+        Simulation run = make(effect);
+        run.advance_to(30U);
+        return run;
+    };
+    const Simulation plain = dragged(1.0F, 1.0F);
+    const Simulation spread = dragged(0.25F, 4.0F);
+    float slowest = 4.0F;
+    float fastest = 0.0F;
+    for (std::size_t i = 0U; i < plain.emitter(0).alive(); ++i) {
+        AJFX_CHECK(plain.emitter(0).velocity[i].x == plain.emitter(0).velocity[0].x);
+        slowest = std::min(slowest, spread.emitter(0).velocity[i].x);
+        fastest = std::max(fastest, spread.emitter(0).velocity[i].x);
+    }
+    AJFX_CHECK(slowest < plain.emitter(0).velocity[0].x && fastest > plain.emitter(0).velocity[0].x);
 }
 
 void reset_and_restore_return_to_earlier_states() {
@@ -518,16 +785,24 @@ int main() {
         {"rate_spawning_is_exact", rate_spawning_is_exact},
         {"bursts_fire_on_their_step", bursts_fire_on_their_step},
         {"gravity_integrates_semi_implicitly", gravity_integrates_semi_implicitly},
+        {"forces_follow_their_curves_over_life", forces_follow_their_curves_over_life},
+        {"drifting_turbulence_moves_its_field", drifting_turbulence_moves_its_field},
+        {"converge_pulls_towards_its_axis_below_its_height", converge_pulls_towards_its_axis_below_its_height},
+        {"spin_turns_sprites_and_slows", spin_turns_sprites_and_slows},
         {"particles_die_in_order", particles_die_in_order},
         {"plane_collision_holds_or_kills", plane_collision_holds_or_kills},
         {"spheres_and_boxes_hold_particles_in_or_out", spheres_and_boxes_hold_particles_in_or_out},
         {"distance_fields_hold_particles_out_or_in", distance_fields_hold_particles_out_or_in},
         {"debris_settles_on_the_floor", debris_settles_on_the_floor},
         {"friction_turns_sliding_into_rolling", friction_turns_sliding_into_rolling},
+        {"friction_slows_a_chip_by_its_weight", friction_slows_a_chip_by_its_weight},
         {"tumbles_start_uniformly", tumbles_start_uniformly},
         {"parameters_are_clamped_to_their_range", parameters_are_clamped_to_their_range},
         {"colour_and_size_follow_normalized_age", colour_and_size_follow_normalized_age},
         {"velocity_cone_respects_its_spread", velocity_cone_respects_its_spread},
+        {"shapes_give_each_particle_its_own_radius", shapes_give_each_particle_its_own_radius},
+        {"brightness_is_picked_apart_from_the_colour", brightness_is_picked_apart_from_the_colour},
+        {"forces_scale_each_particle_by_its_own_factor", forces_scale_each_particle_by_its_own_factor},
         {"reset_and_restore_return_to_earlier_states", reset_and_restore_return_to_earlier_states},
         {"invalid_effects_do_not_simulate", invalid_effects_do_not_simulate},
     };

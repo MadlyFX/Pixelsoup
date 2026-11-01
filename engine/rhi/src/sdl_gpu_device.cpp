@@ -2016,6 +2016,13 @@ core::u64 Device::dedicated_video_memory_bytes() const noexcept {
     return detail::d3d12_dedicated_video_memory(handle_);
 }
 
+std::string_view Device::lost_reason() const noexcept {
+    if (handle_ == nullptr || capabilities_.backend != BackendKind::D3d12) {
+        return {};
+    }
+    return detail::d3d12_lost_reason(handle_);
+}
+
 bool Device::supports(ShaderFormat format) const noexcept {
     if (handle_ == nullptr) {
         return false;

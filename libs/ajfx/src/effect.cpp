@@ -198,13 +198,16 @@ void check_module(const Effect& e, const Lifetime& m, FieldChecker& check) {
 }
 
 void check_module(const Effect& e, const ShapeLocation& m, FieldChecker& check) {
-    check.require(range(e, m.radius).lo >= 0.0F, "radius", "must not be negative");
+    check.require(range(e, m.radius_min).lo >= 0.0F, "radius_min", "must not be negative");
+    check.require(range(e, m.radius_max).lo >= 0.0F, "radius_max", "must not be negative");
     check.require(m.size.x >= 0.0F && m.size.y >= 0.0F && m.size.z >= 0.0F, "size", "must not be negative");
 }
 
 void check_module(const Effect& e, const Velocity& m, FieldChecker& check) {
     const Range spread = range(e, m.spread);
     check.require(spread.lo >= 0.0F && spread.hi <= 180.0F, "spread", "must be between 0 and 180 degrees");
+    const Range inner = range(e, m.spread_min);
+    check.require(inner.lo >= 0.0F && inner.hi <= 180.0F, "spread_min", "must be between 0 and 180 degrees");
 }
 
 void check_module(const Effect& e, const InitSize& m, FieldChecker& check) {
@@ -216,6 +219,8 @@ void check_module(const Effect& e, const RigidBody& m, FieldChecker& check) {
     check.require(range(e, m.angular_drag).lo >= 0.0F, "angular_drag", "must not be negative");
     check.require(m.contact_scale >= 0.0F, "contact_scale", "must not be negative");
     check.require(range(e, m.rest_speed).lo >= 0.0F, "rest_speed", "must not be negative");
+    const Range roundness = range(e, m.roundness);
+    check.require(roundness.lo >= 0.0F && roundness.hi <= 1.0F, "roundness", "must be between 0 and 1");
 }
 
 void check_module(const Effect& e, const Drag& m, FieldChecker& check) {
@@ -228,6 +233,14 @@ void check_module(const Effect& e, const CurlNoise& m, FieldChecker& check) {
 
 void check_module(const Effect& e, const Attractor& m, FieldChecker& check) {
     check.require(range(e, m.radius).lo >= 0.0F, "radius", "must not be negative");
+}
+
+void check_module(const Effect& e, const Converge& m, FieldChecker& check) {
+    check.require(range(e, m.height).lo >= 0.0F, "height", "must not be negative");
+}
+
+void check_module(const Effect& e, const InitSpin& m, FieldChecker& check) {
+    check.require(range(e, m.drag).lo >= 0.0F, "drag", "must not be negative");
 }
 
 void check_module(const Effect& e, const PlaneCollision& m, FieldChecker& check) {
@@ -310,6 +323,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     bool has_lifetime = false;
     bool has_tumble = false;
     std::size_t rigid_bodies = 0U;
+    std::size_t spins = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
             return;
@@ -326,6 +340,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
             has_tumble = true;
         } else if constexpr (std::is_same_v<M, RigidBody>) {
             ++rigid_bodies;
+        } else if constexpr (std::is_same_v<M, InitSpin>) {
+            ++spins;
         }
         error = check_module_fields(effect, emitter, module);
     };
@@ -344,6 +360,9 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
     if (rigid_bodies > 1U) {
         return Error{ErrorCode::InvalidEffect, where + " has more than one 'rigid_body' module"};
     }
+    if (spins > 1U) {
+        return Error{ErrorCode::InvalidEffect, where + " has more than one 'spin' module"};
+    }
     if (has_tumble && rigid_bodies == 0U) {
         return Error{ErrorCode::InvalidEffect, where + " has a 'tumble' module but no 'rigid_body' module to turn it"};
     }
@@ -354,10 +373,20 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter)
                      "needs at least one column and row");
     renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
     renderer.require(emitter.renderer.soft_distance >= 0.0F, "soft_distance", "must not be negative");
-    renderer.require(emitter.renderer.light_count <= 64U, "light_count", "must be at most 64");
-    renderer.require(emitter.renderer.light_intensity >= 0.0F, "light_intensity", "must not be negative");
-    renderer.require(emitter.renderer.light_count == 0U || emitter.renderer.light_range > 0.0F, "light_range",
-                     "must be positive");
+    const SpriteRenderer& sprite = emitter.renderer;
+    renderer.require(sprite.light_count <= 64U, "light_count", "must be at most 64");
+    renderer.require(sprite.light_intensity_min >= 0.0F && sprite.light_intensity_max >= sprite.light_intensity_min,
+                     "light_intensity", "must not be negative, with max at least min");
+    renderer.require(sprite.light_count == 0U ||
+                         (sprite.light_range_min > 0.0F && sprite.light_range_max >= sprite.light_range_min),
+                     "light_range", "must be positive, with max at least min");
+    renderer.require(sprite.light_colors.size() <= SpriteRenderer::max_light_keys, "light_colors",
+                     "has more than " + std::to_string(SpriteRenderer::max_light_keys) + " keys");
+    renderer.require(sprite.light_curve.size() <= SpriteRenderer::max_light_keys, "light_curve",
+                     "has more than " + std::to_string(SpriteRenderer::max_light_keys) + " keys");
+    for (const CurveKey& key : sprite.light_curve) {
+        renderer.require(key.value >= 0.0F, "light_curve", "must not go negative");
+    }
     if (emitter.renderer.geometry == Geometry::Mesh) {
         renderer.require(valid_texture_name(emitter.renderer.mesh), "mesh",
                          "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
@@ -440,6 +469,15 @@ std::uint64_t particle_bound(const Effect& effect, const Emitter& emitter) {
     return static_cast<std::uint64_t>(bound);
 }
 
+std::uint32_t light_spacing(const Effect& effect, const Emitter& emitter) {
+    const std::uint64_t lights = emitter.renderer.light_count;
+    if (lights == 0U) {
+        return 1U;
+    }
+    const std::uint64_t alive = std::min<std::uint64_t>(particle_bound(effect, emitter), emitter.capacity);
+    return static_cast<std::uint32_t>(std::max<std::uint64_t>((alive + lights - 1U) / lights, 1U));
+}
+
 Result<bool> validate(const Effect& effect) {
     if (effect.name.empty()) {
         return Error{ErrorCode::InvalidEffect, "the effect has no name"};
@@ -485,6 +523,9 @@ std::uint32_t required_attributes(const Emitter& emitter) {
                 } else if constexpr (std::is_same_v<M, InitTumble>) {
                     add(Attribute::Orientation);
                     add(Attribute::AngularVelocity);
+                } else if constexpr (std::is_same_v<M, InitSpin>) {
+                    add(Attribute::Rotation);
+                    add(Attribute::Spin);
                 }
             },
             module);

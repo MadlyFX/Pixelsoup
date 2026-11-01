@@ -866,11 +866,13 @@ effects; it does not author them.
   Precompiled kernels keep shader compilation off the media server's load and
   frame paths and give every node identical bytecode. A package is identified
   by content hash, so it is an ordinary asset with a digest.
-- **ajfx Studio**: a separate authoring application built on the same runtime,
-  with no media server dependency: module stack and parameter editing, a
-  scrubbable preview that matches playback exactly because the simulation is
-  deterministic, budget and GPU cost readouts, and export to `.ajfx`. A
-  node-graph view can sit on the module model later.
+- **ajfx Studio** (`apps/ajfx-studio`): a block editor built on the same
+  runtime. Effects are pages of layers and plain-language blocks, which a
+  compiler turns into module stacks, merged curves and worked-out budgets.
+  It has a scrubbable preview, budget and GPU cost readouts, raw modules for
+  experts and export to `.ajfx`. The preview is drawn by the media server's
+  own renderer, so effects look as they will on the wall. Its page model and
+  compiler depend on ajfx alone.
 
 In the media server an effect is a library asset. Operators place instances,
 set and animate the effect's published parameters in the Inspector, and the
@@ -1028,8 +1030,11 @@ feedback forces evaluate any frame directly.
        - In the media server blended meshes write depth. The reference
          renderer has no depth buffer, so it culls back faces instead,
          which suits convex meshes.
-     - **Particle lights.** `light_count` of an emitter's particles become
-       point lights of their colour, chosen evenly in birth order.
+     - **Particle lights.** Up to `light_count` of an emitter's particles
+       become point lights. Each keeps its light for life (every
+       `light_spacing()`-th particle by spawn index), with intensity and
+       reach picked per particle and colour and intensity curves over its
+       life.
        - A compute pass writes them into 64 reserved slots a render, so
          positions never leave the GPU.
        - An effect that would overrun the slots is refused with the reason.
@@ -1041,7 +1046,10 @@ feedback forces evaluate any frame directly.
        integrated each step in the same order on the CPU and GPU.
      - Colliders meet a rigid particle as a solid ball of its size.
        - A contact below `rest_speed` stops, so piles settle.
-       - Friction grips the surface, so sliding becomes rolling.
+       - Friction grips the surface, limited by the push as Coulomb
+         friction is, so a resting piece slides to a stop.
+       - `roundness` picks between a ball that rolls and a flat chip
+         that only slides and loses its spin at each contact.
      - The GPU matches the reference particle for particle through contact
        and rest. Mesh particles turn by the orientation in both renderers.
      - A `debris` preset throws chips of a generated `chip` mesh.
@@ -1080,11 +1088,51 @@ feedback forces evaluate any frame directly.
 6. Custom HLSL modules, data interfaces (depth, SDF, meshes, textures, curves,
    media) that a host binds to an effect's named inputs, debug statistics and
    profiling markers.
-7. ajfx Studio: a standalone application on the D3D12 reference backend with
-   module stack editing, preview with transport and scrubbing, published
-   parameter editing, cost and budget readouts, and `.ajfx` export. A first
-   usable version can start once phase 2 renders sprites; it grows with the
-   runtime.
+7. ajfx Studio (`apps/ajfx-studio`, see its README).
+   - **First version, done:**
+     - A block editor: pages, layers and blocks, a searchable picker ("/"),
+       drag to reorder, undo and saved `.ajfxstudio` pages.
+     - A compiler that places modules by stage, merges colour and size
+       curves, derives capacities, keeps module ids stable and scales the
+       whole effect.
+     - Recipes and ready-made layers.
+     - A coach whose notes come with one-click fixes.
+     - Raw Module blocks and "Detach into modules" for experts.
+     - A preview through the media server's renderer, with transport,
+       framing, peak counts and GPU time.
+     - `.ajfx` export with kernels.
+     - `ajfx.studio` covers the page model and compiler headless.
+   - **The renderer change it needed:** `RendererLimits::particles` lets a
+     renderer's owner set the particle step budget and checkpoints. Studio
+     raises the budget so an edited effect catches up in one frame.
+   - **Published parameters, done:** a control's link button publishes it
+     with a name and range. Its budget is sized for the whole range, two
+     controls may share one parameter, and values can be tried in the
+     preview through the placement's parameters.
+   - **Not yet:**
+     - textures and meshes from files;
+     - distance-field colliders;
+     - a timeline of parameter keys.
+   - **Found while building it, fixed.** With temporal antialiasing on, a
+     held (paused) show frame used to keep its last image. A particle
+     package that loaded or changed while a show was paused stayed
+     invisible until playback moved. A held frame now resets its history
+     once when the particles it draws change (`RenderStats::particle_digest`;
+     see `docs/renderer.md`).
+   - **Also found.** From a 512-pixel shorter side, bloom's slice apron
+     alone is 256 pixels. Temporal antialiasing and occlusion add theirs
+     to it, so the total passes the default `slice_apron_limit` (256) and
+     the frame is refused with `InvalidConfiguration`. Studio's
+     single-canvas preview raises the limit; a project with bloom on a
+     large canvas has to raise it as well.
+   - **Found while testing, fixed.** A D3D12 recording could touch only 64
+     device buffers. A sorted emitter records with a dozen or more, so the
+     sixth layer of an effect had its dispatches refused ("a particle
+     dispatch was refused") and the whole effect stopped drawing. The
+     journal now holds 1024
+     (`an_effect_with_many_sorted_emitters_draws_every_one`). That is still
+     a fixed bound, and the refusal does not say that the bound was the
+     cause; a scene of many large effects should be measured against it.
 8. Publication: Vulkan backend, documentation, examples, presets, Studio
    builds, a license and versioned releases.
 

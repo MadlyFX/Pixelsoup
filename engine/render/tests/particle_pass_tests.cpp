@@ -4,11 +4,15 @@
 #include <ajfx/d3d12.hpp>
 #include <ajfx/presets.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -631,56 +635,68 @@ void tumbling_meshes_turn_by_their_orientation() {
     PASS_CHECK(areas[0] != areas[1]);
 }
 
+// Records `show_frame` of `instance` and its lights from slot `first`, and
+// returns `slots` light records, 32 floats each.
+std::vector<float> lights_at(render::ParticlePass& pass, render::ParticleInstance& instance, core::u64 show_frame,
+                             const scene::Mat4& placed, core::u32 first, core::u32 slots) {
+    auto lights = g_device->create_writable_buffer(render::max_particle_lights * 128U);
+    auto readback = g_device->create_readback((first + slots) * 128U);
+    PASS_CHECK(lights && readback);
+    auto acquired = g_device->acquire_commands();
+    PASS_CHECK(acquired);
+    rhi::CommandList commands = std::move(acquired).value();
+    PASS_CHECK(pass.advance(commands, instance, show_frame, 24U, 1U));
+    PASS_CHECK(pass.write_lights(commands, instance, placed, lights.value(), first));
+    PASS_CHECK(commands.download(lights.value(), 0U, (first + slots) * 128U, readback.value()));
+    auto submitted = g_device->submit(std::move(commands));
+    PASS_CHECK(submitted);
+    PASS_CHECK(std::move(submitted).value().wait());
+    PASS_CHECK(!pass.take_error());
+    std::vector<float> words((first + slots) * 32U);
+    const auto mapped = readback.value().map();
+    std::memcpy(words.data(), mapped.data(), words.size() * sizeof(float));
+    readback.value().unmap();
+    return words;
+}
+
 void particle_lights_are_written_for_the_lit_pass() {
-    // Ten particles flung out with four lights: particles 0, 2, 5 and 7 (k *
-    // 10 / 4). A second emitter with one particle and three lights fills two
-    // slots with nothing.
+    // Ten particles flung out with four lights: the bound of ten spread over
+    // four lights puts one on every third particle by birth - 0, 3, 6 and 9 -
+    // in slots 0 to 3. A second emitter with one particle and three lights
+    // fills two slots with nothing.
     ajfx::EffectBuilder builder{"lamps"};
     builder.emitter("many")
         .spawn(ajfx::SpawnBurst{.count = 10U})
         .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
-        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius = 2.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius_min = 2.0F, .radius_max = 2.0F})
         .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.5F, 0.25F, 0.5F}, .b = ajfx::Color{1.0F, 0.5F, 0.25F, 0.5F}})
-        .renderer(ajfx::SpriteRenderer{.light_count = 4U, .light_intensity = 3.0F, .light_range = 2.5F});
+        .renderer(ajfx::SpriteRenderer{.light_count = 4U,
+                                       .light_intensity_min = 3.0F,
+                                       .light_intensity_max = 3.0F,
+                                       .light_range_min = 2.5F,
+                                       .light_range_max = 2.5F});
     builder.emitter("one")
         .spawn(ajfx::SpawnBurst{.count = 1U})
         .init(ajfx::Lifetime{.min = 10.0F, .max = 10.0F})
         .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Point})
         .renderer(ajfx::SpriteRenderer{.light_count = 3U});
     const ajfx::Effect effect = builder.build().value();
+    PASS_CHECK(ajfx::light_spacing(effect, effect.emitters[0]) == 3U);
     render::ParticlePass pass = make_pass();
     render::ParticleInstance instance = make_instance(pass, effect);
     PASS_CHECK(pass.light_count(instance) == 7U);
 
     scene::Mat4 placed = identity();
     placed.set(0U, 3U, 2.0F); // two units along X
-    auto lights = g_device->create_writable_buffer(render::max_particle_lights * 128U);
-    auto readback = g_device->create_readback(10U * 128U);
-    PASS_CHECK(lights && readback);
-    auto acquired = g_device->acquire_commands();
-    PASS_CHECK(acquired);
-    rhi::CommandList commands = std::move(acquired).value();
-    PASS_CHECK(pass.advance(commands, instance, 1U, 24U, 1U));
     // From slot 3, as if an earlier effect held 0 to 2.
-    PASS_CHECK(pass.write_lights(commands, instance, placed, lights.value(), 3U));
-    PASS_CHECK(commands.download(lights.value(), 0U, 10U * 128U, readback.value()));
-    auto submitted = g_device->submit(std::move(commands));
-    PASS_CHECK(submitted);
-    PASS_CHECK(std::move(submitted).value().wait());
-    PASS_CHECK(!pass.take_error());
-    std::vector<float> words(10U * 32U);
-    {
-        const auto mapped = readback.value().map();
-        std::memcpy(words.data(), mapped.data(), words.size() * sizeof(float));
-        readback.value().unmap();
-    }
+    const std::vector<float> words = lights_at(pass, instance, 1U, placed, 3U, 7U);
     const ajfx::EmitterState many = instance.simulation().read_emitter(0U).value();
     PASS_CHECK(many.alive() == 10U);
     const auto slot = [&](core::u32 index) { return std::span<const float>{words.data() + index * 32U, 32U}; };
-    const core::u32 picked[4] = {0U, 2U, 5U, 7U};
     for (core::u32 k = 0U; k < 4U; ++k) {
         const std::span<const float> light = slot(3U + k);
-        const ajfx::Vec3 p = many.position[picked[k]];
+        PASS_CHECK(many.spawn_index[3U * k] == 3U * k);
+        const ajfx::Vec3 p = many.position[3U * k];
         PASS_CHECK(light[0] == p.x + 2.0F && light[1] == p.y && light[2] == p.z);
         std::uint32_t kind = 0U;
         std::memcpy(&kind, &light[3], 4U);
@@ -694,6 +710,93 @@ void particle_lights_are_written_for_the_lit_pass() {
     PASS_CHECK(slot(7U)[7] == 1.0F && slot(8U)[7] == 0.0F && slot(9U)[7] == 0.0F);
     // Slots before `first_slot` are left alone.
     PASS_CHECK(slot(0U)[7] == 0.0F && slot(2U)[0] == 0.0F);
+}
+
+void particle_lights_stay_with_their_particles() {
+    // A stream whose particles live different lengths, so births and deaths
+    // keep changing which particles are alive. Each light belongs to one
+    // particle for its life: its slot follows from the particle's spawn
+    // index, its intensity and reach are picked for it within their ranges,
+    // and its own colour and intensity follow the particle's age.
+    ajfx::EffectBuilder builder{"stream"};
+    builder.emitter("e")
+        .spawn(ajfx::SpawnRate{.rate = 30.0F})
+        .init(ajfx::Lifetime{.min = 0.3F, .max = 1.5F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Sphere, .radius_min = 2.0F, .radius_max = 2.0F})
+        .renderer(ajfx::SpriteRenderer{
+            .light_count = 4U,
+            .light_intensity_min = 1.0F,
+            .light_intensity_max = 3.0F,
+            .light_range_min = 2.0F,
+            .light_range_max = 4.0F,
+            .light_own_color = true,
+            .light_colors = {{0.0F, ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}}, {1.0F, ajfx::Color{0.0F, 0.0F, 1.0F, 0.5F}}},
+            .light_curve = {{0.0F, 0.0F}, {0.5F, 1.0F}, {1.0F, 0.0F}}});
+    const ajfx::Effect effect = builder.build().value();
+    const core::u32 spacing = ajfx::light_spacing(effect, effect.emitters[0]);
+    PASS_CHECK(spacing > 1U);
+    render::ParticlePass pass = make_pass(render::ParticleSettings{.step_budget = 256U});
+    render::ParticleInstance instance = make_instance(pass, effect);
+
+    // Which particle each slot lit, by spawn index, at two show frames a
+    // quarter of a second apart.
+    std::array<std::optional<std::uint32_t>, 4U> earlier{};
+    std::array<std::optional<std::uint32_t>, 4U> later{};
+    std::vector<float> reaches;
+    for (const core::u64 frame : {48U, 54U}) {
+        const std::vector<float> words = lights_at(pass, instance, frame, identity(), 0U, 4U);
+        const ajfx::EmitterState state = instance.simulation().read_emitter(0U).value();
+        std::size_t carriers = 0U;
+        for (std::size_t i = 0U; i < state.alive(); ++i) {
+            carriers += state.spawn_index[i] % spacing == 0U ? 1U : 0U;
+        }
+        PASS_CHECK(carriers <= 4U);
+        std::size_t lit = 0U;
+        for (core::u32 k = 0U; k < 4U; ++k) {
+            const float* light = words.data() + k * 32U;
+            // The live carrier that owns slot k, if any.
+            std::optional<std::size_t> owner;
+            for (std::size_t i = 0U; i < state.alive(); ++i) {
+                const std::uint32_t s = state.spawn_index[i];
+                if (s % spacing == 0U && (s / spacing) % 4U == k) {
+                    owner = i;
+                }
+            }
+            if (!owner) {
+                PASS_CHECK(light[7] == 0.0F);
+                continue;
+            }
+            ++lit;
+            const std::size_t i = *owner;
+            const ajfx::Vec3 p = state.position[i];
+            PASS_CHECK(light[0] == p.x && light[1] == p.y && light[2] == p.z);
+            const float t = std::clamp(state.age[i] / state.lifetime[i], 0.0F, 1.0F);
+            // Red to half-strength blue, by alpha.
+            const float alpha = 1.0F - 0.5F * t;
+            PASS_CHECK(std::fabs(light[4] - (1.0F - t) * alpha) < 1.0e-4F);
+            PASS_CHECK(std::fabs(light[6] - t * alpha) < 1.0e-4F && light[5] == 0.0F);
+            const float curve = t <= 0.5F ? t * 2.0F : (1.0F - t) * 2.0F;
+            PASS_CHECK(light[7] >= 1.0F * curve - 1.0e-4F && light[7] <= 3.0F * curve + 1.0e-4F);
+            PASS_CHECK(light[8] >= 2.0F && light[8] <= 4.0F);
+            reaches.push_back(light[8]);
+            (frame == 48U ? earlier : later)[k] = state.spawn_index[i];
+        }
+        PASS_CHECK(lit == carriers && lit != 0U);
+    }
+    // A particle lit at both frames kept its slot, and so its light.
+    bool kept = false;
+    for (core::u32 k = 0U; k < 4U; ++k) {
+        for (core::u32 j = 0U; j < 4U; ++j) {
+            if (earlier[k] && later[j] && *earlier[k] == *later[j]) {
+                PASS_CHECK(k == j);
+                kept = true;
+            }
+        }
+    }
+    PASS_CHECK(kept);
+    // Each particle picks its own reach.
+    PASS_CHECK(std::adjacent_find(reaches.begin(), reaches.end(), std::not_equal_to<>{}) != reaches.end());
+    g_device->wait_idle();
 }
 
 void ribbons_join_the_particles_in_birth_order() {
@@ -831,6 +934,7 @@ int main() {
         {"mesh_particles_draw_solid_meshes", mesh_particles_draw_solid_meshes},
         {"tumbling_meshes_turn_by_their_orientation", tumbling_meshes_turn_by_their_orientation},
         {"particle_lights_are_written_for_the_lit_pass", particle_lights_are_written_for_the_lit_pass},
+        {"particle_lights_stay_with_their_particles", particle_lights_stay_with_their_particles},
         {"seeks_hold_until_caught_up_then_match_playing_through",
          seeks_hold_until_caught_up_then_match_playing_through},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

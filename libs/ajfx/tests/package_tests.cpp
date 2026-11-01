@@ -8,6 +8,7 @@
 #include <ajfx/simulation.hpp>
 #include <ajfx/texture.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -169,6 +170,40 @@ void invalid_effects_are_not_written() {
     Effect soft = presets::sparks();
     soft.emitters[0].renderer.soft_distance = -1.0F;
     AJFX_CHECK(fails_with(write_package(soft), ErrorCode::InvalidEffect, "field 'soft_distance' must not be negative"));
+    Effect dim = presets::sparks();
+    dim.emitters[0].renderer.light_count = 2U;
+    dim.emitters[0].renderer.light_intensity_min = 3.0F;
+    dim.emitters[0].renderer.light_intensity_max = 2.0F;
+    AJFX_CHECK(fails_with(write_package(dim), ErrorCode::InvalidEffect, "field 'light_intensity' must not be negative"));
+    Effect busy = presets::sparks();
+    busy.emitters[0].renderer.light_count = 2U;
+    busy.emitters[0].renderer.light_curve.assign(SpriteRenderer::max_light_keys + 1U, CurveKey{0.0F, 1.0F});
+    AJFX_CHECK(fails_with(write_package(busy), ErrorCode::InvalidEffect, "field 'light_curve' has more than 8 keys"));
+}
+
+void lights_round_trip() {
+    // Every light field away from its default survives a package.
+    Effect effect = presets::sparks();
+    SpriteRenderer& r = effect.emitters[0].renderer;
+    r.light_count = 5U;
+    r.light_intensity_min = 1.5F;
+    r.light_intensity_max = 4.25F;
+    r.light_range_min = 0.75F;
+    r.light_range_max = 2.5F;
+    r.light_own_color = true;
+    r.light_colors = {{0.0F, Color{1.0F, 0.5F, 0.25F, 1.0F}}, {0.4F, Color{0.2F, 0.3F, 0.9F, 0.5F}},
+                      {1.0F, Color{0.0F, 0.0F, 0.0F, 0.0F}}};
+    r.light_curve = {{0.0F, 0.0F}, {0.1F, 2.0F}, {1.0F, 0.5F}};
+    const Result<std::vector<std::uint8_t>> written = write_package(effect);
+    AJFX_CHECK(written.ok());
+    const Result<Effect> read = read_package(written.value());
+    AJFX_CHECK(read.ok() && read.value() == effect);
+    // The emitter's bound shared out over its lights, rounded up.
+    const std::uint64_t bound = std::min<std::uint64_t>(particle_bound(effect, effect.emitters[0]),
+                                                        effect.emitters[0].capacity);
+    AJFX_CHECK(light_spacing(effect, effect.emitters[0]) == (bound + 4U) / 5U);
+    r.light_count = 0U;
+    AJFX_CHECK(light_spacing(effect, effect.emitters[0]) == 1U);
 }
 
 // A 4x2 texture: a red left half, a blue right half.
@@ -343,6 +378,7 @@ int main() {
         {"container_layout_is_fixed", container_layout_is_fixed},
         {"damaged_packages_are_refused", damaged_packages_are_refused},
         {"invalid_effects_are_not_written", invalid_effects_are_not_written},
+        {"lights_round_trip", lights_round_trip},
         {"textures_carry_a_full_mip_chain", textures_carry_a_full_mip_chain},
         {"textures_round_trip_through_packages", textures_round_trip_through_packages},
         {"texture_problems_are_named", texture_problems_are_named},

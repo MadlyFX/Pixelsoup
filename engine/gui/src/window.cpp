@@ -520,6 +520,7 @@ core::Result<UiWindow, WindowError> UiWindow::create(const WindowConfig& config)
     const auto open_backend = [&](rhi::BackendKind backend) {
         rhi::DeviceConfig device_config{};
         device_config.backend = backend;
+        device_config.debug = config.debug;
         // An editor frame records the offscreen Program/Stage work and the UI
         // presentation as separate submissions on this same device. Keep two
         // complete frame pairs available on native D3D12; SDL_GPU exposes at
