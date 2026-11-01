@@ -13,7 +13,7 @@ contracts; check current code before treating an individual item as missing.
   markers; verify feathering and placement across output-node seams.
 - Bindless descriptors before GPU-driven culling or BLAS/TLAS/ray-query
   effects; writable buffers and indirect dispatch and draw now exist in the
-  D3D12 RHI (see the particle effects section). Preserve deterministic
+  D3D12 RHI (used by particle effects). Preserve deterministic
   instance ordering, honest capability gates and cohort conformance.
 - Physical two-node genlock/present-barrier and camera latency qualification,
   recorded capture procedures and a pinned driver matrix; an editor-as-remote
@@ -845,116 +845,30 @@ the ARP table (NovaStar OUI `54:b5:6c`) as well as by subnet search.
 - File storage servers and cameras on the map, each a device kind with its own
   sprite
 
-## Particle effects (ajfx)
+## Particle effects
 
-### Problem
-
-The renderer had no particle or volumetric effects beyond the froxel fog.
-Effects come from ajfx, the separate project beside the media server in this
-repository (`ajfx/`, roadmap in [`ajfx/docs/roadmap.md`](ajfx/docs/roadmap.md)).
-The media server plays `.ajfx` packages; it does not author them. What is
-tracked here is the host side: every node must draw the same particles at a
-given show frame, a seek must land on what playback would have shown, and
-loading or replacing a package must never stall the control or frame path.
-
-### Status
-
-- **RHI, done.** Writable buffers in compute, indirect dispatch,
-  single-batch indirect pulled draws and buffer readback, on D3D12 (the SDL
-  backend reports them unsupported). `render::ParticleDevice` implements
-  ajfx's GPU interface on the RHI and records into the renderer's command
-  lists; on one GPU it leaves particle records byte-identical to ajfx's own
-  D3D12 device.
-- **Render pass, done.** `render::ParticlePass`: show-frame stepping within
-  a step budget, a preallocated checkpoint ring for seeks, holding while
-  behind, sprites drawn from the camera's axes with the slice's projection,
-  depth-tested without depth writes.
-- **Scene renderer, done.** Packages are read and checked on a
-  `render::ParticlePackageCache` worker, at most one new instance a frame;
-  readiness holds while a package loads, fails or a seek catches up; the
-  Basic renderer is refused with a reason; full canvas and slices draw
-  byte-identical sprites.
-- **Document and workflow, done.** `scene.particle_effect` (source, seed and
-  start frame, normalized, replicated and digested); `.ajfx` import as an
-  `asset.particle_effect` Library asset (menu, file dialog and desktop drops;
-  in the project manifest so nodes check the file); placement by dragging
-  from the Library; seed and start frame in the Inspector; Stage and Program
-  status naming why effects hold; adoption of a re-exported package at the
-  next asset generation (Rescan Sources).
-- **Published parameters, done.** `particle_parameter.<name>.<component>`
-  values on the node, and scene.channel keys under the same name, carried as
-  curves the renderer samples at each simulation step; a changed value or
-  key restarts the simulation. Parameter keys are on the Timeline (a row per
-  keyed component, with retiming, deleting, easing and tangents addressed by
-  key).
-- **Rendering depth in the renderer, done.**
-  - Sorting along the camera's forward axis taken into the effect's space,
-    so slices agree.
-  - Textures staged a recording's upload space at a time, holding until
-    they land; a package missing a texture its effect names fails readiness,
-    naming it. sRGB is decoded after filtering, as for model textures (the
-    ajfx reference renderer decodes before).
-  - Motion vectors: with temporal antialiasing on, sprites write the
-    Advanced velocity target where they cover at least half a pixel, one
-    flat value per sprite from canvas-wide matrices, so slices write the
-    same bits as the full canvas (tested). Not yet: particles in object
-    motion blur, and motion from an effect's own placement moving.
-  - Soft particles read scene depth from the velocity product's z, so there
-    is no extra target or copy; particles therefore draw every effect's
-    colour before any effect's motion. Perspective and orthographic views
-    both work.
-  - Blended mesh particles write depth.
-  - Particle lights: a compute pass writes them into 64 reserved slots a
-    render, so positions never leave the GPU; an effect that would overrun
-    them is refused with the reason. The Advanced lit pass adds them
-    without shadows, cones or profiles. Not yet in Basic, reflections or fog.
-- **Rigid physics, done (2026-11-01).** `ParticlePass` creates instances
-  with `RigidHosting::Host` and one `ajfx::RigidRunner` per pass. Each
-  advance writes the target step's rigid particles once the runner has
-  them; until then the instance is behind and the node holds. No engine
-  step or engine checkpoint runs while a frame records. Thread budget:
-  `ParticleSettings::rigid_threads` (default 2), made with the first rigid
-  instance. The runner's parameter provider owns copies of the placement's
-  tracks, and its digest includes the start frame and show rate, which
-  shift keyed parameters.
-- **What ajfx Studio needed, done.** `RendererLimits::particles` lets a
-  renderer's owner set the particle step budget and checkpoints.
-
-Found while building Studio:
-
-- **Fixed:** with temporal antialiasing on, a held (paused) show frame kept
-  its last image, so a package that loaded or changed while paused stayed
-  invisible until playback moved. A held frame now resets its history once
-  when the particles it draws change (`RenderStats::particle_digest`; see
-  `docs/renderer.md`).
-- **Fixed:** a D3D12 recording could touch only 64 device buffers. A sorted
-  emitter records with a dozen or more, so an effect's sixth layer had its
-  dispatches refused and the whole effect stopped drawing. The journal now
-  holds 1024 (`an_effect_with_many_sorted_emitters_draws_every_one`). That
-  is still a fixed bound, the refusal does not name it as the cause, and a
-  scene of many large effects should be measured against it.
-- **Open:** from a 512-pixel shorter side, bloom's slice apron alone is 256
-  pixels. Temporal antialiasing and occlusion add theirs, so the total
-  passes the default `slice_apron_limit` (256) and the frame is refused with
-  `InvalidConfiguration`. Studio's single-canvas preview raises the limit; a
-  project with bloom on a large canvas has to raise it as well.
-
-### Remaining
+Playing `.ajfx` packages is described in the [renderer guide](docs/renderer.md)
+and [operator guide](docs/operator-guide.md). The ajfx runtime and Studio have
+their own [roadmap](ajfx/docs/roadmap.md). What remains on the media server
+side:
 
 - Two-node agreement on the cluster, for sprites, meshes and lights.
-- Rigid effects on the cluster: the laptop must print the same
-  `ajfx_rigid_bench` digest as the Director first.
+- Rigid effects on the cluster, once the laptop prints the same
+  `ajfx_rigid_bench` digest as the Director.
 - Copying and pasting parameter keys (the key clipboard skips them).
-- Catching up is slow for an effect placed or seeked far from its
-  checkpoints: at 16 steps a frame, an effect dropped 2.5 minutes into a show
-  holds for about 25 seconds. A larger budget while off air, or checkpoints
-  kept across the whole show, would shorten it.
+- Faster catch-up for an effect placed or seeked far from its checkpoints: at
+  16 steps a frame, one dropped 2.5 minutes into a show holds for about 25
+  seconds. A larger budget while off air, or checkpoints kept across the
+  whole show, would shorten it.
+- The D3D12 buffer bound per recording (1024) is fixed and its refusal does
+  not name it; measure a scene of many large effects against it.
+- Bloom on a large canvas passes the default `slice_apron_limit`; raise the
+  default or size it from the enabled effects.
+- Particles in object motion blur, and in Basic, reflections and fog.
 
-### Exit criteria
-
-An effect exported from ajfx Studio plays in the media server exactly as it
-previewed, matches across a two-node slice boundary, and loading or
-replacing its package never stalls the control or frame path.
+Exit criteria: an effect exported from ajfx Studio plays exactly as it
+previewed, matches across a two-node slice boundary, and loading or replacing
+its package never stalls the control or frame path.
 
 ## Vehicle process platesets
 

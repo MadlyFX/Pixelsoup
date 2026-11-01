@@ -321,6 +321,49 @@ so two nodes round the pixel they share identically. Basic input remains a
 straight sample. Applied last, after warp and after the switcher's dissolve;
 per-panel calibration stays on the LED processor.
 
+**Particle effects.** A `scene.particle_effect` places an `.ajfx` package
+(see [ajfx](../ajfx/README.md)). `render::ParticlePackageCache` reads and
+checks packages on a worker, and the scene renderer creates at most one new
+instance a frame. `render::ParticlePass` steps each instance to its show
+frame's simulation step within a per-frame step budget
+(`RendererLimits::particles`), seeking through a preallocated checkpoint ring
+and holding readiness while it catches up. Its kernels run on the RHI through
+`render::ParticleDevice`, which leaves particle records byte-identical to
+ajfx's own D3D12 device on the same GPU. Particles need the Advanced renderer;
+Basic refuses a started effect with the reason.
+
+- **Drawing.** Sprites face along the camera's axes with the slice's
+  projection, depth-tested without depth writes; blended mesh particles write
+  depth. Alpha-blended emitters sort along the camera's forward axis taken
+  into the effect's space, so slices agree. Full canvas and slices draw
+  byte-identical sprites.
+- **Textures** are staged one recording's upload space at a time, and an
+  effect holds until they land. sRGB is decoded after filtering, as for model
+  textures. A package missing a texture its effect names fails readiness,
+  naming the texture.
+- **Motion vectors.** With temporal antialiasing on, sprites covering at
+  least half a pixel write one flat velocity each, from canvas-wide matrices,
+  so slices write the same bits as the full canvas. Particles are not in
+  object motion blur, and an effect's own placement moving adds no motion.
+- **Soft particles** read scene depth from the velocity product's z, so all
+  effects' colour draws before any effect's motion. Perspective and
+  orthographic views both work.
+- **Particle lights** go into 64 reserved light slots, written by a compute
+  pass so positions never leave the GPU; an effect that would overrun them is
+  refused with the reason. The Advanced lit pass adds them without shadows,
+  cones or profiles; Basic, reflections and fog do not see them.
+- **Published parameters** (`particle_parameter.<name>.<component>` values
+  and keys under the same name) are sampled as curves at each simulation
+  step. A changed value or key restarts the simulation.
+- **Rigid physics** runs off the frame path: each pass owns one
+  `ajfx::RigidRunner` (`ParticleSettings::rigid_threads` threads, default 2),
+  and an instance whose step the runner has not reached holds. No physics
+  step or checkpoint runs while a frame records.
+- **Limits.** One D3D12 recording may touch 1024 device buffers; a sorted
+  emitter uses a dozen or more. From a 512-pixel shorter side, bloom's slice
+  apron is 256 pixels and, with temporal antialiasing and occlusion, passes
+  the default `slice_apron_limit` (256), so such a project must raise it.
+
 **Temporal antialiasing on a held frame.** A paused show renders the same
 show frame over and over. Each repeat is a hold: the temporal resolve returns
 its last image untouched and takes in no new sample, so a paused wall neither

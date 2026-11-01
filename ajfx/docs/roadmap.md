@@ -80,8 +80,8 @@ feedback forces could evaluate any frame directly.
    byte-identical to ajfx's own D3D12 device.
 4. **First host, done.** The media server imports packages as Library
    assets, places and animates them, and draws them in its scene renderer.
-   That work and what remains of it (two-node agreement on the cluster,
-   catching up after a far seek) are tracked in the media server's
+   What remains of it (two-node agreement on the cluster, catching
+   up after a far seek) is in the media server's
    [`next-steps-plan.md`](../../next-steps-plan.md).
 5. **Rendering depth.**
    - **5a, done:** deterministic depth sorting, and textured sprites with
@@ -172,8 +172,8 @@ feedback forces could evaluate any frame directly.
    - **What it needed from the renderer:** `RendererLimits::particles`, so
      Studio can raise the particle step budget and an edited effect catches
      up in one frame; a raised `slice_apron_limit` for bloom on its single
-     canvas. Renderer faults it found are recorded in the media server's
-     plan.
+     canvas. The renderer limits it found are in the media server's
+     [renderer guide](../../docs/renderer.md).
    - **Not yet:** textures on imported debris models; per-block thumbnails;
      a timeline of parameter keys.
 9. **Publication.** A Vulkan backend, documentation, examples, presets,
@@ -203,4 +203,5 @@ An effect authored in Studio and exported as `.ajfx` is reproducible bit for
 bit on rerun and after a seek, stays within its declared budget or reports
 why not, has a measured GPU cost, and plays in its host exactly as it
 previewed. The host-side criteria (two-node slice agreement, loading without
-stalling the control or frame path) are in the media server's plan.
+stalling the control or frame path) are in the media server's
+[plan](../../next-steps-plan.md).
