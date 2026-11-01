@@ -19,6 +19,16 @@ contracts; check current code before treating an individual item as missing.
   client role would let a stage machine own the Director clock.
 - Optional USD composition/identity translation remains gated by a real studio
   workflow need; see the [adapter proposal](blender%20live%20scene%20link/13-optional-usd-adapter.md).
+- Camera-carried stages (CAVE, immersive room) render each face from one eye.
+  Still to decide and build:
+  - a rule for neighbourhood effects (bloom, AO, TAA, DOF) at a fold between
+    faces: accept a bounded difference or render cross-face aprons, with a
+    seam-conformance test either way;
+  - a head-tracked viewer eye in room space fed by the tracking channels;
+  - optional stereo;
+  - a Stage gizmo that moves a surface in stage coordinates on a carried stage;
+  - a one-step preset that adds the faces of a measured box room.
+  Budget each face as a full scene view in readiness.
 
 ## Media and studio qualification
 
