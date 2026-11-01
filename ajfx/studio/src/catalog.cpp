@@ -1283,6 +1283,18 @@ std::string block_summary(const Block& block) {
         return choice_label(block, "shape") + ", friction " + format_number(number_of(block, "friction"), 2) +
                ", bounce " + format_number(number_of(block, "bounce"), 2);
     }
+    if (kind == "break") {
+        return "Over " + with_unit(number_of(block, "force"), 1, "m/s");
+    }
+    if (kind == "part") {
+        const std::string model =
+            choice_of(block, "model") == "file" ? file_label(file_of(block, "model_file")) : choice_label(block, "model");
+        return (model.empty() ? std::string{"No model"} : model) + ", " +
+               format_number(number_of(block, "size") * 100.0F, 0) + "% of the piece";
+    }
+    if (kind == "pieces") {
+        return choice_label(block, "response") + " on the pieces above";
+    }
     if (kind == "pile") {
         std::string text = choice_label(block, "shape") + " of " + format_number(number_of(block, "count"), 0);
         const float release = number_of(block, "release");

@@ -281,17 +281,24 @@ Layer bucket_spill(Document& d) {
 Layer breaking_crates(Document& d) {
     return build_layer(d, LayerKind::Rigid, "Crates and a dropped ball", 60.0F, 60.0F,
                        {{"pile",
+                         // A crate 0.4 across reaches 0.69 corner to corner,
+                         // so spacing 0.6 sets them just touching and a 0.9
+                         // footprint holds two each way: four, four and one.
                          {{"count", number(9.0F)},
                           {"shape", choice("stack")},
-                          {"width", number(1.2F)},
-                          {"depth", number(1.2F)},
+                          {"width", number(0.9F)},
+                          {"depth", number(0.9F)},
+                          {"spacing", number(0.6F)},
                           {"jitter", number(0.0F)}}},
+                        // Half a metre across and heavy beside a crate, from
+                        // four metres up: it arrives at about six and a half,
+                        // well past the four a crate comes apart at.
                         {"prop",
                          {{"motion", choice("loose")},
                           {"shape", choice("ball")},
-                          {"at", vec3(0.0F, 2.5F, 0.0F)},
-                          {"radius", number(0.3F)},
-                          {"size", number(0.6F)},
+                          {"at", vec3(0.0F, 4.0F, 0.0F)},
+                          {"radius", number(0.5F)},
+                          {"size", number(1.0F)},
                           {"density", number(1200.0F)},
                           {"friction", number(0.3F)},
                           {"bounce", number(0.8F)}}},
