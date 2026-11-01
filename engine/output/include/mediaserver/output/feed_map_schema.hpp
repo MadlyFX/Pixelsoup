@@ -36,6 +36,9 @@ namespace mediaserver::output::schema {
 inline constexpr std::string_view map_type = "output.map";
 // One reusable physical LED face. Output maps reference it by document id.
 inline constexpr std::string_view surface_type = "output.surface";
+// The LED stage every surface is calibrated in: fixed in the world, or carried
+// by the scene camera. A project has at most one; the lowest document id wins.
+inline constexpr std::string_view stage_type = "output.stage";
 
 // ---------------------------------------------------------------------------
 // output.map
@@ -98,6 +101,20 @@ inline constexpr std::string_view mesh_source = "mesh_source";
 // compatibility; mesh_source remains the display/legacy fallback.
 inline constexpr std::string_view mesh_asset_id = "mesh_asset_id";
 inline constexpr std::string_view mesh_scale = "mesh_scale";
+
+// ---------------------------------------------------------------------------
+// output.stage
+
+// "world" (default) or "camera".
+inline constexpr std::string_view stage_anchor = "anchor";
+// Where the viewer stands, in stage coordinates. Only a camera-anchored stage
+// reads it: that point is placed on the scene camera's eye.
+inline constexpr std::string_view stage_eye_x = "eye_x";
+inline constexpr std::string_view stage_eye_y = "eye_y";
+inline constexpr std::string_view stage_eye_z = "eye_z";
+
+inline constexpr std::string_view anchor_world = "world";
+inline constexpr std::string_view anchor_camera = "camera";
 
 inline constexpr std::string_view projection_canvas = "canvas";
 inline constexpr std::string_view projection_planar_surface =

@@ -1361,7 +1361,8 @@ schedule_asset_delete(cmd::DirectorScheduler &scheduler,
     }
     if (existing->type != assets::schema::media_type &&
         existing->type != assets::schema::model_type &&
-        existing->type != assets::schema::projection_mesh_type) {
+        existing->type != assets::schema::projection_mesh_type &&
+        existing->type != assets::schema::plateset_type) {
         // A stale or malformed UI request must never erase a non-asset node.
         return true;
     }

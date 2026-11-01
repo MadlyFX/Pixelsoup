@@ -708,7 +708,8 @@ int main(int argc, char **argv) {
   const bool viewer_view = view.substr(0U, 12U) == "asset-viewer";
   // The Hardware Map: `hardware` selects the NovaStar processor,
   // `hardware-brompton` the Brompton, `hardware-cable` the cable whose EDID
-  // offers the wrong rate.
+  // offers the wrong rate, `hardware-mosaic` one of two cables sharing
+  // Render B's Mosaic output.
   const bool hardware_view = view.substr(0U, 8U) == "hardware";
   const std::string_view properties =
       curves || summaries || feed || tall || keys_sheet || tracks ||
@@ -949,7 +950,31 @@ int main(int argc, char **argv) {
       std::clamp(timeline_bounds.width * 0.26F, 250.0F, 340.0F);
   editor::HardwareMappingPanel hardware_panel{
       gui::ui_id("snapshot.hardware")};
-  const HardwareStage stage = hardware_stage();
+  HardwareStage stage = hardware_stage();
+  if (view == "hardware-mosaic") {
+    // Render B's OUT 1 is an NVIDIA Mosaic surface of two 960x1080
+    // displays; it also feeds a second processor, left of the Brompton.
+    topology::HardwareDevice second{};
+    second.node = doc::NodeId{8U};
+    second.kind = topology::HardwareDeviceKind::LedProcessor;
+    second.name = "Side processor";
+    second.grid_x = 6;
+    second.grid_y = 3;
+    stage.map.devices.push_back(second);
+    stage.map.links.push_back(topology::HardwareLink{
+        doc::NodeId{16U}, {doc::NodeId{3U}, 1U},
+        {doc::NodeId{8U}, topology::processor_input_port(1U)}});
+    for (topology::HardwareRuntimeNode &node : stage.runtime.nodes) {
+      if (node.device == doc::NodeId{3U}) {
+        node.video_outputs.front().width = 1920U;
+        node.video_outputs.front().height = 1080U;
+        node.video_outputs.front().mosaic_tiles = {
+            {0U, 0U, 960U, 1080U}, {960U, 0U, 960U, 1080U}};
+      }
+    }
+    hardware_panel.select(editor::HardwareSelection{
+        editor::HardwareSelectionKind::Link, doc::NodeId{16U}});
+  }
   std::optional<rhi::Texture> sprite_sheet;
   if (hardware_view) {
     if (auto acquired = device.acquire_commands()) {
@@ -1126,6 +1151,9 @@ int main(int argc, char **argv) {
       } else if (view == "hardware-brompton") {
         target = editor::project_isometric(projection, 4, -1);
         target.y -= 12.0F;
+      } else if (view == "hardware-mosaic") {
+        // Selected already; keep the click off the map.
+        target = editor::IsoPoint{-100.0F, -100.0F};
       } else {
         target = editor::project_isometric(projection, 1, -4);
         target.y -= 20.0F;

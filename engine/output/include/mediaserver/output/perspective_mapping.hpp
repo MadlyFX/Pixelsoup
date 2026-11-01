@@ -65,7 +65,68 @@ enum class PerspectiveMappingError : core::u8 {
     MeshBehindEye,
     DegenerateFrustum,
     AllocationFailed,
+    InvalidStage,
 };
+
+// How the authored stage coordinates sit in the world.
+//
+// A world-fixed stage is the identity: a virtual-production volume stands
+// still while the camera moves inside it. A camera-anchored stage is carried by
+// the scene camera, which is what an immersive room or CAVE needs when the
+// camera's own motion is the show: every face keeps looking where it physically
+// faces relative to the viewer while the room flies through the world.
+//
+// Rigid by construction - three orthonormal, right-handed axes and an origin -
+// so a surface placed through it keeps its size, its raster and its front face.
+struct StagePose final {
+    scene::Vec3 origin{};
+    scene::Vec3 right{1.0F, 0.0F, 0.0F};
+    scene::Vec3 up{0.0F, 1.0F, 0.0F};
+    // Stage +Z. The camera looks down stage -Z, as every scene view does.
+    scene::Vec3 back{0.0F, 0.0F, 1.0F};
+
+    bool operator==(const StagePose&) const = default;
+};
+
+// The pose of a stage carried by `camera`: stage +X is the camera's right,
+// +Y its up, -Z where it looks, and the stage point `eye` - where the viewer
+// stands in the room - lands on the camera's eye. A camera with no usable
+// direction or up is refused rather than given an arbitrary roll.
+[[nodiscard]] core::Result<StagePose, PerspectiveMappingError>
+camera_stage_pose(const scene::Camera& camera, scene::Vec3 eye) noexcept;
+
+[[nodiscard]] scene::Vec3 stage_point(const StagePose& pose,
+                                      scene::Vec3 point) noexcept;
+[[nodiscard]] scene::Vec3 stage_direction(const StagePose& pose,
+                                          scene::Vec3 direction) noexcept;
+
+// The surface at its world position. Size and raster are unchanged; only the
+// centre and the two orientation axes move.
+[[nodiscard]] PhysicalSurface place_on_stage(const PhysicalSurface& surface,
+                                             const StagePose& pose) noexcept;
+
+// Surface orientation as the operator authors it: yaw turns the face about
+// stage +Y, then pitch tilts it about its own right edge. A wall is pitch zero;
+// a quarter turn of pitch lays the face flat facing down, which is a ceiling
+// for a viewer below it, and minus a quarter turn is a floor.
+//
+// `orient` rebuilds both axes from these two angles with the deterministic
+// turn functions, so every node evaluates the same bits. `surface_pitch_basis`
+// returns the cosine and sine of the authored pitch without an arctangent,
+// which is how an animated yaw keeps a tilted face tilted.
+void orient(PhysicalSurface& surface, float yaw_turns,
+            float pitch_turns) noexcept;
+
+struct SurfacePitchBasis final {
+    float cosine{1.0F};
+    float sine{};
+};
+[[nodiscard]] SurfacePitchBasis surface_pitch_basis(
+    const PhysicalSurface& surface) noexcept;
+
+// Replaces only the yaw, keeping the authored pitch exactly as the basis
+// above measures it.
+void set_yaw_keeping_pitch(PhysicalSurface& surface, float yaw_turns) noexcept;
 
 struct PerspectiveView final {
     // The region of PhysicalSurface::raster this view renders.
@@ -196,6 +257,12 @@ struct ProjectionMeshPlacement final {
 [[nodiscard]] scene::Vec3 place_projection_mesh_position(
     scene::Vec3 local_position,
     const ProjectionMeshPlacement& placement) noexcept;
+
+// The placement that carries a generated (stage-space) mesh onto a
+// camera-anchored stage. The mesh cache keeps its stage-space vertices; only
+// this per-frame placement follows the camera.
+[[nodiscard]] ProjectionMeshPlacement stage_mesh_placement(
+    const StagePose& pose) noexcept;
 
 inline constexpr core::u32 min_horizontal_arc_columns = 2U;
 inline constexpr core::u32 max_horizontal_arc_columns = 512U;

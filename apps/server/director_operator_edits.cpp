@@ -1514,6 +1514,32 @@ PhaseExit DirectorShowLoop::apply_hardware_requests(OperatorFrame &op) {
         }
     }
     pending_hardware_properties.clear();
+    for (const auto &edit : pending_hardware_link_regions) {
+        if (!schedule_hardware_link_region(scheduler, edit, frame)) {
+            std::cerr << "could not author a cable region for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_link_regions.clear();
+    for (const auto &request : pending_hardware_walls) {
+        std::vector<doc::NodeId> ids;
+        ids.reserve(request.walls.size() * 2U);
+        for (std::size_t index = 0U; index < request.walls.size() * 2U;
+             ++index) {
+            while (scheduler.projected_document().contains(
+                doc::NodeId{next_new_node})) {
+                ++next_new_node;
+            }
+            ids.push_back(doc::NodeId{next_new_node++});
+        }
+        if (!schedule_hardware_walls(scheduler, request, ids, frame)) {
+            std::cerr << "could not author processor walls for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+    }
+    pending_hardware_walls.clear();
     if (pending_hardware_control_port.has_value()) {
         while (scheduler.projected_document().contains(
             doc::NodeId{next_new_node})) {
@@ -1581,6 +1607,11 @@ PhaseExit DirectorShowLoop::apply_hardware_requests(OperatorFrame &op) {
     }
     pending_hardware_output_binding_deletes.clear();
     for (const auto &request : pending_hardware_links) {
+        if (!schedule_hardware_link_replace(scheduler, request, frame)) {
+            std::cerr << "could not move a hardware link for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
         if (request.output_binding.has_value()) {
             const topology::HardwareOutputBinding &binding =
                 *request.output_binding;
@@ -1682,6 +1713,27 @@ PhaseExit DirectorShowLoop::apply_feed_map_requests(OperatorFrame &op) {
                           << frame.value() << '\n';
                 return 1;
             }
+        }
+    }
+    if (pending_feed_stage.has_value()) {
+        const editor::FeedStageEditRequest request =
+            std::move(*pending_feed_stage);
+        pending_feed_stage.reset();
+        while (scheduler.projected_document().contains(
+            doc::NodeId{next_new_node})) {
+            ++next_new_node;
+        }
+        // The id is used only when the project has no stage node yet.
+        const doc::NodeId id{next_new_node};
+        bool allocated = false;
+        if (!schedule_feed_stage_edit(scheduler, request, id, frame,
+                                      allocated)) {
+            std::cerr << "could not author the stage for frame "
+                      << frame.value() << '\n';
+            return 1;
+        }
+        if (allocated) {
+            ++next_new_node;
         }
     }
     for (const auto &request : pending_feed_surface_adds) {

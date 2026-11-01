@@ -31,6 +31,8 @@ namespace mediaserver::devices::coex {
 inline constexpr std::uint16_t default_port = 8001U;
 
 inline constexpr std::string_view screen_path = "/api/v1/screen";
+inline constexpr std::string_view screen_with_cabinets_path =
+    "/api/v1/screen?isNeedCabinetInfo=true";
 inline constexpr std::string_view input_sources_path =
     "/api/v1/device/input/sources";
 inline constexpr std::string_view monitor_path = "/api/v1/device/monitor/info";

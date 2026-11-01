@@ -2,6 +2,7 @@
 
 #include <mediaserver/core/output_limits.hpp>
 #include <mediaserver/output/feed_map.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <algorithm>
 #include <map>
@@ -11,9 +12,13 @@
 namespace mediaserver::output {
 namespace {
 
-// One cabled render output: the window it shows and what it feeds.
+// One cable from a render output: the window it shows, the part of that
+// window the cable carries (all of it, or one tile of a shared output), and
+// what it feeds.
 struct Feed final {
   core::u32 window{};
+  core::u32 x{};
+  core::u32 y{};
   core::u32 width{};
   core::u32 height{};
   // The processor's VIDEO IN number, or zero for a wall fed directly.
@@ -24,7 +29,9 @@ struct Feed final {
 // output - receives.
 struct Group final {
   const topology::HardwareDevice *device{};
-  // The wall a processor's LED OUT drives, when it is cabled.
+  // The walls a processor's LED OUT drives, in map order; the first stands
+  // for the group.
+  std::vector<const topology::HardwareDevice *> walls;
   const topology::HardwareDevice *wall{};
   std::vector<Feed> feeds;
 };
@@ -121,25 +128,27 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
     if (const topology::HardwareOutputBinding *const binding =
             map.output_binding_for(from->node, link.from.port)) {
       feed.window = binding->feed_index;
-      feed.width = binding->width;
-      feed.height = binding->height;
     } else if (link.from.port == topology::first_render_server_video_port) {
       // A card without bindings outputs its single legacy window.
       feed.window = from->node_index;
-      feed.width = from->width;
-      feed.height = from->height;
     } else {
       plan.notes.push_back(from->name + " output " +
                            std::to_string(link.from.port) +
                            " has no output binding, so it is left out");
       continue;
     }
+    const topology::HardwareOutputRegion carried =
+        topology::link_output_region(map, link, runtime).region;
+    feed.x = carried.x;
+    feed.y = carried.y;
+    feed.width = carried.width;
+    feed.height = carried.height;
     Group &group = groups[to->node];
     group.device = to;
     group.feeds.push_back(feed);
   }
 
-  // Which wall each processor drives.
+  // Which walls each processor drives.
   for (auto &[node, group] : groups) {
     for (const topology::HardwareLink &link : map.links) {
       if (link.from.device != node) {
@@ -148,10 +157,15 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
       const topology::HardwareDevice *const target = map.device(link.to.device);
       if (target != nullptr &&
           target->kind == topology::HardwareDeviceKind::LedWall) {
-        group.wall = target;
-        break;
+        group.walls.push_back(target);
       }
     }
+    std::stable_sort(group.walls.begin(), group.walls.end(),
+                     [](const topology::HardwareDevice *left,
+                        const topology::HardwareDevice *right) {
+                       return map_order(*left) < map_order(*right);
+                     });
+    group.wall = group.walls.empty() ? nullptr : group.walls.front();
     std::stable_sort(group.feeds.begin(), group.feeds.end(),
                      [](const Feed &left, const Feed &right) {
                        return left.input < right.input;
@@ -209,6 +223,8 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
         if (screen.width == 0U || screen.height == 0U) {
           continue;
         }
+        // One screen is its wall; several keep the processor's names for
+        // them, which the wall cards it proposed were given.
         const std::string screen_name =
             observed->screens.size() == 1U || screen.name.empty()
                 ? wall_name
@@ -228,14 +244,17 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
           shown[static_cast<std::size_t>(feed - group->feeds.data())] = true;
           const scene::CanvasRect crop{layer.source.x, layer.source.y,
                                        layer.source.width, layer.source.height};
-          const scene::CanvasRect in_window =
+          const scene::CanvasRect in_tile =
               clamp_to(crop, feed->width, feed->height);
-          if (!(in_window == crop)) {
+          const scene::CanvasRect in_window{feed->x + in_tile.x,
+                                            feed->y + in_tile.y, in_tile.width,
+                                            in_tile.height};
+          if (!(in_tile == crop)) {
             plan.notes.push_back(input_label(observed, layer.input) +
                                  " takes more than its " +
                                  std::to_string(feed->width) + "x" +
                                  std::to_string(feed->height) +
-                                 " window; the viewport is cut to fit");
+                                 " signal; the viewport is cut to fit");
           }
           const scene::CanvasRect on_screen = clamp_to(
               scene::CanvasRect{layer.screen.x, layer.screen.y,
@@ -272,22 +291,39 @@ FeedLayoutPlan plan_feed_layout(const topology::HardwareMap &map,
                            " has not reported its screens, so its inputs "
                            "are laid side by side");
     }
+    // A processor with one input and one wall smaller than its signal shows
+    // the top left of it, pixel for pixel, as processors do unless told
+    // otherwise. The wall card's size says how much.
+    const topology::HardwareDevice *const sized = group->wall;
+    std::vector<Feed> feeds = group->feeds;
+    if (sized != nullptr && group->walls.size() <= 1U && feeds.size() == 1U &&
+        sized->width != 0U && sized->height != 0U &&
+        (sized->width < feeds.front().width ||
+         sized->height < feeds.front().height)) {
+      Feed &feed = feeds.front();
+      feed.width = std::min(feed.width, sized->width);
+      feed.height = std::min(feed.height, sized->height);
+      plan.notes.push_back(sized->name + " takes the top left " +
+                           std::to_string(feed.width) + "x" +
+                           std::to_string(feed.height) +
+                           " of its signal, the size on its card");
+    }
     core::u32 width{};
     core::u32 height{};
-    for (const Feed &feed : group->feeds) {
+    for (const Feed &feed : feeds) {
       width += feed.width;
       height = std::max(height, feed.height);
     }
     const scene::CanvasRect origin = shelf.place(width, height);
     plan.screens.push_back(FeedLayoutScreen{wall_name, origin, false});
     core::u32 x = origin.x;
-    for (const Feed &feed : group->feeds) {
+    for (const Feed &feed : feeds) {
       const std::string label =
           feed.input == 0U ? wall_name
                            : wall_name + " - " + input_label(observed, feed.input);
       add_viewport(FeedLayoutViewport{
           feed.window, label, scene::CanvasRect{x, origin.y, feed.width, feed.height},
-          scene::CanvasRect{0U, 0U, feed.width, feed.height}});
+          scene::CanvasRect{feed.x, feed.y, feed.width, feed.height}});
       x += feed.width;
     }
   }

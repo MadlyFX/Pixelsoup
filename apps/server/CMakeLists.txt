@@ -51,6 +51,7 @@ add_executable(media-server
     project_assets.cpp
     sync_device_probe.cpp
     system_hardware_probe.cpp
+    mosaic_layout.cpp
     timeline_playback_cache.cpp
     waveform_generation_service.cpp
 )
@@ -780,6 +781,7 @@ if(BUILD_TESTING)
 
     add_executable(mediaserver_system_hardware_probe_tests
         system_hardware_probe.cpp
+        mosaic_layout.cpp
         tests/system_hardware_probe_tests.cpp
     )
     target_include_directories(mediaserver_system_hardware_probe_tests
@@ -805,6 +807,7 @@ if(BUILD_TESTING)
     add_executable(mediaserver_sync_device_probe_tests
         sync_device_probe.cpp
         system_hardware_probe.cpp
+        mosaic_layout.cpp
         tests/sync_device_probe_tests.cpp
     )
     target_include_directories(mediaserver_sync_device_probe_tests

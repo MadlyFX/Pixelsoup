@@ -99,6 +99,16 @@ schedule_feed_map_delete(cmd::DirectorScheduler &scheduler,
                          const editor::FeedMapDeleteRequest &request,
                          cmd::FrameNumber apply_at);
 
+// Writes the project's stage. The first edit of a project that has none
+// creates its output.stage node with `allocated_id` and sets `allocated`; a
+// later edit replaces the existing node's value. A non-finite eye authors
+// nothing.
+[[nodiscard]] bool
+schedule_feed_stage_edit(cmd::DirectorScheduler &scheduler,
+                         const editor::FeedStageEditRequest &request,
+                         doc::NodeId allocated_id, cmd::FrameNumber apply_at,
+                         bool &allocated);
+
 // Build from hardware: erases every viewport of the windows the plan lays
 // out and adds the plan's, named and in order, in the request's transaction.
 // `ids` holds one fresh id per planned viewport. The canvas is the caller's,

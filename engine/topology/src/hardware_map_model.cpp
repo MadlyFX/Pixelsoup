@@ -339,11 +339,22 @@ void HardwareMapModel::put(const doc::Node& node) {
         !as_port(reader.integer(schema::to_port, 0), to.port)) {
         reader.fail();
     }
+    HardwareOutputRegion region{};
+    if (!as_u32(reader.integer(schema::region_x, 0), region.x) ||
+        !as_u32(reader.integer(schema::region_y, 0), region.y) ||
+        !as_u32(reader.integer(schema::region_width, 0), region.width) ||
+        !as_u32(reader.integer(schema::region_height, 0), region.height)) {
+        reader.fail();
+    }
     if (!reader.ok()) {
         ++counters_.rejected;
         return;
     }
-    links_.insert_or_assign(node.id, HardwareLink{node.id, from, to});
+    if (region.empty()) {
+        region = HardwareOutputRegion{};
+    }
+    links_.insert_or_assign(node.id,
+                            HardwareLink{node.id, from, to, region});
 }
 
 void HardwareMapModel::recount() noexcept {

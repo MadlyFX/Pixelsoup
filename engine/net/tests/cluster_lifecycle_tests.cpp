@@ -204,6 +204,16 @@ public:
         0x1234U, 3U, 1U, 0x4c2dU, 0x1234U,
         net::ClusterVideoOutputTechnology::DisplayPort, true, true, 3840U,
         2160U, 60'000U, 1'001U, 0, 0, 0U, 0U, "LED processor"});
+    // An NVIDIA Mosaic surface: one target to Windows, four displays.
+    net::ClusterDisplayTargetInfo mosaic{
+        0x1234U, 5U, 2U, 0U, 0U,
+        net::ClusterVideoOutputTechnology::DisplayPort, true, true, 7680U,
+        1080U, 60U, 1U, 0, 0, 0U, 0U, "Mosaic"};
+    for (mediaserver::core::u32 column = 0U; column < 4U; ++column) {
+        mosaic.mosaic_tiles.push_back(
+            net::ClusterMosaicTile{column * 1920U, 0U, 1920U, 1080U});
+    }
+    value.display_targets.push_back(std::move(mosaic));
     return value;
 }
 
@@ -510,6 +520,14 @@ void inventory_is_bounded_and_invalid_text_fails_closed() {
     oversized.display_targets.assign(
         net::max_cluster_machine_display_targets + 4U,
         target);
+    // More displays than a surface may report: none rather than some, since
+    // a partial grid would put cables on the wrong tiles.
+    oversized.display_targets[1U].mosaic_tiles.assign(
+        net::max_cluster_display_mosaic_tiles + 1U,
+        net::ClusterMosaicTile{0U, 0U, 1920U, 1080U});
+    oversized.display_targets[2U].mosaic_tiles.assign(
+        net::max_cluster_display_mosaic_tiles,
+        net::ClusterMosaicTile{0U, 0U, 1920U, 1080U});
     oversized.adapters.front().name.assign(
         net::max_cluster_machine_adapter_name_bytes + 10U, 'g');
     FakeMachineInfoProvider bounded_provider{std::move(oversized)};
@@ -524,6 +542,9 @@ void inventory_is_bounded_and_invalid_text_fails_closed() {
                     net::max_cluster_machine_gpu_adapters);
     LIFECYCLE_CHECK(bounded.value().display_targets.size() ==
                     net::max_cluster_machine_display_targets);
+    LIFECYCLE_CHECK(bounded.value().display_targets[1U].mosaic_tiles.empty());
+    LIFECYCLE_CHECK(bounded.value().display_targets[2U].mosaic_tiles.size() ==
+                    net::max_cluster_display_mosaic_tiles);
     LIFECYCLE_CHECK(bounded.value().adapters.front().name.size() ==
                     net::max_cluster_machine_adapter_name_bytes);
 

@@ -3353,8 +3353,9 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
             }
         }
 
-        // Turns, like every other rotation in the Inspector; surfaces stand
-        // upright, so yaw is their whole orientation.
+        // Turns, like every other rotation in the Inspector. Yaw turns the
+        // face about stage up and keeps its pitch; pitch tilts it about its
+        // own right edge, a quarter turn for a ceiling.
         constexpr double tau = 6.28318530717958647692;
         const double yaw_turns =
             std::atan2(-static_cast<double>(geometry.right.z),
@@ -3367,13 +3368,45 @@ InspectorFrame InspectorPanel::draw_surface(gui::UiContext& ctx,
             fields_row("Yaw (turns)", 1U, yaw_channel, yaw_value);
         double yaw{};
         if (number("surface.yaw", rotation[0U], "Y", yaw_turns, 0.002, yaw)) {
-            const double radians = std::clamp(yaw, -10.0, 10.0) * tau;
-            geometry.right = scene::Vec3{static_cast<float>(std::cos(radians)),
-                                         0.0F,
-                                         static_cast<float>(-std::sin(radians))};
-            geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+            output::set_yaw_keeping_pitch(
+                geometry, static_cast<float>(std::clamp(yaw, -10.0, 10.0)));
             changed |= FeedSurfaceTransform::Yaw;
             edited = true;
+        }
+        const output::SurfacePitchBasis pitch_basis =
+            output::surface_pitch_basis(geometry);
+        const double pitch_turns =
+            std::atan2(static_cast<double>(pitch_basis.sine),
+                       static_cast<double>(pitch_basis.cosine)) /
+            tau;
+        const auto tilt = fields_row("Pitch (turns)", 1U);
+        gui::Rect pitch_field = tilt[0U];
+        const auto set_pitch = [&](double turns) {
+            const double current_yaw =
+                std::atan2(-static_cast<double>(geometry.right.z),
+                           static_cast<double>(geometry.right.x)) /
+                tau;
+            output::orient(geometry, static_cast<float>(current_yaw),
+                           static_cast<float>(turns));
+            changed |= FeedSurfaceTransform::Yaw;
+            edited = true;
+        };
+        if (std::abs(pitch_turns) > 1.0e-6) {
+            const gui::Rect reset{pitch_field.right() - reset_button_width,
+                                  pitch_field.y, reset_button_width,
+                                  pitch_field.height};
+            pitch_field.width =
+                std::max(pitch_field.width - reset_button_width - 2.0F, 1.0F);
+            if (reset_button(ctx, mix(id_, "surface.pitch.reset",
+                                      surface.node.value()),
+                             reset, "Reset to upright (0 turns)")) {
+                set_pitch(0.0);
+            }
+        }
+        double pitch{};
+        if (number("surface.pitch", pitch_field, "P", pitch_turns, 0.002,
+                   pitch)) {
+            set_pitch(std::clamp(pitch, -0.5, 0.5));
         }
 
         // Size is calibration, not a keyable transform channel, so it marks no

@@ -15,6 +15,7 @@
 #include <mediaserver/sync/sync_policy.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
+#include <mediaserver/topology/hardware_walls.hpp>
 
 #include <memory>
 #include <optional>
@@ -216,6 +217,10 @@ struct HardwareLinkRequest final {
   // the current project canvas before this reaches the authoring boundary.
   std::optional<topology::HardwareOutputBinding> output_binding;
   scene::CanvasRect output_region{};
+  // The cable this one replaces: the same device's cable already in `to`,
+  // removed in the same gesture so the device never goes unwired (a parked
+  // Render Server stops being probed, and its discovered outputs vanish).
+  doc::NodeId replaces{};
 
   bool operator==(const HardwareLinkRequest &) const = default;
 };
@@ -227,6 +232,8 @@ enum class HardwareLinkFeedback : core::u8 {
   AwaitingTarget,
   Dragging,
   Compatible,
+  // The input holds a cable from the same device; dropping moves it here.
+  Replaces,
   Incompatible,
   Occupied,
   Missed,
@@ -236,6 +243,12 @@ enum class HardwareLinkFeedback : core::u8 {
 // drawn from topology::schema and the value keeps the document's native scalar
 // type, so names/addresses stay strings while raster/timing fields stay exact
 // integers.
+// The property of a HardwarePropertyEdit that sets a card's refresh rate,
+// its value hertz as a double (23.976). The authoring boundary writes it as
+// refresh_numerator and refresh_denominator together: the exact fraction
+// topology::refresh_from_hertz gives, so 23.976 is 24000/1001.
+inline constexpr std::string_view hardware_refresh_edit = "refresh";
+
 struct HardwarePropertyEdit final {
   doc::NodeId device{};
   std::string property;
@@ -243,6 +256,27 @@ struct HardwarePropertyEdit final {
   core::u64 gesture{};
 
   bool operator==(const HardwarePropertyEdit &) const = default;
+};
+
+// The part of its Render Server output a selected cable carries, set from the
+// cable's details. An empty region puts the cable back on its share.
+struct HardwareLinkRegionEdit final {
+  doc::NodeId link{};
+  topology::HardwareOutputRegion region{};
+  core::u64 gesture{};
+
+  bool operator==(const HardwareLinkRegionEdit &) const = default;
+};
+
+// Wall cards for the screens a processor reported, each cabled from its LED
+// OUT, placed as one undoable step. The authoring boundary places nothing
+// when that LED OUT has been cabled since.
+struct HardwareWallsRequest final {
+  doc::NodeId processor{};
+  std::vector<topology::HardwareWallProposal> walls;
+  core::u64 gesture{};
+
+  bool operator==(const HardwareWallsRequest &) const = default;
 };
 
 // The lifecycle listener range is one project setting, not text repeated on
@@ -336,6 +370,7 @@ struct HardwareMappingFrame final {
   std::optional<HardwareMoveRequest> move;
   std::optional<HardwareLinkRequest> link;
   std::optional<HardwarePropertyEdit> property_edit;
+  std::optional<HardwareLinkRegionEdit> link_region_edit;
   std::optional<HardwareControlPortEdit> control_port_edit;
   std::optional<HardwareCanvasEdit> canvas_edit;
   std::optional<HardwareSyncPolicyEdit> sync_policy_edit;
@@ -390,6 +425,8 @@ public:
   [[nodiscard]] HardwareSelection selection() const noexcept {
     return selection_;
   }
+  // Selects a device or cable as a click on it would.
+  void select(HardwareSelection selection) noexcept { selection_ = selection; }
   [[nodiscard]] std::optional<topology::HardwareEndpoint>
   pending_link() const noexcept {
     return pending_link_;
@@ -433,6 +470,7 @@ public:
     settings_numbers_ = NumberField{};
     canvas_numbers_ = NumberField{};
     sync_numbers_ = NumberField{};
+    link_numbers_ = NumberField{};
   }
 
 private:
@@ -493,6 +531,8 @@ private:
   NumberField settings_numbers_;
   NumberField canvas_numbers_;
   NumberField sync_numbers_;
+  // The selected cable's region of its output.
+  NumberField link_numbers_;
 };
 
 // The canvas-sized rectangle fitted into the visual editor area. A zero canvas
@@ -668,6 +708,16 @@ struct FeedLayoutRequest final {
   bool operator==(const FeedLayoutRequest &) const = default;
 };
 
+// The project's stage: whether its surfaces stand in the world or travel with
+// the scene camera, and where the viewer stands in it. The complete value, so
+// a scrub's newest request is the whole answer.
+struct FeedStageEditRequest final {
+  output::StagePlacement stage{};
+  core::u64 gesture{};
+
+  bool operator==(const FeedStageEditRequest &) const = default;
+};
+
 struct FeedSurfaceLockRequest final {
   doc::NodeId node{};
   bool locked{};
@@ -698,6 +748,7 @@ struct FeedMappingFrame final {
   std::optional<FeedSurfaceLockRequest> surface_lock;
   std::optional<FeedOrganizeRequest> organize;
   std::optional<FeedLayoutRequest> layout;
+  std::optional<FeedStageEditRequest> stage_edit;
   // Delete was handled by this focused panel, so the shell must not also
   // delete the current scene selection.
   bool consume_delete{};
@@ -778,6 +829,8 @@ public:
     surface_numbers_ = NumberField{};
     rectangle_numbers_ = NumberField{};
     rectangle_mesh_domain_ = false;
+    stage_ = output::StagePlacement{};
+    stage_numbers_ = NumberField{};
     focused_ = false;
     rename_.reset();
     clicks_.reset();
@@ -837,6 +890,10 @@ private:
   NumberField surface_numbers_;
   NumberField rectangle_numbers_;
   bool rectangle_mesh_domain_{};
+  // The stage as shown. It follows the document except while an eye field is
+  // mid-scrub, so a scrub is never re-based on a value still in flight.
+  output::StagePlacement stage_{};
+  NumberField stage_numbers_;
   bool focused_{};
   // What the last Build from hardware did, shown until this time.
   std::vector<std::string> build_notes_;

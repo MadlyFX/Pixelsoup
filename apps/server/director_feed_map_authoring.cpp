@@ -323,6 +323,63 @@ schedule_feed_surface_delete(cmd::DirectorScheduler &scheduler,
 }
 
 [[nodiscard]] bool
+schedule_feed_stage_edit(cmd::DirectorScheduler &scheduler,
+                         const editor::FeedStageEditRequest &request,
+                         doc::NodeId allocated_id, cmd::FrameNumber apply_at,
+                         bool &allocated) {
+    allocated = false;
+    const output::StagePlacement &stage = request.stage;
+    if (!std::isfinite(stage.eye.x) || !std::isfinite(stage.eye.y) ||
+        !std::isfinite(stage.eye.z)) {
+        return true;
+    }
+    // The model takes the lowest-id stage node, and a full diff enumerates in
+    // ascending id order, so the first one met is the one that is shown.
+    const doc::Node *existing = nullptr;
+    const doc::Delta contents =
+        doc::diff(doc::Root{}, scheduler.projected_document());
+    for (const doc::NodeChange &change : contents.changes) {
+        if (change.after && change.after->type == output::schema::stage_type) {
+            existing = change.after.get();
+            break;
+        }
+    }
+    doc::Node updated{};
+    if (existing != nullptr) {
+        updated = *existing;
+    } else {
+        updated.id = allocated_id;
+        updated.type = std::string{output::schema::stage_type};
+    }
+    updated.properties.insert_or_assign(
+        std::string{output::schema::stage_anchor},
+        doc::PropertyValue{std::string{
+            stage.anchor == output::StageAnchor::Camera
+                ? output::schema::anchor_camera
+                : output::schema::anchor_world}});
+    updated.properties.insert_or_assign(
+        std::string{output::schema::stage_eye_x},
+        doc::PropertyValue{static_cast<double>(stage.eye.x)});
+    updated.properties.insert_or_assign(
+        std::string{output::schema::stage_eye_y},
+        doc::PropertyValue{static_cast<double>(stage.eye.y)});
+    updated.properties.insert_or_assign(
+        std::string{output::schema::stage_eye_z},
+        doc::PropertyValue{static_cast<double>(stage.eye.z)});
+    if (existing != nullptr) {
+        return static_cast<bool>(scheduler.schedule_edit(
+            cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+            cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture},
+            apply_at));
+    }
+    allocated = true;
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)}, cmd::EraseNode{allocated_id},
+        cmd::UndoContextId{4U}, cmd::TransactionId{request.gesture},
+        apply_at));
+}
+
+[[nodiscard]] bool
 schedule_feed_projection_edit(cmd::DirectorScheduler &scheduler,
                               const editor::FeedProjectionEdit &edit,
                               cmd::FrameNumber apply_at) {

@@ -1,5 +1,7 @@
 #include "system_hardware_probe.hpp"
 
+#include "mosaic_layout.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -371,6 +373,20 @@ void collect_displays(ClusterMachineInfo &info) {
       target.edid_manufacturer_id = device.edidManufactureId;
       target.edid_product_code_id = device.edidProductCodeId;
       target.name = utf8(terminated_view(device.monitorFriendlyDeviceName));
+    }
+    if (target.active) {
+      // A Mosaic surface is one target here; the NVIDIA driver knows the
+      // displays behind it.
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+      source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      source.header.size = sizeof(source);
+      source.header.adapterId = path.sourceInfo.adapterId;
+      source.header.id = path.sourceInfo.id;
+      if (DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS) {
+        target.mosaic_tiles = query_mosaic_tiles(
+            utf8(terminated_view(source.viewGdiDeviceName)),
+            target.desktop_width, target.desktop_height);
+      }
     }
     info.display_targets.push_back(std::move(target));
   }

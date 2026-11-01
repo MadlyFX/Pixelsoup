@@ -13,6 +13,7 @@
 #include <mediaserver/sync/sync_schema.hpp>
 #include <mediaserver/topology/hardware_map_model.hpp>
 #include <mediaserver/topology/hardware_map_schema.hpp>
+#include <mediaserver/topology/hardware_signal.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -206,6 +207,128 @@ schedule_hardware_link(cmd::DirectorScheduler &scheduler,
 }
 
 [[nodiscard]] bool
+schedule_hardware_walls(cmd::DirectorScheduler &scheduler,
+                        const editor::HardwareWallsRequest &request,
+                        std::span<const doc::NodeId> ids,
+                        cmd::FrameNumber apply_at) {
+    if (ids.size() < request.walls.size() * 2U) {
+        return true;
+    }
+    topology::HardwareMapModel model;
+    model.reset(scheduler.projected_document());
+    const topology::HardwareMap map = model.evaluate();
+    const topology::HardwareDevice *const processor =
+        map.device(request.processor);
+    if (processor == nullptr ||
+        processor->kind != topology::HardwareDeviceKind::LedProcessor ||
+        std::any_of(map.links.begin(), map.links.end(),
+                    [&](const topology::HardwareLink &link) {
+                        return link.from.device == processor->node &&
+                               link.from.port ==
+                                   topology::processor_led_output_port;
+                    })) {
+        return true;
+    }
+    for (std::size_t index = 0U; index < request.walls.size(); ++index) {
+        const topology::HardwareWallProposal &wall = request.walls[index];
+        if (wall.width == 0U || wall.height == 0U ||
+            wall.refresh_numerator == 0U || wall.refresh_denominator == 0U) {
+            continue;
+        }
+        const doc::NodeId wall_id = ids[index * 2U];
+        editor::HardwarePlaceRequest place{};
+        place.kind = topology::HardwareDeviceKind::LedWall;
+        place.grid_x = wall.grid_x;
+        place.grid_y = wall.grid_y;
+        place.gesture = request.gesture;
+        place.machine = editor::HardwarePlaceMachine{wall.name, {}, 0U};
+        doc::Node node = make_hardware_device(wall_id, place, 0U);
+        node.properties.insert_or_assign(
+            std::string{topology::schema::width},
+            doc::PropertyValue{static_cast<std::int64_t>(wall.width)});
+        node.properties.insert_or_assign(
+            std::string{topology::schema::height},
+            doc::PropertyValue{static_cast<std::int64_t>(wall.height)});
+        node.properties.insert_or_assign(
+            std::string{topology::schema::refresh_numerator},
+            doc::PropertyValue{
+                static_cast<std::int64_t>(wall.refresh_numerator)});
+        node.properties.insert_or_assign(
+            std::string{topology::schema::refresh_denominator},
+            doc::PropertyValue{
+                static_cast<std::int64_t>(wall.refresh_denominator)});
+        if (!scheduler.schedule_edit(
+                cmd::PutNode{std::move(node)}, cmd::EraseNode{wall_id},
+                cmd::UndoContextId{3U}, cmd::TransactionId{request.gesture},
+                apply_at)) {
+            return false;
+        }
+        editor::HardwareLinkRequest cable{};
+        cable.from = topology::HardwareEndpoint{
+            processor->node, topology::processor_led_output_port};
+        cable.to = topology::HardwareEndpoint{wall_id, 0U};
+        cable.gesture = request.gesture;
+        if (!schedule_hardware_link(scheduler, cable, ids[index * 2U + 1U],
+                                    apply_at)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+schedule_hardware_link_region(cmd::DirectorScheduler &scheduler,
+                              const editor::HardwareLinkRegionEdit &edit,
+                              cmd::FrameNumber apply_at) {
+    const doc::Node *const existing =
+        scheduler.projected_document().get(edit.link);
+    if (existing == nullptr || existing->type != topology::schema::link_type) {
+        return true;
+    }
+    topology::HardwareMapModel model;
+    model.reset(scheduler.projected_document());
+    const topology::HardwareMap map = model.evaluate();
+    const topology::HardwareLink *const link = map.link(edit.link);
+    const topology::HardwareDevice *const from =
+        link != nullptr ? map.device(link->from.device) : nullptr;
+    const topology::HardwareOutputRegion &region = edit.region;
+    const bool region_fits =
+        region.empty() ||
+        (region.width <= topology::max_hardware_output_width &&
+         region.height <= topology::max_hardware_output_height &&
+         region.x <= topology::max_hardware_output_width - region.width &&
+         region.y <= topology::max_hardware_output_height - region.height);
+    if (from == nullptr ||
+        from->kind != topology::HardwareDeviceKind::RenderServer ||
+        !region_fits) {
+        return true;
+    }
+    doc::Node updated = *existing;
+    for (const std::string_view key :
+         {topology::schema::region_x, topology::schema::region_y,
+          topology::schema::region_width, topology::schema::region_height}) {
+        updated.properties.erase(std::string{key});
+    }
+    if (!region.empty()) {
+        for (const auto &[key, value] :
+             {std::pair{topology::schema::region_x, region.x},
+              std::pair{topology::schema::region_y, region.y},
+              std::pair{topology::schema::region_width, region.width},
+              std::pair{topology::schema::region_height, region.height}}) {
+            updated.properties.insert_or_assign(
+                std::string{key},
+                doc::PropertyValue{static_cast<std::int64_t>(value)});
+        }
+    }
+    if (updated == *existing) {
+        return true;
+    }
+    return static_cast<bool>(scheduler.schedule_edit(
+        cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
+        cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
+}
+
+[[nodiscard]] bool
 schedule_hardware_property(cmd::DirectorScheduler &scheduler,
                            const editor::HardwarePropertyEdit &edit,
                            cmd::FrameNumber apply_at) {
@@ -222,7 +345,8 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         edit.property == topology::schema::desktop_x ||
         edit.property == topology::schema::desktop_y ||
         edit.property == topology::schema::main_node ||
-        edit.property == topology::schema::protocol;
+        edit.property == topology::schema::protocol ||
+        edit.property == editor::hardware_refresh_edit;
     const doc::Node *const existing =
         scheduler.projected_document().get(edit.device);
     if (!allowed || existing == nullptr ||
@@ -294,7 +418,26 @@ schedule_hardware_property(cmd::DirectorScheduler &scheduler,
         }
     }
     doc::Node updated = *existing;
-    updated.properties.insert_or_assign(edit.property, edit.value);
+    if (edit.property == editor::hardware_refresh_edit) {
+        // Typed hertz: both halves of the exact fraction, in one edit.
+        const double *const hertz = std::get_if<double>(&edit.value);
+        const topology::HardwareRefresh rate =
+            topology::refresh_from_hertz(hertz != nullptr ? *hertz : 0.0);
+        if (rate.numerator == 0U) {
+            return true;
+        }
+        updated.properties.insert_or_assign(
+            std::string{topology::schema::refresh_numerator},
+            doc::PropertyValue{static_cast<std::int64_t>(rate.numerator)});
+        updated.properties.insert_or_assign(
+            std::string{topology::schema::refresh_denominator},
+            doc::PropertyValue{static_cast<std::int64_t>(rate.denominator)});
+        if (updated == *existing) {
+            return true;
+        }
+    } else {
+        updated.properties.insert_or_assign(edit.property, edit.value);
+    }
     return static_cast<bool>(scheduler.schedule_edit(
         cmd::PutNode{std::move(updated)}, cmd::PutNode{*existing},
         cmd::UndoContextId{3U}, cmd::TransactionId{edit.gesture}, apply_at));
@@ -601,6 +744,61 @@ schedule_hardware_output_binding(cmd::DirectorScheduler &scheduler,
                                cmd::TransactionId{request.gesture}, apply_at);
 }
 
+// The binding a cable's removal takes with it: its output's, unless another
+// cable still leaves that output (one tile of a shared Mosaic output going
+// leaves the rest of the surface deployed).
+[[nodiscard]] const topology::HardwareOutputBinding *
+binding_freed_by(const topology::HardwareMap &map,
+                 const topology::HardwareLink &link) noexcept {
+    const bool shared = std::any_of(
+        map.links.begin(), map.links.end(),
+        [&](const topology::HardwareLink &other) {
+            return other.node != link.node && other.from == link.from;
+        });
+    return shared ? nullptr
+                  : map.output_binding_for(link.from.device, link.from.port);
+}
+
+[[nodiscard]] bool
+schedule_hardware_link_replace(cmd::DirectorScheduler &scheduler,
+                               const editor::HardwareLinkRequest &request,
+                               cmd::FrameNumber apply_at) {
+    if (request.replaces == doc::NodeId{}) {
+        return true;
+    }
+    topology::HardwareMapModel model;
+    model.reset(scheduler.projected_document());
+    const topology::HardwareMap map = model.evaluate();
+    const topology::HardwareLink *const replaced = map.link(request.replaces);
+    // Only the same device's cable in the very input being cabled may go;
+    // anything else is a stale request and leaves the document alone.
+    if (replaced == nullptr || replaced->to != request.to ||
+        replaced->from.device != request.from.device) {
+        return true;
+    }
+    const cmd::UndoContextId context{3U};
+    const cmd::TransactionId transaction{request.gesture};
+    if (const topology::HardwareOutputBinding *const binding =
+            binding_freed_by(map, *replaced)) {
+        // The new output takes over this feed, so its region stays.
+        const bool feed_handed_on =
+            request.output_binding.has_value() &&
+            request.output_binding->feed_index == binding->feed_index;
+        if (feed_handed_on
+                ? !schedule_erase_node(scheduler, binding->node, context,
+                                       transaction, apply_at)
+                : !schedule_hardware_output_binding_delete(
+                      scheduler,
+                      editor::HardwareOutputBindingDelete{binding->node,
+                                                          request.gesture},
+                      apply_at)) {
+            return false;
+        }
+    }
+    return schedule_erase_node(scheduler, replaced->node, context, transaction,
+                               apply_at);
+}
+
 [[nodiscard]] bool
 schedule_hardware_delete(cmd::DirectorScheduler &scheduler,
                          const editor::HardwareDeleteRequest &request,
@@ -627,8 +825,7 @@ schedule_hardware_delete(cmd::DirectorScheduler &scheduler,
         const topology::HardwareMap map = model.evaluate();
         if (const topology::HardwareLink *const link = map.link(target_id)) {
             if (const topology::HardwareOutputBinding *const binding =
-                    map.output_binding_for(link->from.device,
-                                           link->from.port)) {
+                    binding_freed_by(map, *link)) {
                 if (!schedule_hardware_output_binding_delete(
                         scheduler,
                         editor::HardwareOutputBindingDelete{binding->node,

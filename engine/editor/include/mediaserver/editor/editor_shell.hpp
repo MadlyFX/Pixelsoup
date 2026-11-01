@@ -951,6 +951,9 @@ struct EditorFrame final {
   std::vector<HardwareMoveRequest> hardware_moves;
   std::vector<HardwareLinkRequest> hardware_links;
   std::vector<HardwarePropertyEdit> hardware_property_edits;
+  std::vector<HardwareLinkRegionEdit> hardware_link_region_edits;
+  // Wall cards for processors that have just reported their screens.
+  std::vector<HardwareWallsRequest> hardware_walls;
   // Project-wide lifecycle listener range. Empty settings provenance in the
   // request means the authoring boundary must create hardware.settings.
   std::optional<HardwareControlPortEdit> hardware_control_port_edit;
@@ -974,6 +977,8 @@ struct EditorFrame final {
   std::vector<FeedOrganizeRequest> feed_organize;
   // Build from hardware: one plan, applied as one undoable edit.
   std::optional<FeedLayoutRequest> feed_layout;
+  // The stage setting. Newest wins: each request is the complete value.
+  std::optional<FeedStageEditRequest> feed_stage;
   std::vector<FeedSurfaceAddRequest> feed_surface_adds;
   std::vector<FeedSurfaceEditRequest> feed_surface_edits;
   std::vector<FeedSurfaceDeleteRequest> feed_surface_deletes;

@@ -420,6 +420,9 @@ struct ControllerEntry final {
     bool missing_media_only{};
     std::string content_detail;
     bool eligible{};
+    // A Render Server card no cable touches: polled for status and inventory
+    // only, and left out of every show-facing view and gate.
+    bool parked{};
     core::u8 configuration_class{};
     core::u64 revision{1U};
     core::u64 last_sequence{};
@@ -680,7 +683,7 @@ public:
     void enqueue_asset_readiness(
         ControllerEntry& entry,
         std::chrono::steady_clock::time_point now) {
-        if (entry.asset_readiness_pending || !manifest.valid ||
+        if (entry.parked || entry.asset_readiness_pending || !manifest.valid ||
             manifest.requirements == nullptr ||
             manifest.requirements->empty() ||
             now < entry.next_asset_readiness_poll) {
@@ -1395,7 +1398,11 @@ void ClusterLifecycleController::sync(
         entry.assets_verification_failed = 0U;
         entry.missing_media_only = false;
         entry.next_asset_readiness_poll = now;
-        if (!state_->manifest.valid) {
+        if (entry.parked) {
+            // Nothing is rendered there, so nothing need be on its disk.
+            entry.content = ContentStatus::NotRequired;
+            entry.content_detail.clear();
+        } else if (!state_->manifest.valid) {
             entry.content = ContentStatus::Error;
             entry.content_detail =
                 "conflicting asset revisions share one source path";
@@ -1413,11 +1420,13 @@ void ClusterLifecycleController::sync(
     };
     std::set<core::u64> seen;
     for (const topology::HardwareDevice& device : map.devices) {
-        // A parked card has no entry: it is not launched, probed or counted,
-        // and an entry it held while cabled is dropped below.
-        if (!topology::render_server_active(map, device)) {
+        if (device.kind != topology::HardwareDeviceKind::RenderServer) {
             continue;
         }
+        // A parked card is asked only what its machine is and which displays
+        // it has, so its outputs can be cabled; it is never launched, checked
+        // for assets, or counted in the show.
+        const bool parked = !topology::render_server_active(map, device);
         const core::u64 id = device.node.value();
         seen.insert(id);
         auto [position, inserted] = state_->entries.try_emplace(id);
@@ -1425,6 +1434,8 @@ void ClusterLifecycleController::sync(
         if (inserted) {
             entry.revision = state_->next_revision++;
         }
+        const bool parked_changed = !inserted && entry.parked != parked;
+        entry.parked = parked;
         const auto resolved_endpoint =
             topology::lifecycle_endpoint_for(map, device);
         const std::string endpoint_text =
@@ -1462,7 +1473,8 @@ void ClusterLifecycleController::sync(
         }
 
         const bool secret_available = usable_secret(state_->config.shared_secret);
-        const bool duplicate = node_index_counts[device.node_index] > 1U;
+        const bool duplicate =
+            !parked && node_index_counts[device.node_index] > 1U;
         const bool eligible = secret_available && parsed.has_value() &&
                               !duplicate;
         const core::u8 configuration_class =
@@ -1487,7 +1499,7 @@ void ClusterLifecycleController::sync(
         }
         entry.configuration_class = configuration_class;
         if (inserted || changed || manifest_changed || deployment_changed ||
-            configuration_changed) {
+            configuration_changed || parked_changed) {
             reset_content(entry, eligible);
         }
         if (!eligible) {
@@ -1640,6 +1652,9 @@ sync::SyncStatusSnapshot ClusterLifecycleController::sync_snapshot(
     snapshot.nodes.reserve(state_->entries.size());
     for (const auto& [id, entry] : state_->entries) {
         static_cast<void>(id);
+        if (entry.parked) {
+            continue;
+        }
         sync::NodeSyncStatus status{};
         status.node_index = entry.node_index;
         status.detail = entry.sync_status_detail;
@@ -1704,6 +1719,9 @@ ClusterLifecycleController::tracking_snapshot(
     rows.reserve(state_->entries.size());
     for (const auto& [id, entry] : state_->entries) {
         static_cast<void>(id);
+        if (entry.parked) {
+            continue;
+        }
         editor::NodeTrackingObservation row{};
         row.node_index = entry.node_index;
         row.name = entry.name;
@@ -1729,7 +1747,7 @@ std::string ClusterLifecycleController::node_name(core::u32 node_index) const {
     const std::lock_guard lock{state_->mutex};
     for (const auto& [id, entry] : state_->entries) {
         static_cast<void>(id);
-        if (entry.node_index == node_index) {
+        if (!entry.parked && entry.node_index == node_index) {
             return entry.name;
         }
     }
@@ -1778,6 +1796,9 @@ ClusterLifecycleController::snapshot(const net::DirectorFrameBarrier* barrier) c
     rows.reserve(state_->entries.size());
     for (const auto& [id, entry] : state_->entries) {
         static_cast<void>(id);
+        if (entry.parked) {
+            continue;
+        }
         editor::OutputMonitorState::Node row{
             entry.device, entry.name, entry.endpoint_text, entry.node_index,
             entry.width, entry.height, entry.status, entry.generation,
@@ -1874,6 +1895,11 @@ ClusterLifecycleController::hardware_snapshot() const {
                     target.refresh_numerator,
                     std::max(target.refresh_denominator, core::u32{1U}),
                     target.active, target.available});
+                for (const net::ClusterMosaicTile& tile : target.mosaic_tiles) {
+                    runtime.video_outputs.back().mosaic_tiles.push_back(
+                        topology::HardwareOutputRegion{tile.x, tile.y,
+                                                       tile.width, tile.height});
+                }
             }
         }
         snapshot.nodes.push_back(std::move(runtime));
@@ -1885,7 +1911,7 @@ void ClusterLifecycleController::submit(
     const editor::OutputLifecycleRequest& request) {
     const std::lock_guard lock{state_->mutex};
     const auto submit_entry = [&](detail::ControllerEntry& entry) {
-        if (!entry.eligible) {
+        if (!entry.eligible || entry.parked) {
             return;
         }
         if ((request.action == editor::OutputLifecycleAction::Start ||
@@ -1959,7 +1985,8 @@ bool ClusterLifecycleController::content_ready(
         return std::all_of(
             state_->entries.begin(), state_->entries.end(),
             [](const auto& item) noexcept {
-                return content_status_ready(item.second.content);
+                return item.second.parked ||
+                       content_status_ready(item.second.content);
             });
     } catch (...) {
         return false;
@@ -1999,6 +2026,9 @@ bool ClusterLifecycleController::program_ready(
         std::size_t required_count{};
         for (const auto& [id, entry] : state_->entries) {
             static_cast<void>(id);
+            if (entry.parked) {
+                continue;
+            }
             // Store readiness and lifecycle configuration are independent of
             // runtime adoption. An invalid endpoint, missing secret, duplicate
             // node index, or stale store reply must fail before promotion.

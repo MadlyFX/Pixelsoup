@@ -3,6 +3,7 @@
 #include <mediaserver/topology/hardware_map_schema.hpp>
 #include <mediaserver/topology/hardware_runtime.hpp>
 #include <mediaserver/topology/hardware_signal.hpp>
+#include <mediaserver/topology/hardware_walls.hpp>
 
 #include <array>
 #include <cstddef>
@@ -838,12 +839,233 @@ void processor_signals_are_checked_against_the_output_mode() {
   TOPOLOGY_CHECK(topology::refresh_millihertz(24000U, 1001U) == 23'976U);
 }
 
+// One 7680x1080 output feeding four processors - an NVIDIA Mosaic surface
+// that is one output to Windows. The cables share it left to right as the
+// processors sit on the map, take the render machine's reported tiles when
+// there are some, and an authored region beats both.
+void one_output_feeds_several_processors_a_region_each() {
+  doc::Root root;
+  root = root.set(device(1U, schema::render_server_kind, "Render", 0, 0));
+  // Map positions left to right: 4, 2, 5, 3 - not document order.
+  const std::array<std::pair<core::u64, core::i32>, 4U> processors{
+      {{2U, 4}, {3U, 8}, {4U, 2}, {5U, 6}}};
+  for (const auto &[id, x] : processors) {
+    root = root.set(node(id, schema::device_type,
+                         {text(schema::kind, schema::led_processor_kind),
+                          text(schema::name, "Processor"),
+                          text(schema::protocol, schema::novastar_coex_protocol),
+                          whole(schema::grid_x, x), whole(schema::grid_y, 0)}));
+  }
+  root = root.set(output_binding(20U, 1U, 1U, 0U, 0x101U, 7U, 0U, 7680U,
+                                 1080U, 60U, 1U));
+  for (core::u64 id = 2U; id <= 5U; ++id) {
+    root = root.set(link(8U + id, 1U, 1U, id, 0U));
+  }
+  topology::HardwareMapModel model;
+  model.reset(root);
+  const topology::HardwareMap map = model.evaluate();
+  TOPOLOGY_CHECK(map.links.size() == 4U);
+  topology::HardwareRuntimeSnapshot runtime{};
+
+  const auto region = [&](core::u64 link_id) {
+    return topology::link_output_region(map, *map.link(doc::NodeId{link_id}),
+                                        runtime);
+  };
+  // Processor 4 is leftmost (link 12), then 2 (10), 5 (13), 3 (11).
+  TOPOLOGY_CHECK(region(12U).region ==
+                 (topology::HardwareOutputRegion{0U, 0U, 1920U, 1080U}));
+  TOPOLOGY_CHECK(region(10U).region ==
+                 (topology::HardwareOutputRegion{1920U, 0U, 1920U, 1080U}));
+  TOPOLOGY_CHECK(region(13U).region ==
+                 (topology::HardwareOutputRegion{3840U, 0U, 1920U, 1080U}));
+  TOPOLOGY_CHECK(region(11U).region ==
+                 (topology::HardwareOutputRegion{5760U, 0U, 1920U, 1080U}));
+  TOPOLOGY_CHECK(region(11U).source == topology::HardwareRegionSource::EvenShare);
+
+  // Each processor input is checked against its own tile, not the surface.
+  topology::HardwareProcessorNode observed{};
+  observed.device = doc::NodeId{2U};
+  observed.reachability = topology::HardwareRuntimeReachability::Online;
+  topology::HardwareProcessorInput input{};
+  input.number = 1U;
+  input.signal = true;
+  input.width = 1920U;
+  input.height = 1080U;
+  input.refresh_millihertz = 60'000U;
+  observed.inputs.push_back(input);
+  runtime.processors.push_back(observed);
+  const auto checks = topology::check_processor_signals(map, runtime);
+  TOPOLOGY_CHECK(checks.size() == 1U);
+  TOPOLOGY_CHECK(checks[0].issue == topology::HardwareSignalIssue::None);
+  TOPOLOGY_CHECK(checks[0].width == 1920U);
+
+  // The render machine reports the surface as a 2x2 grid of 3840x540.
+  topology::HardwareRuntimeNode machine{};
+  machine.device = doc::NodeId{1U};
+  topology::HardwareVideoOutput surface{};
+  surface.target = topology::HardwareDisplayTargetKey{0x101U, 7U, 0U};
+  surface.width = 7680U;
+  surface.height = 1080U;
+  surface.mosaic_tiles = {{0U, 0U, 3840U, 540U},
+                          {3840U, 0U, 3840U, 540U},
+                          {0U, 540U, 3840U, 540U},
+                          {3840U, 540U, 3840U, 540U}};
+  machine.video_outputs.push_back(surface);
+  runtime.nodes.push_back(machine);
+  TOPOLOGY_CHECK(region(13U).region ==
+                 (topology::HardwareOutputRegion{0U, 540U, 3840U, 540U}));
+  TOPOLOGY_CHECK(region(13U).source ==
+                 topology::HardwareRegionSource::MosaicTile);
+
+  // An authored region wins, cut to the output it is part of.
+  doc::Node authored = *root.get(doc::NodeId{13U});
+  authored.properties.insert_or_assign(std::string{schema::region_x},
+                                       doc::PropertyValue{std::int64_t{7000}});
+  authored.properties.insert_or_assign(std::string{schema::region_y},
+                                       doc::PropertyValue{std::int64_t{0}});
+  authored.properties.insert_or_assign(std::string{schema::region_width},
+                                       doc::PropertyValue{std::int64_t{1920}});
+  authored.properties.insert_or_assign(std::string{schema::region_height},
+                                       doc::PropertyValue{std::int64_t{1080}});
+  const core::u64 before = topology::digest(map);
+  model.reset(root.set(authored));
+  const topology::HardwareMap edited = model.evaluate();
+  TOPOLOGY_CHECK(topology::digest(edited) != before);
+  const topology::HardwareLinkRegion cut = topology::link_output_region(
+      edited, *edited.link(doc::NodeId{13U}), runtime);
+  TOPOLOGY_CHECK(cut.source == topology::HardwareRegionSource::Authored);
+  TOPOLOGY_CHECK(cut.region ==
+                 (topology::HardwareOutputRegion{7000U, 0U, 680U, 1080U}));
+
+  // A lone cable carries its whole output.
+  doc::Root lone;
+  lone = lone.set(*root.get(doc::NodeId{1U}));
+  lone = lone.set(*root.get(doc::NodeId{2U}));
+  lone = lone.set(*root.get(doc::NodeId{20U}));
+  lone = lone.set(*root.get(doc::NodeId{10U}));
+  model.reset(lone);
+  const topology::HardwareMap single = model.evaluate();
+  const topology::HardwareLinkRegion all = topology::link_output_region(
+      single, single.links.front(), topology::HardwareRuntimeSnapshot{});
+  TOPOLOGY_CHECK(all.source == topology::HardwareRegionSource::WholeOutput);
+  TOPOLOGY_CHECK(all.region ==
+                 (topology::HardwareOutputRegion{0U, 0U, 7680U, 1080U}));
+}
+
+// Rates come back from processors in thousandths of a hertz, rounded; the
+// NTSC family must come out as the exact n*1000/1001 fractions a GPU uses.
+void decimal_rates_become_exact_fractions() {
+  using Refresh = topology::HardwareRefresh;
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(23'976U) ==
+                 (Refresh{24'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(29'970U) ==
+                 (Refresh{30'000U, 1'001U}));
+  // A rate rounded the other way is still 30000/1001.
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(29'980U) ==
+                 (Refresh{30'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(59'940U) ==
+                 (Refresh{60'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(119'880U) ==
+                 (Refresh{120'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(24'000U) ==
+                 (Refresh{24U, 1U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(50'000U) ==
+                 (Refresh{50U, 1U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(47'500U) ==
+                 (Refresh{47'500U, 1'000U}));
+  TOPOLOGY_CHECK(topology::refresh_from_millihertz(0U) == (Refresh{0U, 1U}));
+  // And back: the fraction is the rate the processor reported.
+  TOPOLOGY_CHECK(topology::refresh_millihertz(24'000U, 1'001U) == 23'976U);
+
+  // Typed hertz take the same path, held to a sane range.
+  TOPOLOGY_CHECK(topology::refresh_from_hertz(23.976) ==
+                 (Refresh{24'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_hertz(59.94) ==
+                 (Refresh{60'000U, 1'001U}));
+  TOPOLOGY_CHECK(topology::refresh_from_hertz(25.0) == (Refresh{25U, 1U}));
+  TOPOLOGY_CHECK(topology::refresh_from_hertz(5'000.0) ==
+                 (Refresh{1'000U, 1U}));
+  TOPOLOGY_CHECK(topology::refresh_from_hertz(-1.0) == (Refresh{0U, 1U}));
+  TOPOLOGY_CHECK(topology::refresh_decimals(60'000U) == 0);
+  TOPOLOGY_CHECK(topology::refresh_decimals(59'940U) == 2);
+  TOPOLOGY_CHECK(topology::refresh_decimals(23'976U) == 3);
+  TOPOLOGY_CHECK(topology::refresh_decimals(47'500U) == 1);
+}
+
+void a_reporting_processor_proposes_its_walls() {
+  topology::HardwareMap map{};
+  topology::HardwareDevice processor{};
+  processor.node = doc::NodeId{4U};
+  processor.kind = topology::HardwareDeviceKind::LedProcessor;
+  processor.name = "MX40 Pro";
+  processor.grid_x = 2;
+  processor.grid_y = -1;
+  topology::HardwareDevice neighbour{};
+  neighbour.node = doc::NodeId{5U};
+  neighbour.kind = topology::HardwareDeviceKind::RenderServer;
+  // On the first cell a wall would take.
+  neighbour.grid_x = 5;
+  neighbour.grid_y = -4;
+  map.devices = {processor, neighbour};
+
+  topology::HardwareProcessorNode report{};
+  report.device = processor.node;
+  report.reachability = topology::HardwareRuntimeReachability::Online;
+  topology::HardwareProcessorScreen main{};
+  main.name = "Main";
+  main.width = 2880U;
+  main.height = 1536U;
+  main.refresh_millihertz = 23'976U;
+  topology::HardwareProcessorScreen unnamed{};
+  unnamed.width = 1152U;
+  unnamed.height = 768U;
+  topology::HardwareProcessorScreen empty{};
+  empty.name = "Unmapped";
+  report.screens = {main, unnamed, empty};
+
+  const std::vector<topology::HardwareWallProposal> walls =
+      topology::proposed_walls(map, report);
+  TOPOLOGY_CHECK(walls.size() == 2U);
+  TOPOLOGY_CHECK(walls[0].name == "Main");
+  TOPOLOGY_CHECK(walls[0].width == 2880U && walls[0].height == 1536U);
+  TOPOLOGY_CHECK(walls[0].refresh_numerator == 24'000U &&
+                 walls[0].refresh_denominator == 1'001U);
+  TOPOLOGY_CHECK(walls[1].name == "MX40 Pro wall");
+  // A screen that gives no rate keeps a new card's 60 Hz.
+  TOPOLOGY_CHECK(walls[1].refresh_numerator == 60U &&
+                 walls[1].refresh_denominator == 1U);
+  // Beside the processor, clear of the server and of each other.
+  TOPOLOGY_CHECK(walls[0].grid_x == 5 && walls[0].grid_y == -1);
+  TOPOLOGY_CHECK(walls[1].grid_x == 5 && walls[1].grid_y == 2);
+
+  // A stale report, or an LED OUT that drives something, proposes nothing.
+  topology::HardwareProcessorNode stale = report;
+  stale.stale = true;
+  TOPOLOGY_CHECK(topology::proposed_walls(map, stale).empty());
+  topology::HardwareDevice wall{};
+  wall.node = doc::NodeId{6U};
+  wall.kind = topology::HardwareDeviceKind::LedWall;
+  map.devices.push_back(wall);
+  map.links.push_back(topology::HardwareLink{
+      doc::NodeId{9U},
+      topology::HardwareEndpoint{processor.node,
+                                 topology::processor_led_output_port},
+      topology::HardwareEndpoint{wall.node, 0U}});
+  TOPOLOGY_CHECK(topology::proposed_walls(map, report).empty());
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 17U> cases{{
+constexpr std::array<Case, 20U> cases{{
+    {"decimal rates become exact fractions",
+     &decimal_rates_become_exact_fractions},
+    {"a reporting processor proposes its walls",
+     &a_reporting_processor_proposes_its_walls},
+    {"one output feeds several processors a region each",
+     &one_output_feeds_several_processors_a_region_each},
     {"processors take many inputs and keep their old ports",
      &processors_take_many_inputs_and_keep_their_old_ports},
     {"a protocol is a processor property in the digest",

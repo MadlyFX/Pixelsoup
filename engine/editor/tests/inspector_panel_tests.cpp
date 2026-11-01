@@ -1844,12 +1844,13 @@ void add_effect_picker_authors_a_choice_and_keeps_an_existing_stack() {
 }
 
 // A projection surface's form: header 10..40, the "LED surface" line 44..66,
-// TRANSFORM 74..98, then Position, Yaw and Size rows 26 pixels apart. The
-// one-field Yaw row starts at the same x as Position; Size's two fields are
-// 93.2 wide from x = 99.6.
+// TRANSFORM 74..98, then Position, Yaw, Pitch and Size rows 26 pixels apart.
+// The one-field Yaw and Pitch rows start at the same x as Position; Size's
+// two fields are 93.2 wide from x = 99.6.
 constexpr float surface_position_y = 113.0F;
 constexpr float surface_yaw_y = 139.0F;
-constexpr float surface_size_y = 165.0F;
+constexpr float surface_pitch_y = 165.0F;
+constexpr float surface_size_y = 191.0F;
 constexpr float surface_height_x = 243.0F;
 
 [[nodiscard]] mediaserver::output::ProjectionSurface make_surface() {
@@ -1925,6 +1926,21 @@ void a_surface_yaw_is_in_turns_and_keeps_the_wall_upright() {
     UI_CHECK(near(edit.surface.center.x, 1.5));
 }
 
+void a_surface_pitch_tilts_about_its_right_edge_in_turns() {
+    SurfaceHarness h;
+    // 50 pixels at 0.002 turns per pixel: a tenth of a turn back.
+    const editor::InspectorFrame dragged =
+        h.scrub(field_x0, surface_pitch_y, 50.0F);
+    UI_CHECK(dragged.surface_edit.has_value());
+    const editor::FeedSurfaceEditRequest& edit = *dragged.surface_edit;
+    UI_CHECK(edit.transform_components == editor::FeedSurfaceTransform::Yaw);
+    const double radians = 0.1 * 6.28318530717958647692;
+    UI_CHECK(near(edit.surface.up.y, std::cos(radians)));
+    UI_CHECK(near(edit.surface.up.z, std::sin(radians)));
+    UI_CHECK(near(edit.surface.right.x, 1.0));
+    UI_CHECK(near(edit.surface.center.x, 1.5));
+}
+
 void a_surface_size_is_calibration_not_a_transform_channel() {
     SurfaceHarness h;
     const editor::InspectorFrame dragged =
@@ -1984,7 +2000,7 @@ void an_imported_surface_without_its_mesh_authors_nothing() {
     UI_CHECK(!dragged.surface_edit.has_value());
 }
 
-constexpr std::array<Case, 57U> cases{{
+constexpr std::array<Case, 58U> cases{{
     {"a changed value resets to its default", &a_changed_value_resets_to_its_default},
     {"a video clip chooses the size it is held at", &a_video_clip_chooses_the_size_it_is_held_at},
     {"a surface diamond keys its position at the playhead",
@@ -1997,6 +2013,8 @@ constexpr std::array<Case, 57U> cases{{
      &a_surface_yaw_is_in_turns_and_keeps_the_wall_upright},
     {"a surface size is calibration, not a transform channel",
      &a_surface_size_is_calibration_not_a_transform_channel},
+    {"a surface pitch tilts about its right edge in turns",
+     &a_surface_pitch_tilts_about_its_right_edge_in_turns},
     {"an imported surface without its mesh authors nothing",
      &an_imported_surface_without_its_mesh_authors_nothing},
     {"camera key buttons preserve cubic evaluated values",

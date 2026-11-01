@@ -95,6 +95,8 @@ palette_index(topology::HardwareDeviceKind kind,
 enum class PortTargetState : core::u8 {
   None,
   Compatible,
+  // Holds a cable from the dragged output's own device, which the drop moves.
+  Replaces,
   Incompatible,
   Occupied,
 };
@@ -1220,7 +1222,8 @@ void draw_socket(gui::UiContext &ctx, const IsoPoint &point,
                                         : base_color);
   const bool targeted = target_state != PortTargetState::None;
   const gui::UiColor rim =
-      target_state == PortTargetState::Compatible
+      target_state == PortTargetState::Compatible ||
+              target_state == PortTargetState::Replaces
           ? ctx.theme().good
           : (target_state == PortTargetState::None ? color
                                                    : ctx.theme().warning);
@@ -1334,15 +1337,15 @@ void draw_wire(gui::UiContext &ctx, const IsoPoint &from, const IsoPoint &to,
                      4.0F, color);
 }
 
-[[nodiscard]] bool
-input_occupied(const topology::HardwareMap &map,
-               topology::HardwareEndpoint endpoint) noexcept {
+[[nodiscard]] const topology::HardwareLink *
+link_into(const topology::HardwareMap &map,
+          topology::HardwareEndpoint endpoint) noexcept {
   for (const topology::HardwareLink &link : map.links) {
     if (link.to == endpoint) {
-      return true;
+      return &link;
     }
   }
-  return false;
+  return nullptr;
 }
 
 [[nodiscard]] std::string hardware_count_text(std::size_t count) {
@@ -2615,25 +2618,28 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             static_cast<core::u32>(std::llround(next));
         changed = true;
       }
-      if (number_row(
-              "hardware.sync.rate-num", "Rate num",
-              static_cast<double>(
-                  sync_policy.required_timing.refresh_numerator),
-              1.0, static_cast<double>(sync::max_sync_refresh_numerator),
-              next)) {
-        edited.required_timing.refresh_numerator =
-            static_cast<core::u32>(std::llround(next));
-        changed = true;
-      }
-      if (number_row(
-              "hardware.sync.rate-den", "Rate den",
-              static_cast<double>(
-                  sync_policy.required_timing.refresh_denominator),
-              1.0, static_cast<double>(sync::max_sync_refresh_denominator),
-              next)) {
-        edited.required_timing.refresh_denominator =
-            static_cast<core::u32>(std::llround(next));
-        changed = true;
+      {
+        // Hertz as typed, kept as the exact fraction (23.976 is 24000/1001).
+        const core::u32 millihertz = topology::refresh_millihertz(
+            sync_policy.required_timing.refresh_numerator,
+            sync_policy.required_timing.refresh_denominator);
+        const gui::FormRow row = rows.row();
+        if (fits(row.field)) {
+          ctx.label(row.label, "Refresh", ctx.theme().text_muted);
+          double typed{};
+          if (sync_numbers_.draw(ctx, mix(id_, "hardware.sync.refresh"),
+                                 row.field, {},
+                                 static_cast<double>(millihertz) / 1000.0,
+                                 0.01, typed,
+                                 topology::refresh_decimals(millihertz))) {
+            const topology::HardwareRefresh rate =
+                topology::refresh_from_hertz(
+                    std::clamp(typed, 1.0, topology::max_refresh_hertz));
+            edited.required_timing.refresh_numerator = rate.numerator;
+            edited.required_timing.refresh_denominator = rate.denominator;
+            changed = true;
+          }
+        }
       }
       if (number_row("hardware.sync.group", "Swap group",
                      static_cast<double>(sync_policy.group), 1.0,
@@ -2741,21 +2747,43 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
         !topology::compatible(*from, pending_link_->port, *to, endpoint.port)) {
       return PortTargetState::Incompatible;
     }
-    const bool output_occupied = std::any_of(
-        map.links.begin(), map.links.end(),
-        [&](const topology::HardwareLink &link) {
-          return link.from == *pending_link_;
-        });
+    // A Render Server video output may feed several inputs: an NVIDIA Mosaic
+    // surface is one output to Windows but one connector per processor. A
+    // processor's LED OUT may drive several walls, one per screen it runs.
+    // Every other output drives one cable.
+    const bool fans_out =
+        (from->kind == topology::HardwareDeviceKind::RenderServer &&
+         pending_link_->port >= topology::first_render_server_video_port &&
+         pending_link_->port <= topology::last_render_server_video_port) ||
+        (from->kind == topology::HardwareDeviceKind::LedProcessor &&
+         pending_link_->port == topology::processor_led_output_port);
+    const bool output_occupied =
+        !fans_out && std::any_of(map.links.begin(), map.links.end(),
+                                 [&](const topology::HardwareLink &link) {
+                                   return link.from == *pending_link_;
+                                 });
     if (output_occupied) {
       return PortTargetState::Occupied;
     }
-    return input_occupied(map, endpoint) ? PortTargetState::Occupied
-                                         : PortTargetState::Compatible;
+    // Re-patching one device's cable to another of its outputs replaces it
+    // in place; another device's cable is never pulled out by a drop.
+    const topology::HardwareLink *const existing = link_into(map, endpoint);
+    if (existing == nullptr) {
+      return PortTargetState::Compatible;
+    }
+    if (existing->from == *pending_link_) {
+      return PortTargetState::Occupied;
+    }
+    return existing->from.device == pending_link_->device
+               ? PortTargetState::Replaces
+               : PortTargetState::Occupied;
   };
   const auto feedback_for = [](PortTargetState state) {
     switch (state) {
     case PortTargetState::Compatible:
       return HardwareLinkFeedback::Compatible;
+    case PortTargetState::Replaces:
+      return HardwareLinkFeedback::Replaces;
     case PortTargetState::Incompatible:
       return HardwareLinkFeedback::Incompatible;
     case PortTargetState::Occupied:
@@ -2768,8 +2796,15 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
   const auto attempt_link = [&](topology::HardwareEndpoint endpoint) {
     const PortTargetState state = target_state(endpoint);
     frame.link_feedback = feedback_for(state);
-    if (state == PortTargetState::Compatible && pending_link_.has_value()) {
+    if ((state == PortTargetState::Compatible ||
+         state == PortTargetState::Replaces) &&
+        pending_link_.has_value()) {
       HardwareLinkRequest request{*pending_link_, endpoint};
+      if (const topology::HardwareLink *const replaced =
+              link_into(map, endpoint);
+          state == PortTargetState::Replaces && replaced != nullptr) {
+        request.replaces = replaced->node;
+      }
       const topology::HardwareDevice *const source =
           map.device(pending_link_->device);
       if (source != nullptr &&
@@ -3080,7 +3115,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   port_shown.runtime_state);
       // Port names beside the sockets of the device in hand, and of every
       // input a cable could end on.
-      if (labelled || state == PortTargetState::Compatible) {
+      if (labelled || state == PortTargetState::Compatible ||
+          state == PortTargetState::Replaces) {
         std::string label{port.name};
         if (entry.device.kind == topology::HardwareDeviceKind::RenderServer &&
             port.direction == topology::HardwarePortDirection::Output) {
@@ -3148,7 +3184,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       const IsoPoint start = presented_port_position(
           projection, displayed_from, from_presentation, pending_link_->port);
       const gui::UiColor wire_color =
-          frame.link_feedback == HardwareLinkFeedback::Compatible
+          frame.link_feedback == HardwareLinkFeedback::Compatible ||
+                  frame.link_feedback == HardwareLinkFeedback::Replaces
               ? ctx.theme().good
               : ((frame.link_feedback == HardwareLinkFeedback::Incompatible ||
                   frame.link_feedback == HardwareLinkFeedback::Occupied)
@@ -3160,6 +3197,9 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
       switch (frame.link_feedback) {
       case HardwareLinkFeedback::Compatible:
         label = "RELEASE TO CONNECT";
+        break;
+      case HardwareLinkFeedback::Replaces:
+        label = "RELEASE TO MOVE THE CABLE HERE";
         break;
       case HardwareLinkFeedback::Incompatible:
         label = "INCOMPATIBLE SIGNAL";
@@ -3890,13 +3930,27 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
           emit_binding_number("Height", 2U, selected_binding->height, 1U,
                               topology::max_hardware_output_height,
                               changed_binding.height);
-          emit_binding_number("Refresh", 3U,
-                              selected_binding->refresh_numerator, 1U,
-                              240'000U,
-                              changed_binding.refresh_numerator);
-          emit_binding_number("Rate div", 4U,
-                              selected_binding->refresh_denominator, 1U,
-                              1001U, changed_binding.refresh_denominator);
+          {
+            const core::u32 millihertz = topology::refresh_millihertz(
+                selected_binding->refresh_numerator,
+                selected_binding->refresh_denominator);
+            double changed{};
+            if (details_numbers_.draw(
+                    ctx,
+                    mix(id_, "hardware.binding.number",
+                        selected_binding->node.value() * 8U + 3U),
+                    labelled_bounds("Refresh"), {},
+                    static_cast<double>(millihertz) / 1000.0, 0.01, changed,
+                    topology::refresh_decimals(millihertz))) {
+              const topology::HardwareRefresh rate =
+                  topology::refresh_from_hertz(
+                      std::clamp(changed, 1.0, topology::max_refresh_hertz));
+              changed_binding.refresh_numerator = rate.numerator;
+              changed_binding.refresh_denominator = rate.denominator;
+              frame.output_binding_edit =
+                  HardwareOutputBindingEdit{changed_binding};
+            }
+          }
 
           const topology::HardwareVideoOutput *const replacement =
               next_unbound_target();
@@ -3948,7 +4002,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                              selected_device->desktop_y);
         }
       }
-      if (!explicit_output_bindings) {
+      // A raster and rate mean something on a Render Server (what it sends)
+      // and an LED Wall (what it lights). A processor's input modes come from
+      // the outputs cabled to it and from its own report, so neither it nor an
+      // Operator Machine shows them.
+      const bool has_raster =
+          render_server ||
+          selected_device->kind == topology::HardwareDeviceKind::LedWall;
+      if (!explicit_output_bindings && has_raster) {
         const core::u32 maximum_width =
             render_server ? topology::max_hardware_output_width : 32'768U;
         const core::u32 maximum_height =
@@ -3957,10 +4018,25 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                     selected_device->width, 1U, maximum_width);
         emit_number("Height", topology::schema::height, 1U,
                     selected_device->height, 1U, maximum_height);
-        emit_number("Refresh", topology::schema::refresh_numerator, 2U,
-                    selected_device->refresh_numerator, 1U, 240'000U);
-        emit_number("Rate div", topology::schema::refresh_denominator, 3U,
-                    selected_device->refresh_denominator, 1U, 1001U);
+        {
+          // Hertz as typed; the Director keeps the exact fraction.
+          const core::u32 millihertz =
+              topology::refresh_millihertz(selected_device->refresh_numerator,
+                                           selected_device->refresh_denominator);
+          double changed{};
+          if (details_numbers_.draw(
+                  ctx,
+                  mix(id_, "hardware.details.number",
+                      details_node_.value() * 8U + 2U),
+                  labelled_bounds("Refresh"), {},
+                  static_cast<double>(millihertz) / 1000.0, 0.01, changed,
+                  topology::refresh_decimals(millihertz))) {
+            frame.property_edit = HardwarePropertyEdit{
+                details_node_, std::string{hardware_refresh_edit},
+                doc::PropertyValue{std::clamp(
+                    changed, 1.0, topology::max_refresh_hertz)}};
+          }
+        }
       }
 
       if (render_server) {
@@ -4146,6 +4222,14 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
               break;
             }
           }
+          // Online without a screen: what it answered instead, so a
+          // processor that will not describe its wall says why.
+          if (observed->screens.empty() && !observed->detail.empty() &&
+              observed->reachability ==
+                  topology::HardwareRuntimeReachability::Online) {
+            static_cast<void>(
+                row("Screen", observed->detail, ctx.theme().caution));
+          }
           if (observed->panels != 0U) {
             std::string panels = std::to_string(observed->panels_online) +
                                  " of " + std::to_string(observed->panels) +
@@ -4249,6 +4333,7 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
                   ctx.theme().keyframe);
         ctx.pop_clip();
         static_cast<void>(gui::cut_top(lines, 6.0F));
+
         if (const topology::HardwareSignalCheck *const check =
                 check_for(link->node)) {
           const std::string sent =
@@ -4304,6 +4389,87 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
             }
           }
         }
+        // The part of the render output this cable carries: all of it, or a
+        // tile when one output feeds several processors (NVIDIA Mosaic).
+        const topology::HardwareDevice *const source =
+            map.device(link->from.device);
+        if (source != nullptr &&
+            source->kind == topology::HardwareDeviceKind::RenderServer &&
+            link->from.port >= topology::first_render_server_video_port &&
+            link->from.port <= topology::last_render_server_video_port) {
+          const topology::HardwareLinkRegion carried =
+              topology::link_output_region(map, *link, runtime);
+          static_cast<void>(gui::cut_top(lines, 8.0F));
+          gui::Rect heading = gui::cut_top(lines, 19.0F);
+          if (carried.source == topology::HardwareRegionSource::Authored) {
+            const gui::Rect reset =
+                gui::cut_right(heading, reset_button_width);
+            if (reset_button(ctx,
+                             mix(id_, "hardware.link.region.reset",
+                                 link->node.value()),
+                             reset, "Reset to its share of the output")) {
+              frame.link_region_edit =
+                  HardwareLinkRegionEdit{link->node, {}};
+            }
+          }
+          ctx.label(heading, "Carries", ctx.theme().text_muted);
+          std::string_view origin;
+          switch (carried.source) {
+          case topology::HardwareRegionSource::Authored:
+            origin = "Set by hand";
+            break;
+          case topology::HardwareRegionSource::WholeOutput:
+            origin = "The whole output";
+            break;
+          case topology::HardwareRegionSource::MosaicTile:
+            origin = "Its Mosaic display";
+            break;
+          case topology::HardwareRegionSource::EvenShare:
+            origin = "An even share of the output";
+            break;
+          }
+          const gui::Rect origin_line = gui::cut_top(lines, 19.0F);
+          ctx.label(origin_line, origin, ctx.theme().text_muted);
+          if (carried.source == topology::HardwareRegionSource::MosaicTile) {
+            ctx.tooltip(origin_line,
+                        "The render machine reports this output as an NVIDIA "
+                        "Mosaic surface; this cable takes the display in the "
+                        "same place in its grid");
+          }
+          const std::array<std::pair<std::string_view, core::u32>, 4U> fields{
+              {{"X", carried.region.x},
+               {"Y", carried.region.y},
+               {"Width", carried.region.width},
+               {"Height", carried.region.height}}};
+          for (std::size_t index = 0U; index < fields.size(); ++index) {
+            static_cast<void>(gui::cut_top(lines, 4.0F));
+            gui::Rect row = gui::cut_top(lines, details_row_height);
+            ctx.label(gui::cut_left(row, details_label_width),
+                      fields[index].first, ctx.theme().text_muted);
+            double changed{};
+            if (!link_numbers_.draw(
+                    ctx,
+                    mix(id_, "hardware.link.region",
+                        link->node.value() * 4U + index),
+                    row, {}, static_cast<double>(fields[index].second), 1.0,
+                    changed, 0)) {
+              continue;
+            }
+            const bool size = index >= 2U;
+            const auto value = static_cast<core::u32>(std::llround(std::clamp(
+                changed, size ? 1.0 : 0.0,
+                static_cast<double>(topology::max_hardware_output_width))));
+            topology::HardwareOutputRegion edited = carried.region;
+            (index == 0U   ? edited.x
+             : index == 1U ? edited.y
+             : index == 2U ? edited.width
+                           : edited.height) = value;
+            if (!edited.empty()) {
+              frame.link_region_edit =
+                  HardwareLinkRegionEdit{link->node, edited};
+            }
+          }
+        }
       }
     } else {
       gui::Rect message =
@@ -4315,7 +4481,8 @@ HardwareMappingPanel::draw(gui::UiContext &ctx, const gui::Rect &bounds,
 
   frame.dragging = drag_kind_ != DragKind::None || link_dragging_;
   frame.editing = frame.editing || settings_numbers_.live() ||
-                  canvas_numbers_.live() || sync_numbers_.live();
+                  canvas_numbers_.live() || sync_numbers_.live() ||
+                  link_numbers_.live();
   ctx.pop_clip();
   return frame;
 }
@@ -4990,6 +5157,86 @@ FeedMappingFrame FeedMappingPanel::draw(
     }
     surface_rows.emplace_back(row, surface.node);
   }
+  // The stage the surfaces above are calibrated in. Project setup, like the
+  // surfaces themselves, so it sits with them rather than with any one output.
+  if (!stage_numbers_.live()) {
+    stage_ = feed_map.stage;
+  }
+  const auto emit_stage = [&] {
+    frame.stage_edit = FeedStageEditRequest{stage_, 0U};
+  };
+  list_column.space(7.0F);
+  {
+    gui::Rect heading = gui::inset(
+        list_column.next(feed_details_label_height, 3.0F), 3.0F, 0.0F);
+    const gui::Rect reset = gui::cut_right(heading, reset_button_width);
+    ctx.label(heading, "Stage", ctx.theme().text_muted);
+    if (stage_.anchor != output::StageAnchor::World &&
+        reset_button(ctx, mix(id_, "feed.stage.anchor.reset"), reset,
+                     "Reset to fixed in the world")) {
+      stage_.anchor = output::StageAnchor::World;
+      emit_stage();
+    }
+    const gui::Rect choice = list_column.next(feed_add_button_height, 4.0F);
+    if (pill_button(ctx, mix(id_, "feed.stage.world"),
+                    gui::column(choice, 0U, 2U, 3.0F), std::nullopt, "Fixed",
+                    "Surfaces stand still in the world and the camera moves "
+                    "among them, as in a virtual-production volume",
+                    ButtonTone::Quiet, true,
+                    stage_.anchor == output::StageAnchor::World) &&
+        stage_.anchor != output::StageAnchor::World) {
+      stage_.anchor = output::StageAnchor::World;
+      emit_stage();
+    }
+    if (pill_button(ctx, mix(id_, "feed.stage.camera"),
+                    gui::column(choice, 1U, 2U, 3.0F), std::nullopt,
+                    "Follows camera",
+                    "The whole stage travels and turns with the scene camera: "
+                    "an immersive room or CAVE whose camera motion is the "
+                    "show. Surfaces are measured in the room, and tracked "
+                    "camera plates are not drawn",
+                    ButtonTone::Quiet, true,
+                    stage_.anchor == output::StageAnchor::Camera) &&
+        stage_.anchor != output::StageAnchor::Camera) {
+      stage_.anchor = output::StageAnchor::Camera;
+      emit_stage();
+    }
+    if (stage_.anchor == output::StageAnchor::Camera) {
+      gui::Rect eye_heading = gui::inset(
+          list_column.next(feed_details_label_height, 2.0F), 3.0F, 0.0F);
+      const gui::Rect eye_reset = gui::cut_right(eye_heading, reset_button_width);
+      ctx.label(eye_heading, "Viewer eye", ctx.theme().text_muted);
+      ctx.tooltip(eye_heading,
+                  "Where the viewer stands in the room, in stage metres. This "
+                  "point rides on the scene camera's eye");
+      if (stage_.eye != scene::Vec3{} &&
+          reset_button(ctx, mix(id_, "feed.stage.eye.reset"), eye_reset,
+                       "Reset to the stage origin (0, 0, 0)")) {
+        stage_.eye = scene::Vec3{};
+        emit_stage();
+      }
+      const gui::Rect strip = list_column.next(22.0F, 4.0F);
+      const std::array<std::pair<std::string_view, float *>, 3U> axes{{
+          {"X", &stage_.eye.x},
+          {"Y", &stage_.eye.y},
+          {"Z", &stage_.eye.z},
+      }};
+      for (std::size_t axis = 0U; axis < axes.size(); ++axis) {
+        double changed{};
+        if (stage_numbers_.draw(ctx, mix(id_, "feed.stage.eye", axis),
+                                gui::column(strip, axis, axes.size(), 3.0F),
+                                axes[axis].first,
+                                static_cast<double>(*axes[axis].second), 0.01,
+                                changed, 3)) {
+          *axes[axis].second =
+              static_cast<float>(std::clamp(changed, -1'000'000.0, 1'000'000.0));
+          emit_stage();
+        }
+      }
+    }
+  }
+  frame.editing = frame.editing || stage_numbers_.live();
+
   rename_.end_frame(ctx);
   sync_surface_details();
 
@@ -5632,13 +5879,45 @@ FeedMappingFrame FeedMappingPanel::draw(
       if (surface_numbers_.draw(
               ctx, mix(id_, "feed.surface.yaw", surface_details_node_.value()),
               fields[0U], "YAW", yaw_degrees, 0.25, changed_yaw, 1)) {
-        const double radians =
-            std::clamp(changed_yaw, -3600.0, 3600.0) * pi / 180.0;
-        surface_geometry_.right =
-            scene::Vec3{static_cast<float>(std::cos(radians)), 0.0F,
-                        static_cast<float>(-std::sin(radians))};
-        surface_geometry_.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+        output::set_yaw_keeping_pitch(
+            surface_geometry_,
+            static_cast<float>(std::clamp(changed_yaw, -3600.0, 3600.0) /
+                               360.0));
         emit_surface_edit(FeedSurfaceTransform::Yaw);
+      }
+
+      // Tilt about the face's own right edge: a quarter turn faces it down,
+      // which is a ceiling over the viewer, and minus a quarter turn is a
+      // floor. Orientation, so it travels with yaw as one transform bit.
+      const output::SurfacePitchBasis pitch_basis =
+          output::surface_pitch_basis(surface_geometry_);
+      const double pitch_degrees =
+          std::atan2(static_cast<double>(pitch_basis.sine),
+                     static_cast<double>(pitch_basis.cosine)) *
+          180.0 / pi;
+      fields = labelled_columns("PITCH", 1U);
+      const auto set_pitch = [&](double degrees) {
+        output::orient(surface_geometry_, static_cast<float>(yaw_degrees / 360.0),
+                       static_cast<float>(degrees / 360.0));
+        emit_surface_edit(FeedSurfaceTransform::Yaw);
+      };
+      gui::Rect pitch_field = fields[0U];
+      if (std::abs(pitch_degrees) > 1.0e-4) {
+        const gui::Rect reset = gui::cut_right(pitch_field, reset_button_width);
+        static_cast<void>(gui::cut_right(pitch_field, field_gap));
+        if (reset_button(ctx,
+                         mix(id_, "feed.surface.pitch.reset",
+                             surface_details_node_.value()),
+                         reset, "Reset to upright (0 degrees)")) {
+          set_pitch(0.0);
+        }
+      }
+      double changed_pitch{};
+      if (surface_numbers_.draw(
+              ctx,
+              mix(id_, "feed.surface.pitch", surface_details_node_.value()),
+              pitch_field, "PITCH", pitch_degrees, 0.25, changed_pitch, 1)) {
+        set_pitch(std::clamp(changed_pitch, -180.0, 180.0));
       }
 
       if (surface_shape_ == output::ProjectionSurfaceShape::HorizontalArc) {

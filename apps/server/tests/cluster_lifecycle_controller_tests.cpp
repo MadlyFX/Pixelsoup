@@ -5,6 +5,7 @@
 #include <mediaserver/net/cluster_lifecycle.hpp>
 #include <mediaserver/net/director_frame_barrier.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -1565,12 +1566,15 @@ void offline_media_can_start_while_store_health_remains_missing() {
     CONTROLLER_CHECK(starts == 1U);
 }
 
-// A Render Server card no cable touches is a parked alternative. It is not
-// probed or listed, it does not make the cabled card's node index a
+// A Render Server card no cable touches is a parked alternative. It is asked
+// only for its status and displays, so its real outputs can be cabled. It is
+// not listed or started, it does not make the cabled card's node index a
 // duplicate, and it never holds the Program gate for the rest of the cluster.
 void a_parked_render_server_is_ignored_by_the_cluster() {
     std::mutex observed_mutex;
     std::vector<ObservedRequest> observed;
+    std::vector<core::u32> inventoried;
+    std::vector<core::u32> asset_checked;
     app::ClusterLifecycleController controller{
         controller_config(),
         [&](const asio::ip::tcp::endpoint&, core::u32 node_index,
@@ -1582,12 +1586,41 @@ void a_parked_render_server_is_ignored_by_the_cluster() {
             return app::ClusterLifecycleRequestResult::success(
                 net::ClusterLifecycleReply{
                     net::ClusterLifecycleOutcome::NoChange,
-                    net::ClusterProcessState::Running, node_index, 1U,
-                    "running"});
+                    net::ClusterProcessState::Stopped, node_index, 1U,
+                    "stopped"});
         },
-        no_inventory,
-        all_assets_ready};
-    const app::ProjectAssetManifest manifest{};
+        [&](const asio::ip::tcp::endpoint&, core::u32 node_index) {
+            {
+                const std::lock_guard lock{observed_mutex};
+                inventoried.push_back(node_index);
+            }
+            net::ClusterMachineInfo info{};
+            info.availability =
+                net::ClusterMachineInfoAvailability::Available;
+            info.display_state =
+                net::ClusterDisplayEnumerationState::Available;
+            info.node_index = node_index;
+            for (core::u32 target = 1U; target <= 2U; ++target) {
+                info.display_targets.push_back(net::ClusterDisplayTargetInfo{
+                    7U, target, 0U, 0U, 0U,
+                    net::ClusterVideoOutputTechnology::Hdmi,
+                    true, true, 1920U, 1080U, 60U, 1U, 0, 0, 1920U, 1080U,
+                    "HDMI"});
+            }
+            return app::ClusterMachineInfoRequestResult::success(
+                std::move(info));
+        },
+        [&](const asio::ip::tcp::endpoint& endpoint, core::u32 node_index,
+            std::span<const net::ClusterAssetRequirement> sources,
+            std::stop_token stop) {
+            {
+                const std::lock_guard lock{observed_mutex};
+                asset_checked.push_back(node_index);
+            }
+            return all_assets_ready(endpoint, node_index, sources, stop);
+        }};
+    const app::ProjectAssetManifest manifest =
+        portable_manifest();
     constexpr core::u64 project_generation = 62U;
     topology::HardwareMap map{};
     map.devices.push_back(render_server(1U, 0U, "127.0.0.1:47840"));
@@ -1604,23 +1637,55 @@ void a_parked_render_server_is_ignored_by_the_cluster() {
 
     controller.sync(map, manifest, project_generation);
     CONTROLLER_CHECK(wait_idle(controller));
+    controller.submit(editor::OutputLifecycleRequest{
+        {}, 0U, {}, editor::OutputLifecycleAction::Start, true});
+    controller.submit(editor::OutputLifecycleRequest{
+        doc::NodeId{3U}, 9U, "127.0.0.1:47849",
+        editor::OutputLifecycleAction::Start, false});
+    CONTROLLER_CHECK(wait_idle(controller));
     const auto rows = controller.snapshot();
     CONTROLLER_CHECK(rows.size() == 1U);
     CONTROLLER_CHECK(rows[0U].device == doc::NodeId{1U});
     CONTROLLER_CHECK(rows[0U].status !=
                      editor::OutputMonitorState::Node::Status::DuplicateNodeIndex);
+    CONTROLLER_CHECK(controller.node_name(9U).empty());
+    CONTROLLER_CHECK(controller.sync_snapshot().nodes.size() == 1U);
+    CONTROLLER_CHECK(controller.tracking_snapshot().size() == 1U);
     {
         const std::lock_guard lock{observed_mutex};
-        CONTROLLER_CHECK(!observed.empty());
+        bool parked_status_polled = false;
         for (const ObservedRequest& request : observed) {
-            CONTROLLER_CHECK(request.node_index == 0U);
+            if (request.node_index == 9U) {
+                // Asked, never started.
+                CONTROLLER_CHECK(request.command ==
+                                 net::ClusterLifecycleCommand::Status);
+                parked_status_polled = true;
+            }
+        }
+        CONTROLLER_CHECK(parked_status_polled);
+        CONTROLLER_CHECK(std::find(inventoried.begin(), inventoried.end(),
+                                   9U) != inventoried.end());
+        CONTROLLER_CHECK(!asset_checked.empty());
+        for (const core::u32 node_index : asset_checked) {
+            CONTROLLER_CHECK(node_index == 0U);
         }
     }
+
+    // The map sees the parked machine's two displays.
+    const topology::HardwareRuntimeSnapshot hardware =
+        controller.hardware_snapshot();
+    const topology::HardwareRuntimeNode* const parked =
+        hardware.node(doc::NodeId{3U});
+    CONTROLLER_CHECK(parked != nullptr);
+    CONTROLLER_CHECK(parked->video_outputs.size() == 2U);
+    CONTROLLER_CHECK(parked->inventory ==
+                     topology::HardwareRuntimeInventoryState::Available);
 
     net::DirectorFrameBarrier barrier{genesis_cursor()};
     CONTROLLER_CHECK(barrier.register_live(
         runtime_registration(31U, 310U, 0U)));
     publish_runtime_adoption(barrier, 31U, 2U, manifest.digest);
+    CONTROLLER_CHECK(controller.content_ready(manifest));
     CONTROLLER_CHECK(controller.program_ready(
         manifest, map, project_generation, barrier));
 }

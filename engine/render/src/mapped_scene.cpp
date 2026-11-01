@@ -37,8 +37,16 @@ struct ProjectionMeshKey final {
       // inputs, not asset identity, so animation cannot enqueue another read.
       return surface.mesh_source == candidate.mesh_source;
     }
+    // A generated mesh is built in stage coordinates; the stage only places
+    // it each frame, so it is not part of the mesh's identity.
     return map_node == map.node && surface_node == map.surface &&
-           region == map.source && surface == candidate;
+           region == map.source && surface.geometry == candidate.geometry &&
+           surface.horizontal_arc_turns == candidate.horizontal_arc_turns &&
+           surface.mesh_columns == candidate.mesh_columns &&
+           surface.mesh_source == candidate.mesh_source &&
+           surface.mesh_scale == candidate.mesh_scale &&
+           surface.mesh_asset == candidate.mesh_asset &&
+           surface.color == candidate.color;
   }
 };
 
@@ -704,27 +712,61 @@ namespace {
     return std::nullopt;
   }
   const output::ResolvedProjectionSurface &surface = *map.resolved_surface;
+  // A camera-anchored stage is placed afresh every frame from the evaluated
+  // scene camera. Only the surface's centre and axes move into the world; the
+  // eye stays the camera's own, so a world-fixed stage and a carried one
+  // differ in exactly one place. Generated meshes keep their cached
+  // stage-space vertices and follow through a placement instead, which keeps
+  // camera motion off the mesh cache entirely.
+  std::optional<output::StagePose> stage;
+  if (surface.stage.anchor == output::StageAnchor::Camera) {
+    const auto pose =
+        output::camera_stage_pose(frame.camera, surface.stage.eye);
+    if (!pose) {
+      return std::nullopt;
+    }
+    stage = pose.value();
+  }
+  const output::PhysicalSurface geometry =
+      stage.has_value() ? output::place_on_stage(surface.geometry, *stage)
+                        : surface.geometry;
+  // The roll a fitted mesh view takes. On a carried stage it is the face's
+  // own up edge, so a ceiling fits about the room rather than about whichever
+  // world axis the fitter falls back to when it looks straight up.
+  const scene::Vec3 stage_up =
+      stage.has_value() ? geometry.up : scene::Vec3{0.0F, 1.0F, 0.0F};
   switch (surface.shape) {
   case output::ProjectionSurfaceShape::Planar: {
     const auto built = output::perspective_view_for(
-        surface.geometry, map.source, frame.camera.eye, frame.camera.near_plane,
+        geometry, map.source, frame.camera.eye, frame.camera.near_plane,
         frame.camera.far_plane);
     if (!built) {
       return std::nullopt;
     }
-    return MappedProjection{
+    MappedProjection projection{
         SceneRenderView{built.value().matrices, built.value().eye,
                         built.value().forward, map.node.value()},
         {},
         std::nullopt};
+    projection.surface_up = geometry.up;
+    return projection;
   }
   case output::ProjectionSurfaceShape::HorizontalArc: {
     if (mesh == nullptr) {
       return std::nullopt;
     }
-    auto mesh_view = output::mesh_perspective_view_for(*mesh, frame.camera.eye,
-                                                       frame.camera.near_plane,
-                                                       frame.camera.far_plane);
+    std::optional<output::ProjectionMeshPlacement> placement;
+    if (stage.has_value()) {
+      placement = output::stage_mesh_placement(*stage);
+    }
+    auto mesh_view =
+        placement.has_value()
+            ? output::mesh_perspective_view_for(
+                  *mesh, *placement, frame.camera.eye,
+                  frame.camera.near_plane, frame.camera.far_plane, stage_up)
+            : output::mesh_perspective_view_for(*mesh, frame.camera.eye,
+                                                frame.camera.near_plane,
+                                                frame.camera.far_plane);
     if (!mesh_view) {
       return std::nullopt;
     }
@@ -734,13 +776,15 @@ namespace {
                         mesh_view.value().forward, map.node.value()};
     projection.retained_mesh = std::move(mesh);
     projection.mesh_view.emplace(std::move(mesh_view).value());
+    projection.mesh_placement = placement;
+    projection.surface_up = geometry.up;
     return projection;
   }
   case output::ProjectionSurfaceShape::ImportedMesh: {
     if (mesh == nullptr) {
       return std::nullopt;
     }
-    const output::ProjectionMeshPlacement placement{surface.geometry,
+    const output::ProjectionMeshPlacement placement{geometry,
                                                      surface.mesh_scale};
     if (surface.mesh_scale > output::max_imported_mesh_scale ||
         !output::valid(placement)) {
@@ -748,7 +792,7 @@ namespace {
     }
     auto mesh_view = output::mesh_perspective_view_for(
         *mesh, placement, frame.camera.eye, frame.camera.near_plane,
-        frame.camera.far_plane);
+        frame.camera.far_plane, stage_up);
     if (!mesh_view) {
       return std::nullopt;
     }
@@ -759,6 +803,7 @@ namespace {
     projection.retained_mesh = std::move(mesh);
     projection.mesh_view.emplace(std::move(mesh_view).value());
     projection.mesh_placement.emplace(placement);
+    projection.surface_up = geometry.up;
     return projection;
   }
   }

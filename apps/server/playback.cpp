@@ -2036,6 +2036,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::HardwareMoveRequest> pending_hardware_moves;
     std::vector<editor::HardwareLinkRequest> pending_hardware_links;
     std::vector<editor::HardwarePropertyEdit> pending_hardware_properties;
+    std::vector<editor::HardwareLinkRegionEdit> pending_hardware_link_regions;
+    std::vector<editor::HardwareWallsRequest> pending_hardware_walls;
     std::optional<editor::HardwareControlPortEdit>
         pending_hardware_control_port;
     std::optional<editor::HardwareCanvasEdit> pending_hardware_canvas;
@@ -2051,6 +2053,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
     std::vector<editor::FeedProjectionEdit> pending_feed_projection_edits;
     std::vector<editor::FeedOrganizeRequest> pending_feed_organize;
     std::optional<editor::FeedLayoutRequest> pending_feed_layout;
+    std::optional<editor::FeedStageEditRequest> pending_feed_stage;
     std::vector<editor::FeedSurfaceAddRequest> pending_feed_surface_adds;
     std::vector<editor::FeedSurfaceEditRequest> pending_feed_surface_edits;
     std::vector<editor::FeedSurfaceDeleteRequest> pending_feed_surface_deletes;
@@ -2498,6 +2501,8 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_hardware_moves = pending_hardware_moves,
         .pending_hardware_links = pending_hardware_links,
         .pending_hardware_properties = pending_hardware_properties,
+        .pending_hardware_link_regions = pending_hardware_link_regions,
+        .pending_hardware_walls = pending_hardware_walls,
         .pending_hardware_control_port = pending_hardware_control_port,
         .pending_hardware_canvas = pending_hardware_canvas,
         .pending_sync_policy = pending_sync_policy,
@@ -2510,6 +2515,7 @@ int run_director_show(cmd::DirectorScheduler &scheduler,
         .pending_feed_projection_edits = pending_feed_projection_edits,
         .pending_feed_organize = pending_feed_organize,
         .pending_feed_layout = pending_feed_layout,
+        .pending_feed_stage = pending_feed_stage,
         .pending_feed_surface_adds = pending_feed_surface_adds,
         .pending_feed_surface_edits = pending_feed_surface_edits,
         .pending_feed_surface_deletes = pending_feed_surface_deletes,

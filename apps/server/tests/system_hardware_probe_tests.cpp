@@ -1,3 +1,4 @@
+#include "mosaic_layout.hpp"
 #include "system_hardware_probe.hpp"
 
 #include <atomic>
@@ -91,6 +92,38 @@ void platform_collection_is_bounded_and_unambiguous() {
 #endif
 }
 
+// NVIDIA reports a 2x2 Mosaic of 1920x1080 displays as rectangles in grid
+// order, with unused slots zeroed; the tiles come out row by row whichever
+// edge convention the driver uses.
+void mosaic_viewports_become_tiles_row_by_row() {
+  const std::vector<app::MosaicViewport> exclusive{
+      {1920U, 1080U, 3840U, 2160U}, {0U, 0U, 1920U, 1080U},
+      {0U, 0U, 0U, 0U},            {1920U, 0U, 3840U, 1080U},
+      {0U, 1080U, 1920U, 2160U}};
+  const std::vector<net::ClusterMosaicTile> expected{
+      {0U, 0U, 1920U, 1080U},
+      {1920U, 0U, 1920U, 1080U},
+      {0U, 1080U, 1920U, 1080U},
+      {1920U, 1080U, 1920U, 1080U}};
+  PROBE_CHECK(app::mosaic_tiles_from_viewports(exclusive, 3840U, 2160U) ==
+              expected);
+
+  const std::vector<app::MosaicViewport> inclusive{
+      {0U, 0U, 1919U, 1079U}, {1920U, 0U, 3839U, 1079U},
+      {0U, 1080U, 1919U, 2159U}, {1920U, 1080U, 3839U, 2159U}};
+  PROBE_CHECK(app::mosaic_tiles_from_viewports(inclusive, 3840U, 2160U) ==
+              expected);
+
+  // One display is an ordinary output, not a grid.
+  const std::vector<app::MosaicViewport> single{{0U, 0U, 3840U, 2160U}};
+  PROBE_CHECK(app::mosaic_tiles_from_viewports(single, 3840U, 2160U).empty());
+
+  // Without NVAPI in the build, nothing is ever claimed to be Mosaic.
+#if !defined(MEDIASERVER_HAS_NVAPI_RUNTIME)
+  PROBE_CHECK(app::query_mosaic_tiles(R"(\\.\DISPLAY1)", 3840U, 2160U).empty());
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -100,6 +133,8 @@ int main() {
        &collection_failures_publish_an_explicit_state},
       {"platform collection is bounded",
        &platform_collection_is_bounded_and_unambiguous},
+      {"mosaic viewports become tiles row by row",
+       &mosaic_viewports_become_tiles_row_by_row},
   };
   std::size_t failures{};
   for (const auto &[name, test] : tests) {

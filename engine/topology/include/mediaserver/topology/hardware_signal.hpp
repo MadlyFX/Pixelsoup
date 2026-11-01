@@ -38,6 +38,28 @@ enum class HardwareSignalIssue : core::u8 {
 // 59.94 for 60000/1001, never 59.9400599.
 inline constexpr core::u32 refresh_tolerance_millihertz = 10U;
 
+// A rate in thousandths of a hertz as an exact fraction: the NTSC family
+// (23.976, 29.97, 59.94...) becomes n*1000/1001, a whole rate n/1, and
+// anything else stays in thousandths. Zero gives 0/1.
+struct HardwareRefresh final {
+  core::u32 numerator{};
+  core::u32 denominator{1U};
+
+  bool operator==(const HardwareRefresh &) const = default;
+};
+[[nodiscard]] HardwareRefresh
+refresh_from_millihertz(core::u32 millihertz) noexcept;
+
+// The highest rate an operator may type, in hertz.
+inline constexpr double max_refresh_hertz = 1'000.0;
+
+// A rate typed in hertz (23.976, 59.94, 50) as the same exact fraction,
+// held to 0.001..max_refresh_hertz; a value that is not a number is 0/1.
+[[nodiscard]] HardwareRefresh refresh_from_hertz(double hertz) noexcept;
+
+// How many decimals show a rate as typed: 60, 59.94, 23.976.
+[[nodiscard]] int refresh_decimals(core::u32 millihertz) noexcept;
+
 struct HardwareSignalCheck final {
   doc::NodeId link{};
   doc::NodeId render_server{};
@@ -48,7 +70,8 @@ struct HardwareSignalCheck final {
   // The most useful thing to tell the operator. An EDID mismatch outranks
   // the mode mismatch it causes, since fixing it fixes both.
   HardwareSignalIssue issue{HardwareSignalIssue::None};
-  // What the output is set to send.
+  // What the output is set to send down this cable: its region of the
+  // output, at the output's rate.
   core::u32 width{};
   core::u32 height{};
   core::u32 refresh_millihertz{};
@@ -83,6 +106,35 @@ struct HardwareOutputMode final {
 [[nodiscard]] HardwareOutputMode
 output_mode_for(const HardwareMap &map, const HardwareDevice &render_server,
                 core::u8 output_port) noexcept;
+
+// Where an unauthored cable's region came from.
+enum class HardwareRegionSource : core::u8 {
+  // The cable's own authored region, cut to the output.
+  Authored,
+  // The output's only cable carries all of it.
+  WholeOutput,
+  // The tile of an NVIDIA Mosaic surface the render machine reported.
+  MosaicTile,
+  // An even left-to-right share among the output's cables.
+  EvenShare,
+};
+
+struct HardwareLinkRegion final {
+  HardwareOutputRegion region{};
+  HardwareRegionSource source{HardwareRegionSource::WholeOutput};
+
+  bool operator==(const HardwareLinkRegion &) const = default;
+};
+
+// The part of its Render Server output a cable carries. An authored region
+// wins. Otherwise the output's cables, ordered by where their targets sit on
+// the map (left to right) and then by input, take the Mosaic tiles the
+// render machine reports for the output's bound display in row order, or
+// else equal slices of its width. A cable from anything other than a Render
+// Server video output carries nothing (an empty region).
+[[nodiscard]] HardwareLinkRegion
+link_output_region(const HardwareMap &map, const HardwareLink &link,
+                   const HardwareRuntimeSnapshot &runtime);
 
 // "3840x2160 at 59.94", for a check's text.
 [[nodiscard]] std::string format_video_mode(core::u32 width, core::u32 height,

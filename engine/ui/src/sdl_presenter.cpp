@@ -266,6 +266,13 @@ record_inner_frustum(std::optional<render::IcvfxStage> &stage,
         once("this output is not mapped to a planar LED surface");
         return scene_target;
     }
+    if (map.resolved_surface->stage.anchor == output::StageAnchor::Camera) {
+        // A tracked plate is framed on a wall that stands still in the world.
+        // A stage carried by the scene camera has no such wall to frame it on.
+        once("the LED stage follows the scene camera, so there is no fixed "
+             "wall for a tracked plate");
+        return scene_target;
+    }
     // One region per tracked camera, in the scene's composite order, so the
     // stage draws the stack the same way round the scene named it.
     std::array<scene::InnerFrustumRegion, scene::max_tracked_cameras> regions{};

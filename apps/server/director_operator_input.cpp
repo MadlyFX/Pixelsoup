@@ -135,6 +135,8 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_hardware_moves.clear();
     pending_hardware_links.clear();
     pending_hardware_properties.clear();
+    pending_hardware_link_regions.clear();
+    pending_hardware_walls.clear();
     pending_hardware_control_port.reset();
     pending_hardware_canvas.reset();
     pending_sync_policy.reset();
@@ -147,6 +149,7 @@ void DirectorShowLoop::clear_pending_project_authoring() {
     pending_feed_projection_edits.clear();
     pending_feed_organize.clear();
     pending_feed_layout.reset();
+    pending_feed_stage.reset();
     pending_feed_surface_adds.clear();
     pending_feed_surface_edits.clear();
     pending_feed_surface_deletes.clear();

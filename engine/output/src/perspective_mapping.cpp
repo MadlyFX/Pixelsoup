@@ -649,6 +649,132 @@ scene::Vec3 place_projection_mesh_position(
     return placed_position(local_position, basis);
 }
 
+ProjectionMeshPlacement stage_mesh_placement(const StagePose& pose) noexcept {
+    // A unit "surface" whose basis is the stage's own axes: placed_position
+    // then reads origin + right*x + up*y + back*z, which is stage_point.
+    PhysicalSurface frame{};
+    frame.center = pose.origin;
+    frame.right = pose.right;
+    frame.up = pose.up;
+    frame.width = 1.0F;
+    frame.height = 1.0F;
+    frame.raster = scene::Canvas{1U, 1U};
+    return ProjectionMeshPlacement{frame, 1.0F};
+}
+
+core::Result<StagePose, PerspectiveMappingError>
+camera_stage_pose(const scene::Camera& camera, scene::Vec3 eye) noexcept {
+    using PoseResult = core::Result<StagePose, PerspectiveMappingError>;
+    if (!finite(camera.eye) || !finite(camera.target) || !finite(camera.up)
+        || !finite(eye)) {
+        return PoseResult::failure(PerspectiveMappingError::InvalidStage);
+    }
+    const scene::Vec3 look = camera.target - camera.eye;
+    const float look_length = scene::length(look);
+    if (!finite(look_length) || !(look_length > 1.0e-12F)) {
+        return PoseResult::failure(PerspectiveMappingError::InvalidStage);
+    }
+    const scene::Vec3 forward = look * (1.0F / look_length);
+    const scene::Vec3 side = scene::cross(forward, camera.up);
+    const float side_length = scene::length(side);
+    if (!finite(side_length) || !(side_length > 1.0e-12F)) {
+        // Looking straight along `up` leaves the roll undefined. Choosing one
+        // would turn every face of the room by an amount nobody authored.
+        return PoseResult::failure(PerspectiveMappingError::InvalidStage);
+    }
+    StagePose pose{};
+    pose.right = side * (1.0F / side_length);
+    pose.up = scene::cross(pose.right, forward);
+    pose.back = -forward;
+    pose.origin = camera.eye
+        - (pose.right * eye.x + pose.up * eye.y + pose.back * eye.z);
+    if (!finite(pose.origin) || !finite(pose.right) || !finite(pose.up)
+        || !finite(pose.back)) {
+        return PoseResult::failure(PerspectiveMappingError::InvalidStage);
+    }
+    return PoseResult::success(pose);
+}
+
+scene::Vec3 stage_point(const StagePose& pose, scene::Vec3 point) noexcept {
+    return pose.origin + pose.right * point.x + pose.up * point.y
+        + pose.back * point.z;
+}
+
+scene::Vec3 stage_direction(const StagePose& pose,
+                            scene::Vec3 direction) noexcept {
+    return pose.right * direction.x + pose.up * direction.y
+        + pose.back * direction.z;
+}
+
+PhysicalSurface place_on_stage(const PhysicalSurface& surface,
+                               const StagePose& pose) noexcept {
+    PhysicalSurface placed = surface;
+    placed.center = stage_point(pose, surface.center);
+    placed.right = stage_direction(pose, surface.right);
+    placed.up = stage_direction(pose, surface.up);
+    return placed;
+}
+
+namespace {
+
+// The horizontal normal of a pitch-zero face with the given right edge, which
+// is the direction a positive pitch tips the top edge towards.
+[[nodiscard]] scene::Vec3 level_normal(scene::Vec3 level_right) noexcept {
+    return scene::Vec3{-level_right.z, 0.0F, level_right.x};
+}
+
+void set_yaw_and_pitch_basis(PhysicalSurface& surface, float yaw_turns,
+                             SurfacePitchBasis pitch) noexcept {
+    const float cosine = scene::deterministic::cos_turns(yaw_turns);
+    const float sine = scene::deterministic::sin_turns(yaw_turns);
+    surface.right = scene::Vec3{cosine, 0.0F, -sine};
+    if (pitch.sine == 0.0F) {
+        // Exactly the upright basis an untilted wall has always had (or its
+        // half-turn, for a face hung upside down).
+        surface.up = scene::Vec3{0.0F, pitch.cosine, 0.0F};
+        return;
+    }
+    const scene::Vec3 normal = level_normal(surface.right);
+    surface.up = scene::Vec3{normal.x * pitch.sine, pitch.cosine,
+                             normal.z * pitch.sine};
+}
+
+} // namespace
+
+void orient(PhysicalSurface& surface, float yaw_turns,
+            float pitch_turns) noexcept {
+    SurfacePitchBasis pitch{};
+    if (pitch_turns != 0.0F) {
+        pitch.cosine = scene::deterministic::cos_turns(pitch_turns);
+        pitch.sine = scene::deterministic::sin_turns(pitch_turns);
+    }
+    set_yaw_and_pitch_basis(surface, yaw_turns, pitch);
+}
+
+SurfacePitchBasis surface_pitch_basis(const PhysicalSurface& surface) noexcept {
+    const scene::Vec3 level = scene::Vec3{surface.right.x, 0.0F,
+                                          surface.right.z};
+    const float level_length = scene::length(level);
+    if (!finite(level_length) || !(level_length > 1.0e-12F)) {
+        return SurfacePitchBasis{};
+    }
+    const scene::Vec3 normal = level_normal(level * (1.0F / level_length));
+    const float cosine = surface.up.y;
+    const float sine = scene::dot(surface.up, normal);
+    const float magnitude = std::sqrt(cosine * cosine + sine * sine);
+    if (!finite(magnitude) || !(magnitude > 1.0e-12F)) {
+        return SurfacePitchBasis{};
+    }
+    if (sine == 0.0F) {
+        return SurfacePitchBasis{cosine < 0.0F ? -1.0F : 1.0F, 0.0F};
+    }
+    return SurfacePitchBasis{cosine / magnitude, sine / magnitude};
+}
+
+void set_yaw_keeping_pitch(PhysicalSurface& surface, float yaw_turns) noexcept {
+    set_yaw_and_pitch_basis(surface, yaw_turns, surface_pitch_basis(surface));
+}
+
 core::Result<ProjectionMesh, PerspectiveMappingError>
 horizontal_arc_mesh(const PhysicalSurface& surface, float total_arc_turns,
                     core::u32 columns) noexcept {

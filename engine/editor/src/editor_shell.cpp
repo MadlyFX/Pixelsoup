@@ -2379,6 +2379,9 @@ struct EditorShell::Impl final {
 
   core::u64 edit_gesture{};
   core::u64 hardware_edit_gesture{};
+  // Processors whose reported screens have been offered as wall cards
+  // this session, so a wall the operator deletes does not come back.
+  std::vector<doc::NodeId> walls_offered;
   core::u64 feed_mapping_edit_gesture{};
   core::u64 compositor_edit_gesture{};
   HistoryContext history_context{HistoryContext::Scene};
@@ -3177,6 +3180,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     impl.navigate_middle = false;
     impl.navigate_right = false;
     impl.hardware_edit_gesture = 0U;
+    impl.walls_offered.clear();
     impl.feed_mapping_edit_gesture = 0U;
     impl.compositor_edit_gesture = 0U;
     impl.clip_edit_gesture = 0U;
@@ -3216,6 +3220,31 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
     } else {
       impl.model_thumbnails.queue.clear();
     }
+  }
+
+  // A processor's first report of its screens offers a wall card for each,
+  // cabled from its LED OUT, as a starting point. Once per processor per
+  // session: the operator may delete or change what it placed.
+  try {
+    for (const topology::HardwareProcessorNode &report :
+         hardware_runtime.processors) {
+      if (report.screens.empty() || report.stale ||
+          report.reachability !=
+              topology::HardwareRuntimeReachability::Online ||
+          std::find(impl.walls_offered.begin(), impl.walls_offered.end(),
+                    report.device) != impl.walls_offered.end()) {
+        continue;
+      }
+      impl.walls_offered.push_back(report.device);
+      std::vector<topology::HardwareWallProposal> walls =
+          topology::proposed_walls(hardware_map, report);
+      if (!walls.empty()) {
+        result.hardware_walls.push_back(HardwareWallsRequest{
+            report.device, std::move(walls), impl.next_edit_gesture++});
+      }
+    }
+  } catch (const std::bad_alloc &) {
+    result.hardware_walls.clear();
   }
 
   // Media stream discovery can take seconds for multi-gigabyte MOV files.
@@ -4405,9 +4434,8 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         render::MappedProjection *const mapped =
             &program_mapped_projection.value();
         projection.forward = mapped->render_view.forward;
-        if (program_output->resolved_surface.has_value()) {
-          projection.up = program_output->resolved_surface->geometry.up;
-        }
+        // In the world, after a camera-anchored stage has carried the surface.
+        projection.up = mapped->surface_up;
         const output::ProjectionMesh *const mesh =
             mapped->projection_mesh();
         if (mesh != nullptr && mapped->mesh_view.has_value()) {
@@ -6386,11 +6414,15 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                                   header.y + 2.0F, 26.0F, 24.0F};
         const gui::Rect copy_scene{header.right() - 29.0F,
                                    header.y + 2.0F, 26.0F, 24.0F};
+        // The list scrolls to the scene a click adds once it exists. This
+        // frame's rows still index the current list, so the scroll is applied
+        // after they are drawn and clamped by the next frame.
+        bool scroll_to_added = false;
         if (icon_button(ui, gui::ui_id("editor.scene.create"), add_scene,
                         gui::Icon::Plus, "New scene", false,
                         !switcher.rehearsal_locked)) {
           result.switcher = SwitcherRequest{SwitcherAction::CreateScene};
-          impl.scene_list_offset = max_offset + 1U;
+          scroll_to_added = true;
         }
         if (icon_button(ui, gui::ui_id("editor.scene.duplicate"), copy_scene,
                         gui::Icon::Duplicate,
@@ -6398,7 +6430,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                         !switcher.rehearsal_locked)) {
           result.switcher = SwitcherRequest{SwitcherAction::DuplicateScene,
                                             authored_stage.id, 0U};
-          impl.scene_list_offset = max_offset + 1U;
+          scroll_to_added = true;
         }
 
         float row_y = header.bottom() + 2.0F;
@@ -6627,6 +6659,7 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
                              2.0F, thumb},
                    theme.widget_hover);
         }
+        if (scroll_to_added) impl.scene_list_offset = max_offset + 1U;
         if (impl.scene_menu_scene.has_value()) {
           const gui::UiId menu_id = gui::ui_id("editor.scene-menu");
           const scene::SceneId menu_scene = *impl.scene_menu_scene;
@@ -7297,7 +7330,26 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         if (mapping.link->output_binding.has_value()) {
           topology::HardwareOutputBinding &binding =
               *mapping.link->output_binding;
-          if (binding.node == doc::NodeId{}) {
+          // A moved cable hands its feed, and the region mapped to it, to the
+          // output it moved to - when it was its old output's last cable, so
+          // the old binding goes with it.
+          const topology::HardwareLink *const replaced =
+              hardware_map.link(mapping.link->replaces);
+          const bool replaced_shared =
+              replaced != nullptr &&
+              std::any_of(hardware_map.links.begin(), hardware_map.links.end(),
+                          [&](const topology::HardwareLink &other) {
+                            return other.node != replaced->node &&
+                                   other.from == replaced->from;
+                          });
+          const topology::HardwareOutputBinding *const replaced_binding =
+              replaced != nullptr && !replaced_shared
+                  ? hardware_map.output_binding_for(replaced->from.device,
+                                                    replaced->from.port)
+                  : nullptr;
+          if (binding.node == doc::NodeId{} && replaced_binding != nullptr) {
+            binding.feed_index = replaced_binding->feed_index;
+          } else if (binding.node == doc::NodeId{}) {
             std::optional<core::u32> free_feed;
             if (feed_map.maps.size() < output::max_output_maps) {
               for (core::u32 index = 0U; index < output::max_output_maps;
@@ -7334,6 +7386,14 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
         }
         mapping.property_edit->gesture = impl.hardware_edit_gesture;
         result.hardware_property_edits.push_back(mapping.property_edit.value());
+      }
+      if (mapping.link_region_edit.has_value()) {
+        if (impl.hardware_edit_gesture == 0U) {
+          impl.hardware_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.link_region_edit->gesture = impl.hardware_edit_gesture;
+        result.hardware_link_region_edits.push_back(
+            mapping.link_region_edit.value());
       }
       if (mapping.control_port_edit.has_value()) {
         if (mapping.place.has_value() && mapping.place->machine.has_value()) {
@@ -7447,6 +7507,13 @@ EditorShell::frame(const scene::Scene &scene, const EditorTimeline &timeline,
       if (mapping.layout.has_value()) {
         mapping.layout->gesture = impl.next_edit_gesture++;
         result.feed_layout = std::move(mapping.layout);
+      }
+      if (mapping.stage_edit.has_value()) {
+        if (impl.feed_mapping_edit_gesture == 0U) {
+          impl.feed_mapping_edit_gesture = impl.next_edit_gesture++;
+        }
+        mapping.stage_edit->gesture = impl.feed_mapping_edit_gesture;
+        result.feed_stage = std::move(mapping.stage_edit);
       }
       if (mapping.surface_add.has_value()) {
         auto request = std::move(*mapping.surface_add);

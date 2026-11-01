@@ -53,5 +53,11 @@ inline constexpr std::string_view from_device = "from_device";
 inline constexpr std::string_view from_port = "from_port";
 inline constexpr std::string_view to_device = "to_device";
 inline constexpr std::string_view to_port = "to_port";
+// The part of a Render Server output a cable carries, in output pixels. Absent
+// means the cable's share of the output (see link_output_region).
+inline constexpr std::string_view region_x = "region_x";
+inline constexpr std::string_view region_y = "region_y";
+inline constexpr std::string_view region_width = "region_width";
+inline constexpr std::string_view region_height = "region_height";
 
 } // namespace mediaserver::topology::schema

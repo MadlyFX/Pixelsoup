@@ -31,7 +31,12 @@ struct MappedProjection final {
   std::optional<output::MeshPerspectiveView> mesh_view;
   // Present only for imported geometry, whose retained vertices remain in
   // immutable file-local coordinates across live calibration animation.
+  // Imported geometry, and generated geometry carried by a camera-anchored
+  // stage, whose cached vertices stay in stage coordinates.
   std::optional<output::ProjectionMeshPlacement> mesh_placement;
+  // The world-space up axis of the surface this view was built for, after any
+  // stage placement. What an interactive view orients its gizmo with.
+  scene::Vec3 surface_up{0.0F, 1.0F, 0.0F};
 
   [[nodiscard]] const output::ProjectionMesh *projection_mesh() const noexcept;
 };

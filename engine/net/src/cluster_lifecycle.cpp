@@ -1154,6 +1154,9 @@ enum class ResponseParse : std::uint8_t {
                 ((target.width == 0U) == (target.height == 0U)) &&
                 ((target.refresh_numerator == 0U) ==
                  (target.refresh_denominator == 0U));
+        for (const ClusterMosaicTile& tile : target.mosaic_tiles) {
+            valid = valid && tile.width != 0U && tile.height != 0U;
+        }
     }
     if (!valid) {
         info = failed_machine_info(
@@ -1184,6 +1187,11 @@ enum class ResponseParse : std::uint8_t {
     for (ClusterDisplayTargetInfo& target : info.display_targets) {
         truncate_utf8(target.name, max_cluster_machine_display_name_bytes,
                       info.truncated);
+        if (target.mosaic_tiles.size() > max_cluster_display_mosaic_tiles) {
+            // Half a grid would misplace every cable; report none.
+            target.mosaic_tiles.clear();
+            info.truncated = true;
+        }
     }
     return true;
 }
@@ -1249,10 +1257,16 @@ enum class ResponseParse : std::uint8_t {
         put_u32(body, target.refresh_numerator);
         put_u32(body, target.refresh_denominator);
         body.push_back(static_cast<std::byte>(target.name.size()));
-        body.push_back(std::byte{});
+        body.push_back(static_cast<std::byte>(target.mosaic_tiles.size()));
         body.push_back(std::byte{});
         body.push_back(std::byte{});
         put_text(body, target.name);
+        for (const ClusterMosaicTile& tile : target.mosaic_tiles) {
+            put_u32(body, tile.x);
+            put_u32(body, tile.y);
+            put_u32(body, tile.width);
+            put_u32(body, tile.height);
+        }
     }
     const auto mac_input = machine_info_response_mac_input(body, nonce);
     put_bytes(body, hmac(secret, mac_input));
@@ -1395,11 +1409,13 @@ enum class ResponseParse : std::uint8_t {
         const auto record_flags = std::to_integer<std::uint8_t>(record[21U]);
         const std::size_t name_length =
             std::to_integer<std::uint8_t>(record[40U]);
+        const std::size_t tile_count =
+            std::to_integer<std::uint8_t>(record[41U]);
         if (technology > static_cast<std::uint8_t>(
                              ClusterVideoOutputTechnology::Other) ||
             (record_flags & ~3U) != 0U || get_u16(record, 22U) != 0U ||
-            record[41U] != std::byte{} || record[42U] != std::byte{} ||
-            record[43U] != std::byte{}) {
+            tile_count > max_cluster_display_mosaic_tiles ||
+            record[42U] != std::byte{} || record[43U] != std::byte{}) {
             return ResponseParse::Protocol;
         }
         ClusterDisplayTargetInfo target{};
@@ -1426,6 +1442,24 @@ enum class ResponseParse : std::uint8_t {
                                 max_cluster_machine_display_name_bytes,
                                 target.name)) {
             return ResponseParse::Protocol;
+        }
+        constexpr std::size_t tile_bytes = 16U;
+        if (cursor > tag_offset ||
+            tile_count * tile_bytes > tag_offset - cursor) {
+            return ResponseParse::Protocol;
+        }
+        target.mosaic_tiles.reserve(tile_count);
+        for (std::size_t tile_index = 0U; tile_index < tile_count;
+             ++tile_index) {
+            const auto tile_record = body.subspan(cursor, tile_bytes);
+            const ClusterMosaicTile tile{
+                get_u32(tile_record, 0U), get_u32(tile_record, 4U),
+                get_u32(tile_record, 8U), get_u32(tile_record, 12U)};
+            if (tile.width == 0U || tile.height == 0U) {
+                return ResponseParse::Protocol;
+            }
+            target.mosaic_tiles.push_back(tile);
+            cursor += tile_bytes;
         }
         decoded.display_targets.push_back(std::move(target));
     }

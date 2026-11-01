@@ -12,6 +12,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -766,12 +767,128 @@ void invalid_imported_mesh_scales_and_nonfinite_dormant_scales_are_rejected() {
     OUTPUT_CHECK(invalid_arc.counters().rejected == 1U);
 }
 
+[[nodiscard]] doc::Node camera_stage(core::u64 id, double eye_x, double eye_y,
+                                     double eye_z) {
+    return node(id, schema::stage_type,
+                {text(schema::stage_anchor, schema::anchor_camera),
+                 real(schema::stage_eye_x, eye_x),
+                 real(schema::stage_eye_y, eye_y),
+                 real(schema::stage_eye_z, eye_z)});
+}
+
+[[nodiscard]] doc::Node surface_map(core::u64 id) {
+    return node(id, schema::map_type,
+                {whole(schema::node_index, 0), whole(schema::source_x, 0),
+                 whole(schema::source_y, 0),
+                 whole(schema::source_width, 3'840),
+                 whole(schema::source_height, 2'160),
+                 text(schema::projection, schema::projection_planar_surface),
+                 whole(schema::surface_id, 50)});
+}
+
+void a_project_without_a_stage_is_world_fixed_and_keeps_its_digest() {
+    std::vector<doc::Node> nodes{front_surface(), surface_map(1U)};
+    output::FeedMapModel without;
+    without.reset(root_of(nodes));
+    const output::FeedMap plain = without.evaluate();
+    OUTPUT_CHECK(plain.stage == output::StagePlacement{});
+    OUTPUT_CHECK(plain.stage_node == doc::NodeId{});
+    OUTPUT_CHECK(plain.maps.front().resolved_surface->stage ==
+                 output::StagePlacement{});
+
+    // Authoring the default explicitly is still the same picture, and so the
+    // same digest: nodes cannot disagree about a stage nobody moved.
+    nodes.push_back(node(7U, schema::stage_type,
+                         {text(schema::stage_anchor, schema::anchor_world)}));
+    output::FeedMapModel explicit_world;
+    explicit_world.reset(root_of(nodes));
+    const output::FeedMap world = explicit_world.evaluate();
+    OUTPUT_CHECK(world.stage_node == doc::NodeId{7U});
+    OUTPUT_CHECK(output::digest(world) == output::digest(plain));
+}
+
+void a_camera_stage_reaches_every_resolved_surface_and_the_digest() {
+    std::vector<doc::Node> nodes{front_surface(), surface_map(1U),
+                                 camera_stage(9U, 0.25, 1.6, -0.5)};
+    output::FeedMapModel model;
+    model.reset(root_of(nodes));
+    OUTPUT_CHECK(model.counters().rejected == 0U);
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.stage_node == doc::NodeId{9U});
+    OUTPUT_CHECK(built.stage.anchor == output::StageAnchor::Camera);
+    OUTPUT_CHECK(built.stage.eye == (scene::Vec3{0.25F, 1.6F, -0.5F}));
+    const output::OutputMap* const map = built.map_node(doc::NodeId{1U});
+    OUTPUT_CHECK(map != nullptr && map->resolved_surface.has_value());
+    OUTPUT_CHECK(map->resolved_surface->stage == built.stage);
+
+    output::FeedMapModel world;
+    world.reset(root_of({front_surface(), surface_map(1U)}));
+    const core::u64 world_digest = output::digest(world.evaluate());
+    OUTPUT_CHECK(output::digest(built) != world_digest);
+
+    // One eye axis a step apart is a different stage.
+    output::FeedMapModel moved;
+    moved.reset(root_of({front_surface(), surface_map(1U),
+                         camera_stage(9U, 0.25, 1.6, -0.75)}));
+    OUTPUT_CHECK(output::digest(moved.evaluate()) != output::digest(built));
+}
+
+void the_lowest_valid_stage_node_wins_and_bad_ones_are_counted() {
+    const doc::Node invalid = node(10U, schema::stage_type,
+                                   {text(schema::stage_anchor, "ceiling")});
+    const doc::Root before = root_of({camera_stage(30U, 0.0, 2.0, 0.0),
+                                      camera_stage(20U, 0.0, 1.0, 0.0),
+                                      invalid});
+    output::FeedMapModel model;
+    model.reset(before);
+    OUTPUT_CHECK(model.counters().rejected == 1U);
+    const output::FeedMap built = model.evaluate();
+    OUTPUT_CHECK(built.stage_node == doc::NodeId{20U});
+    OUTPUT_CHECK(built.stage.eye.y == 1.0F);
+
+    model.apply(doc::diff(
+        before, root_of({camera_stage(30U, 0.0, 2.0, 0.0), invalid})));
+    OUTPUT_CHECK(model.evaluate().stage_node == doc::NodeId{30U});
+}
+
+void an_animated_yaw_keeps_a_ceiling_facing_down() {
+    doc::Node ceiling = front_surface();
+    // A quarter turn of pitch: the face lies flat, looking down.
+    ceiling.properties.insert_or_assign(std::string{schema::up_y},
+                                        doc::PropertyValue{0.0});
+    ceiling.properties.insert_or_assign(std::string{schema::up_z},
+                                        doc::PropertyValue{1.0});
+    output::FeedMapModel model;
+    model.reset(root_of(
+        {ceiling,
+         surface_channel(11U, 50U, scene_schema::rotation_yaw, 0.0, 0.25)}));
+    const output::FeedMap turned =
+        model.evaluate(scene::SceneTime{10U, 24U, 1U});
+    const output::ProjectionSurface* const surface =
+        turned.surface_for(doc::NodeId{50U});
+    OUTPUT_CHECK(surface != nullptr);
+    const scene::Vec3 normal =
+        scene::cross(surface->geometry.right, surface->geometry.up);
+    OUTPUT_CHECK(std::abs(normal.x) < 1.0e-6F);
+    OUTPUT_CHECK(std::abs(normal.y + 1.0F) < 1.0e-6F);
+    OUTPUT_CHECK(std::abs(normal.z) < 1.0e-6F);
+    OUTPUT_CHECK(std::abs(surface->geometry.right.z + 1.0F) < 1.0e-6F);
+}
+
 struct Case final {
     const char* name;
     void (*function)();
 };
 
-constexpr std::array<Case, 19U> cases{{
+constexpr std::array<Case, 23U> cases{{
+    {"a project without a stage is world fixed and keeps its digest",
+     &a_project_without_a_stage_is_world_fixed_and_keeps_its_digest},
+    {"a camera stage reaches every resolved surface and the digest",
+     &a_camera_stage_reaches_every_resolved_surface_and_the_digest},
+    {"the lowest valid stage node wins and bad ones are counted",
+     &the_lowest_valid_stage_node_wins_and_bad_ones_are_counted},
+    {"an animated yaw keeps a ceiling facing down",
+     &an_animated_yaw_keeps_a_ceiling_facing_down},
     {"list order and names are authored and digested",
      &list_order_and_names_are_authored_and_digested},
     {"a document becomes the feed map it describes",

@@ -44,6 +44,27 @@ enum class ProjectionSurfaceShape : core::u8 {
     ImportedMesh,
 };
 
+// Where the stage that every surface is calibrated in stands. World is the
+// virtual-production volume: surfaces are world coordinates and the camera
+// moves among them. Camera carries the whole stage with the scene camera, so a
+// wall, a ceiling and side walls keep facing where they physically face for
+// the viewer while the camera flies - an immersive room or CAVE.
+enum class StageAnchor : core::u8 {
+    World,
+    Camera,
+};
+
+struct StagePlacement final {
+    StageAnchor anchor{StageAnchor::World};
+    // Where the viewer stands, in stage coordinates. A camera-anchored stage
+    // puts this point on the scene camera's eye, so the room is measured from
+    // its own floor while the sweet spot moves independently of it. Unused by
+    // a world-fixed stage, whose eye is the camera's.
+    scene::Vec3 eye{};
+
+    bool operator==(const StagePlacement&) const = default;
+};
+
 // Imported calibration geometry is expressed in stage units after this
 // multiplier is applied. Bound it before an asset loader sees it so a damaged
 // project cannot manufacture infinities or unusably large world coordinates.
@@ -90,6 +111,9 @@ struct ResolvedProjectionSurface final {
     // Authored stable identity copied from ProjectionSurface.
     doc::NodeId mesh_asset{};
     scene::WallColorSettings color;
+    // The project's stage, copied here so a presenter holding one map can
+    // place its surface without reaching back for the whole feed map.
+    StagePlacement stage;
 
     bool operator==(const ResolvedProjectionSurface&) const = default;
 };
@@ -157,6 +181,11 @@ struct FeedMap final {
     // List order, then document id. Surfaces are project setup data and remain in
     // the evaluated value even when no feed currently references them.
     std::vector<ProjectionSurface> surfaces;
+
+    // The project's stage. `stage_node` is the document node that authored
+    // it, or zero for a project that never set one (a world-fixed stage).
+    StagePlacement stage;
+    doc::NodeId stage_node{};
 
     // Every viewport bound to one logical output window. The returned span is
     // empty when the window is unmapped.

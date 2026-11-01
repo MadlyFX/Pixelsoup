@@ -952,6 +952,42 @@ mesh_surface_visual(const output::ProjectionMesh& mesh,
     return visual;
 }
 
+// The outline of `surface` in the world. `mesh` is its generated or imported
+// geometry when one is resolved. A camera-anchored stage places the authored
+// stage coordinates first; a generated mesh keeps its stage-space vertices in
+// the cache and is carried vertex by vertex here.
+[[nodiscard]] SurfaceVisual
+surface_visual(const output::ProjectionSurface& surface,
+               const output::ProjectionMesh* mesh,
+               const std::optional<output::StagePose>& stage) {
+    output::ProjectionSurface placed = surface;
+    if (stage.has_value()) {
+        placed.geometry = output::place_on_stage(surface.geometry, *stage);
+    }
+    switch (surface.shape) {
+    case output::ProjectionSurfaceShape::Planar:
+        return planar_surface_visual(placed);
+    case output::ProjectionSurfaceShape::HorizontalArc: {
+        if (mesh == nullptr) {
+            return planar_surface_visual(placed, true);
+        }
+        SurfaceVisual visual = mesh_surface_visual(*mesh, true);
+        if (stage.has_value()) {
+            for (scene::Vec3& vertex : visual.vertices) {
+                vertex = output::stage_point(*stage, vertex);
+            }
+        }
+        return visual;
+    }
+    case output::ProjectionSurfaceShape::ImportedMesh:
+        return mesh != nullptr
+                   ? mesh_surface_visual(*mesh, false, &placed.geometry,
+                                         surface.mesh_scale)
+                   : planar_surface_visual(placed, true);
+    }
+    return SurfaceVisual{};
+}
+
 struct ProjectedSurface final {
     const output::ProjectionSurface* surface{};
     output::ProjectionSurface display;
@@ -3473,7 +3509,27 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
         selected_surface_value = nullptr;
         surface_dragging_ = false;
     }
-    if (role_ == ViewportRole::Stage && show_overlays_ && feed_map != nullptr) {
+    // A stage carried by the scene camera is drawn where the authored camera
+    // puts it, so the operator sees the room the camera is carrying. Its
+    // gizmo would move a surface through world coordinates the document does
+    // not hold, so on that stage a surface is picked here and placed in stage
+    // coordinates from Feed Mapping.
+    const bool camera_stage =
+        feed_map != nullptr &&
+        feed_map->stage.anchor == output::StageAnchor::Camera;
+    std::optional<output::StagePose> stage_pose;
+    if (camera_stage) {
+        selected_surface_value = nullptr;
+        surface_dragging_ = false;
+        const auto pose = output::camera_stage_pose(
+            camera_overlay != nullptr ? *camera_overlay : scene.camera,
+            feed_map->stage.eye);
+        if (pose) {
+            stage_pose = pose.value();
+        }
+    }
+    if (role_ == ViewportRole::Stage && show_overlays_ && feed_map != nullptr &&
+        (!camera_stage || stage_pose.has_value())) {
         projected_surfaces.reserve(feed_map->surfaces.size());
         for (const output::ProjectionSurface& surface : feed_map->surfaces) {
             ProjectedSurface projected{};
@@ -3484,27 +3540,11 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     ? surface_preview_.value()
                     : surface;
             const output::ProjectionSurface& display = projected.display;
-            switch (display.shape) {
-            case output::ProjectionSurfaceShape::Planar:
-                projected.visual = planar_surface_visual(display);
-                break;
-            case output::ProjectionSurfaceShape::HorizontalArc: {
-                const auto mesh = projection_mesh_for(display);
-                projected.visual = mesh != nullptr
-                                       ? mesh_surface_visual(*mesh, true)
-                                       : planar_surface_visual(display, true);
-                break;
-            }
-            case output::ProjectionSurfaceShape::ImportedMesh: {
-                const auto mesh = projection_mesh_for(display);
-                projected.visual =
-                    mesh != nullptr
-                        ? mesh_surface_visual(*mesh, false, &display.geometry,
-                                              display.mesh_scale)
-                        : planar_surface_visual(display, true);
-                break;
-            }
-            }
+            const auto mesh =
+                display.shape == output::ProjectionSurfaceShape::Planar
+                    ? std::shared_ptr<const output::ProjectionMesh>{}
+                    : projection_mesh_for(display);
+            projected.visual = surface_visual(display, mesh.get(), stage_pose);
             project_surface(projected, frame.image, scene);
             projected_surfaces.push_back(std::move(projected));
         }
@@ -4069,7 +4109,8 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
             press_x_ = frame.pointer.x;
             press_y_ = frame.pointer.y;
             press_pointer_x_ = ctx.pointer_x();
-            surface_dragging_ = true;
+            // Picked, not dragged, on a stage the camera carries.
+            surface_dragging_ = !camera_stage;
         } else if (hovered_scene_axis != GizmoAxis::None &&
                    pivot.has_value()) {
             frame.picked = primary;
@@ -4230,28 +4271,12 @@ ViewportFrame ViewportPanel::draw(gui::UiContext& ctx, const gui::Rect& bounds,
                     continue;
                 }
                 projected.display = edited;
-                switch (edited.shape) {
-                case output::ProjectionSurfaceShape::Planar:
-                    projected.visual = planar_surface_visual(edited);
-                    break;
-                case output::ProjectionSurfaceShape::HorizontalArc: {
-                    const auto mesh = projection_mesh_for(edited);
-                    projected.visual =
-                        mesh != nullptr ? mesh_surface_visual(*mesh, true)
-                             : planar_surface_visual(edited, true);
-                    break;
-                }
-                case output::ProjectionSurfaceShape::ImportedMesh: {
-                    const auto mesh = projection_mesh_for(edited);
-                    projected.visual =
-                        mesh != nullptr
-                            ? mesh_surface_visual(*mesh, false,
-                                                  &edited.geometry,
-                                                  edited.mesh_scale)
-                            : planar_surface_visual(edited, true);
-                    break;
-                }
-                }
+                const auto mesh =
+                    edited.shape == output::ProjectionSurfaceShape::Planar
+                        ? std::shared_ptr<const output::ProjectionMesh>{}
+                        : projection_mesh_for(edited);
+                projected.visual =
+                    surface_visual(edited, mesh.get(), stage_pose);
                 project_surface(projected, frame.image, scene);
                 break;
             }

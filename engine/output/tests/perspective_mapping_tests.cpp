@@ -617,6 +617,170 @@ void a_curved_mesh_bounds_the_region_conservatively() {
              .valid);
 }
 
+[[nodiscard]] bool near(scene::Vec3 a, scene::Vec3 b, float tolerance) noexcept {
+    return std::abs(a.x - b.x) < tolerance && std::abs(a.y - b.y) < tolerance
+        && std::abs(a.z - b.z) < tolerance;
+}
+
+// A 4 m cube room around a viewer at its centre: the front wall and the
+// ceiling, authored the way an operator does - yaw zero, the ceiling pitched a
+// quarter turn so it faces down.
+[[nodiscard]] output::PhysicalSurface cave_front() noexcept {
+    output::PhysicalSurface front{};
+    front.center = scene::Vec3{0.0F, 0.0F, -2.0F};
+    output::orient(front, 0.0F, 0.0F);
+    front.width = 4.0F;
+    front.height = 4.0F;
+    front.raster = scene::Canvas{1'024U, 1'024U};
+    return front;
+}
+
+[[nodiscard]] output::PhysicalSurface cave_ceiling() noexcept {
+    output::PhysicalSurface ceiling = cave_front();
+    ceiling.center = scene::Vec3{0.0F, 2.0F, 0.0F};
+    output::orient(ceiling, 0.0F, 0.25F);
+    return ceiling;
+}
+
+void a_pitched_quarter_turn_faces_a_ceiling_down_onto_the_front_wall() {
+    const output::PhysicalSurface front = cave_front();
+    const output::PhysicalSurface ceiling = cave_ceiling();
+    // Pitch zero is exactly the upright basis every wall has always had.
+    PERSPECTIVE_CHECK(front.up == (scene::Vec3{0.0F, 1.0F, 0.0F}));
+    PERSPECTIVE_CHECK(front.right == (scene::Vec3{1.0F, 0.0F, 0.0F}));
+
+    const auto front_corners =
+        output::surface_corners(front, scene::whole(front.raster));
+    const auto ceiling_corners =
+        output::surface_corners(ceiling, scene::whole(ceiling.raster));
+    PERSPECTIVE_CHECK(front_corners.has_value() && ceiling_corners.has_value());
+    // The ceiling's bottom edge is the front wall's top edge, so the two
+    // images meet along the fold rather than leaving a gap or a flip.
+    PERSPECTIVE_CHECK(near(ceiling_corners.value().lower_left,
+                           front_corners.value().upper_left, 1.0e-5F));
+    PERSPECTIVE_CHECK(near(ceiling_corners.value().lower_right,
+                           front_corners.value().upper_right, 1.0e-5F));
+
+    const auto view = output::perspective_view_for(
+        ceiling, scene::whole(ceiling.raster), eye, 0.1F, 100.0F);
+    PERSPECTIVE_CHECK(view.has_value());
+    PERSPECTIVE_CHECK(near(view.value().forward,
+                           scene::Vec3{0.0F, 1.0F, 0.0F}, 1.0e-6F));
+    // A point on the fold is the top row of one image and the bottom row of
+    // the other, seen from the one shared eye.
+    const scene::Vec3 fold{0.5F, 2.0F, -2.0F};
+    const auto front_view = output::perspective_view_for(
+        front, scene::whole(front.raster), eye, 0.1F, 100.0F);
+    PERSPECTIVE_CHECK(front_view.has_value());
+    const auto on_front =
+        output::project_through_surface(front_view.value(), fold);
+    const auto on_ceiling = output::project_through_surface(view.value(), fold);
+    PERSPECTIVE_CHECK(std::abs(on_front.y - 0.0F) < 1.0e-2F);
+    PERSPECTIVE_CHECK(std::abs(on_ceiling.y - 1'024.0F) < 1.0e-2F);
+    PERSPECTIVE_CHECK(std::abs(on_front.x - on_ceiling.x) < 1.0e-2F);
+}
+
+void a_yaw_keeps_the_authored_pitch() {
+    output::PhysicalSurface ceiling = cave_ceiling();
+    output::set_yaw_keeping_pitch(ceiling, 0.25F);
+    const output::SurfacePitchBasis pitch =
+        output::surface_pitch_basis(ceiling);
+    PERSPECTIVE_CHECK(std::abs(pitch.cosine) < 1.0e-6F);
+    PERSPECTIVE_CHECK(std::abs(pitch.sine - 1.0F) < 1.0e-6F);
+    // Still facing down; only the way its raster runs has turned.
+    const scene::Vec3 normal = scene::cross(ceiling.right, ceiling.up);
+    PERSPECTIVE_CHECK(near(normal, scene::Vec3{0.0F, -1.0F, 0.0F}, 1.0e-6F));
+    PERSPECTIVE_CHECK(near(ceiling.right, scene::Vec3{0.0F, 0.0F, -1.0F},
+                           1.0e-6F));
+
+    output::PhysicalSurface wall = cave_front();
+    output::set_yaw_keeping_pitch(wall, 0.125F);
+    PERSPECTIVE_CHECK(wall.up == (scene::Vec3{0.0F, 1.0F, 0.0F}));
+}
+
+[[nodiscard]] scene::Camera flying_camera() noexcept {
+    // Somewhere far from the origin, looking down world +X - a quarter turn
+    // from the stage's own -Z.
+    scene::Camera camera{};
+    camera.eye = scene::Vec3{40.0F, 3.0F, -12.0F};
+    camera.target = scene::Vec3{41.0F, 3.0F, -12.0F};
+    camera.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+    return camera;
+}
+
+void a_camera_anchored_stage_carries_every_face_with_the_camera() {
+    const scene::Camera camera = flying_camera();
+    // The viewer stands 1.6 m above the room's floor origin.
+    const scene::Vec3 viewer{0.0F, 1.6F, 0.0F};
+    const auto pose = output::camera_stage_pose(camera, viewer);
+    PERSPECTIVE_CHECK(pose.has_value());
+    PERSPECTIVE_CHECK(near(output::stage_point(pose.value(), viewer),
+                           camera.eye, 1.0e-5F));
+    PERSPECTIVE_CHECK(near(
+        output::stage_direction(pose.value(), scene::Vec3{0.0F, 0.0F, -1.0F}),
+        scene::Vec3{1.0F, 0.0F, 0.0F}, 1.0e-6F));
+
+    output::PhysicalSurface front = cave_front();
+    front.center = scene::Vec3{0.0F, 1.6F, -2.0F};
+    output::PhysicalSurface ceiling = cave_ceiling();
+    ceiling.center = scene::Vec3{0.0F, 3.6F, 0.0F};
+    const output::PhysicalSurface placed_front =
+        output::place_on_stage(front, pose.value());
+    const output::PhysicalSurface placed_ceiling =
+        output::place_on_stage(ceiling, pose.value());
+    PERSPECTIVE_CHECK(near(placed_front.center,
+                           scene::Vec3{42.0F, 3.0F, -12.0F}, 1.0e-5F));
+    PERSPECTIVE_CHECK(placed_front.raster == front.raster);
+    PERSPECTIVE_CHECK(placed_front.width == front.width);
+
+    const auto front_view = output::perspective_view_for(
+        placed_front, scene::whole(placed_front.raster), camera.eye, 0.1F,
+        100.0F);
+    const auto ceiling_view = output::perspective_view_for(
+        placed_ceiling, scene::whole(placed_ceiling.raster), camera.eye, 0.1F,
+        100.0F);
+    PERSPECTIVE_CHECK(front_view.has_value() && ceiling_view.has_value());
+    // The front looks where the camera looks and the ceiling straight up,
+    // and the frustum is the one the room had standing still at the origin.
+    PERSPECTIVE_CHECK(near(front_view.value().forward,
+                           scene::Vec3{1.0F, 0.0F, 0.0F}, 1.0e-6F));
+    PERSPECTIVE_CHECK(near(ceiling_view.value().forward,
+                           scene::Vec3{0.0F, 1.0F, 0.0F}, 1.0e-6F));
+    const auto still = output::perspective_view_for(
+        cave_ceiling(), scene::whole(ceiling.raster), eye, 0.1F, 100.0F);
+    PERSPECTIVE_CHECK(still.has_value());
+    PERSPECTIVE_CHECK(std::abs(ceiling_view.value().frustum.left -
+                               still.value().frustum.left) < 1.0e-6F);
+    PERSPECTIVE_CHECK(std::abs(ceiling_view.value().frustum.top -
+                               still.value().frustum.top) < 1.0e-6F);
+
+    // A generated mesh carried by the same pose lands where the surface does.
+    const output::ProjectionMeshPlacement placement =
+        output::stage_mesh_placement(pose.value());
+    PERSPECTIVE_CHECK(output::valid(placement));
+    PERSPECTIVE_CHECK(near(
+        output::place_projection_mesh_position(front.center, placement),
+        placed_front.center, 1.0e-5F));
+}
+
+void a_camera_without_a_direction_or_roll_is_refused() {
+    scene::Camera camera = flying_camera();
+    camera.target = camera.eye;
+    const auto still = output::camera_stage_pose(camera, scene::Vec3{});
+    PERSPECTIVE_CHECK(!still.has_value());
+    PERSPECTIVE_CHECK(still.error()
+                      == output::PerspectiveMappingError::InvalidStage);
+    camera = flying_camera();
+    camera.target = camera.eye + scene::Vec3{0.0F, 1.0F, 0.0F};
+    PERSPECTIVE_CHECK(
+        !output::camera_stage_pose(camera, scene::Vec3{}).has_value());
+    camera = flying_camera();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    PERSPECTIVE_CHECK(!output::camera_stage_pose(
+                           camera, scene::Vec3{nan, 0.0F, 0.0F})
+                           .has_value());
+}
+
 struct Case final {
     const char* name;
     void (*function)();
@@ -685,7 +849,14 @@ void a_calibrated_lens_sizes_the_plate_rather_than_the_feed_fallback() {
     PERSPECTIVE_CHECK(!turned.value().valid);
 }
 
-constexpr std::array<Case, 15U> cases{{
+constexpr std::array<Case, 19U> cases{{
+    {"a pitched quarter turn faces a ceiling down onto the front wall",
+     &a_pitched_quarter_turn_faces_a_ceiling_down_onto_the_front_wall},
+    {"a yaw keeps the authored pitch", &a_yaw_keeps_the_authored_pitch},
+    {"a camera-anchored stage carries every face with the camera",
+     &a_camera_anchored_stage_carries_every_face_with_the_camera},
+    {"a camera without a direction or roll is refused",
+     &a_camera_without_a_direction_or_roll_is_refused},
     {"a front surface builds the expected off-axis window",
      &a_front_surface_builds_the_expected_off_axis_window},
     {"left and right walls look into their side of the scene",

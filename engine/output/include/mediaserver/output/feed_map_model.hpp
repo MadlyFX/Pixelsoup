@@ -73,6 +73,8 @@ private:
     // index.
     std::map<doc::NodeId, OutputMap> entries_;
     std::map<doc::NodeId, ProjectionSurface> surfaces_;
+    // Every valid output.stage node; the first (lowest id) is the stage.
+    std::map<doc::NodeId, StagePlacement> stages_;
     // Only Position X/Y/Z and Rotation Yaw channels are retained here. The
     // SceneModel independently owns the complete scene.channel vocabulary;
     // keeping these by source node id preserves the same lowest-id-wins rule.

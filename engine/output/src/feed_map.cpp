@@ -55,6 +55,15 @@ void mix(core::u64& state, const scene::WallColorSettings& source) noexcept {
     mix(state, color.camera_inverse_lut_source);
 }
 
+// A world-fixed stage hashes nothing, so every project that never authored a
+// stage keeps the digest it always had.
+void mix(core::u64& state, const StagePlacement& stage) noexcept {
+    if (stage == StagePlacement{}) return;
+    mix(state, core::u64{0x5354414745ULL}); // "STAGE"
+    mix(state, static_cast<core::u64>(stage.anchor));
+    mix(state, stage.eye);
+}
+
 void mix(core::u64& state,
          const ResolvedProjectionSurface& surface) noexcept {
     mix(state, surface.geometry);
@@ -68,6 +77,7 @@ void mix(core::u64& state,
         mix(state, 0x6173736574ULL);
         mix(state, surface.mesh_asset.value());
     }
+    mix(state, surface.stage);
 }
 
 void mix(core::u64& state, std::string_view text) noexcept {
@@ -155,6 +165,8 @@ core::u64 digest(const FeedMap& feed_map) noexcept {
             mix(state, surface.mesh_asset.value());
         }
     }
+
+    mix(state, feed_map.stage);
 
     return state;
 }

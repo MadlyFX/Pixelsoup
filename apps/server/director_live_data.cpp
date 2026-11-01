@@ -36,7 +36,10 @@ void inject_tracked_poses(scene::Scene &scene,
 [[nodiscard]] std::optional<scene::InnerFrustumRegion> director_inner_frustum_rect(
     const scene::Scene &frame, const scene::TrackedCameraView &view,
     const output::FeedMap &feed_map) {
-    if (!view.drawing() || !frame.renderer_settings.icvfx.inner_frustum) {
+    if (!view.drawing() || !frame.renderer_settings.icvfx.inner_frustum ||
+        feed_map.stage.anchor == output::StageAnchor::Camera) {
+        // Nodes draw no plate on a stage carried by the scene camera; see the
+        // presenter's matching refusal.
         return std::nullopt;
     }
     const scene::Camera tracked = scene::tracked_view_camera(

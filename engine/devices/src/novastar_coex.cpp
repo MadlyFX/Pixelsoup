@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <utility>
 
@@ -43,6 +44,31 @@ position_at(const JsonValue &object, std::string_view key) {
     return {0U, 0U};
   }
   return {to_u32(position->number_at("x")), to_u32(position->number_at("y"))};
+}
+
+// The first non-zero {"width", "height"} under one of `keys`, or the
+// object's own width and height. Firmware differs in where it puts a
+// canvas's or cabinet's pixel size; "resolution" comes first because a
+// cabinet's "size" may be its physical size where both are given.
+[[nodiscard]] std::pair<core::u32, core::u32>
+extent_of(const JsonValue &object,
+          std::initializer_list<std::string_view> keys) {
+  for (const std::string_view key : keys) {
+    const auto extent = size_at(object, key);
+    if (extent.first != 0U && extent.second != 0U) {
+      return extent;
+    }
+  }
+  return {to_u32(object.number_at("width")), to_u32(object.number_at("height"))};
+}
+
+// Its "position", or its own x and y.
+[[nodiscard]] std::pair<core::u32, core::u32>
+place_of(const JsonValue &object) {
+  if (object.find("position") != nullptr) {
+    return position_at(object, "position");
+  }
+  return {to_u32(object.number_at("x")), to_u32(object.number_at("y"))};
 }
 
 // The array an answer's data holds: the data itself, or the first array
@@ -305,42 +331,75 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
         static_cast<int>(entry.number_at("workingMode", 1.0));
 
     // The raster is everything the canvases cover. A cabinet sits within its
-    // canvas, which sits within the screen.
+    // canvas, which sits within the screen. Some firmware lists the cabinets
+    // beside the canvases instead, in screen pixels, or gives the screen's
+    // own size; whichever is largest is the raster.
+    const auto add_cabinets = [&](const JsonValue *cabinets, core::u32 left,
+                                  core::u32 top, core::u32 &width,
+                                  core::u32 &height) {
+      if (cabinets == nullptr) {
+        return;
+      }
+      for (const JsonValue &cabinet : cabinets->items()) {
+        if (!cabinet.is_object()) {
+          continue;
+        }
+        const auto [x, y] = place_of(cabinet);
+        const auto [w, h] = extent_of(cabinet, {"resolution", "size"});
+        width = std::max(width, left + x + w);
+        height = std::max(height, top + y + h);
+        ++screen.cabinets;
+      }
+    };
     if (const JsonValue *const canvases = entry.find("canvases")) {
       for (const JsonValue &canvas : canvases->items()) {
-        const auto [canvas_x, canvas_y] = position_at(canvas, "position");
-        auto [width, height] = size_at(canvas, "size");
+        if (!canvas.is_object()) {
+          continue;
+        }
+        const auto [canvas_x, canvas_y] = place_of(canvas);
+        auto [width, height] = extent_of(canvas, {"size", "resolution"});
         const auto [rect_width, rect_height] = size_at(canvas, "rectSize");
         width = std::max(width, rect_width);
         height = std::max(height, rect_height);
-        if (const JsonValue *const cabinets = canvas.find("cabinets")) {
-          for (const JsonValue &cabinet : cabinets->items()) {
-            const auto [x, y] = position_at(cabinet, "position");
-            const auto [w, h] = size_at(cabinet, "size");
-            width = std::max(width, x + w);
-            height = std::max(height, y + h);
-            ++screen.cabinets;
-          }
-        }
+        add_cabinets(canvas.find("cabinets"), 0U, 0U, width, height);
         screen.width = std::max(screen.width, canvas_x + width);
         screen.height = std::max(screen.height, canvas_y + height);
       }
     }
+    add_cabinets(entry.find("cabinets"), 0U, 0U, screen.width, screen.height);
+    {
+      const auto [width, height] = extent_of(entry, {"resolution", "size"});
+      screen.width = std::max(screen.width, width);
+      screen.height = std::max(screen.height, height);
+    }
 
     // In All-In-One mode layers place inputs on the screen; pick the layer
     // set for the screen's working mode.
+    // Some firmware lists the layers themselves there, or under "layers".
     const JsonValue *layers{};
     if (const JsonValue *const sets = entry.find("layersInWorkingMode")) {
       for (const JsonValue &set : sets->items()) {
         const JsonValue *const candidate = set.find("layers");
-        if (candidate == nullptr || candidate->items().empty()) {
+        if (candidate == nullptr) {
+          if (set.find("source") != nullptr && layers == nullptr) {
+            layers = sets;
+          }
           continue;
         }
-        if (layers == nullptr ||
+        if (candidate->items().empty()) {
+          continue;
+        }
+        if (layers == nullptr || layers == sets ||
             static_cast<int>(set.number_at("workingMode", -1.0)) ==
                 working_mode) {
           layers = candidate;
         }
+      }
+    }
+    if (layers == nullptr) {
+      if (const JsonValue *const plain = entry.find("layers");
+          plain != nullptr && plain->is_array() && !plain->items().empty()) {
+        layers = plain;
       }
     }
     if (layers != nullptr && working_mode != 0) {
@@ -350,8 +409,8 @@ parse_screens(const JsonValue &data, const std::vector<Input> &inputs) {
             static_cast<core::i64>(layer.number_at("source", -1.0)));
         topology::HardwareProcessorLayer placed{};
         placed.input = number_of(input);
-        const auto [x, y] = position_at(layer, "position");
-        auto [width, height] = size_at(layer, "scaler");
+        const auto [x, y] = place_of(layer);
+        auto [width, height] = extent_of(layer, {"scaler", "size"});
         placed.source = topology::HardwarePixelRect{
             0U, 0U, input != nullptr ? input->width : 0U,
             input != nullptr ? input->height : 0U};
@@ -486,7 +545,14 @@ Poll poll(const HttpEndpoint &endpoint, std::chrono::milliseconds timeout) {
     result.node.detail = error.empty() ? "no answer" : error;
     return result;
   }
-  const std::optional<JsonValue> screens = read(screen_path);
+  // The cabinets are asked for by name; firmware that refuses the parameter,
+  // or answers it with an error, is asked again without it.
+  const std::string before = error;
+  std::optional<JsonValue> screens = read(screen_with_cabinets_path);
+  if (!screens.has_value() || unwrap(*screens).data == nullptr) {
+    error = before;
+    screens = read(screen_path);
+  }
   const std::optional<JsonValue> monitor = read(monitor_path);
 
   std::string refused;
@@ -502,6 +568,16 @@ Poll poll(const HttpEndpoint &endpoint, std::chrono::milliseconds timeout) {
     const Unwrapped data = unwrap(*screens);
     if (data.data != nullptr) {
       result.node.screens = parse_screens(*data.data, result.inputs);
+      if (std::none_of(result.node.screens.begin(), result.node.screens.end(),
+                       [](const topology::HardwareProcessorScreen &screen) {
+                         return screen.width != 0U && screen.height != 0U;
+                       })) {
+        // Said so, rather than shown as a processor with no screen at all.
+        error = result.node.screens.empty()
+                    ? "reports no screens"
+                    : "reports its screens without a size";
+        result.node.screens.clear();
+      }
     } else if (refused.empty()) {
       refused = data.error;
     }

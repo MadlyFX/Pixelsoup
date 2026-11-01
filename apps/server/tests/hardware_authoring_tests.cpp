@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -229,6 +230,46 @@ void a_found_processor_is_placed_speaking_its_protocol() {
                  topology::HardwareProcessorProtocol::NovastarCoex);
 }
 
+// A rate typed in hertz becomes both halves of its exact fraction in one undo
+// step; anything but a number is ignored.
+void a_typed_rate_is_stored_as_an_exact_fraction() {
+    cmd::DirectorScheduler scheduler{cluster()};
+    const auto edit = [&](doc::PropertyValue value, core::u64 gesture) {
+        return app::schedule_hardware_property(
+            scheduler,
+            editor::HardwarePropertyEdit{
+                doc::NodeId{30U}, std::string{editor::hardware_refresh_edit},
+                std::move(value), gesture},
+            cmd::FrameNumber{1U});
+    };
+    AUTHOR_CHECK(edit(doc::PropertyValue{23.976}, 50U));
+    const topology::HardwareMap rated_map =
+        hardware_of(scheduler.projected_document());
+    const topology::HardwareDevice *const rated =
+        rated_map.device(doc::NodeId{30U});
+    AUTHOR_CHECK(rated != nullptr && rated->refresh_numerator == 24'000U &&
+                 rated->refresh_denominator == 1'001U);
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+    // Nothing is stored under the edit's own name.
+    AUTHOR_CHECK(!scheduler.projected_document()
+                      .get(doc::NodeId{30U})
+                      ->properties.contains(
+                          std::string{editor::hardware_refresh_edit}));
+
+    AUTHOR_CHECK(edit(doc::PropertyValue{std::string{"fast"}}, 51U));
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+
+    AUTHOR_CHECK(scheduler.schedule_undo(hardware_context,
+                                         cmd::TransactionId{52U},
+                                         cmd::FrameNumber{2U}));
+    const topology::HardwareMap restored_map =
+        hardware_of(scheduler.projected_document());
+    const topology::HardwareDevice *const restored =
+        restored_map.device(doc::NodeId{30U});
+    AUTHOR_CHECK(restored->refresh_numerator == 60U &&
+                 restored->refresh_denominator == 1U);
+}
+
 void a_protocol_is_only_ever_a_processors() {
     cmd::DirectorScheduler scheduler{cluster()};
     const auto edit = [&](core::u64 device, std::string value,
@@ -254,6 +295,57 @@ void a_protocol_is_only_ever_a_processors() {
     AUTHOR_CHECK(hardware_of(scheduler.projected_document())
                      .device(doc::NodeId{31U})
                      ->protocol == topology::HardwareProcessorProtocol::Generic);
+}
+
+void a_processors_reported_walls_are_placed_cabled_in_one_undo() {
+    cmd::DirectorScheduler scheduler{cluster()};
+    editor::HardwareWallsRequest request{};
+    request.processor = doc::NodeId{30U};
+    request.gesture = 12U;
+    request.walls = {
+        topology::HardwareWallProposal{"Main", 2880U, 1536U, 24'000U, 1'001U,
+                                       5, -1},
+        topology::HardwareWallProposal{"Ceiling", 1152U, 768U, 50U, 1U, 5, 2}};
+    const std::vector<doc::NodeId> ids{doc::NodeId{70U}, doc::NodeId{71U},
+                                       doc::NodeId{72U}, doc::NodeId{73U}};
+    AUTHOR_CHECK(app::schedule_hardware_walls(scheduler, request, ids,
+                                              cmd::FrameNumber{1U}));
+    const topology::HardwareMap map =
+        hardware_of(scheduler.projected_document());
+    const topology::HardwareDevice *const main = map.device(doc::NodeId{70U});
+    AUTHOR_CHECK(main != nullptr &&
+                 main->kind == topology::HardwareDeviceKind::LedWall);
+    AUTHOR_CHECK(main->name == "Main" && main->width == 2880U &&
+                 main->height == 1536U && main->refresh_numerator == 24'000U &&
+                 main->refresh_denominator == 1'001U);
+    AUTHOR_CHECK(main->grid_x == 5 && main->grid_y == -1);
+    const topology::HardwareLink *const cable = map.link(doc::NodeId{73U});
+    AUTHOR_CHECK(cable != nullptr);
+    AUTHOR_CHECK(cable->from ==
+                 (topology::HardwareEndpoint{
+                     doc::NodeId{30U}, topology::processor_led_output_port}));
+    AUTHOR_CHECK(cable->to ==
+                 (topology::HardwareEndpoint{doc::NodeId{72U}, 0U}));
+    AUTHOR_CHECK(map.link(doc::NodeId{71U}) != nullptr);
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+
+    // Asked again - a second editor, or a report after a cable - it places
+    // nothing, since the LED OUT now drives something.
+    request.gesture = 13U;
+    const std::vector<doc::NodeId> more{doc::NodeId{80U}, doc::NodeId{81U},
+                                        doc::NodeId{82U}, doc::NodeId{83U}};
+    AUTHOR_CHECK(app::schedule_hardware_walls(scheduler, request, more,
+                                              cmd::FrameNumber{2U}));
+    AUTHOR_CHECK(!scheduler.projected_document().contains(doc::NodeId{80U}));
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+
+    AUTHOR_CHECK(scheduler.schedule_undo(hardware_context,
+                                         cmd::TransactionId{14U},
+                                         cmd::FrameNumber{3U}));
+    const doc::Root &undone = scheduler.projected_document();
+    for (const core::u64 id : {70U, 71U, 72U, 73U}) {
+        AUTHOR_CHECK(!undone.contains(doc::NodeId{id}));
+    }
 }
 
 [[nodiscard]] doc::Node viewport(core::u64 id, std::int64_t window,
@@ -324,12 +416,207 @@ void a_built_feed_layout_replaces_its_windows_in_one_undo() {
     AUTHOR_CHECK(restored.map_node(doc::NodeId{80U}) == nullptr);
 }
 
+void a_stage_edit_creates_then_updates_one_node_in_one_gesture() {
+    cmd::DirectorScheduler scheduler{doc::Root{}};
+    const auto stage_of = [&] {
+        output::FeedMapModel model;
+        model.reset(scheduler.projected_document());
+        return model.evaluate();
+    };
+    AUTHOR_CHECK(stage_of().stage == output::StagePlacement{});
+
+    // The first edit of a project with no stage creates its node...
+    bool allocated = false;
+    output::StagePlacement carried{};
+    carried.anchor = output::StageAnchor::Camera;
+    carried.eye = scene::Vec3{0.0F, 1.6F, 0.25F};
+    AUTHOR_CHECK(app::schedule_feed_stage_edit(
+        scheduler, editor::FeedStageEditRequest{carried, 60U},
+        doc::NodeId{90U}, cmd::FrameNumber{1U}, allocated));
+    AUTHOR_CHECK(allocated);
+    const output::FeedMap first = stage_of();
+    AUTHOR_CHECK(first.stage_node == doc::NodeId{90U});
+    AUTHOR_CHECK(first.stage == carried);
+
+    // ...and a scrub in the same gesture updates it in place.
+    carried.eye.y = 1.75F;
+    allocated = false;
+    AUTHOR_CHECK(app::schedule_feed_stage_edit(
+        scheduler, editor::FeedStageEditRequest{carried, 60U},
+        doc::NodeId{91U}, cmd::FrameNumber{2U}, allocated));
+    AUTHOR_CHECK(!allocated);
+    const output::FeedMap second = stage_of();
+    AUTHOR_CHECK(second.stage_node == doc::NodeId{90U});
+    AUTHOR_CHECK(second.stage.eye.y == 1.75F);
+    AUTHOR_CHECK(!scheduler.projected_document().contains(doc::NodeId{91U}));
+
+    // A non-finite eye authors nothing.
+    carried.eye.x = std::numeric_limits<float>::infinity();
+    AUTHOR_CHECK(app::schedule_feed_stage_edit(
+        scheduler, editor::FeedStageEditRequest{carried, 61U},
+        doc::NodeId{92U}, cmd::FrameNumber{3U}, allocated));
+    AUTHOR_CHECK(!allocated);
+    AUTHOR_CHECK(stage_of().stage.eye.x == 0.0F);
+
+    // One undo takes the whole gesture back to the world-fixed stage.
+    constexpr cmd::UndoContextId feed_context{4U};
+    AUTHOR_CHECK(scheduler.undo_depth(feed_context) == 1U);
+    AUTHOR_CHECK(scheduler.schedule_undo(feed_context,
+                                         cmd::TransactionId{62U},
+                                         cmd::FrameNumber{4U}));
+    AUTHOR_CHECK(stage_of().stage == output::StagePlacement{});
+    AUTHOR_CHECK(!scheduler.projected_document().contains(doc::NodeId{90U}));
+}
+
+[[nodiscard]] topology::HardwareOutputBinding
+bound_output(core::u64 id, core::u8 port, core::u32 feed, core::u32 target) {
+    topology::HardwareOutputBinding binding{};
+    binding.node = doc::NodeId{id};
+    binding.render_server = doc::NodeId{10U};
+    binding.logical_port = port;
+    binding.feed_index = feed;
+    binding.target = topology::HardwareDisplayTargetKey{0xA1B2C3ULL, target, 7U};
+    binding.width = 3840U;
+    binding.height = 2160U;
+    return binding;
+}
+
+void moving_a_cable_to_another_output_keeps_its_region_in_one_undo() {
+    // Render 3 drives Processor 30 from OUT 1, bound to feed 4.
+    doc::Root start = cluster();
+    start = start.set(app::make_hardware_output_binding(
+        doc::NodeId{50U}, bound_output(50U, 1U, 4U, 1U)));
+    start = start.set(viewport(70U, 4, 0));
+    cmd::DirectorScheduler scheduler{start};
+
+    // Another machine's cable is never removed, whatever the request says.
+    editor::HardwareLinkRequest foreign{
+        topology::HardwareEndpoint{doc::NodeId{10U}, 2U},
+        topology::HardwareEndpoint{doc::NodeId{31U}, 0U}, 90U};
+    foreign.replaces = doc::NodeId{41U};
+    AUTHOR_CHECK(app::schedule_hardware_link_replace(scheduler, foreign,
+                                                     cmd::FrameNumber{1U}));
+    AUTHOR_CHECK(hardware_of(scheduler.projected_document())
+                     .link(doc::NodeId{41U}) != nullptr);
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 0U);
+
+    // OUT 2 takes the cable and feed 4, as the editor sends it.
+    editor::HardwareLinkRequest moved{
+        topology::HardwareEndpoint{doc::NodeId{10U}, 2U},
+        topology::HardwareEndpoint{doc::NodeId{30U}, 0U}, 91U};
+    moved.replaces = doc::NodeId{40U};
+    moved.output_binding = bound_output(0U, 2U, 4U, 2U);
+    moved.output_region = scene::CanvasRect{0U, 0U, 1920U, 1080U};
+    const cmd::FrameNumber frame{2U};
+    AUTHOR_CHECK(app::schedule_hardware_link_replace(scheduler, moved, frame));
+    AUTHOR_CHECK(app::schedule_hardware_output_binding(
+        scheduler, editor::HardwareOutputBindingEdit{*moved.output_binding, 91U},
+        doc::NodeId{51U}, frame));
+    AUTHOR_CHECK(app::schedule_hardware_link(scheduler, moved,
+                                             doc::NodeId{52U}, frame));
+
+    const topology::HardwareMap map =
+        hardware_of(scheduler.projected_document());
+    AUTHOR_CHECK(map.link(doc::NodeId{40U}) == nullptr);
+    AUTHOR_CHECK(map.output_binding(doc::NodeId{50U}) == nullptr);
+    const topology::HardwareLink *const cable = map.link(doc::NodeId{52U});
+    AUTHOR_CHECK(cable != nullptr && cable->from.port == 2U &&
+                 cable->to.device == doc::NodeId{30U});
+    const topology::HardwareOutputBinding *const binding =
+        map.output_binding_for(doc::NodeId{10U}, 2U);
+    AUTHOR_CHECK(binding != nullptr && binding->feed_index == 4U);
+    AUTHOR_CHECK(scheduler.projected_document().contains(doc::NodeId{70U}));
+
+    // One gesture: one undo puts OUT 1's cable and binding back.
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+    AUTHOR_CHECK(scheduler.schedule_undo(hardware_context,
+                                         cmd::TransactionId{92U},
+                                         cmd::FrameNumber{3U}));
+    const topology::HardwareMap restored =
+        hardware_of(scheduler.projected_document());
+    AUTHOR_CHECK(restored.link(doc::NodeId{40U}) != nullptr);
+    AUTHOR_CHECK(restored.link(doc::NodeId{52U}) == nullptr);
+    AUTHOR_CHECK(restored.output_binding(doc::NodeId{50U}) != nullptr);
+    AUTHOR_CHECK(restored.output_binding_for(doc::NodeId{10U}, 2U) == nullptr);
+}
+
+// Render 3's OUT 1 is a Mosaic surface feeding two processors. Each cable
+// takes a region by hand and gives it back; and pulling one cable leaves the
+// surface bound, with its region, for the cable that is left.
+void a_shared_output_keeps_its_binding_until_its_last_cable() {
+    doc::Root start = cluster();
+    start = start.set(processor(32U));
+    start = start.set(link(42U, 10U, 32U));
+    start = start.set(app::make_hardware_output_binding(
+        doc::NodeId{50U}, bound_output(50U, 1U, 4U, 1U)));
+    start = start.set(viewport(70U, 4, 0));
+    cmd::DirectorScheduler scheduler{start};
+
+    const topology::HardwareOutputRegion half{1920U, 0U, 1920U, 2160U};
+    AUTHOR_CHECK(app::schedule_hardware_link_region(
+        scheduler, editor::HardwareLinkRegionEdit{doc::NodeId{42U}, half, 80U},
+        cmd::FrameNumber{1U}));
+    AUTHOR_CHECK(hardware_of(scheduler.projected_document())
+                     .link(doc::NodeId{42U})
+                     ->region == half);
+    // Not a Render Server's cable, or not inside an output: no edit.
+    AUTHOR_CHECK(app::schedule_hardware_link_region(
+        scheduler,
+        editor::HardwareLinkRegionEdit{
+            doc::NodeId{42U},
+            topology::HardwareOutputRegion{
+                topology::max_hardware_output_width, 0U, 1U, 1U},
+            81U},
+        cmd::FrameNumber{1U}));
+    AUTHOR_CHECK(scheduler.undo_depth(hardware_context) == 1U);
+    AUTHOR_CHECK(app::schedule_hardware_link_region(
+        scheduler, editor::HardwareLinkRegionEdit{doc::NodeId{42U}, {}, 82U},
+        cmd::FrameNumber{1U}));
+    AUTHOR_CHECK(hardware_of(scheduler.projected_document())
+                     .link(doc::NodeId{42U})
+                     ->region.empty());
+
+    AUTHOR_CHECK(app::schedule_hardware_delete(
+        scheduler,
+        editor::HardwareDeleteRequest{
+            editor::HardwareSelection{editor::HardwareSelectionKind::Link,
+                                      doc::NodeId{40U}},
+            83U},
+        cmd::FrameNumber{2U}));
+    topology::HardwareMap map = hardware_of(scheduler.projected_document());
+    AUTHOR_CHECK(map.link(doc::NodeId{40U}) == nullptr);
+    AUTHOR_CHECK(map.output_binding(doc::NodeId{50U}) != nullptr);
+    AUTHOR_CHECK(scheduler.projected_document().contains(doc::NodeId{70U}));
+
+    // The last cable takes the binding and its region with it.
+    AUTHOR_CHECK(app::schedule_hardware_delete(
+        scheduler,
+        editor::HardwareDeleteRequest{
+            editor::HardwareSelection{editor::HardwareSelectionKind::Link,
+                                      doc::NodeId{42U}},
+            84U},
+        cmd::FrameNumber{3U}));
+    map = hardware_of(scheduler.projected_document());
+    AUTHOR_CHECK(map.output_binding(doc::NodeId{50U}) == nullptr);
+    AUTHOR_CHECK(!scheduler.projected_document().contains(doc::NodeId{70U}));
+}
+
 struct Case final {
     const char *name;
     void (*function)();
 };
 
-constexpr std::array<Case, 6U> cases{{
+constexpr std::array<Case, 11U> cases{{
+    {"a typed rate is stored as an exact fraction",
+     &a_typed_rate_is_stored_as_an_exact_fraction},
+    {"a processor's reported walls are placed cabled in one undo",
+     &a_processors_reported_walls_are_placed_cabled_in_one_undo},
+    {"a shared output keeps its binding until its last cable",
+     &a_shared_output_keeps_its_binding_until_its_last_cable},
+    {"moving a cable to another output keeps its region in one undo",
+     &moving_a_cable_to_another_output_keeps_its_region_in_one_undo},
+    {"a stage edit creates then updates one node in one gesture",
+     &a_stage_edit_creates_then_updates_one_node_in_one_gesture},
     {"a found processor is placed speaking its protocol",
      &a_found_processor_is_placed_speaking_its_protocol},
     {"a protocol is only ever a processors",

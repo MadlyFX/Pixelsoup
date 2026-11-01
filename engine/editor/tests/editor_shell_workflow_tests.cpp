@@ -152,12 +152,14 @@ void workflow(const char* project_path, const char* workspace_path) {
   scale = SDL_GetWindowDisplayScale(window);
   if (!saved_workspace.empty()) adopt_layout(saved_workspace);
   editor::EditorSwitcherState switcher;
+  std::optional<editor::SwitcherRequest> requested_switcher;
   auto frame = [&](const char* step) {
     std::printf("frame: %s\n", step); std::fflush(stdout);
     const auto start = std::chrono::steady_clock::now();
     auto result = shell->frame(show, timeline, keyframes, elements,
                                {}, {}, {}, switcher, {}, {}, {}, project_state);
     if (result.load_project) requested_project = result.load_project->path;
+    if (result.switcher) requested_switcher = result.switcher;
     completed_timing = result.frame_timing;
     requested_effects.insert(requested_effects.end(), result.effects.begin(), result.effects.end());
     const auto elapsed = std::chrono::duration<double, std::milli>(
@@ -290,6 +292,29 @@ void workflow(const char* project_path, const char* workspace_path) {
   removed_key.key.down = false;
   check(SDL_PushEvent(&removed_key), "release Delete after source removal");
   frame("removed source settled");
+
+  // New and Duplicate scroll the scene list to the scene they add. The click's
+  // own frame still draws the list as it is, so it must not index past it.
+  const std::array<scene::SceneInfo, 1U> one_scene{
+      scene::SceneInfo{show.id, "Opening", scene::Canvas{1'920U, 1'080U}}};
+  switcher.scenes = one_scene;
+  switcher.program_scene = show.id;
+  frame("one scene listed");
+  const auto scene_bounds =
+      layout.content_of(layout.leaf_of(gui::ui_id("editor.panel.scene")));
+  click(scene_bounds.right() - 43.0F, scene_bounds.y + 14.0F, "New scene");
+  check(requested_switcher.has_value() &&
+            requested_switcher->action == editor::SwitcherAction::CreateScene,
+        "New scene asks the Director for a scene");
+  requested_switcher.reset();
+  click(scene_bounds.right() - 16.0F, scene_bounds.y + 14.0F, "Duplicate scene");
+  check(requested_switcher.has_value() &&
+            requested_switcher->action == editor::SwitcherAction::DuplicateScene &&
+            requested_switcher->scene == show.id,
+        "Duplicate asks the Director to copy the scene being edited");
+  switcher.scenes = {};
+  switcher.program_scene = {};
+  frame("scene list cleared");
 
   // A cold model on Stage must report its own preparation even though
   // Program has no reference to it. Drive the shipping frame/UI path through

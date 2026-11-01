@@ -837,9 +837,10 @@ state of a stack reads from across a stage. The stage's LED surfaces follow the
 scene's elements in both the Timeline and the Scene outliner, each with the same
 padlock - the lock Feed Mapping and Stage picking already honour. A surface has
 no eye, and clicking its Scene row selects it on Stage.
-A selected, unlocked surface shows its **Position**, **Yaw** (in turns) and
-**Size** in **Properties**; a UV-mesh surface shows its **Origin** and Yaw and
-takes its size from the mesh. Shape, pixels and wall colour stay in Feed
+A selected, unlocked surface shows its **Position**, **Yaw** and **Pitch** (in
+turns) and **Size** in **Properties**; a UV-mesh surface shows its **Origin**,
+Yaw and Pitch and takes its size from the mesh. Pitch is not keyable; an
+animated Yaw keeps the authored pitch. Shape, pixels and wall colour stay in Feed
 Mapping. With Auto Key on, Properties edits to an animated Position or Yaw key
 it at the Program playhead, as Stage drags do.
 To animate an LED surface, select it on Stage or its row in **Scene** and
@@ -1501,7 +1502,9 @@ state plus runtime inventory. Only a cabled card is part of the show: a Render
 Server no cable touches and no output binding names reads `PARKED` on the map -
 an alternative or future configuration - and is never launched, never holds the
 Program gate or the asset cohort for the rest of the cluster, and cannot make a
-cabled card's node index a duplicate. A newly placed card takes the next free
+cabled card's node index a duplicate. The Director still asks a parked card's
+machine for its status and displays, so its real video outputs show on the
+card before the first cable; it stays out of Output Monitor. A newly placed card takes the next free
 node index. **Main node**, under Node index, chooses the one render node whose
 playhead the Timeline draws beside the editor's; a parked card is never the
 main node. The first Render Server placed in a show starts ticked; later
@@ -1515,10 +1518,44 @@ video-output pin to the corresponding video input. That one gesture creates
 the cable, a persistent binding to the display's stable observed identity, and
 a full-canvas Feed Mapping region. Repeat for each display driven by the same
 render process. Select a binding row to tune its exact Feed index, Window mode,
-Width, Height, Refresh numerator, and Rate divisor. Disconnecting the graph
+Width, Height and Refresh. Refresh, on bindings, cards and the sync policy
+alike, is one field in hertz: type `23.976`, `29.97`, `59.94` or `50`, and the
+NTSC rates are kept as their exact fractions (24000/1001 and so on), which is
+what the GPU and the sync check compare. Disconnecting the graph
 cable removes its generated binding and region; a region shared by another
 binding is retained. Feed indices refer to the numbered rows in Feed Mapping
 and are never inferred from physical display order.
+
+To move a cable to a different output of the same machine, drag that output
+onto the same input: an input holding a cable from the same machine lights green and reads
+`RELEASE TO MOVE THE CABLE HERE`, and the drop swaps the cable in one undoable
+step, handing the old cable's feed and its Feed Mapping region to the new
+output. The machine stays cabled throughout. An input cabled from a different
+machine still refuses the drop.
+
+**One output, several processors (NVIDIA Mosaic).** Mosaic joins several
+physical connectors into one surface, so Windows - and the render machine's
+card - shows one output, say 7680x1080 for four 1920x1080 connectors. Cable
+that one output to every processor it feeds: a Render Server video output takes
+any number of cables (other outputs still take one). Each cable carries a
+region of the output, shown under **Carries** when the cable is selected:
+
+- A lone cable carries the whole output.
+- Several cables share it. When the render machine reports the Mosaic grid,
+  each cable takes a display of it - reading **Its Mosaic display** - in
+  order: cables by where their processors sit on the map, left to right, then
+  by input; displays row by row. Otherwise they take equal slices of the
+  output's width, left to right (**An even share of the output**).
+- **X**, **Y**, **Width** and **Height** set a cable's region by hand - a 2x2
+  grid, uneven displays, or processors placed out of order - and the reset
+  arrow beside **Carries** gives it back its share.
+
+The signal check compares each processor input with its cable's region, and
+**Build from hardware** crops each processor's viewport from that region of the
+one window. Removing one of an output's cables leaves its binding and Feed
+Mapping region in place for the others; the last cable takes them with it.
+Reading the grid from the NVIDIA driver needs a build with
+`MEDIASERVER_ENABLE_NVAPI=ON`; without it, set 2x2 and other grids by hand.
 
 Each binding drives the display its saved target names, chosen by that
 identity rather than by where the window happens to land. Two active displays
@@ -1578,7 +1615,9 @@ art is `engine/editor/assets/hardware_sprites.png`, made by
 keeping each sprite's rectangle.
 
 An LED Processor is **Generic** until it is given a protocol: a box with
-cables that nothing asks about. Drag **NovaStar processor** from the palette,
+cables that nothing asks about. A processor card has no resolution or rate of
+its own: what each input receives is the mode of the render output cabled to
+it, and what the LEDs show is the size on the LED Wall card it drives. Drag **NovaStar processor** from the palette,
 or set **Protocol** to **NovaStar COEX** in its details, and give it the
 controller's **Address** (the IP on its front LCD; `ip:port` reaches a
 simulator). The Director then reads it every two seconds over the COEX HTTP
@@ -1589,7 +1628,17 @@ is green while it answers, amber while it is first checked, red when it does
 not answer, and its inputs become the card's VIDEO IN sockets, named as the
 processor names them. A processor that VMP has locked answers with a refusal,
 shown as `Refused:` and the controller's message; release it in VMP. A
-processor that stops answering keeps its last report, marked as such.
+processor that stops answering keeps its last report, marked as such. One that
+answers but describes no screen with a size says so on a **Screen** line in
+its details, in amber, instead of listing nothing.
+
+The first time a processor reports its screens in a session, and nothing is
+cabled to its LED OUT, an LED Wall card appears for each screen beside it,
+cabled from its LED OUT, with the screen's raster and rate (a 23.976 Hz screen
+becomes 24000/1001). It is a starting point, placed as one step that undo
+takes back: rename, resize or delete the walls as you would any card, and a
+deleted one does not come back while the project is open. A processor's LED
+OUT may drive several walls, one per screen.
 
 A **Brompton processor** (Protocol **Brompton Tessera**) is read the same way
 through Tessera's IP control API on port 80, which software 3.1 and later
@@ -1632,7 +1681,12 @@ is sized to hold them; in every window a processor input shows, the viewport is
 the part of the window the processor takes, cropping the canvas pixels that
 land there on the wall. A processor that reports nothing - Generic, not yet
 answering, or a Brompton, whose IP control has no layout - gets its windows
-side by side, each shown whole. The build replaces
+side by side, each shown whole - unless it has one input and drives one wall
+smaller than that input's signal, which then takes the top left of the
+signal, the size on the wall card, as processors do by default. Four
+processors each showing the top-left 2880x1536 of a 3840x2160 output, with
+2880x1536 wall cards, build an 11520x1536 canvas, one continuous wall, with a
+2880x1536 viewport in each output. The build replaces
 every viewport of the windows it lays out (not other windows, nor surfaces),
 says what it did and anything it could not do, and one undo takes it back.
 
@@ -2341,6 +2395,39 @@ the drop outlines itself while one is in flight. The details rail names the
 surface an output is on rather than offering a stepper to hunt through them:
 cycling blindly past eight walls to find the ninth is what a control looks like
 when the gesture was never decided.
+
+Each surface faces the way its **YAW** and **PITCH** turn it in Surface
+Calibration. Yaw turns the face about the stage's up axis. Pitch then tilts it
+about its own right edge: 90 degrees lays it flat facing down, which is a
+ceiling over the viewer, and -90 degrees is a floor. A ceiling at the height
+of a front wall's top edge, with its centre half its depth from that edge
+towards the viewer, meets the wall along that edge: the bottom row of the
+ceiling image continues the top row of the wall. Side walls are walls with a yaw of 90 and -90 degrees.
+Every face renders its own view from the one shared eye, so the picture lines
+up across each fold as long as the calibrated corners meet.
+
+The **Stage** setting under the surface list says where all the surfaces
+stand:
+
+- **Fixed** (the default) keeps them in the world. The camera moves among
+  them, as in a virtual-production volume, and tracked-camera plates are drawn
+  on them.
+- **Follows camera** carries the whole stage with the scene camera, for an
+  immersive room or CAVE whose camera move is the show. Surfaces are then
+  measured in the room: stage -Z is where the camera looks, +Y its up and +X
+  its right. **Viewer eye** is where the viewer stands in the room, in metres;
+  that point rides on the scene camera's eye, so a room measured from its
+  floor centre with the eye at 1.6 m up flies with the camera at head height.
+  On Stage the surfaces are drawn where the authored camera puts them; place
+  them from Feed Mapping or Properties, since the Stage gizmo does not drag a
+  surface on a carried stage. A tracked camera has no fixed wall to frame a
+  plate on, so outputs report that instead of drawing one.
+
+Screen-space effects (bloom, ambient occlusion, depth of field, temporal
+anti-aliasing) run per face, so near a fold between two faces they can differ
+slightly where they would blend across a flat wall. Compositor effects defined
+over the canvas, such as gradients, do not continue around a fold; place
+anything that should wrap the room in the scene instead.
 
 Viewport and surface rows can be named, reordered and copied in the list.
 Double-click a row, or click it and press F2, to type a name; Enter keeps it

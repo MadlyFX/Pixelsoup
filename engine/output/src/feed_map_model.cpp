@@ -162,6 +162,7 @@ core::u32 FeedMapCounters::surfaces_over_capacity() const noexcept {
 
 void FeedMapModel::forget(doc::NodeId id) noexcept {
     surface_channels_.erase(id);
+    stages_.erase(id);
     const auto found = entries_.find(id);
     if (found != entries_.end()) {
         if (counters_.maps != 0U) {
@@ -300,12 +301,35 @@ void FeedMapModel::put(const doc::Node& node) {
         return;
     }
 
-    if (node.type != schema::map_type && node.type != schema::surface_type) {
+    if (node.type != schema::map_type && node.type != schema::surface_type &&
+        node.type != schema::stage_type) {
         // Not a feed-map node. Nothing to hold and nothing to report.
         return;
     }
 
     Reader reader{node.properties};
+
+    if (node.type == schema::stage_type) {
+        StagePlacement stage{};
+        const std::string_view anchor =
+            reader.text(schema::stage_anchor, schema::anchor_world);
+        if (anchor == schema::anchor_world) {
+            stage.anchor = StageAnchor::World;
+        } else if (anchor == schema::anchor_camera) {
+            stage.anchor = StageAnchor::Camera;
+        } else {
+            reader.fail();
+        }
+        stage.eye = scene::Vec3{reader.number(schema::stage_eye_x, 0.0F),
+                                reader.number(schema::stage_eye_y, 0.0F),
+                                reader.number(schema::stage_eye_z, 0.0F)};
+        if (!reader.ok()) {
+            ++counters_.rejected;
+            return;
+        }
+        stages_.insert_or_assign(node.id, stage);
+        return;
+    }
 
     if (node.type == schema::surface_type) {
         ProjectionSurface surface{};
@@ -467,6 +491,7 @@ void FeedMapModel::put(const doc::Node& node) {
 void FeedMapModel::reset(const doc::Root& root) {
     entries_.clear();
     surfaces_.clear();
+    stages_.clear();
     surface_channels_.clear();
     counters_ = FeedMapCounters{};
     // Diffing against an empty root enumerates every node in ascending id
@@ -498,6 +523,11 @@ FeedMap FeedMapModel::evaluate() const {
 FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
     FeedMap feed_map{};
 
+    if (!stages_.empty()) {
+        feed_map.stage_node = stages_.begin()->first;
+        feed_map.stage = stages_.begin()->second;
+    }
+
     feed_map.surfaces.reserve(
         std::min<std::size_t>(surfaces_.size(), max_projection_surfaces));
     for (const auto& [id, surface] : surfaces_) {
@@ -519,8 +549,9 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
     // Surface transform channels use the same document vocabulary and
     // interpolation as scene objects. Channel source ids are ordered, so the
     // first valid channel owns one (surface, component) slot just as it does in
-    // SceneModel. Yaw is deliberately horizontal: this is the same canonical
-    // vertical basis authored by the Mapping panel's YAW field.
+    // SceneModel. Yaw turns about stage +Y, as the Mapping panel's YAW field
+    // does, and keeps the face's authored pitch: an animated ceiling stays a
+    // ceiling.
     std::set<std::pair<doc::NodeId, scene::PropertyChannel>> applied;
     core::u32 channels_seen = 0U;
     const core::i64 frame = time.frame > static_cast<core::u64>(
@@ -556,10 +587,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
             found->geometry.center.z = value;
             break;
         case scene::PropertyChannel::RotationYaw:
-            found->geometry.right = scene::Vec3{
-                scene::deterministic::cos_turns(value), 0.0F,
-                -scene::deterministic::sin_turns(value)};
-            found->geometry.up = scene::Vec3{0.0F, 1.0F, 0.0F};
+            set_yaw_keeping_pitch(found->geometry, value);
             break;
         default:
             break;
@@ -590,6 +618,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
                     surface->mesh_source, surface->mesh_scale};
                 resolved.resolved_surface->mesh_asset = surface->mesh_asset;
                 resolved.resolved_surface->color = surface->color;
+                resolved.resolved_surface->stage = feed_map.stage;
             } else if (surface != nullptr &&
                        scene::contains(surface->geometry.raster,
                                        resolved.source)) {
@@ -599,6 +628,7 @@ FeedMap FeedMapModel::evaluate(scene::SceneTime time) const {
                     surface->mesh_source, surface->mesh_scale};
                 resolved.resolved_surface->mesh_asset = surface->mesh_asset;
                 resolved.resolved_surface->color = surface->color;
+                resolved.resolved_surface->stage = feed_map.stage;
             }
         }
         feed_map.maps.push_back(std::move(resolved));

@@ -500,6 +500,14 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
             pending_hardware_properties.end(),
             editor_frame.hardware_property_edits.begin(),
             editor_frame.hardware_property_edits.end());
+        pending_hardware_link_regions.insert(
+            pending_hardware_link_regions.end(),
+            editor_frame.hardware_link_region_edits.begin(),
+            editor_frame.hardware_link_region_edits.end());
+        pending_hardware_walls.insert(
+            pending_hardware_walls.end(),
+            std::make_move_iterator(editor_frame.hardware_walls.begin()),
+            std::make_move_iterator(editor_frame.hardware_walls.end()));
         pending_hardware_output_binding_edits.insert(
             pending_hardware_output_binding_edits.end(),
             editor_frame.hardware_output_binding_edits.begin(),
@@ -528,6 +536,9 @@ PhaseExit DirectorShowLoop::queue_editor_requests(
                                      editor_frame.feed_organize.end());
         if (editor_frame.feed_layout.has_value()) {
             pending_feed_layout = std::move(editor_frame.feed_layout);
+        }
+        if (editor_frame.feed_stage.has_value()) {
+            pending_feed_stage = std::move(editor_frame.feed_stage);
         }
         pending_feed_surface_adds.insert(
             pending_feed_surface_adds.end(),

@@ -9,6 +9,7 @@
 #include <mediaserver/editor/mapping_panels.hpp>
 #include <mediaserver/topology/hardware_map.hpp>
 
+#include <span>
 #include <string_view>
 
 namespace mediaserver::app {
@@ -38,6 +39,24 @@ schedule_hardware_move(cmd::DirectorScheduler &scheduler,
 schedule_hardware_link(cmd::DirectorScheduler &scheduler,
                        const editor::HardwareLinkRequest &request,
                        doc::NodeId id, cmd::FrameNumber apply_at);
+
+// Places a processor's reported walls, each cabled from its LED OUT, under the
+// request's gesture so one undo removes them all. `ids` holds two fresh node
+// ids per wall (the wall, then its cable). Nothing is placed when the
+// processor is gone or its LED OUT has been cabled since the request.
+[[nodiscard]] bool
+schedule_hardware_walls(cmd::DirectorScheduler &scheduler,
+                        const editor::HardwareWallsRequest &request,
+                        std::span<const doc::NodeId> ids,
+                        cmd::FrameNumber apply_at);
+
+// Sets the part of its output a cable carries; an empty region clears it
+// back to the cable's share. Refused without an edit for anything but a cable
+// from a Render Server video output.
+[[nodiscard]] bool
+schedule_hardware_link_region(cmd::DirectorScheduler &scheduler,
+                              const editor::HardwareLinkRegionEdit &edit,
+                              cmd::FrameNumber apply_at);
 
 [[nodiscard]] bool
 schedule_hardware_property(cmd::DirectorScheduler &scheduler,
@@ -79,6 +98,14 @@ schedule_hardware_output_binding(cmd::DirectorScheduler &scheduler,
     cmd::DirectorScheduler &scheduler,
     const editor::HardwareOutputBindingDelete &request,
     cmd::FrameNumber apply_at);
+
+// Removes the cable a link request replaces (and its output binding), under
+// the request's gesture so the move undoes as one step. Call it before the new
+// link and binding are scheduled; a stale or foreign `replaces` is ignored.
+[[nodiscard]] bool
+schedule_hardware_link_replace(cmd::DirectorScheduler &scheduler,
+                               const editor::HardwareLinkRequest &request,
+                               cmd::FrameNumber apply_at);
 
 [[nodiscard]] bool
 schedule_hardware_delete(cmd::DirectorScheduler &scheduler,

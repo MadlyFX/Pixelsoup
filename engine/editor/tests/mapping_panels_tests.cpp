@@ -659,7 +659,7 @@ void selected_device_details_author_exact_configuration_properties() {
   HardwareHarness harness;
   topology::HardwareMap map{};
   map.devices.push_back(device(
-      4U, topology::HardwareDeviceKind::OperatorMachine, "Operator", 0, 0));
+      4U, topology::HardwareDeviceKind::LedWall, "Wall", 0, 0));
   const editor::IsometricProjection projection =
       editor::hardware_mapping_projection(HardwareHarness::bounds);
   const editor::IsoPoint card = editor::project_isometric(projection, 0, 0);
@@ -670,6 +670,28 @@ void selected_device_details_author_exact_configuration_properties() {
   // The details rail is right-aligned. Width is the first numeric row.
   constexpr float width_field_x = 800.0F;
   constexpr float width_field_y = 127.0F;
+
+  // An Operator Machine has no raster or rate to set: the same drag on its
+  // details authors nothing.
+  {
+    HardwareHarness desk_harness;
+    topology::HardwareMap desk_map{};
+    desk_map.devices.push_back(device(
+        5U, topology::HardwareDeviceKind::OperatorMachine, "Operator", 0, 0));
+    static_cast<void>(desk_harness.frame(card.x, card.y, false, desk_map));
+    static_cast<void>(desk_harness.frame(card.x, card.y, true, desk_map));
+    static_cast<void>(desk_harness.frame(card.x, card.y, false, desk_map));
+    for (const float y : {width_field_y, width_field_y + 27.0F,
+                          width_field_y + 54.0F}) {
+      static_cast<void>(desk_harness.frame(width_field_x, y, false, desk_map));
+      static_cast<void>(desk_harness.frame(width_field_x, y, true, desk_map));
+      const auto dragged =
+          desk_harness.frame(width_field_x + 20.0F, y, true, desk_map);
+      static_cast<void>(desk_harness.frame(width_field_x + 20.0F, y, false,
+                                           desk_map));
+      MAPPING_CHECK(!dragged.property_edit.has_value());
+    }
+  }
   static_cast<void>(harness.frame(width_field_x, width_field_y, false, map));
   static_cast<void>(harness.frame(width_field_x, width_field_y, true, map));
   const auto changed =
@@ -691,6 +713,19 @@ void selected_device_details_author_exact_configuration_properties() {
       std::get_if<std::int64_t>(&broad.property_edit->value);
   MAPPING_CHECK(broad_value != nullptr);
   MAPPING_CHECK(*broad_value == 32'768);
+
+  // Refresh, two rows down, is one field in hertz: a hundredth per pixel,
+  // authored as the rate the Director turns into an exact fraction.
+  constexpr float refresh_field_y = width_field_y + 54.0F;
+  static_cast<void>(harness.frame(width_field_x, refresh_field_y, false, map));
+  static_cast<void>(harness.frame(width_field_x, refresh_field_y, true, map));
+  const auto rate =
+      harness.frame(width_field_x + 100.0F, refresh_field_y, true, map);
+  MAPPING_CHECK(rate.property_edit.has_value());
+  MAPPING_CHECK(rate.property_edit->property == editor::hardware_refresh_edit);
+  const auto *const hertz = std::get_if<double>(&rate.property_edit->value);
+  MAPPING_CHECK(hertz != nullptr);
+  MAPPING_CHECK(std::abs(*hertz - 61.0) < 1e-9);
 }
 
 void a_render_server_is_marked_as_the_timelines_main_node() {
@@ -1021,7 +1056,8 @@ void output_deployment_is_created_by_wiring_and_remains_repairable() {
   topology::HardwareRuntimeSnapshot replacement = render_runtime(1U, 1U);
   replacement.nodes[0U].video_outputs[0U] =
       two_outputs.nodes[0U].video_outputs[1U];
-  constexpr float repair_y = 462.0F;
+  // One Refresh row in hertz above it, where a rate and a divisor were.
+  constexpr float repair_y = 435.0F;
   static_cast<void>(
       harness.runtime_frame(details_x, repair_y, false, map, replacement));
   static_cast<void>(
@@ -1095,6 +1131,74 @@ void live_render_outputs_are_distinct_cable_targets_without_mutating_map() {
                 runtime.nodes[0U].video_outputs[2U].target);
   MAPPING_CHECK(!released.property_edit.has_value());
   MAPPING_CHECK(topology::digest(map) == authored_digest);
+}
+
+// A card cabled before its outputs were known holds OUT 1. Its real outputs
+// appear once cabled, and dropping another of them on the same input moves
+// the cable there instead of reporting the input as taken.
+void dropping_a_devices_other_output_on_its_input_moves_the_cable() {
+  HardwareHarness harness;
+  const topology::HardwareMap map = hardware_demo(true);
+  const topology::HardwareRuntimeSnapshot runtime = render_runtime(1U, 2U);
+  const editor::IsometricProjection projection =
+      harness.panel.view_projection(HardwareHarness::bounds);
+  const editor::IsoPoint output_two = editor::hardware_presented_port_position(
+      projection, map, map.devices[0U], runtime, 2U);
+  const editor::IsoPoint processor_input =
+      editor::hardware_presented_port_position(projection, map, map.devices[1U],
+                                               runtime, 0U);
+
+  static_cast<void>(
+      harness.runtime_frame(output_two.x, output_two.y, false, map, runtime));
+  static_cast<void>(
+      harness.runtime_frame(output_two.x, output_two.y, true, map, runtime));
+  const auto over_target = harness.runtime_frame(
+      processor_input.x, processor_input.y, true, map, runtime);
+  MAPPING_CHECK(over_target.link_feedback ==
+                editor::HardwareLinkFeedback::Replaces);
+  const auto released = harness.runtime_frame(
+      processor_input.x, processor_input.y, false, map, runtime);
+  MAPPING_CHECK(released.link.has_value());
+  MAPPING_CHECK(!released.incompatible_link_attempted);
+  MAPPING_CHECK(released.link->from ==
+                topology::HardwareEndpoint{doc::NodeId{1U}, 2U});
+  MAPPING_CHECK(released.link->to ==
+                topology::HardwareEndpoint{doc::NodeId{2U}, 0U});
+  MAPPING_CHECK(released.link->replaces == doc::NodeId{10U});
+  MAPPING_CHECK(released.link->output_binding.has_value());
+  MAPPING_CHECK(released.link->output_binding->target ==
+                runtime.nodes[0U].video_outputs[1U].target);
+}
+
+// An NVIDIA Mosaic surface is one output to the render machine but one
+// connector per processor, so a Render Server output takes a second cable.
+// Dropping it back on an input it already feeds does nothing.
+void a_render_output_cables_to_several_processors() {
+  HardwareHarness harness;
+  topology::HardwareMap map = hardware_demo(true);
+  map.devices.push_back(device(4U, topology::HardwareDeviceKind::LedProcessor,
+                               "Processor B", 5, -3));
+  const editor::IsometricProjection projection =
+      harness.panel.view_projection(HardwareHarness::bounds);
+  const editor::IsoPoint output_one =
+      editor::hardware_port_position(projection, map.devices[0U], 1U);
+  const editor::IsoPoint second_input =
+      editor::hardware_port_position(projection, map.devices[3U], 0U);
+  const editor::IsoPoint first_input =
+      editor::hardware_port_position(projection, map.devices[1U], 0U);
+
+  static_cast<void>(harness.frame(output_one.x, output_one.y, false, map));
+  static_cast<void>(harness.frame(output_one.x, output_one.y, true, map));
+  const auto same = harness.frame(first_input.x, first_input.y, true, map);
+  MAPPING_CHECK(same.link_feedback == editor::HardwareLinkFeedback::Occupied);
+  const auto over = harness.frame(second_input.x, second_input.y, true, map);
+  MAPPING_CHECK(over.link_feedback == editor::HardwareLinkFeedback::Compatible);
+  const auto released =
+      harness.frame(second_input.x, second_input.y, false, map);
+  MAPPING_CHECK(released.link ==
+                editor::HardwareLinkRequest{
+                    topology::HardwareEndpoint{doc::NodeId{1U}, 1U},
+                    topology::HardwareEndpoint{doc::NodeId{4U}, 0U}});
 }
 
 void output_inventory_preserves_unknown_zero_and_last_good_semantics() {
@@ -1915,7 +2019,7 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   static_cast<void>(harness.frame(center_x + 10.0F, center_y, false, map));
 
   constexpr float browse_x = 700.0F;
-  constexpr float browse_y = 356.0F;
+  constexpr float browse_y = 383.0F;
   static_cast<void>(harness.frame(browse_x, browse_y, false, map));
   static_cast<void>(harness.frame(browse_x, browse_y, true, map));
   const auto browse = harness.frame(browse_x, browse_y, false, map);
@@ -1942,7 +2046,7 @@ void imported_mesh_add_and_browse_are_explicit_panel_contracts() {
   // Once the shell-authored document comes back, the panel reconciles that
   // externally filled path without disturbing ordinary live numeric scrubs.
   constexpr float scale_x = 700.0F;
-  constexpr float scale_y = 383.0F;
+  constexpr float scale_y = 410.0F;
   static_cast<void>(harness.frame(scale_x, scale_y, false, resolved));
   static_cast<void>(harness.frame(scale_x, scale_y, true, resolved));
   const auto scale = harness.frame(scale_x + 10.0F, scale_y, true, resolved);
@@ -1974,7 +2078,7 @@ void imported_mesh_shape_scale_and_reset_preserve_complete_values() {
   MAPPING_CHECK(shape.surface_edit->mesh_scale == 0.5F);
 
   constexpr float scale_x = 700.0F;
-  constexpr float scale_y = 383.0F;
+  constexpr float scale_y = 410.0F;
   static_cast<void>(harness.frame(scale_x, scale_y, false, map));
   static_cast<void>(harness.frame(scale_x, scale_y, true, map));
   const auto scaled = harness.frame(scale_x + 20.0F, scale_y, true, map);
@@ -2096,7 +2200,7 @@ void uv_wireframe_preview_reloads_explicit_same_path_replacements() {
   // REPLACE can return the same pathname after an external tool overwrote its
   // contents. Clicking it must invalidate both the decoded mesh and its key.
   constexpr float browse_x = 700.0F;
-  constexpr float browse_y = 356.0F;
+  constexpr float browse_y = 383.0F;
   static_cast<void>(harness.frame(browse_x, browse_y, false, map));
   static_cast<void>(harness.frame(browse_x, browse_y, true, map));
   const auto browse = harness.frame(browse_x, browse_y, false, map);
@@ -2311,7 +2415,7 @@ void horizontal_arc_shape_and_mesh_controls_emit_complete_surface_edits() {
   // Forty pixels at 0.25 degrees/pixel changes the default 90-degree arc to
   // 100 degrees.
   constexpr float bend_x = 670.0F;
-  constexpr float arc_fields_y = 340.0F;
+  constexpr float arc_fields_y = 367.0F;
   static_cast<void>(harness.frame(bend_x, arc_fields_y, false, map));
   static_cast<void>(harness.frame(bend_x, arc_fields_y, true, map));
   const auto bend = harness.frame(bend_x + 40.0F, arc_fields_y, true, map);
@@ -2971,12 +3075,106 @@ void processors_found_at_one_address_stay_apart() {
                     topology::HardwareProcessorProtocol::BromptonTessera);
 }
 
+void the_stage_follows_the_camera_and_places_the_viewer() {
+  FeedHarness harness;
+  output::FeedMap map = feed_demo();
+  // Below the surface list: the Stage heading, then Fixed | Follows camera.
+  constexpr float fixed_x = 50.0F;
+  constexpr float camera_x = 141.0F;
+  constexpr float choice_y = 280.0F;
+  const auto carried = harness.click(camera_x, choice_y, map);
+  MAPPING_CHECK(carried.stage_edit.has_value());
+  MAPPING_CHECK(carried.stage_edit->stage.anchor ==
+                output::StageAnchor::Camera);
+  MAPPING_CHECK(carried.stage_edit->stage.eye == scene::Vec3{});
+  // The document still says Fixed, so choosing Fixed authors nothing.
+  MAPPING_CHECK(!harness.click(fixed_x, choice_y, map).stage_edit.has_value());
+
+  map.stage.anchor = output::StageAnchor::Camera;
+  map.stage.eye = scene::Vec3{0.0F, 1.5F, 0.0F};
+  // The viewer eye appears with a carried stage. Y scrubs a centimetre a
+  // pixel and holds the gesture open while it does.
+  constexpr float eye_y_x = 96.0F;
+  constexpr float eye_fields_y = 324.0F;
+  static_cast<void>(harness.frame(eye_y_x, eye_fields_y, false, map));
+  static_cast<void>(harness.frame(eye_y_x, eye_fields_y, true, map));
+  const auto scrub = harness.frame(eye_y_x + 20.0F, eye_fields_y, true, map);
+  MAPPING_CHECK(scrub.stage_edit.has_value());
+  MAPPING_CHECK(scrub.stage_edit->stage.anchor == output::StageAnchor::Camera);
+  MAPPING_CHECK(std::abs(scrub.stage_edit->stage.eye.y - 1.7F) < 1.0e-4F);
+  MAPPING_CHECK(scrub.stage_edit->stage.eye.x == 0.0F);
+  MAPPING_CHECK(scrub.stage_edit->stage.eye.z == 0.0F);
+  MAPPING_CHECK(scrub.editing);
+  static_cast<void>(harness.frame(eye_y_x + 20.0F, eye_fields_y, false, map));
+
+  // Each reset arrow puts back its own default and nothing else.
+  constexpr float reset_x = 174.0F;
+  const auto eye_reset = harness.click(reset_x, 303.0F, map);
+  MAPPING_CHECK(eye_reset.stage_edit.has_value());
+  MAPPING_CHECK(eye_reset.stage_edit->stage.eye == scene::Vec3{});
+  MAPPING_CHECK(eye_reset.stage_edit->stage.anchor ==
+                output::StageAnchor::Camera);
+  const auto anchor_reset = harness.click(reset_x, 258.0F, map);
+  MAPPING_CHECK(anchor_reset.stage_edit.has_value());
+  MAPPING_CHECK(anchor_reset.stage_edit->stage.anchor ==
+                output::StageAnchor::World);
+  MAPPING_CHECK(anchor_reset.stage_edit->stage.eye ==
+                (scene::Vec3{0.0F, 1.5F, 0.0F}));
+}
+
+void a_surface_pitch_tilts_it_into_a_ceiling() {
+  FeedHarness harness;
+  const output::FeedMap map = feed_surface_demo();
+  static_cast<void>(harness.click(96.0F, 101.0F, map));
+
+  // Pitch sits under Yaw in Surface Calibration, a quarter degree a pixel.
+  constexpr float pitch_x = 700.0F;
+  constexpr float pitch_y = 340.0F;
+  static_cast<void>(harness.frame(pitch_x, pitch_y, false, map));
+  static_cast<void>(harness.frame(pitch_x, pitch_y, true, map));
+  const auto tilted = harness.frame(pitch_x + 40.0F, pitch_y, true, map);
+  MAPPING_CHECK(tilted.surface_edit.has_value());
+  MAPPING_CHECK(tilted.surface_edit->node == doc::NodeId{70U});
+  MAPPING_CHECK(tilted.surface_edit->transform_components ==
+                editor::FeedSurfaceTransform::Yaw);
+  // Ten degrees: the top edge tips back, the right edge stays level.
+  const scene::Vec3 up = tilted.surface_edit->surface.up;
+  MAPPING_CHECK(std::abs(up.x) < 1.0e-5F);
+  MAPPING_CHECK(std::abs(up.y - 0.98480775F) < 1.0e-4F);
+  MAPPING_CHECK(std::abs(up.z - 0.17364818F) < 1.0e-4F);
+  MAPPING_CHECK(std::abs(tilted.surface_edit->surface.right.x - 1.0F) <
+                1.0e-6F);
+  MAPPING_CHECK(tilted.surface_edit->surface.center ==
+                map.surfaces[0U].geometry.center);
+  static_cast<void>(harness.frame(pitch_x + 40.0F, pitch_y, false, map));
+
+  // A face already laid flat as a ceiling carries a reset arrow at the end
+  // of its pitch field that stands it upright again.
+  output::FeedMap ceiling = map;
+  output::orient(ceiling.surfaces[0U].geometry, 0.0F, 0.25F);
+  static_cast<void>(
+      harness.frame(10.0F, 450.0F, false, ceiling, std::nullopt, 1U));
+  static_cast<void>(
+      harness.frame(782.0F, pitch_y, false, ceiling, std::nullopt, 1U));
+  static_cast<void>(
+      harness.frame(782.0F, pitch_y, true, ceiling, std::nullopt, 1U));
+  const auto upright =
+      harness.frame(782.0F, pitch_y, false, ceiling, std::nullopt, 1U);
+  MAPPING_CHECK(upright.surface_edit.has_value());
+  MAPPING_CHECK(upright.surface_edit->surface.up ==
+                (scene::Vec3{0.0F, 1.0F, 0.0F}));
+}
+
 struct Case final {
   const char *name;
   void (*function)();
 };
 
-constexpr std::array<Case, 57U> cases{{
+constexpr std::array<Case, 61U> cases{{
+    {"the stage follows the camera and places the viewer",
+     &the_stage_follows_the_camera_and_places_the_viewer},
+    {"a surface pitch tilts it into a ceiling",
+     &a_surface_pitch_tilts_it_into_a_ceiling},
     {"processors found at one address stay apart",
      &processors_found_at_one_address_stay_apart},
     {"a novastar processor shows its inputs and matches an edid",
@@ -3034,6 +3232,10 @@ constexpr std::array<Case, 57U> cases{{
      &output_deployment_is_created_by_wiring_and_remains_repairable},
     {"live render outputs are distinct cable targets without mutating map",
      &live_render_outputs_are_distinct_cable_targets_without_mutating_map},
+    {"dropping a device's other output on its input moves the cable",
+     &dropping_a_devices_other_output_on_its_input_moves_the_cable},
+    {"a render output cables to several processors",
+     &a_render_output_cables_to_several_processors},
     {"output inventory preserves unknown zero and last good semantics",
      &output_inventory_preserves_unknown_zero_and_last_good_semantics},
     {"linked missing outputs stay compact and live details are read only",

@@ -70,6 +70,8 @@ inline constexpr std::size_t max_cluster_machine_operating_system_bytes = 96U;
 inline constexpr std::size_t max_cluster_machine_message_bytes = 160U;
 inline constexpr std::size_t max_cluster_machine_adapter_name_bytes = 128U;
 inline constexpr std::size_t max_cluster_machine_display_name_bytes = 96U;
+// The physical displays one NVIDIA Mosaic surface may report.
+inline constexpr std::size_t max_cluster_display_mosaic_tiles = 16U;
 
 enum class ClusterMachineInfoAvailability : std::uint8_t {
     Available,
@@ -120,6 +122,16 @@ struct ClusterGpuAdapterInfo final {
     bool operator==(const ClusterGpuAdapterInfo&) const = default;
 };
 
+// One physical display of an NVIDIA Mosaic surface, in the surface's pixels.
+struct ClusterMosaicTile final {
+    core::u32 x{};
+    core::u32 y{};
+    core::u32 width{};
+    core::u32 height{};
+
+    bool operator==(const ClusterMosaicTile&) const = default;
+};
+
 struct ClusterDisplayTargetInfo final {
     // adapter_id + target_id identifies a display target only within this
     // runtime inventory. MST, indirect, and virtual targets mean the count is
@@ -150,6 +162,9 @@ struct ClusterDisplayTargetInfo final {
     core::u32 desktop_width{};
     core::u32 desktop_height{};
     std::string name;
+    // The displays an NVIDIA Mosaic surface spans, row by row; empty for an
+    // ordinary display. Windows sees the surface as this one target.
+    std::vector<ClusterMosaicTile> mosaic_tiles;
 
     bool operator==(const ClusterDisplayTargetInfo&) const = default;
 };

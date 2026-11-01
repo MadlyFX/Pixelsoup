@@ -51,6 +51,9 @@ struct HardwareVideoOutput final {
   core::u32 refresh_denominator{1U};
   bool active{true};
   bool available{true};
+  // The physical displays an NVIDIA Mosaic surface spans, row by row, in
+  // the surface's pixels. Empty for an ordinary single display.
+  std::vector<HardwareOutputRegion> mosaic_tiles;
 
   bool operator==(const HardwareVideoOutput &) const = default;
 };

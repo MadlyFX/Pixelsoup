@@ -201,10 +201,28 @@ struct HardwareEndpoint final {
   bool operator==(const HardwareEndpoint &) const = default;
 };
 
+// A rectangle of a Render Server output, in its pixels.
+struct HardwareOutputRegion final {
+  core::u32 x{};
+  core::u32 y{};
+  core::u32 width{};
+  core::u32 height{};
+
+  [[nodiscard]] bool empty() const noexcept {
+    return width == 0U || height == 0U;
+  }
+  bool operator==(const HardwareOutputRegion &) const = default;
+};
+
 struct HardwareLink final {
   doc::NodeId node{};
   HardwareEndpoint from;
   HardwareEndpoint to;
+  // The part of the output this cable carries. One output may feed several
+  // inputs - an NVIDIA Mosaic surface spanning one connector per processor -
+  // and each cable then carries a tile of it. Empty means unauthored: the
+  // cable takes the share link_output_region gives it.
+  HardwareOutputRegion region{};
 
   bool operator==(const HardwareLink &) const = default;
 };
@@ -291,7 +309,9 @@ lifecycle_endpoint_for(const HardwareMap &map,
 // a card no cable touches and no output binding names is parked: an
 // alternative or future configuration kept on the map. A parked card is never
 // launched, never gates Program, never joins the asset cohort, and cannot make
-// a wired card's node index ambiguous. Always false for other device kinds.
+// a wired card's node index ambiguous; the Director still asks its machine for
+// status and displays so its outputs can be cabled. Always false for other
+// device kinds.
 [[nodiscard]] bool render_server_active(const HardwareMap &map,
                                         const HardwareDevice &device) noexcept;
 

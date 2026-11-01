@@ -350,6 +350,10 @@ core::u64 digest(const HardwareMap &map) noexcept {
     hash_byte(hash, link.from.port);
     hash_u64(hash, link.to.device.value());
     hash_byte(hash, link.to.port);
+    hash_u64(hash, link.region.x);
+    hash_u64(hash, link.region.y);
+    hash_u64(hash, link.region.width);
+    hash_u64(hash, link.region.height);
   }
   hash_u64(hash, static_cast<core::u64>(map.output_bindings.size()));
   for (const HardwareOutputBinding &binding : map.output_bindings) {

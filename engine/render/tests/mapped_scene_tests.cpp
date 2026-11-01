@@ -474,6 +474,79 @@ void reset_and_teardown_do_not_join_an_in_flight_loader() {
   MAPPED_CHECK(teardown_gate->wait_until_finished_for_test());
 }
 
+[[nodiscard]] bool near(scene::Vec3 a, scene::Vec3 b) noexcept {
+  return std::abs(a.x - b.x) < 1.0e-5F && std::abs(a.y - b.y) < 1.0e-5F &&
+         std::abs(a.z - b.z) < 1.0e-5F;
+}
+
+// The camera a fly-through has reached: far from the origin, looking down
+// world +X, a quarter turn from where the room was authored to face.
+[[nodiscard]] scene::Scene flown_frame(float x) {
+  scene::Scene value = frame();
+  value.camera.eye = scene::Vec3{x, 2.0F, 7.0F};
+  value.camera.target = scene::Vec3{x + 1.0F, 2.0F, 7.0F};
+  return value;
+}
+
+void a_camera_stage_carries_flat_and_arc_faces_without_rebuilding_meshes() {
+  output::OutputMap ceiling = arc_map();
+  // Facing down, two metres over the viewer.
+  output::orient(ceiling.resolved_surface->geometry, 0.0F, 0.25F);
+  ceiling.resolved_surface->geometry.center = scene::Vec3{0.0F, 2.0F, 0.0F};
+  ceiling.resolved_surface->stage.anchor = output::StageAnchor::Camera;
+  output::OutputMap front = arc_map(0.20F, 42U);
+  front.resolved_surface->shape = output::ProjectionSurfaceShape::Planar;
+  front.resolved_surface->stage.anchor = output::StageAnchor::Camera;
+
+  render::OutputProjectionCache ceiling_cache;
+  render::OutputProjectionCache front_cache;
+  const auto first = ceiling_cache.resolve(flown_frame(10.0F), ceiling);
+  const auto flat = front_cache.resolve(flown_frame(10.0F), front);
+  MAPPED_CHECK(first.has_value() && flat.has_value());
+  // The front face looks where the camera looks, the ceiling straight up,
+  // both from the camera's own eye.
+  MAPPED_CHECK(near(flat->render_view.forward, scene::Vec3{1.0F, 0.0F, 0.0F}));
+  MAPPED_CHECK(near(flat->render_view.eye, scene::Vec3{10.0F, 2.0F, 7.0F}));
+  MAPPED_CHECK(near(first->render_view.forward, scene::Vec3{0.0F, 1.0F, 0.0F}));
+  MAPPED_CHECK(first->mesh_placement.has_value());
+  MAPPED_CHECK(near(flat->surface_up, scene::Vec3{0.0F, 1.0F, 0.0F}));
+
+  // Flying on moves the view but never the cached stage-space mesh.
+  const output::ProjectionMesh *const retained = first->projection_mesh();
+  MAPPED_CHECK(retained != nullptr);
+  for (int step = 1; step <= 32; ++step) {
+    const auto later = ceiling_cache.resolve(
+        flown_frame(10.0F + static_cast<float>(step)), ceiling);
+    MAPPED_CHECK(later.has_value());
+    MAPPED_CHECK(later->projection_mesh() == retained);
+  }
+  // Nor does moving the viewer within the room: the stage is placement.
+  output::OutputMap shifted = ceiling;
+  shifted.resolved_surface->stage.eye = scene::Vec3{0.0F, 0.5F, 0.0F};
+  const auto shifted_view = ceiling_cache.resolve(flown_frame(10.0F), shifted);
+  MAPPED_CHECK(shifted_view.has_value());
+  MAPPED_CHECK(shifted_view->projection_mesh() == retained);
+  const auto moved = ceiling_cache.resolve(flown_frame(30.0F), ceiling);
+  MAPPED_CHECK(moved.has_value());
+  MAPPED_CHECK(near(moved->render_view.eye, scene::Vec3{30.0F, 2.0F, 7.0F}));
+  MAPPED_CHECK(moved->render_view.matrices.view !=
+               first->render_view.matrices.view);
+
+  // The same front face fixed in the world keeps facing where it was built
+  // to face while the camera has turned a quarter turn away from it.
+  output::OutputMap fixed = front;
+  fixed.resolved_surface->stage = output::StagePlacement{};
+  render::OutputProjectionCache fixed_cache;
+  const auto world = fixed_cache.resolve(flown_frame(10.0F), fixed);
+  MAPPED_CHECK(world.has_value());
+  MAPPED_CHECK(near(world->render_view.forward, scene::Vec3{0.0F, 0.0F, -1.0F}));
+
+  // A camera with no direction has no room to carry: refused, not guessed.
+  scene::Scene stuck = flown_frame(10.0F);
+  stuck.camera.target = stuck.camera.eye;
+  MAPPED_CHECK(!front_cache.resolve(stuck, front).has_value());
+}
+
 struct Case final {
   const char *name;
   void (*function)();
@@ -500,7 +573,9 @@ void authored_refresh_generation_replaces_the_mesh_and_diagnostics_reuse_it() {
   MAPPED_CHECK(cache.resolve(scene_frame, map)->projection_mesh() == second->projection_mesh());
 }
 
-constexpr std::array<Case, 7U> cases{{
+constexpr std::array<Case, 8U> cases{{
+    {"a camera stage carries flat and arc faces without rebuilding meshes",
+     &a_camera_stage_carries_flat_and_arc_faces_without_rebuilding_meshes},
     {"authored refresh and diagnostic mesh reuse", &authored_refresh_generation_replaces_the_mesh_and_diagnostics_reuse_it},
     {"failed imports are sticky until an explicit refresh",
      &failed_imports_are_sticky_until_an_explicit_refresh},

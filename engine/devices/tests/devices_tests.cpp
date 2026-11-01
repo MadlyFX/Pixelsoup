@@ -224,6 +224,34 @@ void coex_answers_become_a_processor_card() {
                 plain[0].layers[0].source ==
                     topology::HardwarePixelRect{0U, 0U, 2880U, 1536U});
 
+  // The other layout firmware uses: a canvas's pixel size as its own width
+  // and height, cabinets beside the canvases with a pixel resolution and a
+  // physical size in millimetres, and the layers listed flat.
+  const auto flat = devices::parse_json(R"({"screens":[{
+      "screenID":"{77}","screenName":"","workingMode":1,"masterFrameRate":23.976,
+      "canvases":[{"canvasID":0,"width":2880,"height":1536}],
+      "cabinets":[
+        {"id":1,"x":0,"y":0,"resolution":{"width":288,"height":256},
+         "size":{"width":500,"height":500}},
+        {"id":2,"x":2592,"y":1280,"resolution":{"width":288,"height":256},
+         "size":{"width":500,"height":500}}],
+      "layersInWorkingMode":[
+        {"id":1,"source":10,"position":{"x":0,"y":0},
+         "size":{"width":2880,"height":1536},
+         "cut":{"enable":true,"rect":{"x":0,"y":0,"width":2880,"height":1536}}}]}]})");
+  DEVICES_CHECK(flat.has_value());
+  const auto other = coex::parse_screens(*flat, inputs);
+  DEVICES_CHECK(other.size() == 1U);
+  DEVICES_CHECK(other[0].width == 2880U && other[0].height == 1536U);
+  DEVICES_CHECK(other[0].cabinets == 2U &&
+                other[0].refresh_millihertz == 23'976U);
+  DEVICES_CHECK(other[0].layers.size() == 1U &&
+                other[0].layers[0].input == 1U &&
+                other[0].layers[0].source ==
+                    topology::HardwarePixelRect{0U, 0U, 2880U, 1536U} &&
+                other[0].layers[0].screen ==
+                    topology::HardwarePixelRect{0U, 0U, 2880U, 1536U});
+
   const auto monitor = devices::parse_json(monitor_answer);
   const coex::Identity identity =
       coex::parse_identity(coex::unwrap(*monitor).data, nullptr);
