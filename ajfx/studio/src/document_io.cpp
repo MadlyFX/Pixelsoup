@@ -252,6 +252,10 @@ std::string save_document(const Document& document) {
         out.add("name", json::Value::of(layer.name));
         out.add("enabled", json::Value::of(layer.enabled));
         out.add("solo", json::Value::of(layer.solo));
+        out.add("kind", json::Value::of(std::string{layer_kind_id(layer.kind)}));
+        if (layer.world) {
+            out.add("world", block_to_json(*layer.world));
+        }
         json::Value life = json::Value::array();
         life.push(json::Value::of(static_cast<double>(layer.life_min)));
         life.push(json::Value::of(static_cast<double>(layer.life_max)));
@@ -316,6 +320,13 @@ Loaded load_document(std::string_view text) {
                 layer.life_max = std::max(static_cast<float>(life->items[1].number), layer.life_min);
             }
             layer.seed = static_cast<std::uint32_t>(std::clamp(in.number_or("seed", 0.0), 0.0, 1.0e6));
+            // A page saved before layers had a kind says nothing. Its kind
+            // is what its blocks were: a Physics, Pile or Prop block put
+            // the whole layer in a physics world, which is the confusion
+            // the kind exists to end.
+            const json::Value* stated = in.find("kind");
+            bool infer = stated == nullptr || stated->type != json::Value::Type::String;
+            layer.kind = infer ? LayerKind::Particles : layer_kind_from(stated->text);
             if (const json::Value* blocks = in.find("blocks"); blocks != nullptr) {
                 for (const json::Value& b : blocks->items) {
                     std::string error;
@@ -328,8 +339,40 @@ Loaded load_document(std::string_view text) {
                     if (block->detached) {
                         highest = std::max(highest, block->detached->from);
                     }
+                    if (infer && (block->kind == world_block_kind || block->kind == "pile" || block->kind == "prop")) {
+                        layer.kind = LayerKind::Rigid;
+                    }
                     layer.blocks.push_back(std::move(*block));
                 }
+            }
+            if (const json::Value* world = in.find("world"); world != nullptr && layer.kind == LayerKind::Rigid) {
+                std::string error;
+                if (std::optional<Block> block = block_from_json(*world, error);
+                    block && block->kind == world_block_kind) {
+                    highest = std::max(highest, block->uid);
+                    layer.world = std::move(block);
+                }
+            }
+            if (layer.kind == LayerKind::Rigid && !layer.world) {
+                // Either an older page, whose world was the Physics block on
+                // its list, or a rigid layer that never had one: the block
+                // leaves the list and becomes the layer's own settings.
+                const auto found = std::find_if(layer.blocks.begin(), layer.blocks.end(),
+                                                [](const Block& b) { return b.kind == world_block_kind; });
+                if (found != layer.blocks.end()) {
+                    layer.world = std::move(*found);
+                    layer.blocks.erase(found);
+                } else {
+                    Block world_block;
+                    world_block.kind = std::string{world_block_kind};
+                    layer.world = std::move(world_block);
+                }
+            }
+            // Any further Physics block is a duplicate of the world it just
+            // became; the layer has one world and holds it once.
+            std::erase_if(layer.blocks, [](const Block& b) { return b.kind == world_block_kind; });
+            for (Block& block : layer.blocks) {
+                conform_block(block, layer.kind);
             }
             document.layers.push_back(std::move(layer));
         }
@@ -345,15 +388,30 @@ Loaded load_document(std::string_view text) {
             repeated = repeated || block.uid == 0U || std::find(seen.begin(), seen.end(), block.uid) != seen.end();
             seen.push_back(block.uid);
         }
+        // A world lifted out of an older page's blocks keeps that block's
+        // uid, so its random streams and module ids stay where they were;
+        // one made fresh has none yet and is given one below.
+        if (layer.world && layer.world->uid != 0U) {
+            repeated = repeated || std::find(seen.begin(), seen.end(), layer.world->uid) != seen.end();
+            seen.push_back(layer.world->uid);
+        }
     }
     document.next_uid = std::max<Uid>(static_cast<Uid>(root->number_or("next_uid", 1.0)), highest + 1U);
     if (repeated) {
         document.next_uid = 1U;
         for (Layer& layer : document.layers) {
             layer.uid = document.allocate();
+            if (layer.world) {
+                layer.world->uid = document.allocate();
+            }
             for (Block& block : layer.blocks) {
                 block.uid = document.allocate();
             }
+        }
+    }
+    for (Layer& layer : document.layers) {
+        if (layer.world && layer.world->uid == 0U) {
+            layer.world->uid = document.allocate();
         }
     }
     loaded.document = std::move(document);

@@ -16,7 +16,7 @@
 namespace ajfx::studio {
 
 inline constexpr std::string_view document_extension = ".ajfxstudio";
-inline constexpr int document_version = 1;
+inline constexpr int document_version = 2;
 
 [[nodiscard]] std::string save_document(const Document& document);
 

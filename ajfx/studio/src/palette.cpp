@@ -19,6 +19,15 @@ namespace editor = mediaserver::editor;
 constexpr float entry_height = 28.0F;
 constexpr float heading_height = 26.0F;
 
+// "Rigid physics" -> "rigid physics", to sit inside a sentence.
+std::string lower_first(std::string_view text) {
+    std::string out{text};
+    if (!out.empty()) {
+        out[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[0])));
+    }
+    return out;
+}
+
 std::string lower(std::string_view text) {
     std::string out{text};
     for (char& c : out) {
@@ -34,8 +43,14 @@ void Palette::build() {
         return;
     }
     Section layers{"Layers", {}};
-    layers.entries.push_back(Entry{Incoming{Incoming::Kind::Layer, "", "Empty layer", std::nullopt},
-                                   "A layer with no blocks, to build from scratch.", "new blank", false});
+    // A layer's kind decides what can go in it, so the choice is made here,
+    // where the layer is made.
+    for (const LayerKind kind : {LayerKind::Particles, LayerKind::Rigid}) {
+        layers.entries.push_back(
+            Entry{Incoming{Incoming::Kind::Layer, empty_layer_id(kind),
+                           "Empty " + lower_first(layer_kind_name(kind)) + " layer", std::nullopt},
+                  std::string{layer_kind_description(kind)}, "new blank", false});
+    }
     for (const LayerPreset& preset : layer_presets()) {
         layers.entries.push_back(Entry{Incoming{Incoming::Kind::Layer, std::string{preset.id}, std::string{preset.title},
                                                 std::nullopt},
@@ -46,10 +61,11 @@ void Palette::build() {
                                     Category::Physics, Category::Light}) {
         Section section{std::string{category_name(category)}, {}};
         for (const BlockDef& def : block_catalog()) {
-            if (def.category == category && def.kind != raw_block_kind) {
+            if (def.category == category && def.kind != raw_block_kind && def.layers != in_no_layer) {
                 section.entries.push_back(Entry{Incoming{Incoming::Kind::Block, std::string{def.kind},
                                                          std::string{def.title}, def.category},
-                                                std::string{def.description}, std::string{def.keywords}, def.unique});
+                                                std::string{def.description}, std::string{def.keywords}, def.unique,
+                                                def.layers, std::string{def.only_in}});
             }
         }
         sections_.push_back(std::move(section));
@@ -155,33 +171,43 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
                                          "palette.entry." + entry->incoming.id);
             const gui::Interaction hit = ctx.grab(id, row);
             ctx.cursor_for(hit, gui::Cursor::Hand);
+            // A block the layer being worked on cannot hold at all: shown,
+            // so an artist can see what there is, but plainly not for this
+            // layer, with the reason on hover.
+            const bool wrong_kind = working != nullptr && !fits(entry->layers, working->kind);
             // A block that may be in a layer once, already in the working one.
-            const bool there = entry->unique && working != nullptr &&
+            const bool there = entry->unique && working != nullptr && !wrong_kind &&
                                std::any_of(working->blocks.begin(), working->blocks.end(),
                                            [&](const Block& b) { return b.kind == entry->incoming.id; });
-            const float glow = ctx.ease(id ^ 0x5A5AU, hit.hovered || hit.held ? 1.0F : 0.0F);
+            const bool dimmed = there || wrong_kind;
+            const float glow = ctx.ease(id ^ 0x5A5AU, (hit.hovered || hit.held) && !wrong_kind ? 1.0F : 0.0F);
             if (glow > 0.0F) {
                 ctx.rounded(row, gui::fade(theme.widget_hover, 0.6F * glow), theme.radius_small);
             }
-            const gui::UiColor ink = there ? gui::fade(theme.text_muted, 0.7F) : theme.text;
+            const gui::UiColor ink = dimmed ? gui::fade(theme.text_muted, wrong_kind ? 0.5F : 0.7F) : theme.text;
             if (entry->incoming.category) {
                 draw_category_icon(ctx, *entry->incoming.category, row.x + 14.0F, row.center_y(),
-                                   gui::fade(theme.text_muted, there ? 0.6F : 1.0F));
+                                   gui::fade(theme.text_muted, dimmed ? (wrong_kind ? 0.4F : 0.6F) : 1.0F));
             } else {
                 gui::draw_icon(ctx.draw_list(), gui::Icon::Plus, row.x + 14.0F, row.center_y(),
                                gui::fade(theme.text_muted, 0.9F), 0.75F);
             }
             ctx.label(gui::Rect{row.x + 30.0F, row.y, row.width - 34.0F, row.height}, entry->incoming.title, ink);
-            ctx.tooltip(row, there ? entry->description + " This layer has one already: drag it to another."
-                                   : entry->description + " Drag onto the page, or click to add.");
-            if (hit.pressed) {
+            if (wrong_kind) {
+                ctx.tooltip(row, "Not in a " + lower_first(layer_kind_name(working->kind)) + " layer. " +
+                                     entry->only_in);
+            } else {
+                ctx.tooltip(row, there ? entry->description + " This layer has one already: drag it to another."
+                                       : entry->description + " Drag onto the page, or click to add.");
+            }
+            if (!wrong_kind && hit.pressed) {
                 pressed_ = true;
                 dragging_ = false;
                 press_x_ = ctx.pointer_x();
                 press_y_ = ctx.pointer_y();
                 pressed_entry_ = entry->incoming;
             }
-            if (hit.clicked && !dragging_) {
+            if (!wrong_kind && hit.clicked && !dragging_) {
                 clicked_ = entry->incoming;
             }
             y += entry_height;

@@ -21,6 +21,8 @@ struct LayerPreset final {
     std::string_view id;
     std::string_view title;
     std::string_view description;
+    // What moves it: the preset's blocks are the ones that kind can hold.
+    LayerKind kind{LayerKind::Particles};
 };
 
 [[nodiscard]] const std::vector<Recipe>& recipes();

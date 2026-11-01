@@ -357,9 +357,9 @@ std::multiset<std::string> described(const Compiled& compiled, Uid layer) {
 }
 
 void detaching_a_block_keeps_the_picture() {
-    for (const char* kind : {"launch", "turbulence", "color", "fade", "size", "tumble", "pile", "physics"}) {
+    for (const char* kind : {"launch", "turbulence", "color", "fade", "size", "tumble", "pile"}) {
         const std::string_view k{kind};
-        const bool rocks = k == "pile" || k == "physics";
+        const bool rocks = k == "pile";
         Document document = recipe(k == "tumble" ? "explosion" : rocks ? "rock_pile" : "campfire");
         Layer& layer = k == "tumble" ? layer_named(document, "Debris")
                        : rocks       ? layer_named(document, "Rock pile")
@@ -896,15 +896,13 @@ void props_stand_in_the_world_and_spill_what_they_hold() {
 // the block at fault rather than silently approximated.
 void a_prop_takes_default_physics_and_names_what_it_cannot_be() {
     Document document;
-    Layer layer;
-    layer.uid = document.allocate();
-    layer.name = "Crate";
+    Layer layer = make_layer(document, LayerKind::Rigid, "Crate");
     insert_block(layer, 0U, *make_block(document, "prop"));
-    document.layers.push_back(layer);
+    document.layers.push_back(std::move(layer));
     const Uid prop = document.layers[0].blocks[0].uid;
 
-    // No Physics block: a prop stands in a world, so the layer takes the
-    // default physics, exactly as a pile does.
+    // A rigid layer always has a world, whatever is on its list: that is
+    // what its kind means, so a prop stands in one without being asked.
     const Compiled bare = compile(document, Purpose::Preview);
     CHECK(bare.error.empty() && bare.effect.has_value());
     const auto* physics = find_module<ajfx::RigidPhysics>(bare.effect->emitters[0]);
@@ -994,14 +992,16 @@ void piles_stand_until_the_effect_plays() {
     std::cout << "  the rock pile stands " << standing << " m and comes down to " << top() << " m\n";
     CHECK(standing > 0.8F && top() < standing - 0.2F);
 
-    // A pile without Physics takes the default; one with a raw physics
-    // module takes that instead.
+    // The world is the layer's own, and its values reach the module. A
+    // rigid layer cannot be without one, so there is no "no physics" case.
     Layer& layer = layer_named(document, "Rock pile");
-    remove_block(document, block_of(layer, "physics").uid);
-    const Compiled plain = compile(document, Purpose::Export);
-    CHECK(plain.error.empty());
-    CHECK(find_module<ajfx::RigidPhysics>(emitter_of(plain, layer)) != nullptr);
-    CHECK(find_module<ajfx::RigidBody>(emitter_of(plain, layer)) == nullptr);
+    CHECK(layer.kind == LayerKind::Rigid && layer.world.has_value());
+    CHECK(near(find_module<ajfx::RigidPhysics>(rocks)->friction, 0.8F));
+    layer.world->set("friction", number(0.25F));
+    const Compiled changed = compile(document, Purpose::Export);
+    CHECK(changed.error.empty());
+    CHECK(near(find_module<ajfx::RigidPhysics>(emitter_of(changed, layer))->friction, 0.25F));
+    CHECK(find_module<ajfx::RigidBody>(emitter_of(changed, layer)) == nullptr);
 }
 
 ImportedMesh unit_cube() {
@@ -1195,6 +1195,247 @@ void studio_comes_back_as_it_was_left() {
     CHECK(session.recent.size() == remembered_pages && session.recent.front().first == "page39");
 }
 
+// A layer's kind is what decides which blocks it can hold, so the catalog's
+// answer, what the page offers, what a drop accepts and what the compiler
+// will build must be one answer. Checked against the runtime's own refusal
+// list: every block the catalog keeps out of a rigid layer is one
+// ajfx::validate would refuse there, and every block it lets in compiles.
+void a_layer_kind_decides_which_blocks_it_can_hold() {
+    // Every block in the catalog belongs to at least one kind, except the
+    // world, which is the layer's own settings and is never offered.
+    std::size_t offered_in_rigid = 0U;
+    for (const BlockDef& def : block_catalog()) {
+        if (def.kind == world_block_kind) {
+            CHECK(def.layers == in_no_layer && !def.detachable);
+            continue;
+        }
+        CHECK(def.layers != in_no_layer);
+        // A block kept out of a kind says why, for the artist who looks.
+        CHECK(def.layers == in_any_layer || !def.only_in.empty());
+        offered_in_rigid += fits(def.layers, LayerKind::Rigid) ? 1U : 0U;
+    }
+    CHECK(offered_in_rigid > 0U);
+
+    // The forces a rigid layer refuses are kept out of it, and the ones it
+    // takes are let in.
+    for (const char* kept_out : {"turbulence", "swirl", "attract", "draw_in", "spin", "mesh_collider"}) {
+        CHECK(block_fits(kept_out, LayerKind::Particles));
+        CHECK(!block_fits(kept_out, LayerKind::Rigid));
+    }
+    for (const char* rigid_only : {"prop", "pile"}) {
+        CHECK(block_fits(rigid_only, LayerKind::Rigid));
+        CHECK(!block_fits(rigid_only, LayerKind::Particles));
+    }
+    for (const char* both : {"stream", "burst", "gravity", "wind", "drag", "ground", "tumble", "color", "light"}) {
+        CHECK(block_fits(both, LayerKind::Particles) && block_fits(both, LayerKind::Rigid));
+    }
+
+    // Every block a rigid layer offers really does compile there: the
+    // catalog's list and the runtime's refusals agree, which is the whole
+    // point of filtering rather than explaining afterwards.
+    for (const BlockDef& def : block_catalog()) {
+        if (def.kind == raw_block_kind || def.kind == world_block_kind || !fits(def.layers, LayerKind::Rigid)) {
+            continue;
+        }
+        Document document;
+        Layer layer = make_layer(document, LayerKind::Rigid, "Bodies");
+        insert_block(layer, 0U, *make_block(document, "pile"));
+        insert_block(layer, 1U, *make_block(document, "gravity"));
+        if (def.kind != "pile" && def.kind != "gravity") {
+            insert_block(layer, 2U, *make_block(document, def.kind));
+        }
+        document.layers.push_back(std::move(layer));
+        const Compiled compiled = compile(document, Purpose::Export);
+        if (!compiled.error.empty()) {
+            throw std::runtime_error{std::string{def.title} + " is offered in a rigid layer but will not compile: " +
+                                     compiled.error};
+        }
+    }
+
+    // A block the kind does not have cannot be moved into such a layer, and
+    // adding one by hand is reported rather than quietly ignored.
+    Document document;
+    Layer rigid = make_layer(document, LayerKind::Rigid, "Rocks");
+    insert_block(rigid, 0U, *make_block(document, "pile"));
+    document.layers.push_back(std::move(rigid));
+    Layer sparks = make_layer(document, LayerKind::Particles, "Sparks");
+    insert_block(sparks, 0U, *make_block(document, "stream"));
+    const Uid swirl = insert_block(sparks, 1U, *make_block(document, "swirl"));
+    document.layers.push_back(std::move(sparks));
+    CHECK(!move_block(document, swirl, document.layers[0].uid, 0U));
+    CHECK(document.find_block(swirl)->layer->uid == document.layers[1].uid);
+    document.layers[0].blocks.push_back(*make_block(document, "swirl"));
+    const Compiled smuggled = compile(document, Purpose::Export);
+    CHECK(smuggled.error.find("Swirl does not belong") != std::string::npos);
+}
+
+// Changing a layer's kind takes its blocks with it, and refuses rather than
+// throwing away anything the artist authored.
+void changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest() {
+    Document document;
+    Layer layer = make_layer(document, LayerKind::Particles, "Embers");
+    insert_block(layer, 0U, *make_block(document, "stream"));
+    insert_block(layer, 1U, *make_block(document, "gravity"));
+    const Uid sized = insert_block(layer, 2U, *make_block(document, "size"));
+    document.layers.push_back(std::move(layer));
+    Layer& work = document.layers[0];
+    work.blocks[2].set("over_life", choice("shrink"));
+
+    // Nothing is in the way, so it changes: it gains a world, and the
+    // settings a rigid layer cannot act on are cleared rather than kept
+    // where no one can see them.
+    CHECK(blocks_against_kind(work, LayerKind::Rigid).empty());
+    CHECK(set_layer_kind(document, work, LayerKind::Rigid));
+    CHECK(work.kind == LayerKind::Rigid && work.world && work.world->uid != 0U);
+    CHECK(document.block(work.world->uid) == &*work.world);
+    CHECK(document.block(sized)->find("over_life") == nullptr);
+    CHECK(compile(document, Purpose::Export).error.empty());
+
+    // A block the other kind does not have stops the change and is named,
+    // so nothing an artist made is dropped behind their back.
+    insert_block(work, work.blocks.size(), *make_block(document, "prop"));
+    const std::vector<std::string> blocking = blocks_against_kind(work, LayerKind::Particles);
+    CHECK(blocking.size() == 1U && blocking[0] == "Prop");
+    CHECK(!set_layer_kind(document, work, LayerKind::Particles));
+    CHECK(work.kind == LayerKind::Rigid);
+
+    // Going back drops the world, since a particle layer has none.
+    remove_block(document, work.blocks.back().uid);
+    CHECK(set_layer_kind(document, work, LayerKind::Particles));
+    CHECK(!work.world.has_value());
+}
+
+// A page saved before layers had a kind still opens as what it was: the
+// Physics, Pile or Prop block that put it in a physics world is what made it
+// a rigid layer, and the Physics block becomes the layer's own world.
+void older_pages_open_as_the_kind_their_blocks_made_them() {
+    const std::string older =
+        R"({"format":"ajfx-studio","version":1,"name":"Old","next_uid":9,"layers":[
+           {"uid":1,"name":"Rocks","life":[60,60],"blocks":[
+             {"uid":2,"kind":"pile","values":{"count":12}},
+             {"uid":3,"kind":"gravity"},
+             {"uid":4,"kind":"physics","values":{"friction":0.75}}]},
+           {"uid":5,"name":"Smoke","life":[2,3],"blocks":[
+             {"uid":6,"kind":"stream"},
+             {"uid":7,"kind":"swirl"}]}]})";
+    const Loaded loaded = load_document(older);
+    CHECK(loaded.error.empty() && loaded.document.has_value());
+    const Layer& rocks = loaded.document->layers[0];
+    CHECK(rocks.kind == LayerKind::Rigid);
+    // The Physics block left the list and became the layer's world, values
+    // and all, so the page plays exactly as it did.
+    CHECK(rocks.world && near(number_of(*rocks.world, "friction"), 0.75F));
+    CHECK(std::none_of(rocks.blocks.begin(), rocks.blocks.end(),
+                       [](const Block& b) { return b.kind == world_block_kind; }));
+    CHECK(loaded.document->layers[1].kind == LayerKind::Particles);
+    CHECK(!loaded.document->layers[1].world.has_value());
+
+    Document document = *loaded.document;
+    const Compiled compiled = compile(document, Purpose::Export);
+    CHECK(compiled.error.empty());
+    CHECK(near(find_module<ajfx::RigidPhysics>(emitter_of(compiled, rocks))->friction, 0.75F));
+
+    // Saved and read back, the kind and the world are what they were.
+    const Loaded again = load_document(save_document(document));
+    CHECK(again.error.empty() && again.document.has_value() && *again.document == document);
+}
+
+// A rigid layer's forces are the world's. Their strength has to reach the
+// engine through the force itself, because the engine reads neither a
+// force's per-particle scale nor its curve over life.
+void a_rigid_layer_force_carries_its_strength() {
+    Document document;
+    Layer layer = make_layer(document, LayerKind::Rigid, "Rocks");
+    insert_block(layer, 0U, *make_block(document, "pile"));
+    const Uid gravity = insert_block(layer, 1U, *make_block(document, "gravity"));
+    const Uid wind = insert_block(layer, 2U, *make_block(document, "wind"));
+    const Uid drag = insert_block(layer, 3U, *make_block(document, "drag"));
+    document.layers.push_back(std::move(layer));
+    document.block(gravity)->set("strength", range(0.5F, 0.5F));
+    document.block(wind)->set("strength", range(4.0F, 4.0F));
+    document.block(drag)->set("amount", range(3.0F, 3.0F));
+
+    const Compiled compiled = compile(document, Purpose::Export);
+    CHECK(compiled.error.empty());
+    const ajfx::Emitter& bodies = compiled.effect->emitters[0];
+    // Half a g down and 4 m/s^2 sideways, in the accelerations themselves.
+    float down = 0.0F;
+    float sideways = 0.0F;
+    for (const ajfx::UpdateModule& module : bodies.update) {
+        if (const auto* g = std::get_if<ajfx::Gravity>(&module)) {
+            down += g->acceleration.value.y;
+            sideways += g->acceleration.value.x;
+            // Nothing is promised per particle that the engine cannot give.
+            CHECK(near(g->scale_min.value, 1.0F) && near(g->scale_max.value, 1.0F));
+        } else if (const auto* d = std::get_if<ajfx::Drag>(&module)) {
+            CHECK(near(d->coefficient.value, 3.0F));
+        }
+    }
+    CHECK(near(down, -9.81F * 0.5F) && near(sideways, 4.0F));
+
+    // The same blocks in a particle layer keep the per-particle spread they
+    // have always had: this is the rigid layer's rule, not a new one.
+    Document other;
+    Layer particles = make_layer(other, LayerKind::Particles, "Sparks");
+    insert_block(particles, 0U, *make_block(other, "stream"));
+    const Uid pull = insert_block(particles, 1U, *make_block(other, "gravity"));
+    other.layers.push_back(std::move(particles));
+    other.block(pull)->set("strength", range(0.5F, 2.0F));
+    const Compiled loose = compile(other, Purpose::Export);
+    CHECK(loose.error.empty());
+    const auto* spread = find_module<ajfx::Gravity>(loose.effect->emitters[0]);
+    CHECK(spread != nullptr && near(spread->scale_min.value, 0.5F) && near(spread->scale_max.value, 2.0F));
+}
+
+// Everything the palette and the pickers offer must be something that can
+// actually be made. An id neither side recognised once produced a layer with
+// no uid, which looked like a layer but shared every widget id with every
+// other such layer, so its menu never opened.
+void every_layer_the_palette_offers_can_be_made() {
+    Document document;
+    const auto made = [&](const std::string& id) {
+        if (const std::optional<LayerKind> empty = empty_layer_kind(id)) {
+            return std::optional<Layer>{make_layer(document, *empty, "Layer")};
+        }
+        return make_layer_preset(document, id);
+    };
+    std::vector<std::string> ids;
+    for (const LayerKind kind : {LayerKind::Particles, LayerKind::Rigid}) {
+        ids.push_back(empty_layer_id(kind));
+    }
+    for (const LayerPreset& preset : layer_presets()) {
+        ids.emplace_back(preset.id);
+    }
+    std::vector<Uid> seen;
+    for (const std::string& id : ids) {
+        const std::optional<Layer> layer = made(id);
+        if (!layer) {
+            throw std::runtime_error{"the palette offers '" + id + "', which cannot be made"};
+        }
+        // A uid of its own: without one every widget on it collides with
+        // every other layer's, and the layer menu never opens.
+        CHECK(layer->uid != 0U);
+        CHECK(std::find(seen.begin(), seen.end(), layer->uid) == seen.end());
+        seen.push_back(layer->uid);
+        if (layer->kind == LayerKind::Rigid) {
+            CHECK(layer->world && layer->world->uid != 0U && layer->world->uid != layer->uid);
+        } else {
+            CHECK(!layer->world.has_value());
+        }
+        for (const Block& block : layer->blocks) {
+            CHECK(block.uid != 0U);
+            CHECK(block.kind == raw_block_kind || block_fits(block.kind, layer->kind));
+        }
+    }
+    // An empty layer's id round-trips, and nothing else is read as one.
+    for (const LayerKind kind : {LayerKind::Particles, LayerKind::Rigid}) {
+        CHECK(empty_layer_kind(empty_layer_id(kind)) == kind);
+    }
+    CHECK(empty_layer_kind("") == LayerKind::Particles);
+    CHECK(!empty_layer_kind("rock_pile").has_value());
+    CHECK(!empty_layer_kind("empty:volumes").has_value());
+}
+
 } // namespace
 
 int main() {
@@ -1230,6 +1471,13 @@ int main() {
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},
         {"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields},
         {"studio_comes_back_as_it_was_left", studio_comes_back_as_it_was_left},
+        {"a_layer_kind_decides_which_blocks_it_can_hold", a_layer_kind_decides_which_blocks_it_can_hold},
+        {"changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest",
+         changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest},
+        {"older_pages_open_as_the_kind_their_blocks_made_them",
+         older_pages_open_as_the_kind_their_blocks_made_them},
+        {"a_rigid_layer_force_carries_its_strength", a_rigid_layer_force_carries_its_strength},
+        {"every_layer_the_palette_offers_can_be_made", every_layer_the_palette_offers_can_be_made},
     };
     int failures = 0;
     for (const Case& test : cases) {

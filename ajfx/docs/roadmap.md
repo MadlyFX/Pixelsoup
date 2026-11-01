@@ -162,9 +162,9 @@ feedback forces could evaluate any frame directly.
      settling, bit-identical reruns and thread counts, seek equivalence
      through a topple, and every refusal.
      Studio authors them with the **Prop** block (`Category::Physics`,
-     beside Pile and Physics): a model, a pose, how it moves and what it
-     collides as, with the model's outline and the collision shape drawn
-     over the preview so the difference between them is visible. The
+     beside Pile): a model, a pose, how it moves and what it collides as,
+     with the model's outline and the collision shape drawn over the
+     preview so the difference between them is visible. The
      **Bucket of stones** recipe is the worked shot, and the coach names what
      a prop cannot be with the fix that makes it possible.
      The media server draws them in its particle pass, through the same path
@@ -173,6 +173,28 @@ feedback forces could evaluate any frame directly.
        position across the floor and its radius, and the turn is typed);
        convex decomposition, so that a prop which moves could still collide
        as an arbitrary concave model rather than a generated shape.
+   - **Round 4, done (2026-11-01): layer kinds.** A Studio layer is of one
+     kind, `LayerKind::Particles` or `LayerKind::Rigid`, chosen when it is
+     made. The kind, not the blocks a layer happens to hold, decides what
+     moves it, and the catalog says per block, per control and per choice
+     option which kinds have it (`BlockDef::layers`, `ControlDef::layers`,
+     `ChoiceDef::layers`). The palette, the block picker, drag-and-drop and
+     `move_block` all read that one answer, so what `check_rigid_physics`
+     would refuse is never offered: Turbulence, Swirl, Attract, Draw in,
+     Spin and Mesh collider are not in a rigid layer, and Pile and Prop are
+     only there. `conform_block` clears what a kind hides, so a block never
+     carries a setting no one can see. The Physics block is gone: those
+     settings are the layer's own world (`Layer::world`), read as **Bodies**
+     on the layer's heading, since a rigid layer has one world and no way to
+     be without it. Changing kind is refused, naming the blocks in the way,
+     rather than dropping anything authored. Older pages infer their kind
+     from the Physics, Pile or Prop block that put them in a physics world,
+     and the Physics block becomes the world; page format is now 2.
+     Two silent losses were fixed with it: a rigid layer's Gravity, Rise,
+     Wind and Air resistance put their strength in the force itself, since
+     the engine reads neither a force's per-particle scale (so every slider
+     was ignored, leaving exactly 1 g, 1 m/s^2 and a damping of 1) nor its
+     curve over life.
    - **Cross-machine agreement is unverified.** Determinism is tested across
      reruns, thread counts, and Debug and Release on one machine; no second
      machine has printed the same `ajfx_rigid_bench` digest. Props widened

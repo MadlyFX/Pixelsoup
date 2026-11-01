@@ -48,6 +48,10 @@ private:
         // Words the search matches beyond the title and description.
         std::string keywords;
         bool unique{false};
+        // The layer kinds this entry belongs in, and why it is not in the
+        // others, for an entry greyed against the layer being worked on.
+        std::uint8_t layers{in_any_layer};
+        std::string only_in;
     };
     struct Section final {
         std::string heading;

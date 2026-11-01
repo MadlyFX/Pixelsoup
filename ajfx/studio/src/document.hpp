@@ -118,6 +118,31 @@ struct Block final {
     friend bool operator==(const Block&, const Block&) = default;
 };
 
+// What moves a layer's particles, chosen when the layer is made. The runtime
+// cannot mix them: in a rigid layer a physics engine owns every particle's
+// motion, so the forces and per-particle curves a particle layer is built
+// from cannot act (ajfx::check_rigid_physics). Rather than let an artist
+// build something the runtime will refuse, the kind decides which blocks the
+// palette and the picker offer at all, and `catalog.hpp` says which is which.
+enum class LayerKind : std::uint8_t {
+    Particles, // the GPU simulation: forces, collisions, curves over life
+    Rigid,     // a physics engine: solid bodies that collide with each other
+};
+
+[[nodiscard]] std::string_view layer_kind_name(LayerKind kind) noexcept;
+// One sentence: what a layer of this kind is, for the artist choosing one.
+[[nodiscard]] std::string_view layer_kind_description(LayerKind kind) noexcept;
+[[nodiscard]] std::string_view layer_kind_id(LayerKind kind) noexcept;
+[[nodiscard]] LayerKind layer_kind_from(std::string_view id) noexcept;
+
+// How the palette and the pickers name an empty layer of a kind, and how
+// that name is read back. One pair, so the side that offers a layer and the
+// side that makes one cannot drift apart: an id neither recognises would
+// make a layer with no uid, and every widget on it would collide with every
+// other such layer.
+[[nodiscard]] std::string empty_layer_id(LayerKind kind);
+[[nodiscard]] std::optional<LayerKind> empty_layer_kind(std::string_view id) noexcept;
+
 struct Layer final {
     Uid uid{};
     std::string name;
@@ -130,6 +155,15 @@ struct Layer final {
     float life_max{2.0F};
     // Deals the whole layer's random values afresh; 0 keeps the layer's own.
     std::uint32_t seed{0U};
+    LayerKind kind{LayerKind::Particles};
+    // A rigid layer's physics world: one body shape, friction, bounciness,
+    // density, spin damping and rest, held as a block of the catalog's
+    // "physics" definition so that it stores, draws, publishes and undoes
+    // exactly as any block does. Present only while `kind` is Rigid; a
+    // particle layer has no world. It is the layer's, not a block on its
+    // list, because there is one world per layer and no way to be without
+    // it: that is what the kind means.
+    std::optional<Block> world;
     std::vector<Block> blocks;
 
     friend bool operator==(const Layer&, const Layer&) = default;
@@ -169,7 +203,11 @@ struct Document final {
         std::size_t index{};
     };
     [[nodiscard]] std::optional<BlockPlace> find_block(Uid uid);
+    // Any block on the page, a rigid layer's world among them.
     [[nodiscard]] const Block* block(Uid uid) const;
+    [[nodiscard]] Block* block(Uid uid);
+    // The layer whose world block this is, or null.
+    [[nodiscard]] Layer* world_of(Uid block);
 
     friend bool operator==(const Document&, const Document&) = default;
 };
@@ -179,6 +217,16 @@ struct Document final {
 // A block of `kind` with fresh uid and default values, or nothing for a kind
 // the catalog does not have.
 [[nodiscard]] std::optional<Block> make_block(Document& document, std::string_view kind);
+// An empty layer of `kind`, with its world where the kind has one.
+[[nodiscard]] Layer make_layer(Document& document, LayerKind kind, std::string name);
+// Gives `layer` the kind: adds or drops its world and conforms every block,
+// so nothing is left holding a setting its new kind hides. Blocks the kind
+// does not have at all are refused rather than dropped, so nothing an artist
+// authored is lost: `blocks_against_kind` names them first.
+bool set_layer_kind(Document& document, Layer& layer, LayerKind kind);
+// The blocks of `layer` that a layer of `kind` cannot hold, by title, in
+// page order. Empty when the layer may become that kind.
+[[nodiscard]] std::vector<std::string> blocks_against_kind(const Layer& layer, LayerKind kind);
 // A Module block holding `module`.
 [[nodiscard]] Block make_raw_block(Document& document, RawModule module);
 

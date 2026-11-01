@@ -17,6 +17,30 @@ namespace ajfx::studio {
 // The Module block's kind: one raw ajfx module.
 inline constexpr std::string_view raw_block_kind = "module";
 
+// The kind of layer a block, a control or one of a choice's options belongs
+// in, as a set. A particle layer and a rigid layer are moved by different
+// runtimes and accept different things, so the catalog says once which is
+// which and the palette, the picker, the page and the compiler all read it
+// from here. What is not offered cannot be authored, so a refusal the
+// runtime would raise never reaches an artist.
+inline constexpr std::uint8_t in_particles = 1U << 0U;
+inline constexpr std::uint8_t in_rigid = 1U << 1U;
+inline constexpr std::uint8_t in_any_layer = in_particles | in_rigid;
+// Never offered: a definition the catalog holds for something other than a
+// block on a layer's list (today, a rigid layer's own world settings).
+inline constexpr std::uint8_t in_no_layer = 0U;
+
+[[nodiscard]] constexpr std::uint8_t layer_bit(LayerKind kind) noexcept {
+    return static_cast<std::uint8_t>(1U << static_cast<std::uint8_t>(kind));
+}
+[[nodiscard]] constexpr bool fits(std::uint8_t layers, LayerKind kind) noexcept {
+    return (layers & layer_bit(kind)) != 0U;
+}
+
+// The catalog entry a rigid layer's world settings are drawn and stored
+// from (Layer::world). It is never offered as a block.
+inline constexpr std::string_view world_block_kind = "physics";
+
 enum class Category : std::uint8_t {
     Birth,   // how many particles, where they start and how they leave
     Motion,  // the forces on them
@@ -54,6 +78,9 @@ enum class Level : std::uint8_t {
 struct ChoiceDef final {
     std::string_view id;
     std::string_view label;
+    // The layer kinds this option is offered in: a response the rigid
+    // runtime has no answer for is not on the list there.
+    std::uint8_t layers{in_any_layer};
 };
 
 // Shown only while another control of the block holds (or, with `negate`,
@@ -89,6 +116,15 @@ struct ControlDef final {
     bool number_is_high{false};
     // For a File control.
     FileKind files{FileKind::Image};
+    // The layer kinds this control is shown and stored in. A control the
+    // kind leaves out is hidden on the page and cleared from the block
+    // (conform_block), so a block never carries a setting an artist cannot
+    // see and the compiler cannot act on one.
+    std::uint8_t layers{in_any_layer};
+    // The layer kinds a Range control shows as one number in, both ends
+    // together: where a runtime takes one value for the whole layer, a
+    // spread would promise a variation it does not deliver.
+    std::uint8_t one_number{in_no_layer};
 };
 
 struct BlockDef final {
@@ -104,11 +140,29 @@ struct BlockDef final {
     bool unique{false};
     // Can be turned into the Module blocks it compiles to.
     bool detachable{true};
+    // The layer kinds this block may be used in. A block outside the
+    // working layer's kind is not offered by the palette or the picker and
+    // cannot be dropped there, so the layer's kind alone decides what a
+    // page can be built from.
+    std::uint8_t layers{in_any_layer};
+    // Why this block is not in a layer of a kind it leaves out, in the
+    // artist's words, for the palette's tooltip. Empty for a block that is
+    // in every kind.
+    std::string_view only_in;
 };
 
 [[nodiscard]] const std::vector<BlockDef>& block_catalog();
 [[nodiscard]] const BlockDef* find_block_def(std::string_view kind);
 [[nodiscard]] const ControlDef* find_control(const BlockDef& def, std::string_view id);
+
+// Whether a block of this kind belongs in a layer of that kind.
+[[nodiscard]] bool block_fits(std::string_view block_kind, LayerKind layer) noexcept;
+// The options a choice offers in a layer of this kind, in catalog order.
+[[nodiscard]] std::vector<ChoiceDef> choices_in(const ControlDef& control, LayerKind layer);
+// Clears every value a layer of this kind hides, and squares a range the
+// kind shows as one number, so a block carries only what its layer can act
+// on. Called wherever a block arrives in a layer or a layer changes kind.
+void conform_block(Block& block, LayerKind layer);
 
 // A control's value: what the block stores, else its default.
 [[nodiscard]] Value value_of(const Block& block, const ControlDef& control);
@@ -124,7 +178,9 @@ struct BlockDef final {
 // Clamps to the control's hard range; a choice not on the list falls back.
 [[nodiscard]] Value sanitize(const ControlDef& control, Value value);
 
-[[nodiscard]] bool control_visible(const Block& block, const BlockDef& def, const ControlDef& control);
+// Whether the page draws this control: its condition holds, and the layer's
+// kind has it at all.
+[[nodiscard]] bool control_visible(const Block& block, const BlockDef& def, const ControlDef& control, LayerKind layer);
 
 // A short reading of the block's values, shown beside its title.
 [[nodiscard]] std::string block_summary(const Block& block);

@@ -123,24 +123,20 @@ public:
 
     // Builds the emitter; on failure sets `error` and `error_block`.
     std::optional<Emitter> build(LayerReport& report) {
-        // With Physics the engine turns the pieces: Tumble then only sets
-        // their spin, and a pile takes default physics without it.
-        physics_ = std::any_of(layer_.blocks.begin(), layer_.blocks.end(), [](const Block& b) {
-            const auto* update = b.raw ? std::get_if<UpdateModule>(&*b.raw) : nullptr;
-            return b.enabled && (b.kind == "physics" ||
-                                 (b.kind == raw_block_kind && update != nullptr &&
-                                  std::holds_alternative<RigidPhysics>(*update)));
-        });
-        const bool piled = std::any_of(layer_.blocks.begin(), layer_.blocks.end(),
-                                       [](const Block& b) { return b.enabled && b.kind == "pile"; });
-        // A prop stands in a physics world, so a layer with one and no
-        // Physics block takes the default physics, as a pile does.
-        const bool propped = std::any_of(layer_.blocks.begin(), layer_.blocks.end(),
-                                         [](const Block& b) { return b.enabled && b.kind == "prop"; });
-        if ((piled || propped) && !physics_) {
+        // The layer's kind decides, not what blocks it happens to hold: a
+        // rigid layer is one world, declared once, and the engine turns its
+        // pieces, so Tumble there only sets the spin they are thrown with.
+        physics_ = layer_.kind == LayerKind::Rigid;
+        if (physics_) {
+            world();
+        } else if (std::any_of(layer_.blocks.begin(), layer_.blocks.end(), [](const Block& b) {
+                       const auto* update = b.raw ? std::get_if<UpdateModule>(&*b.raw) : nullptr;
+                       return b.enabled && b.kind == raw_block_kind && update != nullptr &&
+                              std::holds_alternative<RigidPhysics>(*update);
+                   })) {
+            // An expert put the module in by hand with a Module block. The
+            // runtime's own validation has the last word on that.
             physics_ = true;
-            place_after(SlotRigid, layer_.uid, RigidPhysics{.id = module_id(layer_.uid, 4U), .density = 2400.0F,
-                                                            .friction = 0.6F, .restitution = 0.15F});
         }
         for (const Block& block : layer_.blocks) {
             if (block.enabled) {
@@ -223,6 +219,16 @@ private:
         std::tie(force.scale_min, force.scale_max) = range_input(block, control, strength.x, strength.y, 1.0F);
     }
 
+    // A force's strength in a rigid layer. The physics engine applies one
+    // gravity to the whole world and one damping to each body, and reads
+    // neither a force's per-particle scale nor its curve over life, so the
+    // strength has to be in the force itself or it is silently lost. The
+    // control is one number there (ControlDef::one_number), so the high end
+    // is the strength, and nothing random is promised.
+    [[nodiscard]] float world_strength(const Block& block, std::string_view control) const {
+        return get(block, control).y;
+    }
+
     template <class M>
     void place_init(int slot, Uid origin, M module) {
         init_.push_back(Placed{slot, ModuleLine{origin, RawModule{InitModule{std::move(module)}}}});
@@ -251,6 +257,15 @@ private:
                 error_ = "A layer can have only one " + std::string{def->title} + " block";
                 return;
             }
+        }
+        // The palette and the picker never offer a block outside the
+        // layer's kind, and a drop is refused, so one here came from a
+        // hand-edited page. It is reported rather than quietly dropped.
+        if (block.kind != raw_block_kind && !fits(def->layers, layer_.kind)) {
+            std::string kind_words{layer_kind_name(layer_.kind)};
+            kind_words[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(kind_words[0])));
+            error_ = std::string{def->title} + " does not belong in a " + kind_words + " layer";
+            return;
         }
         const Uid uid = block.uid;
         const std::string_view kind = block.kind;
@@ -312,22 +327,32 @@ private:
             }
             place_init(SlotVelocity, uid, velocity);
         } else if (kind == "gravity") {
-            Gravity gravity{.id = id(block, 1U), .acceleration = Vec3{0.0F, -earth_gravity * s, 0.0F}};
-            scale_by(gravity, block, "strength");
+            const float pull = physics_ ? world_strength(block, "strength") : 1.0F;
+            Gravity gravity{.id = id(block, 1U), .acceleration = Vec3{0.0F, -earth_gravity * s * pull, 0.0F}};
+            if (!physics_) {
+                scale_by(gravity, block, "strength");
+            }
             place_force(SlotGravity, uid, gravity);
         } else if (kind == "rise") {
             const std::string over_life = choice_of(block, "over_life");
+            const float lift = physics_ ? world_strength(block, "strength") : 1.0F;
             Gravity rise{.id = id(block, 1U),
-                         .acceleration = Vec3{0.0F, s, 0.0F},
+                         .acceleration = Vec3{0.0F, s * lift, 0.0F},
                          .over_life = over_life == "cools"    ? std::vector<CurveKey>{{0.0F, 1.6F}, {1.0F, 0.2F}}
                                       : over_life == "builds" ? std::vector<CurveKey>{{0.0F, 0.2F}, {1.0F, 1.6F}}
                                                               : std::vector<CurveKey>{{0.0F, 1.0F}, {1.0F, 1.0F}}};
-            scale_by(rise, block, "strength");
+            if (!physics_) {
+                scale_by(rise, block, "strength");
+            }
             place_force(SlotRise, uid, rise);
         } else if (kind == "wind") {
             const float heading = number_of(block, "heading") * 3.14159265F / 180.0F;
-            Gravity wind{.id = id(block, 1U), .acceleration = Vec3{std::cos(heading) * s, 0.0F, -std::sin(heading) * s}};
-            scale_by(wind, block, "strength");
+            const float push = physics_ ? world_strength(block, "strength") : 1.0F;
+            Gravity wind{.id = id(block, 1U),
+                         .acceleration = Vec3{std::cos(heading) * s * push, 0.0F, -std::sin(heading) * s * push}};
+            if (!physics_) {
+                scale_by(wind, block, "strength");
+            }
             place_force(SlotWind, uid, wind);
         } else if (kind == "turbulence") {
             const float size = std::max(number_of(block, "size"), 0.01F) * s;
@@ -356,8 +381,13 @@ private:
                                 .both_ways = toggle_of(block, "both_ways"),
                                 .drag = number_of(block, "slows")});
         } else if (kind == "drag") {
-            Drag drag{.id = id(block, 1U), .coefficient = 1.0F};
-            scale_by(drag, block, "amount");
+            // In a rigid layer the amount is the body's linear damping, so
+            // it is the coefficient; the engine never reads the scale.
+            Drag drag{.id = id(block, 1U),
+                      .coefficient = physics_ ? FloatInput{world_strength(block, "amount")} : FloatInput{1.0F}};
+            if (!physics_) {
+                scale_by(drag, block, "amount");
+            }
             place_force(SlotDrag, uid, drag);
         } else if (kind == "swirl") {
             Vortex vortex{.id = id(block, 1U),
@@ -433,18 +463,6 @@ private:
                                   .contact_scale = number_of(block, "contact"),
                                   .rest_speed = input(block, "settle", number_of(block, "settle") * s, s),
                                   .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
-        } else if (kind == "physics") {
-            const std::string shape = choice_of(block, "shape");
-            place_after(SlotRigid, uid,
-                        RigidPhysics{.id = id(block, 1U),
-                                     .shape = shape == "ball"   ? RigidShape::Sphere
-                                              : shape == "cube" ? RigidShape::Box
-                                                                : RigidShape::Auto,
-                                     .density = number_of(block, "density"),
-                                     .friction = number_of(block, "friction"),
-                                     .restitution = number_of(block, "bounce"),
-                                     .angular_damping = number_of(block, "damping"),
-                                     .allow_sleep = toggle_of(block, "rest")});
         } else if (kind == "prop") {
             prop(block);
         } else if (kind == "light") {
@@ -452,6 +470,31 @@ private:
         } else if (kind == raw_block_kind) {
             raw(block);
         }
+    }
+
+    // The rigid layer's own physics world (Layer::world), placed once from
+    // the layer rather than from a block on its list. A layer whose world
+    // is somehow missing takes the defaults, so a rigid layer always has
+    // one: that is what its kind promises.
+    void world() {
+        if (!layer_.world) {
+            place_after(SlotRigid, layer_.uid,
+                        RigidPhysics{.id = module_id(layer_.uid, 4U), .density = 2400.0F, .friction = 0.6F,
+                                     .restitution = 0.15F});
+            return;
+        }
+        const Block& block = *layer_.world;
+        const std::string shape = choice_of(block, "shape");
+        place_after(SlotRigid, block.uid,
+                    RigidPhysics{.id = id(block, 1U),
+                                 .shape = shape == "ball"   ? RigidShape::Sphere
+                                          : shape == "cube" ? RigidShape::Box
+                                                            : RigidShape::Auto,
+                                 .density = number_of(block, "density"),
+                                 .friction = number_of(block, "friction"),
+                                 .restitution = number_of(block, "bounce"),
+                                 .angular_damping = number_of(block, "damping"),
+                                 .allow_sleep = toggle_of(block, "rest")});
     }
 
     // An object the artist placed in the layer's physics world. Props are

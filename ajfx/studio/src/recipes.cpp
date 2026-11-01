@@ -14,32 +14,42 @@ struct Spec final {
     std::initializer_list<std::pair<std::string_view, Value>> values;
 };
 
-Layer build_layer(Document& document, std::string name, float life_min, float life_max,
-                  std::initializer_list<Spec> blocks) {
-    Layer layer;
-    layer.uid = document.allocate();
-    layer.name = std::move(name);
+// Sets a block's (or a layer's world's) values from a spec.
+void fill(Block& block, const std::vector<std::pair<std::string_view, Value>>& values) {
+    const BlockDef* def = find_block_def(block.kind);
+    if (def == nullptr) {
+        return;
+    }
+    for (const auto& [control, value] : values) {
+        if (const ControlDef* found = find_control(*def, control)) {
+            block.set(control, sanitize(*found, value));
+        }
+    }
+}
+
+Layer build_layer(Document& document, LayerKind kind, std::string name, float life_min, float life_max,
+                  std::initializer_list<Spec> blocks,
+                  std::initializer_list<std::pair<std::string_view, Value>> world = {}) {
+    Layer layer = make_layer(document, kind, std::move(name));
     layer.life_min = life_min;
     layer.life_max = life_max;
+    if (layer.world) {
+        fill(*layer.world, {world.begin(), world.end()});
+    }
     for (const Spec& spec : blocks) {
         std::optional<Block> block = make_block(document, spec.kind);
         if (!block) {
             continue;
         }
-        const BlockDef* def = find_block_def(spec.kind);
-        for (const auto& [control, value] : spec.values) {
-            const ControlDef* found = find_control(*def, control);
-            if (found != nullptr) {
-                block->set(control, sanitize(*found, value));
-            }
-        }
+        fill(*block, {spec.values.begin(), spec.values.end()});
+        conform_block(*block, kind);
         layer.blocks.push_back(std::move(*block));
     }
     return layer;
 }
 
 Layer starter(Document& d) {
-    return build_layer(d, "Particles", 1.0F, 2.0F,
+    return build_layer(d, LayerKind::Particles, "Particles", 1.0F, 2.0F,
                        {{"stream", {{"rate", number(40.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.1F, 0.1F)}}},
                         {"launch", {{"speed", range(0.6F, 1.2F)}, {"spread", range(0.0F, 25.0F)}}},
@@ -50,7 +60,7 @@ Layer starter(Document& d) {
 }
 
 Layer flames(Document& d) {
-    return build_layer(d, "Flames", 0.6F, 1.1F,
+    return build_layer(d, LayerKind::Particles, "Flames", 0.6F, 1.1F,
                        {{"stream", {{"rate", number(90.0F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.22F, 0.22F)}}},
                         {"launch", {{"speed", range(0.2F, 0.5F)}, {"spread", range(0.0F, 15.0F)}}},
@@ -70,7 +80,7 @@ Layer flames(Document& d) {
 }
 
 Layer embers(Document& d) {
-    return build_layer(d, "Embers", 1.5F, 3.0F,
+    return build_layer(d, LayerKind::Particles, "Embers", 1.5F, 3.0F,
                        {{"stream", {{"rate", number(14.0F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}}},
                         {"launch", {{"speed", range(0.8F, 1.8F)}, {"spread", range(0.0F, 25.0F)}}},
@@ -87,7 +97,7 @@ Layer embers(Document& d) {
 }
 
 Layer fire_smoke(Document& d) {
-    return build_layer(d, "Smoke", 3.5F, 5.5F,
+    return build_layer(d, LayerKind::Particles, "Smoke", 3.5F, 5.5F,
                        {{"stream", {{"rate", number(10.0F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
                         {"launch", {{"speed", range(0.3F, 0.6F)}, {"spread", range(0.0F, 12.0F)}}},
@@ -125,7 +135,7 @@ Layer plume(Document& d) {
 }
 
 Layer sparks(Document& d) {
-    return build_layer(d, "Sparks", 0.8F, 1.6F,
+    return build_layer(d, LayerKind::Particles, "Sparks", 0.8F, 1.6F,
                        {{"stream", {{"rate", number(140.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.03F, 0.03F)}}},
                         {"launch", {{"speed", range(3.0F, 6.0F)}, {"spread", range(0.0F, 28.0F)}}},
@@ -142,7 +152,7 @@ Layer sparks(Document& d) {
 }
 
 Layer spark_burst(Document& d) {
-    return build_layer(d, "Spark burst", 0.6F, 1.4F,
+    return build_layer(d, LayerKind::Particles, "Spark burst", 0.6F, 1.4F,
                        {{"burst", {{"count", number(160.0F)}, {"every", number(3.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.15F, 0.15F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
                         {"launch", {{"direction", choice("out")}, {"speed", range(4.0F, 9.0F)}}},
@@ -159,7 +169,7 @@ Layer spark_burst(Document& d) {
 }
 
 Layer glow_core(Document& d) {
-    return build_layer(d, "Glow core", 0.4F, 0.6F,
+    return build_layer(d, LayerKind::Particles, "Glow core", 0.4F, 0.6F,
                        {{"stream", {{"rate", number(25.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.05F, 0.05F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
                         {"launch", {{"speed", range(0.0F, 0.05F)}}},
@@ -172,7 +182,7 @@ Layer glow_core(Document& d) {
 
 Layer magic_motes(Document& d) {
     return build_layer(
-        d, "Motes", 2.0F, 3.0F,
+        d, LayerKind::Particles, "Motes", 2.0F, 3.0F,
         {{"stream", {{"rate", number(60.0F)}}},
          {"shape", {{"shape", choice("shell")}, {"size", range(0.6F, 0.6F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
          {"launch", {{"direction", choice("out")}, {"speed", range(0.1F, 0.3F)}}},
@@ -189,7 +199,7 @@ Layer magic_motes(Document& d) {
 }
 
 Layer debris(Document& d) {
-    return build_layer(d, "Debris", 2.6F, 3.0F,
+    return build_layer(d, LayerKind::Particles, "Debris", 2.6F, 3.0F,
                        {{"burst", {{"count", number(50.0F)}, {"every", number(3.0F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.15F, 0.15F)}}},
                         {"launch", {{"speed", range(2.0F, 6.0F)}, {"spread", range(0.0F, 35.0F)}}},
@@ -206,19 +216,19 @@ Layer debris(Document& d) {
 // Already standing when the effect starts; let go at once, so it collapses
 // as the effect plays. Physics makes each rock a body the others rest on.
 Layer rock_pile(Document& d) {
-    return build_layer(d, "Rock pile", 60.0F, 60.0F,
+    return build_layer(d, LayerKind::Rigid, "Rock pile", 60.0F, 60.0F,
                        {{"pile",
                          {{"count", number(220.0F)}, {"slope", number(62.0F)}, {"spacing", number(0.75F)},
                           {"jitter", number(0.25F)}}},
                         {"gravity", {}},
                         // A pile starts still: Tumble only turns each rock to lie its own way.
                         {"tumble", {{"spin", range(0.0F, 0.0F)}}},
-                        {"physics", {{"friction", number(0.8F)}, {"bounce", number(0.1F)}, {"density", number(2600.0F)}}},
                         {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
                         {"appearance", {{"material", choice("debris")}, {"mesh", choice("rock")}}},
                         {"color",
                          {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.36F, 0.33F, 0.29F)}}},
-                        {"size", {{"size", range(0.12F, 0.22F)}}}});
+                        {"size", {{"size", range(0.12F, 0.22F)}}}},
+                       {{"friction", number(0.8F)}, {"bounce", number(0.1F)}, {"density", number(2600.0F)}});
 }
 
 // A bucket of stones that tips over and spills them. The bucket collides as a
@@ -227,7 +237,7 @@ Layer rock_pile(Document& d) {
 // and lands the same way every time. Measurements agree with the prop's: the
 // balls start inside the bucket's floor, 0.05 up, in its 0.45 inside radius.
 Layer bucket_spill(Document& d) {
-    return build_layer(d, "Bucket of stones", 60.0F, 60.0F,
+    return build_layer(d, LayerKind::Rigid, "Bucket of stones", 60.0F, 60.0F,
                        {{"prop",
                          {{"motion", choice("driven")},
                           {"shape", choice("bucket")},
@@ -250,7 +260,6 @@ Layer bucket_spill(Document& d) {
                           {"at", vec3(0.0F, 0.05F, 0.0F)},
                           {"jitter", number(0.0F)}}},
                         {"gravity", {}},
-                        {"physics", {{"shape", choice("ball")}, {"friction", number(0.5F)}, {"bounce", number(0.2F)}}},
                         {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
                         // Drawn as rocks; they collide as balls, so they roll
                         // out of the bucket rather than catching on a corner.
@@ -258,12 +267,13 @@ Layer bucket_spill(Document& d) {
                         {"color",
                          {{"color", color(0.42F, 0.36F, 0.30F)}, {"mix", toggle(true)},
                           {"second", color(0.58F, 0.50F, 0.42F)}}},
-                        {"size", {{"size", range(0.1F, 0.1F)}}}});
+                        {"size", {{"size", range(0.1F, 0.1F)}}}},
+                       {{"shape", choice("ball")}, {"friction", number(0.5F)}, {"bounce", number(0.2F)}});
 }
 
 // One puff as a pile comes down, spreading low along the ground.
 Layer pile_dust(Document& d) {
-    return build_layer(d, "Collapse dust", 2.0F, 3.5F,
+    return build_layer(d, LayerKind::Particles, "Collapse dust", 2.0F, 3.5F,
                        {{"burst", {{"count", number(40.0F)}, {"time", number(0.25F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.3F, 0.9F)}, {"offset", vec3(0.0F, 0.15F, 0.0F)}}},
                         {"launch", {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
@@ -279,7 +289,7 @@ Layer pile_dust(Document& d) {
 }
 
 Layer dust(Document& d) {
-    return build_layer(d, "Dust", 1.5F, 2.5F,
+    return build_layer(d, LayerKind::Particles, "Dust", 1.5F, 2.5F,
                        {{"burst", {{"count", number(30.0F)}, {"every", number(3.0F)}}},
                         {"shape", {{"shape", choice("disc")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.1F, 0.0F)}}},
                         {"launch", {{"direction", choice("out")}, {"speed", range(0.6F, 1.8F)}}},
@@ -295,7 +305,7 @@ Layer dust(Document& d) {
 }
 
 Layer fireball(Document& d) {
-    return build_layer(d, "Fireball", 0.8F, 1.4F,
+    return build_layer(d, LayerKind::Particles, "Fireball", 0.8F, 1.4F,
                        {{"burst", {{"count", number(40.0F)}, {"every", number(3.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
                         {"launch", {{"direction", choice("out")}, {"speed", range(0.5F, 2.0F)}}},
@@ -314,7 +324,7 @@ Layer fireball(Document& d) {
 }
 
 Layer blast_smoke(Document& d) {
-    return build_layer(d, "Blast smoke", 3.0F, 4.5F,
+    return build_layer(d, LayerKind::Particles, "Blast smoke", 3.0F, 4.5F,
                        {{"burst", {{"count", number(25.0F)}, {"time", number(0.1F)}, {"every", number(3.0F)}}},
                         {"shape", {{"shape", choice("ball")}, {"size", range(0.3F, 0.3F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
                         {"launch", {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
@@ -330,7 +340,7 @@ Layer blast_smoke(Document& d) {
 }
 
 Layer snow(Document& d) {
-    return build_layer(d, "Snow", 6.0F, 8.0F,
+    return build_layer(d, LayerKind::Particles, "Snow", 6.0F, 8.0F,
                        {{"stream", {{"rate", number(80.0F)}}},
                         {"shape",
                          {{"shape", choice("box")}, {"box", vec3(3.0F, 0.1F, 3.0F)},
@@ -347,7 +357,7 @@ Layer snow(Document& d) {
 }
 
 Layer rain(Document& d) {
-    return build_layer(d, "Rain", 1.2F, 1.6F,
+    return build_layer(d, LayerKind::Particles, "Rain", 1.2F, 1.6F,
                        {{"stream", {{"rate", number(400.0F)}}},
                         {"shape",
                          {{"shape", choice("box")}, {"box", vec3(3.0F, 0.1F, 3.0F)},
@@ -384,11 +394,11 @@ const std::vector<PresetEntry>& preset_entries() {
         {{"dust", "Dust", "A puff of dust kicked up along the ground."}, dust},
         {{"snow", "Snow", "Flakes drifting down and settling."}, snow},
         {{"rain", "Rain", "Fast streaks of rain that vanish on the ground."}, rain},
-        {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays."},
+        {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays.", LayerKind::Rigid},
          rock_pile},
         {{"pile_dust", "Collapse dust", "One low puff of dust as a pile comes down."}, pile_dust},
         {{"bucket_spill", "Bucket of stones",
-          "A bucket standing full of stones, which tips over and spills them across the floor."},
+          "A bucket standing full of stones, which tips over and spills them across the floor.", LayerKind::Rigid},
          bucket_spill},
     };
     return entries;

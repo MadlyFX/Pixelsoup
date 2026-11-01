@@ -5,7 +5,22 @@ packages that a host, today the media server, places, plays and animates.
 
 Studio is a block editor, like a page in Notion, rather than a node graph or a
 stack of modules. Each part of an effect is a **layer**: Flames, Embers or
-Smoke. Each layer is a short list of **blocks**, each one a plain statement:
+Smoke. A layer is of one **kind**, chosen when it is made, which decides what
+moves its particles and so what it can be built from:
+
+- **Particles** -- points moved by forces: smoke, sparks, flames, rain. They
+  pass through each other.
+- **Rigid physics** -- solid pieces moved by a physics engine: they knock
+  into each other, pile up and come to rest.
+
+The two runtimes accept different things, so the kind decides which blocks
+the palette and the picker offer at all. Nothing that cannot play can be put
+on a layer, rather than being offered and refused afterwards. A page mixes
+kinds freely, a layer at a time; the layer's heading says which it is, and
+**Layer actions** changes it, naming any block that stands in the way rather
+than throwing it away.
+
+Each layer is a short list of **blocks**, each one a plain statement:
 
 - *Stream* 70 a second
 - *Spawn shape*: disc, 0.22 m
@@ -25,6 +40,10 @@ what there is gives ideas.
 - **Drag** an entry onto the page: a line shows where it will land, between
   blocks of a layer or between layers. A block a layer may have once
   (Appearance, Tumble...) only lands in a layer without one.
+- A block the layer being worked on cannot hold is **greyed**, and hovering
+  it says why ("Not in a rigid physics layer. Swirl pulls each particle
+  round a line; a physics engine moves whole bodies..."). It cannot be
+  clicked or dropped there.
 - **Click** an entry to add it to the end of the layer being worked on (a
   layer goes to the end of the page).
 - **Search** matches titles, descriptions and keywords. Headings fold.
@@ -136,21 +155,34 @@ shows the shape of a burst of sparks or a throw of debris in one picture,
 for dialling in speed, spread, gravity and drag. Effects too large for the
 CPU reference (over 200,000 particles) show no paths.
 
-## Solid pieces and piles
+## Rigid physics layers
 
-Both blocks are under **Rigid physics** in the palette.
+A **rigid physics** layer's particles are solid bodies in a physics engine:
+they knock into each other, stack, tumble off and come to rest. Pile and
+Prop are under **Rigid physics** in the palette and only appear there.
 
-**Physics** makes a layer's particles solid bodies in a physics engine: they
-knock into each other, stack, tumble off and come to rest.
+**Bodies**, on the layer's heading beside "Each lives", is what every piece
+in the layer is made of. It belongs to the layer, not to a block, because a
+rigid layer has exactly one physics world and no way to be without one.
 - *Body* is what each piece collides as: *Its own shape* wraps a debris
   chunk tightly, *Ball* rolls, *Cube* stacks.
 - *Friction* and *Bounciness* set the material; *Density*, *Spin damping*
   and *Rest when still* are under More settings.
-- Gravity, Air resistance and Ground, sphere and box colliders act on them.
-  Other forces, mesh colliders and Vanish on contact cannot move an engine
-  body, and the layer says so on the block at fault.
-- With Physics, Tumble only sets each piece's spin and how it lies; the
-  engine does the rest.
+
+**What a rigid layer can hold.** Stream, Burst, Spawn shape, Launch,
+Gravity, Rise, Wind, Air resistance, Ground, Sphere and Box colliders,
+Tumble, Appearance, Color, Size, Fade and Cast light, plus Pile and Prop.
+Turbulence, Swirl, Attract, Draw in, Spin and Mesh collider are not offered:
+a physics engine moves whole bodies, so a force that stirs each particle on
+its own has nothing to act on. Within the blocks it does have, settings the
+engine cannot honour are not shown either -- Size over its life, Rise's
+curve over life, Random spin, Vanish on contact and Keep inside.
+
+**Forces act on the world, not on each piece.** The engine takes one gravity
+for the whole layer and one damping for each body, so a force's *Strength*
+is one number in a rigid layer rather than a spread: there is no per-particle
+variation to promise. Tumble only sets each piece's spin and how it lies; the
+engine does the rest.
 
 **Pile** puts pieces in place before the effect starts: a heap of rocks that
 collapses when the effect plays, or a stack that stands until something
@@ -161,7 +193,6 @@ knocks it down.
   the effect plays. A paused preview at the start shows it standing.
 - Under More settings: *Position*, *Spacing* (how far apart pieces start,
   as a share of the largest piece's reach) and *Untidiness*.
-- A Pile without a Physics block uses the default physics.
 - A pile's pieces live on after they fall, so the automatic loop covers
   the fall and a few seconds of settling, not their whole life.
 

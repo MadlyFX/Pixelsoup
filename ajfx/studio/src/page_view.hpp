@@ -113,10 +113,12 @@ private:
                      float x, float y, float w);
     float draw_block(gui::UiContext& ctx, Document& document, Layer& layer, std::size_t index,
                      const PageInputs& inputs, float x, float y, float w);
-    float block_body_height(const Block& block, const BlockDef& def) const;
-    float draw_controls(gui::UiContext& ctx, Block& block, const BlockDef& def, float x, float y, float w);
+    float block_body_height(const Block& block, const BlockDef& def, LayerKind kind) const;
+    float draw_controls(gui::UiContext& ctx, Block& block, const BlockDef& def, LayerKind kind, float x, float y,
+                        float w);
     float draw_raw_fields(gui::UiContext& ctx, Block& block, float x, float y, float w);
-    bool draw_control(gui::UiContext& ctx, Block& block, const ControlDef& control, const gui::Rect& row);
+    bool draw_control(gui::UiContext& ctx, Block& block, const ControlDef& control, LayerKind kind,
+                      const gui::Rect& row);
     [[nodiscard]] Published default_publication(const Block& block, const ControlDef& control) const;
     float draw_publication(gui::UiContext& ctx, Block& block, const ControlDef& control, const Published& published,
                            float x, float y, float w);

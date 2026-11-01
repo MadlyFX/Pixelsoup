@@ -37,6 +37,15 @@ void grey_out(gui::UiContext& ctx, const gui::Rect& area) {
     ctx.rounded(area, gui::fade(ctx.theme().panel, 1.0F - hidden_dim), ctx.theme().radius);
 }
 
+// "Rigid physics" -> "rigid physics", to sit inside a sentence.
+std::string lower_words(std::string_view text) {
+    std::string out{text};
+    if (!out.empty()) {
+        out[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[0])));
+    }
+    return out;
+}
+
 std::string readable(std::string_view field) {
     std::string out{field};
     std::replace(out.begin(), out.end(), '_', ' ');
@@ -168,9 +177,8 @@ Uid PageView::working_layer(const Document& document) const {
 void PageView::insert(Document& document, const Incoming& incoming, Uid layer_uid, std::size_t index) {
     if (incoming.kind == Incoming::Kind::Layer) {
         Layer layer;
-        if (incoming.id.empty()) {
-            layer.uid = document.allocate();
-            layer.name = "Layer " + std::to_string(document.layers.size() + 1U);
+        if (const std::optional<LayerKind> empty = empty_layer_kind(incoming.id)) {
+            layer = make_layer(document, *empty, "Layer " + std::to_string(document.layers.size() + 1U));
         } else if (std::optional<Layer> preset = make_layer_preset(document, incoming.id)) {
             layer = std::move(*preset);
         } else {
@@ -185,6 +193,11 @@ void PageView::insert(Document& document, const Incoming& incoming, Uid layer_ui
     }
     Layer* layer = document.layer(layer_uid);
     if (layer == nullptr) {
+        return;
+    }
+    // A block outside this layer's kind is never offered, but a drag can
+    // still be let go over the wrong layer: nothing lands.
+    if (incoming.kind == Incoming::Kind::Block && !block_fits(incoming.id, layer->kind)) {
         return;
     }
     std::optional<Block> block;
@@ -225,6 +238,9 @@ void PageView::add(Document& document, const Incoming& incoming) {
     }
     const Layer* layer = document.layer(target);
     const BlockDef* def = incoming.kind == Incoming::Kind::Block ? find_block_def(incoming.id) : nullptr;
+    if (def != nullptr && layer != nullptr && !fits(def->layers, layer->kind)) {
+        return;
+    }
     if (def != nullptr && def->unique && layer != nullptr &&
         std::any_of(layer->blocks.begin(), layer->blocks.end(), [&](const Block& b) { return b.kind == def->kind; })) {
         // Already there: open the one it has rather than refuse silently.
@@ -248,9 +264,16 @@ void PageView::open_picker(PickerMode mode, Uid layer, std::size_t index, float 
     std::vector<ListEntry> entries;
     std::string title;
     if (mode == PickerMode::Blocks) {
-        title = "Add a block";
         const Layer* target = document.layer(layer);
+        const LayerKind kind = target != nullptr ? target->kind : LayerKind::Particles;
+        title = "Add a block to this " + lower_words(layer_kind_name(kind)) + " layer";
         for (const BlockDef& def : block_catalog()) {
+            // Only what this kind of layer can play: a block the runtime
+            // would refuse is not on the list to be chosen in the first
+            // place.
+            if (!fits(def.layers, kind)) {
+                continue;
+            }
             bool present = false;
             if (target != nullptr && def.unique) {
                 present = std::any_of(target->blocks.begin(), target->blocks.end(),
@@ -271,10 +294,16 @@ void PageView::open_picker(PickerMode mode, Uid layer, std::size_t index, float 
         }
     } else {
         title = "Add a layer";
-        entries.push_back(ListEntry{"", "Empty layer", "A layer with no blocks, to build from scratch.", true, {}});
-        picker_ids_.emplace_back("");
+        // The kind comes first, because it decides what the layer can be
+        // built from. Each empty layer says what it is for.
+        for (const LayerKind empty : {LayerKind::Particles, LayerKind::Rigid}) {
+            entries.push_back(ListEntry{"Start empty", "Empty " + lower_words(layer_kind_name(empty)) + " layer",
+                                        std::string{layer_kind_description(empty)}, true, {}});
+            picker_ids_.emplace_back(empty_layer_id(empty));
+        }
         for (const LayerPreset& preset : layer_presets()) {
-            entries.push_back(ListEntry{"Ready-made", std::string{preset.title}, std::string{preset.description}, true, {}});
+            entries.push_back(ListEntry{std::string{layer_kind_name(preset.kind)}, std::string{preset.title},
+                                        std::string{preset.description}, true, {}});
             picker_ids_.emplace_back(preset.id);
         }
     }
@@ -553,7 +582,12 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         }
     }
     const float budget_w = budget.empty() ? 0.0F : ctx.font_width(budget) + 12.0F;
-    const gui::Rect name{x + 20.0F, y, std::max(w - 20.0F - buttons - budget_w - 8.0F, 40.0F), layer_header};
+    // What moves this layer, said on the layer itself. It is the one thing
+    // that decides which blocks the layer can hold, so it is read at a
+    // glance rather than worked out from what is on the list.
+    const std::string kind_text{layer_kind_name(layer.kind)};
+    const float kind_w = ctx.font_width(kind_text) + 20.0F;
+    const gui::Rect name{x + 20.0F, y, std::max(w - 20.0F - buttons - budget_w - kind_w - 16.0F, 40.0F), layer_header};
     if (rename_.editing(uid)) {
         if (std::optional<std::string> renamed = rename_.draw(ctx, gui::Rect{name.x, y + 5.0F, name.width, 26.0F})) {
             layer.name = std::move(*renamed);
@@ -575,6 +609,16 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
             }
         }
         ctx.tooltip(name, "Click to work on this layer, double-click to rename");
+    }
+    {
+        const gui::Rect chip{eye.x - budget_w - kind_w - 8.0F, y + (layer_header - 22.0F) * 0.5F, kind_w, 22.0F};
+        const float dim = layer.enabled ? 1.0F : hidden_dim;
+        ctx.rounded(chip, gui::fade(theme.widget, 0.7F * dim), theme.radius_small);
+        ctx.label(gui::Rect{chip.x + 10.0F, chip.y, chip.width - 20.0F, chip.height}, kind_text,
+                  gui::fade(theme.text_muted, dim));
+        ctx.tooltip(chip, std::string{layer_kind_description(layer.kind)} +
+                              " The palette and the block picker offer what this kind of layer can play, and "
+                              "nothing else. Change it under Layer actions.");
     }
     if (!budget.empty()) {
         const gui::Rect budget_rect{eye.x - budget_w - 4.0F, y, budget_w, layer_header};
@@ -650,6 +694,42 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         y += row_height + 8.0F;
     }
 
+    // A rigid layer's world: what every piece in it is made of and how it
+    // behaves on contact. It belongs to the layer, like how long a particle
+    // lives, so it reads here rather than as a block that could be removed.
+    if (layer.world) {
+        const BlockDef* world_def = find_block_def(world_block_kind);
+        const Uid world_uid = layer.world->uid;
+        const bool shown = open_.contains(world_uid);
+        const gui::Rect world_row{x + 12.0F, y, w - 12.0F, row_height};
+        const gui::Interaction hit = ctx.grab(part_id(world_uid, "layer.world"), world_row);
+        ctx.cursor_for(hit, gui::Cursor::Hand);
+        editor::draw_twirl(ctx, world_row.x + 8.0F, world_row.center_y(), shown, theme.text_muted);
+        ctx.label(gui::Rect{world_row.x + 22.0F, y, label_width, row_height}, "Bodies",
+                  hit.hovered ? theme.text : theme.text_muted);
+        ctx.label(gui::Rect{world_row.x + label_width + 12.0F, y, world_row.width - label_width - 20.0F, row_height},
+                  block_summary(*layer.world), gui::fade(theme.text_muted, 0.85F));
+        ctx.tooltip(world_row, "What the pieces in this layer are made of, and how they behave when they touch. "
+                          "Every piece in a rigid physics layer is one of these.");
+        if (hit.clicked) {
+            if (shown) {
+                open_.erase(world_uid);
+            } else {
+                open_.insert(world_uid);
+            }
+            last_layer_ = uid;
+            layer_focus_ = uid;
+        }
+        y += row_height + 2.0F;
+        if (shown && world_def != nullptr) {
+            y = draw_controls(ctx, *layer.world, *world_def, layer.kind, x + 24.0F, y, w - 36.0F);
+        }
+        if (!layer.enabled) {
+            grey_out(ctx, gui::Rect{world_row.x, world_row.y, world_row.width, y - world_row.y});
+        }
+        y += 8.0F;
+    }
+
     for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
         y = draw_block(ctx, document, layer, i, inputs, x, y, w);
     }
@@ -688,7 +768,7 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
     return y + 26.0F;
 }
 
-float PageView::block_body_height(const Block& block, const BlockDef& def) const {
+float PageView::block_body_height(const Block& block, const BlockDef& def, LayerKind kind) const {
     if (block.kind == raw_block_kind) {
         RawRows rows;
         if (block.raw) {
@@ -699,7 +779,7 @@ float PageView::block_body_height(const Block& block, const BlockDef& def) const
     float rows = 0.0F;
     bool any_detail = false;
     for (const ControlDef& control : def.controls) {
-        if (!control_visible(block, def, control)) {
+        if (!control_visible(block, def, control, kind)) {
             continue;
         }
         if (control.level == Level::Detail) {
@@ -724,7 +804,7 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     }
     const bool open = open_.contains(uid);
     const std::vector<std::string> hood = hood_lines_for(inputs, layer.uid, uid, false);
-    const float body = open ? block_body_height(block, *def) : 0.0F;
+    const float body = open ? block_body_height(block, *def, layer.kind) : 0.0F;
     const float hood_h = hood.empty() ? 0.0F : static_cast<float>(hood.size()) * hood_line + 8.0F;
     const gui::Rect card{x, y, w, header_height + body + hood_h};
     const bool being_dragged = dragging_ && drag_block_ == uid;
@@ -820,7 +900,7 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
         if (block.kind == raw_block_kind) {
             cy = draw_raw_fields(ctx, block, x + 12.0F, cy, w - 24.0F);
         } else {
-            cy = draw_controls(ctx, block, *def, x + 12.0F, cy, w - 24.0F);
+            cy = draw_controls(ctx, block, *def, layer.kind, x + 12.0F, cy, w - 24.0F);
         }
         cy = y + header_height + body;
     }
@@ -845,13 +925,14 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     return bottom;
 }
 
-float PageView::draw_controls(gui::UiContext& ctx, Block& block, const BlockDef& def, float x, float y, float w) {
+float PageView::draw_controls(gui::UiContext& ctx, Block& block, const BlockDef& def, LayerKind kind, float x,
+                              float y, float w) {
     const gui::Theme& theme = ctx.theme();
     y += 4.0F;
     bool any_detail = false;
     const bool details = details_.contains(block.uid);
     for (const ControlDef& control : def.controls) {
-        if (!control_visible(block, def, control)) {
+        if (!control_visible(block, def, control, kind)) {
             continue;
         }
         if (control.level == Level::Detail) {
@@ -868,7 +949,7 @@ float PageView::draw_controls(gui::UiContext& ctx, Block& block, const BlockDef&
         }
         const float link_w = control.publishable ? 28.0F : 0.0F;
         const gui::Rect field{x + label_width, y, w - label_width - editor::reset_button_width - 4.0F - link_w, row_height};
-        if (draw_control(ctx, block, control, field)) {
+        if (draw_control(ctx, block, control, kind, field)) {
             focus_ = block.uid;
             layer_focus_ = 0U;
         }
@@ -919,7 +1000,8 @@ float PageView::draw_controls(gui::UiContext& ctx, Block& block, const BlockDef&
     return y;
 }
 
-bool PageView::draw_control(gui::UiContext& ctx, Block& block, const ControlDef& control, const gui::Rect& field) {
+bool PageView::draw_control(gui::UiContext& ctx, Block& block, const ControlDef& control, LayerKind kind,
+                            const gui::Rect& field) {
     const gui::Theme& theme = ctx.theme();
     Value value = value_of(block, control);
     const auto commit = [&](Value changed) {
@@ -942,6 +1024,17 @@ bool PageView::draw_control(gui::UiContext& ctx, Block& block, const ControlDef&
         return changed && commit(studio::number(v));
     }
     case ControlType::Range: {
+        if (fits(control.one_number, kind)) {
+            // One value here, not a spread: this layer's runtime applies it
+            // to everything alike, so two ends would promise a variation it
+            // does not deliver. Both ends move together.
+            const gui::Rect box{field.x, field.y, std::min(150.0F, field.width - 60.0F), field.height};
+            float v = value.y;
+            const bool changed = number(ctx, part_id(block.uid, control.id), box, v, speed, control.decimals, {},
+                                        control.min, control.max);
+            unit_label(box.right());
+            return changed && commit(range(v, v));
+        }
         const float box_w = std::min(90.0F, (field.width - 70.0F) * 0.5F);
         float low = value.x;
         float high = value.y;
@@ -985,16 +1078,18 @@ bool PageView::draw_control(gui::UiContext& ctx, Block& block, const ControlDef&
         return false;
     }
     case ControlType::Choice: {
+        // Only the options this kind of layer can answer for.
+        const std::vector<ChoiceDef> offered = choices_in(control, kind);
         std::vector<std::string_view> labels;
         std::size_t selected = 0U;
-        for (std::size_t i = 0U; i < control.choices.size(); ++i) {
-            labels.push_back(control.choices[i].label);
-            if (control.choices[i].id == value.text) {
+        for (std::size_t i = 0U; i < offered.size(); ++i) {
+            labels.push_back(offered[i].label);
+            if (offered[i].id == value.text) {
                 selected = i;
             }
         }
-        if (choice_chips(ctx, part_id(block.uid, control.id), field, labels, selected)) {
-            return commit(choice(std::string{control.choices[selected].id}));
+        if (!offered.empty() && choice_chips(ctx, part_id(block.uid, control.id), field, labels, selected)) {
+            return commit(choice(std::string{offered[selected].id}));
         }
         return false;
     }
@@ -1551,15 +1646,11 @@ void PageView::draw_overlays(gui::UiContext& ctx, const gui::Rect& window, Docum
                 }
             }
         } else {
-            Layer layer;
-            if (id.empty()) {
-                layer.uid = document.allocate();
-                layer.name = "Layer " + std::to_string(document.layers.size() + 1U);
-            } else if (std::optional<Layer> preset = make_layer_preset(document, id)) {
-                layer = std::move(*preset);
-            }
-            last_layer_ = layer.uid;
-            document.layers.push_back(std::move(layer));
+            // Through insert(), which is the one place that knows how to
+            // build a layer of any kind: a second copy here once pushed a
+            // layer with no uid when it did not recognise the id, and every
+            // widget on it then shared the uid of every other such layer.
+            insert(document, Incoming{Incoming::Kind::Layer, id, {}, {}}, 0U, document.layers.size());
         }
     }
 
@@ -1625,7 +1716,30 @@ void PageView::draw_overlays(gui::UiContext& ctx, const gui::Rect& window, Docum
     // The layer's actions.
     if (menu_layer_ != 0U) {
         const gui::UiId id = part_id(0U, "layer.context");
-        const std::array<std::string_view, 6> options{"Rename", "Duplicate", "Move up", "Move down", "Fold all others",
+        // The kind it could be instead, as an action when nothing is in the
+        // way and as the reason when something is. A block the other kind
+        // does not have is never dropped behind an artist's back: it is
+        // named, and the layer stays as it is until they deal with it.
+        const Layer* menu_target = document.layer(menu_layer_);
+        const LayerKind other = menu_target != nullptr && menu_target->kind == LayerKind::Particles
+                                    ? LayerKind::Rigid
+                                    : LayerKind::Particles;
+        std::string switch_entry;
+        bool can_switch = false;
+        if (menu_target != nullptr) {
+            const std::vector<std::string> blocking = blocks_against_kind(*menu_target, other);
+            can_switch = blocking.empty();
+            if (can_switch) {
+                switch_entry = "Make it a " + lower_words(layer_kind_name(other)) + " layer";
+            } else {
+                switch_entry = "Cannot be " + lower_words(layer_kind_name(other)) + ": ";
+                for (std::size_t i = 0U; i < blocking.size(); ++i) {
+                    switch_entry += (i == 0U ? "" : ", ") + blocking[i];
+                }
+            }
+        }
+        const std::array<std::string_view, 7> options{"Rename",           "Duplicate",   "Move up",
+                                                      "Move down",        switch_entry,  "Fold all others",
                                                       "Delete layer"};
         if (const std::optional<std::size_t> chosen = ctx.context_menu(id, options)) {
             const Uid uid = menu_layer_;
@@ -1648,14 +1762,24 @@ void PageView::draw_overlays(gui::UiContext& ctx, const gui::Rect& window, Docum
                     break;
                 case 3U: move_layer(document, uid, at + 1U); break;
                 case 4U:
-                    for (const Layer& other : document.layers) {
-                        if (other.uid != uid) {
-                            folded_.insert(other.uid);
+                    // Nothing happens when a block is in the way: the entry
+                    // read as the reason, not as something to do.
+                    if (can_switch) {
+                        set_layer_kind(document, *found, other);
+                        focus_ = 0U;
+                        layer_focus_ = uid;
+                        last_layer_ = uid;
+                    }
+                    break;
+                case 5U:
+                    for (const Layer& fold : document.layers) {
+                        if (fold.uid != uid) {
+                            folded_.insert(fold.uid);
                         }
                     }
                     folded_.erase(uid);
                     break;
-                case 5U: remove_layer(document, uid); break;
+                case 6U: remove_layer(document, uid); break;
                 default: break;
                 }
             }
