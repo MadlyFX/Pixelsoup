@@ -716,7 +716,26 @@ std::vector<BlockDef> make_catalog() {
         .description = "The layer's pieces come apart when something hits them hard enough.",
         .category = Category::Physics,
         .controls =
-            {number_control("force", "Comes apart when hit at", 4.0F, 0.5F, 30.0F, "m/s", 1,
+            {choice_control("into", "Comes apart into", "parts",
+                            {{"parts", "Parts you place"}, {"cut", "Pieces cut from its model"}},
+                            "Parts you place are the Part blocks beside this one: a lid, a wall, whatever you "
+                            "put there. Pieces cut from its model cut the model itself into cells that fill "
+                            "it, so the pieces are the piece rather than models laid beside one another."),
+             when(number_control("cells", "Into", 8.0F, 2.0F, 64.0F, "", 0,
+                                 "How many pieces to cut it into. More is finer rubble and costs more to "
+                                 "simulate.",
+                                 2.0F, 64.0F),
+                  "into", {"cut"}),
+             when(number_control("spread", "Cut towards the middle", 0.0F, 0.0F, 1.0F, "", 2,
+                                 "0 cuts evenly through the piece. Towards 1 the cells crowd at its middle, so "
+                                 "it shatters finely there and holds together at its edges.",
+                                 0.0F, 1.0F),
+                  "into", {"cut"}),
+             when(detail(number_control("cut_seed", "Cut seed", 0.0F, 0.0F, 999.0F, "", 0,
+                                        "Changes how the model is cut, without changing anything else.", 0.0F,
+                                        1.0e6F)),
+                  "into", {"cut"}),
+             number_control("force", "Comes apart when hit at", 4.0F, 0.5F, 30.0F, "m/s", 1,
                             "How fast something has to arrive to break a piece apart. A piece dropped from a "
                             "metre lands at about four and a half.",
                             0.1F),

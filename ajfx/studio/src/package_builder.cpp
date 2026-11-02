@@ -351,6 +351,8 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
             }
         }
     }
+    // The models are all in now, so what asked to be cut can be.
+    make_cuts(compiled, issue);
 }
 
 std::optional<gpu::KernelSet> PackageBuilder::kernels_for(const Effect& effect, std::string& error,

@@ -389,12 +389,19 @@ feedback forces could evaluate any frame directly.
        cells, every one of them starting inside where the crate stood, and
        they settle no higher than 0.78 with all 8 at rest. Both budgets now
        hold a cut: 64 pieces and 64 body kinds.
-       - **Not yet:** Studio cannot ask for a cut. A Part block names a
-         model; "cut this one into eight" needs the model's geometry, and a
-         user's own model is only read when the package is built, after the
-         compiler has run. The cut belongs where the assets are resolved,
-         which is the next piece of plumbing rather than a question about
-         the geometry.
+       Studio asks for one on the Break block: **Comes apart into** is
+       either the Part blocks beside it or pieces cut from the model, with
+       how many, how much they crowd at the middle, and a cut seed. The
+       compiler only names the cut, since a model is not read until the
+       package is built; `make_cuts` makes it once the models are in, adds
+       a body kind and a mesh a cell and the Break that scatters them, and
+       validates what it made before it goes anywhere. A cut that cannot be
+       made leaves the layer playing unbroken and says why. The coach says
+       when parts are placed beside a cut that ignores them.
+       Measured: a page cutting a cube into six gives six kinds, six cells
+       and six pieces, each at its own middle within the model and at the
+       size it was cut; the same page cuts the same twice over, and another
+       cut seed cuts it differently.
      - **Cracks that run, done (2026-11-01).** A `Glue` module holds the
        bodies born together where they touch, each join taking an impulse
        before it gives way, so a crack runs through the joins rather than a

@@ -84,6 +84,27 @@ struct AssetRequest final {
     friend bool operator==(const AssetRequest&, const AssetRequest&) = default;
 };
 
+// A Break block set to cut its model rather than to use the Part blocks
+// beside it. The compiler only names the cut, since the model's geometry is
+// not read until the builder reads it; the builder cuts and puts the cells
+// into the effect (see PackageBuilder::resolve_assets).
+struct FractureCut final {
+    Uid layer{};
+    Uid block{};
+    // The emitter whose bodies come apart, and the mesh entry to cut.
+    std::string emitter;
+    std::string model;
+    ModuleId id{};
+    std::uint32_t cells{8U};
+    std::uint32_t seed{0U};
+    float spread{0.0F};
+    float threshold{4.0F};
+    float scatter{1.0F};
+    float spin{180.0F};
+
+    friend bool operator==(const FractureCut&, const FractureCut&) = default;
+};
+
 struct Compiled final {
     // Set when at least one layer compiled.
     std::optional<Effect> effect;
@@ -94,6 +115,8 @@ struct Compiled final {
     FieldSet fields;
     // The artist's files the played layers name, for the builder to read.
     std::vector<AssetRequest> requests;
+    // The cuts the builder makes once it has the models they cut.
+    std::vector<FractureCut> cuts;
     // Empty when every included layer compiled; else the first problem.
     std::string error;
 
@@ -102,6 +125,14 @@ struct Compiled final {
 };
 
 [[nodiscard]] Compiled compile(const Document& document, Purpose purpose);
+
+// Makes the cuts `compiled` asks for, which needs the models they cut: the
+// caller reads those into `compiled.meshes` first, so this runs after the
+// artist's files are resolved and not when the layers compile. Each cut adds
+// a body kind and a mesh per cell and the Break module that scatters them. A
+// cut that cannot be made leaves its layer playing unbroken and says why in
+// `issue`, and what the cuts made is validated before it goes anywhere.
+void make_cuts(Compiled& compiled, std::string& issue);
 
 // The texture, mesh and field entries a package of the compiled effect needs.
 [[nodiscard]] std::vector<PackageEntry> asset_entries(const Compiled& compiled);

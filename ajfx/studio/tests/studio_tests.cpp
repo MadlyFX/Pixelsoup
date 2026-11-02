@@ -1036,6 +1036,76 @@ void landing_on_pieces_needs_a_layer_above() {
     CHECK(advise(ordered, compiled).empty() || !said(advise(ordered, compiled), "no physics layer above"));
 }
 
+// A Break block set to cut its model names the cut and places nothing: the
+// model is not read until the package is built, so the cells are made there.
+void a_break_can_cut_its_own_model_into_pieces() {
+    Document document;
+    Layer crates = make_layer(document, LayerKind::Rigid, "Crates");
+    insert_block(crates, 0U, *make_block(document, "pile"));
+    insert_block(crates, 1U, *make_block(document, "gravity"));
+    insert_block(crates, 2U, *make_block(document, "appearance"));
+    insert_block(crates, 3U, *make_block(document, "break"));
+    document.layers.push_back(std::move(crates));
+    Layer& layer = document.layers[0];
+    block_of(layer, "appearance").set("material", choice("debris"));
+    block_of(layer, "appearance").set("mesh", choice("cube"));
+    block_of(layer, "break").set("into", choice("cut"));
+    block_of(layer, "break").set("cells", number(6.0F));
+
+    // The compiler names the cut and leaves the layer unbroken, since it has
+    // not read the model.
+    Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(compiled.cuts.size() == 1U);
+    CHECK(compiled.cuts[0].cells == 6U && compiled.cuts[0].model == "cube");
+    CHECK(compiled.cuts[0].emitter == emitter_of(compiled, layer).name);
+    CHECK(find_module<ajfx::Break>(compiled.effect->emitters[0]) == nullptr);
+
+    // Making the cut puts the cells in: a body kind and a mesh each, and the
+    // Break that scatters them.
+    std::string issue;
+    make_cuts(compiled, issue);
+    CHECK(issue.empty());
+    CHECK(compiled.effect.has_value());
+    const ajfx::Emitter& bodies = compiled.effect->emitters[0];
+    const auto* physics = find_module<ajfx::RigidPhysics>(bodies);
+    const auto* breaking = find_module<ajfx::Break>(bodies);
+    CHECK(physics != nullptr && breaking != nullptr);
+    CHECK(physics->bodies.size() == 6U && breaking->pieces.size() == 6U);
+    for (std::size_t i = 0U; i < 6U; ++i) {
+        CHECK(breaking->pieces[i].body == static_cast<std::uint32_t>(i + 1U));
+        CHECK(physics->bodies[i].shape == ajfx::RigidShape::Hull);
+        CHECK(physics->bodies[i].mesh == "cube.cell." + std::to_string(i));
+        CHECK(physics->bodies[i].draw == physics->bodies[i].mesh);
+        // A cell is placed at its own middle inside the model it was cut
+        // from, which is a unit across, and is left at the size it was cut.
+        CHECK(near(breaking->pieces[i].size, 1.0F));
+        CHECK(std::fabs(breaking->pieces[i].offset.x) < 0.5F);
+        CHECK(std::fabs(breaking->pieces[i].offset.y) < 0.5F);
+        CHECK(std::fabs(breaking->pieces[i].offset.z) < 0.5F);
+    }
+    // Every cell's mesh is in the package, and what came out still validates.
+    CHECK(ajfx::check_meshes(*compiled.effect, compiled.meshes).ok());
+    CHECK(ajfx::validate(*compiled.effect).ok());
+
+    // The same page cut again gives the same cells, as a bake must.
+    Compiled again = compile(document, Purpose::Preview);
+    std::string second;
+    make_cuts(again, second);
+    CHECK(second.empty() && again.effect.has_value());
+    CHECK(*find_module<ajfx::RigidPhysics>(again.effect->emitters[0]) == *physics);
+    CHECK(*find_module<ajfx::Break>(again.effect->emitters[0]) == *breaking);
+
+    // And a different cut seed cuts it differently.
+    block_of(document.layers[0], "break").set("cut_seed", number(5.0F));
+    Compiled other = compile(document, Purpose::Preview);
+    std::string third;
+    make_cuts(other, third);
+    CHECK(third.empty() && other.effect.has_value());
+    CHECK(!(*find_module<ajfx::Break>(other.effect->emitters[0]) == *breaking));
+    std::cout << "  six cells cut from the cube, the same twice over and different on another seed\n";
+}
+
 // Breaking is two halves, and half of it alone does nothing: the coach says
 // which half is missing rather than the compiler guessing at the other.
 void half_a_break_is_refused_with_the_missing_half() {
@@ -1659,6 +1729,7 @@ int main() {
          props_stand_in_the_world_and_spill_what_they_hold},
         {"crates_break_into_the_parts_beside_them", crates_break_into_the_parts_beside_them},
         {"half_a_break_is_refused_with_the_missing_half", half_a_break_is_refused_with_the_missing_half},
+        {"a_break_can_cut_its_own_model_into_pieces", a_break_can_cut_its_own_model_into_pieces},
         {"snow_lands_on_the_pieces_of_the_layer_above", snow_lands_on_the_pieces_of_the_layer_above},
         {"landing_on_pieces_needs_a_layer_above", landing_on_pieces_needs_a_layer_above},
         {"a_prop_takes_default_physics_and_names_what_it_cannot_be",

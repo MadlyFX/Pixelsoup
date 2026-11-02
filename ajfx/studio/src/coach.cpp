@@ -129,7 +129,14 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         // missing on the block that is there.
         const Block* breaking = first(layer, "break");
         const Block* part = first(layer, "part");
-        if (breaking != nullptr && part == nullptr) {
+        const bool cutting = breaking != nullptr && choice_of(*breaking, "into") == "cut";
+        if (cutting && part != nullptr) {
+            notes.push_back({layer.uid, part->uid, AdviceLevel::Warning,
+                             "Breaking is set to cut the model into pieces, so the parts you place here are not "
+                             "used. Set it back to parts you place, or remove them.",
+                             "Use the parts", set_value(breaking->uid, "into", choice("parts"))});
+        }
+        if (breaking != nullptr && part == nullptr && !cutting) {
             notes.push_back({layer.uid, breaking->uid, AdviceLevel::Warning,
                              "Nothing is set to break off yet, so the pieces stay whole. Add a Part for each "
                              "panel, plank or shard a piece comes apart into.",

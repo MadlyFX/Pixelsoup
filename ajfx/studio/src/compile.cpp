@@ -5,6 +5,7 @@
 #include "library.hpp"
 #include "raw_modules.hpp"
 
+#include <ajfx/fracture.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/random.hpp>
 
@@ -122,6 +123,9 @@ public:
                  std::string pieces_above = {})
         : layer_{layer}, s_{scale}, parameters_{parameters}, pieces_above_{std::move(pieces_above)} {}
 
+    // The cut this layer's Break block asked for, if it asked for one. Its
+    // model is filled in by the caller, which knows what the layer draws.
+    [[nodiscard]] const std::optional<FractureCut>& cut() const noexcept { return cut_; }
     // The parameters this layer's blocks publish.
     [[nodiscard]] const std::vector<std::string>& published() const noexcept { return published_; }
     // The artist's files the layer's blocks name.
@@ -499,11 +503,25 @@ private:
                                   .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
         } else if (kind == "break") {
             // What it breaks into is the layer's Part blocks, so the module
-            // is placed in build() once they are all in.
+            // is placed in build() once they are all in. A block set to cut
+            // its model instead names a cut and places nothing: the model is
+            // not read until the builder reads it.
             breaking_ = Break{.id = id(block, 1U),
                               .threshold = number_of(block, "force") * s_,
                               .scatter = number_of(block, "scatter") * s_,
                               .spin = number_of(block, "spin")};
+            if (choice_of(block, "into") == "cut") {
+                cut_ = FractureCut{.layer = layer_.uid,
+                                   .block = block.uid,
+                                   .id = breaking_->id,
+                                   .cells = static_cast<std::uint32_t>(std::lround(number_of(block, "cells"))),
+                                   .seed = static_cast<std::uint32_t>(std::lround(number_of(block, "cut_seed"))),
+                                   .spread = number_of(block, "spread"),
+                                   .threshold = breaking_->threshold,
+                                   .scatter = breaking_->scatter,
+                                   .spin = breaking_->spin};
+                breaking_.reset();
+            }
         } else if (kind == "part") {
             part(block);
         } else if (kind == "prop") {
@@ -983,6 +1001,7 @@ private:
     std::vector<RigidBodyKind> kinds_;
     std::vector<BreakPiece> parts_;
     std::optional<Break> breaking_;
+    std::optional<FractureCut> cut_;
     std::vector<Placed> spawn_;
     std::vector<Placed> init_;
     std::vector<Placed> forces_;
@@ -1111,6 +1130,12 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         if (emitter && wanted(layer)) {
             report.included = true;
+            if (const std::optional<FractureCut>& cut = builder.cut()) {
+                FractureCut asked = *cut;
+                asked.emitter = report.emitter;
+                asked.model = emitter->renderer.mesh;
+                compiled.cuts.push_back(std::move(asked));
+            }
             effect.emitters.push_back(std::move(*emitter));
             used.insert(report.parameters.begin(), report.parameters.end());
             for (const AssetRequest& request : builder.requests()) {
@@ -1161,6 +1186,78 @@ Compiled compile(const Document& document, Purpose purpose) {
         compiled.effect = std::move(effect);
     }
     return compiled;
+}
+
+// Cuts the models the compiled effect's Break blocks asked to be cut, now
+// that the models are read. Each cut adds a body kind and a mesh per cell and
+// the Break module that scatters them, so the pieces are the piece rather
+// than models laid beside it. A cut that cannot be made leaves the layer
+// playing unbroken and says why.
+void make_cuts(Compiled& compiled, std::string& issue) {
+    if (!compiled.effect) {
+        return;
+    }
+    for (const FractureCut& cut : compiled.cuts) {
+        const auto named = [&](const std::string& why) {
+            if (issue.empty()) {
+                issue = why;
+            }
+        };
+        Emitter* emitter = nullptr;
+        for (Emitter& candidate : compiled.effect->emitters) {
+            if (candidate.name == cut.emitter) {
+                emitter = &candidate;
+            }
+        }
+        const auto model = compiled.meshes.find(cut.model);
+        if (emitter == nullptr || model == compiled.meshes.end()) {
+            named("the model to cut into pieces could not be read");
+            continue;
+        }
+        RigidPhysics* physics = nullptr;
+        for (UpdateModule& module : emitter->update) {
+            if (auto* found = std::get_if<RigidPhysics>(&module)) {
+                physics = found;
+            }
+        }
+        if (physics == nullptr) {
+            named("a layer that cuts its model into pieces needs a physics world");
+            continue;
+        }
+        const FractureOptions options{.count = cut.cells,
+                                      .seed = cut.seed,
+                                      .focus = Vec3{},
+                                      .focus_bias = std::clamp(cut.spread, 0.0F, 1.0F)};
+        Result<FracturedPieces> made = cells_as_pieces(
+            model->second, cut.model, options, static_cast<std::uint32_t>(physics->bodies.size()) + 1U);
+        if (!made) {
+            named(made.error().message);
+            continue;
+        }
+        for (RigidBodyKind& kind : made.value().bodies) {
+            physics->bodies.push_back(std::move(kind));
+        }
+        for (auto& [name, mesh] : made.value().meshes) {
+            compiled.meshes.emplace(name, std::move(mesh));
+        }
+        emitter->update.push_back(Break{.id = cut.id,
+                                        .body = 0U,
+                                        .threshold = cut.threshold,
+                                        .scatter = cut.scatter,
+                                        .spin = cut.spin,
+                                        .pieces = std::move(made).value().pieces});
+    }
+    if (compiled.cuts.empty()) {
+        return;
+    }
+    // The cuts went in after the compiler validated, so what they made is
+    // held to the same rules here rather than reaching a host unchecked.
+    if (Result<bool> valid = validate(*compiled.effect); !valid) {
+        if (issue.empty()) {
+            issue = valid.error().message;
+        }
+        compiled.effect.reset();
+    }
 }
 
 std::vector<PackageEntry> asset_entries(const Compiled& compiled) {
