@@ -65,18 +65,21 @@ enum class Category : std::uint8_t {
 // out from what the compiler does with it. A particle layer has one scope
 // and keeps its flat list.
 enum class RigidScope : std::uint8_t {
+    Objects,  // each thing standing in the world, owning the blocks under it
     Pieces,   // the layer's own pieces: how many, where, how big, how drawn
     Breaking, // when a piece comes apart, and what into
-    Props,    // each object stood in the world: not a particle, never breaks
+    Props,    // the Prop remnant, which Object replaced
     World,    // the world every piece shares, and what they are made of
     Hood,     // a raw module, which may act on any of them
 };
 
-// The scopes the page draws, in the order it reads them: what the layer is
-// made of, what becomes of it, what stands beside it, then the world it all
-// happens in.
-inline constexpr std::array<RigidScope, 5U> rigid_scopes{RigidScope::Pieces, RigidScope::Breaking,
-                                                         RigidScope::Props, RigidScope::World, RigidScope::Hood};
+// The scopes the page draws, in the order it reads them: the things in the
+// layer, then what the layer's own pieces are and what becomes of them, then
+// the world it all happens in. A scope with nothing in it draws no heading,
+// so Props is here only for a hand-edited page that still holds one.
+inline constexpr std::array<RigidScope, 6U> rigid_scopes{RigidScope::Objects,  RigidScope::Pieces,
+                                                         RigidScope::Breaking, RigidScope::Props,
+                                                         RigidScope::World,    RigidScope::Hood};
 
 [[nodiscard]] std::string_view rigid_scope_name(RigidScope scope) noexcept;
 // One sentence: what this part of a rigid layer is, for the heading's

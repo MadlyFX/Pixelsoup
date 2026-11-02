@@ -276,6 +276,20 @@ Block make_raw_block(Document& document, RawModule module) {
     return block;
 }
 
+bool owned_by_object(std::string_view block_kind) noexcept {
+    return block_kind == "break" || block_kind == "part";
+}
+
+std::optional<std::size_t> object_of(const Layer& layer, std::size_t index) {
+    const std::size_t end = std::min(index, layer.blocks.size());
+    for (std::size_t i = end; i-- > 0U;) {
+        if (layer.blocks[i].kind == "object") {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
 Uid insert_block(Layer& layer, std::size_t index, Block block) {
     const Uid uid = block.uid;
     // Whatever it carried, it holds only what this layer's kind can act on.

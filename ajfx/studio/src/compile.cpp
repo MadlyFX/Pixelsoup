@@ -123,9 +123,24 @@ public:
                  std::string pieces_above = {})
         : layer_{layer}, s_{scale}, parameters_{parameters}, pieces_above_{std::move(pieces_above)} {}
 
-    // The cut this layer's Break block asked for, if it asked for one. Its
-    // model is filled in by the caller, which knows what the layer draws.
-    [[nodiscard]] const std::optional<FractureCut>& cut() const noexcept { return cut_; }
+    // The cuts this layer's Break blocks asked for, in page order. Each
+    // names the body kind that comes apart and the model to cut, so a layer
+    // of several Objects cuts each one's own model.
+    [[nodiscard]] const std::vector<FractureCut>& cuts() const noexcept { return cuts_; }
+
+    // Room the layer needs beyond the bodies it places, because a body that
+    // comes apart is replaced by its pieces. The runtime refuses a break
+    // that will not fit and counts what it refused, so sizing for it here is
+    // what keeps a page from half-breaking without saying why.
+    [[nodiscard]] std::uint64_t extra_for_breaking() const noexcept {
+        std::uint64_t extra = 0U;
+        for (const ObjectBuild& of : objects_) {
+            if (of.pieces > 1U) {
+                extra += static_cast<std::uint64_t>(of.count) * (of.pieces - 1U);
+            }
+        }
+        return extra;
+    }
     // The parameters this layer's blocks publish.
     [[nodiscard]] const std::vector<std::string>& published() const noexcept { return published_; }
     // The artist's files the layer's blocks name.
@@ -158,6 +173,12 @@ public:
                 return std::nullopt;
             }
         }
+        // The last Object on the page has nothing after it to close it.
+        finish_object();
+        if (!error_.empty()) {
+            report.error = error_;
+            return std::nullopt;
+        }
         Emitter emitter;
         emitter.seed = layer_.seed == 0U ? layer_.uid : hash_mix(layer_.uid, layer_.seed);
         emitter.capacity = max_emitter_capacity;
@@ -167,6 +188,37 @@ public:
                    Lifetime{.id = module_id(layer_.uid, 1U), .min = life_min,
                             .max = std::max(layer_.life_max, life_min)});
         finish_over_life();
+        // An Object's size is its own, carried by its body kind's scale. It
+        // is a multiple of the size every body is born at, so a layer with
+        // Objects and no Size block is born at 1 and each Object's size is
+        // the metres it says.
+        if (!object_sizes_.empty()) {
+            if (size_min_ <= 0.0F) {
+                size_min_ = 1.0F;
+                place_init(SlotSize, layer_.uid,
+                           InitSize{.id = module_id(layer_.uid, 5U), .min = 1.0F, .max = 1.0F});
+            }
+            for (const auto& [kind, size] : object_sizes_) {
+                if (kind >= 1U && kind <= kinds_.size()) {
+                    kinds_[kind - 1U].scale = size / size_min_;
+                }
+            }
+        }
+        // Every Object is a kind, every Part is a kind and every cell a cut
+        // makes is a kind, so a page of several cutting Objects can ask for
+        // more than a world may hold. It is refused here, naming what wanted
+        // them, rather than at the far end of the builder.
+        std::size_t wanted = kinds_.size();
+        for (const FractureCut& cut : cuts_) {
+            wanted += cut.cells;
+        }
+        if (wanted > max_rigid_body_kinds) {
+            report.error = "This layer's objects need " + std::to_string(wanted) + " kinds of body, and a world " +
+                           "holds " + std::to_string(max_rigid_body_kinds) + ": cut fewer pieces, place fewer " +
+                           "parts, or move an object to a layer of its own";
+            report.error_block = objects_.empty() ? layer_.uid : objects_.back().block;
+            return std::nullopt;
+        }
         // The props and the parts' body kinds go on the layer's RigidPhysics
         // module, which any block may have placed, so they are attached once
         // every block is in. A part is drawn as its own model only where the
@@ -190,14 +242,6 @@ public:
                 }
             }
         }
-        // Breaking needs both the Break block and something to break into:
-        // either alone is a half-written instruction, which the coach asks
-        // about rather than the compiler guessing at.
-        if (breaking_ && !parts_.empty()) {
-            breaking_->pieces = std::move(parts_);
-            place_after(SlotBreak, layer_.uid, *breaking_);
-        }
-
         const auto by_slot = [](const Placed& a, const Placed& b) { return a.slot < b.slot; };
         std::stable_sort(init_.begin(), init_.end(), by_slot);
         std::stable_sort(forces_.begin(), forces_.end(), by_slot);
@@ -301,17 +345,6 @@ private:
 
         if (kind == "stream") {
             place_spawn(uid, SpawnRate{.id = id(block, 1U), .rate = input(block, "rate", number_of(block, "rate"), 1.0F)});
-        } else if (kind == "pile") {
-            place_spawn(uid, SpawnPile{.id = id(block, 1U),
-                                       .count = static_cast<std::uint32_t>(std::lround(number_of(block, "count"))),
-                                       .shape = choice_of(block, "shape") == "stack" ? PileShape::Box : PileShape::Heap,
-                                       .center = to_vec3(get(block, "at")) * s,
-                                       .slope = number_of(block, "slope"),
-                                       .width = number_of(block, "width") * s,
-                                       .depth = number_of(block, "depth") * s,
-                                       .spacing = number_of(block, "spacing"),
-                                       .jitter = number_of(block, "jitter"),
-                                       .release = number_of(block, "release")});
         } else if (kind == "burst") {
             place_spawn(uid, SpawnBurst{.id = id(block, 1U),
                                         .time = number_of(block, "time"),
@@ -501,31 +534,12 @@ private:
                                   .contact_scale = number_of(block, "contact"),
                                   .rest_speed = input(block, "settle", number_of(block, "settle") * s, s),
                                   .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
+        } else if (kind == "object") {
+            object(block);
         } else if (kind == "break") {
-            // What it breaks into is the layer's Part blocks, so the module
-            // is placed in build() once they are all in. A block set to cut
-            // its model instead names a cut and places nothing: the model is
-            // not read until the builder reads it.
-            breaking_ = Break{.id = id(block, 1U),
-                              .threshold = number_of(block, "force") * s_,
-                              .scatter = number_of(block, "scatter") * s_,
-                              .spin = number_of(block, "spin")};
-            if (choice_of(block, "into") == "cut") {
-                cut_ = FractureCut{.layer = layer_.uid,
-                                   .block = block.uid,
-                                   .id = breaking_->id,
-                                   .cells = static_cast<std::uint32_t>(std::lround(number_of(block, "cells"))),
-                                   .seed = static_cast<std::uint32_t>(std::lround(number_of(block, "cut_seed"))),
-                                   .spread = number_of(block, "spread"),
-                                   .threshold = breaking_->threshold,
-                                   .scatter = breaking_->scatter,
-                                   .spin = breaking_->spin};
-                breaking_.reset();
-            }
+            breaking(block);
         } else if (kind == "part") {
             part(block);
-        } else if (kind == "prop") {
-            prop(block);
         } else if (kind == "light") {
             light(block);
         } else if (kind == raw_block_kind) {
@@ -558,68 +572,237 @@ private:
                                  .allow_sleep = toggle_of(block, "rest")});
     }
 
-    // One part a piece comes apart into. Each is a body kind of its own,
-    // collided and drawn as its model, with the layer's own material: a part
-    // of a crate is made of what the crate is made of. Kind 0 is the layer's
-    // bodies, so the kinds these make run from 1.
-    void part(const Block& block) {
-        RigidBodyKind of;
-        of.shape = RigidShape::Hull;
-        of.mesh = choice_of(block, "model");
-        if (of.mesh == "file") {
-            const std::string path = file_of(block, "model_file");
-            // No model picked yet: shards, until there is one.
-            of.mesh = path.empty() ? std::string{"shard"} : request(AssetRequest::Kind::Mesh, block, path);
+    // The model a block's choice control names, as a package entry: a
+    // library mesh by name, the artist's own file, or empty for the layer's.
+    std::string model_of(const Block& block, std::string_view control, std::string_view file_control,
+                         std::string_view fallback) {
+        std::string name = choice_of(block, control);
+        if (name == "layer") {
+            return {};
         }
-        of.draw = of.mesh;
-        if (layer_.world) {
-            of.density = number_of(*layer_.world, "density");
-            of.friction = number_of(*layer_.world, "friction");
-            of.restitution = number_of(*layer_.world, "bounce");
+        if (name == "file") {
+            const std::string path = file_of(block, file_control);
+            // No model picked yet: the fallback, until there is one.
+            return path.empty() ? std::string{fallback} : request(AssetRequest::Kind::Mesh, block, path);
         }
-        kinds_.push_back(std::move(of));
-        parts_.push_back(BreakPiece{.body = static_cast<std::uint32_t>(kinds_.size()),
-                                    .offset = to_vec3(get(block, "at")),
-                                    .turn = to_vec3(get(block, "turn")),
-                                    .size = number_of(block, "size")});
+        return name;
     }
 
-    // An object the artist placed in the layer's physics world. Props are
+    // The material a body kind takes: the Object's own where it says so,
+    // else the layer's, since a part of a crate is made of what the crate is.
+    void material_of(RigidBodyKind& of, const Block& block, bool own) {
+        const Block* from = own ? &block : (layer_.world ? &*layer_.world : nullptr);
+        if (from == nullptr) {
+            return;
+        }
+        of.density = number_of(*from, "density");
+        of.friction = number_of(*from, "friction");
+        of.restitution = number_of(*from, own ? "bounce" : "bounce");
+    }
+
+    // One Object of the layer: a thing standing in its world, which is a
+    // body kind of its own where it can be and a prop where it cannot. It
+    // opens a group, so the breaking blocks after it are its.
+    void object(const Block& block) {
+        finish_object();
+        ObjectBuild out;
+        out.block = block.uid;
+        out.title = block_summary(block);
+        const std::string arrange = choice_of(block, "arrange");
+        const std::string motion = choice_of(block, "motion");
+        const std::string collides = choice_of(block, "collides");
+        const bool hollow = collides == "bucket" || collides == "crate" || collides == "tube";
+        const bool own_material = toggle_of(block, "own_material");
+        out.count = arrange == "one"
+                        ? 1U
+                        : static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "count"))));
+        out.model = model_of(block, "model", "model_file", "cube");
+        const std::string& model = out.model;
+        const float size = std::max(number_of(block, "size") * s_, 1.0e-4F);
+
+        // A body is moved by the world and collides as a sphere, a cube or
+        // its model's hull. Anything else an artist may ask for -- standing
+        // still, being driven, or being hollow so things sit inside it -- is
+        // a prop, which is the only thing the engine can make of it.
+        if (motion == "loose" && !hollow) {
+            RigidBodyKind of;
+            // Its own shape means its model's hull. An Object drawn as the
+            // layer's own pieces has no model to wrap, so it takes the
+            // layer's shape instead, which is what every other body is:
+            // Auto is a hull where the layer draws models and a ball where
+            // it draws sprites, so a heap of sprites still has bodies.
+            of.shape = collides == "ball"    ? RigidShape::Sphere
+                       : collides == "block" ? RigidShape::Box
+                       : model.empty()       ? RigidShape::Auto
+                                             : RigidShape::Hull;
+            if (of.shape == RigidShape::Hull) {
+                of.mesh = model;
+            }
+            of.draw = model;
+            material_of(of, block, own_material);
+            kinds_.push_back(std::move(of));
+            out.kind = static_cast<std::uint32_t>(kinds_.size());
+            // Its size is the kind's, so one layer holds a crate and the
+            // girder beside it. The scale is worked out in build(), once the
+            // size every body is born at is known.
+            object_sizes_.emplace_back(out.kind, size);
+            place_spawn(block.uid,
+                        SpawnPile{.id = id(block, 1U),
+                                  .count = out.count,
+                                  .shape = arrange == "stack" ? PileShape::Box : PileShape::Heap,
+                                  .center = to_vec3(get(block, "at")) * s_,
+                                  .slope = number_of(block, "slope"),
+                                  .width = number_of(block, "width") * s_,
+                                  .depth = number_of(block, "depth") * s_,
+                                  .spacing = number_of(block, "spacing"),
+                                  .jitter = arrange == "one" ? 0.0F : number_of(block, "jitter"),
+                                  .release = number_of(block, "release"),
+                                  .body = out.kind});
+        } else {
+            out.prop = true;
+            if (out.count > 1U) {
+                error_ = "Only one " + std::string{block_title(block)} +
+                         " can stand still, be moved or be hollow: set how many back to just one, or let it be "
+                         "knocked about";
+                return;
+            }
+            if (motion == "driven" && collides == "own") {
+                error_ = "An object that is moved cannot collide as its own shape: have it collide as a hollow "
+                         "crate, a bucket or a tube instead";
+                return;
+            }
+            prop(block, model, size, motion, collides, hollow);
+        }
+        objects_.push_back(std::move(out));
+        open_ = objects_.size() - 1U;
+    }
+
+    // When the Object above comes apart. What it breaks into is the Part
+    // blocks under it, so the module is placed once they are all in; a block
+    // set to cut its model names a cut and places nothing, since the model is
+    // not read until the builder reads it.
+    void breaking(const Block& block) {
+        // With no Object above it there is nothing to break. The layer
+        // plays on unbroken and the coach asks for one, as a cut that
+        // cannot be made does: half an instruction is not a refusal.
+        if (open_ == no_object) {
+            return;
+        }
+        ObjectBuild& of = objects_[open_];
+        if (of.breaking || of.cut) {
+            error_ = "An object can come apart only one way, so it has one Break";
+            return;
+        }
+        Break made{.id = id(block, 1U),
+                   .body = of.kind,
+                   .threshold = number_of(block, "force") * s_,
+                   .scatter = number_of(block, "scatter") * s_,
+                   .spin = number_of(block, "spin")};
+        if (choice_of(block, "into") == "cut") {
+            of.pieces = static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "cells"))));
+            of.cut = FractureCut{.layer = layer_.uid,
+                                 .block = block.uid,
+                                 .body = of.kind,
+                                 .id = made.id,
+                                 .cells = of.pieces,
+                                 .seed = static_cast<std::uint32_t>(std::lround(number_of(block, "cut_seed"))),
+                                 .spread = number_of(block, "spread"),
+                                 .threshold = made.threshold,
+                                 .scatter = made.scatter,
+                                 .spin = made.spin};
+            return;
+        }
+        of.breaking = std::move(made);
+    }
+
+    // One part the Object above comes apart into. Each is a body kind of its
+    // own, collided and drawn as that part's model.
+    void part(const Block& block) {
+        if (open_ == no_object) {
+            return;
+        }
+        RigidBodyKind of;
+        of.shape = RigidShape::Hull;
+        of.mesh = model_of(block, "model", "model_file", "shard");
+        if (of.mesh.empty()) {
+            of.mesh = "shard";
+        }
+        of.draw = of.mesh;
+        material_of(of, block, false);
+        kinds_.push_back(std::move(of));
+        ObjectBuild& owner = objects_[open_];
+        owner.parts.push_back(BreakPiece{.body = static_cast<std::uint32_t>(kinds_.size()),
+                                         .offset = to_vec3(get(block, "at")),
+                                         .turn = to_vec3(get(block, "turn")),
+                                         .size = number_of(block, "size")});
+        owner.pieces = static_cast<std::uint32_t>(owner.parts.size());
+    }
+
+    // Places what the Object that is open came apart into, and closes it.
+    // Breaking is two halves and either alone does nothing, so a Break with
+    // no parts beside it is left out rather than guessed at; the coach says
+    // which half is missing.
+    void finish_object() {
+        if (open_ == no_object) {
+            return;
+        }
+        ObjectBuild& of = objects_[open_];
+        if (of.prop && (of.breaking || of.cut)) {
+            error_ = "Only a piece the world moves can come apart: let this object be knocked about, and have "
+                     "it collide as its own shape, a ball or a block";
+            open_ = no_object;
+            return;
+        }
+        if (of.breaking && !of.parts.empty()) {
+            of.breaking->pieces = of.parts;
+            place_after(SlotBreak, of.block, *of.breaking);
+        }
+        if (of.cut) {
+            // The model cut is the Object's own, so a layer of several cuts
+            // each one's own rather than whatever the layer draws.
+            of.cut->model = of.model;
+            cuts_.push_back(*of.cut);
+        }
+        open_ = no_object;
+    }
+
+    // An Object the engine cannot make a body of: one that stands still, one
+    // the effect drives, or one that is hollow so pieces sit inside it. It
+    // becomes a prop, which is authored rather than born. Props are
     // collected here and attached to the RigidPhysics module in build(),
     // since that module may be placed by a block that comes after this one.
-    void prop(const Block& block) {
+    void prop(const Block& block, const std::string& model, float size, const std::string& motion,
+              const std::string& collides, bool hollow) {
         RigidProp out;
-        const std::string motion = choice_of(block, "motion");
         out.motion = motion == "driven" ? PropMotion::Driven
                      : motion == "loose" ? PropMotion::Loose
                                          : PropMotion::Fixed;
-        const std::string shape = choice_of(block, "shape");
-        if (shape == "bucket") {
+        if (collides == "bucket") {
             out.shape = PropShape::HollowCylinder;
-        } else if (shape == "crate") {
+        } else if (collides == "crate") {
             out.shape = PropShape::HollowBox;
-        } else if (shape == "tube") {
+        } else if (collides == "tube") {
             out.shape = PropShape::Pipe;
-        } else if (shape == "ball") {
+        } else if (collides == "ball") {
             out.shape = PropShape::Sphere;
-        } else if (shape == "block") {
+        } else if (collides == "block") {
             out.shape = PropShape::Box;
         } else {
             out.shape = PropShape::Mesh;
         }
+        static_cast<void>(hollow);
         // The model is what a host draws, whatever the prop collides as, so
-        // it is named whenever one is picked.
-        const std::string path = file_of(block, "model");
-        if (!path.empty()) {
-            out.mesh = request(AssetRequest::Kind::Mesh, block, path);
+        // it is named whenever the Object has one.
+        if (!model.empty()) {
+            out.mesh = model;
         } else if (out.shape == PropShape::Mesh) {
-            // Nothing picked yet: stand in as a block of its size, so the
+            // Nothing to follow: stand in as a block of its size, so the
             // layer still plays while the coach asks for a model.
             out.shape = PropShape::Box;
         }
         out.position = to_vec3(get(block, "at")) * s_;
         out.turn = to_vec3(get(block, "turn"));
-        out.size = number_of(block, "size") * s_;
+        out.size = size;
         out.half_size = to_vec3(get(block, "extent")) * (0.5F * s_);
         out.radius = number_of(block, "radius") * s_;
         out.height = number_of(block, "height") * s_;
@@ -902,6 +1085,9 @@ private:
         const Value size = get(block, "size");
         InitSize init{.id = id(block, 1U)};
         std::tie(init.min, init.max) = range_input(block, "size", size.x * s_, size.y * s_, s_);
+        // What an Object's own size is measured against: its kind's scale
+        // multiplies the size every body is born at.
+        size_min_ = std::max(size.x * s_, 1.0e-4F);
         place_init(SlotSize, block.uid, init);
         const std::string over = choice_of(block, "over_life");
         const float change = number_of(block, "change");
@@ -993,15 +1179,41 @@ private:
     std::set<std::string> unique_;
     std::set<ModuleId> seeded_;
     bool physics_{false};
-    // The props the layer's Prop blocks describe, in page order.
+    // The props the layer's Objects describe, in page order.
     std::string pieces_above_;
     std::vector<RigidProp> props_;
-    // The body kinds the layer's Part blocks make, and the parts that are
-    // made of them, in the order the blocks are listed.
+    // The body kinds the layer's Objects and their Parts make, in the order
+    // the blocks are listed. Kind 0 is the emitter's own, so the kind a push
+    // makes is kinds_.size() once it is in.
     std::vector<RigidBodyKind> kinds_;
-    std::vector<BreakPiece> parts_;
-    std::optional<Break> breaking_;
-    std::optional<FractureCut> cut_;
+    // One Object of the layer, and what it comes apart into. An Object owns
+    // the breaking blocks that follow it, so `open_` is the one they reach.
+    struct ObjectBuild final {
+        Uid block{};
+        std::string title;
+        // The model it draws and collides as, empty for the layer's own.
+        std::string model;
+        // The body kind it is, or 0 when it stands as a prop instead.
+        std::uint32_t kind{0U};
+        bool prop{false};
+        std::optional<Break> breaking;
+        std::vector<BreakPiece> parts;
+        std::optional<FractureCut> cut;
+        // How many bodies it places, and what one of them comes apart into,
+        // for the layer's budget.
+        std::uint32_t count{1U};
+        std::uint32_t pieces{1U};
+    };
+    std::vector<ObjectBuild> objects_;
+    static constexpr std::size_t no_object = static_cast<std::size_t>(-1);
+    std::size_t open_{no_object};
+    std::vector<FractureCut> cuts_;
+    // The size every body is born at, which an Object's own size is a
+    // multiple of. 0 until a Size block says.
+    float size_min_{0.0F};
+    // Each body-kind Object's kind and the size it asked for, turned into
+    // the kind's scale in build() once `size_min_` is known.
+    std::vector<std::pair<std::uint32_t, float>> object_sizes_;
     std::vector<Placed> spawn_;
     std::vector<Placed> init_;
     std::vector<Placed> forces_;
@@ -1110,7 +1322,10 @@ Compiled compile(const Document& document, Purpose purpose) {
             alone.simulation_rate = effect.simulation_rate;
             alone.parameters = wanted(layer) ? parameters : own;
             alone.emitters = effect.emitters;
-            const std::uint64_t bound = particle_bound(alone, *emitter);
+            // What its objects come apart into is room the layer needs: a
+            // body that breaks is replaced by its pieces, and a break that
+            // will not fit is refused as it happens.
+            const std::uint64_t bound = particle_bound(alone, *emitter) + builder.extra_for_breaking();
             if (bound > max_emitter_capacity) {
                 report.error = "This layer could have more particles alive than any layer may (" +
                                std::to_string(max_emitter_capacity) + "): lower its amount or life";
@@ -1130,10 +1345,14 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         if (emitter && wanted(layer)) {
             report.included = true;
-            if (const std::optional<FractureCut>& cut = builder.cut()) {
-                FractureCut asked = *cut;
+            for (const FractureCut& cut : builder.cuts()) {
+                FractureCut asked = cut;
                 asked.emitter = report.emitter;
-                asked.model = emitter->renderer.mesh;
+                // An Object with no model of its own cuts whatever the layer
+                // draws, as every other body is drawn.
+                if (asked.model.empty()) {
+                    asked.model = emitter->renderer.mesh;
+                }
                 compiled.cuts.push_back(std::move(asked));
             }
             effect.emitters.push_back(std::move(*emitter));
@@ -1241,7 +1460,7 @@ void make_cuts(Compiled& compiled, std::string& issue) {
             compiled.meshes.emplace(name, std::move(mesh));
         }
         emitter->update.push_back(Break{.id = cut.id,
-                                        .body = 0U,
+                                        .body = cut.body,
                                         .threshold = cut.threshold,
                                         .scatter = cut.scatter,
                                         .spin = cut.spin,

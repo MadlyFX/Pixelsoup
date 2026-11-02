@@ -166,10 +166,10 @@ public:
 private:
     static bool always_shown(const Block& block) {
         const std::string_view kind = block.kind;
-        // A prop is scenery: it reads as part of the stage whether or not it
-        // is the block being worked on.
+        // An object is scenery: it reads as part of the stage whether or
+        // not it is the block being worked on.
         return kind == "shape" || kind == "sphere" || kind == "box" || kind == "mesh_collider" ||
-               kind == "prop" || (kind == "ground" && number_of(block, "height") != 0.0F);
+               kind == "object" || (kind == "ground" && number_of(block, "height") != 0.0F);
     }
 
     void handle(const Block& block, std::string control, HandleMotion motion, Vec3 at, Vec3 origin, std::string label,
@@ -404,14 +404,14 @@ private:
             }
             drop(guide, at);
             handle(block, "position", HandleMotion::Floor, at, at, "Position");
-        } else if (kind == "prop") {
+        } else if (kind == "object") {
             guide.kind = GuideKind::Collider;
             const Vec3 at = to_vec3(get(block, "at")) * s_;
             const Quat turn = prop_orientation(to_vec3(get(block, "turn")));
             const float size = std::max(number_of(block, "size"), 0.001F) * s_;
             // The model, where one is picked: what the audience will see,
             // placed and turned exactly as the prop is.
-            const std::string path = file_of(block, "model");
+            const std::string path = file_of(block, "model_file");
             const std::vector<Vec3>* outline = nullptr;
             if (options_.outlines != nullptr) {
                 if (const auto found = options_.outlines->find(path); found != options_.outlines->end()) {
@@ -429,10 +429,12 @@ private:
                 guide.strokes.push_back(line(at - Vec3{0.0F, 0.0F, r}, at + Vec3{0.0F, 0.0F, r}));
                 guide.strokes.push_back(line(at, at + up * (r * 2.0F)));
             }
-            // And, when the prop does not collide as its model, the shape it
-            // does collide as, faintly over the top: that difference is the
-            // one thing about a prop an artist cannot otherwise see.
-            const std::string shape = choice_of(block, "shape");
+            // And, when it does not collide as its model, the shape it does
+            // collide as, faintly over the top: that difference is the one
+            // thing about an object an artist cannot otherwise see. Only for
+            // one on its own, since a heap's shapes are not at its base.
+            const std::string shape = choice_of(block, "arrange") == "one" ? choice_of(block, "collides")
+                                                                           : std::string{};
             if (shape == "bucket" || shape == "tube") {
                 turned_tube(guide, at, number_of(block, "radius") * s_, number_of(block, "height") * s_, turn);
             } else if (shape == "ball") {
@@ -440,7 +442,7 @@ private:
             } else if (shape == "crate" || shape == "block") {
                 turned_box(guide, at, to_vec3(get(block, "extent")) * (0.5F * s_), turn);
             }
-            // Where a driven prop is headed, so its move reads at a glance.
+            // Where a driven object is headed, so its move reads at a glance.
             if (choice_of(block, "motion") == "driven") {
                 const Value* to = block.find("move_to");
                 const Vec3 ends = to != nullptr ? to_vec3(*to) * s_ : at;

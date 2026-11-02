@@ -16,7 +16,12 @@
 namespace ajfx::studio {
 
 inline constexpr std::string_view document_extension = ".ajfxstudio";
-inline constexpr int document_version = 2;
+// 3: Pile and Prop became one Object block (and so did the model, size and
+//    material each of them carried). A page saved at 2 or earlier is
+//    converted as it loads, each Object keeping the uid of the block it came
+//    from so that module ids and seeds -- and therefore the particles -- stay
+//    where they were.
+inline constexpr int document_version = 3;
 
 [[nodiscard]] std::string save_document(const Document& document);
 

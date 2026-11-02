@@ -374,7 +374,10 @@ feedback forces could evaluate any frame directly.
        model would hide the near one: the middle of the frame is the near
        body's colour, ringed by the far one's.
      - **Studio, done (2026-11-01).** Two blocks in a rigid layer, beside
-       Pile and Prop. **Break** says when the layer's pieces come apart:
+       Pile and Prop (which an Object block later replaced; see **Studio
+       authors things rather than arrangements** below, where a Break became
+       one Object's rather than the layer's). **Break** says when the pieces
+       come apart:
        how hard a hit it takes, how far the parts are thrown and how fast
        they tumble. **Part** is one of the parts a piece comes apart into:
        a model (the built-in shard, chip, rock or cube, or one of the
@@ -396,6 +399,35 @@ feedback forces could evaluate any frame directly.
          cannot break again from Studio, though the runtime allows it; and
          a body kind of its own for a spawn block, so a bouncy ball among
          the crates is a loose prop rather than one of the layer's bodies.
+     - **Studio authors things rather than arrangements, done (2026-11-01).**
+       One **Object** block replaces Pile and Prop. An Object is one thing in
+       the layer: its model, how many of it (just one, a heap or a stack),
+       how big it is, how it moves, what it collides as, and the Break and
+       Part blocks under it, which are its own. Breaking belongs to the
+       Object above it, so a page of several things says which comes apart
+       without any block naming another -- the page-order idiom that already
+       decides which layer's pieces a particle lands on.
+       This answers the complaint that started it: fracturing a mesh meant
+       reaching for a Pile, and a second mesh to fracture it had to be a
+       Prop, which cannot break at all. Now each is an Object, each at its
+       own size (RigidBodyKind::scale, above), each with its own Break.
+       The compiler decides what the engine makes of one: a body kind where
+       the world moves it, a prop where it stays put, is driven, or is hollow
+       so things sit inside it -- the artist meets neither word, and the
+       coach speaks only where a combination is impossible. Every Object is a
+       kind, every Part is a kind and every cell of a cut is a kind, so the
+       compiler apportions `max_rigid_body_kinds` up front and refuses with
+       what asked for them. It also sizes the layer for breaking, which
+       `particle_bound` does not count, so a break is not refused mid-shot.
+       Page format 3: a Pile or a Prop is converted as it loads, keeping its
+       uid so module ids, seeds and therefore its bodies stay where they
+       were, and a converted pile asks for the size its bodies were born at.
+       Measured in its test: a crate cut into four and a boulder two and a
+       half times its size break in one world, each Break naming its own
+       kind; and the Crates recipe is now two Objects, where the ball was a
+       prop that could never break.
+       - **Not yet:** an Object cannot publish its size or pose for a host to
+         animate, and a Part still cannot break again from Studio.
      - **Not yet after it:** snow settling on the pieces, which is
        accumulation, in phase 5 above.
    - **What breaking is, and what it is not (2026-11-01).** Round 5 is
@@ -510,8 +542,8 @@ feedback forces could evaluate any frame directly.
      `ajfx.studio` covers the page model and compiler headless.
    - **Done since:** ranges and per-block seeds, guides, handles and
      particle paths, the artist's own textures, debris models and mesh
-     colliders, published parameters, Physics and Pile blocks, and taking up
-     where Studio was left.
+     colliders, published parameters, the Object block and what it holds,
+     and taking up where Studio was left.
    - **A rigid layer says what each block acts on, done (2026-11-01).** Such
      a layer holds blocks for four things at once -- its own pieces, what
      they break into, the props beside them and the world they share -- and

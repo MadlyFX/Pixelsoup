@@ -215,10 +215,18 @@ Layer debris(Document& d) {
 
 // Already standing when the effect starts; let go at once, so it collapses
 // as the effect plays. Physics makes each rock a body the others rest on.
+// The Object's size is the low end of the layer's Size, so the rocks keep the
+// spread they had: a body is born at the layer's size and its kind's scale
+// multiplies it, and a scale of 1 leaves 0.12 to 0.22 exactly as it was.
 Layer rock_pile(Document& d) {
     return build_layer(d, LayerKind::Rigid, "Rock pile", 60.0F, 60.0F,
-                       {{"pile",
-                         {{"count", number(220.0F)}, {"slope", number(62.0F)}, {"spacing", number(0.75F)},
+                       {{"object",
+                         {{"model", choice("rock")},
+                          {"arrange", choice("heap")},
+                          {"count", number(220.0F)},
+                          {"size", number(0.12F)},
+                          {"slope", number(62.0F)},
+                          {"spacing", number(0.75F)},
                           {"jitter", number(0.25F)}}},
                         {"gravity", {}},
                         // A pile starts still: Tumble only turns each rock to lie its own way.
@@ -238,9 +246,10 @@ Layer rock_pile(Document& d) {
 // balls start inside the bucket's floor, 0.05 up, in its 0.45 inside radius.
 Layer bucket_spill(Document& d) {
     return build_layer(d, LayerKind::Rigid, "Bucket of stones", 60.0F, 60.0F,
-                       {{"prop",
-                         {{"motion", choice("driven")},
-                          {"shape", choice("bucket")},
+                       {{"object",
+                         {{"model", choice("layer")},
+                          {"motion", choice("driven")},
+                          {"collides", choice("bucket")},
                           {"at", vec3(0.0F, 0.4F, 0.0F)},
                           {"radius", number(0.5F)},
                           {"height", number(0.8F)},
@@ -250,11 +259,15 @@ Layer bucket_spill(Document& d) {
                           {"turn_to", vec3(0.0F, 0.0F, 115.0F)},
                           {"move_at", number(1.0F)},
                           {"move_over", number(0.6F)},
+                          {"own_material", toggle(true)},
                           {"friction", number(0.7F)},
                           {"bounce", number(0.05F)}}},
-                        {"pile",
-                         {{"count", number(24.0F)},
-                          {"shape", choice("stack")},
+                        {"object",
+                         {{"model", choice("rock")},
+                          {"collides", choice("ball")},
+                          {"arrange", choice("stack")},
+                          {"count", number(24.0F)},
+                          {"size", number(0.1F)},
                           {"width", number(0.5F)},
                           {"depth", number(0.5F)},
                           {"at", vec3(0.0F, 0.05F, 0.0F)},
@@ -280,31 +293,23 @@ Layer bucket_spill(Document& d) {
 // seven, well past the four the crates come apart at.
 Layer breaking_crates(Document& d) {
     return build_layer(d, LayerKind::Rigid, "Crates and a dropped ball", 60.0F, 60.0F,
-                       {{"pile",
+                       {{"object",
                          // A crate 0.4 across reaches 0.69 corner to corner,
                          // so spacing 0.6 sets them just touching and a 0.9
                          // footprint holds two each way: four, four and one.
-                         {{"count", number(9.0F)},
-                          {"shape", choice("stack")},
+                         {{"model", choice("cube")},
+                          {"collides", choice("block")},
+                          {"arrange", choice("stack")},
+                          {"count", number(9.0F)},
+                          {"size", number(0.4F)},
                           {"width", number(0.9F)},
                           {"depth", number(0.9F)},
                           {"spacing", number(0.6F)},
                           {"jitter", number(0.0F)}}},
-                        // Half a metre across and heavy beside a crate, from
-                        // four metres up: it arrives at about six and a half,
-                        // well past the four a crate comes apart at.
-                        {"prop",
-                         {{"motion", choice("loose")},
-                          {"shape", choice("ball")},
-                          {"at", vec3(0.0F, 4.0F, 0.0F)},
-                          {"radius", number(0.5F)},
-                          {"size", number(1.0F)},
-                          {"density", number(1200.0F)},
-                          {"friction", number(0.3F)},
-                          {"bounce", number(0.8F)}}},
                         // Cut from the crate's own model, so the pieces are
-                        // the crate rather than shards laid beside it. Six
-                        // apiece keeps nine crates inside the layer's room.
+                        // the crate rather than shards laid beside it. It is
+                        // under the crates, so it is the crates that break
+                        // and not the stone below.
                         {"break",
                          {{"into", choice("cut")},
                           {"cells", number(6.0F)},
@@ -312,6 +317,20 @@ Layer breaking_crates(Document& d) {
                           {"force", number(4.0F)},
                           {"scatter", number(1.2F)},
                           {"spin", number(220.0F)}}},
+                        // A metre across and heavy beside a crate, from four
+                        // metres up: it arrives well past the four a crate
+                        // comes apart at. It is one of the layer's bodies
+                        // rather than a prop, so it carries its own size and
+                        // material and the crates feel its weight.
+                        {"object",
+                         {{"model", choice("rock")},
+                          {"collides", choice("ball")},
+                          {"at", vec3(0.0F, 4.0F, 0.0F)},
+                          {"size", number(1.0F)},
+                          {"own_material", toggle(true)},
+                          {"density", number(1200.0F)},
+                          {"friction", number(0.3F)},
+                          {"bounce", number(0.8F)}}},
                         {"gravity", {}},
                         {"ground", {{"bounce", number(0.05F)}, {"friction", number(0.9F)}}},
                         {"appearance", {{"material", choice("debris")}, {"mesh", choice("cube")}}},

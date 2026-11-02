@@ -635,6 +635,131 @@ std::vector<BlockDef> make_catalog() {
         .unique = true,
     });
     // --------------------------------------------------- rigid physics
+    // One thing in the layer's world, and the blocks under it are its own.
+    // It is the merge of what Pile and Prop were: an artist who wants a
+    // crate to fracture places an Object and gives it a Break, rather than
+    // reaching for a pile of one and finding that a second crate has to be
+    // a prop, which cannot break at all.
+    blocks.push_back(BlockDef{
+        .kind = "object",
+        .title = "Object",
+        .description = "One thing in this layer: its model, how many, and what it comes apart into.",
+        .category = Category::Physics,
+        .controls =
+            {choice_control("model", "Model", "cube",
+                            {{"layer", "The layer's own"},
+                             {"cube", "Cube"},
+                             {"rock", "Rock"},
+                             {"chip", "Chip"},
+                             {"shard", "Shard"},
+                             {"file", "From a file"}},
+                            "What this object looks like, and what it hits things as. The layer's own draws it "
+                            "as every other piece in the layer is drawn."),
+             when(file_control("model_file", "Model file", FileKind::Model,
+                               "An OBJ, glTF or GLB. It is centred and fitted to a 1 m box, so Size sets how big "
+                               "the object is."),
+                  "model", {"file"}),
+             choice_control("arrange", "How many", "one",
+                            {{"one", "Just one"}, {"heap", "A heap"}, {"stack", "A stack"}},
+                            "Just one stands where you put it. A heap is a cone of them, as rocks or rubble "
+                            "lie. A stack fills a footprint layer by layer, as a wall of bricks or a pile of "
+                            "crates."),
+             when(number_control("count", "Pieces", 9.0F, 2.0F, 1000.0F, "", 0, "How many the heap or stack holds.",
+                                 2.0F, 20000.0F),
+                  "arrange", {"heap", "stack"}),
+             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
+                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it "
+                                 "slumps when let go.",
+                                 5.0F, 85.0F),
+                  "arrange", {"heap"}),
+             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.",
+                                 0.01F),
+                  "arrange", {"stack"}),
+             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2,
+                                 "The stack's footprint front to back.", 0.01F),
+                  "arrange", {"stack"}),
+             number_control("size", "Size", 0.4F, 0.05F, 5.0F, "m", 2,
+                            "The object's longest side. One model serves at any size.", 0.01F),
+             vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
+                          "Where it sits: the middle of the object, or of a heap or stack's base."),
+             angles_control("turn", "Turn", "How the object is turned where it stands."),
+             choice_control("motion", "It can", "loose",
+                            {{"loose", "Be knocked about"}, {"fixed", "Stay put"}, {"driven", "Be moved"}},
+                            "Be knocked about is an ordinary piece: gravity and the others move it. Stay put for "
+                            "a floor, a wall or a bucket that only has to hold. Be moved to tip or swing it "
+                            "yourself, shoving whatever is in the way."),
+             choice_control("collides", "Collides as", "own",
+                            {{"own", "Its own shape"},
+                             {"ball", "A ball"},
+                             {"block", "A block"},
+                             {"bucket", "A bucket"},
+                             {"crate", "A hollow crate"},
+                             {"tube", "A tube"}},
+                            "What the other pieces actually hit. Its own shape follows the model. A bucket, a "
+                            "hollow crate and a tube are hollow, so pieces sit inside them, and only one object "
+                            "on its own can be hollow."),
+             when(number_control("wall", "Wall thickness", 0.05F, 0.01F, 0.3F, "m", 2,
+                                 "How thick the sides and bottom are.", 0.001F),
+                  "collides", {"bucket", "crate", "tube"}),
+             when(number_control("radius", "Radius", 0.5F, 0.05F, 2.0F, "m", 2, "How wide across it is.", 0.01F),
+                  "collides", {"bucket", "tube", "ball"}),
+             when(number_control("height", "Height", 0.8F, 0.05F, 3.0F, "m", 2, "How tall it is.", 0.01F),
+                  "collides", {"bucket", "tube"}),
+             when(vec3_control("extent", "Size across", vec3(0.6F, 0.6F, 0.6F), "m",
+                               "How wide, tall and deep it is."),
+                  "collides", {"block"}),
+             when(vec3_control("move_to", "Moves to", vec3(0.0F, 0.0F, 0.0F), "m",
+                               "Where it ends up. The same position leaves it where it is and only the turn "
+                               "changes."),
+                  "motion", {"driven"}),
+             when(angles_control("turn_to", "Turns to",
+                                 "How it is turned when the move is done. Past 90 degrees a bucket is upside "
+                                 "down and whatever it held falls out."),
+                  "motion", {"driven"}),
+             when(number_control("move_at", "Starts moving at", 0.5F, 0.0F, 10.0F, "s", 2, "When the move begins."),
+                  "motion", {"driven"}),
+             when(number_control("move_over", "Taking", 0.5F, 0.0F, 10.0F, "s", 2,
+                                 "How long the move takes. 0 puts it there at once."),
+                  "motion", {"driven"}),
+             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
+                            "When it is let go. Until then it stands still unless something knocks it; 0 lets "
+                            "it go as soon as the effect plays."),
+             detail(toggle_control("own_material", "Made of its own thing", false,
+                                   "Off, the object is made of what the layer's Bodies row says. On, it has its "
+                                   "own, so a steel ball among wooden crates is heavier and bouncier.")),
+             detail(when(number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
+                                        "How much it grips what it touches.", 0.0F, 1.0F),
+                         "own_material", {"on"})),
+             detail(when(number_control("bounce", "Bounciness", 0.15F, 0.0F, 1.0F, "", 2,
+                                        "1 bounces back as fast as it arrived.", 0.0F, 1.0F),
+                         "own_material", {"on"})),
+             detail(when(number_control("density", "Density", 2400.0F, 100.0F, 8000.0F, "kg/m^3", 0,
+                                        "How heavy it is for its size. Wood is about 600, stone 2400.", 1.0F),
+                         "own_material", {"on"})),
+             detail(when(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
+                                        "How far apart they start, as a share of the largest piece's reach. "
+                                        "Below 1 they start packed closer, and may overlap until they fall.",
+                                        0.5F, 4.0F),
+                         "arrange", {"heap", "stack"})),
+             detail(when(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
+                                        "How far each one is nudged off its place, so it is not a perfect "
+                                        "stack.",
+                                        0.0F, 1.0F),
+                         "arrange", {"heap", "stack"})),
+             detail(when(number_control("sides", "Sides", 12.0F, 3.0F, 48.0F, "", 0,
+                                        "How many flat sides a round shape is built from. More is rounder and "
+                                        "costs a little more.",
+                                        3.0F, 64.0F),
+                         "collides", {"bucket", "tube"})),
+             seed_control()},
+        .keywords = "object thing crate box rock bucket wall barrel model import obj gltf glb place pile heap "
+                    "stack prop scenery knock over tip spill fracture break piece",
+        // Its shape, pose and arrangement are the physics world's, not one
+        // module's: the compiler makes a body kind or a prop of it.
+        .detachable = false,
+        .layers = in_rigid,
+        .only_in = "An object stands in a physics world, so it needs a rigid physics layer.",
+    });
     blocks.push_back(BlockDef{
         .kind = "prop",
         .title = "Prop",
@@ -707,7 +832,11 @@ std::vector<BlockDef> make_catalog() {
                     "knock over tip spill scenery",
         // Its shape and pose are the physics world's, not a module's.
         .detachable = false,
-        .layers = in_rigid,
+        // Read-only remnant: Object does what this did, and a page saved
+        // before Object turns its Prop blocks into Objects as it loads
+        // (document_io.cpp). The definition stays so such a page can still
+        // be read; it is never offered and never lands in a layer.
+        .layers = in_no_layer,
         .only_in = "A prop is an object in a physics world, so it needs a rigid physics layer.",
     });
     blocks.push_back(BlockDef{
@@ -744,8 +873,11 @@ std::vector<BlockDef> make_catalog() {
              number_control("spin", "And tumbling them", 180.0F, 0.0F, 1440.0F, "deg/s", 0,
                             "How fast the parts tumble as they come loose.", 0.0F)},
         .keywords = "break shatter smash fracture crack apart destroy panels planks shards splinters debris",
-        .unique = true,
-        // What it breaks into is the Part blocks beside it.
+        // One per Object rather than one per layer: a layer of several
+        // things each comes apart in its own way, and the Object above a
+        // Break is the one that breaks.
+        .unique = false,
+        // What it breaks into is the Part blocks under it.
         .detachable = false,
         .layers = in_rigid,
         .only_in = "Only a piece in a physics world can come apart, so breaking needs a rigid physics layer.",
@@ -820,7 +952,10 @@ std::vector<BlockDef> make_catalog() {
                                    0.0F, 1.0F)),
              seed_control()},
         .keywords = "prespawn pre-spawn stack heap rubble rocks wall bricks collapse topple preplaced",
-        .layers = in_rigid,
+        // Read-only remnant, as Prop above: an Object arranged as a heap or
+        // a stack is what this was, and a page saved before Object is
+        // converted as it loads.
+        .layers = in_no_layer,
         .only_in = "A pile is stacked solid pieces resting on each other, so it needs a rigid physics layer.",
     });
     blocks.push_back(BlockDef{
@@ -918,6 +1053,7 @@ std::string_view category_name(Category category) noexcept {
 
 std::string_view rigid_scope_name(RigidScope scope) noexcept {
     switch (scope) {
+    case RigidScope::Objects: return "What is in it";
     case RigidScope::Pieces: return "The pieces";
     case RigidScope::Breaking: return "When they break";
     case RigidScope::Props: return "Props";
@@ -929,6 +1065,9 @@ std::string_view rigid_scope_name(RigidScope scope) noexcept {
 
 std::string_view rigid_scope_help(RigidScope scope) noexcept {
     switch (scope) {
+    case RigidScope::Objects:
+        return "The things standing in this layer's world. Each carries its own model, how many of it there are "
+               "and what it comes apart into, and the blocks under it are its own.";
     case RigidScope::Pieces:
         return "The solid pieces this layer is made of: how many there are, where they start, how big they are "
                "and what they look like.";
@@ -947,9 +1086,16 @@ std::string_view rigid_scope_help(RigidScope scope) noexcept {
 }
 
 RigidScope rigid_scope(std::string_view block_kind) noexcept {
+    if (block_kind == "object") {
+        return RigidScope::Objects;
+    }
     if (block_kind == "prop") {
         return RigidScope::Props;
     }
+    // Breaking belongs to the Object above it, so the page draws these
+    // under their Object rather than under a heading of their own. The
+    // scope is what a Break with no Object over it reads under, which the
+    // coach then asks about.
     if (block_kind == "break" || block_kind == "part") {
         return RigidScope::Breaking;
     }

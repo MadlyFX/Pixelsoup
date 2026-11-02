@@ -94,6 +94,9 @@ struct FractureCut final {
     // The emitter whose bodies come apart, and the mesh entry to cut.
     std::string emitter;
     std::string model;
+    // The body kind that comes apart: the Object's own, since a layer may
+    // hold several and each cuts its own model.
+    std::uint32_t body{0U};
     ModuleId id{};
     std::uint32_t cells{8U};
     std::uint32_t seed{0U};

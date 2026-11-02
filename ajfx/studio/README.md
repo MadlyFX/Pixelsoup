@@ -158,42 +158,26 @@ CPU reference (over 200,000 particles) show no paths.
 ## Rigid physics layers
 
 A **rigid physics** layer's particles are solid bodies in a physics engine:
-they knock into each other, stack, tumble off and come to rest. Pile and
-Prop are under **Rigid physics** in the palette and only appear there.
+they knock into each other, stack, tumble off and come to rest. Object is
+under **Rigid physics** in the palette and only appears there.
 
-**What a block acts on.** A rigid layer holds blocks for four different
-things at once, so its blocks read under headings that say which:
-
-- **The pieces** -- the solid pieces the layer is made of: how many there
-  are, where they start, how big they are and what they look like.
-- **When they break** -- what becomes of a piece hit hard enough. These act
-  on the layer's pieces, never on a prop.
-- **Props** -- each object you stood in the world. A prop carries its own
-  model and material, and is not a piece: it never dies and never breaks.
-- **The world** -- the one physics world they all share: what they are made
-  of (Bodies), what pulls on them and what they land on.
-
-A block's kind decides which heading it reads under, so dragging one only
-offers it places under its own heading. The order within a heading is
-yours; it is for reading, and never changes the effect. A particle layer
-has one scope and keeps its flat list.
-
-**Bodies**, under The world, is what every piece
-in the layer is made of. It belongs to the layer, not to a block, because a
-rigid layer has exactly one physics world and no way to be without one.
-- *Body* is what each piece collides as: *Its own shape* wraps a debris
-  chunk tightly, *Ball* rolls, *Cube* stacks.
+**Bodies**, on the layer's heading beside "Each lives", is what every piece in
+the layer is made of unless an object says otherwise. It belongs to the layer,
+not to a block, because a rigid layer has exactly one physics world and no way
+to be without one.
+- *Body* is what each piece collides as: *Its own shape* wraps a debris chunk
+  tightly, *Ball* rolls, *Cube* stacks.
 - *Friction* and *Bounciness* set the material; *Density*, *Spin damping*
   and *Rest when still* are under More settings.
 
 **What a rigid layer can hold.** Stream, Burst, Spawn shape, Launch,
 Gravity, Rise, Wind, Air resistance, Ground, Sphere and Box colliders,
-Tumble, Appearance, Color, Size, Fade and Cast light, plus Pile and Prop.
-Turbulence, Swirl, Attract, Draw in, Spin and Mesh collider are not offered:
-a physics engine moves whole bodies, so a force that stirs each particle on
-its own has nothing to act on. Within the blocks it does have, settings the
-engine cannot honour are not shown either -- Size over its life, Rise's
-curve over life, Random spin, Vanish on contact and Keep inside.
+Tumble, Appearance, Color, Size, Fade and Cast light, plus Object, Break and
+Part. Turbulence, Swirl, Attract, Draw in, Spin and Mesh collider are not
+offered: a physics engine moves whole bodies, so a force that stirs each
+particle on its own has nothing to act on. Within the blocks it does have,
+settings the engine cannot honour are not shown either -- Size over its life,
+Rise's curve over life, Random spin, Vanish on contact and Keep inside.
 
 **Forces act on the world, not on each piece.** The engine takes one gravity
 for the whole layer and one damping for each body, so a force's *Strength*
@@ -201,57 +185,74 @@ is one number in a rigid layer rather than a spread: there is no per-particle
 variation to promise. Tumble only sets each piece's spin and how it lies; the
 engine does the rest.
 
-**Pile** puts pieces in place before the effect starts: a heap of rocks that
-collapses when the effect plays, or a stack that stands until something
-knocks it down.
-- *Stacked as* a Heap (a cone whose sides slope at *Slope*) or a Stack
-  (filling *Width* by *Depth*, layer by layer).
-- *Let go at* holds the pile still until then; 0 lets it fall as soon as
-  the effect plays. A paused preview at the start shows it standing.
-- Under More settings: *Position*, *Spacing* (how far apart pieces start,
-  as a share of the largest piece's reach) and *Untidiness*.
-- A pile's pieces live on after they fall, so the automatic loop covers
-  the fall and a few seconds of settling, not their whole life.
+## Objects
 
-**Prop** puts an object of your own in the layer's physics world: a bucket
-for the pieces to spill out of, a wall to pile against, a crate to knock
-over. A prop is not a particle. It stands there from the first frame, never
-dies, and takes no part of the layer's budget, so the layer heading counts
-props rather than particles when a layer places them and nothing is born.
-- *Model* is an OBJ, glTF or GLB, fitted so its longest side is *Size*. One
-  model serves at any size.
-- *Position* and *Turn* place it. *Turn* is three whole degrees: round the
-  upright axis, then tipped, then rolled.
+An **Object** is one thing standing in the layer's world: a crate, a heap of
+rocks, a bucket, a wall. It carries its own model, how many of it there are
+and how big it is, and **the blocks under it are its own**, so a page reads as
+each thing in the layer and what becomes of it:
+
+```
+Rigid physics  "Crates"              Bodies | 35 of 64 max
+  What is in it
+    Object  Cube, a stack of 9, 0.40 m
+      Break  Cut into 6, over 4 m/s
+    Object  Rock, just one, 1.00 m
+  The world
+    Gravity   Ground
+```
+
+Breaking belongs to the Object above it, so the Break and Part blocks under
+one object are what *that* object comes apart into. Nothing names anything:
+reading down the page is what says so, as it is for a particle layer landing
+on the pieces of the rigid layer above it.
+
+- *Model* is what it looks like and what it hits things as: a cube, a rock, a
+  chip, a shard, one of your own (OBJ, glTF or GLB), or *The layer's own*,
+  which draws it as every other piece in the layer is drawn.
+- *How many* is *Just one*, *A heap* (a cone whose sides slope at *Slope*) or
+  *A stack* (filling *Width* by *Depth*, layer by layer). Under More settings,
+  *Spacing* is how far apart they start, as a share of the largest piece's
+  reach, and *Untidiness* nudges each off its place.
+- *Size* is its longest side, in metres, and is its own: one layer can hold a
+  crate and the girder beside it. (Where the layer's Size is a spread, the
+  objects keep that spread in proportion.)
+- *Position* and *Turn* place it. *Let go at* holds it still until then; 0
+  lets it go as soon as the effect plays. A paused preview at the start shows
+  a heap standing.
 - *It can* is how it moves:
+  - *Be knocked about* is an ordinary piece: gravity and the others move it,
+    and it is the only one that can come apart.
   - *Stay put* for a floor, a wall, or a bucket that only has to hold.
-  - *Be moved* to tip or swing it yourself, from where it stands to *Moves
-    to* and *Turns to*, starting at *Starts moving at* and *Taking* that
-    long. It shoves whatever is in its way and nothing pushes it back, so a
-    tip-over lands the same every time. Past 90 degrees a bucket is upside
-    down and empties.
-  - *Be knocked about* lets the pieces move it, as one of them.
-- *Collides as* is what the pieces actually hit, and the one thing about a
-  prop worth understanding:
-  - *Its own shape* follows the model exactly, hollows and all, and is the
-    best choice for anything that only has to hold. Only a prop that stays
-    put can use it: a collision mesh cannot move.
-  - *A bucket*, *a crate* and *a tube* are **hollow**, built from a few
-    simple pieces, so things sit inside them. Measured by *Radius*,
-    *Height*, *Size across* and *Wall thickness* rather than taken from the
-    model.
+  - *Be moved* to tip or swing it yourself, from where it stands to *Moves to*
+    and *Turns to*, starting at *Starts moving at* and *Taking* that long. It
+    shoves whatever is in its way and nothing pushes it back, so a tip-over
+    lands the same every time. Past 90 degrees a bucket is upside down and
+    empties.
+- *Collides as* is what the other pieces actually hit:
+  - *Its own shape* follows the model. Where the object is knocked about this
+    is the model's convex wrapping; where it stays put it is the model's own
+    triangles exactly, hollows and all.
+  - *A bucket*, *a hollow crate* and *a tube* are **hollow**, built from a few
+    simple pieces, so things sit inside them. Measured by *Radius*, *Height*,
+    *Size across* and *Wall thickness* rather than taken from the model.
   - *A ball* and *a block* are simple solids.
-  - A prop that **moves at all** — moved or knocked about — cannot collide
-    as its own shape. The layer says so on the block, and the fix offers a
-    bucket. So a bucket that tips is a *bucket*, not its own shape.
-- The preview draws the model where the prop stands, and, when it collides
-  as something else, that shape faintly over the top: the difference between
-  what is seen and what is hit is otherwise invisible.
+  - Only one object on its own can stay put, be moved or be hollow: those are
+    an authored thing rather than a heap of them. The coach says so, with the
+    fix.
+- Under More settings, *Made of its own thing* gives it its own friction,
+  bounciness and density, so a steel ball among wooden crates is heavier and
+  bouncier. Off, it is made of what the layer's Bodies row says.
+- The preview draws the model where the object stands, and, for one on its
+  own that collides as something else, that shape faintly over the top: the
+  difference between what is seen and what is hit is otherwise invisible.
 
-The **Rock pile** recipe is the starting point for piles: 220 rocks heaped
-steeper than they can stand, which slump as the effect plays, and a low puff
-of dust as they come down. **Bucket of stones** is the starting point for
-props: a bucket standing full of stones that tips over a second in and spills
-them across the floor.
+The **Rock pile** recipe is the starting point: 220 rocks heaped steeper than
+they can stand, which slump as the effect plays, and a low puff of dust as
+they come down. **Bucket of stones** is a bucket standing full of stones that
+tips over a second in and spills them across the floor. **Crates and a
+dropped ball** is two objects in one world: nine crates that cut into six
+pieces each, and the rock dropped on them that breaks them.
 
 ## Your own pictures and models
 
@@ -282,10 +283,10 @@ pictures, meshes and fields, so the media server needs none of the files.
 Smoke plume, Snowfall, Rain, Rock pile, Bucket of stones, Crates in the
 snow, and a blank page.
 
-A **Break** block either breaks a piece into the **Part** blocks beside it,
-or cuts the piece's own model into cells that fill it. Cutting happens when
-the package is built, since that is when the model is read, and the cells
-become a body kind and a mesh each.
+A **Break** block either breaks the Object above it into the **Part** blocks
+under it, or cuts that object's own model into cells that fill it. Cutting
+happens when the package is built, since that is when the model is read, and
+the cells become a body kind and a mesh each.
 **Add layer** offers ready-made layers: Flames, Embers, Smoke, Sparks,
 Fireball, Debris, Dust, Motes, Rock pile, Bucket of stones and others. These
 are ordinary blocks with tuned values, so everything they do can be seen and

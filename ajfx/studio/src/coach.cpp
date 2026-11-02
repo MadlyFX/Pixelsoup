@@ -69,27 +69,41 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         if (!layer.enabled) {
             continue;
         }
-        // A prop asked to be something it cannot stops the whole layer
+        // An Object asked to be something it cannot stops the whole layer
         // compiling, and the reason reads better here, on the block at fault
         // and with the fix, than passed through in the runtime's own words.
-        bool impossible_prop = false;
+        bool impossible_object = false;
         for (const Block& block : layer.blocks) {
-            if (!block.enabled || block.kind != "prop") {
+            if (!block.enabled || block.kind != "object") {
                 continue;
             }
+            const std::string motion = choice_of(block, "motion");
+            const std::string collides = choice_of(block, "collides");
+            const bool hollow = collides == "bucket" || collides == "crate" || collides == "tube";
+            const bool many = choice_of(block, "arrange") != "one";
             // A collision mesh cannot move at all: it has no volume to take
             // mass from and no inside, so contact against a moving one is
-            // unreliable. The simple shapes are solid pieces, and those move.
-            if (choice_of(block, "shape") == "model" && choice_of(block, "motion") != "fixed") {
+            // unreliable. The generated shapes are solid pieces, and move.
+            if (motion == "driven" && collides == "own") {
                 notes.push_back({layer.uid, block.uid, AdviceLevel::Error,
-                                 "A prop that moves cannot collide as its own shape: only a prop that stays put "
-                                 "can. Collide as a bucket, crate, tube, ball or block instead, or set it to "
-                                 "stay put.",
-                                 "Collide as a bucket", set_value(block.uid, "shape", choice("bucket"))});
-                impossible_prop = true;
+                                 "An object that is moved cannot collide as its own shape: a shape taken from a "
+                                 "model has no inside for the engine to move. Collide as a hollow crate, a "
+                                 "bucket or a tube instead, or let it be knocked about.",
+                                 "Collide as a crate", set_value(block.uid, "collides", choice("crate"))});
+                impossible_object = true;
+            }
+            // Standing still, being driven and being hollow are a prop's,
+            // and a prop is one authored thing rather than a heap of them.
+            if (many && (motion != "loose" || hollow)) {
+                notes.push_back({layer.uid, block.uid, AdviceLevel::Error,
+                                 "Only one object on its own can stand still, be moved or be hollow. Set how "
+                                 "many back to just one, or let it be knocked about and collide as its own "
+                                 "shape, a ball or a block.",
+                                 "Just one", set_value(block.uid, "arrange", choice("one"))});
+                impossible_object = true;
             }
         }
-        if (impossible_prop) {
+        if (impossible_object) {
             continue;
         }
 
@@ -130,66 +144,129 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             }
         }
 
-        // Breaking is two halves: when a piece comes apart, and what it
-        // comes apart into. Either alone does nothing, so say which is
-        // missing on the block that is there.
-        const Block* breaking = first(layer, "break");
-        const Block* part = first(layer, "part");
-        const bool cutting = breaking != nullptr && choice_of(*breaking, "into") == "cut";
-        // A piece that comes apart needs room for what it comes apart into,
-        // or the break is refused when it happens and nothing says why.
-        if (breaking != nullptr) {
-            const std::size_t into =
-                cutting ? static_cast<std::size_t>(number_of(*breaking, "cells")) : count_of(layer, "part");
-            const Block* pile = first(layer, "pile");
-            const LayerReport* room = compiled.layer(layer.uid);
-            const std::size_t pieces = pile != nullptr ? static_cast<std::size_t>(number_of(*pile, "count")) : 0U;
-            if (into > 0U && pieces > 0U && room != nullptr && pieces * into > room->capacity) {
-                notes.push_back({layer.uid, breaking->uid, AdviceLevel::Warning,
-                                 "If every piece came apart there would be " + std::to_string(pieces * into) +
-                                     " of them, and this layer holds " + std::to_string(room->capacity) +
-                                     ". The ones that do not fit stay whole. Break into fewer, or start with "
-                                     "fewer pieces.",
-                                 {},
-                                 {}});
+        // Breaking belongs to the Object above it, so each Object's own
+        // Break and Parts are gathered and spoken about together. A breaking
+        // block with no Object over it is the first thing to say.
+        const Block* breaking = nullptr;
+        const Block* part = nullptr;
+        for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
+            const Block& block = layer.blocks[i];
+            if (!block.enabled || !owned_by_object(block.kind)) {
+                continue;
+            }
+            if (!object_of(layer, i)) {
+                notes.push_back({layer.uid, block.uid, AdviceLevel::Error,
+                                 "Breaking belongs to an object: this block has none above it, so nothing comes "
+                                 "apart. Add an Object above it, and it is that object which breaks.",
+                                 "Add an object", add_block(layer.uid, "object")});
+                break;
             }
         }
-        if (cutting && part != nullptr) {
-            notes.push_back({layer.uid, part->uid, AdviceLevel::Warning,
-                             "Breaking is set to cut the model into pieces, so the parts you place here are not "
-                             "used. Set it back to parts you place, or remove them.",
-                             "Use the parts", set_value(breaking->uid, "into", choice("parts"))});
-        }
-        if (breaking != nullptr && part == nullptr && !cutting) {
-            notes.push_back({layer.uid, breaking->uid, AdviceLevel::Warning,
-                             "Nothing is set to break off yet, so the pieces stay whole. Add a Part for each "
-                             "panel, plank or shard a piece comes apart into.",
-                             "Add a part", add_block(layer.uid, "part")});
-        }
-        if (part != nullptr && breaking == nullptr) {
-            notes.push_back({layer.uid, part->uid, AdviceLevel::Warning,
-                             "Nothing breaks, so this part is never made. Add a Break to say how hard a piece "
-                             "has to be hit to come apart.",
-                             "Add break", add_block(layer.uid, "break")});
-        }
-        // A part is drawn as its own model only where the layer draws models.
-        if (part != nullptr) {
-            const Block* appearance = first(layer, "appearance");
-            if (appearance != nullptr && choice_of(*appearance, "material") != "debris") {
-                notes.push_back({layer.uid, part->uid, AdviceLevel::Tip,
-                                 "The parts hit things as their own shapes, but the layer draws its pieces as "
-                                 "sprites, so they are not drawn as their models. Set Appearance to debris to "
-                                 "see them.",
-                                 "Draw debris", set_value(appearance->uid, "material", choice("debris"))});
+        for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
+            if (layer.blocks[i].kind != "object" || !layer.blocks[i].enabled) {
+                continue;
+            }
+            const Block& object = layer.blocks[i];
+            // What this Object owns: the breaking blocks after it, up to the
+            // next Object.
+            const Block* its_break = nullptr;
+            std::size_t parts = 0U;
+            const Block* its_part = nullptr;
+            for (std::size_t j = i + 1U; j < layer.blocks.size() && layer.blocks[j].kind != "object"; ++j) {
+                const Block& block = layer.blocks[j];
+                if (!block.enabled) {
+                    continue;
+                }
+                if (block.kind == "break" && its_break == nullptr) {
+                    its_break = &block;
+                } else if (block.kind == "part") {
+                    ++parts;
+                    if (its_part == nullptr) {
+                        its_part = &block;
+                    }
+                }
+            }
+            if (its_break != nullptr && breaking == nullptr) {
+                breaking = its_break;
+            }
+            if (its_part != nullptr && part == nullptr) {
+                part = its_part;
+            }
+            const bool cutting = its_break != nullptr && choice_of(*its_break, "into") == "cut";
+            const std::string motion = choice_of(object, "motion");
+            const std::string collides = choice_of(object, "collides");
+            const bool hollow = collides == "bucket" || collides == "crate" || collides == "tube";
+            // Only a piece the world moves can come apart: what stands
+            // still, what the effect drives and what is hollow is a prop.
+            if (its_break != nullptr && (motion != "loose" || hollow)) {
+                notes.push_back({layer.uid, its_break->uid, AdviceLevel::Error,
+                                 "Only an object the world moves can come apart. Let it be knocked about, and "
+                                 "have it collide as its own shape, a ball or a block.",
+                                 "Knocked about", set_value(object.uid, "motion", choice("loose"))});
+                continue;
+            }
+            // A piece that comes apart needs room for what it comes apart
+            // into, or the break is refused when it happens and nothing
+            // says why. The compiler sizes for it, so this is the bound the
+            // layer could not grow to.
+            if (its_break != nullptr) {
+                const std::size_t into =
+                    cutting ? static_cast<std::size_t>(number_of(*its_break, "cells")) : parts;
+                const LayerReport* room = compiled.layer(layer.uid);
+                const std::size_t count = choice_of(object, "arrange") == "one"
+                                              ? 1U
+                                              : static_cast<std::size_t>(number_of(object, "count"));
+                if (into > 0U && room != nullptr && count * into > room->capacity) {
+                    notes.push_back({layer.uid, its_break->uid, AdviceLevel::Warning,
+                                     "If every one of these came apart there would be " +
+                                         std::to_string(count * into) + " pieces, and this layer holds " +
+                                         std::to_string(room->capacity) +
+                                         ". The ones that do not fit stay whole. Break into fewer, or start "
+                                         "with fewer.",
+                                     {},
+                                     {}});
+                }
+            }
+            if (cutting && its_part != nullptr) {
+                notes.push_back({layer.uid, its_part->uid, AdviceLevel::Warning,
+                                 "This object is set to cut its model into pieces, so the parts placed under it "
+                                 "are not used. Set it back to parts you place, or remove them.",
+                                 "Use the parts", set_value(its_break->uid, "into", choice("parts"))});
+            }
+            if (its_break != nullptr && its_part == nullptr && !cutting) {
+                notes.push_back({layer.uid, its_break->uid, AdviceLevel::Warning,
+                                 "Nothing is set to break off yet, so this object stays whole. Add a Part for "
+                                 "each panel, plank or shard it comes apart into.",
+                                 "Add a part", add_block(layer.uid, "part")});
+            }
+            if (its_part != nullptr && its_break == nullptr) {
+                notes.push_back({layer.uid, its_part->uid, AdviceLevel::Warning,
+                                 "Nothing breaks, so this part is never made. Add a Break to say how hard this "
+                                 "object has to be hit to come apart.",
+                                 "Add break", add_block(layer.uid, "break")});
+            }
+            // A part is drawn as its own model only where the layer draws
+            // models at all.
+            if (its_part != nullptr) {
+                const Block* appearance = first(layer, "appearance");
+                if (appearance != nullptr && choice_of(*appearance, "material") != "debris") {
+                    notes.push_back({layer.uid, its_part->uid, AdviceLevel::Tip,
+                                     "The parts hit things as their own shapes, but the layer draws its pieces "
+                                     "as sprites, so they are not drawn as their models. Set Appearance to "
+                                     "debris to see them.",
+                                     "Draw debris", set_value(appearance->uid, "material", choice("debris"))});
+                }
             }
         }
 
-        const bool piled = first(layer, "pile") != nullptr || has_raw(layer, "spawn_pile");
-        const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr || piled ||
-                          has_raw(layer, "spawn_rate") || has_raw(layer, "spawn_burst");
-        // A layer of props alone is a stage piece, not an empty layer: it has
-        // something to show without anything being born in it.
-        const bool propped = first(layer, "prop") != nullptr;
+        const bool objects = first(layer, "object") != nullptr;
+        const bool born = first(layer, "stream") != nullptr || first(layer, "burst") != nullptr || objects ||
+                          has_raw(layer, "spawn_rate") || has_raw(layer, "spawn_burst") ||
+                          has_raw(layer, "spawn_pile");
+        // A layer holding one object that only stands there is a stage
+        // piece, not an empty layer: it has something to show without
+        // anything being born in it.
+        const bool propped = objects;
         if (!born && !propped) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Warning, "Nothing is born in this layer yet.",
                              "Add a stream", add_block(layer.uid, "stream", true)});
@@ -204,8 +281,10 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
                              "Add appearance", add_block(layer.uid, "appearance")});
         }
 
-        // A pile's pieces lie on long after the loop, so their end is not seen.
-        if (born && first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life") && !piled) {
+        // An object's pieces lie on long after the loop, so their end is
+        // not seen.
+        if (born && first(layer, "fade") == nullptr && !has_raw(layer, "color_over_life") && !objects &&
+            !has_raw(layer, "spawn_pile")) {
             notes.push_back({layer.uid, 0U, AdviceLevel::Tip,
                              "Particles vanish suddenly at the end of their life. A fade hides the pop.", "Add fade",
                              add_block(layer.uid, "fade")});
@@ -264,12 +343,12 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
                 notes.push_back({layer.uid, block.uid, AdviceLevel::Warning,
                                  "Pick a model for particles to bounce off. Until then nothing collides.", {}, {}});
             }
-            if (block.kind == "prop" && file_of(block, "model").empty()) {
+            if (block.kind == "object" && choice_of(block, "model") == "file" &&
+                file_of(block, "model_file").empty()) {
                 notes.push_back({layer.uid, block.uid, AdviceLevel::Warning,
-                                 "Pick a model for this prop. Until then it stands in as a plain block and "
-                                 "nothing is drawn.",
-                                 {},
-                                 {}});
+                                 "Pick a model for this object. Until then it is drawn as the layer's own "
+                                 "pieces are.",
+                                 "Draw as a cube", set_value(block.uid, "model", choice("cube"))});
             }
             if (block.kind == "appearance") {
                 const bool debris = choice_of(block, "material") == "debris";

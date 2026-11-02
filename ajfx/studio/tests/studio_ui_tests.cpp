@@ -212,23 +212,32 @@ void a_dropped_block_lands_under_its_own_heading() {
     gui::UiContext ctx{input, list, font};
     Document document = crates_page();
     const std::vector<std::string> before = kinds_of(document.layers[0]);
-    CHECK(before == std::vector<std::string>({"pile", "prop", "break", "gravity", "ground", "appearance", "color",
-                                              "size"}));
+    // The crates, the cut under them, then the ball: breaking belongs to the
+    // Object above it, so it reads between the two.
+    CHECK(before == std::vector<std::string>({"object", "break", "object", "gravity", "ground", "appearance",
+                                              "color", "size"}));
 
-    // Wind is the world's, and the top of the page is the pieces. It lands
+    // Wind is the world's, and the top of the page is the objects. It lands
     // at the top of the world all the same, before the gravity there.
     PageView page;
     drop_from_palette(page, input, ctx, document, "wind", 6.0F);
     CHECK(kinds_of(document.layers[0]) ==
-          std::vector<std::string>({"pile", "prop", "break", "wind", "gravity", "ground", "appearance", "color",
-                                    "size"}));
-
-    // And a second prop let go at the foot of the page joins the props,
-    // after the ball already there, rather than at the end of the list.
-    drop_from_palette(page, input, ctx, document, "prop", 880.0F);
-    CHECK(kinds_of(document.layers[0]) ==
-          std::vector<std::string>({"pile", "prop", "prop", "break", "wind", "gravity", "ground", "appearance",
+          std::vector<std::string>({"object", "break", "object", "wind", "gravity", "ground", "appearance",
                                     "color", "size"}));
+
+    // A third object let go at the foot of the page joins the objects, after
+    // the two already there, rather than at the end of the list.
+    drop_from_palette(page, input, ctx, document, "object", 880.0F);
+    CHECK(kinds_of(document.layers[0]) ==
+          std::vector<std::string>({"object", "break", "object", "object", "wind", "gravity", "ground",
+                                    "appearance", "color", "size"}));
+
+    // And a Break let go at the very top lands under the first object, not
+    // above it: breaking has to belong to something, and the object it is
+    // drawn under is the one that comes apart.
+    drop_from_palette(page, input, ctx, document, "break", 6.0F);
+    const std::vector<std::string> after = kinds_of(document.layers[0]);
+    CHECK(after[0] == "object" && after[1] == "break" && after[2] == "break");
 }
 
 // A particle layer has one scope, so it keeps the flat list it always had:

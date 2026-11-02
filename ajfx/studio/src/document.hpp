@@ -230,6 +230,17 @@ bool set_layer_kind(Document& document, Layer& layer, LayerKind kind);
 // A Module block holding `module`.
 [[nodiscard]] Block make_raw_block(Document& document, RawModule module);
 
+// Whether a block of this kind belongs to the Object above it rather than to
+// the layer: breaking is a thing's own, where births, looks and the world are
+// the layer's.
+[[nodiscard]] bool owned_by_object(std::string_view block_kind) noexcept;
+// The Object block governing the block at `index`: the nearest "object" block
+// before it, or nothing where none stands above it. An Object owns the
+// breaking blocks that follow it until the next Object, which is how a Break
+// says which thing comes apart without naming it -- the same page-order idiom
+// that decides which layer's pieces a particle lands on.
+[[nodiscard]] std::optional<std::size_t> object_of(const Layer& layer, std::size_t index);
+
 // Inserts `block` into `layer` at `index` (clamped). Returns its uid.
 Uid insert_block(Layer& layer, std::size_t index, Block block);
 // Moves a block to `index` in `to` (which may be its own layer). The index is

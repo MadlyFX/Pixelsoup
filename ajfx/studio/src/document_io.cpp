@@ -162,6 +162,77 @@ std::string block_text(const Block& block) {
     return json::write(block_to_json(block));
 }
 
+// A Pile or a Prop block from a page saved at format 2 or earlier, turned
+// into the Object that replaced both. It keeps the block's uid, so the module
+// ids and seeds derived from it are the ones it had and its bodies stay where
+// they were; only the controls are renamed, since Object's merge what Pile
+// and Prop each called their own.
+//   Pile: `shape` (heap or stack) became `arrange`, and a pile was always a
+//     body the world moves, so the rest of Object's defaults are right.
+//   Prop: `shape` became `collides` (its own shape reading as "own"), the
+//     model moved from a file control to the model choice, and the material
+//     it always carried is now an override, so `own_material` goes on.
+// `layer_size` is the low end of the layer's Size block, which is the size a
+// pile's bodies were born at: an Object says its size in metres, so that is
+// what a converted pile asks for and nothing changes size.
+void into_object(Block& block, float layer_size) {
+    const bool pile = block.kind == "pile";
+    const bool prop = block.kind == "prop";
+    if (!pile && !prop) {
+        return;
+    }
+    Block out;
+    out.uid = block.uid;
+    out.kind = "object";
+    out.enabled = block.enabled;
+    out.published = block.published;
+    const auto carry = [&](std::string_view from, std::string_view to) {
+        if (const Value* value = block.find(from)) {
+            out.set(to, *value);
+        }
+    };
+    if (pile) {
+        const Value* shape = block.find("shape");
+        const bool stack = shape != nullptr && shape->text == "stack";
+        out.set("arrange", choice(stack ? "stack" : "heap"));
+        // A pile was drawn and collided as the layer's own pieces, at the
+        // size every body was born at.
+        out.set("model", choice("layer"));
+        out.set("size", number(layer_size));
+        for (const auto& [from, to] : {std::pair{"count", "count"}, std::pair{"slope", "slope"},
+                                       std::pair{"width", "width"}, std::pair{"depth", "depth"},
+                                       std::pair{"release", "release"}, std::pair{"at", "at"},
+                                       std::pair{"spacing", "spacing"}, std::pair{"jitter", "jitter"},
+                                       std::pair{"seed", "seed"}}) {
+            carry(from, to);
+        }
+    } else {
+        const Value* shape = block.find("shape");
+        const std::string collides = shape != nullptr && !shape->text.empty()
+                                         ? (shape->text == "model" ? std::string{"own"} : shape->text)
+                                         : std::string{"own"};
+        out.set("collides", choice(collides));
+        // A prop's model was a file; Object names one through its choice.
+        if (const Value* model = block.find("model"); model != nullptr && !model->text.empty()) {
+            out.set("model", choice("file"));
+            out.set("model_file", *model);
+        } else {
+            out.set("model", choice("layer"));
+        }
+        out.set("own_material", toggle(true));
+        for (const auto& [from, to] :
+             {std::pair{"motion", "motion"}, std::pair{"at", "at"}, std::pair{"turn", "turn"},
+              std::pair{"size", "size"}, std::pair{"wall", "wall"}, std::pair{"radius", "radius"},
+              std::pair{"height", "height"}, std::pair{"extent", "extent"}, std::pair{"move_to", "move_to"},
+              std::pair{"turn_to", "turn_to"}, std::pair{"move_at", "move_at"},
+              std::pair{"move_over", "move_over"}, std::pair{"friction", "friction"},
+              std::pair{"bounce", "bounce"}, std::pair{"density", "density"}, std::pair{"sides", "sides"}}) {
+            carry(from, to);
+        }
+    }
+    block = std::move(out);
+}
+
 std::optional<Block> block_from_json(const json::Value& b, std::string& error) {
     Block block;
     block.uid = static_cast<Uid>(std::max(b.number_or("uid", 0.0), 0.0));
@@ -371,6 +442,24 @@ Loaded load_document(std::string_view text) {
             // Any further Physics block is a duplicate of the world it just
             // became; the layer has one world and holds it once.
             std::erase_if(layer.blocks, [](const Block& b) { return b.kind == world_block_kind; });
+            // Pile and Prop became Object. The layer's Size is read first,
+            // since a converted pile asks for the size its bodies were born
+            // at and an Object says its size in metres.
+            float layer_size = 1.0F;
+            for (const Block& block : layer.blocks) {
+                if (block.kind == "size") {
+                    if (const Value* value = block.find("size")) {
+                        layer_size = std::max(value->x, 1.0e-4F);
+                    } else if (const BlockDef* def = find_block_def("size")) {
+                        if (const ControlDef* control = find_control(*def, "size")) {
+                            layer_size = std::max(control->fallback.x, 1.0e-4F);
+                        }
+                    }
+                }
+            }
+            for (Block& block : layer.blocks) {
+                into_object(block, layer_size);
+            }
             for (Block& block : layer.blocks) {
                 conform_block(block, layer.kind);
             }

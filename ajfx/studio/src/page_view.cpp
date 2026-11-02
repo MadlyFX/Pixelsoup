@@ -27,6 +27,9 @@ constexpr float layer_header = 36.0F;
 // A scope heading over a rigid layer's blocks, and the air after its group.
 constexpr float scope_heading = 24.0F;
 constexpr float scope_gap = 8.0F;
+// How far an Object's own blocks sit in from it, so a page reads as each
+// thing in the layer and what becomes of it.
+constexpr float object_indent = 16.0F;
 // How much of a hidden row's ink is left.
 constexpr float hidden_dim = 0.45F;
 
@@ -559,17 +562,21 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
     const gui::Rect menu{x + w - 26.0F, y + 6.0F, 24.0F, 24.0F};
     const gui::Rect solo{menu.x - 28.0F, menu.y, 24.0F, 24.0F};
     const gui::Rect eye{solo.x - 28.0F, menu.y, 24.0F, 24.0F};
-    // A layer of props alone has no particles to budget: it says what it
-    // holds instead, since "0 of 64 max" would only puzzle.
-    const std::size_t props = std::count_if(layer.blocks.begin(), layer.blocks.end(),
-                                            [](const Block& b) { return b.enabled && b.kind == "prop"; });
+    // A layer holding only objects that stand there has no particles to
+    // budget: it says what it holds instead, since "0 of 64 max" would only
+    // puzzle. An object the world moves is a body and does have a budget.
+    const std::size_t standing = static_cast<std::size_t>(
+        std::count_if(layer.blocks.begin(), layer.blocks.end(), [](const Block& b) {
+            return b.enabled && b.kind == "object" && choice_of(b, "motion") != "loose";
+        }));
     const bool births = std::any_of(layer.blocks.begin(), layer.blocks.end(), [](const Block& b) {
-        return b.enabled && (b.kind == "stream" || b.kind == "burst" || b.kind == "pile");
+        return b.enabled && (b.kind == "stream" || b.kind == "burst" ||
+                             (b.kind == "object" && choice_of(b, "motion") == "loose"));
     });
     std::string budget;
     if (report != nullptr && report->error.empty()) {
-        if (props > 0U && !births) {
-            budget = std::to_string(props) + (props == 1U ? " prop" : " props");
+        if (standing > 0U && !births) {
+            budget = std::to_string(standing) + (standing == 1U ? " object" : " objects");
         } else {
             budget = thousands(report->capacity) + " max";
             if (inputs.analysis != nullptr) {
@@ -623,9 +630,9 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         const gui::Rect budget_rect{eye.x - budget_w - 4.0F, y, budget_w, layer_header};
         ctx.label(budget_rect, budget, gui::fade(theme.text_muted, layer.enabled ? 1.0F : hidden_dim));
         ctx.tooltip(budget_rect,
-                    props > 0U && !births
-                        ? "The objects this layer places. Props are not particles: they stand in the physics "
-                          "world for the whole effect and take no part of a budget."
+                    standing > 0U && !births
+                        ? "The objects this layer stands in its world. One that only stands there is not a "
+                          "particle: it is there for the whole effect and takes no part of a budget."
                         : "Most particles alive at once in the preview loop, of the most this layer can ever "
                           "hold. The budget is worked out from its blocks; nobody sets it by hand.");
     }
@@ -754,9 +761,16 @@ float PageView::draw_layer_blocks(gui::UiContext& ctx, Document& document, Layer
         const bool world_row = scope == RigidScope::World && layer.world.has_value();
         std::vector<std::size_t> members;
         for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
-            if (rigid_scope(layer.blocks[i].kind) == scope) {
-                members.push_back(i);
+            if (rigid_scope(layer.blocks[i].kind) != scope) {
+                continue;
             }
+            // Breaking belongs to the Object above it, and is drawn there.
+            // What is left under this heading is a block with no Object over
+            // it, which the coach asks about.
+            if (scope == RigidScope::Breaking && object_of(layer, i)) {
+                continue;
+            }
+            members.push_back(i);
         }
         if (members.empty() && !world_row) {
             continue;
@@ -767,6 +781,24 @@ float PageView::draw_layer_blocks(gui::UiContext& ctx, Document& document, Layer
         }
         for (const std::size_t index : members) {
             y = draw_block(ctx, document, layer, index, inputs, x, y, w);
+            if (scope != RigidScope::Objects) {
+                continue;
+            }
+            // What this Object owns, indented under it: reading the page is
+            // then reading each thing in the layer and what becomes of it.
+            std::size_t end = index + 1U;
+            for (std::size_t j = index + 1U;
+                 j < layer.blocks.size() && layer.blocks[j].kind != "object"; ++j) {
+                if (!owned_by_object(layer.blocks[j].kind)) {
+                    continue;
+                }
+                y = draw_block(ctx, document, layer, j, inputs, x + object_indent, y, w - object_indent);
+                end = j + 1U;
+            }
+            // A gap at the group's foot, so a Break dragged onto this Object
+            // lands in it rather than at the end of the layer.
+            slots_.push_back(Slot{layer.uid, end, gui::Rect{x + object_indent, y, w - object_indent, 0.0F},
+                                  RigidScope::Breaking, true});
         }
         // The gap at the heading's foot: a block of this scope dropped
         // below everything under it lands after the last of them, which is
