@@ -41,6 +41,7 @@ add_library(ajfx STATIC
     src/builder.cpp
     src/effect.cpp
     src/field.cpp
+    src/fracture.cpp
     src/mesh.cpp
     src/noise.cpp
     src/gpu/kernels.cpp
@@ -178,6 +179,13 @@ if(BUILD_TESTING)
         AJFX_SHADER_INCLUDE_DIR="${AJFX_SHADER_INCLUDE_DIR}")
     add_test(NAME ajfx.random COMMAND ajfx_random_tests)
     set_target_properties(ajfx_random_tests PROPERTIES FOLDER "ajfx/tests")
+
+    # Cell fracture cuts a model at bake time; the suite is pure geometry.
+    add_executable(ajfx_fracture_tests tests/fracture_tests.cpp)
+    target_link_libraries(ajfx_fracture_tests PRIVATE ajfx::ajfx)
+    ajfx_set_options(ajfx_fracture_tests)
+    add_test(NAME ajfx.fracture COMMAND ajfx_fracture_tests)
+    set_target_properties(ajfx_fracture_tests PROPERTIES FOLDER "ajfx/tests")
 
     foreach(suite IN ITEMS effect package simulation)
         add_executable(ajfx_${suite}_tests tests/${suite}_tests.cpp)
