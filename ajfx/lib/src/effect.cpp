@@ -308,6 +308,12 @@ void check_module(const Effect&, const Break& m, FieldChecker& check) {
     }
 }
 
+void check_module(const Effect&, const Glue& m, FieldChecker& check) {
+    check.require(m.range >= 0.0F, "range", "must not be negative");
+    check.require(m.strength > 0.0F, "strength",
+                  "must be positive: a join that takes no force is not a join");
+}
+
 void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
     check.require(m.density > 0.0F, "density", "must be positive");
     check.require(m.friction >= 0.0F && m.friction <= 1.0F, "friction", "must be between 0 and 1");
@@ -494,7 +500,7 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                 } else if constexpr (std::is_same_v<M, BoxCollision>) {
                     unmoving(m, m.center.bound() || m.restitution.bound() || m.friction.bound());
                 } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife> &&
-                                     !std::is_same_v<M, Break>) {
+                                     !std::is_same_v<M, Break> && !std::is_same_v<M, Glue>) {
                     refuse(m, "cannot act on rigid physics particles; the physics engine moves them");
                 }
             },
@@ -641,6 +647,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
     std::size_t rigid_physics = 0U;
     std::size_t spins = 0U;
     std::size_t breaks = 0U;
+    std::size_t glues = 0U;
     std::uint64_t piled = 0U;
     const auto visit_module = [&](const auto& module) {
         if (error) {
@@ -662,6 +669,8 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
             ++rigid_physics;
         } else if constexpr (std::is_same_v<M, Break>) {
             ++breaks;
+        } else if constexpr (std::is_same_v<M, Glue>) {
+            ++glues;
         } else if constexpr (std::is_same_v<M, InitSpin>) {
             ++spins;
         } else if constexpr (std::is_same_v<M, SpawnPile>) {
@@ -717,6 +726,14 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
                 return checker.error();
             }
         }
+    }
+    if (glues > 1U) {
+        return Error{ErrorCode::InvalidEffect, where + " has more than one 'glue' module"};
+    }
+    if (glues > 0U && rigid_physics == 0U) {
+        return Error{ErrorCode::InvalidEffect,
+                     where + " has a 'glue' module but no 'rigid_physics' module: only bodies in a physics "
+                             "world can be held to each other"};
     }
     if (breaks > 0U && rigid_physics == 0U) {
         return Error{ErrorCode::InvalidEffect, where +

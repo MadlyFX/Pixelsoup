@@ -57,6 +57,10 @@ struct EmitterState final {
     // RigidWorld::save), which Simulation::state brings up to date.
     std::vector<std::uint32_t> body;
     std::vector<std::uint32_t> body_kind;
+    // Which bodies are held to each other (Glue), by slot, in the order
+    // they were joined. A join goes when either of its bodies does, or when
+    // a step pulls it apart.
+    std::vector<RigidJoin> joins;
     std::vector<std::uint8_t> solver_state;
     // Rigid physics emitters only: where each of the emitter's props stands,
     // in the order RigidPhysics lists them, so a host can draw them. A prop

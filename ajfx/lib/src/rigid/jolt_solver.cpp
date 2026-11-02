@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
@@ -100,6 +101,9 @@ constexpr float smallest_size = 1.0e-3F;
 constexpr float plane_extent = 1000.0F;
 // How far beyond a removed body's bounds a body counts as touching it.
 constexpr float touch_margin = 0.05F;
+// The arm a join's twist is measured against, so a turn and a pull can be
+// compared as one force: a join holding at a quarter of a unit.
+constexpr float turn_arm = 0.25F;
 // Sides a generated round prop is built from. Three is the fewest that
 // encloses anything; past this the pieces cost more than the roundness.
 constexpr std::uint32_t fewest_segments = 3U;
@@ -495,6 +499,75 @@ public:
         }
     }
 
+    // Jolt fixes the two where they stand, so a join holds the pose the
+    // bodies were put in rather than pulling them to a point.
+    void glue(const RigidJoin& join, float strength) override {
+        // A world is stepped from one thread at a time, so the bodies are
+        // taken without a lock, as everything else here takes them.
+        const JPH::BodyLockInterfaceNoLock& bodies = system_.GetBodyLockInterfaceNoLock();
+        JPH::Body* first = bodies.TryGetBody(JPH::BodyID(join.a));
+        JPH::Body* second = bodies.TryGetBody(JPH::BodyID(join.b));
+        if (first == nullptr || second == nullptr) {
+            return;
+        }
+        // Jolt bakes a joint's rest from the world poses the bodies are in
+        // when it is made, and offers no setting for it. A world rebuilt
+        // from a checkpoint has them somewhere else by then, and baking from
+        // there gives numbers a rounding apart, which is a seek that lands
+        // beside the step it should land on.
+        //
+        // So both bodies are put somewhere the join alone decides -- the
+        // first at the origin, unturned, the second at the rest the join
+        // carries -- the constraint is made there, and both are put back.
+        // What Jolt bakes is then a function of the join and nothing else,
+        // the same on the step it was made and on every rebuild after.
+        JPH::BodyInterface& moving = system_.GetBodyInterfaceNoLock();
+        const JPH::RVec3 a_was_at = first->GetPosition();
+        const JPH::Quat a_was_turned = first->GetRotation();
+        const JPH::RVec3 b_was_at = second->GetPosition();
+        const JPH::Quat b_was_turned = second->GetRotation();
+        moving.SetPositionAndRotation(JPH::BodyID(join.a), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
+                                      JPH::EActivation::DontActivate);
+        moving.SetPositionAndRotation(JPH::BodyID(join.b), JPH::RVec3(join.at.x, join.at.y, join.at.z),
+                                      JPH::Quat(join.turn.x, join.turn.y, join.turn.z, join.turn.w).Normalized(),
+                                      JPH::EActivation::DontActivate);
+        JPH::FixedConstraintSettings settings;
+        settings.mAutoDetectPoint = true;
+        JPH::Constraint* made = settings.Create(*first, *second);
+        moving.SetPositionAndRotation(JPH::BodyID(join.a), a_was_at, a_was_turned, JPH::EActivation::DontActivate);
+        moving.SetPositionAndRotation(JPH::BodyID(join.b), b_was_at, b_was_turned, JPH::EActivation::DontActivate);
+        if (made == nullptr) {
+            return;
+        }
+        made->AddRef();
+        system_.AddConstraint(made);
+        joins_.push_back(Join{join, strength, made});
+        held_.push_back(join);
+    }
+
+    // Jolt moves its last constraint into the gap when one goes, and reads a
+    // checkpoint back by that numbering, so the same move is made here: the
+    // two lists stay in step and `joins` gives the order a rebuild needs.
+    void drop(std::size_t at) {
+        system_.RemoveConstraint(joins_[at].constraint);
+        joins_[at].constraint->Release();
+        joins_[at] = joins_.back();
+        held_[at] = held_.back();
+        joins_.pop_back();
+        held_.pop_back();
+    }
+
+    void unglue(const RigidJoin& join) override {
+        for (std::size_t i = 0U; i < joins_.size(); ++i) {
+            if (joins_[i].join == join) {
+                drop(i);
+                return;
+            }
+        }
+    }
+
+    std::span<const RigidJoin> joins() const override { return held_; }
+
     // A driven prop is told where to be, and Jolt gives it the velocity that
     // takes it there over the step, so it shoves what is in its way instead
     // of passing through it.
@@ -512,6 +585,23 @@ public:
         dropped_ = 0U;
         system_.SetGravity(vec(gravity));
         system_.Update(desc_.step_seconds, 1, &temp_, &jobs_);
+        // What the step had to pull through each join to hold it. Walked in
+        // the order the joins were made, so which of two joins at the same
+        // force goes first is the order they were made in and nothing else.
+        // Walked from the end, so dropping one never moves a join not yet
+        // looked at: what breaks is decided by the force through it and by
+        // nothing about the order it is walked in.
+        for (std::size_t i = joins_.size(); i-- > 0U;) {
+            const JPH::Vec3 pull = joins_[i].fixed()->GetTotalLambdaPosition();
+            const JPH::Vec3 twist = joins_[i].fixed()->GetTotalLambdaRotation();
+            // The twist is scaled by a body's reach to compare with the
+            // pull: a join an arm's length out takes that much less to turn
+            // than to drag.
+            const float force = std::sqrt(pull.Dot(pull)) + std::sqrt(twist.Dot(twist)) / turn_arm;
+            if (force > joins_[i].strength) {
+                drop(i);
+            }
+        }
         std::sort(contacts_.begin(), contacts_.end(), contact_before);
         if (contacts_.size() > desc_.contact_limit) {
             dropped_ = static_cast<std::uint32_t>(contacts_.size() - desc_.contact_limit);
@@ -645,10 +735,31 @@ private:
     JPH::PhysicsSystem system_;
     // One wrapped hull per body kind; empty for a kind that is not one.
     std::vector<JPH::RefConst<JPH::Shape>> hulls_;
+    // One join the world holds: which bodies, what it can take, and Jolt's
+    // constraint. Held in the order they were made.
+    struct Join final {
+        RigidJoin join;
+        float strength{0.0F};
+        JPH::Constraint* constraint{nullptr};
+        [[nodiscard]] JPH::FixedConstraint* fixed() const {
+            return static_cast<JPH::FixedConstraint*>(constraint);
+        }
+    };
+    std::vector<Join> joins_;
+    // The same joins, in the same order, as `joins` reports them.
+    std::vector<RigidJoin> held_;
     // Contact callbacks arrive on the job threads that find the collisions.
     std::mutex collecting_;
     std::vector<RigidContact> contacts_;
     std::uint32_t dropped_{0U};
+
+public:
+    ~JoltWorld() override {
+        for (const Join& join : joins_) {
+            system_.RemoveConstraint(join.constraint);
+            join.constraint->Release();
+        }
+    }
 };
 
 class JoltSolver final : public RigidSolver {

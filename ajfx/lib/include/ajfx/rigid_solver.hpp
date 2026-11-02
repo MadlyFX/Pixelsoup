@@ -185,6 +185,24 @@ struct RigidWorldDesc final {
     std::uint32_t contact_limit{256U};
 };
 
+// Two bodies held to each other, by their slots, with `a` the lower of the
+// two so a pair reads one way only. Which bodies are joined is ajfx's
+// business; a world holds them until the force through one passes what it
+// was given to hold.
+// - **Its rest:** `at` and `turn` are where b sits in a's own frame at the
+//   moment they were joined, and the join holds them that way. An engine
+//   bakes a joint's rest from the poses the bodies are in when it is made,
+//   so a world rebuilt from a checkpoint would otherwise bake a different
+//   one and carry on differently: the rest travels with the join instead.
+struct RigidJoin final {
+    std::uint32_t a{0U};
+    std::uint32_t b{0U};
+    Vec3 at{};
+    Quat turn{};
+
+    friend bool operator==(const RigidJoin&, const RigidJoin&) = default;
+};
+
 // A body as a particle is born, and as the solver reports it after a step.
 struct RigidBodyState final {
     Vec3 position{};
@@ -194,6 +212,13 @@ struct RigidBodyState final {
 
     friend bool operator==(const RigidBodyState&, const RigidBodyState&) = default;
 };
+
+// Where b sits in a's own frame, which is what a join holds them at.
+[[nodiscard]] constexpr RigidJoin rest_of(std::uint32_t a, std::uint32_t b, const RigidBodyState& first,
+                                          const RigidBodyState& second) noexcept {
+    const Quat back{-first.orientation.x, -first.orientation.y, -first.orientation.z, first.orientation.w};
+    return RigidJoin{a, b, rotate(back, second.position - first.position), times(back, second.orientation)};
+}
 
 class RigidWorld {
 public:
@@ -209,6 +234,20 @@ public:
     virtual void wake(std::span<const std::uint32_t> slots) = 0;
     // Removes the body in `slot`.
     virtual void remove(std::uint32_t slot) = 0;
+    // Holds `join`'s two bodies in the pose they are in now, until the
+    // impulse through the join passes `strength`. Joins are held in the
+    // order they are made and never reordered, since what a solver computes
+    // depends on the order it holds them in.
+    virtual void glue(const RigidJoin& join, float strength) = 0;
+    // Drops that join, if it is held. A body leaving the world takes its
+    // joins with it, so the caller ungles them before it removes the body.
+    virtual void unglue(const RigidJoin& join) = 0;
+    // The joins the world holds, in the world's own order, which is the
+    // order they must be made again in to rebuild it. An engine keeps its
+    // joints in an order of its own and renumbers them as they go, and it
+    // reads a checkpoint back by that numbering, so the caller takes this
+    // order rather than keeping one of its own.
+    [[nodiscard]] virtual std::span<const RigidJoin> joins() const = 0;
     // Puts the Driven prop in `index` at `position` and `orientation`. Called
     // before step, which then moves whatever the prop has moved into. Fixed
     // and Loose props are never given a pose.

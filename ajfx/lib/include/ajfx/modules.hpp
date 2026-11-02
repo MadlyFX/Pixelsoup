@@ -789,6 +789,39 @@ struct RigidProp final {
 // and what an editor draws over the picture cannot disagree.
 [[nodiscard]] Quat prop_orientation(Vec3 degrees) noexcept;
 
+// Holds the emitter's bodies to each other where they touch, so a pile of
+// bricks is a wall rather than a heap waiting to happen. A join gives way
+// when enough force goes through it, and the rest hold: hit a wall in the
+// middle and the middle goes while the ends stand.
+// - **What is joined:** every pair of bodies born in the same step whose
+//   surfaces are within `range` of each other, in birth order. Bodies born
+//   later are not joined to what is already there -- a wall is built at
+//   once, and what lands on it afterwards is not part of it.
+// - **What breaks one:** `strength` is the impulse a join carries before it
+//   gives way, in kilogram-units a second. A join between heavy bodies
+//   carries their weight, so a tall wall wants more than a low one.
+// - **With breaking:** a body that comes apart (Break) takes its joins with
+//   it, and the pieces it leaves are joined to nothing. The crack is in the
+//   joins; the rubble is in the pieces.
+// - Rigid physics emitters only, and at most one per emitter.
+struct Glue final {
+    static constexpr std::string_view kind = "glue";
+    ModuleId id{};
+    float range{0.02F};
+    float strength{400.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("range", self.range);
+        visit("strength", self.strength);
+    }
+    friend bool operator==(const Glue&, const Glue&) = default;
+};
+
+// Joins one emitter's world may hold. Every pair of bodies born together is
+// considered, so this is what bounds both the looking and the holding.
+inline constexpr std::size_t max_rigid_joins = 8192U;
+
 // One piece a body comes apart into, placed in the parent's own frame.
 // - **What it is:** a body of kind `body` (RigidPhysics::bodies, 0 being the
 //   emitter's own), at `size` of the parent's size. A piece shaped like a
@@ -945,7 +978,7 @@ struct SizeOverLife final {
 
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
                                   SphereCollision, BoxCollision, SdfCollision, BodyCollision, ColorOverLife,
-                                  SizeOverLife, RigidBody, RigidPhysics, Break>;
+                                  SizeOverLife, RigidBody, RigidPhysics, Break, Glue>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -959,7 +992,8 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
 [[nodiscard]] constexpr bool is_force(const UpdateModule& module) noexcept {
     return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
-           !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module);
+           !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module) &&
+           !std::holds_alternative<Glue>(module);
 }
 
 // ---------------------------------------------------------------- render

@@ -644,6 +644,9 @@ void apply(const RigidPhysics&, Step&) {}
 // A body comes apart after the world has stepped (see break_bodies).
 void apply(const Break&, Step&) {}
 
+// Joins are made as bodies are born and broken by the world (see glue_bodies).
+void apply(const Glue&, Step&) {}
+
 // Where a prop stands at `seconds`: a driven prop moves from its pose to the
 // one it is given, over its window; every other prop stands where it was put.
 void prop_pose_at(const RigidProp& prop, float seconds, Vec3& position, Quat& orientation) {
@@ -662,6 +665,13 @@ void prop_pose_at(const RigidProp& prop, float seconds, Vec3& position, Quat& or
     const float e = t * t * (3.0F - 2.0F * t);
     position = prop.position + (prop.to_position - prop.position) * e;
     orientation = prop_orientation(prop.turn + (prop.to_turn - prop.turn) * e);
+}
+
+// The joins the world holds, in its order, which is the order they must be
+// made again in to rebuild it.
+void take_joins(EmitterState& s, const RigidWorld& world) {
+    const std::span<const RigidJoin> held = world.joins();
+    s.joins.assign(held.begin(), held.end());
 }
 
 // A rigid physics emitter's motion for one step, between retiring the dead
@@ -700,6 +710,9 @@ void move_rigid(Step& step, const Emitter& emitter, const RigidPhysics& physics,
     for (std::size_t i = 0U; i < physics.props.size(); ++i) {
         s.props[i] = world.prop(i);
     }
+    // What the step pulled apart is no longer held, and what is left is in
+    // the order the world now keeps it.
+    take_joins(s, world);
     for (const UpdateModule& module : emitter.update) {
         if (const auto* color = std::get_if<ColorOverLife>(&module)) {
             apply(*color, step);
@@ -726,6 +739,58 @@ void add_bodies(EmitterState& s, std::size_t first, std::uint32_t capacity, Rigi
         world.add(next, s.body_kind[i], s.size[i],
                   RigidBodyState{s.position[i], s.orientation[i], s.velocity[i], s.angular_velocity[i]}, asleep);
     }
+}
+
+const Glue* glue_module(const Emitter& emitter) {
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* glue = std::get_if<Glue>(&module)) {
+            return glue;
+        }
+    }
+    return nullptr;
+}
+
+// Joins between the bodies born in [first, alive) whose surfaces are within
+// `range` of each other, in birth order, lowest slot first in each pair.
+// Only the newborns are considered: a wall is built at once, and what lands
+// on it afterwards is not part of it.
+void glue_bodies(EmitterState& s, std::size_t first, const Glue& glue, RigidWorld& world) {
+    for (std::size_t i = first; i < s.alive(); ++i) {
+        for (std::size_t j = i + 1U; j < s.alive(); ++j) {
+            if (s.joins.size() >= max_rigid_joins) {
+                return;
+            }
+            const Vec3 d = s.position[j] - s.position[i];
+            // Their surfaces, taking each as the ball its size describes:
+            // close enough to touch, plus the range the join reaches.
+            const float gap = std::sqrt(dot(d, d)) - 0.5F * (s.size[i] + s.size[j]);
+            if (gap > glue.range) {
+                continue;
+            }
+            const bool first_is_a = s.body[i] < s.body[j];
+            const std::size_t lower = first_is_a ? i : j;
+            const std::size_t upper = first_is_a ? j : i;
+            const RigidJoin join = rest_of(
+                s.body[lower], s.body[upper],
+                RigidBodyState{s.position[lower], s.orientation[lower], s.velocity[lower],
+                               s.angular_velocity[lower]},
+                RigidBodyState{s.position[upper], s.orientation[upper], s.velocity[upper],
+                               s.angular_velocity[upper]});
+            world.glue(join, glue.strength);
+            take_joins(s, world);
+        }
+    }
+}
+
+// Drops every join the slot is in: a body about to leave takes its joins
+// with it.
+void unglue_body(EmitterState& s, std::uint32_t slot, RigidWorld& world) {
+    for (const RigidJoin& join : std::vector<RigidJoin>{s.joins}) {
+        if (join.a == slot || join.b == slot) {
+            world.unglue(join);
+        }
+    }
+    take_joins(s, world);
 }
 
 // The step a pile is let go at: the first that starts at or after its
@@ -937,9 +1002,11 @@ void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
     if (broken.empty()) {
         return;
     }
-    // The broken leave their world oldest first, as the dead do.
+    // The broken leave their world oldest first, as the dead do, and the
+    // joins that held them go with them: the crack is where they were.
     for (std::size_t i = 0U; i < s.alive(); ++i) {
         if (gone[i]) {
+            unglue_body(s, s.body[i], world);
             world.remove(s.body[i]);
         }
     }
@@ -1339,6 +1406,9 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
         }
         place_pile(*pile, step, reach);
         add_bodies(s, step.first, emitter.capacity, *world, release_tick(*pile, effect_.simulation_rate) > 0U);
+        if (const Glue* glue = glue_module(emitter)) {
+            glue_bodies(s, step.first, *glue, *world);
+        }
         // Step 0 shows the poses the engine holds (it keeps its own
         // normalized turn), so a held body never moves by a bit.
         for (std::size_t i = step.first; i < step.last; ++i) {
@@ -1375,10 +1445,19 @@ void Simulation::rebuild_worlds() {
         }
         rigid.world = std::move(world).value();
         const EmitterState& s = state_.emitters[i];
+        const Glue* glue = glue_module(effect_.emitters[i]);
         for (std::size_t p = 0U; p < s.alive() && p < s.body.size(); ++p) {
             rigid.world->add(s.body[p], p < s.body_kind.size() ? s.body_kind[p] : 0U, s.size[p],
                              RigidBodyState{s.position[p], s.orientation[p], s.velocity[p], s.angular_velocity[p]},
                              held(i, s.spawn_index[p]));
+        }
+        // The joins the state holds, made again in the order they were, so
+        // a restored world holds them as the saved one did. The solver
+        // state that follows was written against exactly these.
+        if (glue != nullptr) {
+            for (const RigidJoin& join : s.joins) {
+                rigid.world->glue(join, glue->strength);
+            }
         }
     }
 }
@@ -1497,6 +1576,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     if (world != nullptr) {
         for (std::size_t i = 0U; i < s.alive(); ++i) {
             if (!(s.age[i] < s.lifetime[i])) {
+                unglue_body(s, s.body[i], *world);
                 world->remove(s.body[i]);
             }
         }
@@ -1617,6 +1697,9 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     }
     if (world != nullptr) {
         add_bodies(s, step.first, emitter.capacity, *world);
+        if (const Glue* glue = glue_module(emitter)) {
+            glue_bodies(s, step.first, *glue, *world);
+        }
     }
 }
 

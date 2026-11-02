@@ -1538,6 +1538,195 @@ void impossible_body_colliders_are_refused() {
     AJFX_CHECK(refused(crowded.build(), "may be collided with"));
 }
 
+// ---------------------------------------------------------------- glue
+
+// A wall of small bricks held to each other, with a heavy ball dropped on
+// its middle. Bricks 0.2 across reach 0.35 corner to corner, so a spacing of
+// 0.6 sets them 0.21 apart, just touching: a footprint 3 long and 0.4 deep
+// holds fourteen in a row, one deep, and 42 of them stand three courses
+// high. The ball lands on the middle of the top course.
+Effect glued_wall(bool glued) {
+    EffectBuilder builder{"wall"};
+    RigidProp ball{};
+    ball.shape = PropShape::Sphere;
+    ball.motion = PropMotion::Loose;
+    ball.position = Vec3{0.0F, 3.0F, 0.0F};
+    ball.radius = 0.3F;
+    ball.size = 1.0F;
+    ball.density = 4000.0F;
+    ball.friction = 0.4F;
+    ball.restitution = 0.3F;
+
+    EmitterBuilder& bricks = builder.emitter("bricks");
+    bricks.capacity(64U)
+        .spawn(SpawnPile{.count = 42U,
+                         .shape = PileShape::Box,
+                         .width = 3.0F,
+                         .depth = 0.4F,
+                         .spacing = 0.6F,
+                         .jitter = 0.0F,
+                         .release = 0.0F})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 0.2F, .max = 0.2F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.8F, .restitution = 0.0F, .props = {ball}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    if (glued) {
+        bricks.update(Glue{.range = 0.02F, .strength = 10.0F});
+    }
+    Result<Effect> built = builder.build();
+    if (!built) {
+        std::cout << "  " << built.error().message << "\n";
+    }
+    AJFX_CHECK(built.ok());
+    return std::move(built).value();
+}
+
+void a_glued_wall_breaks_where_it_is_hit() {
+    Simulation simulation = make(glued_wall(true));
+    const EmitterState& s = simulation.emitter(0U);
+    AJFX_CHECK(s.alive() == 42U);
+    // Every brick is joined to the ones it touches, and the wall stands.
+    AJFX_CHECK(!s.joins.empty());
+    const std::size_t joined = s.joins.size();
+    std::vector<Vec3> stood = s.position;
+    simulation.advance_to(18U);
+    float settled = 0.0F;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Vec3 d = s.position[i] - stood[i];
+        settled = std::max(settled, std::sqrt(dot(d, d)));
+    }
+    std::cout << "  the standing wall settled by " << settled << '\n';
+    AJFX_CHECK(settled < 0.05F);
+
+    // The ball lands on the middle. What it hits goes; the ends stand.
+    simulation.advance_to(240U);
+    std::size_t middle_moved = 0U;
+    std::size_t middle = 0U;
+    std::size_t ends_still = 0U;
+    std::size_t ends = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Vec3 d = s.position[i] - stood[i];
+        const float moved = std::sqrt(dot(d, d));
+        if (std::fabs(stood[i].x) < 0.4F) {
+            ++middle;
+            middle_moved += moved > 0.1F ? 1U : 0U;
+        } else if (std::fabs(stood[i].x) > 1.0F) {
+            ++ends;
+            ends_still += moved < 0.05F ? 1U : 0U;
+        }
+    }
+    std::cout << "  " << joined << " joins held " << s.alive() << " bricks; " << middle_moved << " of " << middle
+              << " in the middle went, " << ends_still << " of " << ends << " at the ends stand\n";
+    std::cout << "  " << s.joins.size() << " joins left\n";
+    // What the ball reached went, and what it did not reach stands: the
+    // bricks under the blow are counted too, and those are pressed down
+    // rather than thrown, so a quarter of the middle moving is the wall
+    // opening where it was hit.
+    AJFX_CHECK(middle > 0U && ends > 0U);
+    AJFX_CHECK(middle_moved >= middle / 4U && middle_moved > 0U);
+    AJFX_CHECK(ends_still == ends);
+    // Joins gave way where it was hit, and not everywhere.
+    AJFX_CHECK(s.joins.size() < joined && !s.joins.empty());
+
+    // Unglued, the same blow takes the whole wall down.
+    Simulation loose = make(glued_wall(false));
+    const EmitterState& l = loose.emitter(0U);
+    const std::vector<Vec3> loose_stood = l.position;
+    loose.advance_to(240U);
+    std::size_t loose_ends_still = 0U;
+    std::size_t loose_ends = 0U;
+    for (std::size_t i = 0U; i < l.alive(); ++i) {
+        if (std::fabs(loose_stood[i].x) > 1.0F) {
+            ++loose_ends;
+            const Vec3 d = l.position[i] - loose_stood[i];
+            loose_ends_still += std::sqrt(dot(d, d)) < 0.05F ? 1U : 0U;
+        }
+    }
+    std::cout << "  unglued, " << loose_ends_still << " of " << loose_ends << " at the ends stand\n";
+    AJFX_CHECK(l.joins.empty());
+    AJFX_CHECK(loose_ends_still < ends_still);
+}
+
+void glued_walls_rerun_and_seek_exactly() {
+    const Effect effect = glued_wall(true);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t tick : {1U, 60U, 150U, 300U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    // A seek over the blow puts the joins back as they were, so the wall
+    // carries on breaking the same way.
+    CheckpointRing ring{30U, 8U};
+    for (const std::uint64_t target : {120U, 45U, 300U, 61U, 240U}) {
+        Simulation seeker = make(effect);
+        ring.seek(seeker, target);
+        Simulation straight = make(effect);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.tick() == target);
+        if (!(seeker.state() == straight.state())) {
+            const EmitterState& sought = seeker.state().emitters[0];
+            const EmitterState& stepped = straight.state().emitters[0];
+            std::cout << "  step " << target << " differs:";
+            if (sought.alive() != stepped.alive()) {
+                std::cout << " alive " << sought.alive() << " vs " << stepped.alive();
+            }
+            if (sought.joins != stepped.joins) {
+                std::cout << " joins " << sought.joins.size() << " vs " << stepped.joins.size();
+                const std::size_t both = std::min(sought.joins.size(), stepped.joins.size());
+                for (std::size_t i = 0U; i < both; ++i) {
+                    if (!(sought.joins[i] == stepped.joins[i])) {
+                        std::cout << " first at " << i;
+                        break;
+                    }
+                }
+            }
+            if (sought.position != stepped.position) {
+                float worst = 0.0F;
+                for (std::size_t i = 0U; i < std::min(sought.alive(), stepped.alive()); ++i) {
+                    const Vec3 d = sought.position[i] - stepped.position[i];
+                    worst = std::max(worst, std::sqrt(dot(d, d)));
+                }
+                std::cout << " position by " << worst;
+            }
+            if (sought.solver_state != stepped.solver_state) {
+                std::cout << " solver state " << sought.solver_state.size() << " vs " << stepped.solver_state.size()
+                          << " bytes";
+            }
+            std::cout << '\n';
+        }
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+}
+
+void impossible_glue_is_refused() {
+    const auto refused = [](const Result<Effect>& built, const std::string& fragment) {
+        if (built.ok() || built.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (built.ok() ? std::string{"accepted"} : built.error().message) << '\n';
+            return false;
+        }
+        return true;
+    };
+    EffectBuilder alone{"x"};
+    alone.emitter("e").init(Lifetime{}).update(Glue{});
+    AJFX_CHECK(refused(alone.build(), "no 'rigid_physics' module"));
+
+    EffectBuilder weak{"x"};
+    weak.emitter("e").init(Lifetime{}).update(RigidPhysics{}).update(Glue{.strength = 0.0F});
+    AJFX_CHECK(refused(weak.build(), "strength"));
+
+    EffectBuilder twice{"x"};
+    twice.emitter("e").init(Lifetime{}).update(RigidPhysics{}).update(Glue{}).update(Glue{});
+    AJFX_CHECK(refused(twice.build(), "more than one 'glue' module"));
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -1573,6 +1762,9 @@ int main() {
         {"snow_lands_on_the_bodies_of_another_emitter", snow_lands_on_the_bodies_of_another_emitter},
         {"bodies_as_colliders_rerun_and_seek_exactly", bodies_as_colliders_rerun_and_seek_exactly},
         {"impossible_body_colliders_are_refused", impossible_body_colliders_are_refused},
+        {"a_glued_wall_breaks_where_it_is_hit", a_glued_wall_breaks_where_it_is_hit},
+        {"glued_walls_rerun_and_seek_exactly", glued_walls_rerun_and_seek_exactly},
+        {"impossible_glue_is_refused", impossible_glue_is_refused},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

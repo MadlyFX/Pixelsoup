@@ -314,6 +314,9 @@ inline void pack(const RigidPhysics&, const PackContext&, Packer&) {}
 // nothing for a kernel to read.
 inline void pack(const Break&, const PackContext&, Packer&) {}
 
+// So does holding bodies to each other.
+inline void pack(const Glue&, const PackContext&, Packer&) {}
+
 // One module: its id, then its data.
 template <class Module>
 void pack_module(const Module& module, const PackContext& context, Packer& p) {
