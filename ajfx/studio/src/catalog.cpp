@@ -369,10 +369,14 @@ std::vector<BlockDef> make_catalog() {
         .category = Category::Look,
         .controls =
             {choice_control("material", "Material", "glow",
-                            {{"glow", "Glow"}, {"smoke", "Smoke"}, {"solid", "Solid"}, {"debris", "Debris"},
-                             {"trail", "Trail"}},
-                            "Glow adds light (fire, sparks, magic). Smoke and Solid cover what is behind. Debris "
-                            "draws solid chunks. Trail draws one ribbon through the layer's particles."),
+                            {{"glow", "Glow"},
+                             {"smoke", "Smoke", in_particles},
+                             {"solid", "Solid", in_particles},
+                             {"model", "Model"},
+                             {"trail", "Trail", in_particles}},
+                            "Model draws each piece as a 3D model, which is what a solid thing is. Glow adds "
+                            "light (fire, sparks, magic). Smoke and Solid are flat pictures that cover what is "
+                            "behind, and Trail draws one ribbon through the layer's particles."),
              when(choice_control("texture", "Texture", "dot",
                                  {{"dot", "Soft dot"},
                                   {"glow", "Hot glow"},
@@ -385,7 +389,7 @@ std::vector<BlockDef> make_catalog() {
                                   {"file", "From a file"}},
                                  "The picture each particle carries. Flame and Smoke puff animate over its life. "
                                  "From a file uses a picture of your own."),
-                  "material", {"debris"}, true),
+                  "material", {"model"}, true),
              when(file_control("texture_file", "Picture", FileKind::Image,
                                "A PNG, JPEG, TGA or BMP. Its alpha shapes each particle; the export carries the "
                                "picture, so the media server needs no copy of the file."),
@@ -398,11 +402,11 @@ std::vector<BlockDef> make_catalog() {
              when(number_control("rows", "Frames down", 1.0F, 1.0F, 16.0F, "", 0,
                                  "For a flipbook: how many rows of frames the picture holds.", 1.0F, 64.0F),
                   "texture", {"file"}),
-             when(choice_control("mesh", "Chunk", "chip",
+             when(choice_control("mesh", "Model", "chip",
                                  {{"chip", "Chip"}, {"shard", "Shard"}, {"rock", "Rock"}, {"cube", "Cube"},
                                   {"file", "From a file"}},
                                  "The solid shape each piece of debris has. From a file uses a model of your own."),
-                  "material", {"debris"}),
+                  "material", {"model"}),
              when(file_control("mesh_file", "Model", FileKind::Model,
                                "An OBJ, glTF or GLB. It is centred and scaled to fit a 1 m box, so Size sets how "
                                "big each piece is."),
@@ -410,17 +414,17 @@ std::vector<BlockDef> make_catalog() {
              when(choice_control("facing", "Facing", "camera",
                                  {{"camera", "Face camera"}, {"motion", "Stretch along motion"}},
                                  "Stretching along motion turns sparks and rain into streaks."),
-                  "material", {"debris", "trail"}, true),
+                  "material", {"model", "trail"}, true),
              when(number_control("stretch", "Stretch", 0.04F, 0.0F, 0.3F, "s", 3,
                                  "How long a streak is: the distance travelled in this many seconds."),
                   "facing", {"motion"}),
              particles_only(when(toggle_control("spin", "Random spin", false,
                                                 "Turns each particle's picture to a random angle."),
-                                 "material", {"debris", "trail"}, true)),
+                                 "material", {"model", "trail"}, true)),
              detail(when(number_control("soft", "Soft edges", 0.15F, 0.0F, 1.0F, "m", 2,
                                         "Fades particles out as they meet the floor or objects, instead of a hard "
                                         "line."),
-                         "material", {"debris"}, true)),
+                         "material", {"model"}, true)),
              detail(when(toggle_control("sort", "Depth sort", true,
                                         "Draws smoke and solid particles back to front. Glow never needs it."),
                          "material", {"smoke", "solid"})),
@@ -532,27 +536,29 @@ std::vector<BlockDef> make_catalog() {
     });
     blocks.push_back(BlockDef{
         .kind = "pieces",
-        .title = "Lands on pieces",
-        .description = "Particles land on the solid pieces of the physics layer above, not through them.",
+        .title = "Hits solid objects",
+        .description = "Particles meet everything solid in the effect instead of passing through it.",
         .category = Category::Contact,
         .controls =
             {choice_control("response", "On contact", "stick",
                             {{"stick", "Stick"}, {"slide", "Slide"}, {"bounce", "Bounce"}, {"vanish", "Vanish"}},
-                            "What a particle does when it reaches a piece. Sticking is what makes snow settle "
-                            "on what it falls on."),
+                            "What a particle does when it reaches something solid. Sticking is what makes "
+                            "snow settle on what it falls on."),
              when(number_control("bounce", "Bounciness", 0.3F, 0.0F, 1.0F, "", 2,
                                  "1 bounces back as fast as it arrived."),
                   "response", {"bounce"}),
              when(number_control("friction", "Friction", 0.4F, 0.0F, 1.0F, "", 2,
                                  "How quickly sliding comes to a stop.", 0.0F, 1.0F),
                   "response", {"bounce", "slide"})},
-        .keywords = "land settle on crates rocks debris pieces bodies physics snow dust rest lie collide",
+        .keywords = "land settle on crates rocks debris pieces bodies rigid physics snow dust rest lie "
+                    "collide objects solid",
         .unique = true,
-        // Which pieces it lands on is the page's order, not a module field.
+        // Which objects it meets is every rigid layer of the page, not a
+        // field an artist fills in.
         .detachable = false,
         .layers = in_particles,
-        .only_in = "A rigid layer's pieces already meet each other, so landing on pieces is for a particle "
-                   "layer above them.",
+        .only_in = "A rigid layer's own pieces already meet each other, so this is for a particle layer "
+                   "beside them.",
     });
     blocks.push_back(BlockDef{
         .kind = "sphere",
@@ -1227,6 +1233,18 @@ void conform_block(Block& block, LayerKind layer) {
     if (def == nullptr) {
         return;
     }
+    // An Appearance in a rigid physics layer draws models unless the artist
+    // asks for Glow. The layer is made of solid things, and an Object's
+    // model is drawn only where the layer draws models at all, which is not
+    // something to have to discover. It is set here rather than left to the
+    // generic fallback below, which would land on the first material on the
+    // list and draw a crate as a glowing dot.
+    if (block.kind == "appearance" && layer == LayerKind::Rigid) {
+        const Value* held = block.find("material");
+        if (held == nullptr || (held->text != "glow" && held->text != "model")) {
+            block.set("material", choice("model"));
+        }
+    }
     for (const ControlDef& control : def->controls) {
         if (!fits(control.layers, layer)) {
             block.clear(control.id);
@@ -1452,7 +1470,7 @@ std::string block_summary(const Block& block) {
     }
     if (kind == "appearance") {
         const std::string material = choice_of(block, "material");
-        if (material == "debris") {
+        if (material == "model") {
             return "Debris, " + (choice_of(block, "mesh") == "file" ? file_label(file_of(block, "mesh_file"))
                                                                    : choice_label(block, "mesh"));
         }

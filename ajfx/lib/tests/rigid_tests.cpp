@@ -1540,6 +1540,66 @@ Effect snow_on_crates(bool collide) {
     return std::move(built).value();
 }
 
+// The same two emitters the other way round: the snow is listed first and
+// the crates it lands on second. Every rigid physics emitter steps before
+// any other, so where they are written settles nothing.
+Effect snow_listed_before_crates() {
+    EffectBuilder builder{"snow"};
+    EmitterBuilder& flakes = builder.emitter("snow");
+    flakes.capacity(1024U)
+        .seed(11U)
+        .spawn(SpawnRate{.rate = 90.0F})
+        .init(Lifetime{.min = 8.0F, .max = 8.0F})
+        .init(ShapeLocation{.shape = Shape::Disc, .center = Vec3{0.0F, 4.0F, 0.0F}, .radius_min = 0.0F,
+                            .radius_max = 1.2F})
+        .init(Velocity{.direction = Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 0.8F, .speed_max = 1.2F})
+        .init(InitSize{.min = 0.05F, .max = 0.05F})
+        .update(Gravity{.acceleration = Vec3{0.0F, -2.0F, 0.0F}})
+        .update(BodyCollision{.emitter = "crates", .restitution = 0.0F, .friction = 1.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    builder.emitter("crates")
+        .capacity(16U)
+        .spawn(SpawnPile{.count = 1U,
+                         .shape = PileShape::Box,
+                         .center = Vec3{0.0F, 0.0F, 0.0F},
+                         .width = 1.0F,
+                         .depth = 1.0F,
+                         .spacing = 1.0F,
+                         .jitter = 0.0F,
+                         .release = 0.0F,
+                         .body = 0U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 1.0F, .max = 1.0F})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.9F, .restitution = 0.0F});
+    Result<Effect> built = builder.build();
+    if (!built) {
+        std::cout << built.error().message << '\n';
+    }
+    AJFX_CHECK(built.ok());
+    return std::move(built).value();
+}
+
+void bodies_are_met_whichever_order_the_emitters_are_in() {
+    // Naming an emitter listed after this one used to be refused outright.
+    Simulation forward = make(snow_on_crates(true));
+    Simulation backward = make(snow_listed_before_crates());
+    forward.advance_to(600U);
+    backward.advance_to(600U);
+    // The snow is emitter 1 one way round and emitter 0 the other.
+    const EmitterState& a = forward.emitter(1U);
+    const EmitterState& b = backward.emitter(0U);
+    AJFX_CHECK(a.alive() == b.alive() && a.alive() > 100U);
+    std::size_t apart = 0U;
+    for (std::size_t i = 0U; i < a.alive() && i < b.alive(); ++i) {
+        if (!(a.position[i] == b.position[i]) || !(a.velocity[i] == b.velocity[i])) {
+            ++apart;
+        }
+    }
+    std::cout << "  " << a.alive() << " flakes, " << apart
+              << " of them anywhere else when the crates are listed after the snow\n";
+    AJFX_CHECK(apart == 0U);
+}
+
 void snow_lands_on_the_bodies_of_another_emitter() {
     // Four crates a unit across, stacked two by two on the floor, so their
     // lids are a unit up. Nothing moves them.
@@ -1626,11 +1686,16 @@ void impossible_body_colliders_are_refused() {
     itself.emitter("crates").init(Lifetime{}).update(RigidPhysics{}).update(BodyCollision{.emitter = "crates"});
     AJFX_CHECK(refused(itself.build(), "names its own emitter"));
 
-    // One that comes after, whose bodies would be last step's.
+    // But not one that is merely listed after: every rigid physics emitter
+    // steps before any other, so its bodies are this step's either way.
     EffectBuilder later{"x"};
     later.emitter("snow").init(Lifetime{}).update(BodyCollision{.emitter = "crates"});
-    later.emitter("crates").init(Lifetime{}).update(RigidPhysics{});
-    AJFX_CHECK(refused(later.build(), "comes after this one"));
+    later.emitter("crates").capacity(8U).init(Lifetime{}).update(RigidPhysics{});
+    const Result<Effect> listed_after = later.build();
+    if (!listed_after) {
+        std::cout << "  unexpectedly refused: " << listed_after.error().message << '\n';
+    }
+    AJFX_CHECK(listed_after.ok());
 
     // And one holding more bodies than every particle may be tested against.
     EffectBuilder crowded{"x"};
@@ -1990,6 +2055,8 @@ int main() {
         {"a_break_with_no_room_is_refused_whole", a_break_with_no_room_is_refused_whole},
         {"impossible_breaks_are_refused", impossible_breaks_are_refused},
         {"snow_lands_on_the_bodies_of_another_emitter", snow_lands_on_the_bodies_of_another_emitter},
+        {"bodies_are_met_whichever_order_the_emitters_are_in",
+         bodies_are_met_whichever_order_the_emitters_are_in},
         {"bodies_as_colliders_rerun_and_seek_exactly", bodies_as_colliders_rerun_and_seek_exactly},
         {"impossible_body_colliders_are_refused", impossible_body_colliders_are_refused},
         {"a_glued_wall_breaks_where_it_is_hit", a_glued_wall_breaks_where_it_is_hit},

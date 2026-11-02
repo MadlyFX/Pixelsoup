@@ -1542,8 +1542,20 @@ void Simulation::step(const ParameterProvider* parameters) {
     if (has_piles_ && state_.tick == 0U && values_ != pile_values_) {
         start(values_);
     }
-    for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
-        step_emitter(i, values_);
+    // Rigid physics emitters step first, all of them, then the rest. A
+    // particle that meets a body has to meet it where this step left it, and
+    // which emitters those are must not depend on the order they happen to
+    // be listed in: so the order is this one, fixed, declared and the same
+    // on every node, rather than "whatever is listed before me". Rigid
+    // emitters cannot meet each other's bodies (check_rigid_physics refuses
+    // a collider there), so the order within the first pass settles nothing
+    // and is simply the effect's own.
+    for (const bool rigid : {true, false}) {
+        for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
+            if ((rigid_physics(effect_.emitters[i]) != nullptr) == rigid) {
+                step_emitter(i, values_);
+            }
+        }
     }
     ++state_.tick;
     solver_state_stale_ = solver_state_stale_ || std::any_of(rigid_.begin(), rigid_.end(), [](const RigidEmitter& r) {

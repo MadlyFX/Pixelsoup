@@ -63,6 +63,16 @@ std::string thousands(std::uint64_t value) {
 
 } // namespace
 
+// The uid of the layer with this name, for a note that already found it.
+Uid layer_named_uid(const Document& document, const std::string& name) {
+    for (const Layer& layer : document.layers) {
+        if (layer.name == name) {
+            return layer.uid;
+        }
+    }
+    return 0U;
+}
+
 std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
     std::vector<Advice> notes;
     for (const Layer& layer : document.layers) {
@@ -114,31 +124,51 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             continue;
         }
 
-        // Landing on pieces lands on the rigid layer above, so there has to
-        // be one, and it has to be small enough to meet every particle.
+        // Hitting solid objects meets every rigid layer of the page,
+        // wherever it sits, so there has to be one; each has to be small
+        // enough to meet every particle, and what they come to together is
+        // a cost worth saying out loud.
         if (const Block* lands = first(layer, "pieces")) {
-            const Layer* above = nullptr;
+            std::size_t solid_layers = 0U;
+            std::uint64_t met = 0U;
+            std::string crowded;
             for (const Layer& other : document.layers) {
-                if (other.uid == layer.uid) {
-                    break;
+                if (!other.enabled || other.kind != LayerKind::Rigid) {
+                    continue;
                 }
-                if (other.enabled && other.kind == LayerKind::Rigid) {
-                    above = &other;
+                ++solid_layers;
+                if (const LayerReport* theirs = compiled.layer(other.uid); theirs != nullptr) {
+                    met += theirs->capacity;
+                    if (theirs->capacity > ajfx::max_body_colliders && crowded.empty()) {
+                        crowded = other.name;
+                    }
                 }
             }
-            if (above == nullptr) {
+            if (solid_layers == 0U) {
                 notes.push_back({layer.uid, lands->uid, AdviceLevel::Warning,
-                                 "There is no physics layer above this one, so there are no pieces to land on "
-                                 "and these particles fall through. Move a rigid layer above it, or start one.",
+                                 "Nothing in this effect is solid, so these particles meet nothing and fall "
+                                 "through. Add a rigid physics layer with something in it.",
                                  {},
                                  {}});
-            } else if (const LayerReport* theirs = compiled.layer(above->uid);
-                       theirs != nullptr && theirs->capacity > ajfx::max_body_colliders) {
+            } else if (!crowded.empty()) {
                 notes.push_back({layer.uid, lands->uid, AdviceLevel::Error,
-                                 "The layer above holds up to " + std::to_string(theirs->capacity) +
-                                     " pieces, and landing on them means meeting every one: at most " +
+                                 "The " + crowded + " layer holds up to " +
+                                     std::to_string(compiled.layer(layer_named_uid(document, crowded))->capacity) +
+                                     " pieces, and meeting them means meeting every one: at most " +
                                      std::to_string(ajfx::max_body_colliders) +
-                                     " can be landed on. Make that layer's pieces fewer.",
+                                     " can be met. Make that layer's pieces fewer.",
+                                 {},
+                                 {}});
+            } else if (met > ajfx::max_body_colliders) {
+                // Not refused: each layer is within what a particle may be
+                // tested against, and the data grows to fit. It is the cost
+                // that is worth knowing, since it is every particle against
+                // every body, every step.
+                notes.push_back({layer.uid, lands->uid, AdviceLevel::Tip,
+                                 "These particles are tested against up to " + std::to_string(met) +
+                                     " solid pieces every step, across " + std::to_string(solid_layers) +
+                                     " layers. That is every particle against every piece, so it is worth "
+                                     "keeping an eye on the GPU time.",
                                  {},
                                  {}});
             }
@@ -249,12 +279,12 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
             // models at all.
             if (its_part != nullptr) {
                 const Block* appearance = first(layer, "appearance");
-                if (appearance != nullptr && choice_of(*appearance, "material") != "debris") {
+                if (appearance != nullptr && choice_of(*appearance, "material") != "model") {
                     notes.push_back({layer.uid, its_part->uid, AdviceLevel::Tip,
                                      "The parts hit things as their own shapes, but the layer draws its pieces "
                                      "as sprites, so they are not drawn as their models. Set Appearance to "
                                      "debris to see them.",
-                                     "Draw debris", set_value(appearance->uid, "material", choice("debris"))});
+                                     "Draw debris", set_value(appearance->uid, "material", choice("model"))});
                 }
             }
         }
@@ -314,14 +344,14 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         }
 
         const Block* tumble = first(layer, "tumble");
-        if (tumble != nullptr && material != "debris") {
+        if (tumble != nullptr && material != "model") {
             notes.push_back({layer.uid, tumble->uid, AdviceLevel::Tip,
                              "Tumbling only shows on solid chunks: set Appearance to Debris.", "Use debris",
-                             appearance != nullptr ? set_value(appearance->uid, "material", choice("debris"))
+                             appearance != nullptr ? set_value(appearance->uid, "material", choice("model"))
                                                    : add_block(layer.uid, "appearance", false,
-                                                               {{"material", choice("debris")}})});
+                                                               {{"material", choice("model")}})});
         }
-        if (appearance != nullptr && material == "debris" && tumble == nullptr) {
+        if (appearance != nullptr && material == "model" && tumble == nullptr) {
             notes.push_back({layer.uid, appearance->uid, AdviceLevel::Tip,
                              "Debris reads as solid when it spins and rolls to rest.", "Add tumble",
                              add_block(layer.uid, "tumble")});
@@ -351,7 +381,7 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
                                  "Draw as a cube", set_value(block.uid, "model", choice("cube"))});
             }
             if (block.kind == "appearance") {
-                const bool debris = choice_of(block, "material") == "debris";
+                const bool debris = choice_of(block, "material") == "model";
                 if (!debris && choice_of(block, "texture") == "file" && file_of(block, "texture_file").empty()) {
                     notes.push_back({layer.uid, block.uid, AdviceLevel::Tip,
                                      "Pick a picture. Until then particles draw as soft dots.", {}, {}});

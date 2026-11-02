@@ -585,9 +585,11 @@ struct SdfCollision final {
 //   to its capacity, which is why that capacity is held to
 //   `max_body_colliders`: every particle is tested against every body, so
 //   the cost is declared up front rather than discovered.
-// - **Order:** the named emitter must come before this one, so the bodies
-//   this step meets are this step's. Validation refuses a later one rather
-//   than letting the answer depend on the order emitters happen to be in.
+// - **Order:** every rigid physics emitter steps before any other
+//   (Simulation::step), so the bodies met are this step's wherever the
+//   named emitter is listed. An emitter may hold one of these per emitter
+//   it meets, so one layer of dust can settle on everything solid in the
+//   effect; the bodies are gathered once a step and shared between them.
 // - The response is the plane's: pushed back out, with restitution, friction
 //   and `kill` as there. Particles are not carried along by a body they rest
 //   on: a body that moves out from under its snow leaves it behind.

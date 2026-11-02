@@ -21,7 +21,9 @@ inline constexpr std::string_view document_extension = ".ajfxstudio";
 //    converted as it loads, each Object keeping the uid of the block it came
 //    from so that module ids and seeds -- and therefore the particles -- stay
 //    where they were.
-inline constexpr int document_version = 3;
+// 4: Appearance's "debris" material became "model", since it is the one
+//    that draws a 3D model and "Solid" beside it read as a near-synonym.
+inline constexpr int document_version = 4;
 
 [[nodiscard]] std::string save_document(const Document& document);
 

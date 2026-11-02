@@ -206,7 +206,7 @@ Layer debris(Document& d) {
                         {"gravity", {}},
                         {"tumble", {{"spin", range(180.0F, 900.0F)}, {"damping", number(1.5F)}, {"contact", number(0.3F)}}},
                         {"ground", {{"bounce", number(0.3F)}, {"friction", number(0.6F)}}},
-                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("chip")}}},
+                        {"appearance", {{"material", choice("model")}, {"mesh", choice("chip")}}},
                         {"color",
                          {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.34F, 0.31F, 0.27F)}}},
                         {"size", {{"size", range(0.06F, 0.16F)}}},
@@ -232,7 +232,7 @@ Layer rock_pile(Document& d) {
                         // A pile starts still: Tumble only turns each rock to lie its own way.
                         {"tumble", {{"spin", range(0.0F, 0.0F)}}},
                         {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
-                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("rock")}}},
+                        {"appearance", {{"material", choice("model")}, {"mesh", choice("rock")}}},
                         {"color",
                          {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.36F, 0.33F, 0.29F)}}},
                         {"size", {{"size", range(0.12F, 0.22F)}}}},
@@ -276,7 +276,7 @@ Layer bucket_spill(Document& d) {
                         {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
                         // Drawn as rocks; they collide as balls, so they roll
                         // out of the bucket rather than catching on a corner.
-                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("rock")}}},
+                        {"appearance", {{"material", choice("model")}, {"mesh", choice("rock")}}},
                         {"color",
                          {{"color", color(0.42F, 0.36F, 0.30F)}, {"mix", toggle(true)},
                           {"second", color(0.58F, 0.50F, 0.42F)}}},
@@ -333,7 +333,7 @@ Layer breaking_crates(Document& d) {
                           {"bounce", number(0.8F)}}},
                         {"gravity", {}},
                         {"ground", {{"bounce", number(0.05F)}, {"friction", number(0.9F)}}},
-                        {"appearance", {{"material", choice("debris")}, {"mesh", choice("cube")}}},
+                        {"appearance", {{"material", choice("model")}, {"mesh", choice("cube")}}},
                         {"color",
                          {{"color", color(0.44F, 0.30F, 0.16F)}, {"mix", toggle(true)},
                           {"second", color(0.56F, 0.40F, 0.23F)}}},

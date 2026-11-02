@@ -257,6 +257,16 @@ std::optional<Block> block_from_json(const json::Value& b, std::string& error) {
             if (control == nullptr) {
                 continue;
             }
+            // The material that draws a 3D model was called "debris" until
+            // it was called "model". It is renamed from the text on the
+            // page, before the value is held to the options the control now
+            // has: through that it would fall back to the first of them,
+            // and a page of debris would open as glowing dots.
+            if (block.kind == "appearance" && control->id == "material" &&
+                value.type == json::Value::Type::String && value.text == "debris") {
+                block.set(control->id, choice("model"));
+                continue;
+            }
             if (std::optional<Value> read = value_from(*control, value)) {
                 block.set(control->id, std::move(*read));
             }

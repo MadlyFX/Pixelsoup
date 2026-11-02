@@ -68,9 +68,11 @@ blend mode suits smoke. Studio moves those decisions into its compiler:
   where they were.
 - **Page scale.** Size on the page scales every distance, size, speed and
   force together. An effect gets bigger and keeps its look.
-- **Materials, not blend modes.** Appearance offers Glow, Smoke, Solid, Debris
-  and Trail. Each sets the blend mode, depth sorting, soft edges and geometry
-  that suit it.
+- **Materials, not blend modes.** Appearance offers Model (a 3D model each),
+  Glow, Smoke, Solid and Trail. Each sets the blend mode, depth sorting, soft
+  edges and geometry that suit it. A rigid physics layer is made of solid
+  things, so it offers Model and Glow alone and starts on Model: an object
+  draws as the model you picked without anyone saying so.
 - **A coach.** Notes appear under the layer or block they concern, each with
   a one-click fix:
   - particles that pop at the end of their life: add a fade;
@@ -259,9 +261,10 @@ pieces each, and the rock dropped on them that breaks them.
 - **Sprites.** Appearance's Texture offers *From a file*: a PNG, JPEG, TGA or
   BMP. *Frames across* and *Frames down* make it a flipbook played over each
   particle's life.
-- **Debris.** With the Debris material, Chunk offers *From a file*: an OBJ,
-  glTF or GLB, centred and fitted to a 1 m box, so Size sets how big each
-  piece is. Its own normals and UVs are kept.
+- **Models.** With the Model material, the layer's Model offers *From a
+  file*: an OBJ, glTF or GLB, centred and fitted to a 1 m box, so Size sets
+  how big each piece is. Its own normals and UVs are kept. An Object carries
+  a model of its own, and this is what the rest of the layer is drawn as.
 - **Mesh collider** (Contact): particles bounce off a model of your own, a
   table, rocks or terrain. Only its shape is used: Studio bakes it into a
   signed distance field, which is what the export carries; the model itself

@@ -918,7 +918,7 @@ void a_break_uses_the_parts_beside_it() {
     document.layers.push_back(std::move(crates));
     Layer& layer = document.layers[0];
     block_of(layer, "object").set("count", number(4.0F));
-    block_of(layer, "appearance").set("material", choice("debris"));
+    block_of(layer, "appearance").set("material", choice("model"));
     block_of(layer, "appearance").set("mesh", choice("cube"));
     const ajfx::Vec3 faces[4] = {{0.0F, 0.5F, 0.0F}, {0.5F, 0.0F, 0.0F}, {-0.5F, 0.0F, 0.0F}, {0.0F, -0.5F, 0.0F}};
     std::size_t at = 0U;
@@ -946,10 +946,11 @@ void a_break_uses_the_parts_beside_it() {
     for (std::size_t i = 0U; i < 4U; ++i) {
         // The Object is kind 1, so its cells are the kinds after it.
         CHECK(breaking->pieces[i].body == static_cast<std::uint32_t>(i + 2U));
-        CHECK(physics->bodies[i].shape == ajfx::RigidShape::Hull);
-        CHECK(!physics->bodies[i].mesh.empty() && physics->bodies[i].draw == physics->bodies[i].mesh);
+        const ajfx::RigidBodyKind& made = physics->bodies[i + 1U];
+        CHECK(made.shape == ajfx::RigidShape::Hull);
+        CHECK(!made.mesh.empty() && made.draw == made.mesh);
         // A part is made of what the layer's pieces are made of.
-        CHECK(near(physics->bodies[i].density, number_of(*layer.world, "density")));
+        CHECK(near(made.density, number_of(*layer.world, "density")));
     }
     CHECK(near(breaking->pieces[0].offset.y, 0.5F));
     CHECK(near(breaking->pieces[1].offset.x, 0.5F));
@@ -1053,9 +1054,10 @@ void snow_lands_on_the_pieces_of_the_layer_above() {
     CHECK(aloft > 5U);
 }
 
-// Landing on pieces needs pieces above: the coach says so rather than the
-// flakes quietly falling through.
-void landing_on_pieces_needs_a_layer_above() {
+// Hitting solid objects meets every rigid layer of the page, wherever it
+// sits, and several particle layers may meet the same one. With nothing
+// solid anywhere the coach says so rather than the flakes falling through.
+void solid_objects_are_met_wherever_they_are() {
     Document document;
     Layer snow = make_layer(document, LayerKind::Particles, "Snow");
     insert_block(snow, 0U, *make_block(document, "stream"));
@@ -1063,25 +1065,56 @@ void landing_on_pieces_needs_a_layer_above() {
     document.layers.push_back(std::move(snow));
     Compiled compiled = compile(document, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
-    // Nothing to land on, so the block compiles to nothing and the layer
-    // still plays.
+    // Nothing solid, so the block compiles to nothing and the layer plays.
     CHECK(find_module<ajfx::BodyCollision>(compiled.effect->emitters[0]) == nullptr);
-    CHECK(said(advise(document, compiled), "no physics layer above this one"));
+    CHECK(said(advise(document, compiled), "Nothing in this effect is solid"));
 
-    // With a rigid layer above it, the block binds to that layer.
-    Document ordered;
-    Layer crates = make_layer(ordered, LayerKind::Rigid, "Crates");
-    insert_block(crates, 0U, *make_block(ordered, "burst"));
-    ordered.layers.push_back(std::move(crates));
-    Layer flakes = make_layer(ordered, LayerKind::Particles, "Snow");
-    insert_block(flakes, 0U, *make_block(ordered, "stream"));
-    insert_block(flakes, 1U, *make_block(ordered, "pieces"));
-    ordered.layers.push_back(std::move(flakes));
-    compiled = compile(ordered, Purpose::Preview);
+    // Dust and sparks both meet the crates, and the crates are below them
+    // both: every rigid emitter steps before any other, so where the layer
+    // sits on the page settles nothing.
+    Document shot;
+    Layer dust = make_layer(shot, LayerKind::Particles, "Dust");
+    insert_block(dust, 0U, *make_block(shot, "stream"));
+    insert_block(dust, 1U, *make_block(shot, "pieces"));
+    shot.layers.push_back(std::move(dust));
+    Layer sparks = make_layer(shot, LayerKind::Particles, "Sparks");
+    insert_block(sparks, 0U, *make_block(shot, "stream"));
+    insert_block(sparks, 1U, *make_block(shot, "pieces"));
+    shot.layers.push_back(std::move(sparks));
+    Layer crates = make_layer(shot, LayerKind::Rigid, "Crates");
+    insert_block(crates, 0U, *make_block(shot, "object"));
+    shot.layers.push_back(std::move(crates));
+
+    compiled = compile(shot, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
-    const auto* lands = find_module<ajfx::BodyCollision>(compiled.effect->emitters[1]);
-    CHECK(lands != nullptr && lands->emitter == compiled.effect->emitters[0].name);
-    CHECK(advise(ordered, compiled).empty() || !said(advise(ordered, compiled), "no physics layer above"));
+    // The emitters are still in page order, which is the order they draw in.
+    CHECK(compiled.effect->emitters.size() == 3U);
+    const std::string solid = compiled.effect->emitters[2].name;
+    CHECK(emitter_of(compiled, layer_named(shot, "Crates")).name == solid);
+    for (const std::size_t at : {0U, 1U}) {
+        const auto* meets = find_module<ajfx::BodyCollision>(compiled.effect->emitters[at]);
+        CHECK(meets != nullptr && meets->emitter == solid);
+    }
+    CHECK(!said(advise(shot, compiled), "Nothing in this effect is solid"));
+    std::cout << "  dust and sparks both meet the crates listed after them\n";
+
+    // A second solid layer, and each of them is met as well: one block, one
+    // module a layer.
+    Layer wall = make_layer(shot, LayerKind::Rigid, "Wall");
+    insert_block(wall, 0U, *make_block(shot, "object"));
+    shot.layers.push_back(std::move(wall));
+    compiled = compile(shot, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    std::vector<std::string> met;
+    for (const ajfx::UpdateModule& module : compiled.effect->emitters[0].update) {
+        if (const auto* meets = std::get_if<ajfx::BodyCollision>(&module)) {
+            met.push_back(meets->emitter);
+        }
+    }
+    CHECK(met.size() == 2U);
+    CHECK(met[0] == emitter_of(compiled, layer_named(shot, "Crates")).name);
+    CHECK(met[1] == emitter_of(compiled, layer_named(shot, "Wall")).name);
+    std::cout << "  and both solid layers once a second one is there\n";
 }
 
 // A Break block set to cut its model names the cut and places nothing: the
@@ -1095,7 +1128,7 @@ void a_break_can_cut_its_own_model_into_pieces() {
     insert_block(crates, 3U, *make_block(document, "break"));
     document.layers.push_back(std::move(crates));
     Layer& layer = document.layers[0];
-    block_of(layer, "appearance").set("material", choice("debris"));
+    block_of(layer, "appearance").set("material", choice("model"));
     block_of(layer, "appearance").set("mesh", choice("cube"));
     block_of(layer, "break").set("into", choice("cut"));
     block_of(layer, "break").set("cells", number(6.0F));
@@ -1198,13 +1231,27 @@ void half_a_break_is_refused_with_the_missing_half() {
     CHECK(compiled.error.empty() && compiled.effect.has_value());
     const auto* breaking = find_module<ajfx::Break>(compiled.effect->emitters[0]);
     CHECK(breaking != nullptr && breaking->pieces.size() == 1U);
-    // A layer that draws sprites cannot draw a part as its own model, so the
-    // part still collides as its shape and the coach offers the fix.
-    const auto* physics = find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0]);
     // The Object is kind 1 and the Part kind 2.
+    const auto* physics = find_module<ajfx::RigidPhysics>(compiled.effect->emitters[0]);
     CHECK(physics != nullptr && physics->bodies.size() == 2U);
-    CHECK(physics->bodies[0].draw.empty() && !physics->bodies[0].mesh.empty());
-    CHECK(said(advise(both, compiled), "Set Appearance to debris"));
+    // A layer of solid things draws them, so the part is drawn as its own
+    // model without anyone saying so.
+    CHECK(!physics->bodies[1].draw.empty() && physics->bodies[1].draw == physics->bodies[1].mesh);
+
+    // Asked for Glow instead, the layer draws sprites: the part still hits
+    // things as its own shape, is not drawn as its model, and the coach
+    // offers the fix.
+    Document glowing = both;
+    for (Block& block : glowing.layers[0].blocks) {
+        if (block.kind == "appearance") {
+            block.set("material", choice("glow"));
+        }
+    }
+    const Compiled sprites = compile(glowing, Purpose::Preview);
+    CHECK(sprites.error.empty() && sprites.effect.has_value());
+    const auto* flat = find_module<ajfx::RigidPhysics>(sprites.effect->emitters[0]);
+    CHECK(flat != nullptr && flat->bodies[1].draw.empty() && !flat->bodies[1].mesh.empty());
+    CHECK(said(advise(glowing, sprites), "Set Appearance to"));
 }
 
 // A prop needs no Physics block of its own, and what it cannot be is said on
@@ -1308,7 +1355,7 @@ void two_objects_break_in_one_world() {
     insert_block(layer, 5U, *make_block(document, "appearance"));
     document.layers.push_back(std::move(layer));
     Layer& yard = document.layers[0];
-    yard.blocks[5].set("material", choice("debris"));
+    yard.blocks[5].set("material", choice("model"));
 
     // A crate: its own model, 0.4 across, cut into four.
     yard.blocks[0].set("model", choice("cube"));
@@ -1431,6 +1478,71 @@ void older_pages_open_their_piles_and_props_as_objects() {
     const Loaded again = load_document(save_document(document));
     CHECK(again.error.empty() && again.document.has_value());
     CHECK(*again.document == document);
+}
+
+// A layer of solid things draws them. Until Object, the model an artist
+// picked was drawn only where the layer also held an Appearance set to the
+// material that happened to mean "a 3D model", and the model was quietly
+// dropped otherwise.
+void an_object_draws_its_model_without_being_asked() {
+    Document document;
+    Layer yard = make_layer(document, LayerKind::Rigid, "Yard");
+    insert_block(yard, 0U, *make_block(document, "object"));
+    document.layers.push_back(std::move(yard));
+    document.layers[0].blocks[0].set("model", choice("rock"));
+
+    // No Appearance block at all.
+    CHECK(std::none_of(document.layers[0].blocks.begin(), document.layers[0].blocks.end(),
+                       [](const Block& b) { return b.kind == "appearance"; }));
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    const ajfx::Emitter& emitter = compiled.effect->emitters[0];
+    CHECK(emitter.renderer.geometry == ajfx::Geometry::Mesh);
+    const auto* physics = find_module<ajfx::RigidPhysics>(emitter);
+    CHECK(physics != nullptr && physics->bodies.size() == 1U);
+    CHECK(physics->bodies[0].draw == "rock");
+    std::cout << "  an object drawn as its model with no Appearance block on the layer\n";
+
+    // And an Appearance added to a rigid layer starts on Model, so it is an
+    // override rather than the thing that switched the models on.
+    std::optional<Block> look = make_block(document, "appearance");
+    CHECK(look.has_value());
+    conform_block(*look, LayerKind::Rigid);
+    CHECK(choice_of(*look, "material") == "model");
+    // Smoke, Solid and Trail are not offered there at all.
+    const BlockDef* def = find_block_def("appearance");
+    CHECK(def != nullptr);
+    const ControlDef* material = find_control(*def, "material");
+    CHECK(material != nullptr);
+    std::vector<std::string> offered;
+    for (const ChoiceDef& option : choices_in(*material, LayerKind::Rigid)) {
+        offered.emplace_back(option.id);
+    }
+    CHECK(offered == std::vector<std::string>({"glow", "model"}));
+    CHECK(choices_in(*material, LayerKind::Particles).size() == 5U);
+}
+
+// A page saved when the material that drew a model was called "debris"
+// opens drawing models, rather than falling back to the first material on
+// the list and turning a crate into a glowing dot.
+void older_pages_open_their_debris_as_models() {
+    const std::string older =
+        R"({"format":"ajfx-studio","version":3,"name":"Old","next_uid":9,"layers":[
+           {"uid":1,"name":"Chips","kind":"particles","life":[2,3],"blocks":[
+             {"uid":2,"kind":"burst"},
+             {"uid":3,"kind":"appearance","values":{"material":"debris","mesh":"rock"}}]}]})";
+    const Loaded loaded = load_document(older);
+    CHECK(loaded.error.empty() && loaded.document.has_value());
+    const Block& look = loaded.document->layers[0].blocks[1];
+    CHECK(look.kind == "appearance" && choice_of(look, "material") == "model");
+    CHECK(choice_of(look, "mesh") == "rock");
+
+    Document document = *loaded.document;
+    const Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(compiled.effect->emitters[0].renderer.geometry == ajfx::Geometry::Mesh);
+    CHECK(compiled.effect->emitters[0].renderer.mesh == "rock");
+    std::cout << "  a page of debris opened drawing its models\n";
 }
 
 void piles_stand_until_the_effect_plays() {
@@ -2039,12 +2151,15 @@ int main() {
         {"a_break_uses_the_parts_beside_it", a_break_uses_the_parts_beside_it},
         {"the_crates_recipe_cuts_its_crates", the_crates_recipe_cuts_its_crates},
         {"two_objects_break_in_one_world", two_objects_break_in_one_world},
+        {"an_object_draws_its_model_without_being_asked",
+         an_object_draws_its_model_without_being_asked},
+        {"older_pages_open_their_debris_as_models", older_pages_open_their_debris_as_models},
         {"older_pages_open_their_piles_and_props_as_objects",
          older_pages_open_their_piles_and_props_as_objects},
         {"half_a_break_is_refused_with_the_missing_half", half_a_break_is_refused_with_the_missing_half},
         {"a_break_can_cut_its_own_model_into_pieces", a_break_can_cut_its_own_model_into_pieces},
         {"snow_lands_on_the_pieces_of_the_layer_above", snow_lands_on_the_pieces_of_the_layer_above},
-        {"landing_on_pieces_needs_a_layer_above", landing_on_pieces_needs_a_layer_above},
+        {"solid_objects_are_met_wherever_they_are", solid_objects_are_met_wherever_they_are},
         {"a_prop_takes_default_physics_and_names_what_it_cannot_be",
          a_prop_takes_default_physics_and_names_what_it_cannot_be},
         {"own_pictures_and_models_go_into_the_package", own_pictures_and_models_go_into_the_package},

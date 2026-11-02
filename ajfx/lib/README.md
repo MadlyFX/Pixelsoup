@@ -292,12 +292,16 @@ the crates rather than falling through them. A body is met as the ball or
 box its size describes, turned as the body is -- a box for a body kind that
 is a box, a ball for one that is a ball or a model's hull -- and the
 response is the plane's, with restitution, friction and `kill`.
-- **Order:** the named emitter must come before this one, so the bodies
-  met are this step's. A later one is refused rather than leaving the
-  answer to the order emitters happen to be in.
-- **How many:** every particle is tested against every live body, so the
+- **Order:** every rigid physics emitter steps before any other, so the
+  bodies met are this step's wherever the named emitter is listed. An
+  emitter may hold one of these per emitter it meets, so one layer of dust
+  settles on everything solid in the effect; the bodies are gathered once a
+  step and shared between them.
+- **How many:** every particle is tested against every live body, so each
   named emitter's capacity is held to `max_body_colliders`. The cost is
-  declared up front rather than discovered.
+  declared up front rather than discovered. Meeting several emitters
+  multiplies it, and nothing caps the total: a host that means to meet a
+  great many bodies should say so in its own budget.
 - **On the GPU:** the bodies travel in the module data the kernels already
   read each step, so a host binds nothing new. The kernel and the
   reference do the same arithmetic in the same order; snow on a crate

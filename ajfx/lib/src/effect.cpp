@@ -284,12 +284,10 @@ void check_body_collision(const Effect& effect, std::size_t index, const BodyCol
                   "names emitter " + quoted(m.emitter) +
                       ", which has no 'rigid_physics' module, so it holds no bodies to hit");
     check.require(*at != index, "emitter", "names its own emitter; particles meet the bodies of another");
-    if (*at > index) {
-        check.require(false, "emitter",
-                      "names emitter " + quoted(m.emitter) +
-                          ", which comes after this one; the bodies met must already have moved this step, so "
-                          "move that emitter first");
-    }
+    // Where the named emitter is listed no longer matters: every rigid
+    // physics emitter steps before any other (Simulation::step), so the
+    // bodies met have already moved this step whichever way round they are
+    // written.
     check.require(other.capacity <= max_body_colliders, "emitter",
                   "names emitter " + quoted(m.emitter) + ", which holds up to " + std::to_string(other.capacity) +
                       " bodies; every particle meets every body, so at most " +

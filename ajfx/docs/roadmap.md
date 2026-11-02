@@ -428,6 +428,39 @@ feedback forces could evaluate any frame directly.
        prop that could never break.
        - **Not yet:** an Object cannot publish its size or pose for a host to
          animate, and a Part still cannot break again from Studio.
+     - **Particles meet everything solid, done (2026-11-01).** Every rigid
+       physics emitter now steps before any other (`Simulation::step`), so
+       a `BodyCollision` may name any of them wherever it is listed and the
+       refusal of a later one is gone. The GPU runtime already worked this
+       way -- it runs the whole CPU rigid part, then gathers bodies from
+       every rigid emitter -- so this is the reference catching up, and the
+       two agree in orderings that were previously refused. Measured: the
+       same two emitters the other way round give 720 flakes in exactly the
+       same places, none of them anywhere else.
+       Studio's block is a switch again: **Hits solid objects** compiles to
+       one `BodyCollision` a rigid layer, so dust and sparks both settle on
+       the crates and the crates may be written below them. Nothing names a
+       layer, and nothing depends on the order they are in.
+       - **The cost is the thing to watch.** Each named emitter is still
+         held to `max_body_colliders`, but meeting several multiplies it and
+         nothing caps the total: it is every particle against every body,
+         brute force, no broadphase. The coach says what a layer comes to
+         across all of them rather than refusing, since the module data
+         grows to fit and the limit is a frame's time, not a budget that
+         overruns. Under caching this is bake time for a cached layer.
+     - **Appearance says what it does, done (2026-11-01).** The material
+       that draws a 3D model was called **Debris**, beside a **Solid** that
+       draws an opaque sprite: the two read as near-synonyms and the wrong
+       one of them was the one that drew a model. It is **Model** now, in
+       both layer kinds, and a page saved before is converted as it loads
+       (format 4) rather than falling back to the first material and
+       opening as glowing dots.
+       A rigid layer offers Model and Glow alone -- Smoke, Solid and Trail
+       are for sprites -- and starts on Model. And a rigid layer holding
+       Objects draws models whether or not it has an Appearance block,
+       which closes a trap: a `RigidBodyKind::draw` only takes effect where
+       the renderer draws meshes, so until this an artist could pick a model
+       for an Object and have the compiler quietly discard it.
      - **Not yet after it:** snow settling on the pieces, which is
        accumulation, in phase 5 above.
    - **What breaking is, and what it is not (2026-11-01).** Round 5 is
