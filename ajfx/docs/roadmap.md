@@ -485,6 +485,28 @@ feedback forces could evaluate any frame directly.
      particle paths, the artist's own textures, debris models and mesh
      colliders, published parameters, Physics and Pile blocks, and taking up
      where Studio was left.
+   - **A rigid layer says what each block acts on, done (2026-11-01).** Such
+     a layer holds blocks for four things at once -- its own pieces, what
+     they break into, the props beside them and the world they share -- and
+     a flat list said nothing about which, so Bodies set the pieces'
+     material while a Prop three rows down carried its own and Break acted
+     on neither. Its blocks now read under **The pieces**, **When they
+     break**, **Props** and **The world**, with the layer's own Bodies row
+     under the last of them. The grouping is the catalog's (`RigidScope`,
+     `rigid_scope`), so one answer serves the page and anything that asks
+     later. `Layer::blocks` stays one list in the order it was authored and
+     nothing about the page format or the compiler moves: order is for
+     reading, so drawing it grouped changes nothing else. A block's kind
+     decides its heading, so a drag is offered only the gaps under its own
+     and the drop line cannot promise a place the block will not stay --
+     which `ajfx.studio_ui` covers by letting a palette block go at the
+     wrong end of the page and reading where it landed. A particle layer
+     has one scope and keeps its flat list.
+     - **Not yet:** this says what a block acts on without changing what an
+       artist has to build. Placing one object still means a Pile of one,
+       a second object that breaks is still impossible (a prop has no body
+       kind for Break to name), and the model of the thing that fractures
+       still lives in Appearance.
    - **What it needed from the renderer:** `RendererLimits::particles`, so
      Studio can raise the particle step budget and an edited effect catches
      up in one frame; a raised `slice_apron_limit` for bloom on its single

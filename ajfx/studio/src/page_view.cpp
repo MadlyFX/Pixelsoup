@@ -24,6 +24,9 @@ constexpr float row_gap = 4.0F;
 constexpr float label_width = 112.0F;
 constexpr float hood_line = 17.0F;
 constexpr float layer_header = 36.0F;
+// A scope heading over a rigid layer's blocks, and the air after its group.
+constexpr float scope_heading = 24.0F;
+constexpr float scope_gap = 8.0F;
 // How much of a hidden row's ink is left.
 constexpr float hidden_dim = 0.45F;
 
@@ -641,7 +644,8 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
     y += layer_header + 2.0F;
 
     if (folded) {
-        layer_areas_.push_back(LayerArea{uid, gui::Rect{x, top, w, y - top}, layer.blocks.size(), y});
+        layer_areas_.push_back(
+            LayerArea{uid, gui::Rect{x, top, w, y - top}, layer.blocks.size(), y, layer.kind == LayerKind::Rigid});
         return y + 14.0F;
     }
 
@@ -690,45 +694,7 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         y += row_height + 8.0F;
     }
 
-    // A rigid layer's world: what every piece in it is made of and how it
-    // behaves on contact. It belongs to the layer, like how long a particle
-    // lives, so it reads here rather than as a block that could be removed.
-    if (layer.world) {
-        const BlockDef* world_def = find_block_def(world_block_kind);
-        const Uid world_uid = layer.world->uid;
-        const bool shown = open_.contains(world_uid);
-        const gui::Rect world_row{x + 12.0F, y, w - 12.0F, row_height};
-        const gui::Interaction hit = ctx.grab(part_id(world_uid, "layer.world"), world_row);
-        ctx.cursor_for(hit, gui::Cursor::Hand);
-        editor::draw_twirl(ctx, world_row.x + 8.0F, world_row.center_y(), shown, theme.text_muted);
-        ctx.label(gui::Rect{world_row.x + 22.0F, y, label_width, row_height}, "Bodies",
-                  hit.hovered ? theme.text : theme.text_muted);
-        ctx.label(gui::Rect{world_row.x + label_width + 12.0F, y, world_row.width - label_width - 20.0F, row_height},
-                  block_summary(*layer.world), gui::fade(theme.text_muted, 0.85F));
-        ctx.tooltip(world_row, "What the pieces in this layer are made of, and how they behave when they touch. "
-                          "Every piece in a rigid physics layer is one of these.");
-        if (hit.clicked) {
-            if (shown) {
-                open_.erase(world_uid);
-            } else {
-                open_.insert(world_uid);
-            }
-            last_layer_ = uid;
-            layer_focus_ = uid;
-        }
-        y += row_height + 2.0F;
-        if (shown && world_def != nullptr) {
-            y = draw_controls(ctx, *layer.world, *world_def, layer.kind, x + 24.0F, y, w - 36.0F);
-        }
-        if (!layer.enabled) {
-            grey_out(ctx, gui::Rect{world_row.x, world_row.y, world_row.width, y - world_row.y});
-        }
-        y += 8.0F;
-    }
-
-    for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
-        y = draw_block(ctx, document, layer, i, inputs, x, y, w);
-    }
+    y = draw_layer_blocks(ctx, document, layer, inputs, x, y, w);
 
     // The coach's notes about the layer as a whole.
     if (inputs.advice != nullptr) {
@@ -757,11 +723,112 @@ float PageView::draw_layer(gui::UiContext& ctx, Document& document, std::size_t 
         open_picker(PickerMode::Blocks, uid, layer.blocks.size(), add.x + 20.0F, add.bottom() + 4.0F, document);
     }
     y += 32.0F;
-    layer_areas_.push_back(LayerArea{uid, gui::Rect{x, top, w, y - top}, layer.blocks.size(), add.y - 3.0F});
+    layer_areas_.push_back(LayerArea{uid, gui::Rect{x, top, w, y - top}, layer.blocks.size(), add.y - 3.0F,
+                                     layer.kind == LayerKind::Rigid});
 
     // A rule before the next layer.
     ctx.panel(gui::Rect{x, y + 10.0F, w, 1.0F}, theme.divider);
     return y + 26.0F;
+}
+
+// A rigid layer holds blocks for four different things at once -- its own
+// pieces, what they break into, the props beside them and the world they
+// share -- and a flat list says nothing about which a block is for. So its
+// blocks read under headings, each block under the heading its kind belongs
+// to, while `Layer::blocks` stays one list in the order it was authored:
+// block order is for reading, never for the effect (see compile.cpp), so
+// drawing it grouped changes nothing but the reading.
+//
+// A particle layer has one scope and keeps its flat list.
+float PageView::draw_layer_blocks(gui::UiContext& ctx, Document& document, Layer& layer, const PageInputs& inputs,
+                                  float x, float y, float w) {
+    if (layer.kind != LayerKind::Rigid) {
+        for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
+            y = draw_block(ctx, document, layer, i, inputs, x, y, w);
+        }
+        return y;
+    }
+    for (const RigidScope scope : rigid_scopes) {
+        // The world row is the layer's own, not a block on its list, so it
+        // gives The world a heading even where no block does.
+        const bool world_row = scope == RigidScope::World && layer.world.has_value();
+        std::vector<std::size_t> members;
+        for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
+            if (rigid_scope(layer.blocks[i].kind) == scope) {
+                members.push_back(i);
+            }
+        }
+        if (members.empty() && !world_row) {
+            continue;
+        }
+        y = draw_scope_heading(ctx, scope, x, y, w);
+        if (world_row) {
+            y = draw_world_row(ctx, layer, x, y, w);
+        }
+        for (const std::size_t index : members) {
+            y = draw_block(ctx, document, layer, index, inputs, x, y, w);
+        }
+        // The gap at the heading's foot: a block of this scope dropped
+        // below everything under it lands after the last of them, which is
+        // one past that block in the list.
+        const std::size_t end = members.empty() ? layer.blocks.size() : members.back() + 1U;
+        slots_.push_back(Slot{layer.uid, end, gui::Rect{x, y, w, 0.0F}, scope, true});
+        y += scope_gap;
+    }
+    return y;
+}
+
+float PageView::draw_scope_heading(gui::UiContext& ctx, RigidScope scope, float x, float y, float w) {
+    const gui::Theme& theme = ctx.theme();
+    const std::string_view text = rigid_scope_name(scope);
+    const float text_w = ctx.font_width(text);
+    ctx.label(gui::Rect{x + 2.0F, y, text_w + 6.0F, scope_heading}, text, gui::fade(theme.text_muted, 0.85F));
+    ctx.tooltip(gui::Rect{x, y, text_w + 10.0F, scope_heading}, rigid_scope_help(scope));
+    // A hairline on from the words, so the heading reads as a band over its
+    // blocks rather than as another row of them.
+    const float rule_x = x + text_w + 14.0F;
+    if (x + w - rule_x > 24.0F) {
+        ctx.panel(gui::Rect{rule_x, y + scope_heading * 0.5F, x + w - rule_x, 1.0F}, theme.divider);
+    }
+    return y + scope_heading;
+}
+
+// A rigid layer's world: what every piece in it is made of and how it
+// behaves on contact. It belongs to the layer, like how long a particle
+// lives, so it reads as a row of The world rather than as a block that
+// could be dragged away or removed.
+float PageView::draw_world_row(gui::UiContext& ctx, Layer& layer, float x, float y, float w) {
+    const gui::Theme& theme = ctx.theme();
+    const BlockDef* world_def = find_block_def(world_block_kind);
+    const Uid world_uid = layer.world->uid;
+    const bool shown = open_.contains(world_uid);
+    const gui::Rect world_row{x + 12.0F, y, w - 12.0F, row_height};
+    const gui::Interaction hit = ctx.grab(part_id(world_uid, "layer.world"), world_row);
+    ctx.cursor_for(hit, gui::Cursor::Hand);
+    editor::draw_twirl(ctx, world_row.x + 8.0F, world_row.center_y(), shown, theme.text_muted);
+    ctx.label(gui::Rect{world_row.x + 22.0F, y, label_width, row_height}, "Bodies",
+              hit.hovered ? theme.text : theme.text_muted);
+    ctx.label(gui::Rect{world_row.x + label_width + 12.0F, y, world_row.width - label_width - 20.0F, row_height},
+              block_summary(*layer.world), gui::fade(theme.text_muted, 0.85F));
+    ctx.tooltip(world_row, "What the pieces in this layer are made of, and how they behave when they touch. "
+                           "Every piece in a rigid physics layer is one of these.");
+    if (hit.clicked) {
+        if (shown) {
+            open_.erase(world_uid);
+        } else {
+            open_.insert(world_uid);
+        }
+        last_layer_ = layer.uid;
+        layer_focus_ = layer.uid;
+    }
+    y += row_height + 2.0F;
+    if (shown && world_def != nullptr) {
+        y = draw_controls(ctx, *layer.world, *world_def, layer.kind, x + 24.0F, y, w - 36.0F);
+    }
+    if (!layer.enabled) {
+        grey_out(ctx, gui::Rect{world_row.x, world_row.y, world_row.width, y - world_row.y});
+    }
+    return y + 8.0F;
 }
 
 float PageView::block_body_height(const Block& block, const BlockDef& def, LayerKind kind) const {
@@ -798,6 +865,11 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     if (def == nullptr) {
         return y;
     }
+    // Which heading this block reads under, and so which gaps may take it
+    // when it is dragged. It is the block's kind that decides, not where it
+    // happens to be drawn, so a block dragged out of a particle layer aims
+    // at the right heading of the rigid layer it is let go over.
+    const RigidScope scope = rigid_scope(block.kind);
     const bool open = open_.contains(uid);
     const std::vector<std::string> hood = hood_lines_for(inputs, layer.uid, uid, false);
     const float body = open ? block_body_height(block, *def, layer.kind) : 0.0F;
@@ -812,7 +884,7 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     const float hover = ctx.ease(part_id(uid, "block.hover"), hovered ? 1.0F : 0.0F);
     if (being_dragged) {
         ctx.rounded_outline(card, gui::fade(theme.accent, 0.5F), theme.radius);
-        slots_.push_back(Slot{layer.uid, index, card});
+        slots_.push_back(Slot{layer.uid, index, card, scope, false});
         return card.bottom() + 6.0F;
     }
     ctx.rounded(card, gui::blend(theme.row, theme.widget, open ? 0.35F + 0.25F * hover : 0.6F * hover), theme.radius);
@@ -832,6 +904,7 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     }
     if (grip_hit.pressed) {
         drag_block_ = uid;
+        drag_scope_ = scope;
         drag_press_y_ = ctx.pointer_press_y();
         dragging_ = false;
         last_layer_ = layer.uid;
@@ -906,7 +979,7 @@ float PageView::draw_block(gui::UiContext& ctx, Document& document, Layer& layer
     if (!shown && card.height > header_height) {
         grey_out(ctx, gui::Rect{x, y + header_height, w, card.height - header_height});
     }
-    slots_.push_back(Slot{layer.uid, index, card});
+    slots_.push_back(Slot{layer.uid, index, card, scope, false});
     float bottom = card.bottom() + 6.0F;
 
     // The coach's notes about this block, under it.
@@ -1446,6 +1519,37 @@ float PageView::draw_advice(gui::UiContext& ctx, const Advice& advice, std::size
     return card.bottom() + 6.0F;
 }
 
+// Where a block of `scope` would land in `area` with the pointer at `py`:
+// the index it takes in the layer's list, and where to draw the line.
+//
+// The gaps are walked in the order they were drawn, so the first whose
+// middle is below the pointer is the gap the pointer is in. A grouped
+// layer draws its blocks out of list order, so only the gaps of the
+// block's own heading can take it -- its kind decides where it is drawn,
+// and a line at any other heading would promise a place it cannot land.
+// With the pointer past them all, the heading's own foot takes it. Nothing
+// matching leaves the layer's end, which is what an ungrouped layer always
+// uses.
+std::optional<std::pair<std::size_t, float>> PageView::drop_gap(const LayerArea& area, RigidScope scope,
+                                                                float py) const {
+    std::optional<std::pair<std::size_t, float>> foot;
+    for (const Slot& slot : slots_) {
+        if (slot.layer != area.layer) {
+            continue;
+        }
+        if (area.grouped && slot.scope != scope) {
+            continue;
+        }
+        if (py < slot.rect.center_y()) {
+            return std::make_pair(slot.index, slot.rect.y - 3.0F);
+        }
+        if (area.grouped && slot.tail) {
+            foot = std::make_pair(slot.index, slot.rect.y - 3.0F);
+        }
+    }
+    return foot;
+}
+
 void PageView::resolve_drag(gui::UiContext& ctx) {
     if (drag_block_ == 0U) {
         return;
@@ -1470,18 +1574,11 @@ void PageView::resolve_drag(gui::UiContext& ctx) {
             }
         }
         if (area != nullptr) {
-            std::size_t index = area->count;
-            drop_y_ = area->end_y;
-            for (const Slot& slot : slots_) {
-                if (slot.layer == area->layer && py < slot.rect.center_y()) {
-                    index = slot.index;
-                    drop_y_ = slot.rect.y - 3.0F;
-                    break;
-                }
-            }
+            const std::optional<std::pair<std::size_t, float>> gap = drop_gap(*area, drag_scope_, py);
             drop_x_ = area->rect.x;
             drop_w_ = area->rect.width;
-            drop_ = std::make_pair(area->layer, index);
+            drop_y_ = gap ? gap->second : area->end_y;
+            drop_ = std::make_pair(area->layer, gap ? gap->first : area->count);
         }
         ctx.set_cursor(gui::Cursor::Move);
     }
@@ -1557,18 +1654,16 @@ void PageView::resolve_incoming(gui::UiContext& ctx, const Document& document) {
         if (area == nullptr) {
             return;
         }
-        std::size_t index = area->count;
-        incoming_y_ = area->end_y;
-        for (const Slot& slot : slots_) {
-            if (slot.layer == area->layer && py < slot.rect.center_y()) {
-                index = slot.index;
-                incoming_y_ = slot.rect.y - 3.0F;
-                break;
-            }
-        }
+        // A palette entry lands under the heading its kind belongs to, as a
+        // dragged block does: a Module block under the hood, a Prop among
+        // the props, a force in the world.
+        const RigidScope scope = incoming_->kind == Incoming::Kind::Module ? RigidScope::Hood
+                                                                          : rigid_scope(incoming_->id);
+        const std::optional<std::pair<std::size_t, float>> gap = drop_gap(*area, scope, py);
         drop_x_ = area->rect.x;
         drop_w_ = area->rect.width;
-        incoming_drop_ = std::make_pair(area->layer, index);
+        incoming_y_ = gap ? gap->second : area->end_y;
+        incoming_drop_ = std::make_pair(area->layer, gap ? gap->first : area->count);
     }
     ctx.set_cursor(gui::Cursor::Move);
     if (!ctx.pointer_down()) {

@@ -916,6 +916,59 @@ std::string_view category_name(Category category) noexcept {
     return "";
 }
 
+std::string_view rigid_scope_name(RigidScope scope) noexcept {
+    switch (scope) {
+    case RigidScope::Pieces: return "The pieces";
+    case RigidScope::Breaking: return "When they break";
+    case RigidScope::Props: return "Props";
+    case RigidScope::World: return "The world";
+    case RigidScope::Hood: return "Under the hood";
+    }
+    return "";
+}
+
+std::string_view rigid_scope_help(RigidScope scope) noexcept {
+    switch (scope) {
+    case RigidScope::Pieces:
+        return "The solid pieces this layer is made of: how many there are, where they start, how big they are "
+               "and what they look like.";
+    case RigidScope::Breaking:
+        return "What becomes of a piece that is hit hard enough. These act on the layer's pieces, not on a prop.";
+    case RigidScope::Props:
+        return "Objects you stood in the world for the pieces to land on, fall out of or knock over. Each carries "
+               "its own model and material, and a prop is not a piece: it never dies and never comes apart.";
+    case RigidScope::World:
+        return "The one physics world every piece in this layer shares: what they are made of, what pulls on them "
+               "and what they land on.";
+    case RigidScope::Hood:
+        return "Raw modules, which may act on any part of the layer.";
+    }
+    return "";
+}
+
+RigidScope rigid_scope(std::string_view block_kind) noexcept {
+    if (block_kind == "prop") {
+        return RigidScope::Props;
+    }
+    if (block_kind == "break" || block_kind == "part") {
+        return RigidScope::Breaking;
+    }
+    // A force in a rigid layer is the world's gravity or a body's damping,
+    // and a collider becomes an unmoving body in the world, so both are the
+    // world's rather than each piece's (see compile.cpp's world_strength).
+    // The world block is what every piece is made of, so it reads here too.
+    if (block_kind == "gravity" || block_kind == "rise" || block_kind == "wind" || block_kind == "drag" ||
+        block_kind == "ground" || block_kind == "sphere" || block_kind == "box" || block_kind == "mesh_collider" ||
+        block_kind == "pieces" || block_kind == world_block_kind) {
+        return RigidScope::World;
+    }
+    if (block_kind == raw_block_kind) {
+        return RigidScope::Hood;
+    }
+    // Spawning, placing, launching, tumbling and every look: the pieces'.
+    return RigidScope::Pieces;
+}
+
 const std::vector<BlockDef>& block_catalog() {
     static const std::vector<BlockDef> catalog = make_catalog();
     return catalog;

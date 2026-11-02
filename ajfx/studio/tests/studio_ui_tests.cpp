@@ -1,3 +1,5 @@
+#include "page_view.hpp"
+#include "recipes.hpp"
 #include "widgets.hpp"
 
 #include <mediaserver/gui/input.hpp>
@@ -20,7 +22,12 @@ namespace {
 
 namespace gui = mediaserver::gui;
 
+using ajfx::studio::Document;
+using ajfx::studio::Incoming;
+using ajfx::studio::Layer;
 using ajfx::studio::ListEntry;
+using ajfx::studio::PageInputs;
+using ajfx::studio::PageView;
 using ajfx::studio::PopoverList;
 using ajfx::studio::PopoverShield;
 
@@ -159,6 +166,91 @@ void the_card_leaves_the_rest_of_the_window_alone() {
 
 } // namespace
 
+// The crates layer on a page of its own, so the pointer has one layer to
+// find: the pile of crates, the ball beside them, the cut that breaks them
+// and the world, in that order in the list.
+[[nodiscard]] Document crates_page() {
+    Document document;
+    std::optional<Layer> layer = ajfx::studio::make_layer_preset(document, "breaking_crates");
+    CHECK(layer.has_value());
+    document.layers.push_back(std::move(*layer));
+    return document;
+}
+
+[[nodiscard]] std::vector<std::string> kinds_of(const Layer& layer) {
+    std::vector<std::string> kinds;
+    for (const ajfx::studio::Block& block : layer.blocks) {
+        kinds.push_back(block.kind);
+    }
+    return kinds;
+}
+
+// Holds a palette entry over the page at `py` and lets it go there, as
+// dragging one out of the palette does. Two frames: the first works out
+// where it would land, the second lets go and lands it.
+void drop_from_palette(PageView& page, gui::InputState& input, gui::UiContext& ctx, Document& document,
+                       std::string_view block_kind, float py) {
+    const gui::Rect bounds{0.0F, 0.0F, 900.0F, 900.0F};
+    const Incoming incoming{Incoming::Kind::Block, std::string{block_kind}, std::string{block_kind}, std::nullopt};
+    for (const bool down : {true, false}) {
+        begin_frame(input, ctx, 450.0F, py, down);
+        page.set_incoming(&incoming);
+        page.draw(ctx, bounds, document, PageInputs{});
+        page.draw_overlays(ctx, bounds, document, PageInputs{});
+        page.set_incoming(nullptr);
+    }
+}
+
+// A rigid layer draws its blocks under headings that say what each acts on,
+// so a block can only land under its own heading however far the pointer is
+// from it. Its kind decides where it is drawn, so a line anywhere else
+// would promise a place it cannot stay.
+void a_dropped_block_lands_under_its_own_heading() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    Document document = crates_page();
+    const std::vector<std::string> before = kinds_of(document.layers[0]);
+    CHECK(before == std::vector<std::string>({"pile", "prop", "break", "gravity", "ground", "appearance", "color",
+                                              "size"}));
+
+    // Wind is the world's, and the top of the page is the pieces. It lands
+    // at the top of the world all the same, before the gravity there.
+    PageView page;
+    drop_from_palette(page, input, ctx, document, "wind", 6.0F);
+    CHECK(kinds_of(document.layers[0]) ==
+          std::vector<std::string>({"pile", "prop", "break", "wind", "gravity", "ground", "appearance", "color",
+                                    "size"}));
+
+    // And a second prop let go at the foot of the page joins the props,
+    // after the ball already there, rather than at the end of the list.
+    drop_from_palette(page, input, ctx, document, "prop", 880.0F);
+    CHECK(kinds_of(document.layers[0]) ==
+          std::vector<std::string>({"pile", "prop", "prop", "break", "wind", "gravity", "ground", "appearance",
+                                    "color", "size"}));
+}
+
+// A particle layer has one scope, so it keeps the flat list it always had:
+// a block let go at the foot of the page goes to the end of it.
+void a_particle_layer_still_takes_a_block_anywhere() {
+    gui::InputState input;
+    gui::UiDrawList list;
+    const gui::FontAtlas font = gui::FontAtlas::empty();
+    gui::UiContext ctx{input, list, font};
+    Document document;
+    std::optional<Layer> layer = ajfx::studio::make_layer_preset(document, "embers");
+    CHECK(layer.has_value());
+    CHECK(layer->kind == ajfx::studio::LayerKind::Particles);
+    document.layers.push_back(std::move(*layer));
+    const std::size_t before = document.layers[0].blocks.size();
+
+    PageView page;
+    drop_from_palette(page, input, ctx, document, "wind", 880.0F);
+    CHECK(document.layers[0].blocks.size() == before + 1U);
+    CHECK(document.layers[0].blocks.back().kind == "wind");
+}
+
 int main() {
     struct Case final {
         const char* name;
@@ -166,6 +258,8 @@ int main() {
     };
     const Case cases[] = {
         {"an_entry_wins_over_the_control_under_the_card", an_entry_wins_over_the_control_under_the_card},
+        {"a_dropped_block_lands_under_its_own_heading", a_dropped_block_lands_under_its_own_heading},
+        {"a_particle_layer_still_takes_a_block_anywhere", a_particle_layer_still_takes_a_block_anywhere},
         {"without_the_shield_the_control_underneath_takes_the_click",
          without_the_shield_the_control_underneath_takes_the_click},
         {"the_card_leaves_the_rest_of_the_window_alone", the_card_leaves_the_rest_of_the_window_alone},

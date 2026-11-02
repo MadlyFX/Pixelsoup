@@ -60,13 +60,17 @@ if(AJFX_BUILD_STUDIO_APP)
     set_target_properties(ajfx-studio PROPERTIES FOLDER "ajfx")
 
     if(BUILD_TESTING)
-        # Studio's own controls against synthetic input: they need the media
-        # server's UI toolkit, so they are built with the application.
-        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp src/widgets.cpp)
+        # Studio's own controls and its page against synthetic input: they
+        # need the media server's UI toolkit, so they are built with the
+        # application. The page is here rather than with the headless tests
+        # because where a dragged block lands is a question about the
+        # drawing, and only the drawing knows.
+        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp src/widgets.cpp src/page_view.cpp)
         target_link_libraries(ajfx_studio_ui_tests PRIVATE
             ajfx_studio_core
             MediaServer::Gui
             MediaServer::Editor
+            tinyfiledialogs::tinyfiledialogs
         )
         ajfx_set_options(ajfx_studio_ui_tests)
         add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)

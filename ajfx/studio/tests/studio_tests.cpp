@@ -1570,6 +1570,78 @@ void a_layer_kind_decides_which_blocks_it_can_hold() {
     CHECK(smuggled.error.find("Swirl does not belong") != std::string::npos);
 }
 
+// A rigid layer holds blocks for four different things at once: its own
+// pieces, what they come apart into, the props standing beside them and the
+// world they all share. The page reads them under headings that say which,
+// and the grouping is the catalog's answer, so it is checked here rather
+// than in the drawing.
+void a_rigid_block_says_what_it_acts_on() {
+    // What the compiler makes of each in a rigid layer: a force is the
+    // world's one gravity or a body's damping and a collider an unmoving
+    // body in it, where spawning, placing, tumbling and every look belong
+    // to the pieces themselves.
+    CHECK(rigid_scope("pile") == RigidScope::Pieces);
+    CHECK(rigid_scope("stream") == RigidScope::Pieces);
+    CHECK(rigid_scope("burst") == RigidScope::Pieces);
+    CHECK(rigid_scope("shape") == RigidScope::Pieces);
+    CHECK(rigid_scope("launch") == RigidScope::Pieces);
+    CHECK(rigid_scope("tumble") == RigidScope::Pieces);
+    CHECK(rigid_scope("appearance") == RigidScope::Pieces);
+    CHECK(rigid_scope("color") == RigidScope::Pieces);
+    CHECK(rigid_scope("size") == RigidScope::Pieces);
+    CHECK(rigid_scope("fade") == RigidScope::Pieces);
+    CHECK(rigid_scope("light") == RigidScope::Pieces);
+    CHECK(rigid_scope("break") == RigidScope::Breaking);
+    CHECK(rigid_scope("part") == RigidScope::Breaking);
+    CHECK(rigid_scope("prop") == RigidScope::Props);
+    CHECK(rigid_scope("gravity") == RigidScope::World);
+    CHECK(rigid_scope("rise") == RigidScope::World);
+    CHECK(rigid_scope("wind") == RigidScope::World);
+    CHECK(rigid_scope("drag") == RigidScope::World);
+    CHECK(rigid_scope("ground") == RigidScope::World);
+    CHECK(rigid_scope("sphere") == RigidScope::World);
+    CHECK(rigid_scope("box") == RigidScope::World);
+    // What every piece is made of is the world's, not one block's.
+    CHECK(rigid_scope(world_block_kind) == RigidScope::World);
+    CHECK(rigid_scope(raw_block_kind) == RigidScope::Hood);
+
+    // Every scope is read once, so no heading is drawn twice and none is
+    // left without words. The gui font atlas is ASCII only.
+    std::set<RigidScope> seen;
+    for (const RigidScope scope : rigid_scopes) {
+        CHECK(seen.insert(scope).second);
+        CHECK(!rigid_scope_name(scope).empty());
+        CHECK(!rigid_scope_help(scope).empty());
+        for (const char c : rigid_scope_name(scope)) {
+            CHECK(static_cast<unsigned char>(c) < 128U);
+        }
+        for (const char c : rigid_scope_help(scope)) {
+            CHECK(static_cast<unsigned char>(c) < 128U);
+        }
+    }
+    CHECK(seen.size() == rigid_scopes.size());
+    // And every block a rigid layer can hold has a heading to read under.
+    for (const BlockDef& def : block_catalog()) {
+        if (block_fits(def.kind, LayerKind::Rigid)) {
+            CHECK(seen.contains(rigid_scope(def.kind)));
+        }
+    }
+
+    // The worked shot falls where the shot says it does: nine crates, the
+    // ball dropped on them, the cut that breaks them, and the world.
+    Document document = recipe("breaking_crates");
+    const Layer& crates = layer_named(document, "Crates and a dropped ball");
+    std::map<RigidScope, int> counted;
+    for (const Block& block : crates.blocks) {
+        ++counted[rigid_scope(block.kind)];
+    }
+    CHECK(counted[RigidScope::Pieces] == 4);   // the pile, and how it looks
+    CHECK(counted[RigidScope::Breaking] == 1); // the cut
+    CHECK(counted[RigidScope::Props] == 1);    // the ball
+    CHECK(counted[RigidScope::World] == 2);    // gravity and the ground
+    CHECK(counted[RigidScope::Hood] == 0);
+}
+
 // Changing a layer's kind takes its blocks with it, and refuses rather than
 // throwing away anything the artist authored.
 void changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest() {
@@ -1779,6 +1851,7 @@ int main() {
         {"model_colliders_bake_to_distance_fields", model_colliders_bake_to_distance_fields},
         {"studio_comes_back_as_it_was_left", studio_comes_back_as_it_was_left},
         {"a_layer_kind_decides_which_blocks_it_can_hold", a_layer_kind_decides_which_blocks_it_can_hold},
+        {"a_rigid_block_says_what_it_acts_on", a_rigid_block_says_what_it_acts_on},
         {"changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest",
          changing_a_layer_kind_keeps_what_fits_and_refuses_the_rest},
         {"older_pages_open_as_the_kind_their_blocks_made_them",

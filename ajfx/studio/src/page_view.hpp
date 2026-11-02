@@ -94,16 +94,26 @@ public:
     void try_value(std::string name, ParameterValue value) { preview_values_[std::move(name)] = value; }
 
 private:
+    // Where a dragged block may land: the gap above `rect`, which puts the
+    // block at `index` of `layer`. A rigid layer draws its blocks under
+    // scope headings, so a gap belongs to one heading and only a block of
+    // that scope may land in it; `tail` is the gap at a heading's foot,
+    // which is where a block of its scope goes when nothing follows it.
     struct Slot final {
         Uid layer{};
         std::size_t index{};
         gui::Rect rect;
+        RigidScope scope{RigidScope::Pieces};
+        bool tail{false};
     };
     struct LayerArea final {
         Uid layer{};
         gui::Rect rect;
         std::size_t count{};
         float end_y{};
+        // Drawn under scope headings (a rigid layer), so a drop is held to
+        // the heading the dragged block belongs under.
+        bool grouped{false};
     };
     enum class PickerMode {
         Blocks,
@@ -116,6 +126,13 @@ private:
                      float x, float y, float w);
     float draw_block(gui::UiContext& ctx, Document& document, Layer& layer, std::size_t index,
                      const PageInputs& inputs, float x, float y, float w);
+    // A rigid layer's blocks under their scope headings; a particle layer's
+    // as one list.
+    float draw_layer_blocks(gui::UiContext& ctx, Document& document, Layer& layer, const PageInputs& inputs,
+                            float x, float y, float w);
+    float draw_scope_heading(gui::UiContext& ctx, RigidScope scope, float x, float y, float w);
+    // The layer's own world row ("Bodies"), which reads under The world.
+    float draw_world_row(gui::UiContext& ctx, Layer& layer, float x, float y, float w);
     float block_body_height(const Block& block, const BlockDef& def, LayerKind kind) const;
     float draw_controls(gui::UiContext& ctx, Block& block, const BlockDef& def, LayerKind kind, float x, float y,
                         float w);
@@ -131,6 +148,11 @@ private:
     bool number(gui::UiContext& ctx, gui::UiId id, const gui::Rect& field, float& value, float speed, int decimals,
                 std::string_view axis = {}, float min = 0.0F, float max = 0.0F);
 
+    // Where a block of `scope` would land in `area`: its index in the
+    // layer's list and where the drop line goes, or nothing for the
+    // layer's end.
+    [[nodiscard]] std::optional<std::pair<std::size_t, float>> drop_gap(const LayerArea& area, RigidScope scope,
+                                                                       float py) const;
     void open_picker(PickerMode mode, Uid layer, std::size_t index, float x, float y, const Document& document);
     void resolve_drag(gui::UiContext& ctx);
     void resolve_incoming(gui::UiContext& ctx, const Document& document);
@@ -151,6 +173,11 @@ private:
     float restore_scroll_{-1.0F};
 
     Uid drag_block_{};
+    // The scope the dragged block belongs under, taken when the drag
+    // starts: a rigid layer only offers it the gaps of its own heading,
+    // since its kind decides where it is drawn and the drop line would
+    // otherwise point somewhere it cannot land.
+    RigidScope drag_scope_{RigidScope::Pieces};
     float drag_press_y_{};
     bool dragging_{false};
     std::vector<Slot> slots_;

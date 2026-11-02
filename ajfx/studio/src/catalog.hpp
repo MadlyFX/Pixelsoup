@@ -53,6 +53,40 @@ enum class Category : std::uint8_t {
 
 [[nodiscard]] std::string_view category_name(Category category) noexcept;
 
+// Which part of a rigid physics layer a block acts on.
+//
+// A rigid layer is one physics world holding the layer's own pieces, the
+// objects an artist stood in it, and the parts a piece comes apart into.
+// Blocks for all of them sit in one list, so a flat page says nothing about
+// which a block is for: Bodies is the pieces' material while a Prop three
+// rows down carries its own, Break acts on the pieces and not on a prop,
+// and Gravity is the whole world's. The page draws a rigid layer's blocks
+// under these headings, so what a block acts on is read rather than worked
+// out from what the compiler does with it. A particle layer has one scope
+// and keeps its flat list.
+enum class RigidScope : std::uint8_t {
+    Pieces,   // the layer's own pieces: how many, where, how big, how drawn
+    Breaking, // when a piece comes apart, and what into
+    Props,    // each object stood in the world: not a particle, never breaks
+    World,    // the world every piece shares, and what they are made of
+    Hood,     // a raw module, which may act on any of them
+};
+
+// The scopes the page draws, in the order it reads them: what the layer is
+// made of, what becomes of it, what stands beside it, then the world it all
+// happens in.
+inline constexpr std::array<RigidScope, 5U> rigid_scopes{RigidScope::Pieces, RigidScope::Breaking,
+                                                         RigidScope::Props, RigidScope::World, RigidScope::Hood};
+
+[[nodiscard]] std::string_view rigid_scope_name(RigidScope scope) noexcept;
+// One sentence: what this part of a rigid layer is, for the heading's
+// tooltip.
+[[nodiscard]] std::string_view rigid_scope_help(RigidScope scope) noexcept;
+// What a block of this kind acts on in a rigid physics layer, the world
+// block among them. Every kind has an answer, a kind a rigid layer cannot
+// hold included, since the catalog is asked before the layer is known.
+[[nodiscard]] RigidScope rigid_scope(std::string_view block_kind) noexcept;
+
 enum class ControlType : std::uint8_t {
     Number,
     Range,

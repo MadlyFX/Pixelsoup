@@ -161,7 +161,24 @@ A **rigid physics** layer's particles are solid bodies in a physics engine:
 they knock into each other, stack, tumble off and come to rest. Pile and
 Prop are under **Rigid physics** in the palette and only appear there.
 
-**Bodies**, on the layer's heading beside "Each lives", is what every piece
+**What a block acts on.** A rigid layer holds blocks for four different
+things at once, so its blocks read under headings that say which:
+
+- **The pieces** -- the solid pieces the layer is made of: how many there
+  are, where they start, how big they are and what they look like.
+- **When they break** -- what becomes of a piece hit hard enough. These act
+  on the layer's pieces, never on a prop.
+- **Props** -- each object you stood in the world. A prop carries its own
+  model and material, and is not a piece: it never dies and never breaks.
+- **The world** -- the one physics world they all share: what they are made
+  of (Bodies), what pulls on them and what they land on.
+
+A block's kind decides which heading it reads under, so dragging one only
+offers it places under its own heading. The order within a heading is
+yours; it is for reading, and never changes the effect. A particle layer
+has one scope and keeps its flat list.
+
+**Bodies**, under The world, is what every piece
 in the layer is made of. It belongs to the layer, not to a block, because a
 rigid layer has exactly one physics world and no way to be without one.
 - *Body* is what each piece collides as: *Its own shape* wraps a debris
