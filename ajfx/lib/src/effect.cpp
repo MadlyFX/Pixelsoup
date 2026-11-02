@@ -329,6 +329,10 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
                       "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
         check.require(body.draw.empty() || valid_texture_name(body.draw), at + ".draw",
                       "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+        // A kind at no size is a body with no shape to build, which an
+        // engine answers for in its own way rather than complaining, so it
+        // is refused here with the kind that asked for it.
+        check.require(body.scale > 0.0F && std::isfinite(body.scale), at + ".scale", "must be above zero");
         check.require(body.density > 0.0F, at + ".density", "must be positive");
         check.require(body.friction >= 0.0F && body.friction <= 1.0F, at + ".friction",
                       "must be between 0 and 1");

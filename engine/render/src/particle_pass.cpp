@@ -37,7 +37,9 @@ struct ViewConstants final {
     core::u32 rotation_offset{absent};
     core::u32 facing_velocity{};
     core::u32 premultiplied{};
-    std::array<float, 4U> extra{}; // x: stretch, y: 1 for additive light, z: orientation offset bits
+    // x: stretch, y: 1 for additive light, z: orientation offset bits,
+    // w: the body kind's size scale for a mesh draw (1 leaves the size alone)
+    std::array<float, 4U> extra{};
     core::u32 age_offset{absent};
     core::u32 lifetime_offset{absent};
     core::u32 flipbook{};
@@ -150,6 +152,10 @@ struct ParticleInstance::State final {
             // Written each time, allocated once: never on the frame path.
             std::vector<std::uint32_t> scratch;
             core::u32 count{0U};
+            // The body kind's own size scale, which the draw multiplies each
+            // particle's size by. Kinds sharing a model at different scales
+            // are different groups, since the scale is the draw's.
+            float scale{1.0F};
         };
         std::vector<Group> groups;
         // The group each body kind draws with, by kind. Empty when the
@@ -484,22 +490,30 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         // themselves. The emitter's own model is group 0, and the kind that
         // names nothing is drawn with it.
         const ajfx::RigidPhysics* physics = ajfx::rigid_physics(emitter);
-        const bool per_kind = physics != nullptr &&
-                              std::any_of(physics->bodies.begin(), physics->bodies.end(),
-                                          [](const ajfx::RigidBodyKind& kind) { return !kind.draw.empty(); });
+        // A kind with a size of its own needs a draw of its own as surely as
+        // one with a model of its own does, since the scale is the draw's.
+        const bool per_kind =
+            physics != nullptr && std::any_of(physics->bodies.begin(), physics->bodies.end(),
+                                              [](const ajfx::RigidBodyKind& kind) {
+                                                  return !kind.draw.empty() || kind.scale != 1.0F;
+                                              });
         if (per_kind) {
-            std::vector<std::string> models{emitter.renderer.mesh};
+            // A group is one model at one scale: two kinds share a draw only
+            // when both agree, so the same model at half the size is drawn
+            // apart from it.
+            std::vector<std::pair<std::string, float>> models{{emitter.renderer.mesh, 1.0F}};
             mesh.kind_group.assign(physics->bodies.size() + 1U, 0U);
             for (std::size_t k = 0U; k < physics->bodies.size(); ++k) {
-                const std::string& model =
-                    physics->bodies[k].draw.empty() ? emitter.renderer.mesh : physics->bodies[k].draw;
+                const std::pair<std::string, float> model{
+                    physics->bodies[k].draw.empty() ? emitter.renderer.mesh : physics->bodies[k].draw,
+                    physics->bodies[k].scale};
                 const auto at = std::find(models.begin(), models.end(), model);
                 mesh.kind_group[k + 1U] = static_cast<std::size_t>(at - models.begin());
                 if (at == models.end()) {
                     models.push_back(model);
                 }
             }
-            for (const std::string& model : models) {
+            for (const auto& [model, scale] : models) {
                 const std::optional<std::size_t> group_upload = mesh_upload(model);
                 if (!group_upload) {
                     return Result::failure(failure(ParticleErrorCode::DeviceFailure, mesh_error));
@@ -513,6 +527,7 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
                 group.upload = *group_upload;
                 group.order = order.value();
                 group.scratch.reserve(emitter.capacity);
+                group.scale = scale;
                 mesh.groups.push_back(std::move(group));
             }
         }
@@ -880,7 +895,9 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         // particles' path exactly, so a prop and the debris around it are lit
         // alike. Untextured, unsorted (a record's index is its instance) and
         // with no life, so no flipbook.
-        prop.extra = {0.0F, 0.0F, std::bit_cast<float>(prop_orientation_at), 0.0F};
+        // A prop is placed and sized by the effect, not by a body kind, so
+        // its mesh draw leaves the size as the record gives it.
+        prop.extra = {0.0F, 0.0F, std::bit_cast<float>(prop_orientation_at), 1.0F};
         prop.motion = {targets.motion_valid ? targets.motion_seconds : 0.0F,
                        targets.motion_valid ? 1.0F : 0.0F, 0.0F, 0.0F};
         prop.flags = flag_mesh;
@@ -935,7 +952,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
         constants.facing_velocity = sprite.facing == ajfx::Facing::Velocity ? 1U : 0U;
         constants.premultiplied = sprite.blend == ajfx::BlendMode::Premultiplied ? 1U : 0U;
         constants.extra = {sprite.stretch, sprite.blend == ajfx::BlendMode::Additive ? 1.0F : 0.0F,
-                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), 0.0F};
+                           std::bit_cast<float>(offset_or_absent(buffers.layout.orientation)), 1.0F};
         constants.age_offset = offset_or_absent(buffers.layout.age);
         constants.lifetime_offset = offset_or_absent(buffers.layout.lifetime);
         constants.flipbook = sprite.flipbook_columns | (sprite.flipbook_rows << 16U);
@@ -990,11 +1007,17 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                 }
                 const rhi::StorageBuffer* group_buffers[] = {records, ordered, counters, vertices, indices};
                 const std::array<rhi::DrawBatch, 1U> group_batches{rhi::DrawBatch{model.index_count, group.count}};
+                // The kind's own size scale is this draw's, so each group
+                // carries the emitter's constants with its own scale in them.
+                ViewConstants group_constants = constants;
+                group_constants.extra[3] = group.scale;
+                const std::span<const core::u8> group_uniform{reinterpret_cast<const core::u8*>(&group_constants),
+                                                              sizeof(group_constants)};
                 rhi::PulledDraw group_draw{};
                 group_draw.pipeline =
                     motion ? &s.velocity : sprite.blend == ajfx::BlendMode::Additive ? &s.additive : &s.mesh;
                 group_draw.vertex_buffers = group_buffers;
-                group_draw.vertex_uniform = emitter_uniform;
+                group_draw.vertex_uniform = group_uniform;
                 group_draw.fragment_textures = sampled;
                 group_draw.batches = group_batches;
                 group_draw.load = motion || !first || targets.load;

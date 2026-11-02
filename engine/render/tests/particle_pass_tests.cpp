@@ -1161,6 +1161,74 @@ void body_kinds_draw_as_their_own_models() {
     PASS_CHECK(right >= whole / 4U - side && right <= whole / 4U + side);
 }
 
+// The same two bodies, but both kinds draw the emitter's own model and the
+// second is a kind at half the size. Only the scale differs, so what the two
+// cover says whether the draw took it.
+[[nodiscard]] ajfx::Effect one_model_at_two_sizes() {
+    ajfx::EffectBuilder builder{"scaled"};
+    builder.emitter("pieces")
+        .capacity(4U)
+        .spawn(ajfx::SpawnPile{.count = 1U,
+                               .shape = ajfx::PileShape::Box,
+                               .center = ajfx::Vec3{-0.5F, -0.25F, 0.0F},
+                               .jitter = 0.0F,
+                               .release = 0.0F,
+                               .body = 0U})
+        .spawn(ajfx::SpawnPile{.count = 1U,
+                               .shape = ajfx::PileShape::Box,
+                               .center = ajfx::Vec3{0.5F, -0.25F, 0.0F},
+                               .jitter = 0.0F,
+                               .release = 0.0F,
+                               .body = 1U})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitColor{.a = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = ajfx::Color{1.0F, 0.0F, 0.0F, 1.0F}})
+        .init(ajfx::InitSize{.min = 0.5F, .max = 0.5F})
+        .update(ajfx::RigidPhysics{
+            .shape = ajfx::RigidShape::Sphere,
+            .bodies = {ajfx::RigidBodyKind{.shape = ajfx::RigidShape::Sphere, .scale = 0.5F}}})
+        .renderer(ajfx::SpriteRenderer{.geometry = ajfx::Geometry::Mesh, .mesh = "cube"});
+    return builder.build().value();
+}
+
+void a_body_kinds_scale_reaches_its_draw() {
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
+    const ajfx::Effect effect = one_model_at_two_sizes();
+    const ajfx::gpu::KernelSet kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    render::ParticlePass pass = make_pass();
+    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+    PASS_CHECK(created);
+    render::ParticleInstance instance = std::move(created).value();
+    const Frame frame = render_prop_frame(pass, instance, 12U);
+
+    const auto read = instance.simulation().read_emitter(0U);
+    PASS_CHECK(read.ok());
+    PASS_CHECK(read.value().alive() == 2U);
+
+    // Both kinds draw the one model, so the only thing that can tell them
+    // apart on screen is the scale. A cube of side 0.5 covers (0.5 * size/4)
+    // squared; at half the size it covers a quarter of that.
+    const auto side = static_cast<core::u32>(0.5F * static_cast<float>(size) / 4.0F);
+    const std::size_t whole = static_cast<std::size_t>(side) * side;
+    std::size_t left = 0U;
+    std::size_t right = 0U;
+    for (core::u32 y = 0U; y < size; ++y) {
+        for (core::u32 x = 0U; x < size; ++x) {
+            if (frame.alpha(x, y) == 0U) {
+                continue;
+            }
+            if (x < size / 2U) {
+                ++left;
+            } else {
+                ++right;
+            }
+        }
+    }
+    std::cout << "  one model at two sizes covered " << left << " pixels (expected " << whole << ") and " << right
+              << " (expected " << whole / 4U << ")\n";
+    PASS_CHECK(left >= whole - side && left <= whole + side);
+    PASS_CHECK(right >= whole / 4U - side && right <= whole / 4U + side);
+}
+
 void props_draw_where_they_stand() {
     const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
     const auto instance_of = [&](render::ParticlePass& pass, const ajfx::Effect& effect) {
@@ -1384,6 +1452,7 @@ int main() {
          seeks_hold_until_caught_up_then_match_playing_through},
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
         {"body_kinds_draw_as_their_own_models", body_kinds_draw_as_their_own_models},
+        {"a_body_kinds_scale_reaches_its_draw", a_body_kinds_scale_reaches_its_draw},
         {"props_draw_where_they_stand", props_draw_where_they_stand},
         {"props_write_their_motion", props_write_their_motion},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},

@@ -425,7 +425,9 @@ public:
              bool asleep) override {
         const std::size_t k = std::min<std::size_t>(kind, desc_.bodies.size() - 1U);
         const RigidWorldDesc::Body& of_kind = desc_.bodies[k];
-        const float s = std::max(size, smallest_size);
+        // The kind's own size, applied here and nowhere else, so a body made
+        // by a birth, by a break or by a restore is the same size.
+        const float s = std::max(size * of_kind.scale, smallest_size);
         JPH::RefConst<JPH::Shape> shape;
         switch (of_kind.shape) {
         case RigidWorldDesc::Shape::Hull:

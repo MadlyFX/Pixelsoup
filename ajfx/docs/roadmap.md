@@ -285,13 +285,40 @@ feedback forces could evaluate any frame directly.
        - **Not yet, and what breaking needs on top:** a body is a sphere, a
          cube or a hull, scaled by one number, so a panel, a slab or a
          splinter cannot be a box at all. A box kind needs its own half
-         extents, as a prop already has. And a kind decides what a body
+         extents, as a prop already has. (The one number is now the kind's
+         own rather than the emitter's; see **A size per body kind** below.)
+         And a kind decides what a body
          collides as, not what it looks like, since the renderer draws one
          mesh for the whole emitter. Pieces shaped like pieces therefore
          want both: extents on a box kind, or a shard model per kind, and a
          mesh per particle to draw them by, which is rendering work rather
          than physics. Fifteen kinds is also few for a shard library, so a
          piece set may need to carry its shapes rather than name kinds.
+     - **A size per body kind, done (2026-11-01).** `RigidBodyKind::scale`
+       multiplies the size the emitter gave at birth, so one world can hold
+       a crate and the girder beside it. An emitter has one `InitSize` for
+       every particle, so until this a kind could only be the size every
+       other body was: an object that breaks has to be a body kind, and two
+       breakable objects of different sizes could not be authored at all.
+       Found while designing Studio's Object block, which wants exactly
+       that.
+       The scale is applied once, where the solver builds a body's shape, so
+       a body made by a birth, by a break or by a restore agrees; and
+       `body_colliders`, the pile lattice's spacing, the sample renderer and
+       the media server's particle pass all take it, so what collides, what
+       a `BodyCollision` meets and what is drawn cannot come apart. The
+       media server groups a mesh draw by model *and* scale for that reason.
+       A missing field keeps its default, so packages written before this
+       read unchanged.
+       Measured: a ball of size 0.4 rests with its middle at 0.2 and the
+       same ball at half the size at 0.1, the radius each predicts; and one
+       model drawn at both sizes covered 64 and 16 pixels of the test view,
+       the 4:1 their sides predict. Tests also cover bit-identical reruns on
+       1 and 4 threads, seek equivalence through a settle, the package round
+       trip and the refusal of a scale that is zero, negative or not finite.
+       - **Still not yet:** a box kind has no half extents of its own, so a
+         panel or a slab is still a cube scaled by one number rather than a
+         box. That is the other half of what pieces shaped like pieces want.
      - **The Break module, done (2026-11-01).** A `Break` module makes one
        body kind breakable: a body of that kind whose hardest contact in a
        step closed at `threshold` or faster comes apart at the end of it,

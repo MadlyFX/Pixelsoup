@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -1192,6 +1193,104 @@ std::vector<BreakPiece> crate_panels(std::uint32_t shard_kind) {
     return pieces;
 }
 
+// Two balls of one emitter dropped side by side, alike but for the size
+// their kinds are: one at the particle's own size and one at `scale` of it.
+// An emitter has one size at birth, so without a kind's own scale these two
+// could only be the same ball twice.
+Effect two_balls_of_different_kinds(float scale) {
+    EffectBuilder builder{"scaled"};
+    builder.emitter("balls")
+        .capacity(8U)
+        // A pile of one places its body at its own centre, so the two stand
+        // apart and fall without meeting each other.
+        .spawn(SpawnPile{.count = 1U, .center = Vec3{-1.0F, 1.0F, 0.0F}, .jitter = 0.0F, .release = 0.0F, .body = 1U})
+        .spawn(SpawnPile{.count = 1U, .center = Vec3{1.0F, 1.0F, 0.0F}, .jitter = 0.0F, .release = 0.0F, .body = 2U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ShapeLocation{.shape = Shape::Point})
+        .init(Velocity{.speed_min = 0.0F, .speed_max = 0.0F})
+        .init(InitSize{.min = 0.4F, .max = 0.4F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Sphere,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Sphere},
+                                        RigidBodyKind{.shape = RigidShape::Sphere, .scale = scale}}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.9F});
+    return builder.build().value();
+}
+
+void a_kinds_own_size_decides_the_body_it_is() {
+    // A ball rests with its middle a radius above the floor, and a sphere of
+    // size s has radius s / 2. At size 0.4 the unscaled ball must come to
+    // rest at 0.2 and the half-size one at 0.1, which is the whole claim:
+    // the kind's scale reached the body the solver built.
+    Simulation simulation = make(two_balls_of_different_kinds(0.5F));
+    simulation.advance_to(240U);
+    const EmitterState& s = simulation.emitter(0);
+    AJFX_CHECK(s.alive() == 2U);
+    const float full = s.position[0].y;
+    const float half = s.position[1].y;
+    std::cout << "  a ball of size 0.4 rests at " << full << ", the same ball at half the size at " << half << '\n';
+    AJFX_CHECK(std::abs(full - 0.2F) < 0.01F);
+    AJFX_CHECK(std::abs(half - 0.1F) < 0.01F);
+    // And the two are twice one another, worked out from the poses rather
+    // than from the numbers above.
+    AJFX_CHECK(std::abs(full / half - 2.0F) < 0.1F);
+
+    // A scale of 1 is the size the emitter gave, so both rest alike.
+    Simulation plain = make(two_balls_of_different_kinds(1.0F));
+    plain.advance_to(240U);
+    const EmitterState& p = plain.emitter(0);
+    AJFX_CHECK(std::abs(p.position[0].y - p.position[1].y) < 0.001F);
+    AJFX_CHECK(std::abs(p.position[0].y - 0.2F) < 0.01F);
+}
+
+void kind_scales_rerun_and_seek_exactly() {
+    const Effect effect = two_balls_of_different_kinds(0.35F);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t tick : {1U, 30U, 120U, 240U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    // A seek rebuilds the world, so each body has to come back the size its
+    // kind says and not the size the emitter gave.
+    Simulation stepped = make(effect);
+    stepped.advance_to(60U);
+    const SimulationState at_60 = stepped.state();
+    Simulation seeker = make(effect);
+    seeker.restore(at_60);
+    AJFX_CHECK(seeker.state() == at_60);
+    seeker.advance_to(240U);
+    Simulation straight = make(effect);
+    straight.advance_to(240U);
+    AJFX_CHECK(seeker.state() == straight.state());
+}
+
+void impossible_kind_scales_are_refused() {
+    const auto refused = [](const Result<Effect>& built, const std::string& fragment) {
+        if (built.ok() || built.error().message.find(fragment) == std::string::npos) {
+            std::cout << "  expected '" << fragment << "', got: "
+                      << (built.ok() ? std::string{"accepted"} : built.error().message) << '\n';
+            return false;
+        }
+        std::cout << "  " << built.error().message << '\n';
+        return true;
+    };
+    // A body at no size has no shape to build, and an engine would answer
+    // for it in its own way rather than complaining.
+    for (const float scale : {0.0F, -1.0F, std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+        EffectBuilder builder{"x"};
+        builder.emitter("e").init(Lifetime{}).update(
+            RigidPhysics{.bodies = {RigidBodyKind{.shape = RigidShape::Sphere, .scale = scale}}});
+        AJFX_CHECK(refused(builder.build(), "bodies[0].scale"));
+    }
+}
+
 // A crate standing on the floor with a ball dropped on it from `height`. The
 // crate is the emitter's own kind, the ball is a bouncy sphere, and the
 // panels the crate breaks into are hulls of the chip model.
@@ -1883,6 +1982,9 @@ int main() {
         {"body_kinds_mix_shapes_and_materials", body_kinds_mix_shapes_and_materials},
         {"body_kinds_rerun_and_seek_exactly", body_kinds_rerun_and_seek_exactly},
         {"impossible_body_kinds_are_refused", impossible_body_kinds_are_refused},
+        {"a_kinds_own_size_decides_the_body_it_is", a_kinds_own_size_decides_the_body_it_is},
+        {"kind_scales_rerun_and_seek_exactly", kind_scales_rerun_and_seek_exactly},
+        {"impossible_kind_scales_are_refused", impossible_kind_scales_are_refused},
         {"a_hit_crate_comes_apart_into_its_pieces", a_hit_crate_comes_apart_into_its_pieces},
         {"breaking_reruns_and_seeks_exactly", breaking_reruns_and_seeks_exactly},
         {"a_break_with_no_room_is_refused_whole", a_break_with_no_room_is_refused_whole},

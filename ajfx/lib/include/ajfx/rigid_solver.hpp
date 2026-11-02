@@ -156,6 +156,11 @@ struct RigidWorldDesc final {
         Shape shape{Shape::Sphere};
         // For Hull: the points the hull wraps, at size 1.
         std::vector<Vec3> hull_points;
+        // Multiplies the size `add` is given, so a kind can be a size of its
+        // own where the emitter has one size at birth for every body. A
+        // solver applies it once, where it builds the body's shape, so every
+        // way a body is made takes it. Above zero.
+        float scale{1.0F};
         float density{1000.0F};
         float friction{0.5F};
         float restitution{0.2F};

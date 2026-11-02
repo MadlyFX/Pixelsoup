@@ -146,9 +146,13 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         // one model and one entry.
         const bool by_kind = models_by_kind(emitter);
         std::vector<std::string> names{emitter.renderer.mesh};
+        // Each kind's own size beside its model, so what is drawn is the
+        // body the engine built. Kind 0 is the particle's size exactly.
+        std::vector<float> scales{1.0F};
         if (by_kind) {
             for (const RigidBodyKind& kind : rigid_physics(emitter)->bodies) {
                 names.push_back(kind.draw.empty() ? emitter.renderer.mesh : kind.draw);
+                scales.push_back(kind.scale);
             }
         }
         // One pair of buffers holds every model the emitter draws, each
@@ -160,7 +164,8 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
                                          static_cast<std::uint32_t>(names.size())};
         std::map<std::string, std::pair<std::uint32_t, std::uint32_t>, std::less<>> placed;
         State::MeshBuffers buffers;
-        for (const std::string& name : names) {
+        for (std::size_t n = 0U; n < names.size(); ++n) {
+            const std::string& name = names[n];
             if (!placed.contains(name)) {
                 const MeshData& mesh = meshes.find(name)->second;
                 const auto base = static_cast<std::uint32_t>(vertices.size() / 8U);
@@ -179,6 +184,12 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
             const auto [first, count] = placed.find(name)->second;
             table.push_back(first);
             table.push_back(count);
+            // The scale travels as its bits, since the table is one buffer
+            // of words and the shader reads it back with asfloat.
+            std::uint32_t bits = 0U;
+            const float scale = scales[n];
+            std::memcpy(&bits, &scale, sizeof(bits));
+            table.push_back(bits);
         }
         for (const auto& [bytes, label, target] :
              {std::tuple{vertices.size() * 4U, " mesh vertices", &buffers.vertices},

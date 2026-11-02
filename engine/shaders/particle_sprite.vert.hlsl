@@ -48,7 +48,8 @@ cbuffer ParticleView : register(b0, space1) {
     uint premultiplied;
     // x: seconds of motion a velocity-aligned quad spans. y: 1 for additive
     // light. z: the bits of a mesh particle's orientation offset (asuint),
-    // absent when it has none.
+    // absent when it has none. w: the body kind's own size scale for this
+    // mesh draw, 1 where the size is the record's alone.
     float4 sprite_extra;
     uint age_offset;
     uint lifetime_offset;
@@ -190,7 +191,9 @@ Output mesh_vertex(uint vertex, uint instance) {
     const uint record = (flags & 8U) != 0U ? order.Load(instance * 4U) : instance;
     const uint base = record * stride;
     const float3 position = to_world_point(asfloat(particles.Load3(base + position_offset)));
-    const float size = size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F;
+    // The body kind's own size as well, so the model drawn is the body the
+    // solver built rather than the one the emitter's size describes.
+    const float size = (size_offset != absent ? asfloat(particles.Load(base + size_offset)) : 0.1F) * sprite_extra.w;
     const uint index = mesh_indices.Load(vertex * 4U);
     const float3 local = asfloat(mesh_vertices.Load3(index * 32U));
     const float3 normal = asfloat(mesh_vertices.Load3(index * 32U + 12U));

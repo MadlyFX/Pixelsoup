@@ -360,6 +360,17 @@ colliders, pile up, knock each other about and fall asleep at rest.
   A kind may also name the model its bodies are **drawn** as (`draw`),
   where the emitter draws meshes: a crate and the panels it breaks into are
   then each drawn as themselves, without being emitters of their own.
+
+  A kind carries its own **size** as well (`scale`), multiplying the size
+  the emitter gave at birth. An emitter has one `InitSize` for every
+  particle, so without it a kind could only be the size every other body
+  is, and a crate and the girder beside it could not be one world's bodies.
+  A solver applies it once, where it builds the body's shape, so a body
+  made by a birth, by a break or by a restore is the same size; what a
+  `BodyCollision` meets and what a renderer draws take it too, so the shape
+  and the model cannot come apart. A piece a body breaks into takes
+  `BreakPiece::size` of its parent on top, which is a share of that parent
+  rather than of the kind.
   `models_by_kind` says an emitter does this, and its records then carry
   each body's kind. Size is the particle's, so whatever spawns a body
   decides how big it is.

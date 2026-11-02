@@ -670,11 +670,21 @@ enum class RigidShape {
 //   a renderer that draws a mesh per particle; empty draws the emitter's own
 //   model, as every other body is drawn. A crate's panels collide and draw
 //   as panels this way, without being an emitter of their own.
+// - **How big it is:** `scale` multiplies the particle's size for bodies of
+//   this kind, so a crate and the girder beside it are one world's bodies at
+//   sizes of their own. An emitter has one size at birth (InitSize), which is
+//   every body's; without this a kind could only be the size every other body
+//   is. A body is therefore `shape` at the particle's size times `scale`, and
+//   what collides, what is met as a BodyCollision and what is drawn all take
+//   it, so the shape and the model cannot come apart. It must be above zero.
+//   A piece a body breaks into takes BreakPiece::size of its parent as well,
+//   which is a share of that parent rather than of this kind.
 // - **What it does not change:** damping and sleep are the emitter's.
 struct RigidBodyKind final {
     RigidShape shape{RigidShape::Auto};
     std::string mesh;
     std::string draw;
+    float scale{1.0F};
     float density{1000.0F};
     float friction{0.5F};
     float restitution{0.2F};
@@ -684,6 +694,7 @@ struct RigidBodyKind final {
         visit("shape", self.shape);
         visit("mesh", self.mesh);
         visit("draw", self.draw);
+        visit("scale", self.scale);
         visit("density", self.density);
         visit("friction", self.friction);
         visit("restitution", self.restitution);

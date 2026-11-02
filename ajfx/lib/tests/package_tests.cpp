@@ -429,7 +429,10 @@ void breaks_round_trip_and_are_checked() {
         .spawn(SpawnBurst{.count = 1U})
         .init(Lifetime{.min = 4.0F, .max = 4.0F})
         .update(Gravity{})
-        .update(RigidPhysics{.shape = RigidShape::Box, .bodies = {RigidBodyKind{.shape = RigidShape::Box}}})
+        // A kind at a size of its own, so the round trip carries the scale
+        // as well as the shape.
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Box, .scale = 0.45F}}})
         .update(Break{.body = 0U, .threshold = 2.5F, .scatter = 1.5F, .spin = 240.0F, .pieces = {lid, side}});
     const Effect effect = builder.build().value();
 

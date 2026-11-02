@@ -38,8 +38,9 @@ RWByteAddressBuffer sprite_counters : register(u3);
 //   0: the byte offset of a record's body kind, or sprite_absent for an
 //      emitter whose bodies are all drawn alike;
 //   1: how many kinds the table holds, at least one;
-//   then two words a kind: where its model's indices start, and how many it
-//   has. Several kinds may share a model, and then share its range.
+//   then three words a kind: where its model's indices start, how many it
+//   has, and the bits of the kind's own size scale. Several kinds may share
+//   a model, and then share its range while keeping their own scale.
 // A particle's kind picks its model, so one draw covers every model the
 // emitter has and the order between them is still the sort's.
 RWByteAddressBuffer sprite_models : register(u6);
@@ -149,8 +150,9 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     if (kind_offset != sprite_absent) {
         kind = min(sprite_particles.Load(base + kind_offset), kinds - 1u);
     }
-    uint first_index = sprite_models.Load(8u + kind * 8u);
-    uint index_count = sprite_models.Load(12u + kind * 8u);
+    uint first_index = sprite_models.Load(8u + kind * 12u);
+    uint index_count = sprite_models.Load(12u + kind * 12u);
+    float kind_scale = asfloat(sprite_models.Load(16u + kind * 12u));
     if (vertex >= index_count) {
         SpriteVertex folded;
         folded.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -200,7 +202,7 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
         ax = float3(c, 0.0f, -s);
         az = float3(s, 0.0f, c);
     }
-    float4 world = float4(position + (ax * local.x + ay * local.y + az * local.z) * size, 1.0f);
+    float4 world = float4(position + (ax * local.x + ay * local.y + az * local.z) * (size * kind_scale), 1.0f);
     float3 n = normalize(ax * normal.x + ay * normal.y + az * normal.z);
     float shade = 0.35f + 0.65f * saturate(dot(n, -sprite_camera_row(6u).xyz));
     SpriteVertex output;

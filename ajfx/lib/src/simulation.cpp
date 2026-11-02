@@ -800,23 +800,26 @@ std::uint64_t release_tick(const SpawnPile& pile, std::uint32_t simulation_rate)
 }
 
 // How far a body of one kind at size 1 reaches across, however it is turned:
-// the diameter of the ball it turns within.
+// the diameter of the ball it turns within. The kind's own scale is in it, so
+// a pile of a kind bigger than the particle's size is spaced for the bodies
+// it will actually hold.
 float body_reach(const RigidWorldDesc& desc, std::uint32_t kind) {
     const RigidWorldDesc::Body& body = desc.bodies[std::min<std::size_t>(kind, desc.bodies.size() - 1U)];
+    const float scale = body.scale;
     switch (body.shape) {
     case RigidWorldDesc::Shape::Sphere:
-        return 1.0F;
+        return scale;
     case RigidWorldDesc::Shape::Box:
-        return std::numbers::sqrt3_v<float>;
+        return scale * std::numbers::sqrt3_v<float>;
     case RigidWorldDesc::Shape::Hull: {
         float farthest = 0.0F;
         for (const Vec3& point : body.hull_points) {
             farthest = std::max(farthest, dot(point, point));
         }
-        return 2.0F * std::sqrt(farthest);
+        return scale * 2.0F * std::sqrt(farthest);
     }
     }
-    return 1.0F;
+    return scale;
 }
 
 // Where `count` bodies spaced `d` apart stack, bottom first, relative to the
@@ -1090,9 +1093,10 @@ RigidPropDesc::Motion solver_motion(PropMotion motion) {
 // kinds rigid physics lists. An empty `mesh` wraps the renderer's own model,
 // as the emitter's shape does; a kind that names one wraps that.
 Result<RigidWorldDesc::Body> rigid_body_desc(const Emitter& emitter, RigidShape shape, const std::string& mesh,
-                                             float density, float friction, float restitution,
+                                             float scale, float density, float friction, float restitution,
                                              const MeshSet& meshes) {
     RigidWorldDesc::Body body;
+    body.scale = scale;
     body.density = density;
     body.friction = friction;
     body.restitution = restitution;
@@ -1153,14 +1157,16 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
     // Kind 0 is the emitter's own shape and material, then the kinds it
     // lists, in order, so a spawn module's `body` indexes straight into this.
     desc.bodies.clear();
-    Result<RigidWorldDesc::Body> own = rigid_body_desc(emitter, physics.shape, {}, physics.density, physics.friction,
-                                                       physics.restitution, meshes);
+    // The emitter's own kind is the particle's size exactly: its scale is
+    // what every other kind is measured against.
+    Result<RigidWorldDesc::Body> own = rigid_body_desc(emitter, physics.shape, {}, 1.0F, physics.density,
+                                                       physics.friction, physics.restitution, meshes);
     if (!own) {
         return own.error();
     }
     desc.bodies.push_back(std::move(own).value());
     for (const RigidBodyKind& kind : physics.bodies) {
-        Result<RigidWorldDesc::Body> body = rigid_body_desc(emitter, kind.shape, kind.mesh, kind.density,
+        Result<RigidWorldDesc::Body> body = rigid_body_desc(emitter, kind.shape, kind.mesh, kind.scale, kind.density,
                                                             kind.friction, kind.restitution, meshes);
         if (!body) {
             return body.error();
@@ -1481,15 +1487,19 @@ std::vector<BodyCollider> body_colliders(const RigidPhysics& physics, const Emit
     for (std::size_t i = 0U; i < state.alive(); ++i) {
         const std::size_t kind = i < state.body_kind.size() ? state.body_kind[i] : 0U;
         RigidShape shape = physics.shape;
+        // The kind's own size as well, so a particle meets the body the
+        // engine built rather than the one the emitter's size describes.
+        float scale = 1.0F;
         if (kind > 0U && kind <= physics.bodies.size()) {
             shape = physics.bodies[kind - 1U].shape;
+            scale = physics.bodies[kind - 1U].scale;
         }
         if (shape == RigidShape::Auto) {
             shape = geometry == Geometry::Mesh ? RigidShape::Hull : RigidShape::Sphere;
         }
         // A hull is met as the ball its size describes: its model's own
         // shape is the engine's business, not a particle's.
-        out.push_back(BodyCollider{state.position[i], state.orientation[i], 0.5F * state.size[i],
+        out.push_back(BodyCollider{state.position[i], state.orientation[i], 0.5F * state.size[i] * scale,
                                    shape == RigidShape::Box});
     }
     return out;
