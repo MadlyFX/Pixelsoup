@@ -34,6 +34,12 @@ enum class ErrorCode {
     RigidSolverMissing,
     // The rigid solver could not build or restore an emitter's world.
     RigidSolverFailure,
+    // Saved simulation state or a cache (cache.hpp) is truncated, damaged
+    // or inconsistent.
+    MalformedCache,
+    // A cache that does not belong to the effect in front of it: another
+    // package, instance seed or bake-time parameter value.
+    StaleCache,
 };
 
 struct Error final {

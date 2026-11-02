@@ -34,14 +34,27 @@ struct RigidRunnerOptions final {
     std::size_t checkpoint_count{8U};
     // Steps one track takes before the runner turns to the next.
     std::uint32_t turn{8U};
+    // Contacts a host wants reported beside what the effect reads of them
+    // (SimulationOptions::contacts); none asks for only those.
+    std::optional<ContactOptions> contacts;
 };
 
 // A track's rigid physics emitters at one tick, as Simulation holds them
 // (without solver state), indexed as the effect's emitters. The others are
 // empty.
+// - `contacts` are each emitter's contacts from the step that reached this
+//   tick, as Simulation::contacts gives them: what the effect reads of them
+//   (Break, SpawnFromContacts) and whatever the runner's options asked for
+//   besides. Empty at tick 0. A frame at a tick the runner reached by a seek
+//   carries them too: the runner always steps into a tick it hands out,
+//   never restores straight onto it.
+// - GpuSimulation::step takes a frame so its particle emitters meet these
+//   bodies and are born of these contacts.
 struct RigidFrame final {
     std::uint64_t tick{0U};
     std::vector<EmitterState> emitters;
+    std::vector<std::vector<RigidContact>> contacts;
+    std::vector<std::uint32_t> contacts_dropped;
 };
 
 class RigidTrack;

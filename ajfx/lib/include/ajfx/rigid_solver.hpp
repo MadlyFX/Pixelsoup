@@ -94,6 +94,17 @@ struct RigidContact final {
     return key(l) < key(r);
 }
 
+// Which of two contacts a full step keeps: the faster, then by
+// contact_before. A world over its limit drops the softest, so a host asking
+// for slower contacts as well never crowds out a hard one that an effect
+// reads (see contact_floor).
+[[nodiscard]] inline bool contact_harder(const RigidContact& l, const RigidContact& r) noexcept {
+    if (l.speed != r.speed) {
+        return l.speed > r.speed;
+    }
+    return contact_before(l, r);
+}
+
 // An object the artist placed, resolved from the emitter's RigidProp list:
 // the shape is chosen and measured, and the model, where one is used, is
 // already here. A Driven prop is moved by the caller through set_prop_pose
@@ -185,7 +196,8 @@ struct RigidWorldDesc final {
     // This is what bounds how many there are: bodies at rest close at
     // nothing, so a settled pile reports none however large it is.
     float contact_min_speed{0.0F};
-    // At most this many are reported. What will not fit is counted
+    // At most this many are reported: the hardest (contact_harder), then
+    // put in contact_before's order. What will not fit is counted
     // (RigidWorld::contacts_dropped) rather than quietly left out.
     std::uint32_t contact_limit{256U};
 };
@@ -257,6 +269,13 @@ public:
     // before step, which then moves whatever the prop has moved into. Fixed
     // and Loose props are never given a pose.
     virtual void set_prop_pose(std::size_t index, Vec3 position, Quat orientation) = 0;
+    // Adds `change` to the velocity of one of the emitter's bodies (its
+    // slot) or of a Loose prop (its index), waking it if it sleeps: a
+    // blast's throw, which is a change of speed whatever the mass. Called
+    // before step, in a fixed order (bodies in birth order, then props in
+    // order), so the step carries it. Fixed and Driven props, statics and
+    // slots holding no body are left alone.
+    virtual void push(RigidSide side, std::uint32_t index, Vec3 change) = 0;
     // Advances by the world's step under `gravity`.
     virtual void step(Vec3 gravity) = 0;
     [[nodiscard]] virtual RigidBodyState body(std::uint32_t slot) const = 0;

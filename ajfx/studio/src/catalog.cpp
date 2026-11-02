@@ -1,8 +1,10 @@
 #include "catalog.hpp"
 
+#include "catalog_parts.hpp"
 #include "raw_modules.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -10,1035 +12,14 @@
 namespace ajfx::studio {
 namespace {
 
-ControlDef number_control(std::string_view id, std::string_view label, float fallback, float min, float max,
-                          std::string_view unit, int decimals, std::string_view help, float hard_min = 0.0F,
-                          float hard_max = 1.0e9F) {
-    ControlDef control;
-    control.id = id;
-    control.label = label;
-    control.type = ControlType::Number;
-    control.fallback = number(fallback);
-    control.min = min;
-    control.max = max;
-    control.hard_min = hard_min;
-    control.hard_max = hard_max;
-    control.unit = unit;
-    control.decimals = decimals;
-    control.help = help;
-    return control;
-}
-
-ControlDef range_control(std::string_view id, std::string_view label, float low, float high, float min, float max,
-                         std::string_view unit, int decimals, std::string_view help) {
-    ControlDef control = number_control(id, label, 0.0F, min, max, unit, decimals, help);
-    control.type = ControlType::Range;
-    control.fallback = range(low, high);
-    return control;
-}
-
-ControlDef vec3_control(std::string_view id, std::string_view label, Value fallback, std::string_view unit,
-                        std::string_view help) {
-    ControlDef control = number_control(id, label, 0.0F, -5.0F, 5.0F, unit, 2, help, -1.0e6F, 1.0e6F);
-    control.type = ControlType::Vec3;
-    control.fallback = std::move(fallback);
-    return control;
-}
-
-// Three turns in degrees, round the upright axis, then tipped, then rolled.
-// Whole degrees: a tenth of one is not a thing an artist means.
-ControlDef angles_control(std::string_view id, std::string_view label, std::string_view help) {
-    ControlDef control = number_control(id, label, 0.0F, -180.0F, 180.0F, "deg", 0, help, -3600.0F, 3600.0F);
-    control.type = ControlType::Vec3;
-    control.fallback = vec3(0.0F, 0.0F, 0.0F);
-    return control;
-}
-
-ControlDef color_control(std::string_view id, std::string_view label, Value fallback, std::string_view help) {
-    ControlDef control;
-    control.id = id;
-    control.label = label;
-    control.type = ControlType::Color;
-    control.fallback = std::move(fallback);
-    control.hard_min = 0.0F;
-    control.hard_max = 1.0F;
-    control.help = help;
-    return control;
-}
-
-ControlDef choice_control(std::string_view id, std::string_view label, std::string_view fallback,
-                          std::vector<ChoiceDef> choices, std::string_view help) {
-    ControlDef control;
-    control.id = id;
-    control.label = label;
-    control.type = ControlType::Choice;
-    control.fallback = choice(std::string{fallback});
-    control.choices = std::move(choices);
-    control.help = help;
-    return control;
-}
-
-ControlDef toggle_control(std::string_view id, std::string_view label, bool fallback, std::string_view help) {
-    ControlDef control;
-    control.id = id;
-    control.label = label;
-    control.type = ControlType::Toggle;
-    control.fallback = toggle(fallback);
-    control.help = help;
-    return control;
-}
-
-ControlDef file_control(std::string_view id, std::string_view label, FileKind files, std::string_view help) {
-    ControlDef control;
-    control.id = id;
-    control.label = label;
-    control.type = ControlType::File;
-    control.fallback = choice({});
-    control.files = files;
-    control.help = help;
-    return control;
-}
-
-// A control a particle layer has and a rigid layer does not: the physics
-// engine turns and sizes its own bodies, and refuses what would kill or
-// hold a particle, so these are not shown there and not stored (see
-// conform_block).
-ControlDef particles_only(ControlDef control) {
-    control.layers = in_particles;
-    return control;
-}
-
-// A force's strength in a rigid layer is the world's, not each body's: one
-// number, with both ends together.
-ControlDef one_strength_in_rigid(ControlDef control) {
-    control.one_number = in_rigid;
-    return control;
-}
-
-ControlDef publishable(ControlDef control) {
-    control.publishable = true;
-    return control;
-}
-
-ControlDef detail(ControlDef control) {
-    control.level = Level::Detail;
-    return control;
-}
-
-ControlDef when(ControlDef control, std::string_view other, std::array<std::string_view, 3> values,
-                bool negate = false) {
-    control.shown_if = Condition{other, values, negate};
-    return control;
-}
-
-// A force's strength: each particle feels its own, picked between the two
-// and kept for life, so some fall heavier or drift further than others.
-ControlDef strength_control(std::string_view id, std::string_view label, float fallback, float min, float max,
-                            std::string_view unit, int decimals, std::string_view help, float hard_min = 0.0F) {
-    ControlDef control = range_control(id, label, fallback, fallback, min, max, unit, decimals, help);
-    control.hard_min = hard_min;
-    return control;
-}
-
-// Under More settings on every block that picks values at random: another
-// number deals each particle different values, for a different look with
-// the same settings.
-ControlDef seed_control() {
-    return detail(number_control("seed", "Seed", 0.0F, 0.0F, 100.0F, "", 0,
-                                 "Deals out different random values: the same settings, another look. 0 is the "
-                                 "block's own.",
-                                 0.0F, 1.0e6F));
-}
-
-ControlDef spread_control() {
-    ControlDef control = publishable(range_control(
-        "spread", "Spread", 0.0F, 20.0F, 0.0F, 180.0F, "deg", 0,
-        "How far from the direction each particle goes, between the two: 0 to 20 is a narrow cone, 0 is a beam, "
-        "180 every way. Raising the first hollows the cone, as a fountain's crown."));
-    control.hard_max = 180.0F;
-    control.number_is_high = true;
-    return control;
-}
-
 std::vector<BlockDef> make_catalog() {
     std::vector<BlockDef> blocks;
-
-    // ---------------------------------------------------------- birth
-    blocks.push_back(BlockDef{
-        .kind = "stream",
-        .title = "Stream",
-        .description = "A steady flow of new particles, so many each second.",
-        .category = Category::Birth,
-        .controls = {publishable(number_control("rate", "Amount", 30.0F, 0.0F, 500.0F, "/s", 0, "Particles born each second.",
-                                    0.0F, 1.0e6F))},
-        .keywords = "emit spawn rate continuous flow",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "burst",
-        .title = "Burst",
-        .description = "Many particles at once, once or again and again.",
-        .category = Category::Birth,
-        .controls =
-            {number_control("count", "Count", 60.0F, 1.0F, 1000.0F, "", 0, "Particles in each burst.", 1.0F, 1.0e6F),
-             number_control("time", "At", 0.0F, 0.0F, 10.0F, "s", 2, "When the first burst goes off."),
-             number_control("every", "Repeat every", 0.0F, 0.0F, 10.0F, "s", 2,
-                            "Seconds between bursts; 0 bursts once."),
-             detail(number_control("repeats", "Bursts", 0.0F, 0.0F, 20.0F, "", 0,
-                                   "How many bursts when repeating; 0 keeps going for ever.", 0.0F, 1.0e6F))},
-        .keywords = "emit spawn explosion pop once",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "shape",
-        .title = "Spawn shape",
-        .description = "Where particles are born: a point, inside a ball, on a ring...",
-        .category = Category::Birth,
-        .controls = {choice_control("shape", "Shape", "ball",
-                                    {{"point", "Point"},
-                                     {"ball", "Ball"},
-                                     {"shell", "Shell"},
-                                     {"box", "Box"},
-                                     {"disc", "Disc"},
-                                     {"ring", "Ring"}},
-                                    "Ball and Disc fill the shape; Shell and Ring use only its edge."),
-                     when(publishable(range_control("size", "Radius", 0.2F, 0.2F, 0.0F, 3.0F, "m", 2,
-                                                    "Each particle's own radius, picked between the two. Equal "
-                                                    "ends give a crisp edge; apart, a ball's edge goes soft and a "
-                                                    "shell or ring grows thick.")),
-                          "shape", {"point", "box"}, true),
-                     when(vec3_control("box", "Box size", vec3(0.4F, 0.4F, 0.4F), "m", "Width, height and depth."),
-                          "shape", {"box"}),
-                     detail(vec3_control("offset", "Offset", vec3(0.0F, 0.0F, 0.0F), "m",
-                                         "Moves the shape away from the effect's origin. Drag its dot in the "
-                                         "preview.")),
-                     seed_control()},
-        .keywords = "location position emitter area volume sphere circle",
-        .unique = true,
-    });
-    blocks.push_back(BlockDef{
-        .kind = "launch",
-        .title = "Launch",
-        .description = "The speed and direction particles set off with.",
-        .category = Category::Birth,
-        .controls = {choice_control("direction", "Direction", "up",
-                                    {{"up", "Up"}, {"out", "Outward"}, {"down", "Down"}, {"side", "Sideways"},
-                                     {"custom", "Custom"}},
-                                    "Outward throws particles every way from where they are born."),
-                     publishable(range_control("speed", "Speed", 1.0F, 2.0F, 0.0F, 20.0F, "m/s", 2,
-                                   "Each particle's speed, between the two.")),
-                     when(spread_control(), "direction", {"out"}, true),
-                     when(detail(vec3_control("custom", "Aim", vec3(0.0F, 1.0F, 0.0F), "", "The direction to aim.")),
-                          "direction", {"custom"}),
-                     seed_control()},
-        .keywords = "velocity speed throw shoot initial direction cone",
-        .unique = true,
-    });
-
-    // --------------------------------------------------------- motion
-    blocks.push_back(BlockDef{
-        .kind = "gravity",
-        .title = "Gravity",
-        .description = "Pulls particles down, as heavy things fall.",
-        .category = Category::Motion,
-        .controls = {one_strength_in_rigid(strength_control("strength", "Strength", 1.0F, 0.0F, 3.0F, "g", 2,
-                                      "1 is Earth's gravity; less for floaty things. Apart, some particles fall "
-                                      "heavier than others.")),
-                     seed_control()},
-        .keywords = "fall weight down heavy",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "rise",
-        .title = "Rise",
-        .description = "Lifts particles, as heat carries flames and smoke upwards.",
-        .category = Category::Motion,
-        .controls = {one_strength_in_rigid(strength_control("strength", "Lift", 2.0F, 0.0F, 20.0F, "m/s^2", 1,
-                                      "How hard heat pushes up, each particle between the two.")),
-                     particles_only(detail(choice_control("over_life", "Over its life", "steady",
-                                           {{"steady", "Steady"}, {"cools", "Eases as it cools"}, {"builds", "Builds up"}},
-                                           "Hot flames shoot up and slow at the tip as they cool."))),
-                     seed_control()},
-        .keywords = "buoyancy heat float up hot",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "wind",
-        .title = "Wind",
-        .description = "A steady push to one side.",
-        .category = Category::Motion,
-        .controls = {one_strength_in_rigid(strength_control("strength", "Strength", 1.5F, 0.0F, 20.0F, "m/s^2", 1,
-                                      "How hard it pushes, each particle between the two: light ones blow further.")),
-                     number_control("heading", "Heading", 0.0F, 0.0F, 360.0F, "deg", 0,
-                                    "Where it blows: 0 is along +X, 90 along -Z. Drag its arrow in the preview.",
-                                    0.0F, 360.0F),
-                     seed_control()},
-        .keywords = "breeze push sideways direction",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "turbulence",
-        .title = "Turbulence",
-        .description = "Swirling, natural motion, like air stirring.",
-        .category = Category::Motion,
-        .controls = {publishable(strength_control("strength", "Amount", 1.5F, 0.0F, 10.0F, "", 2,
-                                                  "How strongly the air churns, each particle between the two.")),
-                     number_control("size", "Swirl size", 0.6F, 0.05F, 5.0F, "m", 2,
-                                    "Small swirls make jittery motion; large ones slow rolling.", 0.01F, 1000.0F),
-                     detail(publishable(number_control("churn", "Churn", 0.4F, 0.0F, 3.0F, "", 2,
-                                           "How quickly the swirls themselves change."))),
-                     detail(number_control("roll", "Rolls upward", 0.0F, 0.0F, 5.0F, "m/s", 2,
-                                           "The swirls travel up at this speed, so particles rising about as fast "
-                                           "ride the same eddy and curl, as in a real plume.",
-                                           0.0F, 100.0F)),
-                     detail(choice_control("over_life", "Over its life", "steady",
-                                           {{"steady", "Steady"}, {"grows", "Calm, then breaks up"},
-                                            {"settles", "Settles down"}},
-                                           "Flames are smooth at the base and break up towards the tip.")),
-                     seed_control()},
-        .keywords = "noise curl swirl chaos organic flow rolling eddy plume",
-        .layers = in_particles,
-        .only_in = "Turbulence stirs each particle on its own; a physics engine moves whole bodies, so a rigid layer has no place for it.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "drag",
-        .title = "Air resistance",
-        .description = "Slows particles down over time.",
-        .category = Category::Motion,
-        .controls = {publishable(one_strength_in_rigid(strength_control("amount", "Amount", 1.0F, 0.0F, 10.0F, "", 2,
-                                                  "The share of speed lost each second, each particle between the "
-                                                  "two: light ones slow sooner."))),
-                     seed_control()},
-        .keywords = "drag friction slow damping",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "swirl",
-        .title = "Swirl",
-        .description = "Spins particles around an axis, like a whirlwind.",
-        .category = Category::Motion,
-        .controls = {publishable(strength_control("strength", "Strength", 3.0F, -20.0F, 20.0F, "m/s^2", 1,
-                                                  "Each particle between the two. Negative spins the other way.",
-                                                  -1.0e6F)),
-                     choice_control("axis", "Axis", "vertical", {{"vertical", "Vertical"}, {"horizontal", "Horizontal"}},
-                                    "The axis particles turn around."),
-                     detail(vec3_control("center", "Center", vec3(0.0F, 0.0F, 0.0F), "m",
-                                         "Where the axis passes through. Drag its dot in the preview.")),
-                     seed_control()},
-        .keywords = "vortex tornado spin orbit whirl",
-        .layers = in_particles,
-        .only_in = "Swirl pulls each particle round a line; a physics engine moves whole bodies, so a rigid layer has no place for it.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "draw_in",
-        .title = "Draw in",
-        .description = "Pulls particles in towards the middle near the base, as a fire draws in air, so flames "
-                       "gather into tongues.",
-        .category = Category::Motion,
-        .controls = {strength_control("strength", "Pull", 6.0F, 0.0F, 30.0F, "/s^2", 1,
-                                      "How hard particles are pulled towards the middle, for each metre away; each "
-                                      "particle between the two."),
-                     number_control("height", "Fades by", 1.0F, 0.0F, 5.0F, "m", 2,
-                                    "The pull fades to nothing by this height. 0 pulls at every height.", 0.0F,
-                                    1000.0F),
-                     detail(vec3_control("center", "Center", vec3(0.0F, 0.0F, 0.0F), "m",
-                                         "The base of the line particles are pulled to. Drag its dot in the "
-                                         "preview.")),
-                     seed_control()},
-        .keywords = "converge inflow gather pinch tongue entrain fire",
-        .unique = true,
-        .layers = in_particles,
-        .only_in = "Draw in gathers each particle towards a line; a physics engine moves whole bodies, so a rigid layer has no place for it.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "attract",
-        .title = "Attract",
-        .description = "Pulls particles towards a point, or pushes them away.",
-        .category = Category::Motion,
-        .controls = {publishable(strength_control("strength", "Strength", 4.0F, -30.0F, 30.0F, "m/s^2", 1,
-                                                  "Each particle between the two. Negative pushes particles away.",
-                                                  -1.0e6F)),
-                     vec3_control("point", "Point", vec3(0.0F, 1.0F, 0.0F), "m",
-                                  "Where they are pulled to. Drag its dot in the preview."),
-                     detail(publishable(number_control("reach", "Reach", 0.0F, 0.0F, 10.0F, "m", 2,
-                                           "Beyond this distance there is no pull; 0 reaches everywhere."))),
-                     seed_control()},
-        .keywords = "attractor magnet pull push repel gather",
-        .layers = in_particles,
-        .only_in = "Attract pulls each particle to a point; a physics engine moves whole bodies, so a rigid layer has no place for it.",
-    });
-
-    // ----------------------------------------------------------- look
-    blocks.push_back(BlockDef{
-        .kind = "appearance",
-        .title = "Appearance",
-        .description = "What each particle looks like: glowing, smoky, solid or a chunk of debris.",
-        .category = Category::Look,
-        .controls =
-            {choice_control("material", "Material", "glow",
-                            {{"glow", "Glow"},
-                             {"smoke", "Smoke", in_particles},
-                             {"solid", "Solid", in_particles},
-                             {"model", "Model"},
-                             {"trail", "Trail", in_particles}},
-                            "Model draws each piece as a 3D model, which is what a solid thing is. Glow adds "
-                            "light (fire, sparks, magic). Smoke and Solid are flat pictures that cover what is "
-                            "behind, and Trail draws one ribbon through the layer's particles."),
-             when(choice_control("texture", "Texture", "dot",
-                                 {{"dot", "Soft dot"},
-                                  {"glow", "Hot glow"},
-                                  {"spark", "Spark"},
-                                  {"flame", "Flame"},
-                                  {"smoke", "Smoke puff"},
-                                  {"wisp", "Wisp"},
-                                  {"star", "Star"},
-                                  {"ring", "Ring"},
-                                  {"file", "From a file"}},
-                                 "The picture each particle carries. Flame and Smoke puff animate over its life. "
-                                 "From a file uses a picture of your own."),
-                  "material", {"model"}, true),
-             when(file_control("texture_file", "Picture", FileKind::Image,
-                               "A PNG, JPEG, TGA or BMP. Its alpha shapes each particle; the export carries the "
-                               "picture, so the media server needs no copy of the file."),
-                  "texture", {"file"}),
-             when(number_control("columns", "Frames across", 1.0F, 1.0F, 16.0F, "", 0,
-                                 "For a flipbook: how many frames the picture holds side by side. They play left "
-                                 "to right, top to bottom over each particle's life.",
-                                 1.0F, 64.0F),
-                  "texture", {"file"}),
-             when(number_control("rows", "Frames down", 1.0F, 1.0F, 16.0F, "", 0,
-                                 "For a flipbook: how many rows of frames the picture holds.", 1.0F, 64.0F),
-                  "texture", {"file"}),
-             when(choice_control("mesh", "Model", "chip",
-                                 {{"chip", "Chip"}, {"shard", "Shard"}, {"rock", "Rock"}, {"cube", "Cube"},
-                                  {"file", "From a file"}},
-                                 "The solid shape each piece of debris has. From a file uses a model of your own."),
-                  "material", {"model"}),
-             when(file_control("mesh_file", "Model", FileKind::Model,
-                               "An OBJ, glTF or GLB. It is centred and scaled to fit a 1 m box, so Size sets how "
-                               "big each piece is."),
-                  "mesh", {"file"}),
-             when(choice_control("facing", "Facing", "camera",
-                                 {{"camera", "Face camera"}, {"motion", "Stretch along motion"}},
-                                 "Stretching along motion turns sparks and rain into streaks."),
-                  "material", {"model", "trail"}, true),
-             when(number_control("stretch", "Stretch", 0.04F, 0.0F, 0.3F, "s", 3,
-                                 "How long a streak is: the distance travelled in this many seconds."),
-                  "facing", {"motion"}),
-             particles_only(when(toggle_control("spin", "Random spin", false,
-                                                "Turns each particle's picture to a random angle."),
-                                 "material", {"model", "trail"}, true)),
-             detail(when(number_control("soft", "Soft edges", 0.15F, 0.0F, 1.0F, "m", 2,
-                                        "Fades particles out as they meet the floor or objects, instead of a hard "
-                                        "line."),
-                         "material", {"model"}, true)),
-             detail(when(toggle_control("sort", "Depth sort", true,
-                                        "Draws smoke and solid particles back to front. Glow never needs it."),
-                         "material", {"smoke", "solid"})),
-             detail(when(toggle_control("blend", "Smooth animation", true,
-                                        "Cross-fades between a flipbook's frames."),
-                         "texture", {"flame", "smoke", "file"})),
-             when(seed_control(), "spin", {"on"})},
-        .keywords = "material texture sprite render look blend mesh ribbon trail additive",
-        .unique = true,
-        .detachable = false,
-    });
-    blocks.push_back(BlockDef{
-        .kind = "color",
-        .title = "Color",
-        .description = "The colour and brightness particles have, and how it changes as they age.",
-        .category = Category::Look,
-        .controls =
-            {publishable(color_control("color", "Color", color(1.0F, 0.55F, 0.2F), "The colour each particle starts with.")),
-             range_control("brightness", "Brightness", 1.0F, 1.0F, 0.0F, 20.0F, "x", 1,
-                           "Each particle's, picked between the two. Above 1, glowing particles bloom and light up "
-                           "their surroundings."),
-             number_control("opacity", "Opacity", 1.0F, 0.0F, 1.0F, "", 2, "How solid each particle is.", 0.0F, 1.0F),
-             choice_control("over_life", "As it ages", "constant",
-                            {{"constant", "Stays"},
-                             {"fire", "Burns out"},
-                             {"cool", "Cools"},
-                             {"darken", "Darkens"},
-                             {"shift", "Shifts"}},
-                            "Burns out runs hot white to yellow, orange and a dark ember."),
-             when(color_control("end_color", "Becomes", color(0.35F, 0.1F, 0.8F), "The colour it shifts to."),
-                  "over_life", {"shift"}),
-             detail(toggle_control("mix", "Two colors", false, "Each particle picks a colour between two.")),
-             detail(when(color_control("second", "Second color", color(1.0F, 0.8F, 0.35F),
-                                       "The other end of the mix."),
-                         "mix", {"on"})),
-             seed_control()},
-        .keywords = "colour tint hue brightness emissive gradient over life hdr",
-        .unique = true,
-    });
-    blocks.push_back(BlockDef{
-        .kind = "size",
-        .title = "Size",
-        .description = "How big particles are, and whether they grow or shrink.",
-        .category = Category::Look,
-        .controls = {publishable(range_control("size", "Size", 0.05F, 0.1F, 0.0F, 2.0F, "m", 3,
-                                   "Each particle's size across, between the two.")),
-                     particles_only(choice_control("over_life", "As it ages", "constant",
-                                    {{"constant", "Stays"},
-                                     {"grow", "Grows"},
-                                     {"shrink", "Shrinks"},
-                                     {"pop", "Pops"},
-                                     {"swell", "Swells"}},
-                                    "Pops grows quickly then shrinks away; Swells grows slowly.")),
-                     particles_only(when(number_control("change", "Grows to", 3.0F, 1.0F, 10.0F, "x", 1,
-                                         "How much bigger it ends than it starts.", 1.0F, 1000.0F),
-                          "over_life", {"grow", "swell"})),
-                     seed_control()},
-        .keywords = "scale scale over life grow shrink big small",
-        .unique = true,
-    });
-    blocks.push_back(BlockDef{
-        .kind = "spin",
-        .title = "Spin",
-        .description = "Turns each particle's picture as it moves, slowing as it goes: flames twist, smoke rolls.",
-        .category = Category::Look,
-        .controls = {range_control("speed", "Speed", 30.0F, 120.0F, 0.0F, 720.0F, "deg/s", 0,
-                                   "How fast each particle turns, picked between the two."),
-                     detail(toggle_control("both_ways", "Both ways", true,
-                                           "Half turn one way and half the other.")),
-                     detail(number_control("slows", "Slows", 0.5F, 0.0F, 5.0F, "", 2,
-                                           "The share of its spin each particle loses per second.")),
-                     seed_control()},
-        .keywords = "rotate rotation twist turn roll angular",
-        .unique = true,
-        .layers = in_particles,
-        .only_in = "Spin turns flat sprites; a solid body turns as it tumbles, so a rigid layer has no place for it.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "fade",
-        .title = "Fade",
-        .description = "Fades particles in when born and out before they die, so none pop.",
-        .category = Category::Look,
-        .controls = {number_control("in", "Fade in", 10.0F, 0.0F, 50.0F, "% of life", 0, "", 0.0F, 100.0F),
-                     number_control("out", "Fade out", 40.0F, 0.0F, 100.0F, "% of life", 0, "", 0.0F, 100.0F)},
-        .keywords = "alpha opacity transparency dissolve",
-        .unique = true,
-    });
-
-    // -------------------------------------------------------- contact
-    blocks.push_back(BlockDef{
-        .kind = "ground",
-        .title = "Ground",
-        .description = "Particles hit the ground and bounce, slide, stick or vanish.",
-        .category = Category::Contact,
-        .controls = {choice_control("response", "On contact", "bounce",
-                                    {{"bounce", "Bounce"}, {"slide", "Slide"}, {"stick", "Stick"},
-                                     // A body leaves the world when its life ends, never on contact.
-                                     {"vanish", "Vanish", in_particles}},
-                                    "What a particle does when it reaches the ground."),
-                     when(publishable(number_control("bounce", "Bounciness", 0.4F, 0.0F, 1.0F, "", 2,
-                                         "1 bounces back as fast as it arrived.")),
-                          "response", {"bounce"}),
-                     when(publishable(number_control("friction", "Friction", 0.2F, 0.0F, 1.0F, "", 2,
-                                         "How quickly sliding comes to a stop.", 0.0F, 1.0F)),
-                          "response", {"bounce", "slide"}),
-                     detail(number_control("height", "Height", 0.0F, -2.0F, 2.0F, "m", 2,
-                                           "Where the ground is.", -1.0e6F))},
-        .keywords = "floor collide collision plane bounce land",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "pieces",
-        .title = "Hits solid objects",
-        .description = "Particles meet everything solid in the effect instead of passing through it.",
-        .category = Category::Contact,
-        .controls =
-            {choice_control("response", "On contact", "stick",
-                            {{"stick", "Stick"}, {"slide", "Slide"}, {"bounce", "Bounce"}, {"vanish", "Vanish"}},
-                            "What a particle does when it reaches something solid. Sticking is what makes "
-                            "snow settle on what it falls on."),
-             when(number_control("bounce", "Bounciness", 0.3F, 0.0F, 1.0F, "", 2,
-                                 "1 bounces back as fast as it arrived."),
-                  "response", {"bounce"}),
-             when(number_control("friction", "Friction", 0.4F, 0.0F, 1.0F, "", 2,
-                                 "How quickly sliding comes to a stop.", 0.0F, 1.0F),
-                  "response", {"bounce", "slide"})},
-        .keywords = "land settle on crates rocks debris pieces bodies rigid physics snow dust rest lie "
-                    "collide objects solid",
-        .unique = true,
-        // Which objects it meets is every rigid layer of the page, not a
-        // field an artist fills in.
-        .detachable = false,
-        .layers = in_particles,
-        .only_in = "A rigid layer's own pieces already meet each other, so this is for a particle layer "
-                   "beside them.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "sphere",
-        .title = "Sphere collider",
-        .description = "Keeps particles out of a ball, or inside it.",
-        .category = Category::Contact,
-        .controls = {vec3_control("center", "Center", vec3(0.0F, 1.0F, 0.0F), "m", ""),
-                     publishable(number_control("radius", "Radius", 0.5F, 0.0F, 5.0F, "m", 2, "")),
-                     particles_only(toggle_control("inside", "Keep inside", false,
-                                    "Holds particles within the ball instead.")),
-                     publishable(number_control("bounce", "Bounciness", 0.4F, 0.0F, 1.0F, "", 2, "")),
-                     detail(publishable(number_control("friction", "Friction", 0.1F, 0.0F, 1.0F, "", 2, "", 0.0F, 1.0F))),
-                     particles_only(detail(toggle_control("vanish", "Vanish on contact", false, "")))},
-        .keywords = "collide collision ball obstacle",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "box",
-        .title = "Box collider",
-        .description = "Keeps particles out of a box, or inside it.",
-        .category = Category::Contact,
-        .controls = {vec3_control("center", "Center", vec3(0.0F, 0.5F, 0.0F), "m", ""),
-                     vec3_control("size", "Size", vec3(1.0F, 1.0F, 1.0F), "m", "Width, height and depth."),
-                     particles_only(toggle_control("inside", "Keep inside", false,
-                                    "Holds particles within the box instead.")),
-                     publishable(number_control("bounce", "Bounciness", 0.4F, 0.0F, 1.0F, "", 2, "")),
-                     detail(publishable(number_control("friction", "Friction", 0.1F, 0.0F, 1.0F, "", 2, "", 0.0F, 1.0F))),
-                     particles_only(detail(toggle_control("vanish", "Vanish on contact", false, "")))},
-        .keywords = "collide collision cube wall obstacle container",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "mesh_collider",
-        .title = "Mesh collider",
-        .description = "Particles bounce off a 3D model of your own: a table, rocks, a wall.",
-        .category = Category::Contact,
-        .controls = {file_control("file", "Model", FileKind::Model,
-                                  "An OBJ, glTF or GLB. Only its shape is used: Studio turns it into a distance field "
-                                  "the export carries, so the model itself is not in the effect."),
-                     vec3_control("position", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
-                                  "Where the model's origin sits."),
-                     number_control("scale", "Scale", 1.0F, 0.1F, 4.0F, "x", 2,
-                                    "Multiplies the model's own size. Models in centimetres want 0.01.", 0.001F,
-                                    1000.0F),
-                     choice_control("solid", "Treat as", "auto",
-                                    {{"auto", "Automatic"}, {"solid", "Solid"}, {"surface", "Thin surface"}},
-                                    "Solid keeps particles out of the model's inside. A thin surface (a floor, "
-                                    "terrain, an open shape) keeps them off both of its sides. Automatic is solid "
-                                    "when the model is closed."),
-                     toggle_control("inside", "Keep inside", false, "Holds particles within the model instead."),
-                     publishable(number_control("bounce", "Bounciness", 0.4F, 0.0F, 1.0F, "", 2, "")),
-                     detail(publishable(number_control("friction", "Friction", 0.1F, 0.0F, 1.0F, "", 2, "", 0.0F, 1.0F))),
-                     detail(choice_control("detail", "Detail", "medium",
-                                           {{"coarse", "Coarse"}, {"medium", "Medium"}, {"fine", "Fine"}},
-                                           "How closely the field follows the model. Finer catches small parts and "
-                                           "makes a larger export.")),
-                     detail(toggle_control("vanish", "Vanish on contact", false, ""))},
-        .keywords = "collide collision mesh model import obj gltf glb obstacle terrain sdf",
-        // Its distance field is baked from the file; a Module could not name it.
-        .detachable = false,
-        .layers = in_particles,
-        .only_in = "A rigid layer collides with a model by placing it as a prop, which is solid and exact.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "tumble",
-        .title = "Tumble",
-        .description = "Particles become small solid bodies that spin, roll and come to rest.",
-        .category = Category::Contact,
-        .controls = {publishable(range_control("spin", "Spin", 180.0F, 720.0F, 0.0F, 2000.0F, "deg/s", 0,
-                                   "How fast each piece spins when thrown.")),
-                     particles_only(publishable(number_control("roundness", "Roundness", 0.1F, 0.0F, 1.0F, "", 2,
-                                                "0 for flat chips that slide to a stop, 1 for stones that roll.",
-                                                0.0F, 1.0F))),
-                     particles_only(detail(publishable(number_control("damping", "Spin damping", 1.0F, 0.0F, 10.0F, "", 2,
-                                           "How quickly spinning slows.")))),
-                     particles_only(detail(publishable(number_control("settle", "Settle below", 0.2F, 0.0F, 2.0F, "m/s", 2,
-                                           "Slower contacts stop instead of bouncing, so piles settle.")))),
-                     particles_only(detail(number_control("contact", "Contact size", 0.4F, 0.05F, 1.0F, "", 2,
-                                           "The ball each piece collides as, as a share of its size."))),
-                     seed_control()},
-        .keywords = "rigid body debris physics rotate rolling",
-        .unique = true,
-    });
-    // --------------------------------------------------- rigid physics
-    // One thing in the layer's world, and the blocks under it are its own.
-    // It is the merge of what Pile and Prop were: an artist who wants a
-    // crate to fracture places an Object and gives it a Break, rather than
-    // reaching for a pile of one and finding that a second crate has to be
-    // a prop, which cannot break at all.
-    blocks.push_back(BlockDef{
-        .kind = "object",
-        .title = "Object",
-        .description = "One thing in this layer: its model, how many, and what it comes apart into.",
-        .category = Category::Physics,
-        .controls =
-            {choice_control("model", "Model", "cube",
-                            {{"layer", "The layer's own"},
-                             {"cube", "Cube"},
-                             {"rock", "Rock"},
-                             {"chip", "Chip"},
-                             {"shard", "Shard"},
-                             {"file", "From a file"}},
-                            "What this object looks like, and what it hits things as. The layer's own draws it "
-                            "as every other piece in the layer is drawn."),
-             when(file_control("model_file", "Model file", FileKind::Model,
-                               "An OBJ, glTF or GLB. It is centred and fitted to a 1 m box, so Size sets how big "
-                               "the object is."),
-                  "model", {"file"}),
-             choice_control("arrange", "How many", "one",
-                            {{"one", "Just one"}, {"heap", "A heap"}, {"stack", "A stack"}},
-                            "Just one stands where you put it. A heap is a cone of them, as rocks or rubble "
-                            "lie. A stack fills a footprint layer by layer, as a wall of bricks or a pile of "
-                            "crates."),
-             when(number_control("count", "Pieces", 9.0F, 2.0F, 1000.0F, "", 0, "How many the heap or stack holds.",
-                                 2.0F, 20000.0F),
-                  "arrange", {"heap", "stack"}),
-             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
-                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it "
-                                 "slumps when let go.",
-                                 5.0F, 85.0F),
-                  "arrange", {"heap"}),
-             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.",
-                                 0.01F),
-                  "arrange", {"stack"}),
-             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2,
-                                 "The stack's footprint front to back.", 0.01F),
-                  "arrange", {"stack"}),
-             number_control("size", "Size", 0.4F, 0.05F, 5.0F, "m", 2,
-                            "The object's longest side. One model serves at any size.", 0.01F),
-             vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
-                          "Where it sits: the middle of the object, or of a heap or stack's base."),
-             angles_control("turn", "Turn", "How the object is turned where it stands."),
-             choice_control("motion", "It can", "loose",
-                            {{"loose", "Be knocked about"}, {"fixed", "Stay put"}, {"driven", "Be moved"}},
-                            "Be knocked about is an ordinary piece: gravity and the others move it. Stay put for "
-                            "a floor, a wall or a bucket that only has to hold. Be moved to tip or swing it "
-                            "yourself, shoving whatever is in the way."),
-             choice_control("collides", "Collides as", "own",
-                            {{"own", "Its own shape"},
-                             {"ball", "A ball"},
-                             {"block", "A block"},
-                             {"bucket", "A bucket"},
-                             {"crate", "A hollow crate"},
-                             {"tube", "A tube"}},
-                            "What the other pieces actually hit. Its own shape follows the model. A bucket, a "
-                            "hollow crate and a tube are hollow, so pieces sit inside them, and only one object "
-                            "on its own can be hollow."),
-             when(number_control("wall", "Wall thickness", 0.05F, 0.01F, 0.3F, "m", 2,
-                                 "How thick the sides and bottom are.", 0.001F),
-                  "collides", {"bucket", "crate", "tube"}),
-             when(number_control("radius", "Radius", 0.5F, 0.05F, 2.0F, "m", 2, "How wide across it is.", 0.01F),
-                  "collides", {"bucket", "tube", "ball"}),
-             when(number_control("height", "Height", 0.8F, 0.05F, 3.0F, "m", 2, "How tall it is.", 0.01F),
-                  "collides", {"bucket", "tube"}),
-             when(vec3_control("extent", "Size across", vec3(0.6F, 0.6F, 0.6F), "m",
-                               "How wide, tall and deep it is."),
-                  "collides", {"block"}),
-             when(vec3_control("move_to", "Moves to", vec3(0.0F, 0.0F, 0.0F), "m",
-                               "Where it ends up. The same position leaves it where it is and only the turn "
-                               "changes."),
-                  "motion", {"driven"}),
-             when(angles_control("turn_to", "Turns to",
-                                 "How it is turned when the move is done. Past 90 degrees a bucket is upside "
-                                 "down and whatever it held falls out."),
-                  "motion", {"driven"}),
-             when(number_control("move_at", "Starts moving at", 0.5F, 0.0F, 10.0F, "s", 2, "When the move begins."),
-                  "motion", {"driven"}),
-             when(number_control("move_over", "Taking", 0.5F, 0.0F, 10.0F, "s", 2,
-                                 "How long the move takes. 0 puts it there at once."),
-                  "motion", {"driven"}),
-             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
-                            "When it is let go. Until then it stands still unless something knocks it; 0 lets "
-                            "it go as soon as the effect plays."),
-             detail(toggle_control("own_material", "Made of its own thing", false,
-                                   "Off, the object is made of what the layer's Bodies row says. On, it has its "
-                                   "own, so a steel ball among wooden crates is heavier and bouncier.")),
-             detail(when(number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
-                                        "How much it grips what it touches.", 0.0F, 1.0F),
-                         "own_material", {"on"})),
-             detail(when(number_control("bounce", "Bounciness", 0.15F, 0.0F, 1.0F, "", 2,
-                                        "1 bounces back as fast as it arrived.", 0.0F, 1.0F),
-                         "own_material", {"on"})),
-             detail(when(number_control("density", "Density", 2400.0F, 100.0F, 8000.0F, "kg/m^3", 0,
-                                        "How heavy it is for its size. Wood is about 600, stone 2400.", 1.0F),
-                         "own_material", {"on"})),
-             detail(when(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
-                                        "How far apart they start, as a share of the largest piece's reach. "
-                                        "Below 1 they start packed closer, and may overlap until they fall.",
-                                        0.5F, 4.0F),
-                         "arrange", {"heap", "stack"})),
-             detail(when(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
-                                        "How far each one is nudged off its place, so it is not a perfect "
-                                        "stack.",
-                                        0.0F, 1.0F),
-                         "arrange", {"heap", "stack"})),
-             detail(when(number_control("sides", "Sides", 12.0F, 3.0F, 48.0F, "", 0,
-                                        "How many flat sides a round shape is built from. More is rounder and "
-                                        "costs a little more.",
-                                        3.0F, 64.0F),
-                         "collides", {"bucket", "tube"})),
-             seed_control()},
-        .keywords = "object thing crate box rock bucket wall barrel model import obj gltf glb place pile heap "
-                    "stack prop scenery knock over tip spill fracture break piece",
-        // Its shape, pose and arrangement are the physics world's, not one
-        // module's: the compiler makes a body kind or a prop of it.
-        .detachable = false,
-        .layers = in_rigid,
-        .only_in = "An object stands in a physics world, so it needs a rigid physics layer.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "prop",
-        .title = "Prop",
-        .description = "An object you place in the scene for the pieces to land on, fall out of or knock over.",
-        .category = Category::Physics,
-        .controls =
-            {file_control("model", "Model", FileKind::Model,
-                          "The model to place. Its longest side becomes its size, so a bucket and a crate are "
-                          "set up the same way."),
-             choice_control("motion", "It can", "fixed",
-                            {{"fixed", "Stay put"}, {"driven", "Be moved"}, {"loose", "Be knocked about"}},
-                            "Stay put for a floor, a wall or a bucket that only holds; only a prop that stays "
-                            "put can collide as its own shape. Be moved to tip or swing it yourself, shoving "
-                            "whatever is in the way. Be knocked about to let the pieces move it."),
-             vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m", "Where the middle of the prop sits."),
-             angles_control("turn", "Turn", "How the prop is turned where it stands."),
-             number_control("size", "Size", 1.0F, 0.1F, 5.0F, "m", 2,
-                            "The prop's longest side. The model is fitted to it, so one model serves at any "
-                            "size.",
-                            0.01F),
-             choice_control("shape", "Collides as", "model",
-                            {{"model", "Its own shape"},
-                             {"bucket", "A bucket"},
-                             {"crate", "A crate"},
-                             {"tube", "A tube"},
-                             {"ball", "A ball"},
-                             {"block", "A block"}},
-                            "What the pieces actually hit. Its own shape follows the model exactly, hollows and "
-                            "all, but only a prop that stays put can use it. The rest are worked out from their "
-                            "measurements and can move, and a bucket, crate or tube is hollow, so pieces sit "
-                            "inside it."),
-             when(number_control("wall", "Wall thickness", 0.05F, 0.01F, 0.3F, "m", 2,
-                                 "How thick the sides and bottom are. Thinner holds more; thicker survives a "
-                                 "harder knock.",
-                                 0.001F),
-                  "shape", {"bucket", "crate", "tube"}),
-             when(number_control("radius", "Radius", 0.5F, 0.05F, 2.0F, "m", 2, "How wide across it is.", 0.01F),
-                  "shape", {"bucket", "tube", "ball"}),
-             when(number_control("height", "Height", 0.8F, 0.05F, 3.0F, "m", 2, "How tall it is.", 0.01F),
-                  "shape", {"bucket", "tube"}),
-             when(vec3_control("extent", "Size across", vec3(0.6F, 0.6F, 0.6F), "m",
-                               "How wide, tall and deep it is."),
-                  "shape", {"crate", "block"}),
-             when(vec3_control("move_to", "Moves to", vec3(0.0F, 0.0F, 0.0F), "m",
-                               "Where it ends up. The same position leaves it where it is, and only the turn "
-                               "changes."),
-                  "motion", {"driven"}),
-             when(angles_control("turn_to", "Turns to", "How it is turned when the move is done. Past 90 degrees "
-                                                        "a bucket is upside down and whatever it held falls out."),
-                  "motion", {"driven"}),
-             when(number_control("move_at", "Starts moving at", 0.5F, 0.0F, 10.0F, "s", 2,
-                                 "When the move begins."),
-                  "motion", {"driven"}),
-             when(number_control("move_over", "Taking", 0.5F, 0.0F, 10.0F, "s", 2,
-                                 "How long the move takes. 0 puts it there at once."),
-                  "motion", {"driven"}),
-             detail(number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
-                                   "How much the pieces grip it.", 0.0F, 1.0F)),
-             detail(number_control("bounce", "Bounciness", 0.1F, 0.0F, 1.0F, "", 2,
-                                   "How hard the pieces bounce off it.", 0.0F, 1.0F)),
-             detail(when(number_control("density", "Density", 600.0F, 100.0F, 8000.0F, "kg/m^3", 0,
-                                        "How heavy it is for its size. Wood is about 600, stone 2400.", 1.0F),
-                         "motion", {"loose"})),
-             detail(when(number_control("sides", "Sides", 12.0F, 3.0F, 48.0F, "", 0,
-                                        "How many flat sides a round shape is built from. More is rounder and "
-                                        "costs a little more.",
-                                        3.0F, 64.0F),
-                         "shape", {"bucket", "tube"}))},
-        .keywords = "prop object bucket crate wall barrel pipe model import obj gltf glb place static kinematic "
-                    "knock over tip spill scenery",
-        // Its shape and pose are the physics world's, not a module's.
-        .detachable = false,
-        // Read-only remnant: Object does what this did, and a page saved
-        // before Object turns its Prop blocks into Objects as it loads
-        // (document_io.cpp). The definition stays so such a page can still
-        // be read; it is never offered and never lands in a layer.
-        .layers = in_no_layer,
-        .only_in = "A prop is an object in a physics world, so it needs a rigid physics layer.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "break",
-        .title = "Break",
-        .description = "The layer's pieces come apart when something hits them hard enough.",
-        .category = Category::Physics,
-        .controls =
-            {choice_control("into", "Comes apart into", "parts",
-                            {{"parts", "Parts you place"}, {"cut", "Pieces cut from its model"}},
-                            "Parts you place are the Part blocks beside this one: a lid, a wall, whatever you "
-                            "put there. Pieces cut from its model cut the model itself into cells that fill "
-                            "it, so the pieces are the piece rather than models laid beside one another."),
-             when(number_control("cells", "Into", 8.0F, 2.0F, 64.0F, "", 0,
-                                 "How many pieces to cut it into. More is finer rubble and costs more to "
-                                 "simulate.",
-                                 2.0F, 64.0F),
-                  "into", {"cut"}),
-             when(number_control("spread", "Cut towards the middle", 0.0F, 0.0F, 1.0F, "", 2,
-                                 "0 cuts evenly through the piece. Towards 1 the cells crowd at its middle, so "
-                                 "it shatters finely there and holds together at its edges.",
-                                 0.0F, 1.0F),
-                  "into", {"cut"}),
-             when(detail(number_control("cut_seed", "Cut seed", 0.0F, 0.0F, 999.0F, "", 0,
-                                        "Changes how the model is cut, without changing anything else.", 0.0F,
-                                        1.0e6F)),
-                  "into", {"cut"}),
-             number_control("force", "Comes apart when hit at", 4.0F, 0.5F, 30.0F, "m/s", 1,
-                            "How fast something has to arrive to break a piece apart. A piece dropped from a "
-                            "metre lands at about four and a half.",
-                            0.1F),
-             number_control("scatter", "Throwing the parts", 1.0F, 0.0F, 10.0F, "m/s", 2,
-                            "How hard the parts are thrown outwards as they come loose.", 0.0F),
-             number_control("spin", "And tumbling them", 180.0F, 0.0F, 1440.0F, "deg/s", 0,
-                            "How fast the parts tumble as they come loose.", 0.0F)},
-        .keywords = "break shatter smash fracture crack apart destroy panels planks shards splinters debris",
-        // One per Object rather than one per layer: a layer of several
-        // things each comes apart in its own way, and the Object above a
-        // Break is the one that breaks.
-        .unique = false,
-        // What it breaks into is the Part blocks under it.
-        .detachable = false,
-        .layers = in_rigid,
-        .only_in = "Only a piece in a physics world can come apart, so breaking needs a rigid physics layer.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "part",
-        .title = "Part",
-        .description = "One part a piece comes apart into: a panel, a plank or a shard.",
-        .category = Category::Physics,
-        .controls =
-            {choice_control("model", "Shape", "shard",
-                            {{"shard", "Shard"},
-                             {"chip", "Chip"},
-                             {"rock", "Rock"},
-                             {"cube", "Cube"},
-                             {"file", "From a file"}},
-                            "The model this part is. It both looks like this model and hits things as its "
-                            "shape, so a panel lands flat and a splinter lands thin. From a file uses a model "
-                            "of your own: a panel, a plank, a shard."),
-             when(file_control("model_file", "Model", FileKind::Model,
-                               "An OBJ, glTF or GLB. It is centred and scaled to fit a 1 m box, so Size sets "
-                               "how big the part is beside the piece."),
-                  "model", {"file"}),
-             number_control("size", "Size", 0.4F, 0.05F, 1.0F, "", 2,
-                            "How big the part is beside the whole piece. 0.4 is a part a little under half the "
-                            "piece across.",
-                            0.01F, 1.0F),
-             vec3_control("at", "Sat at", vec3(0.0F, 0.5F, 0.0F), "",
-                          "Where this part sat in the piece, from its middle, as a share of the piece's size: "
-                          "0.5 up is its lid, 0.5 out to one side is that wall. It is thrown out this way as "
-                          "it comes loose."),
-             angles_control("turn", "Turned", "How the part is turned where it sat.")},
-        .keywords = "part panel plank shard splinter chunk lid wall side piece fragment break into",
-        .detachable = false,
-        .layers = in_rigid,
-        .only_in = "A part is what a piece of a physics world comes apart into, so it needs a rigid physics "
-                   "layer.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "pile",
-        .title = "Pile",
-        .description = "Solid pieces already stacked when the effect starts, that collapse when it plays.",
-        .category = Category::Physics,
-        .controls =
-            {number_control("count", "Pieces", 150.0F, 1.0F, 1000.0F, "", 0, "How many pieces the pile holds.", 1.0F,
-                            20000.0F),
-             choice_control("shape", "Stacked as", "heap", {{"heap", "Heap"}, {"stack", "Stack"}},
-                            "A heap is a cone of pieces, as rocks or rubble lie. A stack fills a footprint layer "
-                            "by layer, as a wall of bricks or a pile of crates."),
-             when(number_control("slope", "Slope", 55.0F, 15.0F, 80.0F, "deg", 0,
-                                 "How steep the heap's sides are. Steeper than the pieces can hold, and it slumps "
-                                 "when let go.",
-                                 5.0F, 85.0F),
-                  "shape", {"heap"}),
-             when(number_control("width", "Width", 1.0F, 0.1F, 5.0F, "m", 2, "The stack's footprint across.", 0.01F),
-                  "shape", {"stack"}),
-             when(number_control("depth", "Depth", 0.4F, 0.1F, 5.0F, "m", 2, "The stack's footprint front to back.",
-                                 0.01F),
-                  "shape", {"stack"}),
-             number_control("release", "Let go at", 0.0F, 0.0F, 10.0F, "s", 2,
-                            "When the pile is let go. Until then it stands still, unless something knocks into "
-                            "it; 0 lets it fall as soon as the effect plays."),
-             detail(vec3_control("at", "Position", vec3(0.0F, 0.0F, 0.0F), "m",
-                                 "Where the middle of the pile's base sits.")),
-             detail(number_control("spacing", "Spacing", 1.0F, 0.5F, 2.0F, "x", 2,
-                                   "How far apart the pieces start, as a share of the largest piece's reach. Below "
-                                   "1 they start packed closer, and may overlap until they fall.",
-                                   0.5F, 4.0F)),
-             detail(number_control("jitter", "Untidiness", 0.15F, 0.0F, 1.0F, "", 2,
-                                   "How far each piece is nudged off its place, so the pile is not a perfect "
-                                   "stack.",
-                                   0.0F, 1.0F)),
-             seed_control()},
-        .keywords = "prespawn pre-spawn stack heap rubble rocks wall bricks collapse topple preplaced",
-        // Read-only remnant, as Prop above: an Object arranged as a heap or
-        // a stack is what this was, and a page saved before Object is
-        // converted as it loads.
-        .layers = in_no_layer,
-        .only_in = "A pile is stacked solid pieces resting on each other, so it needs a rigid physics layer.",
-    });
-    blocks.push_back(BlockDef{
-        .kind = "physics",
-        .title = "Bodies",
-        .description = "What every piece in this layer is made of, and how it behaves when it touches another.",
-        .category = Category::Physics,
-        .controls = {choice_control("shape", "Body", "auto",
-                                    {{"auto", "Its own shape"}, {"ball", "Ball"}, {"cube", "Cube"}},
-                                    "What each piece collides as. Its own shape wraps a debris chunk tightly; a "
-                                    "ball rolls."),
-                     number_control("friction", "Friction", 0.6F, 0.0F, 1.0F, "", 2,
-                                    "How much pieces grip each other and the ground.", 0.0F, 1.0F),
-                     number_control("bounce", "Bounciness", 0.15F, 0.0F, 1.0F, "", 2,
-                                    "1 bounces back as fast as it arrived.", 0.0F, 1.0F),
-                     detail(number_control("density", "Density", 2400.0F, 100.0F, 8000.0F, "kg/m^3", 0,
-                                           "How heavy each piece is for its size. Stone is about 2400.", 1.0F)),
-                     detail(number_control("damping", "Spin damping", 0.05F, 0.0F, 2.0F, "", 2,
-                                           "How quickly spinning slows in the air.")),
-                     detail(toggle_control("rest", "Rest when still", true,
-                                           "Pieces that come to rest sleep until something knocks them, which "
-                                           "costs nothing while they lie still."))},
-        .keywords = "rigid body physics collide stack pile topple jolt solid",
-        .unique = true,
-        // Part of the layer, so there is nothing to take it apart into.
-        .detachable = false,
-        // A rigid layer's world, held on the layer (Layer::world), not a
-        // block an artist adds: there is one world per rigid layer and no
-        // way to be without it. Never offered by the palette or the picker.
-        .layers = in_no_layer,
-    });
-
-    // ---------------------------------------------------------- light
-    blocks.push_back(BlockDef{
-        .kind = "light",
-        .title = "Cast light",
-        .description = "Some particles light the scene around them, each light staying with its particle.",
-        .category = Category::Light,
-        .controls = {number_control("count", "Lights", 6.0F, 1.0F, 64.0F, "", 0,
-                                    "The most lights at once. Particles are picked through the layer, and each "
-                                    "keeps its light for its whole life.",
-                                    1.0F, 64.0F),
-                     range_control("intensity", "Intensity", 1.5F, 2.5F, 0.0F, 20.0F, "", 1,
-                                   "Each light's brightness, picked between the two."),
-                     range_control("reach", "Reach", 1.2F, 2.0F, 0.05F, 10.0F, "m", 2,
-                                   "How far each light carries, picked between the two."),
-                     detail(choice_control("over_life", "Over its life", "fade",
-                                           {{"steady", "Steady"},
-                                            {"fade", "Fades in and out"},
-                                            {"flare", "Flares, then fades"},
-                                            {"out", "Fades out"}},
-                                           "How bright each light is as its particle ages. Fading lets lights come "
-                                           "and go without popping.")),
-                     detail(choice_control("color_mode", "Light color", "particle",
-                                           {{"particle", "The particle's"}, {"own", "Its own"}, {"shift", "Shifts"}},
-                                           "Follow the particle's colour, or give the light a colour of its own.")),
-                     detail(when(color_control("light_color", "Color", color(1.0F, 0.6F, 0.3F),
-                                               "The light's own colour."),
-                                 "color_mode", {"own", "shift"})),
-                     detail(when(color_control("end_color", "Becomes", color(0.8F, 0.2F, 0.05F),
-                                               "The colour the light shifts to by the end of its particle's life."),
-                                 "color_mode", {"shift"}))},
-        .keywords = "illuminate glow point light lighting",
-        .unique = true,
-        .detachable = false,
-    });
-
-    // --------------------------------------------------------- expert
-    blocks.push_back(BlockDef{
-        .kind = raw_block_kind,
-        .title = "Module",
-        .description = "One ajfx module, exactly as the runtime runs it, every field editable.",
-        .category = Category::Expert,
-        .controls = {},
-        .keywords = "raw expert advanced module custom",
-        .detachable = false,
-    });
+    add_birth_blocks(blocks);
+    add_motion_blocks(blocks);
+    add_look_blocks(blocks);
+    add_contact_blocks(blocks);
+    add_rigid_blocks(blocks);
+    add_expert_blocks(blocks);
     return blocks;
 }
 
@@ -1062,7 +43,6 @@ std::string_view rigid_scope_name(RigidScope scope) noexcept {
     case RigidScope::Objects: return "What is in it";
     case RigidScope::Pieces: return "The pieces";
     case RigidScope::Breaking: return "When they break";
-    case RigidScope::Props: return "Props";
     case RigidScope::World: return "The world";
     case RigidScope::Hood: return "Under the hood";
     }
@@ -1072,53 +52,81 @@ std::string_view rigid_scope_name(RigidScope scope) noexcept {
 std::string_view rigid_scope_help(RigidScope scope) noexcept {
     switch (scope) {
     case RigidScope::Objects:
-        return "The things standing in this layer's world. Each carries its own model, how many of it there are "
-               "and what it comes apart into, and the blocks under it are its own.";
+        return "Things standing in this layer.";
     case RigidScope::Pieces:
-        return "The solid pieces this layer is made of: how many there are, where they start, how big they are "
-               "and what they look like.";
+        return "The layer's own pieces.";
     case RigidScope::Breaking:
-        return "What becomes of a piece that is hit hard enough. These act on the layer's pieces, not on a prop.";
-    case RigidScope::Props:
-        return "Objects you stood in the world for the pieces to land on, fall out of or knock over. Each carries "
-               "its own model and material, and a prop is not a piece: it never dies and never comes apart.";
+        return "What happens when a piece is hit hard.";
     case RigidScope::World:
-        return "The one physics world every piece in this layer shares: what they are made of, what pulls on them "
-               "and what they land on.";
+        return "What every piece shares.";
     case RigidScope::Hood:
-        return "Raw modules, which may act on any part of the layer.";
+        return "Raw modules.";
     }
     return "";
 }
 
-RigidScope rigid_scope(std::string_view block_kind) noexcept {
-    if (block_kind == "object") {
+RigidScope rigid_scope(BlockKind kind) noexcept {
+    switch (kind) {
+    case BlockKind::Object:
         return RigidScope::Objects;
-    }
-    if (block_kind == "prop") {
-        return RigidScope::Props;
-    }
     // Breaking belongs to the Object above it, so the page draws these
     // under their Object rather than under a heading of their own. The
     // scope is what a Break with no Object over it reads under, which the
     // coach then asks about.
-    if (block_kind == "break" || block_kind == "part") {
+    case BlockKind::Break:
+    case BlockKind::Part:
         return RigidScope::Breaking;
-    }
     // A force in a rigid layer is the world's gravity or a body's damping,
     // and a collider becomes an unmoving body in the world, so both are the
-    // world's rather than each piece's (see compile.cpp's world_strength).
-    // The world block is what every piece is made of, so it reads here too.
-    if (block_kind == "gravity" || block_kind == "rise" || block_kind == "wind" || block_kind == "drag" ||
-        block_kind == "ground" || block_kind == "sphere" || block_kind == "box" || block_kind == "mesh_collider" ||
-        block_kind == "pieces" || block_kind == world_block_kind) {
+    // world's rather than each piece's (see the rigid builder's
+    // world_strength). The world block is what every piece is made of, so
+    // it reads here too.
+    case BlockKind::Gravity:
+    case BlockKind::Rise:
+    case BlockKind::Wind:
+    case BlockKind::Drag:
+    case BlockKind::Ground:
+    case BlockKind::Sphere:
+    case BlockKind::Box:
+    case BlockKind::MeshCollider:
+    case BlockKind::PassesThrough:
+    case BlockKind::Physics:
+    // An explosion throws everything in every world, so it reads with the
+    // world rather than with any one piece.
+    case BlockKind::Explosion:
+    case BlockKind::Push:
         return RigidScope::World;
-    }
-    if (block_kind == raw_block_kind) {
+    case BlockKind::Module:
         return RigidScope::Hood;
-    }
     // Spawning, placing, launching, tumbling and every look: the pieces'.
+    case BlockKind::Stream:
+    case BlockKind::Burst:
+    case BlockKind::Shape:
+    case BlockKind::Launch:
+    case BlockKind::Stirred:
+    case BlockKind::HitPuffs:
+    case BlockKind::HitSparks:
+    case BlockKind::Trail:
+    case BlockKind::Turbulence:
+    case BlockKind::Swirl:
+    case BlockKind::DrawIn:
+    case BlockKind::Attract:
+    case BlockKind::Appearance:
+    case BlockKind::Color:
+    case BlockKind::Size:
+    case BlockKind::Spin:
+    case BlockKind::Fade:
+    case BlockKind::Heat:
+    case BlockKind::Tumble:
+    case BlockKind::Light:
+        return RigidScope::Pieces;
+    }
     return RigidScope::Pieces;
+}
+
+RigidScope rigid_scope(std::string_view block_kind) noexcept {
+    const std::optional<BlockKind> kind = block_kind_from(block_kind);
+    return kind ? rigid_scope(*kind) : RigidScope::Pieces;
 }
 
 const std::vector<BlockDef>& block_catalog() {
@@ -1126,13 +134,21 @@ const std::vector<BlockDef>& block_catalog() {
     return catalog;
 }
 
-const BlockDef* find_block_def(std::string_view kind) {
-    for (const BlockDef& def : block_catalog()) {
-        if (def.kind == kind) {
-            return &def;
+const BlockDef* find_block_def(BlockKind kind) {
+    // Indexed by kind, so a lookup is not a search of the catalog.
+    static const std::array<const BlockDef*, block_kind_count> index = [] {
+        std::array<const BlockDef*, block_kind_count> found{};
+        for (const BlockDef& def : block_catalog()) {
+            found[static_cast<std::size_t>(def.kind)] = &def;
         }
-    }
-    return nullptr;
+        return found;
+    }();
+    return index[static_cast<std::size_t>(kind)];
+}
+
+const BlockDef* find_block_def(std::string_view kind) {
+    const std::optional<BlockKind> known = block_kind_from(kind);
+    return known ? find_block_def(*known) : nullptr;
 }
 
 const ControlDef* find_control(const BlockDef& def, std::string_view id) {
@@ -1142,6 +158,15 @@ const ControlDef* find_control(const BlockDef& def, std::string_view id) {
         }
     }
     return nullptr;
+}
+
+ParameterTiming control_timing(std::string_view block_kind, std::string_view control) {
+    if (const BlockDef* def = find_block_def(block_kind)) {
+        if (const ControlDef* found = find_control(*def, control)) {
+            return found->timing;
+        }
+    }
+    return ParameterTiming::Bake;
 }
 
 Value value_of(const Block& block, const ControlDef& control) {
@@ -1198,6 +223,9 @@ Value sanitize(const ControlDef& control, Value value) {
         return toggle(value.x != 0.0F);
     case ControlType::File:
         return choice(std::move(value.text));
+    case ControlType::SolidLayer:
+        // A uid, whole; 0 is every solid layer.
+        return number(std::isfinite(value.x) ? std::max(std::round(value.x), 0.0F) : 0.0F);
     }
     return value;
 }
@@ -1211,6 +239,11 @@ std::string file_label(std::string_view path) {
         return "no file";
     }
     return std::filesystem::path{std::string{path}}.filename().string();
+}
+
+bool block_fits(BlockKind block_kind, LayerKind layer) noexcept {
+    const BlockDef* def = find_block_def(block_kind);
+    return def != nullptr && fits(def->layers, layer);
 }
 
 bool block_fits(std::string_view block_kind, LayerKind layer) noexcept {
@@ -1239,7 +272,7 @@ void conform_block(Block& block, LayerKind layer) {
     // something to have to discover. It is set here rather than left to the
     // generic fallback below, which would land on the first material on the
     // list and draw a crate as a glowing dot.
-    if (block.kind == "appearance" && layer == LayerKind::Rigid) {
+    if (block.kind == BlockKind::Appearance && layer == LayerKind::Rigid) {
         const Value* held = block.find("material");
         if (held == nullptr || (held->text != "glow" && held->text != "model")) {
             block.set("material", choice("model"));
@@ -1363,10 +396,32 @@ std::string choice_label(const Block& block, std::string_view control) {
     return id;
 }
 
+// ", Rock" after a Stream's or Burst's summary when its pieces are a model of
+// their own; nothing while they are the layer's.
+std::string piece_model_suffix(const Block& block) {
+    const std::string model = choice_of(block, "model");
+    if (model == "layer") {
+        return {};
+    }
+    if (model == "file") {
+        const std::string label = file_label(file_of(block, "model_file"));
+        return ", " + (label.empty() ? std::string{"no model yet"} : label);
+    }
+    return ", " + choice_label(block, "model");
+}
+
+// "Glass" -> "glass", to sit inside a reading.
+std::string lower_first(std::string text) {
+    if (!text.empty()) {
+        text[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(text[0])));
+    }
+    return text;
+}
+
 } // namespace
 
 std::string block_title(const Block& block) {
-    if (block.kind == raw_block_kind && block.raw) {
+    if (block.kind == BlockKind::Module && block.raw) {
         return std::string{raw_title(*block.raw)};
     }
     const BlockDef* def = find_block_def(block.kind);
@@ -1375,38 +430,16 @@ std::string block_title(const Block& block) {
 
 std::string block_summary(const Block& block) {
     const std::string_view kind = block.kind;
-    if (kind == "stream") {
-        return format_number(number_of(block, "rate"), 0) + " a second";
+    if (kind == BlockKind::Stream) {
+        return format_number(number_of(block, "rate"), 0) + " a second" + piece_model_suffix(block);
     }
-    if (kind == "prop") {
-        const std::string model = file_label(file_of(block, "model"));
-        std::string text = model.empty() ? "no model yet" : model;
-        const std::string shape = choice_of(block, "shape");
-        if (shape == "bucket") {
-            text += ", a bucket";
-        } else if (shape == "crate") {
-            text += ", a crate";
-        } else if (shape == "tube") {
-            text += ", a tube";
-        } else if (shape == "ball") {
-            text += ", a ball";
-        } else if (shape == "block") {
-            text += ", a block";
-        }
-        const std::string motion = choice_of(block, "motion");
-        if (motion == "driven") {
-            text += ", moved";
-        } else if (motion == "loose") {
-            text += ", loose";
-        }
-        return text;
-    }
-    if (kind == "burst") {
+    if (kind == BlockKind::Burst) {
         const std::string count = format_number(number_of(block, "count"), 0);
         const float every = number_of(block, "every");
-        return every > 0.0F ? count + " every " + with_unit(every, 2, "s") : count + " at once";
+        return (every > 0.0F ? count + " every " + with_unit(every, 2, "s") : count + " at once") +
+               piece_model_suffix(block);
     }
-    if (kind == "shape") {
+    if (kind == BlockKind::Shape) {
         const std::string shape = choice_label(block, "shape");
         const std::string id = choice_of(block, "shape");
         if (id == "point") {
@@ -1419,24 +452,45 @@ std::string block_summary(const Block& block) {
         }
         return shape + ", " + format_range(get(block, "size"), 2, "m");
     }
-    if (kind == "launch") {
+    if (kind == BlockKind::HitPuffs || kind == BlockKind::HitSparks) {
+        std::string text;
+        if (number_of(block, "per_hit") > 0.0F) {
+            text = format_number(number_of(block, "per_hit"), 0) + " a hit + ";
+        }
+        return text + format_number(number_of(block, "per_speed"), 1) + " per m/s, over " +
+               with_unit(number_of(block, "hardness"), 1, "m/s");
+    }
+    if (kind == BlockKind::Stirred) {
+        return format_range(get(block, "strength"), 1, "") + ", reaching " +
+               format_number(number_of(block, "reach"), 1) + " half sizes";
+    }
+    if (kind == BlockKind::Trail) {
+        return format_number(number_of(block, "per_speed"), 1) + " per m/s" +
+               (toggle_of(block, "pieces") ? ", broken pieces" : "");
+    }
+    if (kind == BlockKind::Heat) {
+        return "Heat " + format_number(number_of(block, "start"), 2) + ", halves in " +
+               with_unit(number_of(block, "half_life"), 2, "s") +
+               (choice_of(block, "what") == "pieces" ? ", broken pieces" : "");
+    }
+    if (kind == BlockKind::Launch) {
         std::string text = choice_label(block, "direction") + " at " + format_range(get(block, "speed"), 2, "m/s");
         if (choice_of(block, "direction") != "out") {
             text += ", " + format_range(get(block, "spread"), 0, "deg") + " spread";
         }
         return text;
     }
-    if (kind == "gravity") {
-        return format_range(get(block, "strength"), 2, "g");
+    if (kind == BlockKind::Gravity) {
+        return format_range(get(block, "strength"), 2, "x") + " the page's";
     }
-    if (kind == "rise") {
+    if (kind == BlockKind::Rise) {
         return format_range(get(block, "strength"), 1, "m/s^2");
     }
-    if (kind == "wind") {
+    if (kind == BlockKind::Wind) {
         return format_range(get(block, "strength"), 1, "m/s^2") + " toward " +
                with_unit(number_of(block, "heading"), 0, "deg");
     }
-    if (kind == "turbulence") {
+    if (kind == BlockKind::Turbulence) {
         std::string text = "Amount " + format_range(get(block, "strength"), 2, "") + ", swirls " +
                            with_unit(number_of(block, "size"), 2, "m");
         if (number_of(block, "roll") > 0.0F) {
@@ -1444,41 +498,41 @@ std::string block_summary(const Block& block) {
         }
         return text;
     }
-    if (kind == "draw_in") {
+    if (kind == BlockKind::DrawIn) {
         std::string text = "Pull " + format_range(get(block, "strength"), 1, "");
         if (number_of(block, "height") > 0.0F) {
             text += ", fades by " + with_unit(number_of(block, "height"), 2, "m");
         }
         return text;
     }
-    if (kind == "spin") {
+    if (kind == BlockKind::Spin) {
         const Value speed = get(block, "speed");
         return format_number(speed.x, 0) + " to " + with_unit(speed.y, 0, "deg/s");
     }
-    if (kind == "drag") {
+    if (kind == BlockKind::Drag) {
         return format_range(get(block, "amount"), 2, "");
     }
-    if (kind == "swirl") {
+    if (kind == BlockKind::Swirl) {
         return choice_label(block, "axis") + ", " + format_range(get(block, "strength"), 1, "m/s^2");
     }
-    if (kind == "attract") {
+    if (kind == BlockKind::Attract) {
         const Value strength = get(block, "strength");
         if (strength.y <= 0.0F) {
             return "Push " + format_range(range(-strength.y, -strength.x), 1, "m/s^2");
         }
         return (strength.x < 0.0F ? "Pull or push " : "Pull ") + format_range(strength, 1, "m/s^2");
     }
-    if (kind == "appearance") {
+    if (kind == BlockKind::Appearance) {
         const std::string material = choice_of(block, "material");
         if (material == "model") {
-            return "Debris, " + (choice_of(block, "mesh") == "file" ? file_label(file_of(block, "mesh_file"))
-                                                                   : choice_label(block, "mesh"));
+            return "Model, " + (choice_of(block, "mesh") == "file" ? file_label(file_of(block, "mesh_file"))
+                                                                  : choice_label(block, "mesh"));
         }
         return choice_label(block, "material") + ", " +
                (choice_of(block, "texture") == "file" ? file_label(file_of(block, "texture_file"))
                                                       : choice_label(block, "texture"));
     }
-    if (kind == "color") {
+    if (kind == BlockKind::Color) {
         std::string text = choice_label(block, "over_life");
         const Value brightness = get(block, "brightness");
         if (brightness.x != 1.0F || brightness.y != 1.0F) {
@@ -1486,66 +540,89 @@ std::string block_summary(const Block& block) {
         }
         return text;
     }
-    if (kind == "size") {
+    if (kind == BlockKind::Size) {
         const Value size = get(block, "size");
         return format_number(size.x, 3) + " to " + with_unit(size.y, 3, "m") + ", " + choice_label(block, "over_life");
     }
-    if (kind == "fade") {
+    if (kind == BlockKind::Fade) {
         return "In " + format_number(number_of(block, "in"), 0) + "%, out " + format_number(number_of(block, "out"), 0) +
                "%";
     }
-    if (kind == "ground") {
+    if (kind == BlockKind::Ground) {
         const std::string response = choice_of(block, "response");
         return response == "bounce" ? "Bounce " + format_number(number_of(block, "bounce"), 2)
                                     : choice_label(block, "response");
     }
-    if (kind == "sphere") {
+    if (kind == BlockKind::Sphere) {
         return (toggle_of(block, "inside") ? "Inside, " : "Outside, ") + with_unit(number_of(block, "radius"), 2, "m");
     }
-    if (kind == "box") {
+    if (kind == BlockKind::Box) {
         return toggle_of(block, "inside") ? "Keep inside" : "Keep out";
     }
-    if (kind == "mesh_collider") {
+    if (kind == BlockKind::MeshCollider) {
         return file_label(file_of(block, "file")) + (toggle_of(block, "inside") ? ", keep inside" : ", keep out");
     }
-    if (kind == "tumble") {
+    if (kind == BlockKind::Tumble) {
         const Value spin = get(block, "spin");
         if (spin.y <= 0.0F) {
             return "Turned every way, no spin";
         }
         return format_number(spin.x, 0) + " to " + with_unit(spin.y, 0, "deg/s");
     }
-    if (kind == world_block_kind) {
+    if (kind == BlockKind::Physics) {
         return choice_label(block, "shape") + ", friction " + format_number(number_of(block, "friction"), 2) +
                ", bounce " + format_number(number_of(block, "bounce"), 2);
     }
-    if (kind == "break") {
-        const std::string hit = "over " + with_unit(number_of(block, "force"), 1, "m/s");
+    if (kind == BlockKind::Break) {
+        std::string hit = "over " + with_unit(number_of(block, "force"), 1, "m/s");
+        if (number_of(block, "blast") > 0.0F) {
+            hit += ", blasted over " + with_unit(number_of(block, "blast"), 1, "m/s");
+        }
         if (choice_of(block, "into") == "cut") {
             return "Cut into " + format_number(number_of(block, "cells"), 0) + ", " + hit;
         }
         return "Into the parts below, " + hit;
     }
-    if (kind == "part") {
+    if (kind == BlockKind::Object) {
+        const std::string model =
+            choice_of(block, "model") == "file" ? file_label(file_of(block, "model_file")) : choice_label(block, "model");
+        const std::string arrange = choice_of(block, "arrange");
+        std::string text = (model.empty() ? std::string{"No model"} : model) + ", " +
+                           (arrange == "one" ? std::string{"one"}
+                                             : choice_label(block, "arrange") + " of " +
+                                                   format_number(number_of(block, "count"), 0)) +
+                           ", " + with_unit(number_of(block, "size"), 2, "m");
+        if (choice_of(block, "material") != "layer") {
+            text += ", " + lower_first(choice_label(block, "material"));
+        }
+        if (arrange == "one" && number_of(block, "appear") > 0.0F) {
+            text += ", appears at " + with_unit(number_of(block, "appear"), 2, "s");
+        }
+        return text;
+    }
+    if (kind == BlockKind::Explosion) {
+        return with_unit(number_of(block, "power"), 1, "m/s") + ", reaching " +
+               with_unit(number_of(block, "radius"), 2, "m") + ", at " + with_unit(number_of(block, "time"), 2, "s");
+    }
+    if (kind == BlockKind::Push) {
+        return with_unit(number_of(block, "power"), 1, "m/s") + ", reaching " +
+               with_unit(number_of(block, "radius"), 2, "m") + ", at " + with_unit(number_of(block, "time"), 2, "s");
+    }
+    if (kind == BlockKind::Part) {
         const std::string model =
             choice_of(block, "model") == "file" ? file_label(file_of(block, "model_file")) : choice_label(block, "model");
         return (model.empty() ? std::string{"No model"} : model) + ", " +
                format_number(number_of(block, "size") * 100.0F, 0) + "% of the piece";
     }
-    if (kind == "pieces") {
-        return choice_label(block, "response") + " on the pieces above";
+    if (kind == BlockKind::PassesThrough) {
+        return toggle_of(block, "ground") ? "Solid things and the ground" : "Solid things";
     }
-    if (kind == "pile") {
-        std::string text = choice_label(block, "shape") + " of " + format_number(number_of(block, "count"), 0);
-        const float release = number_of(block, "release");
-        return text + (release > 0.0F ? ", let go at " + with_unit(release, 2, "s") : ", falls at once");
-    }
-    if (kind == "light") {
+    if (kind == BlockKind::Light) {
         const Value reach = get(block, "reach");
         return format_number(number_of(block, "count"), 0) + " lights, reach " + format_number(reach.x, 1) +
                " to " + with_unit(reach.y, 1, "m");
     }
-    if (kind == raw_block_kind && block.raw) {
+    if (kind == BlockKind::Module && block.raw) {
         return std::string{raw_stage(*block.raw)} + ": " + std::string{raw_kind(*block.raw)};
     }
     return {};

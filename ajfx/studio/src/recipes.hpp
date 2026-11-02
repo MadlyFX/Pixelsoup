@@ -23,6 +23,9 @@ struct LayerPreset final {
     std::string_view description;
     // What moves it: the preset's blocks are the ones that kind can hold.
     LayerKind kind{LayerKind::Particles};
+    // What it is, which the layer it makes says, and which decides how the
+    // page's ground, gravity and wind act on it.
+    LayerWhat what{LayerWhat::Other};
 };
 
 [[nodiscard]] const std::vector<Recipe>& recipes();

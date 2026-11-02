@@ -211,7 +211,10 @@ MeshData faceted(const std::vector<std::array<Vec3, 3>>& triangles) {
     return mesh;
 }
 
-MeshData chip() {
+// A cube half as tall and four fifths as deep: a flat block, like a paving
+// slab or a lump of plaster. It lies flat and slides to a stop where a cube
+// would stack.
+MeshData slab() {
     MeshData mesh = cube_mesh();
     for (MeshVertex& vertex : mesh.vertices) {
         vertex.position = Vec3{vertex.position.x, vertex.position.y * 0.5F, vertex.position.z * 0.8F};
@@ -270,10 +273,15 @@ const Generated& generated() {
         g.textures.emplace("wisp", wisp());
         g.textures.emplace("star", star());
         g.textures.emplace("ring", ring());
-        g.meshes.emplace("chip", chip());
+        g.meshes.emplace("slab", slab());
         g.meshes.emplace("shard", shard());
         g.meshes.emplace("rock", rock());
         g.meshes.emplace("cube", cube_mesh());
+        MeshData floor = cube_mesh();
+        for (MeshVertex& vertex : floor.vertices) {
+            vertex.position.y *= 0.01F;
+        }
+        g.meshes.emplace("floor", std::move(floor));
         return g;
     }();
     return library;

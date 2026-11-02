@@ -4,6 +4,8 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 
@@ -18,6 +20,8 @@ struct RigidRunner::Job final {
     std::size_t emitters{0U};
     std::uint32_t seed{0U};
     MeshSet meshes;
+    // What the whole effect reads of each of the part's emitters' contacts.
+    std::vector<std::optional<float>> contact_floors;
 
     // Under Shared::mutex.
     std::uint64_t wanted{0U};
@@ -106,6 +110,7 @@ EmitterState particles_of(const EmitterState& s) {
     out.spawned = s.spawned;
     out.refused = s.refused;
     out.rate_carry = s.rate_carry;
+    out.spawn_counts = s.spawn_counts;
     return out;
 }
 
@@ -115,8 +120,11 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
                                                std::uint64_t generation, const ParameterProvider* parameters,
                                                std::vector<std::shared_ptr<const RigidFrame>>& produced) const {
     if (!job.simulation) {
-        Result<Simulation> made =
-            Simulation::create(job.part, job.seed, SimulationOptions{.meshes = job.meshes, .rigid = solver});
+        Result<Simulation> made = Simulation::create(job.part, job.seed,
+                                                     SimulationOptions{.meshes = job.meshes,
+                                                                       .rigid = solver,
+                                                                       .contacts = options.contacts,
+                                                                       .contact_floors = job.contact_floors});
         if (!made) {
             return made.error();
         }
@@ -131,11 +139,16 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
         job.built = generation;
     }
 
-    // Behind where it stands: back to the latest checkpoint at or before the
-    // first missing tick. Ahead: on from a checkpoint already past it.
+    // Behind where it stands: back to the latest checkpoint before the
+    // first missing tick. Ahead: on from a checkpoint already past it. A
+    // frame carries the contacts of the step that reached it, which a
+    // restore has not taken, so a checkpoint is only ever stepped on from:
+    // one at the first missing tick itself would hand that tick out with
+    // none.
     const SimulationState* best = nullptr;
     for (const SimulationState& checkpoint : job.checkpoints) {
-        if (checkpoint.tick <= from && (best == nullptr || checkpoint.tick > best->tick)) {
+        const bool before = checkpoint.tick < from || (from == 0U && checkpoint.tick == 0U);
+        if (before && (best == nullptr || checkpoint.tick > best->tick)) {
             best = &checkpoint;
         }
     }
@@ -165,8 +178,13 @@ std::optional<Error> RigidRunner::Shared::turn(Job& job, std::uint64_t from, std
             auto frame = std::make_shared<RigidFrame>();
             frame->tick = tick;
             frame->emitters.resize(job.emitters);
+            frame->contacts.resize(job.emitters);
+            frame->contacts_dropped.resize(job.emitters, 0U);
             for (std::size_t k = 0U; k < job.emitter_of.size(); ++k) {
                 frame->emitters[job.emitter_of[k]] = particles_of(simulation.emitter(k));
+                const std::span<const RigidContact> contacts = simulation.contacts(k);
+                frame->contacts[job.emitter_of[k]].assign(contacts.begin(), contacts.end());
+                frame->contacts_dropped[job.emitter_of[k]] = simulation.contacts_dropped(k);
             }
             produced.push_back(std::move(frame));
         }
@@ -280,6 +298,7 @@ std::unique_ptr<RigidTrack> RigidRunner::track(const Effect& effect, std::uint32
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         if (rigid_physics(effect.emitters[i]) != nullptr) {
             job->emitter_of.push_back(i);
+            job->contact_floors.push_back(contact_floor(effect, i));
         }
     }
     job->emitters = effect.emitters.size();

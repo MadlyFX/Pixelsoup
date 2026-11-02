@@ -582,6 +582,26 @@ public:
             JPH::Quat(orientation.x, orientation.y, orientation.z, orientation.w).Normalized(), desc_.step_seconds);
     }
 
+    // Jolt adds the velocity and wakes a sleeping body itself. It is called
+    // from the one thread that steps the world, in the caller's order, so
+    // which bodies wake in which order is the caller's alone.
+    void push(RigidSide side, std::uint32_t index, Vec3 change) override {
+        JPH::BodyID id;
+        if (side == RigidSide::Body && index < desc_.capacity) {
+            id = JPH::BodyID(index);
+        } else if (side == RigidSide::Prop && index < desc_.props.size() &&
+                   desc_.props[index].motion == RigidPropDesc::Motion::Loose) {
+            id = JPH::BodyID(prop_id(index));
+        } else {
+            return;
+        }
+        JPH::BodyInterface& bodies = system_.GetBodyInterfaceNoLock();
+        if (!bodies.IsAdded(id)) {
+            return;
+        }
+        bodies.AddLinearVelocity(id, vec(change));
+    }
+
     void step(Vec3 gravity) override {
         contacts_.clear();
         dropped_ = 0U;
@@ -604,11 +624,15 @@ public:
                 drop(i);
             }
         }
-        std::sort(contacts_.begin(), contacts_.end(), contact_before);
+        // Past the limit the softest go: whatever slower contacts a host
+        // also asked for, the hardest are kept, which is what an effect
+        // reading its own contacts (contact_floor) relies on.
         if (contacts_.size() > desc_.contact_limit) {
+            std::sort(contacts_.begin(), contacts_.end(), contact_harder);
             dropped_ = static_cast<std::uint32_t>(contacts_.size() - desc_.contact_limit);
             contacts_.resize(desc_.contact_limit);
         }
+        std::sort(contacts_.begin(), contacts_.end(), contact_before);
     }
 
     RigidBodyState body(std::uint32_t slot) const override { return state_of(JPH::BodyID(slot)); }

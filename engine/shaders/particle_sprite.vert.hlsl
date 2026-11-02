@@ -69,6 +69,7 @@ cbuffer ParticleView : register(b0, space1) {
     // The projection's (2,2), (2,3), (3,2) and (3,3): how reversed device
     // depth maps back to view distance.
     float4 depth_terms;
+    float4 draw_tint;
 };
 
 static const uint absent = 0xffffffffU;
@@ -138,6 +139,8 @@ void finish_vertex(inout Output output, uint base, float3 position, float shade)
                                   mul(previous_view_projection, float4(position - moved, 1.0F)), motion.y);
     float4 color = color_offset != absent ? asfloat(particles.Load4(base + color_offset))
                                           : float4(1.0F, 1.0F, 1.0F, 1.0F);
+    color *= draw_tint;
+    if (premultiplied != 0U) { color.rgb *= draw_tint.a; }
     color.rgb *= shade;
     output.color = premultiplied != 0U ? color : float4(color.rgb * color.a, color.a);
     if (sprite_extra.y > 0.5F) {

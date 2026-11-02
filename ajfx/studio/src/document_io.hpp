@@ -17,13 +17,14 @@ namespace ajfx::studio {
 
 inline constexpr std::string_view document_extension = ".ajfxstudio";
 // 3: Pile and Prop became one Object block (and so did the model, size and
-//    material each of them carried). A page saved at 2 or earlier is
-//    converted as it loads, each Object keeping the uid of the block it came
-//    from so that module ids and seeds -- and therefore the particles -- stay
-//    where they were.
+//    material each of them carried). Studio no longer converts them, so a
+//    page saved at 2 or earlier that holds either does not open.
 // 4: Appearance's "debris" material became "model", since it is the one
 //    that draws a 3D model and "Solid" beside it read as a near-synonym.
-inline constexpr int document_version = 4;
+// 5: a layer says whether it is baked or live ("baked", written only when
+//    it is), and Appearance gained the draw-time tint, brightness, opacity
+//    and size scale.
+inline constexpr int document_version = 5;
 
 [[nodiscard]] std::string save_document(const Document& document);
 

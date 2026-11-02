@@ -17,13 +17,15 @@ on nothing there.
 | Piece | Where | What it is |
 | --- | --- | --- |
 | Runtime | [`lib/`](lib/README.md) | The C++20 library: effect model, CPU reference simulator, `.ajfx` packages, GPU runtime, D3D12 reference backend, rigid physics on Jolt, and the `ajfx_viewer` and `ajfx_player` samples |
-| ajfx Studio | [`studio/`](studio/README.md) | A block editor: effects are pages of layers and plain-language blocks, compiled to module stacks and exported as `.ajfx` |
-| Roadmap | [`docs/roadmap.md`](docs/roadmap.md) | Status, measured results and what remains |
+| ajfx Studio | [`studio/`](studio/README.md) | A viewport-centered scene workspace with typed objects, particle systems and shared deterministic physics; packages export as `.ajfx` |
+| Current scene architecture | [`docs/studio-scene-reference.md`](docs/studio-scene-reference.md) | Implemented behavior, validation and current boundaries |
+| Remaining work | [`next-steps-plan.md`](next-steps-plan.md) | The rest of the scene sandbox and its acceptance criteria |
 
 A `.ajfx` package carries everything an effect needs: emitters and module
 stacks, textures, meshes and distance fields, published parameters, and
 precompiled kernels. A host loads and plays packages; it does not author
-them.
+them. A `.ajfxcache` beside a package holds what its baked layers worked
+out, for a host to play back rather than simulate.
 
 ## Building
 

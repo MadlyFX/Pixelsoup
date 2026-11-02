@@ -1,9 +1,10 @@
 #include "compile.hpp"
 
+#include "build_core.hpp"
 #include "catalog.hpp"
-#include "document_io.hpp"
+#include "layer_builder.hpp"
 #include "library.hpp"
-#include "raw_modules.hpp"
+#include "solid_world.hpp"
 
 #include <ajfx/fracture.hpp>
 #include <ajfx/gpu/kernels.hpp>
@@ -22,81 +23,6 @@
 namespace ajfx::studio {
 namespace {
 
-constexpr float earth_gravity = 9.81F;
-constexpr std::size_t over_life_keys = 17U;
-
-// Module ids: sixteen a uid, so each block (and each layer, for what the
-// compiler makes from it) owns its own run of ids.
-constexpr ModuleId module_id(Uid uid, std::uint32_t slot) noexcept {
-    return uid * 16U + slot;
-}
-
-// Where a module goes within its stage. Lower first; ties keep page order.
-enum Slot : int {
-    // init
-    SlotLifetime = 0,
-    SlotShape,
-    SlotVelocity,
-    SlotColor,
-    SlotSize,
-    SlotRotation,
-    SlotSpin,
-    SlotTumble,
-    SlotRawInit,
-    // update: forces
-    SlotGravity = 0,
-    SlotRise,
-    SlotWind,
-    SlotSwirl,
-    SlotAttract,
-    SlotDrawIn,
-    SlotTurbulence,
-    SlotRawForce,
-    SlotDrag, // last: it slows what the forces gave
-    // update: after integration
-    SlotRigid = 0,
-    SlotBreak, // after the world it breaks bodies in
-    SlotCollision,
-    SlotRawCollision,
-};
-
-struct Placed final {
-    int slot{};
-    ModuleLine line;
-};
-
-Vec3 to_vec3(const Value& value) {
-    return Vec3{value.x, value.y, value.z};
-}
-
-Vec3 normalized(Vec3 v, Vec3 fallback) {
-    const float length = std::sqrt(dot(v, v));
-    return length > 1.0e-6F ? v * (1.0F / length) : fallback;
-}
-
-float smoothstep(float edge0, float edge1, float x) {
-    if (edge0 == edge1) {
-        return x < edge0 ? 0.0F : 1.0F;
-    }
-    const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0F, 1.0F);
-    return t * t * (3.0F - 2.0F * t);
-}
-
-// A piecewise-linear multiplier through `keys` (t, r, g, b).
-Color ramp(std::span<const std::array<float, 4>> keys, float t) {
-    if (t <= keys.front()[0]) {
-        return Color{keys.front()[1], keys.front()[2], keys.front()[3], 1.0F};
-    }
-    for (std::size_t i = 1U; i < keys.size(); ++i) {
-        if (t <= keys[i][0]) {
-            const float f = (t - keys[i - 1U][0]) / (keys[i][0] - keys[i - 1U][0]);
-            const auto lerp = [&](std::size_t c) { return keys[i - 1U][c] + (keys[i][c] - keys[i - 1U][c]) * f; };
-            return Color{lerp(1U), lerp(2U), lerp(3U), 1.0F};
-        }
-    }
-    return Color{keys.back()[1], keys.back()[2], keys.back()[3], 1.0F};
-}
-
 std::string emitter_name(const Layer& layer, std::set<std::string>& taken) {
     std::string base;
     for (const char c : layer.name) {
@@ -112,1142 +38,6 @@ std::string emitter_name(const Layer& layer, std::set<std::string>& taken) {
     }
     return name;
 }
-
-class LayerBuilder final {
-public:
-    // `rigid_emitters` names every rigid physics layer that will play, in
-    // page order, which is what a "collides with solid objects" block meets:
-    // all of them, since every rigid emitter steps before any other. Empty
-    // where the page has none, and the block then compiles to nothing -- the
-    // coach asks for something solid rather than the layer refusing to play.
-    LayerBuilder(const Layer& layer, float scale, std::vector<ParameterDesc>& parameters,
-                 std::vector<std::string> rigid_emitters = {})
-        : layer_{layer}, s_{scale}, parameters_{parameters}, rigid_emitters_{std::move(rigid_emitters)} {}
-
-    // The cuts this layer's Break blocks asked for, in page order. Each
-    // names the body kind that comes apart and the model to cut, so a layer
-    // of several Objects cuts each one's own model.
-    [[nodiscard]] const std::vector<FractureCut>& cuts() const noexcept { return cuts_; }
-
-    // Room the layer needs beyond the bodies it places, because a body that
-    // comes apart is replaced by its pieces. The runtime refuses a break
-    // that will not fit and counts what it refused, so sizing for it here is
-    // what keeps a page from half-breaking without saying why.
-    [[nodiscard]] std::uint64_t extra_for_breaking() const noexcept {
-        std::uint64_t extra = 0U;
-        for (const ObjectBuild& of : objects_) {
-            if (of.pieces > 1U) {
-                extra += static_cast<std::uint64_t>(of.count) * (of.pieces - 1U);
-            }
-        }
-        return extra;
-    }
-    // The parameters this layer's blocks publish.
-    [[nodiscard]] const std::vector<std::string>& published() const noexcept { return published_; }
-    // The artist's files the layer's blocks name.
-    [[nodiscard]] const std::vector<AssetRequest>& requests() const noexcept { return requests_; }
-
-    // Builds the emitter; on failure sets `error` and `error_block`.
-    std::optional<Emitter> build(LayerReport& report) {
-        // The layer's kind decides, not what blocks it happens to hold: a
-        // rigid layer is one world, declared once, and the engine turns its
-        // pieces, so Tumble there only sets the spin they are thrown with.
-        physics_ = layer_.kind == LayerKind::Rigid;
-        if (physics_) {
-            world();
-        } else if (std::any_of(layer_.blocks.begin(), layer_.blocks.end(), [](const Block& b) {
-                       const auto* update = b.raw ? std::get_if<UpdateModule>(&*b.raw) : nullptr;
-                       return b.enabled && b.kind == raw_block_kind && update != nullptr &&
-                              std::holds_alternative<RigidPhysics>(*update);
-                   })) {
-            // An expert put the module in by hand with a Module block. The
-            // runtime's own validation has the last word on that.
-            physics_ = true;
-        }
-        for (const Block& block : layer_.blocks) {
-            if (block.enabled) {
-                add(block);
-            }
-            if (!error_.empty()) {
-                report.error = error_;
-                report.error_block = block.uid;
-                return std::nullopt;
-            }
-        }
-        // The last Object on the page has nothing after it to close it.
-        finish_object();
-        // A layer of solid things draws them, whether or not it has an
-        // Appearance block saying so. An Object's model is drawn only where
-        // the layer draws models, and having to add a Look block before the
-        // model you picked appears is not something to discover.
-        if (physics_ && !saw_appearance_ && !objects_.empty() && renderer_.geometry != Geometry::Mesh) {
-            renderer_.geometry = Geometry::Mesh;
-            renderer_.mesh = "chip";
-            renderer_.texture.clear();
-        }
-        if (!error_.empty()) {
-            report.error = error_;
-            return std::nullopt;
-        }
-        Emitter emitter;
-        emitter.seed = layer_.seed == 0U ? layer_.uid : hash_mix(layer_.uid, layer_.seed);
-        emitter.capacity = max_emitter_capacity;
-
-        const float life_min = std::max(layer_.life_min, 0.01F);
-        place_init(SlotLifetime, layer_.uid,
-                   Lifetime{.id = module_id(layer_.uid, 1U), .min = life_min,
-                            .max = std::max(layer_.life_max, life_min)});
-        finish_over_life();
-        // An Object's size is its own, carried by its body kind's scale. It
-        // is a multiple of the size every body is born at, so a layer with
-        // Objects and no Size block is born at 1 and each Object's size is
-        // the metres it says.
-        if (!object_sizes_.empty()) {
-            if (size_min_ <= 0.0F) {
-                size_min_ = 1.0F;
-                place_init(SlotSize, layer_.uid,
-                           InitSize{.id = module_id(layer_.uid, 5U), .min = 1.0F, .max = 1.0F});
-            }
-            for (const auto& [kind, size] : object_sizes_) {
-                if (kind >= 1U && kind <= kinds_.size()) {
-                    kinds_[kind - 1U].scale = size / size_min_;
-                }
-            }
-        }
-        // Every Object is a kind, every Part is a kind and every cell a cut
-        // makes is a kind, so a page of several cutting Objects can ask for
-        // more than a world may hold. It is refused here, naming what wanted
-        // them, rather than at the far end of the builder.
-        std::size_t wanted = kinds_.size();
-        for (const FractureCut& cut : cuts_) {
-            wanted += cut.cells;
-        }
-        if (wanted > max_rigid_body_kinds) {
-            report.error = "This layer's objects need " + std::to_string(wanted) + " kinds of body, and a world " +
-                           "holds " + std::to_string(max_rigid_body_kinds) + ": cut fewer pieces, place fewer " +
-                           "parts, or move an object to a layer of its own";
-            report.error_block = objects_.empty() ? layer_.uid : objects_.back().block;
-            return std::nullopt;
-        }
-        // The props and the parts' body kinds go on the layer's RigidPhysics
-        // module, which any block may have placed, so they are attached once
-        // every block is in. A part is drawn as its own model only where the
-        // layer draws models at all; otherwise it still hits things as its
-        // own shape and is drawn as the layer's pieces are.
-        if (!props_.empty() || !kinds_.empty()) {
-            // The layer's renderer, which reaches the emitter further down.
-            const bool draws_models = renderer_.geometry == Geometry::Mesh;
-            for (Placed& placed : after_) {
-                auto* update = std::get_if<UpdateModule>(&placed.line.module);
-                auto* physics = update != nullptr ? std::get_if<RigidPhysics>(update) : nullptr;
-                if (physics != nullptr) {
-                    physics->props = std::move(props_);
-                    if (!draws_models) {
-                        for (RigidBodyKind& of : kinds_) {
-                            of.draw.clear();
-                        }
-                    }
-                    physics->bodies = std::move(kinds_);
-                    break;
-                }
-            }
-        }
-        const auto by_slot = [](const Placed& a, const Placed& b) { return a.slot < b.slot; };
-        std::stable_sort(init_.begin(), init_.end(), by_slot);
-        std::stable_sort(forces_.begin(), forces_.end(), by_slot);
-        std::stable_sort(after_.begin(), after_.end(), by_slot);
-        for (Placed& placed : spawn_) {
-            emitter.spawn.push_back(std::get<SpawnModule>(placed.line.module));
-            report.modules.push_back(std::move(placed.line));
-        }
-        for (Placed& placed : init_) {
-            emitter.init.push_back(std::get<InitModule>(placed.line.module));
-            report.modules.push_back(std::move(placed.line));
-        }
-        for (std::vector<Placed>* group : {&forces_, &after_, &life_}) {
-            for (Placed& placed : *group) {
-                emitter.update.push_back(std::get<UpdateModule>(placed.line.module));
-                report.modules.push_back(std::move(placed.line));
-            }
-        }
-        emitter.renderer = renderer_;
-        report.renderer = renderer_;
-        return emitter;
-    }
-
-private:
-    // A block's module id. Random streams are keyed by id, so a block's seed
-    // picks another id to deal its particles other values. Seeded ids have
-    // the top bit set, apart from every plain uid * 16 + slot, and the rare
-    // clash of two seeded ones moves on to the next free id.
-    ModuleId id(const Block& block, std::uint32_t slot) {
-        const float seed = number_of(block, "seed");
-        if (!(seed >= 1.0F)) {
-            return module_id(block.uid, slot);
-        }
-        constexpr ModuleId seeded = 0x80000000U;
-        ModuleId id = seeded | (hash_mix(module_id(block.uid, slot), static_cast<std::uint32_t>(seed)) & ~seeded);
-        while (!seeded_.insert(id).second) {
-            id = seeded | ((id + 1U) & ~seeded);
-        }
-        return id;
-    }
-
-    // The two ends of a force block's strength, as the factor each particle
-    // takes the force by (see the forces in ajfx/modules.hpp).
-    template <class Force>
-    void scale_by(Force& force, const Block& block, std::string_view control) {
-        const Value strength = get(block, control);
-        std::tie(force.scale_min, force.scale_max) = range_input(block, control, strength.x, strength.y, 1.0F);
-    }
-
-    // A force's strength in a rigid layer. The physics engine applies one
-    // gravity to the whole world and one damping to each body, and reads
-    // neither a force's per-particle scale nor its curve over life, so the
-    // strength has to be in the force itself or it is silently lost. The
-    // control is one number there (ControlDef::one_number), so the high end
-    // is the strength, and nothing random is promised.
-    [[nodiscard]] float world_strength(const Block& block, std::string_view control) const {
-        return get(block, control).y;
-    }
-
-    template <class M>
-    void place_init(int slot, Uid origin, M module) {
-        init_.push_back(Placed{slot, ModuleLine{origin, RawModule{InitModule{std::move(module)}}}});
-    }
-    template <class M>
-    void place_force(int slot, Uid origin, M module) {
-        forces_.push_back(Placed{slot, ModuleLine{origin, RawModule{UpdateModule{std::move(module)}}}});
-    }
-    template <class M>
-    void place_after(int slot, Uid origin, M module) {
-        after_.push_back(Placed{slot, ModuleLine{origin, RawModule{UpdateModule{std::move(module)}}}});
-    }
-    template <class M>
-    void place_spawn(Uid origin, M module) {
-        spawn_.push_back(Placed{0, ModuleLine{origin, RawModule{SpawnModule{std::move(module)}}}});
-    }
-
-    void add(const Block& block) {
-        const BlockDef* def = find_block_def(block.kind);
-        if (def == nullptr) {
-            error_ = "Studio does not know the block '" + block.kind + "'";
-            return;
-        }
-        if (def->unique) {
-            if (!unique_.insert(block.kind).second) {
-                error_ = "A layer can have only one " + std::string{def->title} + " block";
-                return;
-            }
-        }
-        // The palette and the picker never offer a block outside the
-        // layer's kind, and a drop is refused, so one here came from a
-        // hand-edited page. It is reported rather than quietly dropped.
-        if (block.kind != raw_block_kind && !fits(def->layers, layer_.kind)) {
-            std::string kind_words{layer_kind_name(layer_.kind)};
-            kind_words[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(kind_words[0])));
-            error_ = std::string{def->title} + " does not belong in a " + kind_words + " layer";
-            return;
-        }
-        const Uid uid = block.uid;
-        const std::string_view kind = block.kind;
-        const float s = s_;
-
-        if (kind == "stream") {
-            place_spawn(uid, SpawnRate{.id = id(block, 1U), .rate = input(block, "rate", number_of(block, "rate"), 1.0F)});
-        } else if (kind == "burst") {
-            place_spawn(uid, SpawnBurst{.id = id(block, 1U),
-                                        .time = number_of(block, "time"),
-                                        .count = static_cast<std::uint32_t>(std::lround(number_of(block, "count"))),
-                                        .interval = number_of(block, "every"),
-                                        .cycles = number_of(block, "every") > 0.0F
-                                                      ? static_cast<std::uint32_t>(std::lround(number_of(block, "repeats")))
-                                                      : 1U});
-        } else if (kind == "shape") {
-            const std::string shape = choice_of(block, "shape");
-            const Value radius = get(block, "size");
-            const Value box = get(block, "box");
-            ShapeLocation location{.id = id(block, 1U)};
-            location.center = to_vec3(get(block, "offset")) * s;
-            std::tie(location.radius_min, location.radius_max) =
-                range_input(block, "size", radius.x * s, radius.y * s, s);
-            location.shape = shape == "point"                    ? Shape::Point
-                             : shape == "box"                    ? Shape::Box
-                             : shape == "disc" || shape == "ring" ? Shape::Disc
-                                                                  : Shape::Sphere;
-            location.surface_only = shape == "shell" || shape == "ring";
-            location.size = Vec3{std::fabs(box.x), std::fabs(box.y), std::fabs(box.z)} * s;
-            place_init(SlotShape, uid, location);
-        } else if (kind == "launch") {
-            const std::string direction = choice_of(block, "direction");
-            const Value speed = get(block, "speed");
-            Velocity velocity{.id = id(block, 1U)};
-            const Vec3 up{0.0F, 1.0F, 0.0F};
-            velocity.direction = direction == "down"     ? Vec3{0.0F, -1.0F, 0.0F}
-                                 : direction == "side"   ? Vec3{1.0F, 0.0F, 0.0F}
-                                 : direction == "custom" ? normalized(to_vec3(get(block, "custom")), up)
-                                                         : up;
-            std::tie(velocity.speed_min, velocity.speed_max) = range_input(block, "speed", speed.x * s, speed.y * s, s);
-            if (direction == "out") {
-                velocity.spread = 180.0F;
-            } else {
-                const Value spread = get(block, "spread");
-                std::tie(velocity.spread_min, velocity.spread) =
-                    range_input(block, "spread", std::clamp(spread.x, 0.0F, 180.0F), std::clamp(spread.y, 0.0F, 180.0F),
-                                1.0F);
-            }
-            place_init(SlotVelocity, uid, velocity);
-        } else if (kind == "gravity") {
-            const float pull = physics_ ? world_strength(block, "strength") : 1.0F;
-            Gravity gravity{.id = id(block, 1U), .acceleration = Vec3{0.0F, -earth_gravity * s * pull, 0.0F}};
-            if (!physics_) {
-                scale_by(gravity, block, "strength");
-            }
-            place_force(SlotGravity, uid, gravity);
-        } else if (kind == "rise") {
-            const std::string over_life = choice_of(block, "over_life");
-            const float lift = physics_ ? world_strength(block, "strength") : 1.0F;
-            Gravity rise{.id = id(block, 1U),
-                         .acceleration = Vec3{0.0F, s * lift, 0.0F},
-                         .over_life = over_life == "cools"    ? std::vector<CurveKey>{{0.0F, 1.6F}, {1.0F, 0.2F}}
-                                      : over_life == "builds" ? std::vector<CurveKey>{{0.0F, 0.2F}, {1.0F, 1.6F}}
-                                                              : std::vector<CurveKey>{{0.0F, 1.0F}, {1.0F, 1.0F}}};
-            if (!physics_) {
-                scale_by(rise, block, "strength");
-            }
-            place_force(SlotRise, uid, rise);
-        } else if (kind == "wind") {
-            const float heading = number_of(block, "heading") * 3.14159265F / 180.0F;
-            const float push = physics_ ? world_strength(block, "strength") : 1.0F;
-            Gravity wind{.id = id(block, 1U),
-                         .acceleration = Vec3{std::cos(heading) * s * push, 0.0F, -std::sin(heading) * s * push}};
-            if (!physics_) {
-                scale_by(wind, block, "strength");
-            }
-            place_force(SlotWind, uid, wind);
-        } else if (kind == "turbulence") {
-            const float size = std::max(number_of(block, "size"), 0.01F) * s;
-            CurlNoise noise{.id = id(block, 1U),
-                            .strength = s,
-                            .frequency = 1.0F / size,
-                            .evolution = input(block, "churn", number_of(block, "churn") * s, s),
-                            .seed = hash_mix(uid, static_cast<std::uint32_t>(number_of(block, "seed"))),
-                            .drift = Vec3{0.0F, number_of(block, "roll") * s, 0.0F},
-                            .over_life = turbulence_curve(choice_of(block, "over_life"))};
-            scale_by(noise, block, "strength");
-            place_force(SlotTurbulence, uid, noise);
-        } else if (kind == "draw_in") {
-            Converge converge{.id = id(block, 1U),
-                              .center = to_vec3(get(block, "center")) * s,
-                              .strength = 1.0F,
-                              .height = number_of(block, "height") * s};
-            scale_by(converge, block, "strength");
-            place_force(SlotDrawIn, uid, converge);
-        } else if (kind == "spin") {
-            const Value speed = get(block, "speed");
-            place_init(SlotSpin, uid,
-                       InitSpin{.id = id(block, 1U),
-                                .speed_min = std::min(speed.x, speed.y),
-                                .speed_max = std::max(speed.x, speed.y),
-                                .both_ways = toggle_of(block, "both_ways"),
-                                .drag = number_of(block, "slows")});
-        } else if (kind == "drag") {
-            // In a rigid layer the amount is the body's linear damping, so
-            // it is the coefficient; the engine never reads the scale.
-            Drag drag{.id = id(block, 1U),
-                      .coefficient = physics_ ? FloatInput{world_strength(block, "amount")} : FloatInput{1.0F}};
-            if (!physics_) {
-                scale_by(drag, block, "amount");
-            }
-            place_force(SlotDrag, uid, drag);
-        } else if (kind == "swirl") {
-            Vortex vortex{.id = id(block, 1U),
-                          .center = to_vec3(get(block, "center")) * s,
-                          .axis = choice_of(block, "axis") == "horizontal" ? Vec3{1.0F, 0.0F, 0.0F}
-                                                                           : Vec3{0.0F, 1.0F, 0.0F},
-                          .strength = s};
-            scale_by(vortex, block, "strength");
-            place_force(SlotSwirl, uid, vortex);
-        } else if (kind == "attract") {
-            Attractor attractor{.id = id(block, 1U),
-                                .position = to_vec3(get(block, "point")) * s,
-                                .strength = s,
-                                .radius = input(block, "reach", number_of(block, "reach") * s, s)};
-            scale_by(attractor, block, "strength");
-            place_force(SlotAttract, uid, attractor);
-        } else if (kind == "appearance") {
-            saw_appearance_ = true;
-            appearance(block);
-        } else if (kind == "color") {
-            color(block);
-        } else if (kind == "size") {
-            size(block);
-        } else if (kind == "fade") {
-            const float in = number_of(block, "in") / 100.0F;
-            const float out = number_of(block, "out") / 100.0F;
-            color_life_.push_back([in, out](float t) {
-                const float a = (in > 0.0F ? smoothstep(0.0F, in, t) : 1.0F) *
-                                (out > 0.0F ? 1.0F - smoothstep(1.0F - out, 1.0F, t) : 1.0F);
-                return Color{1.0F, 1.0F, 1.0F, a};
-            });
-            life_origins_.push_back(uid);
-        } else if (kind == "ground") {
-            const std::string response = choice_of(block, "response");
-            PlaneCollision plane{.id = id(block, 1U)};
-            plane.offset = number_of(block, "height") * s;
-            plane.restitution = response == "bounce" ? input(block, "bounce", number_of(block, "bounce"), 1.0F) : FloatInput{0.0F};
-            plane.friction = response == "stick" ? FloatInput{1.0F} : input(block, "friction", number_of(block, "friction"), 1.0F);
-            plane.kill = response == "vanish";
-            place_after(SlotCollision, uid, plane);
-        } else if (kind == "pieces") {
-            // One of these a rigid layer: a particle meets everything solid
-            // in the effect, wherever those layers sit on the page, since
-            // every rigid emitter steps before any other. A block's module
-            // ids run from its uid, which leaves fifteen.
-            if (rigid_emitters_.size() > 15U) {
-                error_ = "This layer meets the bodies of " + std::to_string(rigid_emitters_.size()) +
-                         " rigid physics layers, and one layer may meet 15: put the solid things in fewer layers";
-                return;
-            }
-            const std::string response = choice_of(block, "response");
-            std::uint32_t slot = 1U;
-            for (const std::string& met : rigid_emitters_) {
-                place_after(SlotCollision, uid,
-                            BodyCollision{.id = id(block, slot++),
-                                          .emitter = met,
-                                          .restitution = response == "bounce" ? number_of(block, "bounce") : 0.0F,
-                                          .friction = response == "stick" ? 1.0F : number_of(block, "friction"),
-                                          .kill = response == "vanish"});
-            }
-        } else if (kind == "sphere") {
-            place_after(SlotCollision, uid,
-                        SphereCollision{.id = id(block, 1U),
-                                        .center = to_vec3(get(block, "center")) * s,
-                                        .radius = input(block, "radius", number_of(block, "radius") * s, s),
-                                        .inside = toggle_of(block, "inside"),
-                                        .restitution = input(block, "bounce", number_of(block, "bounce"), 1.0F),
-                                        .friction = input(block, "friction", number_of(block, "friction"), 1.0F),
-                                        .kill = toggle_of(block, "vanish")});
-        } else if (kind == "box") {
-            const Vec3 extent = to_vec3(get(block, "size"));
-            place_after(SlotCollision, uid,
-                        BoxCollision{.id = id(block, 1U),
-                                     .center = to_vec3(get(block, "center")) * s,
-                                     .half_size = Vec3{std::fabs(extent.x), std::fabs(extent.y), std::fabs(extent.z)} *
-                                                  (0.5F * s),
-                                     .inside = toggle_of(block, "inside"),
-                                     .restitution = input(block, "bounce", number_of(block, "bounce"), 1.0F),
-                                     .friction = input(block, "friction", number_of(block, "friction"), 1.0F),
-                                     .kill = toggle_of(block, "vanish")});
-        } else if (kind == "mesh_collider") {
-            mesh_collider(block);
-        } else if (kind == "tumble") {
-            const Value spin = get(block, "spin");
-            InitTumble tumble{.id = id(block, 1U)};
-            std::tie(tumble.speed_min, tumble.speed_max) = range_input(block, "spin", spin.x, spin.y, 1.0F);
-            place_init(SlotTumble, uid, tumble);
-            if (physics_) {
-                return;
-            }
-            place_after(SlotRigid, uid,
-                        RigidBody{.id = id(block, 2U),
-                                  .angular_drag = input(block, "damping", number_of(block, "damping"), 1.0F),
-                                  .contact_scale = number_of(block, "contact"),
-                                  .rest_speed = input(block, "settle", number_of(block, "settle") * s, s),
-                                  .roundness = input(block, "roundness", number_of(block, "roundness"), 1.0F)});
-        } else if (kind == "object") {
-            object(block);
-        } else if (kind == "break") {
-            breaking(block);
-        } else if (kind == "part") {
-            part(block);
-        } else if (kind == "light") {
-            light(block);
-        } else if (kind == raw_block_kind) {
-            raw(block);
-        }
-    }
-
-    // The rigid layer's own physics world (Layer::world), placed once from
-    // the layer rather than from a block on its list. A layer whose world
-    // is somehow missing takes the defaults, so a rigid layer always has
-    // one: that is what its kind promises.
-    void world() {
-        if (!layer_.world) {
-            place_after(SlotRigid, layer_.uid,
-                        RigidPhysics{.id = module_id(layer_.uid, 4U), .density = 2400.0F, .friction = 0.6F,
-                                     .restitution = 0.15F});
-            return;
-        }
-        const Block& block = *layer_.world;
-        const std::string shape = choice_of(block, "shape");
-        place_after(SlotRigid, block.uid,
-                    RigidPhysics{.id = id(block, 1U),
-                                 .shape = shape == "ball"   ? RigidShape::Sphere
-                                          : shape == "cube" ? RigidShape::Box
-                                                            : RigidShape::Auto,
-                                 .density = number_of(block, "density"),
-                                 .friction = number_of(block, "friction"),
-                                 .restitution = number_of(block, "bounce"),
-                                 .angular_damping = number_of(block, "damping"),
-                                 .allow_sleep = toggle_of(block, "rest")});
-    }
-
-    // The model a block's choice control names, as a package entry: a
-    // library mesh by name, the artist's own file, or empty for the layer's.
-    std::string model_of(const Block& block, std::string_view control, std::string_view file_control,
-                         std::string_view fallback) {
-        std::string name = choice_of(block, control);
-        if (name == "layer") {
-            return {};
-        }
-        if (name == "file") {
-            const std::string path = file_of(block, file_control);
-            // No model picked yet: the fallback, until there is one.
-            return path.empty() ? std::string{fallback} : request(AssetRequest::Kind::Mesh, block, path);
-        }
-        return name;
-    }
-
-    // The material a body kind takes: the Object's own where it says so,
-    // else the layer's, since a part of a crate is made of what the crate is.
-    void material_of(RigidBodyKind& of, const Block& block, bool own) {
-        const Block* from = own ? &block : (layer_.world ? &*layer_.world : nullptr);
-        if (from == nullptr) {
-            return;
-        }
-        of.density = number_of(*from, "density");
-        of.friction = number_of(*from, "friction");
-        of.restitution = number_of(*from, own ? "bounce" : "bounce");
-    }
-
-    // One Object of the layer: a thing standing in its world, which is a
-    // body kind of its own where it can be and a prop where it cannot. It
-    // opens a group, so the breaking blocks after it are its.
-    void object(const Block& block) {
-        finish_object();
-        ObjectBuild out;
-        out.block = block.uid;
-        out.title = block_summary(block);
-        const std::string arrange = choice_of(block, "arrange");
-        const std::string motion = choice_of(block, "motion");
-        const std::string collides = choice_of(block, "collides");
-        const bool hollow = collides == "bucket" || collides == "crate" || collides == "tube";
-        const bool own_material = toggle_of(block, "own_material");
-        out.count = arrange == "one"
-                        ? 1U
-                        : static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "count"))));
-        out.model = model_of(block, "model", "model_file", "cube");
-        const std::string& model = out.model;
-        const float size = std::max(number_of(block, "size") * s_, 1.0e-4F);
-
-        // A body is moved by the world and collides as a sphere, a cube or
-        // its model's hull. Anything else an artist may ask for -- standing
-        // still, being driven, or being hollow so things sit inside it -- is
-        // a prop, which is the only thing the engine can make of it.
-        if (motion == "loose" && !hollow) {
-            RigidBodyKind of;
-            // Its own shape means its model's hull. An Object drawn as the
-            // layer's own pieces has no model to wrap, so it takes the
-            // layer's shape instead, which is what every other body is:
-            // Auto is a hull where the layer draws models and a ball where
-            // it draws sprites, so a heap of sprites still has bodies.
-            of.shape = collides == "ball"    ? RigidShape::Sphere
-                       : collides == "block" ? RigidShape::Box
-                       : model.empty()       ? RigidShape::Auto
-                                             : RigidShape::Hull;
-            if (of.shape == RigidShape::Hull) {
-                of.mesh = model;
-            }
-            of.draw = model;
-            material_of(of, block, own_material);
-            kinds_.push_back(std::move(of));
-            out.kind = static_cast<std::uint32_t>(kinds_.size());
-            // Its size is the kind's, so one layer holds a crate and the
-            // girder beside it. The scale is worked out in build(), once the
-            // size every body is born at is known.
-            object_sizes_.emplace_back(out.kind, size);
-            place_spawn(block.uid,
-                        SpawnPile{.id = id(block, 1U),
-                                  .count = out.count,
-                                  .shape = arrange == "stack" ? PileShape::Box : PileShape::Heap,
-                                  .center = to_vec3(get(block, "at")) * s_,
-                                  .slope = number_of(block, "slope"),
-                                  .width = number_of(block, "width") * s_,
-                                  .depth = number_of(block, "depth") * s_,
-                                  .spacing = number_of(block, "spacing"),
-                                  .jitter = arrange == "one" ? 0.0F : number_of(block, "jitter"),
-                                  .release = number_of(block, "release"),
-                                  .body = out.kind});
-        } else {
-            out.prop = true;
-            if (out.count > 1U) {
-                error_ = "Only one " + std::string{block_title(block)} +
-                         " can stand still, be moved or be hollow: set how many back to just one, or let it be "
-                         "knocked about";
-                return;
-            }
-            if (motion == "driven" && collides == "own") {
-                error_ = "An object that is moved cannot collide as its own shape: have it collide as a hollow "
-                         "crate, a bucket or a tube instead";
-                return;
-            }
-            prop(block, model, size, motion, collides, hollow);
-        }
-        objects_.push_back(std::move(out));
-        open_ = objects_.size() - 1U;
-    }
-
-    // When the Object above comes apart. What it breaks into is the Part
-    // blocks under it, so the module is placed once they are all in; a block
-    // set to cut its model names a cut and places nothing, since the model is
-    // not read until the builder reads it.
-    void breaking(const Block& block) {
-        // With no Object above it there is nothing to break. The layer
-        // plays on unbroken and the coach asks for one, as a cut that
-        // cannot be made does: half an instruction is not a refusal.
-        if (open_ == no_object) {
-            return;
-        }
-        ObjectBuild& of = objects_[open_];
-        if (of.breaking || of.cut) {
-            error_ = "An object can come apart only one way, so it has one Break";
-            return;
-        }
-        Break made{.id = id(block, 1U),
-                   .body = of.kind,
-                   .threshold = number_of(block, "force") * s_,
-                   .scatter = number_of(block, "scatter") * s_,
-                   .spin = number_of(block, "spin")};
-        if (choice_of(block, "into") == "cut") {
-            of.pieces = static_cast<std::uint32_t>(std::max(1L, std::lround(number_of(block, "cells"))));
-            of.cut = FractureCut{.layer = layer_.uid,
-                                 .block = block.uid,
-                                 .body = of.kind,
-                                 .id = made.id,
-                                 .cells = of.pieces,
-                                 .seed = static_cast<std::uint32_t>(std::lround(number_of(block, "cut_seed"))),
-                                 .spread = number_of(block, "spread"),
-                                 .threshold = made.threshold,
-                                 .scatter = made.scatter,
-                                 .spin = made.spin};
-            return;
-        }
-        of.breaking = std::move(made);
-    }
-
-    // One part the Object above comes apart into. Each is a body kind of its
-    // own, collided and drawn as that part's model.
-    void part(const Block& block) {
-        if (open_ == no_object) {
-            return;
-        }
-        RigidBodyKind of;
-        of.shape = RigidShape::Hull;
-        of.mesh = model_of(block, "model", "model_file", "shard");
-        if (of.mesh.empty()) {
-            of.mesh = "shard";
-        }
-        of.draw = of.mesh;
-        material_of(of, block, false);
-        kinds_.push_back(std::move(of));
-        ObjectBuild& owner = objects_[open_];
-        owner.parts.push_back(BreakPiece{.body = static_cast<std::uint32_t>(kinds_.size()),
-                                         .offset = to_vec3(get(block, "at")),
-                                         .turn = to_vec3(get(block, "turn")),
-                                         .size = number_of(block, "size")});
-        owner.pieces = static_cast<std::uint32_t>(owner.parts.size());
-    }
-
-    // Places what the Object that is open came apart into, and closes it.
-    // Breaking is two halves and either alone does nothing, so a Break with
-    // no parts beside it is left out rather than guessed at; the coach says
-    // which half is missing.
-    void finish_object() {
-        if (open_ == no_object) {
-            return;
-        }
-        ObjectBuild& of = objects_[open_];
-        if (of.prop && (of.breaking || of.cut)) {
-            error_ = "Only a piece the world moves can come apart: let this object be knocked about, and have "
-                     "it collide as its own shape, a ball or a block";
-            open_ = no_object;
-            return;
-        }
-        if (of.breaking && !of.parts.empty()) {
-            of.breaking->pieces = of.parts;
-            place_after(SlotBreak, of.block, *of.breaking);
-        }
-        if (of.cut) {
-            // The model cut is the Object's own, so a layer of several cuts
-            // each one's own rather than whatever the layer draws.
-            of.cut->model = of.model;
-            cuts_.push_back(*of.cut);
-        }
-        open_ = no_object;
-    }
-
-    // An Object the engine cannot make a body of: one that stands still, one
-    // the effect drives, or one that is hollow so pieces sit inside it. It
-    // becomes a prop, which is authored rather than born. Props are
-    // collected here and attached to the RigidPhysics module in build(),
-    // since that module may be placed by a block that comes after this one.
-    void prop(const Block& block, const std::string& model, float size, const std::string& motion,
-              const std::string& collides, bool hollow) {
-        RigidProp out;
-        out.motion = motion == "driven" ? PropMotion::Driven
-                     : motion == "loose" ? PropMotion::Loose
-                                         : PropMotion::Fixed;
-        if (collides == "bucket") {
-            out.shape = PropShape::HollowCylinder;
-        } else if (collides == "crate") {
-            out.shape = PropShape::HollowBox;
-        } else if (collides == "tube") {
-            out.shape = PropShape::Pipe;
-        } else if (collides == "ball") {
-            out.shape = PropShape::Sphere;
-        } else if (collides == "block") {
-            out.shape = PropShape::Box;
-        } else {
-            out.shape = PropShape::Mesh;
-        }
-        static_cast<void>(hollow);
-        // The model is what a host draws, whatever the prop collides as, so
-        // it is named whenever the Object has one.
-        if (!model.empty()) {
-            out.mesh = model;
-        } else if (out.shape == PropShape::Mesh) {
-            // Nothing to follow: stand in as a block of its size, so the
-            // layer still plays while the coach asks for a model.
-            out.shape = PropShape::Box;
-        }
-        out.position = to_vec3(get(block, "at")) * s_;
-        out.turn = to_vec3(get(block, "turn"));
-        out.size = size;
-        out.half_size = to_vec3(get(block, "extent")) * (0.5F * s_);
-        out.radius = number_of(block, "radius") * s_;
-        out.height = number_of(block, "height") * s_;
-        out.wall = number_of(block, "wall") * s_;
-        out.segments = static_cast<std::uint32_t>(std::lround(number_of(block, "sides")));
-        out.density = number_of(block, "density");
-        out.friction = number_of(block, "friction");
-        out.restitution = number_of(block, "bounce");
-        // A move the artist has not touched leaves the prop where it stands,
-        // rather than carrying it to the origin.
-        const Value* to_position = block.find("move_to");
-        const Value* to_turn = block.find("turn_to");
-        out.to_position = to_position != nullptr ? to_vec3(*to_position) * s_ : out.position;
-        out.to_turn = to_turn != nullptr ? to_vec3(*to_turn) : out.turn;
-        out.move_from = number_of(block, "move_at");
-        out.move_over = number_of(block, "move_over");
-        props_.push_back(std::move(out));
-    }
-
-    // The control's value as a runtime input: bound to its published
-    // parameter, else the constant. `factor` takes the published range into
-    // the units the value is in (page scale for distances).
-    FloatInput input(const Block& block, std::string_view control, float value, float factor) {
-        const Published* published = block.publication(control);
-        if (published == nullptr) {
-            return value;
-        }
-        return declare(published->name, ParameterType::Float, to_value(value), published->low * factor,
-                       published->high * factor);
-    }
-
-    std::pair<FloatInput, FloatInput> range_input(const Block& block, std::string_view control, float low, float high,
-                                                  float factor) {
-        const Published* published = block.publication(control);
-        if (published == nullptr) {
-            return {low, high};
-        }
-        const float from = published->low * factor;
-        const float to = published->high * factor;
-        return {declare(published->name + "_min", ParameterType::Float, to_value(low), from, to),
-                declare(published->name + "_max", ParameterType::Float, to_value(high), from, to)};
-    }
-
-    ColorInput color_input(const Block& block, std::string_view control, Color value) {
-        const Published* published = block.publication(control);
-        if (published == nullptr) {
-            return value;
-        }
-        return declare(published->name, ParameterType::Color, to_value(value), published->low, published->high);
-    }
-
-    // Declares (or joins) a parameter of the effect. Two controls may share
-    // a name and so one parameter, if they publish the same kind of value;
-    // the range covers both.
-    Binding declare(const std::string& name, ParameterType type, ParameterValue value, float low, float high) {
-        if (low > high) {
-            std::swap(low, high);
-        }
-        if (!valid_parameter_name(name)) {
-            error_ = "A published control needs a name of letters, digits and underscores";
-            return bind(name);
-        }
-        const std::size_t components = type == ParameterType::Float ? 1U : type == ParameterType::Vec3 ? 3U : 4U;
-        for (std::size_t i = 0U; i < components; ++i) {
-            value[i] = std::clamp(value[i], low, high);
-        }
-        if (std::find(published_.begin(), published_.end(), name) == published_.end()) {
-            published_.push_back(name);
-        }
-        for (ParameterDesc& existing : parameters_) {
-            if (existing.name != name) {
-                continue;
-            }
-            if (existing.type != type) {
-                error_ = "'" + name + "' is published twice as different kinds of value";
-                return bind(name);
-            }
-            existing.min = std::min(existing.min, low);
-            existing.max = std::max(existing.max, high);
-            return bind(name);
-        }
-        parameters_.push_back(ParameterDesc{name, type, value, low, high});
-        return bind(name);
-    }
-
-    static std::vector<CurveKey> turbulence_curve(const std::string& over_life) {
-        if (over_life == "grows") {
-            return {{0.0F, 0.15F}, {0.5F, 1.0F}, {1.0F, 1.4F}};
-        }
-        if (over_life == "settles") {
-            return {{0.0F, 1.4F}, {1.0F, 0.2F}};
-        }
-        return {{0.0F, 1.0F}, {1.0F, 1.0F}};
-    }
-
-    // Lights ride on the renderer: Appearance keeps whatever this sets.
-    void light(const Block& block) {
-        SpriteRenderer& r = renderer_;
-        r.light_count = static_cast<std::uint32_t>(std::lround(number_of(block, "count")));
-        const Value intensity = get(block, "intensity");
-        const Value reach = get(block, "reach");
-        r.light_intensity_min = std::max(std::min(intensity.x, intensity.y), 0.0F);
-        r.light_intensity_max = std::max(std::max(intensity.x, intensity.y), 0.0F);
-        r.light_range_min = std::max(std::min(reach.x, reach.y), 0.01F) * s_;
-        r.light_range_max = std::max(std::max(reach.x, reach.y), 0.01F) * s_;
-        const std::string over_life = choice_of(block, "over_life");
-        if (over_life == "fade") {
-            r.light_curve = {{0.0F, 0.0F}, {0.15F, 1.0F}, {0.6F, 1.0F}, {1.0F, 0.0F}};
-        } else if (over_life == "flare") {
-            r.light_curve = {{0.0F, 0.0F}, {0.04F, 1.0F}, {0.3F, 0.35F}, {1.0F, 0.0F}};
-        } else if (over_life == "out") {
-            r.light_curve = {{0.0F, 1.0F}, {1.0F, 0.0F}};
-        } else {
-            r.light_curve = {{0.0F, 1.0F}, {1.0F, 1.0F}};
-        }
-        const std::string mode = choice_of(block, "color_mode");
-        r.light_own_color = mode == "own" || mode == "shift";
-        const Value own = get(block, "light_color");
-        const Color start{own.x, own.y, own.z, 1.0F};
-        Color end = start;
-        if (mode == "shift") {
-            const Value to = get(block, "end_color");
-            end = Color{to.x, to.y, to.z, 1.0F};
-        }
-        r.light_colors = {{0.0F, start}, {1.0F, end}};
-    }
-
-    void appearance(const Block& block) {
-        const std::string material = choice_of(block, "material");
-        SpriteRenderer r = renderer_; // keeps the light fields
-        r.blend = material == "glow" || material == "trail" ? BlendMode::Additive : BlendMode::Alpha;
-        r.sort = (material == "smoke" || material == "solid") && toggle_of(block, "sort");
-        r.soft_distance = material == "model" ? 0.0F : number_of(block, "soft") * s_;
-        if (material == "model") {
-            r.geometry = Geometry::Mesh;
-            r.mesh = choice_of(block, "mesh");
-            if (r.mesh == "file") {
-                const std::string path = file_of(block, "mesh_file");
-                // No model picked yet: chips, until there is.
-                r.mesh = path.empty() ? std::string{"chip"} : request(AssetRequest::Kind::Mesh, block, path);
-            }
-            r.texture.clear();
-            r.facing = Facing::Camera;
-            r.stretch = 0.0F;
-            r.flipbook_columns = r.flipbook_rows = 1U;
-            r.flipbook_blend = false;
-        } else {
-            LibraryTexture own{};
-            const LibraryTexture* texture = library_texture(choice_of(block, "texture"));
-            std::string own_entry;
-            if (choice_of(block, "texture") == "file") {
-                texture = nullptr;
-                if (const std::string path = file_of(block, "texture_file"); !path.empty()) {
-                    own_entry = request(AssetRequest::Kind::Texture, block, path);
-                    own.entry = own_entry;
-                    own.columns = static_cast<std::uint32_t>(std::clamp(std::lround(number_of(block, "columns")), 1L, 64L));
-                    own.rows = static_cast<std::uint32_t>(std::clamp(std::lround(number_of(block, "rows")), 1L, 64L));
-                    texture = &own;
-                }
-            }
-            const bool flipbook = texture != nullptr && texture->columns * texture->rows > 1U;
-            r.geometry = material == "trail" ? Geometry::Ribbon : Geometry::Sprites;
-            r.mesh.clear();
-            // A ribbon runs one picture along its length, so it cannot play
-            // a flipbook; it keeps the soft disc instead.
-            const bool usable = texture != nullptr && !(material == "trail" && flipbook);
-            r.texture = usable ? std::string{texture->entry} : std::string{};
-            r.flipbook_columns = usable ? texture->columns : 1U;
-            r.flipbook_rows = usable ? texture->rows : 1U;
-            r.flipbook_blend = usable && flipbook && toggle_of(block, "blend");
-            const bool streak = material != "trail" && choice_of(block, "facing") == "motion";
-            r.facing = streak ? Facing::Velocity : Facing::Camera;
-            r.stretch = streak ? number_of(block, "stretch") : 0.0F;
-            if (material != "trail" && toggle_of(block, "spin")) {
-                place_init(SlotRotation, block.uid, InitRotation{.id = id(block, 1U)});
-            }
-        }
-        renderer_ = std::move(r);
-    }
-
-    // Names the package entry an artist's file goes in, and asks for it.
-    std::string request(AssetRequest::Kind kind, const Block& block, const std::string& path, float scale = 1.0F,
-                        std::uint32_t cells = 0U, ColliderSolid solid = ColliderSolid::Auto) {
-        std::string options;
-        if (kind == AssetRequest::Kind::Field) {
-            options = format_number(scale, 6) + "/" + std::to_string(cells) + "/" +
-                      std::to_string(static_cast<int>(solid));
-        }
-        const std::string_view what = kind == AssetRequest::Kind::Texture ? "texture"
-                                      : kind == AssetRequest::Kind::Mesh  ? "mesh"
-                                                                          : "field";
-        AssetRequest wanted{kind, user_asset_name(what, path, options), path, layer_.uid, block.uid, scale, cells, solid};
-        const std::string entry = wanted.entry;
-        if (std::none_of(requests_.begin(), requests_.end(), [&](const AssetRequest& r) { return r.entry == entry; })) {
-            requests_.push_back(std::move(wanted));
-        }
-        return entry;
-    }
-
-    void mesh_collider(const Block& block) {
-        const std::string path = file_of(block, "file");
-        if (path.empty()) {
-            return; // nothing to collide with until a model is picked
-        }
-        const std::string detail = choice_of(block, "detail");
-        const std::uint32_t cells = detail == "coarse" ? 40U : detail == "fine" ? 120U : 72U;
-        const std::string mode = choice_of(block, "solid");
-        const ColliderSolid solid = mode == "solid"     ? ColliderSolid::Solid
-                                    : mode == "surface" ? ColliderSolid::Surface
-                                                        : ColliderSolid::Auto;
-        const float scale = std::max(number_of(block, "scale"), 0.001F) * s_;
-        const std::string field = request(AssetRequest::Kind::Field, block, path, scale, cells, solid);
-        place_after(SlotCollision, block.uid,
-                    SdfCollision{.id = id(block, 1U),
-                                 .field = field,
-                                 .offset = to_vec3(get(block, "position")) * s_,
-                                 .inside = toggle_of(block, "inside"),
-                                 .restitution = input(block, "bounce", number_of(block, "bounce"), 1.0F),
-                                 .friction = input(block, "friction", number_of(block, "friction"), 1.0F),
-                                 .kill = toggle_of(block, "vanish")});
-    }
-
-    void color(const Block& block) {
-        const Value base = get(block, "color");
-        // The starting colour carries the brightest end; each particle takes
-        // its own share of that down to the dimmest.
-        const Value bright = get(block, "brightness");
-        const float brightness = bright.y;
-        const float opacity = number_of(block, "opacity");
-        const Color a{base.x * brightness, base.y * brightness, base.z * brightness, opacity};
-        Color b = a;
-        if (toggle_of(block, "mix")) {
-            const Value second = get(block, "second");
-            b = Color{second.x * brightness, second.y * brightness, second.z * brightness, opacity};
-        }
-        // A published colour is the whole starting colour, brightness and
-        // opacity included; without a second colour both ends follow it.
-        const ColorInput start = color_input(block, "color", a);
-        place_init(SlotColor, block.uid,
-                   InitColor{.id = id(block, 1U),
-                             .a = start,
-                             .b = toggle_of(block, "mix") ? ColorInput{b} : start,
-                             .brightness_min = brightness > 0.0F ? std::clamp(bright.x / brightness, 0.0F, 1.0F) : 1.0F,
-                             .brightness_max = 1.0F});
-
-        const std::string over = choice_of(block, "over_life");
-        if (over == "fire") {
-            static constexpr std::array<std::array<float, 4>, 6> fire = {{{0.0F, 1.0F, 1.0F, 1.0F},
-                                                                          {0.12F, 1.0F, 0.88F, 0.62F},
-                                                                          {0.35F, 1.0F, 0.5F, 0.16F},
-                                                                          {0.62F, 0.75F, 0.18F, 0.04F},
-                                                                          {0.85F, 0.3F, 0.06F, 0.02F},
-                                                                          {1.0F, 0.12F, 0.03F, 0.02F}}};
-            color_life_.push_back([](float t) { return ramp(fire, t); });
-        } else if (over == "cool") {
-            static constexpr std::array<std::array<float, 4>, 3> cool = {
-                {{0.0F, 1.0F, 1.0F, 1.0F}, {0.35F, 0.7F, 0.82F, 1.0F}, {1.0F, 0.22F, 0.3F, 0.55F}}};
-            color_life_.push_back([](float t) { return ramp(cool, t); });
-        } else if (over == "darken") {
-            color_life_.push_back([](float t) {
-                const float k = 1.0F - 0.78F * t;
-                return Color{k, k, k, 1.0F};
-            });
-        } else if (over == "shift") {
-            const Value end = get(block, "end_color");
-            // A multiplier that takes the start colour to the end colour.
-            const auto ratio = [](float to, float from) { return std::min(to / std::max(from, 0.02F), 20.0F); };
-            const Color target{ratio(end.x, base.x), ratio(end.y, base.y), ratio(end.z, base.z), 1.0F};
-            color_life_.push_back([target](float t) {
-                return Color{1.0F + (target.r - 1.0F) * t, 1.0F + (target.g - 1.0F) * t, 1.0F + (target.b - 1.0F) * t,
-                             1.0F};
-            });
-        }
-        if (over != "constant") {
-            life_origins_.push_back(block.uid);
-        }
-    }
-
-    void size(const Block& block) {
-        const Value size = get(block, "size");
-        InitSize init{.id = id(block, 1U)};
-        std::tie(init.min, init.max) = range_input(block, "size", size.x * s_, size.y * s_, s_);
-        // What an Object's own size is measured against: its kind's scale
-        // multiplies the size every body is born at.
-        size_min_ = std::max(size.x * s_, 1.0e-4F);
-        place_init(SlotSize, block.uid, init);
-        const std::string over = choice_of(block, "over_life");
-        const float change = number_of(block, "change");
-        if (over == "grow") {
-            size_life_.push_back([change](float t) { return 1.0F + (change - 1.0F) * (1.0F - (1.0F - t) * (1.0F - t)); });
-        } else if (over == "swell") {
-            size_life_.push_back([change](float t) { return 1.0F + (change - 1.0F) * smoothstep(0.0F, 1.0F, t); });
-        } else if (over == "shrink") {
-            size_life_.push_back([](float t) { return std::pow(std::max(1.0F - t, 0.0F), 0.8F); });
-        } else if (over == "pop") {
-            size_life_.push_back([](float t) { return smoothstep(0.0F, 0.12F, t) * (1.0F - smoothstep(0.35F, 1.0F, t)); });
-        }
-        if (over != "constant") {
-            life_origins_.push_back(block.uid);
-        }
-    }
-
-    void raw(const Block& block) {
-        if (!block.raw) {
-            error_ = "This Module block holds no module";
-            return;
-        }
-        RawModule module = *block.raw;
-        set_raw_id(module, module_id(block.uid, 1U));
-        if (const auto* spawn = std::get_if<SpawnModule>(&module)) {
-            spawn_.push_back(Placed{0, ModuleLine{block.uid, RawModule{*spawn}}});
-        } else if (const auto* init = std::get_if<InitModule>(&module)) {
-            init_.push_back(Placed{SlotRawInit, ModuleLine{block.uid, RawModule{*init}}});
-        } else {
-            const UpdateModule& update = std::get<UpdateModule>(module);
-            if (std::holds_alternative<SdfCollision>(update)) {
-                error_ = "Distance field collision needs a baked field, which Studio cannot make yet";
-                return;
-            }
-            if (std::holds_alternative<ColorOverLife>(update)) {
-                raw_color_life_ = ModuleLine{block.uid, module};
-            } else if (std::holds_alternative<SizeOverLife>(update)) {
-                raw_size_life_ = ModuleLine{block.uid, module};
-            } else if (is_force(update)) {
-                forces_.push_back(Placed{SlotRawForce, ModuleLine{block.uid, module}});
-            } else if (std::holds_alternative<RigidBody>(update) || std::holds_alternative<RigidPhysics>(update)) {
-                after_.push_back(Placed{SlotRigid, ModuleLine{block.uid, module}});
-            } else {
-                after_.push_back(Placed{SlotRawCollision, ModuleLine{block.uid, module}});
-            }
-        }
-    }
-
-    // One colour-over-life and one size-over-life module from everything the
-    // blocks asked for; a raw one of either replaces the merged one.
-    void finish_over_life() {
-        if (raw_color_life_) {
-            life_.push_back(Placed{0, std::move(*raw_color_life_)});
-        } else if (!color_life_.empty()) {
-            ColorOverLife module{.id = module_id(layer_.uid, 2U), .keys = {}};
-            for (std::size_t i = 0U; i < over_life_keys; ++i) {
-                const float t = static_cast<float>(i) / static_cast<float>(over_life_keys - 1U);
-                Color product{1.0F, 1.0F, 1.0F, 1.0F};
-                for (const auto& contribution : color_life_) {
-                    const Color c = contribution(t);
-                    product = Color{product.r * c.r, product.g * c.g, product.b * c.b, product.a * c.a};
-                }
-                module.keys.push_back(ColorKey{t, product});
-            }
-            life_.push_back(Placed{0, ModuleLine{layer_.uid, RawModule{UpdateModule{std::move(module)}}}});
-        }
-        if (raw_size_life_) {
-            life_.push_back(Placed{1, std::move(*raw_size_life_)});
-        } else if (!size_life_.empty()) {
-            SizeOverLife module{.id = module_id(layer_.uid, 3U), .keys = {}};
-            for (std::size_t i = 0U; i < over_life_keys; ++i) {
-                const float t = static_cast<float>(i) / static_cast<float>(over_life_keys - 1U);
-                float product = 1.0F;
-                for (const auto& contribution : size_life_) {
-                    product *= contribution(t);
-                }
-                module.keys.push_back(CurveKey{t, product});
-            }
-            life_.push_back(Placed{1, ModuleLine{layer_.uid, RawModule{UpdateModule{std::move(module)}}}});
-        }
-    }
-
-    const Layer& layer_;
-    float s_;
-    std::vector<ParameterDesc>& parameters_;
-    std::vector<std::string> published_;
-    std::vector<AssetRequest> requests_;
-    std::string error_;
-    std::set<std::string> unique_;
-    std::set<ModuleId> seeded_;
-    bool physics_{false};
-    bool saw_appearance_{false};
-    // The props the layer's Objects describe, in page order.
-    std::vector<std::string> rigid_emitters_;
-    std::vector<RigidProp> props_;
-    // The body kinds the layer's Objects and their Parts make, in the order
-    // the blocks are listed. Kind 0 is the emitter's own, so the kind a push
-    // makes is kinds_.size() once it is in.
-    std::vector<RigidBodyKind> kinds_;
-    // One Object of the layer, and what it comes apart into. An Object owns
-    // the breaking blocks that follow it, so `open_` is the one they reach.
-    struct ObjectBuild final {
-        Uid block{};
-        std::string title;
-        // The model it draws and collides as, empty for the layer's own.
-        std::string model;
-        // The body kind it is, or 0 when it stands as a prop instead.
-        std::uint32_t kind{0U};
-        bool prop{false};
-        std::optional<Break> breaking;
-        std::vector<BreakPiece> parts;
-        std::optional<FractureCut> cut;
-        // How many bodies it places, and what one of them comes apart into,
-        // for the layer's budget.
-        std::uint32_t count{1U};
-        std::uint32_t pieces{1U};
-    };
-    std::vector<ObjectBuild> objects_;
-    static constexpr std::size_t no_object = static_cast<std::size_t>(-1);
-    std::size_t open_{no_object};
-    std::vector<FractureCut> cuts_;
-    // The size every body is born at, which an Object's own size is a
-    // multiple of. 0 until a Size block says.
-    float size_min_{0.0F};
-    // Each body-kind Object's kind and the size it asked for, turned into
-    // the kind's scale in build() once `size_min_` is known.
-    std::vector<std::pair<std::uint32_t, float>> object_sizes_;
-    std::vector<Placed> spawn_;
-    std::vector<Placed> init_;
-    std::vector<Placed> forces_;
-    std::vector<Placed> after_;
-    std::vector<Placed> life_;
-    std::vector<std::function<Color(float)>> color_life_;
-    std::vector<std::function<float(float)>> size_life_;
-    std::vector<Uid> life_origins_;
-    std::optional<ModuleLine> raw_color_life_;
-    std::optional<ModuleLine> raw_size_life_;
-    SpriteRenderer renderer_{};
-};
 
 // The block a validation message names ("... module 'drag' #37 ..."), if it
 // belongs to the layer.
@@ -1289,7 +79,60 @@ std::uint32_t Compiled::total_capacity() const {
     return total;
 }
 
+std::string blast_name(Uid block) {
+    return "blast_" + std::to_string(block);
+}
+
+std::vector<PageBlast> page_blasts(const Document& document, float scale) {
+    std::vector<PageBlast> out;
+    for (const Layer& layer : document.layers) {
+        if (!layer.enabled) {
+            continue;
+        }
+        for (const Block& block : layer.blocks) {
+            if (block.enabled && block.kind == BlockKind::Push) {
+                // A blast set half its reach behind the point, against
+                // "Toward", reaching half as far again past it: what stands at
+                // the point is thrown along "Toward" at Power (two thirds of
+                // the way to the middle of a blast half as strong again).
+                const Value at = get(block, "at");
+                const Value toward = get(block, "toward");
+                Vec3 way{toward.x, toward.y, toward.z};
+                const float length = std::sqrt(dot(way, way));
+                way = length > 1.0e-6F ? way * (1.0F / length) : Vec3{0.0F, 0.0F, -1.0F};
+                const float reach = std::max(number_of(block, "radius"), 0.01F);
+                const Vec3 point{at.x, at.y, at.z};
+                out.push_back(PageBlast{.block = block.uid,
+                                        .layer = layer.uid,
+                                        .blast = Blast{.name = blast_name(block.uid),
+                                                       .center = (point - way * (0.5F * reach)) * scale,
+                                                       .power = std::max(number_of(block, "power"), 0.0F) * 1.5F * scale,
+                                                       .radius = 1.5F * reach * scale,
+                                                       .time = std::max(number_of(block, "time"), 0.0F)}});
+                continue;
+            }
+            if (!block.enabled || block.kind != BlockKind::Explosion) {
+                continue;
+            }
+            const Value at = get(block, "at");
+            out.push_back(PageBlast{.block = block.uid,
+                                    .layer = layer.uid,
+                                    .blast = Blast{.name = blast_name(block.uid),
+                                                   .center = Vec3{at.x, at.y, at.z} * scale,
+                                                   .power = std::max(number_of(block, "power"), 0.0F) * scale,
+                                                   .radius = std::max(number_of(block, "radius"), 0.01F) * scale,
+                                                   .time = std::max(number_of(block, "time"), 0.0F)}});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const PageBlast& a, const PageBlast& b) { return a.block < b.block; });
+    if (out.size() > max_blasts) {
+        out.resize(max_blasts);
+    }
+    return out;
+}
+
 Compiled compile(const Document& document, Purpose purpose) {
+    if (document.scene) { return compile_scene(document, purpose); }
     Compiled compiled;
     Effect effect;
     effect.name = document.name.empty() ? std::string{"effect"} : document.name;
@@ -1301,13 +144,20 @@ Compiled compile(const Document& document, Purpose purpose) {
 
     const auto wanted = [&](const Layer& layer) { return layer.enabled && (!any_solo || layer.solo); };
 
+    // The page's explosions, which every layer answers: listed on the effect
+    // before any layer is checked, since a layer's shockwave names one.
+    const std::vector<PageBlast> blasts = page_blasts(document, scale);
+    for (const PageBlast& blast : blasts) {
+        effect.blasts.push_back(blast.blast);
+    }
+
     // Every published range first: a parameter two layers share has to be
     // sized for both before either layer's budget is worked out.
     std::vector<ParameterDesc> parameters;
     for (const Layer& layer : document.layers) {
         if (wanted(layer)) {
             LayerReport scratch;
-            static_cast<void>(LayerBuilder{layer, scale, parameters}.build(scratch));
+            static_cast<void>(LayerBuilder{layer, scale, parameters, document.world}.build(scratch));
         }
     }
     std::set<std::string> used;
@@ -1320,23 +170,109 @@ Compiled compile(const Document& document, Purpose purpose) {
     for (const Layer& layer : document.layers) {
         emitter_names.push_back(emitter_name(layer, names));
     }
-    // Everything solid that will play. A layer that meets bodies meets all
-    // of them, wherever they sit on the page, because every rigid physics
-    // emitter steps before any other (Simulation::step).
-    std::vector<std::string> rigid_emitters;
-    for (std::size_t i = 0U; i < document.layers.size(); ++i) {
-        if (document.layers[i].kind == LayerKind::Rigid && wanted(document.layers[i])) {
-            rigid_emitters.push_back(emitter_names[i]);
-        }
-    }
-    // Rigid layers compile first, so a layer that meets their bodies
-    // validates against emitters that already exist -- the same order the
-    // runtime steps them in. The emitters are assembled in page order
-    // afterwards, since that is the order they are drawn in.
+    // The one world every solid layer that plays is part of, which every
+    // particle layer meets unless it passes through, and which blocks born
+    // of solid things read. Known once the solid layers have compiled and
+    // merged.
+    SolidWorld solids;
+    // Rigid layers compile first, each on its own, and then merge into the
+    // page's one world, so a layer that meets or reads its bodies validates
+    // against an emitter that already exists -- the same order the runtime
+    // steps them in. The emitters are assembled in page order afterwards,
+    // since that is the order they are drawn in.
     std::vector<LayerReport> reports(document.layers.size());
     std::vector<std::optional<Emitter>> built(document.layers.size());
+    std::vector<std::uint64_t> extras(document.layers.size(), 0U);
+    std::vector<std::vector<FractureCut>> layer_cuts(document.layers.size());
     std::vector<Emitter> so_far;
+    // Merges the solid layers that compiled and play into the page's one
+    // world (SolidWorld, solid_world.hpp). A layer that will not fit beside
+    // the rest is left out, newest first, and says why; the others play.
+    const auto merge_world = [&]() {
+        SolidWorld world;
+        std::vector<SolidBuild> members;
+        for (std::size_t i = 0U; i < document.layers.size(); ++i) {
+            if (document.layers[i].kind != LayerKind::Rigid || !reports[i].included || !built[i]) {
+                continue;
+            }
+            SolidBuild build{.index = i,
+                             .layer = document.layers[i].uid,
+                             .emitter = *built[i],
+                             .spawn_origins = {},
+                             .extra = extras[i],
+                             .cuts = layer_cuts[i]};
+            // A layer's report lists its spawn modules first, in stack order.
+            for (std::size_t k = 0U; k < build.emitter.spawn.size() && k < reports[i].modules.size(); ++k) {
+                build.spawn_origins.push_back(reports[i].modules[k].origin);
+            }
+            members.push_back(std::move(build));
+        }
+        std::sort(members.begin(), members.end(),
+                  [](const SolidBuild& a, const SolidBuild& b) { return a.layer < b.layer; });
+        while (!members.empty()) {
+            std::string why;
+            std::optional<MergedSolids> merged = merge_solids(members, why);
+            if (merged && members.size() > 1U) {
+                // Sized and checked as one emitter, as a layer is.
+                Effect alone;
+                alone.name = effect.name;
+                alone.simulation_rate = effect.simulation_rate;
+                alone.blasts = effect.blasts;
+                alone.parameters = parameters;
+                const std::uint64_t bound = particle_bound(alone, merged->emitter) + merged->extra;
+                if (bound > max_emitter_capacity) {
+                    why = "together the solid layers could have more pieces alive than one world holds";
+                } else {
+                    const std::uint64_t rounded = std::max<std::uint64_t>(64U, (bound + 63U) / 64U * 64U);
+                    merged->emitter.capacity =
+                        static_cast<std::uint32_t>(std::min<std::uint64_t>(rounded, max_emitter_capacity));
+                    alone.emitters.push_back(merged->emitter);
+                    if (Result<bool> valid = validate(alone); !valid) {
+                        why = valid.error().message;
+                    }
+                }
+            }
+            if (merged && why.empty()) {
+                world.emitter = merged->emitter.name;
+                world.capacity = merged->emitter.capacity;
+                world.moves = !merged->emitter.spawn.empty();
+                for (std::size_t m = 0U; m < members.size(); ++m) {
+                    const std::size_t at = members[m].index;
+                    world.layers.push_back(SolidWorld::Member{members[m].layer, merged->scopes[m]});
+                    reports[at].emitter = world.emitter;
+                    reports[at].scope = merged->scopes[m];
+                    reports[at].emitter_capacity = world.capacity;
+                    built[at].reset();
+                }
+                // Drawn where the world's first layer is on the page.
+                built[members.front().index] = std::move(merged->emitter);
+                for (FractureCut& cut : merged->cuts) {
+                    compiled.cuts.push_back(std::move(cut));
+                }
+                break;
+            }
+            const SolidBuild& last = members.back();
+            LayerReport& report = reports[last.index];
+            report.included = false;
+            report.error = "It does not fit in the page's one solid world: " + why;
+            built[last.index].reset();
+            if (compiled.error.empty()) {
+                compiled.error = document.layers[last.index].name + ": " + report.error;
+            }
+            members.pop_back();
+        }
+        return world;
+    };
     for (const bool rigid_pass : {true, false}) {
+    if (!rigid_pass) {
+        solids = merge_world();
+        so_far.clear();
+        for (const std::optional<Emitter>& emitter : built) {
+            if (emitter) {
+                so_far.push_back(*emitter);
+            }
+        }
+    }
     for (std::size_t layer_index = 0U; layer_index < document.layers.size(); ++layer_index) {
         const Layer& layer = document.layers[layer_index];
         if ((layer.kind == LayerKind::Rigid) != rigid_pass) {
@@ -1348,21 +284,26 @@ Compiled compile(const Document& document, Purpose purpose) {
         // A layer that will not play still compiles, against its own copy,
         // so what it publishes never widens what the playing layers see.
         std::vector<ParameterDesc> own = parameters;
-        LayerBuilder builder{layer, scale, wanted(layer) ? parameters : own, rigid_emitters};
+        LayerBuilder builder{layer, scale, wanted(layer) ? parameters : own, document.world,
+                             rigid_pass ? SolidWorld{} : solids, blasts};
         std::optional<Emitter> emitter = builder.build(report);
         report.parameters = builder.published();
+        report.baked = layer.baked;
+        report.held = builder.held();
         if (emitter) {
             emitter->name = report.emitter;
             // The most particles it can have alive, with every published
             // parameter anywhere in its range; then its capacity is exactly
             // that, rounded up.
             // This layer's emitter, after the layers already in: a block
-            // may name an earlier layer's emitter (landing on its pieces),
-            // and the runtime wants that one to come first. Those emitters
-            // have validated already, so any error here is this layer's.
+            // may name the solid world's emitter (landing on its pieces,
+            // born where they hit), and the runtime wants that one to come
+            // first. Those emitters have validated already, so any error
+            // here is this layer's.
             Effect alone;
             alone.name = effect.name;
             alone.simulation_rate = effect.simulation_rate;
+            alone.blasts = effect.blasts;
             alone.parameters = wanted(layer) ? parameters : own;
             alone.emitters = so_far;
             // What its objects come apart into is room the layer needs: a
@@ -1377,6 +318,7 @@ Compiled compile(const Document& document, Purpose purpose) {
                 const std::uint64_t rounded = std::max<std::uint64_t>(64U, (bound + 63U) / 64U * 64U);
                 emitter->capacity = static_cast<std::uint32_t>(std::min<std::uint64_t>(rounded, max_emitter_capacity));
                 report.capacity = emitter->capacity;
+                report.emitter_capacity = emitter->capacity;
                 report.bytes = static_cast<std::uint64_t>(gpu::particle_layout(*emitter).stride) * emitter->capacity;
                 alone.emitters.push_back(*emitter);
                 if (Result<bool> valid = validate(alone); !valid) {
@@ -1396,9 +338,12 @@ Compiled compile(const Document& document, Purpose purpose) {
                 if (asked.model.empty()) {
                     asked.model = emitter->renderer.mesh;
                 }
-                compiled.cuts.push_back(std::move(asked));
+                layer_cuts[layer_index].push_back(std::move(asked));
             }
-            so_far.push_back(*emitter);
+            extras[layer_index] = builder.extra_for_breaking();
+            if (!rigid_pass) {
+                so_far.push_back(*emitter);
+            }
             built[layer_index] = std::move(*emitter);
             used.insert(report.parameters.begin(), report.parameters.end());
             for (const AssetRequest& request : builder.requests()) {
@@ -1414,6 +359,15 @@ Compiled compile(const Document& document, Purpose purpose) {
         reports[layer_index] = std::move(report);
     }
     }
+    // The cuts of the layers that play: a solid layer's name the world's
+    // emitter and kinds (merge_world); any other layer's are its own.
+    for (std::size_t i = 0U; i < document.layers.size(); ++i) {
+        if (document.layers[i].kind != LayerKind::Rigid && reports[i].included) {
+            for (FractureCut& cut : layer_cuts[i]) {
+                compiled.cuts.push_back(std::move(cut));
+            }
+        }
+    }
     // Back into page order, which is the order they are drawn in.
     for (std::size_t i = 0U; i < document.layers.size(); ++i) {
         if (built[i]) {
@@ -1421,9 +375,10 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         compiled.layers.push_back(std::move(reports[i]));
     }
-    // A layer that meets bodies names every rigid layer that was going to
-    // play; one that did not compile is not there, so its name is dropped
-    // rather than left for validation to trip over.
+    compiled.solids = std::move(solids);
+    // A layer that meets bodies names the solid world that was going to
+    // play; where it did not compile it is not there, so its name is
+    // dropped rather than left for validation to trip over.
     for (Emitter& emitter : effect.emitters) {
         std::erase_if(emitter.update, [&](const UpdateModule& module) {
             const auto* meets = std::get_if<BodyCollision>(&module);
@@ -1440,12 +395,17 @@ Compiled compile(const Document& document, Purpose purpose) {
         }
         // The emitter's own model, then the models its body kinds collide
         // and draw as: a part of a piece names one as readily as the layer
-        // does.
+        // does. And the models its props are shaped by: a thing that stands
+        // there as its own shape is built from its model, and a world with a
+        // prop whose mesh the package lacks cannot be made.
         std::vector<std::string> models{emitter.renderer.mesh};
         if (const RigidPhysics* physics = rigid_physics(emitter)) {
             for (const RigidBodyKind& of : physics->bodies) {
                 models.push_back(of.mesh);
                 models.push_back(of.draw);
+            }
+            for (const RigidProp& prop : physics->props) {
+                models.push_back(prop.mesh);
             }
         }
         for (const std::string& name : models) {
@@ -1515,15 +475,33 @@ void make_cuts(Compiled& compiled, std::string& issue) {
             named(made.error().message);
             continue;
         }
+        const auto first_cell = static_cast<std::uint32_t>(physics->bodies.size()) + 1U;
+        const auto cell_count = static_cast<std::uint32_t>(made.value().bodies.size());
+        // An Object's size is its kind's scale, so the cells cut from it
+        // keep that scale and are as big as the thing they came from.
+        const float parent_scale =
+            cut.body >= 1U && cut.body <= physics->bodies.size() ? physics->bodies[cut.body - 1U].scale : 1.0F;
+        const RigidBodyKind parent = cut.body >= 1U && cut.body <= physics->bodies.size()
+            ? physics->bodies[cut.body - 1U] : RigidBodyKind{};
         for (RigidBodyKind& kind : made.value().bodies) {
+            kind.scale *= parent_scale;
+            kind.draw_tint = parent.draw_tint;
+            kind.density = parent.density;
+            kind.friction = parent.friction;
+            kind.restitution = parent.restitution;
             physics->bodies.push_back(std::move(kind));
         }
+        // A cell is in every scope the thing it was cut from is in: in the
+        // page's one solid world, its layer's looks and what reads its
+        // bodies.
+        widen_scopes(compiled, cut.emitter, cut.body, first_cell, cell_count);
         for (auto& [name, mesh] : made.value().meshes) {
             compiled.meshes.emplace(name, std::move(mesh));
         }
         emitter->update.push_back(Break{.id = cut.id,
                                         .body = cut.body,
                                         .threshold = cut.threshold,
+                                        .blast_threshold = cut.blast_threshold,
                                         .scatter = cut.scatter,
                                         .spin = cut.spin,
                                         .pieces = std::move(made).value().pieces});
@@ -1573,6 +551,17 @@ float natural_loop_seconds(const Compiled& compiled) {
     float end = 0.0F;
     if (compiled.effect) {
         const Effect& effect = *compiled.effect;
+        // Objects that appear part way through fall and settle as a thing
+        // let go does, rather than living a solid layer's whole minute.
+        std::set<ModuleId> appearing;
+        for (const LayerReport& report : compiled.layers) {
+            appearing.insert(report.appearing.begin(), report.appearing.end());
+        }
+        // Whatever a blast throws is seen landing: a couple of seconds past
+        // the last to go off.
+        for (const Blast& blast : effect.blasts) {
+            end = std::max(end, std::max(blast.time, 0.0F) + 2.0F);
+        }
         for (const Emitter& emitter : effect.emitters) {
             float life = 0.0F;
             for (const InitModule& module : emitter.init) {
@@ -1589,7 +578,9 @@ float natural_loop_seconds(const Compiled& compiled) {
                     end = std::max(end, std::min(life, std::max(pile->release, 0.0F) + 5.0F));
                 } else if (const auto* burst = std::get_if<SpawnBurst>(&module)) {
                     const float start = std::max(burst->time, 0.0F);
-                    if (burst->interval > 0.0F && burst->cycles == 0U) {
+                    if (appearing.count(burst->id) != 0U) {
+                        end = std::max(end, std::min(start + life, start + 5.0F));
+                    } else if (burst->interval > 0.0F && burst->cycles == 0U) {
                         // Repeating for ever: until bursts overlap as they will from then on.
                         end = std::max(end, start + std::max(burst->interval, life) + life);
                     } else {
@@ -1610,156 +601,11 @@ float natural_loop_seconds(const Compiled& compiled) {
 }
 
 float loop_seconds(const Document& document, const Compiled& compiled) {
+    if (document.scene) { return std::clamp(document.loop_seconds, 0.5F, 3600.0F); }
     if (!document.loop_auto) {
         return std::clamp(document.loop_seconds, 0.5F, 120.0F);
     }
     return natural_loop_seconds(compiled);
-}
-
-std::vector<Block> detach_block(Document& document, const Compiled& compiled, Uid uid) {
-    std::vector<Block> blocks;
-    const std::optional<Document::BlockPlace> place = document.find_block(uid);
-    if (!place) {
-        return blocks;
-    }
-    const Block& block = place->layer->blocks[place->index];
-    const BlockDef* def = find_block_def(block.kind);
-    const LayerReport* report = compiled.layer(place->layer->uid);
-    if (def == nullptr || !def->detachable || report == nullptr || !report->error.empty()) {
-        return blocks;
-    }
-    const bool shapes_life = block.kind == "color" || block.kind == "size" || block.kind == "fade";
-    const Layer& layer = *place->layer;
-    const std::string original = block_text(block);
-    for (const ModuleLine& line : report->modules) {
-        bool take = line.origin == uid;
-        // The merged over-life curve this block shapes travels with it, so
-        // the picture is unchanged the moment it is detached.
-        if (!take && shapes_life && line.origin == layer.uid) {
-            const auto* update = std::get_if<UpdateModule>(&line.module);
-            take = update != nullptr &&
-                   ((block.kind == "size" && std::holds_alternative<SizeOverLife>(*update)) ||
-                    (block.kind != "size" && std::holds_alternative<ColorOverLife>(*update)));
-        }
-        if (take) {
-            RawModule module = line.module;
-            set_raw_id(module, 0U);
-            // What the block published goes with it, so its inputs keep the
-            // values they had rather than naming parameters nobody declares.
-            visit_fields(module, [&](std::string_view, auto& field) {
-                using T = std::decay_t<decltype(field)>;
-                if constexpr (std::is_same_v<T, FloatInput> || std::is_same_v<T, Vec3Input> ||
-                              std::is_same_v<T, ColorInput>) {
-                    if (!field.bound()) {
-                        return;
-                    }
-                    ParameterValue value{};
-                    if (compiled.effect) {
-                        for (const ParameterDesc& parameter : compiled.effect->parameters) {
-                            if (parameter.name == field.parameter) {
-                                value = parameter.default_value;
-                            }
-                        }
-                    }
-                    if constexpr (std::is_same_v<T, FloatInput>) {
-                        field.value = value[0];
-                    } else if constexpr (std::is_same_v<T, Vec3Input>) {
-                        field.value = Vec3{value[0], value[1], value[2]};
-                    } else {
-                        field.value = Color{value[0], value[1], value[2], value[3]};
-                    }
-                    field.parameter.clear();
-                }
-            });
-            Block raw = make_raw_block(document, module);
-            raw.detached = Detached{uid, original, std::move(module), 1U};
-            blocks.push_back(std::move(raw));
-        }
-    }
-    for (Block& raw : blocks) {
-        raw.detached->count = static_cast<std::uint32_t>(blocks.size());
-    }
-    return blocks;
-}
-
-namespace {
-
-// The block a detach came from, as it was.
-std::optional<Block> original_of(const Detached& detached) {
-    std::string error;
-    return block_from_text(detached.original, error);
-}
-
-} // namespace
-
-std::optional<DetachedGroup> detached_group(const Document& document, Uid uid) {
-    const Block* block = document.block(uid);
-    if (block == nullptr || !block->detached) {
-        return std::nullopt;
-    }
-    const std::optional<Block> original = original_of(*block->detached);
-    if (!original) {
-        return std::nullopt;
-    }
-    DetachedGroup group;
-    group.from = block->detached->from;
-    group.title = block_title(*original);
-    std::size_t expected = 0U;
-    for (const Layer& layer : document.layers) {
-        for (const Block& other : layer.blocks) {
-            if (!other.detached || other.detached->from != group.from) {
-                continue;
-            }
-            const bool in_layer = std::any_of(layer.blocks.begin(), layer.blocks.end(),
-                                              [&](const Block& b) { return b.uid == uid; });
-            if (!in_layer) {
-                continue;
-            }
-            ++group.modules;
-            RawModule now = other.raw ? *other.raw : other.detached->module;
-            set_raw_id(now, 0U);
-            if (!other.raw || !(now == other.detached->module) || !other.enabled) {
-                group.changed = true;
-            }
-        }
-    }
-    expected = block->detached->count;
-    if (expected > group.modules) {
-        group.changed = true;
-    }
-    return group;
-}
-
-std::optional<Uid> recombine_block(Document& document, Uid uid) {
-    const std::optional<Document::BlockPlace> place = document.find_block(uid);
-    if (!place) {
-        return std::nullopt;
-    }
-    Layer& layer = *place->layer;
-    const Block& block = layer.blocks[place->index];
-    if (!block.detached) {
-        return std::nullopt;
-    }
-    std::optional<Block> original = original_of(*block.detached);
-    if (!original) {
-        return std::nullopt;
-    }
-    const Uid from = block.detached->from;
-    std::size_t at = layer.blocks.size();
-    for (std::size_t i = 0U; i < layer.blocks.size(); ++i) {
-        if (layer.blocks[i].detached && layer.blocks[i].detached->from == from) {
-            at = std::min(at, i);
-        }
-    }
-    std::erase_if(layer.blocks, [&](const Block& b) { return b.detached && b.detached->from == from; });
-    // Its own uid back, so its random streams are the ones it had - unless
-    // something (a copied layer) has taken it since.
-    if (document.block(original->uid) != nullptr || document.layer(original->uid) != nullptr || original->uid == 0U) {
-        original->uid = document.allocate();
-    }
-    const Uid restored = original->uid;
-    insert_block(layer, std::min(at, layer.blocks.size()), std::move(*original));
-    return restored;
 }
 
 } // namespace ajfx::studio

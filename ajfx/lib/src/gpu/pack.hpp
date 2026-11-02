@@ -1,11 +1,13 @@
 #pragma once
 
+#include "../body_grid.hpp"
 #include "../step_inputs.hpp"
 
 #include <ajfx/effect.hpp>
 #include <ajfx/field.hpp>
 #include <ajfx/math.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -25,11 +27,21 @@
 // never needs the kernels compiled again.
 namespace ajfx::detail {
 
-// Where an emitter's distance fields sit in its fields buffer (in floats).
+// Where an emitter's distance fields sit in its fields buffer (in floats),
+// and after them, where the bodies of each emitter its BodyCollision and
+// Wake modules name are written every step (body_region_floats each).
 struct FieldLayout final {
     std::map<std::string, std::uint32_t, std::less<>> offsets;
     const FieldSet* fields{nullptr};
+    std::map<std::string, std::uint32_t, std::less<>> body_offsets;
 };
+
+// Floats one emitter's bodies take in a fields buffer, for an emitter of
+// `capacity`: each cell's first body (one more entry than cells), the body
+// indices by cell, then each body's record.
+inline std::uint64_t body_region_floats(std::uint32_t capacity) {
+    return std::uint64_t{body_grid_cells} + 1U + std::uint64_t{capacity} * (1U + body_record_floats);
+}
 
 struct PackContext final {
     const Inputs& in;
@@ -37,10 +49,14 @@ struct PackContext final {
     double start; // seconds at the start of the step
     // None when only the data's size matters (kernel generation).
     const FieldLayout* fields{nullptr};
-    // The bodies this step's BodyCollision modules meet, by the emitter they
-    // name. None leaves every collider empty, which is what kernel
-    // generation wants: the data's size is the same either way.
-    const std::map<std::string, std::vector<BodyCollider>, std::less<>>* bodies{nullptr};
+    // The bodies this step's BodyCollision and Wake modules meet, by the
+    // emitter they name, in their grids. None leaves every one empty, which
+    // is what kernel generation wants: the data's size is the same either
+    // way.
+    const BodyGrids* bodies{nullptr};
+    // The step being taken, which a blast goes off in or not. Kernel
+    // generation leaves it at 0: only the data's size matters there.
+    std::uint64_t tick{0U};
 };
 
 class Packer final {
@@ -48,6 +64,9 @@ public:
     explicit Packer(std::vector<float>& out) : out_{out} {}
 
     void f(float value) { out_.push_back(value); }
+    // Where the next value goes, and a value already written there changed.
+    [[nodiscard]] std::size_t size() const noexcept { return out_.size(); }
+    void set(std::size_t at, float value) { out_[at] = value; }
     void u(std::uint32_t value) { out_.push_back(std::bit_cast<float>(value)); }
     void v3(Vec3 value) {
         f(value.x);
@@ -198,6 +217,19 @@ inline void pack(const Converge& m, const PackContext& c, Packer& p) {
     pack_scale(m, c, p);
 }
 
+// [fires this step, center.xyz, power, radius, scale_min, scale_max]. Whether
+// the blast goes off is decided here, on the CPU, from the step, so the
+// kernel only throws when told to.
+inline void pack(const Shockwave& m, const PackContext& c, Packer& p) {
+    const Blast* blast = find_blast(c.in.effect, m.blast);
+    const bool fires = blast != nullptr && blast_tick(*blast, c.in.effect.simulation_rate) == c.tick;
+    p.u(fires ? 1U : 0U);
+    p.v3(blast != nullptr ? blast->center : Vec3{});
+    p.f(blast != nullptr ? blast->power : 0.0F);
+    p.f(blast != nullptr ? blast->radius : 1.0F);
+    pack_scale(m, c, p);
+}
+
 inline void pack(const PlaneCollision& m, const PackContext& c, Packer& p) {
     p.v3(normalized(m.normal));
     p.f(m.offset);
@@ -215,42 +247,85 @@ inline void pack(const SphereCollision& m, const PackContext& c, Packer& p) {
     p.u(m.kill ? 1U : 0U);
 }
 
-// [restitution, 1 - friction, kill, count, then nine floats a body:
-//  position, orientation, half size, 1 for a box]. The bodies travel in the
-//  module data, which is written every step, so they are where the emitter
-//  they belong to has just put them.
+// Where the named emitter's bodies are this step, as ajfx_cell_span and
+// ajfx_next_body read it, in 13 floats: [records at, order at, starts at (all in floats of
+// the fields buffer), count, usable, origin.xyz, 1 / cell, nx, ny, nz,
+// bound]. A count of 0 where there are no bodies to meet, or no buffer to
+// find them in (kernel generation).
+inline const BodyGrid* pack_grid(const std::string& name, const PackContext& c, Packer& p) {
+    const BodyGrid* grid = nullptr;
+    std::uint32_t at = 0U;
+    if (c.bodies != nullptr && c.fields != nullptr) {
+        const auto found = c.bodies->find(name);
+        const auto offset = c.fields->body_offsets.find(name);
+        if (found != c.bodies->end() && offset != c.fields->body_offsets.end()) {
+            grid = &found->second;
+            at = offset->second;
+        }
+    }
+    std::uint32_t capacity = 0U;
+    for (const Emitter& other : c.in.effect.emitters) {
+        if (other.name == name) {
+            capacity = other.capacity;
+            break;
+        }
+    }
+    const std::uint32_t order_at = at + body_grid_cells + 1U;
+    p.u(order_at + capacity);
+    p.u(order_at);
+    p.u(at);
+    p.u(grid != nullptr ? static_cast<std::uint32_t>(grid->bodies.size()) : 0U);
+    p.u(grid != nullptr && grid->usable ? 1U : 0U);
+    p.v3(grid != nullptr ? grid->origin : Vec3{});
+    p.f(grid != nullptr ? grid->inv_cell : 1.0F);
+    p.u(grid != nullptr ? grid->nx : 0U);
+    p.u(grid != nullptr ? grid->ny : 0U);
+    p.u(grid != nullptr ? grid->nz : 0U);
+    p.f(grid != nullptr ? grid->bound : 0.0F);
+    return grid;
+}
+
+// [restitution, 1 - friction, kill, grid (pack_grid)]. The bodies travel in
+// the fields buffer, written every step, so they are where the emitter they
+// belong to has just put them.
 inline void pack(const BodyCollision& m, const PackContext& c, Packer& p) {
     p.f(c.in(m.restitution));
     p.f(1.0F - c.in(m.friction));
     p.u(m.kill ? 1U : 0U);
-    const std::vector<BodyCollider>* bodies = nullptr;
-    if (c.bodies != nullptr) {
-        const auto found = c.bodies->find(m.emitter);
-        if (found != c.bodies->end()) {
-            bodies = &found->second;
+    static_cast<void>(pack_grid(m.emitter, c, p));
+}
+
+// [every source, 8 words of one bit per spawn source, every kind, 8 words of
+// one bit per body kind]: which bodies a wake follows, as
+// ajfx_body_in_scope reads it and in_scope decides it.
+inline void pack_body_scope(const Scope& scope, Packer& p) {
+    for (const std::vector<std::uint32_t>* list : {&scope.sources, &scope.kinds}) {
+        std::uint32_t words[8]{};
+        for (const std::uint32_t entry : *list) {
+            if (entry < 256U) {
+                words[entry >> 5U] |= 1U << (entry & 31U);
+            }
+        }
+        p.u(list->empty() ? 1U : 0U);
+        for (const std::uint32_t word : words) {
+            p.u(word);
         }
     }
-    const std::size_t count = bodies != nullptr ? bodies->size() : 0U;
-    p.u(static_cast<std::uint32_t>(count));
-    // Room for every body the named emitter may hold, so the data is the
-    // same size every step whatever is alive, and the same size the kernel
-    // was generated for; the count says how much of it to read.
-    std::uint32_t room = 0U;
-    for (const Emitter& other : c.in.effect.emitters) {
-        if (other.name == m.emitter) {
-            room = std::min(other.capacity, max_body_colliders);
-            break;
-        }
-    }
-    for (std::size_t i = 0U; i < room; ++i) {
-        const BodyCollider body = i < count ? (*bodies)[i] : BodyCollider{};
-        p.v3(body.position);
-        p.f(body.orientation.x);
-        p.f(body.orientation.y);
-        p.f(body.orientation.z);
-        p.f(body.orientation.w);
-        p.f(body.half);
-        p.f(body.box ? 1.0F : 0.0F);
+}
+
+// [strength * dt, radius, min_speed squared, scale_min, scale_max, the
+// farthest any wake reaches (radius times the largest half size), bodies
+// scope (18), grid (pack_grid)], as ajfx_wake reads them.
+inline void pack(const Wake& m, const PackContext& c, Packer& p) {
+    p.f(c.in(m.strength) * c.dt);
+    p.f(m.radius);
+    p.f(m.min_speed * m.min_speed);
+    pack_scale(m, c, p);
+    const std::size_t reach_at = p.size();
+    p.f(0.0F);
+    pack_body_scope(m.bodies, p);
+    if (const BodyGrid* grid = pack_grid(m.emitter, c, p)) {
+        p.set(reach_at, m.radius * grid->half);
     }
 }
 
@@ -307,6 +382,34 @@ inline void pack(const SizeOverLife& m, const PackContext&, Packer& p) {
     pack_curve(m.keys, p);
 }
 
+// [start, 1 / half_life, glow], as ajfx_heat reads them and detail::heat_glow
+// works with them.
+inline void pack(const Heat& m, const PackContext&, Packer& p) {
+    p.f(m.start);
+    p.f(1.0F / m.half_life);
+    p.f(m.glow);
+}
+
+// Floats a module's scope takes in its data: whether it is every particle,
+// then one bit per spawn source (piece_spawn_source the last).
+inline constexpr std::uint32_t scope_floats = 9U;
+
+// [every particle, 8 words of one bit per spawn source], as ajfx_in_scope
+// reads them. A scope's kinds never reach a kernel: only a rigid physics
+// emitter's particles are bodies, and the CPU simulates those.
+inline void pack_scope(const Scope& scope, Packer& p) {
+    std::uint32_t words[8]{};
+    for (const std::uint32_t source : scope.sources) {
+        if (source < 256U) {
+            words[source >> 5U] |= 1U << (source & 31U);
+        }
+    }
+    p.u(scope.sources.empty() ? 1U : 0U);
+    for (const std::uint32_t word : words) {
+        p.u(word);
+    }
+}
+
 // Rigid physics emitters run on the CPU; their kernels read no module data.
 inline void pack(const RigidPhysics&, const PackContext&, Packer&) {}
 
@@ -317,10 +420,14 @@ inline void pack(const Break&, const PackContext&, Packer&) {}
 // So does holding bodies to each other.
 inline void pack(const Glue&, const PackContext&, Packer&) {}
 
-// One module: its id, then its data.
+// One module: its id, then its scope where it has one (scope_floats), then
+// its data.
 template <class Module>
 void pack_module(const Module& module, const PackContext& context, Packer& p) {
     p.u(module.id);
+    if constexpr (requires { module.only; }) {
+        pack_scope(module.only, p);
+    }
     pack(module, context, p);
 }
 
@@ -335,6 +442,18 @@ inline void pack_emitter(const Emitter& emitter, const PackContext& context, std
         std::visit(visit, module);
     }
 }
+
+// Whether an emitter bears particles from contacts or moving bodies, whose
+// newborns then start where those put them: the spawn kernel reads each
+// one's start (birth_origin_floats) after the ages and spawn indices.
+inline bool has_birth_origins(const Emitter& emitter) {
+    return std::any_of(emitter.spawn.begin(), emitter.spawn.end(), [](const SpawnModule& module) {
+        return std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module);
+    });
+}
+
+// [position.xyz, velocity.xyz, 1 where it has one] a birth.
+inline constexpr std::uint32_t birth_origin_floats = 7U;
 
 // Module data floats for an emitter. The count does not depend on parameter
 // values, so the kernels can bake each module's offset.

@@ -4,9 +4,11 @@
 #include <ajfx/presets.hpp>
 #include <ajfx/simulation.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace {
 
@@ -778,6 +780,151 @@ void invalid_effects_do_not_simulate() {
 
 } // namespace
 
+// Sparks with every per-particle random draw an emitter can make, and, when
+// `second`, another spawn module after the first, with modules of its own
+// kind: the first module's particles must not notice it.
+Effect sparks_with_a_second_source(bool second) {
+    EffectBuilder builder{"sources"};
+    EmitterBuilder& e = builder.emitter("e");
+    e.capacity(4000U)
+        .seed(12U)
+        .spawn(SpawnRate{.id = 1U, .rate = 70.0F})
+        .init(Lifetime{.id = 2U, .min = 0.5F, .max = 2.0F})
+        .init(ShapeLocation{.id = 3U, .shape = Shape::Sphere, .radius_min = 0.2F, .radius_max = 1.0F})
+        .init(Velocity{.id = 4U, .speed_min = 1.0F, .speed_max = 3.0F, .spread = 60.0F})
+        .init(InitColor{.id = 5U, .a = Color{1.0F, 0.2F, 0.1F, 1.0F}, .b = Color{0.1F, 0.2F, 1.0F, 1.0F}})
+        .init(InitSize{.id = 6U, .min = 0.05F, .max = 0.2F})
+        .update(Gravity{.id = 7U, .scale_min = 0.5F, .scale_max = 1.5F})
+        .update(Drag{.id = 8U, .coefficient = 0.4F, .scale_min = 0.5F, .scale_max = 2.0F})
+        .update(ColorOverLife{.id = 9U});
+    if (second) {
+        e.spawn(SpawnBurst{.id = 10U, .time = 0.25F, .count = 40U, .interval = 0.5F, .cycles = 0U});
+    }
+    return builder.build().value();
+}
+
+void adding_a_spawn_module_leaves_the_others_alone() {
+    Simulation alone = make(sparks_with_a_second_source(false), 4U);
+    Simulation beside = make(sparks_with_a_second_source(true), 4U);
+    for (const std::uint64_t tick : {1U, 20U, 61U, 150U, 300U}) {
+        alone.advance_to(tick);
+        beside.advance_to(tick);
+        const EmitterState& a = alone.emitter(0);
+        const EmitterState& b = beside.emitter(0);
+        AJFX_CHECK(a.alive() > 0U);
+        // The second module's particles are there, and are its own.
+        std::size_t from_burst = 0U;
+        std::size_t j = 0U;
+        for (std::size_t i = 0U; i < b.alive(); ++i) {
+            if (spawn_source(b.spawn_index[i]) == 1U) {
+                ++from_burst;
+                continue;
+            }
+            AJFX_CHECK(spawn_source(b.spawn_index[i]) == 0U);
+            // The first module's particles, in their order, are exactly the
+            // ones it makes alone: same spawn index, same draws, same bits.
+            AJFX_CHECK(j < a.alive());
+            AJFX_CHECK(b.spawn_index[i] == a.spawn_index[j]);
+            AJFX_CHECK(b.position[i] == a.position[j] && b.velocity[i] == a.velocity[j]);
+            AJFX_CHECK(b.age[i] == a.age[j] && b.lifetime[i] == a.lifetime[j]);
+            AJFX_CHECK(b.color[i] == a.color[j] && b.size[i] == a.size[j]);
+            ++j;
+        }
+        AJFX_CHECK(j == a.alive());
+        AJFX_CHECK(tick < 15U || from_burst > 0U);
+        // Each source counts its own births.
+        AJFX_CHECK(b.spawn_counts.size() == 3U && a.spawn_counts.size() == 2U);
+        AJFX_CHECK(b.spawn_counts[0] == a.spawn_counts[0]);
+        AJFX_CHECK(b.spawned == b.spawn_counts[0] + b.spawn_counts[1]);
+    }
+    // A seek over both sources lands on the stepped state, counts and all.
+    CheckpointRing ring{40U, 4U};
+    Simulation seeker = make(sparks_with_a_second_source(true), 4U);
+    for (const std::uint64_t target : {170U, 35U, 290U, 81U}) {
+        ring.seek(seeker, target);
+        Simulation straight = make(sparks_with_a_second_source(true), 4U);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+}
+
+// Particles standing still in a ball of radius 4, and a blast of radius 3 at
+// its centre half a second in.
+Effect still_dust_and_a_blast(float scale_min, float scale_max) {
+    EffectBuilder builder{"shockwave"};
+    builder.blast(Blast{.name = "boom", .center = Vec3{0.5F, 1.0F, 0.0F}, .power = 6.0F, .radius = 3.0F, .time = 0.5F});
+    builder.emitter("dust")
+        .capacity(400U)
+        .seed(3U)
+        .spawn(SpawnBurst{.count = 300U})
+        .init(Lifetime{.min = 10.0F, .max = 10.0F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .center = Vec3{0.5F, 1.0F, 0.0F}, .radius_min = 0.0F,
+                            .radius_max = 4.0F})
+        .update(Shockwave{.blast = "boom", .scale_min = scale_min, .scale_max = scale_max});
+    return builder.build().value();
+}
+
+void a_shockwave_throws_particles_out_from_its_blast() {
+    const Effect effect = still_dust_and_a_blast(1.0F, 1.0F);
+    const Blast& blast = effect.blasts[0];
+    AJFX_CHECK(blast_tick(blast, effect.simulation_rate) == 30U);
+    Simulation simulation = make(effect, 2U);
+    simulation.advance_to(30U);
+    const EmitterState& s = simulation.emitter(0);
+    const std::vector<Vec3> before = s.position;
+    for (const Vec3& v : s.velocity) {
+        AJFX_CHECK(v == Vec3{});
+    }
+    simulation.step();
+    std::size_t thrown = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Vec3 out = before[i] - blast.center;
+        const float distance = std::sqrt(dot(out, out));
+        const float speed = std::sqrt(dot(s.velocity[i], s.velocity[i]));
+        if (distance >= blast.radius) {
+            // Beyond its reach a blast touches nothing.
+            AJFX_CHECK(s.velocity[i] == Vec3{});
+            continue;
+        }
+        ++thrown;
+        // Straight out from the centre, as hard as the blast is there.
+        AJFX_CHECK(near(speed, blast.power * (1.0F - distance / blast.radius), 1.0e-4F));
+        AJFX_CHECK(distance < 1.0e-3F || dot(s.velocity[i], out) > 0.999F * speed * distance);
+    }
+    AJFX_CHECK(thrown > 50U && thrown < s.alive());
+    // Once: the next step leaves every velocity as it was.
+    const std::vector<Vec3> after = s.velocity;
+    simulation.step();
+    AJFX_CHECK(s.velocity == after);
+
+    // Each particle takes the blast by its own factor.
+    Simulation scaled = make(still_dust_and_a_blast(0.0F, 2.0F), 2U);
+    scaled.advance_to(31U);
+    float slowest = 1.0e9F;
+    float fastest = 0.0F;
+    for (std::size_t i = 0U; i < scaled.emitter(0).alive(); ++i) {
+        const Vec3 out = before[i] - blast.center;
+        const float distance = std::sqrt(dot(out, out));
+        if (distance < blast.radius * 0.8F) {
+            const Vec3 v = scaled.emitter(0).velocity[i];
+            const float ratio = std::sqrt(dot(v, v)) / (blast.power * (1.0F - distance / blast.radius));
+            slowest = std::min(slowest, ratio);
+            fastest = std::max(fastest, ratio);
+        }
+    }
+    AJFX_CHECK(slowest < 0.5F && fastest > 1.5F && fastest <= 2.0F + 1.0e-4F);
+
+    // A seek over the blast finds it in the same step.
+    CheckpointRing ring{20U, 4U};
+    Simulation seeker = make(effect, 2U);
+    for (const std::uint64_t target : {45U, 29U, 31U, 60U, 30U}) {
+        ring.seek(seeker, target);
+        Simulation straight = make(effect, 2U);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+}
+
 int main() {
     const ajfx::test::Case cases[] = {
         {"reruns_are_identical_and_seeds_differ", reruns_are_identical_and_seeds_differ},
@@ -805,6 +952,8 @@ int main() {
         {"forces_scale_each_particle_by_its_own_factor", forces_scale_each_particle_by_its_own_factor},
         {"reset_and_restore_return_to_earlier_states", reset_and_restore_return_to_earlier_states},
         {"invalid_effects_do_not_simulate", invalid_effects_do_not_simulate},
+        {"adding_a_spawn_module_leaves_the_others_alone", adding_a_spawn_module_leaves_the_others_alone},
+        {"a_shockwave_throws_particles_out_from_its_blast", a_shockwave_throws_particles_out_from_its_blast},
     };
     return ajfx::test::run(cases);
 }

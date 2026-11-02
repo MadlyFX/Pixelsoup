@@ -87,7 +87,13 @@ std::string save_session(const SessionState& session) {
     root.add("paths", json::Value::of(session.paths));
     root.add("figure", json::Value::of(session.figure));
     root.add("expert", json::Value::of(session.expert));
+    root.add("night", json::Value::of(session.night));
+    root.add("zoom", json::Value::of(static_cast<double>(session.zoom)));
     root.add("looping", json::Value::of(session.looping));
+    root.add("scene_tree_split", json::Value::of(static_cast<double>(session.scene_tree_split)));
+    root.add("scene_inspector_split", json::Value::of(static_cast<double>(session.scene_inspector_split)));
+    root.add("scene_selection", uids(session.scene_selection));
+    root.add("scene_folded", uids(session.scene_folded));
     if (session.camera) {
         json::Value camera = json::Value::array();
         for (const float v : *session.camera) {
@@ -140,7 +146,16 @@ SessionState load_session(std::string_view text) {
     session.paths = root->bool_or("paths", false);
     session.figure = root->bool_or("figure", true);
     session.expert = root->bool_or("expert", false);
+    session.night = root->bool_or("night", false);
+    const double zoom = root->number_or("zoom", 1.0);
+    session.zoom = std::isfinite(zoom) ? static_cast<float>(std::clamp(zoom, 0.75, 1.5)) : 1.0F;
     session.looping = root->bool_or("looping", true);
+    const double tree = root->number_or("scene_tree_split", 0.19);
+    const double inspector = root->number_or("scene_inspector_split", 0.66);
+    session.scene_tree_split = std::isfinite(tree) ? static_cast<float>(std::clamp(tree, 0.12, 0.35)) : 0.19F;
+    session.scene_inspector_split = std::isfinite(inspector) ? static_cast<float>(std::clamp(inspector, 0.4, 0.8)) : 0.66F;
+    session.scene_selection = uids_from(root->find("scene_selection"));
+    session.scene_folded = uids_from(root->find("scene_folded"));
     if (const json::Value* camera = root->find("camera"); camera != nullptr && camera->items.size() == 6U) {
         std::array<float, 6> values{};
         bool ok = true;

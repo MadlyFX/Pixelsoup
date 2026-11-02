@@ -478,6 +478,52 @@ struct HullFace final {
     return directions;
 }
 
+// The corners the hull is built from. A model with few corners gives all of
+// them. A detailed one gives the corners that reach farthest along a fixed
+// spread of directions, every lattice step of -3 to 3 on each axis, so the
+// hull's cost stops growing with the model's detail: a scanned prop of
+// 50,000 corners is cut as quickly as a cube. The hull of these sits inside
+// the model's, and support_planes still pushes each of its directions out to
+// the farthest corner of all, so the region is never narrower than the model.
+// Ties go to the earlier corner and the chosen keep the model's order, so one
+// model always gives one set.
+[[nodiscard]] std::vector<Vec3> hull_points(const std::vector<Vec3>& points) {
+    constexpr int reach = 3;
+    constexpr std::size_t lattice = (2 * reach + 1) * (2 * reach + 1) * (2 * reach + 1) - 1;
+    if (points.size() <= lattice) {
+        return points;
+    }
+    std::vector<std::uint32_t> chosen;
+    chosen.reserve(lattice);
+    for (int x = -reach; x <= reach; ++x) {
+        for (int y = -reach; y <= reach; ++y) {
+            for (int z = -reach; z <= reach; ++z) {
+                if (x == 0 && y == 0 && z == 0) {
+                    continue;
+                }
+                const Vec3 along{static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)};
+                std::uint32_t farthest = 0U;
+                float most = dot(along, points[0]);
+                for (std::uint32_t i = 1U; i < static_cast<std::uint32_t>(points.size()); ++i) {
+                    if (const float here = dot(along, points[i]); here > most) {
+                        most = here;
+                        farthest = i;
+                    }
+                }
+                chosen.push_back(farthest);
+            }
+        }
+    }
+    std::sort(chosen.begin(), chosen.end());
+    chosen.erase(std::unique(chosen.begin(), chosen.end()), chosen.end());
+    std::vector<Vec3> out;
+    out.reserve(chosen.size());
+    for (const std::uint32_t i : chosen) {
+        out.push_back(points[i]);
+    }
+    return out;
+}
+
 // The planes to clip by: each hull direction pushed out until it touches the
 // model's farthest point that way. Taking the offsets from the points rather
 // than from the hull's own triangles means a face the incremental hull built
@@ -612,7 +658,7 @@ Result<std::vector<FractureCell>> fracture(const MeshData& model, const Fracture
                                                "same place"};
     }
 
-    Result<std::vector<Vec3>> directions = hull_directions(points, scale);
+    Result<std::vector<Vec3>> directions = hull_directions(hull_points(points), scale);
     if (!directions) {
         return directions.error();
     }

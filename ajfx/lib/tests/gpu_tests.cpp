@@ -494,6 +494,70 @@ void only_order_dependent_emitters_sort() {
 
 } // namespace
 
+// Sparks from two spawn modules thrown by a blast as they fly: each newborn's
+// spawn index comes from its own module's count, on the GPU as on the CPU,
+// and the shockwave throws every particle as the reference does, each by its
+// own factor.
+Effect blasted_sparks() {
+    EffectBuilder builder{"blasted"};
+    builder.blast(Blast{.name = "boom", .center = Vec3{0.3F, 0.5F, -0.2F}, .power = 8.0F, .radius = 2.5F,
+                        .time = 0.5F});
+    builder.emitter("sparks")
+        .capacity(2000U)
+        .seed(6U)
+        .spawn(SpawnRate{.rate = 120.0F})
+        .spawn(SpawnBurst{.time = 0.2F, .count = 50U, .interval = 0.3F, .cycles = 0U})
+        .init(Lifetime{.min = 1.0F, .max = 2.0F})
+        .init(ShapeLocation{.shape = Shape::Sphere, .radius_min = 0.0F, .radius_max = 1.5F})
+        .init(Velocity{.speed_min = 0.1F, .speed_max = 0.5F, .spread = 180.0F})
+        .update(Shockwave{.blast = "boom", .scale_min = 0.25F, .scale_max = 1.75F})
+        .update(Drag{.coefficient = 1.0F});
+    return builder.build().value();
+}
+
+void shockwaves_match_the_reference() {
+    const Effect effect = blasted_sparks();
+    Simulation cpu = make_cpu(effect, 5U);
+    gpu::GpuSimulation gpu = make_gpu(effect, 5U);
+    for (const std::uint64_t tick : {12U, 30U, 31U, 45U, 90U}) {
+        cpu.advance_to(tick);
+        gpu.advance_to(tick);
+        const EmitterState& c = cpu.emitter(0);
+        const EmitterState g = read(gpu);
+        AJFX_CHECK(compare(c, g, 1.0e-3F) == 1.0F);
+        // Both sources are among the live particles once the bursts begin.
+        bool burst = false;
+        for (const std::uint32_t index : g.spawn_index) {
+            burst = burst || spawn_source(index) == 1U;
+        }
+        AJFX_CHECK(tick < 13U || burst);
+    }
+    // The blast happened: right after it, particles near its centre fly far
+    // faster than anything the launch or drag gives.
+    Simulation probe = make_cpu(effect, 5U);
+    probe.advance_to(31U);
+    float fastest = 0.0F;
+    for (const Vec3& v : probe.emitter(0).velocity) {
+        fastest = std::max(fastest, std::sqrt(dot(v, v)));
+    }
+    AJFX_CHECK(fastest > 2.0F);
+
+    // Reruns are bit-identical, and a checkpoint taken before the blast
+    // finds it again.
+    gpu::GpuSimulation a = make_gpu(effect, 5U);
+    gpu::GpuSimulation b = make_gpu(effect, 5U);
+    a.advance_to(20U);
+    Result<gpu::GpuCheckpoint> before = a.save();
+    AJFX_CHECK(before.ok());
+    a.advance_to(60U);
+    b.advance_to(60U);
+    const std::vector<std::uint8_t> straight = bytes(a);
+    AJFX_CHECK(!straight.empty() && straight == bytes(b));
+    a.restore(before.value());
+    a.advance_to(60U);
+    AJFX_CHECK(bytes(a) == straight);
+}
+
 int main() {
     // Hardware first, then WARP. AJFX_TEST_WARP=1 forces WARP;
     // AJFX_TEST_DEBUG_LAYER=1 fails any flush the debug layer objects to.
@@ -515,6 +579,7 @@ int main() {
 
     const ajfx::test::Case cases[] = {
         {"gpu_matches_the_cpu_reference", gpu_matches_the_cpu_reference},
+        {"shockwaves_match_the_reference", shockwaves_match_the_reference},
         {"distance_fields_collide_as_the_reference_does", distance_fields_collide_as_the_reference_does},
         {"rigid_bodies_match_the_reference", rigid_bodies_match_the_reference},
         {"presets_match_the_reference_within_tolerance", presets_match_the_reference_within_tolerance},

@@ -72,7 +72,7 @@ void floats_survive_exactly() {
 
 void hand_written_json_fills_in_defaults() {
     const Result<Effect> effect = effect_from_json(R"({
-        "format": 1,
+        "format": 5,
         "name": "hand",
         "parameters": [{"name": "tint", "type": "color", "default": [1, 0.5, 0.25, 1], "min": 0, "max": 2}],
         "emitters": [{
@@ -98,17 +98,17 @@ void hand_written_json_fills_in_defaults() {
 }
 
 void malformed_json_is_reported_with_its_path() {
-    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", )";
+    const std::string head = R"({"format": 5, "name": "x", "emitters": [{"name": "e", )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "lifetime", "id": 1, "mn": 2}]}]})"),
                           ErrorCode::MalformedPackage, "emitters[0].init[0] has unknown field 'mn'"));
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "gravity", "id": 1}]}]})"),
                           ErrorCode::MalformedPackage, "unknown module type 'gravity' for this stack"));
     AJFX_CHECK(fails_with(effect_from_json(head + R"("init": [{"type": "lifetime", "id": 1, "min": "2"}]}]})"),
                           ErrorCode::MalformedPackage, "emitters[0].init[0].min must be a number"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 1, "name": )"), ErrorCode::MalformedPackage, "at byte"));
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 5, "name": )"), ErrorCode::MalformedPackage, "at byte"));
     AJFX_CHECK(fails_with(effect_from_json(R"({"name": "x"})"), ErrorCode::MalformedPackage, "no format version"));
-    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 2, "name": "x"})"), ErrorCode::UnsupportedVersion,
-                          "format 2 is not supported"));
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 6, "name": "x"})"), ErrorCode::UnsupportedVersion,
+                          "format 6 is not supported"));
     // Valid syntax, but the effect itself is refused.
     AJFX_CHECK(fails_with(effect_from_json(head + R"("capacity": 5, "spawn": [{"type": "spawn_burst", "id": 1,
                           "count": 6}], "init": [{"type": "lifetime", "id": 2}]}]})"),
@@ -370,7 +370,8 @@ void meshes_round_trip_and_are_checked() {
 void body_kinds_round_trip_and_are_checked() {
     // Two kinds beyond the emitter's own, each carrying a value in every
     // field, and a spawn module that names one.
-    const RigidBodyKind shards{.shape = RigidShape::Box, .density = 700.0F, .friction = 0.65F, .restitution = 0.15F};
+    const RigidBodyKind shards{.shape = RigidShape::Box, .density = 700.0F, .friction = 0.65F, .restitution = 0.15F,
+                               .draw_tint = Color{0.17F, 0.29F, 0.83F, 0.61F}};
     const RigidBodyKind ball{
         .shape = RigidShape::Hull, .mesh = "ball", .density = 300.0F, .friction = 0.2F, .restitution = 0.85F};
 
@@ -402,7 +403,7 @@ void body_kinds_round_trip_and_are_checked() {
                           "has a body kind shaped by mesh 'ball'"));
 
     // A misspelt field of a kind is reported with its path, as a prop's is.
-    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 5, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "bodies": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "box", "frictoin": 0.5}]}]}]})"),
                           ErrorCode::MalformedPackage,
@@ -453,7 +454,7 @@ void breaks_round_trip_and_are_checked() {
     AJFX_CHECK(breaking->threshold == 2.5F && breaking->scatter == 1.5F && breaking->spin == 240.0F);
 
     // A misspelt field of a piece is reported with its path, as a prop's is.
-    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 5, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2},
         {"type": "break", "id": 3, "pieces": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"size": 0.5, "ofset": [0, 1, 0]}]}]}]})"),
@@ -464,6 +465,68 @@ void breaks_round_trip_and_are_checked() {
     // A break with no pieces in the JSON is a break into nothing, refused.
     AJFX_CHECK(fails_with(effect_from_json(head + R"([]}]}]})"), ErrorCode::InvalidEffect,
                           "needs at least one piece"));
+}
+
+void blasts_round_trip_and_are_checked() {
+    // A blast with a non-default value in every field, a shockwave naming it
+    // and a break that shatters at it, so none of them is quietly lost.
+    const Blast boom{.name = "boom", .center = Vec3{1.5F, 0.25F, -2.0F}, .power = 7.5F, .radius = 4.25F,
+                     .time = 0.75F};
+    EffectBuilder builder{"blasting"};
+    builder.blast(boom);
+    builder.emitter("dust")
+        .capacity(64U)
+        .spawn(SpawnBurst{.count = 8U})
+        .init(Lifetime{.min = 4.0F, .max = 4.0F})
+        .update(Shockwave{.blast = "boom", .scale_min = 0.5F, .scale_max = 1.25F});
+    builder.emitter("crates")
+        .capacity(64U)
+        .spawn(SpawnBurst{.count = 1U})
+        .init(Lifetime{.min = 4.0F, .max = 4.0F})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Box},
+                                        RigidBodyKind{.shape = RigidShape::Box}}})
+        .update(Shockwave{.blast = "boom"})
+        .update(Break{.threshold = 9.0F, .blast_threshold = 3.5F, .pieces = {BreakPiece{.body = 1U}}});
+    const Result<Effect> built = builder.build();
+    AJFX_CHECK(built.ok());
+    const Effect effect = built.value();
+
+    const Result<std::vector<std::uint8_t>> first = write_package(effect);
+    AJFX_CHECK(first.ok());
+    const Result<Effect> read = read_package(first.value());
+    AJFX_CHECK(read.ok() && read.value() == effect);
+    AJFX_CHECK(read.value().blasts.size() == 1U && read.value().blasts[0] == boom);
+    const Result<std::vector<std::uint8_t>> second = write_package(read.value());
+    AJFX_CHECK(second.ok() && second.value() == first.value());
+    AJFX_CHECK(std::get<Break>(read.value().emitters[1].update[2]).blast_threshold == 3.5F);
+    // An effect without blasts says nothing of them.
+    AJFX_CHECK(effect_to_json(presets::smoke()).find("blasts") == std::string::npos);
+
+    // A shockwave answers a blast the effect lists.
+    EffectBuilder orphan{"orphan"};
+    orphan.emitter("e").spawn(SpawnBurst{}).init(Lifetime{}).update(Shockwave{.blast = "nothing"});
+    AJFX_CHECK(fails_with(orphan.build(), ErrorCode::InvalidEffect, "names blast 'nothing'"));
+    // Blasts are named once, reach somewhere and go off at a time.
+    const auto with = [](Blast blast) {
+        EffectBuilder b{"b"};
+        b.blast(std::move(blast));
+        b.emitter("e").spawn(SpawnBurst{}).init(Lifetime{});
+        return b.build();
+    };
+    AJFX_CHECK(fails_with(with(Blast{.name = ""}), ErrorCode::InvalidEffect, "a blast has no name"));
+    AJFX_CHECK(fails_with(with(Blast{.name = "b", .radius = 0.0F}), ErrorCode::InvalidEffect, "'radius'"));
+    AJFX_CHECK(fails_with(with(Blast{.name = "b", .power = -1.0F}), ErrorCode::InvalidEffect, "'power'"));
+    AJFX_CHECK(fails_with(with(Blast{.name = "b", .time = -0.5F}), ErrorCode::InvalidEffect, "'time'"));
+    EffectBuilder twice{"twice"};
+    twice.blast(Blast{.name = "b"}).blast(Blast{.name = "b"});
+    AJFX_CHECK(fails_with(twice.build(), ErrorCode::InvalidEffect, "blast 'b' is declared twice"));
+
+    // A misspelt field of a blast is reported with its path.
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 5, "name": "x", "blasts": [{"name": "b", "radus": 2}]})"),
+                          ErrorCode::MalformedPackage, "blasts[0] has unknown field 'radus'"));
+    AJFX_CHECK(fails_with(effect_from_json(R"({"format": 5, "name": "x", "blasts": {"name": "b"}})"),
+                          ErrorCode::MalformedPackage, "blasts must be an array of blasts"));
 }
 
 void props_round_trip_and_are_checked() {
@@ -484,6 +547,7 @@ void props_round_trip_and_are_checked() {
     bucket.to_turn = Vec3{0.0F, 0.0F, 115.0F};
     bucket.move_from = 0.5F;
     bucket.move_over = 0.4F;
+    bucket.draw_tint = Color{0.31F, 0.47F, 0.79F, 0.93F};
     // The one that does move collides as a generated shape, as it must.
     RigidProp tube{};
     tube.shape = PropShape::Pipe;
@@ -523,7 +587,7 @@ void props_round_trip_and_are_checked() {
 
     // A misspelt field of a prop is reported with its path, as a module's is,
     // rather than being ignored.
-    const std::string head = R"({"format": 1, "name": "x", "emitters": [{"name": "e", "capacity": 8,
+    const std::string head = R"({"format": 5, "name": "x", "emitters": [{"name": "e", "capacity": 8,
         "init": [{"type": "lifetime", "id": 1}], "update": [{"type": "rigid_physics", "id": 2, "props": )";
     AJFX_CHECK(fails_with(effect_from_json(head + R"([{"shape": "sphere", "radius": 0.5, "radus": 1}]}]}]})"),
                           ErrorCode::MalformedPackage,
@@ -545,6 +609,7 @@ int main() {
         {"props_round_trip_and_are_checked", props_round_trip_and_are_checked},
         {"body_kinds_round_trip_and_are_checked", body_kinds_round_trip_and_are_checked},
         {"breaks_round_trip_and_are_checked", breaks_round_trip_and_are_checked},
+        {"blasts_round_trip_and_are_checked", blasts_round_trip_and_are_checked},
         {"floats_survive_exactly", floats_survive_exactly},
         {"hand_written_json_fills_in_defaults", hand_written_json_fills_in_defaults},
         {"malformed_json_is_reported_with_its_path", malformed_json_is_reported_with_its_path},

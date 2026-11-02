@@ -21,10 +21,10 @@ cbuffer AjfxConstants : register(b0, space1) {
     uint ajfx_stride;       // bytes per particle record
     uint ajfx_capacity;
     uint ajfx_birth_count;
-    uint ajfx_spawn_base;
+    uint ajfx_spawn_base;   // unused: each newborn's spawn index is in ajfx_data
     uint ajfx_seed;
     float ajfx_dt;
-    uint ajfx_ages_offset;  // in floats, within ajfx_data
+    uint ajfx_ages_offset;  // in floats, within ajfx_data; spawn indices follow capacity later
     uint ajfx_reserved0;
     uint4 ajfx_reserved1;
     uint4 ajfx_reserved2;
@@ -36,7 +36,7 @@ RWByteAddressBuffer ajfx_counters : register(u2); // alive, compacted, refused
 RWByteAddressBuffer ajfx_flags : register(u3);    // 1 per surviving particle
 RWByteAddressBuffer ajfx_offsets : register(u4);  // survivor's index within its block
 RWByteAddressBuffer ajfx_blocks : register(u5);   // block totals, then block offsets
-RWByteAddressBuffer ajfx_data : register(u6);     // module data, then birth ages
+RWByteAddressBuffer ajfx_data : register(u6);     // module data, birth ages, then birth spawn indices
 RWByteAddressBuffer ajfx_args : register(u7);     // indirect dispatch sizes
 
 static const uint ajfx_group_size = 256u;
@@ -96,6 +96,17 @@ float3 ajfx_cross(float3 a, float3 b) {
 
 float ajfx_random(Particle p, uint module_id, uint draw) {
     return ajfx_particle_unit(ajfx_seed, p.spawn_index, ajfx_hash_mix(module_id, draw));
+}
+
+// Whether a module with a scope acts on this particle: [every particle, 8
+// words of one bit per spawn source], packed by pack_scope. The source is the
+// spawn index's top 8 bits (spawn_source).
+bool ajfx_in_scope(Particle p, uint o) {
+    if (ajfx_u32(o) != 0u) {
+        return true;
+    }
+    uint source = p.spawn_index >> 24u;
+    return ((ajfx_u32(o + 1u + (source >> 5u)) >> (source & 31u)) & 1u) != 0u;
 }
 
 // ------------------------------------------------------------ noise
@@ -360,6 +371,24 @@ void ajfx_converge(inout Particle p, uint o, uint id) {
     p.velocity = p.velocity - radial * (ajfx_f(o + 6u) * ajfx_force_scale(p, o + 8u, id) * falloff);
 }
 
+// [fires this step, center.xyz, power, radius, scale_min, scale_max]. Out
+// from the blast's centre, fading linearly to nothing at its radius, as
+// blast_push (src/effect.cpp) works it out.
+void ajfx_shockwave(inout Particle p, uint o, uint id) {
+    if (ajfx_u32(o) == 0u) {
+        return;
+    }
+    float3 d = p.position - ajfx_f3(o + 1u);
+    float dist = sqrt(ajfx_dot(d, d));
+    float radius = ajfx_f(o + 5u);
+    if (!(dist < radius)) {
+        return;
+    }
+    float3 out_dir = dist > 1.0e-6f ? d * (1.0f / dist) : float3(0.0f, 1.0f, 0.0f);
+    float speed = ajfx_f(o + 4u) * (1.0f - dist / radius);
+    p.velocity += out_dir * (speed * ajfx_force_scale(p, o + 6u, id));
+}
+
 // ------------------------------------------------------------ constraints and appearance
 
 #ifdef AJFX_RIGID_DATA
@@ -453,60 +482,268 @@ float3 ajfx_turn(float4 q, float3 v) {
     return v + t * q.w + ajfx_cross(u, t);
 }
 
-// [restitution, 1 - friction, kill, count, then nine floats a body:
-// position, orientation, half size, 1 for a box]. Each body is met in turn,
-// so a particle pushed out of one is where the next finds it, as the
-// reference does it.
+// The update kernel's distance fields share u7 with the bookkeeping
+// kernel's indirect arguments, which the update kernel never touches. So do
+// the bodies its BodyCollision and Wake modules meet, after the fields.
+#define ajfx_fields ajfx_args
+
+float ajfx_wf(uint o) { return asfloat(ajfx_fields.Load(o * 4u)); }
+float3 ajfx_wf3(uint o) { return float3(ajfx_wf(o), ajfx_wf(o + 1u), ajfx_wf(o + 2u)); }
+uint ajfx_wu(uint o) { return ajfx_fields.Load(o * 4u); }
+
+// ------------------------------------------------------------ bodies
+//
+// Another emitter's bodies, sorted into a grid each step (src/body_grid.hpp
+// says how and why the result is that of meeting every body in turn). A
+// module's grid data, packed by pack_grid, is [records at, order at, starts
+// at, count, usable, origin.xyz, 1 / cell, nx, ny, nz, bound]; each body's
+// record in the fields buffer is [position.xyz, orientation.xyzw, half size,
+// box, velocity.xyz, spawn index, kind].
+
+static const uint ajfx_no_body = 0xffffffffu;
+static const uint ajfx_body_floats = 14u;
+
+struct AjfxCellSpan {
+    uint3 lo;
+    uint3 hi;
+    bool none;
+};
+
+// The cells a body whose surface comes within `reach` of `pos` can be in, or
+// false to look at every body instead. As cell_span does it.
+bool ajfx_cell_span(uint g, float3 pos, float reach, out AjfxCellSpan span) {
+    span.lo = uint3(0u, 0u, 0u);
+    span.hi = uint3(0u, 0u, 0u);
+    span.none = false;
+    if (ajfx_u32(g + 4u) == 0u) {
+        return false;
+    }
+    float inv = ajfx_f(g + 8u);
+    float k = ceil(reach * 1.01f * inv);
+    if (!(k <= 3.0f)) {
+        return false;
+    }
+    float3 origin = ajfx_f3(g + 5u);
+    float3 at = float3(floor((pos.x - origin.x) * inv), floor((pos.y - origin.y) * inv),
+                       floor((pos.z - origin.z) * inv));
+    if (isnan(at.x) || isnan(at.y) || isnan(at.z)) {
+        return false;
+    }
+    uint3 dims = uint3(ajfx_u32(g + 9u), ajfx_u32(g + 10u), ajfx_u32(g + 11u));
+    float3 top = float3((float)(dims.x - 1u), (float)(dims.y - 1u), (float)(dims.z - 1u));
+    float3 first = at - float3(k, k, k);
+    float3 last = at + float3(k, k, k);
+    if (last.x < 0.0f || last.y < 0.0f || last.z < 0.0f || first.x > top.x || first.y > top.y || first.z > top.z) {
+        span.none = true;
+        return true;
+    }
+    span.lo = uint3(first.x <= 0.0f ? 0u : (uint)first.x, first.y <= 0.0f ? 0u : (uint)first.y,
+                    first.z <= 0.0f ? 0u : (uint)first.z);
+    span.hi = uint3(last.x >= top.x ? dims.x - 1u : (uint)last.x, last.y >= top.y ? dims.y - 1u : (uint)last.y,
+                    last.z >= top.z ? dims.z - 1u : (uint)last.z);
+    return true;
+}
+
+// How far from its middle a body's surface may be: sqrt(3) half sizes for a
+// box, as body_bound works it out.
+float ajfx_body_bound(uint at) {
+    float half_size = ajfx_wf(at + 7u);
+    return ajfx_wu(at + 8u) != 0u ? half_size * 1.7320508f : half_size;
+}
+
+// The first body at or after `from`, in body order, among the span's cells,
+// whose bounding ball grown by `extra` reaches `pos`. As next_body does it.
+uint ajfx_next_body(uint g, AjfxCellSpan span, float3 pos, float extra, uint from) {
+    uint best = ajfx_no_body;
+    if (span.none) {
+        return best;
+    }
+    uint records = ajfx_u32(g);
+    uint order = ajfx_u32(g + 1u);
+    uint starts = ajfx_u32(g + 2u);
+    uint nx = ajfx_u32(g + 9u);
+    uint ny = ajfx_u32(g + 10u);
+    for (uint z = span.lo.z; z <= span.hi.z; ++z) {
+        for (uint y = span.lo.y; y <= span.hi.y; ++y) {
+            for (uint x = span.lo.x; x <= span.hi.x; ++x) {
+                uint cell = (z * ny + y) * nx + x;
+                uint end = ajfx_wu(starts + cell + 1u);
+                for (uint j = ajfx_wu(starts + cell); j < end; ++j) {
+                    uint b = ajfx_wu(order + j);
+                    if (b >= best) {
+                        break;
+                    }
+                    if (b < from) {
+                        continue;
+                    }
+                    uint at = records + b * ajfx_body_floats;
+                    float3 d = pos - ajfx_wf3(at);
+                    float r = (ajfx_body_bound(at) + extra) * 1.01f;
+                    if (ajfx_dot(d, d) <= r * r) {
+                        best = b;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// The particle kept out of the one body whose record is at `at`, as
+// meet_body (src/simulation.cpp) does it.
+void ajfx_meet_body(inout Particle p, uint at, float restitution, float slide, bool kill) {
+    float3 centre = ajfx_wf3(at);
+    float4 q = float4(ajfx_wf(at + 3u), ajfx_wf(at + 4u), ajfx_wf(at + 5u), ajfx_wf(at + 6u));
+    float half_size = ajfx_wf(at + 7u);
+    bool box = ajfx_wu(at + 8u) != 0u;
+    float3 d = p.position - centre;
+    if (!box) {
+        float len = sqrt(ajfx_dot(d, d));
+        float3 out_dir = len > 1.0e-6f ? d * (1.0f / len) : float3(0.0f, 1.0f, 0.0f);
+        ajfx_respond(p, len - half_size, out_dir, restitution, slide, kill);
+        return;
+    }
+    // The box is axis aligned in the body's own frame: turn the offset back
+    // by the conjugate, decide there, and turn the way out forward.
+    float4 back = float4(-q.x, -q.y, -q.z, q.w);
+    float3 local = ajfx_turn(back, d);
+    float3 over = abs(local) - float3(half_size, half_size, half_size);
+    if (over.x >= 0.0f || over.y >= 0.0f || over.z >= 0.0f) {
+        float3 clamped = clamp(local, -half_size, half_size);
+        float3 away = local - clamped;
+        float len = sqrt(ajfx_dot(away, away));
+        if (len > 1.0e-6f) {
+            ajfx_respond(p, len, ajfx_turn(q, away * (1.0f / len)), restitution, slide, kill);
+        }
+        return;
+    }
+    // Inside: out through the nearest face, x before y before z on a tie, as
+    // the box collider does.
+    float3 out_dir = float3(local.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
+    float dist = over.x;
+    if (over.y > over.x && over.y >= over.z) {
+        out_dir = float3(0.0f, local.y < 0.0f ? -1.0f : 1.0f, 0.0f);
+        dist = over.y;
+    } else if (over.z > over.x && over.z > over.y) {
+        out_dir = float3(0.0f, 0.0f, local.z < 0.0f ? -1.0f : 1.0f);
+        dist = over.z;
+    }
+    ajfx_respond(p, dist, ajfx_turn(q, out_dir), restitution, slide, kill);
+}
+
+// [restitution, 1 - friction, kill, grid]. Each body the particle may be
+// touching is met in body order, the search starting again from wherever
+// the last one left it, so a particle pushed out of one is where the next
+// finds it: meeting every body in turn, as the reference does it
+// (meet_bodies).
 void ajfx_body_collision(inout Particle p, uint o, uint id) {
     float restitution = ajfx_f(o);
     float slide = ajfx_f(o + 1u);
     bool kill = ajfx_u32(o + 2u) != 0u;
-    uint count = ajfx_u32(o + 3u);
-    for (uint b = 0u; b < count; ++b) {
-        uint at = o + 4u + b * 9u;
-        float3 centre = ajfx_f3(at);
-        float4 q = float4(ajfx_f(at + 3u), ajfx_f(at + 4u), ajfx_f(at + 5u), ajfx_f(at + 6u));
-        float half_size = ajfx_f(at + 7u);
-        bool box = ajfx_f(at + 8u) != 0.0f;
-        float3 d = p.position - centre;
-        if (!box) {
-            float len = sqrt(ajfx_dot(d, d));
-            float3 out_dir = len > 1.0e-6f ? d * (1.0f / len) : float3(0.0f, 1.0f, 0.0f);
-            ajfx_respond(p, len - half_size, out_dir, restitution, slide, kill);
-            continue;
-        }
-        // The box is axis aligned in the body's own frame: turn the offset
-        // back by the conjugate, decide there, and turn the way out forward.
-        float4 back = float4(-q.x, -q.y, -q.z, q.w);
-        float3 local = ajfx_turn(back, d);
-        float3 over = abs(local) - float3(half_size, half_size, half_size);
-        if (over.x >= 0.0f || over.y >= 0.0f || over.z >= 0.0f) {
-            float3 clamped = clamp(local, -half_size, half_size);
-            float3 away = local - clamped;
-            float len = sqrt(ajfx_dot(away, away));
-            if (len > 1.0e-6f) {
-                ajfx_respond(p, len, ajfx_turn(q, away * (1.0f / len)), restitution, slide, kill);
+    uint g = o + 3u;
+    uint records = ajfx_u32(g);
+    uint count = ajfx_u32(g + 3u);
+    float extra = 0.0f;
+#ifdef AJFX_RIGID_DATA
+    // A rigid particle reaches out by its contact radius.
+    extra = max(p.size * ajfx_f(AJFX_RIGID_DATA + 2u), 0.0f);
+#endif
+    uint from = 0u;
+    for (uint guard = 0u; guard < count && from < count; ++guard) {
+        AjfxCellSpan span;
+        if (!ajfx_cell_span(g, p.position, ajfx_f(g + 12u) + extra, span)) {
+            for (uint rest = from; rest < count; ++rest) {
+                ajfx_meet_body(p, records + rest * ajfx_body_floats, restitution, slide, kill);
             }
-            continue;
+            return;
         }
-        // Inside: out through the nearest face, x before y before z on a
-        // tie, as the box collider does.
-        float3 out_dir = float3(local.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
-        float dist = over.x;
-        if (over.y > over.x && over.y >= over.z) {
-            out_dir = float3(0.0f, local.y < 0.0f ? -1.0f : 1.0f, 0.0f);
-            dist = over.y;
-        } else if (over.z > over.x && over.z > over.y) {
-            out_dir = float3(0.0f, 0.0f, local.z < 0.0f ? -1.0f : 1.0f);
-            dist = over.z;
+        uint b = ajfx_next_body(g, span, p.position, extra, from);
+        if (b == ajfx_no_body) {
+            return;
         }
-        ajfx_respond(p, dist, ajfx_turn(q, out_dir), restitution, slide, kill);
+        ajfx_meet_body(p, records + b * ajfx_body_floats, restitution, slide, kill);
+        from = b + 1u;
     }
 }
 
-// The update kernel's distance fields share u7 with the bookkeeping
-// kernel's indirect arguments, which the update kernel never touches.
-#define ajfx_fields ajfx_args
+// Whether a body is in a wake's bodies scope: [every source, 8 words of
+// source bits, every kind, 8 words of kind bits], as pack_body_scope packs
+// it and in_scope decides it.
+bool ajfx_body_in_scope(uint o, uint spawn_index, uint kind) {
+    uint source = spawn_index >> 24u;
+    bool sources = ajfx_u32(o) != 0u || ((ajfx_u32(o + 1u + (source >> 5u)) >> (source & 31u)) & 1u) != 0u;
+    bool kinds = ajfx_u32(o + 9u) != 0u ||
+                 (kind < 256u && ((ajfx_u32(o + 10u + (kind >> 5u)) >> (kind & 31u)) & 1u) != 0u);
+    return sources && kinds;
+}
+
+// Whether body `b`'s wake at `pos` is stronger than the best so far (the
+// earlier body on a tie), and if so, it becomes the best.
+void ajfx_wake_consider(uint o, uint records, uint b, float3 pos, inout uint best, inout float best_weight) {
+    uint at = records + b * ajfx_body_floats;
+    float3 v = ajfx_wf3(at + 9u);
+    if (ajfx_dot(v, v) < ajfx_f(o + 2u)) {
+        return;
+    }
+    if (!ajfx_body_in_scope(o + 6u, ajfx_wu(at + 12u), ajfx_wu(at + 13u))) {
+        return;
+    }
+    float3 d = pos - ajfx_wf3(at);
+    float dist = sqrt(ajfx_dot(d, d));
+    float r = ajfx_f(o + 1u) * ajfx_wf(at + 7u);
+    if (!(dist < r)) {
+        return;
+    }
+    float w = 1.0f - dist / r;
+    if (w > best_weight || (w == best_weight && b < best)) {
+        best = b;
+        best_weight = w;
+    }
+}
+
+// [strength * dt, radius, min_speed squared, scale_min, scale_max, reach,
+// bodies scope (18), grid]. The particle takes k / (1 + k) of the way to the
+// velocity of the strongest wake at it, as the reference's Wake does.
+void ajfx_wake(inout Particle p, uint o, uint id) {
+    uint g = o + 24u;
+    uint records = ajfx_u32(g);
+    uint count = ajfx_u32(g + 3u);
+    if (count == 0u) {
+        return;
+    }
+    uint best = ajfx_no_body;
+    float best_weight = 0.0f;
+    AjfxCellSpan span;
+    if (!ajfx_cell_span(g, p.position, ajfx_f(o + 5u), span)) {
+        for (uint b = 0u; b < count; ++b) {
+            ajfx_wake_consider(o, records, b, p.position, best, best_weight);
+        }
+    } else if (!span.none) {
+        uint order = ajfx_u32(g + 1u);
+        uint starts = ajfx_u32(g + 2u);
+        uint nx = ajfx_u32(g + 9u);
+        uint ny = ajfx_u32(g + 10u);
+        for (uint z = span.lo.z; z <= span.hi.z; ++z) {
+            for (uint y = span.lo.y; y <= span.hi.y; ++y) {
+                for (uint x = span.lo.x; x <= span.hi.x; ++x) {
+                    uint cell = (z * ny + y) * nx + x;
+                    uint end = ajfx_wu(starts + cell + 1u);
+                    for (uint j = ajfx_wu(starts + cell); j < end; ++j) {
+                        ajfx_wake_consider(o, records, ajfx_wu(order + j), p.position, best, best_weight);
+                    }
+                }
+            }
+        }
+    }
+    if (best == ajfx_no_body) {
+        return;
+    }
+    float k = ajfx_f(o) * ajfx_force_scale(p, o + 3u, id) * best_weight;
+    float t = k / (1.0f + k);
+    float3 vb = ajfx_wf3(records + best * ajfx_body_floats + 9u);
+    p.velocity = p.velocity + (vb - p.velocity) * t;
+}
 
 float ajfx_field_at(uint base, uint nx, uint ny, uint x, uint y, uint z) {
     return asfloat(ajfx_fields.Load((base + (z * ny + y) * nx + x) * 4u));
@@ -647,6 +884,19 @@ void ajfx_color_over_life(inout Particle p, uint o, uint id) {
 // [count, (t, value) per key]
 void ajfx_size_over_life(inout Particle p, uint o, uint id) {
     p.size = p.base_size * ajfx_curve(o, ajfx_normalized_age(p));
+}
+
+// [start, 1 / half_life, glow]. The heat at this age, start * 2^(-age /
+// half_life), through a black-body-like ramp, added to the colour, as
+// detail::heat_glow (src/curves.hpp) works it out. Called after the colour
+// is worked out afresh from the base and every colour over life.
+void ajfx_heat(inout Particle p, uint o, uint id) {
+    float heat = ajfx_f(o) * exp2(-(p.age * ajfx_f(o + 1u)));
+    float t = min(max(heat, 0.0f), 1.0f);
+    float glow = ajfx_f(o + 2u);
+    p.color = float4(p.color.x + min(max(3.0f * t, 0.0f), 1.0f) * glow,
+                     p.color.y + min(max(3.0f * t - 1.0f, 0.0f), 1.0f) * glow,
+                     p.color.z + min(max(3.0f * t - 2.0f, 0.0f), 1.0f) * glow, p.color.w);
 }
 
 #endif

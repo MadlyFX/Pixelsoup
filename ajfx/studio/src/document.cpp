@@ -110,9 +110,9 @@ std::string_view layer_kind_name(LayerKind kind) noexcept {
 std::string_view layer_kind_description(LayerKind kind) noexcept {
     switch (kind) {
     case LayerKind::Particles:
-        return "Points moved by forces: smoke, sparks, flames, rain. They pass through each other.";
+        return "Forces move them: smoke, sparks, flames.";
     case LayerKind::Rigid:
-        return "Solid pieces moved by a physics engine: they knock into each other, pile up and come to rest.";
+        return "Solid pieces that knock and pile up.";
     }
     return {};
 }
@@ -129,30 +129,125 @@ LayerKind layer_kind_from(std::string_view id) noexcept {
     return id == "rigid" ? LayerKind::Rigid : LayerKind::Particles;
 }
 
+std::string_view layer_what_name(LayerWhat what) noexcept {
+    switch (what) {
+    case LayerWhat::Other: return "Something else";
+    case LayerWhat::Solid: return "Solid";
+    case LayerWhat::Sparks: return "Sparks";
+    case LayerWhat::Debris: return "Debris";
+    case LayerWhat::Fire: return "Fire";
+    case LayerWhat::Smoke: return "Smoke";
+    case LayerWhat::Dust: return "Dust";
+    case LayerWhat::Rain: return "Rain";
+    case LayerWhat::Snow: return "Snow";
+    case LayerWhat::Magic: return "Magic";
+    }
+    return "Something else";
+}
+
+std::string_view layer_what_description(LayerWhat what) noexcept {
+    switch (what) {
+    case LayerWhat::Other: return "Built by hand. Floats unless told.";
+    case LayerWhat::Solid: return "Things that knock and pile up.";
+    case LayerWhat::Sparks: return "Falls and bounces.";
+    case LayerWhat::Debris: return "Chunks that fall and tumble.";
+    case LayerWhat::Fire: return "Rises and slides.";
+    case LayerWhat::Smoke: return "Rises, drifts and slides.";
+    case LayerWhat::Dust: return "Drifts down and sticks.";
+    case LayerWhat::Rain: return "Falls and is gone.";
+    case LayerWhat::Snow: return "Drifts down and sticks.";
+    case LayerWhat::Magic: return "Floats and slides.";
+    }
+    return {};
+}
+
+std::string_view layer_what_id(LayerWhat what) noexcept {
+    switch (what) {
+    case LayerWhat::Other: return "other";
+    case LayerWhat::Solid: return "solid";
+    case LayerWhat::Sparks: return "sparks";
+    case LayerWhat::Debris: return "debris";
+    case LayerWhat::Fire: return "fire";
+    case LayerWhat::Smoke: return "smoke";
+    case LayerWhat::Dust: return "dust";
+    case LayerWhat::Rain: return "rain";
+    case LayerWhat::Snow: return "snow";
+    case LayerWhat::Magic: return "magic";
+    }
+    return "other";
+}
+
+std::optional<LayerWhat> layer_what_from(std::string_view id) noexcept {
+    for (const LayerWhat what : layer_whats) {
+        if (layer_what_id(what) == id) {
+            return what;
+        }
+    }
+    return std::nullopt;
+}
+
+LayerKind layer_what_kind(LayerWhat what) noexcept {
+    return what == LayerWhat::Solid ? LayerKind::Rigid : LayerKind::Particles;
+}
+
+WorldShare world_share(const Layer& layer) noexcept {
+    // Gravity and wind shares, then the contact: what it does at the ground
+    // and at anything solid.
+    WorldShare share;
+    switch (layer.kind == LayerKind::Rigid && layer.what == LayerWhat::Other ? LayerWhat::Solid : layer.what) {
+    case LayerWhat::Solid: share = {1.0F, 0.0F, Contact::Bounce, 0.1F, 0.8F}; break;
+    case LayerWhat::Sparks: share = {1.0F, 0.3F, Contact::Bounce, 0.35F, 0.25F}; break;
+    case LayerWhat::Debris: share = {1.0F, 0.1F, Contact::Bounce, 0.3F, 0.6F}; break;
+    case LayerWhat::Fire: share = {0.0F, 1.0F, Contact::Slide, 0.0F, 0.2F}; break;
+    case LayerWhat::Smoke: share = {0.0F, 1.0F, Contact::Slide, 0.0F, 0.2F}; break;
+    case LayerWhat::Dust: share = {0.05F, 1.0F, Contact::Stick, 0.0F, 1.0F}; break;
+    case LayerWhat::Rain: share = {1.0F, 0.3F, Contact::Vanish, 0.0F, 0.0F}; break;
+    case LayerWhat::Snow: share = {0.04F, 1.0F, Contact::Stick, 0.0F, 1.0F}; break;
+    case LayerWhat::Magic: share = {0.0F, 0.5F, Contact::Slide, 0.0F, 0.2F}; break;
+    case LayerWhat::Other: share = {0.0F, 1.0F, Contact::Slide, 0.0F, 0.2F}; break;
+    }
+    // How hard an Explosion throws it, as a share of the blast's speed.
+    switch (layer.what) {
+    case LayerWhat::Solid: break;
+    case LayerWhat::Sparks: share.blast_min = 0.8F; share.blast_max = 1.2F; break;
+    case LayerWhat::Debris: share.blast_min = 0.7F; share.blast_max = 1.0F; break;
+    case LayerWhat::Fire: share.blast_min = 0.3F; share.blast_max = 0.6F; break;
+    case LayerWhat::Smoke: share.blast_min = 0.4F; share.blast_max = 0.8F; break;
+    case LayerWhat::Dust: share.blast_min = 0.5F; share.blast_max = 1.0F; break;
+    case LayerWhat::Rain:
+    case LayerWhat::Snow: share.blast_min = 0.6F; share.blast_max = 1.0F; break;
+    case LayerWhat::Magic:
+    case LayerWhat::Other: share.blast_min = 0.5F; share.blast_max = 1.0F; break;
+    }
+    if (layer.kind == LayerKind::Rigid) {
+        // A physics engine has one gravity for every body, and a body leaves
+        // the world when its life ends, never on contact.
+        share.gravity = 1.0F;
+        share.blast_min = share.blast_max = 1.0F;
+        if (share.contact == Contact::Vanish) {
+            share.contact = Contact::Stick;
+        }
+    }
+    return share;
+}
+
 namespace {
 constexpr std::string_view empty_layer_prefix = "empty:";
 } // namespace
 
-std::string empty_layer_id(LayerKind kind) {
-    return std::string{empty_layer_prefix} + std::string{layer_kind_id(kind)};
+std::string empty_layer_id(LayerWhat what) {
+    return std::string{empty_layer_prefix} + std::string{layer_what_id(what)};
 }
 
-std::optional<LayerKind> empty_layer_kind(std::string_view id) noexcept {
-    // A bare "" is the empty layer as pages and pickers named it before
-    // layers had kinds; it is the particle layer.
+std::optional<LayerWhat> empty_layer_what(std::string_view id) noexcept {
+    // A bare "" is the empty layer a block needs to land in: Something else.
     if (id.empty()) {
-        return LayerKind::Particles;
+        return LayerWhat::Other;
     }
     if (!id.starts_with(empty_layer_prefix)) {
         return std::nullopt;
     }
-    const std::string_view rest = id.substr(empty_layer_prefix.size());
-    for (const LayerKind kind : {LayerKind::Particles, LayerKind::Rigid}) {
-        if (layer_kind_id(kind) == rest) {
-            return kind;
-        }
-    }
-    return std::nullopt;
+    return layer_what_from(id.substr(empty_layer_prefix.size()));
 }
 
 Layer* Document::layer(Uid uid) {
@@ -203,12 +298,17 @@ Layer* Document::world_of(Uid block) {
 }
 
 std::optional<Block> make_block(Document& document, std::string_view kind) {
-    if (find_block_def(kind) == nullptr || kind == raw_block_kind) {
+    const std::optional<BlockKind> known = block_kind_from(kind);
+    return known ? make_block(document, *known) : std::nullopt;
+}
+
+std::optional<Block> make_block(Document& document, BlockKind kind) {
+    if (kind == BlockKind::Module) {
         return std::nullopt;
     }
     Block block;
     block.uid = document.allocate();
-    block.kind = std::string{kind};
+    block.kind = std::string{block_kind_id(kind)};
     return block;
 }
 
@@ -217,22 +317,41 @@ Layer make_layer(Document& document, LayerKind kind, std::string name) {
     layer.uid = document.allocate();
     layer.name = std::move(name);
     layer.kind = kind;
+    layer.what = kind == LayerKind::Rigid ? LayerWhat::Solid : LayerWhat::Other;
     if (kind == LayerKind::Rigid) {
         Block world;
         world.uid = document.allocate();
-        world.kind = std::string{world_block_kind};
+        world.kind = std::string{block_kind_id(BlockKind::Physics)};
         layer.world = std::move(world);
         // Pieces in a physics world lie where they fall: they are watched
         // long after a particle's life would have ended.
         layer.life_min = layer.life_max = 60.0F;
+        // A solid world is baked by default: physics is the expensive half
+        // of an effect and what playback waits on, so Studio works it out
+        // once the page settles and the host plays it back (bake.hpp).
+        layer.baked = true;
     }
     return layer;
+}
+
+Layer make_layer(Document& document, LayerWhat what, std::string name) {
+    Layer layer = make_layer(document, layer_what_kind(what), std::move(name));
+    layer.what = what;
+    return layer;
+}
+
+bool set_layer_what(Document& document, Layer& layer, LayerWhat what) {
+    if (!set_layer_kind(document, layer, layer_what_kind(what))) {
+        return false;
+    }
+    layer.what = what;
+    return true;
 }
 
 std::vector<std::string> blocks_against_kind(const Layer& layer, LayerKind kind) {
     std::vector<std::string> titles;
     for (const Block& block : layer.blocks) {
-        if (block.kind == raw_block_kind || block_fits(block.kind, kind)) {
+        if (block.kind == BlockKind::Module || block_fits(block.kind, kind)) {
             continue;
         }
         if (const BlockDef* def = find_block_def(block.kind)) {
@@ -250,11 +369,21 @@ bool set_layer_kind(Document& document, Layer& layer, LayerKind kind) {
         return false;
     }
     layer.kind = kind;
+    // A Solid is what a rigid layer is; one made particles again is
+    // something else, and a particle layer of something else made rigid is
+    // solid. Any other answer stays: rigid sparks are still sparks.
+    if (kind == LayerKind::Particles && layer.what == LayerWhat::Solid) {
+        layer.what = LayerWhat::Other;
+    } else if (kind == LayerKind::Rigid && layer.what == LayerWhat::Other) {
+        layer.what = LayerWhat::Solid;
+    }
+    // Each kind's own default: a solid world bakes, particles play live.
+    layer.baked = kind == LayerKind::Rigid;
     if (kind == LayerKind::Rigid) {
         if (!layer.world) {
             Block world;
             world.uid = document.allocate();
-            world.kind = std::string{world_block_kind};
+            world.kind = std::string{block_kind_id(BlockKind::Physics)};
             layer.world = std::move(world);
         }
     } else {
@@ -271,19 +400,19 @@ bool set_layer_kind(Document& document, Layer& layer, LayerKind kind) {
 Block make_raw_block(Document& document, RawModule module) {
     Block block;
     block.uid = document.allocate();
-    block.kind = std::string{raw_block_kind};
+    block.kind = std::string{block_kind_id(BlockKind::Module)};
     block.raw = std::move(module);
     return block;
 }
 
 bool owned_by_object(std::string_view block_kind) noexcept {
-    return block_kind == "break" || block_kind == "part";
+    return block_kind == BlockKind::Break || block_kind == BlockKind::Part;
 }
 
 std::optional<std::size_t> object_of(const Layer& layer, std::size_t index) {
     const std::size_t end = std::min(index, layer.blocks.size());
     for (std::size_t i = end; i-- > 0U;) {
-        if (layer.blocks[i].kind == "object") {
+        if (layer.blocks[i].kind == BlockKind::Object) {
             return i;
         }
     }
@@ -307,7 +436,7 @@ bool move_block(Document& document, Uid uid, Uid to_layer, std::size_t index) {
     }
     // A block the target's kind does not have stays where it is: the drop
     // is refused rather than landing something the layer cannot play.
-    if (place->layer->blocks[place->index].kind != raw_block_kind &&
+    if (place->layer->blocks[place->index].kind != BlockKind::Module &&
         !block_fits(place->layer->blocks[place->index].kind, target->kind)) {
         return false;
     }

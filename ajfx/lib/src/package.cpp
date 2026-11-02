@@ -127,6 +127,33 @@ Json to_json(const std::vector<RigidProp>& props) {
     return array;
 }
 
+Json to_json(const std::vector<std::uint32_t>& values) {
+    Json array = Json::array();
+    for (const std::uint32_t value : values) {
+        array.items.push_back(number(value));
+    }
+    return array;
+}
+
+Json to_json(const Scope& scope) {
+    Json object = Json::object();
+    Scope::fields(scope, [&object](std::string_view name, const auto& field) {
+        // An empty list is no filter, and is left unsaid.
+        if (!field.empty()) {
+            object.add(std::string{name}, to_json(field));
+        }
+    });
+    return object;
+}
+
+Json to_json(const Blast& blast) {
+    Json object = Json::object();
+    Blast::fields(blast, [&object](std::string_view name, const auto& field) {
+        object.add(std::string{name}, to_json(field));
+    });
+    return object;
+}
+
 template <class Module>
 Json module_to_json(const Module& module) {
     Json object = Json::object();
@@ -135,6 +162,27 @@ Json module_to_json(const Module& module) {
         object.add("id", number(module.id));
     }
     Module::fields(module, [&object](std::string_view name, const auto& field) {
+        // The renderer's draw inputs are left unsaid at their defaults, so a
+        // package that does not use them reads and writes as it did before
+        // they existed, and keeps its content hash.
+        // A scope that is every particle is left unsaid too.
+        if constexpr (std::is_same_v<std::decay_t<decltype(field)>, Scope>) {
+            if (field.empty()) {
+                return;
+            }
+        }
+        if constexpr (std::is_same_v<Module, SpriteRenderer>) {
+            using F = std::decay_t<decltype(field)>;
+            if constexpr (std::is_same_v<F, FloatInput>) {
+                if (!field.bound() && field.value == 1.0F) {
+                    return;
+                }
+            } else if constexpr (std::is_same_v<F, ColorInput>) {
+                if (!field.bound() && field.value == Color{}) {
+                    return;
+                }
+            }
+        }
         object.add(std::string{name}, to_json(field));
     });
     return object;
@@ -179,6 +227,11 @@ Json parameter_to_json(const ParameterDesc& parameter) {
     }
     object.add("min", number(parameter.min));
     object.add("max", number(parameter.max));
+    // Bake-time is the default and is left unsaid, so a package written
+    // before timings existed reads, and writes, exactly as it did.
+    if (parameter.timing == ParameterTiming::Playback) {
+        object.add("timing", Json::string("playback"));
+    }
     return object;
 }
 
@@ -336,6 +389,30 @@ public:
         return true;
     }
 
+    bool read(const std::string& path, const Json& json, std::vector<std::uint32_t>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of whole numbers");
+            return false;
+        }
+        out.clear();
+        for (std::size_t i = 0U; i < json.items.size(); ++i) {
+            std::uint32_t value = 0U;
+            if (!read(path + "[" + std::to_string(i) + "]", json.items[i], value)) {
+                return false;
+            }
+            out.push_back(value);
+        }
+        return true;
+    }
+
+    // A scope is an object of Scope's own fields, refused as a module's are
+    // when one is misspelt.
+    bool read(const std::string& path, const Json& json, Scope& out) {
+        out = Scope{};
+        read_fields(path, json, out, {});
+        return !failed();
+    }
+
     bool read(const std::string& path, const Json& json, std::vector<BreakPiece>& out) {
         if (json.type != Json::Type::Array) {
             fail(path, "must be an array of pieces");
@@ -460,7 +537,8 @@ public:
             return;
         }
         for (const auto& [name, value] : json.members) {
-            if (name != "name" && name != "type" && name != "default" && name != "min" && name != "max") {
+            if (name != "name" && name != "type" && name != "default" && name != "min" && name != "max" &&
+                name != "timing") {
                 fail(path, "has unknown field '" + name + "'");
                 return;
             }
@@ -479,6 +557,20 @@ public:
             !read(path + ".min", *min, out.min) || !read(path + ".max", *max, out.max)) {
             return;
         }
+        if (const Json* timing = json.find("timing")) {
+            std::string timing_text;
+            if (!read(path + ".timing", *timing, timing_text)) {
+                return;
+            }
+            if (timing_text == "bake") {
+                out.timing = ParameterTiming::Bake;
+            } else if (timing_text == "playback") {
+                out.timing = ParameterTiming::Playback;
+            } else {
+                fail(path + ".timing", "must be bake or playback");
+                return;
+            }
+        }
         if (type_text == "float") {
             out.type = ParameterType::Float;
             read(path + ".default", *value, out.default_value[0]);
@@ -490,6 +582,22 @@ public:
             read_floats(path + ".default", *value, out.default_value.data(), 4U);
         } else {
             fail(path + ".type", "must be float, vec3 or color");
+        }
+    }
+
+    // A blast is an object of Blast's own fields, refused as a module's are
+    // when one is misspelt.
+    void read_blasts(const std::string& path, const Json& json, std::vector<Blast>& out) {
+        if (json.type != Json::Type::Array) {
+            fail(path, "must be an array of blasts");
+            return;
+        }
+        out.clear();
+        out.reserve(json.items.size());
+        for (std::size_t i = 0U; i < json.items.size() && !failed(); ++i) {
+            Blast blast;
+            read_fields(path + "[" + std::to_string(i) + "]", json.items[i], blast, {});
+            out.push_back(std::move(blast));
         }
     }
 
@@ -627,6 +735,13 @@ std::string effect_to_json(const Effect& effect) {
         object.add("renderer", module_to_json(emitter.renderer));
         emitters.items.push_back(std::move(object));
     }
+    // Left unsaid when there are none, as most effects have.
+    if (!effect.blasts.empty()) {
+        Json& blasts = root.add("blasts", Json::array());
+        for (const Blast& blast : effect.blasts) {
+            blasts.items.push_back(to_json(blast));
+        }
+    }
     return detail::write_json(root);
 }
 
@@ -653,7 +768,7 @@ Result<Effect> effect_from_json(std::string_view json) {
     }
     for (const auto& [name, value] : root->members) {
         if (name != "format" && name != "name" && name != "simulation_rate" && name != "parameters" &&
-            name != "emitters") {
+            name != "emitters" && name != "blasts") {
             reader.fail("", "has unknown field '" + name + "'");
         }
     }
@@ -684,6 +799,9 @@ Result<Effect> effect_from_json(std::string_view json) {
                                     effect.emitters.emplace_back());
             }
         }
+    }
+    if (const Json* blasts = root->find("blasts"); blasts != nullptr && !reader.failed()) {
+        reader.read_blasts("blasts", *blasts, effect.blasts);
     }
     if (reader.failed()) {
         return reader.error();

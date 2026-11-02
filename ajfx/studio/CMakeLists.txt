@@ -10,16 +10,34 @@
 add_library(ajfx_studio_core STATIC
     src/json.cpp
     src/document.cpp
+    src/scene.cpp
+    src/scene_properties.cpp
+    src/scene_io.cpp
     src/catalog.cpp
+    src/catalog_birth.cpp
+    src/catalog_motion.cpp
+    src/catalog_look.cpp
+    src/catalog_contact.cpp
+    src/catalog_rigid.cpp
+    src/catalog_expert.cpp
     src/raw_modules.cpp
     src/library.cpp
     src/compile.cpp
+    src/compile_worker.cpp
+    src/layer_builder.cpp
+    src/rigid_builder.cpp
+    src/solid_world.cpp
+    src/detach.cpp
     src/document_io.cpp
     src/recipes.cpp
     src/coach.cpp
     src/guides.cpp
     src/user_assets.cpp
     src/session.cpp
+    src/bake.cpp
+    src/blast.cpp
+    src/sandbox.cpp
+    src/budget.cpp
 )
 target_include_directories(ajfx_studio_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -35,18 +53,40 @@ if(AJFX_BUILD_STUDIO_APP)
     endif()
     find_package(tinyfiledialogs CONFIG REQUIRED)
 
+    # The page and its controls: drawn by the application and, headless of the
+    # window, by the UI tests.
+    add_library(ajfx_studio_page STATIC
+        src/widgets.cpp
+        src/scene_view.cpp
+        src/page_view.cpp
+        src/page_view_layer.cpp
+        src/page_view_block.cpp
+        src/page_view_notes.cpp
+        src/page_view_overlays.cpp
+        src/stage_camera.cpp
+        src/sandbox_tools.cpp
+    )
+    target_link_libraries(ajfx_studio_page PUBLIC
+        ajfx_studio_core
+        MediaServer::Gui
+        MediaServer::Editor
+        tinyfiledialogs::tinyfiledialogs
+    )
+    ajfx_set_options(ajfx_studio_page)
+    set_target_properties(ajfx_studio_page PROPERTIES FOLDER "ajfx")
+
     add_executable(ajfx-studio
         src/main.cpp
         src/preview.cpp
+        src/budget_meter.cpp
         src/package_builder.cpp
         src/studio_app.cpp
-        src/page_view.cpp
-        src/widgets.cpp
         src/stage_overlay.cpp
         src/palette.cpp
     )
     target_link_libraries(ajfx-studio PRIVATE
         ajfx_studio_core
+        ajfx_studio_page
         ajfx::d3d12
         ajfx::rigid
         MediaServer::Render
@@ -65,13 +105,8 @@ if(AJFX_BUILD_STUDIO_APP)
         # application. The page is here rather than with the headless tests
         # because where a dragged block lands is a question about the
         # drawing, and only the drawing knows.
-        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp src/widgets.cpp src/page_view.cpp)
-        target_link_libraries(ajfx_studio_ui_tests PRIVATE
-            ajfx_studio_core
-            MediaServer::Gui
-            MediaServer::Editor
-            tinyfiledialogs::tinyfiledialogs
-        )
+        add_executable(ajfx_studio_ui_tests tests/studio_ui_tests.cpp)
+        target_link_libraries(ajfx_studio_ui_tests PRIVATE ajfx_studio_page)
         ajfx_set_options(ajfx_studio_ui_tests)
         add_test(NAME ajfx.studio_ui COMMAND ajfx_studio_ui_tests)
         set_target_properties(ajfx_studio_ui_tests PROPERTIES FOLDER "ajfx/tests")
@@ -79,7 +114,25 @@ if(AJFX_BUILD_STUDIO_APP)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(ajfx_studio_tests tests/studio_tests.cpp)
+    add_executable(ajfx_studio_tests
+        tests/studio_tests.cpp
+        tests/scene_tests.cpp
+        tests/stream_object_tests.cpp
+        tests/catalog_tests.cpp
+        tests/document_tests.cpp
+        tests/compile_tests.cpp
+        tests/detach_tests.cpp
+        tests/rigid_objects_tests.cpp
+        tests/rigid_break_tests.cpp
+        tests/coach_tests.cpp
+        tests/guides_tests.cpp
+        tests/bake_tests.cpp
+        tests/world_tests.cpp
+        tests/blast_tests.cpp
+        tests/solid_world_tests.cpp
+        tests/sandbox_tests.cpp
+        tests/budget_tests.cpp
+    )
     # The rock pile recipe is run through the physics engine.
     target_link_libraries(ajfx_studio_tests PRIVATE ajfx_studio_core ajfx::rigid)
     if(TARGET ajfx::d3d12)
@@ -91,4 +144,11 @@ if(BUILD_TESTING)
     ajfx_set_options(ajfx_studio_tests)
     add_test(NAME ajfx.studio COMMAND ajfx_studio_tests)
     set_target_properties(ajfx_studio_tests PROPERTIES FOLDER "ajfx/tests")
+
+    # Times what the application does on its interface thread each frame and
+    # per edit. Not a test: run it to see where a frame goes.
+    add_executable(ajfx_studio_frame_bench tests/frame_bench.cpp)
+    target_link_libraries(ajfx_studio_frame_bench PRIVATE ajfx_studio_core)
+    ajfx_set_options(ajfx_studio_frame_bench)
+    set_target_properties(ajfx_studio_frame_bench PROPERTIES FOLDER "ajfx/tests")
 endif()

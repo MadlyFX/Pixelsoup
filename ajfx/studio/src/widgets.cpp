@@ -6,9 +6,33 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <initializer_list>
 #include <memory>
+#include <utility>
 
 namespace ajfx::studio {
+
+gui::Theme studio_theme(bool night) {
+    gui::Theme theme;
+    if (!night) { return theme; }
+    const auto dim = [](gui::UiColor c, float amount) {
+        return gui::UiColor{c.r * amount, c.g * amount, c.b * amount, c.a};
+    };
+    theme.background = dim(theme.background, 0.7F);
+    theme.panel = dim(theme.panel, 0.72F);
+    theme.header = dim(theme.header, 0.74F);
+    theme.row = dim(theme.row, 0.72F);
+    theme.row_alt = dim(theme.row_alt, 0.72F);
+    theme.widget = dim(theme.widget, 0.76F);
+    theme.widget_hover = dim(theme.widget_hover, 0.8F);
+    theme.track = dim(theme.track, 0.7F);
+    theme.divider = dim(theme.divider, 0.75F);
+    theme.border = dim(theme.border, 0.75F);
+    theme.text = dim(theme.text, 0.82F);
+    theme.text_muted = dim(theme.text_muted, 0.85F);
+    theme.glow *= 0.45F;
+    return theme;
+}
 
 gui::UiId part_id(std::uint64_t owner, std::string_view name, std::uint32_t part) {
     gui::UiId id = gui::ui_id(name);
@@ -49,6 +73,48 @@ void draw_grip(gui::UiContext& ctx, float cx, float cy, gui::UiColor color) {
             ctx.rounded(gui::Rect{x - 1.25F, y - 1.25F, 2.5F, 2.5F}, color, 1.25F);
         }
     }
+}
+
+void draw_dice(gui::UiContext& ctx, float cx, float cy, gui::UiColor color) {
+    // A rounded square, five pips.
+    ctx.rounded_outline(gui::Rect{cx - 6.5F, cy - 6.5F, 13.0F, 13.0F}, color, 3.0F, 1.5F);
+    constexpr float pip = 1.4F;
+    for (const auto& [x, y] : {std::pair{-3.0F, -3.0F}, std::pair{3.0F, -3.0F}, std::pair{0.0F, 0.0F},
+                               std::pair{-3.0F, 3.0F}, std::pair{3.0F, 3.0F}}) {
+        ctx.rounded(gui::Rect{cx + x - pip, cy + y - pip, pip * 2.0F, pip * 2.0F}, color, pip);
+    }
+}
+
+void draw_burst(gui::UiContext& ctx, float cx, float cy, gui::UiColor color) {
+    // Eight rays out from a dot, alternately long and short.
+    ctx.rounded(gui::Rect{cx - 2.0F, cy - 2.0F, 4.0F, 4.0F}, color, 2.0F);
+    for (int ray = 0; ray < 8; ++ray) {
+        const float angle = static_cast<float>(ray) * 0.785398163F;
+        const float inner = 3.5F;
+        const float outer = ray % 2 == 0 ? 7.0F : 5.5F;
+        const float c = std::cos(angle);
+        const float s = std::sin(angle);
+        ctx.draw_list().add_line(cx + c * inner, cy + s * inner, cx + c * outer, cy + s * outer, 1.5F, color);
+    }
+}
+
+bool glyph_key(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds, GlyphDraw glyph, bool engaged,
+               std::string_view tooltip, gui::UiColor engaged_color) {
+    const gui::Interaction interaction = ctx.grab(id, bounds);
+    ctx.cursor_for(interaction, gui::Cursor::Hand);
+    const gui::Theme& theme = ctx.theme();
+    const float hover = ctx.ease(id ^ gui::ui_id("studio.glyph-key.hover"), interaction.hovered ? 1.0F : 0.0F);
+    const float radius = std::min(bounds.height * 0.5F, theme.radius);
+    const bool pressed = interaction.held && !interaction.released;
+    ctx.rounded(pressed ? bounds.inflated(-1.0F, -1.0F) : bounds,
+                pressed ? theme.widget_active
+                        : (engaged ? gui::fade(engaged_color, 0.22F + 0.08F * hover)
+                                   : gui::blend(theme.widget, theme.widget_hover, hover)),
+                radius);
+    glyph(ctx, bounds.center_x(), bounds.center_y(),
+          engaged ? engaged_color : gui::blend(theme.text_muted, theme.text, hover));
+    ctx.tooltip(bounds, tooltip);
+    return interaction.clicked;
 }
 
 bool choice_chips(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds,

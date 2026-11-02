@@ -149,10 +149,12 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
         // Each kind's own size beside its model, so what is drawn is the
         // body the engine built. Kind 0 is the particle's size exactly.
         std::vector<float> scales{1.0F};
+        std::vector<Color> tints{Color{}};
         if (by_kind) {
             for (const RigidBodyKind& kind : rigid_physics(emitter)->bodies) {
                 names.push_back(kind.draw.empty() ? emitter.renderer.mesh : kind.draw);
                 scales.push_back(kind.scale);
+                tints.push_back(kind.draw_tint);
             }
         }
         // One pair of buffers holds every model the emitter draws, each
@@ -190,6 +192,10 @@ Result<ParticleRenderer> ParticleRenderer::create(Device& device, const Effect& 
             const float scale = scales[n];
             std::memcpy(&bits, &scale, sizeof(bits));
             table.push_back(bits);
+            table.push_back(std::bit_cast<std::uint32_t>(tints[n].r));
+            table.push_back(std::bit_cast<std::uint32_t>(tints[n].g));
+            table.push_back(std::bit_cast<std::uint32_t>(tints[n].b));
+            table.push_back(std::bit_cast<std::uint32_t>(tints[n].a));
         }
         for (const auto& [bytes, label, target] :
              {std::tuple{vertices.size() * 4U, " mesh vertices", &buffers.vertices},

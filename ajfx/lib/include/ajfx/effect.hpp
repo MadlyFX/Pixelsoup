@@ -4,8 +4,11 @@
 #include <ajfx/parameters.hpp>
 #include <ajfx/result.hpp>
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ajfx {
@@ -36,9 +39,72 @@ struct Effect final {
     std::uint32_t simulation_rate{60U};
     std::vector<ParameterDesc> parameters;
     std::vector<Emitter> emitters;
+    // The effect's blasts, each set once and named by every module that
+    // answers it (Shockwave, and Break::blast_threshold through it).
+    std::vector<Blast> blasts;
 
     friend bool operator==(const Effect&, const Effect&) = default;
 };
+
+// The blast called `name`, if the effect has one.
+[[nodiscard]] const Blast* find_blast(const Effect& effect, std::string_view name) noexcept;
+
+// A particle's spawn index says which spawn module bore it and which of that
+// module's births it was: the module's place in the emitter's spawn stack in
+// the top 8 bits, its own count of births in the low 24. Each module counts
+// its own (EmitterState::spawn_counts), so adding a spawn module after the
+// others leaves their particles' random draws, and so the particles
+// themselves, exactly as they were. The pieces broken bodies become count
+// as one more source of their own, `piece_spawn_source`.
+// - **Unique:** no two particles of an emitter alive together share one,
+//   unless one module has made 16,777,216 births while the other lived.
+// - **Order:** within one module's particles it rises with birth; between
+//   modules it says nothing of age. Birth order is the particles' order in
+//   the emitter (EmitterState), not their spawn indices.
+inline constexpr std::uint32_t spawn_count_bits = 24U;
+inline constexpr std::uint32_t spawn_count_mask = (1U << spawn_count_bits) - 1U;
+// Spawn modules one emitter may hold: every source but the pieces'.
+inline constexpr std::uint32_t max_spawn_modules = 255U;
+inline constexpr std::uint32_t piece_spawn_source = 255U;
+
+[[nodiscard]] constexpr std::uint32_t spawn_index_of(std::uint32_t source, std::uint64_t count) noexcept {
+    return (source << spawn_count_bits) | (static_cast<std::uint32_t>(count) & spawn_count_mask);
+}
+
+// Which spawn module bore the particle (its place in the spawn stack), or
+// piece_spawn_source for a piece of a broken body.
+[[nodiscard]] constexpr std::uint32_t spawn_source(std::uint32_t spawn_index) noexcept {
+    return spawn_index >> spawn_count_bits;
+}
+
+// Whether a particle with `spawn_index`, a body of `kind` (0 for a particle
+// that is no body), is in `scope` (Scope): every list that is not empty
+// names it.
+[[nodiscard]] inline bool in_scope(const Scope& scope, std::uint32_t spawn_index, std::uint32_t kind) noexcept {
+    const auto names = [](const std::vector<std::uint32_t>& list, std::uint32_t value) {
+        for (const std::uint32_t entry : list) {
+            if (entry == value) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return (scope.sources.empty() || names(scope.sources, spawn_source(spawn_index))) &&
+           (scope.kinds.empty() || names(scope.kinds, kind));
+}
+
+// Contacts one rigid physics emitter's world reports a step for what the
+// effect itself reads of them (Break, SpawnFromContacts), at least: the
+// hardest this many, or the emitter's capacity if that is more. Past it the
+// softest are dropped and counted (RigidWorld::contacts_dropped), never the
+// hardest.
+inline constexpr std::uint32_t max_rigid_contacts = 4096U;
+
+// The slowest contact anything in `effect` reads of emitter `index`'s
+// contacts: its own Break modules' thresholds and the min_speed of every
+// SpawnFromContacts naming it. None when nothing reads them. The world
+// collects contacts down to this whatever its host asked for.
+[[nodiscard]] std::optional<float> contact_floor(const Effect& effect, std::size_t index);
 
 // Checks names, ranges, parameter bindings, module ids and that each
 // emitter's worst case fits its capacity. Builders and package readers call
@@ -54,7 +120,9 @@ struct Effect final {
 // multiple of this. It spreads `light_count` lights over the most particles
 // the emitter can have alive (particle_bound, else its capacity), so a light
 // stays with its particle for life and at most `light_count` are lit at once.
-// One when the emitter has no lights.
+// Spawn indices count per spawn module (spawn_index_of), so an emitter with
+// several picks within each module's births and may light up to one more for
+// each module beyond the first. One when the emitter has no lights.
 [[nodiscard]] std::uint32_t light_spacing(const Effect& effect, const Emitter& emitter);
 
 // Per-particle attributes an emitter's modules read or write. Position, age

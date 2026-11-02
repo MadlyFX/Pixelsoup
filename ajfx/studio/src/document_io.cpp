@@ -3,6 +3,7 @@
 #include "catalog.hpp"
 #include "json.hpp"
 #include "raw_modules.hpp"
+#include "scene_io.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +18,8 @@ json::Value value_json(const ControlDef& control, const Value& value) {
     json::Value array = json::Value::array();
     const auto push = [&](float v) { array.push(json::Value::of(static_cast<double>(v))); };
     switch (control.type) {
-    case ControlType::Number: return json::Value::of(static_cast<double>(value.x));
+    case ControlType::Number:
+    case ControlType::SolidLayer: return json::Value::of(static_cast<double>(value.x));
     case ControlType::Toggle: return json::Value::of(value.x != 0.0F);
     case ControlType::Choice:
     case ControlType::File: return json::Value::of(value.text);
@@ -58,6 +60,7 @@ std::optional<Value> value_from(const ControlDef& control, const json::Value& in
     bool ok = false;
     switch (control.type) {
     case ControlType::Number:
+    case ControlType::SolidLayer:
         ok = in.type == json::Value::Type::Number;
         value.x = static_cast<float>(in.number);
         break;
@@ -162,77 +165,6 @@ std::string block_text(const Block& block) {
     return json::write(block_to_json(block));
 }
 
-// A Pile or a Prop block from a page saved at format 2 or earlier, turned
-// into the Object that replaced both. It keeps the block's uid, so the module
-// ids and seeds derived from it are the ones it had and its bodies stay where
-// they were; only the controls are renamed, since Object's merge what Pile
-// and Prop each called their own.
-//   Pile: `shape` (heap or stack) became `arrange`, and a pile was always a
-//     body the world moves, so the rest of Object's defaults are right.
-//   Prop: `shape` became `collides` (its own shape reading as "own"), the
-//     model moved from a file control to the model choice, and the material
-//     it always carried is now an override, so `own_material` goes on.
-// `layer_size` is the low end of the layer's Size block, which is the size a
-// pile's bodies were born at: an Object says its size in metres, so that is
-// what a converted pile asks for and nothing changes size.
-void into_object(Block& block, float layer_size) {
-    const bool pile = block.kind == "pile";
-    const bool prop = block.kind == "prop";
-    if (!pile && !prop) {
-        return;
-    }
-    Block out;
-    out.uid = block.uid;
-    out.kind = "object";
-    out.enabled = block.enabled;
-    out.published = block.published;
-    const auto carry = [&](std::string_view from, std::string_view to) {
-        if (const Value* value = block.find(from)) {
-            out.set(to, *value);
-        }
-    };
-    if (pile) {
-        const Value* shape = block.find("shape");
-        const bool stack = shape != nullptr && shape->text == "stack";
-        out.set("arrange", choice(stack ? "stack" : "heap"));
-        // A pile was drawn and collided as the layer's own pieces, at the
-        // size every body was born at.
-        out.set("model", choice("layer"));
-        out.set("size", number(layer_size));
-        for (const auto& [from, to] : {std::pair{"count", "count"}, std::pair{"slope", "slope"},
-                                       std::pair{"width", "width"}, std::pair{"depth", "depth"},
-                                       std::pair{"release", "release"}, std::pair{"at", "at"},
-                                       std::pair{"spacing", "spacing"}, std::pair{"jitter", "jitter"},
-                                       std::pair{"seed", "seed"}}) {
-            carry(from, to);
-        }
-    } else {
-        const Value* shape = block.find("shape");
-        const std::string collides = shape != nullptr && !shape->text.empty()
-                                         ? (shape->text == "model" ? std::string{"own"} : shape->text)
-                                         : std::string{"own"};
-        out.set("collides", choice(collides));
-        // A prop's model was a file; Object names one through its choice.
-        if (const Value* model = block.find("model"); model != nullptr && !model->text.empty()) {
-            out.set("model", choice("file"));
-            out.set("model_file", *model);
-        } else {
-            out.set("model", choice("layer"));
-        }
-        out.set("own_material", toggle(true));
-        for (const auto& [from, to] :
-             {std::pair{"motion", "motion"}, std::pair{"at", "at"}, std::pair{"turn", "turn"},
-              std::pair{"size", "size"}, std::pair{"wall", "wall"}, std::pair{"radius", "radius"},
-              std::pair{"height", "height"}, std::pair{"extent", "extent"}, std::pair{"move_to", "move_to"},
-              std::pair{"turn_to", "turn_to"}, std::pair{"move_at", "move_at"},
-              std::pair{"move_over", "move_over"}, std::pair{"friction", "friction"},
-              std::pair{"bounce", "bounce"}, std::pair{"density", "density"}, std::pair{"sides", "sides"}}) {
-            carry(from, to);
-        }
-    }
-    block = std::move(out);
-}
-
 std::optional<Block> block_from_json(const json::Value& b, std::string& error) {
     Block block;
     block.uid = static_cast<Uid>(std::max(b.number_or("uid", 0.0), 0.0));
@@ -262,7 +194,7 @@ std::optional<Block> block_from_json(const json::Value& b, std::string& error) {
             // page, before the value is held to the options the control now
             // has: through that it would fall back to the first of them,
             // and a page of debris would open as glowing dots.
-            if (block.kind == "appearance" && control->id == "material" &&
+            if (block.kind == BlockKind::Appearance && control->id == "material" &&
                 value.type == json::Value::Type::String && value.text == "debris") {
                 block.set(control->id, choice("model"));
                 continue;
@@ -316,6 +248,7 @@ std::optional<Block> block_from_text(std::string_view text, std::string& error) 
 }
 
 std::string save_document(const Document& document) {
+    if (document.scene) { return save_scene(document); }
     json::Value root = json::Value::object();
     root.add("format", json::Value::of("ajfx-studio"));
     root.add("version", json::Value::of(static_cast<double>(document_version)));
@@ -325,6 +258,16 @@ std::string save_document(const Document& document) {
     root.add("loop_auto", json::Value::of(document.loop_auto));
     root.add("backdrop", json::Value::of(std::string{backdrop_name(document.backdrop)}));
     root.add("glow", json::Value::of(static_cast<double>(document.glow)));
+    root.add("budget_ms", json::Value::of(static_cast<double>(document.budget_ms)));
+    {
+        json::Value world = json::Value::object();
+        world.add("ground", json::Value::of(document.world.ground));
+        world.add("ground_height", json::Value::of(static_cast<double>(document.world.ground_height)));
+        world.add("gravity", json::Value::of(static_cast<double>(document.world.gravity)));
+        world.add("wind", json::Value::of(static_cast<double>(document.world.wind)));
+        world.add("wind_heading", json::Value::of(static_cast<double>(document.world.wind_heading)));
+        root.add("world", std::move(world));
+    }
     root.add("next_uid", json::Value::of(static_cast<double>(document.next_uid)));
     json::Value layers = json::Value::array();
     for (const Layer& layer : document.layers) {
@@ -334,6 +277,10 @@ std::string save_document(const Document& document) {
         out.add("enabled", json::Value::of(layer.enabled));
         out.add("solo", json::Value::of(layer.solo));
         out.add("kind", json::Value::of(std::string{layer_kind_id(layer.kind)}));
+        out.add("what", json::Value::of(std::string{layer_what_id(layer.what)}));
+        if (layer.baked) {
+            out.add("baked", json::Value::of(true));
+        }
         if (layer.world) {
             out.add("world", block_to_json(*layer.world));
         }
@@ -364,6 +311,7 @@ Loaded load_document(std::string_view text) {
                        std::to_string(parse_error.offset) + ")";
         return loaded;
     }
+    if (root->string_or("format", "") == "ajfx-studio-scene") { return load_scene(*root); }
     if (root->string_or("format", "") != "ajfx-studio") {
         loaded.error = "This file is not an ajfx Studio page";
         return loaded;
@@ -381,6 +329,20 @@ Loaded load_document(std::string_view text) {
     document.loop_auto = root->bool_or("loop_auto", true);
     document.backdrop = backdrop_from(root->string_or("backdrop", "night"));
     document.glow = std::clamp(static_cast<float>(root->number_or("glow", 0.6)), 0.0F, 8.0F);
+    document.budget_ms = std::clamp(static_cast<float>(root->number_or("budget_ms", default_budget_ms)),
+                                    min_budget_ms, max_budget_ms);
+    // A page saved before the page had a world plays in the default one.
+    if (const json::Value* world = root->find("world"); world != nullptr && world->type == json::Value::Type::Object) {
+        const PageWorld fallback;
+        document.world.ground = world->bool_or("ground", fallback.ground);
+        document.world.ground_height =
+            std::clamp(static_cast<float>(world->number_or("ground_height", fallback.ground_height)), -1000.0F, 1000.0F);
+        document.world.gravity =
+            std::clamp(static_cast<float>(world->number_or("gravity", fallback.gravity)), 0.0F, 10.0F);
+        document.world.wind = std::clamp(static_cast<float>(world->number_or("wind", fallback.wind)), 0.0F, 100.0F);
+        document.world.wind_heading =
+            std::clamp(static_cast<float>(world->number_or("wind_heading", fallback.wind_heading)), -360.0F, 360.0F);
+    }
     Uid highest = 0U;
     const auto uid_of = [&](const json::Value& value) {
         const Uid uid = static_cast<Uid>(std::max(value.number_or("uid", 0.0), 0.0));
@@ -394,6 +356,7 @@ Loaded load_document(std::string_view text) {
             layer.name = in.string_or("name", "Layer");
             layer.enabled = in.bool_or("enabled", true);
             layer.solo = in.bool_or("solo", false);
+            layer.baked = in.bool_or("baked", false);
             if (const json::Value* life = in.find("life");
                 life != nullptr && life->items.size() == 2U && life->items[0].type == json::Value::Type::Number &&
                 life->items[1].type == json::Value::Type::Number) {
@@ -408,6 +371,7 @@ Loaded load_document(std::string_view text) {
             const json::Value* stated = in.find("kind");
             bool infer = stated == nullptr || stated->type != json::Value::Type::String;
             layer.kind = infer ? LayerKind::Particles : layer_kind_from(stated->text);
+            const std::optional<LayerWhat> what = layer_what_from(in.string_or("what", ""));
             if (const json::Value* blocks = in.find("blocks"); blocks != nullptr) {
                 for (const json::Value& b : blocks->items) {
                     std::string error;
@@ -420,7 +384,7 @@ Loaded load_document(std::string_view text) {
                     if (block->detached) {
                         highest = std::max(highest, block->detached->from);
                     }
-                    if (infer && (block->kind == world_block_kind || block->kind == "pile" || block->kind == "prop")) {
+                    if (infer && block->kind == BlockKind::Physics) {
                         layer.kind = LayerKind::Rigid;
                     }
                     layer.blocks.push_back(std::move(*block));
@@ -429,7 +393,7 @@ Loaded load_document(std::string_view text) {
             if (const json::Value* world = in.find("world"); world != nullptr && layer.kind == LayerKind::Rigid) {
                 std::string error;
                 if (std::optional<Block> block = block_from_json(*world, error);
-                    block && block->kind == world_block_kind) {
+                    block && block->kind == BlockKind::Physics) {
                     highest = std::max(highest, block->uid);
                     layer.world = std::move(block);
                 }
@@ -439,37 +403,25 @@ Loaded load_document(std::string_view text) {
                 // its list, or a rigid layer that never had one: the block
                 // leaves the list and becomes the layer's own settings.
                 const auto found = std::find_if(layer.blocks.begin(), layer.blocks.end(),
-                                                [](const Block& b) { return b.kind == world_block_kind; });
+                                                [](const Block& b) { return b.kind == BlockKind::Physics; });
                 if (found != layer.blocks.end()) {
                     layer.world = std::move(*found);
                     layer.blocks.erase(found);
                 } else {
                     Block world_block;
-                    world_block.kind = std::string{world_block_kind};
+                    world_block.kind = std::string{block_kind_id(BlockKind::Physics)};
                     layer.world = std::move(world_block);
                 }
             }
+            // What it is, as saved; a page saved before layers said so is
+            // solid where it is rigid and something else where it is not.
+            layer.what = what ? *what : (layer.kind == LayerKind::Rigid ? LayerWhat::Solid : LayerWhat::Other);
+            if (layer.kind == LayerKind::Particles && layer.what == LayerWhat::Solid) {
+                layer.what = LayerWhat::Other;
+            }
             // Any further Physics block is a duplicate of the world it just
             // became; the layer has one world and holds it once.
-            std::erase_if(layer.blocks, [](const Block& b) { return b.kind == world_block_kind; });
-            // Pile and Prop became Object. The layer's Size is read first,
-            // since a converted pile asks for the size its bodies were born
-            // at and an Object says its size in metres.
-            float layer_size = 1.0F;
-            for (const Block& block : layer.blocks) {
-                if (block.kind == "size") {
-                    if (const Value* value = block.find("size")) {
-                        layer_size = std::max(value->x, 1.0e-4F);
-                    } else if (const BlockDef* def = find_block_def("size")) {
-                        if (const ControlDef* control = find_control(*def, "size")) {
-                            layer_size = std::max(control->fallback.x, 1.0e-4F);
-                        }
-                    }
-                }
-            }
-            for (Block& block : layer.blocks) {
-                into_object(block, layer_size);
-            }
+            std::erase_if(layer.blocks, [](const Block& b) { return b.kind == BlockKind::Physics; });
             for (Block& block : layer.blocks) {
                 conform_block(block, layer.kind);
             }

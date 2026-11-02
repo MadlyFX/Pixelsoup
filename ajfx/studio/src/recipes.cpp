@@ -1,5 +1,6 @@
 #include "recipes.hpp"
 
+#include "blast.hpp"
 #include "catalog.hpp"
 
 #include <initializer_list>
@@ -10,7 +11,7 @@ namespace ajfx::studio {
 namespace {
 
 struct Spec final {
-    std::string_view kind;
+    BlockKind kind;
     std::initializer_list<std::pair<std::string_view, Value>> values;
 };
 
@@ -27,10 +28,14 @@ void fill(Block& block, const std::vector<std::pair<std::string_view, Value>>& v
     }
 }
 
-Layer build_layer(Document& document, LayerKind kind, std::string name, float life_min, float life_max,
+// A layer of what it is, which gives it its kind and its share of the page's
+// ground, gravity and wind: a recipe adds neither a Gravity nor a Ground
+// block where the page's do, and only tunes them where it wants its own.
+Layer build_layer(Document& document, LayerWhat what, std::string name, float life_min, float life_max,
                   std::initializer_list<Spec> blocks,
                   std::initializer_list<std::pair<std::string_view, Value>> world = {}) {
-    Layer layer = make_layer(document, kind, std::move(name));
+    Layer layer = make_layer(document, what, std::move(name));
+    const LayerKind kind = layer.kind;
     layer.life_min = life_min;
     layer.life_max = life_max;
     if (layer.world) {
@@ -49,85 +54,85 @@ Layer build_layer(Document& document, LayerKind kind, std::string name, float li
 }
 
 Layer starter(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Particles", 1.0F, 2.0F,
-                       {{"stream", {{"rate", number(40.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.1F, 0.1F)}}},
-                        {"launch", {{"speed", range(0.6F, 1.2F)}, {"spread", range(0.0F, 25.0F)}}},
-                        {"appearance", {{"material", choice("glow")}, {"texture", choice("glow")}}},
-                        {"color", {{"color", color(0.45F, 0.7F, 1.0F)}, {"brightness", range(3.0F, 3.0F)}}},
-                        {"size", {{"size", range(0.05F, 0.1F)}}},
-                        {"fade", {}}});
+    return build_layer(d, LayerWhat::Magic, "Particles", 1.0F, 2.0F,
+                       {{BlockKind::Stream, {{"rate", number(40.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.1F, 0.1F)}}},
+                        {BlockKind::Launch, {{"speed", range(0.6F, 1.2F)}, {"spread", range(0.0F, 25.0F)}}},
+                        {BlockKind::Appearance, {{"material", choice("glow")}, {"texture", choice("glow")}}},
+                        {BlockKind::Color, {{"color", color(0.45F, 0.7F, 1.0F)}, {"brightness", range(3.0F, 3.0F)}}},
+                        {BlockKind::Size, {{"size", range(0.05F, 0.1F)}}},
+                        {BlockKind::Fade, {}}});
 }
 
 Layer flames(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Flames", 0.6F, 1.1F,
-                       {{"stream", {{"rate", number(90.0F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.22F, 0.22F)}}},
-                        {"launch", {{"speed", range(0.2F, 0.5F)}, {"spread", range(0.0F, 15.0F)}}},
-                        {"rise", {{"strength", range(5.0F, 5.0F)}, {"over_life", choice("cools")}}},
-                        {"draw_in", {{"strength", range(6.0F, 6.0F)}, {"height", number(0.6F)}}},
-                        {"turbulence",
+    return build_layer(d, LayerWhat::Fire, "Flames", 0.6F, 1.1F,
+                       {{BlockKind::Stream, {{"rate", number(90.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.22F, 0.22F)}}},
+                        {BlockKind::Launch, {{"speed", range(0.2F, 0.5F)}, {"spread", range(0.0F, 15.0F)}}},
+                        {BlockKind::Rise, {{"strength", range(5.0F, 5.0F)}, {"over_life", choice("cools")}}},
+                        {BlockKind::DrawIn, {{"strength", range(6.0F, 6.0F)}, {"height", number(0.6F)}}},
+                        {BlockKind::Turbulence,
                          {{"strength", range(1.6F, 1.6F)}, {"size", number(0.3F)}, {"churn", number(0.6F)},
                           {"roll", number(1.6F)}, {"over_life", choice("grows")}}},
-                        {"drag", {{"amount", range(1.2F, 1.2F)}}},
-                        {"appearance", {{"material", choice("glow")}, {"texture", choice("flame")}, {"spin", toggle(true)}}},
-                        {"spin", {{"speed", range(40.0F, 160.0F)}, {"slows", number(0.6F)}}},
-                        {"color",
+                        {BlockKind::Drag, {{"amount", range(1.2F, 1.2F)}}},
+                        {BlockKind::Appearance, {{"material", choice("glow")}, {"texture", choice("flame")}, {"spin", toggle(true)}}},
+                        {BlockKind::Spin, {{"speed", range(40.0F, 160.0F)}, {"slows", number(0.6F)}}},
+                        {BlockKind::Color,
                          {{"color", color(1.0F, 0.62F, 0.3F)}, {"brightness", range(5.0F, 5.0F)}, {"over_life", choice("fire")}}},
-                        {"size", {{"size", range(0.38F, 0.58F)}, {"over_life", choice("shrink")}}},
-                        {"fade", {{"in", number(8.0F)}, {"out", number(35.0F)}}},
-                        {"light", {{"count", number(6.0F)}, {"intensity", range(1.2F, 2.2F)}, {"reach", range(1.8F, 2.8F)}}}});
+                        {BlockKind::Size, {{"size", range(0.38F, 0.58F)}, {"over_life", choice("shrink")}}},
+                        {BlockKind::Fade, {{"in", number(8.0F)}, {"out", number(35.0F)}}},
+                        {BlockKind::Light, {{"count", number(6.0F)}, {"intensity", range(1.2F, 2.2F)}, {"reach", range(1.8F, 2.8F)}}}});
 }
 
 Layer embers(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Embers", 1.5F, 3.0F,
-                       {{"stream", {{"rate", number(14.0F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}}},
-                        {"launch", {{"speed", range(0.8F, 1.8F)}, {"spread", range(0.0F, 25.0F)}}},
-                        {"rise", {{"strength", range(0.6F, 0.6F)}}},
-                        {"turbulence", {{"strength", range(2.5F, 2.5F)}, {"size", number(0.5F)}, {"churn", number(0.6F)}}},
-                        {"drag", {{"amount", range(0.8F, 0.8F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Fire, "Embers", 1.5F, 3.0F,
+                       {{BlockKind::Stream, {{"rate", number(14.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}}},
+                        {BlockKind::Launch, {{"speed", range(0.8F, 1.8F)}, {"spread", range(0.0F, 25.0F)}}},
+                        {BlockKind::Rise, {{"strength", range(0.6F, 0.6F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(2.5F, 2.5F)}, {"size", number(0.5F)}, {"churn", number(0.6F)}}},
+                        {BlockKind::Drag, {{"amount", range(0.8F, 0.8F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("glow")}, {"texture", choice("glow")}, {"facing", choice("motion")},
                           {"stretch", number(0.03F)}}},
-                        {"color",
+                        {BlockKind::Color,
                          {{"color", color(1.0F, 0.55F, 0.18F)}, {"brightness", range(8.0F, 8.0F)}, {"over_life", choice("fire")}}},
-                        {"size", {{"size", range(0.012F, 0.025F)}}},
-                        {"fade", {{"in", number(5.0F)}, {"out", number(30.0F)}}}});
+                        {BlockKind::Size, {{"size", range(0.012F, 0.025F)}}},
+                        {BlockKind::Fade, {{"in", number(5.0F)}, {"out", number(30.0F)}}}});
 }
 
 Layer fire_smoke(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Smoke", 3.5F, 5.5F,
-                       {{"stream", {{"rate", number(10.0F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
-                        {"launch", {{"speed", range(0.3F, 0.6F)}, {"spread", range(0.0F, 12.0F)}}},
-                        {"rise", {{"strength", range(0.6F, 0.6F)}}},
-                        {"wind", {{"strength", range(0.25F, 0.25F)}, {"heading", number(20.0F)}}},
-                        {"turbulence",
+    return build_layer(d, LayerWhat::Smoke, "Smoke", 3.5F, 5.5F,
+                       {{BlockKind::Stream, {{"rate", number(10.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.2F, 0.2F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
+                        {BlockKind::Launch, {{"speed", range(0.3F, 0.6F)}, {"spread", range(0.0F, 12.0F)}}},
+                        {BlockKind::Rise, {{"strength", range(0.6F, 0.6F)}}},
+                        {BlockKind::Wind, {{"strength", range(0.25F, 0.25F)}, {"heading", number(20.0F)}}},
+                        {BlockKind::Turbulence,
                          {{"strength", range(0.6F, 0.6F)}, {"size", number(0.9F)}, {"churn", number(0.25F)}, {"roll", number(0.5F)}}},
-                        {"drag", {{"amount", range(0.5F, 0.5F)}}},
-                        {"appearance",
+                        {BlockKind::Drag, {{"amount", range(0.5F, 0.5F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
                           {"soft", number(0.3F)}}},
-                        {"spin", {{"speed", range(8.0F, 35.0F)}, {"slows", number(0.15F)}}},
-                        {"color", {{"color", color(0.075F, 0.07F, 0.065F)}, {"opacity", number(0.5F)}}},
-                        {"size", {{"size", range(0.5F, 0.8F)}, {"over_life", choice("swell")}, {"change", number(3.5F)}}},
-                        {"fade", {{"in", number(15.0F)}, {"out", number(50.0F)}}}});
+                        {BlockKind::Spin, {{"speed", range(8.0F, 35.0F)}, {"slows", number(0.15F)}}},
+                        {BlockKind::Color, {{"color", color(0.075F, 0.07F, 0.065F)}, {"opacity", number(0.5F)}}},
+                        {BlockKind::Size, {{"size", range(0.5F, 0.8F)}, {"over_life", choice("swell")}, {"change", number(3.5F)}}},
+                        {BlockKind::Fade, {{"in", number(15.0F)}, {"out", number(50.0F)}}}});
 }
 
 Layer plume(Document& d) {
     Layer layer = fire_smoke(d);
     layer.name = "Plume";
     for (Block& block : layer.blocks) {
-        if (block.kind == "stream") {
+        if (block.kind == BlockKind::Stream) {
             block.set("rate", number(16.0F));
-        } else if (block.kind == "shape") {
+        } else if (block.kind == BlockKind::Shape) {
             block.set("offset", vec3(0.0F, 0.05F, 0.0F));
             block.set("size", range(0.3F, 0.3F));
-        } else if (block.kind == "color") {
+        } else if (block.kind == BlockKind::Color) {
             block.set("color", color(0.55F, 0.54F, 0.52F));
             block.set("opacity", number(0.5F));
-        } else if (block.kind == "rise") {
+        } else if (block.kind == BlockKind::Rise) {
             block.set("strength", range(0.9F, 0.9F));
         }
     }
@@ -135,82 +140,76 @@ Layer plume(Document& d) {
 }
 
 Layer sparks(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Sparks", 0.8F, 1.6F,
-                       {{"stream", {{"rate", number(140.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.03F, 0.03F)}}},
-                        {"launch", {{"speed", range(3.0F, 6.0F)}, {"spread", range(0.0F, 28.0F)}}},
-                        {"gravity", {}},
-                        {"drag", {{"amount", range(0.3F, 0.3F)}}},
-                        {"ground", {{"bounce", number(0.35F)}, {"friction", number(0.25F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Sparks, "Sparks", 0.8F, 1.6F,
+                       {{BlockKind::Stream, {{"rate", number(140.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.03F, 0.03F)}}},
+                        {BlockKind::Launch, {{"speed", range(3.0F, 6.0F)}, {"spread", range(0.0F, 28.0F)}}},
+                        {BlockKind::Drag, {{"amount", range(0.3F, 0.3F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("glow")}, {"texture", choice("spark")}, {"facing", choice("motion")},
                           {"stretch", number(0.035F)}}},
-                        {"color",
+                        {BlockKind::Color,
                          {{"color", color(1.0F, 0.7F, 0.35F)}, {"brightness", range(10.0F, 10.0F)}, {"over_life", choice("fire")}}},
-                        {"size", {{"size", range(0.015F, 0.03F)}}},
-                        {"fade", {{"in", number(0.0F)}, {"out", number(25.0F)}}}});
+                        {BlockKind::Size, {{"size", range(0.015F, 0.03F)}}},
+                        {BlockKind::Fade, {{"in", number(0.0F)}, {"out", number(25.0F)}}}});
 }
 
 Layer spark_burst(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Spark burst", 0.6F, 1.4F,
-                       {{"burst", {{"count", number(160.0F)}, {"every", number(3.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.15F, 0.15F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
-                        {"launch", {{"direction", choice("out")}, {"speed", range(4.0F, 9.0F)}}},
-                        {"gravity", {}},
-                        {"drag", {{"amount", range(1.0F, 1.0F)}}},
-                        {"ground", {{"bounce", number(0.3F)}, {"friction", number(0.3F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Sparks, "Spark burst", 0.6F, 1.4F,
+                       {{BlockKind::Burst, {{"count", number(160.0F)}, {"every", number(3.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.15F, 0.15F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
+                        {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(4.0F, 9.0F)}}},
+                        {BlockKind::Drag, {{"amount", range(1.0F, 1.0F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("glow")}, {"texture", choice("spark")}, {"facing", choice("motion")},
                           {"stretch", number(0.03F)}}},
-                        {"color",
+                        {BlockKind::Color,
                          {{"color", color(1.0F, 0.75F, 0.4F)}, {"brightness", range(12.0F, 12.0F)}, {"over_life", choice("fire")}}},
-                        {"size", {{"size", range(0.015F, 0.03F)}}},
-                        {"fade", {{"in", number(0.0F)}, {"out", number(30.0F)}}}});
+                        {BlockKind::Size, {{"size", range(0.015F, 0.03F)}}},
+                        {BlockKind::Fade, {{"in", number(0.0F)}, {"out", number(30.0F)}}}});
 }
 
 Layer glow_core(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Glow core", 0.4F, 0.6F,
-                       {{"stream", {{"rate", number(25.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.05F, 0.05F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
-                        {"launch", {{"speed", range(0.0F, 0.05F)}}},
-                        {"appearance", {{"material", choice("glow")}, {"texture", choice("glow")}}},
-                        {"color", {{"color", color(0.4F, 0.65F, 1.0F)}, {"brightness", range(4.0F, 4.0F)}}},
-                        {"size", {{"size", range(0.5F, 0.7F)}, {"over_life", choice("pop")}}},
-                        {"fade", {{"in", number(20.0F)}, {"out", number(60.0F)}}},
-                        {"light", {{"count", number(2.0F)}, {"intensity", range(2.5F, 3.5F)}, {"reach", range(2.0F, 3.0F)}}}});
+    return build_layer(d, LayerWhat::Magic, "Glow core", 0.4F, 0.6F,
+                       {{BlockKind::Stream, {{"rate", number(25.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.05F, 0.05F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
+                        {BlockKind::Launch, {{"speed", range(0.0F, 0.05F)}}},
+                        {BlockKind::Appearance, {{"material", choice("glow")}, {"texture", choice("glow")}}},
+                        {BlockKind::Color, {{"color", color(0.4F, 0.65F, 1.0F)}, {"brightness", range(4.0F, 4.0F)}}},
+                        {BlockKind::Size, {{"size", range(0.5F, 0.7F)}, {"over_life", choice("pop")}}},
+                        {BlockKind::Fade, {{"in", number(20.0F)}, {"out", number(60.0F)}}},
+                        {BlockKind::Light, {{"count", number(2.0F)}, {"intensity", range(2.5F, 3.5F)}, {"reach", range(2.0F, 3.0F)}}}});
 }
 
 Layer magic_motes(Document& d) {
     return build_layer(
-        d, LayerKind::Particles, "Motes", 2.0F, 3.0F,
-        {{"stream", {{"rate", number(60.0F)}}},
-         {"shape", {{"shape", choice("shell")}, {"size", range(0.6F, 0.6F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
-         {"launch", {{"direction", choice("out")}, {"speed", range(0.1F, 0.3F)}}},
-         {"swirl", {{"strength", range(4.0F, 4.0F)}, {"center", vec3(0.0F, 1.0F, 0.0F)}}},
-         {"attract", {{"strength", range(2.0F, 2.0F)}, {"point", vec3(0.0F, 1.0F, 0.0F)}}},
-         {"turbulence", {{"strength", range(0.8F, 0.8F)}, {"size", number(0.4F)}}},
-         {"drag", {{"amount", range(1.5F, 1.5F)}}},
-         {"appearance", {{"material", choice("glow")}, {"texture", choice("star")}, {"spin", toggle(true)}}},
-         {"color",
+        d, LayerWhat::Magic, "Motes", 2.0F, 3.0F,
+        {{BlockKind::Stream, {{"rate", number(60.0F)}}},
+         {BlockKind::Shape, {{"shape", choice("shell")}, {"size", range(0.6F, 0.6F)}, {"offset", vec3(0.0F, 1.0F, 0.0F)}}},
+         {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(0.1F, 0.3F)}}},
+         {BlockKind::Swirl, {{"strength", range(4.0F, 4.0F)}, {"center", vec3(0.0F, 1.0F, 0.0F)}}},
+         {BlockKind::Attract, {{"strength", range(2.0F, 2.0F)}, {"point", vec3(0.0F, 1.0F, 0.0F)}}},
+         {BlockKind::Turbulence, {{"strength", range(0.8F, 0.8F)}, {"size", number(0.4F)}}},
+         {BlockKind::Drag, {{"amount", range(1.5F, 1.5F)}}},
+         {BlockKind::Appearance, {{"material", choice("glow")}, {"texture", choice("star")}, {"spin", toggle(true)}}},
+         {BlockKind::Color,
           {{"color", color(0.45F, 0.6F, 1.0F)}, {"brightness", range(6.0F, 6.0F)}, {"over_life", choice("cool")},
            {"mix", toggle(true)}, {"second", color(0.85F, 0.4F, 1.0F)}}},
-         {"size", {{"size", range(0.03F, 0.07F)}, {"over_life", choice("pop")}}},
-         {"fade", {{"in", number(20.0F)}, {"out", number(40.0F)}}}});
+         {BlockKind::Size, {{"size", range(0.03F, 0.07F)}, {"over_life", choice("pop")}}},
+         {BlockKind::Fade, {{"in", number(20.0F)}, {"out", number(40.0F)}}}});
 }
 
 Layer debris(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Debris", 2.6F, 3.0F,
-                       {{"burst", {{"count", number(50.0F)}, {"every", number(3.0F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.15F, 0.15F)}}},
-                        {"launch", {{"speed", range(2.0F, 6.0F)}, {"spread", range(0.0F, 35.0F)}}},
-                        {"gravity", {}},
-                        {"tumble", {{"spin", range(180.0F, 900.0F)}, {"damping", number(1.5F)}, {"contact", number(0.3F)}}},
-                        {"ground", {{"bounce", number(0.3F)}, {"friction", number(0.6F)}}},
-                        {"appearance", {{"material", choice("model")}, {"mesh", choice("chip")}}},
-                        {"color",
+    return build_layer(d, LayerWhat::Debris, "Debris", 2.6F, 3.0F,
+                       {{BlockKind::Burst, {{"count", number(50.0F)}, {"every", number(3.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.15F, 0.15F)}}},
+                        {BlockKind::Launch, {{"speed", range(2.0F, 6.0F)}, {"spread", range(0.0F, 35.0F)}}},
+                        {BlockKind::Tumble, {{"spin", range(180.0F, 900.0F)}, {"damping", number(1.5F)}, {"contact", number(0.3F)}}},
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("slab")}}},
+                        {BlockKind::Color,
                          {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.34F, 0.31F, 0.27F)}}},
-                        {"size", {{"size", range(0.06F, 0.16F)}}},
-                        {"fade", {{"in", number(0.0F)}, {"out", number(12.0F)}}}});
+                        {BlockKind::Size, {{"size", range(0.06F, 0.16F)}}},
+                        {BlockKind::Fade, {{"in", number(0.0F)}, {"out", number(12.0F)}}}});
 }
 
 // Already standing when the effect starts; let go at once, so it collapses
@@ -219,8 +218,8 @@ Layer debris(Document& d) {
 // spread they had: a body is born at the layer's size and its kind's scale
 // multiplies it, and a scale of 1 leaves 0.12 to 0.22 exactly as it was.
 Layer rock_pile(Document& d) {
-    return build_layer(d, LayerKind::Rigid, "Rock pile", 60.0F, 60.0F,
-                       {{"object",
+    return build_layer(d, LayerWhat::Solid, "Rock pile", 60.0F, 60.0F,
+                       {{BlockKind::Object,
                          {{"model", choice("rock")},
                           {"arrange", choice("heap")},
                           {"count", number(220.0F)},
@@ -228,14 +227,12 @@ Layer rock_pile(Document& d) {
                           {"slope", number(62.0F)},
                           {"spacing", number(0.75F)},
                           {"jitter", number(0.25F)}}},
-                        {"gravity", {}},
                         // A pile starts still: Tumble only turns each rock to lie its own way.
-                        {"tumble", {{"spin", range(0.0F, 0.0F)}}},
-                        {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
-                        {"appearance", {{"material", choice("model")}, {"mesh", choice("rock")}}},
-                        {"color",
+                        {BlockKind::Tumble, {{"spin", range(0.0F, 0.0F)}}},
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("rock")}}},
+                        {BlockKind::Color,
                          {{"color", color(0.2F, 0.19F, 0.17F)}, {"mix", toggle(true)}, {"second", color(0.36F, 0.33F, 0.29F)}}},
-                        {"size", {{"size", range(0.12F, 0.22F)}}}},
+                        {BlockKind::Size, {{"size", range(0.12F, 0.22F)}}}},
                        {{"friction", number(0.8F)}, {"bounce", number(0.1F)}, {"density", number(2600.0F)}});
 }
 
@@ -245,8 +242,8 @@ Layer rock_pile(Document& d) {
 // and lands the same way every time. Measurements agree with the prop's: the
 // balls start inside the bucket's floor, 0.05 up, in its 0.45 inside radius.
 Layer bucket_spill(Document& d) {
-    return build_layer(d, LayerKind::Rigid, "Bucket of stones", 60.0F, 60.0F,
-                       {{"object",
+    return build_layer(d, LayerWhat::Solid, "Bucket of stones", 60.0F, 60.0F,
+                       {{BlockKind::Object,
                          {{"model", choice("layer")},
                           {"motion", choice("driven")},
                           {"collides", choice("bucket")},
@@ -262,7 +259,7 @@ Layer bucket_spill(Document& d) {
                           {"own_material", toggle(true)},
                           {"friction", number(0.7F)},
                           {"bounce", number(0.05F)}}},
-                        {"object",
+                        {BlockKind::Object,
                          {{"model", choice("rock")},
                           {"collides", choice("ball")},
                           {"arrange", choice("stack")},
@@ -272,28 +269,26 @@ Layer bucket_spill(Document& d) {
                           {"depth", number(0.5F)},
                           {"at", vec3(0.0F, 0.05F, 0.0F)},
                           {"jitter", number(0.0F)}}},
-                        {"gravity", {}},
-                        {"ground", {{"bounce", number(0.1F)}, {"friction", number(0.8F)}}},
                         // Drawn as rocks; they collide as balls, so they roll
                         // out of the bucket rather than catching on a corner.
-                        {"appearance", {{"material", choice("model")}, {"mesh", choice("rock")}}},
-                        {"color",
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("rock")}}},
+                        {BlockKind::Color,
                          {{"color", color(0.42F, 0.36F, 0.30F)}, {"mix", toggle(true)},
                           {"second", color(0.58F, 0.50F, 0.42F)}}},
-                        {"size", {{"size", range(0.1F, 0.1F)}}}},
+                        {BlockKind::Size, {{"size", range(0.1F, 0.1F)}}}},
                        {{"shape", choice("ball")}, {"friction", number(0.5F)}, {"bounce", number(0.2F)}});
 }
 
 // A stack of crates with a ball dropped on them, the crates breaking into
-// panels where the ball lands. The crates are the layer's own bodies and the
-// ball is a loose prop, so one physics world holds them both. The parts sit
+// panels where the ball lands. The crates and the ball are both the layer's
+// bodies, so one physics world holds them both. The parts sit
 // at the faces of the crate they came from: a lid, two walls and a base, each
 // a little under half the crate across, which is what a crate in pieces
 // looks like. The ball falls from two and a half metres and arrives at about
 // seven, well past the four the crates come apart at.
 Layer breaking_crates(Document& d) {
-    return build_layer(d, LayerKind::Rigid, "Crates and a dropped ball", 60.0F, 60.0F,
-                       {{"object",
+    return build_layer(d, LayerWhat::Solid, "Crates and a dropped ball", 60.0F, 60.0F,
+                       {{BlockKind::Object,
                          // A crate 0.4 across reaches 0.69 corner to corner,
                          // so spacing 0.6 sets them just touching and a 0.9
                          // footprint holds two each way: four, four and one.
@@ -310,7 +305,7 @@ Layer breaking_crates(Document& d) {
                         // the crate rather than shards laid beside it. It is
                         // under the crates, so it is the crates that break
                         // and not the stone below.
-                        {"break",
+                        {BlockKind::Break,
                          {{"into", choice("cut")},
                           {"cells", number(6.0F)},
                           {"spread", number(0.35F)},
@@ -322,7 +317,7 @@ Layer breaking_crates(Document& d) {
                         // comes apart at. It is one of the layer's bodies
                         // rather than a prop, so it carries its own size and
                         // material and the crates feel its weight.
-                        {"object",
+                        {BlockKind::Object,
                          {{"model", choice("rock")},
                           {"collides", choice("ball")},
                           {"at", vec3(0.0F, 4.0F, 0.0F)},
@@ -331,138 +326,210 @@ Layer breaking_crates(Document& d) {
                           {"density", number(1200.0F)},
                           {"friction", number(0.3F)},
                           {"bounce", number(0.8F)}}},
-                        {"gravity", {}},
-                        {"ground", {{"bounce", number(0.05F)}, {"friction", number(0.9F)}}},
-                        {"appearance", {{"material", choice("model")}, {"mesh", choice("cube")}}},
-                        {"color",
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("cube")}}},
+                        {BlockKind::Color,
                          {{"color", color(0.44F, 0.30F, 0.16F)}, {"mix", toggle(true)},
                           {"second", color(0.56F, 0.40F, 0.23F)}}},
-                        {"size", {{"size", range(0.4F, 0.4F)}}}},
+                        {BlockKind::Size, {{"size", range(0.4F, 0.4F)}}}},
                        {{"shape", choice("cube")},
                         {"friction", number(0.8F)},
                         {"bounce", number(0.05F)},
                         {"density", number(600.0F)}});
 }
 
-// Snow falling on whatever the layer above it is made of. It is a particle
-// layer, so it sits after the crates on the page: the pieces it lands on
-// have to have moved before the flakes meet them, and reading down the page
-// is that order. Sticking is what makes it settle rather than skate off.
+// One wooden crate standing on the ground, half a metre across, waiting to
+// be blown up: Explode this (blast.hpp) makes the rest of the Crate blast
+// recipe from it.
+Layer crate(Document& d) {
+    return build_layer(d, LayerWhat::Solid, "Crate", 60.0F, 60.0F,
+                       {{BlockKind::Object,
+                         {{"model", choice("cube")},
+                          {"collides", choice("block")},
+                          {"extent", vec3(0.5F, 0.5F, 0.5F)},
+                          {"size", number(0.5F)},
+                          {"at", vec3(0.0F, 0.25F, 0.0F)},
+                          {"material", choice("wood")},
+                          {"own_material", toggle(true)},
+                          {"density", number(600.0F)},
+                          {"friction", number(0.6F)},
+                          {"bounce", number(0.25F)}}},
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("cube")}}},
+                        {BlockKind::Color,
+                         {{"color", color(0.44F, 0.30F, 0.16F)}, {"mix", toggle(true)},
+                          {"second", color(0.56F, 0.40F, 0.23F)}}}},
+                       {{"shape", choice("cube")}});
+}
+
+// A board leaning on the ground, three metres long and tipped 25 degrees, so
+// its high end is 1.4 m up and its low end at the floor. A layer of its own:
+// the page's solid layers are one world, so the rocks in another layer land
+// and slide on it.
+Layer slope(Document& d) {
+    return build_layer(d, LayerWhat::Solid, "Slope", 60.0F, 60.0F,
+                       {{BlockKind::Object,
+                         {{"model", choice("cube")},
+                          {"motion", choice("fixed")},
+                          {"collides", choice("block")},
+                          {"size", number(1.0F)},
+                          {"extent", vec3(3.0F, 0.2F, 1.4F)},
+                          {"at", vec3(0.0F, 0.72F, 0.0F)},
+                          {"turn", vec3(0.0F, 0.0F, -25.0F)},
+                          {"own_material", toggle(true)},
+                          {"density", number(2400.0F)},
+                          {"friction", number(0.5F)},
+                          {"bounce", number(0.1F)}}}});
+}
+
+// Rocks held at the top of the slope, let go a moment in: they tumble down
+// it, knock into each other and spill across the floor.
+Layer sliding_rocks(Document& d) {
+    return build_layer(d, LayerWhat::Solid, "Rocks", 60.0F, 60.0F,
+                       {{BlockKind::Object,
+                         {{"model", choice("rock")},
+                          {"arrange", choice("heap")},
+                          {"count", number(60.0F)},
+                          {"size", number(0.12F)},
+                          {"slope", number(50.0F)},
+                          {"spacing", number(0.8F)},
+                          {"jitter", number(0.25F)},
+                          {"at", vec3(-1.05F, 1.45F, 0.0F)},
+                          {"release", number(0.3F)}}},
+                        {BlockKind::Tumble, {{"spin", range(0.0F, 0.0F)}}},
+                        {BlockKind::Appearance, {{"material", choice("model")}, {"mesh", choice("rock")}}},
+                        {BlockKind::Color,
+                         {{"color", color(0.24F, 0.22F, 0.19F)}, {"mix", toggle(true)}, {"second", color(0.4F, 0.36F, 0.31F)}}},
+                        {BlockKind::Size, {{"size", range(0.12F, 0.2F)}}}},
+                       {{"friction", number(0.6F)}, {"bounce", number(0.15F)}, {"density", number(2600.0F)}});
+}
+
+// Dust kicked up wherever a rock hits the slope, the floor or another rock:
+// a puff at each hit, more for a harder one.
+Layer slide_dust(Document& d) {
+    return build_layer(d, LayerWhat::Dust, "Slide dust", 1.5F, 3.0F,
+                       {{BlockKind::HitPuffs,
+                         {{"hardness", number(0.8F)}, {"per_hit", number(1.0F)}, {"per_speed", number(3.0F)},
+                          {"spread", number(70.0F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.35F, 0.35F)}, {"size", number(0.6F)}}},
+                        {BlockKind::Drag, {{"amount", range(2.2F, 2.2F)}}},
+                        {BlockKind::Appearance,
+                         {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
+                          {"soft", number(0.2F)}}},
+                        {BlockKind::Color, {{"color", color(0.56F, 0.52F, 0.46F)}, {"opacity", number(0.4F)}}},
+                        {BlockKind::Size, {{"size", range(0.12F, 0.22F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
+                        {BlockKind::Fade, {{"in", number(5.0F)}, {"out", number(60.0F)}}}});
+}
+
+// Snow falling on the crates. Nothing wires it to them: a particle layer
+// meets every solid thing on the page, and snow sticks where it lands, which
+// is what makes it settle rather than skate off. The page's gravity, a
+// twenty-fifth of it for snow, and its ground do the rest.
 Layer settling_snow(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Snow", 7.0F, 9.0F,
-                       {{"stream", {{"rate", number(70.0F)}}},
-                        {"shape",
+    return build_layer(d, LayerWhat::Snow, "Snow", 7.0F, 9.0F,
+                       {{BlockKind::Stream, {{"rate", number(70.0F)}}},
+                        {BlockKind::Shape,
                          {{"shape", choice("disc")}, {"size", range(1.6F, 1.6F)}, {"offset", vec3(0.0F, 4.0F, 0.0F)}}},
-                        {"launch", {{"direction", choice("down")}, {"speed", range(0.5F, 0.9F)}}},
-                        {"gravity", {{"strength", range(0.04F, 0.06F)}}},
-                        {"turbulence", {{"strength", range(0.25F, 0.25F)}, {"size", number(1.2F)}}},
-                        {"pieces", {{"response", choice("stick")}}},
-                        {"ground", {{"response", choice("stick")}}},
-                        {"appearance", {{"material", choice("solid")}, {"texture", choice("dot")}}},
-                        {"color", {{"color", color(0.95F, 0.96F, 1.0F)}, {"opacity", number(0.9F)}}},
-                        {"size", {{"size", range(0.03F, 0.06F)}}},
-                        {"fade", {{"in", number(10.0F)}, {"out", number(10.0F)}}}});
+                        {BlockKind::Launch, {{"direction", choice("down")}, {"speed", range(0.5F, 0.9F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.25F, 0.25F)}, {"size", number(1.2F)}}},
+                        {BlockKind::Appearance, {{"material", choice("solid")}, {"texture", choice("dot")}}},
+                        {BlockKind::Color, {{"color", color(0.95F, 0.96F, 1.0F)}, {"opacity", number(0.9F)}}},
+                        {BlockKind::Size, {{"size", range(0.03F, 0.06F)}}},
+                        {BlockKind::Fade, {{"in", number(10.0F)}, {"out", number(10.0F)}}}});
 }
 
 // One puff as a pile comes down, spreading low along the ground.
 Layer pile_dust(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Collapse dust", 2.0F, 3.5F,
-                       {{"burst", {{"count", number(40.0F)}, {"time", number(0.25F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.3F, 0.9F)}, {"offset", vec3(0.0F, 0.15F, 0.0F)}}},
-                        {"launch", {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
-                        {"gravity", {{"strength", range(0.03F, 0.03F)}}},
-                        {"turbulence", {{"strength", range(0.4F, 0.4F)}, {"size", number(0.7F)}}},
-                        {"drag", {{"amount", range(2.0F, 2.0F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Dust, "Collapse dust", 2.0F, 3.5F,
+                       {{BlockKind::Burst, {{"count", number(40.0F)}, {"time", number(0.25F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.3F, 0.9F)}, {"offset", vec3(0.0F, 0.15F, 0.0F)}}},
+                        {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.4F, 0.4F)}, {"size", number(0.7F)}}},
+                        {BlockKind::Drag, {{"amount", range(2.0F, 2.0F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
                           {"soft", number(0.3F)}}},
-                        {"color", {{"color", color(0.56F, 0.52F, 0.46F)}, {"opacity", number(0.4F)}}},
-                        {"size", {{"size", range(0.4F, 0.7F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
-                        {"fade", {{"in", number(10.0F)}, {"out", number(60.0F)}}}});
+                        {BlockKind::Color, {{"color", color(0.56F, 0.52F, 0.46F)}, {"opacity", number(0.4F)}}},
+                        {BlockKind::Size, {{"size", range(0.4F, 0.7F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
+                        {BlockKind::Fade, {{"in", number(10.0F)}, {"out", number(60.0F)}}}});
 }
 
 Layer dust(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Dust", 1.5F, 2.5F,
-                       {{"burst", {{"count", number(30.0F)}, {"every", number(3.0F)}}},
-                        {"shape", {{"shape", choice("disc")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.1F, 0.0F)}}},
-                        {"launch", {{"direction", choice("out")}, {"speed", range(0.6F, 1.8F)}}},
-                        {"gravity", {{"strength", range(0.05F, 0.05F)}}},
-                        {"turbulence", {{"strength", range(0.5F, 0.5F)}, {"size", number(0.6F)}}},
-                        {"drag", {{"amount", range(2.2F, 2.2F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Dust, "Dust", 1.5F, 2.5F,
+                       {{BlockKind::Burst, {{"count", number(30.0F)}, {"every", number(3.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("disc")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.1F, 0.0F)}}},
+                        {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(0.6F, 1.8F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.5F, 0.5F)}, {"size", number(0.6F)}}},
+                        {BlockKind::Drag, {{"amount", range(2.2F, 2.2F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
                           {"soft", number(0.25F)}}},
-                        {"color", {{"color", color(0.55F, 0.5F, 0.44F)}, {"opacity", number(0.45F)}}},
-                        {"size", {{"size", range(0.3F, 0.5F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
-                        {"fade", {{"in", number(5.0F)}, {"out", number(60.0F)}}}});
+                        {BlockKind::Color, {{"color", color(0.55F, 0.5F, 0.44F)}, {"opacity", number(0.45F)}}},
+                        {BlockKind::Size, {{"size", range(0.3F, 0.5F)}, {"over_life", choice("grow")}, {"change", number(3.0F)}}},
+                        {BlockKind::Fade, {{"in", number(5.0F)}, {"out", number(60.0F)}}}});
 }
 
 Layer fireball(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Fireball", 0.8F, 1.4F,
-                       {{"burst", {{"count", number(40.0F)}, {"every", number(3.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
-                        {"launch", {{"direction", choice("out")}, {"speed", range(0.5F, 2.0F)}}},
-                        {"rise", {{"strength", range(2.0F, 2.0F)}}},
-                        {"turbulence",
+    return build_layer(d, LayerWhat::Fire, "Fireball", 0.8F, 1.4F,
+                       {{BlockKind::Burst, {{"count", number(40.0F)}, {"every", number(3.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.25F, 0.25F)}, {"offset", vec3(0.0F, 0.4F, 0.0F)}}},
+                        {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(0.5F, 2.0F)}}},
+                        {BlockKind::Rise, {{"strength", range(2.0F, 2.0F)}}},
+                        {BlockKind::Turbulence,
                          {{"strength", range(1.5F, 1.5F)}, {"size", number(0.4F)}, {"roll", number(0.8F)},
                           {"over_life", choice("grows")}}},
-                        {"drag", {{"amount", range(2.5F, 2.5F)}}},
-                        {"appearance", {{"material", choice("glow")}, {"texture", choice("flame")}, {"spin", toggle(true)}}},
-                        {"spin", {{"speed", range(60.0F, 200.0F)}, {"slows", number(1.2F)}}},
-                        {"color",
+                        {BlockKind::Drag, {{"amount", range(2.5F, 2.5F)}}},
+                        {BlockKind::Appearance, {{"material", choice("glow")}, {"texture", choice("flame")}, {"spin", toggle(true)}}},
+                        {BlockKind::Spin, {{"speed", range(60.0F, 200.0F)}, {"slows", number(1.2F)}}},
+                        {BlockKind::Color,
                          {{"color", color(1.0F, 0.75F, 0.4F)}, {"brightness", range(6.0F, 6.0F)}, {"over_life", choice("fire")}}},
-                        {"size", {{"size", range(0.4F, 0.7F)}, {"over_life", choice("grow")}, {"change", number(2.2F)}}},
-                        {"fade", {{"in", number(0.0F)}, {"out", number(40.0F)}}},
-                        {"light", {{"count", number(8.0F)}, {"intensity", range(3.0F, 5.0F)}, {"reach", range(3.0F, 5.0F)}, {"over_life", choice("flare")}}}});
+                        {BlockKind::Size, {{"size", range(0.4F, 0.7F)}, {"over_life", choice("grow")}, {"change", number(2.2F)}}},
+                        {BlockKind::Fade, {{"in", number(0.0F)}, {"out", number(40.0F)}}},
+                        {BlockKind::Light, {{"count", number(8.0F)}, {"intensity", range(3.0F, 5.0F)}, {"reach", range(3.0F, 5.0F)}, {"over_life", choice("flare")}}}});
 }
 
 Layer blast_smoke(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Blast smoke", 3.0F, 4.5F,
-                       {{"burst", {{"count", number(25.0F)}, {"time", number(0.1F)}, {"every", number(3.0F)}}},
-                        {"shape", {{"shape", choice("ball")}, {"size", range(0.3F, 0.3F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
-                        {"launch", {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
-                        {"rise", {{"strength", range(0.8F, 0.8F)}}},
-                        {"turbulence", {{"strength", range(0.7F, 0.7F)}, {"size", number(0.8F)}}},
-                        {"drag", {{"amount", range(1.5F, 1.5F)}}},
-                        {"appearance",
+    return build_layer(d, LayerWhat::Smoke, "Blast smoke", 3.0F, 4.5F,
+                       {{BlockKind::Burst, {{"count", number(25.0F)}, {"time", number(0.1F)}, {"every", number(3.0F)}}},
+                        {BlockKind::Shape, {{"shape", choice("ball")}, {"size", range(0.3F, 0.3F)}, {"offset", vec3(0.0F, 0.5F, 0.0F)}}},
+                        {BlockKind::Launch, {{"direction", choice("out")}, {"speed", range(0.3F, 1.2F)}}},
+                        {BlockKind::Rise, {{"strength", range(0.8F, 0.8F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.7F, 0.7F)}, {"size", number(0.8F)}}},
+                        {BlockKind::Drag, {{"amount", range(1.5F, 1.5F)}}},
+                        {BlockKind::Appearance,
                          {{"material", choice("smoke")}, {"texture", choice("smoke")}, {"spin", toggle(true)},
                           {"soft", number(0.3F)}}},
-                        {"color", {{"color", color(0.18F, 0.17F, 0.16F)}, {"opacity", number(0.65F)}}},
-                        {"size", {{"size", range(0.6F, 1.0F)}, {"over_life", choice("swell")}, {"change", number(3.0F)}}},
-                        {"fade", {{"in", number(10.0F)}, {"out", number(50.0F)}}}});
+                        {BlockKind::Color, {{"color", color(0.18F, 0.17F, 0.16F)}, {"opacity", number(0.65F)}}},
+                        {BlockKind::Size, {{"size", range(0.6F, 1.0F)}, {"over_life", choice("swell")}, {"change", number(3.0F)}}},
+                        {BlockKind::Fade, {{"in", number(10.0F)}, {"out", number(50.0F)}}}});
 }
 
 Layer snow(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Snow", 6.0F, 8.0F,
-                       {{"stream", {{"rate", number(80.0F)}}},
-                        {"shape",
+    return build_layer(d, LayerWhat::Snow, "Snow", 6.0F, 8.0F,
+                       {{BlockKind::Stream, {{"rate", number(80.0F)}}},
+                        {BlockKind::Shape,
                          {{"shape", choice("box")}, {"box", vec3(3.0F, 0.1F, 3.0F)},
                           {"offset", vec3(0.0F, 3.0F, 0.0F)}}},
-                        {"launch", {{"direction", choice("down")}, {"speed", range(0.1F, 0.3F)}, {"spread", range(0.0F, 10.0F)}}},
-                        {"gravity", {{"strength", range(0.04F, 0.04F)}}},
-                        {"turbulence", {{"strength", range(0.6F, 0.6F)}, {"size", number(1.2F)}, {"churn", number(0.3F)}}},
-                        {"drag", {{"amount", range(1.0F, 1.0F)}}},
-                        {"ground", {{"response", choice("stick")}}},
-                        {"appearance", {{"material", choice("solid")}, {"texture", choice("dot")}}},
-                        {"color", {{"color", color(0.95F, 0.97F, 1.0F)}, {"opacity", number(0.9F)}}},
-                        {"size", {{"size", range(0.02F, 0.04F)}}},
-                        {"fade", {{"in", number(10.0F)}, {"out", number(10.0F)}}}});
+                        {BlockKind::Launch, {{"direction", choice("down")}, {"speed", range(0.1F, 0.3F)}, {"spread", range(0.0F, 10.0F)}}},
+                        {BlockKind::Turbulence, {{"strength", range(0.6F, 0.6F)}, {"size", number(1.2F)}, {"churn", number(0.3F)}}},
+                        {BlockKind::Drag, {{"amount", range(1.0F, 1.0F)}}},
+                        {BlockKind::Appearance, {{"material", choice("solid")}, {"texture", choice("dot")}}},
+                        {BlockKind::Color, {{"color", color(0.95F, 0.97F, 1.0F)}, {"opacity", number(0.9F)}}},
+                        {BlockKind::Size, {{"size", range(0.02F, 0.04F)}}},
+                        {BlockKind::Fade, {{"in", number(10.0F)}, {"out", number(10.0F)}}}});
 }
 
 Layer rain(Document& d) {
-    return build_layer(d, LayerKind::Particles, "Rain", 1.2F, 1.6F,
-                       {{"stream", {{"rate", number(400.0F)}}},
-                        {"shape",
+    return build_layer(d, LayerWhat::Rain, "Rain", 1.2F, 1.6F,
+                       {{BlockKind::Stream, {{"rate", number(400.0F)}}},
+                        {BlockKind::Shape,
                          {{"shape", choice("box")}, {"box", vec3(3.0F, 0.1F, 3.0F)},
                           {"offset", vec3(0.0F, 4.0F, 0.0F)}}},
-                        {"launch", {{"direction", choice("down")}, {"speed", range(6.0F, 7.0F)}, {"spread", range(0.0F, 2.0F)}}},
-                        {"gravity", {}},
-                        {"ground", {{"response", choice("vanish")}}},
-                        {"appearance",
+                        {BlockKind::Launch, {{"direction", choice("down")}, {"speed", range(6.0F, 7.0F)}, {"spread", range(0.0F, 2.0F)}}},
+
+                        {BlockKind::Appearance,
                          {{"material", choice("solid")}, {"texture", choice("spark")}, {"facing", choice("motion")},
                           {"stretch", number(0.02F)}}},
-                        {"color", {{"color", color(0.7F, 0.8F, 0.95F)}, {"opacity", number(0.35F)}}},
-                        {"size", {{"size", range(0.008F, 0.012F)}}}});
+                        {BlockKind::Color, {{"color", color(0.7F, 0.8F, 0.95F)}, {"opacity", number(0.35F)}}},
+                        {BlockKind::Size, {{"size", range(0.008F, 0.012F)}}}});
 }
 
 struct PresetEntry final {
@@ -472,29 +539,43 @@ struct PresetEntry final {
 
 const std::vector<PresetEntry>& preset_entries() {
     static const std::vector<PresetEntry> entries = {
-        {{"particles", "Particles", "A simple stream of glowing particles to start from."}, starter},
-        {{"flames", "Flames", "Licking flame tongues that rise and burn out, lighting the ground."}, flames},
-        {{"embers", "Embers", "Hot specks that drift up on the heat and cool."}, embers},
-        {{"smoke", "Smoke", "Dark smoke rising above a fire, curling in the wind."}, fire_smoke},
-        {{"plume", "Smoke plume", "A soft grey column of smoke from the ground."}, plume},
-        {{"sparks", "Sparks", "A fountain of bright sparks that fall and bounce."}, sparks},
-        {{"spark_burst", "Spark burst", "A ball of sparks thrown out at once."}, spark_burst},
-        {{"glow_core", "Glow core", "A soft, bright light at the heart of an effect."}, glow_core},
-        {{"motes", "Magic motes", "Twinkling motes swirling around a centre."}, magic_motes},
-        {{"fireball", "Fireball", "A rolling burst of flame that rises and burns out."}, fireball},
-        {{"blast_smoke", "Blast smoke", "A dark cloud left behind by an explosion."}, blast_smoke},
-        {{"debris", "Debris", "Chunks thrown up that tumble, bounce and settle."}, debris},
-        {{"dust", "Dust", "A puff of dust kicked up along the ground."}, dust},
-        {{"snow", "Snow", "Flakes drifting down and settling."}, snow},
-        {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands."},
+        {{"particles", "Particles", "A simple stream of glowing particles to start from.", LayerKind::Particles, LayerWhat::Magic}, starter},
+        {{"flames", "Flames", "Licking flame tongues that rise and burn out, lighting the ground.", LayerKind::Particles, LayerWhat::Fire}, flames},
+        {{"embers", "Embers", "Hot specks that drift up on the heat and cool.", LayerKind::Particles, LayerWhat::Fire}, embers},
+        {{"smoke", "Smoke", "Dark smoke rising above a fire, curling in the wind.", LayerKind::Particles, LayerWhat::Smoke}, fire_smoke},
+        {{"plume", "Smoke plume", "A soft grey column of smoke from the ground.", LayerKind::Particles, LayerWhat::Smoke}, plume},
+        {{"sparks", "Sparks", "A fountain of bright sparks that fall and bounce.", LayerKind::Particles, LayerWhat::Sparks}, sparks},
+        {{"spark_burst", "Spark burst", "A ball of sparks thrown out at once.", LayerKind::Particles, LayerWhat::Sparks}, spark_burst},
+        {{"glow_core", "Glow core", "A soft, bright light at the heart of an effect.", LayerKind::Particles, LayerWhat::Magic}, glow_core},
+        {{"motes", "Magic motes", "Twinkling motes swirling around a centre.", LayerKind::Particles, LayerWhat::Magic}, magic_motes},
+        {{"fireball", "Fireball", "A rolling burst of flame that rises and burns out.", LayerKind::Particles, LayerWhat::Fire}, fireball},
+        {{"blast_smoke", "Blast smoke", "A dark cloud left behind by an explosion.", LayerKind::Particles, LayerWhat::Smoke}, blast_smoke},
+        {{"debris", "Debris", "Chunks thrown up that tumble, bounce and settle.", LayerKind::Particles, LayerWhat::Debris}, debris},
+        {{"dust", "Dust", "A puff of dust kicked up along the ground.", LayerKind::Particles, LayerWhat::Dust}, dust},
+        {{"snow", "Snow", "Flakes drifting down and settling.", LayerKind::Particles, LayerWhat::Snow}, snow},
+        {{"breaking_crates", "Crates and a dropped ball", "A stack of crates breaking where a ball lands.",
+          LayerKind::Rigid, LayerWhat::Solid},
          breaking_crates},
-        {{"settling_snow", "Settling snow", "Snow that lands on the pieces above it."}, settling_snow},
-        {{"rain", "Rain", "Fast streaks of rain that vanish on the ground."}, rain},
-        {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays.", LayerKind::Rigid},
+        {{"settling_snow", "Settling snow", "Snow that settles on solid things.", LayerKind::Particles,
+          LayerWhat::Snow},
+         settling_snow},
+        {{"rain", "Rain", "Fast streaks of rain that vanish on the ground.", LayerKind::Particles, LayerWhat::Rain}, rain},
+        {{"crate", "Crate", "A wooden crate standing on the ground.", LayerKind::Rigid, LayerWhat::Solid}, crate},
+        {{"rock_pile", "Rock pile", "A heap of rocks, standing when the effect starts, that collapses as it plays.", LayerKind::Rigid,
+          LayerWhat::Solid},
          rock_pile},
-        {{"pile_dust", "Collapse dust", "One low puff of dust as a pile comes down."}, pile_dust},
+        {{"pile_dust", "Collapse dust", "One low puff of dust as a pile comes down.", LayerKind::Particles, LayerWhat::Dust}, pile_dust},
+        {{"slope", "Slope", "A board leaning on the ground for things to slide down.", LayerKind::Rigid, LayerWhat::Solid},
+         slope},
+        {{"sliding_rocks", "Rocks at the top", "Rocks held at the top of a slope, let go a moment in.", LayerKind::Rigid,
+          LayerWhat::Solid},
+         sliding_rocks},
+        {{"slide_dust", "Dust where things hit", "A puff of dust wherever solid things hit.", LayerKind::Particles,
+          LayerWhat::Dust},
+         slide_dust},
         {{"bucket_spill", "Bucket of stones",
-          "A bucket standing full of stones, which tips over and spills them across the floor.", LayerKind::Rigid},
+          "A bucket standing full of stones, which tips over and spills them across the floor.", LayerKind::Rigid,
+          LayerWhat::Solid},
          bucket_spill},
     };
     return entries;
@@ -506,6 +587,8 @@ struct RecipeEntry final {
     float loop_seconds;
     Backdrop backdrop;
     float glow;
+    // Blown up once its layers are in: Explode this on the first layer.
+    bool explode{false};
 };
 
 const std::vector<RecipeEntry>& recipe_entries() {
@@ -532,6 +615,11 @@ const std::vector<RecipeEntry>& recipe_entries() {
         {{"bucket_spill", "Bucket of stones",
           "A bucket of stones that tips over a second in and spills them across the floor."},
          {"bucket_spill"}, 6.0F, Backdrop::Studio, 0.3F},
+        {{"crate_blast", "Crate blast",
+          "A wooden crate blown apart, with fire, sparks, smoke, dust, and pieces that glow and trail embers."},
+         {"crate"}, 4.0F, Backdrop::Studio, 0.6F, true},
+        {{"rock_slide", "Rock slide", "Rocks tumbling down a slope, kicking up dust wherever they hit."},
+         {"slope", "sliding_rocks", "slide_dust"}, 6.0F, Backdrop::Studio, 0.3F},
     };
     return entries;
 }
@@ -583,6 +671,9 @@ std::optional<Document> make_recipe(std::string_view id) {
             if (std::optional<Layer> made = make_layer_preset(document, layer)) {
                 document.layers.push_back(std::move(*made));
             }
+        }
+        if (entry.explode && !document.layers.empty()) {
+            static_cast<void>(explode_this(document, document.layers.front().uid));
         }
         return document;
     }

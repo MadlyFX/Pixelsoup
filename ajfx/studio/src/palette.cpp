@@ -43,13 +43,12 @@ void Palette::build() {
         return;
     }
     Section layers{"Layers", {}};
-    // A layer's kind decides what can go in it, so the choice is made here,
-    // where the layer is made.
-    for (const LayerKind kind : {LayerKind::Particles, LayerKind::Rigid}) {
+    // What a layer is decides what moves it and how the page's world acts
+    // on it, so that is the choice made here, where the layer is made.
+    for (const LayerWhat what : layer_whats) {
         layers.entries.push_back(
-            Entry{Incoming{Incoming::Kind::Layer, empty_layer_id(kind),
-                           "Empty " + lower_first(layer_kind_name(kind)) + " layer", std::nullopt},
-                  std::string{layer_kind_description(kind)}, "new blank", false});
+            Entry{Incoming{Incoming::Kind::Layer, empty_layer_id(what), std::string{layer_what_name(what)}, std::nullopt},
+                  std::string{layer_what_description(what)}, "new blank empty layer what is it", false});
     }
     for (const LayerPreset& preset : layer_presets()) {
         layers.entries.push_back(Entry{Incoming{Incoming::Kind::Layer, std::string{preset.id}, std::string{preset.title},
@@ -61,8 +60,8 @@ void Palette::build() {
                                     Category::Physics, Category::Light}) {
         Section section{std::string{category_name(category)}, {}};
         for (const BlockDef& def : block_catalog()) {
-            if (def.category == category && def.kind != raw_block_kind && def.layers != in_no_layer) {
-                section.entries.push_back(Entry{Incoming{Incoming::Kind::Block, std::string{def.kind},
+            if (def.category == category && def.kind != BlockKind::Module && def.layers != in_no_layer) {
+                section.entries.push_back(Entry{Incoming{Incoming::Kind::Block, std::string{block_kind_id(def.kind)},
                                                          std::string{def.title}, def.category},
                                                 std::string{def.description}, std::string{def.keywords}, def.unique,
                                                 def.layers, std::string{def.only_in}});
@@ -87,7 +86,7 @@ std::optional<Incoming> Palette::take_clicked() {
     return out;
 }
 
-void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document& document, Uid working_layer) {
+void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document& document, Uid target) {
     build();
     const gui::Theme& theme = ctx.theme();
     ctx.rounded(bounds, theme.panel, theme.radius_large);
@@ -95,7 +94,7 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
         // The rail: a way back in, and a hint of what is there.
         const gui::Rect show{bounds.x + (bounds.width - 30.0F) * 0.5F, bounds.y + 10.0F, 30.0F, 30.0F};
         if (editor::icon_button(ctx, gui::ui_id("studio.palette.show"), show, gui::Icon::Plus,
-                                "Show the palette: every layer and block, to drag onto the page")) {
+                                "Show the palette")) {
             open_ = true;
         }
         float y = show.bottom() + 16.0F;
@@ -108,9 +107,14 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
     }
 
     // The heading and a way to fold it away.
+    const Layer* working = document.layer(target);
     const gui::Rect title{bounds.x + 14.0F, bounds.y + 8.0F, bounds.width - 56.0F, 30.0F};
-    ctx.label(title, "Palette", theme.text);
-    ctx.tooltip(title, "Drag a layer or block onto the page, or click one to add it to the layer you are working on.");
+    // Where a click adds to; "Palette" while there is no layer.
+    ctx.label(title,
+              working != nullptr ? "Add to " + (working->name.empty() ? std::string{"layer"} : working->name)
+                                 : std::string{"Palette"},
+              theme.text);
+    ctx.tooltip(title, "Drag onto the page, or click to add.");
     const gui::Rect hide{bounds.right() - 38.0F, bounds.y + 9.0F, 28.0F, 28.0F};
     if (editor::icon_button(ctx, gui::ui_id("studio.palette.hide"), hide, gui::Icon::Minus, "Fold the palette away")) {
         open_ = false;
@@ -126,7 +130,6 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
     }
     const std::string needle = lower(search_);
 
-    const Layer* working = document.layer(working_layer);
     const gui::Rect view{bounds.x + 2.0F, search.bottom() + 8.0F, bounds.width - 4.0F,
                          std::max(bounds.bottom() - search.bottom() - 12.0F, 10.0F)};
     const float offset = scroll_.begin(ctx, view);
@@ -197,8 +200,7 @@ void Palette::draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document&
                 ctx.tooltip(row, "Not in a " + lower_first(layer_kind_name(working->kind)) + " layer. " +
                                      entry->only_in);
             } else {
-                ctx.tooltip(row, there ? entry->description + " This layer has one already: drag it to another."
-                                       : entry->description + " Drag onto the page, or click to add.");
+                ctx.tooltip(row, there ? entry->description + " Already in this layer." : entry->description);
             }
             if (!wrong_kind && hit.pressed) {
                 pressed_ = true;

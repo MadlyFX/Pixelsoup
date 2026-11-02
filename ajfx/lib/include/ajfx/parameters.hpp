@@ -25,6 +25,23 @@ using ParameterValue = std::array<float, 4>;
 [[nodiscard]] constexpr ParameterValue to_value(Vec3 value) noexcept { return {value.x, value.y, value.z, 0.0F}; }
 [[nodiscard]] constexpr ParameterValue to_value(Color value) noexcept { return {value.r, value.g, value.b, value.a}; }
 
+// When a parameter's value takes effect, which decides whether a cache can
+// honour it (cache.hpp).
+// - **Bake:** the simulation reads it -- a rate, a speed, a force, a break
+//   threshold. A cache is taken with one value of each and is refused for
+//   any other, so a host must not offer an operator a bake-time parameter of
+//   a cached effect.
+// - **Playback:** only drawing reads it -- a tint, brightness, opacity or
+//   size scale on the renderer (SpriteRenderer's draw inputs). It applies to
+//   simulated and cached particles alike as they are drawn, costs nothing,
+//   and never invalidates a cache.
+// validate() holds the line: a playback parameter may bind only draw inputs,
+// and a draw input only a playback parameter.
+enum class ParameterTiming {
+    Bake,
+    Playback,
+};
+
 struct ParameterDesc final {
     std::string name;
     ParameterType type{ParameterType::Float};
@@ -34,6 +51,7 @@ struct ParameterDesc final {
     // when it is built, instead of failing mid-show.
     float min{0.0F};
     float max{1.0F};
+    ParameterTiming timing{ParameterTiming::Bake};
 
     friend bool operator==(const ParameterDesc&, const ParameterDesc&) = default;
 };

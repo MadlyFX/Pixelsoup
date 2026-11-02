@@ -77,9 +77,38 @@ struct Describe final {
                 out += (i == 0U ? "" : " ") + text_of(field[i].t) + ":" + text_of(field[i].value);
             }
             out += "]";
+        } else if constexpr (std::is_same_v<T, Scope>) {
+            out += field.empty() ? std::string{"all"}
+                                 : std::to_string(field.sources.size()) + " sources, " +
+                                       std::to_string(field.kinds.size()) + " kinds";
         }
     }
 };
+
+json::Value indices_json(const std::vector<std::uint32_t>& indices) {
+    json::Value array = json::Value::array();
+    for (const std::uint32_t i : indices) {
+        array.push(json::Value::of(static_cast<double>(i)));
+    }
+    return array;
+}
+
+bool read_indices(const json::Value* value, std::vector<std::uint32_t>& out) {
+    out.clear();
+    if (value == nullptr) {
+        return true;
+    }
+    if (value->type != json::Value::Type::Array) {
+        return false;
+    }
+    for (const json::Value& item : value->items) {
+        if (item.type != json::Value::Type::Number || item.number < 0.0 || item.number > 4294967295.0) {
+            return false;
+        }
+        out.push_back(static_cast<std::uint32_t>(item.number));
+    }
+    return true;
+}
 
 json::Value vec_json(Vec3 v) {
     json::Value array = json::Value::array();
@@ -160,6 +189,14 @@ struct ToJson final {
                 keys.push(std::move(entry));
             }
             out.add(std::string{name}, std::move(keys));
+        } else if constexpr (std::is_same_v<T, Scope>) {
+            // An empty scope means everything and is left out.
+            if (!field.empty()) {
+                json::Value scope = json::Value::object();
+                scope.add("sources", indices_json(field.sources));
+                scope.add("kinds", indices_json(field.kinds));
+                out.add(std::string{name}, std::move(scope));
+            }
         } else {
             out.add(std::string{name}, plain(field));
         }
@@ -243,6 +280,9 @@ struct FromJson final {
                 ok = ok && t != nullptr && v != nullptr && plain(*t, key.t) && plain(*v, key.value);
                 field.push_back(key);
             }
+        } else if constexpr (std::is_same_v<T, Scope>) {
+            ok = value->type == json::Value::Type::Object && read_indices(value->find("sources"), field.sources) &&
+                 read_indices(value->find("kinds"), field.kinds);
         } else {
             ok = plain(*value, field);
         }
@@ -258,6 +298,8 @@ const std::vector<RawKindDef>& raw_kinds() {
     static const std::vector<RawKindDef> kinds = {
         {SpawnRate::kind, "Spawn rate", "spawn", make_module<SpawnModule, SpawnRate>},
         {SpawnBurst::kind, "Spawn burst", "spawn", make_module<SpawnModule, SpawnBurst>},
+        {SpawnFromContacts::kind, "Spawn from contacts", "spawn", make_module<SpawnModule, SpawnFromContacts>},
+        {SpawnFromBodies::kind, "Spawn from bodies", "spawn", make_module<SpawnModule, SpawnFromBodies>},
         {Lifetime::kind, "Lifetime", "init", make_module<InitModule, Lifetime>},
         {ShapeLocation::kind, "Shape location", "init", make_module<InitModule, ShapeLocation>},
         {Velocity::kind, "Velocity", "init", make_module<InitModule, Velocity>},
@@ -279,6 +321,8 @@ const std::vector<RawKindDef>& raw_kinds() {
         {SdfCollision::kind, "Distance field collision", "update", make_module<UpdateModule, SdfCollision>},
         {ColorOverLife::kind, "Color over life", "update", make_module<UpdateModule, ColorOverLife>},
         {SizeOverLife::kind, "Size over life", "update", make_module<UpdateModule, SizeOverLife>},
+        {Heat::kind, "Heat", "update", make_module<UpdateModule, Heat>},
+        {Wake::kind, "Wake", "update", make_module<UpdateModule, Wake>},
     };
     return kinds;
 }

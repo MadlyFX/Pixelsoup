@@ -102,7 +102,11 @@ std::string_view kind_of(const Module&) {
 // type, sorted keys, enum values in range.
 class FieldChecker final {
 public:
-    FieldChecker(const Effect& effect, std::string where) : effect_{effect}, where_{std::move(where)} {}
+    // `draw` checks the renderer's draw inputs, which only playback-time
+    // parameters may bind; everything else is read by the simulation, which
+    // only bake-time parameters may reach (ParameterTiming).
+    FieldChecker(const Effect& effect, std::string where, bool draw = false)
+        : effect_{effect}, where_{std::move(where)}, draw_{draw} {}
 
     template <class T>
     void operator()(std::string_view field, const Input<T>& input) {
@@ -118,6 +122,14 @@ public:
         } else if (parameter->type != parameter_type_of<T>()) {
             fail(ErrorCode::ParameterTypeMismatch, field,
                  "is bound to parameter " + quoted(input.parameter) + " of a different type");
+        } else if (draw_ && parameter->timing != ParameterTiming::Playback) {
+            fail(ErrorCode::InvalidEffect, field,
+                 "is a draw input bound to bake-time parameter " + quoted(input.parameter) +
+                     "; only drawing reads it, so make the parameter playback-time");
+        } else if (!draw_ && parameter->timing == ParameterTiming::Playback) {
+            fail(ErrorCode::InvalidEffect, field,
+                 "is read by the simulation and bound to playback-time parameter " + quoted(input.parameter) +
+                     ", which a cache could not honour; make the parameter bake-time");
         }
     }
 
@@ -131,6 +143,9 @@ public:
         if (!finite(value)) {
             fail(ErrorCode::InvalidEffect, field, "is not a finite vector");
         }
+    }
+    void operator()(std::string_view field, const Color& value) {
+        if (!finite(value)) { fail(ErrorCode::InvalidEffect, field, "is not a finite color"); }
     }
 
     template <class Key>
@@ -189,6 +204,15 @@ public:
         }
     }
 
+    // What a scope names is checked against its emitter (check_scope); here
+    // only how much it may name.
+    void operator()(std::string_view field, const Scope& scope) {
+        if (scope.sources.size() > max_scope_entries || scope.kinds.size() > max_scope_entries) {
+            fail(ErrorCode::InvalidEffect, field,
+                 "names more than the " + std::to_string(max_scope_entries) + " entries a scope may hold");
+        }
+    }
+
     void operator()(std::string_view, const std::uint32_t&) {}
     void operator()(std::string_view, const bool&) {}
     void operator()(std::string_view, const std::string&) {}
@@ -211,6 +235,7 @@ public:
 private:
     const Effect& effect_;
     std::string where_;
+    bool draw_{false};
     std::optional<Error> error_;
 };
 
@@ -290,12 +315,21 @@ void check_body_collision(const Effect& effect, std::size_t index, const BodyCol
     // written.
     check.require(other.capacity <= max_body_colliders, "emitter",
                   "names emitter " + quoted(m.emitter) + ", which holds up to " + std::to_string(other.capacity) +
-                      " bodies; every particle meets every body, so at most " +
-                      std::to_string(max_body_colliders) + " may be collided with");
+                      " bodies; at most " + std::to_string(max_body_colliders) +
+                      " may be collided with, the room their grid is given");
+}
+
+void check_module(const Effect& e, const Wake& m, FieldChecker& check) {
+    check.require(range(e, m.strength).lo >= 0.0F, "strength", "must not be negative");
+    check.require(m.radius > 0.0F && std::isfinite(m.radius), "radius",
+                  "must be positive: it is how many half sizes of a body its wake reaches");
+    check.require(m.min_speed >= 0.0F && std::isfinite(m.min_speed), "min_speed", "must not be negative");
 }
 
 void check_module(const Effect&, const Break& m, FieldChecker& check) {
     check.require(m.threshold > 0.0F, "threshold", "must be positive: a body cannot break on no impact at all");
+    check.require(m.blast_threshold >= 0.0F, "blast_threshold",
+                  "must not be negative: zero leaves blasts to push, above zero is how hard one must be to break");
     check.require(m.scatter >= 0.0F, "scatter", "must not be negative");
     check.require(!m.pieces.empty(), "pieces", "needs at least one piece: a body cannot break into nothing");
     check.require(m.pieces.size() <= max_break_pieces, "pieces",
@@ -304,6 +338,37 @@ void check_module(const Effect&, const Break& m, FieldChecker& check) {
         const std::string at = "pieces[" + std::to_string(i) + "]";
         check.require(m.pieces[i].size > 0.0F, at + ".size", "must be positive");
     }
+}
+
+void check_module(const Effect&, const SpawnFromContacts& m, FieldChecker& check) {
+    check.require(m.min_speed > 0.0F, "min_speed",
+                  "must be positive: bodies at rest touch at no speed, and every touch would bear particles");
+    check.require(m.per_hit >= 0.0F, "per_hit", "must not be negative");
+    check.require(m.per_speed >= 0.0F, "per_speed", "must not be negative");
+    check.require(m.max_per_step >= 1U && m.max_per_step <= max_emitter_capacity, "max_per_step",
+                  "must be between 1 and " + std::to_string(max_emitter_capacity));
+    check.require(m.spread >= 0.0F && m.spread <= 180.0F, "spread", "must be between 0 and 180 degrees");
+}
+
+void check_module(const Effect&, const SpawnFromBodies& m, FieldChecker& check) {
+    check.require(m.min_speed >= 0.0F, "min_speed", "must not be negative");
+    check.require(m.rate >= 0.0F, "rate", "must not be negative");
+    check.require(m.per_speed >= 0.0F, "per_speed", "must not be negative");
+    check.require(m.max_per_step >= 1U && m.max_per_step <= max_emitter_capacity, "max_per_step",
+                  "must be between 1 and " + std::to_string(max_emitter_capacity));
+    check.require(m.surface >= 0.0F && m.surface <= 1.0F, "surface", "must be between 0 and 1");
+}
+
+void check_module(const Effect&, const Heat& m, FieldChecker& check) {
+    check.require(m.start >= 0.0F, "start", "must not be negative");
+    check.require(m.half_life > 0.0F, "half_life", "must be positive: a heat that never cools is a colour");
+    check.require(m.glow >= 0.0F, "glow", "must not be negative");
+}
+
+// A shockwave answers a blast the effect lists.
+void check_module(const Effect& e, const Shockwave& m, FieldChecker& check) {
+    check.require(find_blast(e, m.blast) != nullptr, "blast",
+                  "names blast " + quoted(m.blast) + ", which this effect has none of");
 }
 
 void check_module(const Effect&, const Glue& m, FieldChecker& check) {
@@ -327,6 +392,9 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
                       "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
         check.require(body.draw.empty() || valid_texture_name(body.draw), at + ".draw",
                       "must be 1 to 64 characters of a-z, 0-9, '_', '-' and '.'");
+        check.require(std::isfinite(body.draw_tint.r) && std::isfinite(body.draw_tint.g) && std::isfinite(body.draw_tint.b) &&
+                      std::isfinite(body.draw_tint.a) && body.draw_tint.r >= 0 && body.draw_tint.g >= 0 && body.draw_tint.b >= 0 &&
+                      body.draw_tint.a >= 0 && body.draw_tint.a <= 1, at + ".draw_tint", "must be finite nonnegative RGB and alpha between 0 and 1");
         // A kind at no size is a body with no shape to build, which an
         // engine answers for in its own way rather than complaining, so it
         // is refused here with the kind that asked for it.
@@ -342,6 +410,9 @@ void check_module(const Effect&, const RigidPhysics& m, FieldChecker& check) {
     for (std::size_t i = 0U; i < m.props.size(); ++i) {
         const RigidProp& p = m.props[i];
         const std::string at = "props[" + std::to_string(i) + "]";
+        check.require(std::isfinite(p.draw_tint.r) && std::isfinite(p.draw_tint.g) && std::isfinite(p.draw_tint.b) &&
+                      std::isfinite(p.draw_tint.a) && p.draw_tint.r >= 0 && p.draw_tint.g >= 0 && p.draw_tint.b >= 0 &&
+                      p.draw_tint.a >= 0 && p.draw_tint.a <= 1, at + ".draw_tint", "must be finite nonnegative RGB and alpha between 0 and 1");
         const bool from_model = p.shape == PropShape::Mesh || p.shape == PropShape::Hull;
         const bool round = p.shape == PropShape::Sphere || p.shape == PropShape::Cylinder ||
                            p.shape == PropShape::Cone || p.shape == PropShape::HollowCylinder ||
@@ -464,6 +535,17 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                                                          std::to_string(module.id) + " " + why};
         }
     };
+    for (const SpawnModule& module : emitter.spawn) {
+        std::visit(
+            [&](const auto& m) {
+                using M = std::decay_t<decltype(m)>;
+                if constexpr (std::is_same_v<M, SpawnFromContacts> || std::is_same_v<M, SpawnFromBodies>) {
+                    refuse(m, "bears particles from another emitter's bodies; a rigid physics emitter's bodies "
+                              "are not born that way (give the particles an emitter of their own)");
+                }
+            },
+            module);
+    }
     for (const InitModule& module : emitter.init) {
         std::visit(
             [&](const auto& m) {
@@ -502,7 +584,8 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
                 } else if constexpr (std::is_same_v<M, BoxCollision>) {
                     unmoving(m, m.center.bound() || m.restitution.bound() || m.friction.bound());
                 } else if constexpr (!std::is_same_v<M, Gravity> && !std::is_same_v<M, ColorOverLife> &&
-                                     !std::is_same_v<M, Break> && !std::is_same_v<M, Glue>) {
+                                     !std::is_same_v<M, Break> && !std::is_same_v<M, Glue> &&
+                                     !std::is_same_v<M, Shockwave> && !std::is_same_v<M, Heat>) {
                     refuse(m, "cannot act on rigid physics particles; the physics engine moves them");
                 }
             },
@@ -515,7 +598,7 @@ std::optional<Error> check_rigid_physics(const Emitter& emitter, const std::stri
     // of the kinds rigid physics lists.
     const auto kinds = static_cast<std::uint32_t>(physics->bodies.size() + 1U);
     for (const SpawnModule& module : emitter.spawn) {
-        const std::uint32_t named = std::visit([](const auto& m) { return m.body; }, module);
+        const std::uint32_t named = std::visit([](const auto& m) { return spawn_body(m); }, module);
         if (named >= kinds) {
             return Error{ErrorCode::InvalidEffect,
                          where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) + " spawns body kind " +
@@ -634,11 +717,137 @@ std::optional<Error> check_parameters(const Effect& effect) {
     return std::nullopt;
 }
 
+// Every blast is named once, stands somewhere, reaches somewhere and goes
+// off at a time the effect reaches.
+std::optional<Error> check_blasts(const Effect& effect) {
+    if (effect.blasts.size() > max_blasts) {
+        return Error{ErrorCode::InvalidEffect, "the effect lists " + std::to_string(effect.blasts.size()) +
+                                                   " blasts, more than the " + std::to_string(max_blasts) +
+                                                   " one effect may have"};
+    }
+    std::set<std::string_view> names;
+    for (const Blast& blast : effect.blasts) {
+        if (blast.name.empty()) {
+            return Error{ErrorCode::InvalidEffect, "a blast has no name"};
+        }
+        if (!names.insert(blast.name).second) {
+            return Error{ErrorCode::InvalidEffect, "blast " + quoted(blast.name) + " is declared twice"};
+        }
+        FieldChecker check{effect, "blast " + quoted(blast.name)};
+        Blast::fields(blast, check);
+        if (!check.error()) {
+            check.require(blast.power >= 0.0F, "power", "must not be negative: a blast throws outwards");
+            check.require(blast.radius > 0.0F, "radius", "must be positive: a blast reaches somewhere");
+            check.require(blast.time >= 0.0F, "time", "must not be negative");
+        }
+        if (check.error()) {
+            return check.error();
+        }
+    }
+    return std::nullopt;
+}
+
+// What a scope (Scope) may name in `emitter`: its spawn modules, the pieces
+// of broken bodies where it has rigid physics, and its body kinds there. The
+// problem in words, or nothing.
+std::optional<std::string> scope_problem(const Emitter& emitter, const Scope& scope) {
+    const RigidPhysics* physics = rigid_physics(emitter);
+    for (const std::uint32_t source : scope.sources) {
+        if (source == piece_spawn_source) {
+            if (physics == nullptr) {
+                return "names the pieces of broken bodies (" + std::to_string(piece_spawn_source) +
+                       "), and emitter " + quoted(emitter.name) + " has no rigid physics to break";
+            }
+            continue;
+        }
+        if (source >= emitter.spawn.size()) {
+            return "names spawn source " + std::to_string(source) + ", and emitter " + quoted(emitter.name) + " has " +
+                   std::to_string(emitter.spawn.size()) + " spawn module(s), counted from 0";
+        }
+    }
+    if (!scope.kinds.empty() && physics == nullptr) {
+        return "names body kinds, and emitter " + quoted(emitter.name) +
+               " has no rigid physics, so its particles are no bodies";
+    }
+    const std::size_t kinds = physics != nullptr ? physics->bodies.size() + 1U : 1U;
+    for (const std::uint32_t kind : scope.kinds) {
+        if (kind >= kinds) {
+            return "names body kind " + std::to_string(kind) + ", and emitter " + quoted(emitter.name) + " has " +
+                   std::to_string(kinds) + " (0 is its own)";
+        }
+    }
+    return std::nullopt;
+}
+
+// The emitter a spawn module bears particles from must exist, be another and
+// hold bodies, and what its `bodies` scope names must be that emitter's.
+void check_body_source(const Effect& effect, std::size_t index, const std::string& name, const Scope& bodies,
+                       FieldChecker& check) {
+    std::optional<std::size_t> at;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (effect.emitters[i].name == name) {
+            at = i;
+            break;
+        }
+    }
+    if (!at) {
+        check.require(false, "emitter", "names emitter " + quoted(name) + ", which this effect has none of");
+        return;
+    }
+    check.require(*at != index, "emitter", "names its own emitter; particles are born of another's bodies");
+    const Emitter& other = effect.emitters[*at];
+    check.require(rigid_physics(other) != nullptr, "emitter",
+                  "names emitter " + quoted(name) +
+                      ", which has no 'rigid_physics' module, so it has no bodies to bear particles from");
+    if (rigid_physics(other) != nullptr) {
+        if (std::optional<std::string> problem = scope_problem(other, bodies)) {
+            check.require(false, "bodies", *problem);
+        }
+    }
+}
+
+// The bodies a wake follows: another emitter's, of no more than the grid
+// they are found through holds.
+void check_wake(const Effect& effect, std::size_t index, const Wake& m, FieldChecker& check) {
+    std::optional<std::size_t> at;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (effect.emitters[i].name == m.emitter) {
+            at = i;
+            break;
+        }
+    }
+    if (!at) {
+        check.require(false, "emitter", "names emitter " + quoted(m.emitter) + ", which this effect has none of");
+        return;
+    }
+    const Emitter& other = effect.emitters[*at];
+    const RigidPhysics* physics = rigid_physics(other);
+    check.require(physics != nullptr, "emitter",
+                  "names emitter " + quoted(m.emitter) +
+                      ", which has no 'rigid_physics' module, so it has no bodies to stir anything");
+    check.require(*at != index, "emitter", "names its own emitter; particles are stirred by another's bodies");
+    check.require(other.capacity <= max_body_colliders, "emitter",
+                  "names emitter " + quoted(m.emitter) + ", which holds up to " + std::to_string(other.capacity) +
+                      " bodies; at most " + std::to_string(max_body_colliders) +
+                      " may stir particles, the room their grid is given");
+    if (physics != nullptr) {
+        if (std::optional<std::string> problem = scope_problem(other, m.bodies)) {
+            check.require(false, "bodies", *problem);
+        }
+    }
+}
+
 std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter, std::size_t index) {
     const std::string where = "emitter " + quoted(emitter.name);
     if (emitter.capacity == 0U || emitter.capacity > max_emitter_capacity) {
         return Error{ErrorCode::InvalidEffect,
                      where + " capacity must be between 1 and " + std::to_string(max_emitter_capacity)};
+    }
+
+    if (emitter.spawn.size() > max_spawn_modules) {
+        return Error{ErrorCode::InvalidEffect, where + " has " + std::to_string(emitter.spawn.size()) +
+                                                    " spawn modules; a spawn index has room for " +
+                                                    std::to_string(max_spawn_modules)};
     }
 
     std::set<ModuleId> ids;
@@ -711,7 +920,7 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
     }
     if (rigid_physics == 0U) {
         for (const SpawnModule& module : emitter.spawn) {
-            if (std::visit([](const auto& m) { return m.body; }, module) != 0U) {
+            if (std::visit([](const auto& m) { return spawn_body(m); }, module) != 0U) {
                 return Error{ErrorCode::InvalidEffect,
                              where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, module)) +
                                  " spawns a body kind, and the emitter has no 'rigid_physics' module to make "
@@ -724,6 +933,14 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
             FieldChecker checker{effect, "emitter " + quoted(emitter.name) + " module 'body_collision' #" +
                                              std::to_string(meets->id)};
             check_body_collision(effect, index, *meets, checker);
+            if (checker.error()) {
+                return checker.error();
+            }
+        }
+        if (const auto* stirred = std::get_if<Wake>(&module)) {
+            FieldChecker checker{effect, "emitter " + quoted(emitter.name) + " module 'wake' #" +
+                                             std::to_string(stirred->id)};
+            check_wake(effect, index, *stirred, checker);
             if (checker.error()) {
                 return checker.error();
             }
@@ -756,9 +973,49 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
             return rigid;
         }
     }
+    // What every scope names, and the emitters spawn modules bear from.
+    std::optional<Error> scoped;
+    const auto check_scoped = [&](const auto& m) {
+        using M = std::decay_t<decltype(m)>;
+        static_cast<void>(m);
+        if (scoped) {
+            return;
+        }
+        if constexpr (requires { m.only; }) {
+            if (std::optional<std::string> problem = scope_problem(emitter, m.only)) {
+                scoped = Error{ErrorCode::InvalidEffect, where + " module " + quoted(kind_of(m)) + " #" +
+                                                             std::to_string(m.id) + " field 'only' " + *problem};
+                return;
+            }
+        }
+        if constexpr (std::is_same_v<M, SpawnFromContacts> || std::is_same_v<M, SpawnFromBodies>) {
+            FieldChecker checker{effect, where + " module " + quoted(kind_of(m)) + " #" + std::to_string(m.id)};
+            check_body_source(effect, index, m.emitter, m.bodies, checker);
+            if (checker.error()) {
+                scoped = checker.error();
+            }
+        }
+    };
+    for (const SpawnModule& module : emitter.spawn) {
+        std::visit(check_scoped, module);
+    }
+    for (const InitModule& module : emitter.init) {
+        std::visit(check_scoped, module);
+    }
+    for (const UpdateModule& module : emitter.update) {
+        std::visit(check_scoped, module);
+    }
+    if (scoped) {
+        return scoped;
+    }
 
-    FieldChecker renderer{effect, where + " renderer"};
+    FieldChecker renderer{effect, where + " renderer", true};
     SpriteRenderer::fields(emitter.renderer, renderer);
+    for (const auto& [field, input] : {std::pair{"brightness", &emitter.renderer.brightness},
+                                       std::pair{"opacity", &emitter.renderer.opacity},
+                                       std::pair{"size_scale", &emitter.renderer.size_scale}}) {
+        renderer.require(range(effect, *input).lo >= 0.0F, field, "must not be negative");
+    }
     renderer.require(emitter.renderer.flipbook_columns >= 1U && emitter.renderer.flipbook_rows >= 1U, "flipbook",
                      "needs at least one column and row");
     renderer.require(emitter.renderer.stretch >= 0.0F, "stretch", "must not be negative");
@@ -808,6 +1065,23 @@ std::optional<Error> check_emitter(const Effect& effect, const Emitter& emitter,
     if (!emitter.spawn.empty() && !has_lifetime) {
         return Error{ErrorCode::InvalidEffect, where + " spawns particles but has no 'lifetime' module"};
     }
+    // Every spawn module's particles need a life: some Lifetime in scope of
+    // them, unscoped or naming their source and kind.
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        const SpawnModule& spawn = emitter.spawn[slot];
+        const std::uint32_t kind = std::visit([](const auto& m) { return spawn_body(m); }, spawn);
+        const std::uint32_t first = spawn_index_of(static_cast<std::uint32_t>(slot), 0U);
+        const bool lives = std::any_of(emitter.init.begin(), emitter.init.end(), [&](const InitModule& module) {
+            const auto* lifetime = std::get_if<Lifetime>(&module);
+            return lifetime != nullptr && in_scope(lifetime->only, first, kind);
+        });
+        if (!lives) {
+            return Error{ErrorCode::InvalidEffect,
+                         where + " module " + quoted(std::visit([](const auto& m) { return kind_of(m); }, spawn)) +
+                             " #" + std::to_string(std::visit([](const auto& m) { return m.id; }, spawn)) +
+                             " bears particles that no 'lifetime' module is in scope of"};
+        }
+    }
 
     const std::uint64_t bound = particle_bound(effect, emitter);
     if (bound > emitter.capacity) {
@@ -853,6 +1127,21 @@ std::uint64_t particle_bound(const Effect& effect, const Emitter& emitter) {
             bound += occurrences * static_cast<double>(burst->count);
         } else if (const SpawnPile* pile = std::get_if<SpawnPile>(&module)) {
             bound += static_cast<double>(pile->count);
+        } else {
+            // Contacts and moving bodies bear at most their cap a step, in
+            // every step the window holds and the one it starts in.
+            const std::uint32_t cap = std::visit(
+                [](const auto& m) -> std::uint32_t {
+                    if constexpr (requires { m.max_per_step; }) {
+                        return m.max_per_step;
+                    } else {
+                        static_cast<void>(m);
+                        return 0U;
+                    }
+                },
+                module);
+            const double steps = std::ceil(window * static_cast<double>(std::max(effect.simulation_rate, 1U))) + 1.0;
+            bound += steps * static_cast<double>(cap);
         }
     }
     if (!(bound < 1.8e19)) {
@@ -879,6 +1168,9 @@ Result<bool> validate(const Effect& effect) {
                      "simulation rate must be between 1 and " + std::to_string(max_simulation_rate) + " steps per second"};
     }
     if (std::optional<Error> error = check_parameters(effect)) {
+        return *std::move(error);
+    }
+    if (std::optional<Error> error = check_blasts(effect)) {
         return *std::move(error);
     }
     std::set<std::string_view> names;
@@ -923,11 +1215,17 @@ std::uint32_t required_attributes(const Emitter& emitter) {
             },
             module);
     }
+    for (const SpawnModule& module : emitter.spawn) {
+        // A particle born of a contact or a moving body may be thrown by it.
+        if (std::holds_alternative<SpawnFromContacts>(module) || std::holds_alternative<SpawnFromBodies>(module)) {
+            add(Attribute::Velocity);
+        }
+    }
     for (const UpdateModule& module : emitter.update) {
         std::visit(
             [&](const auto& m) {
                 using M = std::decay_t<decltype(m)>;
-                if constexpr (std::is_same_v<M, ColorOverLife>) {
+                if constexpr (std::is_same_v<M, ColorOverLife> || std::is_same_v<M, Heat>) {
                     add(Attribute::Color);
                 } else if constexpr (std::is_same_v<M, SizeOverLife>) {
                     add(Attribute::Size);
@@ -959,6 +1257,56 @@ Quat prop_orientation(Vec3 degrees) noexcept {
     return times(roll, times(pitch, yaw));
 }
 
+const Blast* find_blast(const Effect& effect, std::string_view name) noexcept {
+    for (const Blast& blast : effect.blasts) {
+        if (blast.name == name) {
+            return &blast;
+        }
+    }
+    return nullptr;
+}
+
+// Operation for operation as ajfx_shockwave (shaders/ajfx_particles.hlsli)
+// works it out, so the GPU and the reference throw alike.
+BlastPush blast_push(const Blast& blast, Vec3 at) noexcept {
+    const Vec3 d = at - blast.center;
+    const float distance = std::sqrt(dot(d, d));
+    if (!(distance < blast.radius)) {
+        return {};
+    }
+    const Vec3 out = distance > 1.0e-6F ? d * (1.0F / distance) : Vec3{0.0F, 1.0F, 0.0F};
+    return BlastPush{out, blast.power * (1.0F - distance / blast.radius)};
+}
+
+std::uint64_t blast_tick(const Blast& blast, std::uint32_t simulation_rate) noexcept {
+    return static_cast<std::uint64_t>(std::ceil(static_cast<double>(blast.time) * simulation_rate));
+}
+
+std::optional<float> contact_floor(const Effect& effect, std::size_t index) {
+    if (index >= effect.emitters.size()) {
+        return std::nullopt;
+    }
+    std::optional<float> slowest;
+    const auto lower = [&slowest](float speed) { slowest = slowest ? std::min(*slowest, speed) : speed; };
+    for (const UpdateModule& module : effect.emitters[index].update) {
+        if (const auto* breaking = std::get_if<Break>(&module)) {
+            lower(breaking->threshold);
+        }
+    }
+    const std::string& name = effect.emitters[index].name;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        if (i == index) {
+            continue;
+        }
+        for (const SpawnModule& module : effect.emitters[i].spawn) {
+            if (const auto* reads = std::get_if<SpawnFromContacts>(&module); reads != nullptr && reads->emitter == name) {
+                lower(reads->min_speed);
+            }
+        }
+    }
+    return slowest;
+}
+
 const RigidPhysics* rigid_physics(const Emitter& emitter) noexcept {
     for (const UpdateModule& module : emitter.update) {
         if (const auto* physics = std::get_if<RigidPhysics>(&module)) {
@@ -974,7 +1322,7 @@ bool models_by_kind(const Emitter& emitter) noexcept {
     }
     const RigidPhysics* physics = rigid_physics(emitter);
     return physics != nullptr && std::any_of(physics->bodies.begin(), physics->bodies.end(),
-                                             [](const RigidBodyKind& kind) { return !kind.draw.empty(); });
+                                             [](const RigidBodyKind& kind) { return !kind.draw.empty() || kind.scale != 1.0F || kind.draw_tint != Color{}; });
 }
 
 bool has_rigid_physics(const Effect& effect) noexcept {

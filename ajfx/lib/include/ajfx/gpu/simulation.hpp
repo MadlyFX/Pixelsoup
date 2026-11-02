@@ -4,6 +4,7 @@
 #include <ajfx/gpu/device.hpp>
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/result.hpp>
+#include <ajfx/rigid_runner.hpp>
 #include <ajfx/simulation.hpp>
 
 #include <cstddef>
@@ -62,8 +63,11 @@ enum class RigidHosting {
     // seek resimulates them on the calling thread.
     Inline,
     // The host, off the frame path (ajfx::RigidRunner): stepping leaves
-    // those emitters alone, and the host writes each one's particles with
-    // write_rigid before drawing. Needs no solver or meshes.
+    // those emitters alone, and the host hands each step the runner's frame
+    // of the tick it reaches (step with a RigidFrame), or writes each one's
+    // particles with write_rigid before drawing. Only a step given the frame
+    // meets those bodies and bears particles from their contacts and
+    // motion. Needs no solver or meshes.
     Host,
 };
 
@@ -91,8 +95,18 @@ public:
     [[nodiscard]] const Effect& effect() const noexcept;
     [[nodiscard]] std::uint64_t tick() const noexcept;
 
-    // Records one step; nothing runs until the device is flushed.
+    // Records one step; nothing runs until the device is flushed. Under
+    // hosted rigid physics the step's particle emitters meet no bodies and
+    // are born of no contacts or bodies: give the step the rigid frame.
     void step(const ParameterProvider* parameters = nullptr);
+    // Hosted rigid physics: records one step whose rigid physics emitters
+    // are `rigid`, the host's frame of the tick this step reaches (tick() + 1,
+    // RigidTrack::frame). Its particle emitters meet those bodies
+    // (BodyCollision), are stirred by them (Wake) and are born of those contacts and bodies
+    // (SpawnFromContacts, SpawnFromBodies) as the CPU reference's are, and
+    // the frame's particles are written for drawing, so no write_rigid is
+    // needed for that tick. Inline, the frame is ignored and this is step().
+    void step(const ParameterProvider* parameters, const RigidFrame& rigid);
     void advance_to(std::uint64_t target, const ParameterProvider* parameters = nullptr);
     // Back to step 0, holding only the rigid physics emitters' piles when
     // they are inline (see Simulation::reset).

@@ -48,9 +48,10 @@ void spin_turns_where_position_integrates() {
     emitter.init = {Lifetime{.id = 1U}, InitSpin{.id = 2U}};
     emitter.update = {Gravity{.id = 3U}, PlaneCollision{.id = 4U}};
     const std::string s = gpu::generate_kernel_sources(effect)[0].source;
-    // Lifetime's id and 2 floats, then the spin's id and data.
-    AJFX_CHECK(contains(s, "ajfx_spin(p, 4u, ajfx_u32(3u));"));
-    AJFX_CHECK(contains(s, "ajfx_spin_turn(p, 4u);"));
+    // Lifetime's id, its scope's 9 floats and its 2, then the spin's id and
+    // data.
+    AJFX_CHECK(contains(s, "ajfx_spin(p, 13u, ajfx_u32(12u));"));
+    AJFX_CHECK(contains(s, "ajfx_spin_turn(p, 13u);"));
     AJFX_CHECK(s.find("p.position += p.velocity * ajfx_dt;") < s.find("ajfx_spin_turn(p"));
     AJFX_CHECK(s.find("ajfx_spin_turn(p") < s.find("ajfx_plane_collision(p"));
     // Newborns turn through the part of the step they lived.
@@ -61,20 +62,23 @@ void module_calls_carry_their_data_offsets_and_ids() {
     const std::vector<gpu::EmitterKernelSource> sources = gpu::generate_kernel_sources(presets::sparks());
     AJFX_CHECK(sources.size() == 1U);
     const std::string& s = sources[0].source;
-    // Each module's data is its id, then its packed floats, and offsets are
-    // the running total: lifetime 2, shape 10, velocity 13, colour 10, size
-    // 2, gravity 5 and its curve (1 + 2 per key), drag 5, plane 7,
-    // colour-over-life 1 + 5 per key. A call reads its id from the data.
-    AJFX_CHECK(contains(s, "ajfx_lifetime(p, 1u, ajfx_u32(0u));"));
-    AJFX_CHECK(contains(s, "ajfx_shape_location(p, 4u, ajfx_u32(3u));"));
-    AJFX_CHECK(contains(s, "ajfx_velocity(p, 15u, ajfx_u32(14u));"));
-    AJFX_CHECK(contains(s, "ajfx_color(p, 29u, ajfx_u32(28u));"));
-    AJFX_CHECK(contains(s, "ajfx_size(p, 40u, ajfx_u32(39u));"));
-    AJFX_CHECK(contains(s, "ajfx_gravity(p, 43u, ajfx_u32(42u));"));
-    AJFX_CHECK(contains(s, "ajfx_drag(p, 54u, ajfx_u32(53u));"));
-    AJFX_CHECK(contains(s, "ajfx_plane_collision(p, 60u, ajfx_u32(59u));"));
-    AJFX_CHECK(contains(s, "ajfx_color_over_life(p, 68u, ajfx_u32(67u));"));
-    AJFX_CHECK(sources[0].module_floats == 79U);
+    // Each module's data is its id, then its scope (9 floats) where it has
+    // one, then its packed floats, and offsets are the running total:
+    // lifetime 2, shape 10, velocity 13, colour 10, size 2, gravity 5 and its
+    // curve (1 + 2 per key), drag 5, plane 7, colour-over-life 1 + 5 per key.
+    // A call reads its id from the data, and a scoped one asks its scope.
+    AJFX_CHECK(contains(s, "if (ajfx_in_scope(p, 1u)) {"));
+    AJFX_CHECK(contains(s, "ajfx_lifetime(p, 10u, ajfx_u32(0u));"));
+    AJFX_CHECK(contains(s, "ajfx_shape_location(p, 22u, ajfx_u32(12u));"));
+    AJFX_CHECK(contains(s, "ajfx_velocity(p, 42u, ajfx_u32(32u));"));
+    AJFX_CHECK(contains(s, "ajfx_color(p, 65u, ajfx_u32(55u));"));
+    AJFX_CHECK(contains(s, "ajfx_size(p, 85u, ajfx_u32(75u));"));
+    AJFX_CHECK(contains(s, "ajfx_gravity(p, 88u, ajfx_u32(87u));"));
+    AJFX_CHECK(contains(s, "ajfx_drag(p, 99u, ajfx_u32(98u));"));
+    AJFX_CHECK(contains(s, "ajfx_plane_collision(p, 105u, ajfx_u32(104u));"));
+    AJFX_CHECK(contains(s, "if (ajfx_in_scope(p, 113u)) {"));
+    AJFX_CHECK(contains(s, "ajfx_color_over_life(p, 122u, ajfx_u32(112u));"));
+    AJFX_CHECK(sources[0].module_floats == 133U);
     // Ids are data, not source: new ids (a seed, a copied block) keep the
     // same kernels.
     Effect renumbered = presets::sparks();
@@ -88,6 +92,31 @@ void module_calls_carry_their_data_offsets_and_ids() {
     AJFX_CHECK(s.find("p.position += p.velocity * ajfx_dt;") < s.find("ajfx_plane_collision(p"));
     AJFX_CHECK(contains(s, "void update(") && contains(s, "void spawn("));
     AJFX_CHECK(!contains(s, "#include"));
+}
+
+void heat_and_births_from_bodies_reach_the_kernels() {
+    Effect effect;
+    effect.name = "glow";
+    Emitter& rocks = effect.emitters.emplace_back();
+    rocks.name = "rocks";
+    rocks.update = {RigidPhysics{.id = 1U}};
+    Emitter& sparks = effect.emitters.emplace_back();
+    sparks.name = "sparks";
+    sparks.spawn = {SpawnFromContacts{.id = 1U, .emitter = "rocks"}};
+    sparks.init = {Lifetime{.id = 2U}};
+    sparks.update = {Heat{.id = 3U}, ColorOverLife{.id = 4U}};
+    const std::string s = gpu::generate_kernel_sources(effect)[1].source;
+    // The glow is worked out afresh from the base colour after the colour
+    // over life, in the update and for newborns, wherever Heat stands.
+    const std::size_t reset = s.find("p.color = p.base_color;\n        if (ajfx_in_scope");
+    AJFX_CHECK(reset != std::string::npos);
+    AJFX_CHECK(s.find("ajfx_color_over_life(p", reset) < s.find("ajfx_heat(p", reset));
+    AJFX_CHECK(s.find("ajfx_heat(p") > s.find("ajfx_color_over_life(p"));
+    // Newborns start where their contact put them.
+    AJFX_CHECK(contains(s, "uint origin = ajfx_ages_offset + 2u * ajfx_capacity + b * 7u;"));
+    // Heat keeps the base colour; the layout stores it.
+    const gpu::ParticleLayout layout = gpu::particle_layout(sparks);
+    AJFX_CHECK(layout.color >= 0 && layout.base_color >= 0 && layout.velocity >= 0);
 }
 
 void generation_is_deterministic() {
@@ -184,6 +213,7 @@ int main() {
         {"layouts_store_only_what_modules_use", layouts_store_only_what_modules_use},
         {"module_calls_carry_their_data_offsets_and_ids", module_calls_carry_their_data_offsets_and_ids},
         {"spin_turns_where_position_integrates", spin_turns_where_position_integrates},
+        {"heat_and_births_from_bodies_reach_the_kernels", heat_and_births_from_bodies_reach_the_kernels},
         {"generation_is_deterministic", generation_is_deterministic},
         {"compiled_bytecode_is_reproducible", compiled_bytecode_is_reproducible},
         {"kernels_travel_in_packages_and_go_stale_with_their_source",

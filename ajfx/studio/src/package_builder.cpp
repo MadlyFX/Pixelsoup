@@ -8,6 +8,7 @@
 #include <mediaserver/render/image_decode.hpp>
 #include <mediaserver/render/model_loader.hpp>
 
+#include <ajfx/cache.hpp>
 #include <ajfx/d3d12.hpp>
 #include <ajfx/package.hpp>
 #include <ajfx/rigid.hpp>
@@ -106,17 +107,36 @@ void bounded(Map& map, std::vector<std::string>& order, const std::string& key, 
 // few enough to draw every frame.
 constexpr std::size_t paths_per_layer = 160U;
 
-// Traces every `stride`-th particle by spawn index, doubling the stride (and
-// dropping the paths it no longer picks) whenever there are too many, so the
-// paths kept are spread evenly through the whole loop's births.
+// Traces every `stride`-th particle of one layer by spawn index, doubling the
+// stride (and dropping the paths it no longer picks) whenever there are too
+// many, so the paths kept are spread evenly through the whole loop's births.
+// A layer is the particles of its emitter in its scope: the page's solid
+// layers share one world (SolidWorld), each its own body kinds of it.
 class PathTracer final {
 public:
-    explicit PathTracer(Uid layer) : layer_{layer} {}
+    PathTracer(Uid of_layer, std::size_t in_emitter, Scope within)
+        : layer_{of_layer}, emitter_{in_emitter}, scope_{std::move(within)} {}
+
+    [[nodiscard]] Uid layer() const noexcept { return layer_; }
+    [[nodiscard]] std::size_t emitter() const noexcept { return emitter_; }
+    [[nodiscard]] std::uint64_t peak() const noexcept { return peak_; }
+
+    // The most of the layer's particles alive at once so far.
+    void count(const EmitterState& state) {
+        std::uint64_t alive = state.alive();
+        if (!scope_.empty()) {
+            alive = 0U;
+            for (std::size_t i = 0U; i < state.alive(); ++i) {
+                alive += mine(state, i) ? 1U : 0U;
+            }
+        }
+        peak_ = std::max(peak_, alive);
+    }
 
     void sample(const EmitterState& state, std::uint64_t step) {
         for (std::size_t i = 0U; i < state.alive(); ++i) {
             const std::uint32_t index = state.spawn_index[i];
-            if (index % stride_ != 0U) {
+            if (index % stride_ != 0U || !mine(state, i)) {
                 continue;
             }
             auto found = by_index_.find(index);
@@ -141,20 +161,32 @@ public:
     }
 
 private:
+    [[nodiscard]] bool mine(const EmitterState& state, std::size_t i) const {
+        return scope_.empty() ||
+               in_scope(scope_, state.spawn_index[i], i < state.body_kind.size() ? state.body_kind[i] : 0U);
+    }
+
     Uid layer_;
+    std::size_t emitter_{0U};
+    Scope scope_;
+    std::uint64_t peak_{0U};
     std::uint32_t stride_{1U};
     std::map<std::uint32_t, ParticlePath> by_index_;
 };
 
 } // namespace
 
-PackageBuilder::PackageBuilder(std::filesystem::path preview_package, std::uint32_t instance_seed)
-    : preview_path_{std::move(preview_package)}, instance_seed_{instance_seed}, worker_{[this] { run(); }} {}
+PackageBuilder::PackageBuilder(std::filesystem::path preview_package, std::uint32_t instance_seed, bool analyse)
+    : preview_path_{std::move(preview_package)}, instance_seed_{instance_seed}, analyse_{analyse},
+      worker_{[this] { run(); }} {}
 
 PackageBuilder::~PackageBuilder() {
     {
         std::lock_guard lock{mutex_};
         stopping_ = true;
+        // A bake under way stops at its next step rather than holding the
+        // close up until it is done.
+        cancel_bake_.store(true);
     }
     wake_.notify_all();
     worker_.join();
@@ -169,12 +201,40 @@ void PackageBuilder::submit(Document document, std::uint64_t revision, std::file
     wake_.notify_all();
 }
 
-void PackageBuilder::submit_export(Document document, std::filesystem::path path, std::filesystem::path base) {
+void PackageBuilder::submit_export(Document document, std::filesystem::path path, std::filesystem::path base,
+                                   std::shared_ptr<const BakeRecord> bake) {
     {
         std::lock_guard lock{mutex_};
-        pending_export_ = ExportRequest{std::move(document), std::move(path), std::move(base)};
+        pending_export_ = ExportRequest{std::move(document), std::move(path), std::move(base), std::move(bake)};
     }
     wake_.notify_all();
+}
+
+void PackageBuilder::submit_bake(Document document, std::filesystem::path base) {
+    {
+        std::lock_guard lock{mutex_};
+        pending_bake_ = BakeRequest{std::move(document), std::move(base)};
+        cancel_bake_.store(false);
+        // Under way from the moment it is asked for, so the button says so.
+        bake_progress_.store(0.0);
+    }
+    wake_.notify_all();
+}
+
+void PackageBuilder::cancel_bake() {
+    std::lock_guard lock{mutex_};
+    cancel_bake_.store(true);
+    if (pending_bake_) {
+        pending_bake_.reset();
+        bake_progress_.store(-1.0);
+    }
+}
+
+std::optional<BakeResult> PackageBuilder::take_bake() {
+    std::lock_guard lock{mutex_};
+    std::optional<BakeResult> out = std::move(baked_);
+    baked_.reset();
+    return out;
 }
 
 std::optional<BuildResult> PackageBuilder::take_build() {
@@ -213,19 +273,24 @@ void PackageBuilder::run() {
     while (true) {
         std::optional<Request> request;
         std::optional<ExportRequest> export_request;
+        std::optional<BakeRequest> bake_request_taken;
         {
             std::unique_lock lock{mutex_};
-            wake_.wait(lock, [&] { return stopping_ || pending_ || pending_export_; });
+            wake_.wait(lock, [&] { return stopping_ || pending_ || pending_export_ || pending_bake_; });
             if (stopping_) {
                 return;
             }
-            // The preview first: it is what the artist is looking at.
+            // The preview first: it is what the artist is looking at. A bake
+            // last, since it is the long one.
             if (pending_) {
                 request = std::move(pending_);
                 pending_.reset();
-            } else {
+            } else if (pending_export_) {
                 export_request = std::move(pending_export_);
                 pending_export_.reset();
+            } else {
+                bake_request_taken = std::move(pending_bake_);
+                pending_bake_.reset();
             }
             working_ = true;
         }
@@ -237,13 +302,18 @@ void PackageBuilder::run() {
                 std::lock_guard lock{mutex_};
                 built_ = std::move(result);
             }
-            if (written && compiled.effect) {
+            if (written && compiled.effect && analyse_) {
                 analyse(*request, compiled);
             }
         } else if (export_request) {
             ExportResult result = export_package(*export_request);
             std::lock_guard lock{mutex_};
             exported_ = std::move(result);
+        } else if (bake_request_taken) {
+            BakeResult result = bake_request(*bake_request_taken);
+            std::lock_guard lock{mutex_};
+            baked_ = std::move(result);
+            bake_progress_.store(-1.0);
         }
         std::lock_guard lock{mutex_};
         working_ = false;
@@ -339,9 +409,9 @@ void PackageBuilder::resolve_assets(Compiled& compiled, const std::filesystem::p
                 emitter.renderer.flipbook_columns = emitter.renderer.flipbook_rows = 1U;
                 emitter.renderer.flipbook_blend = false;
             } else if (request.kind == AssetRequest::Kind::Mesh && emitter.renderer.mesh == request.entry) {
-                emitter.renderer.mesh = "chip";
-                if (const MeshData* chip = library_mesh("chip")) {
-                    compiled.meshes.emplace("chip", *chip);
+                emitter.renderer.mesh = "slab";
+                if (const MeshData* slab = library_mesh("slab")) {
+                    compiled.meshes.emplace("slab", *slab);
                 }
             } else if (request.kind == AssetRequest::Kind::Field) {
                 std::erase_if(emitter.update, [&](const UpdateModule& module) {
@@ -390,6 +460,16 @@ BuildResult PackageBuilder::build(const Request& request) {
         return result;
     }
     resolve_assets(result.compiled, request.base, result.asset_issue, &result.outlines);
+    if (request.document.scene && !result.asset_issue.empty()) {
+        result.error = result.asset_issue;
+        return result;
+    }
+    if (!result.compiled.effect) {
+        // A cut the models made could not be held to the effect's rules:
+        // what it was is the asset issue, and nothing new is written.
+        result.error = result.asset_issue.empty() ? "the pieces cut from a model could not be used" : result.asset_issue;
+        return result;
+    }
     std::optional<gpu::KernelSet> kernels = kernels_for(*result.compiled.effect, result.error, result.kernel_ms);
     if (!kernels) {
         return result;
@@ -406,6 +486,7 @@ BuildResult PackageBuilder::build(const Request& request) {
     // The renderer's package worker may be reading the last one; try again
     // for a moment rather than failing an edit.
     for (int attempt = 0; attempt < 40; ++attempt) {
+        if (newest_revision_.load() != request.revision) { return result; }
         std::string error;
         if (write_file(preview_path_, bytes.value(), error)) {
             result.written = true;
@@ -446,12 +527,17 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
                   static_cast<float>(compiled.effect->simulation_rate)));
     Analysis analysis;
     analysis.revision = request.revision;
-    std::vector<std::uint64_t> peaks(compiled.effect->emitters.size(), 0U);
-    // Emitters are the included layers, in page order.
+    // Each layer that plays, by the emitter it plays in and its scope there.
     std::vector<PathTracer> tracers;
     for (const LayerReport& report : compiled.layers) {
-        if (report.included && tracers.size() < peaks.size()) {
-            tracers.emplace_back(report.layer);
+        if (!report.included) {
+            continue;
+        }
+        for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+            if (compiled.effect->emitters[e].name == report.emitter) {
+                tracers.emplace_back(report.layer, e, report.scope);
+                break;
+            }
         }
     }
     // Where particles are, sampled through the loop. The view frames the
@@ -459,20 +545,42 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
     // the last wisp of smoke or one far-flung spark.
     std::array<std::vector<float>, 3> samples;
     constexpr std::size_t sample_limit = 60000U;
+    // Where the solid things stand, for picking them in the preview: from
+    // step 0, where a pile already stands, then every few steps.
+    const std::optional<std::size_t> world = solid_world_index(compiled);
+    if (world) {
+        analysis.bodies.push_back(StageBodies{simulation.tick(), stage_bodies(compiled, simulation.emitter(*world))});
+    }
     float radius = 0.0F;
     std::uint64_t radius_count = 0U;
+    std::uint64_t most_alive = 0U;
     for (std::uint64_t step = 0U; step < steps; ++step) {
         if (newest_revision_.load() != request.revision) {
             return; // edited again: this answer would be stale
         }
         simulation.step();
+        std::uint64_t alive = 0U;
+        for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
+            alive += simulation.emitter(e).alive();
+        }
+        if (alive > most_alive) {
+            most_alive = alive;
+            analysis.peak_step = simulation.tick();
+        }
+        for (PathTracer& tracer : tracers) {
+            const EmitterState& state = simulation.emitter(tracer.emitter());
+            tracer.count(state);
+            // Points at the show frames the preview draws: frame f is step f.
+            if (simulation.tick() % analysis.path_step == 0U) {
+                tracer.sample(state, simulation.tick());
+            }
+        }
+        if (world && simulation.tick() % analysis.body_step == 0U) {
+            analysis.bodies.push_back(
+                StageBodies{simulation.tick(), stage_bodies(compiled, simulation.emitter(*world))});
+        }
         for (std::size_t e = 0U; e < compiled.effect->emitters.size(); ++e) {
             const EmitterState& state = simulation.emitter(e);
-            peaks[e] = std::max<std::uint64_t>(peaks[e], state.alive());
-            // Points at the show frames the preview draws: frame f is step f.
-            if (simulation.tick() % analysis.path_step == 0U && e < tracers.size()) {
-                tracers[e].sample(state, simulation.tick());
-            }
             if (step % 3U != 0U) {
                 continue;
             }
@@ -508,11 +616,8 @@ void PackageBuilder::analyse(const Request& request, const Compiled& compiled) {
         }
         analysis.bounds = Bounds{Vec3{low[0], low[1], low[2]}, Vec3{high[0], high[1], high[2]}, true};
     }
-    std::size_t index = 0U;
-    for (const LayerReport& report : compiled.layers) {
-        if (report.included && index < peaks.size()) {
-            analysis.peak_alive[report.layer] = peaks[index++];
-        }
+    for (const PathTracer& tracer : tracers) {
+        analysis.peak_alive[tracer.layer()] = tracer.peak();
     }
     for (PathTracer& tracer : tracers) {
         tracer.finish(analysis.paths);
@@ -540,6 +645,13 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
         result.message = "Not exported: there is nothing to play. Add a layer with a stream or burst.";
         return result;
     }
+    const std::vector<CacheMode> modes = bake_modes(request.document, compiled);
+    const bool any_baked = std::any_of(modes.begin(), modes.end(), [](CacheMode mode) { return mode != CacheMode::Live; });
+    if (request.document.scene && any_baked) {
+        if (!request.bake) { result.message = "Not exported: required scene cache is missing or out of date. Bake the capture range first."; return result; }
+        const auto fits = Cache::open(request.bake->bytes, *compiled.effect, request.bake->instance_seed, {}, compiled.meshes, compiled.fields);
+        if (!fits) { result.message = "Not exported: " + fits.error().message + ". Bake again."; return result; }
+    }
     std::string error;
     double milliseconds = 0.0;
     std::optional<gpu::KernelSet> kernels = kernels_for(*compiled.effect, error, milliseconds);
@@ -556,6 +668,14 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
         result.message = "Not exported: " + bytes.error().message;
         return result;
     }
+    if (request.document.scene && any_baked) {
+        std::filesystem::path cache_path = request.path;
+        cache_path.replace_extension(".ajfxcache");
+        if (!write_file(cache_path, request.bake->bytes, error)) {
+            result.message = "Not exported: required cache could not be written: " + error;
+            return result;
+        }
+    }
     if (!write_file(request.path, bytes.value(), error)) {
         result.message = "Not exported: " + error;
         return result;
@@ -563,6 +683,67 @@ ExportResult PackageBuilder::export_package(const ExportRequest& request) {
     result.ok = true;
     result.message = "Exported " + request.path.filename().string() + " (" +
                      std::to_string((bytes.value().size() + 1023U) / 1024U) + " KB)";
+    if (request.document.scene) {
+        if (any_baked) { result.message += " with its verified cache"; }
+        return result;
+    }
+    // The cache goes beside it, if it is this page's: opening it against the
+    // exported effect is the very check a host will make.
+    if (request.bake) {
+        Result<Cache> fits = Cache::open(request.bake->bytes, *compiled.effect, request.bake->instance_seed, {},
+                                         compiled.meshes, compiled.fields);
+        if (fits) {
+            std::filesystem::path cache_path = request.path;
+            cache_path.replace_extension(".ajfxcache");
+            if (write_file(cache_path, request.bake->bytes, error)) {
+                result.message += " with its cache, " + cache_path.filename().string() + " (" +
+                                  bytes_text(request.bake->bytes.size()) + ")";
+            } else {
+                result.message += ". Its cache was not written: " + error;
+            }
+        } else if (any_baked) {
+            result.message += ". Its cache was not written, since " + fits.error().message +
+                              ": bake again, then export";
+        }
+    } else if (any_baked) {
+        result.message += ". No cache was written: the baked layers' cache is missing or out of date, so press "
+                          "Bake, then export";
+    }
+    return result;
+}
+
+BakeResult PackageBuilder::bake_request(const BakeRequest& request) {
+    BakeResult result;
+    Compiled compiled = compile(request.document, Purpose::Export);
+    if (!compiled.error.empty()) {
+        result.message = "Not baked. " + compiled.error;
+        return result;
+    }
+    // A bake reads the artist's files and makes the cuts, as the export
+    // does: it is the exported effect that the cache must belong to.
+    std::string issue;
+    resolve_assets(compiled, request.base, issue, nullptr);
+    if (!issue.empty()) {
+        result.message = "Not baked: " + issue;
+        return result;
+    }
+    if (compiled.effect && has_rigid_physics(*compiled.effect) && !rigid_) {
+        rigid_ = rigid::make_jolt_solver();
+    }
+    Result<BakeRecord> baked =
+        bake_page(request.document, compiled, instance_seed_, rigid_.get(), [this](double share) {
+            bake_progress_.store(share);
+            return !cancel_bake_.load();
+        });
+    if (!baked) {
+        result.message = cancel_bake_.load() ? std::string{"Bake cancelled"} : "Not baked: " + baked.error().message;
+        return result;
+    }
+    auto record = std::make_shared<BakeRecord>(std::move(baked).value());
+    result.ok = true;
+    result.message = "Baked " + std::to_string(record->frames) + " steps into " + bytes_text(record->report.bytes) +
+                     " in " + format_number(static_cast<float>(record->seconds), 1) + " s";
+    result.record = std::move(record);
     return result;
 }
 

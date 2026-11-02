@@ -58,7 +58,13 @@ struct SessionState final {
     bool paths{false};
     bool figure{true};
     bool expert{false};
+    bool night{false};
+    float zoom{1.0F};
     bool looping{true};
+    float scene_tree_split{0.19F};
+    float scene_inspector_split{0.66F};
+    std::vector<Uid> scene_selection;
+    std::vector<Uid> scene_folded;
 
     // The preview camera (yaw, pitch, distance, target x, y, z), when kept.
     std::optional<std::array<float, 6>> camera;

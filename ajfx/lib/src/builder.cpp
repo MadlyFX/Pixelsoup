@@ -75,6 +75,13 @@ EffectBuilder& EffectBuilder::float_parameter(std::string name, float default_va
     return *this;
 }
 
+EffectBuilder& EffectBuilder::playback() {
+    if (!effect_.parameters.empty()) {
+        effect_.parameters.back().timing = ParameterTiming::Playback;
+    }
+    return *this;
+}
+
 EffectBuilder& EffectBuilder::vec3_parameter(std::string name, Vec3 default_value, float min, float max) {
     effect_.parameters.push_back({std::move(name), ParameterType::Vec3, to_value(default_value), min, max});
     return *this;
@@ -82,6 +89,11 @@ EffectBuilder& EffectBuilder::vec3_parameter(std::string name, Vec3 default_valu
 
 EffectBuilder& EffectBuilder::color_parameter(std::string name, Color default_value, float min, float max) {
     effect_.parameters.push_back({std::move(name), ParameterType::Color, to_value(default_value), min, max});
+    return *this;
+}
+
+EffectBuilder& EffectBuilder::blast(Blast blast) {
+    effect_.blasts.push_back(std::move(blast));
     return *this;
 }
 

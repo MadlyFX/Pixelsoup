@@ -1,5 +1,7 @@
 #include <ajfx/gpu/simulation.hpp>
 
+#include <ajfx/cache.hpp>
+
 #include <ajfx/random.hpp>
 
 #include "../step_inputs.hpp"
@@ -9,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -39,6 +42,8 @@ struct EmitterGpu final {
     Pipeline spawn;
     // The distance fields its colliders use, one after another, and where
     // each starts; the floats wait here until the first step writes them.
+    // After them, the bodies its BodyCollision and Wake modules meet, written
+    // every step (FieldLayout::body_offsets).
     Buffer fields;
     detail::FieldLayout field_layout;
     std::vector<float> unwritten_fields;
@@ -47,6 +52,12 @@ struct EmitterGpu final {
     std::uint32_t seed{0U};
     std::uint64_t spawned{0U};
     std::vector<double> rate_carry;
+    // Births by source (EmitterState::spawn_counts), counted here on the
+    // CPU, which hands each newborn its spawn index.
+    std::vector<std::uint64_t> spawn_counts;
+    // Whether its newborns may start where a contact or a moving body puts
+    // them (detail::has_birth_origins), which the data then carries.
+    bool origins{false};
 };
 
 template <class T>
@@ -70,6 +81,7 @@ struct GpuCheckpoint::Data final {
         Buffer args;
         std::uint64_t spawned{0U};
         std::vector<double> rate_carry;
+        std::vector<std::uint64_t> spawn_counts;
     };
     std::vector<Emitter> emitters;
     // The rigid physics emitters' CPU simulation, solver state included.
@@ -108,11 +120,19 @@ struct GpuSimulation::State final {
     std::vector<EmitterGpu> emitters;
     std::vector<ParameterValue> values;
     std::vector<float> scratch;
+    std::vector<std::uint32_t> spawn_indices;
+    std::vector<float> origins;
     // The rigid physics emitters, simulated on the CPU, and each emitter's
     // index among them (none for the rest).
     std::optional<Simulation> rigid;
     std::vector<std::optional<std::size_t>> rigid_index;
+    // The slowest contact the effect reads of each emitter (contact_floor).
+    std::vector<std::optional<float>> floors;
     std::vector<std::uint8_t> records;
+    // SimulationOptions::body_broadphase, and the bodies' records as they
+    // are written.
+    bool body_broadphase{true};
+    std::vector<float> body_floats;
 
     ~State() {
         if (device == nullptr) {
@@ -197,6 +217,11 @@ struct GpuSimulation::State final {
         device->barrier();
     }
 
+    // Records one step. `hosted` is the host's frame of the tick the step
+    // reaches, under hosted rigid physics; inline, the CPU simulation holds
+    // the rigid physics emitters.
+    void record(const ParameterProvider* parameters, const RigidFrame* hosted);
+
     void zero_counters(const EmitterGpu& e) const {
         const std::uint8_t zeros[args_bytes]{};
         device->write_buffer(e.counters, 0U, std::span{zeros, counters_bytes});
@@ -235,10 +260,30 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
             rigid_index[i] = rigid_count++;
         }
     }
+    // Playing a cache on the GPU is a host's to wire: under External hosting
+    // it hands cached bodies in as it would a runner's (Cache::emitter_at).
+    // Inline, this simulation would quietly simulate what was cached.
+    if (options.cache != nullptr && hosting == RigidHosting::Inline) {
+        return Error{ErrorCode::InvalidEffect,
+                     "GpuSimulation does not play caches itself; host rigid physics externally and supply the "
+                     "cache's frames, or play the cache with the CPU Simulation"};
+    }
+    std::vector<std::optional<float>> floors(effect.emitters.size());
+    std::vector<std::optional<float>> part_floors;
+    for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+        floors[i] = contact_floor(effect, i);
+        if (rigid_index[i]) {
+            part_floors.push_back(floors[i]);
+        }
+    }
     if (rigid_count != 0U && hosting == RigidHosting::Inline) {
         Effect cpu = rigid_physics_part(effect);
-        Result<Simulation> created = Simulation::create(
-            std::move(cpu), instance_seed, SimulationOptions{.meshes = options.meshes, .rigid = options.rigid});
+        // The part's worlds collect what the whole effect reads of them.
+        Result<Simulation> created =
+            Simulation::create(std::move(cpu), instance_seed,
+                               SimulationOptions{.meshes = options.meshes,
+                                                 .rigid = options.rigid,
+                                                 .contact_floors = std::move(part_floors)});
         if (!created) {
             return created.error();
         }
@@ -251,6 +296,7 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     auto state = std::make_unique<State>();
     state->device = &device;
     state->instance_seed = instance_seed;
+    state->body_broadphase = options.body_broadphase;
     state->dt = 1.0F / static_cast<float>(effect.simulation_rate);
     for (const Emitter& emitter : effect.emitters) {
         for (const UpdateModule& module : emitter.update) {
@@ -288,6 +334,8 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
         e.module_floats = detail::module_float_count(effect, emitter);
         e.seed = hash_mix(instance_seed, emitter.seed);
         e.rate_carry.assign(detail::rate_module_count(emitter), 0.0);
+        e.spawn_counts.assign(detail::spawn_count_slots(emitter), 0U);
+        e.origins = detail::has_birth_origins(emitter);
         if (std::optional<Error> error = pipeline(kernels.emitters[i].update, name + " update", e.update)) {
             return *std::move(error);
         }
@@ -304,8 +352,29 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
                 e.unwritten_fields.insert(e.unwritten_fields.end(), distances.begin(), distances.end());
             }
         }
-        if (!e.unwritten_fields.empty()) {
-            Result<Buffer> buffer = device.create_buffer(e.unwritten_fields.size() * 4U, name + " fields");
+        // Room after the fields for the bodies of every emitter it meets or
+        // is stirred by, each at the most it may hold.
+        std::uint64_t world_floats = e.unwritten_fields.size();
+        for (const UpdateModule& module : emitter.update) {
+            const std::string* named = nullptr;
+            if (const auto* meets = std::get_if<BodyCollision>(&module)) {
+                named = &meets->emitter;
+            } else if (const auto* stirred = std::get_if<Wake>(&module)) {
+                named = &stirred->emitter;
+            }
+            if (named == nullptr || e.field_layout.body_offsets.contains(*named)) {
+                continue;
+            }
+            for (const Emitter& other : effect.emitters) {
+                if (other.name == *named) {
+                    e.field_layout.body_offsets.emplace(*named, static_cast<std::uint32_t>(world_floats));
+                    world_floats += detail::body_region_floats(other.capacity);
+                    break;
+                }
+            }
+        }
+        if (world_floats != 0U) {
+            Result<Buffer> buffer = device.create_buffer(world_floats * 4U, name + " fields");
             if (!buffer) {
                 return device_error("creating " + name + " fields", buffer.error());
             }
@@ -314,13 +383,16 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
 
         const std::uint64_t capacity = emitter.capacity;
         const std::uint64_t record_bytes = capacity * e.layout.stride;
+        const std::uint64_t origin_floats = e.origins ? detail::birth_origin_floats * capacity : 0U;
         for (const auto& [bytes, label, out] :
              {std::tuple{record_bytes, " particles A", &e.particles[0]},
               std::tuple{record_bytes, " particles B", &e.particles[1]},
               std::tuple{counters_bytes, " counters", &e.counters}, std::tuple{capacity * 4U, " flags", &e.flags},
               std::tuple{capacity * 4U, " offsets", &e.offsets},
               std::tuple{std::uint64_t{2U * block_size * 4U}, " blocks", &e.blocks},
-              std::tuple{(e.module_floats + capacity) * 4U, " data", &e.data},
+              // Module data, then an age and a spawn index per birth, then
+              // where each starts if contacts or bodies bear them.
+              std::tuple{(e.module_floats + 2U * capacity + origin_floats) * 4U, " data", &e.data},
               std::tuple{args_bytes, " args", &e.args}}) {
             Result<Buffer> buffer = device.create_buffer(bytes, name + label);
             if (!buffer) {
@@ -332,6 +404,7 @@ Result<GpuSimulation> GpuSimulation::create(Device& device, Effect effect, const
     state->effect = std::move(effect);
     state->rigid = std::move(rigid);
     state->rigid_index = std::move(rigid_index);
+    state->floors = std::move(floors);
     GpuSimulation simulation{std::move(state)};
     // Inline piles stand from step 0; the buffers need them before any step.
     simulation.write_inline_rigid();
@@ -347,8 +420,15 @@ std::uint64_t GpuSimulation::tick() const noexcept {
 }
 
 void GpuSimulation::step(const ParameterProvider* parameters) {
-    State& s = *state_;
-    Device& device = *s.device;
+    state_->record(parameters, nullptr);
+}
+
+void GpuSimulation::step(const ParameterProvider* parameters, const RigidFrame& rigid) {
+    state_->record(parameters, state_->rigid ? nullptr : &rigid);
+}
+
+void GpuSimulation::State::record(const ParameterProvider* parameters, const RigidFrame* hosted) {
+    State& s = *this;
     detail::resolve_values(s.effect, parameters, s.tick, s.values);
     const detail::Inputs in{s.effect, s.values};
     const double rate = static_cast<double>(s.effect.simulation_rate);
@@ -358,26 +438,82 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
         s.rigid->step(parameters);
     }
 
-    // The bodies this step's colliders meet, from the rigid emitters the CPU
-    // simulation has just stepped. Gathered once: several emitters may hit
-    // the same bodies, and they must all see the same step's.
-    std::map<std::string, std::vector<BodyCollider>, std::less<>> bodies;
+    // Each rigid physics emitter's particles at the end of this step, and
+    // its world's contacts from it: the CPU simulation's, inline, or the
+    // host's frame. Neither when the host stepped without a frame.
+    const auto rigid_particles = [&](std::size_t index) -> const EmitterState* {
+        if (const std::optional<std::size_t> cpu = s.rigid_index[index]; cpu && s.rigid) {
+            return &s.rigid->emitter(*cpu);
+        }
+        if (hosted != nullptr && index < hosted->emitters.size() && s.rigid_index[index]) {
+            return &hosted->emitters[index];
+        }
+        return nullptr;
+    };
+    const auto rigid_contacts = [&](std::size_t index) -> std::span<const RigidContact> {
+        if (const std::optional<std::size_t> cpu = s.rigid_index[index]; cpu && s.rigid) {
+            return s.rigid->contacts(*cpu);
+        }
+        if (hosted != nullptr && index < hosted->contacts.size()) {
+            return hosted->contacts[index];
+        }
+        return {};
+    };
+
+    // The bodies this step's colliders and wakes meet, in their grids, and
+    // the bodies and contacts its spawn modules bear particles from, from the
+    // rigid emitters as this step left them. Gathered once: several emitters
+    // may read the same bodies, and they must all see the same step's.
+    detail::BodyGrids bodies;
+    detail::BodySources sources;
     for (const Emitter& emitter : s.effect.emitters) {
         for (const UpdateModule& module : emitter.update) {
-            const auto* meets = std::get_if<BodyCollision>(&module);
-            if (meets == nullptr || bodies.contains(meets->emitter)) {
+            const std::string* met = nullptr;
+            if (const auto* meets = std::get_if<BodyCollision>(&module)) {
+                met = &meets->emitter;
+            } else if (const auto* stirred = std::get_if<Wake>(&module)) {
+                met = &stirred->emitter;
+            }
+            if (met == nullptr || bodies.contains(*met)) {
                 continue;
             }
             for (std::size_t other = 0U; other < s.effect.emitters.size(); ++other) {
                 const RigidPhysics* physics = rigid_physics(s.effect.emitters[other]);
-                const std::optional<std::size_t> cpu = s.rigid_index[other];
-                if (physics == nullptr || !cpu || !s.rigid ||
-                    s.effect.emitters[other].name != meets->emitter) {
+                const EmitterState* particles = rigid_particles(other);
+                if (physics == nullptr || particles == nullptr || s.effect.emitters[other].name != *met) {
                     continue;
                 }
-                bodies.emplace(meets->emitter,
-                               body_colliders(*physics, s.rigid->emitter(*cpu),
-                                              s.effect.emitters[other].renderer.geometry));
+                bodies.emplace(*met, detail::make_body_grid(body_colliders(*physics, *particles,
+                                                                           s.effect.emitters[other].renderer.geometry),
+                                                            s.body_broadphase));
+                break;
+            }
+        }
+        for (const SpawnModule& module : emitter.spawn) {
+            const std::string* named = nullptr;
+            if (const auto* contacts = std::get_if<SpawnFromContacts>(&module)) {
+                named = &contacts->emitter;
+            } else if (const auto* shed = std::get_if<SpawnFromBodies>(&module)) {
+                named = &shed->emitter;
+            }
+            if (named == nullptr || sources.contains(*named)) {
+                continue;
+            }
+            for (std::size_t other = 0U; other < s.effect.emitters.size(); ++other) {
+                const RigidPhysics* physics = rigid_physics(s.effect.emitters[other]);
+                const EmitterState* particles = rigid_particles(other);
+                if (physics == nullptr || particles == nullptr || s.effect.emitters[other].name != *named) {
+                    continue;
+                }
+                // What the effect reads of them, worked out from the world's
+                // list exactly as the CPU reference works it out.
+                std::vector<RigidContact> read;
+                if (s.floors[other]) {
+                    read = detail::effect_contacts(rigid_contacts(other), *s.floors[other],
+                                                   detail::effect_contact_limit(s.effect.emitters[other]));
+                }
+                sources.emplace(*named, detail::body_source(*physics, *particles, std::move(read),
+                                                            s.effect.emitters[other].capacity));
                 break;
             }
         }
@@ -385,72 +521,125 @@ void GpuSimulation::step(const ParameterProvider* parameters) {
     for (std::size_t i = 0U; i < s.emitters.size(); ++i) {
         const Emitter& emitter = s.effect.emitters[i];
         EmitterGpu& e = s.emitters[i];
-        if (const std::optional<std::size_t> cpu = s.rigid_index[i]) {
-            if (s.rigid) {
-                const EmitterState& particles = s.rigid->emitter(*cpu);
-                s.upload(e, particles, 1U - s.current);
-                e.spawned = particles.spawned;
-                e.rate_carry = particles.rate_carry;
+        if (s.rigid_index[i]) {
+            if (const EmitterState* particles = rigid_particles(i)) {
+                s.upload(e, *particles, 1U - s.current);
+                e.spawned = particles->spawned;
+                e.rate_carry = particles->rate_carry;
+                e.spawn_counts = particles->spawn_counts;
             }
             continue;
         }
 
         if (!e.unwritten_fields.empty()) {
-            device.write_buffer(e.fields, 0U, bytes_of(std::span<const float>{e.unwritten_fields}));
+            device->write_buffer(e.fields, 0U, bytes_of(std::span<const float>{e.unwritten_fields}));
             e.unwritten_fields = {};
+        }
+        // The bodies it meets, where pack_grid tells its kernel they are:
+        // each cell's first body and the bodies by cell where the grid is
+        // used, and every body's record.
+        for (const auto& [met, offset] : e.field_layout.body_offsets) {
+            const auto grid = bodies.find(met);
+            if (grid == bodies.end() || grid->second.bodies.empty()) {
+                continue;
+            }
+            const std::uint64_t at = offset;
+            const std::uint64_t order_at = at + detail::body_grid_cells + 1U;
+            std::uint64_t capacity = 0U;
+            for (const Emitter& other : s.effect.emitters) {
+                if (other.name == met) {
+                    capacity = other.capacity;
+                    break;
+                }
+            }
+            if (grid->second.usable) {
+                device->write_buffer(e.fields, at * 4U, bytes_of(std::span<const std::uint32_t>{grid->second.start}));
+                device->write_buffer(e.fields, order_at * 4U,
+                                     bytes_of(std::span<const std::uint32_t>{grid->second.order}));
+            }
+            detail::body_records(grid->second, s.body_floats);
+            device->write_buffer(e.fields, (order_at + capacity) * 4U,
+                                 bytes_of(std::span<const float>{s.body_floats}));
         }
 
         // This step's module data, then one age per birth.
         s.scratch.clear();
-        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout, &bodies}, s.scratch);
+        detail::pack_emitter(emitter, detail::PackContext{in, s.dt, start, &e.field_layout, &bodies, s.tick},
+                             s.scratch);
         std::uint32_t births = 0U;
+        s.spawn_indices.clear();
+        s.origins.clear();
         // A body kind is the CPU's business: these emitters have no bodies.
-        detail::for_each_birth(emitter, in, e.rate_carry, start, end, rate, [&](double age, std::uint32_t) {
-            // Births past capacity are refused by the kernels; they need no age.
-            if (births < emitter.capacity) {
-                s.scratch.push_back(static_cast<float>(age));
-            }
-            ++births;
-        });
+        // Each birth is counted by its own source, as the reference counts
+        // it, refused or not, and starts where a contact or a body puts it,
+        // as the reference starts it.
+        const detail::BirthContext context{s.tick, e.seed, s.dt, &sources};
+        detail::for_each_birth(emitter, in, e.rate_carry, e.spawn_counts, start, end, rate, context,
+                               [&](double age, std::uint32_t, std::uint32_t, std::uint32_t spawn_index,
+                                   const detail::BirthOrigin* origin) {
+                                   // Births past capacity are refused by the
+                                   // kernels; they need no age or index.
+                                   if (births < emitter.capacity) {
+                                       s.scratch.push_back(static_cast<float>(age));
+                                       s.spawn_indices.push_back(spawn_index);
+                                       if (e.origins) {
+                                           const detail::BirthOrigin at =
+                                               origin != nullptr ? *origin : detail::BirthOrigin{};
+                                           s.origins.insert(s.origins.end(),
+                                                            {at.position.x, at.position.y, at.position.z,
+                                                             at.velocity.x, at.velocity.y, at.velocity.z,
+                                                             std::bit_cast<float>(origin != nullptr ? 1U : 0U)});
+                                       }
+                                   }
+                                   ++births;
+                               });
         if (!s.scratch.empty()) {
-            device.write_buffer(e.data, 0U, bytes_of(std::span<const float>{s.scratch}));
+            device->write_buffer(e.data, 0U, bytes_of(std::span<const float>{s.scratch}));
+        }
+        if (!s.spawn_indices.empty()) {
+            const std::uint64_t at = (static_cast<std::uint64_t>(e.module_floats) + emitter.capacity) * 4U;
+            device->write_buffer(e.data, at, bytes_of(std::span<const std::uint32_t>{s.spawn_indices}));
+        }
+        if (!s.origins.empty()) {
+            const std::uint64_t at = (static_cast<std::uint64_t>(e.module_floats) + 2U * emitter.capacity) * 4U;
+            device->write_buffer(e.data, at, bytes_of(std::span<const float>{s.origins}));
         }
 
         Dispatch update = s.dispatch(e, e.update, births);
         update.buffers[7] = e.fields;
         update.indirect = e.args;
         update.indirect_offset = particle_args;
-        device.dispatch(update);
-        device.barrier();
+        device->dispatch(update);
+        device->barrier();
 
         Dispatch scan = s.dispatch(e, s.scan_blocks, births);
         scan.indirect = e.args;
         scan.indirect_offset = block_args;
-        device.dispatch(scan);
-        device.barrier();
+        device->dispatch(scan);
+        device->barrier();
 
-        device.dispatch(s.dispatch(e, s.scan_totals, births));
-        device.barrier();
+        device->dispatch(s.dispatch(e, s.scan_totals, births));
+        device->barrier();
 
-        Dispatch scatter = s.dispatch(e, s.scatter, births);
-        scatter.indirect = e.args;
-        scatter.indirect_offset = particle_args;
-        device.dispatch(scatter);
-        device.barrier();
+        Dispatch scattering = s.dispatch(e, s.scatter, births);
+        scattering.indirect = e.args;
+        scattering.indirect_offset = particle_args;
+        device->dispatch(scattering);
+        device->barrier();
 
         if (births > 0U) {
             const std::uint32_t groups = (std::min(births, emitter.capacity) + group_size - 1U) / group_size;
             Dispatch spawn = s.dispatch(e, e.spawn, births);
             spawn.groups_x = std::min(groups, max_groups_x);
             spawn.groups_y = (groups + max_groups_x - 1U) / max_groups_x;
-            device.dispatch(spawn);
-            device.barrier();
+            device->dispatch(spawn);
+            device->barrier();
         }
 
-        Dispatch finalize = s.dispatch(e, s.finalize, births);
-        finalize.buffers[7] = e.args;
-        device.dispatch(finalize);
-        device.barrier();
+        Dispatch finalizing = s.dispatch(e, s.finalize, births);
+        finalizing.buffers[7] = e.args;
+        device->dispatch(finalizing);
+        device->barrier();
 
         e.spawned += births;
     }
@@ -474,6 +663,7 @@ void GpuSimulation::reset(const ParameterProvider* parameters) {
     for (EmitterGpu& e : s.emitters) {
         e.spawned = 0U;
         std::fill(e.rate_carry.begin(), e.rate_carry.end(), 0.0);
+        std::fill(e.spawn_counts.begin(), e.spawn_counts.end(), 0U);
         s.zero_counters(e);
     }
     s.device->barrier();
@@ -491,6 +681,7 @@ void GpuSimulation::write_inline_rigid() {
             if (particles.alive() != 0U) {
                 s.upload(s.emitters[i], particles, s.current);
                 s.emitters[i].spawned = particles.spawned;
+                s.emitters[i].spawn_counts = particles.spawn_counts;
             }
         }
     }
@@ -505,6 +696,7 @@ void GpuSimulation::write_rigid(std::size_t emitter, const EmitterState& particl
     s.upload(e, particles, s.current);
     e.spawned = particles.spawned;
     e.rate_carry = particles.rate_carry;
+    e.spawn_counts = particles.spawn_counts;
 }
 
 EmitterBuffers GpuSimulation::emitter_buffers(std::size_t emitter) const {
@@ -571,6 +763,7 @@ Result<EmitterState> GpuSimulation::read_emitter(std::size_t emitter) {
     out.spawned = e.spawned;
     out.refused = words[2];
     out.rate_carry = e.rate_carry;
+    out.spawn_counts = e.spawn_counts;
     return out;
 }
 
@@ -619,6 +812,7 @@ void GpuSimulation::save_into(GpuCheckpoint& checkpoint) {
             static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
         saved.spawned = e.spawned;
         saved.rate_carry = e.rate_carry;
+        saved.spawn_counts = e.spawn_counts;
         s.device->copy_buffer(saved.particles, 0U, e.particles[s.current], 0U, record_bytes);
         s.device->copy_buffer(saved.counters, 0U, e.counters, 0U, counters_bytes);
         s.device->copy_buffer(saved.args, 0U, e.args, 0U, args_bytes);
@@ -640,6 +834,7 @@ void GpuSimulation::restore(const GpuCheckpoint& checkpoint) {
             static_cast<std::uint64_t>(s.effect.emitters[i].capacity) * e.layout.stride;
         e.spawned = saved.spawned;
         e.rate_carry = saved.rate_carry;
+        e.spawn_counts = saved.spawn_counts;
         s.device->copy_buffer(e.particles[s.current], 0U, saved.particles, 0U, record_bytes);
         s.device->copy_buffer(e.counters, 0U, saved.counters, 0U, counters_bytes);
         s.device->copy_buffer(e.args, 0U, saved.args, 0U, args_bytes);

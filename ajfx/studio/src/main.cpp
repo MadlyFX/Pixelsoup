@@ -9,8 +9,8 @@ int main(int argc, char** argv) {
     ajfx::studio::StudioOptions options;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            std::puts("ajfx-studio [page.ajfxstudio] [--recipe <id>] [--expert] [--open-blocks <kind|all>] [--picker] [--at <seconds>] [--once] [--try <name=value>] [--paths] [--no-guides] [--fresh] [--gpu-debug] [--lose-device <seconds>]\n"
-                      "Builds particle effects from blocks and exports them as .ajfx packages for the media server.");
+            std::puts("ajfx-studio [page.ajfxstudio] [--recipe <id>] [--expert] [--open-blocks <kind|all>] [--picker] [--at <seconds>] [--once] [--try <name=value>] [--paths] [--no-guides] [--fresh] [--maximize] [--gpu-debug] [--lose-device <seconds>]\n"
+                      "Authors deterministic scenes and exports .ajfx packages. --recipe opens optional legacy reference content.");
             return 0;
         }
         const std::string argument = argv[i];
@@ -28,6 +28,8 @@ int main(int argc, char** argv) {
             options.once = true;
         } else if (argument == "--picker") {
             options.picker = true;
+        } else if (argument == "--maximize") {
+            options.maximize = true;
         } else if (argument == "--gpu-debug") {
             options.gpu_debug = true;
         } else if (argument == "--lose-device" && i + 1 < argc) {

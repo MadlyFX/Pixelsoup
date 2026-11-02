@@ -39,6 +39,7 @@ endif()
 
 add_library(ajfx STATIC
     src/builder.cpp
+    src/cache.cpp
     src/effect.cpp
     src/field.cpp
     src/fracture.cpp
@@ -216,11 +217,36 @@ if(BUILD_TESTING)
         ajfx_set_options(ajfx_rigid_tests)
         add_test(NAME ajfx.rigid COMMAND ajfx_rigid_tests)
         set_target_properties(ajfx_rigid_tests PROPERTIES FOLDER "ajfx/tests")
+        # Saved state, rigid and particle caches, and parameter timing.
+        add_executable(ajfx_cache_tests tests/cache_tests.cpp)
+        target_link_libraries(ajfx_cache_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_cache_tests)
+        add_test(NAME ajfx.cache COMMAND ajfx_cache_tests)
+        set_target_properties(ajfx_cache_tests PROPERTIES FOLDER "ajfx/tests")
+        # Particles born of contacts and moving bodies, scoped init and
+        # appearance, and heat.
+        add_executable(ajfx_contact_spawn_tests tests/contact_spawn_tests.cpp)
+        target_link_libraries(ajfx_contact_spawn_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_contact_spawn_tests)
+        add_test(NAME ajfx.contact_spawn COMMAND ajfx_contact_spawn_tests)
+        set_target_properties(ajfx_contact_spawn_tests PROPERTIES FOLDER "ajfx/tests")
         # Step cost, checkpoint size and a state digest; run by hand.
         add_executable(ajfx_rigid_bench tests/rigid_bench.cpp)
         target_link_libraries(ajfx_rigid_bench PRIVATE ajfx::rigid)
         ajfx_set_options(ajfx_rigid_bench)
         set_target_properties(ajfx_rigid_bench PROPERTIES FOLDER "ajfx/tests")
+        # Particles meeting another emitter's bodies through the grid, and
+        # wakes.
+        add_executable(ajfx_body_grid_tests tests/body_grid_tests.cpp)
+        target_link_libraries(ajfx_body_grid_tests PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_body_grid_tests)
+        add_test(NAME ajfx.body_grid COMMAND ajfx_body_grid_tests)
+        set_target_properties(ajfx_body_grid_tests PROPERTIES FOLDER "ajfx/tests")
+        # The grid's cost against meeting every body in turn; run by hand.
+        add_executable(ajfx_body_grid_bench tests/body_grid_bench.cpp)
+        target_link_libraries(ajfx_body_grid_bench PRIVATE ajfx::rigid)
+        ajfx_set_options(ajfx_body_grid_bench)
+        set_target_properties(ajfx_body_grid_bench PROPERTIES FOLDER "ajfx/tests")
         if(AJFX_BUILD_D3D12)
             add_executable(ajfx_rigid_gpu_tests tests/rigid_gpu_tests.cpp)
             target_link_libraries(ajfx_rigid_gpu_tests PRIVATE ajfx::rigid ajfx::d3d12)

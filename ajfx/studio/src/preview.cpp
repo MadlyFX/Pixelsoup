@@ -85,6 +85,7 @@ std::uint64_t stage_digest(const PreviewFrame& frame) {
     mix(static_cast<std::uint64_t>(frame.backdrop));
     mix_float(frame.glow);
     mix(frame.figure ? 1U : 0U);
+    mix(frame.staging_floor ? 1U : 0U);
     mix(frame.paused ? 1U : 0U);
     if (frame.paused) {
         mix_float(frame.orbit.yaw);
@@ -234,8 +235,10 @@ scene::Scene Preview::scene_for(const PreviewFrame& frame) const {
         // lighter, and a 1.8 m figure to judge size by.
         constexpr int lines = 8;
         constexpr float reach = static_cast<float>(lines);
-        add_prop(stage, scene::Primitive::Plane, box_world(scene::Vec3{}, scene::Vec3{reach * 2.0F, 1.0F, reach * 2.0F}),
-                 floor_colour, 0.85F, 0U);
+        if (frame.staging_floor) {
+            add_prop(stage, scene::Primitive::Plane, box_world(scene::Vec3{}, scene::Vec3{reach * 2.0F, 1.0F, reach * 2.0F}),
+                     floor_colour, 0.85F, 0U);
+        }
         std::uint64_t index = 1U;
         for (int line = -lines; line <= lines; ++line) {
             const float at = static_cast<float>(line);

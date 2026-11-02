@@ -1,7 +1,9 @@
 #pragma once
 
+#include "bake.hpp"
 #include "compile.hpp"
 #include "document.hpp"
+#include "sandbox.hpp"
 
 #include <ajfx/gpu/kernels.hpp>
 #include <ajfx/math.hpp>
@@ -73,12 +75,19 @@ struct Analysis final {
     Bounds bounds;
     // Most particles alive at once, by layer uid.
     std::map<Uid, std::uint64_t> peak_alive;
+    // The step with the most particles alive on the whole page: where the
+    // effect costs the most to simulate and draw.
+    std::uint64_t peak_step{0U};
     // Some of each layer's particles, spread evenly through its births.
     std::vector<ParticlePath> paths;
     std::uint64_t path_step{2U};
     // False when the effect was too large to run on the CPU: then there are
     // no bounds, peaks or paths.
     bool traced{true};
+    // Where the page's solid things stand through the loop, every
+    // `body_step` steps from step 0, for clicking on them in the preview.
+    std::vector<StageBodies> bodies;
+    std::uint64_t body_step{6U};
 };
 
 struct ExportResult final {
@@ -86,10 +95,19 @@ struct ExportResult final {
     std::string message;
 };
 
+struct BakeResult final {
+    bool ok{false};
+    std::string message;
+    // The bake, when it was taken.
+    std::shared_ptr<const BakeRecord> record;
+};
+
 class PackageBuilder final {
 public:
-    // `instance_seed` is the preview placement's, for the CPU runs.
-    PackageBuilder(std::filesystem::path preview_package, std::uint32_t instance_seed);
+    // `instance_seed` is the preview placement's, for the CPU runs. Without
+    // `analyse` a build is not run on the CPU afterwards (the budget's
+    // probes only want the package).
+    PackageBuilder(std::filesystem::path preview_package, std::uint32_t instance_seed, bool analyse = true);
     ~PackageBuilder();
     PackageBuilder(const PackageBuilder&) = delete;
     PackageBuilder& operator=(const PackageBuilder&) = delete;
@@ -98,11 +116,23 @@ public:
     // it says is looked for there, so a page moved with its files still
     // finds them.
     void submit(Document document, std::uint64_t revision, std::filesystem::path base = {});
-    void submit_export(Document document, std::filesystem::path path, std::filesystem::path base = {});
+    // `bake`, the newest bake, is written beside the package as
+    // `<name>.ajfxcache` when it holds the exported page's baked layers as
+    // they are; the result says why when it is not.
+    void submit_export(Document document, std::filesystem::path path, std::filesystem::path base = {},
+                       std::shared_ptr<const BakeRecord> bake = nullptr);
+    // Bakes the page's baked layers (bake.hpp) once nothing else is waiting:
+    // a preview or an export goes first, and a bake under way runs to its
+    // end unless cancelled.
+    void submit_bake(Document document, std::filesystem::path base = {});
+    void cancel_bake();
 
     [[nodiscard]] std::optional<BuildResult> take_build();
     [[nodiscard]] std::optional<Analysis> take_analysis();
     [[nodiscard]] std::optional<ExportResult> take_export();
+    [[nodiscard]] std::optional<BakeResult> take_bake();
+    // The share of the bake under way, 0 to 1; negative when there is none.
+    [[nodiscard]] double bake_progress() const noexcept { return bake_progress_.load(); }
 
     // A page is queued or building.
     [[nodiscard]] bool busy() const;
@@ -117,6 +147,11 @@ private:
     struct ExportRequest final {
         Document document;
         std::filesystem::path path;
+        std::filesystem::path base;
+        std::shared_ptr<const BakeRecord> bake;
+    };
+    struct BakeRequest final {
+        Document document;
         std::filesystem::path base;
     };
     // An artist's file, read and prepared, kept while the file is unchanged.
@@ -139,6 +174,7 @@ private:
     void run();
     BuildResult build(const Request& request);
     ExportResult export_package(const ExportRequest& request);
+    BakeResult bake_request(const BakeRequest& request);
     void analyse(const Request& request, const Compiled& compiled);
     // Reads and prepares the artist's files `compiled` asks for, from the
     // cache where they are unchanged, into its textures, meshes and fields.
@@ -152,6 +188,7 @@ private:
 
     std::filesystem::path preview_path_;
     std::uint32_t instance_seed_{0U};
+    bool analyse_{true};
     std::unique_ptr<gpu::ShaderCompiler> compiler_;
     // Runs rigid physics layers for the CPU analysis; made with the first.
     std::unique_ptr<RigidSolver> rigid_;
@@ -170,6 +207,10 @@ private:
     std::optional<BuildResult> built_;
     std::optional<Analysis> analysed_;
     std::optional<ExportResult> exported_;
+    std::optional<BakeRequest> pending_bake_;
+    std::optional<BakeResult> baked_;
+    std::atomic<double> bake_progress_{-1.0};
+    std::atomic<bool> cancel_bake_{false};
     bool working_{false};
     bool stopping_{false};
     std::atomic<std::uint64_t> newest_revision_{0U};

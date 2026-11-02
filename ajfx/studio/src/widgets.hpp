@@ -20,6 +20,9 @@ namespace ajfx::studio {
 
 namespace gui = mediaserver::gui;
 
+// Workspace-only night dim; authored colors and viewport pixels are untouched.
+[[nodiscard]] gui::Theme studio_theme(bool night);
+
 // Ids for a control of a block: stable across frames, distinct per part.
 [[nodiscard]] gui::UiId part_id(std::uint64_t owner, std::string_view name, std::uint32_t part = 0U);
 
@@ -28,6 +31,18 @@ void draw_category_icon(gui::UiContext& ctx, Category category, float cx, float 
 
 // Six dots: the grip a block is dragged by.
 void draw_grip(gui::UiContext& ctx, float cx, float cy, gui::UiColor color);
+
+// Marks the shared icons do not have, in the same 14 px square: a die, for
+// another random seed, and a burst of rays, for an explosion.
+void draw_dice(gui::UiContext& ctx, float cx, float cy, gui::UiColor color);
+void draw_burst(gui::UiContext& ctx, float cx, float cy, gui::UiColor color);
+
+// A tool key as editor::tool_key draws one -- a soft rounded key, eased
+// lighter under the pointer, lit in `engaged_color` while its mode is on --
+// with one of the marks above. Returns true on a click.
+using GlyphDraw = void (*)(gui::UiContext&, float, float, gui::UiColor);
+[[nodiscard]] bool glyph_key(gui::UiContext& ctx, gui::UiId id, const gui::Rect& bounds, GlyphDraw glyph, bool engaged,
+                             std::string_view tooltip, gui::UiColor engaged_color);
 
 // Choices as a row of pills, the chosen one lit. Falls back to a dropdown
 // when they do not fit. Returns true on the frame the choice changed.

@@ -4,6 +4,7 @@
 #include <ajfx/mesh.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,41 @@ void a_hull_of_many_faces_still_fills_up() {
             AJFX_CHECK(cell.volume > 0.0F);
             AJFX_CHECK(depth(triangles(cell.mesh), cell.center) < 0.0F);
         }
+    }
+}
+
+void a_detailed_model_cuts_as_quickly_as_a_simple_one() {
+    // 60,000 corners, as a scanned or downloaded prop has: the hull is built
+    // from a fixed number of them, so this takes a moment rather than the
+    // minutes every corner against every face would. Nothing of the model is
+    // left out: every corner is inside the one-cell cut.
+    const MeshData dense = sphere_cloud(60000U, Vec3{0.25F, 1.0F, -0.5F}, 1.0F);
+    const auto start = std::chrono::steady_clock::now();
+    const Result<std::vector<FractureCell>> whole = fracture(dense, {.count = 1U});
+    const Result<std::vector<FractureCell>> cells = fracture(dense, {.count = 24U, .seed = 5U});
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    AJFX_CHECK(whole.ok() && cells.ok());
+    const float hull = total_volume(whole.value());
+    std::cout << "  60,000 corners cut twice in " << seconds << " s; the hull holds " << hull
+              << " against the sphere's 4.18879\n";
+    // Its faces touch the sphere rather than cut inside it, so it holds a
+    // little more than the sphere, never less, and not much more.
+    AJFX_CHECK(hull > 4.18879F && hull < 4.18879F * 1.03F);
+    const std::vector<Triangle> faces = triangles(whole.value()[0].mesh);
+    float worst = -1.0F;
+    for (const MeshVertex& corner : dense.vertices) {
+        worst = std::max(worst, depth(faces, corner.position));
+    }
+    std::cout << "  the farthest corner is " << worst << " outside the cut\n";
+    AJFX_CHECK(worst < 1.0e-4F);
+    AJFX_CHECK(cells.value().size() == 24U);
+    AJFX_CHECK(std::fabs(total_volume(cells.value()) - hull) < 1.0e-3F);
+    // And it is still one model, one cut.
+    const Result<std::vector<FractureCell>> again = fracture(dense, {.count = 24U, .seed = 5U});
+    AJFX_CHECK(again.ok() && again.value().size() == cells.value().size());
+    for (std::size_t i = 0U; i < cells.value().size() && i < again.value().size(); ++i) {
+        AJFX_CHECK(again.value()[i].mesh.vertices.size() == cells.value()[i].mesh.vertices.size());
+        AJFX_CHECK(again.value()[i].volume == cells.value()[i].volume);
     }
 }
 
@@ -446,6 +482,7 @@ int main() {
     const ajfx::test::Case cases[] = {
         {"a_unit_cube_cuts_into_cells_that_fill_it", a_unit_cube_cuts_into_cells_that_fill_it},
         {"a_hull_of_many_faces_still_fills_up", a_hull_of_many_faces_still_fills_up},
+        {"a_detailed_model_cuts_as_quickly_as_a_simple_one", a_detailed_model_cuts_as_quickly_as_a_simple_one},
         {"the_same_model_in_other_units_cuts_the_same_way", the_same_model_in_other_units_cuts_the_same_way},
         {"every_cell_is_a_closed_convex_solid", every_cell_is_a_closed_convex_solid},
         {"cells_do_not_overlap_and_leave_no_gap", cells_do_not_overlap_and_leave_no_gap},

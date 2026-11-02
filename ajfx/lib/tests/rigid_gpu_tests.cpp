@@ -15,6 +15,7 @@
 #include <ajfx/simulation.hpp>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -358,6 +359,295 @@ void hosts_write_the_rigid_emitters_they_step() {
     }
 }
 
+// A crate, and a ball dropped on its lid: sparks where the ball hits, which
+// glow and settle on the crate; smoke off whatever moves; and beside them an
+// emitter whose two spawn modules look different, scoped by source. The
+// births are scheduled on the CPU by the reference's own code; the kernels
+// set them up and move them.
+Effect sparks_and_smoke() {
+    EffectBuilder builder{"sparks"};
+    builder.emitter("pieces")
+        .capacity(8U)
+        .spawn(SpawnPile{.count = 1U, .shape = PileShape::Box, .jitter = 0.0F, .release = 0.0F})
+        .spawn(SpawnBurst{.time = 0.5F, .count = 1U, .body = 1U})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ShapeLocation{.shape = Shape::Point, .center = Vec3{0.15F, 3.0F, 0.1F}, .only = Scope{.sources = {1U}}})
+        .init(InitSize{.min = 1.0F, .max = 1.0F, .only = Scope{.kinds = {0U}}})
+        .init(InitSize{.min = 0.3F, .max = 0.3F, .only = Scope{.kinds = {1U}}})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .friction = 0.9F,
+                             .restitution = 0.0F,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Sphere, .friction = 0.9F,
+                                                      .restitution = 0.1F}}})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.9F});
+    builder.emitter("sparks")
+        .capacity(16384U)
+        .seed(7U)
+        .spawn(SpawnFromContacts{.emitter = "pieces",
+                                 .min_speed = 1.0F,
+                                 .per_speed = 6.0F,
+                                 .max_per_step = 32U,
+                                 .along_normal = 0.25F,
+                                 .along_surface = 0.05F,
+                                 .spread = 20.0F,
+                                 .bodies = Scope{.kinds = {1U}}})
+        .init(Lifetime{.min = 8.0F, .max = 8.0F})
+        .init(InitSize{.min = 0.02F, .max = 0.02F})
+        .init(InitColor{.a = Color{0.3F, 0.3F, 0.3F, 1.0F}, .b = Color{0.3F, 0.3F, 0.3F, 1.0F}})
+        .update(Gravity{})
+        .update(BodyCollision{.emitter = "pieces", .restitution = 0.0F, .friction = 1.0F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F})
+        .update(Heat{.start = 1.2F, .half_life = 0.4F, .glow = 3.0F});
+    builder.emitter("smoke")
+        .capacity(4096U)
+        .seed(13U)
+        .spawn(SpawnFromBodies{.emitter = "pieces", .min_speed = 0.3F, .per_speed = 20.0F, .max_per_step = 8U,
+                               .surface = 1.0F, .inherit = 0.2F})
+        .init(Lifetime{.min = 2.0F, .max = 3.0F})
+        .init(InitSize{.min = 0.05F, .max = 0.1F})
+        .update(Gravity{.acceleration = Vec3{0.0F, 0.5F, 0.0F}})
+        .update(Drag{.coefficient = 1.0F})
+        .update(ColorOverLife{});
+    builder.emitter("two")
+        .capacity(512U)
+        .seed(17U)
+        .spawn(SpawnRate{.rate = 40.0F})
+        .spawn(SpawnRate{.rate = 40.0F})
+        .init(Lifetime{.min = 2.0F, .max = 2.0F})
+        .init(Velocity{.speed_min = 0.5F, .speed_max = 1.0F, .spread = 180.0F})
+        .init(InitSize{.min = 0.2F, .max = 0.2F})
+        .init(InitColor{.a = Color{1.0F, 0.0F, 0.0F, 1.0F}, .b = Color{1.0F, 0.2F, 0.0F, 1.0F},
+                        .only = Scope{.sources = {0U}}})
+        .init(InitColor{.a = Color{0.0F, 0.0F, 1.0F, 1.0F}, .b = Color{0.0F, 0.2F, 1.0F, 1.0F},
+                        .only = Scope{.sources = {1U}}})
+        .update(SizeOverLife{.keys = {{0.0F, 1.0F}, {1.0F, 0.25F}}, .only = Scope{.sources = {1U}}})
+        .update(Heat{.start = 1.0F, .half_life = 0.5F, .glow = 2.0F, .only = Scope{.sources = {0U}}});
+    return builder.build().value();
+}
+
+// The GPU's particles against the reference's: born alike exactly, set up
+// and moved within a thousandth.
+std::size_t apart_from(const EmitterState& g, const EmitterState& c) {
+    AJFX_CHECK(g.alive() == c.alive() && g.spawned == c.spawned);
+    AJFX_CHECK(g.spawn_index == c.spawn_index && g.age == c.age);
+    std::size_t apart = 0U;
+    for (std::size_t i = 0U; i < g.alive(); ++i) {
+        const Vec3 d = g.position[i] - c.position[i];
+        const float colour = std::fabs(g.color[i].r - c.color[i].r) + std::fabs(g.color[i].g - c.color[i].g) +
+                             std::fabs(g.color[i].b - c.color[i].b) + std::fabs(g.color[i].a - c.color[i].a);
+        if (std::sqrt(dot(d, d)) > 1.0e-3F || colour > 1.0e-4F || std::fabs(g.size[i] - c.size[i]) > 1.0e-6F) {
+            ++apart;
+        }
+    }
+    return apart;
+}
+
+void contacts_and_bodies_bear_the_same_particles_on_the_gpu() {
+    const Effect effect = sparks_and_smoke();
+    gpu::GpuSimulation gpu = make_gpu(effect);
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    for (const std::uint64_t tick : {40U, 90U, 200U}) {
+        gpu.advance_to(tick);
+        cpu.advance_to(tick);
+        AJFX_CHECK(same(gpu.read_emitter(0U).value(), cpu.emitter(0U)));
+        for (const std::size_t emitter : {1U, 2U, 3U}) {
+            const std::size_t apart = apart_from(gpu.read_emitter(emitter).value(), cpu.emitter(emitter));
+            std::cout << "  step " << tick << ", " << effect.emitters[emitter].name << ": "
+                      << cpu.emitter(emitter).alive() << " alive, " << apart << " apart from the reference\n";
+            AJFX_CHECK(apart == 0U);
+        }
+    }
+    AJFX_CHECK(cpu.emitter(1U).spawned > 0U && cpu.emitter(2U).spawned > 0U);
+}
+
+void hosted_steps_bear_particles_from_the_runners_frames() {
+    const Effect effect = sparks_and_smoke();
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation gpu =
+        gpu::GpuSimulation::create(*g_device, effect, kernels, 5U, SimulationOptions{}, gpu::RigidHosting::Host)
+            .value();
+    RigidRunner runner{*g_solver};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 5U, {});
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    while (gpu.tick() < 120U) {
+        std::shared_ptr<const RigidFrame> frame = track->frame(gpu.tick() + 1U);
+        while (!frame) {
+            AJFX_CHECK(!track->error().has_value());
+            runner.wait_idle();
+            frame = track->frame(gpu.tick() + 1U);
+        }
+        gpu.step(nullptr, *frame);
+    }
+    cpu.advance_to(120U);
+    AJFX_CHECK(same(gpu.read_emitter(0U).value(), cpu.emitter(0U)));
+    for (const std::size_t emitter : {1U, 2U, 3U}) {
+        AJFX_CHECK(apart_from(gpu.read_emitter(emitter).value(), cpu.emitter(emitter)) == 0U);
+    }
+    std::cout << "  " << cpu.emitter(1U).spawned << " sparks and " << cpu.emitter(2U).spawned
+              << " puffs, born of the runner's frames as of the reference's own bodies\n";
+    AJFX_CHECK(cpu.emitter(1U).spawned > 0U);
+}
+
+void contact_spawns_rerun_exactly_on_the_gpu() {
+    const Effect effect = sparks_and_smoke();
+    gpu::GpuSimulation a = make_gpu(effect);
+    gpu::GpuSimulation b = make_gpu(effect);
+    a.advance_to(150U);
+    b.advance_to(150U);
+    for (const std::size_t emitter : {1U, 2U, 3U}) {
+        AJFX_CHECK(a.read_particle_bytes(emitter).value() == b.read_particle_bytes(emitter).value());
+    }
+    // A checkpoint taken before the ball lands resumes to the same bits.
+    gpu::GpuSimulation c = make_gpu(effect);
+    c.advance_to(20U);
+    Result<gpu::GpuCheckpoint> checkpoint = c.save();
+    AJFX_CHECK(checkpoint.ok());
+    c.advance_to(90U);
+    c.restore(checkpoint.value());
+    c.advance_to(150U);
+    for (const std::size_t emitter : {1U, 2U, 3U}) {
+        AJFX_CHECK(c.read_particle_bytes(emitter).value() == a.read_particle_bytes(emitter).value());
+    }
+}
+
+// ---------------------------------------------------------------- the grid
+
+gpu::GpuSimulation make_gpu_grid(const Effect& effect, const gpu::KernelSet& kernels, bool broadphase) {
+    Result<gpu::GpuSimulation> simulation = gpu::GpuSimulation::create(
+        *g_device, effect, kernels, 5U, SimulationOptions{.rigid = g_solver.get(), .body_broadphase = broadphase});
+    if (!simulation) {
+        std::cout << simulation.error().message << '\n';
+    }
+    AJFX_CHECK(simulation.ok());
+    return std::move(simulation).value();
+}
+
+// `crates` boxes 0.5 across in rows 1.3 apart, held still; `flakes` of snow
+// falling on them from just above; `chips` rigid chips (contact radius half
+// their size) among them; and four balls rolling through the snow, stirring
+// it with their wakes and pushing it aside.
+Effect crates_snow_and_balls(std::uint32_t crates, std::uint32_t flakes, std::uint32_t chips) {
+    const float d = 0.5F * std::sqrt(3.0F) * 1.5F;
+    const auto columns = static_cast<std::uint32_t>(std::ceil(std::sqrt(static_cast<float>(crates) * 1.25F)));
+    const float width = static_cast<float>(columns) * d;
+    const float depth = std::ceil(static_cast<float>(crates) / static_cast<float>(columns)) * d;
+    EffectBuilder builder{"grid"};
+    builder.emitter("crates")
+        .capacity(crates)
+        .spawn(SpawnPile{.count = crates,
+                         .shape = PileShape::Box,
+                         .width = width,
+                         .depth = depth,
+                         .spacing = 1.5F,
+                         .jitter = 0.0F,
+                         .release = 1000.0F})
+        .init(Lifetime{.min = 1000.0F, .max = 1000.0F})
+        .init(InitSize{.min = 0.5F, .max = 0.5F})
+        .update(RigidPhysics{.shape = RigidShape::Box, .friction = 0.9F, .restitution = 0.0F});
+    builder.emitter("balls")
+        .capacity(4U)
+        .seed(2U)
+        .spawn(SpawnBurst{.count = 4U})
+        .init(Lifetime{.min = 1000.0F, .max = 1000.0F})
+        .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{0.0F, 1.6F, 0.0F},
+                            .size = Vec3{0.5F * width, 0.0F, 0.5F * depth}})
+        .init(Velocity{.direction = Vec3{1.0F, 0.0F, 0.0F}, .speed_min = 2.0F, .speed_max = 4.0F, .spread = 90.0F})
+        .init(InitSize{.min = 0.8F, .max = 0.8F})
+        .update(RigidPhysics{.shape = RigidShape::Sphere, .allow_sleep = false});
+    builder.emitter("snow")
+        .capacity(flakes)
+        .seed(3U)
+        .spawn(SpawnBurst{.count = flakes})
+        .init(Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{0.0F, 1.5F, 0.0F}, .size = Vec3{width, 1.0F, depth}})
+        .init(Velocity{.direction = Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 0.5F, .speed_max = 1.0F, .spread = 20.0F})
+        .init(InitSize{.min = 0.02F, .max = 0.02F})
+        .update(Gravity{.acceleration = Vec3{0.0F, -2.0F, 0.0F}})
+        .update(Wake{.emitter = "balls", .strength = 6.0F, .radius = 4.0F})
+        .update(BodyCollision{.emitter = "crates", .restitution = 0.0F, .friction = 1.0F})
+        .update(BodyCollision{.emitter = "balls", .restitution = 0.0F, .friction = 0.2F})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    builder.emitter("chips")
+        .capacity(chips)
+        .seed(5U)
+        .spawn(SpawnBurst{.count = chips})
+        .init(Lifetime{.min = 100.0F, .max = 100.0F})
+        .init(ShapeLocation{.shape = Shape::Box, .center = Vec3{0.0F, 1.5F, 0.0F}, .size = Vec3{width, 0.4F, depth}})
+        .init(Velocity{.speed_min = 1.0F, .speed_max = 3.0F, .spread = 60.0F})
+        .init(InitSize{.min = 0.06F, .max = 0.2F})
+        .init(InitTumble{})
+        .update(Gravity{})
+        .update(RigidBody{.contact_scale = 0.5F})
+        .update(BodyCollision{.emitter = "crates", .restitution = 0.2F, .friction = 0.6F})
+        .update(PlaneCollision{.restitution = 0.2F, .friction = 0.6F});
+    return builder.build().value();
+}
+
+// Steps to `tick` and waits for the device: milliseconds a step.
+double timed_steps(gpu::GpuSimulation& simulation, std::uint64_t tick) {
+    const std::uint64_t from = simulation.tick();
+    const auto start = std::chrono::steady_clock::now();
+    simulation.advance_to(tick);
+    AJFX_CHECK(simulation.read_particle_bytes(2U).ok());
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ms / static_cast<double>(tick - from);
+}
+
+void the_gpu_grid_meets_what_every_body_in_turn_meets() {
+    const Effect effect = crates_snow_and_balls(1200U, 8000U, 1000U);
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation grid = make_gpu_grid(effect, kernels, true);
+    gpu::GpuSimulation every = make_gpu_grid(effect, kernels, false);
+    Simulation cpu = Simulation::create(effect, 5U, SimulationOptions{.rigid = g_solver.get()}).value();
+    for (const std::uint64_t tick : {20U, 60U}) {
+        grid.advance_to(tick);
+        every.advance_to(tick);
+        cpu.advance_to(tick);
+        for (const std::size_t emitter : {2U, 3U}) {
+            AJFX_CHECK(grid.read_particle_bytes(emitter).value() == every.read_particle_bytes(emitter).value());
+            const std::size_t apart = apart_from(grid.read_emitter(emitter).value(), cpu.emitter(emitter));
+            std::cout << "  step " << tick << ", " << effect.emitters[emitter].name << ": "
+                      << cpu.emitter(emitter).alive() << " alive, the same bits through the grid and without, "
+                      << apart << " apart from the reference\n";
+            // Snow settles, so it agrees closely; chips tumbling off each
+            // other's rounding are only reported.
+            if (emitter == 2U) {
+                AJFX_CHECK(apart == 0U);
+            }
+        }
+    }
+    // A rerun, and a checkpoint resumed, land on the same bits.
+    gpu::GpuSimulation again = make_gpu_grid(effect, kernels, true);
+    again.advance_to(30U);
+    Result<gpu::GpuCheckpoint> checkpoint = again.save();
+    AJFX_CHECK(checkpoint.ok());
+    again.advance_to(50U);
+    again.restore(checkpoint.value());
+    again.advance_to(60U);
+    for (const std::size_t emitter : {2U, 3U}) {
+        AJFX_CHECK(again.read_particle_bytes(emitter).value() == grid.read_particle_bytes(emitter).value());
+    }
+}
+
+// 2000 crates and 50000 flakes: what a step costs through the grid and
+// meeting every body in turn. Printed, not checked: GPUs differ.
+void the_gpu_grid_cost() {
+    const Effect effect = crates_snow_and_balls(2000U, 50000U, 2000U);
+    const gpu::KernelSet kernels = gpu::compile_kernels(effect, *g_compiler).value();
+    gpu::GpuSimulation grid = make_gpu_grid(effect, kernels, true);
+    gpu::GpuSimulation every = make_gpu_grid(effect, kernels, false);
+    // The first steps compile pipelines and settle; time the ones after.
+    grid.advance_to(5U);
+    every.advance_to(5U);
+    AJFX_CHECK(grid.read_particle_bytes(2U).ok() && every.read_particle_bytes(2U).ok());
+    const double fast = timed_steps(grid, 35U);
+    const double slow = timed_steps(every, 35U);
+    std::cout << "  2000 crates, 4 balls, 50000 flakes and 2000 chips: " << fast << " ms a step through the grid, "
+              << slow << " ms meeting every body in turn (rigid physics on the CPU included in both)\n";
+    AJFX_CHECK(grid.read_particle_bytes(2U).value() == every.read_particle_bytes(2U).value());
+}
+
 } // namespace
 
 int main() {
@@ -383,6 +673,12 @@ int main() {
         {"body_kinds_draw_their_own_models_in_depth_order", body_kinds_draw_their_own_models_in_depth_order},
         {"piles_stand_on_the_gpu_from_the_start", piles_stand_on_the_gpu_from_the_start},
         {"hosts_write_the_rigid_emitters_they_step", hosts_write_the_rigid_emitters_they_step},
+        {"contacts_and_bodies_bear_the_same_particles_on_the_gpu",
+         contacts_and_bodies_bear_the_same_particles_on_the_gpu},
+        {"hosted_steps_bear_particles_from_the_runners_frames", hosted_steps_bear_particles_from_the_runners_frames},
+        {"contact_spawns_rerun_exactly_on_the_gpu", contact_spawns_rerun_exactly_on_the_gpu},
+        {"the_gpu_grid_meets_what_every_body_in_turn_meets", the_gpu_grid_meets_what_every_body_in_turn_meets},
+        {"the_gpu_grid_cost", the_gpu_grid_cost},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

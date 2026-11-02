@@ -30,8 +30,12 @@
 namespace ajfx {
 
 inline constexpr std::uint32_t package_container_version = 1U;
-// Version of the effect.json schema this library reads and writes.
-inline constexpr std::uint32_t effect_format_version = 1U;
+// Version of the effect.json schema this library reads and writes. 2 added
+// the effect's blasts, the shockwave module and Break's blast threshold; 3
+// the spawn_from_contacts, spawn_from_bodies and heat modules and the `only`
+// scope of init modules and appearance curves; 4 the wake module; 5 per-kind
+// and prop draw tint and SpawnPile's initial velocity and turn.
+inline constexpr std::uint32_t effect_format_version = 5U;
 
 struct PackageEntry final {
     std::string name;

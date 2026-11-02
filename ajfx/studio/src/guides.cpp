@@ -167,9 +167,11 @@ private:
     static bool always_shown(const Block& block) {
         const std::string_view kind = block.kind;
         // An object is scenery: it reads as part of the stage whether or
-        // not it is the block being worked on.
-        return kind == "shape" || kind == "sphere" || kind == "box" || kind == "mesh_collider" ||
-               kind == "object" || (kind == "ground" && number_of(block, "height") != 0.0F);
+        // not it is the block being worked on. So is where an explosion
+        // goes off, which is what everything near it answers.
+        return kind == BlockKind::Shape || kind == BlockKind::Sphere || kind == BlockKind::Box || kind == BlockKind::MeshCollider ||
+               kind == BlockKind::Object || kind == BlockKind::Explosion || kind == BlockKind::Push ||
+               (kind == BlockKind::Ground && number_of(block, "height") != 0.0F);
     }
 
     void handle(const Block& block, std::string control, HandleMotion motion, Vec3 at, Vec3 origin, std::string label,
@@ -190,7 +192,7 @@ private:
     void add(const Block& block, Guide& guide) {
         const std::string_view kind = block.kind;
         const Vec3 up{0.0F, 1.0F, 0.0F};
-        if (kind == "shape") {
+        if (kind == BlockKind::Shape) {
             guide.kind = GuideKind::Shape;
             const std::string shape = choice_of(block, "shape");
             const Vec3 centre = to_vec3(get(block, "offset")) * s_;
@@ -229,7 +231,7 @@ private:
             }
             drop(guide, centre);
             handle(block, "offset", HandleMotion::Floor, centre, centre, "Offset");
-        } else if (kind == "launch") {
+        } else if (kind == BlockKind::Launch) {
             guide.kind = GuideKind::Shape;
             const std::string direction = choice_of(block, "direction");
             const Value speed = get(block, "speed");
@@ -265,17 +267,17 @@ private:
             if (spread.x > 0.5F) {
                 cone(spread.x, true);
             }
-        } else if (kind == "gravity" || kind == "rise") {
+        } else if (kind == BlockKind::Gravity || kind == BlockKind::Rise) {
             guide.kind = GuideKind::Force;
             const Value strength = get(block, "strength");
             // Gravity draws half a metre a g; lift a tenth of a metre per m/s^2.
-            const float per = kind == "gravity" ? -0.5F : 0.1F;
+            const float per = kind == BlockKind::Gravity ? -0.5F : 0.1F;
             const Vec3 start = origin_ + Vec3{0.25F * s_, 0.0F, 0.0F};
             arrow(guide, start, start + up * (strength.y * per * s_));
             if (strength.x < strength.y) {
                 guide.strokes.push_back(line(start, start + up * (strength.x * per * s_), true));
             }
-        } else if (kind == "wind") {
+        } else if (kind == BlockKind::Wind) {
             guide.kind = GuideKind::Force;
             const Value strength = get(block, "strength");
             const float heading = number_of(block, "heading") * pi / 180.0F;
@@ -284,12 +286,12 @@ private:
             const float reach = std::max(strength.y * 0.15F, 0.2F) * s_;
             arrow(guide, start, start + along * reach);
             handle(block, "heading", HandleMotion::Heading, start + along * reach, start, "Heading");
-        } else if (kind == "turbulence") {
+        } else if (kind == BlockKind::Turbulence) {
             guide.kind = GuideKind::Field;
             if (focused_) {
                 field(block, guide);
             }
-        } else if (kind == "swirl") {
+        } else if (kind == BlockKind::Swirl) {
             guide.kind = GuideKind::Force;
             const Vec3 centre = to_vec3(get(block, "center")) * s_;
             const bool horizontal = choice_of(block, "axis") == "horizontal";
@@ -312,7 +314,7 @@ private:
             }
             drop(guide, centre);
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
-        } else if (kind == "draw_in") {
+        } else if (kind == BlockKind::DrawIn) {
             guide.kind = GuideKind::Force;
             const Vec3 centre = to_vec3(get(block, "center")) * s_;
             const float height = number_of(block, "height") * s_;
@@ -330,7 +332,7 @@ private:
                 handle(block, "height", HandleMotion::Height, centre + up * height, centre, "Fades by");
             }
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
-        } else if (kind == "attract") {
+        } else if (kind == BlockKind::Attract) {
             guide.kind = GuideKind::Force;
             const Vec3 point = to_vec3(get(block, "point")) * s_;
             const float reach = number_of(block, "reach") * s_;
@@ -351,7 +353,37 @@ private:
             }
             drop(guide, point);
             handle(block, "point", HandleMotion::Floor, point, point, "Point");
-        } else if (kind == "ground") {
+        } else if (kind == BlockKind::Explosion) {
+            guide.kind = GuideKind::Force;
+            const Vec3 centre = to_vec3(get(block, "at")) * s_;
+            const float radius = std::max(number_of(block, "radius"), 0.0F) * s_;
+            // How far it reaches, faintly, and a burst of arrows out from
+            // where it goes off.
+            ball(guide, centre, radius, true);
+            const float inner = 0.06F * s_;
+            const float outer = std::max(std::min(0.3F * s_, radius), inner * 2.0F);
+            for (const Vec3 d : {Vec3{1.0F, 0.0F, 0.0F}, Vec3{-1.0F, 0.0F, 0.0F}, Vec3{0.0F, 1.0F, 0.0F},
+                                 Vec3{0.0F, -1.0F, 0.0F}, Vec3{0.0F, 0.0F, 1.0F}, Vec3{0.0F, 0.0F, -1.0F}}) {
+                arrow(guide, centre + d * inner, centre + d * outer);
+            }
+            drop(guide, centre);
+            handle(block, "radius", HandleMotion::Radius, centre + Vec3{radius, 0.0F, 0.0F}, centre, "Radius");
+            handle(block, "at", HandleMotion::Floor, centre, centre, "Where it goes off");
+        } else if (kind == BlockKind::Push) {
+            guide.kind = GuideKind::Force;
+            const Vec3 point = to_vec3(get(block, "at")) * s_;
+            const float reach = std::max(number_of(block, "radius"), 0.0F) * s_;
+            Vec3 way = to_vec3(get(block, "toward"));
+            const float length = std::sqrt(dot(way, way));
+            way = length > 1.0e-6F ? way * (1.0F / length) : Vec3{0.0F, 0.0F, -1.0F};
+            // An arrow into the point along the way it pushes, and how far
+            // round it reaches, faintly.
+            ball(guide, point, reach, true);
+            arrow(guide, point - way * std::max(reach, 0.15F * s_), point);
+            drop(guide, point);
+            handle(block, "radius", HandleMotion::Radius, point + Vec3{reach, 0.0F, 0.0F}, point, "Reach");
+            handle(block, "at", HandleMotion::Floor, point, point, "What it pushes");
+        } else if (kind == BlockKind::Ground) {
             guide.kind = GuideKind::Collider;
             const float height = number_of(block, "height") * s_;
             const float half = 1.5F * s_;
@@ -365,7 +397,7 @@ private:
             guide.strokes.push_back(line(centre - x * half, centre + x * half, true));
             guide.strokes.push_back(line(centre - z * half, centre + z * half, true));
             handle(block, "height", HandleMotion::Height, centre, Vec3{}, "Height");
-        } else if (kind == "sphere") {
+        } else if (kind == BlockKind::Sphere) {
             guide.kind = GuideKind::Collider;
             const Vec3 centre = to_vec3(get(block, "center")) * s_;
             const float radius = number_of(block, "radius") * s_;
@@ -373,7 +405,7 @@ private:
             drop(guide, centre);
             handle(block, "radius", HandleMotion::Radius, centre + Vec3{radius, 0.0F, 0.0F}, centre, "Radius");
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
-        } else if (kind == "box") {
+        } else if (kind == BlockKind::Box) {
             guide.kind = GuideKind::Collider;
             const Vec3 centre = to_vec3(get(block, "center")) * s_;
             const Value size = get(block, "size");
@@ -381,7 +413,7 @@ private:
             box(guide, centre, half);
             handle(block, "size", HandleMotion::Corner, centre + half, centre, "Size");
             handle(block, "center", HandleMotion::Floor, centre, centre, "Center");
-        } else if (kind == "mesh_collider") {
+        } else if (kind == BlockKind::MeshCollider) {
             guide.kind = GuideKind::Collider;
             const Vec3 at = to_vec3(get(block, "position")) * s_;
             const float scale = std::max(number_of(block, "scale"), 0.001F) * s_;
@@ -404,7 +436,7 @@ private:
             }
             drop(guide, at);
             handle(block, "position", HandleMotion::Floor, at, at, "Position");
-        } else if (kind == "object") {
+        } else if (kind == BlockKind::Object) {
             guide.kind = GuideKind::Collider;
             const Vec3 at = to_vec3(get(block, "at")) * s_;
             const Quat turn = prop_orientation(to_vec3(get(block, "turn")));

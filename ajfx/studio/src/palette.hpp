@@ -25,8 +25,10 @@ public:
     static constexpr float rail_width = 40.0F;
 
     // Draws the palette (or, folded, its rail) in `bounds`. Call before the
-    // page draws, and pass held() to the page.
-    void draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document& document, Uid working_layer);
+    // page draws, and pass held() to the page. `target` is the layer a click
+    // adds to (PageView::target_layer): the heading names it, and entries it
+    // cannot hold are greyed.
+    void draw(gui::UiContext& ctx, const gui::Rect& bounds, const Document& document, Uid target);
     // After every panel: lets go of an entry once the pointer is up.
     void end_frame(gui::UiContext& ctx);
 

@@ -1,7 +1,11 @@
 #pragma once
 
+#include "block_kind.hpp"
+#include "scene.hpp"
+
 #include <ajfx/modules.hpp>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -135,13 +139,48 @@ enum class LayerKind : std::uint8_t {
 [[nodiscard]] std::string_view layer_kind_id(LayerKind kind) noexcept;
 [[nodiscard]] LayerKind layer_kind_from(std::string_view id) noexcept;
 
-// How the palette and the pickers name an empty layer of a kind, and how
+// What a layer is, in the artist's words: what "Add layer" asks ("What is
+// it?") in place of the kind. It decides the kind (a Solid is moved by a
+// physics engine, everything else by forces) and how the page's world acts
+// on the layer -- how much of the page's gravity and wind it feels, and what
+// it does where it meets the ground or anything solid: sparks bounce, dust
+// sticks, smoke slides (`world_share`). Something else is a particle layer
+// built by hand: the page's gravity leaves it alone unless a block says so.
+// The kind can still be changed on its own, under Advanced.
+enum class LayerWhat : std::uint8_t {
+    Other,
+    Solid,
+    Sparks,
+    Debris,
+    Fire,
+    Smoke,
+    Dust,
+    Rain,
+    Snow,
+    Magic,
+};
+
+// In the order "What is it?" offers them.
+inline constexpr std::array<LayerWhat, 10U> layer_whats{
+    LayerWhat::Solid, LayerWhat::Sparks, LayerWhat::Fire, LayerWhat::Smoke, LayerWhat::Dust,
+    LayerWhat::Debris, LayerWhat::Rain, LayerWhat::Snow, LayerWhat::Magic, LayerWhat::Other,
+};
+
+[[nodiscard]] std::string_view layer_what_name(LayerWhat what) noexcept;
+// A few words on what it does, for a tooltip.
+[[nodiscard]] std::string_view layer_what_description(LayerWhat what) noexcept;
+[[nodiscard]] std::string_view layer_what_id(LayerWhat what) noexcept;
+[[nodiscard]] std::optional<LayerWhat> layer_what_from(std::string_view id) noexcept;
+// The kind a layer of this is made as.
+[[nodiscard]] LayerKind layer_what_kind(LayerWhat what) noexcept;
+
+// How the palette and the pickers name an empty layer of what it is, and how
 // that name is read back. One pair, so the side that offers a layer and the
 // side that makes one cannot drift apart: an id neither recognises would
 // make a layer with no uid, and every widget on it would collide with every
-// other such layer.
-[[nodiscard]] std::string empty_layer_id(LayerKind kind);
-[[nodiscard]] std::optional<LayerKind> empty_layer_kind(std::string_view id) noexcept;
+// other such layer. "" is Something else.
+[[nodiscard]] std::string empty_layer_id(LayerWhat what);
+[[nodiscard]] std::optional<LayerWhat> empty_layer_what(std::string_view id) noexcept;
 
 struct Layer final {
     Uid uid{};
@@ -156,6 +195,16 @@ struct Layer final {
     // Deals the whole layer's random values afresh; 0 keeps the layer's own.
     std::uint32_t seed{0U};
     LayerKind kind{LayerKind::Particles};
+    // What the layer is, which sets how the page's world acts on it.
+    LayerWhat what{LayerWhat::Other};
+    // Baked: worked out once and played back from a cache (ajfx/cache.hpp)
+    // rather than simulated wherever it plays -- a rigid layer's bodies to
+    // the bit, a particle layer's particles quantised. Live otherwise. A
+    // baked layer holds its bake-time published controls where they are
+    // set, since a cache cannot follow a value its simulation reads. A
+    // solid layer is made baked (make_layer, set_layer_kind) and a particle
+    // layer live; a page read from a file keeps what it says.
+    bool baked{false};
     // A rigid layer's physics world: one body shape, friction, bounciness,
     // density, spin damping and rest, held as a block of the catalog's
     // "physics" definition so that it stores, draws, publishes and undoes
@@ -169,6 +218,60 @@ struct Layer final {
     friend bool operator==(const Layer&, const Layer&) = default;
 };
 
+// What happens where a layer meets the ground or something solid.
+enum class Contact : std::uint8_t {
+    Bounce, // springs back by `bounce`, and slides with `friction`
+    Slide,  // stops falling and slides with `friction`
+    Stick,  // stops where it lands
+    Vanish, // is gone (particles only)
+};
+
+// How the page's world acts on a layer, from what it is (Layer::what):
+// - `gravity` and `wind` are the shares of the page's gravity and wind it
+//   feels. Smoke and flames rise by their own blocks, so they feel none of
+//   the page's gravity; dust and snow drift, so they feel a little.
+// - `contact`, `bounce` and `friction` are what it does at the page's ground
+//   and at every solid thing on the page. A layer's own Ground block says
+//   both instead.
+// A rigid layer always feels the whole of the page's gravity: a physics
+// engine has no lighter body.
+struct WorldShare final {
+    float gravity{0.0F};
+    float wind{0.0F};
+    Contact contact{Contact::Slide};
+    float bounce{0.0F};
+    float friction{0.2F};
+    // How hard an Explosion throws it, as a share of the blast's own speed,
+    // each particle picking its own between the two: sparks fly, smoke and
+    // flame are pushed less. A solid piece takes the blast as it is, so
+    // whether it breaks reads straight off the blast.
+    float blast_min{1.0F};
+    float blast_max{1.0F};
+
+    friend bool operator==(const WorldShare&, const WorldShare&) = default;
+};
+
+[[nodiscard]] WorldShare world_share(const Layer& layer) noexcept;
+
+// The world every layer of the page plays in: a ground, gravity and wind,
+// the page's rather than each layer's. The compiler gives them to every layer
+// by its share (world_share); a layer's own Ground or Gravity block stands
+// in for the page's, and a Passes through block opts it out of the solids
+// (and, if it says so, the ground).
+struct PageWorld final {
+    // A ground at `ground_height` metres.
+    bool ground{true};
+    float ground_height{0.0F};
+    // In g: 1 is Earth's.
+    float gravity{1.0F};
+    // A steady push, m/s^2, toward `wind_heading` degrees (0 is +X, 90 is
+    // -Z, as the Wind block's heading).
+    float wind{0.0F};
+    float wind_heading{0.0F};
+
+    friend bool operator==(const PageWorld&, const PageWorld&) = default;
+};
+
 // What the preview stands the effect on. Never exported.
 enum class Backdrop : std::uint8_t {
     Studio, // a lit grey floor and a 1.8 m figure for scale
@@ -176,7 +279,16 @@ enum class Backdrop : std::uint8_t {
     Void,   // nothing: black, no floor
 };
 
+// The page's frame-time budget (Document::budget_ms): a share of a 60 Hz
+// frame left for the effect once the show around it has drawn.
+inline constexpr float default_budget_ms = 4.0F;
+inline constexpr float min_budget_ms = 0.1F;
+inline constexpr float max_budget_ms = 100.0F;
+
 struct Document final {
+    // New scenes have one typed authority. `layers` is only for the explicit
+    // legacy importer and the compiler's transient IR, never a second editor.
+    std::optional<Scene> scene;
     std::string name{"Untitled effect"};
     // Multiplies every distance, size, speed and acceleration in the blocks,
     // so the whole effect grows or shrinks and keeps its look. Module blocks
@@ -190,6 +302,13 @@ struct Document final {
     Backdrop backdrop{Backdrop::Night};
     // Bloom strength in the preview (scene::RendererSettings::bloom_strength).
     float glow{0.6F};
+    // Milliseconds of GPU a frame the effect may take, simulation and
+    // drawing together, as the preview measures it. "Maximize budget"
+    // (budget.hpp) scales the page's amounts to fill it. Never exported:
+    // it is the artist's target, not part of the effect.
+    float budget_ms{default_budget_ms};
+    // The ground, gravity and wind every layer plays in.
+    PageWorld world;
     std::vector<Layer> layers;
     Uid next_uid{1U};
 
@@ -217,8 +336,16 @@ struct Document final {
 // A block of `kind` with fresh uid and default values, or nothing for a kind
 // the catalog does not have.
 [[nodiscard]] std::optional<Block> make_block(Document& document, std::string_view kind);
-// An empty layer of `kind`, with its world where the kind has one.
+[[nodiscard]] std::optional<Block> make_block(Document& document, BlockKind kind);
+// An empty layer of `kind`, with its world where the kind has one. It is
+// Something else, unless rigid, when it is a Solid.
 [[nodiscard]] Layer make_layer(Document& document, LayerKind kind, std::string name);
+// An empty layer of what it is, of the kind that is.
+[[nodiscard]] Layer make_layer(Document& document, LayerWhat what, std::string name);
+// Says what the layer is, and gives it the kind that goes with it. Refused,
+// changing nothing, where a block the kind cannot hold is in the way
+// (`blocks_against_kind` names them).
+bool set_layer_what(Document& document, Layer& layer, LayerWhat what);
 // Gives `layer` the kind: adds or drops its world and conforms every block,
 // so nothing is left holding a setting its new kind hides. Blocks the kind
 // does not have at all are refused rather than dropped, so nothing an artist

@@ -23,7 +23,7 @@ struct LibraryTexture final {
 // The generated texels for a package entry name. Built once, then shared.
 [[nodiscard]] const TextureData* library_texture_data(std::string_view entry);
 
-// The generated mesh for a chunk name ("chip", "shard", "rock", "cube").
+// The generated mesh for a primitive/chunk ("floor", "slab", "shard", "rock", "cube").
 [[nodiscard]] const MeshData* library_mesh(std::string_view name);
 
 } // namespace ajfx::studio

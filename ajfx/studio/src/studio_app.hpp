@@ -19,7 +19,7 @@ struct StudioOptions final {
     bool restore_page{true};
     bool fresh{false};
     // The recipe to start from when no page is given.
-    std::string recipe{"campfire"};
+    std::string recipe;
     // Starting states, for checking the interface: the expert view, blocks
     // of one kind open ("all" for every block of the first layer), the
     // block picker open.
@@ -30,6 +30,9 @@ struct StudioOptions final {
     float at{-1.0F};
     // Play once and stop instead of looping.
     bool once{false};
+    // Press "Maximize budget" once the effect is built and analysed, and
+    // write what each probe measured to the console.
+    bool maximize{false};
     // Values to try for published parameters ("name=v" or "name=r,g,b,a").
     std::vector<std::string> tries;
     // The preview's overlays, when given at start: guides and handles, and

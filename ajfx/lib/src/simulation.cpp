@@ -1,7 +1,10 @@
 #include <ajfx/simulation.hpp>
 
+#include <ajfx/cache.hpp>
 #include <ajfx/random.hpp>
 
+#include "body_grid.hpp"
+#include "curves.hpp"
 #include "noise.hpp"
 #include "gpu/pack.hpp"
 #include "step_inputs.hpp"
@@ -27,34 +30,10 @@ constexpr float default_size = 0.1F;
 using detail::Inputs;
 using detail::normalized;
 
-float mix(float a, float b, float t) {
-    return a + (b - a) * t;
-}
-
-Color times(Color a, Color b) {
-    return {a.r * b.r, a.g * b.g, a.b * b.b, a.a * b.a};
-}
-
-template <class Key>
-auto sample(const std::vector<Key>& keys, float t) {
-    const auto next = std::find_if(keys.begin(), keys.end(), [t](const Key& key) { return key.t >= t; });
-    if (next == keys.begin()) {
-        return keys.front().value;
-    }
-    if (next == keys.end()) {
-        return keys.back().value;
-    }
-    const Key& a = *(next - 1);
-    const Key& b = *next;
-    const float span = b.t - a.t;
-    const float f = span > 0.0F ? (t - a.t) / span : 1.0F;
-    if constexpr (std::is_same_v<Key, ColorKey>) {
-        return Color{mix(a.value.r, b.value.r, f), mix(a.value.g, b.value.g, f), mix(a.value.b, b.value.b, f),
-                     mix(a.value.a, b.value.a, f)};
-    } else {
-        return mix(a.value, b.value, f);
-    }
-}
+using detail::mix;
+using detail::normalized_age;
+using detail::sample;
+using detail::times;
 
 // A random value in [0, 1) for one particle, keyed by the module instance
 // and which of its random draws this is.
@@ -121,10 +100,6 @@ void compact(EmitterState& s, Dead dead) {
     s.spawn_index.resize(kept);
 }
 
-float normalized_age(const EmitterState& s, std::size_t i) {
-    return std::clamp(s.age[i] / s.lifetime[i], 0.0F, 1.0F);
-}
-
 // How colliders meet an emitter's particles when it has a RigidBody. Not a
 // RigidContact (rigid_solver.hpp), which is what a physics engine's bodies
 // were found hitting: these are the settings a collider responds by.
@@ -145,11 +120,14 @@ struct Step final {
     std::size_t first;
     std::size_t last;
     const FieldSet* fields{nullptr};
-    // The bodies this emitter's BodyCollision modules meet, by the emitter
-    // they name. Gathered before the step's forces, so every collider is
-    // where the other emitter's physics put it this step.
-    const std::map<std::string, std::vector<BodyCollider>, std::less<>>* bodies{nullptr};
+    // The bodies this emitter's BodyCollision and Wake modules meet, by the
+    // emitter they name, sorted into their grids. Gathered before the step's
+    // forces, so every body is where the other emitter's physics put it this
+    // step.
+    const detail::BodyGrids* bodies{nullptr};
     std::optional<BodyResponse> rigid{};
+    // The step being taken, which a blast goes off in or not.
+    std::uint64_t tick{0U};
 };
 
 // ------------------------------------------------------------ init modules
@@ -158,7 +136,9 @@ void apply(const Lifetime& m, Step& step) {
     const float lo = step.in(m.min);
     const float hi = step.in(m.max);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.lifetime[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U));
+        if (detail::scoped(m.only, step.s, i)) {
+            step.s.lifetime[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U));
+        }
     }
 }
 
@@ -175,6 +155,9 @@ void apply(const ShapeLocation& m, Step& step) {
     const float radius_max = step.in(m.radius_max);
     const Vec3 size = m.size;
     for (std::size_t i = step.first; i < step.last; ++i) {
+        if (!detail::scoped(m.only, step.s, i)) {
+            continue;
+        }
         const std::uint32_t index = step.s.spawn_index[i];
         const auto u = [&](std::uint32_t draw) { return step.random(index, m.id, draw); };
         // Equal ends give exactly that radius, whatever the draw.
@@ -232,6 +215,9 @@ void apply(const Velocity& m, Step& step) {
     const float lo = step.in(m.speed_min);
     const float hi = step.in(m.speed_max);
     for (std::size_t i = step.first; i < step.last; ++i) {
+        if (!detail::scoped(m.only, step.s, i)) {
+            continue;
+        }
         const std::uint32_t index = step.s.spawn_index[i];
         const float cos_theta = cos_inner - step.random(index, m.id, 0U) * (cos_inner - cos_spread);
         const float sin_theta = std::sqrt(std::max(0.0F, 1.0F - cos_theta * cos_theta));
@@ -248,6 +234,9 @@ void apply(const InitColor& m, Step& step) {
     const float lo = step.in(m.brightness_min);
     const float hi = step.in(m.brightness_max);
     for (std::size_t i = step.first; i < step.last; ++i) {
+        if (!detail::scoped(m.only, step.s, i)) {
+            continue;
+        }
         const std::uint32_t index = step.s.spawn_index[i];
         const float t = step.random(index, m.id, 0U);
         const float k = mix(lo, hi, step.random(index, m.id, 1U));
@@ -259,7 +248,9 @@ void apply(const InitSize& m, Step& step) {
     const float lo = step.in(m.min);
     const float hi = step.in(m.max);
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.base_size[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U));
+        if (detail::scoped(m.only, step.s, i)) {
+            step.s.base_size[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U));
+        }
     }
 }
 
@@ -268,7 +259,9 @@ void apply(const InitRotation& m, Step& step) {
     const float hi = step.in(m.max);
     constexpr float radians = std::numbers::pi_v<float> / 180.0F;
     for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.rotation[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U)) * radians;
+        if (detail::scoped(m.only, step.s, i)) {
+            step.s.rotation[i] = mix(lo, hi, step.random(step.s.spawn_index[i], m.id, 0U)) * radians;
+        }
     }
 }
 
@@ -278,6 +271,9 @@ void apply(const InitTumble& m, Step& step) {
     constexpr float radians = std::numbers::pi_v<float> / 180.0F;
     constexpr float two_pi = 2.0F * std::numbers::pi_v<float>;
     for (std::size_t i = step.first; i < step.last; ++i) {
+        if (!detail::scoped(m.only, step.s, i)) {
+            continue;
+        }
         const std::uint32_t index = step.s.spawn_index[i];
         const auto u = [&](std::uint32_t draw) { return step.random(index, m.id, draw); };
         if (m.random_orientation) {
@@ -393,6 +389,23 @@ void apply(const Converge& m, Step& step) {
     }
 }
 
+// Throws particles out from the blast in the step it goes off (Shockwave),
+// as ajfx_shockwave does on the GPU.
+void apply(const Shockwave& m, Step& step) {
+    const Blast* blast = find_blast(step.in.effect, m.blast);
+    if (blast == nullptr || step.tick != blast_tick(*blast, step.in.effect.simulation_rate)) {
+        return;
+    }
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const BlastPush push = blast_push(*blast, step.s.position[i]);
+        // Beyond the radius nothing is touched, not even by a zero.
+        if (push.direction == Vec3{}) {
+            continue;
+        }
+        step.s.velocity[i] += push.direction * (push.speed * force_scale(m, step, i));
+    }
+}
+
 // ------------------------------------------------------------ constraints and appearance
 
 // A rigid particle meets a collider as a ball (see RigidBody).
@@ -491,61 +504,92 @@ void apply(const SphereCollision& m, Step& step) {
     }
 }
 
-// A particle kept out of each body in turn, the nearest surface winning
-// where two overlap, because each response pushes it out of the one it is
-// in and the next sees where it ended up.
+// A particle kept out of one body: the ball or box `body` describes.
+void meet_body(const BodyCollider& body, Step& step, std::size_t i, float restitution, float slide, bool kill) {
+    const Vec3 d = step.s.position[i] - body.position;
+    if (body.box) {
+        // In the body's own frame, where the box is axis aligned.
+        const Quat back{-body.orientation.x, -body.orientation.y, -body.orientation.z, body.orientation.w};
+        const Vec3 local = rotate(back, d);
+        const Vec3 over{std::fabs(local.x) - body.half, std::fabs(local.y) - body.half,
+                        std::fabs(local.z) - body.half};
+        if (over.x >= 0.0F || over.y >= 0.0F || over.z >= 0.0F) {
+            // Outside: the nearest point on the box is the way out.
+            const Vec3 clamped{std::clamp(local.x, -body.half, body.half), std::clamp(local.y, -body.half, body.half),
+                               std::clamp(local.z, -body.half, body.half)};
+            const Vec3 away = local - clamped;
+            const float length = std::sqrt(dot(away, away));
+            if (length > 1.0e-6F) {
+                respond(step, i, length, rotate(body.orientation, away * (1.0F / length)), restitution, slide, kill);
+            }
+            return;
+        }
+        // Inside: out through the face it is nearest, x before y before z on
+        // a tie, as BoxCollision does.
+        Vec3 out{over.x >= over.y && over.x >= over.z ? (local.x < 0.0F ? -1.0F : 1.0F) : 0.0F, 0.0F, 0.0F};
+        float distance = over.x;
+        if (over.y > over.x && over.y >= over.z) {
+            out = Vec3{0.0F, local.y < 0.0F ? -1.0F : 1.0F, 0.0F};
+            distance = over.y;
+        } else if (over.z > over.x && over.z > over.y) {
+            out = Vec3{0.0F, 0.0F, local.z < 0.0F ? -1.0F : 1.0F};
+            distance = over.z;
+        }
+        respond(step, i, distance, rotate(body.orientation, out), restitution, slide, kill);
+        return;
+    }
+    const float length = std::sqrt(dot(d, d));
+    const Vec3 out = length > 1.0e-6F ? d * (1.0F / length) : Vec3{0.0F, 1.0F, 0.0F};
+    respond(step, i, length - body.half, out, restitution, slide, kill);
+}
+
+// A particle kept out of each body in turn, in body order, the nearest
+// surface winning where two overlap, because each response pushes it out of
+// the one it is in and the next sees where it ended up. The grid finds the
+// bodies it may be touching (detail::meet_bodies); a body it is not touching
+// does nothing, so that is meeting every body in turn, to the bit.
 void apply(const BodyCollision& m, Step& step) {
     if (step.bodies == nullptr) {
         return;
     }
     const auto found = step.bodies->find(m.emitter);
-    if (found == step.bodies->end()) {
+    if (found == step.bodies->end() || found->second.bodies.empty()) {
         return;
     }
+    const detail::BodyGrid& grid = found->second;
     const float restitution = step.in(m.restitution);
     const float slide = 1.0F - step.in(m.friction);
-    for (const BodyCollider& body : found->second) {
-        for (std::size_t i = step.first; i < step.last; ++i) {
-            const Vec3 d = step.s.position[i] - body.position;
-            if (body.box) {
-                // In the body's own frame, where the box is axis aligned.
-                const Quat back{-body.orientation.x, -body.orientation.y, -body.orientation.z,
-                                body.orientation.w};
-                const Vec3 local = rotate(back, d);
-                const Vec3 over{std::fabs(local.x) - body.half, std::fabs(local.y) - body.half,
-                                std::fabs(local.z) - body.half};
-                if (over.x >= 0.0F || over.y >= 0.0F || over.z >= 0.0F) {
-                    // Outside: the nearest point on the box is the way out.
-                    const Vec3 clamped{std::clamp(local.x, -body.half, body.half),
-                                       std::clamp(local.y, -body.half, body.half),
-                                       std::clamp(local.z, -body.half, body.half)};
-                    const Vec3 away = local - clamped;
-                    const float length = std::sqrt(dot(away, away));
-                    if (length > 1.0e-6F) {
-                        respond(step, i, length, rotate(body.orientation, away * (1.0F / length)), restitution,
-                                slide, m.kill);
-                    }
-                    continue;
-                }
-                // Inside: out through the face it is nearest, x before y
-                // before z on a tie, as BoxCollision does.
-                Vec3 out{over.x >= over.y && over.x >= over.z ? (local.x < 0.0F ? -1.0F : 1.0F) : 0.0F, 0.0F,
-                         0.0F};
-                float distance = over.x;
-                if (over.y > over.x && over.y >= over.z) {
-                    out = Vec3{0.0F, local.y < 0.0F ? -1.0F : 1.0F, 0.0F};
-                    distance = over.y;
-                } else if (over.z > over.x && over.z > over.y) {
-                    out = Vec3{0.0F, 0.0F, local.z < 0.0F ? -1.0F : 1.0F};
-                    distance = over.z;
-                }
-                respond(step, i, distance, rotate(body.orientation, out), restitution, slide, m.kill);
-            } else {
-                const float length = std::sqrt(dot(d, d));
-                const Vec3 out = length > 1.0e-6F ? d * (1.0F / length) : Vec3{0.0F, 1.0F, 0.0F};
-                respond(step, i, length - body.half, out, restitution, slide, m.kill);
-            }
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        // A rigid particle reaches out by its contact radius, as
+        // respond_rigid works it out.
+        const float extra = step.rigid ? step.s.size[i] * step.rigid->contact_scale : 0.0F;
+        detail::meet_bodies(
+            grid, [&step, i] { return step.s.position[i]; }, extra,
+            [&](const BodyCollider& body) { meet_body(body, step, i, restitution, slide, m.kill); });
+    }
+}
+
+// Pulls particles towards the velocity of the strongest moving body's wake
+// at them (Wake), as ajfx_wake does on the GPU.
+void apply(const Wake& m, Step& step) {
+    if (step.bodies == nullptr) {
+        return;
+    }
+    const auto found = step.bodies->find(m.emitter);
+    if (found == step.bodies->end() || found->second.bodies.empty()) {
+        return;
+    }
+    const detail::BodyGrid& grid = found->second;
+    const float rate = step.in(m.strength) * step.dt;
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        const detail::WakePick pick = detail::strongest_wake(grid, m, step.s.position[i]);
+        if (pick.body == detail::no_body) {
+            continue;
         }
+        const float k = rate * force_scale(m, step, i) * pick.weight;
+        const float t = k / (1.0F + k);
+        const Vec3 v = step.s.velocity[i];
+        step.s.velocity[i] = v + (grid.bodies[pick.body].velocity - v) * t;
     }
 }
 
@@ -627,15 +671,11 @@ void apply(const RigidBody& m, Step& step) {
 }
 
 void apply(const ColorOverLife& m, Step& step) {
-    for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.color[i] = times(step.s.base_color[i], sample(m.keys, normalized_age(step.s, i)));
-    }
+    detail::color_over_life(m, step.s, step.first, step.last);
 }
 
 void apply(const SizeOverLife& m, Step& step) {
-    for (std::size_t i = step.first; i < step.last; ++i) {
-        step.s.size[i] = step.s.base_size[i] * sample(m.keys, normalized_age(step.s, i));
-    }
+    detail::size_over_life(m, step.s, step.first, step.last);
 }
 
 // The engine moves rigid physics particles (see move_rigid).
@@ -646,6 +686,10 @@ void apply(const Break&, Step&) {}
 
 // Joins are made as bodies are born and broken by the world (see glue_bodies).
 void apply(const Glue&, Step&) {}
+
+// A glow is worked out afresh with the colour, after every colour over life
+// (see detail::glow).
+void apply(const Heat&, Step&) {}
 
 // Where a prop stands at `seconds`: a driven prop moves from its pose to the
 // one it is given, over its window; every other prop stands where it was put.
@@ -718,6 +762,7 @@ void move_rigid(Step& step, const Emitter& emitter, const RigidPhysics& physics,
             apply(*color, step);
         }
     }
+    detail::glow(emitter, s, step.first, step.last);
 }
 
 // Bodies for the newborns [first, alive), in birth order, each in the lowest
@@ -915,13 +960,14 @@ void place_pile(const SpawnPile& m, Step& step, float reach) {
         const float jx = (step.random(index, m.id, 0U) - 0.5F) * m.jitter * d;
         const float jz = (step.random(index, m.id, 1U) - 0.5F) * m.jitter * d;
         s.position[i] = m.center + lattice[i - step.first] + Vec3{jx, 0.0F, jz};
-        s.velocity[i] = Vec3{};
+        s.velocity[i] = m.initial_velocity;
+        if (m.turn != Vec3{}) { s.orientation[i] = times(prop_orientation(m.turn), s.orientation[i]); }
         s.angular_velocity[i] = Vec3{};
         s.spin[i] = 0.0F;
     }
 }
 
-void append(EmitterState& s, float age) {
+void append(EmitterState& s, float age, std::uint32_t spawn_index) {
     s.position.push_back({});
     s.velocity.push_back({});
     s.age.push_back(age);
@@ -934,42 +980,37 @@ void append(EmitterState& s, float age) {
     s.orientation.push_back({});
     s.angular_velocity.push_back({});
     s.spin.push_back(0.0F);
-    s.spawn_index.push_back(static_cast<std::uint32_t>(s.spawned));
+    s.spawn_index.push_back(spawn_index);
 }
 
-// A body that was hit hard enough comes apart. Called after the world has
-// stepped, so the contacts it reports are this step's, and before the step's
-// births, so every piece takes its slot in birth order.
+// The Break module of each kind of body, by kind; none where a kind does not
+// break.
+std::vector<const Break*> breaks_by_kind(const Emitter& emitter, const RigidPhysics& physics) {
+    const std::size_t kinds = physics.bodies.size() + 1U;
+    std::vector<const Break*> breaks(kinds, nullptr);
+    for (const UpdateModule& module : emitter.update) {
+        if (const auto* breaking = std::get_if<Break>(&module); breaking != nullptr && breaking->body < kinds) {
+            breaks[breaking->body] = breaking;
+        }
+    }
+    return breaks;
+}
+
+// Bodies come apart into their pieces: every body whose kind breaks and for
+// which `breaks_now(i, by)` holds, `i` being its place among the particles as
+// they stand when this is called and `by` its kind's Break.
 // - Breaks are taken in birth order, the order the emitter does everything
 //   else in, and each body's pieces in the order they are listed.
 // - A body breaks only if every one of its pieces fits the emitter's
 //   capacity. One that does not stays whole and its pieces are counted as
 //   refused, so a body is never half broken.
-void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world) {
+// - Each piece is a birth from the pieces' own source (piece_spawn_source),
+//   so breaking never moves another module's spawn indices.
+template <class BreaksNow>
+void shatter(Step& step, const Emitter& emitter, RigidWorld& world, const std::vector<const Break*>& breaks,
+             BreaksNow&& breaks_now) {
     EmitterState& s = step.s;
-    const std::size_t kinds = physics.bodies.size() + 1U;
-    std::vector<const Break*> breaks(kinds, nullptr);
-    bool any = false;
-    for (const UpdateModule& module : emitter.update) {
-        if (const auto* breaking = std::get_if<Break>(&module); breaking != nullptr && breaking->body < kinds) {
-            breaks[breaking->body] = breaking;
-            any = true;
-        }
-    }
-    if (!any || s.alive() == 0U) {
-        return;
-    }
-    // The hardest this step hit each body, by its slot. Only contacts over
-    // the lowest threshold were collected at all, so this is a short list.
-    std::vector<float> hit(emitter.capacity, 0.0F);
-    for (const RigidContact& contact : world.contacts()) {
-        if (contact.a_is == RigidSide::Body && contact.a < hit.size()) {
-            hit[contact.a] = std::max(hit[contact.a], contact.speed);
-        }
-        if (contact.b_is == RigidSide::Body && contact.b < hit.size()) {
-            hit[contact.b] = std::max(hit[contact.b], contact.speed);
-        }
-    }
+    const std::size_t kinds = breaks.size();
     // What the parent leaves its pieces, kept before compaction moves it.
     struct Broken final {
         Vec3 position;
@@ -988,7 +1029,7 @@ void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
     std::size_t spare = emitter.capacity - s.alive();
     for (std::size_t i = 0U; i < s.alive(); ++i) {
         const Break* by = breaks[std::min<std::size_t>(s.body_kind[i], kinds - 1U)];
-        if (by == nullptr || hit[s.body[i]] < by->threshold) {
+        if (by == nullptr || !breaks_now(i, *by)) {
             continue;
         }
         // The body's own place comes free, so its pieces have one more than
@@ -1014,6 +1055,9 @@ void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
         }
     }
     compact(s, [&gone](std::size_t i) { return gone[i]; });
+    if (s.spawn_counts.size() < detail::spawn_count_slots(emitter)) {
+        s.spawn_counts.resize(detail::spawn_count_slots(emitter), 0U);
+    }
     constexpr float radians = std::numbers::pi_v<float> / 180.0F;
     const std::size_t first_piece = s.alive();
     for (const Broken& parent : broken) {
@@ -1025,7 +1069,7 @@ void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
                 return step.random(parent.spawn_index, parent.by->id,
                                    static_cast<std::uint32_t>(k) * 8U + draw);
             };
-            append(s, parent.age);
+            append(s, parent.age, detail::next_spawn_index(s.spawn_counts, piece_spawn_source));
             const std::size_t i = s.alive() - 1U;
             s.body_kind.push_back(piece.body);
             // Where the piece sat in the thing that broke, and the way out
@@ -1047,6 +1091,88 @@ void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physic
         }
     }
     add_bodies(s, first_piece, emitter.capacity, world);
+}
+
+// A body that was hit hard enough comes apart. Called after the world has
+// stepped, so the contacts it reports are this step's, and before the step's
+// births, so every piece takes its slot in birth order.
+void break_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world,
+                  std::span<const RigidContact> contacts) {
+    EmitterState& s = step.s;
+    const std::vector<const Break*> breaks = breaks_by_kind(emitter, physics);
+    if (s.alive() == 0U || std::none_of(breaks.begin(), breaks.end(), [](const Break* b) { return b != nullptr; })) {
+        return;
+    }
+    // The hardest this step hit each body, by its slot, from what the
+    // effect reads of the step's contacts: none slower than the gentlest
+    // threshold, so this is a short list.
+    std::vector<float> hit(emitter.capacity, 0.0F);
+    for (const RigidContact& contact : contacts) {
+        if (contact.a_is == RigidSide::Body && contact.a < hit.size()) {
+            hit[contact.a] = std::max(hit[contact.a], contact.speed);
+        }
+        if (contact.b_is == RigidSide::Body && contact.b < hit.size()) {
+            hit[contact.b] = std::max(hit[contact.b], contact.speed);
+        }
+    }
+    shatter(step, emitter, world, breaks,
+            [&](std::size_t i, const Break& by) { return hit[s.body[i]] >= by.threshold; });
+}
+
+// The blasts a rigid physics emitter's Shockwave modules answer, in the step
+// each goes off and in stack order. Called before the world steps, so the
+// step carries the throw:
+// - first the bodies of a kind that breaks when blasted come apart, those
+//   thrown at its `blast_threshold` or harder, so their pieces are thrown
+//   from where each of them sits;
+// - then every body is thrown by the blast where it stands, times its own
+//   factor (Shockwave::scale_min to scale_max), in birth order;
+// - then every loose prop, in the order the module lists them, as the blast
+//   is: a prop has no factor of its own. Fixed and driven props are not
+//   moved by anything.
+void blast_bodies(Step& step, const Emitter& emitter, const RigidPhysics& physics, RigidWorld& world) {
+    EmitterState& s = step.s;
+    const Effect& effect = step.in.effect;
+    for (const UpdateModule& module : emitter.update) {
+        const auto* wave = std::get_if<Shockwave>(&module);
+        if (wave == nullptr) {
+            continue;
+        }
+        const Blast* blast = find_blast(effect, wave->blast);
+        if (blast == nullptr || step.tick != blast_tick(*blast, effect.simulation_rate)) {
+            continue;
+        }
+        // How hard the body in place i is thrown: the blast where it stands,
+        // times its own factor.
+        const auto thrown = [&](std::size_t i) {
+            return blast_push(*blast, s.position[i]).speed * force_scale(*wave, step, i);
+        };
+        const std::vector<const Break*> breaks = breaks_by_kind(emitter, physics);
+        if (s.alive() != 0U && std::any_of(breaks.begin(), breaks.end(), [](const Break* b) {
+                return b != nullptr && b->blast_threshold > 0.0F;
+            })) {
+            shatter(step, emitter, world, breaks, [&](std::size_t i, const Break& by) {
+                return by.blast_threshold > 0.0F && thrown(i) >= by.blast_threshold;
+            });
+        }
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            const BlastPush push = blast_push(*blast, s.position[i]);
+            if (push.direction == Vec3{}) {
+                continue;
+            }
+            world.push(RigidSide::Body, s.body[i], push.direction * (push.speed * force_scale(*wave, step, i)));
+        }
+        for (std::size_t p = 0U; p < physics.props.size() && p < s.props.size(); ++p) {
+            if (physics.props[p].motion != PropMotion::Loose) {
+                continue;
+            }
+            const BlastPush push = blast_push(*blast, s.props[p].position);
+            if (push.direction == Vec3{}) {
+                continue;
+            }
+            world.push(RigidSide::Prop, static_cast<std::uint32_t>(p), push.direction * push.speed);
+        }
+    }
 }
 
 std::string quoted(std::string_view text) {
@@ -1132,7 +1258,8 @@ Result<RigidWorldDesc::Body> rigid_body_desc(const Emitter& emitter, RigidShape 
 // The world a rigid physics emitter's bodies live in: its kinds of body, its
 // damping, its colliders as statics, and the artist's props.
 Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysics& physics, const MeshSet& meshes,
-                                        float step_seconds, const std::optional<ContactOptions>& contacts) {
+                                        float step_seconds, const std::optional<ContactOptions>& contacts,
+                                        std::optional<float> slowest) {
     RigidWorldDesc desc;
     desc.capacity = emitter.capacity;
     desc.step_seconds = step_seconds;
@@ -1141,16 +1268,16 @@ Result<RigidWorldDesc> rigid_world_desc(const Emitter& emitter, const RigidPhysi
         desc.contact_min_speed = contacts->min_speed;
         desc.contact_limit = contacts->limit;
     }
-    // A Break module needs the contacts to decide what broke, so the world
-    // reports them whether the host asked or not, down to the gentlest
-    // threshold that breaks anything.
-    for (const UpdateModule& module : emitter.update) {
-        if (const auto* breaking = std::get_if<Break>(&module)) {
-            desc.contact_min_speed =
-                desc.report_contacts ? std::min(desc.contact_min_speed, breaking->threshold) : breaking->threshold;
-            desc.contact_limit = std::max(desc.contact_limit, emitter.capacity);
-            desc.report_contacts = true;
-        }
+    // What the effect reads of the contacts (a Break deciding what broke, a
+    // SpawnFromContacts bearing particles) the world reports whether the
+    // host asked or not, down to the slowest it reads and at least as many
+    // as it reads, so what it reads is the same whatever the host asked.
+    if (slowest) {
+        desc.contact_min_speed = desc.report_contacts ? std::min(desc.contact_min_speed, *slowest) : *slowest;
+        desc.contact_limit =
+            desc.report_contacts ? std::max(desc.contact_limit, detail::effect_contact_limit(emitter))
+                                 : detail::effect_contact_limit(emitter);
+        desc.report_contacts = true;
     }
     desc.angular_damping = physics.angular_damping;
     desc.allow_sleep = physics.allow_sleep;
@@ -1282,13 +1409,68 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
     if (Result<bool> held = check_fields(effect, options.fields); !held) {
         return held.error();
     }
+    const Cache* cache = options.cache.get();
+    if (cache != nullptr && !(cache->effect() == effect)) {
+        return Error{ErrorCode::StaleCache, "the cache was opened for another effect than " + quoted(effect.name)};
+    }
+    // A live emitter bearing particles from a cached one would have nothing
+    // to bear them from: a cache holds bodies, not their contacts or their
+    // velocities.
+    if (cache != nullptr) {
+        for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
+            if (cache->mode(i) != CacheMode::Live) {
+                continue;
+            }
+            for (const SpawnModule& module : effect.emitters[i].spawn) {
+                const std::string* named = nullptr;
+                std::string_view kind;
+                if (const auto* contacts = std::get_if<SpawnFromContacts>(&module)) {
+                    named = &contacts->emitter;
+                    kind = SpawnFromContacts::kind;
+                } else if (const auto* bodies = std::get_if<SpawnFromBodies>(&module)) {
+                    named = &bodies->emitter;
+                    kind = SpawnFromBodies::kind;
+                }
+                for (std::size_t other = 0U; named != nullptr && other < effect.emitters.size(); ++other) {
+                    if (effect.emitters[other].name == *named && cache->mode(other) != CacheMode::Live) {
+                        return Error{ErrorCode::StaleCache,
+                                     "emitter " + quoted(effect.emitters[i].name) + " module " + quoted(kind) +
+                                         " field 'emitter' bears particles from " + quoted(*named) +
+                                         ", which the cache holds; a cache keeps bodies, not their contacts or "
+                                         "speeds, so cache this emitter too or leave that one live"};
+                    }
+                }
+            }
+            // A wake follows the bodies' speeds, which a cache does not keep.
+            for (const UpdateModule& module : effect.emitters[i].update) {
+                const auto* stirred = std::get_if<Wake>(&module);
+                for (std::size_t other = 0U; stirred != nullptr && other < effect.emitters.size(); ++other) {
+                    if (effect.emitters[other].name == stirred->emitter && cache->mode(other) != CacheMode::Live) {
+                        return Error{ErrorCode::StaleCache,
+                                     "emitter " + quoted(effect.emitters[i].name) + " module " +
+                                         quoted(Wake::kind) + " field 'emitter' is stirred by " +
+                                         quoted(stirred->emitter) +
+                                         ", which the cache holds; a cache keeps bodies, not their speeds, so cache "
+                                         "this emitter too or leave that one live"};
+                    }
+                }
+            }
+        }
+    }
     std::vector<RigidEmitter> rigid(effect.emitters.size());
     const float step_seconds = 1.0F / static_cast<float>(effect.simulation_rate);
     for (std::size_t i = 0U; i < effect.emitters.size(); ++i) {
         const Emitter& emitter = effect.emitters[i];
         const RigidPhysics* physics = rigid_physics(emitter);
-        if (physics == nullptr) {
+        // A cached emitter is read, not simulated: it has no world.
+        if (physics == nullptr || (cache != nullptr && cache->mode(i) != CacheMode::Live)) {
             continue;
+        }
+        // What this effect reads of its contacts, and what a larger effect
+        // this one is a part of reads.
+        std::optional<float> slowest = contact_floor(effect, i);
+        if (i < options.contact_floors.size() && options.contact_floors[i]) {
+            slowest = slowest ? std::min(*slowest, *options.contact_floors[i]) : *options.contact_floors[i];
         }
         if (options.rigid == nullptr) {
             return Error{ErrorCode::RigidSolverMissing,
@@ -1296,7 +1478,7 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
                              " has rigid physics, and no rigid solver was given to run it (ajfx::rigid has one)"};
         }
         Result<RigidWorldDesc> desc =
-            rigid_world_desc(emitter, *physics, options.meshes, step_seconds, options.contacts);
+            rigid_world_desc(emitter, *physics, options.meshes, step_seconds, options.contacts, slowest);
         if (!desc) {
             return desc.error();
         }
@@ -1305,22 +1487,112 @@ Result<Simulation> Simulation::create(Effect effect, std::uint32_t instance_seed
             return Error{ErrorCode::RigidSolverFailure,
                          "emitter " + quoted(emitter.name) + "'s rigid physics world: " + world.error().message};
         }
-        rigid[i] = RigidEmitter{std::move(desc).value(), std::move(world).value()};
+        rigid[i] = RigidEmitter{std::move(desc).value(), std::move(world).value(), slowest, {}};
     }
     Simulation simulation{std::move(effect), instance_seed, std::move(options.fields)};
     simulation.solver_ = options.rigid;
+    simulation.body_broadphase_ = options.body_broadphase;
     simulation.rigid_ = std::move(rigid);
-    // The piles and props need their worlds, which the constructor did not
-    // have yet.
-    if (simulation.has_piles_ || simulation.has_props_) {
+    if (cache != nullptr) {
+        simulation.cache_ = std::move(options.cache);
+        simulation.pinned_.resize(simulation.effect_.parameters.size());
+        for (std::size_t i = 0U; i < simulation.effect_.parameters.size(); ++i) {
+            for (const BakeValue& value : simulation.cache_->identity().bake) {
+                if (value.name == simulation.effect_.parameters[i].name) {
+                    simulation.pinned_[i] = value.value;
+                }
+            }
+        }
+    }
+    // The piles and props need their worlds, and cached emitters their
+    // cache, which the constructor did not have yet.
+    if (simulation.has_piles_ || simulation.has_props_ || simulation.cache_) {
         simulation.reset();
     }
     return simulation;
 }
 
+void Simulation::resolve(const ParameterProvider* parameters, std::uint64_t tick,
+                         std::vector<ParameterValue>& values) const {
+    detail::resolve_values(effect_, parameters, tick, values);
+    for (std::size_t i = 0U; i < pinned_.size() && i < values.size(); ++i) {
+        if (pinned_[i]) {
+            values[i] = *pinned_[i];
+        }
+    }
+}
+
+bool Simulation::cached(std::size_t index) const noexcept {
+    return cache_ != nullptr && cache_->mode(index) != CacheMode::Live;
+}
+
+void Simulation::load_cached() {
+    if (!cache_) {
+        return;
+    }
+    for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
+        if (cached(i)) {
+            state_.emitters[i] = cache_->emitter_at(i, state_.tick);
+        }
+    }
+}
+
+bool Simulation::beyond_cache() const noexcept {
+    return cache_ != nullptr && cache_->caches_anything() && state_.tick >= cache_->frames();
+}
+
+std::optional<SimulationState> Simulation::cached_checkpoint(std::uint64_t tick) const {
+    if (!cache_) {
+        return std::nullopt;
+    }
+    std::optional<SimulationState> state = cache_->checkpoint_before(tick);
+    if (state && state->emitters.size() != effect_.emitters.size()) {
+        return std::nullopt;
+    }
+    return state;
+}
+
+std::vector<ParameterValue> parameter_values(const Effect& effect, const ParameterProvider* provider,
+                                             std::uint64_t tick) {
+    std::vector<ParameterValue> values;
+    detail::resolve_values(effect, provider, tick, values);
+    return values;
+}
+
+DrawAdjustment draw_adjustment(const Effect& effect, std::size_t emitter, std::span<const ParameterValue> values) {
+    if (emitter >= effect.emitters.size()) {
+        return {};
+    }
+    std::vector<ParameterValue> resolved;
+    if (values.size() != effect.parameters.size()) {
+        detail::resolve_values(effect, nullptr, 0U, resolved);
+        std::copy_n(values.begin(), std::min(values.size(), resolved.size()), resolved.begin());
+        values = resolved;
+    }
+    const Inputs in{effect, values};
+    const SpriteRenderer& renderer = effect.emitters[emitter].renderer;
+    const Color tint = in(renderer.tint);
+    const float brightness = in(renderer.brightness);
+    return DrawAdjustment{Color{tint.r * brightness, tint.g * brightness, tint.b * brightness,
+                                tint.a * in(renderer.opacity)},
+                          in(renderer.size_scale)};
+}
+
+void adjust_for_drawing(const DrawAdjustment& adjustment, EmitterState& particles) {
+    if (adjustment == DrawAdjustment{}) {
+        return;
+    }
+    for (Color& color : particles.color) {
+        color = times(color, adjustment.color);
+    }
+    for (float& size : particles.size) {
+        size *= adjustment.size;
+    }
+}
+
 void Simulation::reset(const ParameterProvider* parameters) {
     std::vector<ParameterValue> values;
-    detail::resolve_values(effect_, parameters, 0U, values);
+    resolve(parameters, 0U, values);
     start(values);
 }
 
@@ -1329,7 +1601,7 @@ void Simulation::prepare(const ParameterProvider* parameters) {
         return;
     }
     std::vector<ParameterValue> values;
-    detail::resolve_values(effect_, parameters, 0U, values);
+    resolve(parameters, 0U, values);
     if (values != pile_values_) {
         start(values);
     }
@@ -1340,8 +1612,12 @@ void Simulation::start(std::span<const ParameterValue> values) {
     state_.emitters.resize(effect_.emitters.size());
     for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
         state_.emitters[i].rate_carry.assign(detail::rate_module_count(effect_.emitters[i]), 0.0);
+        state_.emitters[i].spawn_counts.assign(detail::spawn_count_slots(effect_.emitters[i]), 0U);
     }
     rebuild_worlds();
+    for (RigidEmitter& r : rigid_) {
+        r.read.clear();
+    }
     solver_state_stale_ = false;
     // The props stand in their worlds from before the first step, whatever
     // else the emitter does, so a paused effect at the start shows them.
@@ -1365,6 +1641,7 @@ void Simulation::start(std::span<const ParameterValue> values) {
         solver_state_stale_ = std::any_of(rigid_.begin(), rigid_.end(),
                                           [](const RigidEmitter& r) { return r.world != nullptr; });
     }
+    load_cached();
 }
 
 // Each pile's bodies, born at age 0 before step 0 and set up by the init
@@ -1380,8 +1657,8 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
     Step step{s, Inputs{effect_, values}, Random{hash_mix(instance_seed_, emitter.seed)}, step_seconds_, 0.0, 0.0,
               0U, 0U, &fields_};
     const auto run = [&step](const auto& module) { apply(module, step); };
-    for (const SpawnModule& spawn : emitter.spawn) {
-        const auto* pile = std::get_if<SpawnPile>(&spawn);
+    for (std::size_t slot = 0U; slot < emitter.spawn.size(); ++slot) {
+        const auto* pile = std::get_if<SpawnPile>(&emitter.spawn[slot]);
         if (pile == nullptr) {
             continue;
         }
@@ -1389,8 +1666,10 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
         const float reach = body_reach(rigid_[index].desc, pile->body);
         step.first = s.alive();
         for (std::uint32_t c = 0U; c < pile->count; ++c) {
+            const std::uint32_t spawn_index =
+                detail::next_spawn_index(s.spawn_counts, static_cast<std::uint32_t>(slot));
             if (s.alive() < emitter.capacity) {
-                append(s, 0.0F);
+                append(s, 0.0F, spawn_index);
                 s.body_kind.push_back(pile->body);
             } else {
                 ++s.refused;
@@ -1410,6 +1689,7 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
                 std::visit(run, module);
             }
         }
+        detail::glow(emitter, s, step.first, step.last);
         place_pile(*pile, step, reach);
         add_bodies(s, step.first, emitter.capacity, *world, release_tick(*pile, effect_.simulation_rate) > 0U);
         if (const Glue* glue = glue_module(emitter)) {
@@ -1426,16 +1706,13 @@ void Simulation::prespawn(std::size_t index, std::span<const ParameterValue> val
 }
 
 bool Simulation::held(std::size_t index, std::uint32_t spawn_index) const {
-    std::uint64_t first = 0U;
-    for (const SpawnModule& spawn : effect_.emitters[index].spawn) {
-        if (const auto* pile = std::get_if<SpawnPile>(&spawn)) {
-            if (spawn_index >= first && spawn_index < first + pile->count) {
-                return state_.tick < release_tick(*pile, effect_.simulation_rate);
-            }
-            first += pile->count;
-        }
+    const std::vector<SpawnModule>& spawn = effect_.emitters[index].spawn;
+    const std::uint32_t source = spawn_source(spawn_index);
+    if (source >= spawn.size()) {
+        return false;
     }
-    return false;
+    const auto* pile = std::get_if<SpawnPile>(&spawn[source]);
+    return pile != nullptr && state_.tick < release_tick(*pile, effect_.simulation_rate);
 }
 
 void Simulation::rebuild_worlds() {
@@ -1500,7 +1777,8 @@ std::vector<BodyCollider> body_colliders(const RigidPhysics& physics, const Emit
         // A hull is met as the ball its size describes: its model's own
         // shape is the engine's business, not a particle's.
         out.push_back(BodyCollider{state.position[i], state.orientation[i], 0.5F * state.size[i] * scale,
-                                   shape == RigidShape::Box});
+                                   shape == RigidShape::Box, state.velocity[i], state.spawn_index[i],
+                                   static_cast<std::uint32_t>(kind)});
     }
     return out;
 }
@@ -1522,6 +1800,9 @@ std::uint32_t Simulation::contacts_dropped(std::size_t index) const {
 void Simulation::restore(const SimulationState& state) {
     state_ = state;
     rebuild_worlds();
+    for (RigidEmitter& r : rigid_) {
+        r.read.clear();
+    }
     bool stale = false;
     for (std::size_t i = 0U; i < rigid_.size(); ++i) {
         if (!rigid_[i].world) {
@@ -1538,7 +1819,7 @@ void Simulation::restore(const SimulationState& state) {
 }
 
 void Simulation::step(const ParameterProvider* parameters) {
-    detail::resolve_values(effect_, parameters, state_.tick, values_);
+    resolve(parameters, state_.tick, values_);
     if (has_piles_ && state_.tick == 0U && values_ != pile_values_) {
         start(values_);
     }
@@ -1552,7 +1833,14 @@ void Simulation::step(const ParameterProvider* parameters) {
     // and is simply the effect's own.
     for (const bool rigid : {true, false}) {
         for (std::size_t i = 0U; i < effect_.emitters.size(); ++i) {
-            if ((rigid_physics(effect_.emitters[i]) != nullptr) == rigid) {
+            if ((rigid_physics(effect_.emitters[i]) != nullptr) != rigid) {
+                continue;
+            }
+            // A cached emitter is read where it would have been stepped, so a
+            // live emitter meets its bodies where this step left them.
+            if (cached(i)) {
+                cache_->advance(i, state_.tick + 1U, state_.emitters[i]);
+            } else {
                 step_emitter(i, values_);
             }
         }
@@ -1582,6 +1870,10 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
               0U,
               0U,
               &fields_};
+    step.tick = state_.tick;
+    if (s.spawn_counts.size() != detail::spawn_count_slots(emitter)) {
+        s.spawn_counts.resize(detail::spawn_count_slots(emitter), 0U);
+    }
     for (const UpdateModule& module : emitter.update) {
         if (const auto* rigid = std::get_if<RigidBody>(&module)) {
             step.rigid =
@@ -1606,23 +1898,29 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
 
     step.last = s.alive();
-    // The bodies this emitter's colliders name, as they stand now. The
-    // emitters they name come first (validation refuses a later one), so
+    // The bodies this emitter's colliders and wakes name, as they stand now,
+    // sorted into their grids. Every rigid physics emitter steps first, so
     // their physics has already moved this step.
-    std::map<std::string, std::vector<BodyCollider>, std::less<>> bodies;
+    detail::BodyGrids bodies;
     for (const UpdateModule& module : emitter.update) {
-        const auto* meets = std::get_if<BodyCollision>(&module);
-        if (meets == nullptr || bodies.contains(meets->emitter)) {
+        const std::string* named = nullptr;
+        if (const auto* meets = std::get_if<BodyCollision>(&module)) {
+            named = &meets->emitter;
+        } else if (const auto* stirred = std::get_if<Wake>(&module)) {
+            named = &stirred->emitter;
+        }
+        if (named == nullptr || bodies.contains(*named)) {
             continue;
         }
         for (std::size_t other = 0U; other < effect_.emitters.size(); ++other) {
             const RigidPhysics* physics = rigid_physics(effect_.emitters[other]);
-            if (physics == nullptr || effect_.emitters[other].name != meets->emitter) {
+            if (physics == nullptr || effect_.emitters[other].name != *named) {
                 continue;
             }
-            bodies.emplace(meets->emitter,
-                           body_colliders(*physics, state_.emitters[other],
-                                          effect_.emitters[other].renderer.geometry));
+            bodies.emplace(*named, detail::make_body_grid(
+                                       body_colliders(*physics, state_.emitters[other],
+                                                      effect_.emitters[other].renderer.geometry),
+                                       body_broadphase_));
             break;
         }
     }
@@ -1631,20 +1929,19 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     }
     const auto run = [&step](const auto& module) { apply(module, step); };
     if (world != nullptr) {
-        // Piles let go this step wake, in slot order.
-        std::uint64_t first = 0U;
+        // Piles let go this step wake, in slot order. A pile's bodies are
+        // the births of its own module (spawn_source).
         std::vector<std::uint32_t> waking;
-        for (const SpawnModule& spawn : emitter.spawn) {
-            if (const auto* pile = std::get_if<SpawnPile>(&spawn)) {
+        for (std::size_t i = 0U; i < s.alive(); ++i) {
+            const std::uint32_t source = spawn_source(s.spawn_index[i]);
+            if (source >= emitter.spawn.size()) {
+                continue;
+            }
+            if (const auto* pile = std::get_if<SpawnPile>(&emitter.spawn[source])) {
                 const std::uint64_t release = release_tick(*pile, effect_.simulation_rate);
                 if (release > 0U && release == state_.tick) {
-                    for (std::size_t i = 0U; i < s.alive(); ++i) {
-                        if (s.spawn_index[i] >= first && s.spawn_index[i] < first + pile->count) {
-                            waking.push_back(s.body[i]);
-                        }
-                    }
+                    waking.push_back(s.body[i]);
                 }
-                first += pile->count;
             }
         }
         if (!waking.empty()) {
@@ -1652,8 +1949,20 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             world->wake(waking);
         }
         const RigidPhysics& physics = *rigid_physics(emitter);
+        // A blast goes off before the world steps, so the step carries it.
+        blast_bodies(step, emitter, physics, *world);
+        step.last = s.alive();
         move_rigid(step, emitter, physics, *world);
-        break_bodies(step, emitter, physics, *world);
+        // What the effect reads of the step's contacts, for its own breaks
+        // and for the emitters bearing particles from them, which step after
+        // this one.
+        RigidEmitter& rigid = rigid_[index];
+        rigid.read.clear();
+        if (rigid.floor) {
+            rigid.read =
+                detail::effect_contacts(world->contacts(), *rigid.floor, detail::effect_contact_limit(emitter));
+        }
+        break_bodies(step, emitter, physics, *world, rigid.read);
     } else {
         // Forces, integration, then constraints and appearance.
         for (const UpdateModule& module : emitter.update) {
@@ -1678,23 +1987,55 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
                 std::visit(run, module);
             }
         }
+        detail::glow(emitter, s, step.first, step.last);
         compact(s, [&s](std::size_t i) { return !(s.age[i] < s.lifetime[i]); });
     }
 
-    // Births, each with the age it has reached by the end of the step.
+    // The bodies and contacts the spawn modules bear particles from, as the
+    // rigid physics emitters (which have stepped) left them.
+    detail::BodySources sources;
+    for (const SpawnModule& module : emitter.spawn) {
+        const std::string* named = nullptr;
+        if (const auto* contacts = std::get_if<SpawnFromContacts>(&module)) {
+            named = &contacts->emitter;
+        } else if (const auto* shed = std::get_if<SpawnFromBodies>(&module)) {
+            named = &shed->emitter;
+        }
+        if (named == nullptr || sources.contains(*named)) {
+            continue;
+        }
+        for (std::size_t other = 0U; other < effect_.emitters.size(); ++other) {
+            const RigidPhysics* physics = rigid_physics(effect_.emitters[other]);
+            if (physics == nullptr || effect_.emitters[other].name != *named) {
+                continue;
+            }
+            sources.emplace(*named, detail::body_source(*physics, state_.emitters[other], rigid_[other].read,
+                                                        effect_.emitters[other].capacity));
+            break;
+        }
+    }
+
+    // Births, each with the age it has reached by the end of the step, and
+    // where a contact or a body puts it, if one does.
     const std::size_t first_new = s.alive();
-    const auto birth = [&s, &emitter, world](double age, std::uint32_t kind) {
+    std::vector<std::optional<detail::BirthOrigin>> origins;
+    const auto birth = [&s, &emitter, &origins, world](double age, std::uint32_t kind, std::uint32_t,
+                                                       std::uint32_t spawn_index,
+                                                       const detail::BirthOrigin* origin) {
         if (s.alive() < emitter.capacity) {
-            append(s, static_cast<float>(age));
+            append(s, static_cast<float>(age), spawn_index);
             if (world != nullptr) {
                 s.body_kind.push_back(kind);
             }
+            origins.push_back(origin != nullptr ? std::optional<detail::BirthOrigin>{*origin} : std::nullopt);
         } else {
             ++s.refused;
         }
         ++s.spawned;
     };
-    detail::for_each_birth(emitter, step.in, s.rate_carry, step.start, step.end, rate, birth);
+    const detail::BirthContext context{state_.tick, step.random.seed, step.dt, &sources};
+    detail::for_each_birth(emitter, step.in, s.rate_carry, s.spawn_counts, step.start, step.end, rate, context,
+                           birth);
 
     // Initialise the newborns, carry them through the part of the step they
     // lived, then give them their appearance at that age.
@@ -1705,6 +2046,15 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
     }
     for (const InitModule& module : emitter.init) {
         std::visit(run, module);
+    }
+    // A particle born of a contact or a body starts there: its init
+    // modules' position is an offset from it, their velocity added to what
+    // it was given. As ajfx's spawn kernel does it.
+    for (std::size_t i = step.first; i < step.last; ++i) {
+        if (const std::optional<detail::BirthOrigin>& origin = origins[i - step.first]) {
+            s.position[i] = origin->position + s.position[i];
+            s.velocity[i] = s.velocity[i] + origin->velocity;
+        }
     }
     for (std::size_t i = step.first; i < step.last; ++i) {
         s.color[i] = s.base_color[i];
@@ -1717,6 +2067,7 @@ void Simulation::step_emitter(std::size_t index, std::span<const ParameterValue>
             std::visit(run, module);
         }
     }
+    detail::glow(emitter, s, step.first, step.last);
     if (world != nullptr) {
         add_bodies(s, step.first, emitter.capacity, *world);
         if (const Glue* glue = glue_module(emitter)) {
@@ -1748,9 +2099,26 @@ void CheckpointRing::seek(Simulation& simulation, std::uint64_t target, const Pa
             best = &checkpoint;
         }
     }
-    const bool keep_current = simulation.tick() <= target && (best == nullptr || simulation.tick() >= best->tick);
+    // A cache's checkpoints are as good as the ring's, and a far seek finds
+    // one there that the ring never passed.
+    std::optional<std::uint64_t> cached_tick;
+    if (simulation.cache() != nullptr) {
+        cached_tick = simulation.cache()->checkpoint_tick(target);
+        if (cached_tick && best != nullptr && best->tick >= *cached_tick) {
+            cached_tick.reset();
+        }
+    }
+    const bool any = best != nullptr || cached_tick.has_value();
+    const std::uint64_t best_tick = cached_tick ? *cached_tick : (best != nullptr ? best->tick : 0U);
+    const bool keep_current = simulation.tick() <= target && (!any || simulation.tick() >= best_tick);
     if (!keep_current) {
-        if (best != nullptr) {
+        std::optional<SimulationState> from_cache;
+        if (cached_tick) {
+            from_cache = simulation.cached_checkpoint(target);
+        }
+        if (from_cache) {
+            simulation.restore(*from_cache);
+        } else if (best != nullptr) {
             simulation.restore(*best);
         } else {
             simulation.reset(parameters);

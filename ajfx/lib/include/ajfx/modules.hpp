@@ -3,6 +3,7 @@
 #include <ajfx/math.hpp>
 #include <ajfx/parameters.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -23,6 +24,41 @@
 namespace ajfx {
 
 using ModuleId = std::uint32_t;
+
+// Which of an emitter's particles a module acts on: its `only`. One emitter
+// can then hold several kinds of thing that start and look different -- a
+// rigid physics world whose crates are brown and whose hot fragments glow, or
+// sparks and dust born from one emitter's contacts -- with an init module or
+// an appearance curve for each.
+// - `sources` names spawn modules by their place in the emitter's spawn stack
+//   (spawn_source of a particle's spawn index), and piece_spawn_source
+//   (effect.hpp) for the pieces broken bodies become.
+// - `kinds` names body kinds of a rigid physics emitter (0 being its own).
+// - A particle is in scope when every list that is not empty names it, so an
+//   empty scope is every particle, which is what a module without one has
+//   always acted on. A particle no Lifetime is in scope of is refused by
+//   validation; one no other init module is in scope of keeps that module's
+//   default, as it would without the module.
+// Scopes are data: the GPU kernels read them each step, so editing one needs
+// no kernels compiled again. On the GPU a particle emitter has no body kinds,
+// so `kinds` is only for rigid physics emitters, which the CPU simulates.
+struct Scope final {
+    std::vector<std::uint32_t> sources;
+    std::vector<std::uint32_t> kinds;
+
+    [[nodiscard]] bool empty() const noexcept { return sources.empty() && kinds.empty(); }
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("sources", self.sources);
+        visit("kinds", self.kinds);
+    }
+    friend bool operator==(const Scope&, const Scope&) = default;
+};
+
+// Entries one scope list may hold: every spawn source an emitter can have,
+// pieces included, or every body kind.
+inline constexpr std::size_t max_scope_entries = 256U;
 
 // ---------------------------------------------------------------- spawn
 
@@ -115,6 +151,8 @@ struct SpawnPile final {
     // (RigidPhysics::bodies) these newborns are. 0 is the emitter's own shape
     // and material, which is every body's unless it is given another.
     std::uint32_t body{0U};
+    Vec3 initial_velocity{};
+    Vec3 turn{}; // degrees, same convention as RigidProp
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -128,11 +166,123 @@ struct SpawnPile final {
         visit("jitter", self.jitter);
         visit("release", self.release);
         visit("body", self.body);
+        visit("initial_velocity", self.initial_velocity);
+        visit("turn", self.turn);
     }
     friend bool operator==(const SpawnPile&, const SpawnPile&) = default;
 };
 
-using SpawnModule = std::variant<SpawnRate, SpawnBurst, SpawnPile>;
+// Particles born where another emitter's bodies hit something: dust where
+// pieces land, sparks where metal strikes. `emitter` names a rigid physics
+// emitter; every step its contacts (RigidContact) are read in their own
+// order, after its world has stepped, and each that qualifies bears
+// particles at its point.
+// - **Which contacts:** those closing at `min_speed` or faster, only those
+//   that began this step with `new_only` (a hit rather than a scrape), and
+//   with a non-empty `bodies` scope only those where a body of the named
+//   emitter in that scope is one of the two sides (its sources and kinds are
+//   the named emitter's).
+// - **How many:** `per_hit` plus `per_speed` for every unit a second of the
+//   contact's speed, rounded up or down by a hash of the step and the
+//   contact's place in the list, so a hit twice as hard bears about twice as
+//   many. At most `max_per_step` a step, taking contacts in order; the rest
+//   bear none. That bound is what validation proves the capacity against.
+// - **How they start:** at the contact's point, at age 0, then set up by the
+//   init modules as any newborn; a ShapeLocation is then an offset around the
+//   point and a Velocity adds to what the contact gives. The contact gives
+//   `along_normal` of its speed along its normal, turned to point up (away
+//   from a floor), and `along_surface` of it along the surface a random way,
+//   the two together scattered within `spread` degrees.
+// The world collects contacts as slow as the slowest reader asks for
+// (contact_floor), whether the host asked for contacts or not. A particle
+// emitter only: bodies are not born of contacts. The named emitter steps
+// first, as every rigid physics emitter does, so the contacts are this
+// step's.
+struct SpawnFromContacts final {
+    static constexpr std::string_view kind = "spawn_from_contacts";
+    ModuleId id{};
+    std::string emitter;
+    float min_speed{1.0F};
+    bool new_only{true};
+    float per_hit{0.0F};
+    float per_speed{2.0F};
+    std::uint32_t max_per_step{64U};
+    float along_normal{0.2F};
+    float along_surface{0.1F};
+    float spread{30.0F};
+    Scope bodies;
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("emitter", self.emitter);
+        visit("min_speed", self.min_speed);
+        visit("new_only", self.new_only);
+        visit("per_hit", self.per_hit);
+        visit("per_speed", self.per_speed);
+        visit("max_per_step", self.max_per_step);
+        visit("along_normal", self.along_normal);
+        visit("along_surface", self.along_surface);
+        visit("spread", self.spread);
+        visit("bodies", self.bodies);
+    }
+    friend bool operator==(const SpawnFromContacts&, const SpawnFromContacts&) = default;
+};
+
+// Particles shed by another emitter's moving bodies: smoke trailing a
+// thrown rock, embers off a burning plank. `emitter` names a rigid physics
+// emitter; every step each of its live bodies, in its own order, that is in
+// the `bodies` scope (its sources and kinds are the named emitter's) and
+// moves at `min_speed` or faster sheds particles.
+// - **How many:** `rate` plus `per_speed` for every unit a second of the
+//   body's speed, per second, rounded up or down by a hash of the body and
+//   the step, so a still body sheds nothing and a fast one a dense trail. At
+//   most `max_per_step` a step in all, taking bodies in order.
+// - **Where:** along the step's stretch of the body's path, each at the age
+//   it reached by the end of the step, so a trail is continuous at any
+//   speed; `surface` places it from the body's middle (0) out to the ball its
+//   size spans (1), a random way.
+// - **How they start:** with `inherit` of the body's velocity, then set up by
+//   the init modules as any newborn (a ShapeLocation offsets, a Velocity
+//   adds). A particle emitter only.
+struct SpawnFromBodies final {
+    static constexpr std::string_view kind = "spawn_from_bodies";
+    ModuleId id{};
+    std::string emitter;
+    float min_speed{0.5F};
+    float rate{0.0F};
+    float per_speed{10.0F};
+    std::uint32_t max_per_step{64U};
+    float surface{1.0F};
+    float inherit{0.0F};
+    Scope bodies;
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("emitter", self.emitter);
+        visit("min_speed", self.min_speed);
+        visit("rate", self.rate);
+        visit("per_speed", self.per_speed);
+        visit("max_per_step", self.max_per_step);
+        visit("surface", self.surface);
+        visit("inherit", self.inherit);
+        visit("bodies", self.bodies);
+    }
+    friend bool operator==(const SpawnFromBodies&, const SpawnFromBodies&) = default;
+};
+
+using SpawnModule = std::variant<SpawnRate, SpawnBurst, SpawnPile, SpawnFromContacts, SpawnFromBodies>;
+
+// The body kind a spawn module's newborns are: its `body`, or 0 for a module
+// that has none (it bears particles, not bodies).
+template <class Module>
+[[nodiscard]] constexpr std::uint32_t spawn_body(const Module& module) noexcept {
+    if constexpr (requires { module.body; }) {
+        return module.body;
+    } else {
+        static_cast<void>(module);
+        return 0U;
+    }
+}
 
 // ---------------------------------------------------------------- init
 
@@ -143,10 +293,14 @@ struct Lifetime final {
     FloatInput min{1.0F};
     FloatInput max{1.0F};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("min", self.min);
         visit("max", self.max);
+        visit("only", self.only);
     }
     friend bool operator==(const Lifetime&, const Lifetime&) = default;
 };
@@ -172,6 +326,9 @@ struct ShapeLocation final {
     Vec3 size{1.0F, 1.0F, 1.0F};    // box
     bool surface_only{false};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("shape", self.shape);
@@ -180,6 +337,7 @@ struct ShapeLocation final {
         visit("radius_max", self.radius_max);
         visit("size", self.size);
         visit("surface_only", self.surface_only);
+        visit("only", self.only);
     }
     friend bool operator==(const ShapeLocation&, const ShapeLocation&) = default;
 };
@@ -197,6 +355,9 @@ struct Velocity final {
     FloatInput spread{0.0F};
     FloatInput spread_min{0.0F};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("direction", self.direction);
@@ -204,6 +365,7 @@ struct Velocity final {
         visit("speed_max", self.speed_max);
         visit("spread", self.spread);
         visit("spread_min", self.spread_min);
+        visit("only", self.only);
     }
     friend bool operator==(const Velocity&, const Velocity&) = default;
 };
@@ -219,12 +381,16 @@ struct InitColor final {
     FloatInput brightness_min{1.0F};
     FloatInput brightness_max{1.0F};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("a", self.a);
         visit("b", self.b);
         visit("brightness_min", self.brightness_min);
         visit("brightness_max", self.brightness_max);
+        visit("only", self.only);
     }
     friend bool operator==(const InitColor&, const InitColor&) = default;
 };
@@ -236,10 +402,14 @@ struct InitSize final {
     FloatInput min{0.1F};
     FloatInput max{0.1F};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("min", self.min);
         visit("max", self.max);
+        visit("only", self.only);
     }
     friend bool operator==(const InitSize&, const InitSize&) = default;
 };
@@ -251,10 +421,14 @@ struct InitRotation final {
     FloatInput min{0.0F};
     FloatInput max{360.0F};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("min", self.min);
         visit("max", self.max);
+        visit("only", self.only);
     }
     friend bool operator==(const InitRotation&, const InitRotation&) = default;
 };
@@ -269,11 +443,15 @@ struct InitTumble final {
     FloatInput speed_max{360.0F};
     bool random_orientation{true};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("speed_min", self.speed_min);
         visit("speed_max", self.speed_max);
         visit("random_orientation", self.random_orientation);
+        visit("only", self.only);
     }
     friend bool operator==(const InitTumble&, const InitTumble&) = default;
 };
@@ -320,7 +498,8 @@ struct CurveKey final {
 
 // ---------------------------------------------------------------- update
 //
-// Forces (gravity, drag, curl noise, vortex, attractor, converge) change
+// Forces (gravity, drag, curl noise, vortex, attractor, converge, shockwave,
+// wake) change
 // velocity and run first, in stack order. Position is then integrated. Turning (rigid
 // body), constraints (the colliders) and appearance (colour and size over
 // life) run after, in stack order.
@@ -366,6 +545,83 @@ struct Drag final {
         visit("scale_max", self.scale_max);
     }
     friend bool operator==(const Drag&, const Drag&) = default;
+};
+
+// A blast: at `time` seconds, everything within `radius` of `center` is
+// thrown straight out from it, hardest at the centre and fading linearly to
+// nothing at the edge. `power` is the speed (units per second) it gives at
+// the centre, whatever the mass of what it throws, so a blast reads the same
+// on a spark, a crate or a splinter.
+// - **Set once:** an effect lists its blasts (Effect::blasts), each by name,
+//   and every module that answers one names it: Shockwave throws an
+//   emitter's particles, and in a rigid physics emitter its bodies and loose
+//   props, and Break::blast_threshold shatters the bodies thrown hardest. A
+//   host or an editor sets a blast in one place and the dust, the debris and
+//   what breaks all follow it.
+// - **When:** in one step, the first that starts at or after `time`
+//   (blast_tick), so every node and every seek finds it in the same step.
+// - **How hard:** blast_push gives what it does to whatever stands at a
+//   point. The CPU reference, the GPU kernels and the rigid world all take
+//   it from there.
+// Its values are authored rather than bound to parameters: a blast is an
+// event of the effect, as a prop is a thing in it.
+struct Blast final {
+    std::string name;
+    Vec3 center{};
+    float power{10.0F};
+    float radius{3.0F};
+    float time{0.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("name", self.name);
+        visit("center", self.center);
+        visit("power", self.power);
+        visit("radius", self.radius);
+        visit("time", self.time);
+    }
+    friend bool operator==(const Blast&, const Blast&) = default;
+};
+
+// Blasts one effect may list.
+inline constexpr std::size_t max_blasts = 64U;
+
+// What a blast does to whatever stands at `at`: the way it is thrown (out
+// from the centre; straight up at the centre itself) and the speed it is
+// given there. Nothing beyond the radius.
+struct BlastPush final {
+    Vec3 direction{};
+    float speed{0.0F};
+
+    friend bool operator==(const BlastPush&, const BlastPush&) = default;
+};
+
+[[nodiscard]] BlastPush blast_push(const Blast& blast, Vec3 at) noexcept;
+
+// The step a blast goes off in: the first that starts at or after its time.
+[[nodiscard]] std::uint64_t blast_tick(const Blast& blast, std::uint32_t simulation_rate) noexcept;
+
+// Throws the emitter's particles out from the blast it names (Effect::blasts)
+// in the step it goes off: each takes blast_push's speed at where it stands,
+// times its own factor between `scale_min` and `scale_max`, as every force
+// takes one. In a rigid physics emitter it throws the bodies and the loose
+// props instead (a prop takes the blast as it is, having no factor of its
+// own), and a body of a kind whose Break has a `blast_threshold` comes apart
+// first if it is thrown that hard.
+struct Shockwave final {
+    static constexpr std::string_view kind = "shockwave";
+    ModuleId id{};
+    std::string blast;
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("blast", self.blast);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
+    }
+    friend bool operator==(const Shockwave&, const Shockwave&) = default;
 };
 
 // Divergence-free turbulence: swirls without bunching particles together.
@@ -582,9 +838,13 @@ struct SdfCollision final {
 //   that is a ball or a model's hull. It is the body's own size, not its
 //   model, so a thin panel is met as the box its size spans.
 // - **Which bodies:** every live body of that emitter, in its own order, up
-//   to its capacity, which is why that capacity is held to
-//   `max_body_colliders`: every particle is tested against every body, so
-//   the cost is declared up front rather than discovered.
+//   to its capacity, which is held to `max_body_colliders`. Each step the
+//   bodies are sorted into a grid of cells about as wide as the largest of
+//   them, and a particle tests only the bodies in the cells around it. It
+//   still meets them in body order, the same bodies at the same moments as
+//   meeting every body in turn would, so the grid changes the cost and not
+//   one bit of the result (SimulationOptions::body_broadphase turns it off,
+//   for proving that).
 // - **Order:** every rigid physics emitter steps before any other
 //   (Simulation::step), so the bodies met are this step's wherever the
 //   named emitter is listed. An emitter may hold one of these per emitter
@@ -612,9 +872,57 @@ struct BodyCollision final {
     friend bool operator==(const BodyCollision&, const BodyCollision&) = default;
 };
 
-// Bodies one emitter may hold while another collides with them. Every
-// particle meets every body, so this is the bound on that.
-inline constexpr std::uint32_t max_body_colliders = 256U;
+// Bodies one emitter may hold while another collides with them (BodyCollision)
+// or is stirred by them (Wake). The grid they are sorted into each step
+// keeps a particle's cost to the bodies near it, so this bounds the memory
+// and the sorting, not a product of particles and bodies.
+inline constexpr std::uint32_t max_body_colliders = 16384U;
+
+// Another emitter's moving bodies stir these particles: smoke pushed aside
+// by a thrown crate, dust dragged along behind a rolling boulder. Each step
+// a particle within reach of a moving body of the named rigid physics
+// emitter is pulled towards that body's velocity, as Drag pulls towards
+// rest:
+// - **Reach:** `radius` times the body's half size (the ball or box its size
+//   describes), from its middle. Strongest at the middle, fading linearly to
+//   nothing at the edge, so a big body stirs a wide wake.
+// - **How hard:** `strength` is how much of the difference the particle
+//   loses per second at full strength: each step it takes k / (1 + k) of the
+//   way to the body's velocity, k being strength times the step times the
+//   fade, so any strength is stable. A particle's own factor between
+//   `scale_min` and `scale_max` multiplies it, as every force's does.
+// - **Which bodies:** those in the `bodies` scope (the named emitter's
+//   sources and kinds) moving at `min_speed` or faster: a body at rest
+//   leaves the smoke around it alone rather than holding it still.
+// - **Overlapping wakes:** the particle follows the strongest wake at it
+//   (the earlier body on a tie) rather than all of them added up, so a
+//   crowd of bodies stirs no harder than one. That is also what makes the
+//   result the same whichever order the bodies are looked at in.
+// - Found through the same grid as BodyCollision, so bounded by
+//   `max_body_colliders` too. A particle emitter only.
+struct Wake final {
+    static constexpr std::string_view kind = "wake";
+    ModuleId id{};
+    std::string emitter;
+    FloatInput strength{4.0F};
+    float radius{4.0F};
+    float min_speed{0.1F};
+    Scope bodies;
+    FloatInput scale_min{1.0F};
+    FloatInput scale_max{1.0F};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("emitter", self.emitter);
+        visit("strength", self.strength);
+        visit("radius", self.radius);
+        visit("min_speed", self.min_speed);
+        visit("bodies", self.bodies);
+        visit("scale_min", self.scale_min);
+        visit("scale_max", self.scale_max);
+    }
+    friend bool operator==(const Wake&, const Wake&) = default;
+};
 
 // Makes the emitter's particles small rigid bodies, for debris. Each turns
 // by its angular velocity, which loses `angular_drag` of itself per second as
@@ -690,6 +998,8 @@ struct RigidBodyKind final {
     float density{1000.0F};
     float friction{0.5F};
     float restitution{0.2F};
+    // Draw-time surface assignment. Never enters the solver or motion cache.
+    Color draw_tint{};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -700,6 +1010,7 @@ struct RigidBodyKind final {
         visit("density", self.density);
         visit("friction", self.friction);
         visit("restitution", self.restitution);
+        visit("draw_tint", self.draw_tint);
     }
     friend bool operator==(const RigidBodyKind&, const RigidBodyKind&) = default;
 };
@@ -772,6 +1083,7 @@ struct RigidProp final {
     Vec3 to_turn{};
     float move_from{0.0F};
     float move_over{0.0F};
+    Color draw_tint{};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -793,6 +1105,7 @@ struct RigidProp final {
         visit("to_turn", self.to_turn);
         visit("move_from", self.move_from);
         visit("move_over", self.move_over);
+        visit("draw_tint", self.draw_tint);
     }
     friend bool operator==(const RigidProp&, const RigidProp&) = default;
 };
@@ -877,12 +1190,19 @@ struct BreakPiece final {
 //   emitter's capacity. One that does not stays whole, and the pieces it
 //   could not bear are counted in EmitterState::refused rather than half of
 //   it breaking.
+// - **Blasted:** with a `blast_threshold` above zero, a body of the kind
+//   that a Shockwave of the emitter throws at that speed or more (its
+//   blast_push speed at the body, times the body's own factor) comes apart
+//   at the start of the blast's step, before the blast throws anything, so
+//   its pieces are thrown from where each of them sits. Bodies farther out,
+//   thrown more gently, are only pushed. Zero leaves blasts to push.
 // - Rigid physics emitters only, and at most one Break for a kind.
 struct Break final {
     static constexpr std::string_view kind = "break";
     ModuleId id{};
     std::uint32_t body{0U};
     float threshold{3.0F};
+    float blast_threshold{0.0F};
     float scatter{0.5F};
     float spin{90.0F};
     std::vector<BreakPiece> pieces;
@@ -891,6 +1211,7 @@ struct Break final {
     static void fields(Self& self, Visitor&& visit) {
         visit("body", self.body);
         visit("threshold", self.threshold);
+        visit("blast_threshold", self.blast_threshold);
         visit("scatter", self.scatter);
         visit("spin", self.spin);
         visit("pieces", self.pieces);
@@ -961,7 +1282,7 @@ inline constexpr std::size_t max_break_pieces = 64U;
 // another material; a handful is a scene, and a world is not a shop. A model
 // cut into cells makes one per cell, so this holds as many as a body may
 // come apart into.
-inline constexpr std::size_t max_rigid_body_kinds = 64U;
+inline constexpr std::size_t max_rigid_body_kinds = 256U;
 // Props stand in the world for the whole effect, so a world full of them
 // costs every step. A few hundred is a stage; thousands are debris.
 inline constexpr std::size_t max_rigid_props = 256U;
@@ -973,9 +1294,13 @@ struct ColorOverLife final {
     ModuleId id{};
     std::vector<ColorKey> keys{{0.0F, Color{}}, {1.0F, Color{1.0F, 1.0F, 1.0F, 0.0F}}};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("keys", self.keys);
+        visit("only", self.only);
     }
     friend bool operator==(const ColorOverLife&, const ColorOverLife&) = default;
 };
@@ -985,16 +1310,57 @@ struct SizeOverLife final {
     ModuleId id{};
     std::vector<CurveKey> keys{{0.0F, 1.0F}, {1.0F, 1.0F}};
 
+    // The particles it sets up (see Scope); empty is every one.
+    Scope only{};
+
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
         visit("keys", self.keys);
+        visit("only", self.only);
     }
     friend bool operator==(const SizeOverLife&, const SizeOverLife&) = default;
 };
 
+// A glow that cools: hot sparks, a fragment fresh from a blast, embers. Each
+// particle in scope has a heat of `start` when it is born, halving every
+// `half_life` seconds of its age, and glows by it on top of its colour.
+// - **The glow:** a black-body-like ramp of the heat (0 to 1) -- black, deep
+//   red, orange, yellow, white -- times `glow`, added to the particle's red,
+//   green and blue (alpha untouched). Above 1 the glow stays white until the
+//   heat falls through 1, so `start` above 1 holds a white heat for a while.
+//   Colours above 1 are emission: what a host's renderer draws as light.
+// - **Pure in age:** the heat at age a is start * 2^(-a / half_life), worked
+//   out afresh each step rather than carried, so a seek, a cache and the GPU
+//   all find it from the age alone, and it falls monotonically. A piece a
+//   body breaks into takes its parent's age, so it is as hot as the parent
+//   was; a fragment that should start hot is born hot (its own spawn module
+//   or kind, scoped).
+// - **With colour over life:** every heat is added after every colour over
+//   life, wherever the modules stand in the stack, so the glow is on the
+//   colour of that age.
+// - In a rigid physics emitter too, scoped by body kind, so hot fragments and
+//   cold crates are one world's bodies.
+struct Heat final {
+    static constexpr std::string_view kind = "heat";
+    ModuleId id{};
+    float start{1.0F};
+    float half_life{0.5F};
+    float glow{4.0F};
+    Scope only{};
+
+    template <class Self, class Visitor>
+    static void fields(Self& self, Visitor&& visit) {
+        visit("start", self.start);
+        visit("half_life", self.half_life);
+        visit("glow", self.glow);
+        visit("only", self.only);
+    }
+    friend bool operator==(const Heat&, const Heat&) = default;
+};
+
 using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, Converge, PlaneCollision,
                                   SphereCollision, BoxCollision, SdfCollision, BodyCollision, ColorOverLife,
-                                  SizeOverLife, RigidBody, RigidPhysics, Break, Glue>;
+                                  SizeOverLife, RigidBody, RigidPhysics, Break, Glue, Shockwave, Heat, Wake>;
 
 // Collision modules constrain positions after integration rather than
 // accelerating particles.
@@ -1009,7 +1375,7 @@ using UpdateModule = std::variant<Gravity, Drag, CurlNoise, Vortex, Attractor, C
     return !is_collision(module) && !std::holds_alternative<ColorOverLife>(module) &&
            !std::holds_alternative<SizeOverLife>(module) && !std::holds_alternative<RigidBody>(module) &&
            !std::holds_alternative<RigidPhysics>(module) && !std::holds_alternative<Break>(module) &&
-           !std::holds_alternative<Glue>(module);
+           !std::holds_alternative<Glue>(module) && !std::holds_alternative<Heat>(module);
 }
 
 // ---------------------------------------------------------------- render
@@ -1085,6 +1451,16 @@ struct SpriteRenderer final {
     bool light_own_color{false};
     std::vector<ColorKey> light_colors{{0.0F, Color{}}, {1.0F, Color{}}};
     std::vector<CurveKey> light_curve{{0.0F, 1.0F}, {1.0F, 1.0F}};
+    // Draw inputs: what a host multiplies every particle by as it draws it,
+    // after the simulation (and after a cache) has had its say. Colour by
+    // `tint` times `brightness`, alpha by `tint`'s alpha times `opacity`,
+    // size by `size_scale`. The simulation never reads them, which is what
+    // lets them follow playback-time parameters (ParameterTiming) that a
+    // cache honours for free; `draw_adjustment` resolves them.
+    ColorInput tint{Color{}};
+    FloatInput brightness{1.0F};
+    FloatInput opacity{1.0F};
+    FloatInput size_scale{1.0F};
 
     template <class Self, class Visitor>
     static void fields(Self& self, Visitor&& visit) {
@@ -1107,6 +1483,10 @@ struct SpriteRenderer final {
         visit("light_own_color", self.light_own_color);
         visit("light_colors", self.light_colors);
         visit("light_curve", self.light_curve);
+        visit("tint", self.tint);
+        visit("brightness", self.brightness);
+        visit("opacity", self.opacity);
+        visit("size_scale", self.size_scale);
     }
     friend bool operator==(const SpriteRenderer&, const SpriteRenderer&) = default;
 };

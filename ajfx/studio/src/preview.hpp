@@ -45,6 +45,8 @@ struct PreviewFrame final {
     Backdrop backdrop{Backdrop::Night};
     float glow{0.6F};
     bool figure{true};
+    // Scene workspaces draw their authored Ground; legacy pages use the stage.
+    bool staging_floor{true};
     Orbit orbit{};
     // The package to play, empty for none, and its generation: a new
     // generation reads the file again.

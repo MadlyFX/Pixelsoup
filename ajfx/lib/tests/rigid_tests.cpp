@@ -2019,6 +2019,173 @@ void cutting_more_than_a_body_may_hold_is_refused() {
     std::cout << "  " << crowded.error().message << '\n';
 }
 
+// A row of six crates resting on the floor along x, a loose box beside them,
+// and a blast at one end of the row once they have settled. A crate thrown
+// at `blast_threshold` or harder comes apart into six panels; one thrown
+// more gently, or out of the blast's reach, stays whole.
+constexpr Vec3 blast_centre{-2.5F, 0.2F, 0.0F};
+
+Effect crates_in_a_blast(float blast_threshold) {
+    RigidProp box{};
+    box.shape = PropShape::Box;
+    box.motion = PropMotion::Loose;
+    box.position = Vec3{-1.0F, 0.2F, 1.0F};
+    box.half_size = Vec3{0.2F, 0.2F, 0.2F};
+    box.density = 500.0F;
+    box.friction = 0.6F;
+
+    EffectBuilder builder{"blast"};
+    builder.blast(Blast{.name = "boom", .center = blast_centre, .power = 12.0F, .radius = 3.5F, .time = 1.0F});
+    builder.emitter("crates")
+        .capacity(32U)
+        // Size 0.4 boxes spaced by their reach (0.4 * sqrt 3): a row of six
+        // along x from -1.73 to 1.73.
+        .spawn(SpawnPile{.count = 6U, .shape = PileShape::Box, .width = 4.2F, .depth = 0.5F, .jitter = 0.0F})
+        .init(Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(InitSize{.min = 0.4F, .max = 0.4F})
+        .update(Gravity{})
+        .update(RigidPhysics{.shape = RigidShape::Box,
+                             .friction = 0.7F,
+                             .restitution = 0.05F,
+                             .bodies = {RigidBodyKind{.shape = RigidShape::Box}},
+                             .props = {box}})
+        .update(Shockwave{.blast = "boom"})
+        // No knock in this scene comes near this threshold: only the blast
+        // breaks anything.
+        .update(Break{.body = 0U,
+                      .threshold = 1000.0F,
+                      .blast_threshold = blast_threshold,
+                      .scatter = 1.0F,
+                      .spin = 180.0F,
+                      .pieces = crate_panels(1U)})
+        .update(PlaneCollision{.restitution = 0.0F, .friction = 0.8F});
+    return builder.build().value();
+}
+
+void a_blast_breaks_what_is_near_and_pushes_what_is_far() {
+    const Effect effect = crates_in_a_blast(5.5F);
+    AJFX_CHECK(blast_tick(effect.blasts[0], effect.simulation_rate) == 60U);
+    Simulation simulation = make(effect);
+    const EmitterState& s = simulation.emitter(0);
+    // Settled and whole up to the blast's step.
+    simulation.advance_to(60U);
+    AJFX_CHECK(s.alive() == 6U);
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        AJFX_CHECK(s.body_kind[i] == 0U);
+        AJFX_CHECK(length(s.velocity[i]) < 0.1F);
+    }
+    AJFX_CHECK(length(s.props[0].velocity) < 0.1F);
+
+    // The blast's step: the two crates nearest (thrown at about 9.4 and 7)
+    // break, the third (about 4.6) and fourth (about 2.2) are only pushed,
+    // and the last two are out of reach.
+    simulation.step();
+    std::size_t whole = 0U;
+    std::size_t pieces = 0U;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        if (s.body_kind[i] == 0U) {
+            ++whole;
+            AJFX_CHECK(spawn_source(s.spawn_index[i]) == 0U);
+        } else {
+            ++pieces;
+            // A piece is a birth of the pieces' own, not of the pile.
+            AJFX_CHECK(spawn_source(s.spawn_index[i]) == piece_spawn_source);
+        }
+    }
+    std::cout << "  the blast left " << whole << " crates whole and " << pieces << " pieces\n";
+    AJFX_CHECK(whole == 4U && pieces == 12U);
+    AJFX_CHECK(s.refused == 0U && s.spawned == 6U + 12U);
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        const Vec3 out = s.position[i] - blast_centre;
+        if (s.body_kind[i] == 0U) {
+            // The crates left whole are the far four, where they stood.
+            AJFX_CHECK(s.position[i].x > -0.6F);
+            if (s.position[i].x < 0.5F) {
+                AJFX_CHECK(s.velocity[i].x > 0.5F);
+            } else if (s.position[i].x > 0.8F) {
+                AJFX_CHECK(length(s.velocity[i]) < 0.1F);
+            }
+        } else {
+            // Every piece is near where its crate was and thrown away from
+            // the centre.
+            AJFX_CHECK(s.position[i].x < -0.5F);
+            AJFX_CHECK(dot(s.velocity[i], out) > 0.0F);
+        }
+    }
+    // The loose box is thrown too; the far crates' places are untouched.
+    AJFX_CHECK(s.props[0].velocity.x > 0.5F);
+
+    // The fragments carry on outward.
+    std::vector<float> then;
+    for (std::size_t i = 0U; i < s.alive(); ++i) {
+        then.push_back(length(s.position[i] - blast_centre));
+    }
+    simulation.advance_to(75U);
+    float went = 0.0F;
+    std::size_t counted = 0U;
+    for (std::size_t i = 0U; i < s.alive() && i < then.size(); ++i) {
+        if (s.body_kind[i] != 0U) {
+            went += length(s.position[i] - blast_centre) - then[i];
+            ++counted;
+        }
+    }
+    AJFX_CHECK(counted == 12U && went / static_cast<float>(counted) > 0.3F);
+
+    // Without a threshold the blast only pushes: nothing breaks.
+    Simulation pushed = make(crates_in_a_blast(0.0F));
+    pushed.advance_to(61U);
+    AJFX_CHECK(pushed.emitter(0).alive() == 6U);
+    AJFX_CHECK(pushed.emitter(0).velocity[0].x > 1.0F);
+}
+
+void blasts_rerun_and_seek_exactly() {
+    const Effect effect = crates_in_a_blast(5.5F);
+    const std::unique_ptr<RigidSolver> four = rigid::make_jolt_solver(rigid::JoltOptions{.threads = 4U});
+    Simulation a = make(effect);
+    Simulation b = make(effect);
+    Simulation c = make(effect, four.get());
+    for (const std::uint64_t tick : {59U, 60U, 61U, 62U, 90U, 150U}) {
+        a.advance_to(tick);
+        b.advance_to(tick);
+        c.advance_to(tick);
+        AJFX_CHECK(a.state() == b.state());
+        AJFX_CHECK(a.state() == c.state());
+    }
+    AJFX_CHECK(a.emitter(0).alive() == 16U);
+    AJFX_CHECK(a.state().emitters[0].spawn_counts.size() == 2U);
+    AJFX_CHECK(a.state().emitters[0].spawn_counts[0] == 6U && a.state().emitters[0].spawn_counts[1] == 12U);
+
+    // A seek over the blast lands on what stepping through it gave, the
+    // pieces' spawn counts included.
+    CheckpointRing ring{30U, 8U};
+    Simulation seeker = make(effect);
+    for (const std::uint64_t target : {61U, 30U, 90U, 60U, 150U, 62U}) {
+        ring.seek(seeker, target);
+        Simulation straight = make(effect);
+        straight.advance_to(target);
+        AJFX_CHECK(seeker.tick() == target);
+        AJFX_CHECK(seeker.state() == straight.state());
+    }
+
+    // So does a runner, off the frame path.
+    RigidRunner runner{*g_solver, RigidRunnerOptions{.lead = 10U, .checkpoint_interval = 30U, .checkpoint_count = 3U,
+                                                     .turn = 5U}};
+    std::unique_ptr<RigidTrack> track = runner.track(effect, 3U, {});
+    for (const std::uint64_t tick : {61U, 90U, 45U, 62U}) {
+        std::shared_ptr<const RigidFrame> frame = track->frame(tick);
+        if (!frame) {
+            runner.wait_idle();
+            frame = track->frame(tick);
+        }
+        AJFX_CHECK(frame != nullptr && frame->tick == tick);
+        Simulation straight = make(effect);
+        straight.advance_to(tick);
+        AJFX_CHECK(same_particles(frame->emitters[0], straight.emitter(0)));
+        AJFX_CHECK(frame->emitters[0].props == straight.emitter(0).props);
+    }
+    AJFX_CHECK(!track->error());
+}
+
 int main() {
     g_solver = rigid::make_jolt_solver();
     const ajfx::test::Case cases[] = {
@@ -2064,6 +2231,8 @@ int main() {
         {"impossible_glue_is_refused", impossible_glue_is_refused},
         {"a_cut_body_comes_apart_into_its_cells", a_cut_body_comes_apart_into_its_cells},
         {"cutting_more_than_a_body_may_hold_is_refused", cutting_more_than_a_body_may_hold_is_refused},
+        {"a_blast_breaks_what_is_near_and_pushes_what_is_far", a_blast_breaks_what_is_near_and_pushes_what_is_far},
+        {"blasts_rerun_and_seek_exactly", blasts_rerun_and_seek_exactly},
     };
     const int result = ajfx::test::run(cases);
     g_solver.reset();

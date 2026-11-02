@@ -48,6 +48,11 @@ public:
     EffectBuilder& float_parameter(std::string name, float default_value, float min, float max);
     EffectBuilder& vec3_parameter(std::string name, Vec3 default_value, float min, float max);
     EffectBuilder& color_parameter(std::string name, Color default_value, float min = 0.0F, float max = 1.0F);
+    // Makes the parameter declared last playback-time (ParameterTiming):
+    // one that only the renderer's draw inputs may bind.
+    EffectBuilder& playback();
+    // Lists a blast (Effect::blasts), which Shockwave modules name.
+    EffectBuilder& blast(Blast blast);
 
     // The emitter with this name, added if it is new. The reference stays
     // valid for the builder's lifetime.

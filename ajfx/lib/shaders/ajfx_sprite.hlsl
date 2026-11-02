@@ -38,9 +38,9 @@ RWByteAddressBuffer sprite_counters : register(u3);
 //   0: the byte offset of a record's body kind, or sprite_absent for an
 //      emitter whose bodies are all drawn alike;
 //   1: how many kinds the table holds, at least one;
-//   then three words a kind: where its model's indices start, how many it
-//   has, and the bits of the kind's own size scale. Several kinds may share
-//   a model, and then share its range while keeping their own scale.
+//   then seven words a kind: index start/count, size scale, and RGBA tint.
+//   Several kinds may share
+//   a model, and then share its range while keeping their own scale and tint.
 // A particle's kind picks its model, so one draw covers every model the
 // emitter has and the order between them is still the sort's.
 RWByteAddressBuffer sprite_models : register(u6);
@@ -150,9 +150,10 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     if (kind_offset != sprite_absent) {
         kind = min(sprite_particles.Load(base + kind_offset), kinds - 1u);
     }
-    uint first_index = sprite_models.Load(8u + kind * 12u);
-    uint index_count = sprite_models.Load(12u + kind * 12u);
-    float kind_scale = asfloat(sprite_models.Load(16u + kind * 12u));
+    uint first_index = sprite_models.Load(8u + kind * 28u);
+    uint index_count = sprite_models.Load(12u + kind * 28u);
+    float kind_scale = asfloat(sprite_models.Load(16u + kind * 28u));
+    float4 kind_tint = asfloat(sprite_models.Load4(20u + kind * 28u));
     if (vertex >= index_count) {
         SpriteVertex folded;
         folded.position = float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -166,6 +167,8 @@ SpriteVertex sprite_mesh_vertex(uint vertex, uint instance) {
     float4 color = sprite_color != sprite_absent ? asfloat(sprite_particles.Load4(base + sprite_color))
                                                  : float4(1.0f, 1.0f, 1.0f, 1.0f);
     float size = sprite_size != sprite_absent ? asfloat(sprite_particles.Load(base + sprite_size)) : 0.1f;
+    color *= kind_tint;
+    if (sprite_premultiplied != 0u) { color.rgb *= kind_tint.a; }
     uint index = sprite_mesh_indices.Load((first_index + vertex) * 4u);
     float3 local = asfloat(sprite_mesh_vertices.Load3(index * 32u));
     float3 normal = asfloat(sprite_mesh_vertices.Load3(index * 32u + 12u));

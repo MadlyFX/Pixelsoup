@@ -1110,6 +1110,46 @@ void rigid_physics_holds_until_its_thread_has_the_step() {
     return builder.build().value();
 }
 
+// Identical geometry in one solver must still have independent draw surfaces.
+void body_kind_surface_tint_reaches_pixels() {
+    ajfx::Effect effect = two_models_in_one_emitter();
+    for (ajfx::InitModule& module : effect.emitters[0].init) {
+        if (auto* color = std::get_if<ajfx::InitColor>(&module)) {
+            color->a = ajfx::Color{};
+            color->b = ajfx::Color{};
+        }
+    }
+    for (ajfx::UpdateModule& module : effect.emitters[0].update) {
+        if (auto* physics = std::get_if<ajfx::RigidPhysics>(&module)) {
+            physics->bodies[0].draw = "cube";
+            physics->bodies[0].draw_tint = {0.05F, 0.15F, 1.0F, 1.0F};
+        }
+    }
+    const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}};
+    const auto kernels = ajfx::gpu::compile_kernels(effect, *g_compiler).value();
+    render::ParticlePass pass = make_pass();
+    auto created = pass.create_instance(effect, kernels, ajfx::TextureSet{}, ajfx::FieldSet{}, meshes, 3U);
+    PASS_CHECK(created);
+    auto instance = std::move(created).value();
+    const Frame frame = render_prop_frame(pass, instance, 12U);
+    std::size_t neutral_left = 0U;
+    std::size_t blue_right = 0U;
+    for (core::u32 y = 0U; y < size; ++y) {
+        for (core::u32 x = 0U; x < size; ++x) {
+            if (frame.alpha(x, y) == 0U) { continue; }
+            if (x < size / 2U && frame.red(x, y) > 0U &&
+                frame.red(x, y) == frame.green(x, y) && frame.green(x, y) == frame.blue(x, y)) {
+                ++neutral_left;
+            }
+            if (x >= size / 2U && frame.blue(x, y) > 3U * frame.red(x, y) &&
+                frame.blue(x, y) > 2U * frame.green(x, y)) {
+                ++blue_right;
+            }
+        }
+    }
+    PASS_CHECK(neutral_left > 32U && blue_right > 32U);
+}
+
 void body_kinds_draw_as_their_own_models() {
     const ajfx::MeshSet meshes{{"cube", ajfx::cube_mesh()}, {"half", half_cube_mesh()}};
     const ajfx::Effect effect = two_models_in_one_emitter();
@@ -1396,6 +1436,78 @@ void props_write_their_motion() {
     PASS_CHECK(at(first, column + 8U, 32U, 0U) == 0.0F && at(first, column + 8U, 32U, 2U) == 0.5F);
 }
 
+// Snow falling on a crate that a rigid physics emitter holds where its pile
+// put it: the snow is simulated by the GPU and meets the crate only if each
+// step is given the runner's frame of the tick it reaches.
+[[nodiscard]] ajfx::Effect snow_on_a_crate() {
+    ajfx::EffectBuilder builder{"snow"};
+    builder.emitter("crates")
+        .capacity(8U)
+        .spawn(ajfx::SpawnPile{.count = 1U, .shape = ajfx::PileShape::Box, .jitter = 0.0F, .release = 0.0F})
+        .init(ajfx::Lifetime{.min = 30.0F, .max = 30.0F})
+        .init(ajfx::InitSize{.min = 1.0F, .max = 1.0F})
+        .update(ajfx::RigidPhysics{.shape = ajfx::RigidShape::Box, .friction = 0.9F, .restitution = 0.0F});
+    builder.emitter("snow")
+        .capacity(512U)
+        .seed(11U)
+        .spawn(ajfx::SpawnRate{.rate = 60.0F})
+        .init(ajfx::Lifetime{.min = 8.0F, .max = 8.0F})
+        .init(ajfx::ShapeLocation{.shape = ajfx::Shape::Disc, .center = ajfx::Vec3{0.0F, 4.0F, 0.0F},
+                                  .radius_min = 0.0F, .radius_max = 0.3F})
+        .init(ajfx::Velocity{.direction = ajfx::Vec3{0.0F, -1.0F, 0.0F}, .speed_min = 0.8F, .speed_max = 1.2F})
+        .init(ajfx::InitSize{.min = 0.05F, .max = 0.05F})
+        .update(ajfx::Gravity{.acceleration = ajfx::Vec3{0.0F, -2.0F, 0.0F}})
+        .update(ajfx::BodyCollision{.emitter = "crates", .restitution = 0.0F, .friction = 1.0F})
+        .update(ajfx::PlaneCollision{.restitution = 0.0F, .friction = 1.0F});
+    return builder.build().value();
+}
+
+void particles_meet_the_runners_bodies() {
+    render::ParticlePass pass = make_pass();
+    const ajfx::Effect effect = snow_on_a_crate();
+    render::ParticleInstance instance = make_instance(pass, effect);
+    const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
+    ajfx::Simulation reference =
+        ajfx::Simulation::create(effect, 3U, ajfx::SimulationOptions{.rigid = solver.get()}).value();
+
+    // Three seconds of show at 24 fps, each frame held until the runner has
+    // the steps it needs: 180 steps.
+    for (core::u64 frame = 1U; frame <= 72U; ++frame) {
+        for (int held = 0; !advance_once(pass, instance, frame); ++held) {
+            PASS_CHECK(held < 5000);
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }
+    PASS_CHECK(instance.step() == 180U);
+    reference.advance_to(180U);
+    const ajfx::EmitterState drawn = instance.simulation().read_emitter(1U).value();
+    const ajfx::EmitterState& expected = reference.emitter(1U);
+    PASS_CHECK(drawn.alive() == expected.alive() && drawn.alive() > 100U);
+    PASS_CHECK(drawn.spawn_index == expected.spawn_index);
+    std::size_t apart = 0U;
+    std::size_t on_the_lid = 0U;
+    std::size_t through = 0U;
+    for (std::size_t i = 0U; i < drawn.alive(); ++i) {
+        const ajfx::Vec3 d = drawn.position[i] - expected.position[i];
+        if (std::sqrt(ajfx::dot(d, d)) > 1.0e-3F) {
+            ++apart;
+        }
+        // The pile stands the crate on a ball of its reach, so its lid is at
+        // about 1.37; every flake falls inside the lid's footprint, so one
+        // below it went through.
+        if (drawn.position[i].y > 1.3F && drawn.position[i].y < 1.45F) {
+            ++on_the_lid;
+        }
+        if (drawn.position[i].y < 1.25F) {
+            ++through;
+        }
+    }
+    std::cout << "  " << drawn.alive() << " flakes, " << on_the_lid << " on the crate, " << through
+              << " below it, " << apart << " apart from the reference\n";
+    PASS_CHECK(apart == 0U);
+    PASS_CHECK(through == 0U && on_the_lid > 50U);
+}
+
 void devices_without_particles_are_refused() {
     rhi::DeviceConfig config{};
     config.backend = rhi::BackendKind::SdlGpu;
@@ -1452,9 +1564,11 @@ int main() {
          seeks_hold_until_caught_up_then_match_playing_through},
         {"rigid_physics_holds_until_its_thread_has_the_step", rigid_physics_holds_until_its_thread_has_the_step},
         {"body_kinds_draw_as_their_own_models", body_kinds_draw_as_their_own_models},
+        {"body_kind_surface_tint_reaches_pixels", body_kind_surface_tint_reaches_pixels},
         {"a_body_kinds_scale_reaches_its_draw", a_body_kinds_scale_reaches_its_draw},
         {"props_draw_where_they_stand", props_draw_where_they_stand},
         {"props_write_their_motion", props_write_their_motion},
+        {"particles_meet_the_runners_bodies", particles_meet_the_runners_bodies},
         {"devices_without_particles_are_refused", devices_without_particles_are_refused},
     };
     int failures = 0;

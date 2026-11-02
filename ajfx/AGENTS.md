@@ -1,7 +1,7 @@
 # ajfx guide
 
 ajfx is its own project: deterministic GPU particles (the runtime in `lib/`)
-and ajfx Studio (`studio/`), the block editor that authors them. It shares
+and ajfx Studio (`studio/`), the scene workspace that authors them. It shares
 the repository with the media server at the root, its first host. Read this
 guide and [README.md](README.md), then only the modules a change touches.
 Search with `rg`; the `CMakeLists.txt` files locate tests.
@@ -12,12 +12,15 @@ Search with `rg`; the `CMakeLists.txt` files locate tests.
 | --- | --- |
 | Effect model, modules, builder, presets | `lib/include/ajfx/effect.hpp`, `modules.hpp`, `builder.hpp`, `lib/src/effect.cpp`, `presets.cpp` |
 | CPU reference simulator, checkpoints, seeking | `lib/include/ajfx/simulation.hpp`, `lib/src/simulation.cpp` |
+| Saved state, caches, bake-time and playback-time parameters | `lib/include/ajfx/cache.hpp`, `lib/src/cache.cpp` |
 | `.ajfx` packages: textures, meshes, fields | `lib/src/package.cpp`, `texture.cpp`, `mesh.cpp`, `field.cpp` |
 | GPU runtime: kernel generation, simulation, sort, renderer | `lib/src/gpu`, `lib/shaders` |
 | D3D12 reference backend and DXC compiler | `lib/backends/d3d12` |
 | Rigid physics: solver interface, Jolt solver, `RigidRunner` | `lib/include/ajfx/rigid*.hpp`, `lib/src/rigid`, `lib/src/rigid_runner.cpp`, `lib/third_party/jolt` |
 | Samples | `lib/examples/viewer`, `lib/examples/player` |
-| Studio core: pages, catalog, compiler, recipes, coach | `studio/src` (`ajfx_studio_core`) |
+| Studio core: pages, catalog, compiler, recipes, coach, bake | `studio/src` (`ajfx_studio_core`) |
+| Scene ownership, metadata and persistence | `studio/src/scene.*`, `scene_properties.*`, `scene_io.*` |
+| Scene tree and selected-item inspector | `studio/src/scene_view.*`, `docs/studio-scene-reference.md` |
 | Studio application: window, preview, worker | `studio/src/studio_app.*`, `preview.*`, `package_builder.*`, `page_view.*` |
 
 `lib/` has no dependency outside the C++ standard library, the platform's
@@ -40,8 +43,6 @@ Studio application links the media server's `MediaServer::Render`, `Gui` and
 - The package format is versioned and refuses unknown fields and newer
   versions. ajfx is unreleased: breaking format changes are acceptable, with
   no migration layers unless a concrete need appears.
-- Every node builds the same Jolt source with the same defines; do not change
-  `lib/third_party/jolt` or its build flags casually.
 - Studio's interface follows the media server's `docs/ui-design.md` (it uses
   that UI toolkit). The gui font atlas is ASCII-only.
 - Test observable behaviour with independent expectations: bit-identical
@@ -73,6 +74,5 @@ particle integration uses, also builds from the repository root: the
 ajfx test) and `area-render` (the media server's particle pass).
 The root's [AGENTS.md](../AGENTS.md) covers that build environment.
 
-Update [docs/roadmap.md](docs/roadmap.md) and the relevant README when
-behaviour changes. Write disposable builds, captures and exported packages
+Write disposable builds, captures and exported packages
 under `../out/`; keep artists' `.ajfxstudio` pages out of commits.

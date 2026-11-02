@@ -16,6 +16,7 @@
 #include <limits>
 #include <span>
 #include <utility>
+#include <tuple>
 
 namespace mediaserver::render {
 namespace {
@@ -48,8 +49,9 @@ struct ViewConstants final {
     std::array<float, 16U> previous_view_projection{};
     std::array<float, 4U> motion{}; // x: seconds back, y: 1 when valid, z: soft distance
     std::array<float, 4U> depth_terms{}; // projection (2,2), (2,3), (3,2), (3,3)
+    std::array<float, 4U> draw_tint{1.0F, 1.0F, 1.0F, 1.0F};
 };
-static_assert(sizeof(ViewConstants) == 400U);
+static_assert(sizeof(ViewConstants) == 416U);
 
 // ViewConstants::flags.
 constexpr core::u32 flag_textured = 1U;
@@ -156,6 +158,7 @@ struct ParticleInstance::State final {
             // particle's size by. Kinds sharing a model at different scales
             // are different groups, since the scale is the draw's.
             float scale{1.0F};
+            ajfx::Color tint{};
         };
         std::vector<Group> groups;
         // The group each body kind draws with, by kind. Empty when the
@@ -495,25 +498,25 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
         const bool per_kind =
             physics != nullptr && std::any_of(physics->bodies.begin(), physics->bodies.end(),
                                               [](const ajfx::RigidBodyKind& kind) {
-                                                  return !kind.draw.empty() || kind.scale != 1.0F;
+                                                  return !kind.draw.empty() || kind.scale != 1.0F || kind.draw_tint != ajfx::Color{};
                                               });
         if (per_kind) {
             // A group is one model at one scale: two kinds share a draw only
             // when both agree, so the same model at half the size is drawn
             // apart from it.
-            std::vector<std::pair<std::string, float>> models{{emitter.renderer.mesh, 1.0F}};
+            std::vector<std::tuple<std::string, float, ajfx::Color>> models{{emitter.renderer.mesh, 1.0F, ajfx::Color{}}};
             mesh.kind_group.assign(physics->bodies.size() + 1U, 0U);
             for (std::size_t k = 0U; k < physics->bodies.size(); ++k) {
-                const std::pair<std::string, float> model{
+                const std::tuple<std::string, float, ajfx::Color> model{
                     physics->bodies[k].draw.empty() ? emitter.renderer.mesh : physics->bodies[k].draw,
-                    physics->bodies[k].scale};
+                    physics->bodies[k].scale, physics->bodies[k].draw_tint};
                 const auto at = std::find(models.begin(), models.end(), model);
                 mesh.kind_group[k + 1U] = static_cast<std::size_t>(at - models.begin());
                 if (at == models.end()) {
                     models.push_back(model);
                 }
             }
-            for (const auto& [model, scale] : models) {
+            for (const auto& [model, scale, tint] : models) {
                 const std::optional<std::size_t> group_upload = mesh_upload(model);
                 if (!group_upload) {
                     return Result::failure(failure(ParticleErrorCode::DeviceFailure, mesh_error));
@@ -528,6 +531,7 @@ core::Result<ParticleInstance, ParticleError> ParticlePass::create_instance(cons
                 group.order = order.value();
                 group.scratch.reserve(emitter.capacity);
                 group.scale = scale;
+                group.tint = tint;
                 mesh.groups.push_back(std::move(group));
             }
         }
@@ -684,8 +688,22 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
         i.rigid_written.reset();
     }
 
+    // Under rigid physics every step takes the runner's frame of the tick it
+    // reaches, so the particle emitters meet those bodies and are born of
+    // their contacts and motion as the reference's are. A frame the runner
+    // has not reached yet stops the stepping there, without waiting: the
+    // instance is not caught up, so it holds and is drawn on a later frame,
+    // never stepped past bodies it did not meet.
+    std::shared_ptr<const ajfx::RigidFrame> reached;
     for (core::u32 steps = 0U; simulation.tick() < i.target && steps < s.settings.step_budget; ++steps) {
         const core::u64 tick = simulation.tick();
+        std::shared_ptr<const ajfx::RigidFrame> next;
+        if (i.rigid) {
+            next = i.rigid->frame(tick + 1U);
+            if (!next) {
+                break;
+            }
+        }
         const bool held = std::any_of(i.saved.begin(), i.saved.end(),
                                       [tick](const std::optional<core::u64>& saved) { return saved == tick; });
         if (!i.checkpoints.empty() && tick % s.settings.checkpoint_interval == 0U && !held) {
@@ -703,19 +721,32 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
             simulation.save_into(i.checkpoints[slot]);
             i.saved[slot] = tick;
         }
-        simulation.step(parameters);
+        if (next) {
+            simulation.step(parameters, *next);
+        } else {
+            simulation.step(parameters);
+        }
+        reached = std::move(next);
     }
     if (simulation.tick() != held_step) {
         i.rigid_written.reset();
     }
     // The rigid physics emitters' particles at the target step, once the
-    // runner has them. Asking also tells it where to work ahead from.
-    if (i.rigid) {
-        const std::shared_ptr<const ajfx::RigidFrame> frame = i.rigid->frame(i.target);
-        if (frame && simulation.tick() == i.target && i.rigid_written != i.target) {
-            for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
-                if (ajfx::rigid_physics(i.effect.emitters[e]) != nullptr) {
-                    simulation.write_rigid(e, frame->emitters[e]);
+    // runner has them. Asking also tells it where to work ahead from, so it
+    // is asked only once the simulation stands at the target: asking for the
+    // target while steps short of it still wait their frames would send the
+    // runner past the ticks those steps need.
+    if (i.rigid && simulation.tick() == i.target) {
+        const std::shared_ptr<const ajfx::RigidFrame> frame =
+            reached && reached->tick == i.target ? reached : i.rigid->frame(i.target);
+        if (frame && i.rigid_written != i.target) {
+            // A step that reached the target with its frame wrote these
+            // particles already.
+            if (frame != reached) {
+                for (std::size_t e = 0U; e < i.effect.emitters.size(); ++e) {
+                    if (ajfx::rigid_physics(i.effect.emitters[e]) != nullptr) {
+                        simulation.write_rigid(e, frame->emitters[e]);
+                    }
                 }
             }
             // The props of the same tick, so what is drawn is one moment of
@@ -747,7 +778,8 @@ bool ParticlePass::advance(rhi::CommandList& commands, ParticleInstance& instanc
                                               pose.orientation.w};
                         // A prop carries no colour of its own: its model is
                         // drawn as it is, lit like the debris around it.
-                        record.color = {1.0F, 1.0F, 1.0F, 1.0F};
+                        const ajfx::Color tint = ajfx::rigid_physics(i.effect.emitters[e])->props[p].draw_tint;
+                        record.color = {tint.r, tint.g, tint.b, tint.a};
                     }
                     s.particles->write_buffer(
                         group.records, 0U,
@@ -1011,6 +1043,7 @@ bool ParticlePass::record_sprites(rhi::CommandList& commands, ParticleInstance& 
                 // carries the emitter's constants with its own scale in them.
                 ViewConstants group_constants = constants;
                 group_constants.extra[3] = group.scale;
+                group_constants.draw_tint = {group.tint.r, group.tint.g, group.tint.b, group.tint.a};
                 const std::span<const core::u8> group_uniform{reinterpret_cast<const core::u8*>(&group_constants),
                                                               sizeof(group_constants)};
                 rhi::PulledDraw group_draw{};

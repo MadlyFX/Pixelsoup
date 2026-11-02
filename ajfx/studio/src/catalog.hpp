@@ -14,9 +14,6 @@
 // What a block turns into is the compiler's business (compile.cpp).
 namespace ajfx::studio {
 
-// The Module block's kind: one raw ajfx module.
-inline constexpr std::string_view raw_block_kind = "module";
-
 // The kind of layer a block, a control or one of a choice's options belongs
 // in, as a set. A particle layer and a rigid layer are moved by different
 // runtimes and accept different things, so the catalog says once which is
@@ -37,9 +34,9 @@ inline constexpr std::uint8_t in_no_layer = 0U;
     return (layers & layer_bit(kind)) != 0U;
 }
 
-// The catalog entry a rigid layer's world settings are drawn and stored
-// from (Layer::world). It is never offered as a block.
-inline constexpr std::string_view world_block_kind = "physics";
+// BlockKind::Module is the Module block, one raw ajfx module. BlockKind::Physics
+// is the catalog entry a rigid layer's world settings are drawn and stored
+// from (Layer::world); it is never offered as a block.
 
 enum class Category : std::uint8_t {
     Birth,   // how many particles, where they start and how they leave
@@ -58,9 +55,9 @@ enum class Category : std::uint8_t {
 // A rigid layer is one physics world holding the layer's own pieces, the
 // objects an artist stood in it, and the parts a piece comes apart into.
 // Blocks for all of them sit in one list, so a flat page says nothing about
-// which a block is for: Bodies is the pieces' material while a Prop three
-// rows down carries its own, Break acts on the pieces and not on a prop,
-// and Gravity is the whole world's. The page draws a rigid layer's blocks
+// which a block is for: Bodies is the pieces' material while an Object three
+// rows down can carry its own, Break acts on the Object above it and not on
+// the pieces, and Gravity is the whole world's. The page draws a rigid layer's blocks
 // under these headings, so what a block acts on is read rather than worked
 // out from what the compiler does with it. A particle layer has one scope
 // and keeps its flat list.
@@ -68,18 +65,16 @@ enum class RigidScope : std::uint8_t {
     Objects,  // each thing standing in the world, owning the blocks under it
     Pieces,   // the layer's own pieces: how many, where, how big, how drawn
     Breaking, // when a piece comes apart, and what into
-    Props,    // the Prop remnant, which Object replaced
     World,    // the world every piece shares, and what they are made of
     Hood,     // a raw module, which may act on any of them
 };
 
 // The scopes the page draws, in the order it reads them: the things in the
 // layer, then what the layer's own pieces are and what becomes of them, then
-// the world it all happens in. A scope with nothing in it draws no heading,
-// so Props is here only for a hand-edited page that still holds one.
-inline constexpr std::array<RigidScope, 6U> rigid_scopes{RigidScope::Objects,  RigidScope::Pieces,
-                                                         RigidScope::Breaking, RigidScope::Props,
-                                                         RigidScope::World,    RigidScope::Hood};
+// the world it all happens in. A scope with nothing in it draws no heading.
+inline constexpr std::array<RigidScope, 5U> rigid_scopes{RigidScope::Objects, RigidScope::Pieces,
+                                                         RigidScope::Breaking, RigidScope::World,
+                                                         RigidScope::Hood};
 
 [[nodiscard]] std::string_view rigid_scope_name(RigidScope scope) noexcept;
 // One sentence: what this part of a rigid layer is, for the heading's
@@ -88,6 +83,7 @@ inline constexpr std::array<RigidScope, 6U> rigid_scopes{RigidScope::Objects,  R
 // What a block of this kind acts on in a rigid physics layer, the world
 // block among them. Every kind has an answer, a kind a rigid layer cannot
 // hold included, since the catalog is asked before the layer is known.
+[[nodiscard]] RigidScope rigid_scope(BlockKind kind) noexcept;
 [[nodiscard]] RigidScope rigid_scope(std::string_view block_kind) noexcept;
 
 enum class ControlType : std::uint8_t {
@@ -99,6 +95,9 @@ enum class ControlType : std::uint8_t {
     Toggle,
     // A file on disk, its path in `text`: an image or a 3D model (`files`).
     File,
+    // One of the page's solid layers, by its uid in `x`; 0 is every one.
+    // The page offers its solid layers by name.
+    SolidLayer,
 };
 
 // What a File control picks.
@@ -147,6 +146,13 @@ struct ControlDef final {
     // Can be published for a host to set (see Published): the control maps
     // onto one runtime input, so a host's value means what the control does.
     bool publishable{false};
+    // When a published value takes effect (ajfx::ParameterTiming). Bake-time
+    // controls are read by the simulation -- an amount, a speed, a force --
+    // so a cache is taken with one value of each and a baked layer holds
+    // them where they are set. Playback-time controls (Appearance's tint,
+    // brightness, opacity and size scale) are applied as particles are
+    // drawn, baked or not, so an operator may always change them.
+    ParameterTiming timing{ParameterTiming::Bake};
     // A range that was once one number: a page saved then gives the number
     // as its high end, from 0 (a spread of 20 is 0 to 20), rather than as
     // both ends.
@@ -165,7 +171,7 @@ struct ControlDef final {
 };
 
 struct BlockDef final {
-    std::string_view kind;
+    BlockKind kind{BlockKind::Stream};
     std::string_view title;
     // One sentence: what the block does, in the artist's words.
     std::string_view description;
@@ -190,9 +196,14 @@ struct BlockDef final {
 
 [[nodiscard]] const std::vector<BlockDef>& block_catalog();
 [[nodiscard]] const BlockDef* find_block_def(std::string_view kind);
+[[nodiscard]] const BlockDef* find_block_def(BlockKind kind);
 [[nodiscard]] const ControlDef* find_control(const BlockDef& def, std::string_view id);
+// When a control of a block of this kind takes effect, if published: bake
+// time for anything the catalog does not know.
+[[nodiscard]] ParameterTiming control_timing(std::string_view block_kind, std::string_view control);
 
 // Whether a block of this kind belongs in a layer of that kind.
+[[nodiscard]] bool block_fits(BlockKind block_kind, LayerKind layer) noexcept;
 [[nodiscard]] bool block_fits(std::string_view block_kind, LayerKind layer) noexcept;
 // The options a choice offers in a layer of this kind, in catalog order.
 [[nodiscard]] std::vector<ChoiceDef> choices_in(const ControlDef& control, LayerKind layer);

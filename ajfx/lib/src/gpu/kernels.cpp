@@ -123,11 +123,19 @@ void generate_access(std::string& out, const ParticleLayout& layout) {
 }
 
 // A module's data starts with its id (see pack_module), so the kernel reads
-// the id rather than baking it in.
+// the id rather than baking it in. A module with a scope (Scope) has it
+// next, and acts only on the particles in it.
 template <class Module>
-std::string call(const Module&, std::uint32_t offset) {
-    return "        ajfx_" + std::string{Module::kind} + "(p, " + std::to_string(offset + 1U) + "u, ajfx_u32(" +
-           std::to_string(offset) + "u));\n";
+std::string call(const Module& module, std::uint32_t offset) {
+    static_cast<void>(module);
+    if constexpr (requires { module.only; }) {
+        return "        if (ajfx_in_scope(p, " + std::to_string(offset + 1U) + "u)) {\n            ajfx_" +
+               std::string{Module::kind} + "(p, " + std::to_string(offset + 1U + detail::scope_floats) +
+               "u, ajfx_u32(" + std::to_string(offset) + "u));\n        }\n";
+    } else {
+        return "        ajfx_" + std::string{Module::kind} + "(p, " + std::to_string(offset + 1U) + "u, ajfx_u32(" +
+               std::to_string(offset) + "u));\n";
+    }
 }
 
 bool is_appearance(const UpdateModule& module) {
@@ -180,21 +188,36 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
     std::string after_calls;
     std::string appearance_calls;
     std::string defines;
+    // A glowing emitter's colour is worked out afresh after everything
+    // else: its base, every colour over life, then every heat (see
+    // detail::glow), so a glow is never added to the last step's.
+    std::string color_calls;
+    std::string heat_calls;
     for (const UpdateModule& module : emitter.update) {
         std::visit(
             [&](const auto& m) {
+                using M = std::decay_t<decltype(m)>;
                 const std::uint32_t offset = offset_of(m);
-                if constexpr (std::is_same_v<std::decay_t<decltype(m)>, RigidBody>) {
+                if constexpr (std::is_same_v<M, RigidBody>) {
                     defines += "#define AJFX_RIGID_DATA " + std::to_string(offset + 1U) + "u\n";
                 }
                 const std::string line = call(m, offset);
-                (is_force(module) ? force_calls : after_calls) += line;
-                if (is_appearance(module)) {
-                    appearance_calls += line;
+                if constexpr (std::is_same_v<M, Heat>) {
+                    heat_calls += line;
+                } else {
+                    if constexpr (std::is_same_v<M, ColorOverLife>) {
+                        color_calls += line;
+                    }
+                    (is_force(module) ? force_calls : after_calls) += line;
+                    if (is_appearance(module)) {
+                        appearance_calls += line;
+                    }
                 }
             },
             module);
     }
+    const std::string glow_calls =
+        heat_calls.empty() ? std::string{} : "        p.color = p.base_color;\n" + color_calls + heat_calls;
     result.module_floats = static_cast<std::uint32_t>(scratch.size());
 
     std::string& out = result.source;
@@ -219,6 +242,7 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
     out += "        p.position += p.velocity * ajfx_dt;\n";
     out += turn_call;
     out += after_calls;
+    out += glow_calls;
     out += "        live = p.age < p.lifetime;\n"
            "    }\n"
            "    ajfx_store_src(i * ajfx_stride, p);\n"
@@ -234,16 +258,31 @@ EmitterKernelSource generate_emitter(const Effect& effect, const Emitter& emitte
            "    }\n"
            "    Particle p = ajfx_default_particle();\n"
            "    p.age = ajfx_f(ajfx_ages_offset + b);\n"
-           "    p.spawn_index = ajfx_spawn_base + b;\n"
+           "    p.spawn_index = ajfx_u32(ajfx_ages_offset + ajfx_capacity + b);\n"
            "    {\n";
     out += init_calls;
-    out += "    }\n"
-           "    p.color = p.base_color;\n"
+    out += "    }\n";
+    if (detail::has_birth_origins(emitter)) {
+        // Born of a contact or a moving body: the init modules' position is
+        // an offset from where it put the particle, their velocity added to
+        // what it gave, as the reference does it.
+        out += "    {\n"
+               "        uint origin = ajfx_ages_offset + 2u * ajfx_capacity + b * " +
+               std::to_string(detail::birth_origin_floats) +
+               "u;\n"
+               "        if (ajfx_u32(origin + 6u) != 0u) {\n"
+               "            p.position = ajfx_f3(origin) + p.position;\n"
+               "            p.velocity = p.velocity + ajfx_f3(origin + 3u);\n"
+               "        }\n"
+               "    }\n";
+    }
+    out += "    p.color = p.base_color;\n"
            "    p.size = p.base_size;\n"
            "    p.position += p.velocity * p.age;\n"
            "    p.rotation += p.spin * p.age;\n"
            "    {\n";
     out += appearance_calls;
+    out += glow_calls;
     out += "    }\n"
            "    ajfx_store_dst((compacted + b) * ajfx_stride, p);\n"
            "}\n";
@@ -257,7 +296,9 @@ ParticleLayout particle_layout(const Emitter& emitter) {
     bool color_over_life = false;
     bool size_over_life = false;
     for (const UpdateModule& module : emitter.update) {
-        color_over_life = color_over_life || std::holds_alternative<ColorOverLife>(module);
+        // A glow is worked out from the base colour every step too.
+        color_over_life = color_over_life || std::holds_alternative<ColorOverLife>(module) ||
+                          std::holds_alternative<Heat>(module);
         size_over_life = size_over_life || std::holds_alternative<SizeOverLife>(module);
     }
 

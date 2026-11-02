@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bake.hpp"
+#include "budget.hpp"
 #include "coach.hpp"
 #include "compile.hpp"
 #include "document.hpp"
@@ -34,6 +36,10 @@ struct PageInputs final {
     bool expert{false};
     // The loop the effect plays out in, for showing beside an automatic one.
     float natural_loop{0.0F};
+    // Each layer's bake state, for its heading.
+    const BakeStatus* bake{nullptr};
+    // "Maximize budget": under way, or what it last came to.
+    const BudgetView* budget{nullptr};
 };
 
 // Something from the palette, being dragged onto the page or clicked.
@@ -47,6 +53,34 @@ struct Incoming final {
     std::string id;
     std::string title;
     std::optional<Category> category;
+};
+
+// What the artist is working on. The block last opened or changed and the
+// layer picked by its heading are what the preview's guides and paths follow,
+// and only one of the two stands at a time. The layer last worked on outlives
+// both, so a click that adds a block has somewhere to add it once Esc or a
+// fold has cleared them.
+struct Selection final {
+    // The block last opened or changed; 0 for none.
+    Uid block{};
+    // The layer picked by its heading, while no block is; 0 for none.
+    Uid layer{};
+    // The layer last worked on; 0 until one has been.
+    Uid last_layer{};
+
+    // Esc: nothing worked on. The last layer worked on is remembered.
+    void clear_working() noexcept { block = layer = 0U; }
+    // A block of `owner` was opened or changed.
+    void work_on_block(Uid owner, Uid uid) noexcept {
+        block = uid;
+        layer = 0U;
+        last_layer = owner;
+    }
+    // A layer was picked by its heading. The block, if it is in another
+    // layer, is the caller's to let go of.
+    void pick_layer(Uid uid) noexcept { layer = last_layer = uid; }
+    // The layer whose guides the page is showing, or the last one picked.
+    [[nodiscard]] Uid picked_layer() const noexcept { return layer != 0U ? layer : last_layer; }
 };
 
 class PageView final {
@@ -72,6 +106,11 @@ public:
     // picked by its heading; 0 for none. The preview's guides and paths
     // follow it.
     [[nodiscard]] Uid working_layer(const Document& document) const;
+    // The layer a palette click or "/" adds to, which the page marks and the
+    // palette names: the one being worked on, else the last one worked on,
+    // else the last on the page; 0 on an empty page. One rule, so what is
+    // marked is what is added to.
+    [[nodiscard]] Uid target_layer(const Document& document) const;
     // A palette entry is held over the window this frame (null when none):
     // the page shows where it would land and adds it there when it is let go
     // over the page.
@@ -81,17 +120,48 @@ public:
     void add(Document& document, const Incoming& incoming);
     void open_block(Uid uid) {
         open_.insert(uid);
-        focus_ = uid;
-        layer_focus_ = 0U;
+        selection_.work_on_block(selection_.last_layer, uid);
     }
+    // What a click in the preview picked or made: the block opened and
+    // worked on, its layer unfolded, so its handles are the ones offered.
+    void select_block(const Document& document, Uid block);
+    // A layer picked with no block of its own (a piece of something broken):
+    // worked on by its heading.
+    void select_layer(Uid layer);
     // The block last opened or changed, whose guides the preview shows
     // strongly and whose handles it offers; 0 for none.
-    [[nodiscard]] Uid focus() const noexcept { return focus_; }
+    [[nodiscard]] Uid focus() const noexcept { return selection_.block; }
+    // Where the layer's starter tiles - what a layer with nothing born in it
+    // offers to begin with - were drawn last frame, in the order the coach
+    // offers them. Empty for a layer that offers none.
+    [[nodiscard]] std::vector<gui::Rect> starter_tiles(Uid layer) const;
+    // Where the layer's next-step chips - what a layer with something born in
+    // it offers to add next - were drawn last frame, in the order the coach
+    // offers them. Empty for a layer that offers none.
+    [[nodiscard]] std::vector<gui::Rect> next_step_chips(Uid layer) const;
+    // Where a layer's heading chips were drawn last frame, by name: "what"
+    // always, "kind" in the expert view (Advanced), and "bake" while it
+    // shows (a baked layer always, a live one while the pointer is over its
+    // heading or it is the target).
+    [[nodiscard]] std::optional<gui::Rect> header_chip(Uid layer, std::string_view name) const;
+    // Where a block's heading chip was drawn last frame, by name: "explode"
+    // on an Object in a solid layer, while the pointer is over the block or
+    // it is open.
+    [[nodiscard]] std::optional<gui::Rect> block_chip(Uid block, std::string_view name) const;
     // Values tried for published parameters, which change only the preview.
     [[nodiscard]] const std::map<std::string, ParameterValue>& preview_values() const noexcept {
         return preview_values_;
     }
     void try_value(std::string name, ParameterValue value) { preview_values_[std::move(name)] = value; }
+    // The budget row's button was pressed since last asked: maximize, scale
+    // down to fit, or stop the run under way. The application measures.
+    [[nodiscard]] std::optional<BudgetRequest> take_budget_request() {
+        std::optional<BudgetRequest> out = budget_request_;
+        budget_request_.reset();
+        return out;
+    }
+    // Where the budget row's button was drawn last frame.
+    [[nodiscard]] std::optional<gui::Rect> budget_button() const noexcept { return budget_button_; }
 
 private:
     // Where a dragged block may land: the gap above `rect`, which puts the
@@ -122,8 +192,16 @@ private:
     };
 
     float draw_header(gui::UiContext& ctx, Document& document, const PageInputs& inputs, float x, float y, float w);
+    // The page's world: its ground, gravity and wind, which every layer gets.
+    float draw_world(gui::UiContext& ctx, Document& document, float x, float y, float w);
+    // The page's frame-time budget, and "Maximize budget".
+    float draw_budget(gui::UiContext& ctx, Document& document, const PageInputs& inputs, float x, float y, float w);
     float draw_layer(gui::UiContext& ctx, Document& document, std::size_t layer_index, const PageInputs& inputs,
                      float x, float y, float w);
+    float draw_layer_header(gui::UiContext& ctx, Document& document, Layer& layer, const PageInputs& inputs, float x,
+                            float y, float w);
+    float draw_layer_settings(gui::UiContext& ctx, Layer& layer, float x, float y, float w);
+    float draw_add_block(gui::UiContext& ctx, const Document& document, Layer& layer, float x, float y, float w);
     float draw_block(gui::UiContext& ctx, Document& document, Layer& layer, std::size_t index,
                      const PageInputs& inputs, float x, float y, float w);
     // A rigid layer's blocks under their scope headings; a particle layer's
@@ -154,6 +232,26 @@ private:
     [[nodiscard]] std::optional<std::pair<std::size_t, float>> drop_gap(const LayerArea& area, RigidScope scope,
                                                                        float py) const;
     void open_picker(PickerMode mode, Uid layer, std::size_t index, float x, float y, const Document& document);
+    // Opens `block` and makes it, and its layer, the one being worked on.
+    void work_on(const Layer& layer, Uid block);
+    // What a layer with nothing born in it offers to begin with, as tiles to
+    // click. Nothing for a layer that has something born.
+    float draw_starters(gui::UiContext& ctx, const Layer& layer, float x, float y, float w);
+    // What a layer with something born in it offers to add next, as chips in
+    // a row under its blocks: a look, a fade, a ground. Nothing when there is
+    // nothing to suggest.
+    float draw_next_steps(gui::UiContext& ctx, const Document& document, const Layer& layer, float x, float y,
+                          float w);
+    // Adds the blocks of a suggestion to the end of the layer, and opens the
+    // first.
+    void take_suggestion(Document& document, Uid layer, const Suggestion& suggestion);
+    // "Explode this" on an Object of a solid layer (0: its first), once the
+    // page has drawn; the Explosion it sets off is opened and worked on.
+    void explode(Uid layer, Uid object);
+    // The same, at once: for a menu, which acts after the page has drawn.
+    void explode_now(Document& document, Uid layer, Uid object);
+    // An Object's "Made of" changed: its material goes into it and its Break.
+    void material_changed(Uid object);
     void resolve_drag(gui::UiContext& ctx);
     void resolve_incoming(gui::UiContext& ctx, const Document& document);
     // Puts `incoming` at `index` of `layer` (a block) or of the page (a layer).
@@ -167,9 +265,9 @@ private:
     std::set<Uid> open_;
     std::set<Uid> details_;
     std::set<Uid> folded_;
-    Uid last_layer_{};
-    Uid focus_{};
-    Uid layer_focus_{};
+    Selection selection_;
+    // The layer a click adds to, as of this frame's start (`target_layer`).
+    Uid target_{};
     float restore_scroll_{-1.0F};
 
     Uid drag_block_{};
@@ -195,10 +293,39 @@ private:
 
     Uid menu_block_{};
     Uid menu_layer_{};
+    // The layer whose kind chip opened the menu of kinds.
+    Uid menu_kind_{};
+    // The layer whose chip opened the menu of what it is.
+    Uid menu_what_{};
     gui::Rect page_{};
     std::string layer_name_;
+    // The page's solid layers this frame, by uid and name, for a control
+    // that names one (ControlType::SolidLayer).
+    std::vector<std::pair<Uid, std::string>> solid_layers_;
     std::map<std::string, ParameterValue> preview_values_;
+    // The budget row: what its button asked for, where it was, and whether
+    // particles shrink as there are more.
+    std::optional<BudgetRequest> budget_request_;
+    std::optional<gui::Rect> budget_button_;
+    bool keep_look_{true};
     std::vector<std::function<void(Document&)>> deferred_;
+    // The starter tiles and next-step chips drawn this frame, by layer.
+    std::vector<std::pair<Uid, gui::Rect>> starter_tiles_;
+    std::vector<std::pair<Uid, gui::Rect>> next_step_chips_;
+    // A heading chip drawn this frame: its layer, its name and where.
+    struct HeaderChip final {
+        Uid layer{};
+        std::string name;
+        gui::Rect rect;
+    };
+    std::vector<HeaderChip> header_chips_;
+    // A block heading's chip drawn this frame: its block, its name and where.
+    struct BlockChip final {
+        Uid block{};
+        std::string name;
+        gui::Rect rect;
+    };
+    std::vector<BlockChip> block_chips_;
 
     const Incoming* incoming_{nullptr};
     // Where the held palette entry would land: a layer and index for a
