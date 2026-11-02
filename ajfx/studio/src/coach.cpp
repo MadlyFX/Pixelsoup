@@ -8,6 +8,12 @@
 namespace ajfx::studio {
 namespace {
 
+std::size_t count_of(const Layer& layer, std::string_view kind) {
+    return static_cast<std::size_t>(std::count_if(layer.blocks.begin(), layer.blocks.end(), [kind](const Block& b) {
+        return b.enabled && b.kind == kind;
+    }));
+}
+
 const Block* first(const Layer& layer, std::string_view kind) {
     for (const Block& block : layer.blocks) {
         if (block.enabled && block.kind == kind) {
@@ -130,6 +136,24 @@ std::vector<Advice> advise(const Document& document, const Compiled& compiled) {
         const Block* breaking = first(layer, "break");
         const Block* part = first(layer, "part");
         const bool cutting = breaking != nullptr && choice_of(*breaking, "into") == "cut";
+        // A piece that comes apart needs room for what it comes apart into,
+        // or the break is refused when it happens and nothing says why.
+        if (breaking != nullptr) {
+            const std::size_t into =
+                cutting ? static_cast<std::size_t>(number_of(*breaking, "cells")) : count_of(layer, "part");
+            const Block* pile = first(layer, "pile");
+            const LayerReport* room = compiled.layer(layer.uid);
+            const std::size_t pieces = pile != nullptr ? static_cast<std::size_t>(number_of(*pile, "count")) : 0U;
+            if (into > 0U && pieces > 0U && room != nullptr && pieces * into > room->capacity) {
+                notes.push_back({layer.uid, breaking->uid, AdviceLevel::Warning,
+                                 "If every piece came apart there would be " + std::to_string(pieces * into) +
+                                     " of them, and this layer holds " + std::to_string(room->capacity) +
+                                     ". The ones that do not fit stay whole. Break into fewer, or start with "
+                                     "fewer pieces.",
+                                 {},
+                                 {}});
+            }
+        }
         if (cutting && part != nullptr) {
             notes.push_back({layer.uid, part->uid, AdviceLevel::Warning,
                              "Breaking is set to cut the model into pieces, so the parts you place here are not "

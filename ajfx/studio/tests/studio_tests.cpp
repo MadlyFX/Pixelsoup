@@ -902,56 +902,96 @@ bool said(const std::vector<Advice>& notes, std::string_view fragment) {
     });
 }
 
-void crates_break_into_the_parts_beside_them() {
-    Document document = recipe("breaking_crates");
+void a_break_uses_the_parts_beside_it() {
+    // A crate of its own, broken into four parts an artist placed: a lid,
+    // two walls and a base, as the Crates recipe did before it cut instead.
+    Document document;
+    Layer crates = make_layer(document, LayerKind::Rigid, "Crates");
+    insert_block(crates, 0U, *make_block(document, "pile"));
+    insert_block(crates, 1U, *make_block(document, "gravity"));
+    insert_block(crates, 2U, *make_block(document, "appearance"));
+    insert_block(crates, 3U, *make_block(document, "break"));
+    for (std::size_t i = 0U; i < 4U; ++i) {
+        insert_block(crates, crates.blocks.size(), *make_block(document, "part"));
+    }
+    document.layers.push_back(std::move(crates));
+    Layer& layer = document.layers[0];
+    block_of(layer, "pile").set("count", number(4.0F));
+    block_of(layer, "appearance").set("material", choice("debris"));
+    block_of(layer, "appearance").set("mesh", choice("cube"));
+    const ajfx::Vec3 faces[4] = {{0.0F, 0.5F, 0.0F}, {0.5F, 0.0F, 0.0F}, {-0.5F, 0.0F, 0.0F}, {0.0F, -0.5F, 0.0F}};
+    std::size_t at = 0U;
+    for (Block& block : layer.blocks) {
+        if (block.kind == "part") {
+            block.set("at", vec3(faces[at].x, faces[at].y, faces[at].z));
+            block.set("size", number(0.45F));
+            ++at;
+        }
+    }
+
     const Compiled compiled = compile(document, Purpose::Preview);
     CHECK(compiled.error.empty() && compiled.effect.has_value());
+    // No cut was asked for, so the parts are what it breaks into, and they
+    // are in the effect from the compiler rather than from the builder.
+    CHECK(compiled.cuts.empty());
+    const ajfx::Emitter& bodies = compiled.effect->emitters[0];
+    const auto* physics = find_module<ajfx::RigidPhysics>(bodies);
+    const auto* breaking = find_module<ajfx::Break>(bodies);
+    CHECK(physics != nullptr && breaking != nullptr);
+    CHECK(physics->bodies.size() == 4U && breaking->pieces.size() == 4U);
+    CHECK(breaking->body == 0U);
+    for (std::size_t i = 0U; i < 4U; ++i) {
+        CHECK(breaking->pieces[i].body == static_cast<std::uint32_t>(i + 1U));
+        CHECK(physics->bodies[i].shape == ajfx::RigidShape::Hull);
+        CHECK(!physics->bodies[i].mesh.empty() && physics->bodies[i].draw == physics->bodies[i].mesh);
+        // A part is made of what the layer's pieces are made of.
+        CHECK(near(physics->bodies[i].density, number_of(*layer.world, "density")));
+    }
+    CHECK(near(breaking->pieces[0].offset.y, 0.5F));
+    CHECK(near(breaking->pieces[1].offset.x, 0.5F));
+    CHECK(ajfx::check_meshes(*compiled.effect, compiled.meshes).ok());
+}
+
+// The Crates recipe cuts its crates rather than placing parts, so the pieces
+// are the crate: the cut is named when it compiles and made when the models
+// are read.
+void the_crates_recipe_cuts_its_crates() {
+    Document document = recipe("breaking_crates");
+    Compiled compiled = compile(document, Purpose::Preview);
+    CHECK(compiled.error.empty() && compiled.effect.has_value());
+    CHECK(compiled.cuts.size() == 1U && compiled.cuts[0].cells == 6U);
+    std::string issue;
+    make_cuts(compiled, issue);
+    CHECK(issue.empty() && compiled.effect.has_value());
+
     const ajfx::Emitter& crates = emitter_of(compiled, layer_named(document, "Crates and a dropped ball"));
     const auto* physics = find_module<ajfx::RigidPhysics>(crates);
     const auto* breaking = find_module<ajfx::Break>(crates);
     CHECK(physics != nullptr && breaking != nullptr);
-    // Four Part blocks, so four body kinds past the layer's own and four
-    // pieces that point at them in order.
-    CHECK(physics->bodies.size() == 4U);
-    CHECK(breaking->pieces.size() == 4U);
-    CHECK(breaking->body == 0U);
-    for (std::size_t i = 0U; i < 4U; ++i) {
-        CHECK(breaking->pieces[i].body == static_cast<std::uint32_t>(i + 1U));
-        // A part collides as its model's hull and is drawn as the same model.
-        CHECK(physics->bodies[i].shape == ajfx::RigidShape::Hull);
-        CHECK(!physics->bodies[i].mesh.empty() && physics->bodies[i].draw == physics->bodies[i].mesh);
-        // And it is made of what the layer's pieces are made of.
-        CHECK(near(physics->bodies[i].density, 600.0F) && near(physics->bodies[i].friction, 0.8F));
-        CHECK(near(physics->bodies[i].restitution, 0.05F));
-    }
-    // The lid sat at the top of the crate and the walls either side of it.
-    CHECK(near(breaking->pieces[0].offset.y, 0.5F));
-    CHECK(near(breaking->pieces[1].offset.x, 0.5F) && near(breaking->pieces[1].turn.z, 90.0F));
-    CHECK(near(breaking->pieces[2].offset.x, -0.5F));
-    CHECK(near(breaking->pieces[3].offset.y, -0.5F));
-    CHECK(near(breaking->threshold, 4.0F) && near(breaking->spin, 220.0F));
-    // Every model a part names is in the package the preview plays.
-    CHECK(ajfx::check_meshes(*compiled.effect, compiled.meshes).ok());
+    CHECK(physics->bodies.size() == 6U && breaking->pieces.size() == 6U);
+    // Nine crates into six apiece is 54, which the layer has room for.
+    CHECK(crates.capacity >= 54U);
 
-    // And it breaks: the ball lands on the stack and the crates it hits come
-    // apart, leaving more bodies than the nine the pile stood up.
+    // And it breaks when the ball lands: more bodies than the nine that
+    // stood, every one of them a crate or one of its cells.
     const std::unique_ptr<ajfx::RigidSolver> solver = ajfx::rigid::make_jolt_solver();
-    ajfx::Simulation simulation =
-        ajfx::Simulation::create(*compiled.effect, 1U,
-                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
-            .value();
     std::size_t index = 0U;
     while (compiled.effect->emitters[index].name != crates.name) {
         ++index;
     }
+    ajfx::Simulation simulation =
+        ajfx::Simulation::create(*compiled.effect, 1U,
+                                 ajfx::SimulationOptions{.meshes = compiled.meshes, .rigid = solver.get()})
+            .value();
+    simulation.advance_to(12U);
     CHECK(simulation.emitter(index).alive() == 9U);
     simulation.advance_to(240U);
-    const std::size_t left = simulation.emitter(index).alive();
-    std::cout << "  nine crates became " << left << " bodies\n";
-    CHECK(left > 9U);
-    // What is left is crates and parts, nothing else.
-    for (const std::uint32_t kind : simulation.emitter(index).body_kind) {
-        CHECK(kind <= 4U);
+    const ajfx::EmitterState& s = simulation.emitter(index);
+    std::cout << "  nine cut crates became " << s.alive() << " bodies, " << s.refused << " refused\n";
+    CHECK(s.alive() > 9U);
+    CHECK(s.refused == 0U);
+    for (const std::uint32_t kind : s.body_kind) {
+        CHECK(kind <= 6U);
     }
 }
 
@@ -1727,7 +1767,8 @@ int main() {
         {"piles_stand_until_the_effect_plays", piles_stand_until_the_effect_plays},
         {"props_stand_in_the_world_and_spill_what_they_hold",
          props_stand_in_the_world_and_spill_what_they_hold},
-        {"crates_break_into_the_parts_beside_them", crates_break_into_the_parts_beside_them},
+        {"a_break_uses_the_parts_beside_it", a_break_uses_the_parts_beside_it},
+        {"the_crates_recipe_cuts_its_crates", the_crates_recipe_cuts_its_crates},
         {"half_a_break_is_refused_with_the_missing_half", half_a_break_is_refused_with_the_missing_half},
         {"a_break_can_cut_its_own_model_into_pieces", a_break_can_cut_its_own_model_into_pieces},
         {"snow_lands_on_the_pieces_of_the_layer_above", snow_lands_on_the_pieces_of_the_layer_above},

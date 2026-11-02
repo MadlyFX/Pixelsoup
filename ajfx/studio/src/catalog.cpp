@@ -1303,7 +1303,11 @@ std::string block_summary(const Block& block) {
                ", bounce " + format_number(number_of(block, "bounce"), 2);
     }
     if (kind == "break") {
-        return "Over " + with_unit(number_of(block, "force"), 1, "m/s");
+        const std::string hit = "over " + with_unit(number_of(block, "force"), 1, "m/s");
+        if (choice_of(block, "into") == "cut") {
+            return "Cut into " + format_number(number_of(block, "cells"), 0) + ", " + hit;
+        }
+        return "Into the parts below, " + hit;
     }
     if (kind == "part") {
         const std::string model =
