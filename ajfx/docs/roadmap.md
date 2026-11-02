@@ -389,6 +389,21 @@ feedback forces could evaluate any frame directly.
        cells, every one of them starting inside where the crate stood, and
        they settle no higher than 0.78 with all 8 at rest. Both budgets now
        hold a cut: 64 pieces and 64 body kinds.
+       - **What 64 costs, and why it is the wrong number to cap
+         (2026-11-01).** It was chosen rather than measured: 32 pieces and
+         15 kinds blocked a cut into eight, so both went to 64. Measured
+         since, in Debug, cutting a cube into N with a pile of 16 bodies: a
+         seek costs about 0.37 ms for every body kind, because each kind is
+         a shape and a seek rebuilds the world -- 2.2 ms at one kind, 5.7
+         at 16, 25.4 at 64. Cutting itself is superlinear (0.5 ms to 59 ms
+         over the same range) and does not matter, being bake time.
+         The seek is the cost worth removing rather than capping. Those
+         shapes depend only on the world's description, which does not
+         change between rebuilds, so a solver that kept them would make a
+         seek cost nothing for its kinds and the limit could then follow
+         what a scene wants. Pieces are already bounded by the emitter's
+         capacity, which refuses a break that will not fit, so the 64 there
+         is belt and braces.
        Studio asks for one on the Break block: **Comes apart into** is
        either the Part blocks beside it or pieces cut from the model, with
        how many, how much they crowd at the middle, and a cut seed. The
